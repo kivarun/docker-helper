@@ -693,6 +693,11 @@ rpm -Uvh --replacepkgs "$RPM" >/dev/null || fail "rpm -U --replacepkgs failed"
   || fail "the %posttrans relabel did not correct the builder state label (upgrade path broken)"
 [ "$(stat -c '%C' /run/docker-helper-builder/manager.sock)" = "system_u:object_r:docker_helper_builder_runtime_t:s0" ] \
   || fail "manager.sock label wrong after the upgrade relabel"
+# The launch vehicle's user-network helper must carry the dedicated exec
+# type after the upgrade relabel (execution is allowed only from the
+# rootlesskit child domain).
+[ "$(stat -c '%C' /usr/bin/slirp4netns)" = "system_u:object_r:docker_helper_slirp4netns_exec_t:s0" ] \
+  || fail "slirp4netns label wrong after the upgrade relabel: $(stat -c '%C' /usr/bin/slirp4netns)"
 [ "$(systemctl is-active "$UNIT" 2>/dev/null || true)" = "active" ] \
   || fail "builder unit stopped across the upgrade"
 audit_window_start
@@ -728,13 +733,21 @@ say "P6 transport confirmed (daemon builder_start + manager START for $P6_OP_ID)
 
 # P5-S2 boundary state: the P5-S1 rootlesskit { lock } denial on the builder
 # state file must be GONE (the evidence-proven lock grant ships in the
+# candidate policy), and so must the former slirp4netns { execute } denial
+# (the dedicated docker_helper_slirp4netns_exec_t grant ships in the same
 # candidate policy). Neither the enforcing AVC window nor the manager
-# journal may carry the old failure anymore.
+# journal may carry the old failures anymore.
 OLD_LOCK_AVC="$(grep -a '{ lock }' "$EVIDENCE_DIR/builder-avc-p6.txt" \
   | grep -a 'comm="rootlesskit"' | grep -a 'docker_helper_builder_state_t' || true)"
 if [ -n "$OLD_LOCK_AVC" ]; then
   printf '%s\n' "$OLD_LOCK_AVC" > "$EVIDENCE_DIR/child-boundary-avc-p6.txt"
   fail "the P5-S1 rootlesskit { lock } denial on docker_helper_builder_state_t still occurs (the evidence-proven grant did not take effect)"
+fi
+OLD_SLIRP_AVC="$(grep -a 'denied  { execute }' "$EVIDENCE_DIR/builder-avc-p6.txt" \
+  | grep -a 'name="slirp4netns"' || true)"
+if [ -n "$OLD_SLIRP_AVC" ]; then
+  printf '%s\n' "$OLD_SLIRP_AVC" > "$EVIDENCE_DIR/old-slirp-exec-avc-p6.txt"
+  fail "the former slirp4netns { execute } denial still occurs (the dedicated exec-type grant did not take effect)"
 fi
 if grep -aqF 'failed to lock' "$EVIDENCE_DIR/builder-journal-p6.txt"; then
   grep -aF 'failed to lock' "$EVIDENCE_DIR/builder-journal-p6.txt" \
@@ -770,7 +783,7 @@ else
     echo "=== builder journal (P6 window) ==="; tail -40 "$EVIDENCE_DIR/builder-journal-p6.txt"
     echo "=== daemon journal (P6 window) ==="; tail -20 "$EVIDENCE_DIR/daemon-journal-p6.txt"
     echo "=== build attempt output ==="; tail -20 "$EVIDENCE_DIR/build-attempt-post-relabel.txt"; } >&2
-  fail "the build advanced past the P5-S1 { lock } boundary and stopped at the NEXT enforcing boundary in docker_helper_rootlesskit_t (evidence: builder-avc-p6.txt, builder-journal-p6.txt, daemon-journal-p6.txt, child-output-p6.txt, build-attempt-post-relabel.txt)"
+  fail "the build advanced past the P5-S1 { lock } and slirp4netns { execute } boundaries and stopped at the NEXT enforcing boundary in docker_helper_rootlesskit_t (evidence: builder-avc-p6.txt, builder-journal-p6.txt, daemon-journal-p6.txt, child-output-p6.txt, build-attempt-post-relabel.txt)"
 fi
 say "P6 upgrade relabel OK (labels corrected by %posttrans; transport $P6_OP_ID)"
 else
