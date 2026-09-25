@@ -312,23 +312,33 @@ reset_failed_builder() {
 
 # --- P2a: audit pipeline sanity + main-unit baseline -----------------------------
 # (a) An AVC-pipeline sanity probe: a deliberate, harmless MAC denial from the
-# builder domain (reading /etc/shadow as a token file) must produce a visible
-# AVC. This proves the audit source works before any phase depends on AVC
-# evidence.
-log "P2a: audit pipeline sanity probe"
+# builder domain must produce a visible AVC. The probe reads the helper config
+# tree as a token file (the N1 negative): a docker_helper_config_t denial is
+# guaranteed to be audited (the distro policy cannot dontaudit types it does
+# not define; distro dontaudit rules suppress some generic denials, so a
+# foreign probe target like /etc/shadow is NOT reliable). This proves the
+# audit source works before any phase depends on AVC evidence.
+log "P2a: audit pipeline sanity probe (config-tree denial)"
 audit_window_start
 SANITY_START="$AVC_EPOCH"
-if run_as_builder_domain sanity root /usr/bin/docker-helper session list \
-    --token-file /etc/shadow >/tmp/p5s1-sanity.out 2>&1; then
-  fail "the builder domain unexpectedly read /etc/shadow (sanity probe inverted)"
+if run_as_builder_domain sanity root /usr/bin/docker-helper config show \
+    >/tmp/p5s1-sanity.out 2>&1; then
+  fail "a process in the builder domain unexpectedly read the helper config"
 fi
+printf '%s\n' "$(cat /tmp/p5s1-sanity.out)" > "$EVIDENCE_DIR/negative-config-show.txt"
 SANITY_AVC="$(avc_window "$SANITY_START")"
 printf '%s\n' "$SANITY_AVC" > "$EVIDENCE_DIR/sanity-avc.txt"
-if ! printf '%s\n' "$SANITY_AVC" | grep -aqF 'shadow_t'; then
+if ! printf '%s\n' "$SANITY_AVC" | grep -aqF 'docker_helper_config_t'; then
   transient_journal sanity > "$EVIDENCE_DIR/sanity-transient-journal.txt"
-  fail "the audit source shows no shadow_t AVC for the sanity probe (see sanity-transient-journal.txt)"
+  {
+    echo "=== raw audit log tail ==="
+    tail -50 /var/log/audit/audit.log 2>/dev/null || true
+    echo "=== klog AVCs ==="
+    journalctl -k --no-pager 2>/dev/null | grep -a 'avc:' | tail -20 || true
+  } > "$EVIDENCE_DIR/sanity-audit-raw.txt"
+  fail "the audit source shows no docker_helper_config_t AVC for the sanity probe (see sanity-transient-journal.txt + sanity-audit-raw.txt)"
 fi
-say "P2a audit pipeline OK (deliberate shadow_t denial visible in the audit source)"
+say "P2a audit pipeline OK (deliberate docker_helper_config_t denial visible in the audit source)"
 
 # (b) The main unit is the proven enforcing path; starting it first establishes
 # a working baseline before any builder-domain phase.
@@ -511,13 +521,9 @@ log "P5: enforcing negative proofs (transient units in docker_helper_builder_t)"
 audit_window_start
 NEG_START="$AVC_EPOCH"
 
-# N1: helper config + admin token (uid-0 transient so DAC cannot short-circuit
-# the MAC check). The token file sits under the config tree, so the config-dir
-# traversal denial is the first MAC wall the attempt hits.
-if run_as_builder_domain n1 root /usr/bin/docker-helper config show >/tmp/p5s1-n1.out 2>&1; then
-  fail "a process in the builder domain unexpectedly read the helper config/admin token"
-fi
-printf '%s\n' "$(cat /tmp/p5s1-n1.out)" > "$EVIDENCE_DIR/negative-config-show.txt"
+# N1 (config + admin token) is proven by the P2a sanity probe above (the
+# config-dir traversal denial subsumes the token-file read; the token sits
+# under the config tree).
 
 # N2: the daemon's helper socket must be unreachable from the builder domain
 # (a fake session token via --setenv so the CLI's client-side token check
@@ -550,8 +556,6 @@ printf '%s\n' "$(cat /tmp/p5s1-n4.out)" > "$EVIDENCE_DIR/negative-workspace.txt"
 NEG_AVC="$(avc_window "$NEG_START")"
 builder_avc_window "$NEG_START" > "$EVIDENCE_DIR/builder-avc-p5-negative.txt" || true
 avc_window "$NEG_START" > "$EVIDENCE_DIR/all-avc-p5.txt" || true
-# N1: the first denial on the config path is the config-dir traversal.
-assert_avc "$NEG_AVC" 'docker_helper_config_t'
 # N2: the daemon socket denial names the runtime sock_file type or the daemon
 # process (connectto).
 printf '%s\n' "$NEG_AVC" | grep -aqE 'docker_helper_runtime_t|docker_helper_t' \
