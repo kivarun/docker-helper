@@ -574,28 +574,46 @@ separate P5-S2 task and is deliberately NOT granted here.
    after both the fresh install and the rerun; `docker-helper selinux
    check` reports `SELinux policy valid`.
 
-### The installer reinstall contract gap (reported, not fixed here)
+### The installer reinstall contract (fixed after the first proof)
 
-The tarball rerun exposed an `install-system.sh` reinstall-path gap: the
-installer stops only the main unit before replacing the binary, so a
-still-running builder service (which execs the same
-`/usr/bin/docker-helper` binary) makes the binary replacement fail with
-`Text file busy`. The proof harness applies the same explicit builder stop
-the shipped uninstaller performs before the rerun; the installer gap
-belongs to the P4 packaging scope and needs its own fix — not silently
-narrowed here.
+The first P5-S1 proof run exposed an `install-system.sh` reinstall-path
+gap: the installer stopped only the main unit before replacing the binary,
+so a still-running builder service (which execs the same
+`/usr/bin/docker-helper` binary) made the binary replacement fail with
+`Text file busy` (run 36145749182; the proof harness worked around it with
+the same explicit builder stop the shipped uninstaller performs). The gap
+is fixed in the installer itself
+(`packaging/install-system.sh`, commit `6d0b9a4`): `check_active_service`
+now records the initial activity of BOTH services, keeps the single
+interactive confirmation, stops the active services and confirms both are
+down BEFORE any file mutation (a failed stop aborts unchanged), and the
+post-install phase restores exactly the previously-active services — a
+previously-inactive main service is left stopped on a reinstall, while a
+fresh install keeps the existing enable+start setup contract. The P5-S1
+P7 tarball rerun now exercises the real contract live: the enforcing
+Tumbleweed proof reinstalls with BOTH services running and the installer
+log shows the stop-both → install → restore-both sequence
+(run [36168484020](https://github.com/kivarun/docker-helper/actions/runs/36168484020),
+artifact `install-system-rerun.log`). The behavioral contract is covered
+by `packaging_test.go` (both services active; only the builder active;
+builder stop failure; declined confirmation; quiet reinstall starts
+nothing).
 
 ### Results
 
 | Target | Result | Evidence |
 |---|---|---|
-| openSUSE Tumbleweed (QEMU/KVM VM, enforcing SELinux) | **PASS** | run [36146864554](https://github.com/kivarun/docker-helper/actions/runs/36146864554), artifact `release-2.4-p5s1-tw-36146864554-1`, digest `sha256:17e343590e1d1d9127709f141f7d01172bb4bd2eb3a1b62cabe93cc771e34727` |
+| openSUSE Tumbleweed (QEMU/KVM VM, enforcing SELinux) | **PASS** | run [36168484020](https://github.com/kivarun/docker-helper/actions/runs/36168484020), artifact `release-2.4-p5s1-tw-36168484020-1`, digest `sha256:d7888d73ce3d4fda769cb3abea21913b524aa024305e3650ca4a4ef3d24cc805` |
 
-Tested commit: `94ffcb50e7332b5d6caa9eb4bf75ce5c3a72a017`. Candidate set
-(`release-2.4-p5s1-candidate-36146864554-1`, digest
-`sha256:dddf73139ccf834763efa8cf0bf98f90359993eb8e3ffa10b70c44c97e89ed13`):
-RPM `c39f2df32452bf4210e713207bc1998621dc5390a7b899cf5230387f742166ed`,
-tarball `f98f7b697073bb4cb1a215aa44d6781b558521b9475b6b191b02b1901e82d4b9`.
+Tested commit: `6f64b8e` (full SHA
+`6f64b8e40f32eebd3d0647a19bbd1afe206ef100`; the first full PASS with the
+op-ID transport pair ran at
+`94ffcb50e7332b5d6caa9eb4bf75ce5c3a72a017`, run 36146864554, before the
+installer reinstall-contract fix). Candidate set
+(`release-2.4-p5s1-candidate-36168484020-1`, digest
+`sha256:d8c42afe9845ad399c0df66d26642a09f751948f7544d8bb0f6e14548028f5b6`):
+RPM `605c6f39d89c563c713e477a42c02541dd0766359749f9ca460aef8680e8e4ec`,
+tarball `1e900de162d14bdae7b0a676ad9ea91a6e08f76bb5fbd259e31c119b7dfd7675`.
 Environment: openSUSE Tumbleweed 20260923, kernel 7.2.6-1-default, SELinux
 enforcing throughout, auditd enabled for fresh AVC evidence (no sysctl
 relaxation anywhere on the passing path). The enforcing build attempts'
@@ -607,10 +625,9 @@ artifact `digests.txt`.
 - **P5-S2 — full child-process MAC:** the rootlesskit `{ lock }` grant on
   the builder state file and the rest of the rootlesskit/buildkitd/slirp4netns
   child surface, each entry evidence-driven from the harvested AVC windows
-  (the 158-record permissive harvest is the evidence base);
+  (the permissive harvest is the evidence base);
 - the AppArmor builder profile for the Ubuntu targets (the SELinux S1
-  boundary has no AppArmor counterpart yet);
-- the installer reinstall contract gap above (P4 packaging scope).
+  boundary has no AppArmor counterpart yet).
 
 ## Builder authority
 
