@@ -2288,15 +2288,9 @@ esac
 func TestInstallSystemActiveServiceSuccessfulUpgrade(t *testing.T) {
 	env := newSystemInstallScriptEnv(t)
 
-	// Service is active, stop succeeds
-	env.fakeSystemctl(t, fmt.Sprintf(`#!/bin/bash
-log_file="%s"
-echo "$0 $@" >> "$log_file"
-case "$*" in
-  *"is-active"*) exit 0 ;;  # active
-  *) exit 0 ;;
-esac
-`, env.logFile))
+	// Only the main service is active, its stop succeeds (the stateful fake
+	// acknowledges the stop for the installer's post-stop confirmation).
+	fakeServiceStateSystemctl(t, env, "active", "inactive", "ok", "ok")
 
 	testRoot := t.TempDir()
 	out, err := env.run(t, "--yes --allowed-root "+testRoot, "")
@@ -2319,6 +2313,249 @@ esac
 	}
 	if foundEnable {
 		t.Error("enable should NOT be called for previously active service (upgrade)")
+	}
+}
+
+// --- install-system.sh reinstall service-activity contract ---
+
+// fakeServiceStateSystemctl installs a stateful systemctl fake whose
+// is-active answers come from per-service state files: mainState and
+// builderState select the recorded initial activity of the two services,
+// stop mutates the state to inactive (a stopFailure "fail" value makes that
+// service's stop exit nonzero and leave its state unchanged), start mutates
+// it to active. Every call is logged to the lifecycle call log. The
+// statefulness is required by the installer's post-stop activity
+// confirmation: a static fake could never acknowledge a stopped service.
+func fakeServiceStateSystemctl(t *testing.T, e *systemScriptEnv, mainState, builderState, mainStop, builderStop string) {
+	t.Helper()
+	stateDir := filepath.Join(e.destDir, "systemctl-state")
+	if err := os.MkdirAll(stateDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for unit, state := range map[string]string{"main": mainState, "builder": builderState} {
+		if err := os.WriteFile(filepath.Join(stateDir, unit), []byte(state), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.fakeSystemctl(t, fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+state_dir="%s"
+echo "$0 $@" >> "$log_file"
+case "$*" in
+  *docker-helper-builder.service*) unit=builder ;;
+  *docker-helper.service*) unit=main ;;
+  *) unit=unknown ;;
+esac
+case "$1" in
+  is-active)
+    [ "$(cat "$state_dir/$unit" 2>/dev/null)" = "active" ] && exit 0
+    exit 1 ;;
+  stop)
+    if [ "$unit" = "main" ] && [ "%s" = "fail" ]; then exit 1; fi
+    if [ "$unit" = "builder" ] && [ "%s" = "fail" ]; then exit 1; fi
+    echo inactive > "$state_dir/$unit"
+    exit 0 ;;
+  start)
+    echo active > "$state_dir/$unit"
+    exit 0 ;;
+  *) exit 0 ;;
+esac
+`, e.logFile, stateDir, mainStop, builderStop))
+}
+
+// seedInstalledSystem seeds the emulated system root with an installed
+// binary and main unit file so detect_existing_install treats the run as a
+// reinstall, and returns the sentinel binary content for the
+// unchanged-on-abort assertions.
+func seedInstalledSystem(t *testing.T, e *systemScriptEnv) []byte {
+	t.Helper()
+	sentinel := []byte("installed-binary-sentinel")
+	if err := os.WriteFile(e.dest("bin/docker-helper"), sentinel, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(e.dest("etc/systemd/system/docker-helper.service"),
+		[]byte("[Service]\nExecStart=/old/bin"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return sentinel
+}
+
+// callIndexes returns the first index of every call containing one of the
+// fragments (-1 when absent).
+func callIndexes(t *testing.T, e *systemScriptEnv, fragments ...string) map[string]int {
+	t.Helper()
+	idx := make(map[string]int, len(fragments))
+	for _, f := range fragments {
+		idx[f] = -1
+	}
+	for i, c := range e.calls(t) {
+		for _, f := range fragments {
+			if idx[f] == -1 && strings.Contains(c, f) {
+				idx[f] = i
+			}
+		}
+	}
+	return idx
+}
+
+func TestInstallSystemReinstallBothServicesActive(t *testing.T) {
+	env := newSystemInstallScriptEnv(t)
+	fakeServiceStateSystemctl(t, env, "active", "active", "ok", "ok")
+	seedInstalledSystem(t, env)
+
+	testRoot := t.TempDir()
+	out, err := env.run(t, "--yes --allowed-root "+testRoot, "")
+	if err != nil {
+		t.Fatalf("install should succeed: %v\n%s", err, out)
+	}
+
+	idx := callIndexes(t, env,
+		"stop docker-helper.service", "stop docker-helper-builder.service",
+		"provision-builder", "binary: init",
+		"start docker-helper.service", "start docker-helper-builder.service", "enable")
+	if idx["stop docker-helper.service"] < 0 || idx["stop docker-helper-builder.service"] < 0 {
+		t.Errorf("both services must be stopped before the binary replacement: %v", env.calls(t))
+	}
+	// The stops are the preflight transaction: both precede the FIRST
+	// installation mutation (provisioning).
+	if idx["stop docker-helper.service"] > idx["provision-builder"] ||
+		idx["stop docker-helper-builder.service"] > idx["provision-builder"] {
+		t.Errorf("stops must precede the first installation mutation: %v", idx)
+	}
+	// Restoration: both units started again after the install; no enable on
+	// the upgrade path.
+	if idx["start docker-helper.service"] < 0 || idx["start docker-helper-builder.service"] < 0 {
+		t.Errorf("both previously-active services must be restored: %v", idx)
+	}
+	if idx["start docker-helper.service"] < idx["provision-builder"] ||
+		idx["start docker-helper-builder.service"] < idx["provision-builder"] {
+		t.Errorf("restoration must follow the installation: %v", idx)
+	}
+	if idx["enable"] >= 0 {
+		t.Error("enable must not be called on the reinstall path")
+	}
+	// The binary was actually replaced.
+	bundleBinary, err := os.ReadFile(filepath.Join(env.scriptDir, "docker-helper"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if installed, err := os.ReadFile(env.dest("bin/docker-helper")); err != nil || string(installed) != string(bundleBinary) {
+		t.Error("the installed binary must be the bundle binary after a reinstall")
+	}
+}
+
+func TestInstallSystemReinstallOnlyBuilderActive(t *testing.T) {
+	env := newSystemInstallScriptEnv(t)
+	fakeServiceStateSystemctl(t, env, "inactive", "active", "ok", "ok")
+	seedInstalledSystem(t, env)
+
+	testRoot := t.TempDir()
+	out, err := env.run(t, "--yes --allowed-root "+testRoot, "")
+	if err != nil {
+		t.Fatalf("install should succeed: %v\n%s", err, out)
+	}
+
+	idx := callIndexes(t, env,
+		"stop docker-helper.service", "stop docker-helper-builder.service",
+		"provision-builder",
+		"start docker-helper.service", "start docker-helper-builder.service", "enable")
+	if idx["stop docker-helper.service"] >= 0 {
+		t.Errorf("an inactive main service must not be stopped: %v", env.calls(t))
+	}
+	if idx["stop docker-helper-builder.service"] < 0 || idx["stop docker-helper-builder.service"] > idx["provision-builder"] {
+		t.Errorf("the active builder must be stopped before the first installation mutation: %v", idx)
+	}
+	if idx["start docker-helper.service"] >= 0 || idx["enable"] >= 0 {
+		t.Errorf("a previously-inactive main service must not be started or enabled on a reinstall: %v", env.calls(t))
+	}
+	if idx["start docker-helper-builder.service"] < 0 || idx["start docker-helper-builder.service"] < idx["provision-builder"] {
+		t.Errorf("the previously-active builder must be restored after the install: %v", idx)
+	}
+	bundleBinary, err := os.ReadFile(filepath.Join(env.scriptDir, "docker-helper"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if installed, err := os.ReadFile(env.dest("bin/docker-helper")); err != nil || string(installed) != string(bundleBinary) {
+		t.Error("the installed binary must be the bundle binary after a reinstall")
+	}
+}
+
+func TestInstallSystemReinstallBuilderStopFailure(t *testing.T) {
+	env := newSystemInstallScriptEnv(t)
+	fakeServiceStateSystemctl(t, env, "active", "active", "ok", "fail")
+	sentinel := seedInstalledSystem(t, env)
+
+	testRoot := t.TempDir()
+	out, err := env.run(t, "--yes --allowed-root "+testRoot, "")
+	if err == nil {
+		t.Fatalf("install must fail when the builder stop fails: %s", out)
+	}
+
+	idx := callIndexes(t, env,
+		"stop docker-helper.service", "stop docker-helper-builder.service", "provision-builder")
+	if idx["stop docker-helper.service"] < 0 || idx["stop docker-helper-builder.service"] < 0 {
+		t.Errorf("both stops must be attempted before the abort: %v", env.calls(t))
+	}
+	// The abort precedes the FIRST installation mutation: provisioning and
+	// every file placement are unreached.
+	if idx["provision-builder"] >= 0 {
+		t.Errorf("a failed stop must abort before any file mutation: %v", env.calls(t))
+	}
+	if actual, err := os.ReadFile(env.dest("bin/docker-helper")); err != nil || string(actual) != string(sentinel) {
+		t.Error("the installed binary must be unchanged when a stop fails")
+	}
+	if actual, err := os.ReadFile(env.dest("etc/systemd/system/docker-helper.service")); err != nil || string(actual) != "[Service]\nExecStart=/old/bin" {
+		t.Error("the installed unit must be unchanged when a stop fails")
+	}
+}
+
+func TestInstallSystemReinstallDeclined(t *testing.T) {
+	env := newSystemInstallScriptEnv(t)
+	fakeServiceStateSystemctl(t, env, "active", "active", "ok", "ok")
+	sentinel := seedInstalledSystem(t, env)
+
+	out, err := env.run(t, "", "n\n")
+	if err != nil {
+		t.Fatalf("a declined reinstall must abort cleanly: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Aborting without changes.") {
+		t.Errorf("a declined reinstall must report the abort: %s", out)
+	}
+
+	for _, c := range env.calls(t) {
+		if strings.Contains(c, "stop ") || strings.Contains(c, "start ") || strings.Contains(c, "provision-builder") {
+			t.Errorf("a declined reinstall must stop and mutate nothing: %v", env.calls(t))
+		}
+	}
+	if actual, err := os.ReadFile(env.dest("bin/docker-helper")); err != nil || string(actual) != string(sentinel) {
+		t.Error("the installed binary must be unchanged when the reinstall is declined")
+	}
+}
+
+func TestInstallSystemReinstallNeitherActiveStartsNothing(t *testing.T) {
+	env := newSystemInstallScriptEnv(t)
+	fakeServiceStateSystemctl(t, env, "inactive", "inactive", "ok", "ok")
+	seedInstalledSystem(t, env)
+
+	testRoot := t.TempDir()
+	out, err := env.run(t, "--yes --allowed-root "+testRoot, "")
+	if err != nil {
+		t.Fatalf("install should succeed: %v\n%s", err, out)
+	}
+
+	// A quiet reinstall with both services previously inactive restores
+	// nothing: the main daemon is not started and nothing is enabled.
+	for _, c := range env.calls(t) {
+		if strings.Contains(c, "stop ") || strings.Contains(c, "start ") || strings.Contains(c, "enable") {
+			t.Errorf("a reinstall with inactive services must not touch service state: %v", env.calls(t))
+		}
+	}
+	bundleBinary, err := os.ReadFile(filepath.Join(env.scriptDir, "docker-helper"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if installed, err := os.ReadFile(env.dest("bin/docker-helper")); err != nil || string(installed) != string(bundleBinary) {
+		t.Error("the installed binary must be the bundle binary after a reinstall")
 	}
 }
 
