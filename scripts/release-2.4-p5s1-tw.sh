@@ -104,14 +104,16 @@ audit_window_start() {
 # runs, the audit log is the authoritative source; journalctl -k is the
 # fallback (never both). The auditd userspace log is flushed asynchronously
 # and can lag (known UAT property), so poll briefly for the first record.
+# ausearch -ts proved unreliable on this image in live runs (empty windows
+# while the raw audit log demonstrably holds the records), so the audit
+# branch greps the raw log by the record's epoch second instead.
 avc_window() {
   local since="$1"
   local out="" tries=10
-  local date
-  date="$(date -d "@$since" '+%m/%d/%Y %H:%M:%S' 2>/dev/null || true)"
   while [ "$tries" -gt 0 ]; do
     if systemctl is-active --quiet auditd 2>/dev/null; then
-      out="$(ausearch -m AVC -m USER_AVC -ts "$date" 2>/dev/null || true)"
+      out="$(grep -a 'type=AVC msg=audit' /var/log/audit/audit.log 2>/dev/null \
+        | awk -v s="$since" '{ for (i = 1; i <= NF; i++) if ($i ~ /^msg=audit\(/) { ts = substr($i, 11); split(ts, t, "."); if (t[1] + 0 >= s + 0) print; break } }' || true)"
     else
       out="$(journalctl -k --since "@$since" --no-pager 2>/dev/null \
         | grep -a 'avc:' || true)"

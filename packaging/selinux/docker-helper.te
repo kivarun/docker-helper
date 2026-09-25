@@ -654,6 +654,15 @@ allow init_t docker_helper_builder_state_t:lnk_file { unlink };
 #   denied { mounton } path=/run/systemd/mount-rootfs/run/docker-helper-builder
 allow init_t docker_helper_builder_runtime_t:dir { mounton };
 
+# The ReadWritePaths bind over the state tree needs the same mount-on grant
+# (live manager journal, same run; the runtime-dir mounton grant above moved
+# the failure past the special-directory step to "Failed at step NAMESPACE"):
+#   docker-helper-builder.service: Failed to mount
+#   /var/lib/docker-helper-builder to
+#   /run/systemd/mount-rootfs/var/lib/docker-helper-builder: Permission denied
+#   -> Failed to set up mount namespacing -> status=226/NAMESPACE
+allow init_t docker_helper_builder_state_t:dir { mounton };
+
 # journald: the manager writes its operational diagnostics to the
 # inherited systemd journal stream socket (StandardOutput=journal,
 # StandardError=journal). Mirror of the proven daemon rule.
