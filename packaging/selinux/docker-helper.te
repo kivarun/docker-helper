@@ -725,7 +725,11 @@ allow docker_helper_builder_t sysctl_net_t:file { read open };
 # (fail closed without one): stat/open of the ca-bundle candidates and
 # the openSUSE symlink resolution (/etc/ssl/ca-bundle.pem ->
 # /var/lib/ca-certificates/ca-bundle.pem), all cert_t on Tumbleweed.
-allow docker_helper_builder_t cert_t:dir { search };
+# Live AVCs (P5-S1 enforcing run): the candidate stat also getattr's the
+# parent directories:
+#   scontext=docker_helper_builder_t tcontext=cert_t tclass=dir
+#   denied { getattr } path=/etc/ssl then path=/var/lib/ca-certificates
+allow docker_helper_builder_t cert_t:dir { search getattr };
 allow docker_helper_builder_t cert_t:lnk_file { getattr read };
 allow docker_helper_builder_t cert_t:file { getattr open read };
 

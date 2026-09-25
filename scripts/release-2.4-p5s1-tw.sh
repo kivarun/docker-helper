@@ -609,8 +609,10 @@ printf '%s\n' "$NEG_AVC" | grep -aqE 'container_var_run_t|container_runtime_t' \
 # N4: the workspace read denial names the workspace type; a /home workspace
 # keeps the host user_home_t label by design (the .te model: the daemon reads
 # /home workspaces through user_home_type grants), a relabeled non-home
-# workspace carries docker_helper_workspace_t.
-assert_avc "$NEG_AVC" 'docker_helper_workspace_t|user_home'
+# workspace carries docker_helper_workspace_t. Extended regex: the fragment
+# is an alternation, not a fixed string.
+printf '%s\n' "$NEG_AVC" | grep -aqE 'docker_helper_workspace_t|user_home' \
+  || fail "expected an enforcing builder-domain AVC naming the workspace surface (N4)"
 say "P5 enforcing negative proofs OK (config, daemon socket, docker.sock, workspace)"
 
 # --- P6: upgrade relabel proof ----------------------------------------------------
