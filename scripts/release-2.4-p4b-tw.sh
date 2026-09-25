@@ -247,7 +247,12 @@ helper_pt="$(grep -n 'docker-helper posttrans:' "$zlog" | head -1 | cut -d: -f1)
   || fail "the RPM transaction must not start the main daemon on a fresh install"
 say "P1 scriptlet-ordering proof OK (container-selinux %posttrans before docker-helper %posttrans)"
 say "starting the builder service standalone (P4-A1 boundary asserts under the packaged unit)"
-systemctl start "$UNIT" || fail "systemctl start $UNIT failed"
+systemctl start "$UNIT" || {
+  journalctl -u "$UNIT" -b --no-pager > "$EVIDENCE_DIR/builder-start-failure-journal.txt" 2>&1 || true
+  systemctl status "$UNIT" --no-pager > "$EVIDENCE_DIR/builder-start-status.txt" 2>&1 || true
+  journalctl -b --no-pager | grep -iE "avc|denied" | tail -60 > "$EVIDENCE_DIR/builder-start-avc.txt" 2>/dev/null || true
+  fail "systemctl start $UNIT failed (unit journal and AVC evidence captured)"
+}
 [ "$(systemctl is-active "$UNIT" 2>/dev/null || true)" = "active" ] || fail "builder service not active after start"
 assert_builder_manager_process
 systemctl stop "$UNIT" || fail "systemctl stop $UNIT failed"
