@@ -310,24 +310,25 @@ reset_failed_builder() {
   systemctl reset-failed "$UNIT" 2>/dev/null || true
 }
 
-# --- P2a: main-unit baseline + operator surface + audit sanity probe -------------
-# (a) The main unit is the proven enforcing path; starting it first establishes
-# a working baseline before any builder-domain phase.
+# --- P2a: config init + main-unit baseline + operator surface + audit sanity -----
+# (a-i) Config init and the global allowed root (CLI-side; no daemon running
+# yet). The system unit's serve needs an existing config on a fresh install.
+/usr/bin/docker-helper init >/dev/null 2>&1 || fail "cannot init the docker-helper config"
+/usr/bin/docker-helper config allowed-root add "$ALLOWED_ROOT" >/dev/null \
+  || fail "config allowed-root add failed"
+
+# (a-ii) The main unit is the proven enforcing path; starting it first
+# establishes a working baseline before any builder-domain phase.
 if [ "$(systemctl is-active "$MAIN_UNIT" 2>/dev/null || true)" != "active" ]; then
   systemctl start "$MAIN_UNIT" || fail "the main daemon failed to start (baseline broken)"
 fi
 [ "$(systemctl is-active "$MAIN_UNIT" 2>/dev/null || true)" = "active" ] \
   || fail "main daemon not active after start"
 systemctl cat "$UNIT" > "$EVIDENCE_DIR/builder-unit-runtime.txt" 2>&1
-audit_window_start
 
-
-# (b) Operator surface (config/init/principal/credential/session) once, before
-# any builder phase, so the sanity probe, the permissive harvest and the
-# enforcing rounds ride the same session.
-/usr/bin/docker-helper init >/dev/null 2>&1 || fail "cannot init the docker-helper config"
-/usr/bin/docker-helper config allowed-root add "$ALLOWED_ROOT" >/dev/null \
-  || fail "config allowed-root add failed"
+# (a-iii) Operator surface (principal/credential/session) once, before any
+# builder phase, so the sanity probe, the permissive harvest and the enforcing
+# rounds ride the same session.
 /usr/bin/docker-helper principal create --no-credential "$PRINCIPAL" >/dev/null \
   || fail "principal create failed"
 /usr/bin/docker-helper principal allowed-root add "$PRINCIPAL" "$ALLOWED_ROOT" >/dev/null \
@@ -349,7 +350,7 @@ case "$WS_LABEL" in
 esac
 
 
-# (c) An AVC-pipeline sanity probe: a deliberate, harmless MAC denial from the
+# (b) An AVC-pipeline sanity probe: a deliberate, harmless MAC denial from the
 # builder domain must produce a visible AVC. The probe reads the helper config
 # tree as a token file (the N1 negative): a docker_helper_config_t denial is
 # guaranteed to be audited (the distro policy cannot dontaudit types it does
