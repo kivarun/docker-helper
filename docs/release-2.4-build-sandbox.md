@@ -515,6 +515,103 @@ systemd 261, SELinux enabled, no user-namespace restrict sysctl.
 - the daemon startup manager verification / shutdown cleanup integration
   (P6) and the final hostile-build UAT matrix (P7) remain open.
 
+## P5-S1 SELinux builder-bootstrap record — 2026-09-25
+
+P5-S1 proved the SELinux bootstrap boundary for the builder service on the
+enforcing openSUSE Tumbleweed Cloud qcow2 through the GENERATED candidate
+RPM + tarball (`scripts/release-2.4-p5s1-tw.sh`, orchestrated by
+`scripts/release-2.4-p5s1-tw-vm.sh`, workflow
+`.github/workflows/release-2.4-p5s1-builder-mac.yml`). The proof covers the
+service bootstrap MAC only — the manager domain, its private runtime/state
+types, and the forbidden-surface negatives. Full child-process MAC
+(rootlesskit/buildkitd/slirp4netns inside the builder domain) is the
+separate P5-S2 task and is deliberately NOT granted here.
+
+### Proven properties
+
+1. **Enforcing bootstrap (P2).** The manager runs in
+   `system_u:system_r:docker_helper_builder_t:s0` (unit
+   `SELinuxContext=` binding), `manager.sock`, `/run/docker-helper-builder`,
+   and `/var/lib/docker-helper-builder` carry the dedicated
+   `docker_helper_builder_runtime_t`/`docker_helper_builder_state_t` types,
+   the manager holds `CapEff 0` with the frozen `CapBnd 0x802000c2` floor
+   and `NoNewPrivs: 0`, and the unit-cgroup boundary is active. The
+   enforcing bootstrap is preceded by a permissive harvest round (P2h) that
+   captured 158 builder-domain AVC records as S2 evidence with zero
+   forbidden-surface attempts, and by an audit-pipeline sanity probe (P2a)
+   that proves a deliberate builder-domain denial is visible in the audit
+   source before any phase depends on AVC evidence.
+2. **Enforcing transport (P3, P6).** The root daemon performs a real
+   manager RPC roundtrip through the build attempt while the build is
+   EXPECTED to fail at the documented child-process boundary. The transport
+   proof is the op-ID-matched pair: the daemon journal's `builder_start`
+   stage line AND the manager journal's `START <op_id>` handling for the
+   SAME operation ID (`op_51ca5bc87dfd35a39943de5fcf2e6ff7` pre-relabel,
+   `op_9a78d76ad72342a01bdf210933a33ba8` post-relabel), with both services'
+   journals and the AVC window captured for the exact attempt window. An
+   arbitrary `docker_build_failed` terminal state is never accepted as the
+   RPC proof: the streamed op buffer carries child output only, so the
+   daemon-side stage evidence is read from the daemon journal.
+3. **Forbidden-surface negatives (P5).** Enforcing AVC evidence that the
+   builder domain cannot read the helper config/admin token, reach the
+   daemon socket, connect to docker.sock, or read a Session workspace file
+   (transient units bound to `docker_helper_builder_t`, uid-0, so DAC
+   cannot short-circuit the MAC check).
+4. **Upgrade relabel (P6).** Poisoned builder state labels are corrected by
+   the existing RPM `%posttrans` deployment lifecycle
+   (`rpm -U --replacepkgs`), the builder keeps serving across the upgrade,
+   and the transport pair is re-proven post-relabel. The enforcing
+   child-process failure is fixed as S2 evidence: the known P3 AVC —
+   `rootlesskit` denied `{ lock }` on
+   `docker_helper_builder_state_t:file`
+   (`ops/<op_id>/rootlesskit-state/lock`, `permissive=0`), corroborated by
+   the child's own `[rootlesskit:parent] error: failed to lock ...`
+   journal tail.
+5. **Tarball lifecycle (P7).** `install-system.sh` on the enforcing host
+   loads the module and labels the builder trees; the poisoned-label rerun
+   proves the relabel path; the manager process context, the
+   runtime/state root labels, and the `manager.sock` label are asserted
+   after both the fresh install and the rerun; `docker-helper selinux
+   check` reports `SELinux policy valid`.
+
+### The installer reinstall contract gap (reported, not fixed here)
+
+The tarball rerun exposed an `install-system.sh` reinstall-path gap: the
+installer stops only the main unit before replacing the binary, so a
+still-running builder service (which execs the same
+`/usr/bin/docker-helper` binary) makes the binary replacement fail with
+`Text file busy`. The proof harness applies the same explicit builder stop
+the shipped uninstaller performs before the rerun; the installer gap
+belongs to the P4 packaging scope and needs its own fix — not silently
+narrowed here.
+
+### Results
+
+| Target | Result | Evidence |
+|---|---|---|
+| openSUSE Tumbleweed (QEMU/KVM VM, enforcing SELinux) | **PASS** | run [36146864554](https://github.com/kivarun/docker-helper/actions/runs/36146864554), artifact `release-2.4-p5s1-tw-36146864554-1`, digest `sha256:17e343590e1d1d9127709f141f7d01172bb4bd2eb3a1b62cabe93cc771e34727` |
+
+Tested commit: `94ffcb50e7332b5d6caa9eb4bf75ce5c3a72a017`. Candidate set
+(`release-2.4-p5s1-candidate-36146864554-1`, digest
+`sha256:dddf73139ccf834763efa8cf0bf98f90359993eb8e3ffa10b70c44c97e89ed13`):
+RPM `c39f2df32452bf4210e713207bc1998621dc5390a7b899cf5230387f742166ed`,
+tarball `f98f7b697073bb4cb1a215aa44d6781b558521b9475b6b191b02b1901e82d4b9`.
+Environment: openSUSE Tumbleweed 20260923, kernel 7.2.6-1-default, SELinux
+enforcing throughout, auditd enabled for fresh AVC evidence (no sysctl
+relaxation anywhere on the passing path). The enforcing build attempts'
+nonzero exits and the permissive round's exit code are recorded in the
+artifact `digests.txt`.
+
+### Remaining after P5-S1
+
+- **P5-S2 — full child-process MAC:** the rootlesskit `{ lock }` grant on
+  the builder state file and the rest of the rootlesskit/buildkitd/slirp4netns
+  child surface, each entry evidence-driven from the harvested AVC windows
+  (the 158-record permissive harvest is the evidence base);
+- the AppArmor builder profile for the Ubuntu targets (the SELinux S1
+  boundary has no AppArmor counterpart yet);
+- the installer reinstall contract gap above (P4 packaging scope).
+
 ## Builder authority
 
 The sandbox is narrower than exposing Docker authority to the caller.
