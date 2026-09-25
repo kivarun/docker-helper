@@ -322,9 +322,14 @@ POISON_OUT="$(rpm -Uvh --replacepkgs "$RPM" \
 POISON_RC=$?
 set -e
 printf '%s\n' "$POISON_OUT" > "$EVIDENCE_DIR/failed-semodule-rpm.txt"
-[ "$POISON_RC" -ne 0 ] || fail "rpm -U must fail when the SELinux module load fails (poisoned semodule)"
+# rpm treats a %posttrans scriptlet failure as a WARNING and completes the
+# transaction with exit 0 (observed on Tumbleweed): the refusal proof is the
+# failing-scriptlet report plus the shipped %posttrans's own fail-closed
+# refusal, never the transaction exit code.
 printf '%s\n' "$POISON_OUT" | grep -q "scriptlet failed" \
   || fail "rpm must report the failing scriptlet (actual failure reporting is recorded; never claimed as rollback)"
+printf '%s\n' "$POISON_OUT" | grep -q "docker-helper.service was not restarted" \
+  || fail "the failed module load must refuse loudly without restarting the daemon (the shipped %posttrans contract)"
 [ "$(systemctl is-active "$MAIN_UNIT" 2>/dev/null || true)" = "active" ] \
   || fail "the failed module load must not stop the active daemon"
 [ "$(systemctl show "$MAIN_UNIT" -p MainPID --value)" = "$OLD_PID" ] \
