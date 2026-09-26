@@ -649,6 +649,23 @@ type docker_helper_newuidmap_exec_t, file_type;
 type docker_helper_newuidmap_t, domain;
 role system_r types docker_helper_newuidmap_t;
 
+# Dedicated exec type and domain for the distro newgidmap binary (P5-S2
+# step 8). RootlessKit launches newgidmap as its GID-mapping helper right
+# after the UID-map step of the same flow; live enforcing AVC evidence
+# (P5-S1 Tumbleweed run 36268063504 P6 window, record 745: denied
+# { execute } comm="rootlesskit" name="newgidmap" tcontext=bin_t tclass=file
+# permissive=0) names /usr/bin/newgidmap as the actual path — the flow
+# reached the GID map exactly because the UID map succeeded, so the exec
+# denial is the GID flow's entry boundary. The P4 proof asserts the distro
+# owns the binary and its chkstat-applied cap_setgid file capability is
+# the distro privilege mechanism (permissions.d/shadow), untouched by
+# docker-helper. A dedicated domain keeps the transition confined to this
+# binary; newgidmap's own runtime surface is the next deliberate boundary
+# and stays ungranted here.
+type docker_helper_newgidmap_exec_t, file_type;
+type docker_helper_newgidmap_t, domain;
+role system_r types docker_helper_newgidmap_t;
+
 # Entrypoint: the builder unit execs the shared binary
 # (docker_helper_exec_t) under SELinuxContext=, so the builder domain
 # needs the same entrypoint shape the daemon domain has for its own
@@ -776,9 +793,11 @@ allow docker_helper_builder_t cert_t:file { getattr open read };
 # denied { read open } on /usr/bin/rootlesskit, permissive=0 — the exec
 # never started until these were granted), so the manager needs execute
 # plus the bprm read/open; the loader-side checks (entrypoint/map) run in
-# the child domain. The helper execs (newuidmap/newgidmap/slirp4netns) and
-# the bundled buildkitd remain ungranted for BOTH domains (the deliberate
-# P5-S2 boundary).
+# the child domain. The helper execs (newuidmap/newgidmap/slirp4netns) are
+# reachable only through their dedicated exec types (the child domain's
+# pointed transitions; the manager may exec none of them), and the bundled
+# buildkitd remains ungranted for BOTH domains (the deliberate P5-S2
+# boundary).
 allow docker_helper_builder_t docker_helper_rootlesskit_exec_t:file { execute read open };
 
 # --- docker_helper_rootlesskit_t: the rootlesskit child domain (P5-S2) ---
@@ -789,10 +808,14 @@ allow docker_helper_builder_t docker_helper_rootlesskit_exec_t:file { execute re
 # label. The shared docker-helper binary is untouched (executing
 # docker_helper_exec_t has no transition rule into this domain), and the
 # unit's SELinuxContext= binding still owns the builder domain. The child
-# domain holds the rootlesskit-owned state-tree access only, moved from the
-# manager by AVC evidence. It gets NO manager rights, NO helper execs
-# (slirp4netns, newuidmap/newgidmap, buildkitd), and no capabilities: those
-# are the next deliberate P5-S2 boundaries and need their own evidence.
+# domain holds the rootlesskit-owned state-tree access moved from the
+# manager by AVC evidence, the Go-runtime startup reads, and the pointed
+# exec-type transitions for its own helper launches (slirp4netns,
+# newuidmap, newgidmap — each entered only from this child domain). It
+# gets NO manager rights, no PLAIN capability grant (its only capability
+# surfaces are the evidenced in-namespace sys_admin bit and the userns
+# create), and no buildkitd/bin_t execution: those stay deliberate
+# boundaries needing their own evidence.
 type docker_helper_rootlesskit_t, domain;
 role system_r types docker_helper_rootlesskit_t;
 
@@ -1078,6 +1101,27 @@ allow docker_helper_newuidmap_t self:capability setuid;
 # stays ungranted; the blocking failure moved to the target-process dir
 # stat above.
 allow docker_helper_newuidmap_t passwd_file_t:file { read open };
+
+# --- docker_helper_newgidmap_t: the rootlesskit GID-map helper domain (P5-S2) ---
+#
+# The same rootlesskit flow launches the distro newgidmap binary for the
+# GID mapping right after the UID-map step. The transition mirrors the
+# proven newuidmap shape EXACTLY: the pointed exec transition from the
+# rootlesskit child domain over the dedicated exec type is the ONLY path
+# into this domain, and the source-side exec checks mirror the proven
+# newuidmap source shape (the same rootlesskit Go exec mechanics: the
+# path-lookup execute, the bprm open/read, the pre-exec getattr). The
+# entry rule carries the transition-required entrypoint plus the loader
+# access (the newuidmap entry shape). NO runtime surface is granted yet
+# (no passwd lookup, no userdb fallback, no gid_map write, no fifo, no
+# capabilities, no cap_userns): the first enforcing boundary INSIDE this
+# domain is the next deliberate step. No transition or allow rule points
+# into the domain from the manager or the daemon.
+type_transition docker_helper_rootlesskit_t docker_helper_newgidmap_exec_t:process docker_helper_newgidmap_t;
+allow docker_helper_rootlesskit_t docker_helper_newgidmap_t:process { transition };
+
+allow docker_helper_rootlesskit_t docker_helper_newgidmap_exec_t:file { execute read open getattr };
+allow docker_helper_newgidmap_t docker_helper_newgidmap_exec_t:file { entrypoint read open execute getattr map };
 
 # The child's user-namespace creation itself: rootlesskit creates the userns
 # that hosts the buildkitd instance. Live enforcing AVC evidence (P5-S1
