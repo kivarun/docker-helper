@@ -566,6 +566,7 @@ var newuidmapDomainSurface = []string{
 	"allow docker_helper_newuidmap_t docker_helper_newuidmap_exec_t:file { entrypoint read open execute getattr map };",
 	"allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:fifo_file { write };",
 	"allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read open getattr search };",
+	"allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:file { write open };",
 	"allow docker_helper_newuidmap_t passwd_file_t:file { read open };",
 }
 
@@ -577,7 +578,14 @@ var newuidmapDomainSurface = []string{
 //     extra grants both violate);
 //   - the domain holds no self:capability, capability2, or cap_userns
 //     grant (the privilege model stays the distro's chkstat-applied file
-//     caps; the enforcing capability boundary stays ungranted).
+//     caps; the enforcing capability boundary stays ungranted);
+//   - the domain holds no grant toward any forbidden surface (same set as
+//     the builder domain);
+//   - the domain holds NO process-class grant toward
+//     docker_helper_rootlesskit_t: the mem file's kernel
+//     PTRACE_MODE_ATTACH check maps to process:ptrace between the
+//     domains, and that barrier (signal/ptrace alike) stays closed — the
+//     file-write grant must never be read as enabling memory writes.
 func newuidmapDomainPolicyViolations(policy string) []string {
 	var violations []string
 	seen := 0
@@ -605,6 +613,23 @@ func newuidmapDomainPolicyViolations(policy string) []string {
 				if strings.Contains(trimmed, ":"+cls+" ") {
 					violations = append(violations, fmt.Sprintf("the UID-map helper domain must hold no %s grant: %s", cls, trimmed))
 				}
+			}
+		}
+		if target, class, ok := strings.Cut(strings.TrimPrefix(trimmed, "allow docker_helper_newuidmap_t "), ":"); ok {
+			class = strings.Fields(class)[0]
+			// The helper's target allowlist: its own entry type, the
+			// rootlesskit child domain (fifo/dir/file surface), the passwd
+			// lookup file type, and the self-targets the surface scan
+			// already pins. ANY other target type — daemon or builder trees,
+			// the Docker socket, workspaces, or a sibling helper — is a
+			// violation.
+			switch target {
+			case "docker_helper_newuidmap_exec_t", "docker_helper_rootlesskit_t", "passwd_file_t", "self":
+			default:
+				violations = append(violations, fmt.Sprintf("the UID-map helper domain must not receive a grant toward %s (unexpected target type): %s", target, trimmed))
+			}
+			if class == "process" && target == "docker_helper_rootlesskit_t" {
+				violations = append(violations, fmt.Sprintf("the UID-map helper domain must hold no process-class grant toward the rootlesskit child domain (the mem file's ptrace barrier stays closed): %s", trimmed))
 			}
 		}
 	}
@@ -644,7 +669,12 @@ func TestSELinuxPolicyNewuidmapDomainSurface(t *testing.T) {
 		{"widened fifo grant", "allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:fifo_file { write append };", "unexpected rule"},
 		{"widened proc-dir grant", "allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read open getattr search write };", "unexpected rule"},
 		{"regressed proc-dir search grant", "allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read open getattr };", "unexpected rule"},
-		{"regressed proc-dir getattr grant", "allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read open };", "unexpected rule"},
+		{"widened uid_map file grant", "allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:file { write open append };", "unexpected rule"},
+		{"regressed uid_map file write grant", "allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:file { open };", "unexpected rule"},
+		{"regressed uid_map file open grant", "allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:file { write };", "unexpected rule"},
+		{"process ptrace toward the child domain", "allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:process ptrace;", "no process-class grant toward the rootlesskit child domain"},
+		{"process signal toward the child domain", "allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:process signal;", "no process-class grant toward the rootlesskit child domain"},
+		{"extra target type (builder state tree)", "allow docker_helper_newuidmap_t docker_helper_builder_state_t:file { write };", "unexpected target type"},
 		{"widened passwd grant", "allow docker_helper_newuidmap_t passwd_file_t:file { read open getattr };", "unexpected rule"},
 		{"extra passwd getattr grant", "allow docker_helper_newuidmap_t passwd_file_t:file { read getattr };", "unexpected rule"},
 		{"regressed passwd open grant", "allow docker_helper_newuidmap_t passwd_file_t:file { read };", "unexpected rule"},
