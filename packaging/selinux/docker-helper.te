@@ -114,7 +114,7 @@ module docker_helper 1.1;
 		class tcp_socket { create setopt bind node_bind listen accept getattr read write connect getopt name_connect };
 		class unix_stream_socket { connectto getattr ioctl read write };
 		class udp_socket { create setopt connect getattr read write };
-		class capability { dac_read_search dac_override sys_admin fowner };
+		class capability { dac_read_search dac_override sys_admin fowner setuid };
 		class capability2 { wake_alarm kill };
 		class user_namespace { create };
 		class cap_userns { sys_admin };
@@ -643,7 +643,8 @@ type docker_helper_slirp4netns_exec_t, file_type;
 # /usr/bin/newuidmap as the actual path; the P4 proof asserts the distro
 # owns the binary and its setuid bit is intact. A dedicated domain keeps
 # the transition confined to this binary; newuidmap's own privilege surface
-# (setuid capabilities, its file access) is the next deliberate boundary.
+# (setuid capabilities, its file access) is granted per enforcing AVC
+# evidence in the P5-S2 runtime section below.
 type docker_helper_newuidmap_exec_t, file_type;
 type docker_helper_newuidmap_t, domain;
 role system_r types docker_helper_newuidmap_t;
@@ -1000,10 +1001,10 @@ allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read open geta
 # separate operations — an open architectural risk, tracked for the final
 # security review. The mem file stays closed: the kernel's
 # PTRACE_MODE_ATTACH check maps to process:ptrace between the domains,
-# which is NOT granted. No getattr/search/append on this pair, no other
-# target types, and the helper's own privilege surface (self:capability
-# setuid, self:cap_userns sys_admin — attempted per the harvest) stays
-# ungranted: the next deliberate boundaries.
+# which is NOT granted. No getattr/search/append on this pair and no other
+# target types. The helper's own privilege surface (self:cap_userns
+# sys_admin, then self:capability setuid) is granted separately below, each
+# with its own enforcing AVC evidence.
 allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:file { write open };
 
 # The helper's in-namespace capability check at the uid_map write itself
@@ -1016,15 +1017,43 @@ allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:file { write open };
 # tcontext=system_u:system_r:docker_helper_newuidmap_t:s0 tclass=cap_userns
 # permissive=0) — the kernel mediated a capability check the helper
 # performs inside a NON-INITIAL user namespace, so the class is cap_userns.
-# Grant ONLY the in-namespace sys_admin bit: no plain self:capability grant
-# is added (the out-of-namespace capability set — including setuid — stays
-# ungranted), and the manager, slirp4netns, and every other domain get no
-# cap_userns rights at all. SCOPE — READ CAREFULLY: like every helper
+# Grant ONLY the in-namespace sys_admin bit: the manager, slirp4netns, and
+# every other domain get no cap_userns rights at all. The plain
+# self:capability surface is granted separately below, ONLY for the
+# evidenced out-of-namespace setuid check (the same write's next kernel
+# boundary). SCOPE — READ CAREFULLY: like every helper
 # grant this is a DOMAIN-PAIR rule, NOT an operation-scoped one; all build
 # operations share the one builder UID and this one SELinux domain, and
 # per-operation isolation is invocation discipline only (the open
 # architectural risk tracked for the final security review).
 allow docker_helper_newuidmap_t self:cap_userns sys_admin;
+
+# The helper's OUT-OF-NAMESPACE capability check at the same uid_map write
+# (P5-S2): with the in-namespace sys_admin bit granted (enforcing run
+# 36263531925), the write advanced to the kernel's next capability layer and
+# stopped there. Live enforcing AVC evidence (run 36265505542, record 569:
+# denied { setuid } for pid=3767 comm="newuidmap" capability=7
+# scontext=system_u:system_r:docker_helper_newuidmap_t:s0
+# tcontext=system_u:system_r:docker_helper_newuidmap_t:s0 tclass=capability
+# permissive=0) — the mapping the helper writes extends beyond the caller's
+# own uid ([0 475 1 1 231072 65536]), so the kernel requires CAP_SETUID in
+# the helper's OWN (initial) user namespace, mediated as the plain
+# capability class. The privilege owner is unchanged: the distro's
+# chkstat-applied cap_setuid file capability (permissions.d/shadow) puts
+# the bit in the helper's permitted set, and this rule lets the
+# file-cap-backed check succeed; docker-helper applies no file capabilities
+# of its own, never widens a bounding set, and changes no systemd
+# configuration.
+# SCOPE — READ CAREFULLY: like every helper grant this is a DOMAIN-WIDE
+# rule, NOT an operation-scoped one. SELinux now permits the use of
+# CAP_SETUID inside docker_helper_newuidmap_t but does NOT restrict that
+# permission to a specific PID or Build Operation: all build operations
+# share the one builder UID and this one SELinux domain, and per-operation
+# isolation is invocation discipline only (the open architectural risk
+# tracked for the final security review). Grant ONLY the setuid bit: no
+# other capability, no capability2, no gid-mapping surface (newgidmap stays
+# ungranted), no additional cap_userns permission.
+allow docker_helper_newuidmap_t self:capability setuid;
 
 # The helper's caller-identity lookup (P5-S2): the getpwuid read of
 # /etc/passwd that locates the caller's user name before validating the
