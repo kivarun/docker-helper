@@ -38,8 +38,12 @@ type Config struct {
 	OperationRetentionTTL time.Duration
 	OperationMaxCompleted int
 	OperationLogMaxBytes  int64
-	// HTTPAddress is the loopback TCP listen address.
+	// HTTPAddress remains plaintext on loopback only.
 	HTTPAddress string
+	// Optional external TLS endpoint. Empty address disables it.
+	TLSAddress  string
+	TLSCertFile string
+	TLSKeyFile  string
 	// Trusted CA injection (runtime-only, computed from file config).
 	TrustedCAInjection   string // "disabled" or "auto"
 	TrustedCAPath        string // absolute path to CA file (only when auto)
@@ -63,6 +67,9 @@ type fileConfig struct {
 	TrustedCAPath         string             `json:"trusted_ca_path,omitempty"`
 	TrustedCAInjection    string             `json:"trusted_ca_injection,omitempty"`
 	HTTPAddress           string             `json:"http_address,omitempty"`
+	TLSAddress            string             `json:"tls_address,omitempty"`
+	TLSCertFile           string             `json:"tls_cert_file,omitempty"`
+	TLSKeyFile            string             `json:"tls_key_file,omitempty"`
 }
 
 func parseLogLevel(s string) (slog.Level, error) {
@@ -85,9 +92,10 @@ func ptrOf[T any](v T) *T {
 }
 
 type configFieldSpec struct {
-	name     string
-	writable bool
-	required bool
+	name       string
+	writable   bool
+	required   bool
+	configOnly bool // accepts config-file input, not piecemeal config set/unset
 }
 
 var configFields = []configFieldSpec{
@@ -108,6 +116,9 @@ var configFields = []configFieldSpec{
 	{name: "trusted_ca_path", writable: true},
 	{name: "trusted_ca_injection", writable: true},
 	{name: "http_address", writable: true},
+	{name: "tls_address", configOnly: true},
+	{name: "tls_cert_file", configOnly: true},
+	{name: "tls_key_file", configOnly: true},
 	{name: "audit_enabled_source"},
 	{name: "config_path"},
 	{name: "config_dir"},
@@ -204,7 +215,7 @@ func isKnownField(name string) bool {
 
 func isReadOnlyField(name string) bool {
 	f, ok := lookupConfigField(name)
-	return ok && !f.writable
+	return ok && !f.writable && !f.configOnly
 }
 
 func isRequiredField(name string) bool {
@@ -411,6 +422,9 @@ func loadAndPrepareRuntimeConfig() (*Config, error) {
 		OperationMaxCompleted: ec.OperationMaxCompleted,
 		OperationLogMaxBytes:  ec.OperationLogMaxBytes,
 		HTTPAddress:           httpAddress,
+		TLSAddress:            fc.TLSAddress,
+		TLSCertFile:           fc.TLSCertFile,
+		TLSKeyFile:            fc.TLSKeyFile,
 		TrustedCAInjection:    trustedCAInjection,
 		TrustedCAPath:         fc.TrustedCAPath,
 	}
@@ -1352,6 +1366,9 @@ func validateRawConfig(raw map[string]json.RawMessage) error {
 		}
 	}
 
+	if err := validateExternalTLSConfig(raw); err != nil {
+		return err
+	}
 	return nil
 }
 
