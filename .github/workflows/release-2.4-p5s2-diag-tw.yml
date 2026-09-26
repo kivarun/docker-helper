@@ -1,0 +1,48 @@
+name: Release 2.4 P5-S2 newuidmap diagnosis
+
+# One-off investigation job (P5-S2 step 8): why does the Tumbleweed shadow
+# package ship newuidmap/newgidmap without setuid or file capabilities and
+# why does the UID/GID mapping fail. Runs the guest-side diagnosis inside
+# the canonical Tumbleweed VM harness (scripts/uat-vm-tumbleweed.sh) — no
+# candidate build, no docker-helper install, no policy or package changes,
+# pure evidence collection plus an unconfined control experiment.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - p3
+    paths:
+      - .github/workflows/release-2.4-p5s2-diag-tw.yml
+      - scripts/release-2.4-p5s2-diag-tw.sh
+      - scripts/release-2.4-p5s2-diag-tw-vm.sh
+
+permissions:
+  contents: read
+
+jobs:
+  newuidmap-diagnosis-tumbleweed:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install QEMU and cloud-image tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage
+
+      - name: Run Tumbleweed newuidmap diagnosis
+        run: |
+          UAT_REPO_DIR="${{ github.workspace }}" \
+          P5S2_DIAG_EVIDENCE_DIR="$RUNNER_TEMP/release-2.4-p5s2-diag-evidence" \
+            scripts/release-2.4-p5s2-diag-tw-vm.sh
+
+      - name: Upload diagnosis evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-2.4-p5s2-diag-tw-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-2.4-p5s2-diag-evidence
+          if-no-files-found: warn
