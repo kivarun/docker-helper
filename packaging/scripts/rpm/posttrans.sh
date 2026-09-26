@@ -68,6 +68,14 @@ if command -v restorecon >/dev/null 2>&1; then
   # context so the rootlesskit child's exec transitions into its dedicated
   # domain (and only that child can exec it).
   restorecon /usr/bin/newuidmap 2>/dev/null || true
+  # newgidmap is a distro dependency of the launch vehicle (the root-owned
+  # GID-map helper; its privilege mechanism is the distro chkstat-applied
+  # cap_setgid file capability, untouched by docker-helper); apply the
+  # shipped docker_helper_newgidmap_exec_t file context so the rootlesskit
+  # child's exec transitions into its dedicated domain (and only that
+  # child can exec it). Label-only: restorecon never alters owner, mode,
+  # or xattrs.
+  restorecon /usr/bin/newgidmap 2>/dev/null || true
   restorecon -R /etc/docker-helper 2>/dev/null || true
   restorecon -R /var/lib/docker-helper 2>/dev/null || true
   # Relabel only the helper-owned /run/docker-helper dir itself to

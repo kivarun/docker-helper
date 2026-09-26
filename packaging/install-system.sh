@@ -647,6 +647,12 @@ apply_selinux_restorecon() {
 	# dedicated exec type is executable only from the rootlesskit child
 	# domain.
 	"$RESTORECON" /usr/bin/newuidmap 2>/dev/null || true
+	# newgidmap: the launch vehicle's root-owned GID-map helper (the distro
+	# chkstat-applied cap_setgid file capability is its privilege
+	# mechanism); the dedicated exec type is executable only from the
+	# rootlesskit child domain. Label-only: restorecon never alters owner,
+	# mode, or xattrs.
+	"$RESTORECON" /usr/bin/newgidmap 2>/dev/null || true
 	"$RESTORECON" -R /run/docker-helper-builder 2>/dev/null || true
 	"$RESTORECON" -R /var/lib/docker-helper-builder 2>/dev/null || true
 	"$RESTORECON" -R /etc/docker-helper 2>/dev/null || true

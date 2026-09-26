@@ -52,6 +52,7 @@ ROOTLESSKIT_BIN="${ROOTLESSKIT_BIN:-/usr/bin/rootlesskit}"
 BINDFS_BIN="${BINDFS_BIN:-/usr/bin/bindfs}"
 SLIRP4NETNS_BIN="${SLIRP4NETNS_BIN:-/usr/bin/slirp4netns}"
 NEWUIDMAP_BIN="${NEWUIDMAP_BIN:-/usr/bin/newuidmap}"
+NEWGIDMAP_BIN="${NEWGIDMAP_BIN:-/usr/bin/newgidmap}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/docker-helper}"
 STATE_DIR="${STATE_DIR:-/var/lib/docker-helper}"
 RUNTIME_DIR="${RUNTIME_DIR:-/run/docker-helper}"
@@ -224,13 +225,13 @@ restore_third_party_binary_labels() {
 		warn "restorecon not available; third-party binary labels not restored"
 		return
 	fi
-	info "Restoring third-party binary labels (rootlesskit, bindfs, slirp4netns, newuidmap)"
-	if ! restore_err="$("$RESTORECON" "$ROOTLESSKIT_BIN" "$BINDFS_BIN" "$SLIRP4NETNS_BIN" "$NEWUIDMAP_BIN" 2>&1 >/dev/null)"; then
-		warn "Failed to restore third-party binary labels (rootlesskit, bindfs, slirp4netns, newuidmap): $restore_err"
+	info "Restoring third-party binary labels (rootlesskit, bindfs, slirp4netns, newuidmap, newgidmap)"
+	if ! restore_err="$("$RESTORECON" "$ROOTLESSKIT_BIN" "$BINDFS_BIN" "$SLIRP4NETNS_BIN" "$NEWUIDMAP_BIN" "$NEWGIDMAP_BIN" 2>&1 >/dev/null)"; then
+		warn "Failed to restore third-party binary labels (rootlesskit, bindfs, slirp4netns, newuidmap, newgidmap): $restore_err"
 		return
 	fi
 	local label_path actual_label canonical_label
-	for label_path in "$ROOTLESSKIT_BIN" "$BINDFS_BIN" "$SLIRP4NETNS_BIN" "$NEWUIDMAP_BIN"; do
+	for label_path in "$ROOTLESSKIT_BIN" "$BINDFS_BIN" "$SLIRP4NETNS_BIN" "$NEWUIDMAP_BIN" "$NEWGIDMAP_BIN"; do
 		if [[ ! -e "$label_path" ]]; then
 			warn "$label_path not present; third-party label restore skipped"
 			continue
