@@ -81,6 +81,30 @@ func TestExternalTLSConfigAllOrNothing(t *testing.T) {
 	}
 }
 
+func TestExternalTLSStrictConfigIngest(t *testing.T) {
+	raw := rawExternalTLS(map[string]any{
+		"allowed_roots": []string{testAllowedRootDir(t)},
+		"session_ttl": "1h",
+		"tls_address": "192.168.1.10:52376",
+		"tls_cert_file": "/etc/docker-helper/tls/server.crt",
+		"tls_key_file": "/etc/docker-helper/tls/server.key",
+	})
+	if err := validateRawConfig(raw); err != nil {
+		t.Fatalf("TLS rejected by strict config ingest: %v", err)
+	}
+	decoded, err := decodeFileConfig(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.TLSAddress != "192.168.1.10:52376" || decoded.TLSCertFile == "" || decoded.TLSKeyFile == "" {
+		t.Fatalf("TLS settings lost in config projection: %+v", decoded)
+	}
+	delete(raw, "tls_key_file")
+	if err := validateRawConfig(raw); err == nil {
+		t.Fatal("partial external TLS configuration passed strict ingest")
+	}
+}
+
 func makeTestTLSFiles(t *testing.T) (certPath, keyPath string, roots *x509.CertPool) {
 	t.Helper()
 	// Test-only keypair: production requires operator-supplied PEM files.
