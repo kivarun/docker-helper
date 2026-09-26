@@ -517,10 +517,10 @@ func TestSELinuxPolicyNewuidmapDomainTransition(t *testing.T) {
 
 // TestSELinuxPolicyNewuidmapIsolation verifies the UID-map helper domain's
 // isolation surface: no Docker socket, admin token, config/state/runtime,
-// or Session workspace grants; no capability/capability2 rules and no
-// cap_userns rule beyond the one evidenced sys_admin grant; and no
-// transition or allow rule pointing into the domain other than the pinned
-// ones.
+// or Session workspace grants; no cap_userns rule beyond the one evidenced
+// sys_admin grant and no plain capability surface beyond the one evidenced
+// setuid grant; and no transition or allow rule pointing into the domain
+// other than the pinned ones.
 func TestSELinuxPolicyNewuidmapIsolation(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
 	for _, line := range strings.Split(policy, "\n") {
@@ -577,6 +577,7 @@ var newuidmapDomainSurface = []string{
 	"allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read open getattr search };",
 	"allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:file { write open };",
 	"allow docker_helper_newuidmap_t self:cap_userns sys_admin;",
+	"allow docker_helper_newuidmap_t self:capability setuid;",
 	"allow docker_helper_newuidmap_t passwd_file_t:file { read open };",
 }
 
@@ -586,10 +587,11 @@ var newuidmapDomainSurface = []string{
 //   - the domain's allow-rule surface is EXACTLY newuidmapDomainSurface
 //     (source-scoped, full-line equality, so widened permission sets and
 //     extra grants both violate);
-//   - the domain holds no self:capability or capability2 grant (the
-//     privilege model stays the distro's chkstat-applied file caps; the
-//     out-of-namespace capability set — setuid included — stays
-//     ungranted), and its cap_userns surface is exactly the evidenced
+//   - the domain's plain self:capability surface is EXACTLY the evidenced
+//     { setuid } bit (the uid_map write's out-of-namespace check; the
+//     privilege owner stays the distro's chkstat-applied file caps), any
+//     widening or additional bit violates, and every capability2 grant
+//     violates; its cap_userns surface is exactly the evidenced
 //     { sys_admin } in-namespace bit;
 //   - the domain holds no grant toward any forbidden surface (same set as
 //     the builder domain);
@@ -621,8 +623,15 @@ func newuidmapDomainPolicyViolations(policy string) []string {
 			violations = append(violations, fmt.Sprintf("the UID-map helper domain's surface is exact; unexpected rule: %s", trimmed))
 		}
 		if strings.HasPrefix(trimmed, "allow docker_helper_newuidmap_t self:") {
-			if strings.Contains(trimmed, ":capability ") || strings.Contains(trimmed, ":capability2 ") {
-				violations = append(violations, fmt.Sprintf("the UID-map helper domain must hold no capability/capability2 grant: %s", trimmed))
+			if strings.Contains(trimmed, ":capability2 ") {
+				violations = append(violations, fmt.Sprintf("the UID-map helper domain must hold no capability2 grant: %s", trimmed))
+			}
+			if strings.Contains(trimmed, ":capability ") && trimmed != "allow docker_helper_newuidmap_t self:capability setuid;" {
+				// The plain out-of-namespace surface is exactly the one
+				// evidenced setuid bit (the uid_map write's kernel check,
+				// enforcing run 36265505542 record 569); any widening or
+				// additional capability bit is a violation.
+				violations = append(violations, fmt.Sprintf("the UID-map helper domain's plain capability surface is exactly { setuid }: %s", trimmed))
 			}
 			// The in-namespace sys_admin bit is the one evidenced capability
 			// surface (the uid_map write's cap_userns check, enforcing run
@@ -666,8 +675,10 @@ func newuidmapDomainPolicyViolations(policy string) []string {
 // the getpwuid caller lookup — the open(2) proven by run 36251483787)
 // beside the entry rule — and nothing else. Mutation tests prove each
 // guard fires: widened or regressed dir and passwd grants, extra
-// dir/passwd permissions, and any capability, capability2, or cap_userns
-// grant for the helper domain must trip the exact-surface invariant.
+// dir/passwd permissions, capability/cap_userns widening or additional
+// bits (only the evidenced setuid/sys_admin shapes are tolerated), and
+// capability2 grants for the helper domain must trip the exact-surface
+// invariant.
 func TestSELinuxPolicyNewuidmapDomainSurface(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
 	if violations := newuidmapDomainPolicyViolations(policy); len(violations) > 0 {
@@ -697,8 +708,10 @@ func TestSELinuxPolicyNewuidmapDomainSurface(t *testing.T) {
 		{"regressed passwd open grant", "allow docker_helper_newuidmap_t passwd_file_t:file { read };", "unexpected rule"},
 		{"widened helper cap_userns", "allow docker_helper_newuidmap_t self:cap_userns { sys_admin setuid };", "cap_userns surface is exactly"},
 		{"extra helper cap_userns permission", "allow docker_helper_newuidmap_t self:cap_userns setuid;", "cap_userns surface is exactly"},
-		{"capability for helper", "allow docker_helper_newuidmap_t self:capability sys_admin;", "no capability/capability2 grant"},
-		{"capability2 for helper", "allow docker_helper_newuidmap_t self:capability2 kill;", "no capability/capability2 grant"},
+		{"widened helper setuid capability", "allow docker_helper_newuidmap_t self:capability { setuid sys_admin };", "plain capability surface is exactly"},
+		{"extended helper setuid capability", "allow docker_helper_newuidmap_t self:capability { setuid dac_override };", "plain capability surface is exactly"},
+		{"extra helper capability bit", "allow docker_helper_newuidmap_t self:capability sys_admin;", "plain capability surface is exactly"},
+		{"capability2 for helper", "allow docker_helper_newuidmap_t self:capability2 kill;", "no capability2 grant"},
 	} {
 		mutated := policy + "\n" + mut.rule
 		violations := newuidmapDomainPolicyViolations(mutated)
@@ -718,37 +731,66 @@ func TestSELinuxPolicyNewuidmapDomainSurface(t *testing.T) {
 // domain's and the UID-map helper domain's evidenced self:cap_userns
 // sys_admin bits (both in-namespace capability checks on the P5-S2 flow).
 // The manager, the slirp4netns helper, and every other subject hold no
-// cap_userns rules; widening either evidenced rule and any plain
-// self:capability/capability2 surface on the two granted subjects are
-// violations.
+// cap_userns rules. The plain capability carve-out is narrow: ONLY the
+// UID-map helper's evidenced self:capability setuid (the uid_map write's
+// out-of-namespace check) may exist; the rootlesskit child keeps a zero
+// plain self:capability surface and both subjects keep zero
+// self:capability2 surfaces. Mutations prove the carve-out is narrow: a
+// setuid or sys_admin grant for the rootlesskit child, a widened helper
+// capability set, and a helper capability2 grant all trip.
 func TestSELinuxPolicyCapUsernsShape(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
-	want := map[string]bool{
-		"allow docker_helper_rootlesskit_t self:cap_userns sys_admin;": false,
-		"allow docker_helper_newuidmap_t self:cap_userns sys_admin;":   false,
-	}
-	for _, line := range strings.Split(policy, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		if strings.Contains(trimmed, ":cap_userns ") {
-			if seen, ok := want[trimmed]; ok && !seen {
-				want[trimmed] = true
+	// capUsernsShapeViolations returns one violation per line of text that
+	// breaks the shape invariant: a cap_userns rule beyond the two evidenced
+	// sys_admin grants, a plain capability grant that is not the helper's
+	// single evidenced setuid bit, or any capability2 grant on the two
+	// cap_userns subjects.
+	capUsernsShapeViolations := func(text string) []string {
+		var violations []string
+		for _, line := range strings.Split(text, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") {
 				continue
 			}
-			t.Errorf("no cap_userns rule may exist beyond the two evidenced in-namespace sys_admin grants (the manager, slirp4netns, and other subjects get none): %s", trimmed)
+			switch {
+			case strings.Contains(trimmed, ":cap_userns "):
+				if trimmed != "allow docker_helper_rootlesskit_t self:cap_userns sys_admin;" &&
+					trimmed != "allow docker_helper_newuidmap_t self:cap_userns sys_admin;" {
+					violations = append(violations, fmt.Sprintf("no cap_userns rule may exist beyond the two evidenced in-namespace sys_admin grants (the manager, slirp4netns, and other subjects get none): %s", trimmed))
+				}
+			case strings.Contains(trimmed, ":capability ") && strings.Contains(trimmed, "docker_helper_rootlesskit_t"):
+				violations = append(violations, fmt.Sprintf("the rootlesskit child domain must keep zero plain self:capability surfaces: %s", trimmed))
+			case strings.Contains(trimmed, ":capability ") && strings.Contains(trimmed, "docker_helper_newuidmap_t") && trimmed != "allow docker_helper_newuidmap_t self:capability setuid;":
+				violations = append(violations, fmt.Sprintf("the UID-map helper's only plain capability grant is the evidenced setuid bit: %s", trimmed))
+			case strings.Contains(trimmed, ":capability2 ") && (strings.Contains(trimmed, "docker_helper_rootlesskit_t") || strings.Contains(trimmed, "docker_helper_newuidmap_t")):
+				violations = append(violations, fmt.Sprintf("the two cap_userns subjects must keep zero plain self:capability2 surfaces: %s", trimmed))
+			}
 		}
-		if strings.Contains(trimmed, ":capability ") && (strings.Contains(trimmed, "docker_helper_rootlesskit_t") || strings.Contains(trimmed, "docker_helper_newuidmap_t")) {
-			t.Errorf("the two cap_userns subjects must keep zero plain self:capability surfaces: %s", trimmed)
-		}
-		if strings.Contains(trimmed, ":capability2 ") && (strings.Contains(trimmed, "docker_helper_rootlesskit_t") || strings.Contains(trimmed, "docker_helper_newuidmap_t")) {
-			t.Errorf("the two cap_userns subjects must keep zero plain self:capability2 surfaces: %s", trimmed)
+		return violations
+	}
+	if violations := capUsernsShapeViolations(policy); len(violations) > 0 {
+		t.Errorf("the committed policy violates the cap_userns/capability shape invariants: %v", violations)
+	}
+	for _, rule := range []string{
+		"allow docker_helper_rootlesskit_t self:cap_userns sys_admin;",
+		"allow docker_helper_newuidmap_t self:cap_userns sys_admin;",
+	} {
+		if !strings.Contains(policy, rule) {
+			t.Errorf("the evidenced cap_userns grant must be present: %q", rule)
 		}
 	}
-	for rule, seen := range want {
-		if !seen {
-			t.Errorf("the evidenced cap_userns grant must be present: %q", rule)
+	for _, mut := range []struct {
+		name string
+		rule string
+	}{
+		{"setuid capability for the rootlesskit child", "allow docker_helper_rootlesskit_t self:capability setuid;"},
+		{"plain capability for the rootlesskit child", "allow docker_helper_rootlesskit_t self:capability sys_admin;"},
+		{"widened helper capability set", "allow docker_helper_newuidmap_t self:capability { setuid sys_admin };"},
+		{"additional helper capability bit", "allow docker_helper_newuidmap_t self:capability dac_override;"},
+		{"capability2 for the helper", "allow docker_helper_newuidmap_t self:capability2 kill;"},
+	} {
+		if violations := capUsernsShapeViolations(policy + "\n" + mut.rule); len(violations) == 0 {
+			t.Errorf("mutation %q must fail the cap_userns/capability shape invariant", mut.name)
 		}
 	}
 }
