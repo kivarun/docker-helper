@@ -982,6 +982,30 @@ allow docker_helper_newuidmap_t docker_helper_newuidmap_exec_t:file { entrypoint
 allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:fifo_file { write };
 allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read open getattr search };
 
+# The helper's core write (P5-S2): the write-open of the target process's
+# uid_map. Live enforcing AVC evidence (P5-S1 Tumbleweed run 36258882064
+# P6 window, record 568: denied { write } name="uid_map" dev="proc"
+# tcontext=system_u:system_r:docker_helper_rootlesskit_t:s0 tclass=file
+# permissive=0) plus the grant-scope assessment's permissive harvest (run
+# 36261874263: records 334/335 — the SAME open also requires { open } on
+# the file class, /proc/2510/uid_map).
+#
+# SCOPE — READ CAREFULLY: this is a TYPE-PAIR grant, NOT a path-specific
+# uid_map rule. It authorizes write/open on the procfs regular files of
+# EVERY process running in docker_helper_rootlesskit_t — INCLUDING the
+# processes of OTHER concurrent operations: all BuildKit instances run
+# their rootlesskit flow in this ONE domain, their file surfaces are
+# type-identical (proven by the scope assessment), and the per-instance
+# isolation is invocation discipline only. The shared type pair does NOT
+# separate operations — an open architectural risk, tracked for the final
+# security review. The mem file stays closed: the kernel's
+# PTRACE_MODE_ATTACH check maps to process:ptrace between the domains,
+# which is NOT granted. No getattr/search/append on this pair, no other
+# target types, and the helper's own privilege surface (self:capability
+# setuid, self:cap_userns sys_admin — attempted per the harvest) stays
+# ungranted: the next deliberate boundaries.
+allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:file { write open };
+
 # The helper's caller-identity lookup (P5-S2): the getpwuid read of
 # /etc/passwd that locates the caller's user name before validating the
 # requested mapping ranges against the caller's subid database. Live
