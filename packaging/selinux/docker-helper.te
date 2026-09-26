@@ -941,9 +941,9 @@ allow docker_helper_rootlesskit_t docker_helper_newuidmap_t:process { transition
 allow docker_helper_rootlesskit_t docker_helper_newuidmap_exec_t:file { execute read open getattr };
 allow docker_helper_newuidmap_t docker_helper_newuidmap_exec_t:file { entrypoint read open execute getattr map };
 
-# The helper's own runtime surface (P5-S2 step 8): exactly the two live
-# enforcing AVC records of the previous boundary (P5-S1 Tumbleweed run
-# 36229266623 P6 window, both permissive=0, comm="newuidmap"
+# The helper's own runtime surface (P5-S2): exactly the live enforcing AVC
+# records of the previous boundaries (P5-S1 Tumbleweed runs 36229266623 and
+# 36248541393 P6 windows, permissive=0, comm="newuidmap"
 # scontext=system_u:system_r:docker_helper_newuidmap_t:s0):
 #   denied { write }  tcontext=system_u:system_r:docker_helper_rootlesskit_t:s0
 #     tclass=fifo_file  path="pipe:[21945]" dev="pipefs"
@@ -952,13 +952,20 @@ allow docker_helper_newuidmap_t docker_helper_newuidmap_exec_t:file { entrypoint
 #     error output is lost)
 #   denied { read }   tcontext=system_u:system_r:docker_helper_rootlesskit_t:s0
 #     tclass=dir        name="3757" dev="proc"
-#     (/proc/<rootlesskit-pid> — the procfs parent-directory check on the
-#     uid_map write path; the dir read grant is NOT a general directory
-#     read: no other dir permission is evidenced)
-# Nothing else was denied: no getattr, no file-class record, no capability
-# or cap_userns surface — those stay ungranted boundaries.
+#     (run 36229266623: the procfs parent directory of the uid_map write
+#     path; the pair grant is NOT a general directory grant:
+#     docker_helper_rootlesskit_t:dir objects are /proc/<pid> entries of
+#     processes running in the child domain)
+#   denied { open }   tcontext=system_u:system_r:docker_helper_rootlesskit_t:s0
+#     tclass=dir        path="/proc/3746" dev="proc"
+#     (run 36248541393: the O_DIRECTORY open of the SAME target after the
+#     read grant; newuidmap failed with its own output "Could not open proc
+#     directory for target 3746: Permission denied")
+# Nothing else was denied: no getattr, no search, no write on the dir, no
+# file-class record, no capability or cap_userns surface — those stay
+# ungranted boundaries.
 allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:fifo_file { write };
-allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read };
+allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read open };
 
 # The child's user-namespace creation itself: rootlesskit creates the userns
 # that hosts the buildkitd instance. Live enforcing AVC evidence (P5-S1
