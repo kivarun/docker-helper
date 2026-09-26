@@ -716,7 +716,25 @@ rpm -Uvh --replacepkgs "$RPM" >/dev/null || fail "rpm -U --replacepkgs failed"
   || fail "builder unit stopped across the upgrade"
 audit_window_start
 P6_START="$AVC_EPOCH"
+# Poll for the slirp4netns helper process while the attempt runs and record
+# its actual runtime SELinux context from /proc when found. This is the
+# runtime-context proof (item: never base the positive context claim on AVC
+# records alone); if the process is not observable, the note is recorded and
+# the report says so honestly instead of claiming the transition was proven.
+(
+  while :; do
+    slirp_pid="$(pgrep -f /usr/bin/slirp4netns 2>/dev/null | head -1)"
+    if [ -n "$slirp_pid" ] && [ -r "/proc/$slirp_pid/attr/current" ]; then
+      cat "/proc/$slirp_pid/attr/current" > "$EVIDENCE_DIR/slirp-runtime-context.txt" 2>&1
+      break
+    fi
+    sleep 0.05
+  done
+) &
+POLL_PID=$!
 BUILD_P6_OUT="$(attempt_build)" && BUILD_P6_RC=0 || BUILD_P6_RC=$?
+kill "$POLL_PID" 2>/dev/null || true
+wait "$POLL_PID" 2>/dev/null || true
 save_build_output "$EVIDENCE_DIR/build-attempt-post-relabel.txt" "$BUILD_P6_OUT"
 log "post-relabel build attempt exit code: $BUILD_P6_RC"
 
@@ -743,6 +761,21 @@ if ! grep -aqF "START $P6_OP_ID" "$EVIDENCE_DIR/builder-journal-p6.txt"; then
     echo "=== builder-domain AVC window ==="; cat "$EVIDENCE_DIR/builder-avc-p6.txt"; } >&2
   fail "the manager journal shows no START handling for $P6_OP_ID (the RPC never reached the manager — S1 transport defect)"
 fi
+# Runtime-context proof of the helper-domain transition: when the helper
+# process was observed, its /proc context must be the dedicated helper
+# domain; when not observable, the note is recorded honestly (the exec may
+# not have been reached under enforcing, or the helper died at its own
+# runtime boundary before the poll found it).
+if [ -s "$EVIDENCE_DIR/slirp-runtime-context.txt" ]; then
+  SLIRP_RUNTIME_CTX="$(cat "$EVIDENCE_DIR/slirp-runtime-context.txt")"
+  case "$SLIRP_RUNTIME_CTX" in
+    *docker_helper_slirp4netns_t*) say "P6 slirp4netns runtime context confirmed from /proc: $SLIRP_RUNTIME_CTX" ;;
+    *) fail "the helper process ran in an unexpected context: $SLIRP_RUNTIME_CTX" ;;
+  esac
+else
+  log "P6 NOTE: slirp4netns runtime context NOT observable under enforcing (no /proc capture; the exec may not have been reached or the helper exited at its own runtime boundary)"
+fi
+
 say "P6 transport confirmed (daemon builder_start + manager START for $P6_OP_ID)"
 
 # P5-S2 boundary state: the P5-S1 rootlesskit { lock } denial on the builder
@@ -768,6 +801,12 @@ OLD_USERNS_AVC="$(grep -a 'tclass=user_namespace' "$EVIDENCE_DIR/builder-avc-p6.
 if [ -n "$OLD_USERNS_AVC" ]; then
   printf '%s\n' "$OLD_USERNS_AVC" > "$EVIDENCE_DIR/old-userns-create-avc-p6.txt"
   fail "the former user_namespace { create } denial still occurs (the evidenced userns grant did not take effect)"
+fi
+OLD_CAPUSERS_AVC="$(grep -a 'tclass=cap_userns' "$EVIDENCE_DIR/builder-avc-p6.txt" \
+  | grep -a '{ sys_admin }' || true)"
+if [ -n "$OLD_CAPUSERS_AVC" ]; then
+  printf '%s\n' "$OLD_CAPUSERS_AVC" > "$EVIDENCE_DIR/old-capuserns-sysadmin-avc-p6.txt"
+  fail "the former cap_userns { sys_admin } denial still occurs (the evidenced cap_userns grant did not take effect)"
 fi
 if grep -aqF 'failed to lock' "$EVIDENCE_DIR/builder-journal-p6.txt"; then
   grep -aF 'failed to lock' "$EVIDENCE_DIR/builder-journal-p6.txt" \
