@@ -230,7 +230,7 @@ func TestSELinuxPolicyRootlesskitDomainTransition(t *testing.T) {
 	transitions := 0
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "type_transition") && strings.Contains(trimmed, "docker_helper_rootlesskit_t") {
+		if strings.HasPrefix(trimmed, "type_transition") && strings.HasSuffix(trimmed, ":process docker_helper_rootlesskit_t;") {
 			transitions++
 		}
 	}
@@ -283,9 +283,9 @@ func TestSELinuxPolicySlirp4netnsExecType(t *testing.T) {
 	if !strings.Contains(fc, "/usr/bin/slirp4netns                --  system_u:object_r:docker_helper_slirp4netns_exec_t:s0") {
 		t.Error("file contexts must label /usr/bin/slirp4netns with the dedicated exec type")
 	}
-	want := "allow docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:file { execute execute_no_trans read open getattr };"
+	want := "allow docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:file { execute read open getattr };"
 	if !strings.Contains(policy, want) {
-		t.Errorf("the slirp4netns execution grant must be exactly the child-domain execute pair: %q", want)
+		t.Errorf("the slirp4netns execution grant must be exactly the transition-exec source set: %q", want)
 	}
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -295,13 +295,87 @@ func TestSELinuxPolicySlirp4netnsExecType(t *testing.T) {
 		if !strings.HasPrefix(trimmed, "allow ") || !strings.Contains(trimmed, "docker_helper_slirp4netns_exec_t:") {
 			continue
 		}
+		// The helper domain's own entry/loader rule is legitimate; only the
+		// exec grant must be unique to the rootlesskit child domain.
+		if strings.HasPrefix(trimmed, "allow docker_helper_slirp4netns_t docker_helper_slirp4netns_exec_t:file { entrypoint read open getattr map };") {
+			continue
+		}
 		if trimmed != want {
-			t.Errorf("no other domain may receive a slirp4netns execution grant: %s", trimmed)
+			t.Errorf("no other domain may receive a slirp4netns exec grant: %s", trimmed)
 		}
 	}
 	// The manager must not gain the right to execute slirp4netns.
 	if strings.Contains(policy, "allow docker_helper_builder_t docker_helper_slirp4netns_exec_t") {
 		t.Error("the manager domain must not be able to execute slirp4netns")
+	}
+}
+
+// TestSELinuxPolicySlirp4netnsDomain verifies the P5-S2 helper domain: it is
+// declared and entered ONLY through the pointed transition from the
+// rootlesskit child domain on the existing exec type, its entry rule carries
+// exactly the transition-required entrypoint plus the loader access, and the
+// domain is held to the same isolation surface as the other two builder
+// domains (no bin_t, no Docker socket/admin token/workspace targets, and no
+// capability, capability2, or cap_userns grants — the current enforcing
+// boundary stays ungranted, as do any manager-side capability grants).
+func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	for _, want := range []string{
+		"type docker_helper_slirp4netns_t, domain;",
+		"role system_r types docker_helper_slirp4netns_t;",
+		"type_transition docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:process docker_helper_slirp4netns_t;",
+		"allow docker_helper_rootlesskit_t docker_helper_slirp4netns_t:process { transition };",
+		"allow docker_helper_slirp4netns_t docker_helper_slirp4netns_exec_t:file { entrypoint read open getattr map };",
+	} {
+		if !strings.Contains(policy, want) {
+			t.Errorf("SELinux policy must contain exactly this rule: %s", want)
+		}
+	}
+	// The transition into the helper domain is the ONLY path in.
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		target := allowTargetToken(trimmed, "type_transition ")
+		if target == "docker_helper_slirp4netns_t" && !strings.Contains(trimmed, "docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t") {
+			t.Errorf("no other exec path may transition into the helper domain: %s", trimmed)
+		}
+		if !strings.HasPrefix(trimmed, "allow ") || !strings.Contains(trimmed, "docker_helper_slirp4netns_t") {
+			continue
+		}
+		subject := allowTargetToken(trimmed, "allow ")
+		if subject == "docker_helper_slirp4netns_exec_t" {
+			if !strings.Contains(trimmed, "docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:file") {
+				t.Errorf("only the rootlesskit child domain may exec the helper entry file: %s", trimmed)
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "allow docker_helper_slirp4netns_t docker_helper_slirp4netns_exec_t:file") {
+			continue
+		}
+		if target == "bin_t" {
+			t.Errorf("no bin_t grant may name the helper domain: %s", trimmed)
+		}
+		for _, forbidden := range forbiddenBuilderTargets {
+			if target == forbidden {
+				t.Errorf("the helper domain must not receive a grant toward %s: %s", forbidden, trimmed)
+			}
+		}
+		if strings.HasPrefix(trimmed, "allow docker_helper_slirp4netns_t self:capability") ||
+			strings.HasPrefix(trimmed, "allow docker_helper_slirp4netns_t self:capability2") ||
+			strings.Contains(trimmed, ":cap_userns ") {
+			t.Errorf("the helper domain must hold no capability/capability2/cap_userns grants: %s", trimmed)
+		}
+	}
+	// The manager must not gain capability grants or the cap_userns surface.
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "allow docker_helper_builder_t self:capability") ||
+			strings.HasPrefix(trimmed, "allow docker_helper_builder_t self:capability2") ||
+			strings.Contains(trimmed, ":cap_userns ") {
+			t.Errorf("the manager domain must hold no capability/capability2/cap_userns grants: %s", trimmed)
+		}
 	}
 }
 
