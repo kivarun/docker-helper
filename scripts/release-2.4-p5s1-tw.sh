@@ -749,6 +749,12 @@ if [ -n "$OLD_SLIRP_AVC" ]; then
   printf '%s\n' "$OLD_SLIRP_AVC" > "$EVIDENCE_DIR/old-slirp-exec-avc-p6.txt"
   fail "the former slirp4netns { execute } denial still occurs (the dedicated exec-type grant did not take effect)"
 fi
+OLD_USERNS_AVC="$(grep -a 'tclass=user_namespace' "$EVIDENCE_DIR/builder-avc-p6.txt" \
+  | grep -a '{ create }' || true)"
+if [ -n "$OLD_USERNS_AVC" ]; then
+  printf '%s\n' "$OLD_USERNS_AVC" > "$EVIDENCE_DIR/old-userns-create-avc-p6.txt"
+  fail "the former user_namespace { create } denial still occurs (the evidenced userns grant did not take effect)"
+fi
 if grep -aqF 'failed to lock' "$EVIDENCE_DIR/builder-journal-p6.txt"; then
   grep -aF 'failed to lock' "$EVIDENCE_DIR/builder-journal-p6.txt" \
     > "$EVIDENCE_DIR/child-lock-journal-p6.txt" 2>/dev/null || true
@@ -783,7 +789,7 @@ else
     echo "=== builder journal (P6 window) ==="; tail -40 "$EVIDENCE_DIR/builder-journal-p6.txt"
     echo "=== daemon journal (P6 window) ==="; tail -20 "$EVIDENCE_DIR/daemon-journal-p6.txt"
     echo "=== build attempt output ==="; tail -20 "$EVIDENCE_DIR/build-attempt-post-relabel.txt"; } >&2
-  fail "the build advanced past the P5-S1 { lock } and slirp4netns { execute } boundaries and stopped at the NEXT enforcing boundary in docker_helper_rootlesskit_t (evidence: builder-avc-p6.txt, builder-journal-p6.txt, daemon-journal-p6.txt, child-output-p6.txt, build-attempt-post-relabel.txt)"
+  fail "the build advanced past the P5-S1 { lock }, slirp4netns { execute }, and user_namespace { create } boundaries and stopped at the NEXT enforcing boundary in docker_helper_rootlesskit_t (evidence: builder-avc-p6.txt, builder-journal-p6.txt, daemon-journal-p6.txt, child-output-p6.txt, build-attempt-post-relabel.txt)"
 fi
 say "P6 upgrade relabel OK (labels corrected by %posttrans; transport $P6_OP_ID)"
 else
