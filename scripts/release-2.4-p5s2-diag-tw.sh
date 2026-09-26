@@ -38,8 +38,12 @@ log 'A: package origin and metadata of newuidmap/newgidmap'
   echo "=== stat ==="
   stat /usr/bin/newuidmap /usr/bin/newgidmap 2>&1 || true
   echo "=== getcap -v ==="
-  getcap -v /usr/bin/newuidmap /usr/bin/newgidmap 2>&1
-  echo "getcap rc=$?"
+  if command -v getcap >/dev/null 2>&1; then
+    getcap -v /usr/bin/newuidmap /usr/bin/newgidmap 2>&1
+    echo "getcap rc=$?"
+  else
+    echo "getcap not installed on this image"
+  fi
   echo "=== setuid bit present? ==="
   test -u /usr/bin/newuidmap && echo "newuidmap: setuid bit present" || echo "newuidmap: setuid bit ABSENT"
   test -u /usr/bin/newgidmap && echo "newgidmap: setuid bit present" || echo "newgidmap: setuid bit ABSENT"
@@ -74,9 +78,13 @@ log 'B: distro privilege mechanism'
   grep -i PERMISSIONS_SECURITY /etc/sysconfig/security 2>/dev/null || true
   ls -l /etc/permissions /etc/permissions.secure /etc/permissions.local 2>/dev/null || true
   echo "=== chkstat availability/help ==="
-  chkstat --help 2>&1 | head -30 || true
-  echo "=== chkstat dry-run on the shadow permissions file (no changes) ==="
-  chkstat --system --dry-run /usr/share/permissions/permissions.d/shadow 2>&1 || true
+  if command -v chkstat >/dev/null 2>&1; then
+    chkstat --help 2>&1 | head -30 || true
+    echo "=== chkstat dry-run on the shadow permissions file (no changes) ==="
+    chkstat --system --dry-run /usr/share/permissions/permissions.d/shadow 2>&1 || true
+  else
+    echo "chkstat not installed on this image"
+  fi
 } >"$EVIDENCE_DIR/permissions-mechanism.txt" 2>&1
 cat "$EVIDENCE_DIR/permissions-mechanism.txt" >&2
 
