@@ -838,20 +838,50 @@ allow docker_helper_rootlesskit_t docker_helper_builder_t:fifo_file { write };
 allow docker_helper_rootlesskit_t sysctl_t:file { read open getattr };
 
 # The launch vehicle's user-network helper: rootlesskit forks and execs
-# the distro slirp4netns binary in ITS OWN domain (no transition rule
-# exists for this exec, so the no-transition check applies). Live AVC
-# evidence from the P5-S1 permissive harvests (runs 36168484020,
-# 36179424203, 36187436760): comm="rootlesskit" denied { execute } on the
-# path lookup and { execute_no_trans } on the actual exec of
-# /usr/bin/slirp4netns. Loader-side additions follow live enforcing AVCs
-# only (run 36199764374: denied { getattr } on the pre-exec stat and
-# { read open } on the bprm open/read of /usr/bin/slirp4netns,
-# scontext=docker_helper_rootlesskit_t tclass=file permissive=0; no map
-# denial was recorded, so no map grant). Execute ONLY from the rootlesskit
-# child domain; slirp4netns's own runtime surface (namespace entries,
-# tun_socket, nsfs) and the manager domain's execution stay deliberately
-# ungranted.
-allow docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:file { execute execute_no_trans read open getattr };
+# the distro slirp4netns binary, which transitions into the dedicated
+# helper domain (the type_transition below). Live AVC evidence from the
+# P5-S1 permissive harvests (runs 36168484020, 36179424203, 36187436760):
+# comm="rootlesskit" denied { execute } on the path lookup and
+# { execute_no_trans } on the actual exec of /usr/bin/slirp4netns. The
+# execute_no_trans pair was replaced by the pointed transition grant
+# (P5-S2 step 5): the source-side exec checks are the same checks the
+# transition exec performs (execute for the path lookup, bprm open/read,
+# the pre-exec getattr from run 36199764374's live enforcing AVC; no map
+# denial was recorded on the source side, so no map grant). Execute ONLY
+# from the rootlesskit child domain; the manager domain's execution stays
+# deliberately ungranted.
+allow docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:file { execute read open getattr };
+
+# --- docker_helper_slirp4netns_t: the rootlesskit user-network helper domain (P5-S2) ---
+#
+# RootlessKit forks and execs the distro slirp4netns binary as its
+# user-network helper. This domain exists so the cap_userns decision (the
+# current enforcing boundary) can be made for slirp4netns WITHOUT widening
+# the rootlesskit child domain. The transition is pointed: the ONLY path
+# into this domain is the rootlesskit child's exec of the slirp4netns
+# entry type. The helper gets NO capabilities, no Docker socket, admin
+# token, config/state/runtime, or Session workspace surface, and no
+# further grants: its runtime surface is the next MAC boundary, to be
+# granted only from live enforcing evidence. NOTE: with the current
+# enforcing policy the child stops at cap_userns { sys_admin } BEFORE the
+# helper exec ever starts, so the runtime transition is not yet
+# observable — the type_transition, the transition grant, and the entry
+# rule are statically verified (module compile + policy tests); live
+# transition proof follows in the step that moves the cap_userns boundary.
+type docker_helper_slirp4netns_t, domain;
+role system_r types docker_helper_slirp4netns_t;
+
+# Pointed exec transition: the ONLY path into this domain.
+type_transition docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:process docker_helper_slirp4netns_t;
+allow docker_helper_rootlesskit_t docker_helper_slirp4netns_t:process { transition };
+
+# The helper's own entry file: entrypoint for the transition plus the
+# post-switch loader access (the mmap/read of the binary happens in the
+# new domain — the same loader shape the rootlesskit child domain's own
+# entry rule carries). No execute_no_trans: no AVC evidence exists of
+# slirp4netns re-executing itself, and the exec-side checks stay in the
+# source domain.
+allow docker_helper_slirp4netns_t docker_helper_slirp4netns_exec_t:file { entrypoint read open getattr map };
 
 # The child's user-namespace creation itself: rootlesskit creates the userns
 # that hosts the buildkitd instance. Live enforcing AVC evidence (P5-S1
