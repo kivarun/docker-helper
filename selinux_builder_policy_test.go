@@ -10,6 +10,7 @@ package main
 // builder-owned paths.
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -318,6 +319,90 @@ func TestSELinuxPolicySlirp4netnsExecType(t *testing.T) {
 // domains (no bin_t, no Docker socket/admin token/workspace targets, and no
 // capability, capability2, or cap_userns grants — the current enforcing
 // boundary stays ungranted, as do any manager-side capability grants).
+// builderPolicyAllowRule is one parsed "allow <source> <target>:<class> ..." rule.
+type builderPolicyAllowRule struct {
+	source, target, class string
+}
+
+// builderPolicyTransitionRule is one parsed
+// "type_transition <source> <entry>:<class> <dest>" rule.
+type builderPolicyTransitionRule struct {
+	source, entry, class, dest string
+}
+
+// parseSELinuxRules extracts every non-comment allow and type_transition
+// rule of the module text with its real fields (source, target/class for
+// allows; source, entry type/class, destination for transitions). Malformed
+// lines are skipped; the invariant checks below assert on exact field
+// values, not on substrings.
+func parseSELinuxRules(policy string) ([]builderPolicyAllowRule, []builderPolicyTransitionRule) {
+	var allows []builderPolicyAllowRule
+	var transitions []builderPolicyTransitionRule
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		fields := strings.Fields(strings.TrimSuffix(trimmed, ";"))
+		switch {
+		case strings.HasPrefix(trimmed, "allow ") && len(fields) >= 3:
+			if target, class, ok := strings.Cut(fields[2], ":"); ok {
+				allows = append(allows, builderPolicyAllowRule{source: fields[1], target: target, class: class})
+			}
+		case strings.HasPrefix(trimmed, "type_transition ") && len(fields) >= 4:
+			if entry, class, ok := strings.Cut(fields[2], ":"); ok {
+				transitions = append(transitions, builderPolicyTransitionRule{source: fields[1], entry: entry, class: class, dest: fields[3]})
+			}
+		}
+	}
+	return allows, transitions
+}
+
+// helperDomainPolicyViolations scans the module's parsed rules against the
+// helper-domain invariants and returns one human-readable violation per
+// broken rule, empty when none:
+//   - exactly one type_transition may enter docker_helper_slirp4netns_t, the
+//     pointed rootlesskit-child path;
+//   - the helper domain holds no bin_t grant and no forbidden-surface grant
+//     (Docker socket, admin token, config/state/runtime, Session workspace);
+//   - the manager and the helper domains hold no capability, capability2,
+//     or cap_userns grants. The rootlesskit child domain is deliberately
+//     NOT frozen here: its future cap_userns grant is the next boundary.
+func helperDomainPolicyViolations(policy string) []string {
+	var violations []string
+	allows, transitions := parseSELinuxRules(policy)
+	for _, tr := range transitions {
+		if tr.dest != "docker_helper_slirp4netns_t" {
+			continue
+		}
+		if tr.source != "docker_helper_rootlesskit_t" || tr.entry != "docker_helper_slirp4netns_exec_t" || tr.class != "process" {
+			violations = append(violations, fmt.Sprintf("the only transition into the helper domain is the rootlesskit child's exec of its entry type, got: type_transition %s %s:%s %s", tr.source, tr.entry, tr.class, tr.dest))
+		}
+	}
+	for _, rule := range allows {
+		switch rule.source {
+		case "docker_helper_slirp4netns_t":
+			if rule.target == "bin_t" {
+				violations = append(violations, fmt.Sprintf("no bin_t grant for the helper domain: allow %s %s:%s", rule.source, rule.target, rule.class))
+			}
+			for _, forbidden := range forbiddenBuilderTargets {
+				if rule.target == forbidden {
+					violations = append(violations, fmt.Sprintf("the helper domain must not receive a grant toward %s: allow %s %s:%s", forbidden, rule.source, rule.target, rule.class))
+				}
+			}
+		}
+		if rule.source == "docker_helper_builder_t" || rule.source == "docker_helper_slirp4netns_t" {
+			if rule.target == "self" {
+				switch rule.class {
+				case "capability", "capability2", "cap_userns":
+					violations = append(violations, fmt.Sprintf("%s must hold no capability/capability2/cap_userns grants: allow %s %s:%s", rule.source, rule.source, rule.target, rule.class))
+				}
+			}
+		}
+	}
+	return violations
+}
+
 func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
 	for _, want := range []string{
@@ -332,52 +417,10 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 			t.Errorf("SELinux policy must contain exactly this rule: %s", want)
 		}
 	}
-	// The transition into the helper domain is the ONLY path in.
-	for _, line := range strings.Split(policy, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		target := allowTargetToken(trimmed, "type_transition ")
-		if target == "docker_helper_slirp4netns_t" && !strings.Contains(trimmed, "docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t") {
-			t.Errorf("no other exec path may transition into the helper domain: %s", trimmed)
-		}
-		if !strings.HasPrefix(trimmed, "allow ") || !strings.Contains(trimmed, "docker_helper_slirp4netns_t") {
-			continue
-		}
-		subject := allowTargetToken(trimmed, "allow ")
-		if subject == "docker_helper_slirp4netns_exec_t" {
-			if !strings.Contains(trimmed, "docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:file") {
-				t.Errorf("only the rootlesskit child domain may exec the helper entry file: %s", trimmed)
-			}
-			continue
-		}
-		if strings.HasPrefix(trimmed, "allow docker_helper_slirp4netns_t docker_helper_slirp4netns_exec_t:file") {
-			continue
-		}
-		if target == "bin_t" {
-			t.Errorf("no bin_t grant may name the helper domain: %s", trimmed)
-		}
-		for _, forbidden := range forbiddenBuilderTargets {
-			if target == forbidden {
-				t.Errorf("the helper domain must not receive a grant toward %s: %s", forbidden, trimmed)
-			}
-		}
-		if strings.HasPrefix(trimmed, "allow docker_helper_slirp4netns_t self:capability") ||
-			strings.HasPrefix(trimmed, "allow docker_helper_slirp4netns_t self:capability2") ||
-			strings.Contains(trimmed, ":cap_userns ") {
-			t.Errorf("the helper domain must hold no capability/capability2/cap_userns grants: %s", trimmed)
-		}
+	if violations := helperDomainPolicyViolations(policy); len(violations) > 0 {
+		t.Errorf("the committed policy violates the helper-domain invariants: %v", violations)
 	}
-	// The manager must not gain capability grants or the cap_userns surface.
-	for _, line := range strings.Split(policy, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "allow docker_helper_builder_t self:capability") ||
-			strings.HasPrefix(trimmed, "allow docker_helper_builder_t self:capability2") ||
-			strings.Contains(trimmed, ":cap_userns ") {
-			t.Errorf("the manager domain must hold no capability/capability2/cap_userns grants: %s", trimmed)
-		}
-	}
+	// Mutation tests are appended in the follow-up commit.
 }
 
 // TestSELinuxPolicyRootlesskitUsernsCreate verifies the P5-S2 userns grant:
