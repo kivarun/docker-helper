@@ -81,7 +81,7 @@ log 'A: toolchain + candidate module load (disposable VM only)'
   echo "enforce=$(getenforce 2>/dev/null || true)"
   echo "=== install policy toolchain ==="
 } >"$EVIDENCE_DIR/a-toolchain.txt" 2>&1
-zypper --non-interactive install -y checkpolicy container-selinux \
+zypper --non-interactive install -y checkpolicy container-selinux policycoreutils-python-utils \
   >"$EVIDENCE_DIR/zypper-policy-toolchain.log" 2>&1 \
   || note "zypper install of the policy toolchain failed (see zypper-policy-toolchain.log)"
 for t in checkmodule semodule_package semodule semanage restorecon; do
