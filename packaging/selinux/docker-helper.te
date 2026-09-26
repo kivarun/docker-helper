@@ -967,13 +967,20 @@ allow docker_helper_newuidmap_t docker_helper_newuidmap_exec_t:file { entrypoint
 #     directory on the mapping path; newuidmap failed with its own output
 #     "Could not stat directory for target process: Permission denied" —
 #     the identity lookup had already succeeded by then)
-# Nothing else was denied on this pair: no search, no write on the dir, no
-# file-class record, no capability or cap_userns surface — those stay
-# ungranted boundaries. The passwd_file_t getattr denial of the same run
-# (record 563) is NON-blocking evidence: the caller's user name was
-# determined successfully in that run, so it stays ungranted.
+#   denied { search }  tcontext=system_u:system_r:docker_helper_rootlesskit_t:s0
+#     tclass=dir        name="3743" dev="proc"
+#     (run 36256089858, record 556: the PATH TRAVERSAL into the target's
+#     procfs directory /proc/<rootlesskit-pid>/ on the way to uid_map;
+#     newuidmap failed with "open of uid_map failed: Permission denied"
+#     and the window carries no file-class record — the open never reached
+#     the uid_map file because the walk was denied first)
+# Nothing else was denied on this pair: no write on the dir, no file-class
+# record, no capability or cap_userns surface — those stay ungranted
+# boundaries. The passwd_file_t getattr denial of the same runs
+# (records 563/555) is NON-blocking evidence: the caller's user name was
+# determined successfully, so it stays ungranted.
 allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:fifo_file { write };
-allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read open getattr };
+allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read open getattr search };
 
 # The helper's caller-identity lookup (P5-S2): the getpwuid read of
 # /etc/passwd that locates the caller's user name before validating the
