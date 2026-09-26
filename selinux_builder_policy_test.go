@@ -420,7 +420,30 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 	if violations := helperDomainPolicyViolations(policy); len(violations) > 0 {
 		t.Errorf("the committed policy violates the helper-domain invariants: %v", violations)
 	}
-	// Mutation tests are appended in the follow-up commit.
+	// Mutation tests: each forbidden rule, appended to the module text, must
+	// trip exactly the invariant that guards it.
+	for _, mut := range []struct {
+		name        string
+		rule        string
+		wantTripped string
+	}{
+		{"admin token grant to helper", "allow docker_helper_slirp4netns_t docker_helper_admin_token_t:file { read };", "docker_helper_admin_token_t"},
+		{"generic bin_t execute for helper", "allow docker_helper_slirp4netns_t bin_t:file { execute };", "no bin_t grant for the helper domain"},
+		{"manager-side transition into helper", "type_transition docker_helper_builder_t docker_helper_slirp4netns_exec_t:process docker_helper_slirp4netns_t;", "the only transition into the helper domain"},
+		{"cap_userns for manager", "allow docker_helper_builder_t self:cap_userns sys_admin;", "docker_helper_builder_t must hold no capability"},
+		{"cap_userns for helper", "allow docker_helper_slirp4netns_t self:cap_userns sys_admin;", "docker_helper_slirp4netns_t must hold no capability"},
+	} {
+		mutated := policy + "\n" + mut.rule
+		violations := helperDomainPolicyViolations(mutated)
+		if len(violations) == 0 {
+			t.Errorf("mutation %q must fail the helper-domain invariants", mut.name)
+			continue
+		}
+		joined := strings.Join(violations, "\n")
+		if !strings.Contains(joined, mut.wantTripped) {
+			t.Errorf("mutation %q must trip the invariant naming %q, got violations: %v", mut.name, mut.wantTripped, violations)
+		}
+	}
 }
 
 // TestSELinuxPolicyRootlesskitUsernsCreate verifies the P5-S2 userns grant:
