@@ -1782,6 +1782,7 @@ func newSystemUninstallScriptEnv(t *testing.T) *systemScriptEnv {
 		"ROOTLESSKIT_BIN=" + e.dest("usr/bin/rootlesskit"),
 		"BINDFS_BIN=" + e.dest("usr/bin/bindfs"),
 		"SLIRP4NETNS_BIN=" + e.dest("usr/bin/slirp4netns"),
+		"NEWUIDMAP_BIN=" + e.dest("usr/bin/newuidmap"),
 	}
 	return e
 }
@@ -3022,8 +3023,8 @@ exit 0
 	// vehicle (explicit RPM/tarball dependency; shipped exec type), and the
 	// slirp4netns user-network helper (P5-S2: executable only from the
 	// rootlesskit child domain).
-	if len(restoreconCalls) != 9 {
-		t.Errorf("expected exactly 9 restorecon invocations, got %d: %v", len(restoreconCalls), restoreconCalls)
+	if len(restoreconCalls) != 10 {
+		t.Errorf("expected exactly 10 restorecon invocations, got %d: %v", len(restoreconCalls), restoreconCalls)
 	}
 	joined := strings.Join(restoreconCalls, "\n")
 	for _, want := range []string{
@@ -3031,6 +3032,7 @@ exit 0
 		"restorecon /usr/bin/bindfs",
 		"restorecon /usr/bin/rootlesskit",
 		"restorecon /usr/bin/slirp4netns",
+		"restorecon /usr/bin/newuidmap",
 		"restorecon -R /etc/docker-helper",
 		"restorecon -R /var/lib/docker-helper",
 		"restorecon /run/docker-helper",
@@ -3056,6 +3058,7 @@ exit 0
 		"/usr/bin/bindfs":                true,
 		"/usr/bin/rootlesskit":           true,
 		"/usr/bin/slirp4netns":           true,
+		"/usr/bin/newuidmap":             true,
 		"/etc/docker-helper":             true,
 		"/var/lib/docker-helper":         true,
 		"/run/docker-helper":             true,
@@ -3137,7 +3140,7 @@ exit 0
 		if len(callsOf(t, env, "semodule")) == 0 {
 			t.Error("SElinux module load must happen once the floor is established")
 		}
-		if len(callsOf(t, env, "restorecon")) != 9 {
+		if len(callsOf(t, env, "restorecon")) != 10 {
 			t.Errorf("restorecon must still be applied on the SELinux path (got %d calls)", len(callsOf(t, env, "restorecon")))
 		}
 	})
@@ -3393,7 +3396,7 @@ func uninstallThirdPartyLabelEnv(t *testing.T) (*systemScriptEnv, string) {
 	env.env = append(env.env,
 		"STAT_LABEL_FIXTURE="+fixture,
 		"MATCHPATHCON_FIXTURE="+fixture)
-	for _, binPath := range []string{env.dest("usr/bin/rootlesskit"), env.dest("usr/bin/bindfs"), env.dest("usr/bin/slirp4netns")} {
+	for _, binPath := range []string{env.dest("usr/bin/rootlesskit"), env.dest("usr/bin/bindfs"), env.dest("usr/bin/slirp4netns"), env.dest("usr/bin/newuidmap")} {
 		if err := os.MkdirAll(filepath.Dir(binPath), 0755); err != nil {
 			t.Fatal(err)
 		}
@@ -3435,7 +3438,7 @@ func TestUninstallSystemThirdPartyLabelRestoreSuccess(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("exactly one pointed restorecon call is expected, got %d: %v", len(calls), calls)
 	}
-	for _, want := range []string{"rootlesskit", "bindfs", "slirp4netns"} {
+	for _, want := range []string{"rootlesskit", "bindfs", "slirp4netns", "newuidmap"} {
 		if !strings.Contains(calls[0], want) {
 			t.Errorf("restorecon call must cover %s: %s", want, calls[0])
 		}
@@ -5455,15 +5458,15 @@ done
 // labelFixtureEqual returns fixture content whose stat and matchpathcon
 // answers agree for all third-party binaries (the verified-restore case).
 func labelFixtureEqual() string {
-	return "rootlesskit canonical-label\nbindfs canonical-label\nslirp4netns canonical-label\n"
+	return "rootlesskit canonical-label\nbindfs canonical-label\nslirp4netns canonical-label\nnewuidmap canonical-label\n"
 }
 
 // labelFixtureMismatch returns fixture content whose stat and matchpathcon
 // answers disagree for rootlesskit (the unverified-cleanup warning case);
 // the other binaries agree so the mismatch stays rootlesskit-specific.
 func labelFixtureMismatch() (statFixture, matchpathconFixture string) {
-	return "rootlesskit stale-label\nbindfs canonical-label\nslirp4netns canonical-label\n",
-		"rootlesskit canonical-label\nbindfs canonical-label\nslirp4netns canonical-label\n"
+	return "rootlesskit stale-label\nbindfs canonical-label\nslirp4netns canonical-label\nnewuidmap canonical-label\n",
+		"rootlesskit canonical-label\nbindfs canonical-label\nslirp4netns canonical-label\nnewuidmap canonical-label\n"
 }
 
 // readCalls reads the command log.
@@ -5520,6 +5523,7 @@ func runScript(t *testing.T, scriptPath, fakeDir, logFile string, args []string,
 	modified = strings.ReplaceAll(modified, "/usr/bin/rootlesskit", "$ROOTLESSKIT_BIN")
 	modified = strings.ReplaceAll(modified, "/usr/bin/bindfs", "$BINDFS_BIN")
 	modified = strings.ReplaceAll(modified, "/usr/bin/slirp4netns", "$SLIRP4NETNS_BIN")
+	modified = strings.ReplaceAll(modified, "/usr/bin/newuidmap", "$NEWUIDMAP_BIN")
 	modifiedFile := filepath.Join(scriptDir, "modified.sh")
 	if err := os.WriteFile(modifiedFile, []byte(modified), 0755); err != nil {
 		t.Fatal(err)
@@ -5617,6 +5621,7 @@ exit 0
 		{"ROOTLESSKIT_BIN", filepath.Join(tmpDir, "usr", "bin", "rootlesskit")},
 		{"BINDFS_BIN", filepath.Join(tmpDir, "usr", "bin", "bindfs")},
 		{"SLIRP4NETNS_BIN", filepath.Join(tmpDir, "usr", "bin", "slirp4netns")},
+		{"NEWUIDMAP_BIN", filepath.Join(tmpDir, "usr", "bin", "newuidmap")},
 	} {
 		if err := os.MkdirAll(filepath.Dir(pair.rel), 0755); err != nil {
 			t.Fatal(err)
@@ -7308,7 +7313,7 @@ func TestRpmPreremoveFinalEraseRestoresThirdPartyLabels(t *testing.T) {
 	if len(restoreconCalls) != 1 {
 		t.Fatalf("exactly one pointed restorecon call is expected, got %d: %v", len(restoreconCalls), restoreconCalls)
 	}
-	for _, want := range []string{"rootlesskit", "bindfs", "slirp4netns"} {
+	for _, want := range []string{"rootlesskit", "bindfs", "slirp4netns", "newuidmap"} {
 		if !strings.Contains(restoreconCalls[0], want) {
 			t.Errorf("restorecon call must cover %s: %s", want, restoreconCalls[0])
 		}
