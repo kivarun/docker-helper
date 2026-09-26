@@ -305,6 +305,38 @@ func TestSELinuxPolicySlirp4netnsExecType(t *testing.T) {
 	}
 }
 
+// TestSELinuxPolicyRootlesskitUsernsCreate verifies the P5-S2 userns grant:
+// exactly one self:user_namespace create rule exists, it belongs to the
+// rootlesskit child domain only (never the manager or the daemon), and no
+// rule in the module grants the rootlesskit child domain any unproven
+// capability set (cap_userns, self:capability) beyond the previously
+// established builder-domain capability surface.
+func TestSELinuxPolicyRootlesskitUsernsCreate(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	want := "allow docker_helper_rootlesskit_t self:user_namespace create;"
+	if !strings.Contains(policy, want) {
+		t.Errorf("the rootlesskit child domain must have exactly the evidenced userns grant: %q", want)
+	}
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(trimmed, ":user_namespace ") && trimmed != want {
+			t.Errorf("unexpected additional user_namespace rule: %s", trimmed)
+		}
+		if strings.Contains(trimmed, ":capability ") && strings.Contains(trimmed, "docker_helper_rootlesskit_t") {
+			t.Errorf("the rootlesskit child domain must have no capability grant: %s", trimmed)
+		}
+		if strings.Contains(trimmed, ":capability2 ") && strings.Contains(trimmed, "docker_helper_rootlesskit_t") {
+			t.Errorf("the rootlesskit child domain must have no capability2 grant: %s", trimmed)
+		}
+	}
+	if strings.Contains(policy, "allow docker_helper_builder_t self:user_namespace") {
+		t.Error("the manager domain must not gain user_namespace rights")
+	}
+}
+
 // TestSELinuxPolicyRootlesskitIsolation verifies the rootlesskit child
 // domain receives no grant toward any forbidden surface (the same set the
 // builder domain is denied), carries no capability grants, and — for both
