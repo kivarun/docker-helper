@@ -755,6 +755,10 @@ P6_START="$AVC_EPOCH"
         *)
           {
             echo "newuidmap pid: $nuid_pid; target pid: $NUID_TARGET"
+            echo "=== runtime namespace facts from /proc (never inferred from AVC) ==="
+            echo "newuidmap ns/user: $(readlink "/proc/$nuid_pid/ns/user" 2>/dev/null || echo UNAVAILABLE)"
+            echo "target ns/user:    $(readlink "/proc/$NUID_TARGET/ns/user" 2>/dev/null || echo UNAVAILABLE)"
+            echo "target uid_map at helper-sighting: $(cat "/proc/$NUID_TARGET/uid_map" 2>/dev/null || echo UNAVAILABLE)"
             echo "=== samples while the target exists (the LAST captured values are the result) ==="
             for _ in $(seq 1 100); do
               UM="$(cat "/proc/$NUID_TARGET/uid_map" 2>/dev/null || true)"
@@ -948,6 +952,19 @@ OLD_NUID_UIDMAP_OPEN_AVC="$(grep -a 'denied  { open }' "$EVIDENCE_DIR/builder-av
 if [ -n "$OLD_NUID_UIDMAP_OPEN_AVC" ]; then
   printf '%s\n' "$OLD_NUID_UIDMAP_OPEN_AVC" > "$EVIDENCE_DIR/old-nuid-uidmap-open-avc-p6.txt"
   fail "the former newuidmap uid_map { open } denial still occurs (the evidenced helper-surface grant did not take effect)"
+fi
+# ... and the helper's OWN in-namespace capability denial at the map write
+# (run 36263531925 record 560: denied { sys_admin } capability=21
+# comm="newuidmap" scontext=newuidmap_t tcontext=newuidmap_t
+# tclass=cap_userns) must be GONE with the granted
+# self:cap_userns { sys_admin }. The scontext pins the HELPER domain (the
+# rootlesskit child's identical cap_userns record is a different subject).
+OLD_NUID_CAPUSNS_AVC="$(grep -a 'denied  { sys_admin }' "$EVIDENCE_DIR/builder-avc-p6.txt" \
+  | grep -a 'scontext=system_u:system_r:docker_helper_newuidmap_t' \
+  | grep -a 'tclass=cap_userns' || true)"
+if [ -n "$OLD_NUID_CAPUSNS_AVC" ]; then
+  printf '%s\n' "$OLD_NUID_CAPUSNS_AVC" > "$EVIDENCE_DIR/old-nuid-capusns-avc-p6.txt"
+  fail "the former newuidmap self:cap_userns { sys_admin } denial still occurs (the evidenced helper-surface grant did not take effect)"
 fi
 # ... and the proc-dir { getattr } denial (the stat of the target process
 # directory /proc/<rootlesskit-pid>; run 36253390898 record 564) must be
