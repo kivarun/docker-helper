@@ -97,6 +97,8 @@ mkdir -p "$EVIDENCE_DIR"
 # evidence, not an exhaustive enumeration.
 AVC_EPOCH=0
 PERMISSIVE_SET=false
+ROOTLESSKIT_PERMISSIVE_SET=false
+SLIRP4NETNS_PERMISSIVE_SET=false
 BUILD_RC="skipped"
 BUILD_PERM_RC="skipped"
 BUILD_P6_RC="skipped"
@@ -111,6 +113,10 @@ cleanup_permissive() {
   if [ "$ROOTLESSKIT_PERMISSIVE_SET" = true ]; then
     semanage permissive -d docker_helper_rootlesskit_t >/dev/null 2>&1 || true
     ROOTLESSKIT_PERMISSIVE_SET=false
+  fi
+  if [ "$SLIRP4NETNS_PERMISSIVE_SET" = true ]; then
+    semanage permissive -d docker_helper_slirp4netns_t >/dev/null 2>&1 || true
+    SLIRP4NETNS_PERMISSIVE_SET=false
   fi
 }
 trap cleanup_permissive EXIT
@@ -149,7 +155,7 @@ avc_window() {
 # builder manager domain or the rootlesskit child domain (the launch
 # vehicle's post-exec domain, P5-S2).
 builder_avc_window() {
-  avc_window "$1" | grep -aE 'scontext=system_u:system_r:docker_helper_(builder|rootlesskit)_t' || true
+  avc_window "$1" | grep -aE 'scontext=system_u:system_r:docker_helper_(builder|rootlesskit|slirp4netns)_t' || true
 }
 
 # forbidden_surface_hits <window-file> — AVC lines whose TARGET context hits a
@@ -472,6 +478,8 @@ semanage permissive -a docker_helper_builder_t || fail "cannot make the builder 
 PERMISSIVE_SET=true
 semanage permissive -a docker_helper_rootlesskit_t || fail "cannot make the rootlesskit child domain permissive"
 ROOTLESSKIT_PERMISSIVE_SET=true
+semanage permissive -a docker_helper_slirp4netns_t || fail "cannot make the slirp4netns helper domain permissive"
+SLIRP4NETNS_PERMISSIVE_SET=true
 reset_failed_builder
 if systemctl start "$UNIT" 2>"$EVIDENCE_DIR/p2h-start-stderr.txt"; then
   wait_for_builder_socket 50 || fail "manager socket did not appear (permissive start)"

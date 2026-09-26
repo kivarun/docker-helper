@@ -878,10 +878,24 @@ allow docker_helper_rootlesskit_t docker_helper_slirp4netns_t:process { transiti
 # The helper's own entry file: entrypoint for the transition plus the
 # post-switch loader access (the mmap/read of the binary happens in the
 # new domain — the same loader shape the rootlesskit child domain's own
-# entry rule carries). No execute_no_trans: no AVC evidence exists of
-# slirp4netns re-executing itself, and the exec-side checks stay in the
-# source domain.
-allow docker_helper_slirp4netns_t docker_helper_slirp4netns_exec_t:file { entrypoint read open getattr map };
+# entry rule carries). The target-side execute check is live AVC evidence
+# (P5-S1 Tumbleweed run 36222264024 permissive harvest: comm="slirp4netns"
+# scontext=...docker_helper_slirp4netns_t:s0 denied { execute } on
+# /usr/bin/slirp4netns tcontext=...docker_helper_slirp4netns_exec_t:s0
+# tclass=file — the exec reaches the new domain and is stopped there under
+# enforcing). No execute_no_trans: no AVC evidence exists of slirp4netns
+# re-executing itself.
+allow docker_helper_slirp4netns_t docker_helper_slirp4netns_exec_t:file { entrypoint read open execute getattr map };
+
+# The helper inherits the rootlesskit child's stdio pipe (the launch
+# vehicle's inst.diag output pipe; the child pumps it onward). The
+# exec-time inherited-fd check denies ungranted inherited fds, which would
+# silence the helper's own failure output — the same fd-use shape the
+# proven child rule covers toward the manager. Live AVC evidence, same
+# harvest: comm="slirp4netns" scontext=...docker_helper_slirp4netns_t:s0
+# denied { write } tcontext=...docker_helper_rootlesskit_t:s0
+# tclass=fifo_file.
+allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:fifo_file { write };
 
 # The child's user-namespace creation itself: rootlesskit creates the userns
 # that hosts the buildkitd instance. Live enforcing AVC evidence (P5-S1
