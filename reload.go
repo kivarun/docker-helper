@@ -121,7 +121,11 @@ func (a *App) handleReloadWithDeps(w http.ResponseWriter, r *http.Request, deps 
 	}
 
 	// Preserve startup-only fields that cannot be changed at runtime.
-	newCfg.HTTPAddress = a.getConfig().HTTPAddress
+	oldCfg := a.getConfig()
+	newCfg.HTTPAddress = oldCfg.HTTPAddress
+	newCfg.TLSAddress = oldCfg.TLSAddress
+	newCfg.TLSCertFile = oldCfg.TLSCertFile
+	newCfg.TLSKeyFile = oldCfg.TLSKeyFile
 
 	// The authoritative global-ceiling transition: the new global
 	// allowed-root policy becomes durable policy state only together with its
