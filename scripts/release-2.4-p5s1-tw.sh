@@ -709,9 +709,12 @@ rpm -Uvh --replacepkgs "$RPM" >/dev/null || fail "rpm -U --replacepkgs failed"
   || fail "manager.sock label wrong after the upgrade relabel"
 # The launch vehicle's user-network helper must carry the dedicated exec
 # type after the upgrade relabel (execution is allowed only from the
-# rootlesskit child domain).
+# rootlesskit child domain), and so must the UID-map helper's dedicated
+# exec type (the docker_helper_newuidmap_t transition path).
 [ "$(stat -c '%C' /usr/bin/slirp4netns)" = "system_u:object_r:docker_helper_slirp4netns_exec_t:s0" ] \
   || fail "slirp4netns label wrong after the upgrade relabel: $(stat -c '%C' /usr/bin/slirp4netns)"
+[ "$(stat -c '%C' /usr/bin/newuidmap)" = "system_u:object_r:docker_helper_newuidmap_exec_t:s0" ] \
+  || fail "newuidmap label wrong after the upgrade relabel: $(stat -c '%C' /usr/bin/newuidmap)"
 [ "$(systemctl is-active "$UNIT" 2>/dev/null || true)" = "active" ] \
   || fail "builder unit stopped across the upgrade"
 audit_window_start
@@ -834,6 +837,24 @@ if [ -n "$OLD_NEWUIDMAP_AVC" ]; then
   printf '%s\n' "$OLD_NEWUIDMAP_AVC" > "$EVIDENCE_DIR/old-newuidmap-exec-avc-p6.txt"
   fail "the former newuidmap { execute } denial still occurs (the dedicated exec-type transition did not take effect)"
 fi
+# The UID-map helper's own surface (P5-S2): the inherited-stdio fifo write
+# and the /proc/<rootlesskit-pid> dir read on the uid_map write path must
+# be GONE (both grants ship as live-AVC-evidenced rules; the records were
+# permissive=0 in run 36229266623).
+OLD_NUID_FIFO_AVC="$(grep -a 'denied  { write }' "$EVIDENCE_DIR/builder-avc-p6.txt" \
+  | grep -a 'scontext=system_u:system_r:docker_helper_newuidmap_t' \
+  | grep -a 'tclass=fifo_file' || true)"
+if [ -n "$OLD_NUID_FIFO_AVC" ]; then
+  printf '%s\n' "$OLD_NUID_FIFO_AVC" > "$EVIDENCE_DIR/old-nuid-fifo-avc-p6.txt"
+  fail "the former newuidmap fifo_file { write } denial still occurs (the evidenced helper-surface grant did not take effect)"
+fi
+OLD_NUID_PROCDIR_AVC="$(grep -a 'denied  { read }' "$EVIDENCE_DIR/builder-avc-p6.txt" \
+  | grep -a 'scontext=system_u:system_r:docker_helper_newuidmap_t' \
+  | grep -a 'tclass=dir' || true)"
+if [ -n "$OLD_NUID_PROCDIR_AVC" ]; then
+  printf '%s\n' "$OLD_NUID_PROCDIR_AVC" > "$EVIDENCE_DIR/old-nuid-procdir-avc-p6.txt"
+  fail "the former newuidmap proc-dir { read } denial still occurs (the evidenced helper-surface grant did not take effect)"
+fi
 if grep -aqF 'failed to lock' "$EVIDENCE_DIR/builder-journal-p6.txt"; then
   grep -aF 'failed to lock' "$EVIDENCE_DIR/builder-journal-p6.txt" \
     > "$EVIDENCE_DIR/child-lock-journal-p6.txt" 2>/dev/null || true
@@ -857,18 +878,27 @@ say "P6 rootlesskit context confirmed (docker_helper_rootlesskit_t from the laun
 grep -aF -A 30 'child output tail' "$EVIDENCE_DIR/builder-journal-p6.txt" \
   > "$EVIDENCE_DIR/child-output-p6.txt" 2>/dev/null || true
 
+# The actual operation result (never inferred from AVC absence): the
+# attempt's build.finish audit record (result code, duration) from the
+# daemon journal, plus the attempt's exit code. The AVC window proves the
+# MAC boundary state; this file proves the operation outcome.
+grep -a '"event":"build.finish"' "$EVIDENCE_DIR/daemon-journal-p6.txt" \
+  | tail -3 > "$EVIDENCE_DIR/build-finish-p6.txt" 2>/dev/null || true
+printf 'post-relabel build attempt rc=%s\n' "$BUILD_P6_RC" >> "$EVIDENCE_DIR/build-finish-p6.txt"
+
 # The attempt's outcome is the S2 boundary state: a full success ends the
 # child-boundary work; a failure is the NEXT enforcing stopping point —
 # recorded with the full evidence bundle and reported, never auto-granted
 # from the harvest.
 if [ "$BUILD_P6_RC" = 0 ]; then
-  say "P6 build SUCCEEDED after the relabel: the rootlesskit child-domain boundary never enforced on the attempt path"
+  say "P6 build SUCCEEDED after the relabel: the attempt path enforced no boundary"
 else
   { echo "=== builder-family AVC window (P6) ==="; cat "$EVIDENCE_DIR/builder-avc-p6.txt"
     echo "=== builder journal (P6 window) ==="; tail -40 "$EVIDENCE_DIR/builder-journal-p6.txt"
     echo "=== daemon journal (P6 window) ==="; tail -20 "$EVIDENCE_DIR/daemon-journal-p6.txt"
-    echo "=== build attempt output ==="; tail -20 "$EVIDENCE_DIR/build-attempt-post-relabel.txt"; } >&2
-  fail "the build advanced past the P5-S1 { lock }, slirp4netns { execute }, and user_namespace { create } boundaries and stopped at the NEXT enforcing boundary in docker_helper_rootlesskit_t (evidence: builder-avc-p6.txt, builder-journal-p6.txt, daemon-journal-p6.txt, child-output-p6.txt, build-attempt-post-relabel.txt)"
+    echo "=== build attempt output ==="; tail -20 "$EVIDENCE_DIR/build-attempt-post-relabel.txt"
+    echo "=== operation result ==="; cat "$EVIDENCE_DIR/build-finish-p6.txt"; } >&2
+  fail "the build advanced past the granted boundaries (rootlesskit { lock }, slirp4netns/newuidmap exec types, user_namespace { create }, cap_userns { sys_admin }, the newuidmap fifo/proc-dir surface) and stopped at the NEXT enforcing boundary (evidence: builder-avc-p6.txt, builder-journal-p6.txt, daemon-journal-p6.txt, child-output-p6.txt, build-attempt-post-relabel.txt, build-finish-p6.txt)"
 fi
 say "P6 upgrade relabel OK (labels corrected by %posttrans; transport $P6_OP_ID)"
 else
