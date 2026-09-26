@@ -45,13 +45,14 @@
 #       docker_build_failed terminal state is never accepted as the RPC
 #       proof). The build attempt also proves the P5-S2 boundary state:
 #       the P5-S1 rootlesskit { lock } denial must be GONE, the helper's
-#       uid_map { write } AND { open } denials must be GONE, and so must
-#       the helper's full evidenced capability surface (the in-namespace
-#       sys_admin bit and the out-of-namespace setuid bit — the
-#       evidence-proven grants ship in the candidate policy), and the
-#       attempt's outcome — a full success, or the NEXT enforcing stopping
-#       point with the full evidence bundle — is reported, never
-#       auto-granted from the harvest;
+#       uid_map { write } AND { open } denials must be GONE, the helper's
+#       full evidenced capability surface (the in-namespace sys_admin bit
+#       and the out-of-namespace setuid bit) must be GONE, and the former
+#       newgidmap bin_t { execute } denial must be GONE (the dedicated
+#       docker_helper_newgidmap_t transition ships in the candidate
+#       policy). The attempt's outcome — a full success, or the NEXT
+#       enforcing stopping point with the full evidence bundle — is
+#       reported, never auto-granted from the harvest;
 #   P7  tarball lifecycle: install-system.sh on the enforcing host loads
 #       the module and labels the builder trees; a poisoned-label rerun
 #       proves the relabel path; the manager process context, the
@@ -155,10 +156,11 @@ avc_window() {
 }
 
 # builder_avc_window <since-epoch> — AVC lines whose source context is the
-# builder manager domain or the rootlesskit child domain (the launch
-# vehicle's post-exec domain, P5-S2).
+# builder manager domain or one of the child/helper domains (the launch
+# vehicle's post-exec domain and the slirp4netns/newuidmap/newgidmap helper
+# domains, P5-S2).
 builder_avc_window() {
-  avc_window "$1" | grep -aE 'scontext=system_u:system_r:docker_helper_(builder|rootlesskit|slirp4netns|newuidmap)_t' || true
+  avc_window "$1" | grep -aE 'scontext=system_u:system_r:docker_helper_(builder|rootlesskit|slirp4netns|newuidmap|newgidmap)_t' || true
 }
 
 # forbidden_surface_hits <window-file> — AVC lines whose TARGET context hits a
@@ -297,7 +299,7 @@ fi
   for p in /usr/libexec/docker-helper/buildkit/buildkitd \
            /usr/libexec/docker-helper/buildkit/buildctl \
            /usr/libexec/docker-helper/buildkit/buildkit-runc \
-           /usr/bin/rootlesskit /usr/bin/newuidmap /usr/bin/slirp4netns; do
+           /usr/bin/rootlesskit /usr/bin/newuidmap /usr/bin/newgidmap /usr/bin/slirp4netns; do
     echo "matchpathcon $p: $(matchpathcon "$p" 2>/dev/null || echo 'no rule')"
   done
 } > "$EVIDENCE_DIR/preflight-labels.txt"
@@ -354,9 +356,54 @@ expect_context() {
 }
 expect_context /usr/bin/docker-helper system_u:object_r:docker_helper_exec_t:s0
 expect_context /usr/bin/rootlesskit system_u:object_r:docker_helper_rootlesskit_exec_t:s0
+expect_context /usr/bin/newuidmap system_u:object_r:docker_helper_newuidmap_exec_t:s0
+expect_context /usr/bin/newgidmap system_u:object_r:docker_helper_newgidmap_exec_t:s0
 expect_context /run/docker-helper-builder system_u:object_r:docker_helper_builder_runtime_t:s0
 expect_context /var/lib/docker-helper-builder system_u:object_r:docker_helper_builder_state_t:s0
-say "P1 static asserts OK"
+
+# The distro helpers' own on-disk state (P5-S2): docker-helper never
+# changes owner, mode, or the chkstat-applied file capabilities (the distro
+# privilege mechanism, permissions.d/shadow); restorecon is label-only.
+# The state is recorded at install and re-asserted UNCHANGED after the
+# upgrade relabel (P6). getcap is absent on this image; python3 decodes the
+# security.capability xattr's permitted mask (bit numbers: CAP_SETGID=6,
+# CAP_SETUID=7) when the xattr exists.
+distro_helper_binary_state() {
+  local p="$1"
+  printf 'owner=%s mode=%s ' "$(stat -c '%U:%G' "$p" 2>/dev/null || echo UNAVAILABLE)" "$(stat -c '%A' "$p" 2>/dev/null || echo UNAVAILABLE)"
+  if command -v getcap >/dev/null 2>&1; then
+    printf 'caps=%s\n' "$(getcap "$p" 2>/dev/null || echo none-per-getcap)"
+  elif command -v python3 >/dev/null 2>&1; then
+    printf 'caps=%s\n' "$(python3 - "$p" <<'PYEOF' 2>&1
+import os, struct, sys
+try:
+    raw = os.getxattr(sys.argv[1], "security.capability")
+except OSError as e:
+    print("absent (%s)" % (e.strerror or e))
+    raise SystemExit(0)
+magic = struct.unpack_from("<I", raw, 0)[0]
+permitted = struct.unpack_from("<I", raw, 4)[0]
+bits = ",".join(str(i) for i in range(32) if permitted & (1 << i))
+print("rev=%d effective=%d permitted_bits=[%s]" % ((magic >> 24) & 0xFF, magic & 1, bits))
+PYEOF
+)"
+  else
+    printf 'caps=UNAVAILABLE (no getcap, no python3)\n'
+  fi
+}
+rpm -qf /usr/bin/newuidmap >/dev/null 2>&1 || fail "newuidmap must be owned by a real distro package"
+rpm -qf /usr/bin/newgidmap >/dev/null 2>&1 || fail "newgidmap must be owned by a real distro package"
+[ "$(stat -c '%U:%G' /usr/bin/newuidmap)" = "root:root" ] || fail "newuidmap ownership must be root:root"
+[ "$(stat -c '%U:%G' /usr/bin/newgidmap)" = "root:root" ] || fail "newgidmap ownership must be root:root"
+NEWUIDMAP_P1_STATE="$(distro_helper_binary_state /usr/bin/newuidmap)"
+NEWGIDMAP_P1_STATE="$(distro_helper_binary_state /usr/bin/newgidmap)"
+case "$NEWGIDMAP_P1_STATE" in
+  *UNAVAILABLE*) log "P1 NOTE: the on-disk file capability of /usr/bin/newgidmap is not verifiable on this image ($NEWGIDMAP_P1_STATE)" ;;
+  *permitted_bits=\[6\]*|*permitted_bits=\[6,*|*,6\]*|*,6,*) : ;;
+  *) fail "the distro chkstat-applied cap_setgid file capability on /usr/bin/newgidmap is absent/changed: $NEWGIDMAP_P1_STATE" ;;
+esac
+printf 'newuidmap P1 state: %s\nnewgidmap P1 state: %s\n' "$NEWUIDMAP_P1_STATE" "$NEWGIDMAP_P1_STATE" > "$EVIDENCE_DIR/distro-helper-binary-state.txt"
+say "P1 static asserts OK (helper labels; distro helper binary state recorded)"
 
 # docker engine is needed by the tarball lifecycle phase (P7) and makes the
 # permissive-harvest build attempt able to complete end-to-end; install it once
@@ -712,12 +759,25 @@ rpm -Uvh --replacepkgs "$RPM" >/dev/null || fail "rpm -U --replacepkgs failed"
   || fail "manager.sock label wrong after the upgrade relabel"
 # The launch vehicle's user-network helper must carry the dedicated exec
 # type after the upgrade relabel (execution is allowed only from the
-# rootlesskit child domain), and so must the UID-map helper's dedicated
-# exec type (the docker_helper_newuidmap_t transition path).
+# rootlesskit child domain), and so must the UID-map helper's and the
+# GID-map helper's dedicated exec types (the docker_helper_newuidmap_t and
+# docker_helper_newgidmap_t transition paths).
 [ "$(stat -c '%C' /usr/bin/slirp4netns)" = "system_u:object_r:docker_helper_slirp4netns_exec_t:s0" ] \
   || fail "slirp4netns label wrong after the upgrade relabel: $(stat -c '%C' /usr/bin/slirp4netns)"
 [ "$(stat -c '%C' /usr/bin/newuidmap)" = "system_u:object_r:docker_helper_newuidmap_exec_t:s0" ] \
   || fail "newuidmap label wrong after the upgrade relabel: $(stat -c '%C' /usr/bin/newuidmap)"
+[ "$(stat -c '%C' /usr/bin/newgidmap)" = "system_u:object_r:docker_helper_newgidmap_exec_t:s0" ] \
+  || fail "newgidmap label wrong after the upgrade relabel: $(stat -c '%C' /usr/bin/newgidmap)"
+# The distro helpers' own state must be UNCHANGED across the relabel: the
+# relabel path touches labels only — owner, mode, and the chkstat-applied
+# file capabilities stay exactly as recorded at install.
+NEWUIDMAP_P6_STATE="$(distro_helper_binary_state /usr/bin/newuidmap)"
+NEWGIDMAP_P6_STATE="$(distro_helper_binary_state /usr/bin/newgidmap)"
+[ "$NEWUIDMAP_P6_STATE" = "$NEWUIDMAP_P1_STATE" ] \
+  || fail "the relabel path changed the newuidmap binary's distro-owned state: P1 '$NEWUIDMAP_P1_STATE' -> P6 '$NEWUIDMAP_P6_STATE'"
+[ "$NEWGIDMAP_P6_STATE" = "$NEWGIDMAP_P1_STATE" ] \
+  || fail "the relabel path changed the newgidmap binary's distro-owned state: P1 '$NEWGIDMAP_P1_STATE' -> P6 '$NEWGIDMAP_P6_STATE'"
+printf 'newgidmap P6 state: %s\n' "$NEWGIDMAP_P6_STATE" >> "$EVIDENCE_DIR/distro-helper-binary-state.txt"
 [ "$(systemctl is-active "$UNIT" 2>/dev/null || true)" = "active" ] \
   || fail "builder unit stopped across the upgrade"
 audit_window_start
@@ -745,8 +805,13 @@ P6_START="$AVC_EPOCH"
 # established mapping (an initial-namespace process always shows the
 # trivial single-line full-range map; the mapped child shows the real
 # multi-line mapping the helper wrote) — its content is captured once into
-# uid-map-fallback-capture.txt.
+# uid-map-fallback-capture.txt. The loop keeps running after a fallback
+# capture so the newgidmap exec (the next step of the same flow) can still
+# be caught. The GID-map helper is checked FIRST in every iteration: the
+# flow starts it right after the UID-map step completes, so it runs while
+# the UID-map target sampling (backgrounded below) is still in progress.
 (
+  NUID_SIGHTED=false
   while :; do
     if [ ! -s "$EVIDENCE_DIR/slirp-runtime-context.txt" ]; then
       slirp_pid="$(pgrep -f /usr/bin/slirp4netns 2>/dev/null | head -1)"
@@ -754,60 +819,106 @@ P6_START="$AVC_EPOCH"
         cat "/proc/$slirp_pid/attr/current" > "$EVIDENCE_DIR/slirp-runtime-context.txt" 2>&1
       fi
     fi
-    nuid_pid="$(pgrep -f /usr/bin/newuidmap 2>/dev/null | head -1)"
-    if [ -n "$nuid_pid" ] && [ -r "/proc/$nuid_pid/attr/current" ]; then
-      cat "/proc/$nuid_pid/attr/current" > "$EVIDENCE_DIR/newuidmap-runtime-context.txt" 2>&1
-      NUID_TARGET="$(tr '\0' '\n' < "/proc/$nuid_pid/cmdline" 2>/dev/null | sed -n 2p)"
-      case "$NUID_TARGET" in
+    ngid_pid="$(pgrep -f /usr/bin/newgidmap 2>/dev/null | head -1)"
+    if [ -n "$ngid_pid" ] && [ -r "/proc/$ngid_pid/attr/current" ]; then
+      cat "/proc/$ngid_pid/attr/current" > "$EVIDENCE_DIR/newgidmap-runtime-context.txt" 2>&1
+      NGID_TARGET="$(tr '\0' '\n' < "/proc/$ngid_pid/cmdline" 2>/dev/null | sed -n 2p)"
+      case "$NGID_TARGET" in
         ''|*[!0-9]*)
-          echo "target pid not resolvable from newuidmap cmdline: $(tr '\0' ' ' < "/proc/$nuid_pid/cmdline" 2>/dev/null)" \
-            > "$EVIDENCE_DIR/newuidmap-uid-map-capture.txt"
+          echo "target pid not resolvable from newgidmap cmdline: $(tr '\0' ' ' < "/proc/$ngid_pid/cmdline" 2>/dev/null)" \
+            > "$EVIDENCE_DIR/newgidmap-gid-map-capture.txt"
           ;;
         *)
           {
-            echo "newuidmap pid: $nuid_pid; target pid: $NUID_TARGET"
+            echo "newgidmap pid: $ngid_pid; target pid: $NGID_TARGET"
             echo "=== runtime namespace facts from /proc (never inferred from AVC) ==="
-            echo "newuidmap ns/user: $(readlink "/proc/$nuid_pid/ns/user" 2>/dev/null || echo UNAVAILABLE)"
-            echo "target ns/user:    $(readlink "/proc/$NUID_TARGET/ns/user" 2>/dev/null || echo UNAVAILABLE)"
-            echo "target uid_map at helper-sighting: $(cat "/proc/$NUID_TARGET/uid_map" 2>/dev/null || echo UNAVAILABLE)"
+            echo "newgidmap ns/user: $(readlink "/proc/$ngid_pid/ns/user" 2>/dev/null || echo UNAVAILABLE)"
+            echo "target ns/user:    $(readlink "/proc/$NGID_TARGET/ns/user" 2>/dev/null || echo UNAVAILABLE)"
+            echo "target gid_map at helper-sighting: $(cat "/proc/$NGID_TARGET/gid_map" 2>/dev/null || echo UNAVAILABLE)"
+            echo "target uid_map at helper-sighting: $(cat "/proc/$NGID_TARGET/uid_map" 2>/dev/null || echo UNAVAILABLE)"
             echo "=== samples while the target exists (the LAST captured values are the result) ==="
             for _ in $(seq 1 200); do
-              UM="$(cat "/proc/$NUID_TARGET/uid_map" 2>/dev/null || true)"
-              GM="$(cat "/proc/$NUID_TARGET/gid_map" 2>/dev/null || true)"
+              UM="$(cat "/proc/$NGID_TARGET/uid_map" 2>/dev/null || true)"
+              GM="$(cat "/proc/$NGID_TARGET/gid_map" 2>/dev/null || true)"
               if [ -n "$UM" ] || [ -n "$GM" ]; then
                 echo "sampled uid_map: $UM"
                 echo "sampled gid_map: $GM"
                 break
               fi
-              [ -d "/proc/$NUID_TARGET" ] || break
+              [ -d "/proc/$NGID_TARGET" ] || break
               sleep 0.005
             done
             echo "=== final state at capture time ==="
-            echo "uid_map: $(cat "/proc/$NUID_TARGET/uid_map" 2>/dev/null || echo 'NOT READABLE (process gone)')"
-            echo "gid_map: $(cat "/proc/$NUID_TARGET/gid_map" 2>/dev/null || echo 'NOT READABLE (process gone)')"
-          } > "$EVIDENCE_DIR/newuidmap-uid-map-capture.txt" 2>&1
+            echo "uid_map: $(cat "/proc/$NGID_TARGET/uid_map" 2>/dev/null || echo 'NOT READABLE (process gone)')"
+            echo "gid_map: $(cat "/proc/$NGID_TARGET/gid_map" 2>/dev/null || echo 'NOT READABLE (process gone)')"
+          } > "$EVIDENCE_DIR/newgidmap-gid-map-capture.txt" 2>&1
           ;;
       esac
       break
     fi
-    for rpid in $(pgrep -f rootlesskit 2>/dev/null || true); do
-      [ -r "/proc/$rpid/attr/current" ] || continue
-      case "$(cat "/proc/$rpid/attr/current" 2>/dev/null)" in
-        *docker_helper_rootlesskit_t*) ;;
-        *) continue ;;
-      esac
-      FALLBACK_UM="$(cat "/proc/$rpid/uid_map" 2>/dev/null || true)"
-      case "$FALLBACK_UM" in
-        *$'\n'*) ;;
-        *) continue ;;
-      esac
-      {
-        echo "rootlesskit_t pid: $rpid (no newuidmap sighting; the established mapping read from /proc)"
-        echo "uid_map: $FALLBACK_UM"
-        echo "gid_map: $(cat "/proc/$rpid/gid_map" 2>/dev/null || true)"
-      } > "$EVIDENCE_DIR/uid-map-fallback-capture.txt" 2>&1
-      break 2
-    done
+    if [ "$NUID_SIGHTED" = false ]; then
+      nuid_pid="$(pgrep -f /usr/bin/newuidmap 2>/dev/null | head -1)"
+      if [ -n "$nuid_pid" ] && [ -r "/proc/$nuid_pid/attr/current" ]; then
+        cat "/proc/$nuid_pid/attr/current" > "$EVIDENCE_DIR/newuidmap-runtime-context.txt" 2>&1
+        NUID_SIGHTED=true
+        # The target sampling runs in a background subshell: the loop must
+        # keep watching for the newgidmap exec (it starts right after the
+        # uid_map step completes).
+        (
+          NUID_TARGET="$(tr '\0' '\n' < "/proc/$nuid_pid/cmdline" 2>/dev/null | sed -n 2p)"
+          case "$NUID_TARGET" in
+            ''|*[!0-9]*)
+              echo "target pid not resolvable from newuidmap cmdline: $(tr '\0' ' ' < "/proc/$nuid_pid/cmdline" 2>/dev/null)" \
+                > "$EVIDENCE_DIR/newuidmap-uid-map-capture.txt"
+              ;;
+            *)
+              {
+                echo "newuidmap pid: $nuid_pid; target pid: $NUID_TARGET"
+                echo "=== runtime namespace facts from /proc (never inferred from AVC) ==="
+                echo "newuidmap ns/user: $(readlink "/proc/$nuid_pid/ns/user" 2>/dev/null || echo UNAVAILABLE)"
+                echo "target ns/user:    $(readlink "/proc/$NUID_TARGET/ns/user" 2>/dev/null || echo UNAVAILABLE)"
+                echo "target uid_map at helper-sighting: $(cat "/proc/$NUID_TARGET/uid_map" 2>/dev/null || echo UNAVAILABLE)"
+                echo "=== samples while the target exists (the LAST captured values are the result) ==="
+                for _ in $(seq 1 200); do
+                  UM="$(cat "/proc/$NUID_TARGET/uid_map" 2>/dev/null || true)"
+                  GM="$(cat "/proc/$NUID_TARGET/gid_map" 2>/dev/null || true)"
+                  if [ -n "$UM" ] || [ -n "$GM" ]; then
+                    echo "sampled uid_map: $UM"
+                    echo "sampled gid_map: $GM"
+                    break
+                  fi
+                  [ -d "/proc/$NUID_TARGET" ] || break
+                  sleep 0.005
+                done
+                echo "=== final state at capture time ==="
+                echo "uid_map: $(cat "/proc/$NUID_TARGET/uid_map" 2>/dev/null || echo 'NOT READABLE (process gone)')"
+                echo "gid_map: $(cat "/proc/$NUID_TARGET/gid_map" 2>/dev/null || echo 'NOT READABLE (process gone)')"
+              } > "$EVIDENCE_DIR/newuidmap-uid-map-capture.txt" 2>&1
+              ;;
+          esac
+        ) &
+      fi
+    fi
+    if [ ! -s "$EVIDENCE_DIR/uid-map-fallback-capture.txt" ]; then
+      for rpid in $(pgrep -f rootlesskit 2>/dev/null || true); do
+        [ -r "/proc/$rpid/attr/current" ] || continue
+        case "$(cat "/proc/$rpid/attr/current" 2>/dev/null)" in
+          *docker_helper_rootlesskit_t*) ;;
+          *) continue ;;
+        esac
+        FALLBACK_UM="$(cat "/proc/$rpid/uid_map" 2>/dev/null || true)"
+        case "$FALLBACK_UM" in
+          *$'\n'*) ;;
+          *) continue ;;
+        esac
+        {
+          echo "rootlesskit_t pid: $rpid (no newuidmap sighting; the established mapping read from /proc)"
+          echo "uid_map: $FALLBACK_UM"
+          echo "gid_map: $(cat "/proc/$rpid/gid_map" 2>/dev/null || true)"
+        } > "$EVIDENCE_DIR/uid-map-fallback-capture.txt" 2>&1
+        break
+      done
+    fi
     sleep 0.005
   done
 ) &
@@ -869,6 +980,22 @@ elif grep -a 'scontext=system_u:system_r:docker_helper_newuidmap_t' "$EVIDENCE_D
   say "P6 newuidmap runtime transition confirmed by an actual AVC from docker_helper_newuidmap_t"
 else
   log "P6 NOTE: newuidmap runtime context NOT observable under enforcing (no /proc capture and no AVC from the new domain; the transition is statically verified only)"
+fi
+# The GID-map helper's runtime context: the same proof shape — /proc
+# capture when the process was observed, otherwise an actual AVC record
+# FROM the new domain (scontext=docker_helper_newgidmap_t; its first
+# in-domain boundary produces one). A type_transition line alone is never
+# runtime evidence.
+if [ -s "$EVIDENCE_DIR/newgidmap-runtime-context.txt" ]; then
+  NGID_RUNTIME_CTX="$(cat "$EVIDENCE_DIR/newgidmap-runtime-context.txt")"
+  case "$NGID_RUNTIME_CTX" in
+    *docker_helper_newgidmap_t*) say "P6 newgidmap runtime context confirmed from /proc: $NGID_RUNTIME_CTX" ;;
+    *) fail "the newgidmap process ran in an unexpected context: $NGID_RUNTIME_CTX" ;;
+  esac
+elif grep -a 'scontext=system_u:system_r:docker_helper_newgidmap_t' "$EVIDENCE_DIR/builder-avc-p6.txt" >/dev/null 2>&1; then
+  say "P6 newgidmap runtime transition confirmed by an actual AVC from docker_helper_newgidmap_t"
+else
+  log "P6 NOTE: newgidmap runtime context NOT observable under enforcing (no /proc capture and no AVC from the new domain; the transition is statically verified only)"
 fi
 
 say "P6 transport confirmed (daemon builder_start + manager START for $P6_OP_ID)"
@@ -1010,6 +1137,17 @@ if [ -n "$OLD_NUID_SETUID_AVC" ]; then
   printf '%s\n' "$OLD_NUID_SETUID_AVC" > "$EVIDENCE_DIR/old-nuid-setuid-avc-p6.txt"
   fail "the former newuidmap self:capability { setuid } denial still occurs (the evidenced helper-surface grant did not take effect)"
 fi
+# ... and the GID-map helper's former bin_t { execute } exec denial (the
+# boundary this task's dedicated exec type crosses; run 36268063504 record
+# 745: denied { execute } comm="rootlesskit" name="newgidmap"
+# tcontext=bin_t tclass=file) must be GONE — the exec now transitions into
+# the dedicated docker_helper_newgidmap_t domain instead.
+OLD_NGID_BIN_EXEC_AVC="$(grep -a 'denied  { execute }' "$EVIDENCE_DIR/builder-avc-p6.txt" \
+  | grep -a 'name="newgidmap"' || true)"
+if [ -n "$OLD_NGID_BIN_EXEC_AVC" ]; then
+  printf '%s\n' "$OLD_NGID_BIN_EXEC_AVC" > "$EVIDENCE_DIR/old-ngid-exec-avc-p6.txt"
+  fail "the former newgidmap bin_t { execute } denial still occurs (the dedicated exec-type transition did not take effect)"
+fi
 # ... and the proc-dir { getattr } denial (the stat of the target process
 # directory /proc/<rootlesskit-pid>; run 36253390898 record 564) must be
 # GONE with the extended { read open getattr } grant.
@@ -1081,7 +1219,7 @@ else
     echo "=== daemon journal (P6 window) ==="; tail -20 "$EVIDENCE_DIR/daemon-journal-p6.txt"
     echo "=== build attempt output ==="; tail -20 "$EVIDENCE_DIR/build-attempt-post-relabel.txt"
     echo "=== operation result ==="; cat "$EVIDENCE_DIR/build-finish-p6.txt"; } >&2
-  fail "the build advanced past the granted boundaries (rootlesskit { lock }, slirp4netns/newuidmap exec types, user_namespace { create }, cap_userns { sys_admin }, the out-of-namespace setuid capability, the newuidmap fifo write, proc-dir read/open/getattr/search, and passwd read/open surface) and stopped at the NEXT enforcing boundary (evidence: builder-avc-p6.txt, builder-journal-p6.txt, daemon-journal-p6.txt, child-output-p6.txt, nss-fallback-avc-p6.txt, newuidmap-uid-map-capture.txt, build-attempt-post-relabel.txt, build-finish-p6.txt)"
+  fail "the build advanced past the granted boundaries (rootlesskit { lock }, slirp4netns/newuidmap/newgidmap exec types, user_namespace { create }, cap_userns { sys_admin }, the out-of-namespace setuid capability, the newuidmap fifo write, proc-dir read/open/getattr/search, and passwd read/open surface) and stopped at the NEXT enforcing boundary (evidence: builder-avc-p6.txt, builder-journal-p6.txt, daemon-journal-p6.txt, child-output-p6.txt, nss-fallback-avc-p6.txt, newuidmap-uid-map-capture.txt, newgidmap-gid-map-capture.txt, build-attempt-post-relabel.txt, build-finish-p6.txt)"
 fi
 say "P6 upgrade relabel OK (labels corrected by %posttrans; transport $P6_OP_ID)"
 else
