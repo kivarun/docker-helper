@@ -928,6 +928,16 @@ if [ -n "$OLD_NUID_PROCDIR_GETATTR_AVC" ]; then
   printf '%s\n' "$OLD_NUID_PROCDIR_GETATTR_AVC" > "$EVIDENCE_DIR/old-nuid-procdir-getattr-avc-p6.txt"
   fail "the former newuidmap proc-dir { getattr } denial still occurs (the evidenced helper-surface grant did not take effect)"
 fi
+# ... and the proc-dir { search } denial (the path traversal into
+# /proc/<rootlesskit-pid>/ before the uid_map open; run 36256089858 record
+# 556) must be GONE with the extended { read open getattr search } grant.
+OLD_NUID_PROCDIR_SEARCH_AVC="$(grep -a 'denied  { search }' "$EVIDENCE_DIR/builder-avc-p6.txt" \
+  | grep -a 'scontext=system_u:system_r:docker_helper_newuidmap_t' \
+  | grep -a 'tclass=dir' || true)"
+if [ -n "$OLD_NUID_PROCDIR_SEARCH_AVC" ]; then
+  printf '%s\n' "$OLD_NUID_PROCDIR_SEARCH_AVC" > "$EVIDENCE_DIR/old-nuid-procdir-search-avc-p6.txt"
+  fail "the former newuidmap proc-dir { search } denial still occurs (the evidenced helper-surface grant did not take effect)"
+fi
 # NSS fallback check (task item): whether the init_var_run_t { search } and
 # self:unix_dgram_socket { create } denials from the helper domain STILL
 # occur once the direct files-module lookup can complete. Their presence is
@@ -979,7 +989,7 @@ else
     echo "=== daemon journal (P6 window) ==="; tail -20 "$EVIDENCE_DIR/daemon-journal-p6.txt"
     echo "=== build attempt output ==="; tail -20 "$EVIDENCE_DIR/build-attempt-post-relabel.txt"
     echo "=== operation result ==="; cat "$EVIDENCE_DIR/build-finish-p6.txt"; } >&2
-  fail "the build advanced past the granted boundaries (rootlesskit { lock }, slirp4netns/newuidmap exec types, user_namespace { create }, cap_userns { sys_admin }, the newuidmap fifo write, proc-dir read/open/getattr, and passwd read/open surface) and stopped at the NEXT enforcing boundary (evidence: builder-avc-p6.txt, builder-journal-p6.txt, daemon-journal-p6.txt, child-output-p6.txt, nss-fallback-avc-p6.txt, newuidmap-uid-map-capture.txt, build-attempt-post-relabel.txt, build-finish-p6.txt)"
+  fail "the build advanced past the granted boundaries (rootlesskit { lock }, slirp4netns/newuidmap exec types, user_namespace { create }, cap_userns { sys_admin }, the newuidmap fifo write, proc-dir read/open/getattr/search, and passwd read/open surface) and stopped at the NEXT enforcing boundary (evidence: builder-avc-p6.txt, builder-journal-p6.txt, daemon-journal-p6.txt, child-output-p6.txt, nss-fallback-avc-p6.txt, newuidmap-uid-map-capture.txt, build-attempt-post-relabel.txt, build-finish-p6.txt)"
 fi
 say "P6 upgrade relabel OK (labels corrected by %posttrans; transport $P6_OP_ID)"
 else
