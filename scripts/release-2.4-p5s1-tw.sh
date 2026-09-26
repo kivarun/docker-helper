@@ -386,6 +386,12 @@ if [ "$(systemctl is-active "$MAIN_UNIT" 2>/dev/null || true)" != "active" ]; th
 fi
 [ "$(systemctl is-active "$MAIN_UNIT" 2>/dev/null || true)" = "active" ] \
   || { operator_surface_diag main-start; fail "main daemon not active after start"; }
+# The unit is Type=simple: systemd reports active as soon as the process
+# exists, before it opens its listener. Wait for the actual daemon socket
+# (bounded) instead of racing it — the operator surface connects immediately.
+MAIN_SOCK=/run/docker-helper/docker-helper.sock
+for _ in $(seq 1 50); do [ -S "$MAIN_SOCK" ] && break; sleep 0.2; done
+[ -S "$MAIN_SOCK" ] || { operator_surface_diag main-start; fail "main daemon socket did not appear (see main-start-daemon-journal.txt)"; }
 systemctl cat "$UNIT" > "$EVIDENCE_DIR/builder-unit-runtime.txt" 2>&1
 
 # (a-iii) Operator surface (principal/credential/session) once, before any
