@@ -967,6 +967,23 @@ allow docker_helper_newuidmap_t docker_helper_newuidmap_exec_t:file { entrypoint
 allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:fifo_file { write };
 allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read open };
 
+# The helper's caller-identity lookup (P5-S2): the getpwuid read of
+# /etc/passwd that locates the caller's user name before validating the
+# requested mapping ranges against the caller's subid database. Live
+# enforcing AVC evidence (P5-S1 Tumbleweed run 36250310697 P6 window,
+# record 569, permissive=0, comm="newuidmap"
+# scontext=system_u:system_r:docker_helper_newuidmap_t:s0):
+#   denied { read }  tcontext=system_u:object_r:passwd_file_t:s0
+#     tclass=file  name="passwd" dev="vda3"
+#   (the helper's own failure output: "newuidmap: Cannot determine your
+#   user name.")
+# Read ONLY: no open/getattr denial is evidenced yet (the next boundary).
+# The NSS fallback surface of the same failure moment (init_var_run_t
+# search, self:unix_dgram_socket create) stays deliberately ungranted
+# until the direct /etc/passwd read is proven to remove the systemd
+# userdb need.
+allow docker_helper_newuidmap_t passwd_file_t:file { read };
+
 # The child's user-namespace creation itself: rootlesskit creates the userns
 # that hosts the buildkitd instance. Live enforcing AVC evidence (P5-S1
 # Tumbleweed run 36200721417 P6 window: denied { create }
