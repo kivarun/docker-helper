@@ -455,6 +455,109 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 	}
 }
 
+// TestSELinuxPolicyNewuidmapDomainTransition verifies the P5-S2 UID-map
+// helper domain: the exec type and the domain exist, the transition is the
+// ONLY path in (from the rootlesskit child over the newuidmap entry type),
+// the source-side exec set matches the proven sibling shape, the entry rule
+// carries the transition-required entrypoint plus the loader access, the
+// fcontext rule labels exactly /usr/bin/newuidmap, and the manager may not
+// exec newuidmap.
+func TestSELinuxPolicyNewuidmapDomainTransition(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	fc := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.fc")
+	for _, want := range []string{
+		"type docker_helper_newuidmap_exec_t, file_type;",
+		"type docker_helper_newuidmap_t, domain;",
+		"role system_r types docker_helper_newuidmap_t;",
+		"type_transition docker_helper_rootlesskit_t docker_helper_newuidmap_exec_t:process docker_helper_newuidmap_t;",
+		"allow docker_helper_rootlesskit_t docker_helper_newuidmap_t:process { transition };",
+		"allow docker_helper_rootlesskit_t docker_helper_newuidmap_exec_t:file { execute read open getattr };",
+		"allow docker_helper_newuidmap_t docker_helper_newuidmap_exec_t:file { entrypoint read open execute getattr map };",
+	} {
+		if !strings.Contains(policy, want) {
+			t.Errorf("SELinux policy must contain exactly this rule: %s", want)
+		}
+	}
+	if !strings.Contains(fc, "/usr/bin/newuidmap                  --  system_u:object_r:docker_helper_newuidmap_exec_t:s0") {
+		t.Error("file contexts must label /usr/bin/newuidmap with the dedicated exec type")
+	}
+	// The transition into the UID-map helper domain is the ONLY path in.
+	_, transitions := parseSELinuxRules(policy)
+	newuidTransitions := 0
+	for _, tr := range transitions {
+		if tr.dest != "docker_helper_newuidmap_t" {
+			continue
+		}
+		newuidTransitions++
+		if tr.source != "docker_helper_rootlesskit_t" || tr.entry != "docker_helper_newuidmap_exec_t" || tr.class != "process" {
+			t.Errorf("the only transition into the UID-map helper domain is the rootlesskit child's exec of its entry type, got: type_transition %s %s:%s %s", tr.source, tr.entry, tr.class, tr.dest)
+		}
+	}
+	if newuidTransitions != 1 {
+		t.Errorf("exactly one transition may enter the UID-map helper domain, found %d", newuidTransitions)
+	}
+	// The manager must not gain the right to execute newuidmap.
+	if strings.Contains(policy, "allow docker_helper_builder_t docker_helper_newuidmap_exec_t") {
+		t.Error("the manager domain must not be able to execute newuidmap")
+	}
+	// No bin_t execution grants for either builder-family domain.
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		for _, subject := range []string{"docker_helper_builder_t", "docker_helper_rootlesskit_t", "docker_helper_newuidmap_t", "docker_helper_slirp4netns_t"} {
+			target := allowTargetToken(trimmed, "allow "+subject+" ")
+			if target == "bin_t" {
+				t.Errorf("no bin_t grant for %s: %s", subject, trimmed)
+			}
+		}
+	}
+}
+
+// TestSELinuxPolicyNewuidmapIsolation verifies the UID-map helper domain's
+// isolation surface: no Docker socket, admin token, config/state/runtime,
+// or Session workspace grants; no capability, capability2, or cap_userns
+// rules; and no transition or allow rule pointing into the domain other
+// than the pinned ones.
+func TestSELinuxPolicyNewuidmapIsolation(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		for _, subject := range []string{"docker_helper_builder_t", "docker_helper_newuidmap_t"} {
+			target := allowTargetToken(trimmed, "allow "+subject+" ")
+			if target == "" {
+				continue
+			}
+			for _, forbidden := range forbiddenBuilderTargets {
+				if target == forbidden {
+					t.Errorf("%s must not receive a grant toward %s: %s", subject, forbidden, trimmed)
+				}
+			}
+		}
+	}
+	// The module's only cap_userns rule is the rootlesskit child's
+	// evidenced sys_admin grant; the helper domain gets none.
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, ":cap_userns ") && !strings.Contains(trimmed, "docker_helper_rootlesskit_t self:cap_userns sys_admin") {
+			t.Errorf("no cap_userns grant may exist beyond the rootlesskit child's sys_admin rule: %s", trimmed)
+		}
+	}
+	_, transitions := parseSELinuxRules(policy)
+	for _, tr := range transitions {
+		if tr.dest == "docker_helper_newuidmap_t" && (tr.source != "docker_helper_rootlesskit_t" || tr.entry != "docker_helper_newuidmap_exec_t") {
+			t.Errorf("no other exec path may transition into the UID-map helper domain: type_transition %s %s:%s %s", tr.source, tr.entry, tr.class, tr.dest)
+		}
+	}
+}
+
 // TestSELinuxPolicyRootlesskitCapUserns verifies the P5-S2 cap_userns grant:
 // exactly one cap_userns rule exists in the module, and it is exactly the
 // rootlesskit child domain's self:cap_userns sys_admin (the in-namespace
@@ -614,12 +717,14 @@ func TestDeploymentLifecycleIsOnlyBuilderRelabelOwner(t *testing.T) {
 			"restorecon -R /var/lib/docker-helper-builder",
 			"restorecon /usr/bin/rootlesskit",
 			"restorecon /usr/bin/slirp4netns",
+			"restorecon /usr/bin/newuidmap",
 		},
 		"packaging/install-system.sh": {
 			"\"$RESTORECON\" -R /run/docker-helper-builder",
 			"\"$RESTORECON\" -R /var/lib/docker-helper-builder",
 			"\"$RESTORECON\" /usr/bin/rootlesskit",
 			"\"$RESTORECON\" /usr/bin/slirp4netns",
+			"\"$RESTORECON\" /usr/bin/newuidmap",
 		},
 	}
 	for path, wants := range owners {
