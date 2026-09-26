@@ -724,16 +724,49 @@ P6_START="$AVC_EPOCH"
 # runtime-context proof (item: never base the positive context claim on AVC
 # records alone); if the process is not observable, the note is recorded and
 # the report says so honestly instead of claiming the transition was proven.
+# The poller keeps running after a slirp4netns capture so the UID-map helper
+# can still be caught: when newuidmap is observed, its mapping target pid
+# (the rootlesskit child, newuidmap's first argument) is resolved and the
+# target's uid_map/gid_map are sampled until non-empty or the process is
+# gone — the ACTUAL UID mapping result, never inferred from AVC absence.
 (
   while :; do
-    slirp_pid="$(pgrep -f /usr/bin/slirp4netns 2>/dev/null | head -1)"
-    if [ -n "$slirp_pid" ] && [ -r "/proc/$slirp_pid/attr/current" ]; then
-      cat "/proc/$slirp_pid/attr/current" > "$EVIDENCE_DIR/slirp-runtime-context.txt" 2>&1
-      break
+    if [ ! -s "$EVIDENCE_DIR/slirp-runtime-context.txt" ]; then
+      slirp_pid="$(pgrep -f /usr/bin/slirp4netns 2>/dev/null | head -1)"
+      if [ -n "$slirp_pid" ] && [ -r "/proc/$slirp_pid/attr/current" ]; then
+        cat "/proc/$slirp_pid/attr/current" > "$EVIDENCE_DIR/slirp-runtime-context.txt" 2>&1
+      fi
     fi
     nuid_pid="$(pgrep -f /usr/bin/newuidmap 2>/dev/null | head -1)"
     if [ -n "$nuid_pid" ] && [ -r "/proc/$nuid_pid/attr/current" ]; then
       cat "/proc/$nuid_pid/attr/current" > "$EVIDENCE_DIR/newuidmap-runtime-context.txt" 2>&1
+      NUID_TARGET="$(tr '\0' '\n' < "/proc/$nuid_pid/cmdline" 2>/dev/null | sed -n 2p)"
+      case "$NUID_TARGET" in
+        ''|*[!0-9]*)
+          echo "target pid not resolvable from newuidmap cmdline: $(tr '\0' ' ' < "/proc/$nuid_pid/cmdline" 2>/dev/null)" \
+            > "$EVIDENCE_DIR/newuidmap-uid-map-capture.txt"
+          ;;
+        *)
+          {
+            echo "newuidmap pid: $nuid_pid; target pid: $NUID_TARGET"
+            echo "=== samples while the target exists (the LAST captured values are the result) ==="
+            for _ in $(seq 1 100); do
+              UM="$(cat "/proc/$NUID_TARGET/uid_map" 2>/dev/null || true)"
+              GM="$(cat "/proc/$NUID_TARGET/gid_map" 2>/dev/null || true)"
+              if [ -n "$UM" ] || [ -n "$GM" ]; then
+                echo "sampled uid_map: $UM"
+                echo "sampled gid_map: $GM"
+                break
+              fi
+              [ -d "/proc/$NUID_TARGET" ] || break
+              sleep 0.05
+            done
+            echo "=== final state at capture time ==="
+            echo "uid_map: $(cat "/proc/$NUID_TARGET/uid_map" 2>/dev/null || echo 'NOT READABLE (process gone)')"
+            echo "gid_map: $(cat "/proc/$NUID_TARGET/gid_map" 2>/dev/null || echo 'NOT READABLE (process gone)')"
+          } > "$EVIDENCE_DIR/newuidmap-uid-map-capture.txt" 2>&1
+          ;;
+      esac
       break
     fi
     sleep 0.05
@@ -855,6 +888,16 @@ if [ -n "$OLD_NUID_PROCDIR_AVC" ]; then
   printf '%s\n' "$OLD_NUID_PROCDIR_AVC" > "$EVIDENCE_DIR/old-nuid-procdir-avc-p6.txt"
   fail "the former newuidmap proc-dir { read } denial still occurs (the evidenced helper-surface grant did not take effect)"
 fi
+# ... and the proc-dir { open } denial (the O_DIRECTORY open of the SAME
+# /proc/<rootlesskit-pid> target; run 36248541393 record 562) must be GONE
+# with the extended { read open } grant.
+OLD_NUID_PROCDIR_OPEN_AVC="$(grep -a 'denied  { open }' "$EVIDENCE_DIR/builder-avc-p6.txt" \
+  | grep -a 'scontext=system_u:system_r:docker_helper_newuidmap_t' \
+  | grep -a 'tclass=dir' || true)"
+if [ -n "$OLD_NUID_PROCDIR_OPEN_AVC" ]; then
+  printf '%s\n' "$OLD_NUID_PROCDIR_OPEN_AVC" > "$EVIDENCE_DIR/old-nuid-procdir-open-avc-p6.txt"
+  fail "the former newuidmap proc-dir { open } denial still occurs (the evidenced helper-surface grant did not take effect)"
+fi
 if grep -aqF 'failed to lock' "$EVIDENCE_DIR/builder-journal-p6.txt"; then
   grep -aF 'failed to lock' "$EVIDENCE_DIR/builder-journal-p6.txt" \
     > "$EVIDENCE_DIR/child-lock-journal-p6.txt" 2>/dev/null || true
@@ -898,7 +941,7 @@ else
     echo "=== daemon journal (P6 window) ==="; tail -20 "$EVIDENCE_DIR/daemon-journal-p6.txt"
     echo "=== build attempt output ==="; tail -20 "$EVIDENCE_DIR/build-attempt-post-relabel.txt"
     echo "=== operation result ==="; cat "$EVIDENCE_DIR/build-finish-p6.txt"; } >&2
-  fail "the build advanced past the granted boundaries (rootlesskit { lock }, slirp4netns/newuidmap exec types, user_namespace { create }, cap_userns { sys_admin }, the newuidmap fifo/proc-dir surface) and stopped at the NEXT enforcing boundary (evidence: builder-avc-p6.txt, builder-journal-p6.txt, daemon-journal-p6.txt, child-output-p6.txt, build-attempt-post-relabel.txt, build-finish-p6.txt)"
+  fail "the build advanced past the granted boundaries (rootlesskit { lock }, slirp4netns/newuidmap exec types, user_namespace { create }, cap_userns { sys_admin }, the newuidmap fifo write and proc-dir read/open surface) and stopped at the NEXT enforcing boundary (evidence: builder-avc-p6.txt, builder-journal-p6.txt, daemon-journal-p6.txt, child-output-p6.txt, newuidmap-uid-map-capture.txt, build-attempt-post-relabel.txt, build-finish-p6.txt)"
 fi
 say "P6 upgrade relabel OK (labels corrected by %posttrans; transport $P6_OP_ID)"
 else
