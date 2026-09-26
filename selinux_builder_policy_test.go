@@ -517,9 +517,10 @@ func TestSELinuxPolicyNewuidmapDomainTransition(t *testing.T) {
 
 // TestSELinuxPolicyNewuidmapIsolation verifies the UID-map helper domain's
 // isolation surface: no Docker socket, admin token, config/state/runtime,
-// or Session workspace grants; no capability, capability2, or cap_userns
-// rules; and no transition or allow rule pointing into the domain other
-// than the pinned ones.
+// or Session workspace grants; no capability/capability2 rules and no
+// cap_userns rule beyond the one evidenced sys_admin grant; and no
+// transition or allow rule pointing into the domain other than the pinned
+// ones.
 func TestSELinuxPolicyNewuidmapIsolation(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
 	for _, line := range strings.Split(policy, "\n") {
@@ -539,15 +540,23 @@ func TestSELinuxPolicyNewuidmapIsolation(t *testing.T) {
 			}
 		}
 	}
-	// The module's only cap_userns rule is the rootlesskit child's
-	// evidenced sys_admin grant; the helper domain gets none.
+	// The module's cap_userns rules are EXACTLY the two evidenced grants:
+	// the rootlesskit child's and the UID-map helper's sys_admin bits
+	// (both in-namespace, both self-targeted). No other subject — the
+	// manager, slirp4netns, the daemon, or any helper — gets a cap_userns
+	// rule.
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		if strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, ":cap_userns ") && !strings.Contains(trimmed, "docker_helper_rootlesskit_t self:cap_userns sys_admin") {
-			t.Errorf("no cap_userns grant may exist beyond the rootlesskit child's sys_admin rule: %s", trimmed)
+		if strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, ":cap_userns ") {
+			switch trimmed {
+			case "allow docker_helper_rootlesskit_t self:cap_userns sys_admin;",
+				"allow docker_helper_newuidmap_t self:cap_userns sys_admin;":
+			default:
+				t.Errorf("no cap_userns grant may exist beyond the two evidenced in-namespace sys_admin rules (rootlesskit child and UID-map helper): %s", trimmed)
+			}
 		}
 	}
 	_, transitions := parseSELinuxRules(policy)
@@ -567,6 +576,7 @@ var newuidmapDomainSurface = []string{
 	"allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:fifo_file { write };",
 	"allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read open getattr search };",
 	"allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:file { write open };",
+	"allow docker_helper_newuidmap_t self:cap_userns sys_admin;",
 	"allow docker_helper_newuidmap_t passwd_file_t:file { read open };",
 }
 
@@ -576,9 +586,11 @@ var newuidmapDomainSurface = []string{
 //   - the domain's allow-rule surface is EXACTLY newuidmapDomainSurface
 //     (source-scoped, full-line equality, so widened permission sets and
 //     extra grants both violate);
-//   - the domain holds no self:capability, capability2, or cap_userns
-//     grant (the privilege model stays the distro's chkstat-applied file
-//     caps; the enforcing capability boundary stays ungranted);
+//   - the domain holds no self:capability or capability2 grant (the
+//     privilege model stays the distro's chkstat-applied file caps; the
+//     out-of-namespace capability set — setuid included — stays
+//     ungranted), and its cap_userns surface is exactly the evidenced
+//     { sys_admin } in-namespace bit;
 //   - the domain holds no grant toward any forbidden surface (same set as
 //     the builder domain);
 //   - the domain holds NO process-class grant toward
@@ -609,10 +621,15 @@ func newuidmapDomainPolicyViolations(policy string) []string {
 			violations = append(violations, fmt.Sprintf("the UID-map helper domain's surface is exact; unexpected rule: %s", trimmed))
 		}
 		if strings.HasPrefix(trimmed, "allow docker_helper_newuidmap_t self:") {
-			for _, cls := range []string{"capability", "capability2", "cap_userns"} {
-				if strings.Contains(trimmed, ":"+cls+" ") {
-					violations = append(violations, fmt.Sprintf("the UID-map helper domain must hold no %s grant: %s", cls, trimmed))
-				}
+			if strings.Contains(trimmed, ":capability ") || strings.Contains(trimmed, ":capability2 ") {
+				violations = append(violations, fmt.Sprintf("the UID-map helper domain must hold no capability/capability2 grant: %s", trimmed))
+			}
+			// The in-namespace sys_admin bit is the one evidenced capability
+			// surface (the uid_map write's cap_userns check, enforcing run
+			// 36263531925 record 560); any other cap_userns permission —
+			// including setuid — is a widening violation.
+			if strings.Contains(trimmed, ":cap_userns ") && trimmed != "allow docker_helper_newuidmap_t self:cap_userns sys_admin;" {
+				violations = append(violations, fmt.Sprintf("the UID-map helper domain's cap_userns surface is exactly { sys_admin }: %s", trimmed))
 			}
 		}
 		if target, class, ok := strings.Cut(strings.TrimPrefix(trimmed, "allow docker_helper_newuidmap_t "), ":"); ok {
@@ -678,9 +695,10 @@ func TestSELinuxPolicyNewuidmapDomainSurface(t *testing.T) {
 		{"widened passwd grant", "allow docker_helper_newuidmap_t passwd_file_t:file { read open getattr };", "unexpected rule"},
 		{"extra passwd getattr grant", "allow docker_helper_newuidmap_t passwd_file_t:file { read getattr };", "unexpected rule"},
 		{"regressed passwd open grant", "allow docker_helper_newuidmap_t passwd_file_t:file { read };", "unexpected rule"},
-		{"cap_userns for helper", "allow docker_helper_newuidmap_t self:cap_userns sys_admin;", "no cap_userns grant"},
-		{"capability for helper", "allow docker_helper_newuidmap_t self:capability sys_admin;", "no capability grant"},
-		{"capability2 for helper", "allow docker_helper_newuidmap_t self:capability2 kill;", "no capability2 grant"},
+		{"widened helper cap_userns", "allow docker_helper_newuidmap_t self:cap_userns { sys_admin setuid };", "cap_userns surface is exactly"},
+		{"extra helper cap_userns permission", "allow docker_helper_newuidmap_t self:cap_userns setuid;", "cap_userns surface is exactly"},
+		{"capability for helper", "allow docker_helper_newuidmap_t self:capability sys_admin;", "no capability/capability2 grant"},
+		{"capability2 for helper", "allow docker_helper_newuidmap_t self:capability2 kill;", "no capability/capability2 grant"},
 	} {
 		mutated := policy + "\n" + mut.rule
 		violations := newuidmapDomainPolicyViolations(mutated)
@@ -695,31 +713,42 @@ func TestSELinuxPolicyNewuidmapDomainSurface(t *testing.T) {
 	}
 }
 
-// TestSELinuxPolicyRootlesskitCapUserns verifies the P5-S2 cap_userns grant:
-// exactly one cap_userns rule exists in the module, and it is exactly the
-// rootlesskit child domain's self:cap_userns sys_admin (the in-namespace
-// sys_admin bit needed to re-exec inside the new userns). The manager, the
-// slirp4netns helper, and any other subject must hold no cap_userns rules,
-// and the child keeps its zero self:capability/capability2 surface.
-func TestSELinuxPolicyRootlesskitCapUserns(t *testing.T) {
+// TestSELinuxPolicyCapUsernsShape verifies the global cap_userns invariant:
+// the module carries EXACTLY TWO cap_userns rules — the rootlesskit child
+// domain's and the UID-map helper domain's evidenced self:cap_userns
+// sys_admin bits (both in-namespace capability checks on the P5-S2 flow).
+// The manager, the slirp4netns helper, and every other subject hold no
+// cap_userns rules; widening either evidenced rule and any plain
+// self:capability/capability2 surface on the two granted subjects are
+// violations.
+func TestSELinuxPolicyCapUsernsShape(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
-	want := "allow docker_helper_rootlesskit_t self:cap_userns sys_admin;"
-	if !strings.Contains(policy, want) {
-		t.Errorf("the rootlesskit child domain must have exactly the evidenced cap_userns grant: %q", want)
+	want := map[string]bool{
+		"allow docker_helper_rootlesskit_t self:cap_userns sys_admin;": false,
+		"allow docker_helper_newuidmap_t self:cap_userns sys_admin;":   false,
 	}
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		if strings.Contains(trimmed, ":cap_userns ") && trimmed != want {
-			t.Errorf("no other cap_userns rule may exist (the manager and slirp4netns get none): %s", trimmed)
+		if strings.Contains(trimmed, ":cap_userns ") {
+			if seen, ok := want[trimmed]; ok && !seen {
+				want[trimmed] = true
+				continue
+			}
+			t.Errorf("no cap_userns rule may exist beyond the two evidenced in-namespace sys_admin grants (the manager, slirp4netns, and other subjects get none): %s", trimmed)
 		}
-		if strings.Contains(trimmed, ":capability ") && strings.Contains(trimmed, "docker_helper_rootlesskit_t") {
-			t.Errorf("the rootlesskit child domain must keep its zero self:capability surface: %s", trimmed)
+		if strings.Contains(trimmed, ":capability ") && (strings.Contains(trimmed, "docker_helper_rootlesskit_t") || strings.Contains(trimmed, "docker_helper_newuidmap_t")) {
+			t.Errorf("the two cap_userns subjects must keep zero plain self:capability surfaces: %s", trimmed)
 		}
-		if strings.Contains(trimmed, ":capability2 ") && strings.Contains(trimmed, "docker_helper_rootlesskit_t") {
-			t.Errorf("the rootlesskit child domain must keep its zero self:capability2 surface: %s", trimmed)
+		if strings.Contains(trimmed, ":capability2 ") && (strings.Contains(trimmed, "docker_helper_rootlesskit_t") || strings.Contains(trimmed, "docker_helper_newuidmap_t")) {
+			t.Errorf("the two cap_userns subjects must keep zero plain self:capability2 surfaces: %s", trimmed)
+		}
+	}
+	for rule, seen := range want {
+		if !seen {
+			t.Errorf("the evidenced cap_userns grant must be present: %q", rule)
 		}
 	}
 }
