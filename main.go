@@ -96,7 +96,7 @@ func withDaemonInstanceLock(lockPath string, fn func() error) error {
 	return fn()
 }
 
-// serveHTTPUntilShutdown handles both Unix and TCP listeners.
+// serveHTTPUntilShutdown handles Unix, loopback HTTP and an optional external TLS listener.
 // A signal or error on ANY listener triggers shutdown of all.
 // shutdownTimeout is resolved at the moment shutdown begins, so the budget
 // always reflects the ACTUAL App configuration (a reload may have changed
@@ -108,6 +108,7 @@ func serveHTTPUntilShutdown(
 	tcpListener net.Listener,
 	shutdownTimeout func() time.Duration,
 	onShutdown func(),
+	externalTLS ...net.Listener,
 ) (shutdownCtx context.Context, shutdownCancel func(), drainDone <-chan error, err error) {
 	var wg sync.WaitGroup
 
@@ -135,6 +136,22 @@ func serveHTTPUntilShutdown(
 				}
 			}
 		}()
+	}
+
+	for _, listener := range externalTLS {
+		if listener == nil {
+			continue
+		}
+		wg.Add(1)
+		go func(listener net.Listener) {
+			defer wg.Done()
+			if serveErr := server.Serve(listener); serveErr != nil {
+				select {
+				case firstErr <- serveErr:
+				default:
+				}
+			}
+		}(listener)
 	}
 
 	drainDoneCh := make(chan error, 1)
@@ -417,18 +434,31 @@ func runDaemon(stdout, stderr io.Writer) error {
 		}
 		defer cleanupListeners(unixListener, tcpListener, cfg.SocketPath)
 
+		// Opt-in network endpoint; an explicitly configured TLS failure is
+		// fatal rather than silently exposing plaintext or reporting readiness.
+		tlsListener, err := startExternalTLSListener(cfg)
+		if err != nil {
+			serveStartupError(err, "")
+			return err
+		}
+		if tlsListener != nil {
+			defer tlsListener.Close()
+		}
+
 		logger := logging.snapshotLogger()
 
 		if logger != nil {
 			if tcpDegraded != nil {
-				logger.Info("daemon listening (TCP unavailable, serving Unix only)",
+				logger.Warn("local HTTP listener unavailable; other listeners active",
 					slog.String("socket", cfg.SocketPath),
 					slog.String("http", cfg.HTTPAddress),
+					slog.String("tls", cfg.TLSAddress),
 				)
 			} else {
 				logger.Info("daemon listening",
 					slog.String("socket", cfg.SocketPath),
 					slog.String("http", cfg.HTTPAddress),
+					slog.String("tls", cfg.TLSAddress),
 				)
 			}
 		}
@@ -444,7 +474,7 @@ func runDaemon(stdout, stderr io.Writer) error {
 			if app.OperationSupervisor != nil {
 				app.OperationSupervisor.beginShutdown()
 			}
-		})
+		}, tlsListener)
 
 		// Terminate running operations with the same absolute deadline used
 		// by HTTP drain. HTTP drain and operation termination proceed
