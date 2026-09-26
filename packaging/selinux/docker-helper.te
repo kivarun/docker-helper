@@ -115,6 +115,8 @@ module docker_helper 1.1;
 		class unix_stream_socket { connectto getattr ioctl read write };
 		class udp_socket { create setopt connect getattr read write };
 		class capability { dac_read_search dac_override sys_admin fowner };
+		class capability2 { wake_alarm kill };
+		class user_namespace { create };
 		class process { transition siginh noatsecure rlimitinh sigkill };
 		class process2 { nnp_transition };
 	}
@@ -850,6 +852,16 @@ allow docker_helper_rootlesskit_t sysctl_t:file { read open getattr };
 # tun_socket, nsfs) and the manager domain's execution stay deliberately
 # ungranted.
 allow docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:file { execute execute_no_trans read open getattr };
+
+# The child's user-namespace creation itself: rootlesskit creates the userns
+# that hosts the buildkitd instance. Live enforcing AVC evidence (P5-S1
+# Tumbleweed run 36200721417 P6 window: denied { create }
+# comm="rootlesskit" scontext=system_u:system_r:docker_helper_rootlesskit_t:s0
+# tcontext=...docker_helper_rootlesskit_t:s0 tclass=user_namespace
+# permissive=0). Grant ONLY the create to the child domain: no equivalent
+# manager grant, no extra capabilities (cap_userns / self:capability stay
+# ungranted), no in-userns surface — those are separate boundaries.
+allow docker_helper_rootlesskit_t self:user_namespace create;
 
 # Daemon transport to the builder manager (P5-S1 item 4): the daemon
 # dials manager.sock and the per-op buildkitd sockets, and nothing
