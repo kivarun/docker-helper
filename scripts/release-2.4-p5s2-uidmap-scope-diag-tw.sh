@@ -118,17 +118,24 @@ semodule -i /tmp/docker_helper.pp 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
   || { note "semodule -i of the candidate module failed"; exit 1; }
 
 # GUEST-ONLY diag module: lets systemd transient units bind the helper
-# domain through SELinuxContext=. Production binds docker_helper_rootlesskit_t
-# ONLY through the builder unit's pointed exec transition; this module exists
-# solely on the disposable VM for the isolated diagnostic runs.
+# domain through SELinuxContext=. TWO grants are needed for the unit's exec,
+# mirroring the proven production init_t -> docker_helper_exec_t rule shape:
+# the process transition AND the source-domain file execute (the bprm
+# checks run in the SOURCE domain — systemd init_t — before the named
+# transition). Production binds docker_helper_rootlesskit_t ONLY through
+# the builder unit's pointed exec transition; this module exists solely on
+# the disposable VM for the isolated diagnostic runs.
 cat > /tmp/uidmap-diag.te <<'EOF'
 module docker_helper_uidmap_diag 1.0;
 require {
 	type init_t;
 	type docker_helper_rootlesskit_t;
+	type docker_helper_rootlesskit_exec_t;
 	class process { transition siginh };
+	class file { execute read open };
 }
 allow init_t docker_helper_rootlesskit_t:process { transition siginh };
+allow init_t docker_helper_rootlesskit_exec_t:file { execute read open };
 EOF
 checkmodule -M -m -o /tmp/docker_helper_uidmap_diag.tmp /tmp/uidmap-diag.te 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
   || { note "diag module checkmodule failed"; exit 1; }
@@ -159,9 +166,9 @@ restorecon /usr/bin/rootlesskit /usr/bin/slirp4netns /usr/bin/newuidmap 2>>"$EVI
   echo "--- audit.log window (empty output = channel silent for this window) ---"
   grep -a 'type=AVC' /var/log/audit/audit.log 2>/dev/null \
     | awk -v s="$AUDIT_EPOCH" '{ for (i = 1; i <= NF; i++) if ($i ~ /^msg=audit\(/) { ts = substr($i, 11); split(ts, t, "."); if (t[1] + 0 >= s + 0) print; break } }' \
-    | tail -10
+    | tail -10 || true
   echo "--- journalctl -k window (empty output = channel silent for this window) ---"
-  journalctl -k --since "@$AUDIT_EPOCH" --no-pager 2>/dev/null | grep -a 'avc:' | tail -10
+  journalctl -k --since "@$AUDIT_EPOCH" --no-pager 2>/dev/null | grep -a 'avc:' | tail -10 || true
   echo "(either a process-denial or a transition-denial AVC above proves the audit channel works)"
 } >>"$EVIDENCE_DIR/a-toolchain.txt" 2>&1
 cat "$EVIDENCE_DIR/a-toolchain.txt" >&2
