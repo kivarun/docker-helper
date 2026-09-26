@@ -1006,6 +1006,26 @@ allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read open geta
 # ungranted: the next deliberate boundaries.
 allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:file { write open };
 
+# The helper's in-namespace capability check at the uid_map write itself
+# (P5-S2): with the file write-open granted (enforcing run 36263531925),
+# the open succeeded and the write(2) failed at the kernel's capability
+# layer with EPERM ("newuidmap: write to uid_map failed: Operation not
+# permitted"). Live enforcing AVC evidence (the same run, record 560:
+# denied { sys_admin } for pid=3746 comm="newuidmap" capability=21
+# scontext=system_u:system_r:docker_helper_newuidmap_t:s0
+# tcontext=system_u:system_r:docker_helper_newuidmap_t:s0 tclass=cap_userns
+# permissive=0) — the kernel mediated a capability check the helper
+# performs inside a NON-INITIAL user namespace, so the class is cap_userns.
+# Grant ONLY the in-namespace sys_admin bit: no plain self:capability grant
+# is added (the out-of-namespace capability set — including setuid — stays
+# ungranted), and the manager, slirp4netns, and every other domain get no
+# cap_userns rights at all. SCOPE — READ CAREFULLY: like every helper
+# grant this is a DOMAIN-PAIR rule, NOT an operation-scoped one; all build
+# operations share the one builder UID and this one SELinux domain, and
+# per-operation isolation is invocation discipline only (the open
+# architectural risk tracked for the final security review).
+allow docker_helper_newuidmap_t self:cap_userns sys_admin;
+
 # The helper's caller-identity lookup (P5-S2): the getpwuid read of
 # /etc/passwd that locates the caller's user name before validating the
 # requested mapping ranges against the caller's subid database. Live
