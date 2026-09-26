@@ -898,6 +898,16 @@ if [ -n "$OLD_NUID_PROCDIR_OPEN_AVC" ]; then
   printf '%s\n' "$OLD_NUID_PROCDIR_OPEN_AVC" > "$EVIDENCE_DIR/old-nuid-procdir-open-avc-p6.txt"
   fail "the former newuidmap proc-dir { open } denial still occurs (the evidenced helper-surface grant did not take effect)"
 fi
+# ... and the passwd_file_t { read } denial (the getpwuid caller lookup on
+# /etc/passwd; run 36250310697 record 569) must be GONE with the granted
+# read.
+OLD_NUID_PASSWD_AVC="$(grep -a 'denied  { read }' "$EVIDENCE_DIR/builder-avc-p6.txt" \
+  | grep -a 'scontext=system_u:system_r:docker_helper_newuidmap_t' \
+  | grep -a 'tclass=passwd_file_t' || true)"
+if [ -n "$OLD_NUID_PASSWD_AVC" ]; then
+  printf '%s\n' "$OLD_NUID_PASSWD_AVC" > "$EVIDENCE_DIR/old-nuid-passwd-avc-p6.txt"
+  fail "the former newuidmap passwd_file_t { read } denial still occurs (the evidenced helper-surface grant did not take effect)"
+fi
 if grep -aqF 'failed to lock' "$EVIDENCE_DIR/builder-journal-p6.txt"; then
   grep -aF 'failed to lock' "$EVIDENCE_DIR/builder-journal-p6.txt" \
     > "$EVIDENCE_DIR/child-lock-journal-p6.txt" 2>/dev/null || true
@@ -941,7 +951,7 @@ else
     echo "=== daemon journal (P6 window) ==="; tail -20 "$EVIDENCE_DIR/daemon-journal-p6.txt"
     echo "=== build attempt output ==="; tail -20 "$EVIDENCE_DIR/build-attempt-post-relabel.txt"
     echo "=== operation result ==="; cat "$EVIDENCE_DIR/build-finish-p6.txt"; } >&2
-  fail "the build advanced past the granted boundaries (rootlesskit { lock }, slirp4netns/newuidmap exec types, user_namespace { create }, cap_userns { sys_admin }, the newuidmap fifo write and proc-dir read/open surface) and stopped at the NEXT enforcing boundary (evidence: builder-avc-p6.txt, builder-journal-p6.txt, daemon-journal-p6.txt, child-output-p6.txt, newuidmap-uid-map-capture.txt, build-attempt-post-relabel.txt, build-finish-p6.txt)"
+  fail "the build advanced past the granted boundaries (rootlesskit { lock }, slirp4netns/newuidmap exec types, user_namespace { create }, cap_userns { sys_admin }, the newuidmap fifo write, proc-dir read/open, and passwd read surface) and stopped at the NEXT enforcing boundary (evidence: builder-avc-p6.txt, builder-journal-p6.txt, daemon-journal-p6.txt, child-output-p6.txt, newuidmap-uid-map-capture.txt, build-attempt-post-relabel.txt, build-finish-p6.txt)"
 fi
 say "P6 upgrade relabel OK (labels corrected by %posttrans; transport $P6_OP_ID)"
 else
