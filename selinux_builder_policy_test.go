@@ -565,7 +565,7 @@ func TestSELinuxPolicyNewuidmapIsolation(t *testing.T) {
 var newuidmapDomainSurface = []string{
 	"allow docker_helper_newuidmap_t docker_helper_newuidmap_exec_t:file { entrypoint read open execute getattr map };",
 	"allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:fifo_file { write };",
-	"allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read open getattr };",
+	"allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read open getattr search };",
 	"allow docker_helper_newuidmap_t passwd_file_t:file { read open };",
 }
 
@@ -617,15 +617,15 @@ func newuidmapDomainPolicyViolations(policy string) []string {
 // TestSELinuxPolicyNewuidmapDomainSurface verifies the UID-map helper
 // domain's own runtime surface is exactly the live-AVC-evidenced grants
 // (fifo_file { write } on the inherited inst.diag pipe toward the
-// rootlesskit child; dir { read open getattr } on the
+// rootlesskit child; dir { read open getattr search } on the
 // /proc/<rootlesskit-pid> target of the uid_map write — the O_DIRECTORY
-// open proven by run 36248541393 and the target stat by run 36253390898;
-// passwd_file_t:file { read open } for the getpwuid caller lookup — the
-// open(2) proven by run 36251483787) beside the entry rule — and nothing
-// else. Mutation tests prove each guard fires: widened or regressed dir
-// and passwd grants, extra dir/passwd permissions, and any capability,
-// capability2, or cap_userns grant for the helper domain must trip the
-// exact-surface invariant.
+// open proven by run 36248541393, the target stat by run 36253390898, and
+// the traversal by run 36256089858; passwd_file_t:file { read open } for
+// the getpwuid caller lookup — the open(2) proven by run 36251483787)
+// beside the entry rule — and nothing else. Mutation tests prove each
+// guard fires: widened or regressed dir and passwd grants, extra
+// dir/passwd permissions, and any capability, capability2, or cap_userns
+// grant for the helper domain must trip the exact-surface invariant.
 func TestSELinuxPolicyNewuidmapDomainSurface(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
 	if violations := newuidmapDomainPolicyViolations(policy); len(violations) > 0 {
@@ -642,8 +642,8 @@ func TestSELinuxPolicyNewuidmapDomainSurface(t *testing.T) {
 		wantTripped string
 	}{
 		{"widened fifo grant", "allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:fifo_file { write append };", "unexpected rule"},
-		{"widened proc-dir grant", "allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read open getattr write };", "unexpected rule"},
-		{"extra proc-dir search grant", "allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read open getattr search };", "unexpected rule"},
+		{"widened proc-dir grant", "allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read open getattr search write };", "unexpected rule"},
+		{"regressed proc-dir search grant", "allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read open getattr };", "unexpected rule"},
 		{"regressed proc-dir getattr grant", "allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read open };", "unexpected rule"},
 		{"widened passwd grant", "allow docker_helper_newuidmap_t passwd_file_t:file { read open getattr };", "unexpected rule"},
 		{"extra passwd getattr grant", "allow docker_helper_newuidmap_t passwd_file_t:file { read getattr };", "unexpected rule"},
