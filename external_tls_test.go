@@ -10,12 +10,12 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -200,14 +200,13 @@ func TestExternalTLSListenerLiveHTTPSAndCoordinatedShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("external HTTPS request: %v", err)
 	}
-	buf := make([]byte, 6)
-	n, readErr := resp.Body.Read(buf)
+	body, readErr := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if readErr != nil && n == 0 {
+	if readErr != nil {
 		t.Fatalf("read HTTPS response: %v", readErr)
 	}
-	if resp.StatusCode != http.StatusOK || !strings.HasPrefix(string(buf[:n]), "tls-ok") {
-		t.Fatalf("unexpected HTTPS response: %d %q", resp.StatusCode, string(buf[:n]))
+	if resp.StatusCode != http.StatusOK || string(body) != "tls-ok" {
+		t.Fatalf("unexpected HTTPS response: %d %q", resp.StatusCode, string(body))
 	}
 
 	cancel()
