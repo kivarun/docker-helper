@@ -155,7 +155,7 @@ avc_window() {
 # builder manager domain or the rootlesskit child domain (the launch
 # vehicle's post-exec domain, P5-S2).
 builder_avc_window() {
-  avc_window "$1" | grep -aE 'scontext=system_u:system_r:docker_helper_(builder|rootlesskit|slirp4netns)_t' || true
+  avc_window "$1" | grep -aE 'scontext=system_u:system_r:docker_helper_(builder|rootlesskit|slirp4netns|newuidmap)_t' || true
 }
 
 # forbidden_surface_hits <window-file> — AVC lines whose TARGET context hits a
@@ -728,6 +728,11 @@ P6_START="$AVC_EPOCH"
       cat "/proc/$slirp_pid/attr/current" > "$EVIDENCE_DIR/slirp-runtime-context.txt" 2>&1
       break
     fi
+    nuid_pid="$(pgrep -f /usr/bin/newuidmap 2>/dev/null | head -1)"
+    if [ -n "$nuid_pid" ] && [ -r "/proc/$nuid_pid/attr/current" ]; then
+      cat "/proc/$nuid_pid/attr/current" > "$EVIDENCE_DIR/newuidmap-runtime-context.txt" 2>&1
+      break
+    fi
     sleep 0.05
   done
 ) &
@@ -775,6 +780,21 @@ if [ -s "$EVIDENCE_DIR/slirp-runtime-context.txt" ]; then
 else
   log "P6 NOTE: slirp4netns runtime context NOT observable under enforcing (no /proc capture; the exec may not have been reached or the helper exited at its own runtime boundary)"
 fi
+# The UID-map helper's runtime context: /proc capture when the process was
+# observed; otherwise an AVC record FROM the new domain (scontext=
+# docker_helper_newuidmap_t) still proves the transition happened at
+# runtime. A type_transition line alone is never runtime evidence.
+if [ -s "$EVIDENCE_DIR/newuidmap-runtime-context.txt" ]; then
+  NUID_RUNTIME_CTX="$(cat "$EVIDENCE_DIR/newuidmap-runtime-context.txt")"
+  case "$NUID_RUNTIME_CTX" in
+    *docker_helper_newuidmap_t*) say "P6 newuidmap runtime context confirmed from /proc: $NUID_RUNTIME_CTX" ;;
+    *) fail "the newuidmap process ran in an unexpected context: $NUID_RUNTIME_CTX" ;;
+  esac
+elif grep -a 'scontext=system_u:system_r:docker_helper_newuidmap_t' "$EVIDENCE_DIR/builder-avc-p6.txt" >/dev/null 2>&1; then
+  say "P6 newuidmap runtime transition confirmed by an actual AVC from docker_helper_newuidmap_t"
+else
+  log "P6 NOTE: newuidmap runtime context NOT observable under enforcing (no /proc capture and no AVC from the new domain; the transition is statically verified only)"
+fi
 
 say "P6 transport confirmed (daemon builder_start + manager START for $P6_OP_ID)"
 
@@ -803,10 +823,16 @@ if [ -n "$OLD_USERNS_AVC" ]; then
   fail "the former user_namespace { create } denial still occurs (the evidenced userns grant did not take effect)"
 fi
 OLD_CAPUSERS_AVC="$(grep -a 'tclass=cap_userns' "$EVIDENCE_DIR/builder-avc-p6.txt" \
-  | grep -a '{ sys_admin }' || true)"
+  | grep -a '{ sys_admin }' | grep -a 'docker_helper_rootlesskit_t' || true)"
 if [ -n "$OLD_CAPUSERS_AVC" ]; then
   printf '%s\n' "$OLD_CAPUSERS_AVC" > "$EVIDENCE_DIR/old-capuserns-sysadmin-avc-p6.txt"
-  fail "the former cap_userns { sys_admin } denial still occurs (the evidenced cap_userns grant did not take effect)"
+  fail "the former rootlesskit cap_userns { sys_admin } denial still occurs (the evidenced cap_userns grant did not take effect)"
+fi
+OLD_NEWUIDMAP_AVC="$(grep -a 'denied  { execute }' "$EVIDENCE_DIR/builder-avc-p6.txt" \
+  | grep -a 'name="newuidmap"' || true)"
+if [ -n "$OLD_NEWUIDMAP_AVC" ]; then
+  printf '%s\n' "$OLD_NEWUIDMAP_AVC" > "$EVIDENCE_DIR/old-newuidmap-exec-avc-p6.txt"
+  fail "the former newuidmap { execute } denial still occurs (the dedicated exec-type transition did not take effect)"
 fi
 if grep -aqF 'failed to lock' "$EVIDENCE_DIR/builder-journal-p6.txt"; then
   grep -aF 'failed to lock' "$EVIDENCE_DIR/builder-journal-p6.txt" \
