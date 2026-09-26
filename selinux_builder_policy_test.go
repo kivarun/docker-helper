@@ -371,13 +371,21 @@ func parseSELinuxRules(policy string) ([]builderPolicyAllowRule, []builderPolicy
 func helperDomainPolicyViolations(policy string) []string {
 	var violations []string
 	allows, transitions := parseSELinuxRules(policy)
+	// Exactly one transition may enter the helper domain — count the
+	// destination-matching rules, so a duplicate (even byte-identical)
+	// transition also violates.
+	selirpTransitions := 0
 	for _, tr := range transitions {
 		if tr.dest != "docker_helper_slirp4netns_t" {
 			continue
 		}
+		selirpTransitions++
 		if tr.source != "docker_helper_rootlesskit_t" || tr.entry != "docker_helper_slirp4netns_exec_t" || tr.class != "process" {
 			violations = append(violations, fmt.Sprintf("the only transition into the helper domain is the rootlesskit child's exec of its entry type, got: type_transition %s %s:%s %s", tr.source, tr.entry, tr.class, tr.dest))
 		}
+	}
+	if selirpTransitions > 1 {
+		violations = append(violations, fmt.Sprintf("exactly one transition may enter the helper domain, found %d", selirpTransitions))
 	}
 	for _, rule := range allows {
 		switch rule.source {
@@ -430,6 +438,7 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		{"admin token grant to helper", "allow docker_helper_slirp4netns_t docker_helper_admin_token_t:file { read };", "docker_helper_admin_token_t"},
 		{"generic bin_t execute for helper", "allow docker_helper_slirp4netns_t bin_t:file { execute };", "no bin_t grant for the helper domain"},
 		{"manager-side transition into helper", "type_transition docker_helper_builder_t docker_helper_slirp4netns_exec_t:process docker_helper_slirp4netns_t;", "the only transition into the helper domain"},
+		{"duplicate identical transition into helper", "type_transition docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:process docker_helper_slirp4netns_t;", "exactly one transition may enter the helper domain"},
 		{"cap_userns for manager", "allow docker_helper_builder_t self:cap_userns sys_admin;", "docker_helper_builder_t must hold no capability"},
 		{"cap_userns for helper", "allow docker_helper_slirp4netns_t self:cap_userns sys_admin;", "docker_helper_slirp4netns_t must hold no capability"},
 	} {
@@ -442,6 +451,35 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		joined := strings.Join(violations, "\n")
 		if !strings.Contains(joined, mut.wantTripped) {
 			t.Errorf("mutation %q must trip the invariant naming %q, got violations: %v", mut.name, mut.wantTripped, violations)
+		}
+	}
+}
+
+// TestSELinuxPolicyRootlesskitCapUserns verifies the P5-S2 cap_userns grant:
+// exactly one cap_userns rule exists in the module, and it is exactly the
+// rootlesskit child domain's self:cap_userns sys_admin (the in-namespace
+// sys_admin bit needed to re-exec inside the new userns). The manager, the
+// slirp4netns helper, and any other subject must hold no cap_userns rules,
+// and the child keeps its zero self:capability/capability2 surface.
+func TestSELinuxPolicyRootlesskitCapUserns(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	want := "allow docker_helper_rootlesskit_t self:cap_userns sys_admin;"
+	if !strings.Contains(policy, want) {
+		t.Errorf("the rootlesskit child domain must have exactly the evidenced cap_userns grant: %q", want)
+	}
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(trimmed, ":cap_userns ") && trimmed != want {
+			t.Errorf("no other cap_userns rule may exist (the manager and slirp4netns get none): %s", trimmed)
+		}
+		if strings.Contains(trimmed, ":capability ") && strings.Contains(trimmed, "docker_helper_rootlesskit_t") {
+			t.Errorf("the rootlesskit child domain must keep its zero self:capability surface: %s", trimmed)
+		}
+		if strings.Contains(trimmed, ":capability2 ") && strings.Contains(trimmed, "docker_helper_rootlesskit_t") {
+			t.Errorf("the rootlesskit child domain must keep its zero self:capability2 surface: %s", trimmed)
 		}
 	}
 }
