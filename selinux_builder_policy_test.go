@@ -297,7 +297,7 @@ func TestSELinuxPolicySlirp4netnsExecType(t *testing.T) {
 		}
 		// The helper domain's own entry/loader rule is legitimate; only the
 		// exec grant must be unique to the rootlesskit child domain.
-		if strings.HasPrefix(trimmed, "allow docker_helper_slirp4netns_t docker_helper_slirp4netns_exec_t:file { entrypoint read open getattr map };") {
+		if strings.HasPrefix(trimmed, "allow docker_helper_slirp4netns_t docker_helper_slirp4netns_exec_t:file { entrypoint read open execute getattr map };") {
 			continue
 		}
 		if trimmed != want {
@@ -325,7 +325,8 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		"role system_r types docker_helper_slirp4netns_t;",
 		"type_transition docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:process docker_helper_slirp4netns_t;",
 		"allow docker_helper_rootlesskit_t docker_helper_slirp4netns_t:process { transition };",
-		"allow docker_helper_slirp4netns_t docker_helper_slirp4netns_exec_t:file { entrypoint read open getattr map };",
+		"allow docker_helper_slirp4netns_t docker_helper_slirp4netns_exec_t:file { entrypoint read open execute getattr map };",
+		"allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:fifo_file { write };",
 	} {
 		if !strings.Contains(policy, want) {
 			t.Errorf("SELinux policy must contain exactly this rule: %s", want)
