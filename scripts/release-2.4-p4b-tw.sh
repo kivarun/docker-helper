@@ -257,7 +257,20 @@ for helper_path in /usr/bin/slirp4netns /usr/bin/newuidmap; do
   rpm -qf "$helper_path" >/dev/null 2>&1 || fail "$helper_path must be owned by a real distro package"
 done
 [ "$(stat -c '%U:%G' /usr/bin/newuidmap)" = "root:root" ] || fail "newuidmap ownership must be root:root"
-test -u /usr/bin/newuidmap || fail "newuidmap must keep its setuid bit"
+# Tumbleweed's shadow package moved newuidmap off the setuid bit to a
+# cap_setuid=ep file capability (bsc#1208309 era change, shadow 4.19+).
+# The proof checks the binary keeps its distro privilege model: either the
+# setuid bit or the file capability — and we never alter either.
+nuid_mode="$(stat -c '%A' /usr/bin/newuidmap)"
+nuid_caps="$(getcap /usr/bin/newuidmap 2>/dev/null || true)"
+case "$nuid_mode" in
+  ???s*) : ;;
+  *)
+    case "$nuid_caps" in
+      *cap_setuid*) : ;;
+      *) fail "newuidmap must keep its distro privilege model (setuid bit or cap_setuid file capability), got mode=$nuid_mode caps=$nuid_caps" ;;
+    esac
+esac
 
 # P4-B1.2 scriptlet-ordering proof: the docker_helper module load lives in
 # %posttrans, which rpm runs after ALL %post scriptlets of the transaction
