@@ -44,8 +44,9 @@
 #       window captured for the exact attempt window; an arbitrary
 #       docker_build_failed terminal state is never accepted as the RPC
 #       proof). The build attempt also proves the P5-S2 boundary state:
-#       the P5-S1 rootlesskit { lock } denial must be GONE (the
-#       evidence-proven grant ships in the candidate policy), and the
+#       the P5-S1 rootlesskit { lock } denial must be GONE, the helper's
+#       uid_map { write } AND { open } denials must be GONE (the
+#       evidence-proven grants ship in the candidate policy), and the
 #       attempt's outcome — a full success, or the NEXT enforcing stopping
 #       point with the full evidence bundle — is reported, never
 #       auto-granted from the harvest;
@@ -729,6 +730,11 @@ P6_START="$AVC_EPOCH"
 # (the rootlesskit child, newuidmap's first argument) is resolved and the
 # target's uid_map/gid_map are sampled until non-empty or the process is
 # gone — the ACTUAL UID mapping result, never inferred from AVC absence.
+# NOTE: this poller is READ-ONLY by design — the SIGSTOP uid_map capture
+# from the scope assessment stays OUT of this enforcing proof run (a
+# forcibly stopped process must never be presented as the main build's
+# natural result; the SIGSTOP experiment belongs to a separate
+# instrumented run).
 (
   while :; do
     if [ ! -s "$EVIDENCE_DIR/slirp-runtime-context.txt" ]; then
@@ -838,8 +844,10 @@ say "P6 transport confirmed (daemon builder_start + manager START for $P6_OP_ID)
 # state file must be GONE (the evidence-proven lock grant ships in the
 # candidate policy), and so must the former slirp4netns { execute } denial
 # (the dedicated docker_helper_slirp4netns_exec_t grant ships in the same
-# candidate policy). Neither the enforcing AVC window nor the manager
-# journal may carry the old failures anymore.
+# candidate policy). The helper domain's full evidenced surface (fifo write,
+# proc-dir read/open/getattr/search, passwd read/open, and the uid_map file
+# write-open) must all be GONE. Neither the enforcing AVC window nor the
+# manager journal may carry the old failures anymore.
 OLD_LOCK_AVC="$(grep -a '{ lock }' "$EVIDENCE_DIR/builder-avc-p6.txt" \
   | grep -a 'comm="rootlesskit"' | grep -a 'docker_helper_builder_state_t' || true)"
 if [ -n "$OLD_LOCK_AVC" ]; then
@@ -900,10 +908,12 @@ if [ -n "$OLD_NUID_PROCDIR_OPEN_AVC" ]; then
 fi
 # ... and the passwd_file_t { read } denial (the getpwuid caller lookup on
 # /etc/passwd; run 36250310697 record 569) must be GONE with the granted
-# read.
+# read. NOTE: tclass here is FILE (the class); passwd_file_t is the
+# TARGET TYPE — the check matches the tcontext, not the class token.
 OLD_NUID_PASSWD_AVC="$(grep -a 'denied  { read }' "$EVIDENCE_DIR/builder-avc-p6.txt" \
   | grep -a 'scontext=system_u:system_r:docker_helper_newuidmap_t' \
-  | grep -a 'tclass=passwd_file_t' || true)"
+  | grep -a 'tcontext=system_u:object_r:passwd_file_t:s0' \
+  | grep -a 'tclass=file' || true)"
 if [ -n "$OLD_NUID_PASSWD_AVC" ]; then
   printf '%s\n' "$OLD_NUID_PASSWD_AVC" > "$EVIDENCE_DIR/old-nuid-passwd-avc-p6.txt"
   fail "the former newuidmap passwd_file_t { read } denial still occurs (the evidenced helper-surface grant did not take effect)"
@@ -913,10 +923,31 @@ fi
 # extended { read open } grant.
 OLD_NUID_PASSWD_OPEN_AVC="$(grep -a 'denied  { open }' "$EVIDENCE_DIR/builder-avc-p6.txt" \
   | grep -a 'scontext=system_u:system_r:docker_helper_newuidmap_t' \
-  | grep -a 'tclass=passwd_file_t' || true)"
+  | grep -a 'tcontext=system_u:object_r:passwd_file_t:s0' \
+  | grep -a 'tclass=file' || true)"
 if [ -n "$OLD_NUID_PASSWD_OPEN_AVC" ]; then
   printf '%s\n' "$OLD_NUID_PASSWD_OPEN_AVC" > "$EVIDENCE_DIR/old-nuid-passwd-open-avc-p6.txt"
   fail "the former newuidmap passwd_file_t { open } denial still occurs (the evidenced helper-surface grant did not take effect)"
+fi
+# ... and the uid_map write-open denials (the helper's core write; run
+# 36258882064 record 568 { write } + the grant-scope harvest run
+# 36261874263 records 334/335 { write } and { open } on
+# /proc/<target>/uid_map) must be GONE with the { write open } grant.
+OLD_NUID_UIDMAP_WRITE_AVC="$(grep -a 'denied  { write }' "$EVIDENCE_DIR/builder-avc-p6.txt" \
+  | grep -a 'scontext=system_u:system_r:docker_helper_newuidmap_t' \
+  | grep -a 'tcontext=system_u:system_r:docker_helper_rootlesskit_t:s0' \
+  | grep -a 'tclass=file' || true)"
+if [ -n "$OLD_NUID_UIDMAP_WRITE_AVC" ]; then
+  printf '%s\n' "$OLD_NUID_UIDMAP_WRITE_AVC" > "$EVIDENCE_DIR/old-nuid-uidmap-write-avc-p6.txt"
+  fail "the former newuidmap uid_map { write } denial still occurs (the evidenced helper-surface grant did not take effect)"
+fi
+OLD_NUID_UIDMAP_OPEN_AVC="$(grep -a 'denied  { open }' "$EVIDENCE_DIR/builder-avc-p6.txt" \
+  | grep -a 'scontext=system_u:system_r:docker_helper_newuidmap_t' \
+  | grep -a 'tcontext=system_u:system_r:docker_helper_rootlesskit_t:s0' \
+  | grep -a 'tclass=file' || true)"
+if [ -n "$OLD_NUID_UIDMAP_OPEN_AVC" ]; then
+  printf '%s\n' "$OLD_NUID_UIDMAP_OPEN_AVC" > "$EVIDENCE_DIR/old-nuid-uidmap-open-avc-p6.txt"
+  fail "the former newuidmap uid_map { open } denial still occurs (the evidenced helper-surface grant did not take effect)"
 fi
 # ... and the proc-dir { getattr } denial (the stat of the target process
 # directory /proc/<rootlesskit-pid>; run 36253390898 record 564) must be
