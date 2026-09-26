@@ -326,7 +326,7 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		"type_transition docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:process docker_helper_slirp4netns_t;",
 		"allow docker_helper_rootlesskit_t docker_helper_slirp4netns_t:process { transition };",
 		"allow docker_helper_slirp4netns_t docker_helper_slirp4netns_exec_t:file { entrypoint read open execute getattr map };",
-		"allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:fifo_file { write };",
+		"allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:fifo_file { write getattr };",
 	} {
 		if !strings.Contains(policy, want) {
 			t.Errorf("SELinux policy must contain exactly this rule: %s", want)

@@ -889,13 +889,15 @@ allow docker_helper_slirp4netns_t docker_helper_slirp4netns_exec_t:file { entryp
 
 # The helper inherits the rootlesskit child's stdio pipe (the launch
 # vehicle's inst.diag output pipe; the child pumps it onward). The
-# exec-time inherited-fd check denies ungranted inherited fds, which would
-# silence the helper's own failure output — the same fd-use shape the
-# proven child rule covers toward the manager. Live AVC evidence, same
-# harvest: comm="slirp4netns" scontext=...docker_helper_slirp4netns_t:s0
-# denied { write } tcontext=...docker_helper_rootlesskit_t:s0
-# tclass=fifo_file.
-allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:fifo_file { write };
+# exec-time inherited-fd check fstats inherited fds and closes ungranted
+# ones, which would silence the helper's own failure output — the same
+# fd-use shape the proven child rule covers toward the manager. Live AVC
+# evidence, P5-S1 Tumbleweed runs: comm="slirp4netns"
+# scontext=...docker_helper_slirp4netns_t:s0 denied { write } (run
+# 36222264024 harvest) and { getattr } on the same pipes (run 36222881206
+# P6 window — the fd-check fstat runs before any write, so getattr is
+# required for the inherited fds to survive the exec at all).
+allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:fifo_file { write getattr };
 
 # The child's user-namespace creation itself: rootlesskit creates the userns
 # that hosts the buildkitd instance. Live enforcing AVC evidence (P5-S1
