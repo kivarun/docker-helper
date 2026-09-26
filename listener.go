@@ -124,7 +124,7 @@ func prepareListeners(socketPath, httpAddress string) (unixListener, tcpListener
 	if tcpDegradedErr != nil {
 		tcpListener = nil
 		opLog(context.Background()).Warn(
-			"loopback TCP listener unavailable; continuing Unix-only until the next restart",
+			"loopback TCP listener unavailable; continuing with Unix transport until the next restart",
 			slog.String("operation", "serve_startup"),
 			slog.String("http", httpAddress),
 			slog.String("error", tcpDegradedErr.Error()),
