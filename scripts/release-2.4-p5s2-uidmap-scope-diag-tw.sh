@@ -81,7 +81,13 @@ log 'A: toolchain + candidate module load (disposable VM only)'
   echo "enforce=$(getenforce 2>/dev/null || true)"
   echo "=== install policy toolchain ==="
 } >"$EVIDENCE_DIR/a-toolchain.txt" 2>&1
-zypper --non-interactive install -y checkpolicy container-selinux policycoreutils-python-utils \
+# The distro rootlesskit/slirp4netns binaries are NOT on the fresh cloud
+# image (the docker-helper RPM's conditional dependencies pull them in on
+# the UAT VMs); the diagnosis installs the DISTRO packages itself. They are
+# installed without any privilege change: plain distro packages, no file
+# capabilities, no chkstat involvement beyond the distro's own defaults.
+zypper --non-interactive install -y checkpolicy container-selinux \
+  policycoreutils-python-utils rootlesskit slirp4netns \
   >"$EVIDENCE_DIR/zypper-policy-toolchain.log" 2>&1 \
   || note "zypper install of the policy toolchain failed (see zypper-policy-toolchain.log)"
 for t in checkmodule semodule_package semodule semanage restorecon; do
@@ -195,7 +201,7 @@ chown "$BUILDER_USER:$BUILDER_USER" "$DIAG_BASE"/{rk1,rk2,rk3}
 AVC_EPOCH="$(date +%s)"
 
 (
-  while [ "$(date +%s)" -lt $((AVC_EPOCH + 240)) ]; do
+  while [ "$(date +%s)" -lt $((AVC_EPOCH + 60)) ]; do
     for pid in $(pgrep -f rootlesskit 2>/dev/null || true); do
       [ -r "/proc/$pid/attr/current" ] || continue
       ctx="$(cat "/proc/$pid/attr/current" 2>/dev/null || true)"
@@ -257,7 +263,7 @@ for u in rk1 rk2; do
     /bin/sleep 300 >/dev/null 2>&1 || true
 done
 
-watcher_loop 90 "$EVIDENCE_DIR/b-real-domain-processes.txt" &
+watcher_loop 45 "$EVIDENCE_DIR/b-real-domain-processes.txt" &
 WATCHER_PID=$!
 wait "$WATCHER_PID" 2>/dev/null || true
 cat "$EVIDENCE_DIR/b-real-domain-processes.txt" >&2
