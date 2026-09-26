@@ -1,0 +1,54 @@
+name: Release 2.4 P5-S2 uidmap grant scope assessment
+
+# One-off investigation job (P5-S2): establish the ACTUAL object surface of
+# a hypothetical `docker_helper_newuidmap_t docker_helper_rootlesskit_t:file
+# { write }` grant before it is considered for the production policy.
+# Runs the guest-side assessment inside the canonical Tumbleweed VM harness
+# (scripts/uat-vm-tumbleweed.sh): compiles and loads the repo's candidate
+# SELinux module on the disposable VM, observes REAL docker_helper_rootlesskit_t
+# processes (real rootlesskit flows with the real distro newuidmap), performs
+# safe open-only layer-separation checks (SELinux vs DAC vs kernel), and
+# demos the SIGSTOP-based uid_map capture mechanism. NO production changes:
+# no file-write grant, no capabilities, no new types, no repo policy edits.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - p3
+    paths:
+      - .github/workflows/release-2.4-p5s2-uidmap-scope-diag-tw.yml
+      - scripts/release-2.4-p5s2-uidmap-scope-diag-tw.sh
+      - scripts/release-2.4-p5s2-uidmap-scope-diag-tw-vm.sh
+      - packaging/selinux/docker-helper.te
+      - packaging/selinux/docker-helper.fc
+
+permissions:
+  contents: read
+
+jobs:
+  uidmap-scope-assessment-tumbleweed:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install QEMU and cloud-image tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage
+
+      - name: Run Tumbleweed uid_map grant scope assessment
+        run: |
+          UAT_REPO_DIR="${{ github.workspace }}" \
+          P5S2_UIDMAP_SCOPE_DIAG_EVIDENCE_DIR="$RUNNER_TEMP/release-2.4-p5s2-uidmap-scope-diag-evidence" \
+            scripts/release-2.4-p5s2-uidmap-scope-diag-tw-vm.sh
+
+      - name: Upload assessment evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-2.4-p5s2-uidmap-scope-diag-tw-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-2.4-p5s2-uidmap-scope-diag-evidence
+          if-no-files-found: warn
