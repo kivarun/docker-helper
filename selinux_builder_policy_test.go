@@ -558,6 +558,104 @@ func TestSELinuxPolicyNewuidmapIsolation(t *testing.T) {
 	}
 }
 
+// newuidmapDomainSurface is the EXACT allow-rule surface of the UID-map
+// helper domain: the entry/loader rule plus the two live-AVC-evidenced
+// surface grants (P5-S1 Tumbleweed run 36229266623 P6 window). Any
+// additional or widened rule is a policy regression.
+var newuidmapDomainSurface = []string{
+	"allow docker_helper_newuidmap_t docker_helper_newuidmap_exec_t:file { entrypoint read open execute getattr map };",
+	"allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:fifo_file { write };",
+	"allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read };",
+}
+
+// newuidmapDomainPolicyViolations scans the module's parsed rules against
+// the UID-map helper-domain surface invariants and returns one
+// human-readable violation per broken rule, empty when none:
+//   - the domain's allow-rule surface is EXACTLY newuidmapDomainSurface
+//     (source-scoped, full-line equality, so widened permission sets and
+//     extra grants both violate);
+//   - the domain holds no self:capability, capability2, or cap_userns
+//     grant (the privilege model stays the distro's chkstat-applied file
+//     caps; the enforcing capability boundary stays ungranted).
+func newuidmapDomainPolicyViolations(policy string) []string {
+	var violations []string
+	seen := 0
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if !strings.HasPrefix(trimmed, "allow docker_helper_newuidmap_t ") {
+			continue
+		}
+		seen++
+		matched := false
+		for _, want := range newuidmapDomainSurface {
+			if trimmed == want {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			violations = append(violations, fmt.Sprintf("the UID-map helper domain's surface is exact; unexpected rule: %s", trimmed))
+		}
+		if strings.HasPrefix(trimmed, "allow docker_helper_newuidmap_t self:") {
+			for _, cls := range []string{"capability", "capability2", "cap_userns"} {
+				if strings.Contains(trimmed, ":"+cls+" ") {
+					violations = append(violations, fmt.Sprintf("the UID-map helper domain must hold no %s grant: %s", cls, trimmed))
+				}
+			}
+		}
+	}
+	if seen != len(newuidmapDomainSurface) {
+		violations = append(violations, fmt.Sprintf("the UID-map helper domain's surface must carry exactly %d allow rules, found %d", len(newuidmapDomainSurface), seen))
+	}
+	return violations
+}
+
+// TestSELinuxPolicyNewuidmapDomainSurface verifies the UID-map helper
+// domain's own runtime surface is exactly the two live-AVC-evidenced grants
+// from the previous boundary (fifo_file { write } on the inherited
+// inst.diag pipe toward the rootlesskit child, dir { read } on the
+// /proc/<rootlesskit-pid> target of the uid_map write) beside the entry
+// rule — and nothing else. Mutation tests prove each guard fires: a widened
+// fifo/dir grant and any capability, capability2, or cap_userns grant for
+// the helper domain must trip the exact-surface invariant.
+func TestSELinuxPolicyNewuidmapDomainSurface(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	if violations := newuidmapDomainPolicyViolations(policy); len(violations) > 0 {
+		t.Errorf("the committed policy violates the UID-map helper surface invariants: %v", violations)
+	}
+	for _, want := range newuidmapDomainSurface {
+		if !strings.Contains(policy, want) {
+			t.Errorf("SELinux policy must contain exactly this rule: %s", want)
+		}
+	}
+	for _, mut := range []struct {
+		name        string
+		rule        string
+		wantTripped string
+	}{
+		{"widened fifo grant", "allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:fifo_file { write append };", "unexpected rule"},
+		{"widened proc-dir grant", "allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read write };", "unexpected rule"},
+		{"extra proc-dir getattr grant", "allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { getattr };", "unexpected rule"},
+		{"cap_userns for helper", "allow docker_helper_newuidmap_t self:cap_userns sys_admin;", "no cap_userns grant"},
+		{"capability for helper", "allow docker_helper_newuidmap_t self:capability sys_admin;", "no capability grant"},
+		{"capability2 for helper", "allow docker_helper_newuidmap_t self:capability2 kill;", "no capability2 grant"},
+	} {
+		mutated := policy + "\n" + mut.rule
+		violations := newuidmapDomainPolicyViolations(mutated)
+		if len(violations) == 0 {
+			t.Errorf("mutation %q must fail the UID-map helper surface invariants", mut.name)
+			continue
+		}
+		joined := strings.Join(violations, "\n")
+		if !strings.Contains(joined, mut.wantTripped) {
+			t.Errorf("mutation %q must trip the invariant naming %q, got violations: %v", mut.name, mut.wantTripped, violations)
+		}
+	}
+}
+
 // TestSELinuxPolicyRootlesskitCapUserns verifies the P5-S2 cap_userns grant:
 // exactly one cap_userns rule exists in the module, and it is exactly the
 // rootlesskit child domain's self:cap_userns sys_admin (the in-namespace
