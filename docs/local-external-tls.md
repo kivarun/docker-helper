@@ -37,10 +37,13 @@ or `config unset`. The ordinary `reload` command does not change the
 active listeners or the active TLS certificate/key.
 
 The HTTP API and bearer-token authorization are identical on Unix, loopback
-HTTP, and external HTTPS. The local `docker-helper` CLI remains Unix-socket
-based; this change does **not** make that CLI a remote HTTPS client. Existing
-external HTTP API callers only need to use HTTPS and validate the server
-certificate; no JSON endpoints or authentication headers change.
+HTTP, and external HTTPS. The existing `docker-helper` CLI defaults to the Unix socket, but already
+supports `--endpoint http://127.0.0.1:PORT` (operator commands additionally
+require `--token-file`). Its Release-2.3 endpoint validator rejects external
+IP addresses and `https://`, so this server-only fork does **not** enable
+direct remote HTTPS access through the unchanged CLI. External HTTP API callers
+can use HTTPS with normal certificate verification; JSON endpoints and bearer
+authentication headers are unchanged.
 
 ## Build and one-machine install
 
