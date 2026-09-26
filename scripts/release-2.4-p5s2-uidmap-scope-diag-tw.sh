@@ -113,11 +113,11 @@ require {
 }
 allow init_t docker_helper_rootlesskit_t:process { transition siginh };
 EOF
-checkmodule -M -m -o /tmp/uidmap-diag.tmp /tmp/uidmap-diag.te 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
+checkmodule -M -m -o /tmp/docker_helper_uidmap_diag.tmp /tmp/uidmap-diag.te 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
   || { note "diag module checkmodule failed"; exit 1; }
-semodule_package -o /tmp/uidmap-diag.pp -m /tmp/uidmap-diag.tmp 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
+semodule_package -o /tmp/docker_helper_uidmap_diag.pp -m /tmp/docker_helper_uidmap_diag.tmp 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
   || { note "diag module semodule_package failed"; exit 1; }
-semodule -i /tmp/uidmap-diag.pp 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
+semodule -i /tmp/docker_helper_uidmap_diag.pp 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
   || { note "diag module load failed"; exit 1; }
 
 restorecon /usr/bin/rootlesskit /usr/bin/slirp4netns /usr/bin/newuidmap 2>>"$EVIDENCE_DIR/a-toolchain.txt" || true
