@@ -500,13 +500,13 @@ func TestSELinuxPolicyNewuidmapDomainTransition(t *testing.T) {
 	if strings.Contains(policy, "allow docker_helper_builder_t docker_helper_newuidmap_exec_t") {
 		t.Error("the manager domain must not be able to execute newuidmap")
 	}
-	// No bin_t execution grants for either builder-family domain.
+	// No bin_t execution grants for any builder-family domain.
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		for _, subject := range []string{"docker_helper_builder_t", "docker_helper_rootlesskit_t", "docker_helper_newuidmap_t", "docker_helper_slirp4netns_t"} {
+		for _, subject := range []string{"docker_helper_builder_t", "docker_helper_rootlesskit_t", "docker_helper_newuidmap_t", "docker_helper_newgidmap_t", "docker_helper_slirp4netns_t"} {
 			target := allowTargetToken(trimmed, "allow "+subject+" ")
 			if target == "bin_t" {
 				t.Errorf("no bin_t grant for %s: %s", subject, trimmed)
@@ -726,6 +726,214 @@ func TestSELinuxPolicyNewuidmapDomainSurface(t *testing.T) {
 	}
 }
 
+// TestSELinuxPolicyNewgidmapDomainTransition verifies the P5-S2 GID-map
+// helper domain: the exec type and the domain exist, the transition is the
+// ONLY path in (from the rootlesskit child over the newgidmap entry type),
+// the source-side exec set matches the proven newuidmap shape, the entry
+// rule carries the transition-required entrypoint plus the loader access,
+// the fcontext rule labels exactly /usr/bin/newgidmap, and the manager may
+// not exec newgidmap.
+func TestSELinuxPolicyNewgidmapDomainTransition(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	fc := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.fc")
+	for _, want := range []string{
+		"type docker_helper_newgidmap_exec_t, file_type;",
+		"type docker_helper_newgidmap_t, domain;",
+		"role system_r types docker_helper_newgidmap_t;",
+		"type_transition docker_helper_rootlesskit_t docker_helper_newgidmap_exec_t:process docker_helper_newgidmap_t;",
+		"allow docker_helper_rootlesskit_t docker_helper_newgidmap_t:process { transition };",
+		"allow docker_helper_rootlesskit_t docker_helper_newgidmap_exec_t:file { execute read open getattr };",
+		"allow docker_helper_newgidmap_t docker_helper_newgidmap_exec_t:file { entrypoint read open execute getattr map };",
+	} {
+		if !strings.Contains(policy, want) {
+			t.Errorf("SELinux policy must contain exactly this rule: %s", want)
+		}
+	}
+	if !strings.Contains(fc, "/usr/bin/newgidmap                  --  system_u:object_r:docker_helper_newgidmap_exec_t:s0") {
+		t.Error("file contexts must label /usr/bin/newgidmap with the dedicated exec type")
+	}
+	// The transition into the GID-map helper domain is the ONLY path in.
+	_, transitions := parseSELinuxRules(policy)
+	newgidTransitions := 0
+	for _, tr := range transitions {
+		if tr.dest != "docker_helper_newgidmap_t" {
+			continue
+		}
+		newgidTransitions++
+		if tr.source != "docker_helper_rootlesskit_t" || tr.entry != "docker_helper_newgidmap_exec_t" || tr.class != "process" {
+			t.Errorf("the only transition into the GID-map helper domain is the rootlesskit child's exec of its entry type, got: type_transition %s %s:%s %s", tr.source, tr.entry, tr.class, tr.dest)
+		}
+	}
+	if newgidTransitions != 1 {
+		t.Errorf("exactly one transition may enter the GID-map helper domain, found %d", newgidTransitions)
+	}
+	// The manager must not gain the right to execute newgidmap.
+	if strings.Contains(policy, "allow docker_helper_builder_t docker_helper_newgidmap_exec_t") {
+		t.Error("the manager domain must not be able to execute newgidmap")
+	}
+	// No bin_t execution grants for any builder-family domain.
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		for _, subject := range []string{"docker_helper_builder_t", "docker_helper_rootlesskit_t", "docker_helper_newuidmap_t", "docker_helper_newgidmap_t", "docker_helper_slirp4netns_t"} {
+			target := allowTargetToken(trimmed, "allow "+subject+" ")
+			if target == "bin_t" {
+				t.Errorf("no bin_t grant for %s: %s", subject, trimmed)
+			}
+		}
+	}
+}
+
+// newgidmapDomainSurface is the EXACT allow-rule surface of the GID-map
+// helper domain: ONLY the entry/loader rule. The domain holds ZERO runtime
+// grants — no passwd lookup, no userdb fallback, no gid_map write, no
+// inherited-stdio fifo, no /proc surface toward the child, and no
+// capability/cap_userns grant of any kind (the privilege model stays the
+// distro's chkstat-applied cap_setgid file capability). Any additional or
+// widened rule is a policy regression.
+var newgidmapDomainSurface = []string{
+	"allow docker_helper_newgidmap_t docker_helper_newgidmap_exec_t:file { entrypoint read open execute getattr map };",
+}
+
+// newgidmapDomainPolicyViolations scans the module's parsed rules against
+// the GID-map helper-domain invariants and returns one human-readable
+// violation per broken rule, empty when none:
+//   - the domain's allow-rule surface is EXACTLY newgidmapDomainSurface
+//     (source-scoped, full-line equality, so widened permission sets and
+//     extra grants both violate);
+//   - the domain holds no self-targeted grant at all (no capability,
+//     capability2, or cap_userns rule is evidenced for it);
+//   - the domain holds no grant toward any target type other than its own
+//     entry type (the forbidden set includes every daemon/Docker/workspace/
+//     state surface by construction); a grant toward
+//     docker_helper_rootlesskit_t is called out separately as the
+//     ungranted runtime surface (gid_map write, stdio fifo, /proc dir);
+//   - the ONLY transition into the domain is the rootlesskit child's exec
+//     of the newgidmap entry type (duplicates, manager-side or daemon-side
+//     entries violate), and the manager holds no exec grant for the
+//     newgidmap entry type.
+func newgidmapDomainPolicyViolations(policy string) []string {
+	var violations []string
+	seen := 0
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "allow docker_helper_newgidmap_t ") {
+			seen++
+			matched := false
+			for _, want := range newgidmapDomainSurface {
+				if trimmed == want {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				violations = append(violations, fmt.Sprintf("the GID-map helper domain's surface is exact; unexpected rule: %s", trimmed))
+			}
+			if strings.HasPrefix(trimmed, "allow docker_helper_newgidmap_t self:") {
+				violations = append(violations, fmt.Sprintf("the GID-map helper domain must hold no self-targeted grant (no capability, capability2, or cap_userns surface is evidenced): %s", trimmed))
+			}
+			if target, class, ok := strings.Cut(strings.TrimPrefix(trimmed, "allow docker_helper_newgidmap_t "), ":"); ok {
+				class = strings.Fields(class)[0]
+				switch target {
+				case "docker_helper_newgidmap_exec_t", "self":
+				default:
+					violations = append(violations, fmt.Sprintf("the GID-map helper domain must not receive a grant toward %s (unexpected target type): %s", target, trimmed))
+				}
+				if target == "docker_helper_rootlesskit_t" {
+					violations = append(violations, fmt.Sprintf("the GID-map helper domain must hold no runtime grant toward the rootlesskit child domain yet (the gid_map write, the stdio fifo, and the /proc surface are ungranted): %s", trimmed))
+				}
+			}
+		}
+		// The manager may not execute the GID-map helper binary (the entry
+		// transition is child-domain-only; the daemon's own exec of the
+		// shared binary never touches this entry type).
+		if strings.HasPrefix(trimmed, "allow docker_helper_builder_t docker_helper_newgidmap_exec_t") {
+			violations = append(violations, fmt.Sprintf("the manager domain must not be able to execute newgidmap: %s", trimmed))
+		}
+	}
+	if seen != len(newgidmapDomainSurface) {
+		violations = append(violations, fmt.Sprintf("the GID-map helper domain's surface must carry exactly %d allow rule, found %d", len(newgidmapDomainSurface), seen))
+	}
+	_, transitions := parseSELinuxRules(policy)
+	for _, tr := range transitions {
+		if tr.dest != "docker_helper_newgidmap_t" {
+			continue
+		}
+		if tr.source != "docker_helper_rootlesskit_t" || tr.entry != "docker_helper_newgidmap_exec_t" || tr.class != "process" {
+			violations = append(violations, fmt.Sprintf("the only transition into the GID-map helper domain is the rootlesskit child's exec of its entry type, got: type_transition %s %s:%s %s", tr.source, tr.entry, tr.class, tr.dest))
+		}
+	}
+	newgidTransitions := 0
+	for _, tr := range transitions {
+		if tr.dest == "docker_helper_newgidmap_t" {
+			newgidTransitions++
+		}
+	}
+	if newgidTransitions != 1 {
+		violations = append(violations, fmt.Sprintf("exactly one transition may enter the GID-map helper domain, found %d", newgidTransitions))
+	}
+	return violations
+}
+
+// TestSELinuxPolicyNewgidmapDomainSurface verifies the GID-map helper
+// domain's runtime surface is EXACTLY the entry rule and nothing else —
+// zero runtime grants (no passwd, no gid_map, no fifo, no capabilities).
+// Mutation tests prove each guard fires: extra entry paths (a manager-side
+// transition, a duplicate transition, a manager exec grant), extra
+// allow rules toward the child domain (fifo, gid_map file, proc dir) or
+// forbidden surfaces (passwd, builder state, daemon runtime, Docker
+// socket, workspace), widened entry sets, and any self-targeted capability
+// grant must trip the invariants.
+func TestSELinuxPolicyNewgidmapDomainSurface(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	if violations := newgidmapDomainPolicyViolations(policy); len(violations) > 0 {
+		t.Errorf("the committed policy violates the GID-map helper surface invariants: %v", violations)
+	}
+	for _, want := range newgidmapDomainSurface {
+		if !strings.Contains(policy, want) {
+			t.Errorf("SELinux policy must contain exactly this rule: %s", want)
+		}
+	}
+	for _, mut := range []struct {
+		name        string
+		rule        string
+		wantTripped string
+	}{
+		{"manager-side transition into the domain", "type_transition docker_helper_builder_t docker_helper_newgidmap_exec_t:process docker_helper_newgidmap_t;", "the only transition into the GID-map helper domain"},
+		{"duplicate identical transition", "type_transition docker_helper_rootlesskit_t docker_helper_newgidmap_exec_t:process docker_helper_newgidmap_t;", "exactly one transition may enter the GID-map helper domain"},
+		{"manager exec of the helper binary", "allow docker_helper_builder_t docker_helper_newgidmap_exec_t:file { execute read open };", "the manager domain must not be able to execute newgidmap"},
+		{"widened entry rule", "allow docker_helper_newgidmap_t docker_helper_newgidmap_exec_t:file { entrypoint read open execute getattr map append };", "unexpected rule"},
+		{"regressed entry map permission", "allow docker_helper_newgidmap_t docker_helper_newgidmap_exec_t:file { entrypoint read open execute getattr };", "unexpected rule"},
+		{"stdio fifo write", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:fifo_file { write };", "runtime grant toward the rootlesskit child domain"},
+		{"gid_map file write", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:file { write open };", "runtime grant toward the rootlesskit child domain"},
+		{"proc dir read", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:dir { read };", "runtime grant toward the rootlesskit child domain"},
+		{"passwd read", "allow docker_helper_newgidmap_t passwd_file_t:file { read open };", "unexpected target type"},
+		{"builder state tree", "allow docker_helper_newgidmap_t docker_helper_builder_state_t:file { write };", "unexpected target type"},
+		{"daemon runtime tree", "allow docker_helper_newgidmap_t docker_helper_runtime_t:file { read };", "unexpected target type"},
+		{"Docker socket", "allow docker_helper_newgidmap_t container_var_run_t:sock_file { write };", "unexpected target type"},
+		{"Session workspace", "allow docker_helper_newgidmap_t docker_helper_workspace_t:file { read };", "unexpected target type"},
+		{"setgid capability", "allow docker_helper_newgidmap_t self:capability setgid;", "no self-targeted grant"},
+		{"cap_userns grant", "allow docker_helper_newgidmap_t self:cap_userns sys_admin;", "no self-targeted grant"},
+		{"capability2 grant", "allow docker_helper_newgidmap_t self:capability2 kill;", "no self-targeted grant"},
+	} {
+		mutated := policy + "\n" + mut.rule
+		violations := newgidmapDomainPolicyViolations(mutated)
+		if len(violations) == 0 {
+			t.Errorf("mutation %q must fail the GID-map helper surface invariants", mut.name)
+			continue
+		}
+		joined := strings.Join(violations, "\n")
+		if !strings.Contains(joined, mut.wantTripped) {
+			t.Errorf("mutation %q must trip the invariant naming %q, got violations: %v", mut.name, mut.wantTripped, violations)
+		}
+	}
+}
+
 // TestSELinuxPolicyCapUsernsShape verifies the global cap_userns invariant:
 // the module carries EXACTLY TWO cap_userns rules — the rootlesskit child
 // domain's and the UID-map helper domain's evidenced self:cap_userns
@@ -829,10 +1037,11 @@ func TestSELinuxPolicyRootlesskitUsernsCreate(t *testing.T) {
 
 // TestSELinuxPolicyRootlesskitIsolation verifies the rootlesskit child
 // domain receives no grant toward any forbidden surface (the same set the
-// builder domain is denied), carries no capability grants, and — for both
-// the manager and the child — holds no bin_t:file grant: the helper execs
-// (slirp4netns, newuidmap/newgidmap) and the bundled buildkitd are
-// deliberate P5-S2 boundaries.
+// builder domain is denied), carries no plain capability grants, and — for
+// both the manager and the child — holds no bin_t:file grant: the helper
+// execs run through their dedicated exec types only (slirp4netns,
+// newuidmap, newgidmap) and the bundled buildkitd stays a deliberate
+// P5-S2 boundary.
 func TestSELinuxPolicyRootlesskitIsolation(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
 	for _, line := range strings.Split(policy, "\n") {
