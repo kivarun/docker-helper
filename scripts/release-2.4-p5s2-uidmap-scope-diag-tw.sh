@@ -7,33 +7,36 @@
 # script must never: modify the repository's production policy (the module
 # is compiled HERE from the transferred candidate sources and loaded on
 # this disposable VM only), grant the file write, grant capabilities, or
-# modify file contents. Every finding lands in the evidence directory; the
-# run is PASS when all phases completed (not when a particular answer is
-# obtained — a negative IS a finding).
+# modify any file's content. Every finding lands in the evidence directory;
+# the run is PASS when all phases completed (not when a particular answer
+# is obtained — a negative IS a finding).
 #
 #   A  toolchain + module: compile and load the CANDIDATE policy
 #      (transferred docker-helper.te/.fc) plus a GUEST-ONLY diag module
 #      that allows systemd transient units to bind docker_helper_rootlesskit_t
 #      via SELinuxContext= (init_t transition; production binds the domain
-#      only through the builder unit + the pointed exec transition). Distros
-#      tooling (checkpolicy/container-selinux) installed by zypper.
+#      only through the builder unit + the pointed exec transition). Distro
+#      tooling (checkpolicy/container-selinux/policycoreutils-python-utils)
+#      and the DISTRO rootlesskit/slirp4netns/audit packages installed by
+#      zypper (absent from the fresh cloud image; plain distro packages, no
+#      privilege change). Audit-channel sanity probe.
 #   B  real-domain observation: with the four builder-family domains
 #      PERMISSIVE (so the real rootlesskit flow runs through the mapping
-#      step), a transient unit launches the REAL distro rootlesskit with the
-#      REAL distro newuidmap mapping and a long-lived target; the watcher
-#      captures the full /proc/<pid> file surface of the REAL
-#      docker_helper_rootlesskit_t processes (uid_map, gid_map, setgroups,
+#      step), instance rk1 runs the REAL distro rootlesskit with the REAL
+#      distro newuidmap mapping via runcon into docker_helper_rootlesskit_t;
+#      a SIGSTOP watcher freezes the child process at first sighting so the
+#      helper's uid_map write lands in a frozen process (the item-5
+#      reliable-capture mechanism, replacing the 50 ms sampling); the
+#      watcher records the full /proc/<pid> file surface of every REAL
+#      docker_helper_rootlesskit_t process (uid_map, gid_map, setgroups,
 #      mem, oom_score_adj, comm and the complete enumeration) with labels,
 #      modes, owners, and contents.
-#   C  layer separation: safe open-only checks (no content modification) as
-#      the builder identity against the live rootlesskit_t processes, plus a
-#      SECOND concurrent instance to demonstrate that one SELinux domain
-#      spans all concurrent operations (their isolation is invocation
-#      discipline, not MAC, not DAC, not kernel CAP).
-#   D  item-5 mechanism demo: a short-lived flow whose child is SIGSTOPped
-#      by the watcher at first sighting, so the helper's uid_map write lands
-#      in a frozen process and is read at leisure — the reliable capture
-#      mechanism for the next enforcing run, replacing the 50 ms sampling.
+#   C  layer separation: instance rk2 launches the same flow through the
+#      transient unit path; safe open-only checks (no content modification)
+#      as the builder identity against ALL live rootlesskit_t processes of
+#      both instances demonstrate that one SELinux domain spans all
+#      concurrent operations (their isolation is invocation discipline, not
+#      MAC, not DAC, not kernel CAP).
 #
 set -Eeuo pipefail
 
@@ -44,6 +47,7 @@ BUILDER_USER=docker-helper-builder
 BUILDER_SUBUID_START=231072
 BUILDER_SUBUID_COUNT=65536
 TRANSFERRED=/tmp/p5s2-uidmap-diag
+RK_EXEC_T=system_u:system_r:docker_helper_rootlesskit_t:s0
 
 log()  { printf '%s %s\n' "$PREFIX" "$*"; }
 note() { printf '%s NOTE: %s\n' "$PREFIX" "$*"; }
@@ -61,7 +65,7 @@ cleanup() {
   # on stopped processes), then stop the units.
   pkill -KILL -f 'rootlesskit --net=none' 2>/dev/null || true
   pkill -KILL -f '/bin/sleep 300' 2>/dev/null || true
-  for u in uidmap-diag-rk1 uidmap-diag-rk2 uidmap-diag-rk3; do
+  for u in uidmap-diag-rk1 uidmap-diag-rk2; do
     systemctl stop "$u" >/dev/null 2>&1 || true
   done
   for d in "${DOMAINS[@]}"; do
@@ -79,24 +83,31 @@ log 'A: toolchain + candidate module load (disposable VM only)'
   echo "=== LSM state ==="
   cat /sys/kernel/security/lsm 2>/dev/null || true
   echo "enforce=$(getenforce 2>/dev/null || true)"
-  echo "=== install policy toolchain ==="
 } >"$EVIDENCE_DIR/a-toolchain.txt" 2>&1
 # The distro rootlesskit/slirp4netns binaries are NOT on the fresh cloud
 # image (the docker-helper RPM's conditional dependencies pull them in on
 # the UAT VMs); the diagnosis installs the DISTRO packages itself. They are
 # installed without any privilege change: plain distro packages, no file
 # capabilities, no chkstat involvement beyond the distro's own defaults.
+# auditd is installed for the reliable AVC evidence channel (the P5-S1
+# proof installs it for the same reason).
 zypper --non-interactive install -y checkpolicy container-selinux \
-  policycoreutils-python-utils rootlesskit slirp4netns \
+  policycoreutils-python-utils rootlesskit slirp4netns audit \
   >"$EVIDENCE_DIR/zypper-policy-toolchain.log" 2>&1 \
   || note "zypper install of the policy toolchain failed (see zypper-policy-toolchain.log)"
+fail_toolchain=0
 for t in checkmodule semodule_package semodule semanage restorecon; do
   command -v "$t" >/dev/null 2>&1 || { echo "$t not found" >>"$EVIDENCE_DIR/a-toolchain.txt"; fail_toolchain=1; }
 done
-if [ "${fail_toolchain:-0}" = 1 ]; then
+if [ "$fail_toolchain" = 1 ]; then
   note "policy toolchain incomplete; the assessment cannot proceed"
   printf '%s P5S2-UIDMAP-SCOPE-DIAG-RESULT=PASS-INCOMPLETE (toolchain unavailable; recorded as a finding)\n' "$PREFIX" >&2
   exit 0
+fi
+if command -v auditctl >/dev/null 2>&1; then
+  systemctl enable --now auditd >/dev/null 2>&1 || true
+  auditctl -e 1 >/dev/null 2>&1 || true
+  log "auditd enabled for the AVC evidence channel"
 fi
 
 checkmodule -M -m -o /tmp/docker_helper.tmp "$TRANSFERRED/docker-helper.te" 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
@@ -107,7 +118,7 @@ semodule -i /tmp/docker_helper.pp 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
   || { note "semodule -i of the candidate module failed"; exit 1; }
 
 # GUEST-ONLY diag module: lets systemd transient units bind the helper
-# domains through SELinuxContext=. Production binds docker_helper_rootlesskit_t
+# domain through SELinuxContext=. Production binds docker_helper_rootlesskit_t
 # ONLY through the builder unit's pointed exec transition; this module exists
 # solely on the disposable VM for the isolated diagnostic runs.
 cat > /tmp/uidmap-diag.te <<'EOF'
@@ -138,6 +149,20 @@ restorecon /usr/bin/rootlesskit /usr/bin/slirp4netns /usr/bin/newuidmap 2>>"$EVI
   for p in /etc/passwd /etc/subuid /etc/subgid /etc/group; do
     echo "$p -> $(stat -c '%C %U:%G %a' "$p" 2>&1)"
   done
+  echo "=== audit channel sanity probe: a deliberate enforcing denial from the helper domain ==="
+  echo "=== (runcon into docker_helper_newuidmap_t, then an unwritable-file touch; NO content change) ==="
+  AUDIT_EPOCH="$(date +%s)"
+  runcon system_u:system_r:docker_helper_newuidmap_t:s0 touch /etc/shadow >/tmp/uidmap-scope-diag/sanity.out 2>&1 || true
+  echo "touch rc recorded; output:"
+  cat /tmp/uidmap-scope-diag/sanity.out
+  sleep 2
+  echo "--- audit.log window (empty output = channel silent for this window) ---"
+  grep -a 'type=AVC' /var/log/audit/audit.log 2>/dev/null \
+    | awk -v s="$AUDIT_EPOCH" '{ for (i = 1; i <= NF; i++) if ($i ~ /^msg=audit\(/) { ts = substr($i, 11); split(ts, t, "."); if (t[1] + 0 >= s + 0) print; break } }' \
+    | tail -10
+  echo "--- journalctl -k window (empty output = channel silent for this window) ---"
+  journalctl -k --since "@$AUDIT_EPOCH" --no-pager 2>/dev/null | grep -a 'avc:' | tail -10
+  echo "(either a process-denial or a transition-denial AVC above proves the audit channel works)"
 } >>"$EVIDENCE_DIR/a-toolchain.txt" 2>&1
 cat "$EVIDENCE_DIR/a-toolchain.txt" >&2
 
@@ -152,17 +177,24 @@ grep -q "^$BUILDER_USER:" /etc/subgid || echo "$BUILDER_USER:$BUILDER_SUBUID_STA
 } >"$EVIDENCE_DIR/builder-identity.txt" 2>&1
 cat "$EVIDENCE_DIR/builder-identity.txt" >&2
 
+log 'B: real-domain observation (four builder-family domains permissive)'
+for d in "${DOMAINS[@]}"; do
+  set_permissive "$d"
+done
+mkdir -p "$DIAG_BASE"/{rk1,rk2}
+chown "$BUILDER_USER:$BUILDER_USER" "$DIAG_BASE"/{rk1,rk2}
+AVC_EPOCH="$(date +%s)"
+
 # The watcher: continuously records every process observed in
 # docker_helper_rootlesskit_t — labels, modes, owners, contents, the full
 # /proc/<pid> file enumeration, and the status identity lines. Writes one
 # block per pid, deduplicated, bounded by the given budget in seconds.
-WATCHER_STOP=false
 watcher_loop() {
   local budget="$1" out="$2" deadline seen_pids pid f
   deadline=$(( $(date +%s) + budget ))
   : > "$out"
   seen_pids=$(mktemp)
-  while [ "$WATCHER_STOP" = false ] && [ "$(date +%s)" -lt "$deadline" ]; do
+  while [ "$(date +%s)" -lt "$deadline" ]; do
     for pid in $(pgrep -f rootlesskit 2>/dev/null || true); do
       [ -r "/proc/$pid/attr/current" ] || continue
       ctx="$(cat "/proc/$pid/attr/current" 2>/dev/null || true)"
@@ -192,36 +224,28 @@ watcher_loop() {
   rm -f "$seen_pids"
 }
 
-log 'B: real-domain observation (four builder-family domains permissive)'
-for d in "${DOMAINS[@]}"; do
-  set_permissive "$d"
-done
-mkdir -p "$DIAG_BASE"/{rk1,rk2,rk3}
-chown "$BUILDER_USER:$BUILDER_USER" "$DIAG_BASE"/{rk1,rk2,rk3}
-AVC_EPOCH="$(date +%s)"
-
+# The SIGSTOP watcher: freezes the FIRST rootlesskit_t CHILD process (its
+# parent is itself a rootlesskit_t process) at first sighting, so the
+# helper's uid_map write lands in a frozen process and is read at leisure
+# (the reliable capture mechanism for the enforcing proof — no dependence
+# on the short-lived newuidmap's lifetime). Polls every 5 ms.
 (
-  while [ "$(date +%s)" -lt $((AVC_EPOCH + 60)) ]; do
+  local_deadline=$(( $(date +%s) + 60 ))
+  while [ "$(date +%s)" -lt "$local_deadline" ]; do
     for pid in $(pgrep -f rootlesskit 2>/dev/null || true); do
       [ -r "/proc/$pid/attr/current" ] || continue
       ctx="$(cat "/proc/$pid/attr/current" 2>/dev/null || true)"
-      case "$ctx" in *docker_helper_rootlesskit_t*) ;;
-        *) continue ;;
-      esac
+      case "$ctx" in *docker_helper_rootlesskit_t*) ;; *) continue ;; esac
       ppid="$(awk '/^PPid:/{print $2}' "/proc/$pid/status" 2>/dev/null || true)"
       case "$ppid" in
         ''|*[!0-9]*) continue ;;
       esac
       [ -r "/proc/$ppid/attr/current" ] || continue
       pctx="$(cat "/proc/$ppid/attr/current" 2>/dev/null || true)"
-      case "$pctx" in *docker_helper_rootlesskit_t*) ;;
-        *) continue ;;
-      esac
-      # The child: SIGSTOP it at first sighting so the flow's uid_map write
-      # lands in a frozen process (item-5 mechanism demo).
+      case "$pctx" in *docker_helper_rootlesskit_t*) ;; *) continue ;; esac
       kill -STOP "$pid" 2>/dev/null || true
       echo "stopped child pid=$pid (parent=$ppid) at $(date -u +%FT%TZ)" \
-        > "$EVIDENCE_DIR/d-sigstop-demo.txt"
+        > "$EVIDENCE_DIR/b-sigstop-demo.txt"
       exit 0
     done
     sleep 0.005
@@ -229,46 +253,51 @@ AVC_EPOCH="$(date +%s)"
 ) &
 STOPPER_PID=$!
 
-systemd-run --unit=uidmap-diag-rk3 \
-  --property=SELinuxContext=system_u:system_r:docker_helper_rootlesskit_t:s0 \
-  --uid="$BUILDER_USER" --gid="$BUILDER_USER" \
-  /usr/bin/rootlesskit --net=none --state-dir="$DIAG_BASE/rk3/rootlesskit-state" \
-  /bin/false >/dev/null 2>&1 || true
-wait "$STOPPER_PID" 2>/dev/null || true
-sleep 1
-{
-  echo "=== the stopped child's identity and state ==="
-  for pid in $(pgrep -f rootlesskit 2>/dev/null || true); do
-    [ -r "/proc/$pid/attr/current" ] || continue
-    ctx="$(cat "/proc/$pid/attr/current" 2>/dev/null || true)"
-    case "$ctx" in *docker_helper_rootlesskit_t*) ;; *) continue ;; esac
-    st="$(awk '/^State:/{print $2, $3}' "/proc/$pid/status" 2>/dev/null || true)"
-    echo "pid=$pid state=[$st] ctx=$ctx"
-    echo "  uid_map content: [$(cat "/proc/$pid/uid_map" 2>/dev/null || true)]"
-    echo "  uid_map label:   $(stat -c '%C mode=%a owner=%U:%G' "/proc/$pid/uid_map" 2>&1)"
-  done
-} >> "$EVIDENCE_DIR/d-sigstop-demo.txt" 2>&1
-# SIGKILL the stopped child + parent first (a stopped process ignores
-# SIGTERM and would stall the unit stop for TimeoutStopSec).
-pkill -KILL -f 'rootlesskit --net=none' 2>/dev/null || true
-systemctl stop uidmap-diag-rk3 >/dev/null 2>&1 || true
-cat "$EVIDENCE_DIR/d-sigstop-demo.txt" >&2
-
-log 'C: two concurrent real-domain instances + layer separation'
-for u in rk1 rk2; do
-  systemd-run --unit="uidmap-diag-$u" \
-    --property=SELinuxContext=system_u:system_r:docker_helper_rootlesskit_t:s0 \
-    --uid="$BUILDER_USER" --gid="$BUILDER_USER" \
-    /usr/bin/rootlesskit --net=none --state-dir="$DIAG_BASE/$u/rootlesskit-state" \
-    /bin/sleep 300 >/dev/null 2>&1 || true
-done
-
-watcher_loop 45 "$EVIDENCE_DIR/b-real-domain-processes.txt" &
+# Instance rk1: the REAL rootlesskit flow, launched directly (runcon path)
+# as the builder identity into the REAL rootlesskit_t domain. Target: the
+# long-lived /bin/sleep — the bundled buildkitd is NOT installed here (the
+# payload is a separate production artifact); the child process, its user
+# namespace, its mapping, and its procfs file surface are the REAL
+# mechanics under assessment. The watcher + stopper run concurrently.
+watcher_loop 60 "$EVIDENCE_DIR/b-real-domain-processes.txt" &
 WATCHER_PID=$!
+{
+  echo "=== launch: runcon path (instance rk1) ==="
+  echo "command: runuser -u $BUILDER_USER -- runcon $RK_EXEC_T /usr/bin/rootlesskit --net=none --state-dir=$DIAG_BASE/rk1/rootlesskit-state /bin/sleep 300"
+} > "$EVIDENCE_DIR/b-launch-rk1.txt"
+runuser -u "$BUILDER_USER" -- \
+  runcon "$RK_EXEC_T" /usr/bin/rootlesskit --net=none \
+  --state-dir="$DIAG_BASE/rk1/rootlesskit-state" /bin/sleep 300 \
+  >>"$EVIDENCE_DIR/b-launch-rk1.txt" 2>&1 &
+RK1_PID=$!
+wait "$STOPPER_PID" 2>/dev/null || true
+sleep 2
+cat "$EVIDENCE_DIR/b-launch-rk1.txt" >&2
+cat "$EVIDENCE_DIR/b-sigstop-demo.txt" 2>/dev/null >&2 || true
+
+log 'C: second concurrent instance (transient unit path) + layer separation'
+{
+  echo "=== launch: transient unit path (instance rk2) ==="
+  echo "command: systemd-run --unit=uidmap-diag-rk2 --property=SELinuxContext=$RK_EXEC_T --uid=$BUILDER_USER --gid=$BUILDER_USER /usr/bin/rootlesskit --net=none --state-dir=$DIAG_BASE/rk2/rootlesskit-state /bin/sleep 300"
+} > "$EVIDENCE_DIR/c-launch-rk2.txt"
+systemd-run --unit=uidmap-diag-rk2 \
+  --property="SELinuxContext=$RK_EXEC_T" \
+  --uid="$BUILDER_USER" --gid="$BUILDER_USER" \
+  /usr/bin/rootlesskit --net=none \
+  --state-dir="$DIAG_BASE/rk2/rootlesskit-state" /bin/sleep 300 \
+  >>"$EVIDENCE_DIR/c-launch-rk2.txt" 2>&1 || true
+sleep 3
+journalctl -u uidmap-diag-rk2 --no-pager -n 20 >>"$EVIDENCE_DIR/c-launch-rk2.txt" 2>&1 || true
+cat "$EVIDENCE_DIR/c-launch-rk2.txt" >&2
+
+# SIGKILL the possibly-stopped rk1 child + its parent before the unit stop
+# (a stopped process ignores SIGTERM and would stall the stop).
+pkill -KILL -f 'rootlesskit --net=none' 2>/dev/null || true
+kill "$RK1_PID" 2>/dev/null || true
 wait "$WATCHER_PID" 2>/dev/null || true
 cat "$EVIDENCE_DIR/b-real-domain-processes.txt" >&2
 
-sleep 1
+# All live rootlesskit_t processes at this point (both instances).
 CHILDS=()
 for pid in $(pgrep -f rootlesskit 2>/dev/null || true); do
   [ -r "/proc/$pid/attr/current" ] || continue
@@ -298,7 +327,7 @@ if [ "${#CHILDS[@]}" -ge 1 ]; then
   {
     echo "=== safe open-only checks as $BUILDER_USER (O_RDWR, no write performed, no content change) ==="
     echo "=== layer meaning: DAC (same uid) + kernel open policy; SELinux is NOT in this path (unconfined runner) ==="
-    echo "=== pids checked: $PIDS (all live rootlesskit_t processes: parents and children across instances) ==="
+    echo "=== pids checked: $PIDS (all live rootlesskit_t processes: parents and children across BOTH instances) ==="
     su -s /bin/bash "$BUILDER_USER" -c "bash $OPEN_SCRIPT" 2>&1 || true
   } > "$EVIDENCE_DIR/c-open-checks-dac-kernel.txt"
   cat "$EVIDENCE_DIR/c-open-checks-dac-kernel.txt" >&2
@@ -312,14 +341,15 @@ fi
 sleep 2
 {
   echo "=== kernel AVC records of the diagnostic window (permissive=1 = allowed+logged attempts) ==="
-  journalctl -k --since "@$AVC_EPOCH" --no-pager 2>/dev/null | grep -a 'avc:' | tail -80 || true
+  grep -a 'type=AVC' /var/log/audit/audit.log 2>/dev/null \
+    | awk -v s="$AVC_EPOCH" '{ for (i = 1; i <= NF; i++) if ($i ~ /^msg=audit\(/) { ts = substr($i, 11); split(ts, t, "."); if (t[1] + 0 >= s + 0) print; break } }' \
+    | tail -100 || true
+  echo "=== journalctl -k window ==="
+  journalctl -k --since "@$AVC_EPOCH" --no-pager 2>/dev/null | grep -a 'avc:' | tail -100 || true
 } > "$EVIDENCE_DIR/e-permissive-avc-harvest.txt" 2>&1
+cat "$EVIDENCE_DIR/e-permissive-avc-harvest.txt" >&2
 
 log 'cleanup'
-for u in uidmap-diag-rk1 uidmap-diag-rk2; do
-  systemctl stop "$u" >/dev/null 2>&1 || true
-done
-pkill -f 'rootlesskit --net=none' 2>/dev/null || true
 for d in "${DOMAINS[@]}"; do
   clear_permissive "$d"
 done
