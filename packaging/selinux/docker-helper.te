@@ -961,11 +961,19 @@ allow docker_helper_newuidmap_t docker_helper_newuidmap_exec_t:file { entrypoint
 #     (run 36248541393: the O_DIRECTORY open of the SAME target after the
 #     read grant; newuidmap failed with its own output "Could not open proc
 #     directory for target 3746: Permission denied")
-# Nothing else was denied: no getattr, no search, no write on the dir, no
+#   denied { getattr } tcontext=system_u:system_r:docker_helper_rootlesskit_t:s0
+#     tclass=dir        path="/proc/3740" dev="proc"
+#     (run 36253390898, record 564: the stat of the TARGET process
+#     directory on the mapping path; newuidmap failed with its own output
+#     "Could not stat directory for target process: Permission denied" —
+#     the identity lookup had already succeeded by then)
+# Nothing else was denied on this pair: no search, no write on the dir, no
 # file-class record, no capability or cap_userns surface — those stay
-# ungranted boundaries.
+# ungranted boundaries. The passwd_file_t getattr denial of the same run
+# (record 563) is NON-blocking evidence: the caller's user name was
+# determined successfully in that run, so it stays ungranted.
 allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:fifo_file { write };
-allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read open };
+allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read open getattr };
 
 # The helper's caller-identity lookup (P5-S2): the getpwuid read of
 # /etc/passwd that locates the caller's user name before validating the
@@ -981,12 +989,14 @@ allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read open };
 #     the direct successor of the granted read)
 #   (the helper's own failure output at both boundaries: "newuidmap:
 #   Cannot determine your user name.")
-# Read and open ONLY: no getattr denial is evidenced yet (the next
-# boundary). The NSS fallback surface of the same failure moment
-# (init_var_run_t search, self:unix_dgram_socket create) stays
-# deliberately ungranted: whether the completed direct files-module lookup
-# removes the systemd userdb need is checked by the next enforcing run
-# before any userdb grant could even be considered.
+# Read and open ONLY (P5-S2 sufficiency check, run 36253390898): with the
+# open granted the direct files-module lookup COMPLETED — the helper
+# domain's userdb fallback denials (init_var_run_t search,
+# self:unix_dgram_socket create) did not occur at all, so no userdb grant
+# is needed. The passwd getattr denial of the same run (record 563) is
+# non-blocking (the user name was determined successfully without it) and
+# stays ungranted; the blocking failure moved to the target-process dir
+# stat above.
 allow docker_helper_newuidmap_t passwd_file_t:file { read open };
 
 # The child's user-namespace creation itself: rootlesskit creates the userns
