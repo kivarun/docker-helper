@@ -915,13 +915,17 @@ allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:fifo_file { write 
 
 # --- docker_helper_newuidmap_t: the rootlesskit UID-map helper domain (P5-S2) ---
 #
-# RootlessKit forks and execs the distro newuidmap binary (a setuid-root
-# helper) as its UID-mapping step. The transition is pointed: the ONLY path
+# RootlessKit forks and execs the distro newuidmap binary (the shadow
+# UID-mapping helper; on Tumbleweed it ships 0755 WITHOUT setuid and takes
+# its privilege from the distro's chkstat-applied cap_setuid file
+# capability — permissions.d/shadow, proven by the P5-S2 diagnosis) as its
+# UID-mapping step. The transition is pointed: the ONLY path
 # into this domain is the rootlesskit child's exec of the newuidmap entry
 # type. The helper gets NO capabilities, NO cap_userns, no Docker socket,
-# admin token, config/state/runtime, or Session workspace surface: its
-# privilege model (the setuid-root exec) is the next deliberate P5-S2
-# boundary. The source-side exec checks mirror the proven slirp4netns exec
+# admin token, config/state/runtime, or Session workspace surface: the
+# distro privilege mechanism stays the only privilege owner and is never
+# re-set by docker-helper. The source-side exec checks mirror the proven
+# slirp4netns exec
 # shape (the same rootlesskit Go exec mechanics: the path-lookup execute,
 # the bprm open/read, the pre-exec getattr — the getattr live AVC was
 # proven for the sibling exec in run 36199764374). The entry rule carries
@@ -936,6 +940,25 @@ allow docker_helper_rootlesskit_t docker_helper_newuidmap_t:process { transition
 
 allow docker_helper_rootlesskit_t docker_helper_newuidmap_exec_t:file { execute read open getattr };
 allow docker_helper_newuidmap_t docker_helper_newuidmap_exec_t:file { entrypoint read open execute getattr map };
+
+# The helper's own runtime surface (P5-S2 step 8): exactly the two live
+# enforcing AVC records of the previous boundary (P5-S1 Tumbleweed run
+# 36229266623 P6 window, both permissive=0, comm="newuidmap"
+# scontext=system_u:system_r:docker_helper_newuidmap_t:s0):
+#   denied { write }  tcontext=system_u:system_r:docker_helper_rootlesskit_t:s0
+#     tclass=fifo_file  path="pipe:[21945]" dev="pipefs"
+#     (the inherited inst.diag stdio pipe; the fd-use shape mirrors the
+#     proven slirp4netns fifo grant, and without the write the helper's own
+#     error output is lost)
+#   denied { read }   tcontext=system_u:system_r:docker_helper_rootlesskit_t:s0
+#     tclass=dir        name="3757" dev="proc"
+#     (/proc/<rootlesskit-pid> — the procfs parent-directory check on the
+#     uid_map write path; the dir read grant is NOT a general directory
+#     read: no other dir permission is evidenced)
+# Nothing else was denied: no getattr, no file-class record, no capability
+# or cap_userns surface — those stay ungranted boundaries.
+allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:fifo_file { write };
+allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read };
 
 # The child's user-namespace creation itself: rootlesskit creates the userns
 # that hosts the buildkitd instance. Live enforcing AVC evidence (P5-S1
