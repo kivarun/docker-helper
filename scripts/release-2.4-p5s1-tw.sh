@@ -45,7 +45,9 @@
 #       docker_build_failed terminal state is never accepted as the RPC
 #       proof). The build attempt also proves the P5-S2 boundary state:
 #       the P5-S1 rootlesskit { lock } denial must be GONE, the helper's
-#       uid_map { write } AND { open } denials must be GONE (the
+#       uid_map { write } AND { open } denials must be GONE, and so must
+#       the helper's full evidenced capability surface (the in-namespace
+#       sys_admin bit and the out-of-namespace setuid bit — the
 #       evidence-proven grants ship in the candidate policy), and the
 #       attempt's outcome — a full success, or the NEXT enforcing stopping
 #       point with the full evidence bundle — is reported, never
@@ -734,7 +736,16 @@ P6_START="$AVC_EPOCH"
 # from the scope assessment stays OUT of this enforcing proof run (a
 # forcibly stopped process must never be presented as the main build's
 # natural result; the SIGSTOP experiment belongs to a separate
-# instrumented run).
+# instrumented run). The sighting interval is 5 ms (the helper's own
+# lifetime is tens of milliseconds) and the target sampling is 5 ms too:
+# the mapping is written inside the helper's run and the target can be
+# torn down milliseconds later, so coarse sampling misses the window.
+# Fallback (still read-only): when no helper sighting happened, any live
+# rootlesskit_t process whose uid_map has MORE THAN ONE LINE carries the
+# established mapping (an initial-namespace process always shows the
+# trivial single-line full-range map; the mapped child shows the real
+# multi-line mapping the helper wrote) — its content is captured once into
+# uid-map-fallback-capture.txt.
 (
   while :; do
     if [ ! -s "$EVIDENCE_DIR/slirp-runtime-context.txt" ]; then
@@ -760,7 +771,7 @@ P6_START="$AVC_EPOCH"
             echo "target ns/user:    $(readlink "/proc/$NUID_TARGET/ns/user" 2>/dev/null || echo UNAVAILABLE)"
             echo "target uid_map at helper-sighting: $(cat "/proc/$NUID_TARGET/uid_map" 2>/dev/null || echo UNAVAILABLE)"
             echo "=== samples while the target exists (the LAST captured values are the result) ==="
-            for _ in $(seq 1 100); do
+            for _ in $(seq 1 200); do
               UM="$(cat "/proc/$NUID_TARGET/uid_map" 2>/dev/null || true)"
               GM="$(cat "/proc/$NUID_TARGET/gid_map" 2>/dev/null || true)"
               if [ -n "$UM" ] || [ -n "$GM" ]; then
@@ -769,7 +780,7 @@ P6_START="$AVC_EPOCH"
                 break
               fi
               [ -d "/proc/$NUID_TARGET" ] || break
-              sleep 0.05
+              sleep 0.005
             done
             echo "=== final state at capture time ==="
             echo "uid_map: $(cat "/proc/$NUID_TARGET/uid_map" 2>/dev/null || echo 'NOT READABLE (process gone)')"
@@ -779,7 +790,25 @@ P6_START="$AVC_EPOCH"
       esac
       break
     fi
-    sleep 0.05
+    for rpid in $(pgrep -f rootlesskit 2>/dev/null || true); do
+      [ -r "/proc/$rpid/attr/current" ] || continue
+      case "$(cat "/proc/$rpid/attr/current" 2>/dev/null)" in
+        *docker_helper_rootlesskit_t*) ;;
+        *) continue ;;
+      esac
+      FALLBACK_UM="$(cat "/proc/$rpid/uid_map" 2>/dev/null || true)"
+      case "$FALLBACK_UM" in
+        *$'\n'*) ;;
+        *) continue ;;
+      esac
+      {
+        echo "rootlesskit_t pid: $rpid (no newuidmap sighting; the established mapping read from /proc)"
+        echo "uid_map: $FALLBACK_UM"
+        echo "gid_map: $(cat "/proc/$rpid/gid_map" 2>/dev/null || true)"
+      } > "$EVIDENCE_DIR/uid-map-fallback-capture.txt" 2>&1
+      break 2
+    done
+    sleep 0.005
   done
 ) &
 POLL_PID=$!
@@ -966,6 +995,21 @@ if [ -n "$OLD_NUID_CAPUSNS_AVC" ]; then
   printf '%s\n' "$OLD_NUID_CAPUSNS_AVC" > "$EVIDENCE_DIR/old-nuid-capusns-avc-p6.txt"
   fail "the former newuidmap self:cap_userns { sys_admin } denial still occurs (the evidenced helper-surface grant did not take effect)"
 fi
+# ... and the helper's OUT-OF-NAMESPACE capability denial at the same
+# uid_map write (run 36265505542 record 569: denied { setuid } capability=7
+# comm="newuidmap" scontext=newuidmap_t tcontext=newuidmap_t
+# tclass=capability) must be GONE with the granted
+# self:capability { setuid }. The scontext pins the HELPER subject (the
+# rootlesskit child carries no plain capability surface); the class token
+# is matched EXACTLY (not capability2 — a substring match would conflate
+# the two classes).
+OLD_NUID_SETUID_AVC="$(grep -a 'denied  { setuid }' "$EVIDENCE_DIR/builder-avc-p6.txt" \
+  | grep -a 'scontext=system_u:system_r:docker_helper_newuidmap_t' \
+  | grep -aE 'tclass=capability( |$)' || true)"
+if [ -n "$OLD_NUID_SETUID_AVC" ]; then
+  printf '%s\n' "$OLD_NUID_SETUID_AVC" > "$EVIDENCE_DIR/old-nuid-setuid-avc-p6.txt"
+  fail "the former newuidmap self:capability { setuid } denial still occurs (the evidenced helper-surface grant did not take effect)"
+fi
 # ... and the proc-dir { getattr } denial (the stat of the target process
 # directory /proc/<rootlesskit-pid>; run 36253390898 record 564) must be
 # GONE with the extended { read open getattr } grant.
@@ -1037,7 +1081,7 @@ else
     echo "=== daemon journal (P6 window) ==="; tail -20 "$EVIDENCE_DIR/daemon-journal-p6.txt"
     echo "=== build attempt output ==="; tail -20 "$EVIDENCE_DIR/build-attempt-post-relabel.txt"
     echo "=== operation result ==="; cat "$EVIDENCE_DIR/build-finish-p6.txt"; } >&2
-  fail "the build advanced past the granted boundaries (rootlesskit { lock }, slirp4netns/newuidmap exec types, user_namespace { create }, cap_userns { sys_admin }, the newuidmap fifo write, proc-dir read/open/getattr/search, and passwd read/open surface) and stopped at the NEXT enforcing boundary (evidence: builder-avc-p6.txt, builder-journal-p6.txt, daemon-journal-p6.txt, child-output-p6.txt, nss-fallback-avc-p6.txt, newuidmap-uid-map-capture.txt, build-attempt-post-relabel.txt, build-finish-p6.txt)"
+  fail "the build advanced past the granted boundaries (rootlesskit { lock }, slirp4netns/newuidmap exec types, user_namespace { create }, cap_userns { sys_admin }, the out-of-namespace setuid capability, the newuidmap fifo write, proc-dir read/open/getattr/search, and passwd read/open surface) and stopped at the NEXT enforcing boundary (evidence: builder-avc-p6.txt, builder-journal-p6.txt, daemon-journal-p6.txt, child-output-p6.txt, nss-fallback-avc-p6.txt, newuidmap-uid-map-capture.txt, build-attempt-post-relabel.txt, build-finish-p6.txt)"
 fi
 say "P6 upgrade relabel OK (labels corrected by %posttrans; transport $P6_OP_ID)"
 else
