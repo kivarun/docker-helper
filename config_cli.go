@@ -141,7 +141,10 @@ Fields:
   operation_log_max_bytes
   trusted_ca_path
   trusted_ca_injection
-  http_address`,
+  http_address
+  tls_address
+  tls_cert_file
+  tls_key_file`,
 
 	Presentation: humanJSONPresentation(),
 
@@ -788,6 +791,9 @@ func configShowAll(stdout, stderr io.Writer, jsonOut bool) int {
 		"trusted_ca_path":         fc.TrustedCAPath,
 		"trusted_ca_injection":    ec.TrustedCAInjection,
 		"http_address":            ec.HTTPAddress,
+		"tls_address":             fc.TLSAddress,
+		"tls_cert_file":           fc.TLSCertFile,
+		"tls_key_file":            fc.TLSKeyFile,
 	}
 
 	if jsonOut {
@@ -828,6 +834,9 @@ func configShowAll(stdout, stderr io.Writer, jsonOut bool) int {
 		{"trusted_ca_path", fc.TrustedCAPath},
 		{"trusted_ca_injection", ec.TrustedCAInjection},
 		{"http_address", ec.HTTPAddress},
+		{"tls_address", fc.TLSAddress},
+		{"tls_cert_file", fc.TLSCertFile},
+		{"tls_key_file", fc.TLSKeyFile},
 	} {
 		fmt.Fprintf(stdout, "%s: %v\n", f.name, f.value)
 	}
@@ -998,6 +1007,12 @@ func configShowField(field string, stdout, stderr io.Writer, jsonOut bool) int {
 		return printField(fc.TrustedCAPath)
 	case "trusted_ca_injection":
 		return printField(ec.TrustedCAInjection)
+	case "tls_address":
+		return printField(fc.TLSAddress)
+	case "tls_cert_file":
+		return printField(fc.TLSCertFile)
+	case "tls_key_file":
+		return printField(fc.TLSKeyFile)
 	default:
 		fmt.Fprintf(stderr, "error: unknown field %q\n", field)
 		return 2
@@ -1080,6 +1095,10 @@ func configSet(field, value string, stdout, stderr io.Writer, jsonOut bool) int 
 		return 2
 	}
 
+	if spec, ok := lookupConfigField(field); ok && spec.configOnly {
+		fmt.Fprintln(stderr, "error: external TLS fields must be edited together in config.json; restart required")
+		return 2
+	}
 	if isReadOnlyField(field) {
 		fmt.Fprintf(stderr, "error: field %q is read-only\n", field)
 		return 2
@@ -1200,6 +1219,10 @@ func configUnset(field string, stdout, stderr io.Writer, jsonOut bool) int {
 	if field == "allowed_root" {
 		fmt.Fprintln(stderr, "error: allowed_root is legacy and cannot be unset directly")
 		fmt.Fprintln(stderr, "use: docker-helper config allowed-root remove PATH")
+		return 2
+	}
+	if spec, ok := lookupConfigField(field); ok && spec.configOnly {
+		fmt.Fprintln(stderr, "error: external TLS fields must be edited together in config.json; restart required")
 		return 2
 	}
 	if isReadOnlyField(field) {
