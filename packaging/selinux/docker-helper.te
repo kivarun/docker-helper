@@ -117,6 +117,7 @@ module docker_helper 1.1;
 		class capability { dac_read_search dac_override sys_admin fowner };
 		class capability2 { wake_alarm kill };
 		class user_namespace { create };
+		class cap_userns { sys_admin };
 		class process { transition siginh noatsecure rlimitinh sigkill };
 		class process2 { nnp_transition };
 	}
@@ -908,6 +909,19 @@ allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:fifo_file { write 
 # manager grant, no extra capabilities (cap_userns / self:capability stay
 # ungranted), no in-userns surface — those are separate boundaries.
 allow docker_helper_rootlesskit_t self:user_namespace create;
+
+# The child's in-namespace capability system call after the userns is
+# created: the same rootlesskit flow re-executes its binary inside the new
+# userns, which requires the in-namespace sys_admin bit for the
+# namespace-entry operations. Live enforcing AVC evidence (P5-S1 Tumbleweed
+# run 36225231523 P6 window: denied { sys_admin } capability=21
+# comm="rootlesskit" scontext=system_u:system_r:docker_helper_rootlesskit_t:s0
+# tcontext=system_u:system_r:docker_helper_rootlesskit_t:s0
+# tclass=cap_userns permissive=0). Exactly ONE cap_userns grant: the
+# child's sys_admin in its OWN namespace. No plain self:capability grant is
+# added (the out-of-namespace system capability set stays ungranted), and
+# the manager and slirp4netns domains get no cap_userns rights at all.
+allow docker_helper_rootlesskit_t self:cap_userns sys_admin;
 
 # Daemon transport to the builder manager (P5-S1 item 4): the daemon
 # dials manager.sock and the per-op buildkitd sockets, and nothing
