@@ -643,6 +643,10 @@ apply_selinux_restorecon() {
 	# slirp4netns: the launch vehicle's user-network helper; the dedicated
 	# exec type is executable only from the rootlesskit child domain.
 	"$RESTORECON" /usr/bin/slirp4netns 2>/dev/null || true
+	# newuidmap: the launch vehicle's setuid-root UID-map helper; the
+	# dedicated exec type is executable only from the rootlesskit child
+	# domain.
+	"$RESTORECON" /usr/bin/newuidmap 2>/dev/null || true
 	"$RESTORECON" -R /run/docker-helper-builder 2>/dev/null || true
 	"$RESTORECON" -R /var/lib/docker-helper-builder 2>/dev/null || true
 	"$RESTORECON" -R /etc/docker-helper 2>/dev/null || true

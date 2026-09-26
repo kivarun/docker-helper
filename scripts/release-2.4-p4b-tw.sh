@@ -218,7 +218,7 @@ assert_selinux_module_loaded() {
 # path — the assert is self-consistent and never pinned to a specific type.
 assert_canonical_third_party_labels() {
   local phase="$1" bin_path actual canonical
-  for bin_path in /usr/bin/rootlesskit /usr/bin/bindfs /usr/bin/slirp4netns; do
+  for bin_path in /usr/bin/rootlesskit /usr/bin/bindfs /usr/bin/slirp4netns /usr/bin/newuidmap; do
     [ -e "$bin_path" ] || fail "$phase: third-party binary missing: $bin_path"
     actual="$(stat -c '%C' "$bin_path" 2>&1)" || fail "$phase: cannot stat $bin_path: $actual"
     canonical="$(matchpathcon "$bin_path" 2>/dev/null | awk '{print $2}')"
@@ -247,11 +247,17 @@ assert_payload
 assert_builder_unit_enabled
 assert_main_unit_coupling
 assert_selinux_module_loaded
-# The launch vehicle's user-network helper is installed by the dependency
-# resolution from the real repos (an RPM Requires of the candidate, shipped
-# by the distro, never by our payload): confirm the actual path the policy
-# and the proofs rely on.
-[ -x /usr/bin/slirp4netns ] || fail "the slirp4netns helper must exist at /usr/bin/slirp4netns after the RPM dependency resolution"
+# The launch vehicle's helpers are installed by the dependency resolution
+# from the real repos (RPM dependencies of the candidate, shipped by the
+# distro, never by our payload): confirm the actual paths the policy and the
+# proofs rely on, that the distro owns the binaries, and that the UID-map
+# helper keeps its setuid bit (its privilege model).
+for helper_path in /usr/bin/slirp4netns /usr/bin/newuidmap; do
+  [ -x "$helper_path" ] || fail "$helper_path must exist after the RPM dependency resolution"
+  rpm -qf "$helper_path" >/dev/null 2>&1 || fail "$helper_path must be owned by a real distro package"
+done
+[ "$(stat -c '%U:%G' /usr/bin/newuidmap)" = "root:root" ] || fail "newuidmap ownership must be root:root"
+test -u /usr/bin/newuidmap || fail "newuidmap must keep its setuid bit"
 
 # P4-B1.2 scriptlet-ordering proof: the docker_helper module load lives in
 # %posttrans, which rpm runs after ALL %post scriptlets of the transaction

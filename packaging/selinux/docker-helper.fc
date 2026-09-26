@@ -24,6 +24,9 @@
 # P5-S2: the launch vehicle's user-network helper (execution allowed only
 # from the rootlesskit child domain).
 /usr/bin/slirp4netns                --  system_u:object_r:docker_helper_slirp4netns_exec_t:s0
+# P5-S2: the launch vehicle's UID-map helper (setuid-root binary owned by
+# the distro; execution allowed only from the rootlesskit child domain).
+/usr/bin/newuidmap                  --  system_u:object_r:docker_helper_newuidmap_exec_t:s0
 /etc/docker-helper(/.*)?                system_u:object_r:docker_helper_config_t:s0
 /var/lib/docker-helper(/.*)?            system_u:object_r:docker_helper_state_t:s0
 /run/docker-helper(/.*)?                system_u:object_r:docker_helper_runtime_t:s0

@@ -635,6 +635,19 @@ type docker_helper_rootlesskit_exec_t, file_type;
 # rootlesskit).
 type docker_helper_slirp4netns_exec_t, file_type;
 
+# Dedicated exec type and domain for the distro newuidmap binary (P5-S2
+# step 7). RootlessKit launches newuidmap as its UID-mapping helper after
+# creating the user namespace; live enforcing AVC evidence (P5-S1
+# Tumbleweed run 36226290873 P6 window: denied { execute } comm="rootlesskit"
+# name="newuidmap" tcontext=bin_t tclass=file permissive=0) names
+# /usr/bin/newuidmap as the actual path; the P4 proof asserts the distro
+# owns the binary and its setuid bit is intact. A dedicated domain keeps
+# the transition confined to this binary; newuidmap's own privilege surface
+# (setuid capabilities, its file access) is the next deliberate boundary.
+type docker_helper_newuidmap_exec_t, file_type;
+type docker_helper_newuidmap_t, domain;
+role system_r types docker_helper_newuidmap_t;
+
 # Entrypoint: the builder unit execs the shared binary
 # (docker_helper_exec_t) under SELinuxContext=, so the builder domain
 # needs the same entrypoint shape the daemon domain has for its own
@@ -899,6 +912,30 @@ allow docker_helper_slirp4netns_t docker_helper_slirp4netns_exec_t:file { entryp
 # P6 window — the fd-check fstat runs before any write, so getattr is
 # required for the inherited fds to survive the exec at all).
 allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:fifo_file { write getattr };
+
+# --- docker_helper_newuidmap_t: the rootlesskit UID-map helper domain (P5-S2) ---
+#
+# RootlessKit forks and execs the distro newuidmap binary (a setuid-root
+# helper) as its UID-mapping step. The transition is pointed: the ONLY path
+# into this domain is the rootlesskit child's exec of the newuidmap entry
+# type. The helper gets NO capabilities, NO cap_userns, no Docker socket,
+# admin token, config/state/runtime, or Session workspace surface: its
+# privilege model (the setuid-root exec) is the next deliberate P5-S2
+# boundary. The source-side exec checks mirror the proven slirp4netns exec
+# shape (the same rootlesskit Go exec mechanics: the path-lookup execute,
+# the bprm open/read, the pre-exec getattr — the getattr live AVC was
+# proven for the sibling exec in run 36199764374). The entry rule carries
+# the transition-required entrypoint plus the loader access (the same
+# loader shape the helper domain's own entry rule carries, with the
+# target-side execute live-AVC-proven for the slirp4netns exec in run
+# 36222264024). NOTE: with the current enforcing policy the child stops at
+# the newuidmap exec, so the runtime transition is proven per-run only when
+# an actual AVC from the new domain or a /proc capture appears.
+type_transition docker_helper_rootlesskit_t docker_helper_newuidmap_exec_t:process docker_helper_newuidmap_t;
+allow docker_helper_rootlesskit_t docker_helper_newuidmap_t:process { transition };
+
+allow docker_helper_rootlesskit_t docker_helper_newuidmap_exec_t:file { execute read open getattr };
+allow docker_helper_newuidmap_t docker_helper_newuidmap_exec_t:file { entrypoint read open execute getattr map };
 
 # The child's user-namespace creation itself: rootlesskit creates the userns
 # that hosts the buildkitd instance. Live enforcing AVC evidence (P5-S1

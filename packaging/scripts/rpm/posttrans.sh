@@ -63,6 +63,11 @@ if command -v restorecon >/dev/null 2>&1; then
   # docker_helper_slirp4netns_exec_t file context so the rootlesskit child
   # domain can exec it (and only the rootlesskit child domain can).
   restorecon /usr/bin/slirp4netns 2>/dev/null || true
+  # newuidmap is a distro dependency of the launch vehicle (the setuid-root
+  # UID-map helper); apply the shipped docker_helper_newuidmap_exec_t file
+  # context so the rootlesskit child's exec transitions into its dedicated
+  # domain (and only that child can exec it).
+  restorecon /usr/bin/newuidmap 2>/dev/null || true
   restorecon -R /etc/docker-helper 2>/dev/null || true
   restorecon -R /var/lib/docker-helper 2>/dev/null || true
   # Relabel only the helper-owned /run/docker-helper dir itself to
