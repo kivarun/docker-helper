@@ -566,7 +566,7 @@ var newuidmapDomainSurface = []string{
 	"allow docker_helper_newuidmap_t docker_helper_newuidmap_exec_t:file { entrypoint read open execute getattr map };",
 	"allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:fifo_file { write };",
 	"allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read open };",
-	"allow docker_helper_newuidmap_t passwd_file_t:file { read };",
+	"allow docker_helper_newuidmap_t passwd_file_t:file { read open };",
 }
 
 // newuidmapDomainPolicyViolations scans the module's parsed rules against
@@ -619,12 +619,13 @@ func newuidmapDomainPolicyViolations(policy string) []string {
 // (fifo_file { write } on the inherited inst.diag pipe toward the
 // rootlesskit child; dir { read open } on the /proc/<rootlesskit-pid>
 // target of the uid_map write — the O_DIRECTORY open proven by run
-// 36248541393; passwd_file_t:file { read } for the getpwuid caller lookup,
-// proven by run 36250310697) beside the entry rule — and nothing else.
-// Mutation tests prove each guard fires: a widened passwd grant, an extra
-// passwd permission, a widened dir grant, a regressed dir grant, any extra
-// dir permission, and any capability, capability2, or cap_userns grant for
-// the helper domain must trip the exact-surface invariant.
+// 36248541393; passwd_file_t:file { read open } for the getpwuid caller
+// lookup — the open(2) proven by run 36251483787) beside the entry rule —
+// and nothing else. Mutation tests prove each guard fires: a widened
+// passwd grant, an extra passwd permission, a regressed passwd grant, a
+// widened dir grant, a regressed dir grant, any extra dir permission, and
+// any capability, capability2, or cap_userns grant for the helper domain
+// must trip the exact-surface invariant.
 func TestSELinuxPolicyNewuidmapDomainSurface(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
 	if violations := newuidmapDomainPolicyViolations(policy); len(violations) > 0 {
@@ -640,8 +641,9 @@ func TestSELinuxPolicyNewuidmapDomainSurface(t *testing.T) {
 		rule        string
 		wantTripped string
 	}{
-		{"widened passwd grant", "allow docker_helper_newuidmap_t passwd_file_t:file { read open };", "unexpected rule"},
+		{"widened passwd grant", "allow docker_helper_newuidmap_t passwd_file_t:file { read open getattr };", "unexpected rule"},
 		{"extra passwd getattr grant", "allow docker_helper_newuidmap_t passwd_file_t:file { read getattr };", "unexpected rule"},
+		{"regressed passwd open grant", "allow docker_helper_newuidmap_t passwd_file_t:file { read };", "unexpected rule"},
 		{"widened fifo grant", "allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:fifo_file { write append };", "unexpected rule"},
 		{"widened proc-dir grant", "allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read open write };", "unexpected rule"},
 		{"extra proc-dir getattr grant", "allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read open getattr };", "unexpected rule"},
