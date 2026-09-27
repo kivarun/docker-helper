@@ -711,7 +711,10 @@ watch_stage_child_maps() {
       case "$ctx" in *docker_helper_rootlesskit_t*) ;; *) continue ;; esac
       cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
       case "$cmd" in *"$tag"*) ;; *) continue ;; esac
-      case "$cmd" in *map_probe*) continue ;; esac
+      # The flow's processes (parent and re-exec'd child) carry the probe
+      # payload in their argv but NOT as the command name; the standalone
+      # probe vehicles are exactly the ones whose FIRST token is map_probe.
+      case "${cmd%% *}" in *map_probe*) continue ;; esac
       ppid="$(awk '/^PPid:/{print $2}' "/proc/$pid/status" 2>/dev/null || true)"
       [ -r "/proc/$ppid/attr/current" ] || continue
       pctx="$(cat "/proc/$ppid/attr/current" 2>/dev/null || true)"
