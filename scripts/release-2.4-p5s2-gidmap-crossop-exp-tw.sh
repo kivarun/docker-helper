@@ -472,7 +472,8 @@ int main(int argc, char **argv) {
   }
   if (strcmp(argv[1], "--workload-sub") == 0) {
     if (argc < 6) return 2;
-    m = (uid_t)strtoul(argv[4], NULL, 10);
+    /* arg layout: --workload-sub <gofifo> <helper> <target-pid> <mapped-uid> <ranges...> */
+    m = (uid_t)strtoul(argv[5], NULL, 10);
     print_facts("workload-sub-pre");
     wait_go(argv[2]);
     if (setresgid(m, m, m) != 0) {
@@ -487,8 +488,8 @@ int main(int argc, char **argv) {
     }
     print_facts("workload-sub-post");
     k = 0;
-    nargv[k++] = argv[3];
-    nargv[k++] = argv[5];
+    nargv[k++] = argv[3]; /* helper path */
+    nargv[k++] = argv[4]; /* target pid */
     for (i = 6; i < argc && k < 62; i++) nargv[k++] = argv[i];
     nargv[k] = NULL;
     return fork_exec_capture(nargv);
