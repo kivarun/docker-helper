@@ -97,7 +97,8 @@ cleanup() {
     clear_permissive "$d"
   done
   semodule -r docker_helper_gidmap_write_diag >/dev/null 2>&1 || true
-  semodule -r docker_helper_map_probe_diag >/dev/null 2>&1 || true
+  semodule -r gidmap_write_diag >/dev/null 2>&1 || true
+  semodule -r gidmap_probe_diag >/dev/null 2>&1 || true
   semodule -r docker_helper_uidmap_diag >/dev/null 2>&1 || true
   semodule -r docker_helper >/dev/null 2>&1 || true
 }
@@ -258,21 +259,29 @@ fi
 # toward docker_helper_rootlesskit_t is deliberately NOT here — it is the
 # HYPOTHESIZED grant and loads as a separate module below.
 PROBE_LABEL="$(stat -c '%C' "$DIAG_BASE/probe/map-probe" 2>/dev/null || true)"
-PROBE_T="${PROBE_LABEL##*:}"; PROBE_T="${PROBE_T%%:*}"
+PROBE_T="$(printf '%s' "$PROBE_LABEL" | cut -d: -f3)"
 RUNNER_LABEL="$(stat -c '%C' "$EVIDENCE_DIR/d-map-probe-vehicle.txt" 2>/dev/null || true)"
-OUT_T="${RUNNER_LABEL##*:}"; OUT_T="${OUT_T%%:*}"
+OUT_T="$(printf '%s' "$RUNNER_LABEL" | cut -d: -f3)"
+case "${PROBE_T:-x}" in ''|*[!A-Za-z0-9_]*|x) note "the probe file type could not be observed (label: $PROBE_LABEL)"; exit 1 ;; esac
+case "${OUT_T:-x}" in ''|*[!A-Za-z0-9_]*|x) note "the evidence-file type could not be observed (label: $RUNNER_LABEL)"; exit 1 ;; esac
 {
   echo "=== observed types for the generated module ==="
   echo "probe file type: $PROBE_T (from: $PROBE_LABEL)"
   echo "evidence-file type: $OUT_T (from: $RUNNER_LABEL)"
 } >> "$EVIDENCE_DIR/d-map-probe-vehicle.txt"
-cat > /tmp/gidmap-probe-diag.te <<EOF
-module docker_helper_map_probe_diag 1.0;
+if [ "$PROBE_T" = "$OUT_T" ]; then
+  PROBE_REQUIRE_LINE="	type $PROBE_T;"
+  OUT_REQUIRE_LINE=""
+else
+  PROBE_REQUIRE_LINE="	type $PROBE_T;"
+  OUT_REQUIRE_LINE="	type $OUT_T;"
+fi
+cat > /tmp/gidmap_probe_diag.te <<EOF
+module gidmap_probe_diag 1.0;
 require {
 	type docker_helper_newgidmap_t;
 	type docker_helper_newuidmap_t;
-	type $PROBE_T;
-	type $OUT_T;
+$PROBE_REQUIRE_LINE$OUT_REQUIRE_LINE
 	class file { entrypoint append write };
 }
 allow docker_helper_newgidmap_t $PROBE_T:file entrypoint;
@@ -280,12 +289,12 @@ allow docker_helper_newuidmap_t $PROBE_T:file entrypoint;
 allow docker_helper_newgidmap_t $OUT_T:file { append write };
 allow docker_helper_newuidmap_t $OUT_T:file { append write };
 EOF
-cp /tmp/gidmap-probe-diag.te "$EVIDENCE_DIR/d-diag-modules.te"
-checkmodule -M -m -o /tmp/gidmap-probe-diag.tmp /tmp/gidmap-probe-diag.te 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
+cp /tmp/gidmap_probe_diag.te "$EVIDENCE_DIR/d-diag-modules.te"
+checkmodule -M -m -o /tmp/gidmap_probe_diag.tmp /tmp/gidmap_probe_diag.te 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
   || { note "the checker diag module failed to compile (see d-diag-modules.te)"; exit 1; }
-semodule_package -o /tmp/gidmap-probe-diag.pp -m /tmp/gidmap-probe-diag.tmp 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
+semodule_package -o /tmp/gidmap_probe_diag.pp -m /tmp/gidmap_probe_diag.tmp 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
   || { note "the checker diag module failed to package"; exit 1; }
-semodule -i /tmp/gidmap-probe-diag.pp 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
+semodule -i /tmp/gidmap_probe_diag.pp 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
   || { note "the checker diag module failed to load"; exit 1; }
 log "checker diag module loaded (entrypoint for the static probe in both map-helper domains)"
 
@@ -568,8 +577,8 @@ if [ "${#CHILDS[@]}" -ge 1 ]; then
   # exactly `allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:file { write };`.
   # The production module is never modified; the diag module is removed at
   # cleanup and never shipped.
-  cat > /tmp/gidmap-write-diag.te <<'EOF'
-module docker_helper_gidmap_write_diag 1.0;
+  cat > /tmp/gidmap_write_diag.te <<'EOF'
+module gidmap_write_diag 1.0;
 require {
 	type docker_helper_newgidmap_t;
 	type docker_helper_rootlesskit_t;
@@ -577,12 +586,12 @@ require {
 }
 allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:file { write };
 EOF
-  cat /tmp/gidmap-write-diag.te >> "$EVIDENCE_DIR/d-diag-modules.te"
-  checkmodule -M -m -o /tmp/gidmap-write-diag.tmp /tmp/gidmap-write-diag.te 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
+  cat /tmp/gidmap_write_diag.te >> "$EVIDENCE_DIR/d-diag-modules.te"
+  checkmodule -M -m -o /tmp/gidmap_write_diag.tmp /tmp/gidmap_write_diag.te 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
     || { note "the hypothesized-grant diag module failed to compile"; exit 1; }
-  semodule_package -o /tmp/gidmap-write-diag.pp -m /tmp/gidmap-write-diag.tmp 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
+  semodule_package -o /tmp/gidmap_write_diag.pp -m /tmp/gidmap_write_diag.tmp 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
     || { note "the hypothesized-grant diag module failed to package"; exit 1; }
-  semodule -i /tmp/gidmap-write-diag.pp 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
+  semodule -i /tmp/gidmap_write_diag.pp 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
     || { note "the hypothesized-grant diag module failed to load"; exit 1; }
   HYPO_EPOCH="$(date +%s)"
   {
