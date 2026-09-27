@@ -114,7 +114,30 @@ harvest_avcs_since() {
   } > "$out" 2>&1
 }
 
+# diagnose_stand_failure <tag> <since-epoch> <file>... : record the AVC
+# window and the probe outputs when the STAND itself fails (the kernel
+# verdict was not reached; the run stays distinguishable from an attempt
+# result — such results are undefined, not negative findings).
+diagnose_stand_failure() {
+  local tag="$1" since="$2"; shift 2
+  local out="$EVIDENCE_DIR/stand-failure-$tag.txt"
+  {
+    echo "=== stand failure: $tag (AVC window since epoch $since) ==="
+    echo "--- kernel AVC records ---"
+    grep -a 'type=AVC' /var/log/audit/audit.log 2>/dev/null \
+      | awk -v s="$since" '{ for (i = 1; i <= NF; i++) if ($i ~ /^msg=audit\(/) { ts = substr($i, 11); split(ts, t, "."); if (t[1] + 0 >= s + 0) print; break } }' \
+      | tail -200 || true
+    echo "--- journalctl -k window ---"
+    journalctl -k --since "@$since" --no-pager 2>/dev/null | grep -a 'avc:' | tail -200 || true
+    for f in "$@"; do
+      [ -f "$f" ] && { echo "--- $f ---"; cat "$f"; }
+    done
+  } > "$out" 2>&1
+  cat "$out" >&2
+}
+
 log 'A: toolchain + candidate module load (disposable VM only)'
+STAND_EPOCH_ALL="$(date +%s)"
 {
   echo "=== distro ==="
   grep PRETTY_NAME /etc/os-release 2>/dev/null || true
@@ -135,6 +158,7 @@ for t in checkmodule semodule_package semodule semanage restorecon gcc; do
 done
 if [ "$fail_toolchain" = 1 ]; then
   note "policy toolchain incomplete; the experiment cannot proceed"
+  diagnose_stand_failure toolchain "$STAND_EPOCH_ALL"
   printf '%s P5S2-GIDMAP-CROSSOP-EXP-RESULT=PASS-INCOMPLETE (toolchain unavailable; recorded as a finding)\n' "$PREFIX" >&2
   exit 0
 fi
@@ -169,14 +193,34 @@ useradd -m "$BUILDER_USER" 2>/dev/null || true
 grep -q "^$BUILDER_USER:" /etc/subuid || echo "$BUILDER_USER:$BUILDER_SUBUID_START:$BUILDER_SUBUID_COUNT" >> /etc/subuid
 grep -q "^$BUILDER_USER:" /etc/subgid || echo "$BUILDER_USER:$BUILDER_SUBUID_START:$BUILDER_SUBUID_COUNT" >> /etc/subgid
 BUILDER_UID="$(id -u "$BUILDER_USER")"
+# The flow's map arguments must be the ACTUAL provisioned subid ranges (a
+# fresh VM's useradd assigns the next free 65536 slot — the previous
+# hardcoded start sat outside it and would have failed the shadow range
+# validation as a stand artifact, not as a kernel verdict).
+BUILDER_SUBUID_START="$(awk -F: -v u="$BUILDER_USER" '$1==u{print $2; exit}' /etc/subuid)"
+BUILDER_SUBUID_COUNT="$(awk -F: -v u="$BUILDER_USER" '$1==u{print $3; exit}' /etc/subuid)"
+BUILDER_SUBGID_START="$(awk -F: -v u="$BUILDER_USER" '$1==u{print $2; exit}' /etc/subgid)"
+BUILDER_SUBGID_COUNT="$(awk -F: -v u="$BUILDER_USER" '$1==u{print $3; exit}' /etc/subgid)"
+case "${BUILDER_SUBUID_START:-x}:${BUILDER_SUBUID_COUNT:-x}:${BUILDER_SUBGID_START:-x}:${BUILDER_SUBGID_COUNT:-x}" in
+  *[!0-9:]*) note "the builder's subid ranges could not be read; the experiment cannot proceed"
+             diagnose_stand_failure subid-read "$STAND_EPOCH_ALL"
+             printf '%s P5S2-GIDMAP-CROSSOP-EXP-RESULT=PASS-INCOMPLETE (subid ranges unavailable; recorded as a finding)\n' "$PREFIX" >&2
+             exit 0 ;;
+esac
+[ "$BUILDER_SUBGID_START" = "$BUILDER_SUBUID_START" ] && [ "$BUILDER_SUBGID_COUNT" = "$BUILDER_SUBUID_COUNT" ] \
+  || note "the subuid and subgid ranges differ; the uid and gid map arguments are built from each range separately"
+# The flow's helper-argument shapes (rootlesskit parent's own two extents:
+# the own-id entry + the subid range).
+U_MAP_ARGS=(0 "$BUILDER_UID" 1 1 "$BUILDER_SUBUID_START" "$BUILDER_SUBUID_COUNT")
+G_MAP_ARGS=(0 "$BUILDER_UID" 1 1 "$BUILDER_SUBGID_START" "$BUILDER_SUBGID_COUNT")
 {
   echo "=== builder identity ==="
   id "$BUILDER_USER"
   echo "=== subids ==="
   grep "^$BUILDER_USER:" /etc/subuid /etc/subgid
-  echo "=== flow's map arguments (parent uid entry + subuid range) ==="
-  echo "uid entry: 0 $BUILDER_UID 1"
-  echo "subid range: 1 $BUILDER_SUBUID_START $BUILDER_SUBUID_COUNT"
+  echo "=== flow's map arguments (parent uid entry + subid range) ==="
+  echo "uid args: ${U_MAP_ARGS[*]}"
+  echo "gid args: ${G_MAP_ARGS[*]}"
 } >"$EVIDENCE_DIR/builder-identity.txt" 2>&1
 cat "$EVIDENCE_DIR/builder-identity.txt" >&2
 
@@ -188,6 +232,15 @@ mkfifo "$DIAG_BASE/fifos"/bfifo-s1 "$DIAG_BASE/fifos/bfifo-s2" \
        "$DIAG_BASE/fifos/bfifo-s3w2" \
        "$DIAG_BASE/fifos/gofifo-s3w1" "$DIAG_BASE/fifos/gofifo-s3w2"
 chmod 666 "$DIAG_BASE/fifos"/*
+# The per-stage rootlesskit state dirs are created up front: the module
+# generation observes their labels (same creation context as a later
+# mkdir) so rootlesskit's mandatory state-dir work (lock, cleanup lock,
+# child-pid file, the exit-time RemoveAll) is grantable before the flow
+# starts.
+mkdir -p "$DIAG_BASE/s1/a1-state" "$DIAG_BASE/s2/a1-state" \
+         "$DIAG_BASE/s3/a1-state" "$DIAG_BASE/s3/a2-state"
+chown "$BUILDER_USER:$BUILDER_USER" "$DIAG_BASE/s1/a1-state" "$DIAG_BASE/s2/a1-state" \
+      "$DIAG_BASE/s3/a1-state" "$DIAG_BASE/s3/a2-state"
 FIFO_LABEL="$(stat -c '%C' "$DIAG_BASE/fifos/bfifo-s1" 2>/dev/null || true)"
 FIFO_T="$(printf '%s' "$FIFO_LABEL" | cut -d: -f3)"
 RUNNER_CTX="$(cat /proc/self/attr/current 2>/dev/null || true)"
@@ -200,13 +253,31 @@ case "${RUNNER_T:-x}" in ''|*[!A-Za-z0-9_]*|x) note "the runner domain could not
 case "${OUT_T:-x}" in ''|*[!A-Za-z0-9_]*|x) note "the evidence-file type could not be observed (label: $OUT_LABEL)"; exit 1 ;; esac
 case "${BINDIR_T:-x}" in ''|*[!A-Za-z0-9_]*|x) note "the /usr/local/bin directory type could not be observed (label: $BINDIR_T_LABEL)"; exit 1 ;; esac
 case "${FIFO_T:-x}" in ''|*[!A-Za-z0-9_]*|x) note "the fifo type could not be observed (label: $FIFO_LABEL)"; exit 1 ;; esac
+# The DISTINCT dir types along the stand's walk paths: the probe's fifo
+# opens and rootlesskit's state-dir work each traverse these directories
+# (an ungranted dir search short-circuits the open with EACCES BEFORE any
+# fifo/file-class check — the stand failure observed in the previous run).
+WALK_DIRS=(/tmp "$DIAG_BASE" "$DIAG_BASE/fifos" \
+           "$DIAG_BASE/s1" "$DIAG_BASE/s1/a1-state" "$DIAG_BASE/s2" "$DIAG_BASE/s2/a1-state" \
+           "$DIAG_BASE/s3" "$DIAG_BASE/s3/a1-state" "$DIAG_BASE/s3/a2-state")
+DIR_TYPE_LIST=""
+STATE_TYPE_LIST=""
+for d in "${WALK_DIRS[@]}"; do
+  t="$(stat -c '%C' "$d" 2>/dev/null | cut -d: -f3)"
+  case "${t:-x}" in ''|*[!A-Za-z0-9_]*|x) note "a stand walk-dir type could not be observed ($d: $(stat -c '%C' "$d" 2>&1))"; exit 1 ;; esac
+  case " $DIR_TYPE_LIST " in *" $t "*) ;; *) DIR_TYPE_LIST="$DIR_TYPE_LIST $t" ;; esac
+  case "$d" in *-state) case " $STATE_TYPE_LIST " in *" $t "*) ;; *) STATE_TYPE_LIST="$STATE_TYPE_LIST $t" ;; esac ;; esac
+done
 {
   echo "=== observed stand labels ==="
   echo "runner context: $RUNNER_CTX (type $RUNNER_T)"
   echo "evidence-file type: $OUT_T (from: $OUT_LABEL)"
   echo "/usr/local/bin dir: $BINDIR_T_LABEL (type $BINDIR_T)"
   echo "fifo: $FIFO_LABEL (type $FIFO_T)"
+  echo "walk-dir types (dedup):$DIR_TYPE_LIST"
+  echo "state-dir types (dedup):$STATE_TYPE_LIST"
 } > "$EVIDENCE_DIR/b-stand-labels.txt" 2>&1
+cat "$EVIDENCE_DIR/b-stand-labels.txt" >&2
 
 # The STATIC probe vehicle: no /proc/<target> writes exist in its source;
 # it reports identity facts (syscalls + own attr/current + ns/user
@@ -376,32 +447,50 @@ int main(int argc, char **argv) {
   return 2;
 }
 EOF
+DIR_RULES=""
+STATE_RULES=""
+REQ_TYPES=" $OUT_T $RUNNER_T $BINDIR_T $FIFO_T $DIR_TYPE_LIST"
+for t in $STATE_TYPE_LIST; do
+  case " $REQ_TYPES " in *" $t "*) ;; *) REQ_TYPES="$REQ_TYPES $t" ;; esac
+done
+for t in $DIR_TYPE_LIST; do
+  DIR_RULES+="	allow docker_helper_rootlesskit_t $t:dir { search getattr };
+"
+done
+for t in $STATE_TYPE_LIST; do
+  STATE_RULES+="	allow docker_helper_rootlesskit_t $t:dir { search getattr read open write add_name remove_name rmdir lock };
+	allow docker_helper_rootlesskit_t $t:file { create open read write getattr setattr lock unlink append };
+"
+done
+REQ_TYPE_LINES=""
+for t in $REQ_TYPES; do
+  REQ_TYPE_LINES+="	type $t;
+"
+done
 cat > /tmp/gidmap_probe_diag.te <<EOF
 module gidmap_probe_diag 1.0;
 require {
 	type docker_helper_newgidmap_t;
 	type docker_helper_newuidmap_t;
 	type docker_helper_rootlesskit_t;
-	type $OUT_T;
-	type $RUNNER_T;
-	type $BINDIR_T;
-	type $FIFO_T;
-	attribute file_type;
-	class file { entrypoint read open execute getattr map append write create setattr relabelto relabelfrom };
+$REQ_TYPE_LINES	attribute file_type;
+	class file { entrypoint read open execute execute_no_trans getattr map append write create setattr relabelto relabelfrom unlink lock };
 	class fifo_file { read write open getattr };
+	class dir { search getattr read open write add_name remove_name rmdir lock };
 	class process { transition siginh };
 }
 type gidmap_probe_exec_t;
 typeattribute gidmap_probe_exec_t file_type;
 allow docker_helper_newgidmap_t gidmap_probe_exec_t:file { entrypoint read open execute getattr map };
 allow docker_helper_newuidmap_t gidmap_probe_exec_t:file { entrypoint read open execute getattr map };
-allow docker_helper_rootlesskit_t gidmap_probe_exec_t:file { entrypoint read open execute getattr map };
+allow docker_helper_rootlesskit_t gidmap_probe_exec_t:file { entrypoint read open execute execute_no_trans getattr map };
 allow docker_helper_newgidmap_t $OUT_T:file { append write };
 allow docker_helper_newuidmap_t $OUT_T:file { append write };
-allow $RUNNER_T gidmap_probe_exec_t:file { create open write append setattr relabelto };
-allow $RUNNER_T docker_helper_rootlesskit_t:process { transition siginh };
+allow unconfined_t gidmap_probe_exec_t:file { create open write append setattr relabelto };
+allow unconfined_t docker_helper_rootlesskit_t:process { transition siginh };
 allow docker_helper_rootlesskit_t $FIFO_T:fifo_file { read write open getattr };
 allow docker_helper_rootlesskit_t docker_helper_rootlesskit_t:file { read open getattr };
+$DIR_RULES$STATE_RULES
 type_transition $RUNNER_T $BINDIR_T:file gidmap_probe_exec_t "map_probe";
 EOF
 cp /tmp/gidmap_probe_diag.te "$EVIDENCE_DIR/diag-probe-module.te"
@@ -421,6 +510,7 @@ log "probe diag module loaded"
 if [ ! -x /usr/local/bin/map_probe ] \
   || ! stat -c '%C' /usr/local/bin/map_probe 2>/dev/null | grep -q 'gidmap_probe_exec_t'; then
   note "the static probe binary could not be built or is mislabeled; the experiment cannot proceed"
+  diagnose_stand_failure probe-vehicle "$STAND_EPOCH_ALL" "$EVIDENCE_DIR/b-probe-vehicle.txt"
   printf '%s P5S2-GIDMAP-CROSSOP-EXP-RESULT=PASS-INCOMPLETE (probe vehicle unavailable; recorded as a finding)\n' "$PREFIX" >&2
   exit 0
 fi
@@ -456,7 +546,7 @@ set_target_uidmap() {
   set +e
   runuser -u "$BUILDER_USER" -- \
     runcon "$RK_EXEC_T" /usr/local/bin/map_probe --invoke-helper /usr/bin/newuidmap \
-    "$bpid" 0 "$BUILDER_UID" 1 1 "$BUILDER_SUBUID_START" "$BUILDER_SUBUID_COUNT"
+    "$bpid" "${U_MAP_ARGS[@]}"
   rc=$?
   set -e
   [ "$rc" = 0 ] || return 1
@@ -560,14 +650,14 @@ parent_role_attempt() {
     echo "invoker domain: $RK_EXEC_T (privilege shape: builder uid/gid, no kernel caps)"
     echo "target child B: pid=$bpid"
     echo "gid_map before: [$(cat "/proc/$bpid/gid_map" 2>/dev/null || true)]"
-    echo "invocation args: newgidmap $bpid 0 $BUILDER_UID 1 1 $BUILDER_SUBUID_START $BUILDER_SUBUID_COUNT"
+    echo "invocation args: newgidmap $bpid ${G_MAP_ARGS[*]}"
   } > "$out"
   harvest_helper_facts 12 "$EVIDENCE_DIR/tmp-helper-facts.txt" &
   HELPER_FACTS_PID=$!
   set +e
   runuser -u "$BUILDER_USER" -- \
     runcon "$RK_EXEC_T" /usr/local/bin/map_probe --invoke-helper /usr/bin/newgidmap \
-    "$bpid" 0 "$BUILDER_UID" 1 1 "$BUILDER_SUBUID_START" "$BUILDER_SUBUID_COUNT" \
+    "$bpid" "${G_MAP_ARGS[@]}" \
     >>"$out" 2>&1
   rc=$?
   set -e
@@ -587,10 +677,11 @@ parent_role_attempt() {
 RK_PIDS=()
 
 log 'C: stage 1 — CONTROL (production surface only, no capabilities granted)'
+S1_EPOCH="$(date +%s)"
 B_S1="$(make_target_b "$DIAG_BASE/fifos/bfifo-s1" || true)"
 if [ -z "${B_S1:-}" ]; then
   note "stage 1: the target child B could not be created (see b-target.out)"
-  cat "$DIAG_BASE/b-target.out" >&2 || true
+  diagnose_stand_failure s1-target "$S1_EPOCH" "$DIAG_BASE/b-target.out"
   printf '%s P5S2-GIDMAP-CROSSOP-EXP-RESULT=PASS-INCOMPLETE (target stand unavailable; recorded as a finding)\n' "$PREFIX" >&2
   exit 0
 fi
@@ -600,6 +691,7 @@ collect_b_facts "$B_S1" "$EVIDENCE_DIR/c1-b-facts.txt" "stage 1"
 } > "$EVIDENCE_DIR/c1-b-uidmap.txt" 2>&1
 if ! set_target_uidmap "$B_S1" >>"$EVIDENCE_DIR/c1-b-uidmap.txt" 2>&1; then
   note "stage 1: B's uid_map could not be set; the stage is recorded as a stand finding"
+  diagnose_stand_failure s1-uidmap "$S1_EPOCH" "$EVIDENCE_DIR/c1-b-uidmap.txt"
   printf '%s P5S2-GIDMAP-CROSSOP-EXP-RESULT=PASS-INCOMPLETE (target uid_map unavailable; recorded as a finding)\n' "$PREFIX" >&2
   exit 0
 fi
@@ -613,14 +705,12 @@ collect_b_facts "$B_S1" "$EVIDENCE_DIR/c1-b-facts-post-uidmap.txt" "stage 1 afte
   echo "=== stage 1 control: real rootlesskit flow, own-child mapping (the payload cannot start while the gid step fails) ==="
   echo "command: runuser -u $BUILDER_USER -- runcon $RK_EXEC_T /usr/bin/rootlesskit --net=none --state-dir=$DIAG_BASE/s1/a1-state map_probe --workload-root ..."
 } > "$EVIDENCE_DIR/c1-control-a.txt"
-mkdir -p "$DIAG_BASE/s1/a1-state"
-chown "$BUILDER_USER:$BUILDER_USER" "$DIAG_BASE/s1/a1-state"
 C1_EPOCH="$(date +%s)"
 runuser -u "$BUILDER_USER" -- \
   runcon "$RK_EXEC_T" /usr/bin/rootlesskit --net=none \
   --state-dir="$DIAG_BASE/s1/a1-state" \
   /usr/local/bin/map_probe --workload-root "$DIAG_BASE/fifos/gofifo-s3w1" \
-  /usr/bin/newgidmap 0 0 1 1 "$BUILDER_SUBUID_START" "$BUILDER_SUBUID_COUNT" \
+  /usr/bin/newgidmap 0 "${G_MAP_ARGS[@]}" \
   >>"$EVIDENCE_DIR/c1-control-a.txt" 2>&1 &
 RK_PIDS+=($!)
 watch_stage_child_maps "s1/a1-state" "$EVIDENCE_DIR/c1-control-child-maps.txt" || \
@@ -646,20 +736,19 @@ log 'D: stage 2 — guest-only newgidmap_t self:cap_userns sys_admin'
 if [ "${STAGE1_CONFIRMED:-0}" = 1 ]; then
   load_stage_module gidmap_capuserns_diag cap_userns sys_admin
   log "stage 2 module loaded (newgidmap_t self:cap_userns sys_admin; guest-only, removed at cleanup)"
+  S2_EPOCH="$(date +%s)"
   B_S2="$(make_target_b "$DIAG_BASE/fifos/bfifo-s2" || true)"
   if [ -n "${B_S2:-}" ] && set_target_uidmap "$B_S2" >>"$EVIDENCE_DIR/c2-b-uidmap.txt" 2>&1; then
     collect_b_facts "$B_S2" "$EVIDENCE_DIR/c2-b-facts.txt" "stage 2"
     {
       echo "=== stage 2 control: real rootlesskit flow, own-child mapping ==="
     } > "$EVIDENCE_DIR/c2-control-a.txt"
-    mkdir -p "$DIAG_BASE/s2/a1-state"
-    chown "$BUILDER_USER:$BUILDER_USER" "$DIAG_BASE/s2/a1-state"
     C2_EPOCH="$(date +%s)"
     runuser -u "$BUILDER_USER" -- \
       runcon "$RK_EXEC_T" /usr/bin/rootlesskit --net=none \
       --state-dir="$DIAG_BASE/s2/a1-state" \
       /usr/local/bin/map_probe --workload-root "$DIAG_BASE/fifos/gofifo-s3w1" \
-      /usr/bin/newgidmap 0 0 1 1 "$BUILDER_SUBUID_START" "$BUILDER_SUBUID_COUNT" \
+      /usr/bin/newgidmap 0 "${G_MAP_ARGS[@]}" \
       >>"$EVIDENCE_DIR/c2-control-a.txt" 2>&1 &
     RK_PIDS+=($!)
     watch_stage_child_maps "s2/a1-state" "$EVIDENCE_DIR/c2-control-child-maps.txt" || \
@@ -681,6 +770,7 @@ if [ "${STAGE1_CONFIRMED:-0}" = 1 ]; then
     fi
   else
     note "stage 2: the fresh target child B could not be prepared; stage 3 skipped (recorded as a finding)"
+    diagnose_stand_failure s2-target "$S2_EPOCH" "$DIAG_BASE/b-target.out" "$EVIDENCE_DIR/c2-b-uidmap.txt"
     STAGE2_CONFIRMED=0
   fi
 else
@@ -688,6 +778,7 @@ else
 fi
 
 log 'E: stage 3 — additionally guest-only newgidmap_t self:capability setgid'
+S3_EPOCH="$(date +%s)"
 if [ "${STAGE2_CONFIRMED:-0}" = 1 ]; then
   load_stage_module gidmap_capsetgid_diag capability setgid
   log "stage 3 module loaded (newgidmap_t self:capability setgid on top of stage 2; guest-only, removed at cleanup)"
@@ -705,6 +796,7 @@ if [ "${STAGE2_CONFIRMED:-0}" = 1 ]; then
     fi
   else
     note "stage 3: the parent attempt's fresh target child B could not be prepared (recorded as a finding)"
+    diagnose_stand_failure s3-parent-target "$S3_EPOCH" "$DIAG_BASE/b-target.out" "$EVIDENCE_DIR/c3-b-uidmap.txt"
   fi
 
   # (3b) POSITIVE CONTROL at stage 3 + WORKLOAD-ROOT attempt: the real
@@ -716,16 +808,14 @@ if [ "${STAGE2_CONFIRMED:-0}" = 1 ]; then
     collect_b_facts "$B_S3W1" "$EVIDENCE_DIR/c3-workload-root-b-facts.txt" "stage 3 workload-root"
     {
       echo "=== stage 3 control + WORKLOAD-ROOT attempt: real rootlesskit flow; payload = mapped-root probe ==="
-      echo "payload: map_probe --workload-root <gofifo> /usr/bin/newgidmap $B_S3W1 0 $BUILDER_UID 1 1 $BUILDER_SUBUID_START $BUILDER_SUBUID_COUNT"
+      echo "payload: map_probe --workload-root <gofifo> /usr/bin/newgidmap $B_S3W1 ${G_MAP_ARGS[*]}"
     } > "$EVIDENCE_DIR/c3-workload-root.txt"
-    mkdir -p "$DIAG_BASE/s3/a1-state"
-    chown "$BUILDER_USER:$BUILDER_USER" "$DIAG_BASE/s3/a1-state"
     W3_EPOCH="$(date +%s)"
     runuser -u "$BUILDER_USER" -- \
       runcon "$RK_EXEC_T" /usr/bin/rootlesskit --net=none \
       --state-dir="$DIAG_BASE/s3/a1-state" \
       /usr/local/bin/map_probe --workload-root "$DIAG_BASE/fifos/gofifo-s3w1" \
-      /usr/bin/newgidmap "$B_S3W1" 0 "$BUILDER_UID" 1 1 "$BUILDER_SUBUID_START" "$BUILDER_SUBUID_COUNT" \
+      /usr/bin/newgidmap "$B_S3W1" "${G_MAP_ARGS[@]}" \
       >>"$EVIDENCE_DIR/c3-workload-root.txt" 2>&1 &
     RK_PIDS+=($!)
     watch_stage_child_maps "s3/a1-state" "$EVIDENCE_DIR/c3-control-child-maps.txt" || \
@@ -744,27 +834,31 @@ if [ "${STAGE2_CONFIRMED:-0}" = 1 ]; then
     cat "$EVIDENCE_DIR/c3-workload-root.txt" >&2
   else
     note "stage 3: the workload-root target child B could not be prepared (recorded as a finding)"
+    diagnose_stand_failure s3-workload-root-target "$S3_EPOCH" "$DIAG_BASE/b-target.out" "$EVIDENCE_DIR/c3-b-uidmap.txt"
   fi
 
   # (3c) WORKLOAD-SUB attempt: the payload drops to the mapped builder
-  # uid (the only workload shape whose getpwuid(getuid()) resolves to the
-  # target's owner, so the shadow-helper checks pass and the KERNEL
-  # verdict is reachable) against a fresh B.
+  # uid inside operation A's namespace (A-uid $BUILDER_UID is within the
+  # flow's 1..count subid extent, so getuid()/getgid() resolve the
+  # builder's passwd entry and the subgid range check could pass) against
+  # a fresh B. The shadow-helper's target-ownership comparison is a
+  # CALLER-VIEW check (st_uid of the target's /proc dir mapped through
+  # the caller's usern — 0 from inside A, not 1001), so the evidence
+  # decides whether the mapped-builder shape reaches the kernel verdict
+  # at all.
   B_S3W2="$(make_target_b "$DIAG_BASE/fifos/bfifo-s3w2" || true)"
   if [ -n "${B_S3W2:-}" ] && set_target_uidmap "$B_S3W2" >>"$EVIDENCE_DIR/c3-b-uidmap.txt" 2>&1; then
     collect_b_facts "$B_S3W2" "$EVIDENCE_DIR/c3-workload-sub-b-facts.txt" "stage 3 workload-sub"
     {
       echo "=== stage 3 WORKLOAD-SUB attempt: real rootlesskit flow; payload drops to the mapped builder uid ==="
-      echo "payload: map_probe --workload-sub <gofifo> /usr/bin/newgidmap $B_S3W2 $BUILDER_UID 0 $BUILDER_UID 1 1 $BUILDER_SUBUID_START $BUILDER_SUBUID_COUNT"
+      echo "payload: map_probe --workload-sub <gofifo> /usr/bin/newgidmap $B_S3W2 $BUILDER_UID ${G_MAP_ARGS[*]}"
     } > "$EVIDENCE_DIR/c3-workload-sub.txt"
-    mkdir -p "$DIAG_BASE/s3/a2-state"
-    chown "$BUILDER_USER:$BUILDER_USER" "$DIAG_BASE/s3/a2-state"
     W3S_EPOCH="$(date +%s)"
     runuser -u "$BUILDER_USER" -- \
       runcon "$RK_EXEC_T" /usr/bin/rootlesskit --net=none \
       --state-dir="$DIAG_BASE/s3/a2-state" \
       /usr/local/bin/map_probe --workload-sub "$DIAG_BASE/fifos/gofifo-s3w2" \
-      /usr/bin/newgidmap "$B_S3W2" "$BUILDER_UID" 0 "$BUILDER_UID" 1 1 "$BUILDER_SUBUID_START" "$BUILDER_SUBUID_COUNT" \
+      /usr/bin/newgidmap "$B_S3W2" "$BUILDER_UID" "${G_MAP_ARGS[@]}" \
       >>"$EVIDENCE_DIR/c3-workload-sub.txt" 2>&1 &
     RK_PIDS+=($!)
     set +e
@@ -781,6 +875,7 @@ if [ "${STAGE2_CONFIRMED:-0}" = 1 ]; then
     cat "$EVIDENCE_DIR/c3-workload-sub.txt" >&2
   else
     note "stage 3: the workload-sub target child B could not be prepared (recorded as a finding)"
+    diagnose_stand_failure s3-workload-sub-target "$S3_EPOCH" "$DIAG_BASE/b-target.out" "$EVIDENCE_DIR/c3-b-uidmap.txt"
   fi
 else
   note "stage 3 skipped (the stage 2 boundary was not confirmed; recorded as a finding)"
@@ -803,6 +898,15 @@ sleep 2
   echo "=== journalctl -k window (newgidmap only) ==="
   journalctl -k --since "@$AVC_EPOCH_ALL" --no-pager 2>/dev/null | grep -a 'avc:' | grep -a 'newgidmap' | tail -100 || true
 } > "$EVIDENCE_DIR/f-newgidmap-avcs-all.txt" 2>&1
+{
+  echo "=== kernel AVC records of the whole experiment window (ALL docker-helper domains; unfiltered) ==="
+  grep -a 'type=AVC' /var/log/audit/audit.log 2>/dev/null \
+    | awk -v s="$AVC_EPOCH_ALL" '{ for (i = 1; i <= NF; i++) if ($i ~ /^msg=audit\(/) { ts = substr($i, 11); split(ts, t, "."); if (t[1] + 0 >= s + 0) print; break } }' \
+    | grep -a 'docker_helper_' \
+    | tail -300 || true
+  echo "=== journalctl -k window (all avc lines) ==="
+  journalctl -k --since "@$AVC_EPOCH_ALL" --no-pager 2>/dev/null | grep -a 'avc:' | tail -300 || true
+} > "$EVIDENCE_DIR/f-all-helper-avcs-all.txt" 2>&1
 cat "$EVIDENCE_DIR/f-newgidmap-avcs-all.txt" >&2
 
 log 'cleanup (temporary modules removed; the candidate module stays until the VM is disposed)'
