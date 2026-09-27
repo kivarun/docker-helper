@@ -710,54 +710,90 @@ EOF
 # watch_stage_child_maps <state-dir-tag> <out> [which] : identify the
 # instance's rootlesskit_t child (the cmdline carries the state-dir token
 # but not the probe) and keep recording its map files until the requested
-# condition — 'both' maps non-empty (the default, the g22 controls) or
-# 'uid' map non-empty (the g23 own-child uid control) — or the budget
-# runs out, so the last snapshot is the fullest state the process
-# reached while alive.
+# condition — 'both' maps non-empty (the default, the g22 controls) — or
+# the budget runs out, so the last snapshot is the fullest state the
+# process reached while alive. 'uid-frozen' is the deterministic g23
+# own-child control variant: it caches the child on first sight, polls
+# its uid_map tightly and, the moment the uid_map write is observed,
+# freezes the rootlesskit_t PARENT for the snapshot. The parent is the
+# only process whose exit would Pdeathsig-kill the child (the flow dies
+# at its gid step, which the production policy denies), and the parent
+# forks both map helpers, so freezing it right after the uid write
+# preserves the exact between-writes state: the already-running uid
+# helper finishes its remaining writes independently, the gid helper is
+# never launched, and the child is stable (blocked on the idmap-completed
+# pipe). The flow is then resumed to its natural failure path.
 watch_stage_child_maps() {
-  local tag="$1" out="$2" which="${3:-both}" pid ctx ppid pctx cmd cpid uidm gidm
+  local tag="$1" out="$2" which="${3:-both}" \
+    pid ctx ppid pctx cmd cpid fppid fpctx uidm gidm frozen=0
   local deadline=$(( $(date +%s) + 40 ))
+  local interval=0.2
+  case "$which" in
+    uid-frozen) interval=0.002 ;;
+  esac
   : > "$out"
   cpid=""
   while [ "$(date +%s)" -lt "$deadline" ]; do
     # The flow's CHILD re-execs /proc/self/exe, so its cmdline no longer
     # contains the "rootlesskit" name — match both the parent shape and
     # the child shape.
-    for pid in $(pgrep -f 'rootlesskit --net=none|self/exe --net=none' 2>/dev/null || true); do
-      [ -r "/proc/$pid/attr/current" ] || continue
-      ctx="$(cat "/proc/$pid/attr/current" 2>/dev/null || true)"
-      case "$ctx" in *docker_helper_rootlesskit_t*) ;; *) continue ;; esac
-      cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
-      case "$cmd" in *"$tag"*) ;; *) continue ;; esac
-      # The flow's processes (parent and re-exec'd child) carry the probe
-      # payload in their argv but NOT as the command name; the standalone
-      # probe vehicles are exactly the ones whose FIRST token is map_probe.
-      case "${cmd%% *}" in *map_probe*) continue ;; esac
-      ppid="$(awk '/^PPid:/{print $2}' "/proc/$pid/status" 2>/dev/null || true)"
-      [ -r "/proc/$ppid/attr/current" ] || continue
-      pctx="$(cat "/proc/$ppid/attr/current" 2>/dev/null || true)"
-      case "$pctx" in *docker_helper_rootlesskit_t*) cpid="$pid" ;; *) continue ;; esac
-      break
-    done
+    if [ -z "$cpid" ]; then
+      for pid in $(pgrep -f 'rootlesskit --net=none|self/exe --net=none' 2>/dev/null || true); do
+        [ -r "/proc/$pid/attr/current" ] || continue
+        ctx="$(cat "/proc/$pid/attr/current" 2>/dev/null || true)"
+        case "$ctx" in *docker_helper_rootlesskit_t*) ;; *) continue ;; esac
+        cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+        case "$cmd" in *"$tag"*) ;; *) continue ;; esac
+        # The flow's processes (parent and re-exec'd child) carry the probe
+        # payload in their argv but NOT as the command name; the standalone
+        # probe vehicles are exactly the ones whose FIRST token is map_probe.
+        case "${cmd%% *}" in *map_probe*) continue ;; esac
+        ppid="$(awk '/^PPid:/{print $2}' "/proc/$pid/status" 2>/dev/null || true)"
+        [ -r "/proc/$ppid/attr/current" ] || continue
+        pctx="$(cat "/proc/$ppid/attr/current" 2>/dev/null || true)"
+        case "$pctx" in
+          *docker_helper_rootlesskit_t*) cpid="$pid"; fppid="$ppid"; fpctx="$pctx" ;;
+          *) continue ;;
+        esac
+        break
+      done
+    fi
     if [ -n "$cpid" ]; then
       uidm="$(cat "/proc/$cpid/uid_map" 2>/dev/null || true)"
       gidm="$(cat "/proc/$cpid/gid_map" 2>/dev/null || true)"
+      if [ "$which" = uid-frozen ] && [ -n "$uidm" ]; then
+        kill -STOP "$fppid" 2>/dev/null || true
+        sleep 0.02
+        kill -STOP "$cpid" 2>/dev/null || true
+        uidm="$(cat "/proc/$cpid/uid_map" 2>/dev/null || true)"
+        gidm="$(cat "/proc/$cpid/gid_map" 2>/dev/null || true)"
+        frozen=1
+      fi
       {
         echo "=== stage child (positive control target): pid=$cpid state-dir=$tag (snapshot $(date -u +%FT%TZ)) ==="
         echo "attr/current: $(cat "/proc/$cpid/attr/current" 2>/dev/null || true)"
+        echo "status Uid: $(awk '/^Uid:/{print $2, $3, $4, $5}' "/proc/$cpid/status" 2>/dev/null || true)"
+        echo "status CapEff: $(awk '/^CapEff:/{print $2}' "/proc/$cpid/status" 2>/dev/null || true)"
         echo "uid_map content: [$uidm]"
         echo "gid_map content: [$gidm]"
         echo "setgroups content: [$(cat "/proc/$cpid/setgroups" 2>/dev/null || true)]"
+        if [ "$frozen" = 1 ]; then
+          echo "frozen parent while snapshotting: pid=$fppid attr/current=$fpctx"
+        fi
       } > "$out" 2>&1
-      if [ "$which" = uid ] && [ -n "$uidm" ]; then
-        return 0
+      if [ "$frozen" = 1 ]; then
+        kill -CONT "$cpid" 2>/dev/null || true
+        kill -CONT "$fppid" 2>/dev/null || true
+        if [ -n "$uidm" ]; then
+          return 0
+        fi
+        frozen=0
       fi
       if [ -n "$uidm" ] && [ -n "$gidm" ]; then
         return 0
       fi
-      cpid=""
     fi
-    sleep 0.2
+    sleep "$interval"
   done
   return 1
 }
@@ -1052,7 +1088,7 @@ else
     --state-dir="$DIAG_BASE/g23/a1-state" /bin/sleep 12 \
     >>"$EVIDENCE_DIR/g23-control.txt" 2>&1 &
   RK_PIDS+=($!)
-  watch_stage_child_maps "g23/a1-state" "$EVIDENCE_DIR/g23-control-child-maps.txt" uid || \
+  watch_stage_child_maps "g23/a1-state" "$EVIDENCE_DIR/g23-control-child-maps.txt" uid-frozen || \
     note "g23 control: the own-child uid_map snapshot was not captured while alive (see g23-control.txt)"
   sleep 2
   harvest_avcs_since "$GC_EPOCH" "$EVIDENCE_DIR/g23-control-avcs.txt"
