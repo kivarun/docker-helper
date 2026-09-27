@@ -661,7 +661,7 @@ role system_r types docker_helper_newuidmap_t;
 # the distro privilege mechanism (permissions.d/shadow), untouched by
 # docker-helper. A dedicated domain keeps the transition confined to this
 # binary; newgidmap's own runtime surface (its inherited-stdio fifo write,
-# the /proc target-dir read-open-getattr, and the getpwuid passwd
+# the /proc target-dir read-open-getattr-search, and the getpwuid passwd
 # read-open) is granted per enforcing AVC evidence in the P5-S2 runtime
 # section below — everything beyond it stays ungranted.
 type docker_helper_newgidmap_exec_t, file_type;
@@ -1121,13 +1121,13 @@ allow docker_helper_newuidmap_t passwd_file_t:file { read open };
 # path-lookup execute, the bprm open/read, the pre-exec getattr). The
 # entry rule carries the transition-required entrypoint plus the loader
 # access (the newuidmap entry shape). The runtime surface granted so far:
-# the inherited-stdio fifo write, the /proc target-dir read-open-getattr,
-# and the getpwuid passwd read-open (each with its own enforcing AVC
-# evidence, below). NO userdb fallback, no passwd getattr, no gid_map
-# write, no dir search, no capabilities, no cap_userns: the NEXT
-# enforcing boundary inside this domain is the next deliberate step. No
-# transition or allow rule points into the domain from the manager or the
-# daemon.
+# the inherited-stdio fifo write, the /proc target-dir
+# read-open-getattr-search, and the getpwuid passwd read-open (each with
+# its own enforcing AVC evidence, below). NO userdb fallback, no passwd
+# getattr, no gid_map file access, no capabilities, no cap_userns: the
+# NEXT enforcing boundary inside this domain is the next deliberate step.
+# No transition or allow rule points into the domain from the manager or
+# the daemon.
 type_transition docker_helper_rootlesskit_t docker_helper_newgidmap_exec_t:process docker_helper_newgidmap_t;
 allow docker_helper_rootlesskit_t docker_helper_newgidmap_t:process { transition };
 
@@ -1154,11 +1154,11 @@ allow docker_helper_newgidmap_t docker_helper_newgidmap_exec_t:file { entrypoint
 # owner).
 allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:fifo_file { write };
 
-# The /proc/<target> directory read-open on the gid_map write path
-# (P5-S2): the helper opens the target process's procfs directory to write
-# its gid_map. Live enforcing AVC evidence (run 36300820035 P6 window,
-# record 574: denied { read } comm="newgidmap" name="3793" dev="proc"
-# scontext=system_u:system_r:docker_helper_newgidmap_t:s0
+# The /proc/<target> directory access on the gid_map write path (P5-S2):
+# the helper opens the target process's procfs directory to write its
+# gid_map. Live enforcing AVC evidence, one boundary at a time: the read
+# (run 36300820035 P6 window, record 574: denied { read } comm="newgidmap"
+# name="3793" dev="proc" scontext=system_u:system_r:docker_helper_newgidmap_t:s0
 # tcontext=system_u:system_r:docker_helper_rootlesskit_t:s0 tclass=dir
 # permissive=0; and with the read granted, run 36302169439 P6 window,
 # record 546: denied { open } path="/proc/3791" — the O_DIRECTORY open of
@@ -1171,18 +1171,29 @@ allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:fifo_file { write };
 # permissive=0 — the helper's stat("/proc/<target>") call, REQUIRED by
 # libcap's newgidmap to validate the target process before the gid_map
 # write; the helper's own failure output at that point was "newgidmap:
-# Could not stat directory for target process: Permission denied") — the
+# Could not stat directory for target process: Permission denied"; and
+# with the stat passed, run 36307865078 P6 window, record 557:
+# denied { search } for pid=3788 comm="newgidmap" name="3782" dev="proc"
+# scontext=system_u:system_r:docker_helper_newgidmap_t:s0
+# tcontext=system_u:system_r:docker_helper_rootlesskit_t:s0 tclass=dir
+# permissive=0 — the SEARCH required to resolve the path to
+# /proc/<target>/gid_map after the successful stat; the helper's open
+# failed with "newgidmap: open of gid_map failed: Permission denied"
+# WITHOUT any file-level AVC, because the denied dir search
+# short-circuits the path lookup before the file-class check) — the
 # grant is NOT a general directory grant: docker_helper_rootlesskit_t:dir
 # objects are /proc/<pid> entries of processes running in the child
 # domain. SCOPE — READ CAREFULLY: like every helper grant this is a
 # TYPE-PAIR rule, NOT a pid-specific one: it authorizes the
-# read-open-getattr on the procfs directories of EVERY process running in
-# docker_helper_rootlesskit_t — INCLUDING the processes of OTHER
-# concurrent operations (their isolation is invocation discipline only;
-# the open architectural risk tracked for the final security review).
-# Grant ONLY the read-open-getattr: no search on this pair, no gid_map
-# file access, no capability surface — the next deliberate boundaries.
-allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:dir { read open getattr };
+# read-open-getattr-search on the procfs directories of EVERY process
+# running in docker_helper_rootlesskit_t — INCLUDING the processes of
+# OTHER concurrent operations (their isolation is invocation discipline
+# only; the open architectural risk tracked for the final security
+# review). The four-perm set now mirrors the newuidmap dir grant shape;
+# a gid_map FILE grant is a separate boundary with its own scope
+# decision (rootlesskit_t:file would cover other procfs files of all
+# concurrent operations). No gid_map file access, no capability surface.
+allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:dir { read open getattr search };
 
 # The getpwuid passwd lookup of the caller's user name (P5-S2), granted
 # read-open with live enforcing AVC evidence: the read (run 36303567126
