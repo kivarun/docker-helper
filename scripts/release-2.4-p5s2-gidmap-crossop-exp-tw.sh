@@ -149,11 +149,11 @@ STAND_EPOCH_ALL="$(date +%s)"
 } >"$EVIDENCE_DIR/a-toolchain.txt" 2>&1
 zypper --non-interactive install -y checkpolicy container-selinux \
   policycoreutils-python-utils rootlesskit slirp4netns audit gcc glibc-static \
-  libcap-progs \
+  libcap-progs util-linux iproute2 \
   >"$EVIDENCE_DIR/zypper-toolchain.log" 2>&1 \
   || note "zypper install of the policy toolchain failed (see zypper-toolchain.log)"
 fail_toolchain=0
-for t in checkmodule semodule_package semodule semanage restorecon gcc; do
+for t in checkmodule semodule_package semodule semanage restorecon gcc nsenter ip; do
   command -v "$t" >/dev/null 2>&1 || { echo "$t not found" >>"$EVIDENCE_DIR/a-toolchain.txt"; fail_toolchain=1; }
 done
 if [ "$fail_toolchain" = 1 ]; then
@@ -504,13 +504,47 @@ REQ_TYPES=" $OUT_T $RUNNER_T $BINDIR_T $FIFO_T $DIR_TYPE_LIST"
 for t in $STATE_TYPE_LIST; do
   case " $REQ_TYPES " in *" $t "*) ;; *) REQ_TYPES="$REQ_TYPES $t" ;; esac
 done
+# The stage-3 real-rootlesskit-flow surface (--net=none), enumerated from
+# the permissive scope-assessment run's harvest (run 36316667317
+# e-permissive-avc-harvest.txt) plus the driver mechanics: the rootlesskit
+# none-driver runs `nsenter ... ip addr add/link set` (so nsenter+ip are
+# installed and exec'd from bin_t), the `ip` uses a route socket with
+# NET_ADMIN in the child's usern, the flow-child re-mounts propagation on
+# / and stages a temp dir under /tmp, and the parent creates the api.sock
+# in the state dir. All of it is guest-only diagnostic surface, removed at
+# cleanup; the production policy keeps its deliberate boundaries.
+FLOW_RULES="
+	allow docker_helper_rootlesskit_t bin_t:file { execute read open execute_no_trans getattr map };
+	allow docker_helper_rootlesskit_t self:netlink_route_socket { create bind getattr getopt setopt read write nlmsg_read nlmsg_write };
+	allow docker_helper_rootlesskit_t self:cap_userns { sys_admin net_admin setuid setgid };
+	allow docker_helper_rootlesskit_t root_t:dir { mounton };
+"
+REQ_CLASS_LINES="
+	class file { entrypoint read open execute execute_no_trans getattr map append write create setattr relabelto relabelfrom unlink lock };
+	class fifo_file { read write open getattr };
+	class dir { search getattr read open write add_name create remove_name rmdir lock mounton };
+	class process { transition siginh };
+	class fd { use };
+	class sock_file { create unlink };
+	class netlink_route_socket { create bind getattr getopt setopt read write nlmsg_read nlmsg_write };
+	class cap_userns { sys_admin net_admin setuid setgid };
+"
+REQ_TYPES="$REQ_TYPES root_t"
 for t in $DIR_TYPE_LIST; do
-  DIR_RULES+="	allow docker_helper_rootlesskit_t $t:dir { search getattr };
+  # Full management on the walk-dir types: beyond the path walk itself
+  # (search/getattr), the real flow-child stages its mountSysfs temp dir
+  # under /tmp and the parent writes the state tree there, so the
+  # diagnostic stand grants the flow's evidenced runtime shape on these
+  # guest-only types.
+  DIR_RULES+="	allow docker_helper_rootlesskit_t $t:dir { search getattr read open write add_name create remove_name rmdir lock };
+	allow docker_helper_rootlesskit_t $t:file { create open read write getattr setattr lock unlink append };
+	allow docker_helper_rootlesskit_t $t:sock_file { create unlink };
 "
 done
 for t in $STATE_TYPE_LIST; do
-  STATE_RULES+="	allow docker_helper_rootlesskit_t $t:dir { search getattr read open write add_name remove_name rmdir lock };
+  STATE_RULES+="	allow docker_helper_rootlesskit_t $t:dir { search getattr read open write add_name create remove_name rmdir lock };
 	allow docker_helper_rootlesskit_t $t:file { create open read write getattr setattr lock unlink append };
+	allow docker_helper_rootlesskit_t $t:sock_file { create unlink };
 "
 done
 # The helper domains inherit the attempt's evidence-file fds (the runner's
@@ -535,12 +569,7 @@ require {
 	type docker_helper_newuidmap_t;
 	type docker_helper_rootlesskit_t;
 $REQ_TYPE_LINES	attribute file_type;
-	class file { entrypoint read open execute execute_no_trans getattr map append write create setattr relabelto relabelfrom unlink lock };
-	class fifo_file { read write open getattr };
-	class dir { search getattr read open write add_name remove_name rmdir lock };
-	class process { transition siginh };
-	class fd { use };
-}
+$REQ_CLASS_LINES}
 type gidmap_probe_exec_t;
 typeattribute gidmap_probe_exec_t file_type;
 allow docker_helper_newgidmap_t gidmap_probe_exec_t:file { entrypoint read open execute getattr map };
@@ -552,7 +581,7 @@ allow unconfined_t gidmap_probe_exec_t:file { create open write append setattr r
 allow unconfined_t docker_helper_rootlesskit_t:process { transition siginh };
 allow docker_helper_rootlesskit_t $FIFO_T:fifo_file { read write open getattr };
 allow docker_helper_rootlesskit_t docker_helper_rootlesskit_t:file { read open getattr };
-$DIR_RULES$STATE_RULES$FD_RULES
+$DIR_RULES$STATE_RULES$FD_RULES$FLOW_RULES
 type_transition $RUNNER_T $BINDIR_T:file gidmap_probe_exec_t "map_probe";
 EOF
 cp /tmp/gidmap_probe_diag.te "$EVIDENCE_DIR/diag-probe-module.te"
