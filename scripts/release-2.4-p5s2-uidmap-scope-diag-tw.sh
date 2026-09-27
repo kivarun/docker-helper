@@ -576,11 +576,19 @@ if [ "${#CHILDS[@]}" -ge 1 ]; then
 
   # (1) CONTROL: newgidmap_t with its PRODUCTION surface only (enforcing):
   # every open on the rootlesskit_t files must be DENIED (no file grant).
+  # The batteries run as the BUILDER USER — the same uid as the target
+  # files' owner — so the DAC layer passes through the owner bits and the
+  # observed verdicts are pure SELinux decisions (a root-runcon checker
+  # would die at the DAC layer: root is not the owner of the mode-644
+  # files and the SELinux dac_override capability is not granted to the
+  # domain; observed in run 36314767811: the control battery's opens all
+  # died at capability:dac_override with the SELinux file perms never
+  # reached).
   CTRL_EPOCH="$(date +%s)"
   {
     echo "=== CONTROL battery: docker_helper_newgidmap_t WITHOUT the file grant (enforcing; production surface only) ==="
   } > "$EVIDENCE_DIR/d-scope-control-newgidmap.txt"
-  runcon "$NGID_EXEC_T" /usr/local/bin/map_probe "${CHILDS[@]}" \
+  su -s /bin/bash "$BUILDER_USER" -c "runcon '$NGID_EXEC_T' /usr/local/bin/map_probe $PIDS" \
     >>"$EVIDENCE_DIR/d-scope-control-newgidmap.txt" 2>&1 || true
   sleep 2
   harvest_avcs_since "$CTRL_EPOCH" "$EVIDENCE_DIR/d-scope-control-newgidmap-avcs.txt"
@@ -596,7 +604,7 @@ if [ "${#CHILDS[@]}" -ge 1 ]; then
   {
     echo "=== EXISTING-GRANT battery: docker_helper_newuidmap_t with the production rootlesskit_t:file { write open } (enforcing) ==="
   } > "$EVIDENCE_DIR/d-scope-newuidmap.txt"
-  runcon "$NUID_EXEC_T" /usr/local/bin/map_probe "${CHILDS[@]}" \
+  su -s /bin/bash "$BUILDER_USER" -c "runcon '$NUID_EXEC_T' /usr/local/bin/map_probe $PIDS" \
     >>"$EVIDENCE_DIR/d-scope-newuidmap.txt" 2>&1 || true
   sleep 2
   harvest_avcs_since "$NUID_EPOCH" "$EVIDENCE_DIR/d-scope-newuidmap-avcs.txt"
@@ -626,7 +634,7 @@ EOF
   {
     echo "=== HYPOTHESIZED battery: docker_helper_newgidmap_t WITH the guest-only diag { write } grant (enforcing) ==="
   } > "$EVIDENCE_DIR/d-scope-hypo-newgidmap.txt"
-  runcon "$NGID_EXEC_T" /usr/local/bin/map_probe "${CHILDS[@]}" \
+  su -s /bin/bash "$BUILDER_USER" -c "runcon '$NGID_EXEC_T' /usr/local/bin/map_probe $PIDS" \
     >>"$EVIDENCE_DIR/d-scope-hypo-newgidmap.txt" 2>&1 || true
   sleep 2
   harvest_avcs_since "$HYPO_EPOCH" "$EVIDENCE_DIR/d-scope-hypo-newgidmap-avcs.txt"
