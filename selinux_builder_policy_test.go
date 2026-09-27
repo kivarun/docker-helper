@@ -789,9 +789,9 @@ func TestSELinuxPolicyNewgidmapDomainTransition(t *testing.T) {
 // newgidmapDomainSurface is the EXACT allow-rule surface of the GID-map
 // helper domain: the entry/loader rule plus the three live-AVC-evidenced
 // runtime grants (the inherited-stdio fifo write, the /proc
-// target-directory read-open, and the getpwuid passwd read). The domain
-// holds ZERO capability surface — no userdb fallback, no passwd
-// open/getattr, no gid_map write, no dir getattr/search, no
+// target-directory read-open, and the getpwuid passwd read-open). The
+// domain holds ZERO capability surface — no userdb fallback, no passwd
+// getattr, no gid_map write, no dir getattr/search, no
 // capabilities/cap_userns (the privilege model stays the distro's
 // chkstat-applied cap_setgid file capability). Any additional or widened
 // rule is a policy regression.
@@ -799,7 +799,7 @@ var newgidmapDomainSurface = []string{
 	"allow docker_helper_newgidmap_t docker_helper_newgidmap_exec_t:file { entrypoint read open execute getattr map };",
 	"allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:fifo_file { write };",
 	"allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:dir { read open };",
-	"allow docker_helper_newgidmap_t passwd_file_t:file { read };",
+	"allow docker_helper_newgidmap_t passwd_file_t:file { read open };",
 }
 
 // newgidmapDomainPolicyViolations scans the module's parsed rules against
@@ -817,8 +817,9 @@ var newgidmapDomainSurface = []string{
 //     process-class grant (the mem file's kernel PTRACE_MODE_ATTACH check
 //     maps to process:ptrace — signal/ptrace alike) violate; every other
 //     target type except the passwd lookup file (the
-//     passwd_file_t:file { read } rule is the one evidenced grant) is a
-//     violation (daemon/Docker/workspace/state surfaces by construction);
+//     passwd_file_t:file { read open } rule is the one evidenced grant)
+//     is a violation (daemon/Docker/workspace/state surfaces by
+//     construction);
 //   - the ONLY transition into the domain is the rootlesskit child's exec
 //     of the newgidmap entry type (duplicates, manager-side or daemon-side
 //     entries violate), and the manager holds no exec grant for the
@@ -897,17 +898,19 @@ func newgidmapDomainPolicyViolations(policy string) []string {
 // TestSELinuxPolicyNewgidmapDomainSurface verifies the GID-map helper
 // domain's runtime surface is EXACTLY the entry rule plus the three
 // evidenced runtime grants (the inherited-stdio fifo write, the /proc
-// target-dir read-open, and the getpwuid passwd read) and nothing else —
-// no userdb fallback, no passwd open/getattr, no gid_map write, no dir
+// target-dir read-open, and the getpwuid passwd read-open) and nothing
+// else — no userdb fallback, no passwd getattr, no gid_map write, no dir
 // getattr/search, no capabilities. Mutation tests prove each guard
 // fires: extra entry paths (a manager-side transition, a duplicate
-// transition, a manager exec grant), the passwd grant's removal and its
-// open/getattr/both-successor extensions, the dir read/open regressions
-// and the dir grant's removal, the dir getattr/search extensions, the
-// fifo widening/removal, the gid_map file write, forbidden surfaces
-// (builder state, daemon runtime, Docker socket, workspace), widened
-// entry sets, process ptrace/signal toward the child, and any
-// self-targeted capability grant must trip the invariants.
+// transition, a manager exec grant), the passwd read/open regressions,
+// the passwd grant's removal and its getattr extension, the userdb
+// fallback shapes (the systemd-var-run dir search and the self unix
+// dgram socket), the dir read/open regressions and the dir grant's
+// removal, the dir getattr/search extensions, the fifo widening/removal,
+// the gid_map file write, forbidden surfaces (builder state, daemon
+// runtime, Docker socket, workspace), widened entry sets, process
+// ptrace/signal toward the child, and any self-targeted capability grant
+// must trip the invariants.
 func TestSELinuxPolicyNewgidmapDomainSurface(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
 	if violations := newgidmapDomainPolicyViolations(policy); len(violations) > 0 {
@@ -940,10 +943,12 @@ func TestSELinuxPolicyNewgidmapDomainSurface(t *testing.T) {
 		{"process ptrace toward the child domain", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:process ptrace;", "", "no process-class grant toward the rootlesskit child domain"},
 		{"process signal toward the child domain", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:process signal;", "", "no process-class grant toward the rootlesskit child domain"},
 		{"gid_map file write", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:file { write open };", "", "rootlesskit-child surface is exactly"},
-		{"widened passwd grant (open added)", "allow docker_helper_newgidmap_t passwd_file_t:file { read open };", "", "unexpected rule"},
-		{"widened passwd grant (getattr added)", "allow docker_helper_newgidmap_t passwd_file_t:file { read getattr };", "", "unexpected rule"},
-		{"widened passwd grant (both successors)", "allow docker_helper_newgidmap_t passwd_file_t:file { read open getattr };", "", "unexpected rule"},
-		{"removed passwd grant", "", "allow docker_helper_newgidmap_t passwd_file_t:file { read };\n", "must carry exactly 4 allow rule"},
+		{"regressed passwd read grant", "allow docker_helper_newgidmap_t passwd_file_t:file { read };", "", "unexpected rule"},
+		{"regressed passwd open grant", "allow docker_helper_newgidmap_t passwd_file_t:file { open };", "", "unexpected rule"},
+		{"widened passwd grant (getattr added)", "allow docker_helper_newgidmap_t passwd_file_t:file { read open getattr };", "", "unexpected rule"},
+		{"removed passwd grant", "", "allow docker_helper_newgidmap_t passwd_file_t:file { read open };\n", "must carry exactly 4 allow rule"},
+		{"userdb fallback dir search", "allow docker_helper_newgidmap_t init_var_run_t:dir { search };", "", "unexpected target type"},
+		{"userdb fallback unix_dgram_socket", "allow docker_helper_newgidmap_t self:unix_dgram_socket { create };", "", "no self-targeted grant"},
 		{"builder state tree", "allow docker_helper_newgidmap_t docker_helper_builder_state_t:file { write };", "", "unexpected target type"},
 		{"daemon runtime tree", "allow docker_helper_newgidmap_t docker_helper_runtime_t:file { read };", "", "unexpected target type"},
 		{"Docker socket", "allow docker_helper_newgidmap_t container_var_run_t:sock_file { write };", "", "unexpected target type"},
