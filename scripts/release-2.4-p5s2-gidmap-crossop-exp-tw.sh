@@ -243,7 +243,7 @@ AVC_EPOCH_ALL="$(date +%s)"
 log 'B: barrier fifos + probe vehicle'
 mkfifo "$DIAG_BASE/fifos"/bfifo-s1 "$DIAG_BASE/fifos/bfifo-s2" \
        "$DIAG_BASE/fifos/bfifo-s3p" "$DIAG_BASE/fifos/bfifo-s3w1" \
-       "$DIAG_BASE/fifos/bfifo-s3w2" \
+       "$DIAG_BASE/fifos/bfifo-s3w2" "$DIAG_BASE/fifos/bfifo-g23" \
        "$DIAG_BASE/fifos/gofifo-s3w1" "$DIAG_BASE/fifos/gofifo-s3w2"
 chmod 666 "$DIAG_BASE/fifos"/*
 # The per-stage rootlesskit state dirs are created up front: the module
@@ -252,9 +252,10 @@ chmod 666 "$DIAG_BASE/fifos"/*
 # child-pid file, the exit-time RemoveAll) is grantable before the flow
 # starts.
 mkdir -p "$DIAG_BASE/s1/a1-state" "$DIAG_BASE/s2/a1-state" \
-         "$DIAG_BASE/s3/a1-state" "$DIAG_BASE/s3/a2-state"
+         "$DIAG_BASE/s3/a1-state" "$DIAG_BASE/s3/a2-state" \
+         "$DIAG_BASE/g23/a1-state"
 chown "$BUILDER_USER:$BUILDER_USER" "$DIAG_BASE/s1/a1-state" "$DIAG_BASE/s2/a1-state" \
-      "$DIAG_BASE/s3/a1-state" "$DIAG_BASE/s3/a2-state"
+      "$DIAG_BASE/s3/a1-state" "$DIAG_BASE/s3/a2-state" "$DIAG_BASE/g23/a1-state"
 FIFO_LABEL="$(stat -c '%C' "$DIAG_BASE/fifos/bfifo-s1" 2>/dev/null || true)"
 FIFO_T="$(printf '%s' "$FIFO_LABEL" | cut -d: -f3)"
 RUNNER_CTX="$(cat /proc/self/attr/current 2>/dev/null || true)"
@@ -273,7 +274,8 @@ case "${FIFO_T:-x}" in ''|*[!A-Za-z0-9_]*|x) note "the fifo type could not be ob
 # fifo/file-class check — the stand failure observed in the previous run).
 WALK_DIRS=(/tmp "$DIAG_BASE" "$DIAG_BASE/fifos" \
            "$DIAG_BASE/s1" "$DIAG_BASE/s1/a1-state" "$DIAG_BASE/s2" "$DIAG_BASE/s2/a1-state" \
-           "$DIAG_BASE/s3" "$DIAG_BASE/s3/a1-state" "$DIAG_BASE/s3/a2-state")
+           "$DIAG_BASE/s3" "$DIAG_BASE/s3/a1-state" "$DIAG_BASE/s3/a2-state" \
+           "$DIAG_BASE/g23" "$DIAG_BASE/g23/a1-state")
 DIR_TYPE_LIST=""
 STATE_TYPE_LIST=""
 for d in "${WALK_DIRS[@]}"; do
