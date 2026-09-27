@@ -793,7 +793,7 @@ if parent_role_attempt "$DIAG_BASE/fifos/bfifo-s1" "$B_S1" \
   note "stage 1: the parent-role write SUCCEEDED without capabilities (unexpected: the production surface should deny the cap_userns check)"
 fi
 cat "$EVIDENCE_DIR/c1-parent-avcs.txt" >&2
-if grep -E 'denied \{ sys_admin \}.*docker_helper_newgidmap_t.*tclass=cap_userns' "$EVIDENCE_DIR/c1-parent-avcs.txt" >/dev/null 2>&1; then
+if grep -E 'denied  \{ sys_admin \}.*docker_helper_newgidmap_t.*tclass=cap_userns' "$EVIDENCE_DIR/c1-parent-avcs.txt" >/dev/null 2>&1; then
   log "stage 1 boundary CONFIRMED: newgidmap_t denied cap_userns sys_admin (the map_write file_ns_capable gate)"
   STAGE1_CONFIRMED=1
 else
@@ -830,7 +830,7 @@ if [ "${STAGE1_CONFIRMED:-0}" = 1 ]; then
       note "stage 2: the parent-role write SUCCEEDED with only cap_userns sys_admin (unexpected: the setgid capability boundary should still deny)"
     fi
     cat "$EVIDENCE_DIR/c2-parent-avcs.txt" >&2
-    if grep -E 'denied \{ setgid \}.*docker_helper_newgidmap_t.*tclass=capability' "$EVIDENCE_DIR/c2-parent-avcs.txt" >/dev/null 2>&1; then
+    if grep -E 'denied  \{ setgid \}.*docker_helper_newgidmap_t.*tclass=capability' "$EVIDENCE_DIR/c2-parent-avcs.txt" >/dev/null 2>&1; then
       log "stage 2 boundary CONFIRMED: newgidmap_t denied capability setgid (the new_idmap_permitted parent-ns gate)"
       STAGE2_CONFIRMED=1
     else
