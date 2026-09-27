@@ -515,6 +515,7 @@ done
 # cleanup; the production policy keeps its deliberate boundaries.
 FLOW_RULES="
 	allow docker_helper_rootlesskit_t bin_t:file { execute read open execute_no_trans getattr map };
+	allow docker_helper_rootlesskit_t ifconfig_exec_t:file { execute read open execute_no_trans getattr map };
 	allow docker_helper_rootlesskit_t self:netlink_route_socket { create bind getattr getopt setopt read write nlmsg_read nlmsg_write };
 	allow docker_helper_rootlesskit_t self:cap_userns { sys_admin net_admin setuid setgid sys_ptrace sys_chroot };
 	allow docker_helper_rootlesskit_t root_t:dir { mounton };
@@ -530,7 +531,7 @@ REQ_CLASS_LINES="
 	class netlink_route_socket { create bind getattr getopt setopt read write nlmsg_read nlmsg_write };
 	class cap_userns { sys_admin net_admin setuid setgid sys_ptrace sys_chroot };
 "
-REQ_TYPES="$REQ_TYPES root_t nsfs_t"
+REQ_TYPES="$REQ_TYPES root_t nsfs_t ifconfig_exec_t"
 for t in $DIR_TYPE_LIST; do
   # Full management on the walk-dir types: beyond the path walk itself
   # (search/getattr), the real flow-child stages its mountSysfs temp dir
