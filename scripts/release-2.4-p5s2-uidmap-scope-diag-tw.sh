@@ -221,7 +221,7 @@ cat "$EVIDENCE_DIR/a-toolchain.txt" >&2
 # decision), so the label must exist from the file's birth and the
 # harness verifies it after the build.
 mkdir -p /usr/local/bin "$DIAG_BASE/probe"
-cat > "$DIAG_BASE/probe/map-probe.c" <<'EOF'
+cat > "$DIAG_BASE/probe/map_probe.c" <<'EOF'
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -262,7 +262,7 @@ EOF
 # integrity layer with NO SELinux AVC — observed), so the GUEST-ONLY
 # checker module is loaded BEFORE the build: it declares the dedicated
 # type and a name-based type transition that labels the created
-# 'map-probe' directly. The entry grants mirror the production entry
+the 'map_probe' directly. The entry grants mirror the production entry
 # shape exactly ({ entrypoint read open execute getattr map }). The
 # file-write grant toward docker_helper_rootlesskit_t is deliberately NOT
 # here — it is the HYPOTHESIZED grant and loads as a separate module
@@ -282,7 +282,7 @@ case "${BINDIR_T:-x}" in ''|*[!A-Za-z0-9_]*|x) note "the /usr/local/bin director
   echo "evidence-file type: $OUT_T (from: $OUT_LABEL)"
   echo "/usr/local/bin dir: $BINDIR_T_LABEL (type $BINDIR_T; the creation type-transition target)"
   echo "probe source (open-only; no write(2) call):"
-  cat "$DIAG_BASE/probe/map-probe.c"
+  cat "$DIAG_BASE/probe/map_probe.c"
 } > "$EVIDENCE_DIR/d-map-probe-vehicle.txt" 2>&1
 cat > /tmp/gidmap_probe_diag.te <<EOF
 module gidmap_probe_diag 1.0;
@@ -302,7 +302,7 @@ allow docker_helper_newuidmap_t gidmap_probe_exec_t:file { entrypoint read open 
 allow docker_helper_newgidmap_t $OUT_T:file { append write };
 allow docker_helper_newuidmap_t $OUT_T:file { append write };
 allow $RUNNER_T gidmap_probe_exec_t:file { create open write append setattr relabelto };
-type_transition $RUNNER_T $BINDIR_T:file gidmap_probe_exec_t map-probe;
+type_transition $RUNNER_T $BINDIR_T:file gidmap_probe_exec_t "map_probe";
 EOF
 cp /tmp/gidmap_probe_diag.te "$EVIDENCE_DIR/d-diag-modules.te"
 checkmodule -M -m -o /tmp/gidmap_probe_diag.tmp /tmp/gidmap_probe_diag.te 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
@@ -314,16 +314,16 @@ semodule -i /tmp/gidmap_probe_diag.pp 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
 log "checker diag module loaded (the dedicated probe type carries the production entry shape in both map-helper domains)"
 {
   echo "=== build (after the diag module load: the creation type-transition labels the probe) ==="
-  gcc -static -O2 -o /usr/local/bin/map-probe "$DIAG_BASE/probe/map-probe.c" 2>&1 && echo "build OK"
-  echo "probe label (post-build): $(stat -c '%C' /usr/local/bin/map-probe 2>&1)"
-  echo "probe fs: $(stat -c '%m' /usr/local/bin/map-probe 2>&1)"
+  gcc -static -O2 -o /usr/local/bin/map_probe "$DIAG_BASE/probe/map_probe.c" 2>&1 && echo "build OK"
+  echo "probe label (post-build): $(stat -c '%C' /usr/local/bin/map_probe 2>&1)"
+  echo "probe fs: $(stat -c '%m' /usr/local/bin/map_probe 2>&1)"
 } >> "$EVIDENCE_DIR/d-map-probe-vehicle.txt" 2>&1
-if [ ! -x /usr/local/bin/map-probe ]; then
+if [ ! -x /usr/local/bin/map_probe ]; then
   note "the static probe binary could not be built (see d-map-probe-vehicle.txt); the hypothesized-grant stage cannot run"
   printf '%s P5S2-UIDMAP-SCOPE-DIAG-RESULT=PASS-INCOMPLETE (probe vehicle unavailable; recorded as a finding)\n' "$PREFIX" >&2
   exit 0
 fi
-PROBE_POST_LABEL="$(stat -c '%C' /usr/local/bin/map-probe 2>/dev/null || true)"
+PROBE_POST_LABEL="$(stat -c '%C' /usr/local/bin/map_probe 2>/dev/null || true)"
 case "$PROBE_POST_LABEL" in
   *gidmap_probe_exec_t*) ;;
   *)
@@ -541,7 +541,7 @@ if [ "${#CHILDS[@]}" -ge 1 ]; then
     echo "=== safe open-only checks as $BUILDER_USER (the same static probe; O_RDONLY and O_WRONLY, no write performed, no content change) ==="
     echo "=== layer meaning: DAC (same uid) + kernel open policy; SELinux is NOT in this path (unconfined runner) ==="
     echo "=== pids checked: $PIDS (all live rootlesskit_t processes: parents and children across BOTH instances) ==="
-    su -s /bin/bash "$BUILDER_USER" -c "/usr/local/bin/map-probe $PIDS" 2>&1 || true
+    su -s /bin/bash "$BUILDER_USER" -c "/usr/local/bin/map_probe $PIDS" 2>&1 || true
   } > "$EVIDENCE_DIR/c-open-checks-dac-kernel.txt"
   cat "$EVIDENCE_DIR/c-open-checks-dac-kernel.txt" >&2
 else
@@ -580,7 +580,7 @@ if [ "${#CHILDS[@]}" -ge 1 ]; then
   {
     echo "=== CONTROL battery: docker_helper_newgidmap_t WITHOUT the file grant (enforcing; production surface only) ==="
   } > "$EVIDENCE_DIR/d-scope-control-newgidmap.txt"
-  runcon "$NGID_EXEC_T" /usr/local/bin/map-probe "${CHILDS[@]}" \
+  runcon "$NGID_EXEC_T" /usr/local/bin/map_probe "${CHILDS[@]}" \
     >>"$EVIDENCE_DIR/d-scope-control-newgidmap.txt" 2>&1 || true
   sleep 2
   harvest_avcs_since "$CTRL_EPOCH" "$EVIDENCE_DIR/d-scope-control-newgidmap-avcs.txt"
@@ -596,7 +596,7 @@ if [ "${#CHILDS[@]}" -ge 1 ]; then
   {
     echo "=== EXISTING-GRANT battery: docker_helper_newuidmap_t with the production rootlesskit_t:file { write open } (enforcing) ==="
   } > "$EVIDENCE_DIR/d-scope-newuidmap.txt"
-  runcon "$NUID_EXEC_T" /usr/local/bin/map-probe "${CHILDS[@]}" \
+  runcon "$NUID_EXEC_T" /usr/local/bin/map_probe "${CHILDS[@]}" \
     >>"$EVIDENCE_DIR/d-scope-newuidmap.txt" 2>&1 || true
   sleep 2
   harvest_avcs_since "$NUID_EPOCH" "$EVIDENCE_DIR/d-scope-newuidmap-avcs.txt"
@@ -626,7 +626,7 @@ EOF
   {
     echo "=== HYPOTHESIZED battery: docker_helper_newgidmap_t WITH the guest-only diag { write } grant (enforcing) ==="
   } > "$EVIDENCE_DIR/d-scope-hypo-newgidmap.txt"
-  runcon "$NGID_EXEC_T" /usr/local/bin/map-probe "${CHILDS[@]}" \
+  runcon "$NGID_EXEC_T" /usr/local/bin/map_probe "${CHILDS[@]}" \
     >>"$EVIDENCE_DIR/d-scope-hypo-newgidmap.txt" 2>&1 || true
   sleep 2
   harvest_avcs_since "$HYPO_EPOCH" "$EVIDENCE_DIR/d-scope-hypo-newgidmap-avcs.txt"
