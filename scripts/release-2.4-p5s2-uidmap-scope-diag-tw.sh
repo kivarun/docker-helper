@@ -205,15 +205,21 @@ restorecon /usr/bin/rootlesskit /usr/bin/slirp4netns /usr/bin/newuidmap /usr/bin
 } >>"$EVIDENCE_DIR/a-toolchain.txt" 2>&1
 cat "$EVIDENCE_DIR/a-toolchain.txt" >&2
 
-# The STATIC probe vehicle: performs open-only (O_RDWR + close, no
-# write(2) exists in the source) access checks against /proc/<pid> files.
-# A static binary is required because a runcon'd interpreter would depend
-# on the base policy's library-read behavior for the helper domains; the
-# probe needs no runtime at all. It is installed on the ROOT filesystem
-# (/usr/local/bin): a domain-transition entrypoint on a NOSUID filesystem
-# (the /tmp default) is refused by the kernel's process2:nosuid_transition
-# check, while the production helpers live on / — the probe mirrors that
-# placement.
+# The STATIC probe vehicle: performs open-only (O_RDONLY/O_WRONLY + close,
+# no write(2) exists in the source) access checks against /proc/<pid>
+# files. A static binary is required because a runcon'd interpreter would
+# depend on the base policy's library-read behavior for the helper
+# domains; the probe needs no runtime at all. It is built on the ROOT
+# filesystem (/usr/local/bin): a domain-transition entrypoint on a NOSUID
+# filesystem (the /tmp default) is refused by the kernel's
+# process2:nosuid_transition check, while the production helpers live on
+# / — the probe mirrors that placement. Its DEDICATED label is applied at
+# CREATION time via a name-based type transition (see the diag module
+# below): relabeling an existing file's security.selinux xattr is refused
+# by the VM's integrity layer (observed twice: chcon fails with EACCES
+# and NO SELinux AVC — the xattr change never reaches the SELinux
+# decision), so the label must exist from the file's birth and the
+# harness verifies it after the build.
 mkdir -p /usr/local/bin "$DIAG_BASE/probe"
 cat > "$DIAG_BASE/probe/map-probe.c" <<'EOF'
 #include <stdio.h>
@@ -251,44 +257,33 @@ int main(int argc, char **argv) {
   return 0;
 }
 EOF
+# The probe's dedicated label must exist from the file's birth (relabeling
+# an existing file's security.selinux xattr is refused by the VM's
+# integrity layer with NO SELinux AVC — observed), so the GUEST-ONLY
+# checker module is loaded BEFORE the build: it declares the dedicated
+# type and a name-based type transition that labels the created
+# 'map-probe' directly. The entry grants mirror the production entry
+# shape exactly ({ entrypoint read open execute getattr map }). The
+# file-write grant toward docker_helper_rootlesskit_t is deliberately NOT
+# here — it is the HYPOTHESIZED grant and loads as a separate module
+# below.
+RUNNER_CTX="$(cat /proc/self/attr/current 2>/dev/null || true)"
+RUNNER_T="$(printf '%s' "$RUNNER_CTX" | cut -d: -f3)"
+OUT_LABEL="$(stat -c '%C' "$EVIDENCE_DIR/zypper-policy-toolchain.log" 2>/dev/null || true)"
+OUT_T="$(printf '%s' "$OUT_LABEL" | cut -d: -f3)"
+BINDIR_T_LABEL="$(stat -c '%C' /usr/local/bin 2>/dev/null || true)"
+BINDIR_T="$(printf '%s' "$BINDIR_T_LABEL" | cut -d: -f3)"
+case "${RUNNER_T:-x}" in ''|*[!A-Za-z0-9_]*|x) note "the runner domain could not be observed (context: $RUNNER_CTX)"; exit 1 ;; esac
+case "${OUT_T:-x}" in ''|*[!A-Za-z0-9_]*|x) note "the evidence-file type could not be observed (label: $OUT_LABEL)"; exit 1 ;; esac
+case "${BINDIR_T:-x}" in ''|*[!A-Za-z0-9_]*|x) note "the /usr/local/bin directory type could not be observed (label: $BINDIR_T_LABEL)"; exit 1 ;; esac
 {
-  echo "=== static probe build ==="
-  gcc -static -O2 -o /usr/local/bin/map-probe "$DIAG_BASE/probe/map-probe.c" 2>&1 && echo "build OK"
-  echo "probe label: $(stat -c '%C' /usr/local/bin/map-probe 2>&1)"
-  echo "probe fs: $(df --output=target,fid /usr/local/bin/map-probe 2>/dev/null || stat -c '%m' /usr/local/bin/map-probe 2>&1)"
-  echo "runner context: $(cat /proc/self/attr/current 2>&1)"
+  echo "=== static probe vehicle ==="
+  echo "runner context: $RUNNER_CTX (type $RUNNER_T)"
+  echo "evidence-file type: $OUT_T (from: $OUT_LABEL)"
+  echo "/usr/local/bin dir: $BINDIR_T_LABEL (type $BINDIR_T; the creation type-transition target)"
   echo "probe source (open-only; no write(2) call):"
   cat "$DIAG_BASE/probe/map-probe.c"
 } > "$EVIDENCE_DIR/d-map-probe-vehicle.txt" 2>&1
-if [ ! -x /usr/local/bin/map-probe ]; then
-  note "the static probe binary could not be built (see d-map-probe-vehicle.txt); the hypothesized-grant stage cannot run"
-  printf '%s P5S2-UIDMAP-SCOPE-DIAG-RESULT=PASS-INCOMPLETE (probe vehicle unavailable; recorded as a finding)\n' "$PREFIX" >&2
-  exit 0
-fi
-
-# GUEST-ONLY checker module: lets the two map-helper domains run the STATIC
-# probe binary (runcon) and write the probe results through the script's
-# inherited descriptors. The probe gets a DEDICATED type (narrower than
-# labeling it bin_t) and the entry grants mirror the production entry
-# shape exactly ({ entrypoint read open execute getattr map }); the label
-# is applied with chcon after the module load. The file-write grant
-# toward docker_helper_rootlesskit_t is deliberately NOT here — it is the
-# HYPOTHESIZED grant and loads as a separate module below.
-PROBE_LABEL="$(stat -c '%C' /usr/local/bin/map-probe 2>/dev/null || true)"
-PROBE_PRE_T="$(printf '%s' "$PROBE_LABEL" | cut -d: -f3)"
-RUNNER_CTX="$(cat /proc/self/attr/current 2>/dev/null || true)"
-RUNNER_T="$(printf '%s' "$RUNNER_CTX" | cut -d: -f3)"
-OUT_LABEL="$(stat -c '%C' "$EVIDENCE_DIR/d-map-probe-vehicle.txt" 2>/dev/null || true)"
-OUT_T="$(printf '%s' "$OUT_LABEL" | cut -d: -f3)"
-case "${PROBE_PRE_T:-x}" in ''|*[!A-Za-z0-9_]*|x) note "the pre-chcon probe file type could not be observed (label: $PROBE_LABEL)"; exit 1 ;; esac
-case "${RUNNER_T:-x}" in ''|*[!A-Za-z0-9_]*|x) note "the runner domain could not be observed (context: $RUNNER_CTX)"; exit 1 ;; esac
-case "${OUT_T:-x}" in ''|*[!A-Za-z0-9_]*|x) note "the evidence-file type could not be observed (label: $OUT_LABEL)"; exit 1 ;; esac
-{
-  echo "=== observed types for the generated module ==="
-  echo "probe label (pre-chcon): $PROBE_LABEL (type $PROBE_PRE_T) -> chcon to the dedicated gidmap_probe_exec_t after the module load"
-  echo "runner context: $RUNNER_CTX (type $RUNNER_T)"
-  echo "evidence-file type: $OUT_T (from: $OUT_LABEL)"
-} >> "$EVIDENCE_DIR/d-map-probe-vehicle.txt"
 cat > /tmp/gidmap_probe_diag.te <<EOF
 module gidmap_probe_diag 1.0;
 require {
@@ -296,16 +291,18 @@ require {
 	type docker_helper_newuidmap_t;
 	type $OUT_T;
 	type $RUNNER_T;
-	type $PROBE_PRE_T;
-	class file { entrypoint read open execute getattr map append write relabelto relabelfrom };
+	type $BINDIR_T;
+	attribute file_type;
+	class file { entrypoint read open execute getattr map append write create relabelto relabelfrom };
 }
 type gidmap_probe_exec_t;
+typeattribute gidmap_probe_exec_t file_type;
 allow docker_helper_newgidmap_t gidmap_probe_exec_t:file { entrypoint read open execute getattr map };
 allow docker_helper_newuidmap_t gidmap_probe_exec_t:file { entrypoint read open execute getattr map };
 allow docker_helper_newgidmap_t $OUT_T:file { append write };
 allow docker_helper_newuidmap_t $OUT_T:file { append write };
-allow $RUNNER_T gidmap_probe_exec_t:file relabelto;
-allow $RUNNER_T $PROBE_PRE_T:file relabelfrom;
+allow $RUNNER_T gidmap_probe_exec_t:file { create open write append setattr relabelto };
+type_transition $RUNNER_T $BINDIR_T:file gidmap_probe_exec_t map-probe;
 EOF
 cp /tmp/gidmap_probe_diag.te "$EVIDENCE_DIR/d-diag-modules.te"
 checkmodule -M -m -o /tmp/gidmap_probe_diag.tmp /tmp/gidmap_probe_diag.te 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
@@ -314,10 +311,27 @@ semodule_package -o /tmp/gidmap_probe_diag.pp -m /tmp/gidmap_probe_diag.tmp 2>>"
   || { note "the checker diag module failed to package"; exit 1; }
 semodule -i /tmp/gidmap_probe_diag.pp 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
   || { note "the checker diag module failed to load"; exit 1; }
-chcon -t gidmap_probe_exec_t /usr/local/bin/map-probe 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
-  || { note "the probe binary could not be labeled with the dedicated diag type"; exit 1; }
-  log "checker diag module loaded (the dedicated probe type carries the production entry shape in both map-helper domains)"
-  echo "probe label (post-chcon): $(stat -c '%C' /usr/local/bin/map-probe 2>&1)" >> "$EVIDENCE_DIR/d-map-probe-vehicle.txt"
+log "checker diag module loaded (the dedicated probe type carries the production entry shape in both map-helper domains)"
+{
+  echo "=== build (after the diag module load: the creation type-transition labels the probe) ==="
+  gcc -static -O2 -o /usr/local/bin/map-probe "$DIAG_BASE/probe/map-probe.c" 2>&1 && echo "build OK"
+  echo "probe label (post-build): $(stat -c '%C' /usr/local/bin/map-probe 2>&1)"
+  echo "probe fs: $(stat -c '%m' /usr/local/bin/map-probe 2>&1)"
+} >> "$EVIDENCE_DIR/d-map-probe-vehicle.txt" 2>&1
+if [ ! -x /usr/local/bin/map-probe ]; then
+  note "the static probe binary could not be built (see d-map-probe-vehicle.txt); the hypothesized-grant stage cannot run"
+  printf '%s P5S2-UIDMAP-SCOPE-DIAG-RESULT=PASS-INCOMPLETE (probe vehicle unavailable; recorded as a finding)\n' "$PREFIX" >&2
+  exit 0
+fi
+PROBE_POST_LABEL="$(stat -c '%C' /usr/local/bin/map-probe 2>/dev/null || true)"
+case "$PROBE_POST_LABEL" in
+  *gidmap_probe_exec_t*) ;;
+  *)
+    note "the probe binary does not carry the dedicated diag type (label: $PROBE_POST_LABEL); the probe stage cannot run"
+    printf '%s P5S2-UIDMAP-SCOPE-DIAG-RESULT=PASS-INCOMPLETE (probe vehicle mislabeled; recorded as a finding)\n' "$PREFIX" >&2
+    exit 0
+    ;;
+esac
 
 useradd -m "$BUILDER_USER" 2>/dev/null || true
 grep -q "^$BUILDER_USER:" /etc/subuid || echo "$BUILDER_USER:$BUILDER_SUBUID_START:$BUILDER_SUBUID_COUNT" >> /etc/subuid
