@@ -604,19 +604,23 @@ make_target_b() {
 # through the production transition chain (parent-role identity). The
 # gid_map of B stays empty — the experiment's target state.
 set_target_uidmap() {
-  local bpid="$1" rc=0
+  local bpid="$1" rc=0 b_uid b_gid
   set +e
   runuser -u "$BUILDER_USER" -- \
     runcon "$RK_EXEC_T" /usr/local/bin/map_probe --invoke-helper /usr/bin/newuidmap \
     "$bpid" "${U_MAP_ARGS[@]}"
   rc=$?
   set -e
+  # procfs map files report st_size 0 even when they have content — the
+  # check is content-based, never -s.
+  b_uid="$(cat "/proc/$bpid/uid_map" 2>/dev/null || true)"
+  b_gid="$(cat "/proc/$bpid/gid_map" 2>/dev/null || true)"
   echo "helper exit code: $rc"
-  echo "uid_map after: [$(cat "/proc/$bpid/uid_map" 2>/dev/null || true)]"
-  echo "gid_map after: [$(cat "/proc/$bpid/gid_map" 2>/dev/null || true)]"
+  echo "uid_map after: [$b_uid]"
+  echo "gid_map after: [$b_gid]"
   [ "$rc" = 0 ] || return 1
-  [ -s "/proc/$bpid/uid_map" ] || return 1
-  [ ! -s "/proc/$bpid/gid_map" ] || return 1
+  [ -n "$b_uid" ] || return 1
+  [ -z "$b_gid" ] || return 1
   return 0
 }
 
