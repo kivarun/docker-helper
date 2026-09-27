@@ -207,8 +207,12 @@ cat "$EVIDENCE_DIR/a-toolchain.txt" >&2
 # write(2) exists in the source) access checks against /proc/<pid> files.
 # A static binary is required because a runcon'd interpreter would depend
 # on the base policy's library-read behavior for the helper domains; the
-# probe needs no runtime at all.
-mkdir -p "$DIAG_BASE/probe"
+# probe needs no runtime at all. It is installed on the ROOT filesystem
+# (/usr/local/bin): a domain-transition entrypoint on a NOSUID filesystem
+# (the /tmp default) is refused by the kernel's process2:nosuid_transition
+# check, while the production helpers live on / — the probe mirrors that
+# placement.
+mkdir -p /usr/local/bin "$DIAG_BASE/probe"
 cat > "$DIAG_BASE/probe/map-probe.c" <<'EOF'
 #include <stdio.h>
 #include <stdlib.h>
@@ -239,13 +243,14 @@ int main(int argc, char **argv) {
 EOF
 {
   echo "=== static probe build ==="
-  gcc -static -O2 -o "$DIAG_BASE/probe/map-probe" "$DIAG_BASE/probe/map-probe.c" 2>&1 && echo "build OK"
-  echo "probe label: $(stat -c '%C' "$DIAG_BASE/probe/map-probe" 2>&1)"
+  gcc -static -O2 -o /usr/local/bin/map-probe "$DIAG_BASE/probe/map-probe.c" 2>&1 && echo "build OK"
+  echo "probe label: $(stat -c '%C' /usr/local/bin/map-probe 2>&1)"
+  echo "probe fs: $(df --output=target,fid /usr/local/bin/map-probe 2>/dev/null || stat -c '%m' /usr/local/bin/map-probe 2>&1)"
   echo "runner context: $(cat /proc/self/attr/current 2>&1)"
   echo "probe source (open-only; no write(2) call):"
   cat "$DIAG_BASE/probe/map-probe.c"
 } > "$EVIDENCE_DIR/d-map-probe-vehicle.txt" 2>&1
-if [ ! -x "$DIAG_BASE/probe/map-probe" ]; then
+if [ ! -x /usr/local/bin/map-probe ]; then
   note "the static probe binary could not be built (see d-map-probe-vehicle.txt); the hypothesized-grant stage cannot run"
   printf '%s P5S2-UIDMAP-SCOPE-DIAG-RESULT=PASS-INCOMPLETE (probe vehicle unavailable; recorded as a finding)\n' "$PREFIX" >&2
   exit 0
@@ -258,7 +263,7 @@ fi
 # interpolated; the module is removed at cleanup. The file-write grant
 # toward docker_helper_rootlesskit_t is deliberately NOT here — it is the
 # HYPOTHESIZED grant and loads as a separate module below.
-PROBE_LABEL="$(stat -c '%C' "$DIAG_BASE/probe/map-probe" 2>/dev/null || true)"
+PROBE_LABEL="$(stat -c '%C' /usr/local/bin/map-probe 2>/dev/null || true)"
 PROBE_T="$(printf '%s' "$PROBE_LABEL" | cut -d: -f3)"
 RUNNER_LABEL="$(stat -c '%C' "$EVIDENCE_DIR/d-map-probe-vehicle.txt" 2>/dev/null || true)"
 OUT_T="$(printf '%s' "$RUNNER_LABEL" | cut -d: -f3)"
@@ -554,7 +559,7 @@ if [ "${#CHILDS[@]}" -ge 1 ]; then
   {
     echo "=== CONTROL battery: docker_helper_newgidmap_t WITHOUT the file grant (enforcing; production surface only) ==="
   } > "$EVIDENCE_DIR/d-scope-control-newgidmap.txt"
-  runcon "$NGID_EXEC_T" "$DIAG_BASE/probe/map-probe" "${CHILDS[@]}" \
+  runcon "$NGID_EXEC_T" /usr/local/bin/map-probe "${CHILDS[@]}" \
     >>"$EVIDENCE_DIR/d-scope-control-newgidmap.txt" 2>&1 || true
   sleep 2
   harvest_avcs_since "$CTRL_EPOCH" "$EVIDENCE_DIR/d-scope-control-newgidmap-avcs.txt"
@@ -567,7 +572,7 @@ if [ "${#CHILDS[@]}" -ge 1 ]; then
   {
     echo "=== EXISTING-GRANT battery: docker_helper_newuidmap_t with the production rootlesskit_t:file { write open } (enforcing) ==="
   } > "$EVIDENCE_DIR/d-scope-newuidmap.txt"
-  runcon "$NUID_EXEC_T" "$DIAG_BASE/probe/map-probe" "${CHILDS[@]}" \
+  runcon "$NUID_EXEC_T" /usr/local/bin/map-probe "${CHILDS[@]}" \
     >>"$EVIDENCE_DIR/d-scope-newuidmap.txt" 2>&1 || true
   sleep 2
   harvest_avcs_since "$NUID_EPOCH" "$EVIDENCE_DIR/d-scope-newuidmap-avcs.txt"
@@ -597,7 +602,7 @@ EOF
   {
     echo "=== HYPOTHESIZED battery: docker_helper_newgidmap_t WITH the guest-only diag { write } grant (enforcing) ==="
   } > "$EVIDENCE_DIR/d-scope-hypo-newgidmap.txt"
-  runcon "$NGID_EXEC_T" "$DIAG_BASE/probe/map-probe" "${CHILDS[@]}" \
+  runcon "$NGID_EXEC_T" /usr/local/bin/map-probe "${CHILDS[@]}" \
     >>"$EVIDENCE_DIR/d-scope-hypo-newgidmap.txt" 2>&1 || true
   sleep 2
   harvest_avcs_since "$HYPO_EPOCH" "$EVIDENCE_DIR/d-scope-hypo-newgidmap-avcs.txt"
