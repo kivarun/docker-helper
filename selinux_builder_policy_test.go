@@ -787,15 +787,17 @@ func TestSELinuxPolicyNewgidmapDomainTransition(t *testing.T) {
 }
 
 // newgidmapDomainSurface is the EXACT allow-rule surface of the GID-map
-// helper domain: ONLY the entry/loader rule. The domain holds ZERO runtime
-// grants — no passwd lookup, no userdb fallback, no gid_map write, no
-// inherited-stdio fifo, no /proc surface toward the child, and no
-// capability/cap_userns grant of any kind (the privilege model stays the
-// distro's chkstat-applied cap_setgid file capability). Any additional or
-// widened rule is a policy regression.
+// helper domain: the entry/loader rule plus the two live-AVC-evidenced
+// runtime grants (the inherited-stdio fifo write and the /proc
+// target-directory read). The domain holds ZERO capability surface — no
+// passwd lookup, no userdb fallback, no gid_map write, no dir
+// open/getattr/search, no capabilities/cap_userns (the privilege model
+// stays the distro's chkstat-applied cap_setgid file capability). Any
+// additional or widened rule is a policy regression.
 var newgidmapDomainSurface = []string{
 	"allow docker_helper_newgidmap_t docker_helper_newgidmap_exec_t:file { entrypoint read open execute getattr map };",
 	"allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:fifo_file { write };",
+	"allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:dir { read };",
 }
 
 // newgidmapDomainPolicyViolations scans the module's parsed rules against
@@ -806,9 +808,10 @@ var newgidmapDomainSurface = []string{
 //     extra grants both violate);
 //   - the domain holds no self-targeted grant at all (no capability,
 //     capability2, or cap_userns rule is evidenced for it);
-//   - the domain's only runtime grant toward docker_helper_rootlesskit_t is
-//     the inherited-stdio fifo { write } rule; any other shape toward the
-//     child (the /proc dir surface, the gid_map file write) and ANY
+//   - the domain's only runtime grants toward docker_helper_rootlesskit_t
+//     are the inherited-stdio fifo { write } and the /proc target-dir
+//     { read } rules; any other shape toward the child (the dir
+//     open/getattr/search widening, the gid_map file write) and ANY
 //     process-class grant (the mem file's kernel PTRACE_MODE_ATTACH check
 //     maps to process:ptrace — signal/ptrace alike) violate; every other
 //     target type (daemon/Docker/workspace/state surfaces by construction)
@@ -850,8 +853,9 @@ func newgidmapDomainPolicyViolations(policy string) []string {
 				if target == "docker_helper_rootlesskit_t" {
 					if class == "process" {
 						violations = append(violations, fmt.Sprintf("the GID-map helper domain must hold no process-class grant toward the rootlesskit child domain (the mem file's ptrace barrier stays closed): %s", trimmed))
-					} else if trimmed != "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:fifo_file { write };" {
-						violations = append(violations, fmt.Sprintf("the GID-map helper domain's rootlesskit-child surface is exactly the inherited-stdio fifo { write } (the /proc dir and gid_map surfaces stay ungranted): %s", trimmed))
+					} else if trimmed != "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:fifo_file { write };" &&
+						trimmed != "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:dir { read };" {
+						violations = append(violations, fmt.Sprintf("the GID-map helper domain's rootlesskit-child surface is exactly the inherited-stdio fifo { write } and the /proc target-dir { read } (the dir open/getattr/search and gid_map surfaces stay ungranted): %s", trimmed))
 					}
 				}
 			}
@@ -888,14 +892,17 @@ func newgidmapDomainPolicyViolations(policy string) []string {
 }
 
 // TestSELinuxPolicyNewgidmapDomainSurface verifies the GID-map helper
-// domain's runtime surface is EXACTLY the entry rule and nothing else —
-// zero runtime grants (no passwd, no gid_map, no fifo, no capabilities).
-// Mutation tests prove each guard fires: extra entry paths (a manager-side
-// transition, a duplicate transition, a manager exec grant), extra
-// allow rules toward the child domain (fifo, gid_map file, proc dir) or
-// forbidden surfaces (passwd, builder state, daemon runtime, Docker
-// socket, workspace), widened entry sets, and any self-targeted capability
-// grant must trip the invariants.
+// domain's runtime surface is EXACTLY the entry rule plus the two
+// evidenced runtime grants (the inherited-stdio fifo write and the /proc
+// target-dir read) and nothing else — no passwd, no gid_map write, no dir
+// open/getattr/search, no capabilities. Mutation tests prove each guard
+// fires: extra entry paths (a manager-side transition, a duplicate
+// transition, a manager exec grant), widened or removed fifo/dir grants,
+// extra runtime shapes toward the child domain (gid_map file, dir
+// open/getattr), forbidden surfaces (passwd, builder state, daemon
+// runtime, Docker socket, workspace), widened entry sets, process
+// ptrace/signal toward the child, and any self-targeted capability grant
+// must trip the invariants.
 func TestSELinuxPolicyNewgidmapDomainSurface(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
 	if violations := newgidmapDomainPolicyViolations(policy); len(violations) > 0 {
@@ -919,10 +926,12 @@ func TestSELinuxPolicyNewgidmapDomainSurface(t *testing.T) {
 		{"regressed entry map permission", "allow docker_helper_newgidmap_t docker_helper_newgidmap_exec_t:file { entrypoint read open execute getattr };", "", "unexpected rule"},
 		{"widened fifo grant (getattr added)", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:fifo_file { write getattr };", "", "rootlesskit-child surface is exactly"},
 		{"widened fifo grant (append added)", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:fifo_file { write append };", "", "rootlesskit-child surface is exactly"},
-		{"removed fifo grant", "", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:fifo_file { write };\n", "must carry exactly 2 allow rule"},
+		{"removed fifo grant", "", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:fifo_file { write };\n", "must carry exactly 3 allow rule"},
+		{"widened proc-dir grant (open added)", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:dir { read open };", "", "rootlesskit-child surface is exactly"},
+		{"widened proc-dir grant (search added)", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:dir { read getattr search };", "", "rootlesskit-child surface is exactly"},
+		{"removed proc-dir grant", "", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:dir { read };\n", "must carry exactly 3 allow rule"},
 		{"process ptrace toward the child domain", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:process ptrace;", "", "no process-class grant toward the rootlesskit child domain"},
 		{"process signal toward the child domain", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:process signal;", "", "no process-class grant toward the rootlesskit child domain"},
-		{"proc dir read", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:dir { read };", "", "rootlesskit-child surface is exactly"},
 		{"gid_map file write", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:file { write open };", "", "rootlesskit-child surface is exactly"},
 		{"passwd read", "allow docker_helper_newgidmap_t passwd_file_t:file { read open };", "", "unexpected target type"},
 		{"builder state tree", "allow docker_helper_newgidmap_t docker_helper_builder_state_t:file { write };", "", "unexpected target type"},
