@@ -956,9 +956,13 @@ allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:fifo_file { write 
 # the transition-required entrypoint plus the loader access (the same
 # loader shape the helper domain's own entry rule carries, with the
 # target-side execute live-AVC-proven for the slirp4netns exec in run
-# 36222264024). NOTE: with the current enforcing policy the child stops at
-# the newuidmap exec, so the runtime transition is proven per-run only when
-# an actual AVC from the new domain or a /proc capture appears.
+# 36222264024). NOTE: the exec transitions and the helper's UID mapping
+# completes successfully (the enforcing runs since the capability grants:
+# zero uid_map AVCs — the write-open, the in-namespace sys_admin bit, and
+# the out-of-namespace setuid bit are all granted), so the runtime
+# transition is proven per-run by the domain's own AVC record (the
+# tolerated passwd getattr) or a /proc capture, never by the
+# type_transition line alone.
 type_transition docker_helper_rootlesskit_t docker_helper_newuidmap_exec_t:process docker_helper_newuidmap_t;
 allow docker_helper_rootlesskit_t docker_helper_newuidmap_t:process { transition };
 
@@ -998,11 +1002,13 @@ allow docker_helper_newuidmap_t docker_helper_newuidmap_exec_t:file { entrypoint
 #     newuidmap failed with "open of uid_map failed: Permission denied"
 #     and the window carries no file-class record — the open never reached
 #     the uid_map file because the walk was denied first)
-# Nothing else was denied on this pair: no write on the dir, no file-class
-# record, no capability or cap_userns surface — those stay ungranted
-# boundaries. The passwd_file_t getattr denial of the same runs
-# (records 563/555) is NON-blocking evidence: the caller's user name was
-# determined successfully, so it stays ungranted.
+# The pair surface is evidence-frozen at these two entries. The domain's
+# own privilege surface is granted separately below (the in-namespace
+# sys_admin bit and the out-of-namespace setuid bit, each with its own
+# enforcing AVC evidence) and the uid_map write completes successfully in
+# the enforcing runs since. The passwd_file_t getattr denial of the same
+# runs (records 563/555) is NON-blocking evidence: the caller's user name
+# was determined successfully, so it stays ungranted.
 allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:fifo_file { write };
 allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:dir { read open getattr search };
 
@@ -1122,6 +1128,25 @@ allow docker_helper_rootlesskit_t docker_helper_newgidmap_t:process { transition
 
 allow docker_helper_rootlesskit_t docker_helper_newgidmap_exec_t:file { execute read open getattr };
 allow docker_helper_newgidmap_t docker_helper_newgidmap_exec_t:file { entrypoint read open execute getattr map };
+
+# The helper's inherited diagnostic pipe (P5-S2): the first enforcing
+# boundary INSIDE the new domain. Live enforcing AVC evidence (run
+# 36271082542 P6 window, records 562/563: denied { write } for pid=3803
+# comm="newgidmap" path="pipe:[22067]" dev="pipefs"
+# scontext=system_u:system_r:docker_helper_newgidmap_t:s0
+# tcontext=system_u:system_r:docker_helper_rootlesskit_t:s0
+# tclass=fifo_file permissive=0) — the helper inherits the rootlesskit
+# child's stdio pipe (the launch vehicle's inst.diag output pipe), and
+# without the write the helper's OWN failure output is silenced (the child
+# tail's empty message slot: "newgidmap 3797 [0 475 1 1 231072 65536]
+# failed: : exit status 1"). The fd-use shape mirrors the proven
+# newuidmap fifo grant (and the slirp4netns shape; unlike slirp4netns, no
+# getattr is evidenced or granted — the helper writes only). Everything
+# else stays ungranted: the /proc dir { read } denial (record 564 — the
+# expected NEXT boundary candidate), the gid_map file write, and any
+# capability surface (the distro chkstat-applied cap_setgid file capability
+# stays the only privilege owner).
+allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:fifo_file { write };
 
 # The child's user-namespace creation itself: rootlesskit creates the userns
 # that hosts the buildkitd instance. Live enforcing AVC evidence (P5-S1
