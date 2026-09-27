@@ -275,12 +275,18 @@ fi
 # toward docker_helper_rootlesskit_t is deliberately NOT here — it is the
 # HYPOTHESIZED grant and loads as a separate module below.
 PROBE_LABEL="$(stat -c '%C' /usr/local/bin/map-probe 2>/dev/null || true)"
+PROBE_PRE_T="$(printf '%s' "$PROBE_LABEL" | cut -d: -f3)"
+RUNNER_CTX="$(cat /proc/self/attr/current 2>/dev/null || true)"
+RUNNER_T="$(printf '%s' "$RUNNER_CTX" | cut -d: -f3)"
 OUT_LABEL="$(stat -c '%C' "$EVIDENCE_DIR/d-map-probe-vehicle.txt" 2>/dev/null || true)"
 OUT_T="$(printf '%s' "$OUT_LABEL" | cut -d: -f3)"
+case "${PROBE_PRE_T:-x}" in ''|*[!A-Za-z0-9_]*|x) note "the pre-chcon probe file type could not be observed (label: $PROBE_LABEL)"; exit 1 ;; esac
+case "${RUNNER_T:-x}" in ''|*[!A-Za-z0-9_]*|x) note "the runner domain could not be observed (context: $RUNNER_CTX)"; exit 1 ;; esac
 case "${OUT_T:-x}" in ''|*[!A-Za-z0-9_]*|x) note "the evidence-file type could not be observed (label: $OUT_LABEL)"; exit 1 ;; esac
 {
   echo "=== observed types for the generated module ==="
-  echo "probe label (pre-chcon): $PROBE_LABEL -> the dedicated gidmap_probe_exec_t type is applied after the module load"
+  echo "probe label (pre-chcon): $PROBE_LABEL (type $PROBE_PRE_T) -> chcon to the dedicated gidmap_probe_exec_t after the module load"
+  echo "runner context: $RUNNER_CTX (type $RUNNER_T)"
   echo "evidence-file type: $OUT_T (from: $OUT_LABEL)"
 } >> "$EVIDENCE_DIR/d-map-probe-vehicle.txt"
 cat > /tmp/gidmap_probe_diag.te <<EOF
@@ -289,13 +295,17 @@ require {
 	type docker_helper_newgidmap_t;
 	type docker_helper_newuidmap_t;
 	type $OUT_T;
-	class file { entrypoint read open execute getattr map append write };
+	type $RUNNER_T;
+	type $PROBE_PRE_T;
+	class file { entrypoint read open execute getattr map append write relabelto relabelfrom };
 }
 type gidmap_probe_exec_t;
 allow docker_helper_newgidmap_t gidmap_probe_exec_t:file { entrypoint read open execute getattr map };
 allow docker_helper_newuidmap_t gidmap_probe_exec_t:file { entrypoint read open execute getattr map };
 allow docker_helper_newgidmap_t $OUT_T:file { append write };
 allow docker_helper_newuidmap_t $OUT_T:file { append write };
+allow $RUNNER_T gidmap_probe_exec_t:file relabelto;
+allow $RUNNER_T $PROBE_PRE_T:file relabelfrom;
 EOF
 cp /tmp/gidmap_probe_diag.te "$EVIDENCE_DIR/d-diag-modules.te"
 checkmodule -M -m -o /tmp/gidmap_probe_diag.tmp /tmp/gidmap_probe_diag.te 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
