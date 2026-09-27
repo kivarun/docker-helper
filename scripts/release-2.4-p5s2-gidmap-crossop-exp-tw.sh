@@ -12,6 +12,13 @@
 #                      loaded only after the previous stage's boundary is
 #                      confirmed by its enforcing AVC
 #
+# Phase F reuses the same stand for the P5-S2g23 experiment: whether the
+# EXISTING production policy (its current newuidmap file and capability
+# grants, NO new runtime grants, the stage modules unloaded) lets the
+# parent-role newuidmap of operation A change the EMPTY uid_map of
+# another operation's process B. The positive control is the flow's own
+# one-shot child uid_map write.
+#
 # Two scenarios, both invoking the REAL /usr/bin/newgidmap with the PID of
 # a FRESH target child B (uid_map set, gid_map empty) and the flow's valid
 # subgid arguments:
@@ -698,13 +705,15 @@ EOF
     || { note "$name failed to load"; exit 1; }
 }
 
-# watch_stage_child_maps <state-dir-tag> <out> : identify the instance's
-# rootlesskit_t child (the cmdline carries the state-dir token but not
-# the probe) and keep recording its map files until BOTH maps are
-# non-empty or the budget runs out, so the last snapshot is the fullest
-# state the process reached while alive.
+# watch_stage_child_maps <state-dir-tag> <out> [which] : identify the
+# instance's rootlesskit_t child (the cmdline carries the state-dir token
+# but not the probe) and keep recording its map files until the requested
+# condition — 'both' maps non-empty (the default, the g22 controls) or
+# 'uid' map non-empty (the g23 own-child uid control) — or the budget
+# runs out, so the last snapshot is the fullest state the process
+# reached while alive.
 watch_stage_child_maps() {
-  local tag="$1" out="$2" pid ctx ppid pctx cmd cpid uidm gidm
+  local tag="$1" out="$2" which="${3:-both}" pid ctx ppid pctx cmd cpid uidm gidm
   local deadline=$(( $(date +%s) + 40 ))
   : > "$out"
   cpid=""
@@ -738,6 +747,9 @@ watch_stage_child_maps() {
         echo "gid_map content: [$gidm]"
         echo "setgroups content: [$(cat "/proc/$cpid/setgroups" 2>/dev/null || true)]"
       } > "$out" 2>&1
+      if [ "$which" = uid ] && [ -n "$uidm" ]; then
+        return 0
+      fi
       if [ -n "$uidm" ] && [ -n "$gidm" ]; then
         return 0
       fi
@@ -748,33 +760,39 @@ watch_stage_child_maps() {
   return 1
 }
 
-# parent_role_attempt <fifo> <bpid> <out> <avcs> : PARENT scenario — a
-# docker_helper_rootlesskit_t invoker in the INITIAL user namespace (the
-# builder identity, no kernel caps) execs the REAL /usr/bin/newgidmap
-# with B's pid and the flow's valid subgid arguments. Returns the
-# helper's exit code.
+# parent_role_attempt <fifo> <bpid> <out> <avcs> [<helper> <mapfile>
+# <mapargs...>] : PARENT scenario — a docker_helper_rootlesskit_t invoker
+# in the INITIAL user namespace (the builder identity, no kernel caps;
+# the helper's file caps apply at exec) execs the REAL distro map helper
+# with B's pid and the flow's valid subid arguments. Defaults keep the
+# g22 experiment's shape (/usr/bin/newgidmap, gid_map, G_MAP_ARGS); the
+# g23 experiment passes /usr/bin/newuidmap, uid_map, U_MAP_ARGS. Returns
+# the helper's exit code.
 parent_role_attempt() {
   local fifo="$1" bpid="$2" out="$3" avcs="$4" rc=0 epoch
+  local helper="${5:-/usr/bin/newgidmap}" mapfile="${6:-gid_map}"
+  local -a margs=()
+  if [ "$#" -gt 6 ]; then margs=("${@:7}"); else margs=("${G_MAP_ARGS[@]}"); fi
   epoch="$(date +%s)"
   {
-    echo "=== PARENT-ROLE attempt: real newgidmap from the initial user namespace ==="
+    echo "=== PARENT-ROLE attempt: real $(basename "$helper") from the initial user namespace ==="
     echo "invoker domain: $RK_EXEC_T (privilege shape: builder uid/gid, no kernel caps)"
     echo "target child B: pid=$bpid"
-    echo "gid_map before: [$(cat "/proc/$bpid/gid_map" 2>/dev/null || true)]"
-    echo "invocation args: newgidmap $bpid ${G_MAP_ARGS[*]}"
+    echo "$mapfile before: [$(cat "/proc/$bpid/$mapfile" 2>/dev/null || true)]"
+    echo "invocation args: $(basename "$helper") $bpid ${margs[*]}"
   } > "$out"
   harvest_helper_facts 12 "$EVIDENCE_DIR/tmp-helper-facts.txt" &
   HELPER_FACTS_PID=$!
   set +e
   runuser -u "$BUILDER_USER" -- \
-    runcon "$RK_EXEC_T" /usr/local/bin/map_probe --invoke-helper /usr/bin/newgidmap \
-    "$bpid" "${G_MAP_ARGS[@]}" \
+    runcon "$RK_EXEC_T" /usr/local/bin/map_probe --invoke-helper "$helper" \
+    "$bpid" "${margs[@]}" \
     >>"$out" 2>&1
   rc=$?
   set -e
   {
     echo "helper exit code: $rc"
-    echo "gid_map after: [$(cat "/proc/$bpid/gid_map" 2>/dev/null || true)]"
+    echo "$mapfile after: [$(cat "/proc/$bpid/$mapfile" 2>/dev/null || true)]"
   } >> "$out"
   sleep 2
   kill "$HELPER_FACTS_PID" 2>/dev/null || true
@@ -991,6 +1009,56 @@ if [ "${STAGE2_CONFIRMED:-0}" = 1 ]; then
 else
   note "stage 3 skipped (the stage 2 boundary was not confirmed; recorded as a finding)"
 fi
+
+log 'F: P5-S2g23 — uid_map cross-operation experiment (existing production policy only)'
+# Unload the g22 stage modules so the policy is the production module plus
+# the stand's own operation module; no new runtime grants for this phase.
+semodule -r gidmap_capsetgid_diag >/dev/null 2>&1 || true
+semodule -r gidmap_capuserns_diag >/dev/null 2>&1 || true
+{
+  echo "=== loaded policy modules at the g23 phase start ==="
+  semodule -l | grep -a 'docker_helper\|gidmap' || true
+  echo "=== the transferred candidate .te's EXISTING newuidmap grants (no new grants added) ==="
+  grep -an 'newuidmap' "$TRANSFERRED/docker-helper.te" || true
+} > "$EVIDENCE_DIR/g23-production-surface.txt" 2>&1
+G23_EPOCH="$(date +%s)"
+B_G23="$(make_target_b "$DIAG_BASE/fifos/bfifo-g23" || true)"
+if [ -z "${B_G23:-}" ]; then
+  note "g23: the target child B could not be created (recorded as a finding)"
+  P5S2G23_RESULT="the target child B could not be created (see stand-failure-g23-target.txt)"
+  diagnose_stand_failure g23-target "$G23_EPOCH" "$DIAG_BASE/b-target.out" "$EVIDENCE_DIR/g23-b-facts.txt"
+else
+  collect_b_facts "$B_G23" "$EVIDENCE_DIR/g23-b-facts.txt" "g23 target B before"
+  if parent_role_attempt "$DIAG_BASE/fifos/bfifo-g23" "$B_G23" \
+       "$EVIDENCE_DIR/g23-parent-attempt.txt" "$EVIDENCE_DIR/g23-parent-avcs.txt" \
+       /usr/bin/newuidmap uid_map "${U_MAP_ARGS[@]}"; then
+    log "g23 CROSS-OPERATION uid_map write SUCCEEDED under the existing production policy — recorded as an EXISTING production risk (no new runtime grants involved)"
+    P5S2G23_RESULT="cross-operation uid_map write SUCCEEDED under the existing production policy — EXISTING production risk (see g23-parent-attempt.txt)"
+  else
+    log "g23 cross-operation uid_map write FAILED under the existing production policy — the exact additional boundary is in the attempt record and AVCs"
+    P5S2G23_RESULT="cross-operation uid_map write FAILED under the existing production policy — the additional boundary is in g23-parent-attempt.txt and g23-parent-avcs.txt"
+  fi
+  # Positive control: the real rootlesskit flow's own one-shot child
+  # uid_map write, in the same window, same policy.
+  {
+    echo "=== g23 positive control: real rootlesskit flow, own-child uid_map write ==="
+    echo "command: runuser -u $BUILDER_USER -- runcon $RK_EXEC_T /usr/bin/rootlesskit --net=none --state-dir=$DIAG_BASE/g23/a1-state /bin/sleep 12"
+  } > "$EVIDENCE_DIR/g23-control.txt"
+  GC_EPOCH="$(date +%s)"
+  runuser -u "$BUILDER_USER" -- \
+    runcon "$RK_EXEC_T" /usr/bin/rootlesskit --net=none \
+    --state-dir="$DIAG_BASE/g23/a1-state" /bin/sleep 12 \
+    >>"$EVIDENCE_DIR/g23-control.txt" 2>&1 &
+  RK_PIDS+=($!)
+  watch_stage_child_maps "g23/a1-state" "$EVIDENCE_DIR/g23-control-child-maps.txt" uid || \
+    note "g23 control: the own-child uid_map snapshot was not captured while alive (see g23-control.txt)"
+  sleep 2
+  harvest_avcs_since "$GC_EPOCH" "$EVIDENCE_DIR/g23-control-avcs.txt"
+  pkill -KILL -f "state-dir=$DIAG_BASE/g23/a1-state" 2>/dev/null || true
+  cat "$EVIDENCE_DIR/g23-control.txt" >&2
+fi
+P5S2G23_RESULT="${P5S2G23_RESULT:-the g23 phase did not complete its measurement}"
+printf '%s P5S2-G23-UIDMAP-CROSSOP-RESULT=COMPLETED (%s)\n' "$PREFIX" "$P5S2G23_RESULT" >&2
 
 log 'teardown'
 pkill -KILL -f 'rootlesskit --net=none' 2>/dev/null || true
