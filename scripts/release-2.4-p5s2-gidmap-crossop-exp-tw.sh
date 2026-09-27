@@ -126,6 +126,7 @@ log 'A: toolchain + candidate module load (disposable VM only)'
 } >"$EVIDENCE_DIR/a-toolchain.txt" 2>&1
 zypper --non-interactive install -y checkpolicy container-selinux \
   policycoreutils-python-utils rootlesskit slirp4netns audit gcc glibc-static \
+  libcap-progs \
   >"$EVIDENCE_DIR/zypper-toolchain.log" 2>&1 \
   || note "zypper install of the policy toolchain failed (see zypper-toolchain.log)"
 fail_toolchain=0
@@ -157,7 +158,11 @@ restorecon /usr/bin/rootlesskit /usr/bin/slirp4netns /usr/bin/newuidmap /usr/bin
     echo "$p -> $(stat -c '%C' "$p" 2>&1)"
   done
   echo "=== file capabilities (observed, never modified) ==="
-  getcap /usr/bin/newuidmap /usr/bin/newgidmap 2>&1 || true
+  if command -v getcap >/dev/null 2>&1; then
+    getcap /usr/bin/newuidmap /usr/bin/newgidmap 2>&1 || true
+  else
+    echo "getcap unavailable (libcap-progs missing; recorded as a toolchain finding)"
+  fi
 } >>"$EVIDENCE_DIR/a-toolchain.txt" 2>&1
 
 useradd -m "$BUILDER_USER" 2>/dev/null || true
@@ -214,6 +219,7 @@ case "${FIFO_T:-x}" in ''|*[!A-Za-z0-9_]*|x) note "the fifo type could not be ob
 # integrity layer with NO SELinux AVC — observed).
 mkdir -p "$DIAG_BASE/probe"
 cat > "$DIAG_BASE/probe/map_probe.c" <<'EOF'
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
