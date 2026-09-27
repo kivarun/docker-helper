@@ -221,6 +221,9 @@ G_MAP_ARGS=(0 "$BUILDER_UID" 1 1 "$BUILDER_SUBGID_START" "$BUILDER_SUBGID_COUNT"
   echo "=== flow's map arguments (parent uid entry + subid range) ==="
   echo "uid args: ${U_MAP_ARGS[*]}"
   echo "gid args: ${G_MAP_ARGS[*]}"
+  echo "=== shadow subid backend state (which checks the helpers use) ==="
+  grep -a 'subid' /etc/nsswitch.conf 2>/dev/null || echo "no subid line in /etc/nsswitch.conf (the file DB path)"
+  grep -a 'SUB_UID_MIN\|SUB_GID_MIN\|SUB_UID_COUNT\|SUB_GID_COUNT' /etc/login.defs 2>/dev/null || true
 } >"$EVIDENCE_DIR/builder-identity.txt" 2>&1
 cat "$EVIDENCE_DIR/builder-identity.txt" >&2
 
@@ -299,6 +302,7 @@ cat > "$DIAG_BASE/probe/map_probe.c" <<'EOF'
 #include <unistd.h>
 #include <sched.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <linux/capability.h>
 
 static void print_facts(const char *stage) {
@@ -364,6 +368,61 @@ static void wait_go(const char *gofifo) {
   close(fd);
 }
 
+/* fork_exec_capture: fork+exec the helper (the production rootlesskit
+ * exec.Command shape: the helper runs in a forked child, so the exec
+ * domain transition happens there) with its stdio captured through a
+ * pipe OWNED BY THE PROBE (docker_helper_rootlesskit_t:fifo_file — the
+ * fd shape whose write grant the production helper domains hold, so the
+ * captured output survives the transition's inherited-fd flush). The
+ * parent streams the helper's output through its own surviving stdout
+ * and reports the helper's exit code. Returns the helper's rc. */
+static int fork_exec_capture(char **nargv) {
+  int pfd[2];
+  pid_t child;
+  ssize_t n;
+  char buf[4096];
+  int status = 0;
+  int rc;
+
+  if (pipe(pfd) != 0) {
+    printf("PROBE pipe-failed errno=%d (%s)\n", errno, strerror(errno));
+    fflush(stdout);
+    return 6;
+  }
+  child = fork();
+  if (child < 0) {
+    printf("PROBE fork-failed errno=%d (%s)\n", errno, strerror(errno));
+    fflush(stdout);
+    return 6;
+  }
+  if (child == 0) {
+    close(pfd[0]);
+    dup2(pfd[1], STDOUT_FILENO);
+    dup2(pfd[1], STDERR_FILENO);
+    if (pfd[1] > STDERR_FILENO) close(pfd[1]);
+    execv(nargv[0], nargv);
+    fprintf(stderr, "execv-failed errno=%d (%s)\n", errno, strerror(errno));
+    _exit(127);
+  }
+  close(pfd[1]);
+  printf("HELPER pid=%d out-begin\n", (int)child);
+  fflush(stdout);
+  while ((n = read(pfd[0], buf, sizeof buf)) > 0) {
+    if (write(STDOUT_FILENO, buf, (size_t)n) < 0) break;
+  }
+  close(pfd[0]);
+  if (waitpid(child, &status, 0) < 0) {
+    printf("HELPER waitpid-failed errno=%d\n", errno);
+    fflush(stdout);
+    return 6;
+  }
+  rc = WIFEXITED(status) ? WEXITSTATUS(status)
+        : (WIFSIGNALED(status) ? 128 + WTERMSIG(status) : -1);
+  printf("HELPER rc=%d\n", rc);
+  fflush(stdout);
+  return rc;
+}
+
 int main(int argc, char **argv) {
   char line[64];
   char *nargv[64];
@@ -402,20 +461,14 @@ int main(int argc, char **argv) {
   if (strcmp(argv[1], "--invoke-helper") == 0) {
     if (argc < 4) return 2;
     print_facts("invoke-helper");
-    execv(argv[2], &argv[2]);
-    printf("PROBE execv-failed errno=%d (%s)\n", errno, strerror(errno));
-    fflush(stdout);
-    return 127;
+    return fork_exec_capture(&argv[2]);
   }
   if (strcmp(argv[1], "--workload-root") == 0) {
     if (argc < 5) return 2;
     print_facts("workload-root-pre");
     wait_go(argv[2]);
     print_facts("workload-root-go");
-    execv(argv[3], &argv[3]);
-    printf("PROBE execv-failed errno=%d (%s)\n", errno, strerror(errno));
-    fflush(stdout);
-    return 127;
+    return fork_exec_capture(&argv[3]);
   }
   if (strcmp(argv[1], "--workload-sub") == 0) {
     if (argc < 6) return 2;
@@ -438,10 +491,7 @@ int main(int argc, char **argv) {
     nargv[k++] = argv[5];
     for (i = 6; i < argc && k < 62; i++) nargv[k++] = argv[i];
     nargv[k] = NULL;
-    execv(nargv[0], nargv);
-    printf("PROBE execv-failed errno=%d (%s)\n", errno, strerror(errno));
-    fflush(stdout);
-    return 127;
+    return fork_exec_capture(nargv);
   }
   fprintf(stderr, "usage: unknown mode %s\n", argv[1]);
   return 2;
@@ -449,6 +499,7 @@ int main(int argc, char **argv) {
 EOF
 DIR_RULES=""
 STATE_RULES=""
+FD_RULES=""
 REQ_TYPES=" $OUT_T $RUNNER_T $BINDIR_T $FIFO_T $DIR_TYPE_LIST"
 for t in $STATE_TYPE_LIST; do
   case " $REQ_TYPES " in *" $t "*) ;; *) REQ_TYPES="$REQ_TYPES $t" ;; esac
@@ -462,6 +513,16 @@ for t in $STATE_TYPE_LIST; do
 	allow docker_helper_rootlesskit_t $t:file { create open read write getattr setattr lock unlink append };
 "
 done
+# The helper domains inherit the attempt's evidence-file fds (the runner's
+# O_APPEND redirect) across their exec transitions; the transition's
+# inherited-fd flush checks fd:use against the fd's owner domain and the
+# file's open-mode access. Grant both so the helpers' OWN failure output
+# reaches the attempt records deterministically (the flow's own helper
+# stdio is a rootlesskit_t-owned pipe with the same two checks).
+FD_RULES+="	allow docker_helper_rootlesskit_t unconfined_t:fd use;
+	allow docker_helper_newuidmap_t unconfined_t:fd use;
+	allow docker_helper_newgidmap_t unconfined_t:fd use;
+"
 REQ_TYPE_LINES=""
 for t in $REQ_TYPES; do
   REQ_TYPE_LINES+="	type $t;
@@ -478,6 +539,7 @@ $REQ_TYPE_LINES	attribute file_type;
 	class fifo_file { read write open getattr };
 	class dir { search getattr read open write add_name remove_name rmdir lock };
 	class process { transition siginh };
+	class fd { use };
 }
 type gidmap_probe_exec_t;
 typeattribute gidmap_probe_exec_t file_type;
@@ -490,7 +552,7 @@ allow unconfined_t gidmap_probe_exec_t:file { create open write append setattr r
 allow unconfined_t docker_helper_rootlesskit_t:process { transition siginh };
 allow docker_helper_rootlesskit_t $FIFO_T:fifo_file { read write open getattr };
 allow docker_helper_rootlesskit_t docker_helper_rootlesskit_t:file { read open getattr };
-$DIR_RULES$STATE_RULES
+$DIR_RULES$STATE_RULES$FD_RULES
 type_transition $RUNNER_T $BINDIR_T:file gidmap_probe_exec_t "map_probe";
 EOF
 cp /tmp/gidmap_probe_diag.te "$EVIDENCE_DIR/diag-probe-module.te"
@@ -549,6 +611,9 @@ set_target_uidmap() {
     "$bpid" "${U_MAP_ARGS[@]}"
   rc=$?
   set -e
+  echo "helper exit code: $rc"
+  echo "uid_map after: [$(cat "/proc/$bpid/uid_map" 2>/dev/null || true)]"
+  echo "gid_map after: [$(cat "/proc/$bpid/gid_map" 2>/dev/null || true)]"
   [ "$rc" = 0 ] || return 1
   [ -s "/proc/$bpid/uid_map" ] || return 1
   [ ! -s "/proc/$bpid/gid_map" ] || return 1
