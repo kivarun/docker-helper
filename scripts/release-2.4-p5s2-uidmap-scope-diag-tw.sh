@@ -228,12 +228,20 @@ int main(int argc, char **argv) {
     for (j = 0; files[j]; j++) {
       snprintf(path, sizeof path, "/proc/%s/%s", argv[i], files[j]);
       errno = 0;
-      fd = open(path, O_RDWR);
+      fd = open(path, O_RDONLY);
       if (fd >= 0) {
-        printf("OPEN-RDWR-OK pid=%s file=%s\n", argv[i], files[j]);
+        printf("OPEN-RDONLY-OK pid=%s file=%s\n", argv[i], files[j]);
         close(fd);
       } else {
-        printf("OPEN-RDWR-FAILED pid=%s file=%s errno=%d (%s)\n", argv[i], files[j], errno, strerror(errno));
+        printf("OPEN-RDONLY-FAILED pid=%s file=%s errno=%d (%s)\n", argv[i], files[j], errno, strerror(errno));
+      }
+      errno = 0;
+      fd = open(path, O_WRONLY);
+      if (fd >= 0) {
+        printf("OPEN-WRONLY-OK pid=%s file=%s\n", argv[i], files[j]);
+        close(fd);
+      } else {
+        printf("OPEN-WRONLY-FAILED pid=%s file=%s errno=%d (%s)\n", argv[i], files[j], errno, strerror(errno));
       }
       fflush(stdout);
     }
@@ -507,28 +515,11 @@ cat "$EVIDENCE_DIR/b-operation-facts.txt" >&2
 
 if [ "${#CHILDS[@]}" -ge 1 ]; then
   PIDS="${CHILDS[*]}"
-  OPEN_SCRIPT="$DIAG_BASE/open-checks.sh"
-  cat > "$OPEN_SCRIPT" <<'EOF'
-#!/bin/bash
-for pid in PIDS_PLACEHOLDER; do
-  for f in uid_map gid_map setgroups mem oom_score_adj comm; do
-    p="/proc/$pid/$f"
-    if exec 3<>"$p" 2>/dev/null; then
-      echo "OPEN-RDWR-OK pid=$pid file=$f"
-      exec 3>&-
-    else
-      echo "OPEN-RDWR-FAILED pid=$pid file=$f rc=$?"
-    fi
-  done
-done
-EOF
-  sed -i "s/PIDS_PLACEHOLDER/$PIDS/" "$OPEN_SCRIPT"
-  chmod 0755 "$OPEN_SCRIPT"
   {
-    echo "=== safe open-only checks as $BUILDER_USER (O_RDWR, no write performed, no content change) ==="
+    echo "=== safe open-only checks as $BUILDER_USER (the same static probe; O_RDONLY and O_WRONLY, no write performed, no content change) ==="
     echo "=== layer meaning: DAC (same uid) + kernel open policy; SELinux is NOT in this path (unconfined runner) ==="
     echo "=== pids checked: $PIDS (all live rootlesskit_t processes: parents and children across BOTH instances) ==="
-    su -s /bin/bash "$BUILDER_USER" -c "bash $OPEN_SCRIPT" 2>&1 || true
+    su -s /bin/bash "$BUILDER_USER" -c "/usr/local/bin/map-probe $PIDS" 2>&1 || true
   } > "$EVIDENCE_DIR/c-open-checks-dac-kernel.txt"
   cat "$EVIDENCE_DIR/c-open-checks-dac-kernel.txt" >&2
 else
@@ -553,8 +544,16 @@ log 'D: hypothesized-grant scope (open-only probes as the map-helper domains)'
 if [ "${#CHILDS[@]}" -ge 1 ]; then
   PIDS="${CHILDS[*]}"
 
+  # The probe batteries need the map-helper domains ENFORCING (the real
+  # SELinux decisions); they were made permissive for the real-flow phases.
+  # Re-enforce both before the batteries; the flows are complete by now
+  # (both children frozen) and the cleanup clears the rest.
+  clear_permissive docker_helper_newuidmap_t
+  clear_permissive docker_helper_newgidmap_t
+  log "the map-helper domains re-enforced for the probe batteries"
+
   # (1) CONTROL: newgidmap_t with its PRODUCTION surface only (enforcing):
-  # every write-capable open on the rootlesskit_t files must be DENIED.
+  # every open on the rootlesskit_t files must be DENIED (no file grant).
   CTRL_EPOCH="$(date +%s)"
   {
     echo "=== CONTROL battery: docker_helper_newgidmap_t WITHOUT the file grant (enforcing; production surface only) ==="
