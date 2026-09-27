@@ -660,10 +660,10 @@ role system_r types docker_helper_newuidmap_t;
 # owns the binary and its chkstat-applied cap_setgid file capability is
 # the distro privilege mechanism (permissions.d/shadow), untouched by
 # docker-helper. A dedicated domain keeps the transition confined to this
-# binary; newgidmap's own runtime surface (its inherited-stdio fifo write
-# and the /proc target-dir read-open) is granted per enforcing AVC evidence
-# in the P5-S2 runtime section below — everything beyond it stays
-# ungranted.
+# binary; newgidmap's own runtime surface (its inherited-stdio fifo write,
+# the /proc target-dir read-open, and the getpwuid passwd read) is granted
+# per enforcing AVC evidence in the P5-S2 runtime section below —
+# everything beyond it stays ungranted.
 type docker_helper_newgidmap_exec_t, file_type;
 type docker_helper_newgidmap_t, domain;
 role system_r types docker_helper_newgidmap_t;
@@ -1121,12 +1121,12 @@ allow docker_helper_newuidmap_t passwd_file_t:file { read open };
 # path-lookup execute, the bprm open/read, the pre-exec getattr). The
 # entry rule carries the transition-required entrypoint plus the loader
 # access (the newuidmap entry shape). The runtime surface granted so far:
-# the inherited-stdio fifo write and the /proc target-dir read-open (each
-# with its own enforcing AVC evidence, below). NO passwd lookup, no userdb
-# fallback, no gid_map write, no dir getattr/search, no capabilities,
-# no cap_userns: the NEXT enforcing boundary inside this domain is the
-# next deliberate step. No transition or allow rule points
-# into the domain from the manager or the daemon.
+# the inherited-stdio fifo write, the /proc target-dir read-open, and the
+# getpwuid passwd read (each with its own enforcing AVC evidence, below).
+# NO userdb fallback, no passwd open/getattr, no gid_map write, no dir
+# getattr/search, no capabilities, no cap_userns: the NEXT enforcing
+# boundary inside this domain is the next deliberate step. No transition
+# or allow rule points into the domain from the manager or the daemon.
 type_transition docker_helper_rootlesskit_t docker_helper_newgidmap_exec_t:process docker_helper_newgidmap_t;
 allow docker_helper_rootlesskit_t docker_helper_newgidmap_t:process { transition };
 
@@ -1174,6 +1174,25 @@ allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:fifo_file { write };
 # Grant ONLY the read-open: no getattr/search on this pair, no gid_map
 # file access, no capability surface — the next deliberate boundaries.
 allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:dir { read open };
+
+# The helper's caller-identity lookup (P5-S2): the getpwuid read of
+# /etc/passwd that locates the caller's user name before validating the
+# requested mapping ranges against the caller's subid database. Live
+# enforcing AVC evidence (run 36303567126 P6 window, record 572:
+# denied { read } for pid=3806 comm="newgidmap" name="passwd" dev="vda3"
+# scontext=system_u:system_r:docker_helper_newgidmap_t:s0
+# tcontext=system_u:object_r:passwd_file_t:s0 tclass=file permissive=0)
+# and the helper's own failure output ("newgidmap: Cannot determine your
+# user name." — the same message newuidmap had at this boundary). The
+# userdb-fallback denials (init_var_run_t:dir { search },
+# self:unix_dgram_socket { create }) appeared ONLY after the direct read
+# was denied — they are evidence of the fallback PATH, never a grant
+# mandate; whether any fallback permission is needed is decided after the
+# direct lookup is proven to complete (the same sufficiency check the
+# newuidmap domain passed: with its lookup granted the fallback did not
+# occur at all). Grant ONLY the read: the open(2) successor and getattr
+# are not evidenced yet and stay ungranted.
+allow docker_helper_newgidmap_t passwd_file_t:file { read };
 
 # The child's user-namespace creation itself: rootlesskit creates the userns
 # that hosts the buildkitd instance. Live enforcing AVC evidence (P5-S1
