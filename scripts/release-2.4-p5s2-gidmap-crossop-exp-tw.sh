@@ -19,6 +19,17 @@
 # another operation's process B. The positive control is the flow's own
 # one-shot child uid_map write.
 #
+# Phase G reuses the same stand for the P5-S2g24 experiment: whether
+# SELinux MCS categories can isolate two Build Operations that run under
+# the same builder identity and the same SELinux domain. Operation A's
+# vehicles run as docker_helper_rootlesskit_t:s0:c1 and operation B's
+# target child as :s0:c2, with NO new policy modules — the mechanism
+# under test is the shipped MCS constraint set applied on top of the
+# exact g23 shape: whether the categories survive the
+# rootlesskit_t→newuidmap_t SUID-helper transition, whether A's
+# parent-role newuidmap can still write B's empty uid_map across the
+# categories, and whether the own-child write still works.
+#
 # Two scenarios, both invoking the REAL /usr/bin/newgidmap with the PID of
 # a FRESH target child B (uid_map set, gid_map empty) and the flow's valid
 # subgid arguments:
@@ -59,6 +70,10 @@ BUILDER_SUBUID_START=231072
 BUILDER_SUBUID_COUNT=65536
 TRANSFERRED=/tmp/p5s2-gidmap-crossop-exp
 RK_EXEC_T=system_u:system_r:docker_helper_rootlesskit_t:s0
+# The invoker runcon context for parent_role_attempt. Defaults to the
+# same context as the flows (the g22/g23 experiments); the g24 experiment
+# reassigns it to the category-carrying operation-A context.
+RK_INVOKER_CTX="$RK_EXEC_T"
 
 log()  { printf '%s %s\n' "$PREFIX" "$*"; }
 note() { printf '%s NOTE: %s\n' "$PREFIX" "$*"; }
@@ -87,22 +102,25 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# harvest_helper_facts <budget_seconds> <out>: best-effort observation of
-# the SHORT-LIVED helper processes during an attempt window (their
-# deterministic facts come from the probe facts, the AVCs and the exit
-# status; this records the cred state the kernel actually saw).
+# harvest_helper_facts <budget_seconds> <out> <helper-name>: best-effort
+# observation of the SHORT-LIVED helper processes during an attempt
+# window (their deterministic facts come from the probe facts, the AVCs
+# and the exit status; this records the cred state the kernel actually
+# saw). The name is the pgrep -x argument; the caller passes its own
+# helper's basename (newuidmap for the uid-chain attempts), the default
+# keeps the g22 newgidmap shape.
 # shellcheck disable=SC2329
 harvest_helper_facts() {
-  local budget="$1" out="$2" deadline seen p pid
+  local budget="$1" out="$2" name="${3:-newgidmap}" deadline seen p pid
   deadline=$(( $(date +%s) + budget ))
   seen=$(mktemp)
   : > "$out"
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    for pid in $(pgrep -x newgidmap 2>/dev/null || true); do
+    for pid in $(pgrep -x "$name" 2>/dev/null || true); do
       grep -qx "$pid" "$seen" 2>/dev/null && continue
       echo "$pid" >> "$seen"
       {
-        echo "=== newgidmap process pid=$pid (observed $(date -u +%FT%TZ)) ==="
+        echo "=== $name process pid=$pid (observed $(date -u +%FT%TZ)) ==="
         echo "attr/current: $(tr -d '\0' < "/proc/$pid/attr/current" 2>/dev/null || true)"
         echo "ns/user: $(readlink "/proc/$pid/ns/user" 2>/dev/null || echo UNAVAILABLE)"
         grep -E '^(Uid|Gid|PPid|CapEff|CapPrm|NoNewPrivs)' "/proc/$pid/status" 2>/dev/null || true
@@ -160,11 +178,11 @@ STAND_EPOCH_ALL="$(date +%s)"
 } >"$EVIDENCE_DIR/a-toolchain.txt" 2>&1
 zypper --non-interactive install -y checkpolicy container-selinux \
   policycoreutils-python-utils rootlesskit slirp4netns audit gcc glibc-static \
-  libcap-progs util-linux iproute2 \
+  libcap-progs util-linux iproute2 setools-console \
   >"$EVIDENCE_DIR/zypper-toolchain.log" 2>&1 \
   || note "zypper install of the policy toolchain failed (see zypper-toolchain.log)"
 fail_toolchain=0
-for t in checkmodule semodule_package semodule semanage restorecon gcc nsenter ip; do
+for t in checkmodule semodule_package semodule semanage restorecon gcc nsenter ip seinfo; do
   command -v "$t" >/dev/null 2>&1 || { echo "$t not found" >>"$EVIDENCE_DIR/a-toolchain.txt"; fail_toolchain=1; }
 done
 if [ "$fail_toolchain" = 1 ]; then
@@ -244,6 +262,7 @@ log 'B: barrier fifos + probe vehicle'
 mkfifo "$DIAG_BASE/fifos"/bfifo-s1 "$DIAG_BASE/fifos/bfifo-s2" \
        "$DIAG_BASE/fifos/bfifo-s3p" "$DIAG_BASE/fifos/bfifo-s3w1" \
        "$DIAG_BASE/fifos/bfifo-s3w2" "$DIAG_BASE/fifos/bfifo-g23" \
+       "$DIAG_BASE/fifos/bfifo-g24" \
        "$DIAG_BASE/fifos/gofifo-s3w1" "$DIAG_BASE/fifos/gofifo-s3w2"
 chmod 666 "$DIAG_BASE/fifos"/*
 # The per-stage rootlesskit state dirs are created up front: the module
@@ -253,9 +272,10 @@ chmod 666 "$DIAG_BASE/fifos"/*
 # starts.
 mkdir -p "$DIAG_BASE/s1/a1-state" "$DIAG_BASE/s2/a1-state" \
          "$DIAG_BASE/s3/a1-state" "$DIAG_BASE/s3/a2-state" \
-         "$DIAG_BASE/g23/a1-state"
+         "$DIAG_BASE/g23/a1-state" "$DIAG_BASE/g24/a1-state"
 chown "$BUILDER_USER:$BUILDER_USER" "$DIAG_BASE/s1/a1-state" "$DIAG_BASE/s2/a1-state" \
-      "$DIAG_BASE/s3/a1-state" "$DIAG_BASE/s3/a2-state" "$DIAG_BASE/g23/a1-state"
+      "$DIAG_BASE/s3/a1-state" "$DIAG_BASE/s3/a2-state" "$DIAG_BASE/g23/a1-state" \
+      "$DIAG_BASE/g24/a1-state"
 FIFO_LABEL="$(stat -c '%C' "$DIAG_BASE/fifos/bfifo-s1" 2>/dev/null || true)"
 FIFO_T="$(printf '%s' "$FIFO_LABEL" | cut -d: -f3)"
 RUNNER_CTX="$(tr -d '\0' < /proc/self/attr/current 2>/dev/null || true)"
@@ -275,7 +295,8 @@ case "${FIFO_T:-x}" in ''|*[!A-Za-z0-9_]*|x) note "the fifo type could not be ob
 WALK_DIRS=(/tmp "$DIAG_BASE" "$DIAG_BASE/fifos" \
            "$DIAG_BASE/s1" "$DIAG_BASE/s1/a1-state" "$DIAG_BASE/s2" "$DIAG_BASE/s2/a1-state" \
            "$DIAG_BASE/s3" "$DIAG_BASE/s3/a1-state" "$DIAG_BASE/s3/a2-state" \
-           "$DIAG_BASE/g23" "$DIAG_BASE/g23/a1-state")
+           "$DIAG_BASE/g23" "$DIAG_BASE/g23/a1-state" \
+           "$DIAG_BASE/g24" "$DIAG_BASE/g24/a1-state")
 DIR_TYPE_LIST=""
 STATE_TYPE_LIST=""
 for d in "${WALK_DIRS[@]}"; do
@@ -443,8 +464,13 @@ int main(int argc, char **argv) {
   uid_t m;
 
   if (argc < 2) {
-    fprintf(stderr, "usage: map_probe --be-target <fifo> | --invoke-helper <helper> <pid> <range...> | --workload-root <gofifo> <helper> <pid> <range...> | --workload-sub <gofifo> <helper> <pid> <mapped-uid> <range...>\n");
+    fprintf(stderr, "usage: map_probe --be-target <fifo> | --invoke-helper <helper> <pid> <range...> | --workload-root <gofifo> <helper> <pid> <range...> | --workload-sub <gofifo> <helper> <pid> <mapped-uid> <range...> | --facts\n");
     return 2;
+  }
+  if (strcmp(argv[1], "--facts") == 0) {
+    if (argc != 2) return 2;
+    print_facts("facts");
+    return 0;
   }
   if (strcmp(argv[1], "--be-target") == 0) {
     if (argc != 3) return 2;
@@ -622,16 +648,18 @@ if [ ! -x /usr/local/bin/map_probe ] \
   exit 0
 fi
 
-# make_target_b <fifo> : create a FRESH target child B — a rootlesskit_t
-# probe that creates its own user namespace and announces its PID through
-# the fifo (blocking open on both sides; no readiness polling). The
-# caller then sets B's uid_map with the REAL distro newuidmap. Prints the
-# pid on stdout; returns nonzero if the stand failed.
+# make_target_b <fifo> [<runcon-ctx>] : create a FRESH target child B — a
+# rootlesskit_t probe that creates its own user namespace and announces
+# its PID through the fifo (blocking open on both sides; no readiness
+# polling). The context is the vehicle's runcon context (the g24
+# experiment passes the category-carrying B context; the default keeps
+# the g22/g23 shape). The caller then fills (or leaves empty) B's maps.
+# Prints the pid on stdout; returns nonzero if the stand failed.
 make_target_b() {
-  local fifo="$1"
+  local fifo="$1" ctx="${2:-$RK_EXEC_T}"
   local line bpid=""
   runuser -u "$BUILDER_USER" -- \
-    runcon "$RK_EXEC_T" /usr/local/bin/map_probe --be-target "$fifo" \
+    runcon "$ctx" /usr/local/bin/map_probe --be-target "$fifo" \
     >>"$DIAG_BASE/b-target.out" 2>&1 &
   exec 3<>"$fifo"
   if IFS= read -r -t 120 line <&3; then
@@ -866,8 +894,10 @@ watch_control_child_frozen() {
 # the helper's file caps apply at exec) execs the REAL distro map helper
 # with B's pid and the flow's valid subid arguments. Defaults keep the
 # g22 experiment's shape (/usr/bin/newgidmap, gid_map, G_MAP_ARGS); the
-# g23 experiment passes /usr/bin/newuidmap, uid_map, U_MAP_ARGS. Returns
-# the helper's exit code.
+# g23 experiment passes /usr/bin/newuidmap, uid_map, U_MAP_ARGS. The
+# invoker's runcon context is the RK_INVOKER_CTX global (the g24
+# experiment reassigns it to the category-carrying A context; the g22/g23
+# default equals RK_EXEC_T). Returns the helper's exit code.
 parent_role_attempt() {
   local fifo="$1" bpid="$2" out="$3" avcs="$4" rc=0 epoch
   local helper="${5:-/usr/bin/newgidmap}" mapfile="${6:-gid_map}"
@@ -876,16 +906,16 @@ parent_role_attempt() {
   epoch="$(date +%s)"
   {
     echo "=== PARENT-ROLE attempt: real $(basename "$helper") from the initial user namespace ==="
-    echo "invoker domain: $RK_EXEC_T (privilege shape: builder uid/gid, no kernel caps)"
+    echo "invoker domain: $RK_INVOKER_CTX (privilege shape: builder uid/gid, no kernel caps)"
     echo "target child B: pid=$bpid"
     echo "$mapfile before: [$(cat "/proc/$bpid/$mapfile" 2>/dev/null || true)]"
     echo "invocation args: $(basename "$helper") $bpid ${margs[*]}"
   } > "$out"
-  harvest_helper_facts 12 "$EVIDENCE_DIR/tmp-helper-facts.txt" &
+  harvest_helper_facts 12 "$EVIDENCE_DIR/tmp-helper-facts.txt" "$(basename "$helper")" &
   HELPER_FACTS_PID=$!
   set +e
   runuser -u "$BUILDER_USER" -- \
-    runcon "$RK_EXEC_T" /usr/local/bin/map_probe --invoke-helper "$helper" \
+    runcon "$RK_INVOKER_CTX" /usr/local/bin/map_probe --invoke-helper "$helper" \
     "$bpid" "${margs[@]}" \
     >>"$out" 2>&1
   rc=$?
@@ -901,6 +931,35 @@ parent_role_attempt() {
   harvest_avcs_since "$epoch" "$avcs"
   cat "$out" >&2
   return "$rc"
+}
+
+# run_own_child_uid_control <runcon-ctx> <tag> <prefix> : the
+# deterministic positive control — the real rootlesskit flow's own
+# one-shot child uid_map write under the given runcon context, captured
+# by watch_control_child_frozen while the child is frozen between the
+# two map writes, then resumed to its natural failure path (the flow's
+# gid step stays on the production policy's gid boundary). The g23 and
+# g24 phases both run it through here; the evidence files are
+# <prefix>-control.txt, <prefix>-control-child-maps.txt and
+# <prefix>-control-avcs.txt.
+run_own_child_uid_control() {
+  local ctx="$1" tag="$2" prefix="$3" epoch
+  {
+    echo "=== $prefix positive control: real rootlesskit flow, own-child uid_map write ==="
+    echo "command: runuser -u $BUILDER_USER -- runcon $ctx /usr/bin/rootlesskit --net=none --state-dir=$DIAG_BASE/$tag/a1-state /bin/sleep 12"
+  } > "$EVIDENCE_DIR/$prefix-control.txt"
+  epoch="$(date +%s)"
+  runuser -u "$BUILDER_USER" -- \
+    runcon "$ctx" /usr/bin/rootlesskit --net=none \
+    --state-dir="$DIAG_BASE/$tag/a1-state" /bin/sleep 12 \
+    >>"$EVIDENCE_DIR/$prefix-control.txt" 2>&1 &
+  RK_PIDS+=($!)
+  watch_control_child_frozen "$EVIDENCE_DIR/$prefix-control-child-maps.txt" "$!" || \
+    note "$prefix control: the own-child uid_map snapshot was not captured while alive (see $prefix-control.txt)"
+  sleep 2
+  harvest_avcs_since "$epoch" "$EVIDENCE_DIR/$prefix-control-avcs.txt"
+  pkill -KILL -f "state-dir=$DIAG_BASE/$tag/a1-state" 2>/dev/null || true
+  cat "$EVIDENCE_DIR/$prefix-control.txt" >&2
 }
 
 RK_PIDS=()
@@ -1140,25 +1199,95 @@ else
   fi
   # Positive control: the real rootlesskit flow's own one-shot child
   # uid_map write, in the same window, same policy.
-  {
-    echo "=== g23 positive control: real rootlesskit flow, own-child uid_map write ==="
-    echo "command: runuser -u $BUILDER_USER -- runcon $RK_EXEC_T /usr/bin/rootlesskit --net=none --state-dir=$DIAG_BASE/g23/a1-state /bin/sleep 12"
-  } > "$EVIDENCE_DIR/g23-control.txt"
-  GC_EPOCH="$(date +%s)"
-  runuser -u "$BUILDER_USER" -- \
-    runcon "$RK_EXEC_T" /usr/bin/rootlesskit --net=none \
-    --state-dir="$DIAG_BASE/g23/a1-state" /bin/sleep 12 \
-    >>"$EVIDENCE_DIR/g23-control.txt" 2>&1 &
-  RK_PIDS+=($!)
-  watch_control_child_frozen "$EVIDENCE_DIR/g23-control-child-maps.txt" "$!" || \
-    note "g23 control: the own-child uid_map snapshot was not captured while alive (see g23-control.txt)"
-  sleep 2
-  harvest_avcs_since "$GC_EPOCH" "$EVIDENCE_DIR/g23-control-avcs.txt"
-  pkill -KILL -f "state-dir=$DIAG_BASE/g23/a1-state" 2>/dev/null || true
-  cat "$EVIDENCE_DIR/g23-control.txt" >&2
+  run_own_child_uid_control "$RK_EXEC_T" "g23" "g23"
 fi
 P5S2G23_RESULT="${P5S2G23_RESULT:-the g23 phase did not complete its measurement}"
 printf '%s P5S2-G23-UIDMAP-CROSSOP-RESULT=COMPLETED (%s)\n' "$PREFIX" "$P5S2G23_RESULT" >&2
+
+log 'G: P5-S2g24 — MCS category cross-operation isolation experiment'
+# Same domain, same Unix uid, different MCS categories: operation A's
+# vehicles run as docker_helper_rootlesskit_t:s0:c1, operation B's target
+# child as :s0:c2. NO new policy modules and no changed grants: the
+# mechanism under test is the shipped MCS constraint set applied on top
+# of the exact g23 shape. The first gate is the category assignment
+# itself: if the existing policy does not allow the builder's runcon
+# chain to reach the category-carrying contexts, that obstacle is
+# recorded and the phase stops without further attempts.
+RK_EXEC_T_A=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+RK_EXEC_T_B=system_u:system_r:docker_helper_rootlesskit_t:s0:c2
+{
+  echo "=== loaded policy modules at the g24 phase start ==="
+  semodule -l | grep -a 'docker_helper\|gidmap' || true
+  echo "=== the shipped policy's MCS/MLS constraint set (the mechanism under test) ==="
+  echo "--- seinfo --constrain (all classes) ---"
+  seinfo --constrain 2>&1 || true
+  echo "--- seinfo --constrain file ---"
+  seinfo --constrain file 2>&1 || true
+  echo "--- seinfo --constrain process ---"
+  seinfo --constrain process 2>&1 || true
+  echo "=== the production .te's uid_map rules (the TE layer, unchanged) ==="
+  grep -an 'uid_map' "$TRANSFERRED/docker-helper.te" || true
+} > "$EVIDENCE_DIR/g24-production-surface.txt" 2>&1
+A_ASSIGN_RC=0
+B_ASSIGN_RC=0
+{
+  echo "=== the runner's own context (the assignment chain's root) ==="
+  echo "runner attr/current: $(tr -d '\0' < /proc/self/attr/current 2>/dev/null || true)"
+  echo "=== the builder's PAM context after runuser (the runcon chain's origin; id -Z prints the reading process's own context) ==="
+  echo "builder context: $(runuser -u "$BUILDER_USER" -- id -Z 2>/dev/null || echo UNAVAILABLE)"
+  echo "=== assignment probe A: runuser+runcon to $RK_EXEC_T_A ==="
+  runuser -u "$BUILDER_USER" -- runcon "$RK_EXEC_T_A" /usr/local/bin/map_probe --facts || A_ASSIGN_RC=$?
+  echo "assignment A rc=$A_ASSIGN_RC"
+  echo "=== assignment probe B: runuser+runcon to $RK_EXEC_T_B ==="
+  runuser -u "$BUILDER_USER" -- runcon "$RK_EXEC_T_B" /usr/local/bin/map_probe --facts || B_ASSIGN_RC=$?
+  echo "assignment B rc=$B_ASSIGN_RC"
+} > "$EVIDENCE_DIR/g24-assignment.txt" 2>&1
+cat "$EVIDENCE_DIR/g24-assignment.txt" >&2
+A_ASSIGN_OK=0
+B_ASSIGN_OK=0
+if grep -aq 'PROBE selinux=system_u:system_r:docker_helper_rootlesskit_t:s0:c1' "$EVIDENCE_DIR/g24-assignment.txt"; then A_ASSIGN_OK=1; fi
+if grep -aq 'PROBE selinux=system_u:system_r:docker_helper_rootlesskit_t:s0:c2' "$EVIDENCE_DIR/g24-assignment.txt"; then B_ASSIGN_OK=1; fi
+if [ "$A_ASSIGN_OK" = 0 ] || [ "$B_ASSIGN_OK" = 0 ]; then
+  note "g24 OBSTACLE: the existing policy does not allow assigning the required MCS categories (see g24-assignment.txt) — the phase stops without the cross-operation attempt"
+  P5S2G24_RESULT="OBSTACLE: the existing policy does not allow assigning the required MCS categories (see g24-assignment.txt for the probe facts and the exact denial)"
+else
+  G24_EPOCH="$(date +%s)"
+  B_G24="$(make_target_b "$DIAG_BASE/fifos/bfifo-g24" "$RK_EXEC_T_B" || true)"
+  if [ -z "${B_G24:-}" ]; then
+    note "g24: the target child B could not be created (recorded as a finding)"
+    P5S2G24_RESULT="the target child B could not be created (see stand-failure-g24-target.txt)"
+    diagnose_stand_failure g24-target "$G24_EPOCH" "$DIAG_BASE/b-target.out" "$EVIDENCE_DIR/g24-b-facts.txt"
+  else
+    collect_b_facts "$B_G24" "$EVIDENCE_DIR/g24-b-facts.txt" "g24 target B (category c2) before"
+    RK_INVOKER_CTX="$RK_EXEC_T_A"
+    if parent_role_attempt "$DIAG_BASE/fifos/bfifo-g24" "$B_G24" \
+         "$EVIDENCE_DIR/g24-parent-attempt.txt" "$EVIDENCE_DIR/g24-parent-avcs.txt" \
+         /usr/bin/newuidmap uid_map "${U_MAP_ARGS[@]}"; then
+      log "g24 CROSS-OPERATION uid_map write SUCCEEDED across the assigned MCS categories — the shipped policy does not constrain this path by MCS"
+      P5S2G24_RESULT="MCS ISOLATION DOES NOT HOLD on the shipped policy: cross-operation uid_map write SUCCEEDED across the assigned categories (A at c1 wrote B at c2); the own-child control is in g24-control-child-maps.txt (see g24-parent-attempt.txt)"
+    else
+      # A helper failure alone does not prove MCS isolation. With the
+      # production TE write grant in place (the s0/s0 g23 attempt proved
+      # it), a file-class denial whose subject context is
+      # newuidmap_t:s0:c1 and whose target context is
+      # rootlesskit_t:s0:c2 IS the MCS mechanism; anything else is a
+      # different boundary.
+      G24_CAUSE="another boundary (see g24-parent-attempt.txt and g24-parent-avcs.txt)"
+      if grep -aq 'scontext=system_u:system_r:docker_helper_newuidmap_t:s0:c1 ' \
+           "$EVIDENCE_DIR/g24-parent-avcs.txt" 2>/dev/null &&
+         grep -aq 'tcontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c2 tclass=file' \
+           "$EVIDENCE_DIR/g24-parent-avcs.txt" 2>/dev/null; then
+        G24_CAUSE="the shipped policy's MCS constraint on the file class (a c1 subject cannot write a c2-labeled object)"
+      fi
+      log "g24 CROSS-OPERATION uid_map write FAILED across the assigned MCS categories — exact cause: $G24_CAUSE"
+      P5S2G24_RESULT="cross-operation uid_map write FAILED across the assigned categories (A at c1, B at c2); blocking cause: $G24_CAUSE"
+    fi
+    RK_INVOKER_CTX="$RK_EXEC_T"
+    run_own_child_uid_control "$RK_EXEC_T_A" "g24" "g24"
+  fi
+fi
+P5S2G24_RESULT="${P5S2G24_RESULT:-the g24 phase did not complete its measurement}"
+printf '%s P5S2-G24-MCS-CROSSOP-RESULT=COMPLETED (%s)\n' "$PREFIX" "$P5S2G24_RESULT" >&2
 
 log 'teardown'
 pkill -KILL -f 'rootlesskit --net=none' 2>/dev/null || true
