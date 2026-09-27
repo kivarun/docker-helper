@@ -516,7 +516,7 @@ done
 FLOW_RULES="
 	allow docker_helper_rootlesskit_t bin_t:file { execute read open execute_no_trans getattr map };
 	allow docker_helper_rootlesskit_t self:netlink_route_socket { create bind getattr getopt setopt read write nlmsg_read nlmsg_write };
-	allow docker_helper_rootlesskit_t self:cap_userns { sys_admin net_admin setuid setgid };
+	allow docker_helper_rootlesskit_t self:cap_userns { sys_admin net_admin setuid setgid sys_ptrace };
 	allow docker_helper_rootlesskit_t root_t:dir { mounton };
 "
 REQ_CLASS_LINES="
@@ -527,7 +527,7 @@ REQ_CLASS_LINES="
 	class fd { use };
 	class sock_file { create unlink };
 	class netlink_route_socket { create bind getattr getopt setopt read write nlmsg_read nlmsg_write };
-	class cap_userns { sys_admin net_admin setuid setgid };
+	class cap_userns { sys_admin net_admin setuid setgid sys_ptrace };
 "
 REQ_TYPES="$REQ_TYPES root_t"
 for t in $DIR_TYPE_LIST; do
