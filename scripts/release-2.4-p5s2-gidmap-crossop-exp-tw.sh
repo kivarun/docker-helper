@@ -66,6 +66,10 @@ clear_permissive() { semanage permissive -d "$1" >/dev/null 2>&1 || true; }
 cleanup() {
   pkill -KILL -f 'rootlesskit --net=none' 2>/dev/null || true
   pkill -KILL -f 'map_probe --' 2>/dev/null || true
+  # Remove the stand's own artifacts (the evidence dir stays for the
+  # orchestrator's collection; the VM itself is disposable).
+  rm -f /usr/local/bin/map_probe
+  rm -rf "$DIAG_BASE"
   for d in "${DOMAINS[@]}"; do
     clear_permissive "$d"
   done
