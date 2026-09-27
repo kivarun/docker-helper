@@ -49,7 +49,7 @@
 #       full evidenced capability surface (the in-namespace sys_admin bit
 #       and the out-of-namespace setuid bit) must be GONE, the former
 #       newgidmap bin_t { execute } denial must be GONE, and so must the
-#       newgidmap inherited-stdio fifo { write } AND proc-dir { read }
+#       newgidmap inherited-stdio fifo { write } AND proc-dir { read open }
 #       denials (the dedicated transition and the evidence-proven grants
 #       ship in the candidate policy). The attempt's outcome — a full
 #       success, or the NEXT enforcing stopping point with the full
@@ -1176,6 +1176,16 @@ if [ -n "$OLD_NGID_PROCDIR_READ_AVC" ]; then
   printf '%s\n' "$OLD_NGID_PROCDIR_READ_AVC" > "$EVIDENCE_DIR/old-ngid-procdir-avc-p6.txt"
   fail "the former newgidmap proc-dir { read } denial still occurs (the evidenced helper-surface grant did not take effect)"
 fi
+# ... and the proc-dir { open } denial (the O_DIRECTORY open of the SAME
+# /proc/<target>; run 36302169439 record 546) must be GONE with the
+# extended { read open } grant.
+OLD_NGID_PROCDIR_OPEN_AVC="$(grep -a 'denied  { open }' "$EVIDENCE_DIR/builder-avc-p6.txt" \
+  | grep -a 'scontext=system_u:system_r:docker_helper_newgidmap_t' \
+  | grep -a 'tclass=dir' || true)"
+if [ -n "$OLD_NGID_PROCDIR_OPEN_AVC" ]; then
+  printf '%s\n' "$OLD_NGID_PROCDIR_OPEN_AVC" > "$EVIDENCE_DIR/old-ngid-procdir-open-avc-p6.txt"
+  fail "the former newgidmap proc-dir { open } denial still occurs (the evidenced helper-surface grant did not take effect)"
+fi
 # ... and the proc-dir { getattr } denial (the stat of the target process
 # directory /proc/<rootlesskit-pid>; run 36253390898 record 564) must be
 # GONE with the extended { read open getattr } grant.
@@ -1247,7 +1257,7 @@ else
     echo "=== daemon journal (P6 window) ==="; tail -20 "$EVIDENCE_DIR/daemon-journal-p6.txt"
     echo "=== build attempt output ==="; tail -20 "$EVIDENCE_DIR/build-attempt-post-relabel.txt"
     echo "=== operation result ==="; cat "$EVIDENCE_DIR/build-finish-p6.txt"; } >&2
-  fail "the build advanced past the granted boundaries (rootlesskit { lock }, slirp4netns/newuidmap/newgidmap exec types, user_namespace { create }, cap_userns { sys_admin }, the out-of-namespace setuid capability, the newuidmap fifo write, proc-dir read/open/getattr/search, the passwd read/open surface, the newgidmap inherited-stdio fifo write, and the newgidmap proc-dir read) and stopped at the NEXT enforcing boundary (evidence: builder-avc-p6.txt, builder-journal-p6.txt, daemon-journal-p6.txt, child-output-p6.txt, nss-fallback-avc-p6.txt, newuidmap-uid-map-capture.txt, newgidmap-gid-map-capture.txt, build-attempt-post-relabel.txt, build-finish-p6.txt)"
+  fail "the build advanced past the granted boundaries (rootlesskit { lock }, slirp4netns/newuidmap/newgidmap exec types, user_namespace { create }, cap_userns { sys_admin }, the out-of-namespace setuid capability, the newuidmap fifo write, proc-dir read/open/getattr/search, the passwd read/open surface, the newgidmap inherited-stdio fifo write, and the newgidmap proc-dir read-open) and stopped at the NEXT enforcing boundary (evidence: builder-avc-p6.txt, builder-journal-p6.txt, daemon-journal-p6.txt, child-output-p6.txt, nss-fallback-avc-p6.txt, newuidmap-uid-map-capture.txt, newgidmap-gid-map-capture.txt, build-attempt-post-relabel.txt, build-finish-p6.txt)"
 fi
 say "P6 upgrade relabel OK (labels corrected by %posttrans; transport $P6_OP_ID)"
 else
