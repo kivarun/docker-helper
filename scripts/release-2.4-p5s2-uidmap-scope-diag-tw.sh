@@ -108,6 +108,8 @@ log 'A: toolchain + candidate module load (disposable VM only)'
 {
   echo "=== distro ==="
   grep PRETTY_NAME /etc/os-release 2>/dev/null || true
+  echo "=== zypper repositories reachable (a repo outage is a transient guest finding) ==="
+  zypper repos 2>/dev/null | head -5 || true
   echo "=== LSM state ==="
   cat /sys/kernel/security/lsm 2>/dev/null || true
   echo "enforce=$(getenforce 2>/dev/null || true)"
