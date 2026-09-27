@@ -1,0 +1,55 @@
+name: Release 2.4 P5-S2 gidmap cross-op experiment
+
+# One-off investigation job (P5-S2g22): with the REAL distro newgidmap,
+# establish whether a docker_helper_newgidmap_t process of one Build
+# Operation can CHANGE another operation's gid_map once the needed
+# capabilities are granted step by step (control -> cap_userns sys_admin
+# -> capability setgid, each confirmed by its enforcing AVC). Parent-role
+# (initial user namespace, rootlesskit parent's privilege shape) and
+# workload-role (inside operation A's user namespace) scenarios against a
+# fresh gid_map-empty target child. GUEST-ONLY temporary modules; the
+# production module is compiled from the UNCHANGED repo sources and never
+# modified; no file capabilities or distro binary labels change; no
+# nsenter/setns with extra privileges.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - p3
+    paths:
+      - .github/workflows/release-2.4-p5s2-gidmap-crossop-exp-tw.yml
+      - scripts/release-2.4-p5s2-gidmap-crossop-exp-tw.sh
+      - scripts/release-2.4-p5s2-gidmap-crossop-exp-tw-vm.sh
+      - packaging/selinux/docker-helper.te
+      - packaging/selinux/docker-helper.fc
+
+permissions:
+  contents: read
+
+jobs:
+  gidmap-crossop-exp-tumbleweed:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install QEMU and cloud-image tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage
+
+      - name: Run Tumbleweed gid_map cross-op experiment
+        run: |
+          UAT_REPO_DIR="${{ github.workspace }}" \
+          P5S2_GIDMAP_CROSSOP_EXP_EVIDENCE_DIR="$RUNNER_TEMP/release-2.4-p5s2-gidmap-crossop-exp-evidence" \
+            scripts/release-2.4-p5s2-gidmap-crossop-exp-tw-vm.sh
+
+      - name: Upload experiment evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-2.4-p5s2-gidmap-crossop-exp-tw-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-2.4-p5s2-gidmap-crossop-exp-evidence
+          if-no-files-found: warn
