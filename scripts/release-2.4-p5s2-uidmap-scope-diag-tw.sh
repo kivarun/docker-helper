@@ -293,7 +293,7 @@ require {
 	type $RUNNER_T;
 	type $BINDIR_T;
 	attribute file_type;
-	class file { entrypoint read open execute getattr map append write create relabelto relabelfrom };
+	class file { entrypoint read open execute getattr map append write create setattr relabelto relabelfrom };
 }
 type gidmap_probe_exec_t;
 typeattribute gidmap_probe_exec_t file_type;
