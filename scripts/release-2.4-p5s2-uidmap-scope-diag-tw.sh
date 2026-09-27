@@ -267,40 +267,33 @@ if [ ! -x /usr/local/bin/map-probe ]; then
 fi
 
 # GUEST-ONLY checker module: lets the two map-helper domains run the STATIC
-# probe binary (runcon entrypoint) and write the probe results through the
-# script's inherited descriptors. The label types are OBSERVED at runtime
-# (the probe binary and the evidence files' actual contexts) and
-# interpolated; the module is removed at cleanup. The file-write grant
+# probe binary (runcon) and write the probe results through the script's
+# inherited descriptors. The probe gets a DEDICATED type (narrower than
+# labeling it bin_t) and the entry grants mirror the production entry
+# shape exactly ({ entrypoint read open execute getattr map }); the label
+# is applied with chcon after the module load. The file-write grant
 # toward docker_helper_rootlesskit_t is deliberately NOT here — it is the
 # HYPOTHESIZED grant and loads as a separate module below.
 PROBE_LABEL="$(stat -c '%C' /usr/local/bin/map-probe 2>/dev/null || true)"
-PROBE_T="$(printf '%s' "$PROBE_LABEL" | cut -d: -f3)"
-RUNNER_LABEL="$(stat -c '%C' "$EVIDENCE_DIR/d-map-probe-vehicle.txt" 2>/dev/null || true)"
-OUT_T="$(printf '%s' "$RUNNER_LABEL" | cut -d: -f3)"
-case "${PROBE_T:-x}" in ''|*[!A-Za-z0-9_]*|x) note "the probe file type could not be observed (label: $PROBE_LABEL)"; exit 1 ;; esac
-case "${OUT_T:-x}" in ''|*[!A-Za-z0-9_]*|x) note "the evidence-file type could not be observed (label: $RUNNER_LABEL)"; exit 1 ;; esac
+OUT_LABEL="$(stat -c '%C' "$EVIDENCE_DIR/d-map-probe-vehicle.txt" 2>/dev/null || true)"
+OUT_T="$(printf '%s' "$OUT_LABEL" | cut -d: -f3)"
+case "${OUT_T:-x}" in ''|*[!A-Za-z0-9_]*|x) note "the evidence-file type could not be observed (label: $OUT_LABEL)"; exit 1 ;; esac
 {
   echo "=== observed types for the generated module ==="
-  echo "probe file type: $PROBE_T (from: $PROBE_LABEL)"
-  echo "evidence-file type: $OUT_T (from: $RUNNER_LABEL)"
+  echo "probe label (pre-chcon): $PROBE_LABEL -> the dedicated gidmap_probe_exec_t type is applied after the module load"
+  echo "evidence-file type: $OUT_T (from: $OUT_LABEL)"
 } >> "$EVIDENCE_DIR/d-map-probe-vehicle.txt"
-if [ "$PROBE_T" = "$OUT_T" ]; then
-  PROBE_REQUIRE_LINE="	type $PROBE_T;"
-  OUT_REQUIRE_LINE=""
-else
-  PROBE_REQUIRE_LINE="	type $PROBE_T;"
-  OUT_REQUIRE_LINE="	type $OUT_T;"
-fi
 cat > /tmp/gidmap_probe_diag.te <<EOF
 module gidmap_probe_diag 1.0;
 require {
 	type docker_helper_newgidmap_t;
 	type docker_helper_newuidmap_t;
-$PROBE_REQUIRE_LINE$OUT_REQUIRE_LINE
-	class file { entrypoint append write };
+	type $OUT_T;
+	class file { entrypoint read open execute getattr map append write };
 }
-allow docker_helper_newgidmap_t $PROBE_T:file entrypoint;
-allow docker_helper_newuidmap_t $PROBE_T:file entrypoint;
+type gidmap_probe_exec_t;
+allow docker_helper_newgidmap_t gidmap_probe_exec_t:file { entrypoint read open execute getattr map };
+allow docker_helper_newuidmap_t gidmap_probe_exec_t:file { entrypoint read open execute getattr map };
 allow docker_helper_newgidmap_t $OUT_T:file { append write };
 allow docker_helper_newuidmap_t $OUT_T:file { append write };
 EOF
@@ -311,7 +304,10 @@ semodule_package -o /tmp/gidmap_probe_diag.pp -m /tmp/gidmap_probe_diag.tmp 2>>"
   || { note "the checker diag module failed to package"; exit 1; }
 semodule -i /tmp/gidmap_probe_diag.pp 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
   || { note "the checker diag module failed to load"; exit 1; }
-log "checker diag module loaded (entrypoint for the static probe in both map-helper domains)"
+chcon -t gidmap_probe_exec_t /usr/local/bin/map-probe 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
+  || { note "the probe binary could not be labeled with the dedicated diag type"; exit 1; }
+  log "checker diag module loaded (the dedicated probe type carries the production entry shape in both map-helper domains)"
+  echo "probe label (post-chcon): $(stat -c '%C' /usr/local/bin/map-probe 2>&1)" >> "$EVIDENCE_DIR/d-map-probe-vehicle.txt"
 
 useradd -m "$BUILDER_USER" 2>/dev/null || true
 grep -q "^$BUILDER_USER:" /etc/subuid || echo "$BUILDER_USER:$BUILDER_SUBUID_START:$BUILDER_SUBUID_COUNT" >> /etc/subuid
@@ -565,6 +561,9 @@ if [ "${#CHILDS[@]}" -ge 1 ]; then
   sleep 2
   harvest_avcs_since "$CTRL_EPOCH" "$EVIDENCE_DIR/d-scope-control-newgidmap-avcs.txt"
   cat "$EVIDENCE_DIR/d-scope-control-newgidmap.txt" >&2
+  if ! grep -aq 'OPEN-' "$EVIDENCE_DIR/d-scope-control-newgidmap.txt"; then
+    note "the control battery produced no probe lines (the probe vehicle failed to run; see d-scope-control-newgidmap-avcs.txt)"
+  fi
 
   # (2) EXISTING GRANT: newuidmap_t with its PRODUCTION file grant
   # ({ write open }): the same battery shows the authority that ALREADY
