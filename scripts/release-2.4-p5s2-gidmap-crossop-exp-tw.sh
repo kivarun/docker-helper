@@ -705,7 +705,10 @@ watch_stage_child_maps() {
   : > "$out"
   cpid=""
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    for pid in $(pgrep -f 'rootlesskit --net=none' 2>/dev/null || true); do
+    # The flow's CHILD re-execs /proc/self/exe, so its cmdline no longer
+    # contains the "rootlesskit" name — match both the parent shape and
+    # the child shape.
+    for pid in $(pgrep -f 'rootlesskit --net=none|self/exe --net=none' 2>/dev/null || true); do
       [ -r "/proc/$pid/attr/current" ] || continue
       ctx="$(cat "/proc/$pid/attr/current" 2>/dev/null || true)"
       case "$ctx" in *docker_helper_rootlesskit_t*) ;; *) continue ;; esac
