@@ -49,9 +49,10 @@
 #       full evidenced capability surface (the in-namespace sys_admin bit
 #       and the out-of-namespace setuid bit) must be GONE, the former
 #       newgidmap bin_t { execute } denial must be GONE, and so must the
-#       newgidmap inherited-stdio fifo { write } AND proc-dir { read open }
-#       denials (the dedicated transition and the evidence-proven grants
-#       ship in the candidate policy). The attempt's outcome — a full
+#       newgidmap inherited-stdio fifo { write }, proc-dir { read open },
+#       and getpwuid passwd { read } denials (the dedicated transition and
+#       the evidence-proven grants ship in the candidate policy). The
+#       attempt's outcome — a full
 #       success, or the NEXT enforcing stopping point with the full
 #       evidence bundle — is reported, never auto-granted from the
 #       harvest;
@@ -1186,6 +1187,18 @@ if [ -n "$OLD_NGID_PROCDIR_OPEN_AVC" ]; then
   printf '%s\n' "$OLD_NGID_PROCDIR_OPEN_AVC" > "$EVIDENCE_DIR/old-ngid-procdir-open-avc-p6.txt"
   fail "the former newgidmap proc-dir { open } denial still occurs (the evidenced helper-surface grant did not take effect)"
 fi
+# ... and the GID-map helper's passwd { read } denial (the getpwuid
+# caller lookup; run 36303567126 record 572) must be GONE with the
+# granted read. NOTE: tclass here is FILE (the class); passwd_file_t is
+# the TARGET TYPE — the check matches the tcontext, not the class token.
+OLD_NGID_PASSWD_READ_AVC="$(grep -a 'denied  { read }' "$EVIDENCE_DIR/builder-avc-p6.txt" \
+  | grep -a 'scontext=system_u:system_r:docker_helper_newgidmap_t' \
+  | grep -a 'tcontext=system_u:object_r:passwd_file_t:s0' \
+  | grep -a 'tclass=file' || true)"
+if [ -n "$OLD_NGID_PASSWD_READ_AVC" ]; then
+  printf '%s\n' "$OLD_NGID_PASSWD_READ_AVC" > "$EVIDENCE_DIR/old-ngid-passwd-avc-p6.txt"
+  fail "the former newgidmap passwd_file_t { read } denial still occurs (the evidenced helper-surface grant did not take effect)"
+fi
 # ... and the proc-dir { getattr } denial (the stat of the target process
 # directory /proc/<rootlesskit-pid>; run 36253390898 record 564) must be
 # GONE with the extended { read open getattr } grant.
@@ -1207,11 +1220,13 @@ if [ -n "$OLD_NUID_PROCDIR_SEARCH_AVC" ]; then
   fail "the former newuidmap proc-dir { search } denial still occurs (the evidenced helper-surface grant did not take effect)"
 fi
 # NSS fallback check (task item): whether the init_var_run_t { search } and
-# self:unix_dgram_socket { create } denials from the helper domain STILL
-# occur once the direct files-module lookup can complete. Their presence is
-# recorded as evidence; presence alone is never a grant mandate — the
-# operation outcome decides whether they hinder the mapping.
-grep -a 'scontext=system_u:system_r:docker_helper_newuidmap_t' "$EVIDENCE_DIR/builder-avc-p6.txt" 2>/dev/null \
+# self:unix_dgram_socket { create } denials from EITHER map-helper domain
+# STILL occur once the direct files-module lookup can complete. Their
+# presence is recorded as evidence (the before/after comparison against
+# the previous run's records is in the report); presence alone is never a
+# grant mandate — the operation outcome decides whether they hinder the
+# mapping.
+grep -aE 'scontext=system_u:system_r:docker_helper_(newuidmap|newgidmap)_t' "$EVIDENCE_DIR/builder-avc-p6.txt" 2>/dev/null \
   | grep -aE 'init_var_run_t|unix_dgram_socket' \
   > "$EVIDENCE_DIR/nss-fallback-avc-p6.txt" || true
 if grep -aqF 'failed to lock' "$EVIDENCE_DIR/builder-journal-p6.txt"; then
@@ -1257,7 +1272,7 @@ else
     echo "=== daemon journal (P6 window) ==="; tail -20 "$EVIDENCE_DIR/daemon-journal-p6.txt"
     echo "=== build attempt output ==="; tail -20 "$EVIDENCE_DIR/build-attempt-post-relabel.txt"
     echo "=== operation result ==="; cat "$EVIDENCE_DIR/build-finish-p6.txt"; } >&2
-  fail "the build advanced past the granted boundaries (rootlesskit { lock }, slirp4netns/newuidmap/newgidmap exec types, user_namespace { create }, cap_userns { sys_admin }, the out-of-namespace setuid capability, the newuidmap fifo write, proc-dir read/open/getattr/search, the passwd read/open surface, the newgidmap inherited-stdio fifo write, and the newgidmap proc-dir read-open) and stopped at the NEXT enforcing boundary (evidence: builder-avc-p6.txt, builder-journal-p6.txt, daemon-journal-p6.txt, child-output-p6.txt, nss-fallback-avc-p6.txt, newuidmap-uid-map-capture.txt, newgidmap-gid-map-capture.txt, build-attempt-post-relabel.txt, build-finish-p6.txt)"
+  fail "the build advanced past the granted boundaries (rootlesskit { lock }, slirp4netns/newuidmap/newgidmap exec types, user_namespace { create }, cap_userns { sys_admin }, the out-of-namespace setuid capability, the newuidmap fifo write, proc-dir read/open/getattr/search, the passwd read/open surface, the newgidmap inherited-stdio fifo write, the newgidmap proc-dir read-open, and the newgidmap getpwuid passwd read) and stopped at the NEXT enforcing boundary (evidence: builder-avc-p6.txt, builder-journal-p6.txt, daemon-journal-p6.txt, child-output-p6.txt, nss-fallback-avc-p6.txt, newuidmap-uid-map-capture.txt, newgidmap-gid-map-capture.txt, build-attempt-post-relabel.txt, build-finish-p6.txt)"
 fi
 say "P6 upgrade relabel OK (labels corrected by %posttrans; transport $P6_OP_ID)"
 else
