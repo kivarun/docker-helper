@@ -661,9 +661,9 @@ role system_r types docker_helper_newuidmap_t;
 # the distro privilege mechanism (permissions.d/shadow), untouched by
 # docker-helper. A dedicated domain keeps the transition confined to this
 # binary; newgidmap's own runtime surface (its inherited-stdio fifo write,
-# the /proc target-dir read-open, and the getpwuid passwd read-open) is
-# granted per enforcing AVC evidence in the P5-S2 runtime section below —
-# everything beyond it stays ungranted.
+# the /proc target-dir read-open-getattr, and the getpwuid passwd
+# read-open) is granted per enforcing AVC evidence in the P5-S2 runtime
+# section below — everything beyond it stays ungranted.
 type docker_helper_newgidmap_exec_t, file_type;
 type docker_helper_newgidmap_t, domain;
 role system_r types docker_helper_newgidmap_t;
@@ -1121,12 +1121,13 @@ allow docker_helper_newuidmap_t passwd_file_t:file { read open };
 # path-lookup execute, the bprm open/read, the pre-exec getattr). The
 # entry rule carries the transition-required entrypoint plus the loader
 # access (the newuidmap entry shape). The runtime surface granted so far:
-# the inherited-stdio fifo write, the /proc target-dir read-open, and the
-# getpwuid passwd read-open (each with its own enforcing AVC evidence,
-# below). NO userdb fallback, no passwd getattr, no gid_map write, no dir
-# getattr/search, no capabilities, no cap_userns: the NEXT enforcing
-# boundary inside this domain is the next deliberate step. No transition
-# or allow rule points into the domain from the manager or the daemon.
+# the inherited-stdio fifo write, the /proc target-dir read-open-getattr,
+# and the getpwuid passwd read-open (each with its own enforcing AVC
+# evidence, below). NO userdb fallback, no passwd getattr, no gid_map
+# write, no dir search, no capabilities, no cap_userns: the NEXT
+# enforcing boundary inside this domain is the next deliberate step. No
+# transition or allow rule points into the domain from the manager or the
+# daemon.
 type_transition docker_helper_rootlesskit_t docker_helper_newgidmap_exec_t:process docker_helper_newgidmap_t;
 allow docker_helper_rootlesskit_t docker_helper_newgidmap_t:process { transition };
 
@@ -1162,38 +1163,45 @@ allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:fifo_file { write };
 # permissive=0; and with the read granted, run 36302169439 P6 window,
 # record 546: denied { open } path="/proc/3791" — the O_DIRECTORY open of
 # the SAME target, the direct successor of the granted read, the same
-# progression newuidmap showed at its own boundary) — the pair grant is
-# NOT a general directory grant: docker_helper_rootlesskit_t:dir
+# progression newuidmap showed at its own boundary; and with the
+# read-open granted, run 36306315923 P6 window, record 553:
+# denied { getattr } for pid=3805 comm="newgidmap" path="/proc/3799"
+# scontext=system_u:system_r:docker_helper_newgidmap_t:s0
+# tcontext=system_u:system_r:docker_helper_rootlesskit_t:s0 tclass=dir
+# permissive=0 — the helper's stat("/proc/<target>") call, REQUIRED by
+# libcap's newgidmap to validate the target process before the gid_map
+# write; the helper's own failure output at that point was "newgidmap:
+# Could not stat directory for target process: Permission denied") — the
+# grant is NOT a general directory grant: docker_helper_rootlesskit_t:dir
 # objects are /proc/<pid> entries of processes running in the child
 # domain. SCOPE — READ CAREFULLY: like every helper grant this is a
-# TYPE-PAIR rule, NOT a pid-specific one: it authorizes the read-open on
-# the procfs directories of EVERY process running in
+# TYPE-PAIR rule, NOT a pid-specific one: it authorizes the
+# read-open-getattr on the procfs directories of EVERY process running in
 # docker_helper_rootlesskit_t — INCLUDING the processes of OTHER
 # concurrent operations (their isolation is invocation discipline only;
 # the open architectural risk tracked for the final security review).
-# Grant ONLY the read-open: no getattr/search on this pair, no gid_map
+# Grant ONLY the read-open-getattr: no search on this pair, no gid_map
 # file access, no capability surface — the next deliberate boundaries.
-allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:dir { read open };
+allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:dir { read open getattr };
 
-# The helper's caller-identity lookup (P5-S2): the getpwuid access to
-# /etc/passwd that locates the caller's user name before validating the
-# requested mapping ranges against the caller's subid database. Live
-# enforcing AVC evidence: the read (run 36303567126 P6 window, record
-# 572: denied { read } for pid=3806 comm="newgidmap" name="passwd"
-# dev="vda3" scontext=system_u:system_r:docker_helper_newgidmap_t:s0
+# The getpwuid passwd lookup of the caller's user name (P5-S2), granted
+# read-open with live enforcing AVC evidence: the read (run 36303567126
+# P6 window, record 572: denied { read } for pid=3806 comm="newgidmap"
+# name="passwd" dev="vda3" scontext=system_u:system_r:docker_helper_newgidmap_t:s0
 # tcontext=system_u:object_r:passwd_file_t:s0 tclass=file permissive=0)
 # and the open(2) of the SAME /etc/passwd — the direct successor of the
 # granted read (run 36305066030 P6 window, record 531: denied { open }
 # for pid=3810 comm="newgidmap" path="/etc/passwd" dev="vda3"
 # scontext=system_u:system_r:docker_helper_newgidmap_t:s0
-# tcontext=system_u:object_r:passwd_file_t:s0 tclass=file permissive=0),
-# after which the helper still reported "newgidmap: Cannot determine
-# your user name." The userdb-fallback denials
-# (init_var_run_t:dir { search }, self:unix_dgram_socket { create })
-# appeared ONLY after the direct lookup was denied — they are evidence
-# of the fallback PATH, never a grant mandate; they stay ungranted and
-# the next run decides whether the completed lookup makes them moot.
-# getattr is not evidenced yet and stays ungranted.
+# tcontext=system_u:object_r:passwd_file_t:s0 tclass=file permissive=0).
+# With both granted the direct lookup COMPLETED: the userdb-fallback
+# denials that appeared while the lookup was denied
+# (init_var_run_t:dir { search }, self:unix_dgram_socket { create }) did
+# NOT occur in the follow-up enforcing run (36306315923) — the fallback
+# permissions stay ungranted, proven unnecessary for the direct lookup.
+# The helper's passwd getattr denial (run 36306315923 record 552) also
+# occurred and is NON-blocking — the flow continued past it to the next
+# failure; getattr stays ungranted (never treated as a grant mandate).
 allow docker_helper_newgidmap_t passwd_file_t:file { read open };
 
 # The child's user-namespace creation itself: rootlesskit creates the userns
