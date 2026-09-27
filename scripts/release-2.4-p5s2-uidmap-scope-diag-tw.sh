@@ -262,7 +262,7 @@ EOF
 # integrity layer with NO SELinux AVC — observed), so the GUEST-ONLY
 # checker module is loaded BEFORE the build: it declares the dedicated
 # type and a name-based type transition that labels the created
-the 'map_probe' directly. The entry grants mirror the production entry
+# 'map_probe' directly. The entry grants mirror the production entry
 # shape exactly ({ entrypoint read open execute getattr map }). The
 # file-write grant toward docker_helper_rootlesskit_t is deliberately NOT
 # here — it is the HYPOTHESIZED grant and loads as a separate module
