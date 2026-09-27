@@ -661,8 +661,9 @@ role system_r types docker_helper_newuidmap_t;
 # the distro privilege mechanism (permissions.d/shadow), untouched by
 # docker-helper. A dedicated domain keeps the transition confined to this
 # binary; newgidmap's own runtime surface (its inherited-stdio fifo write
-# and the /proc target-dir read) is granted per enforcing AVC evidence in
-# the P5-S2 runtime section below — everything beyond it stays ungranted.
+# and the /proc target-dir read-open) is granted per enforcing AVC evidence
+# in the P5-S2 runtime section below — everything beyond it stays
+# ungranted.
 type docker_helper_newgidmap_exec_t, file_type;
 type docker_helper_newgidmap_t, domain;
 role system_r types docker_helper_newgidmap_t;
@@ -1120,9 +1121,9 @@ allow docker_helper_newuidmap_t passwd_file_t:file { read open };
 # path-lookup execute, the bprm open/read, the pre-exec getattr). The
 # entry rule carries the transition-required entrypoint plus the loader
 # access (the newuidmap entry shape). The runtime surface granted so far:
-# the inherited-stdio fifo write and the /proc target-dir read (each with
-# its own enforcing AVC evidence, below). NO passwd lookup, no userdb
-# fallback, no gid_map write, no dir open/getattr/search, no capabilities,
+# the inherited-stdio fifo write and the /proc target-dir read-open (each
+# with its own enforcing AVC evidence, below). NO passwd lookup, no userdb
+# fallback, no gid_map write, no dir getattr/search, no capabilities,
 # no cap_userns: the NEXT enforcing boundary inside this domain is the
 # next deliberate step. No transition or allow rule points
 # into the domain from the manager or the daemon.
@@ -1152,24 +1153,27 @@ allow docker_helper_newgidmap_t docker_helper_newgidmap_exec_t:file { entrypoint
 # owner).
 allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:fifo_file { write };
 
-# The /proc/<target> directory read on the gid_map write path (P5-S2): the
-# helper opens the target process's procfs directory to write its gid_map.
-# Live enforcing AVC evidence (run 36300820035 P6 window, record 574:
-# denied { read } for pid=3799 comm="newgidmap" name="3793" dev="proc"
+# The /proc/<target> directory read-open on the gid_map write path
+# (P5-S2): the helper opens the target process's procfs directory to write
+# its gid_map. Live enforcing AVC evidence (run 36300820035 P6 window,
+# record 574: denied { read } comm="newgidmap" name="3793" dev="proc"
 # scontext=system_u:system_r:docker_helper_newgidmap_t:s0
 # tcontext=system_u:system_r:docker_helper_rootlesskit_t:s0 tclass=dir
-# permissive=0) — the same target the UID-map helper reads (the pair grant
-# is NOT a general directory grant: docker_helper_rootlesskit_t:dir
+# permissive=0; and with the read granted, run 36302169439 P6 window,
+# record 546: denied { open } path="/proc/3791" — the O_DIRECTORY open of
+# the SAME target, the direct successor of the granted read, the same
+# progression newuidmap showed at its own boundary) — the pair grant is
+# NOT a general directory grant: docker_helper_rootlesskit_t:dir
 # objects are /proc/<pid> entries of processes running in the child
-# domain). SCOPE — READ CAREFULLY: like every helper grant this is a
-# TYPE-PAIR rule, NOT a pid-specific one: it authorizes the read on the
-# procfs directories of EVERY process running in docker_helper_rootlesskit_t
-# — INCLUDING the processes of OTHER concurrent operations (their
-# isolation is invocation discipline only; the open architectural risk
-# tracked for the final security review). Grant ONLY the read: no
-# open/getattr/search on this pair, no gid_map file access, no capability
-# surface — the next deliberate boundaries.
-allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:dir { read };
+# domain. SCOPE — READ CAREFULLY: like every helper grant this is a
+# TYPE-PAIR rule, NOT a pid-specific one: it authorizes the read-open on
+# the procfs directories of EVERY process running in
+# docker_helper_rootlesskit_t — INCLUDING the processes of OTHER
+# concurrent operations (their isolation is invocation discipline only;
+# the open architectural risk tracked for the final security review).
+# Grant ONLY the read-open: no getattr/search on this pair, no gid_map
+# file access, no capability surface — the next deliberate boundaries.
+allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:dir { read open };
 
 # The child's user-namespace creation itself: rootlesskit creates the userns
 # that hosts the buildkitd instance. Live enforcing AVC evidence (P5-S1
