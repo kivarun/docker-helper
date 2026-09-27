@@ -117,11 +117,11 @@ log 'A: toolchain + candidate module load (disposable VM only)'
 # installed without any privilege change: plain distro packages, no file
 # capabilities, no chkstat involvement beyond the distro's own defaults.
 # auditd is installed for the reliable AVC evidence channel (the P5-S1
-# proof installs it for the same reason). gcc builds the STATIC probe
-# binary whose access checks must run inside the map-helper domains
-# without depending on the base policy's library-read behavior.
+# proof installs it for the same reason). gcc + glibc-static build the
+# STATIC probe binary whose access checks must run inside the map-helper
+# domains without depending on the base policy's library-read behavior.
 zypper --non-interactive install -y checkpolicy container-selinux \
-  policycoreutils-python-utils rootlesskit slirp4netns audit gcc \
+  policycoreutils-python-utils rootlesskit slirp4netns audit gcc glibc-static \
   >"$EVIDENCE_DIR/zypper-policy-toolchain.log" 2>&1 \
   || note "zypper install of the policy toolchain failed (see zypper-policy-toolchain.log)"
 fail_toolchain=0
@@ -178,7 +178,7 @@ restorecon /usr/bin/rootlesskit /usr/bin/slirp4netns /usr/bin/newuidmap /usr/bin
   echo "=== loaded modules ==="
   semodule -l 2>/dev/null | grep -E 'docker_helper|container' || true
   echo "=== binary labels ==="
-  for p in /usr/bin/rootlesskit /usr/bin/slirp4netns /usr/bin/newuidmap; do
+  for p in /usr/bin/rootlesskit /usr/bin/slirp4netns /usr/bin/newuidmap /usr/bin/newgidmap; do
     echo "$p -> $(stat -c '%C' "$p" 2>&1)"
   done
   echo "=== file-type question: what carries passwd_file_t vs etc_t ==="
