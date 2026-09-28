@@ -839,12 +839,14 @@ mkdir -p "$WORK/probe"
 PE_EPOCH="$(date +%s)"
 cat > "$WORK/probe/map_probe.c" <<'PROBEOF'
 /* P5-S2g28 Part E stand probe vehicle (guest-only fixture). */
+#define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sched.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -967,8 +969,9 @@ require {
 	type bin_t;
 	type user_tmp_t;
 	attribute file_type;
-	class file { entrypoint read open execute execute_no_trans getattr map append write create setattr unlink };
+	class file { entrypoint read open execute execute_no_trans getattr map append write create setattr relabelto unlink };
 	class fifo_file { read write open getattr };
+	class lnk_file { read };
 	class dir { search getattr read open write add_name create remove_name rmdir };
 	class process { transition siginh };
 	class fd { use };
