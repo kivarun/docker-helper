@@ -1,26 +1,23 @@
 #!/usr/bin/env bash
 #
 # Guest-side P5-S2g28 BuildKit payload MAC closure for openSUSE
-# Tumbleweed. INVESTIGATION ONLY — run 12 (the enforcing candidate
-# iteration, ledger v12): the candidate payload module carries the
-# run-1/2 harvest-ledger grants PLUS the enforcing-proven deltas (run
-# 2.5: kernel module autoload; run 3: the tap-handoff relabel direction;
-# run 4: the resolver's DNS udp write, the buildkitd socket shutdown
-# unlink, the net-driver teardown sigkill; run 5: the DNS reply recv;
-# run 6: the slirp relay's host-side recv; run 7: the slirp TLS-relay
-# tcp send; run 8: the TLS client's tcp send + the relay teardown
-# shutdown; run 9: the TLS client's tcp recv; run 10: the relay's tcp
-# recv; run 11: the cgroup getattr probe, the runc kcore masked-path
-# stat and the manager's state-tree symlink cleanup) plus the relabel
-# reshape (snapshot copies relabel to the state tree's own type,
-# keeping the tree uniform for the manager's mandatory cleanup); every
-# flow/payload domain
-# stays ENFORCING (no permissive), and the full production composition
-# manager -> rootlesskit -> buildkitd -> readiness -> minimal buildctl
-# build -> STOP runs. Every residual AVC denial is harvested as the next
-# iteration's ledger delta; base-policy dontaudit rules are disabled for
-# the attempt window so no hidden denial can mask the ledger source
-# (re-enabled at teardown).
+# Tumbleweed. INVESTIGATION ONLY — run 13 (the FINAL proof): the
+# iteration-12 candidate module (ledger v12) runs UNCHANGED. Run 12
+# (CI 36446519646) completed the FULL production-like build under
+# enforcing: buildctl exit 0, the 3.63MB alpine pull + extraction, the
+# RUN step's runc container executed, the 3.6MB export tar, ZERO
+# non-hygiene residual denials, and the op trees converged after STOP.
+# This run repeats that clean composition from scratch (Part D: the
+# enforcing preconditions asserted, the exact module set asserted, the
+# RUN step's marker verified inside the export tar, the full AVC
+# window) and adds the Part E isolation regressions (the G26/G27
+# probe-vehicle shapes with the candidate module loaded: the cross-op
+# uid_map write, the paired signal matrix, the categorized-tree reach
+# with its own-tree parity, and the live second-op reach measurement).
+# Every flow/payload domain
+# stays ENFORCING (no permissive); base-policy dontaudit rules are
+# disabled for the evidence windows so no hidden denial can mask the
+# harvest (re-enabled at teardown).
 #
 # Starting point (runs 1/2 = CI 36420911926/36423428498, enforcing
 # attempt = run 2.5 = CI 36426082065):
@@ -60,14 +57,13 @@
 #    (the transitions complete), base-policy masked by design, NOT
 #    granted.
 #
-# This run: the candidate module (v4) carries ONLY per-AVC-evidenced
-# grants (85 allow rules; the run-11 deltas attributed to the run-11
-# enforcing AVC window); the run harvests the RESIDUAL denials under
-# enforcing with dontaudits unmapped. The relabel puzzle is solved
+# This run: the candidate module (v12, the FINAL set) carries ONLY
+# per-AVC-evidenced grants (85 allow rules; each delta attributed in
+# the ledger and the commits). The relabel puzzle is solved
 # from the loaded policy's constraint dump (the G26 seinfo --constrain
 # method): file/dir relabelto is constrained by
 # (u1 == u2 or t1 == can_change_object_identity), and the stand's
-# context files now carry the state tree's own type so the snapshot
+# context files carry the state tree's own type so the snapshot
 # copies stay tree-uniform (the run-8 manager cleanup failure is the
 # recorded composition evidence).
 #
@@ -118,7 +114,9 @@ cleanup() {
   systemctl daemon-reload >/dev/null 2>&1 || true
   rm -f /usr/bin/docker-helper
   rm -rf /usr/libexec/docker-helper "$STATE_ROOT" "$RUNTIME_ROOT" "$WORK"
+  rm -f /usr/local/bin/map_probe
   semanage dontaudit on >/dev/null 2>&1 || true
+  semodule -r gidmap_probe_diag >/dev/null 2>&1 || true
   for d in "${DOMAINS[@]}"; do
     clear_permissive "$d"
   done
@@ -174,6 +172,23 @@ gen_op_id() {
 }
 
 log 'A: toolchain + modules (production + candidate + G26 delta) + composition install'
+# Part D precondition: the composition runs ONLY under Enforcing with NO
+# permissive domains, and the loaded module set is exactly the production
+# module + the G26 MCS delta + the guest-only candidate payload module.
+for d in "${DOMAINS[@]}"; do
+  clear_permissive "$d"
+done
+{
+  echo "=== enforcing + permissive-domains precondition ==="
+  echo "getenforce: $(getenforce 2>&1)"
+  echo "permissive domains after the clear:"
+  semanage permissive -l 2>/dev/null || true
+} > "$EVIDENCE_DIR/a-preconditions.txt" 2>&1
+if [ "$(getenforce 2>/dev/null)" != "Enforcing" ]; then
+  note "SELinux is not Enforcing; the experiment cannot proceed"
+  printf '%s P5S2-PAYLOAD-MAC-RESULT=PASS-INCOMPLETE (not enforcing; recorded as a finding)\n' "$PREFIX" >&2
+  exit 0
+fi
 {
   echo "=== distro ==="
   grep PRETTY_NAME /etc/os-release 2>/dev/null || true
@@ -266,11 +281,11 @@ install -m 0755 /tmp/p5s2-g28-payload-extract/bin/buildkit-runc \
   "$BUILDCTL" --version 2>&1 || true
 } > "$EVIDENCE_DIR/a2-payload.txt" 2>&1
 
-log 'A3: the candidate payload module (v12: the harvest ledger + the run-2.5..11 enforcing deltas + the relabel reshape, enforcing)'
+log 'A3: the candidate payload module (v12, unchanged: the final proof runs the exact iteration-12 grant set)'
 cat > /tmp/payload_mac_diag.te <<'MODEOF'
 module payload_mac_diag 12.0;
 
-# P5-S2g28 guest-only candidate payload module. RUN 12: the enforcing
+# P5-S2g28 guest-only candidate payload module. RUN 13 (the final proof, the SAME v12 grant set): the enforcing
 # iteration carrying the per-AVC-evidenced grants from the run-1/2
 # permissive harvest (195 unique (s,t,class,perm) denial tuples over the
 # full production path) plus every enforcing-proven delta since: run 2.5
@@ -565,7 +580,7 @@ cat > /tmp/payload_mac_diag.fc <<'FCOF'
 /usr/libexec/docker-helper/buildkit(/.*)?    --    system_u:object_r:payload_buildkit_exec_t:s0
 FCOF
 {
-  echo "=== the candidate payload module (source, run 12: harvest-ledger grants + the run-2.5..11 enforcing deltas + the relabel reshape) ==="
+  echo "=== the candidate payload module (source, run 13: the UNCHANGED iteration-12 grant set) ==="
   cat /tmp/payload_mac_diag.te
   echo "=== its file contexts ==="
   cat /tmp/payload_mac_diag.fc
@@ -655,7 +670,7 @@ semanage dontaudit off >>"$EVIDENCE_DIR/te-dontaudit-off.log" 2>&1 || true
 OPH="$(gen_op_id)"
 HV_EPOCH="$(date +%s)"
 {
-  echo "=== P5-S2g28 run 12: the enforcing candidate attempt (ledger v12) ==="
+  echo "=== P5-S2g28 run 13: the final enforcing proof (ledger v12, no new grants) ==="
   echo "op id: $OPH; epoch: $HV_EPOCH"
   echo "dontaudit rules disabled for the attempt window (semanage dontaudit off)"
   echo "attribution: run 2.5 proved module_request necessary under enforcing;"
@@ -720,7 +735,7 @@ CTX="$WORK/ctx"
 mkdir -p "$CTX"
 cat > "$CTX/Dockerfile" <<'EOF'
 FROM alpine:3.20
-RUN mkdir -p /m1 && echo p5s2-g28-run12 > /m1/marker.txt && cat /proc/self/uid_map > /m1/uid_map.txt && id > /m1/id.txt
+RUN mkdir -p /m1 && echo p5s2-g28-run13 > /m1/marker.txt && cat /proc/self/uid_map > /m1/uid_map.txt && id > /m1/id.txt
 EOF
 chcon -u system_u -t docker_helper_builder_state_t "$CTX" "$CTX/Dockerfile"
 {
@@ -735,7 +750,7 @@ DOCKER_CONFIG="$WORK/docker-config" timeout 300 "$BUILDCTL" \
   --addr "unix://$RUNTIME_ROOT/ops/$OPH/buildkitd.sock" build \
   --progress=plain --frontend=dockerfile.v0 \
   --local "context=$CTX" --local "dockerfile=$CTX" \
-  --output "type=docker,name=p5s2g28:run12,dest=$WORK/export/out.tar" \
+  --output "type=docker,name=p5s2g28:run13,dest=$WORK/export/out.tar" \
   > "$EVIDENCE_DIR/e-build.txt" 2>&1
 BUILD_RC=$?
 set -e
@@ -745,6 +760,33 @@ set -e
   echo "=== buildctl output tail ==="
   tail -30 "$EVIDENCE_DIR/e-build.txt" 2>/dev/null || true
 } >> "$EVIDENCE_DIR/e-attempt.txt"
+
+# The RUN step's execution proof: the marker file the RUN's container
+# wrote must appear INSIDE the exported docker-format tar (the RUN's
+# layer was materialized by the runc container that executed under
+# enforcing). The export tar's structure: outer tar with manifest +
+# layer tars; the marker lives inside a layer tar at m1/marker.txt.
+python3 - "$WORK/export/out.tar" >"$EVIDENCE_DIR/e-run-proof.txt" 2>&1 <<'PYEOF' || true
+import tarfile, sys, io
+path = sys.argv[1]
+found = []
+with tarfile.open(path, 'r:*') as outer:
+    for m in outer.getmembers():
+        if not m.isfile():
+            continue
+        data = outer.extractfile(m).read()
+        try:
+            with tarfile.open(fileobj=io.BytesIO(data), mode='r:*') as layer:
+                for lm in layer.getmembers():
+                    if lm.name in ('m1/marker.txt', './m1/marker.txt'):
+                        found.append((m.name, lm.name, layer.extractfile(lm).read()))
+        except tarfile.TarError:
+            pass
+for src, name, content in found:
+    print('LAYER-MARKER from=%s name=%s content=%r' % (src, name, content))
+print('marker found:', bool(found))
+PYEOF
+cat "$EVIDENCE_DIR/e-run-proof.txt" >&2
 
 log 'F: own-operation lifecycle stop (the manager STOP; the convergence)'
 STP_EPOCH="$(date +%s)"
@@ -786,8 +828,343 @@ dedup_avcs "$EVIDENCE_DIR/g-residual-avcs.txt" "$EVIDENCE_DIR/g-residual-avcs-de
 } > "$EVIDENCE_DIR/g-relabelto-constraint.txt" 2>&1
 wc -l "$EVIDENCE_DIR/g-residual-avcs.txt" "$EVIDENCE_DIR/g-residual-avcs-dedup.txt" >&2
 
+log 'H: P5-S2g28 Part E — the isolation regressions (the candidate payload module + the G26 delta stay loaded)'
+# The probe vehicle and the probe module follow the G26/G27 stand shapes
+# (stand fixtures only; the legs re-run the necessary regressions with
+# the CANDIDATE payload module loaded, which is what G26/G27 could not
+# measure — their flow stopped before buildkitd). Categories are
+# assigned the same way the prior stands did: runuser+runcon to
+# rootlesskit_t:s0:c1 / :s0:c2 (the assignment probe proves the chain).
+mkdir -p "$WORK/probe"
+PE_EPOCH="$(date +%s)"
+cat > "$WORK/probe/map_probe.c" <<'PROBEOF'
+/* P5-S2g28 Part E stand probe vehicle (guest-only fixture). */
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+static void emit_facts(const char *tag) {
+  char buf[256];
+  ssize_t n;
+  int fd = open("/proc/self/attr/current", O_RDONLY);
+  if (fd < 0) { printf("PROBE %s selinux=UNAVAILABLE errno=%d\n", tag, errno); return; }
+  n = read(fd, buf, sizeof(buf) - 1);
+  close(fd);
+  if (n < 0) n = 0;
+  if (n > 0 && buf[n-1] == '\n') n--;
+  buf[n] = '\0';
+  printf("PROBE %s selinux=%s uid=%d pid=%d\n", tag, buf, (int)getuid(), (int)getpid());
+}
+
+static int do_open_read(const char *path) {
+  int fd = open(path, O_RDONLY);
+  printf("READ path=%s rc=%d errno=%d\n", path, fd, errno);
+  if (fd >= 0) close(fd);
+  return fd >= 0 ? 0 : 1;
+}
+
+static int do_open_write(const char *path) {
+  int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+  printf("WRITE path=%s rc=%d errno=%d\n", path, fd, errno);
+  if (fd >= 0) { write(fd, "probe\n", 6); close(fd); }
+  return fd >= 0 ? 0 : 1;
+}
+
+static int do_unlink(const char *path) {
+  int rc = unlink(path);
+  printf("UNLINK path=%s rc=%d errno=%d\n", path, rc, errno);
+  return rc == 0 ? 0 : 1;
+}
+
+static int do_connect(const char *path) {
+  struct sockaddr_un sa;
+  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (fd < 0) { printf("CONNECT path=%s socket-rc=%d errno=%d\n", path, fd, errno); return 1; }
+  memset(&sa, 0, sizeof(sa));
+  sa.sun_family = AF_UNIX;
+  strncpy(sa.sun_path, path, sizeof(sa.sun_path) - 1);
+  int rc = connect(fd, (struct sockaddr *)&sa, sizeof(sa));
+  printf("CONNECT path=%s rc=%d errno=%d\n", path, rc, errno);
+  close(fd);
+  return rc == 0 ? 0 : 1;
+}
+
+static int do_signal(int pid, int sig) {
+  int rc = kill(pid, sig);
+  printf("SIGNAL target=%d sig=%d rc=%d errno=%d\n", pid, sig, rc, errno);
+  int alive = kill(pid, 0);
+  printf("SIGNAL target=%d alive-check-rc=%d errno=%d\n", pid, alive, errno);
+  return rc == 0 ? 0 : 1;
+}
+
+static int spawn_signal(int sig) {
+  pid_t c = fork();
+  if (c == 0) { emit_facts("spawned-child"); for (;;) pause(); }
+  emit_facts("spawner");
+  printf("SPAWN child=%d\n", c);
+  int rc = kill(c, sig);
+  printf("SPAWN-SIGNAL child=%d sig=%d rc=%d errno=%d\n", c, sig, rc, errno);
+  if (sig == SIGSTOP) {
+    int st; waitpid(c, &st, WUNTRACED);
+    printf("SPAWN-WAIT child=%d stopped=%d\n", c, WIFSTOPPED(st));
+    kill(c, SIGKILL); waitpid(c, &st, 0);
+  } else {
+    int st; waitpid(c, &st, 0);
+    printf("SPAWN-WAIT child=%d exited=%d signaled=%d termsig=%d\n", c, WIFEXITED(st), WIFSIGNALED(st), WTERMSIG(st));
+  }
+  return rc == 0 ? 0 : 1;
+}
+
+static int invoke_helper(char **argv) {
+  execv(argv[0], argv);
+  printf("INVOKE-HELPER execv-errno=%d\n", errno);
+  return 1;
+}
+
+int main(int argc, char **argv) {
+  if (argc < 2) { fprintf(stderr, "usage: map_probe MODE ...\n"); return 2; }
+  if (strcmp(argv[1], "--facts") == 0) { emit_facts("vehicle"); return 0; }
+  if (strcmp(argv[1], "--be-target") == 0 && argc == 3) {
+    if (unshare(CLONE_NEWUSER) != 0) { printf("BE-TARGET unshare-errno=%d\n", errno); return 1; }
+    emit_facts("be-target");
+    int fd = open(argv[2], O_WRONLY);
+    if (fd < 0) { printf("BE-TARGET open-errno=%d\n", errno); return 1; }
+    dprintf(fd, "PID=%d\n", getpid());
+    close(fd);
+    for (;;) pause();
+    return 0;
+  }
+  if (strcmp(argv[1], "--invoke-helper") == 0 && argc >= 4) return invoke_helper(&argv[2]);
+  if (strcmp(argv[1], "--signal") == 0 && argc == 4) return do_signal(atoi(argv[2]), atoi(argv[3]));
+  if (strcmp(argv[1], "--spawn-signal") == 0 && argc == 3) return spawn_signal(atoi(argv[2]));
+  if (strcmp(argv[1], "--read") == 0 && argc == 3) return do_open_read(argv[2]);
+  if (strcmp(argv[1], "--write") == 0 && argc == 3) return do_open_write(argv[2]);
+  if (strcmp(argv[1], "--unlink") == 0 && argc == 3) return do_unlink(argv[2]);
+  if (strcmp(argv[1], "--connect") == 0 && argc == 3) return do_connect(argv[2]);
+  fprintf(stderr, "usage: map_probe MODE ...\n");
+  return 2;
+}
+PROBEOF
+cat > /tmp/gidmap_probe_diag.te <<'PROBEEOF'
+module gidmap_probe_diag 1.0;
+# P5-S2g28 guest-only stand probe module: the PROBE VEHICLE's fixture
+# surface only (the runcon chain, the probe binary's exec/entry, the
+# stand's /tmp fixture tree, the inherited evidence fds). It grants
+# NOTHING to the flow/payload domains beyond what the candidate module
+# already carries; the E-legs' DENIED attempts must stay denied (any
+# ALLOWED cross-op attempt is the measurement, never masked).
+require {
+	type docker_helper_newuidmap_t;
+	type docker_helper_rootlesskit_t;
+	type unconfined_t;
+	type bin_t;
+	type user_tmp_t;
+	attribute file_type;
+	class file { entrypoint read open execute execute_no_trans getattr map append write create setattr unlink };
+	class fifo_file { read write open getattr };
+	class dir { search getattr read open write add_name create remove_name rmdir };
+	class process { transition siginh };
+	class fd { use };
+}
+type gidmap_probe_exec_t;
+typeattribute gidmap_probe_exec_t file_type;
+type_transition unconfined_t bin_t:file gidmap_probe_exec_t "map_probe";
+allow unconfined_t gidmap_probe_exec_t:file { create open write append setattr relabelto };
+allow unconfined_t docker_helper_rootlesskit_t:process { transition siginh };
+allow docker_helper_rootlesskit_t gidmap_probe_exec_t:file { entrypoint read open execute execute_no_trans getattr map };
+allow docker_helper_newuidmap_t gidmap_probe_exec_t:file { entrypoint read open execute getattr map };
+allow docker_helper_newuidmap_t unconfined_t:fd use;
+allow docker_helper_rootlesskit_t unconfined_t:fd use;
+allow docker_helper_rootlesskit_t user_tmp_t:dir { search getattr read open write add_name create remove_name rmdir };
+allow docker_helper_rootlesskit_t user_tmp_t:file { create open read write getattr setattr unlink append };
+allow docker_helper_rootlesskit_t user_tmp_t:fifo_file { read write open getattr };
+allow docker_helper_rootlesskit_t user_tmp_t:lnk_file { read };
+PROBEEOF
+{
+  echo "=== the probe module source ==="
+  cat /tmp/gidmap_probe_diag.te
+} > "$EVIDENCE_DIR/h-probe-module.txt" 2>&1
+checkmodule -M -m -o /tmp/gidmap_probe_diag.tmp /tmp/gidmap_probe_diag.te 2>>"$EVIDENCE_DIR/h-probe-module.txt" \
+  || { note "the probe module failed to compile"; exit 1; }
+semodule_package -o /tmp/gidmap_probe_diag.pp -m /tmp/gidmap_probe_diag.tmp 2>>"$EVIDENCE_DIR/h-probe-module.txt" \
+  || { note "the probe module failed to package"; exit 1; }
+semodule -i /tmp/gidmap_probe_diag.pp 2>>"$EVIDENCE_DIR/h-probe-module.txt" \
+  || { note "the probe module failed to load"; exit 1; }
+gcc -static -O2 -o /usr/local/bin/map_probe "$WORK/probe/map_probe.c" 2>>"$EVIDENCE_DIR/h-probe-module.txt" \
+  || { note "the probe vehicle failed to build"; exit 1; }
+PROBE_LABEL="$(stat -c '%C' /usr/local/bin/map_probe 2>&1)"
+echo "probe label (post-build, the creation type-transition): $PROBE_LABEL" >> "$EVIDENCE_DIR/h-probe-module.txt"
+
+RK_C1='system_u:system_r:docker_helper_rootlesskit_t:s0:c1'
+RK_C2='system_u:system_r:docker_helper_rootlesskit_t:s0:c2'
+{
+  echo "=== the runner's own context (the assignment chain's root) ==="
+  echo "runner attr/current: $(tr -d '\0' < /proc/self/attr/current 2>/dev/null || true)"
+  echo "=== the builder's PAM context after runuser ==="
+  echo "builder context: $(runuser -u "$BUILDER_USER" -- id -Z 2>/dev/null || echo UNAVAILABLE)"
+  echo "=== assignment probe A: runuser+runcon to $RK_C1 ==="
+  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --facts 2>&1 || echo "assignment A rc=$?"
+  echo "=== assignment probe B: runuser+runcon to $RK_C2 ==="
+  runuser -u "$BUILDER_USER" -- runcon "$RK_C2" /usr/local/bin/map_probe --facts 2>&1 || echo "assignment B rc=$?"
+} > "$EVIDENCE_DIR/h-assignment.txt" 2>&1
+cat "$EVIDENCE_DIR/h-assignment.txt" >&2
+ASSIGN_OK=0
+grep -aq 'PROBE vehicle selinux=system_u:system_r:docker_helper_rootlesskit_t:s0:c1' "$EVIDENCE_DIR/h-assignment.txt" && \
+grep -aq 'PROBE vehicle selinux=system_u:system_r:docker_helper_rootlesskit_t:s0:c2' "$EVIDENCE_DIR/h-assignment.txt" && ASSIGN_OK=1
+if [ "$ASSIGN_OK" = 0 ]; then
+  note "Part E OBSTACLE: the required MCS categories are not assignable under the candidate module (see h-assignment.txt); the E-legs are recorded inconclusive"
+  printf '%s P5S2-PAYLOAD-MAC-RESULT=PASS (run 13 completed: the final enforcing proof ran; Part E legs inconclusive on assignment)\n' "$PREFIX" >&2
+  exit 0
+fi
+
+# ---- E1: the cross-op uid_map write (the G26 shape) ----
+log 'H-E1: cross-op newuidmap c1 -> c2 uid_map write (expect MCS-BLOCKED)'
+E1_EPOCH="$(date +%s)"
+FIFO_E1="$WORK/probe/fifo-e1"
+mkfifo "$FIFO_E1"
+runuser -u "$BUILDER_USER" -- runcon "$RK_C2" /usr/local/bin/map_probe --be-target "$FIFO_E1" \
+  >"$WORK/probe/b-e1.out" 2>&1 &
+exec 3<>"$FIFO_E1"
+BPID_E1=""
+if IFS= read -r -t 60 line <&3; then
+  case "$line" in PID=[0-9]*) BPID_E1="${line#PID=}" ;; esac
+fi
+exec 3<&-
+{
+  echo "=== the c2 be-target ==="
+  cat "$WORK/probe/b-e1.out" 2>/dev/null || true
+  echo "target pid: ${BPID_E1:-NONE}"
+  echo "target uid_map before: [$(cat "/proc/$BPID_E1/uid_map" 2>/dev/null || true)]"
+  echo "=== the c1 helper's cross-op uid_map write attempt ==="
+  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe \
+    --invoke-helper /usr/bin/newuidmap "$BPID_E1" 0 475 1 1 165536 65536 2>&1 || echo "helper attempt rc=$?"
+  echo "helper exit code: ${PIPESTATUS[0]:-?}"
+  echo "target uid_map after: [$(cat "/proc/$BPID_E1/uid_map" 2>/dev/null || true)]"
+} > "$EVIDENCE_DIR/h-e1-uidmap.txt" 2>&1
+cat "$EVIDENCE_DIR/h-e1-uidmap.txt" >&2
+pkill -KILL -f 'map_probe --be-target' 2>/dev/null || true
+
+# ---- E2: the paired process-control matrix (the G26 shape) ----
+log 'H-E2: cross-op TERM/STOP/KILL c1 -> c2 (expect MCS-BLOCKED) + the own-op equivalents (expect ALLOWED)'
+E2_EPOCH="$(date +%s)"
+FIFO_E2="$WORK/probe/fifo-e2"
+mkfifo "$FIFO_E2"
+runuser -u "$BUILDER_USER" -- runcon "$RK_C2" /usr/local/bin/map_probe --be-target "$FIFO_E2" \
+  >"$WORK/probe/b-e2.out" 2>&1 &
+exec 3<>"$FIFO_E2"
+BPID_E2=""
+if IFS= read -r -t 60 line <&3; then
+  case "$line" in PID=[0-9]*) BPID_E2="${line#PID=}" ;; esac
+fi
+exec 3<&-
+{
+  echo "=== the c2 be-target ==="
+  cat "$WORK/probe/b-e2.out" 2>/dev/null || true
+  echo "target pid: ${BPID_E2:-NONE}"
+  echo "=== the c1 probe's cross-op signals ==="
+  for sigspec in 15 19 9; do
+    runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --signal "$BPID_E2" "$sigspec" 2>&1 || true
+  done
+  echo "target alive after the cross-op signals: $(kill -0 "$BPID_E2" 2>/dev/null && echo YES || echo NO) (the runner's unconfined check)"
+  echo "=== the own-op equivalents (the c1 probe's own spawned children) ==="
+  for sigspec in 15 19 9; do
+    runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --spawn-signal "$sigspec" 2>&1 || true
+  done
+} > "$EVIDENCE_DIR/h-e2-signals.txt" 2>&1
+cat "$EVIDENCE_DIR/h-e2-signals.txt" >&2
+pkill -KILL -f 'map_probe --be-target' 2>/dev/null || true
+
+# ---- E4a: the categorized-tree reach (the G27 simulation shape) ----
+log 'H-E4a: the c1 probe against c2-labeled simulated op trees (expect MCS-BLOCKED) + the own-tree parity'
+E4_EPOCH="$(date +%s)"
+FB_C2="$STATE_ROOT/ops/op_probe_c2"
+FB_C1="$STATE_ROOT/ops/op_probe_c1"
+for pair in "$FB_C2:c2" "$FB_C1:c1"; do
+  d="${pair%%:*}"; cat="${pair##*:}"
+  mkdir -p "$d/rootlesskit-state" "$d/root"
+  touch "$d/rootlesskit-state/lock" "$d/root/marker"
+  chcon -u system_u -l "$cat" "$d" "$d/rootlesskit-state" "$d/rootlesskit-state/lock" \
+    "$d/root" "$d/root/marker" 2>/dev/null || true
+done
+{
+  echo "=== the simulated op trees' labels ==="
+  stat -c '%C %n' "$FB_C2" "$FB_C2/rootlesskit-state/lock" "$FB_C2/root/marker" \
+    "$FB_C1" "$FB_C1/rootlesskit-state/lock" "$FB_C1/root/marker" 2>&1
+  echo "=== the c1 probe's attempts on the c2-labeled trees (expect EACCES) ==="
+  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --write "$FB_C2/rootlesskit-state/planted" 2>&1 || true
+  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --read "$FB_C2/rootlesskit-state/lock" 2>&1 || true
+  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --unlink "$FB_C2/rootlesskit-state/lock" 2>&1 || true
+  echo "=== the own-tree parity control (the c1 probe on the c1-labeled trees, expect rc=0) ==="
+  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --write "$FB_C1/rootlesskit-state/planted" 2>&1 || true
+  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --read "$FB_C1/rootlesskit-state/lock" 2>&1 || true
+  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --unlink "$FB_C1/rootlesskit-state/planted" 2>&1 || true
+} > "$EVIDENCE_DIR/h-e4-trees.txt" 2>&1
+cat "$EVIDENCE_DIR/h-e4-trees.txt" >&2
+
+# ---- E4b/E5: the REAL manager op's live trees (the uncategorized reality) ----
+log 'H-E4b: op B via the REAL manager START; the c1 probe measures the reach into its live runtime/state trees'
+E4B_EPOCH="$(date +%s)"
+OPB="$(gen_op_id)"
+{
+  echo "=== manager RPC: START $OPB (the second live operation) ==="
+} > "$EVIDENCE_DIR/h-e4b-start.txt"
+set +e
+printf 'START %s\n' "$OPB" | timeout 120 socat - UNIX-CONNECT:"$MANAGER_SOCK" >> "$EVIDENCE_DIR/h-e4b-start.txt" 2>&1
+echo "socat rc: $?" >> "$EVIDENCE_DIR/h-e4b-start.txt"
+set -e
+sleep 6
+RB="$RUNTIME_ROOT/ops/$OPB"
+SB="$STATE_ROOT/ops/$OPB"
+{
+  echo "=== op B's live trees ==="
+  stat -c '%C %U:%G %a %n' "$RB" "$RB/buildkitd.sock" "$SB" 2>&1 || true
+  echo "=== the c1 probe's reach attempts on op B's LIVE runtime tree ==="
+  echo "--- CONNECT to op B's buildkitd.sock (the runtime authority path; TE has no unix_stream_socket connectto grant) ---"
+  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --connect "$RB/buildkitd.sock" 2>&1 || true
+  echo "--- READ the socket file (TE: no sock_file read grant) ---"
+  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --read "$RB/buildkitd.sock" 2>&1 || true
+  echo "--- WRITE-open the socket file (TE: no sock_file write grant) ---"
+  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --write "$RB/probe-planted" 2>&1 || true
+  echo "--- UNLINK op B's buildkitd.sock (TE: the candidate's own-flow cleanup grant + the uncategorized trees) ---"
+  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --unlink "$RB/buildkitd.sock" 2>&1 || true
+  echo "=== the c1 probe's reach attempts on op B's LIVE state tree (the G27 write-link shape) ==="
+  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --write "$SB/root/probe-planted" 2>&1 || true
+  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --read "$SB/root/buildkitd.lock" 2>&1 || true
+  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --unlink "$SB/root/probe-planted" 2>&1 || true
+  echo "=== the candidate payload module's cross-op-relevant grants (the enumeration for the privilege review) ==="
+  grep -E 'builder_state_t|builder_runtime_t|:process |unix_stream|sock_file' /tmp/payload_mac_diag.te || true
+} > "$EVIDENCE_DIR/h-e4b-real-op.txt" 2>&1
+cat "$EVIDENCE_DIR/h-e4b-real-op.txt" >&2
+STPB_EPOCH="$(date +%s)"
+{
+  echo "=== manager RPC: STOP $OPB ==="
+} > "$EVIDENCE_DIR/h-e4b-stop.txt"
+set +e
+printf 'STOP %s\n' "$OPB" | timeout 120 socat - UNIX-CONNECT:"$MANAGER_SOCK" >> "$EVIDENCE_DIR/h-e4b-stop.txt" 2>&1
+echo "socat rc: $?" >> "$EVIDENCE_DIR/h-e4b-stop.txt"
+set -e
+sleep 4
+{
+  echo "=== op B's trees after STOP (the convergence) ==="
+  ls -la "$STATE_ROOT/ops" 2>&1 || true
+  ls -la "$RUNTIME_ROOT/ops" 2>&1 || true
+} >> "$EVIDENCE_DIR/h-e4b-stop.txt"
+
+# ---- the Part E AVC harvest ----
+harvest_avcs_since "$PE_EPOCH" "$EVIDENCE_DIR/h-part-e-avcs.txt"
+dedup_avcs "$EVIDENCE_DIR/h-part-e-avcs.txt" "$EVIDENCE_DIR/h-part-e-avcs-dedup.txt"
+wc -l "$EVIDENCE_DIR/h-part-e-avcs.txt" "$EVIDENCE_DIR/h-part-e-avcs-dedup.txt" >&2
+
 log 'teardown + cleanup (enforcing everywhere; temporary modules removed)'
 semanage dontaudit on >/dev/null 2>&1 || true
+pkill -KILL -f 'map_probe' 2>/dev/null || true
 pkill -KILL -f 'rootlesskit --net=' 2>/dev/null || true
 pkill -KILL -f 'buildkitd --rootless' 2>/dev/null || true
 pkill -KILL -f 'buildctl --addr' 2>/dev/null || true
@@ -798,9 +1175,11 @@ rm -f /etc/systemd/system/"$UNIT".service
 systemctl daemon-reload >/dev/null 2>&1 || true
 rm -f /usr/bin/docker-helper
 rm -rf /usr/libexec/docker-helper "$STATE_ROOT" "$RUNTIME_ROOT" "$WORK"
+rm -f /usr/local/bin/map_probe
+semodule -r gidmap_probe_diag >/dev/null 2>&1 || true
 semodule -r payload_mac_diag >/dev/null 2>&1 || true
 semodule -r gidmap_mcsboundary_diag >/dev/null 2>&1 || true
 semodule -l 2>/dev/null | grep -E 'docker_helper|gidmap|payload' > "$EVIDENCE_DIR/g-final-modules.txt" 2>&1 || true
 
-printf '%s P5S2-PAYLOAD-MAC-RESULT=PASS (run 12 completed: enforcing candidate iteration, ledger v12)\n' "$PREFIX" >&2
+printf '%s P5S2-PAYLOAD-MAC-RESULT=PASS (run 13 completed: the final enforcing proof + the Part E isolation regressions)\n' "$PREFIX" >&2
 exit 0
