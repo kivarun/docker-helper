@@ -83,6 +83,7 @@ PREFIX='[release-2.4-p5s2-state-authority-tw]'
 EVIDENCE_DIR=/tmp/release-2.4-p5s2-state-authority-evidence
 BUILDER_USER=docker-helper-builder
 GUEST_FILES=/tmp/p5s2-state-authority
+TRANSFERRED="$GUEST_FILES"
 STATE_ROOT=/var/lib/docker-helper-builder
 RUNTIME_ROOT=/run/docker-helper-builder
 MANAGER_SOCK="$RUNTIME_ROOT/manager.sock"
