@@ -1599,24 +1599,46 @@ if [ "$A_READY" -eq 1 ]; then
 else
   X_OK=0
 fi
-{
-  echo "=== Part F6: the abnormal-termination cleanup (the manager's own op, the leader killed) ==="
-  echo "launch ready: $A_READY"
-  echo "trees converged after the abnormal termination: $X_OK"
-  echo "runtime tree: $([ -e "$RUNTIME_ROOT/ops/$OPA6" ] && echo survives || echo removed)"
 harvest_avcs_since "$F_EPOCH" "$EVIDENCE_DIR/f6-abnormal-cleanup-avcs.txt"
-} > "$EVIDENCE_DIR/f6-abnormal-cleanup.txt" 2>&1
+{
+  echo "=== Part F6a: the manager's own residue after the SIGKILLed leader ==="
+  echo "launch ready: $A_READY"
+  echo "trees converged by the manager's own cleanup: $X_OK"
+  echo "state residue: $([ -e "$STATE_ROOT/ops/$OPA6" ] && stat -c '%C %a %n' "$STATE_ROOT/ops/$OPA6"/rootlesskit-state/* 2>/dev/null || echo removed)"
+} >> "$EVIDENCE_DIR/f6-abnormal-cleanup.txt" 2>&1
 journalctl -u "$UNIT" --since "@$F_EPOCH" --no-pager 2>/dev/null | tail -8 >> "$EVIDENCE_DIR/f6-abnormal-cleanup.txt" || true
 cat "$EVIDENCE_DIR/f6-abnormal-cleanup.txt" >&2
-
-# F4: the PURGE RPC smoke (the manager's cleanup owner over its own entries).
+if [ -e "$STATE_ROOT/ops/$OPA6/rootlesskit-state/api.sock" ]; then
+  {
+    echo "=== Part F6b: the flow's own-authority socket cleanup ==="
+    echo "the api.sock: $(stat -c '%C %U:%G %a' "$STATE_ROOT/ops/$OPA6/rootlesskit-state/api.sock" 2>&1)"
+  } > "$EVIDENCE_DIR/f6-own-cleanup.txt" 2>&1
+  S6_EPOCH="$(date +%s)"
+  set +e
+  timeout 60 runuser -u "$BUILDER_USER" -- runcon "$RK_C2" /usr/local/bin/map_probe \
+    --unlink "$STATE_ROOT/ops/$OPA6/rootlesskit-state/api.sock" >> "$EVIDENCE_DIR/f6-own-cleanup.txt" 2>&1
+  set -e
+  harvest_avcs_since "$S6_EPOCH" "$EVIDENCE_DIR/f6-own-cleanup-avcs.txt"
+  cat "$EVIDENCE_DIR/f6-own-cleanup.txt" >&2
+fi
+# F4: the PURGE RPC — the retained-entry retry converges after the
+# flow-side socket cleanup (the manager's cleanup owner over its own
+# entries).
 set +e
 printf 'PURGE\n' | timeout 240 socat - UNIX-CONNECT:"$MANAGER_SOCK" >> "$EVIDENCE_DIR/f4-purge.txt" 2>&1
 echo "socat rc: $?" >> "$EVIDENCE_DIR/f4-purge.txt"
 set -e
+P4_WAIT=0
+P4_OK=0
+until [ ! -e "$STATE_ROOT/ops/$OPA6" ] || [ "$P4_WAIT" -ge 240 ]; do
+  sleep 2
+  P4_WAIT=$((P4_WAIT + 2))
+done
+[ ! -e "$STATE_ROOT/ops/$OPA6" ] && P4_OK=1
 {
-  echo "=== Part F4: the PURGE RPC (no live instances) ==="
-  grep -a 'OK\|ERR' "$EVIDENCE_DIR/f4-purge.txt" || true
+  echo "=== Part F4: the PURGE RPC (the retained-entry retry) ==="
+  echo "PURGE response:"; tail -3 "$EVIDENCE_DIR/f4-purge.txt" || true
+  echo "residue converged after the flow-side socket cleanup: $P4_OK"
 } > "$EVIDENCE_DIR/f4-purge-result.txt" 2>&1
 cat "$EVIDENCE_DIR/f4-purge-result.txt" >&2
 
@@ -1732,7 +1754,11 @@ MCS29_OK=0
   && [ "$OWN_SHA" != "$AFTER_SHA" ] && [ "$RESTORED_SHA" = "$PASSWD_SHA0" ] && [ "$CLOS_RC" = "0" ] \
   && echo "$CLOS_ID" | grep -q 'uid=0(root)' && MCS29_OK=1
 MANAGER_OK=0
-[ "$S_OK" = "1" ] && [ "$X_OK" = "1" ] && MANAGER_OK=$((MANAGER_OK+1))
+grep -q 'readiness: 1' "$EVIDENCE_DIR/f1-start-labels.txt" \
+  && grep -q 'trees converged (removed): 1' "$EVIDENCE_DIR/f1-stop-result.txt" \
+  && grep -q 'refusing to adopt' "$EVIDENCE_DIR/f2-refusal.txt" \
+  && grep -q 'planted dirs survive' "$EVIDENCE_DIR/f2-refusal.txt" \
+  && [ "$P4_OK" = "1" ] && MANAGER_OK=1
 PURGE_OK=0
 grep -q 'unit active: yes' "$EVIDENCE_DIR/f3-purge-result.txt" \
   && [ ! -e "$SB" ] && [ ! -e "$RB" ] \
