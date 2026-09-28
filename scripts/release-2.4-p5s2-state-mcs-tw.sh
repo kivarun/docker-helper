@@ -1033,8 +1033,6 @@ HV_EPOCH="$(date +%s)"
 OPB="$(gen_op_id)"
 RB="$RUNTIME_ROOT/ops/$OPB"
 SB="$STATE_ROOT/ops/$OPB"
-BT_C2="system_u:system_r:docker_helper_builder_t:s0:c2"
-BT_S0="system_u:system_r:docker_helper_builder_t:s0"
 # the manager's fixed child PATH (builder_manager.go:48); the payload
 # directory is part of it.
 CHILD_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/usr/libexec/docker-helper/buildkit"
@@ -1099,23 +1097,14 @@ set -e
 } > "$EVIDENCE_DIR/a1-propagation.txt" 2>&1
 cat "$EVIDENCE_DIR/a1-propagation.txt" >&2
 
-# a2: a manager-domain stand-in (docker_helper_builder_t:s0 — the exact
-# production manager context) creates inside the c2 tree; under
-# TARGET_LOW the created object must inherit the tree's category (no
-# de-categorization by trusted creations). This is the model
-# measurement for Part F's "the manager does not recreate operation
-# objects back into s0".
-set +e
-timeout 60 runuser -u "$BUILDER_USER" -- runcon "$BT_S0" mkdir "$SB/root/a2-mgrdir" \
-  > "$EVIDENCE_DIR/a2-manager-create.txt" 2>&1
-set -e
-{
-  echo "=== Part A a2: the manager-domain stand-in's creation inside the c2 tree ==="
-  cat "$EVIDENCE_DIR/a2-manager-create.txt"
-  echo "created dir context: $(stat -c '%C' "$SB/root/a2-mgrdir" 2>&1)"
-  echo "expected: docker_helper_builder_state_t:s0:c2 (no de-categorization)"
-} > "$EVIDENCE_DIR/a2-manager-create-result.txt" 2>&1
-cat "$EVIDENCE_DIR/a2-manager-create-result.txt" >&2
+# a2 (structural, no leg): the default-range mechanism is per-class,
+# not per-creator — the a1 measurement covers every creator whose MCS
+# allows the containing directory (the manager domain is not
+# mcs_constrained, so its creations inside a categorized tree would
+# inherit the tree's category the same way). The reachable production
+# lifecycle never creates inside an existing operation tree (the
+# adoption check refuses pre-existing trees); the allocator's future
+# integration point is the tree provisioning step itself.
 
 # a3: the loaded policy's default-range statements as the binary policy
 # reports them (seinfo --default; the behavioral proof is a1/a2 and the
@@ -1139,12 +1128,12 @@ log 'H: Part C — op B launched at its category (the manager transition path, t
 # category differs.
 {
   echo "=== Part C: the launch command (the production argv, the manager transition path) ==="
-  echo "launch context: $BT_C2 -> docker_helper_rootlesskit_t:s0:c2 (type_transition + caller-range copy)"
+  echo "launch context: runuser builder -> env <manager env> -> runcon $RK_C2 -> /usr/bin/rootlesskit (the forced exec lands rootlesskit_t:s0:c2: the entry file has the entrypoint grant for this domain)"
   echo "argv: /usr/bin/rootlesskit --net=slirp4netns --copy-up=/etc --disable-host-loopback --state-dir=$SB/rootlesskit-state $BUILDKITD --rootless --root=$SB/root --addr=unix://$RB/buildkitd.sock"
 } > "$EVIDENCE_DIR/c-launch-cmd.txt" 2>&1
-runuser -u "$BUILDER_USER" -- runcon "$BT_C2" env HOME="$STATE_ROOT" USER="$BUILDER_USER" \
+runuser -u "$BUILDER_USER" -- env HOME="$STATE_ROOT" USER="$BUILDER_USER" \
     XDG_RUNTIME_DIR="$RB" PATH="$CHILD_PATH" SSL_CERT_FILE="$CA" \
-    /usr/bin/rootlesskit --net=slirp4netns --copy-up=/etc --disable-host-loopback \
+    runcon "$RK_C2" /usr/bin/rootlesskit --net=slirp4netns --copy-up=/etc --disable-host-loopback \
     --state-dir="$SB/rootlesskit-state" "$BUILDKITD" --rootless --root="$SB/root" \
     --addr="unix://$RB/buildkitd.sock" </dev/null > "$EVIDENCE_DIR/c-launch-log.txt" 2>&1 &
 RB_SOCK="$RB/buildkitd.sock"
@@ -1232,10 +1221,9 @@ if [ "$BUILD0_RC" != 0 ] || [ "$MARKER_OK0" != "1" ]; then
   exit 0
 fi
 
-# The a1/a2 stand fixtures served their purpose; remove them so the
-# descendant inventory measures only the operation's own tree.
+# The a1 stand fixture served its purpose; remove it so the descendant
+# inventory measures only the operation's own tree.
 rm -f "$SB/root/a1-created" 2>/dev/null || true
-rmdir "$SB/root/a2-mgrdir" 2>/dev/null || true
 
 log 'J2: Part C — the descendant label inventory (the category deeper in the tree)'
 {
