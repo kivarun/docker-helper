@@ -1,20 +1,32 @@
 #!/usr/bin/env bash
 #
 # Guest-side P5-S2g28 BuildKit payload MAC closure for openSUSE
-# Tumbleweed. INVESTIGATION ONLY — run 1: the Part A enforcing baseline
-# (the exact current stop of the production flow) + the Part B
-# permissive-harvest round 1 (the full production composition
+# Tumbleweed. INVESTIGATION ONLY — run 2 (the enforcing candidate
+# iteration): the candidate payload module (the run-1/2 harvest's
+# grant-ledger rules) is loaded, every flow/payload domain stays
+# ENFORCING (no permissive), and the full production composition
 # manager -> rootlesskit -> buildkitd -> readiness -> minimal buildctl
-# build under permissive payload domains, recording every AVC of the
-# path as the grant-ledger source).
+# build -> STOP runs. Every residual AVC denial is harvested as the next
+# iteration's ledger delta.
 #
-# Starting point (G26/G27): the MCS process boundary is proven; the
-# complete operation boundary stays INCONCLUSIVE on exactly one item —
-# buildkitd's --root consumption — because the production flow stops at
-# its enforced child-process boundary before buildkitd ever runs. G28
-# asks: can a MINIMAL guest-only candidate payload module bring the
-# production flow to a working buildkitd under SELinux Enforcing?
-# Cache poisoning is NOT measured in G28.
+# Starting point (runs 1/2 = CI 36420911926/36423428498):
+#  - Part A baseline recorded: the production flow's exact enforcing
+#    stop at the gid-map capability boundary (newgidmap_t cap_userns
+#    sys_admin + capability setgid), plus the auxiliary boundaries the
+#    flow passes in permissive but needs under enforcing (the getsubids
+#    bin_t exec, the helper passwd_file getattr reads, the manager's
+#    process-control signals for its own flow group).
+#  - The permissive harvest recorded the full production path's AVC
+#    surface (195 unique (s,t,class,perm) tuples: the slirp4netns net
+#    driver, the copy-up mounts, buildkitd boot, content store, runc
+#    workers, HTTPS pulls, export tar) as the grant-ledger source.
+#  - A real FROM alpine:3.20 HTTPS build COMPLETED under permissive
+#    (buildctl exit 0, a 3.6MB export tar), proving the composition and
+#    the harvest method.
+#
+# This run: the candidate module carries ONLY per-AVC-evidenced grants
+# (71 allow rules covering the 195 harvest tuples, each attributed in
+# the ledger); the run harvests the RESIDUAL denials under enforcing.
 #
 # The stand is the G27 stand maximally unchanged: REAL manager under the
 # REAL systemd unit (SELinuxContext binding, P4 unit-cgroup boundary,
@@ -25,19 +37,7 @@
 # compiled from the UNCHANGED repo sources; the candidate payload
 # module is guest-only and removed at cleanup; NO manager/BuildKit/
 # docker-helper source changes; NO production policy commit; NO state
-# relabels.
-#
-# Method (the G-series permissive-harvest precedent, P5-S1 item 2):
-#   baseline (enforcing, no candidate grants): the manager's START with
-#   the production argv; the flow's exact enforced stop is recorded
-#   (the last successful transition = the UID-map step, the first
-#   blocking AVC = the gid-map capability boundary, no readiness).
-#   harvest (permissive rootlesskit_t/newuidmap_t/newgidmap_t/
-#   slirp4netns_t ONLY): the SAME production composition runs to
-#   buildkitd readiness and a real minimal HTTPS build; every AVC of
-#   the whole path is recorded (deduplicated tuples) as the grant
-#   ledger's evidence source. audit2allow is never used for policy
-#   design; the analysis is per-AVC in the report.
+# relabels; NO cache poisoning.
 #
 set -Eeuo pipefail
 
@@ -97,8 +97,6 @@ harvest_avcs_since() {
 }
 
 dedup_avcs() {
-  # Deduplicate raw AVC lines to (scontext, tcontext, tclass, perms)
-  # tuples with per-tuple counts and one representative raw record.
   local in="$1" out="$2"
   python3 - "$in" "$out" <<'PYEOF' 2>/dev/null || true
 import re, sys, collections
@@ -131,8 +129,7 @@ gen_op_id() {
   printf 'op_%s' "$(head -c16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 }
 
-log 'A: toolchain + candidate module (labels) + REAL composition install'
-STAND_EPOCH_ALL="$(date +%s)"
+log 'A: toolchain + modules (production + candidate + G26 delta) + composition install'
 {
   echo "=== distro ==="
   grep PRETTY_NAME /etc/os-release 2>/dev/null || true
@@ -174,7 +171,7 @@ semodule -i /tmp/docker_helper.pp 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
 restorecon /usr/bin/rootlesskit /usr/bin/slirp4netns /usr/bin/newuidmap /usr/bin/newgidmap 2>>"$EVIDENCE_DIR/a-toolchain.txt" || true
 {
   echo "=== binary labels ==="
-  for p in /usr/bin/rootlesskit /usr/bin/newuidmap /usr/bin/newgidmap /usr/libexec/docker-helper/buildkit/buildkitd; do
+  for p in /usr/bin/rootlesskit /usr/bin/newuidmap /usr/bin/newgidmap; do
     echo "$p -> $(stat -c '%C' "$p" 2>&1)"
   done
   echo "=== rootlesskit version ==="
@@ -191,8 +188,6 @@ restorecon /usr/bin/docker-helper 2>>"$EVIDENCE_DIR/a-toolchain.txt" || true
 install -m 0644 "$TRANSFERRED/docker-helper-builder.service" /etc/systemd/system/"$UNIT".service
 systemctl daemon-reload
 
-# The pinned BuildKit payload (the P4A1 pattern: the same digest pins and
-# the verify-before-stage order, downloaded INSIDE the guest).
 BUILDKIT_VERSION=v0.33.0
 BUILDKIT_TARBALL="buildkit-${BUILDKIT_VERSION}.linux-amd64.tar.gz"
 BUILDKIT_SHA256=b6242896d343100808dcbe37565caf381e0a444a6a83d7255926bb1519248ead
@@ -215,7 +210,6 @@ install -m 0755 /tmp/p5s2-g28-payload-extract/bin/buildkitd "$BUILDKITD"
 install -m 0755 /tmp/p5s2-g28-payload-extract/bin/buildctl "$BUILDCTL"
 install -m 0755 /tmp/p5s2-g28-payload-extract/bin/buildkit-runc \
   /usr/libexec/docker-helper/buildkit/buildkit-runc
-# Each payload binary's SHA-256 re-verified against the pinned digests.
 {
   echo "=== pinned payload verification (in-guest, the P4A1 pattern) ==="
   for f in buildkitd buildctl buildkit-runc; do
@@ -226,36 +220,200 @@ install -m 0755 /tmp/p5s2-g28-payload-extract/bin/buildkit-runc \
   echo "expected b-runc:     $BUILDKIT_RUNC_SHA256"
   "$BUILDKITD" --version 2>&1 || true
   "$BUILDCTL" --version 2>&1 || true
-  echo "=== payload labels (default, before the candidate labels) ==="
-  stat -c '%C %U:%G %a' "$BUILDKITD" "$BUILDCTL" /usr/libexec/docker-helper/buildkit/buildkit-runc 2>&1
-  echo "=== /usr/libexec/docker-helper dir label ==="
-  stat -c '%C %U:%G' /usr/libexec/docker-helper /usr/libexec/docker-helper/buildkit 2>&1
 } > "$EVIDENCE_DIR/a2-payload.txt" 2>&1
-cat "$EVIDENCE_DIR/a2-payload.txt" >&2
 
-# The candidate payload module (run 1 = the dedicated payload exec type
-# + its file-context labels ONLY; no allow rules yet — the permissive
-# harvest records the enforcing surface without any candidate grants).
+log 'A3: the candidate payload module (v2: the run-1/2 harvest ledger, enforcing)'
 cat > /tmp/payload_mac_diag.te <<'MODEOF'
-module payload_mac_diag 1.0;
+module payload_mac_diag 2.0;
 
-# P5-S2g28 guest-only candidate payload module (run 1): the dedicated
-# exec type for the pinned BuildKit payload binaries + their file-context
-# labels, applied by restorecon after the install. NO allow rules: the
-# run-1 harvest is permissive and records the production flow's full
-# enforcing surface; the candidate grants are added per-AVC in later
-# runs and must stay minimal (never macro/bulk).
+# P5-S2g28 guest-only candidate payload module. RUN 2: the enforcing
+# iteration carrying the per-AVC-evidenced grants from the run-1/2
+# permissive harvest (the run-1 ledger: 195 unique (s,t,class,perm)
+# denial tuples over the full production path). Every rule below is
+# attributable to harvested AVC records of the REAL production flow
+# (manager -> rootlesskit -> slirp4netns/net driver -> copy-up ->
+# buildkitd boot -> readiness -> buildctl build -> export) or the
+# manager's own-flow control surface; no rule was designed ahead of
+# evidence, audit2allow was not used, no macro/bulk sets were added.
+# This module is guest-only, removed at cleanup, and NEVER committed to
+# the production policy.
 require {
+	class capability { setgid };
+	class cap_userns { chown dac_override dac_read_search fsetid net_admin setgid setpcap setuid sys_admin sys_chroot sys_ptrace };
+	class chr_file { ioctl open read unlink write };
+	class dir { add_name create getattr mounton open read remove_name rmdir search setattr write };
+	class fifo_file { create ioctl open read setattr unlink write };
+	class filesystem { getattr mount remount unmount };
+	class file { append create execute execute_no_trans getattr ioctl mounton open read relabelfrom relabelto rename setattr unlink write };
+	class key { setattr view };
+	class lnk_file { create getattr read setattr unlink };
+	class netlink_route_socket { bind create getattr getopt setopt read write nlmsg_read nlmsg_write };
+	class process { setcap setpgid setsched signal sigkill signull };
+	class sock_file { create getattr setattr };
+	class tcp_socket { connect create getattr getopt name_connect setopt };
+	class tun_socket { create relabelfrom relabelto };
+	class udp_socket { connect create getattr setopt };
 	attribute file_type;
+	type bin_t;
+	type cert_t;
+	type cgroup_t;
+	type device_t;
+	type devpts_t;
+	type docker_helper_builder_runtime_t;
+	type docker_helper_builder_state_t;
+	type docker_helper_builder_t;
+	type docker_helper_newgidmap_t;
+	type docker_helper_newuidmap_t;
+	type docker_helper_rootlesskit_t;
+	type docker_helper_slirp4netns_t;
+	type etc_t;
+	type fs_t;
+	type http_port_t;
+	type ifconfig_exec_t;
+	type kernel_t;
+	type net_conf_t;
+	type nsfs_t;
+	type passwd_file_t;
+	type proc_kcore_t;
+	type proc_psi_t;
+	type proc_t;
+	type root_t;
+	type sysctl_fs_t;
+	type sysctl_irq_t;
+	type sysctl_t;
+	type sysfs_t;
+	type tmp_t;
+	type tmpfs_t;
+	type tun_tap_device_t;
+	type user_tmp_t;
 }
 type payload_buildkit_exec_t;
 typeattribute payload_buildkit_exec_t file_type;
+
+# ---- the flow's own namespace/identity steps (harvest: the flow reaches
+# ---- buildkitd only after these) ----
+# getsubids probe + nsenter/ip for the netns tap (rootlesskit v3
+# PrepareTap execs `nsenter ... ip tuntap add`; bin_t/ifconfig_exec_t on
+# Tumbleweed).
+allow docker_helper_rootlesskit_t bin_t:file { execute execute_no_trans };
+allow docker_helper_rootlesskit_t ifconfig_exec_t:file { execute execute_no_trans getattr open read };
+# in-namespace capability checks the flow's children make inside their own
+# userns (the kernel reports these via cap_userns for non-initial userns)
+allow docker_helper_rootlesskit_t self:cap_userns { chown dac_override dac_read_search fsetid net_admin setgid setpcap setuid sys_chroot sys_ptrace };
+# the runc container children's cap transitions inside the userns
+allow docker_helper_rootlesskit_t self:process { setcap setpgid setsched };
+allow docker_helper_rootlesskit_t self:key { setattr view };
+# route/netns setup (netlink socket ops during the slirp4netns flow)
+allow docker_helper_rootlesskit_t self:netlink_route_socket { bind create getattr getopt setopt read write nlmsg_read nlmsg_write };
+# tap device access (the `ip tuntap` step opens /dev/net/tun)
+allow docker_helper_rootlesskit_t tun_tap_device_t:chr_file { ioctl open read write };
+allow docker_helper_rootlesskit_t self:tun_socket { create };
+allow docker_helper_rootlesskit_t docker_helper_slirp4netns_t:tun_socket { relabelfrom };
+allow docker_helper_slirp4netns_t self:tun_socket { relabelto };
+# the copy-up and container mount steps
+allow docker_helper_rootlesskit_t root_t:dir { mounton };
+allow docker_helper_rootlesskit_t etc_t:dir { mounton };
+allow docker_helper_rootlesskit_t tmp_t:dir { mounton };
+allow docker_helper_rootlesskit_t tmpfs_t:dir { mounton };
+allow docker_helper_rootlesskit_t sysfs_t:dir { mounton };
+allow docker_helper_rootlesskit_t proc_t:dir { mounton };
+allow docker_helper_rootlesskit_t sysctl_t:dir { mounton };
+allow docker_helper_rootlesskit_t sysctl_irq_t:dir { mounton };
+allow docker_helper_rootlesskit_t docker_helper_builder_state_t:dir { mounton };
+allow docker_helper_rootlesskit_t docker_helper_builder_runtime_t:dir { mounton };
+allow docker_helper_rootlesskit_t tmpfs_t:file { mounton };
+allow docker_helper_rootlesskit_t docker_helper_builder_state_t:file { mounton };
+allow docker_helper_rootlesskit_t sysctl_t:file { mounton };
+allow docker_helper_rootlesskit_t proc_t:file { mounton };
+allow docker_helper_rootlesskit_t proc_kcore_t:file { mounton };
+allow docker_helper_rootlesskit_t tmpfs_t:filesystem { mount remount getattr };
+allow docker_helper_rootlesskit_t sysfs_t:filesystem { mount };
+allow docker_helper_rootlesskit_t proc_t:filesystem { mount remount };
+allow docker_helper_rootlesskit_t devpts_t:filesystem { mount };
+allow docker_helper_rootlesskit_t fs_t:filesystem { getattr mount remount unmount };
+allow docker_helper_rootlesskit_t device_t:filesystem { getattr };
+allow docker_helper_rootlesskit_t cgroup_t:filesystem { getattr };
+# sysfs/procfs reads the flow and children make (mountSysfs, resolv.conf,
+# pressure stats, kcore masking)
+allow docker_helper_rootlesskit_t sysctl_fs_t:dir { search };
+allow docker_helper_rootlesskit_t sysctl_fs_t:file { getattr open read };
+allow docker_helper_rootlesskit_t proc_psi_t:dir { getattr search };
+allow docker_helper_rootlesskit_t proc_psi_t:file { getattr open read };
+allow docker_helper_rootlesskit_t proc_t:file { getattr open read };
+allow docker_helper_rootlesskit_t nsfs_t:file { getattr open read };
+allow docker_helper_rootlesskit_t net_conf_t:file { getattr open read };
+allow docker_helper_rootlesskit_t cert_t:dir { search };
+allow docker_helper_rootlesskit_t cert_t:file { getattr open read };
+allow docker_helper_rootlesskit_t cert_t:lnk_file { read };
+# /tmp staging for the flow's temp dirs and the container execs
+allow docker_helper_rootlesskit_t tmp_t:dir { add_name create mounton read remove_name rmdir write };
+allow docker_helper_rootlesskit_t tmp_t:file { create execute execute_no_trans open unlink write };
+allow docker_helper_rootlesskit_t tmpfs_t:dir { create mounton };
+allow docker_helper_rootlesskit_t tmpfs_t:file { create mounton open read write };
+allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create read unlink };
+# the diag pipe's inherited fd (fd-use ioctl only; write grant is production)
+allow docker_helper_rootlesskit_t docker_helper_builder_t:fifo_file { ioctl };
+
+# ---- the pinned BuildKit payload's exec (the payload's OWN binaries) ----
+allow docker_helper_rootlesskit_t payload_buildkit_exec_t:file { execute execute_no_trans getattr open read };
+
+# ---- buildkitd's own boot/runtime under --root in the state tree ----
+# content store, snapshotter metadata, runc state inside the state tree
+allow docker_helper_rootlesskit_t docker_helper_builder_state_t:dir { create getattr reparent rename rmdir setattr };
+allow docker_helper_rootlesskit_t docker_helper_builder_state_t:file { append execute execute_no_trans getattr ioctl relabelfrom rename setattr unlink mounton open read write };
+allow docker_helper_rootlesskit_t docker_helper_builder_state_t:lnk_file { create getattr read setattr };
+allow docker_helper_rootlesskit_t docker_helper_builder_state_t:chr_file { unlink };
+# per-op runtime tree: the buildkitd socket, the otel socket, runc state,
+# exec.fifo (all created under the manager-owned per-op runtime dir)
+allow docker_helper_rootlesskit_t docker_helper_builder_runtime_t:dir { add_name create getattr open read remove_name rmdir search setattr write };
+allow docker_helper_rootlesskit_t docker_helper_builder_runtime_t:file { create getattr open read rename setattr unlink write };
+allow docker_helper_rootlesskit_t docker_helper_builder_runtime_t:sock_file { create getattr setattr };
+allow docker_helper_rootlesskit_t docker_helper_builder_runtime_t:fifo_file { create open read setattr unlink write };
+# HTTPS pulls and DNS (the resolver inside the userns)
+allow docker_helper_rootlesskit_t self:tcp_socket { connect create getattr getopt setopt };
+allow docker_helper_rootlesskit_t self:udp_socket { connect create getattr setopt };
+allow docker_helper_rootlesskit_t http_port_t:tcp_socket { name_connect };
+# kernel module autoload probe (denied silently; no grant — dontaudit only)
+dontaudit docker_helper_rootlesskit_t kernel_t:system module_request;
+# the export tar's destination file (the harness's user_tmp_t file)
+allow docker_helper_rootlesskit_t user_tmp_t:file { open write setattr relabelto };
+
+# ---- the slirp4netns helper's own runtime (the net driver) ----
+allow docker_helper_slirp4netns_t self:cap_userns { sys_admin sys_ptrace };
+allow docker_helper_slirp4netns_t self:tcp_socket { connect create setopt };
+allow docker_helper_slirp4netns_t self:udp_socket { create getattr setopt };
+allow docker_helper_slirp4netns_t http_port_t:tcp_socket { name_connect };
+allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file { ioctl open read write };
+allow docker_helper_slirp4netns_t net_conf_t:file { getattr open read };
+allow docker_helper_slirp4netns_t nsfs_t:file { open read };
+allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:dir { search };
+allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:file { read };
+allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:lnk_file { read };
+
+# ---- the uid/gid map helpers: the gid step needs the SAME privilege
+# ---- shape the uid step already holds (the production .te grants
+# ---- newuidmap_t self:cap_userns sys_admin + self:capability setuid;
+# ---- the flow's gid step needs the exact mirrors). With the G26 delta
+# ---- loaded, the cross-operation gid_map write stays MCS-blocked.
+allow docker_helper_newgidmap_t self:cap_userns { sys_admin };
+allow docker_helper_newgidmap_t self:capability { setgid };
+allow docker_helper_newuidmap_t passwd_file_t:file { getattr };
+allow docker_helper_newgidmap_t passwd_file_t:file { getattr };
+
+# ---- the manager's own-flow process control (the live STOP path) ----
+# terminateGroupBounded sends SIGTERM/SIGKILL to the flow's process group
+# and probes liveness with signull; without these the live group cannot
+# be stopped and STOP never converges. The manager is the trusted control
+# plane that owns every operation (the G26 boundary analysis excludes it
+# from the constrained set).
+allow docker_helper_builder_t docker_helper_rootlesskit_t:process { sigkill signal signull };
+allow docker_helper_builder_t docker_helper_slirp4netns_t:process { sigkill signal signull };
 MODEOF
 cat > /tmp/payload_mac_diag.fc <<'FCOF'
 /usr/libexec/docker-helper/buildkit(/.*)?    --    system_u:object_r:payload_buildkit_exec_t:s0
 FCOF
 {
-  echo "=== the candidate payload module (source, run 1: labels only) ==="
+  echo "=== the candidate payload module (source, run 2: the harvest-ledger grants) ==="
   cat /tmp/payload_mac_diag.te
   echo "=== its file contexts ==="
   cat /tmp/payload_mac_diag.fc
@@ -329,8 +487,6 @@ MG_PID="$(systemctl show -p MainPID --value "$UNIT")"
   echo "state root: $(stat -c '%C %U:%G %a' "$STATE_ROOT" 2>&1)"
   echo "runtime root: $(stat -c '%C %U:%G %a' "$RUNTIME_ROOT" 2>&1)"
   echo "manager.sock: $(stat -c '%C %U:%G %a' "$MANAGER_SOCK" 2>&1)"
-  echo "=== the manager's startup journal (the purge behavior) ==="
-  journalctl -u "$UNIT" --no-pager 2>/dev/null | grep -a 'purge\|serve\|refus' | tail -10 || true
 } > "$EVIDENCE_DIR/d-manager-up.txt" 2>&1
 cat "$EVIDENCE_DIR/d-manager-up.txt" >&2
 if ! stat -c '%C' "$STATE_ROOT" 2>/dev/null | grep -q 'docker_helper_builder_state_t'; then
@@ -339,157 +495,93 @@ if ! stat -c '%C' "$STATE_ROOT" 2>/dev/null | grep -q 'docker_helper_builder_sta
   exit 0
 fi
 
-log 'E: Part A baseline — the enforcing stop of the production flow (NO candidate grants)'
-OPB="$(gen_op_id)"
-BL_EPOCH="$(date +%s)"
-{
-  echo "=== P5-S2g28 Part A baseline: the enforcing stop of the production flow ==="
-  echo "op id: $OPB"
-  echo "the EXACT production argv (builder_manager.go builderNewRootlessKitCommand):"
-  echo "  /usr/bin/rootlesskit --net=slirp4netns --copy-up=/etc --disable-host-loopback \\"
-  echo "    --state-dir=$STATE_ROOT/ops/<opID>/rootlesskit-state \\"
-  echo "    $BUILDKITD --rootless --root=$STATE_ROOT/ops/<opID>/root \\"
-  echo "    --addr=unix://$RUNTIME_ROOT/ops/<opID>/buildkitd.sock"
-  echo "  child env: HOME=$STATE_ROOT USER=$BUILDER_USER XDG_RUNTIME_DIR=<rtDir> PATH=<manager-fixed> SSL_CERT_FILE=<resolved>"
-  echo "=== manager RPC: START $OPB ==="
-} > "$EVIDENCE_DIR/a-baseline.txt"
-set +e
-printf 'START %s\n' "$OPB" | timeout 120 socat - UNIX-CONNECT:"$MANAGER_SOCK" >> "$EVIDENCE_DIR/a-baseline.txt" 2>&1
-echo "socat rc: $?" >> "$EVIDENCE_DIR/a-baseline.txt"
-set -e
-sleep 2
-manager_journal_since "$BL_EPOCH" "$EVIDENCE_DIR/a-baseline-journal.txt"
-harvest_avcs_since "$BL_EPOCH" "$EVIDENCE_DIR/a-baseline-avcs.txt"
-{
-  cat "$EVIDENCE_DIR/a-baseline-journal.txt"
-  echo "=== the AVC window (the enforcing stop's records) ==="
-  cat "$EVIDENCE_DIR/a-baseline-avcs.txt"
-  echo "=== buildkitd readiness: ABSENT (the flow never reached the payload) ==="
-  echo "ops tree after the converged failed start:"
-  ls -la "$STATE_ROOT/ops" 2>&1 || true
-  ls -la "$RUNTIME_ROOT/ops" 2>&1 || true
-} >> "$EVIDENCE_DIR/a-baseline.txt"
-cat "$EVIDENCE_DIR/a-baseline.txt" >&2
-
-log 'F: Part B harvest round 1 — permissive payload domains, full production path'
-# Permissive: ONLY the flow/payload domains (the manager stays enforcing:
-# its own surface is production-granted and P5-S1-proven).
-for d in docker_helper_rootlesskit_t docker_helper_newuidmap_t docker_helper_newgidmap_t docker_helper_slirp4netns_t; do
-  semanage permissive -a "$d" 2>>"$EVIDENCE_DIR/f-harvest-meta.txt" || true
-done
-{
-  echo "=== permissive harvest domains ==="
-  semanage permissive -l 2>/dev/null | grep -a docker_helper || true
-} > "$EVIDENCE_DIR/f-harvest-meta.txt"
-HV_EPOCH="$(date +%s)"
+log 'E: the enforcing candidate attempt — START + readiness + minimal build + STOP'
 OPH="$(gen_op_id)"
+HV_EPOCH="$(date +%s)"
 {
-  echo "=== P5-S2g28 Part B harvest round 1 ==="
+  echo "=== P5-S2g28 run 2: the enforcing candidate attempt ==="
   echo "op id: $OPH; epoch: $HV_EPOCH"
   echo "=== manager RPC: START $OPH ==="
-} > "$EVIDENCE_DIR/f-harvest-start.txt"
+} > "$EVIDENCE_DIR/e-attempt.txt"
 set +e
-printf 'START %s\n' "$OPH" | timeout 120 socat - UNIX-CONNECT:"$MANAGER_SOCK" >> "$EVIDENCE_DIR/f-harvest-start.txt" 2>&1
-echo "socat rc: $?" >> "$EVIDENCE_DIR/f-harvest-start.txt"
+printf 'START %s\n' "$OPH" | timeout 120 socat - UNIX-CONNECT:"$MANAGER_SOCK" >> "$EVIDENCE_DIR/e-attempt.txt" 2>&1
+echo "socat rc: $?" >> "$EVIDENCE_DIR/e-attempt.txt"
 set -e
-sleep 3
+sleep 4
 {
-  echo "=== the process tree at readiness (domains + categories + uid_map) ==="
-  for pat in 'rootlesskit.*--net=slirp4netns' 'buildkitd --rootless' 'slirp4netns'; do
+  echo "=== the process tree at readiness ==="
+  for pat in 'rootlesskit.*--net=' 'buildkitd --rootless' 'slirp4netns'; do
     for p in $(pgrep -f "$pat" 2>/dev/null); do
       echo "pid $p ($(cat "/proc/$p/comm" 2>/dev/null)): $(tr -d '\0' < "/proc/$p/attr/current" 2>/dev/null || true)"
       echo "  uid_map: $(tr '\n' ';' < "/proc/$p/uid_map" 2>/dev/null || true)"
       echo "  cgroup: $(cat "/proc/$p/cgroup" 2>/dev/null | head -1 || true)"
     done
   done
-  echo "=== per-op tree labels (the REAL production tree) ==="
-  stat -c '%C %U:%G %a %n' "$STATE_ROOT/ops/$OPH" "$STATE_ROOT/ops/$OPH/rootlesskit-state" \
-    "$RUNTIME_ROOT/ops/$OPH" "$RUNTIME_ROOT/ops/$OPH/buildkitd.sock" 2>&1 || true
-  echo "=== state dir contents ==="
-  find "$STATE_ROOT/ops/$OPH" -maxdepth 2 -exec stat -c '%C %U:%G %a %n' {} \; 2>&1 | head -20 || true
-} > "$EVIDENCE_DIR/f-harvest-processes.txt" 2>&1
-cat "$EVIDENCE_DIR/f-harvest-processes.txt" >&2
+  echo "=== per-op tree labels ==="
+  stat -c '%C %U:%G %a %n' "$STATE_ROOT/ops/$OPH" "$RUNTIME_ROOT/ops/$OPH" \
+    "$RUNTIME_ROOT/ops/$OPH/buildkitd.sock" 2>&1 || true
+} > "$EVIDENCE_DIR/e-processes.txt" 2>&1
+cat "$EVIDENCE_DIR/e-processes.txt" >&2
 
-# The minimal real build (the P4A1 pattern: the root shell drives buildctl
-# exactly as the daemon's build-driver stage would; the export tar proves
-# the payload functional end to end; NO Docker Engine needed).
+# The minimal real build (the P4A1 pattern; NO Docker Engine needed).
 CTX="$WORK/ctx"
 mkdir -p "$CTX"
 cat > "$CTX/Dockerfile" <<'EOF'
 FROM alpine:3.20
-RUN mkdir -p /m1 && echo p5s2-g28 > /m1/marker.txt && cat /proc/self/uid_map > /m1/uid_map.txt && id > /m1/id.txt
+RUN mkdir -p /m1 && echo p5s2-g28-run2 > /m1/marker.txt && cat /proc/self/uid_map > /m1/uid_map.txt && id > /m1/id.txt
 EOF
-mkdir -p "$WORK/docker-config"
+mkdir -p "$WORK/docker-config" "$WORK/export"
 echo '{}' > "$WORK/docker-config/config.json"
-mkdir -p "$WORK/export"
-{
-  echo "=== the minimal buildctl invocation (the production buildctl argv shape) ==="
-} > "$EVIDENCE_DIR/f-harvest-build.txt"
 set +e
 DOCKER_CONFIG="$WORK/docker-config" timeout 300 "$BUILDCTL" \
   --addr "unix://$RUNTIME_ROOT/ops/$OPH/buildkitd.sock" build \
   --progress=plain --frontend=dockerfile.v0 \
   --local "context=$CTX" --local "dockerfile=$CTX" \
-  --output "type=docker,name=p5s2g28:harvest,dest=$WORK/export/out.tar" \
-  >> "$EVIDENCE_DIR/f-harvest-build.txt" 2>&1
+  --output "type=docker,name=p5s2g28:run2,dest=$WORK/export/out.tar" \
+  > "$EVIDENCE_DIR/e-build.txt" 2>&1
 BUILD_RC=$?
 set -e
-echo "buildctl exit: $BUILD_RC" >> "$EVIDENCE_DIR/f-harvest-build.txt"
-echo "export tar: $(stat -c '%C %U:%G %s' "$WORK/export/out.tar" 2>&1)" >> "$EVIDENCE_DIR/f-harvest-build.txt"
-sleep 3
-harvest_avcs_since "$HV_EPOCH" "$EVIDENCE_DIR/f-harvest-avcs.txt"
-dedup_avcs "$EVIDENCE_DIR/f-harvest-avcs.txt" "$EVIDENCE_DIR/f-harvest-avcs-dedup.txt"
 {
-  echo "=== the manager journal window ==="
-  journalctl -u "$UNIT" --since "@$HV_EPOCH" --no-pager 2>/dev/null | tail -40 || true
-} >> "$EVIDENCE_DIR/f-harvest-build.txt"
-cat "$EVIDENCE_DIR/f-harvest-build.txt" >&2
+  echo "buildctl exit: $BUILD_RC"
+  echo "export tar: $(stat -c '%C %U:%G %s' "$WORK/export/out.tar" 2>&1)"
+  echo "=== buildctl output tail ==="
+  tail -30 "$EVIDENCE_DIR/e-build.txt" 2>/dev/null || true
+} >> "$EVIDENCE_DIR/e-attempt.txt"
 
-log 'G: own-operation lifecycle stop (the manager STOP; the convergence)'
+log 'F: own-operation lifecycle stop (the manager STOP; the convergence)'
 STP_EPOCH="$(date +%s)"
 {
   echo "=== manager RPC: STOP $OPH ==="
-} > "$EVIDENCE_DIR/g-stop.txt"
+} > "$EVIDENCE_DIR/f-stop.txt"
 set +e
-printf 'STOP %s\n' "$OPH" | timeout 120 socat - UNIX-CONNECT:"$MANAGER_SOCK" >> "$EVIDENCE_DIR/g-stop.txt" 2>&1
-echo "socat rc: $?" >> "$EVIDENCE_DIR/g-stop.txt"
+printf 'STOP %s\n' "$OPH" | timeout 120 socat - UNIX-CONNECT:"$MANAGER_SOCK" >> "$EVIDENCE_DIR/f-stop.txt" 2>&1
+echo "socat rc: $?" >> "$EVIDENCE_DIR/f-stop.txt"
 set -e
-sleep 3
-manager_journal_since "$STP_EPOCH" "$EVIDENCE_DIR/g-stop-journal.txt"
-harvest_avcs_since "$STP_EPOCH" "$EVIDENCE_DIR/g-stop-avcs.txt"
+sleep 4
+manager_journal_since "$STP_EPOCH" "$EVIDENCE_DIR/f-stop-journal.txt"
 {
-  echo "=== the manager journal window ==="
-  cat "$EVIDENCE_DIR/g-stop-journal.txt"
+  echo "=== the manager journal window (the stop's behavior) ==="
+  cat "$EVIDENCE_DIR/f-stop-journal.txt"
   echo "=== trees after STOP (removed = the own-op convergence) ==="
   ls -la "$STATE_ROOT/ops" 2>&1 || true
   ls -la "$RUNTIME_ROOT/ops" 2>&1 || true
-} >> "$EVIDENCE_DIR/g-stop.txt"
-cat "$EVIDENCE_DIR/g-stop.txt" >&2
+} >> "$EVIDENCE_DIR/f-stop.txt"
 
-log 'H: the full-window harvest (the grant ledger source)'
+log 'G: the full-window harvest (the residual grant-ledger source)'
 sleep 2
+harvest_avcs_since "$HV_EPOCH" "$EVIDENCE_DIR/g-residual-avcs.txt"
+dedup_avcs "$EVIDENCE_DIR/g-residual-avcs.txt" "$EVIDENCE_DIR/g-residual-avcs-dedup.txt"
 {
-  echo "=== kernel AVC records of the whole experiment window (the flow + payload + build domains; unfiltered) ==="
-  grep -a 'type=AVC' /var/log/audit/audit.log 2>/dev/null \
-    | awk -v s="$BL_EPOCH" '{ for (i = 1; i <= NF; i++) if ($i ~ /^msg=audit\(/) { ts = substr($i, 11); split(ts, t, "."); if (t[1] + 0 >= s + 0) print; break } }' \
-    | grep -a 'docker_helper_' \
-    | tail -5000 || true
-} > "$EVIDENCE_DIR/f-all-avcs-full.txt" 2>&1
-dedup_avcs "$EVIDENCE_DIR/f-all-avcs-full.txt" "$EVIDENCE_DIR/f-all-avcs-dedup.txt"
-{
-  echo "=== the manager's unit journal of the whole experiment window ==="
-  journalctl -u "$UNIT" --since "@$BL_EPOCH" --no-pager 2>/dev/null | tail -300 || true
-} > "$EVIDENCE_DIR/f-manager-journal-all.txt" 2>&1
-wc -l "$EVIDENCE_DIR/f-all-avcs-full.txt" "$EVIDENCE_DIR/f-all-avcs-dedup.txt" >&2
+  echo "=== the manager journal of the whole attempt window ==="
+  journalctl -u "$UNIT" --since "@$HV_EPOCH" --no-pager 2>/dev/null | tail -300 || true
+} > "$EVIDENCE_DIR/g-manager-journal-all.txt" 2>&1
+wc -l "$EVIDENCE_DIR/g-residual-avcs.txt" "$EVIDENCE_DIR/g-residual-avcs-dedup.txt" >&2
 
-log 'teardown + cleanup (permissive flags removed; temporary modules removed)'
+log 'teardown + cleanup (enforcing everywhere; temporary modules removed)'
 pkill -KILL -f 'rootlesskit --net=' 2>/dev/null || true
 pkill -KILL -f 'buildkitd --rootless' 2>/dev/null || true
 pkill -KILL -f 'buildctl --addr' 2>/dev/null || true
 pkill -KILL -f 'slirp4netns' 2>/dev/null || true
-for d in docker_helper_rootlesskit_t docker_helper_newuidmap_t docker_helper_newgidmap_t docker_helper_slirp4netns_t; do
-  clear_permissive "$d"
-done
 systemctl stop "$UNIT" >/dev/null 2>&1 || true
 systemctl disable "$UNIT" >/dev/null 2>&1 || true
 rm -f /etc/systemd/system/"$UNIT".service
@@ -498,7 +590,7 @@ rm -f /usr/bin/docker-helper
 rm -rf /usr/libexec/docker-helper "$STATE_ROOT" "$RUNTIME_ROOT" "$WORK"
 semodule -r payload_mac_diag >/dev/null 2>&1 || true
 semodule -r gidmap_mcsboundary_diag >/dev/null 2>&1 || true
-semodule -l 2>/dev/null | grep -E 'docker_helper|gidmap|payload' > "$EVIDENCE_DIR/f-final-modules.txt" 2>&1 || true
+semodule -l 2>/dev/null | grep -E 'docker_helper|gidmap|payload' > "$EVIDENCE_DIR/g-final-modules.txt" 2>&1 || true
 
-printf '%s P5S2-PAYLOAD-MAC-RESULT=PASS (run 1 completed: baseline + harvest round 1)\n' "$PREFIX" >&2
+printf '%s P5S2-PAYLOAD-MAC-RESULT=PASS (run 2 completed: enforcing candidate iteration)\n' "$PREFIX" >&2
 exit 0
