@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 #
 # Guest-side P5-S2g28 BuildKit payload MAC closure for openSUSE
-# Tumbleweed. INVESTIGATION ONLY — run 3 (the enforcing candidate
-# iteration, ledger v3): the candidate payload module carries the
-# run-1/2 harvest-ledger grants PLUS the one grant the run-2 enforcing
-# attempt proved missing (kernel module autoload for the tun driver);
-# every flow/payload domain stays ENFORCING (no permissive), and the
-# full production composition manager -> rootlesskit -> buildkitd ->
-# readiness -> minimal buildctl build -> STOP runs. Every residual AVC
-# denial is harvested as the next iteration's ledger delta; base-policy
-# dontaudit rules are disabled for the attempt window so no hidden
-# denial can mask the ledger source (re-enabled at teardown).
+# Tumbleweed. INVESTIGATION ONLY — run 4 (the enforcing candidate
+# iteration, ledger v4): the candidate payload module carries the
+# run-1/2 harvest-ledger grants PLUS the two deltas the enforcing
+# attempts proved (run 2.5: kernel module autoload for the tun driver;
+# run 3: the tap-handoff relabel direction); every flow/payload domain
+# stays ENFORCING (no permissive), and the full production composition
+# manager -> rootlesskit -> buildkitd -> readiness -> minimal buildctl
+# build -> STOP runs. Every residual AVC denial is harvested as the next
+# iteration's ledger delta; base-policy dontaudit rules are disabled for
+# the attempt window so no hidden denial can mask the ledger source
+# (re-enabled at teardown).
 #
 # Starting point (runs 1/2 = CI 36420911926/36423428498, enforcing
 # attempt = run 2.5 = CI 36426082065):
@@ -37,13 +38,23 @@
 #    syscall window as the granted tun open/ioctl) but the candidate
 #    module carried only a dontaudit for it; under enforcing the driver
 #    never loads, so the open fails ENODEV ("open: No such device" in
-#    the manager's child-output tail) and the launch aborts. The ledger
-#    delta for run 3 is exactly that one allow.
+#    the manager's child-output tail) and the launch aborts.
+#  - Run 3 (CI 36434942701, enforcing, ledger v3 + dontaudit unmasking):
+#    the tap open worked (the module_request grant confirmed) and
+#    slirp4netns died at the tap handoff — the v2/v3 ledger had the
+#    relabel pair transposed; the run-2 harvest records 431/432-class
+#    tuples (1790599487.339:430/431) both carry scontext=slirp4netns_t
+#    (relabelfrom on the rootlesskit_t-labeled tap socket, relabelto on
+#    self), so the delta is one subject-corrected rule. The unmasking
+#    also surfaced the exec-transition hygiene trio
+#    (noatsecure/siginh/rlimitinh on all four transitions): non-blocking
+#    (the transitions complete), base-policy masked by design, NOT
+#    granted.
 #
-# This run: the candidate module (v3) carries ONLY per-AVC-evidenced
-# grants (72 allow rules; the module_request allow attributed to the
-# run-2 harvest record + the run-2.5 failure); the run harvests the
-# RESIDUAL denials under enforcing with dontaudits unmapped.
+# This run: the candidate module (v4) carries ONLY per-AVC-evidenced
+# grants (72 allow rules; the relabel fix attributed to the run-2
+# harvest records + the run-3 failure); the run harvests the RESIDUAL
+# denials under enforcing with dontaudits unmapped.
 #
 # The stand is the G27 stand maximally unchanged: REAL manager under the
 # REAL systemd unit (SELinuxContext binding, P4 unit-cgroup boundary,
@@ -240,15 +251,15 @@ install -m 0755 /tmp/p5s2-g28-payload-extract/bin/buildkit-runc \
   "$BUILDCTL" --version 2>&1 || true
 } > "$EVIDENCE_DIR/a2-payload.txt" 2>&1
 
-log 'A3: the candidate payload module (v3: the harvest ledger + the run-2.5 module_request delta, enforcing)'
+log 'A3: the candidate payload module (v4: the harvest ledger + the run-2.5/3 enforcing deltas, enforcing)'
 cat > /tmp/payload_mac_diag.te <<'MODEOF'
-module payload_mac_diag 3.0;
+module payload_mac_diag 4.0;
 
-# P5-S2g28 guest-only candidate payload module. RUN 3: the enforcing
+# P5-S2g28 guest-only candidate payload module. RUN 4: the enforcing
 # iteration carrying the per-AVC-evidenced grants from the run-1/2
 # permissive harvest (195 unique (s,t,class,perm) denial tuples over the
-# full production path) PLUS the single delta the run-2.5 enforcing
-# attempt proved missing (kernel module autoload). Every rule below is
+# full production path), the run-2.5-proven module_request delta, and the
+# run-3-proven relabel-direction fix. Every rule below is
 # attributable to harvested AVC records of the REAL production flow
 # (manager -> rootlesskit -> slirp4netns/net driver -> copy-up ->
 # buildkitd boot -> readiness -> buildctl build -> export) or the
@@ -328,7 +339,17 @@ allow docker_helper_rootlesskit_t self:netlink_route_socket { bind create getatt
 # tap device access (the `ip tuntap` step opens /dev/net/tun)
 allow docker_helper_rootlesskit_t tun_tap_device_t:chr_file { ioctl open read write };
 allow docker_helper_rootlesskit_t self:tun_socket { create };
-allow docker_helper_rootlesskit_t docker_helper_slirp4netns_t:tun_socket { relabelfrom };
+# the tap handoff (RUN-4 FIX): the run-2 harvest records
+# 1790599487.339:430/431 both carry scontext=slirp4netns_t (comm=slirp4netns
+# pid 2917) — relabelfrom on the tap socket labeled rootlesskit_t (created
+# by `ip` as rootlesskit_t), then relabelto onto self; the v2/v3 ledger had
+# the direction transposed and run 3 proved the missing rule blocking
+# (slirp4netns died before the ready fd: waiting for ready fd ... tap0:
+# slirp4netns failed). The exec-transition hygiene trio (noatsecure/siginh/
+# rlimitinh, surfaced by the dontaudit unmasking on all four transitions)
+# is NOT granted: non-blocking, secure-default-preserving, base-policy
+# masked by design.
+allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:tun_socket { relabelfrom };
 allow docker_helper_slirp4netns_t self:tun_socket { relabelto };
 # the copy-up and container mount steps
 allow docker_helper_rootlesskit_t root_t:dir { mounton };
@@ -443,7 +464,7 @@ cat > /tmp/payload_mac_diag.fc <<'FCOF'
 /usr/libexec/docker-helper/buildkit(/.*)?    --    system_u:object_r:payload_buildkit_exec_t:s0
 FCOF
 {
-  echo "=== the candidate payload module (source, run 3: harvest-ledger grants + the run-2.5 module_request delta) ==="
+  echo "=== the candidate payload module (source, run 4: harvest-ledger grants + the run-2.5/3 enforcing deltas) ==="
   cat /tmp/payload_mac_diag.te
   echo "=== its file contexts ==="
   cat /tmp/payload_mac_diag.fc
@@ -534,7 +555,7 @@ DOA=$(semanage dontaudit 2>&1 || true)
 OPH="$(gen_op_id)"
 HV_EPOCH="$(date +%s)"
 {
-  echo "=== P5-S2g28 run 3: the enforcing candidate attempt (ledger v3) ==="
+  echo "=== P5-S2g28 run 4: the enforcing candidate attempt (ledger v4) ==="
   echo "op id: $OPH; epoch: $HV_EPOCH"
   echo "dontaudit setting after 'semanage dontaudit off': ${DOA:-unknown}"
   echo "attribution: the run-2 permissive harvest record 1790599487.322:411"
@@ -568,7 +589,7 @@ CTX="$WORK/ctx"
 mkdir -p "$CTX"
 cat > "$CTX/Dockerfile" <<'EOF'
 FROM alpine:3.20
-RUN mkdir -p /m1 && echo p5s2-g28-run3 > /m1/marker.txt && cat /proc/self/uid_map > /m1/uid_map.txt && id > /m1/id.txt
+RUN mkdir -p /m1 && echo p5s2-g28-run4 > /m1/marker.txt && cat /proc/self/uid_map > /m1/uid_map.txt && id > /m1/id.txt
 EOF
 mkdir -p "$WORK/docker-config" "$WORK/export"
 echo '{}' > "$WORK/docker-config/config.json"
@@ -577,7 +598,7 @@ DOCKER_CONFIG="$WORK/docker-config" timeout 300 "$BUILDCTL" \
   --addr "unix://$RUNTIME_ROOT/ops/$OPH/buildkitd.sock" build \
   --progress=plain --frontend=dockerfile.v0 \
   --local "context=$CTX" --local "dockerfile=$CTX" \
-  --output "type=docker,name=p5s2g28:run3,dest=$WORK/export/out.tar" \
+  --output "type=docker,name=p5s2g28:run4,dest=$WORK/export/out.tar" \
   > "$EVIDENCE_DIR/e-build.txt" 2>&1
 BUILD_RC=$?
 set -e
@@ -633,5 +654,5 @@ semodule -r payload_mac_diag >/dev/null 2>&1 || true
 semodule -r gidmap_mcsboundary_diag >/dev/null 2>&1 || true
 semodule -l 2>/dev/null | grep -E 'docker_helper|gidmap|payload' > "$EVIDENCE_DIR/g-final-modules.txt" 2>&1 || true
 
-printf '%s P5S2-PAYLOAD-MAC-RESULT=PASS (run 3 completed: enforcing candidate iteration, ledger v3)\n' "$PREFIX" >&2
+printf '%s P5S2-PAYLOAD-MAC-RESULT=PASS (run 4 completed: enforcing candidate iteration, ledger v4)\n' "$PREFIX" >&2
 exit 0
