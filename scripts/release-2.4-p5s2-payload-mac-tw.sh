@@ -907,20 +907,21 @@ static int do_signal(int pid, int sig) {
 }
 
 static int spawn_signal(int sig) {
+  /* The G26 spawn shape: the measured kill, then the unconditional
+   * cleanup-kill and the plain reap. NO wait that can block on a denied
+   * stop — the SELinux verdict is the kill's rc/errno, never a wait. */
   pid_t c = fork();
   if (c == 0) { emit_facts("spawned-child"); for (;;) pause(); }
   emit_facts("spawner");
   printf("SPAWN child=%d\n", c);
   int rc = kill(c, sig);
   printf("SPAWN-SIGNAL child=%d sig=%d rc=%d errno=%d\n", c, sig, rc, errno);
-  if (sig == SIGSTOP) {
-    int st; waitpid(c, &st, WUNTRACED);
-    printf("SPAWN-WAIT child=%d stopped=%d\n", c, WIFSTOPPED(st));
-    kill(c, SIGKILL); waitpid(c, &st, 0);
-  } else {
-    int st; waitpid(c, &st, 0);
-    printf("SPAWN-WAIT child=%d exited=%d signaled=%d termsig=%d\n", c, WIFEXITED(st), WIFSIGNALED(st), WTERMSIG(st));
-  }
+  fflush(stdout);
+  int rc2 = kill(c, SIGKILL);
+  printf("SPAWN-CLEANUP child=%d rc=%d errno=%d\n", c, rc2, errno);
+  int st;
+  if (waitpid(c, &st, 0) < 0) printf("SPAWN-REAP failed errno=%d\n", errno);
+  else printf("SPAWN-REAP pid=%d st=0x%x\n", c, st);
   return rc == 0 ? 0 : 1;
 }
 
@@ -1013,14 +1014,16 @@ RK_C2='system_u:system_r:docker_helper_rootlesskit_t:s0:c2'
   echo "=== the builder's PAM context after runuser ==="
   echo "builder context: $(runuser -u "$BUILDER_USER" -- id -Z 2>/dev/null || echo UNAVAILABLE)"
   echo "=== assignment probe A: runuser+runcon to $RK_C1 ==="
-  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --facts 2>&1 || echo "assignment A rc=$?"
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --facts 2>&1 || echo "assignment A rc=$?"
   echo "=== assignment probe B: runuser+runcon to $RK_C2 ==="
-  runuser -u "$BUILDER_USER" -- runcon "$RK_C2" /usr/local/bin/map_probe --facts 2>&1 || echo "assignment B rc=$?"
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C2" /usr/local/bin/map_probe --facts 2>&1 || echo "assignment B rc=$?"
 } > "$EVIDENCE_DIR/h-assignment.txt" 2>&1
 cat "$EVIDENCE_DIR/h-assignment.txt" >&2
 ASSIGN_OK=0
-grep -aq 'PROBE vehicle selinux=system_u:system_r:docker_helper_rootlesskit_t:s0:c1' "$EVIDENCE_DIR/h-assignment.txt" && \
-grep -aq 'PROBE vehicle selinux=system_u:system_r:docker_helper_rootlesskit_t:s0:c2' "$EVIDENCE_DIR/h-assignment.txt" && ASSIGN_OK=1
+if grep -aq 'PROBE vehicle selinux=system_u:system_r:docker_helper_rootlesskit_t:s0:c1' "$EVIDENCE_DIR/h-assignment.txt" \
+   && grep -aq 'PROBE vehicle selinux=system_u:system_r:docker_helper_rootlesskit_t:s0:c2' "$EVIDENCE_DIR/h-assignment.txt"; then
+  ASSIGN_OK=1
+fi
 if [ "$ASSIGN_OK" = 0 ]; then
   note "Part E OBSTACLE: the required MCS categories are not assignable under the candidate module (see h-assignment.txt); the E-legs are recorded inconclusive"
   printf '%s P5S2-PAYLOAD-MAC-RESULT=PASS (run 13 completed: the final enforcing proof ran; Part E legs inconclusive on assignment)\n' "$PREFIX" >&2
@@ -1032,7 +1035,8 @@ log 'H-E1: cross-op newuidmap c1 -> c2 uid_map write (expect MCS-BLOCKED)'
 E1_EPOCH="$(date +%s)"
 FIFO_E1="$WORK/probe/fifo-e1"
 mkfifo "$FIFO_E1"
-runuser -u "$BUILDER_USER" -- runcon "$RK_C2" /usr/local/bin/map_probe --be-target "$FIFO_E1" \
+chmod 666 "$FIFO_E1"
+timeout 120 runuser -u "$BUILDER_USER" -- runcon "$RK_C2" /usr/local/bin/map_probe --be-target "$FIFO_E1" \
   >"$WORK/probe/b-e1.out" 2>&1 &
 exec 3<>"$FIFO_E1"
 BPID_E1=""
@@ -1046,9 +1050,8 @@ exec 3<&-
   echo "target pid: ${BPID_E1:-NONE}"
   echo "target uid_map before: [$(cat "/proc/$BPID_E1/uid_map" 2>/dev/null || true)]"
   echo "=== the c1 helper's cross-op uid_map write attempt ==="
-  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe \
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe \
     --invoke-helper /usr/bin/newuidmap "$BPID_E1" 0 475 1 1 165536 65536 2>&1 || echo "helper attempt rc=$?"
-  echo "helper exit code: ${PIPESTATUS[0]:-?}"
   echo "target uid_map after: [$(cat "/proc/$BPID_E1/uid_map" 2>/dev/null || true)]"
 } > "$EVIDENCE_DIR/h-e1-uidmap.txt" 2>&1
 cat "$EVIDENCE_DIR/h-e1-uidmap.txt" >&2
@@ -1059,7 +1062,8 @@ log 'H-E2: cross-op TERM/STOP/KILL c1 -> c2 (expect MCS-BLOCKED) + the own-op eq
 E2_EPOCH="$(date +%s)"
 FIFO_E2="$WORK/probe/fifo-e2"
 mkfifo "$FIFO_E2"
-runuser -u "$BUILDER_USER" -- runcon "$RK_C2" /usr/local/bin/map_probe --be-target "$FIFO_E2" \
+chmod 666 "$FIFO_E2"
+timeout 120 runuser -u "$BUILDER_USER" -- runcon "$RK_C2" /usr/local/bin/map_probe --be-target "$FIFO_E2" \
   >"$WORK/probe/b-e2.out" 2>&1 &
 exec 3<>"$FIFO_E2"
 BPID_E2=""
@@ -1073,12 +1077,12 @@ exec 3<&-
   echo "target pid: ${BPID_E2:-NONE}"
   echo "=== the c1 probe's cross-op signals ==="
   for sigspec in 15 19 9; do
-    runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --signal "$BPID_E2" "$sigspec" 2>&1 || true
+    timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --signal "$BPID_E2" "$sigspec" 2>&1 || true
   done
   echo "target alive after the cross-op signals: $(kill -0 "$BPID_E2" 2>/dev/null && echo YES || echo NO) (the runner's unconfined check)"
   echo "=== the own-op equivalents (the c1 probe's own spawned children) ==="
   for sigspec in 15 19 9; do
-    runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --spawn-signal "$sigspec" 2>&1 || true
+    timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --spawn-signal "$sigspec" 2>&1 || true
   done
 } > "$EVIDENCE_DIR/h-e2-signals.txt" 2>&1
 cat "$EVIDENCE_DIR/h-e2-signals.txt" >&2
@@ -1101,13 +1105,13 @@ done
   stat -c '%C %n' "$FB_C2" "$FB_C2/rootlesskit-state/lock" "$FB_C2/root/marker" \
     "$FB_C1" "$FB_C1/rootlesskit-state/lock" "$FB_C1/root/marker" 2>&1
   echo "=== the c1 probe's attempts on the c2-labeled trees (expect EACCES) ==="
-  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --write "$FB_C2/rootlesskit-state/planted" 2>&1 || true
-  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --read "$FB_C2/rootlesskit-state/lock" 2>&1 || true
-  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --unlink "$FB_C2/rootlesskit-state/lock" 2>&1 || true
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --write "$FB_C2/rootlesskit-state/planted" 2>&1 || true
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --read "$FB_C2/rootlesskit-state/lock" 2>&1 || true
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --unlink "$FB_C2/rootlesskit-state/lock" 2>&1 || true
   echo "=== the own-tree parity control (the c1 probe on the c1-labeled trees, expect rc=0) ==="
-  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --write "$FB_C1/rootlesskit-state/planted" 2>&1 || true
-  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --read "$FB_C1/rootlesskit-state/lock" 2>&1 || true
-  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --unlink "$FB_C1/rootlesskit-state/planted" 2>&1 || true
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --write "$FB_C1/rootlesskit-state/planted" 2>&1 || true
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --read "$FB_C1/rootlesskit-state/lock" 2>&1 || true
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --unlink "$FB_C1/rootlesskit-state/planted" 2>&1 || true
 } > "$EVIDENCE_DIR/h-e4-trees.txt" 2>&1
 cat "$EVIDENCE_DIR/h-e4-trees.txt" >&2
 
@@ -1130,17 +1134,17 @@ SB="$STATE_ROOT/ops/$OPB"
   stat -c '%C %U:%G %a %n' "$RB" "$RB/buildkitd.sock" "$SB" 2>&1 || true
   echo "=== the c1 probe's reach attempts on op B's LIVE runtime tree ==="
   echo "--- CONNECT to op B's buildkitd.sock (the runtime authority path; TE has no unix_stream_socket connectto grant) ---"
-  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --connect "$RB/buildkitd.sock" 2>&1 || true
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --connect "$RB/buildkitd.sock" 2>&1 || true
   echo "--- READ the socket file (TE: no sock_file read grant) ---"
-  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --read "$RB/buildkitd.sock" 2>&1 || true
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --read "$RB/buildkitd.sock" 2>&1 || true
   echo "--- WRITE-open the socket file (TE: no sock_file write grant) ---"
-  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --write "$RB/probe-planted" 2>&1 || true
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --write "$RB/probe-planted" 2>&1 || true
   echo "--- UNLINK op B's buildkitd.sock (TE: the candidate's own-flow cleanup grant + the uncategorized trees) ---"
-  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --unlink "$RB/buildkitd.sock" 2>&1 || true
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --unlink "$RB/buildkitd.sock" 2>&1 || true
   echo "=== the c1 probe's reach attempts on op B's LIVE state tree (the G27 write-link shape) ==="
-  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --write "$SB/root/probe-planted" 2>&1 || true
-  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --read "$SB/root/buildkitd.lock" 2>&1 || true
-  runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --unlink "$SB/root/probe-planted" 2>&1 || true
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --write "$SB/root/probe-planted" 2>&1 || true
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --read "$SB/root/buildkitd.lock" 2>&1 || true
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --unlink "$SB/root/probe-planted" 2>&1 || true
   echo "=== the candidate payload module's cross-op-relevant grants (the enumeration for the privilege review) ==="
   grep -E 'builder_state_t|builder_runtime_t|:process |unix_stream|sock_file' /tmp/payload_mac_diag.te || true
 } > "$EVIDENCE_DIR/h-e4b-real-op.txt" 2>&1
