@@ -899,7 +899,12 @@ checkmodule -M -m -o /tmp/gidmap_probe_diag.tmp /tmp/gidmap_probe_diag.te 2>>"$E
 semodule_package -o /tmp/gidmap_probe_diag.pp -m /tmp/gidmap_probe_diag.tmp 2>>"$EVIDENCE_DIR/i-probe-module.txt" \
   || { note "the probe module failed to package"; exit 1; }
 semodule -i /tmp/gidmap_probe_diag.pp 2>>"$EVIDENCE_DIR/i-probe-module.txt" \
-  || { note "the probe module failed to install"; exit 1; }
+  || { note "the probe module failed to load"; exit 1; }
+gcc -static -O2 -o /usr/local/bin/map_probe "$WORK/probe/map_probe.c" 2>>"$EVIDENCE_DIR/i-probe-module.txt" \
+  || { note "the probe vehicle failed to build"; exit 1; }
+PROBE_LABEL="$(stat -c '%C' /usr/local/bin/map_probe 2>&1)"
+echo "probe label (post-build, the creation type-transition): $PROBE_LABEL" >> "$EVIDENCE_DIR/i-probe-module.txt"
+cat "$EVIDENCE_DIR/i-probe-module.txt" >&2
 
 
 log 'I2: the assignment gate (the runcon chain, the c1/c2 vehicles)'
