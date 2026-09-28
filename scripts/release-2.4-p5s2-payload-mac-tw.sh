@@ -58,7 +58,7 @@
 #    granted.
 #
 # This run: the candidate module (v12, the FINAL set) carries ONLY
-# per-AVC-evidenced grants (85 allow rules; each delta attributed in
+# per-AVC-evidenced grants (82 allow rules; each delta attributed in
 # the ledger and the commits). The relabel puzzle is solved
 # from the loaded policy's constraint dump (the G26 seinfo --constrain
 # method): file/dir relabelto is constrained by
