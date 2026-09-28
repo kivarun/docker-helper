@@ -90,9 +90,9 @@ harvest_avcs_since() {
     echo "=== kernel AVC records since epoch $since ==="
     grep -a 'type=AVC' /var/log/audit/audit.log 2>/dev/null \
       | awk -v s="$since" '{ for (i = 1; i <= NF; i++) if ($i ~ /^msg=audit\(/) { ts = substr($i, 11); split(ts, t, "."); if (t[1] + 0 >= s + 0) print; break } }' \
-      | tail -100 || true
+      | tail -2000 || true
     echo "=== journalctl -k window ==="
-    journalctl -k --since "@$since" --no-pager 2>/dev/null | grep -a 'avc:' | tail -100 || true
+    journalctl -k --since "@$since" --no-pager 2>/dev/null | grep -a 'avc:' | tail -2000 || true
   } > "$out" 2>&1
 }
 
@@ -458,7 +458,6 @@ sleep 3
 manager_journal_since "$STP_EPOCH" "$EVIDENCE_DIR/g-stop-journal.txt"
 harvest_avcs_since "$STP_EPOCH" "$EVIDENCE_DIR/g-stop-avcs.txt"
 {
-  cat "$EVIDENCE_DIR/g-stop.txt"
   echo "=== the manager journal window ==="
   cat "$EVIDENCE_DIR/g-stop-journal.txt"
   echo "=== trees after STOP (removed = the own-op convergence) ==="
@@ -474,7 +473,7 @@ sleep 2
   grep -a 'type=AVC' /var/log/audit/audit.log 2>/dev/null \
     | awk -v s="$BL_EPOCH" '{ for (i = 1; i <= NF; i++) if ($i ~ /^msg=audit\(/) { ts = substr($i, 11); split(ts, t, "."); if (t[1] + 0 >= s + 0) print; break } }' \
     | grep -a 'docker_helper_' \
-    | tail -500 || true
+    | tail -5000 || true
 } > "$EVIDENCE_DIR/f-all-avcs-full.txt" 2>&1
 dedup_avcs "$EVIDENCE_DIR/f-all-avcs-full.txt" "$EVIDENCE_DIR/f-all-avcs-dedup.txt"
 {
