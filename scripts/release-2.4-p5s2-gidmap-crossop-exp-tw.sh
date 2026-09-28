@@ -122,7 +122,7 @@ cleanup() {
   # orchestrator's collection; the VM itself is disposable).
   rm -f /usr/local/bin/map_probe
   rm -rf "$DIAG_BASE"
-  rm -rf /var/lib/docker-helper-builder/g26-e2
+  rm -rf /var/tmp/p5s2-g26-e2
   for d in "${DOMAINS[@]}"; do
     clear_permissive "$d"
   done
@@ -313,6 +313,12 @@ chown "$BUILDER_USER:$BUILDER_USER" "$DIAG_BASE/s1/a1-state" "$DIAG_BASE/s2/a1-s
       "$DIAG_BASE/s3/a1-state" "$DIAG_BASE/s3/a2-state" "$DIAG_BASE/g23/a1-state" \
       "$DIAG_BASE/g24/a1-state" "$DIAG_BASE/g25/a1-state" \
       "$DIAG_BASE/g26/a1-state" "$DIAG_BASE/g26/e-shared"
+# The Part E prodtype dir lives on the DISK filesystem (a tmpfs relabel
+# to the production state type would also need a tmpfs associate rule);
+# /var and /var/tmp join the walk paths so the vehicles' path traversal
+# is grantable on their real types.
+mkdir -p /var/tmp/p5s2-g26-e2
+chown "$BUILDER_USER:$BUILDER_USER" /var/tmp/p5s2-g26-e2
 FIFO_LABEL="$(stat -c '%C' "$DIAG_BASE/fifos/bfifo-s1" 2>/dev/null || true)"
 FIFO_T="$(printf '%s' "$FIFO_LABEL" | cut -d: -f3)"
 RUNNER_CTX="$(tr -d '\0' < /proc/self/attr/current 2>/dev/null || true)"
@@ -329,7 +335,7 @@ case "${FIFO_T:-x}" in ''|*[!A-Za-z0-9_]*|x) note "the fifo type could not be ob
 # opens and rootlesskit's state-dir work each traverse these directories
 # (an ungranted dir search short-circuits the open with EACCES BEFORE any
 # fifo/file-class check — the stand failure observed in the previous run).
-WALK_DIRS=(/tmp "$DIAG_BASE" "$DIAG_BASE/fifos" \
+WALK_DIRS=(/tmp /var /var/tmp "$DIAG_BASE" "$DIAG_BASE/fifos" \
            "$DIAG_BASE/s1" "$DIAG_BASE/s1/a1-state" "$DIAG_BASE/s2" "$DIAG_BASE/s2/a1-state" \
            "$DIAG_BASE/s3" "$DIAG_BASE/s3/a1-state" "$DIAG_BASE/s3/a2-state" \
            "$DIAG_BASE/g23" "$DIAG_BASE/g23/a1-state" \
@@ -1702,7 +1708,7 @@ semodule -r gidmap_mcsconstrained_diag >/dev/null 2>&1 || true
 | docker_helper_newuidmap_t     | rootlesskit_t:dir {read open getattr search} (1016), :file {write open} (1040), :fifo {write} (1015); self:cap_userns sys_admin (1061), self:capability setuid (1088)                                                                                          | dir {ioctl lock read search} + file read/write — the type-pair grants ARE the g23/g24-demonstrated cross-operation path | INCLUDE |
 | docker_helper_newgidmap_t     | the same type-pair shape on the gid path: dir (1196), file {write open} (1229), fifo {write} (1156); NO self rules                                                                                                                                     | the same classes                                                                    | INCLUDE — the same demonstrated cross-operation write-open on the same subject type (the scope note 1180-1196) |
 | docker_helper_builder_t       | /proc enumeration: proc_t:dir read (768) + domain:dir/kernel_t:dir getattr (769-770) — the listing object is proc_t (an s0 type; dir getattr is NOT in the dir mlsconstrain set); NO rootlesskit_t:dir read/search — the /proc/<pid> traversal is TE-denied before any MCS check; the launch transition (826-827) | none applicable                                                                     | EXCLUDE — its only /proc surface is MCS-exempt or TE-blocked; no MCS-relevant cross-operation grant |
-| docker_helper_slirp4netns_t   | rootlesskit_t:fifo_file {write getattr} (941) — fifo_file has NO mlsconstrain; the domain is unreachable in the current enforcing policy (the cap boundary stops the helper exec; the netns fd is passed by fd, not a /proc path)                       | none applicable                                                                     | EXCLUDE — unreachable, and its only cross-operation grant is on an unconstrained class |
+| docker_helper_slirp4netns_t   | rootlesskit_t:fifo_file {write getattr} (941) — fifo_file's mlsconstrain covers OPEN only, and the helper's inherited-fd write never re-opens; the domain is unreachable in the current enforcing policy (the cap boundary stops the helper exec; the netns fd is passed by fd, not a /proc path)                        | none applicable                                                                     | EXCLUDE — unreachable, and its only cross-operation grant is fd-scoped on a class whose open is the only MLS-constrained perm |
 | docker_helper_t (the manager) | process control: semanage_t {transition siginh noatsecure rlimitinh} (434), sigkill (445), process2 nnp_transition (446); self:capability {dac_read_search dac_override sys_admin} (461), fowner (474); NO grants on any docker_helper_rootlesskit_t target (the 8 target-side type-pair lines belong to builder/slirp/newuidmap/newgidmap) | n/a                                                                                  | EXCLUDE — the trusted control plane that owns all operations; its only process-control grant targets semanage_t (the policy reload), not an operation domain |
 
 The minimal set: docker_helper_rootlesskit_t, docker_helper_newuidmap_t,
@@ -1741,6 +1747,8 @@ TABLEEOF
     echo "--- seinfo --constrain $c ---"
     seinfo --constrain "$c" 2>&1 || true
   done
+  echo "=== the loaded policy's default rules (the created-object labeling defaults) ==="
+  seinfo --default 2>&1 || true
   echo "=== the production .te's uid_map rules (the TE layer, unchanged) ==="
   grep -an 'uid_map' "$TRANSFERRED/docker-helper.te" || true
 } > "$EVIDENCE_DIR/g26-domain-surface.txt" 2>&1
@@ -2097,27 +2105,22 @@ if [ -z "$P5S2G26_RESULT" ]; then
   {
     echo "=== P5-S2g26 Part E: the shared-object surface ==="
     echo "the object-class constraint sets are in g26-domain-surface.txt (sock_file/fifo_file/lnk_file/unix_stream_socket included); the policy-level findings:"
-    echo "- the state tree (docker_helper_builder_state_t) is shared at s0 BY DESIGN: both operations' rootlesskit_t domains hold the dir/file/sock_file create+write grants (862-864), the type is NOT in mcs_constrained_type, so every file/dir/sock class check is EXEMPT from MCS for both categories"
-    echo "- the created object's label inherits the parent dir type and the creator's category (the non-MLS constrain: u1 == u2 via the creator's system_u)"
-    echo "- the diag fifos (docker_helper_builder_t) are fd-scoped: the helper's write grant (871/1015/1156) is reachable only through inherited fds, not across operations"
+    echo "- the state tree (docker_helper_builder_state_t) is shared at s0 BY DESIGN: both operations' rootlesskit_t domains hold the dir/file/sock_file create+write grants (862-864), the type is NOT in mcs_constrained_type, so the file/dir/sock class constraints (which exist: sock_file constrains getattr/ioctl/read and setattr/write) are EXEMPT for both categories on these types"
+    echo "- the created object's OBSERVED label: the parent dir's type and the level s0 WITHOUT the creator's category (the markers were created by s0:c1/s0:c2 processes and carry user_tmp_t:s0 — the class's default_range/range-transition behavior, not the creator's current level) — the shared tree is category-transparent at the type AND the level"
+    echo "- the diag fifos (docker_helper_builder_t) are fd-scoped: the helper's write grant (871/1015/1156) is reachable only through inherited fds, not across operations; fifo_file's mlsconstrain covers OPEN only (h1 dom h2 or t1 != mcs_constrained_type) — an inherited-fd write never re-opens, so the constraint never applies on that path"
     echo "- unix_stream_socket has NO mlsconstrain (policy-level gap): a cross-operation connectto would NOT be MCS-isolated — but the loaded TE has no rootlesskit_t→rootlesskit_t connectto allow (verified in g26-domain-surface.txt), so it is TE-denied, not MCS-reachable"
-    echo "=== the prodtype test dir provisioning (inside the REAL production state tree; the fc label makes every object created there docker_helper_builder_state_t) ==="
+    echo "=== the prodtype test dir provisioning (relabeled to docker_helper_builder_state_t, the production state type; the vehicles' access comes from the production 862-864 grants, not the diag module) ==="
   } > "$EVIDENCE_DIR/g26-shared-object.txt"
-  G26_E_PROD_DIR=""
-  if [ -d /var/lib/docker-helper-builder ]; then
-    if mkdir -p /var/lib/docker-helper-builder/g26-e2 &&
-       chown "$BUILDER_USER:$BUILDER_USER" /var/lib/docker-helper-builder/g26-e2; then
-      G26_E_PROD_DIR=/var/lib/docker-helper-builder/g26-e2
-    else
-      echo "prodtype dir: the mkdir/chown failed (recorded as a finding)" >> "$EVIDENCE_DIR/g26-shared-object.txt"
-    fi
-  else
-    echo "prodtype dir: SKIPPED (/var/lib/docker-helper-builder does not exist on this VM)" >> "$EVIDENCE_DIR/g26-shared-object.txt"
+  G26_E_PROD_DIR=/var/tmp/p5s2-g26-e2
+  G26_E_PROD_DIR_OK=0
+  if chcon -t docker_helper_builder_state_t "$G26_E_PROD_DIR" 2>>"$EVIDENCE_DIR/g26-shared-object.txt"; then
+    G26_E_PROD_DIR_OK=1
   fi
-  if [ -n "$G26_E_PROD_DIR" ]; then
-    echo "prodtype dir: $G26_E_PROD_DIR label=$(stat -c '%C' "$G26_E_PROD_DIR" 2>&1) owner=$(stat -c '%U:%G' "$G26_E_PROD_DIR" 2>&1)" \
-      >> "$EVIDENCE_DIR/g26-shared-object.txt"
-  fi
+  {
+    echo "prodtype dir: $G26_E_PROD_DIR pre-label=$(stat -c '%C' "$G26_E_PROD_DIR" 2>&1) chcon-applied=$G26_E_PROD_DIR_OK post-label=$(stat -c '%C' "$G26_E_PROD_DIR" 2>&1)"
+    echo "=== the stand-type test dir (the diag-module-granted tmpfs tree) ==="
+    echo "stand dir: $DIAG_BASE/g26/e-shared label=$(stat -c '%C' "$DIAG_BASE/g26/e-shared" 2>&1)"
+  } >> "$EVIDENCE_DIR/g26-shared-object.txt"
   e_leg() {
     local leg="$1" ctx="$2" mode="$3" path="$4" leg_note="$5" rc
     {
@@ -2152,13 +2155,13 @@ if [ -z "$P5S2G26_RESULT" ]; then
     echo "=== leg 5 skipped: B's touch did not create the marker (see leg 4) ===" >> "$EVIDENCE_DIR/g26-shared-object.txt"
   fi
   if [ "$G26_E_STAND_RUN" = 1 ] &&
-     grep -aq 'PROBE read path=.*/e-shared/a-c1-marker. rc=0' "$EVIDENCE_DIR/g26-shared-object.txt" &&
-     grep -aq 'PROBE write path=.*/e-shared/a-c1-marker. rc=0' "$EVIDENCE_DIR/g26-shared-object.txt"; then
+     grep -aq 'PROBE read path=.*/e-shared/a-c1-marker rc=0' "$EVIDENCE_DIR/g26-shared-object.txt" &&
+     grep -aq 'PROBE write path=.*/e-shared/a-c1-marker rc=0' "$EVIDENCE_DIR/g26-shared-object.txt"; then
     G26_E_STAND_OK=1
   fi
   G26_E_PROD_RUN=0
   G26_E_PROD_OK=0
-  if [ -n "$G26_E_PROD_DIR" ]; then
+  if [ "$G26_E_PROD_DIR_OK" = 1 ]; then
     e_leg p1 "$RK_EXEC_T_A" --touch "$G26_E_PROD_DIR/a-c1-marker" "A:c1 touches its marker in the production state tree" || true
     if [ -f "$G26_E_PROD_DIR/a-c1-marker" ]; then
       G26_E_PROD_RUN=1
@@ -2175,8 +2178,8 @@ if [ -z "$P5S2G26_RESULT" ]; then
       echo "=== leg p5 skipped: B's touch did not create the marker (see leg p4) ===" >> "$EVIDENCE_DIR/g26-shared-object.txt"
     fi
     if [ "$G26_E_PROD_RUN" = 1 ] &&
-       grep -aq 'PROBE read path=.*/g26-e2/a-c1-marker. rc=0' "$EVIDENCE_DIR/g26-shared-object.txt" &&
-       grep -aq 'PROBE write path=.*/g26-e2/a-c1-marker. rc=0' "$EVIDENCE_DIR/g26-shared-object.txt"; then
+       grep -aq 'PROBE read path=.*/p5s2-g26-e2/a-c1-marker rc=0' "$EVIDENCE_DIR/g26-shared-object.txt" &&
+       grep -aq 'PROBE write path=.*/p5s2-g26-e2/a-c1-marker rc=0' "$EVIDENCE_DIR/g26-shared-object.txt"; then
       G26_E_PROD_OK=1
     fi
   fi
@@ -2203,14 +2206,14 @@ if [ -z "$P5S2G26_RESULT" ]; then
   if [ "$G26_E_FIFO_RC" = 0 ]; then G26_E_FIFO_OK=1; fi
   echo "=== the shared-object finding ===" >> "$EVIDENCE_DIR/g26-shared-object.txt"
   echo "the stand-type legs: ran=$G26_E_STAND_RUN all-expected-observed=$G26_E_STAND_OK (cross-operation read AND write of each other's created files is ALLOWED — the exempt-object finding)" >> "$EVIDENCE_DIR/g26-shared-object.txt"
-  echo "the prodtype (builder_state_t, the real production tree) legs: dir=$G26_E_PROD_DIR ran=$G26_E_PROD_RUN all-expected-observed=$G26_E_PROD_OK (the same finding on the production type — the 862-864 grant shape is category-blind)" >> "$EVIDENCE_DIR/g26-shared-object.txt"
-  echo "the fifo leg: rc=$G26_E_FIFO_RC ok=$G26_E_FIFO_OK (the fifo_file class has no mlsconstrain — a cross-operation fifo write is ALLOWED on the exempt label)" >> "$EVIDENCE_DIR/g26-shared-object.txt"
+  echo "the prodtype (builder_state_t, relabeled from the production state type) legs: dir=$G26_E_PROD_DIR provisioned=$G26_E_PROD_DIR_OK ran=$G26_E_PROD_RUN all-expected-observed=$G26_E_PROD_OK (the same finding on the production type — the 862-864 grant shape is category-blind)" >> "$EVIDENCE_DIR/g26-shared-object.txt"
+  echo "the fifo leg: rc=$G26_E_FIFO_RC ok=$G26_E_FIFO_OK (the fifo's open is MCS-constrained but its target type user_tmp_t is exempt; the write perm itself is unconstrained — the cross-operation fifo write is ALLOWED on the exempt label)" >> "$EVIDENCE_DIR/g26-shared-object.txt"
   echo "verdict note: the state tree and the stand tmpfs dirs are shared at s0 BY DESIGN (the manager-owned tree; the .te's own scope notes track this as the invocation-discipline-only risk) — this is the separate finding the task records; it grants NO access to the MCS-protected /proc/<pid> and process-control surfaces, so it is not a bypass of the boundary this experiment proves" >> "$EVIDENCE_DIR/g26-shared-object.txt"
   cat "$EVIDENCE_DIR/g26-shared-object.txt" >&2
   if [ "$G26_E_STAND_RUN" = 1 ] && [ "$G26_E_STAND_OK" = 0 ]; then
     note "g26: the stand-type shared-tree legs did not observe the expected exemption (see g26-shared-object.txt)"
     P5S2G26_RESULT="INCONCLUSIVE: the stand-type shared-tree legs did not observe the expected exemption (see g26-shared-object.txt)"
-  elif [ -n "$G26_E_PROD_DIR" ] && [ "$G26_E_PROD_RUN" = 1 ] && [ "$G26_E_PROD_OK" = 0 ]; then
+  elif [ "$G26_E_PROD_DIR_OK" = 1 ] && [ "$G26_E_PROD_RUN" = 1 ] && [ "$G26_E_PROD_OK" = 0 ]; then
     note "g26: the prodtype shared-tree legs did not observe the expected exemption (see g26-shared-object.txt)"
     P5S2G26_RESULT="INCONCLUSIVE: the prodtype shared-tree legs did not observe the expected exemption (see g26-shared-object.txt)"
   fi
