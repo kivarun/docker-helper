@@ -973,6 +973,7 @@ cat > "$WORK/probe/map_probe.c" <<'PROBEOF'
 #include <string.h>
 #include <sched.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -1033,15 +1034,35 @@ static int do_signal(int pid, int sig) {
 
 static int do_poison(const char *path, long long offset, const char *marker) {
   emit_facts("poisoner");
+  /* The content store finalizes blobs as owner-RO (mode 0444). The write
+   * surface this measurement exercises is the SAME granted domain
+   * authority (rootlesskit_t -> builder_state_t:file setattr + write,
+   * both granted by the loaded policy); the mode flip is performed by
+   * the vehicle itself (owner chmod, no root), and the original mode is
+   * restored after the write. */
+  struct stat st;
+  int need_mode_flip = 0;
+  if (stat(path, &st) != 0) { printf("POISON-STAT path=%s rc=-1 errno=%d\n", path, errno); return 1; }
+  printf("POISON-STAT path=%s mode=0%o size=%lld\n", path, (int)(st.st_mode & 07777), (long long)st.st_size);
+  if (!(st.st_mode & S_IWUSR)) {
+    need_mode_flip = 1;
+    int cr = chmod(path, 0600);
+    printf("POISON-CHMOD path=%s to=0600 rc=%d errno=%d\n", path, cr, errno);
+    if (cr != 0) return 1;
+  }
   int fd = open(path, O_WRONLY);
   printf("POISON-OPEN path=%s rc=%d errno=%d\n", path, fd, errno);
-  if (fd < 0) return 1;
+  if (fd < 0) { if (need_mode_flip) chmod(path, st.st_mode & 07777); return 1; }
   size_t len = strlen(marker);
   ssize_t n = pwrite(fd, marker, len, (off_t)offset);
   printf("POISON-PWRITE path=%s offset=%lld len=%zu rc=%zd errno=%d\n", path, offset, len, n, errno);
   int fs = fsync(fd);
   printf("POISON-FSYNC rc=%d errno=%d\n", fs, errno);
   close(fd);
+  if (need_mode_flip) {
+    int cr2 = chmod(path, st.st_mode & 07777);
+    printf("POISON-CHMOD-RESTORE path=%s to=0%o rc=%d errno=%d\n", path, (int)(st.st_mode & 07777), cr2, errno);
+  }
   if (n < 0) return 1;
   char *buf = calloc(len + 1, 1);
   if (!buf) return 1;
@@ -1326,7 +1347,7 @@ measure_candidate() { # $1=kind $2=path $3=hex $4=poison $5=offset $6=logprefix
   MUT_EPOCH="$(date +%s)"
   set +e
   timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe \
-    --poison "$TPATH" "$OFF" "$PST" >> "$EVIDENCE_DIR/$LP-cross-mutation.txt" 2>&1
+    --poison "$TPATH" "$OFF" "$PST" >> "$EVIDENCE_DIR/$LP-cross-mutation.txt" 2>&1 < /dev/null
   CROSS_WRITE_RC=$?
   set -e
   {
@@ -1357,7 +1378,11 @@ measure_candidate() { # $1=kind $2=path $3=hex $4=poison $5=offset $6=logprefix
   cat "$EVIDENCE_DIR/$LP-cross-compare.txt" >&2
   CROSS_RELEVANT="$(grep -o 'RELEVANT=[A-Z]*' "$EVIDENCE_DIR/$LP-cross-compare.txt" | cut -d= -f2 || true)"
   CROSS_POISON_ANY="$(grep -o 'POISON=[01]' "$EVIDENCE_DIR/$LP-cross-compare-run.txt" | cut -d= -f2 || true)"
-  if [ "$CROSS_BUILD_RC" = 0 ]; then
+  if [ "$CROSS_WRITE_RC" != 0 ]; then
+    # the mutation did NOT land (read-back/digest never proven) — this is
+    # not D4; the task's D-outcomes presuppose a confirmed mutation
+    ROUND_CROSS_OUTCOME="MUTATION-BLOCKED"
+  elif [ "$CROSS_BUILD_RC" = 0 ]; then
     if [ "$CROSS_RELEVANT" = "CHANGED" ] || [ "$CROSS_POISON_ANY" = "1" ]; then
       ROUND_CROSS_OUTCOME="D2-POISONED-OUTPUT"
     else
@@ -1396,7 +1421,7 @@ measure_candidate() { # $1=kind $2=path $3=hex $4=poison $5=offset $6=logprefix
   OWNMUT_EPOCH="$(date +%s)"
   set +e
   timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C2" /usr/local/bin/map_probe \
-    --poison "$TPATH" "$OFF" "$PST" >> "$EVIDENCE_DIR/$LP-own-mutation.txt" 2>&1
+    --poison "$TPATH" "$OFF" "$PST" >> "$EVIDENCE_DIR/$LP-own-mutation.txt" 2>&1 < /dev/null
   OWN_WRITE_RC=$?
   set -e
   {
@@ -1421,7 +1446,9 @@ measure_candidate() { # $1=kind $2=path $3=hex $4=poison $5=offset $6=logprefix
   cat "$EVIDENCE_DIR/$LP-own-compare.txt" >&2
   OWN_RELEVANT="$(grep -o 'RELEVANT=[A-Z]*' "$EVIDENCE_DIR/$LP-own-compare.txt" | cut -d= -f2 || true)"
   OWN_POISON_ANY="$(grep -o 'POISON=[01]' "$EVIDENCE_DIR/$LP-own-compare-run.txt" | cut -d= -f2 || true)"
-  if [ "$OWN_BUILD_RC" = 0 ]; then
+  if [ "$OWN_WRITE_RC" != 0 ]; then
+    ROUND_OWN_OUTCOME="MUTATION-BLOCKED"
+  elif [ "$OWN_BUILD_RC" = 0 ]; then
     if [ "$OWN_RELEVANT" = "CHANGED" ] || [ "$OWN_POISON_ANY" = "1" ]; then
       ROUND_OWN_OUTCOME="D2-POISONED-OUTPUT"
     else
@@ -1437,18 +1464,35 @@ measure_candidate() { # $1=kind $2=path $3=hex $4=poison $5=offset $6=logprefix
 
 # The candidate rounds, in the task's preference order, ONE object at a
 # time; the first terminal cross-op finding (D1/D2/D3) stops the rounds.
+# Round 1 = the chosen content blob (identity-proven consumed); round 2 =
+# the RUN layer blob (the same class, if distinct); round 3 = the RUN
+# snapshot's own marker file. A MUTATION-BLOCKED round falls through to
+# the next justified candidate (run 1 measured: the finalized content
+# blobs are owner-RO mode 0444 — the naive write is DAC-blocked — so the
+# vehicle exercises the SAME granted domain authority through the
+# candidate policy's setattr grant: owner chmod 0600 -> pwrite -> the
+# original mode restored; all inside the vehicle, no root).
 FINAL_CROSS_OUTCOME=""
 FINAL_OWN_OUTCOME=""
 FINAL_ROUND=""
-for ROUND in 1 2; do
+FINAL_LP=""
+FINAL_TARGET_KIND=""
+FINAL_TARGET_PATH=""
+FINAL_TARGET_SHA=""
+MEASURED_PATHS=""
+for ROUND in 1 2 3; do
   case "$ROUND" in
     1) R_KIND="$TARGET_KIND"; R_PATH="$TARGET_PATH"; R_HEX="$TARGET_HEX" ;;
-    2) R_KIND="snapshot-marker"; R_PATH="$SNAPMARK"; R_HEX="$L2_HEX" ;;
+    2) R_KIND="blob-l2"; R_PATH="$BLOB_L2"; R_HEX="$L2_HEX" ;;
+    3) R_KIND="snapshot-marker"; R_PATH="$SNAPMARK"; R_HEX="$L2_HEX" ;;
   esac
   if [ -z "$R_PATH" ]; then
     note "round $ROUND: no such object in the inventory; skipping"
     continue
   fi
+  case " $MEASURED_PATHS " in
+    *" $R_PATH "*) note "round $ROUND skipped: $R_PATH was already measured"; continue ;;
+  esac
   if [ "$ROUND" = 2 ] && [ "$TARGET_KIND" = "snapshot-marker" ]; then
     note "round 2 skipped: the round-1 target already WAS the snapshot marker (no second snapshot-side candidate)"
     break
@@ -1462,14 +1506,18 @@ for ROUND in 1 2; do
     BASELINE_TARGET_SHA="$(sha256sum "$R_PATH" | awk '{print $1}')"
     cp -a "$R_PATH" "$WORK/backup/target.baseline"
     {
-      echo "=== the round-2 target (the next justified candidate after the round-1 outcome) ==="
-      echo "round-1 outcome was: $ROUND_OUTCOME"
+      echo "=== the round-$ROUND target (the next justified candidate after the previous outcome) ==="
+      echo "previous outcome was: ${ROUND_OUTCOME:-none}"
       echo "kind: $R_KIND; path: $R_PATH; size: $TARGET_SIZE"
-    } > "$EVIDENCE_DIR/h-round2-selection.txt"
-    cat "$EVIDENCE_DIR/h-round2-selection.txt" >&2
+    } > "$EVIDENCE_DIR/h-round$ROUND-selection.txt"
+    cat "$EVIDENCE_DIR/h-round$ROUND-selection.txt" >&2
   fi
+  MEASURED_PATHS="$MEASURED_PATHS $R_PATH"
   FINAL_ROUND="$R_KIND"
   FINAL_LP="r$ROUND"
+  FINAL_TARGET_KIND="$R_KIND"
+  FINAL_TARGET_PATH="$R_PATH"
+  FINAL_TARGET_SHA="$BASELINE_TARGET_SHA"
   measure_candidate "$R_KIND" "$R_PATH" "$R_HEX" "$POISON_USE" "$OFFSET_USE" "r$ROUND"
   FINAL_CROSS_OUTCOME="$ROUND_CROSS_OUTCOME"
   FINAL_OWN_OUTCOME="$ROUND_OWN_OUTCOME"
@@ -1488,7 +1536,7 @@ FIFO_G1="$WORK/probe/fifo-g1"
 mkfifo "$FIFO_G1"
 chmod 666 "$FIFO_G1"
 timeout 120 runuser -u "$BUILDER_USER" -- runcon "$RK_C2" /usr/local/bin/map_probe --be-target "$FIFO_G1" \
-  >"$WORK/probe/b-g1.out" 2>&1 &
+  >"$WORK/probe/b-g1.out" 2>&1 < /dev/null &
 exec 3<>"$FIFO_G1"
 BPID_G1=""
 if IFS= read -r -t 60 line <&3; then
@@ -1500,7 +1548,7 @@ exec 3<&-
   echo "target pid: ${BPID_G1:-NONE}"
   echo "target uid_map before: [$(cat "/proc/$BPID_G1/uid_map" 2>/dev/null || true)]"
   timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe \
-    --invoke-helper /usr/bin/newuidmap "$BPID_G1" 0 475 1 1 165536 65536 2>&1 || echo "helper attempt rc=$?"
+    --invoke-helper /usr/bin/newuidmap "$BPID_G1" 0 475 1 1 165536 65536 2>&1 < /dev/null || echo "helper attempt rc=$?"
   echo "target uid_map after: [$(cat "/proc/$BPID_G1/uid_map" 2>/dev/null || true)]"
 } > "$EVIDENCE_DIR/g-guard1-newuidmap.txt" 2>&1
 cat "$EVIDENCE_DIR/g-guard1-newuidmap.txt" >&2
@@ -1510,7 +1558,7 @@ FIFO_G2="$WORK/probe/fifo-g2"
 mkfifo "$FIFO_G2"
 chmod 666 "$FIFO_G2"
 timeout 120 runuser -u "$BUILDER_USER" -- runcon "$RK_C2" /usr/local/bin/map_probe --be-target "$FIFO_G2" \
-  >"$WORK/probe/b-g2.out" 2>&1 &
+  >"$WORK/probe/b-g2.out" 2>&1 < /dev/null &
 exec 3<>"$FIFO_G2"
 BPID_G2=""
 if IFS= read -r -t 60 line <&3; then
@@ -1521,7 +1569,7 @@ exec 3<&-
   echo "=== guard 2: cross-op TERM/KILL c1 -> c2 (expect MCS-BLOCKED, target alive) ==="
   echo "target pid: ${BPID_G2:-NONE}"
   for sigspec in 15 9; do
-    timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --signal "$BPID_G2" "$sigspec" 2>&1 || true
+    timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --signal "$BPID_G2" "$sigspec" 2>&1 < /dev/null || true
   done
   echo "target alive after the cross-op signals: $(kill -0 "$BPID_G2" 2>/dev/null && echo YES || echo NO) (the runner's unconfined check)"
 } > "$EVIDENCE_DIR/g-guard2-signals.txt" 2>&1
@@ -1531,15 +1579,15 @@ pkill -KILL -f 'map_probe --be-target' 2>/dev/null || true
 {
   echo "=== guard 3: cross-op connect to op B's live buildkitd.sock (expect EACCES) ==="
   echo "socket: $(stat -c '%C %U:%G %a' "$RB_SOCK" 2>&1)"
-  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --connect "$RB_SOCK" 2>&1 || true
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --connect "$RB_SOCK" 2>&1 < /dev/null || true
 } > "$EVIDENCE_DIR/g-guard3-sockconnect.txt" 2>&1
 cat "$EVIDENCE_DIR/g-guard3-sockconnect.txt" >&2
 # guard 4: op A cannot reach the manager's authority
 {
   echo "=== guard 4: op A cannot reach the manager's authority (manager.sock connect + signal) ==="
   echo "manager.sock: $(stat -c '%C %U:%G %a' "$MANAGER_SOCK" 2>&1)"
-  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --connect "$MANAGER_SOCK" 2>&1 || true
-  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --signal "$MG_PID" 15 2>&1 || true
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --connect "$MANAGER_SOCK" 2>&1 < /dev/null || true
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --signal "$MG_PID" 15 2>&1 < /dev/null || true
   echo "manager alive after A's signal attempt: $(kill -0 "$MG_PID" 2>/dev/null && echo YES || echo NO)"
 } > "$EVIDENCE_DIR/g-guard4-manager.txt" 2>&1
 cat "$EVIDENCE_DIR/g-guard4-manager.txt" >&2
@@ -1549,13 +1597,13 @@ dedup_avcs "$EVIDENCE_DIR/g-guard-avcs.txt" "$EVIDENCE_DIR/g-guard-avcs-dedup.tx
 GUARD1=0
 if grep -q 'Could not open proc directory for target.*Permission denied' "$EVIDENCE_DIR/g-guard1-newuidmap.txt" \
    && grep -q 'target uid_map after: \[\]' "$EVIDENCE_DIR/g-guard1-newuidmap.txt"; then GUARD1=1; fi
-SIG_COUNT="$(awk '/rc=-1 errno=1$/{n++} END{print n+0}' "$EVIDENCE_DIR/g-guard2-signals.txt")"
+SIG_COUNT="$(awk '/rc=-1 errno=13$/{n++} END{print n+0}' "$EVIDENCE_DIR/g-guard2-signals.txt")"
 GUARD2=0
 if [ "$SIG_COUNT" -ge 2 ] \
    && grep -q 'target alive after the cross-op signals: YES' "$EVIDENCE_DIR/g-guard2-signals.txt"; then GUARD2=1; fi
 GUARD3=0
 if grep -q 'rc=-1 errno=13' "$EVIDENCE_DIR/g-guard3-sockconnect.txt"; then GUARD3=1; fi
-SIGM_COUNT="$(awk '/rc=-1 errno=1$/{n++} END{print n+0}' "$EVIDENCE_DIR/g-guard4-manager.txt")"
+SIGM_COUNT="$(awk '/rc=-1 errno=13$/{n++} END{print n+0}' "$EVIDENCE_DIR/g-guard4-manager.txt")"
 GUARD4=0
 if grep -q 'rc=-1 errno=13' "$EVIDENCE_DIR/g-guard4-manager.txt" \
    && [ "$SIGM_COUNT" -ge 1 ] \
@@ -1600,7 +1648,7 @@ dedup_avcs "$EVIDENCE_DIR/m-residual-avcs.txt" "$EVIDENCE_DIR/m-residual-avcs-de
   echo "op A baseline build rc: ${A_BUILD_RC:-NA}; op B build 1 rc: ${B1_RC:-NA}; build 2 rc: ${B2_RC:-NA}"
   echo "baseline stable (build 1 vs build 2, no mutation): $BASELINE_STABLE"
   echo "measured candidate (round kind): $FINAL_ROUND"
-  echo "chosen target: kind=$TARGET_KIND path=$TARGET_PATH digest=sha256:$TARGET_HEX baseline_sha=$BASELINE_TARGET_SHA"
+  echo "measured target: kind=$FINAL_TARGET_KIND path=$FINAL_TARGET_PATH baseline_sha=$FINAL_TARGET_SHA"
   echo "consumption-path identity (export member bytes == tree blob bytes): $(grep 'IDENTITY.*_BLOB_CONSUMED' "$EVIDENCE_DIR/h-identity-checks.txt" 2>/dev/null | tr '\n' '; ' || true)"
   echo "cross-op mutation: vehicle rc=${CROSS_WRITE_RC:-NA} (POISON-READBACK match in $FINAL_LP-cross-mutation.txt)"
   echo "cross-op consumption build rc: ${CROSS_BUILD_RC:-NA}; outcome: ${FINAL_CROSS_OUTCOME:-NONE}"
@@ -1613,6 +1661,8 @@ dedup_avcs "$EVIDENCE_DIR/m-residual-avcs.txt" "$EVIDENCE_DIR/m-residual-avcs-de
 cat "$EVIDENCE_DIR/m-summary.txt" >&2
 
 log 'teardown + cleanup (enforcing everywhere; temporary modules removed)'
+mkdir -p "$EVIDENCE_DIR/legs"
+cp -a "$WORK/reports/"*.json "$EVIDENCE_DIR/legs/" 2>/dev/null || true
 semanage dontaudit on >/dev/null 2>&1 || true
 pkill -KILL -f 'map_probe' 2>/dev/null || true
 pkill -KILL -f 'rootlesskit --net=' 2>/dev/null || true
