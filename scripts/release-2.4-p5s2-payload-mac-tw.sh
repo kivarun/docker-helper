@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Guest-side P5-S2g28 BuildKit payload MAC closure for openSUSE
-# Tumbleweed. INVESTIGATION ONLY — run 13 (the FINAL proof): the
+# Tumbleweed. INVESTIGATION ONLY — run 14 (the FINAL proof): the
 # iteration-12 candidate module (ledger v12) runs UNCHANGED. Run 12
 # (CI 36446519646) completed the FULL production-like build under
 # enforcing: buildctl exit 0, the 3.63MB alpine pull + extraction, the
@@ -285,7 +285,7 @@ log 'A3: the candidate payload module (v12, unchanged: the final proof runs the 
 cat > /tmp/payload_mac_diag.te <<'MODEOF'
 module payload_mac_diag 12.0;
 
-# P5-S2g28 guest-only candidate payload module. RUN 13 (the final proof, the SAME v12 grant set): the enforcing
+# P5-S2g28 guest-only candidate payload module. RUN 14 (the final proof, the SAME v12 grant set): the enforcing
 # iteration carrying the per-AVC-evidenced grants from the run-1/2
 # permissive harvest (195 unique (s,t,class,perm) denial tuples over the
 # full production path) plus every enforcing-proven delta since: run 2.5
@@ -670,7 +670,7 @@ semanage dontaudit off >>"$EVIDENCE_DIR/te-dontaudit-off.log" 2>&1 || true
 OPH="$(gen_op_id)"
 HV_EPOCH="$(date +%s)"
 {
-  echo "=== P5-S2g28 run 13: the final enforcing proof (ledger v12, no new grants) ==="
+  echo "=== P5-S2g28 run 14: the final enforcing proof (ledger v12, no new grants) ==="
   echo "op id: $OPH; epoch: $HV_EPOCH"
   echo "dontaudit rules disabled for the attempt window (semanage dontaudit off)"
   echo "attribution: run 2.5 proved module_request necessary under enforcing;"
@@ -735,7 +735,7 @@ CTX="$WORK/ctx"
 mkdir -p "$CTX"
 cat > "$CTX/Dockerfile" <<'EOF'
 FROM alpine:3.20
-RUN mkdir -p /m1 && echo p5s2-g28-run13 > /m1/marker.txt && cat /proc/self/uid_map > /m1/uid_map.txt && id > /m1/id.txt
+RUN mkdir -p /m1 && echo p5s2-g28-run14 > /m1/marker.txt && cat /proc/self/uid_map > /m1/uid_map.txt && id > /m1/id.txt
 EOF
 chcon -u system_u -t docker_helper_builder_state_t "$CTX" "$CTX/Dockerfile"
 {
@@ -750,7 +750,7 @@ DOCKER_CONFIG="$WORK/docker-config" timeout 300 "$BUILDCTL" \
   --addr "unix://$RUNTIME_ROOT/ops/$OPH/buildkitd.sock" build \
   --progress=plain --frontend=dockerfile.v0 \
   --local "context=$CTX" --local "dockerfile=$CTX" \
-  --output "type=docker,name=p5s2g28:run13,dest=$WORK/export/out.tar" \
+  --output "type=docker,name=p5s2g28:run14,dest=$WORK/export/out.tar" \
   > "$EVIDENCE_DIR/e-build.txt" 2>&1
 BUILD_RC=$?
 set -e
@@ -932,6 +932,7 @@ static int invoke_helper(char **argv) {
 }
 
 int main(int argc, char **argv) {
+  setvbuf(stdout, NULL, _IONBF, 0);
   if (argc < 2) { fprintf(stderr, "usage: map_probe MODE ...\n"); return 2; }
   if (strcmp(argv[1], "--facts") == 0) { emit_facts("vehicle"); return 0; }
   if (strcmp(argv[1], "--be-target") == 0 && argc == 3) {
@@ -956,7 +957,7 @@ int main(int argc, char **argv) {
 }
 PROBEOF
 cat > /tmp/gidmap_probe_diag.te <<'PROBEEOF'
-module gidmap_probe_diag 1.0;
+module gidmap_probe_diag 1.1;
 # P5-S2g28 guest-only stand probe module: the PROBE VEHICLE's fixture
 # surface only (the runcon chain, the probe binary's exec/entry, the
 # stand's /tmp fixture tree, the inherited evidence fds). It grants
@@ -985,6 +986,7 @@ allow unconfined_t docker_helper_rootlesskit_t:process { transition siginh };
 allow docker_helper_rootlesskit_t gidmap_probe_exec_t:file { entrypoint read open execute execute_no_trans getattr map };
 allow docker_helper_newuidmap_t gidmap_probe_exec_t:file { entrypoint read open execute getattr map };
 allow docker_helper_newuidmap_t unconfined_t:fd use;
+allow docker_helper_newuidmap_t user_tmp_t:file { append write };
 allow docker_helper_rootlesskit_t unconfined_t:fd use;
 allow docker_helper_rootlesskit_t user_tmp_t:dir { search getattr read open write add_name create remove_name rmdir };
 allow docker_helper_rootlesskit_t user_tmp_t:file { create open read write getattr setattr unlink append };
@@ -1093,18 +1095,27 @@ log 'H-E4a: the c1 probe against c2-labeled simulated op trees (expect MCS-BLOCK
 E4_EPOCH="$(date +%s)"
 FB_C2="$STATE_ROOT/ops/op_probe_c2"
 FB_C1="$STATE_ROOT/ops/op_probe_c1"
-for pair in "$FB_C2:c2" "$FB_C1:c1"; do
-  d="${pair%%:*}"; cat="${pair##*:}"
+# The trees are provisioned EXACTLY as launchInstance does (the builder
+# user's own 0700/0600 dirs and files) so the DAC cannot mask the MCS
+# measurement; the category labels use the full range form (s0:c2).
+for pair in "$FB_C2 s0:c2" "$FB_C1 s0:c1"; do
+  d="${pair% *}"; rng="${pair#* }"
   mkdir -p "$d/rootlesskit-state" "$d/root"
   touch "$d/rootlesskit-state/lock" "$d/root/marker"
-  chcon -u system_u -l "$cat" "$d" "$d/rootlesskit-state" "$d/rootlesskit-state/lock" \
+  chown -R "$BUILDER_USER":"$BUILDER_USER" "$d"
+  chmod 700 "$d" "$d/rootlesskit-state" "$d/root"
+  chmod 600 "$d/rootlesskit-state/lock" "$d/root/marker"
+  chcon -u system_u -l "$rng" "$d" "$d/rootlesskit-state" "$d/rootlesskit-state/lock" \
     "$d/root" "$d/root/marker" 2>/dev/null || true
 done
 {
-  echo "=== the simulated op trees' labels ==="
-  stat -c '%C %n' "$FB_C2" "$FB_C2/rootlesskit-state/lock" "$FB_C2/root/marker" \
+  echo "=== the simulated op trees' labels + ownership (the leg-validity gate: the categories MUST be present) ==="
+  stat -c '%C %U:%G %a %n' "$FB_C2" "$FB_C2/rootlesskit-state/lock" "$FB_C2/root/marker" \
     "$FB_C1" "$FB_C1/rootlesskit-state/lock" "$FB_C1/root/marker" 2>&1
-  echo "=== the c1 probe's attempts on the c2-labeled trees (expect EACCES) ==="
+  if stat -c '%C' "$FB_C2/rootlesskit-state/lock" 2>/dev/null | grep -qv ':c2'; then
+    echo "LEG INVALID: the c2 category is not on the tree labels; the attempts below measure something else"
+  fi
+  echo "=== the c1 probe's attempts on the c2-labeled trees (expect EACCES from the MCS) ==="
   timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --write "$FB_C2/rootlesskit-state/planted" 2>&1 || true
   timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --read "$FB_C2/rootlesskit-state/lock" 2>&1 || true
   timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --unlink "$FB_C2/rootlesskit-state/lock" 2>&1 || true
@@ -1188,5 +1199,5 @@ semodule -r payload_mac_diag >/dev/null 2>&1 || true
 semodule -r gidmap_mcsboundary_diag >/dev/null 2>&1 || true
 semodule -l 2>/dev/null | grep -E 'docker_helper|gidmap|payload' > "$EVIDENCE_DIR/g-final-modules.txt" 2>&1 || true
 
-printf '%s P5S2-PAYLOAD-MAC-RESULT=PASS (run 13 completed: the final enforcing proof + the Part E isolation regressions)\n' "$PREFIX" >&2
+printf '%s P5S2-PAYLOAD-MAC-RESULT=PASS (run 14 completed: the final enforcing proof + the Part E isolation regressions)\n' "$PREFIX" >&2
 exit 0
