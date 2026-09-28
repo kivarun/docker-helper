@@ -288,7 +288,7 @@ require {
 	class system { module_request };
 	class tcp_socket { connect create getattr getopt name_connect setopt };
 	class tun_socket { create relabelfrom relabelto };
-	class udp_socket { connect create getattr setopt write };
+	class udp_socket { connect create getattr read setopt write };
 	attribute file_type;
 	type bin_t;
 	type cert_t;
