@@ -885,8 +885,13 @@ def idcontents(rep):
 mc_b, mc_r = mcontents(b), mcontents(r)
 marker_changed = mc_b != mc_r
 id_changed = idcontents(b) != idcontents(r)
-if kind in ('snapshot-marker', 'snapshot-data'):
-    relevant = 'CHANGED' if (marker_changed or id_changed or poison_in) else 'UNCHANGED'
+if kind == 'snapshot-data':
+    # the nonce difference is BY DESIGN (the cache-miss mechanism) and is
+    # NOT a signal; the poison observable is the RUN's own id.txt output
+    # (uid 0's passwd-derived name) or the poison bytes themselves
+    relevant = 'CHANGED' if (id_changed or poison_in) else 'UNCHANGED'
+elif kind == 'snapshot-marker':
+    relevant = 'CHANGED' if (marker_changed or poison_in) else 'UNCHANGED'
 else:
     rn = 'blobs/sha256/' + hexd
     relevant = 'CHANGED' if (rn in changed or rn in poison_in) else 'UNCHANGED'
@@ -1689,6 +1694,17 @@ cat "$EVIDENCE_DIR/g-guard3-sockconnect.txt" >&2
 cat "$EVIDENCE_DIR/g-guard4-manager.txt" >&2
 harvest_avcs_since "$GU_EPOCH" "$EVIDENCE_DIR/g-guard-avcs.txt"
 dedup_avcs "$EVIDENCE_DIR/g-guard-avcs.txt" "$EVIDENCE_DIR/g-guard-avcs-dedup.txt"
+# the sig-0 policy facts: the guards measured cross-op kill(pid,0)
+# succeeding between same-type categorized vehicles while every real
+# signal stayed denied — capture the loaded policy's rules and
+# constraints for the process class so the classification is
+# policy-evidenced
+{
+  echo "=== sesearch: process-class allows between the two vehicle contexts ==="
+  sesearch --allow -s docker_helper_rootlesskit_t -t docker_helper_rootlesskit_t -c process 2>&1 || true
+  echo "=== the loaded policy's mlsconstrain rules for the process class ==="
+  seinfo --constrain 2>&1 | grep -A4 -i 'process' | head -60 || true
+} > "$EVIDENCE_DIR/k-process-policy-facts.txt" 2>&1
 # guard verdicts
 GUARD1=0
 if grep -q 'Could not open proc directory for target.*Permission denied' "$EVIDENCE_DIR/g-guard1-newuidmap.txt" \
