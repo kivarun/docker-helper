@@ -1,0 +1,64 @@
+name: Release 2.4 P5-S2 per-op state MCS isolation experiment
+
+# One-off investigation job (P5-S2g30): the feasibility proof that the
+# state tree of each Build Operation can carry the operation's own MCS
+# category (A -> s0:c1, B -> s0:c2) so cross-op state access is denied,
+# own-state access and the G28 payload flow keep working, the manager
+# lifecycle and cleanup converge over categorized trees, and the exact
+# G29 poisoning primitive becomes MCS-blocked. Runtime measurement:
+# labeled provisioning + the manager-transition-path launch -> own-op
+# build + descendant label inventory -> the cross/own filesystem matrix
+# -> the G29 regression -> the manager compatibility legs -> the G26
+# guards. G30 does NOT commit production policy, does NOT change
+# manager/BuildKit/docker-helper sources, does NOT design the category
+# allocator, and does NOT start production implementation.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - p3
+    paths:
+      - .github/workflows/release-2.4-p5s2-state-mcs-tw.yml
+      - scripts/release-2.4-p5s2-state-mcs-tw.sh
+      - scripts/release-2.4-p5s2-state-mcs-tw-vm.sh
+      - packaging/selinux/docker-helper.te
+      - packaging/selinux/docker-helper.fc
+      - builder_manager.go
+
+permissions:
+  contents: read
+
+jobs:
+  state-mcs-tumbleweed:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+
+      - name: Build the real docker-helper binary from the proof commit
+        run: go build -o docker-helper .
+
+      - name: Install QEMU and cloud-image tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage
+
+      - name: Run Tumbleweed state-MCS isolation measurement
+        run: |
+          UAT_REPO_DIR="${{ github.workspace }}" \
+          STATE_MCS_EVIDENCE_DIR="$RUNNER_TEMP/release-2.4-p5s2-state-mcs-evidence" \
+            scripts/release-2.4-p5s2-state-mcs-tw-vm.sh
+
+      - name: Upload experiment evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-2.4-p5s2-state-mcs-tw-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-2.4-p5s2-state-mcs-evidence
+          if-no-files-found: warn
