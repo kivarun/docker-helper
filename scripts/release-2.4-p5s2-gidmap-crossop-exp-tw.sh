@@ -883,7 +883,7 @@ watch_control_child_frozen() {
     kill -STOP "$p3" 2>/dev/null || true
     sleep 0.02
     {
-      echo "=== g23 control child (frozen at the observed uid_map write): child pid=$p3 parent pid=$p2 walk start=$start (snapshot $(date -u +%FT%TZ)) ==="
+      echo "=== control child (frozen at the observed uid_map write): child pid=$p3 parent pid=$p2 walk start=$start (snapshot $(date -u +%FT%TZ)) ==="
       echo "child attr/current: $(tr -d '\0' < "/proc/$p3/attr/current" 2>/dev/null || true)"
       echo "child status Uid: $(awk '/^Uid:/{print $2, $3, $4, $5}' "/proc/$p3/status" 2>/dev/null || true)"
       echo "child status CapEff: $(awk '/^CapEff:/{print $2}' "/proc/$p3/status" 2>/dev/null || true)"
