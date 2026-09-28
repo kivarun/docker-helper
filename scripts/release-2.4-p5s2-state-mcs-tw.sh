@@ -1489,6 +1489,7 @@ harvest_avcs_since "$GU_EPOCH" "$EVIDENCE_DIR/g-guard-avcs.txt"
 dedup_avcs "$EVIDENCE_DIR/g-guard-avcs.txt" "$EVIDENCE_DIR/g-guard-avcs-dedup.txt"
 
 log 'O: Part F — the manager/control-plane compatibility over categorized trees'
+F_EPOCH="$(date +%s)"
 # F1: the manager's own START creates its own (production-shape) trees
 # and serves the launch; measure the created labels (the manager's own
 # creations are the allocator's integration point) and the lifecycle.
@@ -1520,8 +1521,10 @@ done
   echo "readiness: $M_READY (wait ${M_WAIT}s)"
   echo "the manager-created tree labels (the production shape; the allocator's integration point):"
   stat -c '%C %U:%G %a %n' "$RUNTIME_ROOT/ops/$OPM" "$STATE_ROOT/ops/$OPM" \
-    "$STATE_ROOT/ops/$OPM/rootlesskit-state" "$STATE_ROOT/ops/$OPM/root" 2>&1
-  echo "sock: $(stat -c '%C %U:%G %a' "$RPM_SOCK" 2>&1)"
+    "$STATE_ROOT/ops/$OPM/rootlesskit-state" "$STATE_ROOT/ops/$OPM/root" 2>&1 || true
+  echo "sock: $(stat -c '%C %U:%G %a' "$RPM_SOCK" 2>&1 || true)"
+  echo "the unit journal window (the manager's own diag):"
+  journalctl -u "$UNIT" --since "-3min" --no-pager 2>/dev/null | tail -15
 } > "$EVIDENCE_DIR/f1-start-labels.txt" 2>&1
 cat "$EVIDENCE_DIR/f1-start-labels.txt" >&2
 stop_op "$OPM"
@@ -1558,6 +1561,7 @@ sleep 2
   echo "planted dirs survive (the refusal removes nothing): state=$([ -e "$STATE_ROOT/ops/$OPF" ] && echo yes || echo no) runtime=$([ -e "$RUNTIME_ROOT/ops/$OPF" ] && echo yes || echo no)"
   echo "planted label intact: $(stat -c '%C' "$STATE_ROOT/ops/$OPF" 2>&1)"
 } > "$EVIDENCE_DIR/f2-refusal.txt" 2>&1
+journalctl -u "$UNIT" --since "@$F_EPOCH" --no-pager 2>/dev/null | tail -8 >> "$EVIDENCE_DIR/f2-refusal.txt" || true
 cat "$EVIDENCE_DIR/f2-refusal.txt" >&2
 rm -rf "$RUNTIME_ROOT/ops/$OPF" "$STATE_ROOT/ops/$OPF" 2>/dev/null || true
 
@@ -1592,6 +1596,7 @@ fi
   echo "trees converged after the abnormal termination: $X_OK"
   echo "runtime tree: $([ -e "$RUNTIME_ROOT/ops/$OPA6" ] && echo survives || echo removed)"
 } > "$EVIDENCE_DIR/f6-abnormal-cleanup.txt" 2>&1
+journalctl -u "$UNIT" --since "@$F_EPOCH" --no-pager 2>/dev/null | tail -8 >> "$EVIDENCE_DIR/f6-abnormal-cleanup.txt" || true
 cat "$EVIDENCE_DIR/f6-abnormal-cleanup.txt" >&2
 
 # F4: the PURGE RPC smoke (the manager's cleanup owner over its own entries).
