@@ -654,6 +654,7 @@ if ! stat -c '%C' "$STATE_ROOT" 2>/dev/null | grep -q 'docker_helper_builder_sta
 fi
 
 log 'I: the stand probe vehicle + assignment gate (the mutation instruments)'
+mkdir -p "$WORK/probe" "$WORK/tools"
 # The probe vehicle and the probe module follow the G28 stand shapes
 # (stand fixtures only; the legs use ONLY the candidate policy's already-
 # proven rootlesskit_t -> builder_state_t surface; the probe module grants
