@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 #
 # Guest-side P5-S2g28 BuildKit payload MAC closure for openSUSE
-# Tumbleweed. INVESTIGATION ONLY — run 4 (the enforcing candidate
-# iteration, ledger v4): the candidate payload module carries the
-# run-1/2 harvest-ledger grants PLUS the two deltas the enforcing
-# attempts proved (run 2.5: kernel module autoload for the tun driver;
-# run 3: the tap-handoff relabel direction); every flow/payload domain
+# Tumbleweed. INVESTIGATION ONLY — run 5 (the enforcing candidate
+# iteration, ledger v5): the candidate payload module carries the
+# run-1/2 harvest-ledger grants PLUS the enforcing-proven deltas (run
+# 2.5: kernel module autoload for the tun driver; run 3: the tap-handoff
+# relabel direction; run 4: the resolver's DNS udp write, the buildkitd
+# socket shutdown unlink, the rootlesskit net-driver teardown sigkill);
+# every flow/payload domain
 # stays ENFORCING (no permissive), and the full production composition
 # manager -> rootlesskit -> buildkitd -> readiness -> minimal buildctl
 # build -> STOP runs. Every residual AVC denial is harvested as the next
@@ -52,9 +54,10 @@
 #    granted.
 #
 # This run: the candidate module (v4) carries ONLY per-AVC-evidenced
-# grants (72 allow rules; the relabel fix attributed to the run-2
-# harvest records + the run-3 failure); the run harvests the RESIDUAL
-# denials under enforcing with dontaudits unmapped.
+# grants (73 allow rules; the run-4 deltas attributed to the run-4
+# enforcing AVC window); the run harvests the RESIDUAL denials under
+# enforcing with dontaudits unmapped, and captures the loaded policy's
+# constraint rules for the file-relabel puzzle the run-4 window raised.
 #
 # The stand is the G27 stand maximally unchanged: REAL manager under the
 # REAL systemd unit (SELinuxContext binding, P4 unit-cgroup boundary,
@@ -170,8 +173,8 @@ log 'A: toolchain + modules (production + candidate + G26 delta) + composition i
 } >"$EVIDENCE_DIR/a-toolchain.txt" 2>&1
 zypper --non-interactive install -y checkpolicy container-selinux \
   policycoreutils-python-utils rootlesskit slirp4netns audit socat \
-  setools-console gcc glibc-static util-linux shadow libcap-progs \
-  python3 curl \
+  setools-console python3-setools gcc glibc-static util-linux shadow \
+  libcap-progs python3 curl \
   >"$EVIDENCE_DIR/zypper-toolchain.log" 2>&1 \
   || note "zypper install of the policy toolchain failed (see zypper-toolchain.log)"
 fail_toolchain=0
@@ -251,15 +254,17 @@ install -m 0755 /tmp/p5s2-g28-payload-extract/bin/buildkit-runc \
   "$BUILDCTL" --version 2>&1 || true
 } > "$EVIDENCE_DIR/a2-payload.txt" 2>&1
 
-log 'A3: the candidate payload module (v4: the harvest ledger + the run-2.5/3 enforcing deltas, enforcing)'
+log 'A3: the candidate payload module (v5: the harvest ledger + the run-2.5/3/4 enforcing deltas, enforcing)'
 cat > /tmp/payload_mac_diag.te <<'MODEOF'
-module payload_mac_diag 4.0;
+module payload_mac_diag 5.0;
 
-# P5-S2g28 guest-only candidate payload module. RUN 4: the enforcing
+# P5-S2g28 guest-only candidate payload module. RUN 5: the enforcing
 # iteration carrying the per-AVC-evidenced grants from the run-1/2
 # permissive harvest (195 unique (s,t,class,perm) denial tuples over the
-# full production path), the run-2.5-proven module_request delta, and the
-# run-3-proven relabel-direction fix. Every rule below is
+# full production path), the run-2.5/3 enforcing deltas (module_request,
+# relabel direction), and the run-4 enforcing deltas (the resolver's DNS
+# udp write, buildkitd's socket shutdown unlink, the rootlesskit
+# net-driver teardown sigkill). Every rule below is
 # attributable to harvested AVC records of the REAL production flow
 # (manager -> rootlesskit -> slirp4netns/net driver -> copy-up ->
 # buildkitd boot -> readiness -> buildctl build -> export) or the
@@ -408,11 +413,11 @@ allow docker_helper_rootlesskit_t docker_helper_builder_state_t:chr_file { unlin
 # exec.fifo (all created under the manager-owned per-op runtime dir)
 allow docker_helper_rootlesskit_t docker_helper_builder_runtime_t:dir { add_name create getattr open read remove_name rmdir search setattr write };
 allow docker_helper_rootlesskit_t docker_helper_builder_runtime_t:file { create getattr open read rename setattr unlink write };
-allow docker_helper_rootlesskit_t docker_helper_builder_runtime_t:sock_file { create getattr setattr };
+allow docker_helper_rootlesskit_t docker_helper_builder_runtime_t:sock_file { create getattr setattr unlink };
 allow docker_helper_rootlesskit_t docker_helper_builder_runtime_t:fifo_file { create open read setattr unlink write };
 # HTTPS pulls and DNS (the resolver inside the userns)
 allow docker_helper_rootlesskit_t self:tcp_socket { connect create getattr getopt setopt };
-allow docker_helper_rootlesskit_t self:udp_socket { connect create getattr setopt };
+allow docker_helper_rootlesskit_t self:udp_socket { connect create getattr setopt write };
 allow docker_helper_rootlesskit_t http_port_t:tcp_socket { name_connect };
 # kernel module autoload (RUN-2.5 DELTA, the run-2 permissive AVC
 # 1790599487.322:411: scontext=docker_helper_rootlesskit_t
@@ -440,6 +445,11 @@ allow docker_helper_slirp4netns_t nsfs_t:file { open read };
 allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:dir { search };
 allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:file { read };
 allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:lnk_file { read };
+# rootlesskit's teardown of its net-driver child (RUN-5 DELTA: run-4 AVC
+# 1790605769.929:405, scontext=...rootlesskit_t:s0 pid 2823 comm=rootlesskit,
+# tcontext=...slirp4netns_t:s0 tclass=process perm=sigkill, fired when the
+# failed flow's launch vehicle tore the net driver down)
+allow docker_helper_rootlesskit_t docker_helper_slirp4netns_t:process { sigkill };
 
 # ---- the uid/gid map helpers: the gid step needs the SAME privilege
 # ---- shape the uid step already holds (the production .te grants
@@ -550,18 +560,18 @@ log 'E: the enforcing candidate attempt — START + readiness + minimal build + 
 # Harvest completeness: disable every dontaudit rule (ours and the base
 # policy's) so NO denial can hide from the ledger harvest; re-enabled at
 # teardown. Guest-only, evidence-driven harvest hygiene.
-semanage dontaudit off >>"$EVIDENCE_DIR/e-attempt.txt" 2>&1 || true
-DOA=$(semanage dontaudit 2>&1 || true)
+semanage dontaudit off >>"$EVIDENCE_DIR/te-dontaudit-off.log" 2>&1 || true
 OPH="$(gen_op_id)"
 HV_EPOCH="$(date +%s)"
 {
-  echo "=== P5-S2g28 run 4: the enforcing candidate attempt (ledger v4) ==="
+  echo "=== P5-S2g28 run 5: the enforcing candidate attempt (ledger v5) ==="
   echo "op id: $OPH; epoch: $HV_EPOCH"
-  echo "dontaudit setting after 'semanage dontaudit off': ${DOA:-unknown}"
-  echo "attribution: the run-2 permissive harvest record 1790599487.322:411"
-  echo "(rootlesskit_t -> kernel_t:system module_request kmod=char-major-10-200)"
-  echo "is the grant behind this attempt's tap-open step; run 2.5 proved the"
-  echo "grant necessary under enforcing (ENODEV, empty AVC window)."
+  echo "dontaudit rules disabled for the attempt window (semanage dontaudit off)"
+  echo "attribution: run 2.5 proved the module_request grant necessary under"
+  echo "enforcing (tap open ENODEV); run 3 proved the tap-handoff relabel"
+  echo "direction blocking as transposed; run 4 proved the resolver's DNS udp"
+  echo "write, the buildkitd socket shutdown unlink and the rootlesskit"
+  echo "net-driver teardown sigkill blocking (all three joined the ledger)."
   echo "=== manager RPC: START $OPH ==="
 } > "$EVIDENCE_DIR/e-attempt.txt"
 set +e
@@ -636,6 +646,36 @@ dedup_avcs "$EVIDENCE_DIR/g-residual-avcs.txt" "$EVIDENCE_DIR/g-residual-avcs-de
   echo "=== the manager journal of the whole attempt window ==="
   journalctl -u "$UNIT" --since "@$HV_EPOCH" --no-pager 2>/dev/null | tail -300 || true
 } > "$EVIDENCE_DIR/g-manager-journal-all.txt" 2>&1
+# the relabelto puzzle (run-4 AVC 1790605769.866:399): the TE allow rule
+# exists (docker_helper_rootlesskit_t user_tmp_t:file relabelto) yet the
+# AVC fired — capture the loaded policy's constraint rules for the file
+# class so the classification is policy-evidenced, not guessed
+{
+  echo "=== sesearch: TE allow rules rootlesskit_t -> user_tmp_t:file ==="
+  sesearch --allow -s docker_helper_rootlesskit_t -t user_tmp_t -c file 2>&1 || true
+  echo "=== loaded-policy constraint rules touching file relabelto ==="
+  python3 - <<'PYEOF' 2>&1 || true
+import setools
+p = setools.SELinuxPolicy('/sys/fs/selinux/policy')
+try:
+    rules = p.constraint_rules()
+except AttributeError:
+    rules = []
+for r in rules:
+    if getattr(r, 'tclass', None) is None:
+        continue
+    names = getattr(r.tclass, 'names', None) or [getattr(r.tclass, 'name', '')]
+    if 'file' not in names:
+        continue
+    perms = getattr(r, 'perms', None)
+    if perms is None or 'relabelto' not in [str(x) for x in perms]:
+        continue
+    print('RULE:', type(r).__name__, 'class=file perms=', sorted(str(x) for x in perms))
+    print('EXPRESSION:', r.expression)
+PYEOF
+  echo "=== mcs_constrained_type membership check (the G26 delta made these types constraint-bound) ==="
+  seinfo -a mcs_constrained_type -x 2>/dev/null | grep -A40 'docker_helper' || true
+} > "$EVIDENCE_DIR/g-relabelto-constraint.txt" 2>&1
 wc -l "$EVIDENCE_DIR/g-residual-avcs.txt" "$EVIDENCE_DIR/g-residual-avcs-dedup.txt" >&2
 
 log 'teardown + cleanup (enforcing everywhere; temporary modules removed)'
