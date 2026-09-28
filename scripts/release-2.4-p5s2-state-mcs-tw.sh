@@ -1058,6 +1058,9 @@ mkdir -p "$WORK/ctx" "$WORK/export" "$WORK/probe" "$WORK/tools"
 # the production runtime_t:s0 shape — TE-isolated, not MCS-scoped).
 provision_tree() {
   local op="$1" cat="$2"
+  mkdir -p "$RUNTIME_ROOT/ops" 2>/dev/null || true
+  chown "$BUILDER_USER":"$BUILDER_USER" "$RUNTIME_ROOT/ops" 2>/dev/null || true
+  chmod 700 "$RUNTIME_ROOT/ops" 2>/dev/null || true
   mkdir -p "$RUNTIME_ROOT/ops/$op" "$STATE_ROOT/ops/$op/rootlesskit-state" "$STATE_ROOT/ops/$op/root"
   chown "$BUILDER_USER":"$BUILDER_USER" "$RUNTIME_ROOT/ops/$op" "$STATE_ROOT/ops/$op" \
         "$STATE_ROOT/ops/$op/rootlesskit-state" "$STATE_ROOT/ops/$op/root"
@@ -1166,7 +1169,7 @@ done
 cat "$EVIDENCE_DIR/c-launch-ready.txt" >&2
 if [ "$RB_READY" -ne 1 ]; then
   note "op B failed to reach readiness at s0:c2"
-  harvest_avcs_since "$(date +%s)" avc > "$EVIDENCE_DIR/c-launch-avcs.txt" 2>&1 || true
+  harvest_avcs_since "$(date +%s)" "$EVIDENCE_DIR/c-launch-avcs.txt"
   head -40 "$EVIDENCE_DIR/c-launch-avcs.txt" >&2 || true
   printf '%s P5S2-STATE-MCS-RESULT=INCOMPLETE (op B launch at c2 failed; recorded as a finding)\n' "$PREFIX" >&2
   exit 0
@@ -1598,6 +1601,7 @@ fi
   echo "launch ready: $A_READY"
   echo "trees converged after the abnormal termination: $X_OK"
   echo "runtime tree: $([ -e "$RUNTIME_ROOT/ops/$OPA6" ] && echo survives || echo removed)"
+harvest_avcs_since "$F_EPOCH" "$EVIDENCE_DIR/f6-abnormal-cleanup-avcs.txt"
 } > "$EVIDENCE_DIR/f6-abnormal-cleanup.txt" 2>&1
 journalctl -u "$UNIT" --since "@$F_EPOCH" --no-pager 2>/dev/null | tail -8 >> "$EVIDENCE_DIR/f6-abnormal-cleanup.txt" || true
 cat "$EVIDENCE_DIR/f6-abnormal-cleanup.txt" >&2
@@ -1614,14 +1618,23 @@ set -e
 cat "$EVIDENCE_DIR/f4-purge-result.txt" >&2
 
 log 'P: Part F — the startup purge over categorized trees (the real tree + planted fakes)'
-# Stop the stand's own flow first (the harness lifecycle); the manager's
-# startup purge then converges the categorized residue through the
-# unit-boundary contract (no pid file + no live owned process + the P4
-# unit boundary = removable residue).
+# Stop the stand's own flow first (the harness lifecycle; SIGKILL, so
+# the flow's own socket cleanup does not run). The purge window's AVCs
+# are harvested to attribute each removal outcome.
 pkill -KILL -f "rootlesskit --net=slirp4netns.*$OPB" 2>/dev/null || true
 pkill -KILL -f "buildkitd --rootless --root=$SB/root" 2>/dev/null || true
 pkill -KILL -f slirp4netns 2>/dev/null || true
 sleep 3
+PF_EPOCH="$(date +%s)"
+{
+  echo "=== Part F3 pre: the residue after the SIGKILLed flow ==="
+  find "$SB/rootlesskit-state" -maxdepth 1 -exec stat -c '%C %a %n' {} \; 2>/dev/null || true
+  echo "the flow's own cleanup authority (rootlesskit_t state_t:sock_file unlink, the granted shape):"
+} > "$EVIDENCE_DIR/f3-residue.txt" 2>&1
+timeout 60 runuser -u "$BUILDER_USER" -- runcon "$RK_C2" /usr/local/bin/map_probe \
+  --unlink "$SB/rootlesskit-state/api.sock" >> "$EVIDENCE_DIR/f3-residue.txt" 2>&1 < /dev/null || true
+harvest_avcs_since "$PF_EPOCH" "$EVIDENCE_DIR/f3-residue-avcs.txt"
+cat "$EVIDENCE_DIR/f3-residue.txt" >&2
 OPFAKE1="$(gen_op_id)"
 OPFAKE2="$(gen_op_id)"
 for pair in "$OPFAKE1:s0:c1" "$OPFAKE2:s0:c2"; do
@@ -1663,6 +1676,7 @@ sleep 3
   echo "the manager's purge journal:"
   journalctl -u "$UNIT" --since "@$RESTART_EPOCH" --no-pager 2>/dev/null | grep -a 'purge\|residue\|refus\|skipping' | head -20
 } > "$EVIDENCE_DIR/f3-purge-result.txt" 2>&1
+harvest_avcs_since "$PF_EPOCH" "$EVIDENCE_DIR/f3-purge-avcs.txt"
 cat "$EVIDENCE_DIR/f3-purge-result.txt" >&2
 
 # F5: the reuse check: the same fake id re-provisioned with a fresh
@@ -1683,8 +1697,8 @@ REUSE_LABEL="$(stat -c '%C' "$STATE_ROOT/ops/$OPFAKE2" 2>&1)"
 cat "$EVIDENCE_DIR/f5-reuse.txt" >&2
 
 log 'R: the final harvest + the leg summary'
-harvest_avcs_since "$HV_EPOCH" avc > "$EVIDENCE_DIR/h-avcs-all.txt" 2>&1 || true
-harvest_avcs_since "$HV_EPOCH" denied > "$EVIDENCE_DIR/h-denials-all.txt" 2>&1 || true
+harvest_avcs_since "$HV_EPOCH" "$EVIDENCE_DIR/h-avcs-all.txt"
+harvest_avcs_since "$HV_EPOCH" "$EVIDENCE_DIR/h-denials-all.txt"
 {
   echo "=== the residual AVC ledger (every denial in the leg windows, deduped) ==="
   awk '{for(i=1;i<=NF;i++) if($i=="scontext="||$i=="tcontext="||$i=="class="||$i=="perms=") o=o" "$i" "$(i+1); print o}' "$EVIDENCE_DIR/h-denials-all.txt" 2>/dev/null \
@@ -1705,8 +1719,8 @@ INVENTORY_BLOCK=$(awk '/every distinct scontext in the operation state tree:/{f=
 INVENTORY_C2=$(echo "$INVENTORY_BLOCK" | grep -c 'c2' || true)
 INVENTORY_NONC2=$(echo "$INVENTORY_BLOCK" | grep -vc 'c2' || true)
 OWN_OK=0
-grep -q 'READ .*rc=0' "$EVIDENCE_DIR/d-own-matrix.txt" && OWN_OK=$((OWN_OK+1))
-grep -q 'WRITE .*rc=0' "$EVIDENCE_DIR/d-own-matrix.txt" && OWN_OK=$((OWN_OK+1))
+grep -q 'READ .*errno=0' "$EVIDENCE_DIR/d-own-matrix.txt" && OWN_OK=$((OWN_OK+1))
+grep -q 'WRITE .*errno=0' "$EVIDENCE_DIR/d-own-matrix.txt" && OWN_OK=$((OWN_OK+1))
 grep -q 'UNLINK .*rc=0' "$EVIDENCE_DIR/d-own-matrix.txt" && OWN_OK=$((OWN_OK+1))
 BUILD_OK=0
 [ "$BUILD0_RC" = "0" ] && [ "$MARKER_OK0" = "1" ] && [ "$ID_OK0" = "1" ] && BUILD_OK=1
@@ -1718,7 +1732,10 @@ MANAGER_OK=0
 [ "$S_OK" = "1" ] && [ "$X_OK" = "1" ] && MANAGER_OK=$((MANAGER_OK+1))
 PURGE_OK=0
 grep -q 'unit active: yes' "$EVIDENCE_DIR/f3-purge-result.txt" \
-  && [ ! -e "$SB" ] && [ ! -e "$STATE_ROOT/ops/$OPFAKE1" ] && [ ! -e "$STATE_ROOT/ops/$OPFAKE2" ] && PURGE_OK=1
+  && [ ! -e "$SB" ] && [ ! -e "$RB" ] \
+  && [ ! -e "$STATE_ROOT/ops/$OPFAKE1" ] && [ ! -e "$STATE_ROOT/ops/$OPFAKE2" ] \
+  && grep -q 'fake c1 removed: yes' "$EVIDENCE_DIR/f3-purge-result.txt" \
+  && grep -q 'fake c2 removed: yes' "$EVIDENCE_DIR/f3-purge-result.txt" && PURGE_OK=1
 REUSE_OK=0
 grep -q 'fresh label is c1: yes' "$EVIDENCE_DIR/f5-reuse.txt" && REUSE_OK=1
 GUARDS_OK=0
