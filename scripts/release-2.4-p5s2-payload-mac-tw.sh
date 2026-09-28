@@ -602,7 +602,7 @@ HV_EPOCH="$(date +%s)"
   echo "slirp TLS-relay tcp send (slirp4netns_t tcp write) blocking, and the"
   echo "run-4..7 relabelto AVCs were solved as the u1==u2 relabelto"
   echo "constraint against unconfined_u harness context files (the"
-  "composition now labels them system_u like production's staged context)."
+  echo "composition now labels them system_u like production's staged context)."
   echo "=== manager RPC: START $OPH ==="
 } > "$EVIDENCE_DIR/e-attempt.txt"
 set +e
