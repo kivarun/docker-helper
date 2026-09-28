@@ -171,6 +171,18 @@ semodule_package -o /tmp/docker_helper.pp -m /tmp/docker_helper.tmp -f "$TRANSFE
 semodule -i /tmp/docker_helper.pp 2>>"$EVIDENCE_DIR/a-toolchain.txt" \
   || { note "semodule -i of the candidate module failed"; exit 1; }
 
+restorecon /usr/bin/rootlesskit /usr/bin/slirp4netns /usr/bin/newuidmap /usr/bin/newgidmap 2>>"$EVIDENCE_DIR/a-toolchain.txt" || true
+{
+  echo "=== binary labels ==="
+  for p in /usr/bin/rootlesskit /usr/bin/newuidmap /usr/bin/newgidmap /usr/libexec/docker-helper/buildkit/buildkitd; do
+    echo "$p -> $(stat -c '%C' "$p" 2>&1)"
+  done
+  echo "=== rootlesskit version ==="
+  /usr/bin/rootlesskit --version 2>&1 || true
+  echo "=== file capabilities (observed, never modified) ==="
+  getcap /usr/bin/newuidmap /usr/bin/newgidmap 2>&1 || true
+} >>"$EVIDENCE_DIR/a-toolchain.txt" 2>&1
+
 log 'A2: builder identity + REAL composition + pinned payload install'
 sh "$TRANSFERRED/provision-builder.sh" >"$EVIDENCE_DIR/a2-provision.txt" 2>&1 \
   || { note "provision-builder.sh failed"; exit 1; }
@@ -428,7 +440,6 @@ sleep 3
 harvest_avcs_since "$HV_EPOCH" "$EVIDENCE_DIR/f-harvest-avcs.txt"
 dedup_avcs "$EVIDENCE_DIR/f-harvest-avcs.txt" "$EVIDENCE_DIR/f-harvest-avcs-dedup.txt"
 {
-  cat "$EVIDENCE_DIR/f-harvest-build.txt"
   echo "=== the manager journal window ==="
   journalctl -u "$UNIT" --since "@$HV_EPOCH" --no-pager 2>/dev/null | tail -40 || true
 } >> "$EVIDENCE_DIR/f-harvest-build.txt"
