@@ -241,7 +241,7 @@ require {
 	class capability { setgid };
 	class cap_userns { chown dac_override dac_read_search fsetid net_admin setgid setpcap setuid sys_admin sys_chroot sys_ptrace };
 	class chr_file { ioctl open read unlink write };
-	class dir { add_name create getattr mounton open read remove_name rmdir search setattr write };
+	class dir { add_name create getattr mounton open read remove_name reparent rename rmdir search setattr write };
 	class fifo_file { create ioctl open read setattr unlink write };
 	class filesystem { getattr mount remount unmount };
 	class file { append create execute execute_no_trans getattr ioctl mounton open read relabelfrom relabelto rename setattr unlink write };
@@ -360,7 +360,7 @@ allow docker_helper_rootlesskit_t payload_buildkit_exec_t:file { execute execute
 
 # ---- buildkitd's own boot/runtime under --root in the state tree ----
 # content store, snapshotter metadata, runc state inside the state tree
-allow docker_helper_rootlesskit_t docker_helper_builder_state_t:dir { create getattr reparent rename rmdir setattr };
+allow docker_helper_rootlesskit_t docker_helper_builder_state_t:dir { create getattr rename reparent rmdir setattr };
 allow docker_helper_rootlesskit_t docker_helper_builder_state_t:file { append execute execute_no_trans getattr ioctl relabelfrom rename setattr unlink mounton open read write };
 allow docker_helper_rootlesskit_t docker_helper_builder_state_t:lnk_file { create getattr read setattr };
 allow docker_helper_rootlesskit_t docker_helper_builder_state_t:chr_file { unlink };
