@@ -21,30 +21,39 @@
 # payload module v12 loaded, production policy / manager / BuildKit
 # sources untouched).
 #
-# Legs:
+# Legs (the runs so far: run 1 = CI 36465937458 measured the snapshot
+# marker mutation landing cross-op with the cache-hit export ignoring it
+# (D4) and the blob write DAC-blocked (0444); run 2 = CI 36467005341
+# measured the blob candidate through the granted setattr authority —
+# the mutation landed and the export DETECTED it, fail-closed D3):
 #   Part A  state inventory: ops/<B>/root's real post-build content
 #           (path, size, mode, uid, scontext, sha256 per file) and the
-#           target selection: a content-store blob tied to a specific
-#           input/result by digest association with B's own export.
-#   Part B  baseline pair: B builds a deterministic marker build twice
-#           with no mutation; the export observations (per-layer blob
-#           bytes, manifest digests, the RUN marker inside the exported
-#           layer) must be identical, and the identity check (the
-#           exported layer member's bytes == the state-tree blob's
-#           bytes) proves WHICH state object B's export consumes.
+#           target selection: the snapshot file the RUN's fresh
+#           execution consumes (the FROM snapshot's /etc/passwd — read
+#           by the RUN's own `id`, NOT integrity-verified), with the
+#           digest-proven content blobs as the measured fallback class.
+#   Part B  baseline pair: B builds the nonce-0 Dockerfile twice with no
+#           mutation; the exported observables (the m2 file contents,
+#           the manifest digests, the layer blob bytes) must be stable,
+#           and the identity check (the exported layer member's bytes ==
+#           the state-tree blob's bytes) proves WHICH state object B's
+#           export consumes before anything is mutated.
 #   Part C  cross-op mutation: from op A's category (a rootlesskit_t:s0:c1
 #           vehicle — the G28-established instrument for A's flow
 #           domain, byte-identical TE authority to buildkitd A's own
-#           processes), one same-size in-place pwrite into the ONE
-#           chosen object of op B. Only candidate-policy-granted
-#           production-like access; no root write for the mutation; no
-#           new grants; B is never stopped; the mutation is proven by
-#           the vehicle's pwrite rc + read-back + the harness sha256.
-#   Part D  consumption proof: B rebuilds (cache-hit) and the export is
-#           compared against the baseline reports. Outcomes D1 (poisoned
-#           success), D2 (poisoned cache hit), D3 (integrity fail-closed),
-#           D4 (mutation ignored) are recorded per the task contract.
-#   Part E  paired own-op control: the blob is restored to its exact
+#           processes), one pwrite into the ONE chosen object of op B.
+#           Only candidate-policy-granted production-like access; no
+#           root write for the mutation; no new grants; B is never
+#           stopped; the mutation is proven by the vehicle's pwrite rc +
+#           read-back + the harness sha256.
+#   Part D  consumption proof: B rebuilds with a FRESH leg nonce (the
+#           RUN is a cache-missed execution over the live snapshot state;
+#           the FROM stays a cache hit over the same snapshot chain) and
+#           the export is compared against the pre-mutation consume
+#           baseline. Outcomes: POISONED-OUTPUT (D1/D2 — the FAIL
+#           boundary), D3 (integrity fail-closed), D4 (ignored),
+#           MUTATION-BLOCKED (the write never landed).
+#   Part E  paired own-op control: the object is restored to its exact
 #           baseline bytes (harness hygiene, recorded, B idle), the
 #           post-restore state is re-baselined, then B's OWN category
 #           (a rootlesskit_t:s0:c2 vehicle) performs the SAME mutation
@@ -730,19 +739,29 @@ cat "$EVIDENCE_DIR/e-processes.txt" >&2
 # and buildkitd's xattr-preserving local-context copy relabels the
 # snapshot copies to the source's label, so the state_t-labeled sources
 # keep the snapshot tree uniform and the manager's mandatory op cleanup
-# converges). The SAME context serves every leg — identical input is a
-# precondition of the paired attribution.
+# converges).
+#
+# ONE context dir, ONE Dockerfile, rewritten per leg with a leg nonce:
+# the Part B baseline pair uses the SAME nonce-0 Dockerfile twice (the
+# repeat cache-hits the RUN and re-exports the cached result — the
+# determinism + stability record); the CONSUME builds rewrite the nonce
+# (the RUN vertex becomes a cache MISS — a fresh runc execution that
+# READS op B's live FROM-snapshot state) while the FROM vertex stays a
+# cache HIT over the same live snapshot chain the mutation legs target.
 CTX="$WORK/ctx"
 mkdir -p "$CTX"
-cat > "$CTX/Dockerfile" <<'EOF'
+write_consume_dockerfile() { # nonce — rewrites the Dockerfile (label persists)
+  cat > "$CTX/Dockerfile" <<EOF
 FROM alpine:3.20
-RUN mkdir -p /m1 && echo p5s2-g29-marker > /m1/marker.txt && cat /proc/self/uid_map > /m1/uid_map.txt && id > /m1/id.txt
+RUN mkdir -p /m2 && echo p5s2-g29-nonce-$1 > /m2/nonce.txt && id > /m2/id.txt && echo p5s2-g29-marker2 > /m2/marker.txt && cat /proc/self/uid_map > /m2/uid_map.txt
 EOF
+}
+write_consume_dockerfile 0
 chcon -u system_u -t docker_helper_builder_state_t "$CTX" "$CTX/Dockerfile"
 {
   echo "=== the context files' labels after the system_u/state_t chcon ==="
   stat -c '%C %U:%G %n' "$CTX" "$CTX/Dockerfile" 2>&1
-  echo "=== the build input (identical for every leg) ==="
+  echo "=== the build input (leg nonce 0; identical for the Part B pair) ==="
   sha256sum "$CTX/Dockerfile"
   cat "$CTX/Dockerfile"
 } > "$EVIDENCE_DIR/e-ctx-labels.txt" 2>&1
@@ -750,11 +769,11 @@ cat "$EVIDENCE_DIR/e-ctx-labels.txt" >&2
 mkdir -p "$WORK/docker-config" "$WORK/export" "$WORK/reports" "$WORK/backup" "$WORK/tools" "$WORK/probe"
 echo '{}' > "$WORK/docker-config/config.json"
 
-do_build() { # sock dest logpath — caller wraps with set +e/set -e and reads $BUILD_RC
+do_build() { # sock dest logpath ctxdir — caller wraps with set +e/set -e and reads $BUILD_RC
   DOCKER_CONFIG="$WORK/docker-config" timeout 300 "$BUILDCTL" \
     --addr "unix://$1" build \
     --progress=plain --frontend=dockerfile.v0 \
-    --local "context=$CTX" --local "dockerfile=$CTX" \
+    --local "context=$4" --local "dockerfile=$4" \
     --output "type=docker,name=p5s2g29:poison,dest=$2" \
     > "$3" 2>&1
   BUILD_RC=$?
@@ -801,7 +820,10 @@ if manifest_raw is not None:
             try:
                 with tarfile.open(fileobj=io.BytesIO(data), mode='r:*') as lt:
                     for lm in lt.getmembers():
-                        if lm.name in ('m1/marker.txt', './m1/marker.txt'):
+                        n = lm.name
+                        if n.startswith('./'):
+                            n = n[2:]
+                        if n.startswith('m1/') or n.startswith('m2/'):
                             marker.append({'layer': name, 'name': lm.name,
                                            'content': lt.extractfile(lm).read().decode(errors='replace')})
             except Exception as e:
@@ -857,16 +879,22 @@ for n in sorted(set(r['by_name']) | set(b['by_name'])):
 # immune to an inner-tar parse error on a poisoned layer)
 def mcontents(rep):
     return sorted(m['content'] for m in rep.get('marker', []) if 'content' in m)
+def idcontents(rep):
+    return sorted(m['content'] for m in rep.get('marker', [])
+                  if 'content' in m and m['name'].lstrip('./').endswith('id.txt'))
 mc_b, mc_r = mcontents(b), mcontents(r)
 marker_changed = mc_b != mc_r
-if kind == 'snapshot-marker':
-    relevant = 'CHANGED' if (marker_changed or poison_in) else 'UNCHANGED'
+id_changed = idcontents(b) != idcontents(r)
+if kind in ('snapshot-marker', 'snapshot-data'):
+    relevant = 'CHANGED' if (marker_changed or id_changed or poison_in) else 'UNCHANGED'
 else:
     rn = 'blobs/sha256/' + hexd
     relevant = 'CHANGED' if (rn in changed or rn in poison_in) else 'UNCHANGED'
 lines = ['CHANGED_MEMBERS=%s' % changed, 'POISON_FOUND_IN=%s' % poison_in,
          'MARKER_CONTENT_BEFORE=%s' % mc_b, 'MARKER_CONTENT_AFTER=%s' % mc_r,
          'MARKER_CONTENT_CHANGED=%s' % marker_changed,
+         'ID_CONTENT_BEFORE=%s' % idcontents(b), 'ID_CONTENT_AFTER=%s' % idcontents(r),
+         'ID_CONTENT_CHANGED=%s' % id_changed,
          'RELEVANT=%s' % relevant]
 open(out, 'w').write('\n'.join(lines) + '\n')
 print('CLASSIFY CHANGED=%d POISON=%d MARKERCHG=%d RELEVANT=%s' % (1 if changed else 0, 1 if poison_in else 0, 1 if marker_changed else 0, relevant))
@@ -879,11 +907,12 @@ PYEOF
 } > "$EVIDENCE_DIR/e-tools.txt" 2>&1
 
 log 'F: op A builds first (A is a genuine live builder operation)'
+write_consume_dockerfile 0
 {
-  echo "=== op A's baseline build (buildctl -> $RA_SOCK) ==="
+  echo "=== op A's baseline build (buildctl -> $RA_SOCK, the consume shape) ==="
 } > "$EVIDENCE_DIR/e-build-a.txt"
 set +e
-do_build "$RA_SOCK" "$WORK/export/out-a.tar" "$EVIDENCE_DIR/e-build-a.txt"
+do_build "$RA_SOCK" "$WORK/export/out-a.tar" "$EVIDENCE_DIR/e-build-a.txt" "$CTX"
 A_BUILD_RC=$BUILD_RC
 set -e
 echo "op A build rc: $A_BUILD_RC" >&2
@@ -892,10 +921,10 @@ python3 "$WORK/tools/tar_report.py" "$WORK/export/out-a.tar" "$WORK/reports/a.js
 
 log 'G: Part B baseline — op B build 1 (the deterministic marker build)'
 {
-  echo "=== op B baseline build 1 (buildctl -> $RB_SOCK) ==="
+  echo "=== op B baseline build 1 (buildctl -> $RB_SOCK, nonce 0; COLD: the pull + the fresh RUN) ==="
 } > "$EVIDENCE_DIR/b1-build.txt"
 set +e
-do_build "$RB_SOCK" "$WORK/export/out-b1.tar" "$EVIDENCE_DIR/b1-build.txt"
+do_build "$RB_SOCK" "$WORK/export/out-b1.tar" "$EVIDENCE_DIR/b1-build.txt" "$CTX"
 B1_RC=$BUILD_RC
 set -e
 echo "op B build 1 rc: $B1_RC" >&2
@@ -936,19 +965,28 @@ cat "$EVIDENCE_DIR/h-inventory.txt" >&2
 # Digest association: B's own export names the layer/config digests; the
 # state tree holds the ingested/materialized content objects under those
 # digests. The association (manifest digest -> state-tree path) is what
-# ties the chosen object to a specific input/result.
+# ties the chosen object to a specific input/result. The snapshot-side
+# candidates: the FROM snapshot's /etc/passwd (consumed by the RUN's own
+# execution — `id` resolves the uid name from it — and NOT integrity-
+# verified: unpacked filesystem files carry no digest checks) and the RUN
+# snapshot's own marker file (the run-1 candidate, whose D4 covered only
+# the cache-hit export path).
 L_CONFIG_HEX="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("config","").split("/")[-1])' "$WORK/reports/b1.json" 2>/dev/null || true)"
 L1_HEX="$(python3 -c 'import json,sys;ls=json.load(open(sys.argv[1])).get("layers",[]);print(ls[0].split("/")[-1] if len(ls)>0 else "")' "$WORK/reports/b1.json" 2>/dev/null || true)"
 L2_HEX="$(python3 -c 'import json,sys;ls=json.load(open(sys.argv[1])).get("layers",[]);print(ls[1].split("/")[-1] if len(ls)>1 else "")' "$WORK/reports/b1.json" 2>/dev/null || true)"
 BLOB_L1="$(find "$SB/root" -type f -name "$L1_HEX" 2>/dev/null | head -1 || true)"
 BLOB_L2="$(find "$SB/root" -type f -name "$L2_HEX" 2>/dev/null | head -1 || true)"
-SNAPMARK="$(find "$SB/root" -type f -path '*/m1/marker.txt' 2>/dev/null | head -1 || true)"
+SNAPPASSWD="$(find "$SB/root/runc-overlayfs/snapshots" -type f -path '*/fs/etc/passwd' 2>/dev/null | head -1 || true)"
+SNAPMARK="$(find "$SB/root" -type f -path '*/m2/marker.txt' 2>/dev/null | head -1 || true)"
 {
   echo "=== the digest association (manifest digest -> state-tree object) ==="
   echo "config digest:     sha256:$L_CONFIG_HEX"
   echo "layer 1 (FROM):    sha256:$L1_HEX  -> ${BLOB_L1:-NOT-FOUND-IN-TREE}"
   echo "layer 2 (RUN):     sha256:$L2_HEX  -> ${BLOB_L2:-NOT-FOUND-IN-TREE}"
-  echo "snapshot marker file (the RUN step's own output inside the snapshotter): ${SNAPMARK:-NOT-FOUND}"
+  echo "FROM-snapshot /etc/passwd (consumed by every fresh RUN execution; unverified): ${SNAPPASSWD:-NOT-FOUND}"
+  [ -n "$SNAPPASSWD" ] && echo "  passwd file: $(stat -c '%C %U:%G %a %s' "$SNAPPASSWD" 2>&1) sha=$(sha256sum "$SNAPPASSWD" | awk '{print $1}')"
+  [ -n "$SNAPPASSWD" ] && echo "  passwd content:" && cat "$SNAPPASSWD"
+  echo "RUN-snapshot marker file (the run-1 candidate): ${SNAPMARK:-NOT-FOUND}"
   [ -n "$BLOB_L1" ] && echo "  blob 1 store invariant (content sha == digest name): $(sha256sum "$BLOB_L1" | awk '{print $1}')"
   [ -n "$BLOB_L2" ] && echo "  blob 2 store invariant (content sha == digest name): $(sha256sum "$BLOB_L2" | awk '{print $1}')"
 } > "$EVIDENCE_DIR/h-digest-association.txt" 2>&1
@@ -1209,7 +1247,7 @@ log 'J: Part B — op B build 2 (the no-mutation repeat: stability + consumption
   echo "=== op B baseline build 2 (IDENTICAL input, NO mutation between builds) ==="
 } > "$EVIDENCE_DIR/b2-build.txt"
 set +e
-do_build "$RB_SOCK" "$WORK/export/out-b2.tar" "$EVIDENCE_DIR/b2-build.txt"
+do_build "$RB_SOCK" "$WORK/export/out-b2.tar" "$EVIDENCE_DIR/b2-build.txt" "$CTX"
 B2_RC=$BUILD_RC
 set -e
 echo "op B build 2 rc: $B2_RC" >&2
@@ -1275,18 +1313,29 @@ lines.append('marker_contents_equal=%s (content=%s)' % (marker_equal, mc_a))
 lines.append('BASELINE_STABLE=%s' % ('YES' if marker_equal and manifest_equal else 'NO'))
 print('\n'.join(lines))
 PYEOF
-cp "$WORK/reports/b1.json" "$WORK/reports/baseline.json"
 BASELINE_STABLE="$(grep -o 'BASELINE_STABLE=[A-Z]*' "$EVIDENCE_DIR/b-baseline-compare.txt" | cut -d= -f2 || true)"
 cat "$EVIDENCE_DIR/b-baseline-compare.txt" >&2
 echo "baseline stable: $BASELINE_STABLE" >&2
 
-# Target selection (the task's preference order: a content-store blob
-# tied to a specific input/result first, a snapshot file second). The
-# identity checks decide which object B's export actually consumes.
+# Target selection for THIS run (the measured state so far: run 1
+# measured the cache-hit export path — the export consumes ONLY the
+# digest-named content blobs (both identity checks True) and the RUN
+# snapshot marker's mutation was invisible to it (D4); run 2 measured
+# the blob candidate through the granted setattr authority (the owner
+# chmod dance inside the vehicle): the mutation landed and the export
+# DETECTED it (fail-closed D3). The remaining justified candidate is
+# the OTHER consumption path of the writable snapshot files: the RUN's
+# fresh execution reads op B's live FROM-snapshot files inside the
+# container — /etc/passwd is consumed by the RUN's own `id` (unpacked
+# filesystem files carry NO digest checks). The consume builds use the
+# leg-nonce Dockerfile (the RUN is a fresh cache-missed execution; the
+# FROM stays a cache hit over the same live snapshot chain).
 TARGET_KIND=""
 TARGET_PATH=""
 TARGET_HEX=""
-if [ -n "$BLOB_L1" ] && grep -q 'IDENTITY1_BLOB_CONSUMED=True' "$EVIDENCE_DIR/h-identity-checks.txt"; then
+if [ -n "$SNAPPASSWD" ]; then
+  TARGET_KIND="snapshot-data"; TARGET_PATH="$SNAPPASSWD"; TARGET_HEX=""
+elif [ -n "$BLOB_L1" ] && grep -q 'IDENTITY1_BLOB_CONSUMED=True' "$EVIDENCE_DIR/h-identity-checks.txt"; then
   TARGET_KIND="blob-l1"; TARGET_PATH="$BLOB_L1"; TARGET_HEX="$L1_HEX"
 elif [ -n "$BLOB_L2" ] && grep -q 'IDENTITY2_BLOB_CONSUMED=True' "$EVIDENCE_DIR/h-identity-checks.txt"; then
   TARGET_KIND="blob-l2"; TARGET_PATH="$BLOB_L2"; TARGET_HEX="$L2_HEX"
@@ -1302,13 +1351,15 @@ else
   exit 0
 fi
 TARGET_SIZE="$(stat -c '%s' "$TARGET_PATH" 2>/dev/null || echo 0)"
-if [ "$TARGET_KIND" = "snapshot-marker" ]; then
-  POISON_USE="$(printf '%s' "$POISON_FULL" | head -c "$TARGET_SIZE")"
-  OFFSET_USE=0
-else
-  if [ "$TARGET_SIZE" -gt 2097152 ]; then OFFSET_USE=1048576; else OFFSET_USE=$((TARGET_SIZE / 2)); fi
-  POISON_USE="$POISON_FULL"
-fi
+case "$TARGET_KIND" in
+  snapshot-data)
+    POISON_USE="g29p"; OFFSET_USE=0 ;;
+  snapshot-marker)
+    POISON_USE="$(printf '%s' "$POISON_FULL" | head -c "$TARGET_SIZE")"; OFFSET_USE=0 ;;
+  *)
+    if [ "$TARGET_SIZE" -gt 2097152 ]; then OFFSET_USE=1048576; else OFFSET_USE=$((TARGET_SIZE / 2)); fi
+    POISON_USE="$POISON_FULL" ;;
+esac
 BASELINE_TARGET_SHA="$(sha256sum "$TARGET_PATH" | awk '{print $1}')"
 cp -a "$TARGET_PATH" "$WORK/backup/target.baseline"
 BACKUP_SHA="$(sha256sum "$WORK/backup/target.baseline" | awk '{print $1}')"
@@ -1319,14 +1370,44 @@ BACKUP_SHA="$(sha256sum "$WORK/backup/target.baseline" | awk '{print $1}')"
   echo "SELinux label: $(stat -c '%C' "$TARGET_PATH" 2>&1)"
   echo "owner/mode/size: $(stat -c '%U:%G %a %s' "$TARGET_PATH" 2>&1)"
   echo "digest (logical identity): sha256:$TARGET_HEX"
-  echo "file content sha256: $BASELINE_TARGET_SHA (digest-named store invariant: $([ "$BASELINE_TARGET_SHA" = "$TARGET_HEX" ] && echo holds || echo BROKEN))"
-  echo "produced by: $([ "$TARGET_KIND" = "snapshot-marker" ] && echo 'the RUN step (the runc container wrote /m1/marker.txt into its snapshot)' || echo 'the FROM alpine:3.20 pull ingested this layer blob into the content store (input-tied)')"
-  echo "consumed by: B's export of every subsequent rebuild (the identity check proves the exported layer member's bytes equal this object's bytes)"
+  echo "file content sha256: $BASELINE_TARGET_SHA"
+  case "$TARGET_KIND" in
+    snapshot-data)
+      echo "produced by: the FROM alpine:3.20 layer unpacked into the FROM snapshot (the snapshotter's extracted filesystem)"
+      echo "consumed by: every FRESH RUN execution of op B (the RUN's runc container mounts the live FROM snapshot as its rootfs base; the RUN's \`id\` resolves uid 0's name from /etc/passwd; unpacked snapshot files carry NO digest verification — the identity checks above prove the EXPORT path consumes only the content blobs, which leaves the RUN-execution path as the unmeasured consumption surface)"
+      echo "poison effect claimed: the RUN's id.txt output would name uid 0 as 'g29p' — A's data inside B's trusted consumption path" ;;
+    snapshot-marker)
+      echo "produced by: the RUN step (the runc container wrote /m2/marker.txt into its snapshot)"
+      echo "consumed by: NOT the cache-hit export (run 1's D4); measured here for the completeness of the snapshot class" ;;
+    *)
+      echo "produced by: the FROM alpine:3.20 pull ingested this layer blob into the content store (input-tied)"
+      echo "consumed by: B's export of every subsequent rebuild (the identity check proves the exported layer member's bytes equal this object's bytes); run 2 measured this class: the export verifies the digest at the consumption point and fails closed (D3)" ;;
+  esac
   echo "backup saved: $WORK/backup/target.baseline sha=$BACKUP_SHA (harness read; the restore between legs is the only root write on the target and is recorded)"
-  echo "poison payload: $POISON_USE (unique per run)"
+  echo "poison payload: $POISON_USE"
   echo "poison offset: $OFFSET_USE"
 } > "$EVIDENCE_DIR/h-target-selection.txt" 2>&1
 cat "$EVIDENCE_DIR/h-target-selection.txt" >&2
+
+log 'K: the pre-mutation consume baseline (a fresh RUN over the LIVE state)'
+CONSUME_LEG=1
+write_consume_dockerfile "$CONSUME_LEG"
+{
+  echo "=== op B consume-baseline build (nonce $CONSUME_LEG; a FRESH RUN execution pre-mutation) ==="
+} > "$EVIDENCE_DIR/b3-build.txt"
+set +e
+do_build "$RB_SOCK" "$WORK/export/out-b3.tar" "$EVIDENCE_DIR/b3-build.txt" "$CTX"
+B3_RC=$BUILD_RC
+set -e
+echo "op B consume-baseline rc: $B3_RC" >&2
+python3 "$WORK/tools/tar_report.py" "$WORK/export/out-b3.tar" "$WORK/reports/b3.json" "" \
+  > "$EVIDENCE_DIR/b3-report-run.txt" 2>&1 || true
+if [ "$B3_RC" != 0 ] || [ ! -s "$WORK/export/out-b3.tar" ]; then
+  note "the consume-baseline build failed; the experiment cannot proceed"
+  printf '%s P5S2-STATE-POISON-RESULT=INCOMPLETE (consume baseline failed; recorded as a finding)\n' "$PREFIX" >&2
+  exit 0
+fi
+cp "$WORK/reports/b3.json" "$WORK/reports/baseline-id.json"
 
 # measure_candidate KIND PATH HEX POISON OFFSET LOGPREFIX
 # One paired measurement round on ONE object: cross-op mutation (A's c1
@@ -1360,19 +1441,25 @@ measure_candidate() { # $1=kind $2=path $3=hex $4=poison $5=offset $6=logprefix
   harvest_avcs_since "$MUT_EPOCH" "$EVIDENCE_DIR/$LP-cross-mutation-avcs.txt"
   echo "cross-op mutation AVC window (an allowed write shows no denial; dontaudit is off)" >> "$EVIDENCE_DIR/$LP-cross-mutation.txt"
   DENIALS="$(grep -a 'avc:.*denied' "$EVIDENCE_DIR/$LP-cross-mutation-avcs.txt" 2>/dev/null | wc -l || true)"
-  echo "denial-record-count in the mutation window: ${DENIALS:-0}" >> "$EVIDENCE_DIR/$LP-cross-mutation.txt"  cat "$EVIDENCE_DIR/$LP-cross-mutation.txt" >&2
-  # Part D: the consumption proof (B rebuilds; cache hit; export).
+  echo "denial-record-count in the mutation window: ${DENIALS:-0}" >> "$EVIDENCE_DIR/$LP-cross-mutation.txt"
+  cat "$EVIDENCE_DIR/$LP-cross-mutation.txt" >&2
+  # Part D: the consumption proof (B rebuilds; the RUN is a fresh
+  # cache-missed execution over the LIVE snapshot state; the FROM stays a
+  # cache hit over the same snapshot chain).
+  CONSUME_LEG=$((CONSUME_LEG + 1))
+  write_consume_dockerfile "$CONSUME_LEG"
+  echo "consume leg nonce: $CONSUME_LEG (the RUN's fresh cache-missed execution)" >> "$EVIDENCE_DIR/$LP-cross-mutation.txt"
   {
     echo "=== the consumption build (Part D): B rebuilds after the cross-op mutation ==="
   } > "$EVIDENCE_DIR/$LP-build3.txt"
   set +e
-  do_build "$RB_SOCK" "$WORK/export/out-$LP-3.tar" "$EVIDENCE_DIR/$LP-build3.txt"
+  do_build "$RB_SOCK" "$WORK/export/out-$LP-3.tar" "$EVIDENCE_DIR/$LP-build3.txt" "$CTX"
   CROSS_BUILD_RC=$BUILD_RC
   set -e
   echo "cross-op consumption build rc: $CROSS_BUILD_RC" >&2
   python3 "$WORK/tools/tar_report.py" "$WORK/export/out-$LP-3.tar" "$WORK/reports/$LP-3.json" "$PST" \
     > "$EVIDENCE_DIR/$LP-3-report-run.txt" 2>&1 || true
-  python3 "$WORK/tools/classify_leg.py" "$WORK/reports/baseline.json" "$WORK/reports/$LP-3.json" \
+  python3 "$WORK/tools/classify_leg.py" "$WORK/reports/baseline-id.json" "$WORK/reports/$LP-3.json" \
     "$KIND" "$PST" "$EVIDENCE_DIR/$LP-cross-compare.txt" "$THEX" \
     > "$EVIDENCE_DIR/$LP-cross-compare-run.txt" 2>&1 || true
   cat "$EVIDENCE_DIR/$LP-cross-compare.txt" >&2
@@ -1384,7 +1471,7 @@ measure_candidate() { # $1=kind $2=path $3=hex $4=poison $5=offset $6=logprefix
     ROUND_CROSS_OUTCOME="MUTATION-BLOCKED"
   elif [ "$CROSS_BUILD_RC" = 0 ]; then
     if [ "$CROSS_RELEVANT" = "CHANGED" ] || [ "$CROSS_POISON_ANY" = "1" ]; then
-      ROUND_CROSS_OUTCOME="D2-POISONED-OUTPUT"
+      ROUND_CROSS_OUTCOME="POISONED-OUTPUT"
     else
       ROUND_CROSS_OUTCOME="D4-IGNORED"
     fi
@@ -1399,17 +1486,19 @@ measure_candidate() { # $1=kind $2=path $3=hex $4=poison $5=offset $6=logprefix
     echo "restore digest matches the baseline: $([ "$(sha256sum "$TPATH" | awk '{print $1}')" = "$BASELINE_TARGET_SHA" ] && echo yes || echo no)"
   } > "$EVIDENCE_DIR/$LP-restore.txt"
   cat "$EVIDENCE_DIR/$LP-restore.txt" >&2
+  CONSUME_LEG=$((CONSUME_LEG + 1))
+  write_consume_dockerfile "$CONSUME_LEG"
   {
-    echo "=== the post-restore stability build (the restored state re-baselined) ==="
+    echo "=== the post-restore stability build (the restored state re-baselined; nonce $CONSUME_LEG) ==="
   } > "$EVIDENCE_DIR/$LP-build3b.txt"
   set +e
-  do_build "$RB_SOCK" "$WORK/export/out-$LP-3b.tar" "$EVIDENCE_DIR/$LP-build3b.txt"
+  do_build "$RB_SOCK" "$WORK/export/out-$LP-3b.tar" "$EVIDENCE_DIR/$LP-build3b.txt" "$CTX"
   RESTORE_BUILD_RC=$BUILD_RC
   set -e
   echo "post-restore build rc: $RESTORE_BUILD_RC" >&2
   python3 "$WORK/tools/tar_report.py" "$WORK/export/out-$LP-3b.tar" "$WORK/reports/$LP-3b.json" "$PST" \
     > "$EVIDENCE_DIR/$LP-3b-report-run.txt" 2>&1 || true
-  python3 "$WORK/tools/classify_leg.py" "$WORK/reports/baseline.json" "$WORK/reports/$LP-3b.json" \
+  python3 "$WORK/tools/classify_leg.py" "$WORK/reports/baseline-id.json" "$WORK/reports/$LP-3b.json" \
     "$KIND" "$PST" "$EVIDENCE_DIR/$LP-restore-compare.txt" "$THEX" \
     > "$EVIDENCE_DIR/$LP-restore-compare-run.txt" 2>&1 || true
   # the own-op control (Part E): B's OWN category, the SAME object, the SAME method
@@ -1430,17 +1519,19 @@ measure_candidate() { # $1=kind $2=path $3=hex $4=poison $5=offset $6=logprefix
   } >> "$EVIDENCE_DIR/$LP-own-mutation.txt"
   harvest_avcs_since "$OWNMUT_EPOCH" "$EVIDENCE_DIR/$LP-own-mutation-avcs.txt"
   cat "$EVIDENCE_DIR/$LP-own-mutation.txt" >&2
+  CONSUME_LEG=$((CONSUME_LEG + 1))
+  write_consume_dockerfile "$CONSUME_LEG"
   {
-    echo "=== the own-op consumption build ==="
+    echo "=== the own-op consumption build (nonce $CONSUME_LEG) ==="
   } > "$EVIDENCE_DIR/$LP-build4.txt"
   set +e
-  do_build "$RB_SOCK" "$WORK/export/out-$LP-4.tar" "$EVIDENCE_DIR/$LP-build4.txt"
+  do_build "$RB_SOCK" "$WORK/export/out-$LP-4.tar" "$EVIDENCE_DIR/$LP-build4.txt" "$CTX"
   OWN_BUILD_RC=$BUILD_RC
   set -e
   echo "own-op consumption build rc: $OWN_BUILD_RC" >&2
   python3 "$WORK/tools/tar_report.py" "$WORK/export/out-$LP-4.tar" "$WORK/reports/$LP-4.json" "$PST" \
     > "$EVIDENCE_DIR/$LP-4-report-run.txt" 2>&1 || true
-  python3 "$WORK/tools/classify_leg.py" "$WORK/reports/baseline.json" "$WORK/reports/$LP-4.json" \
+  python3 "$WORK/tools/classify_leg.py" "$WORK/reports/baseline-id.json" "$WORK/reports/$LP-4.json" \
     "$KIND" "$PST" "$EVIDENCE_DIR/$LP-own-compare.txt" "$THEX" \
     > "$EVIDENCE_DIR/$LP-own-compare-run.txt" 2>&1 || true
   cat "$EVIDENCE_DIR/$LP-own-compare.txt" >&2
@@ -1450,7 +1541,7 @@ measure_candidate() { # $1=kind $2=path $3=hex $4=poison $5=offset $6=logprefix
     ROUND_OWN_OUTCOME="MUTATION-BLOCKED"
   elif [ "$OWN_BUILD_RC" = 0 ]; then
     if [ "$OWN_RELEVANT" = "CHANGED" ] || [ "$OWN_POISON_ANY" = "1" ]; then
-      ROUND_OWN_OUTCOME="D2-POISONED-OUTPUT"
+      ROUND_OWN_OUTCOME="POISONED-OUTPUT"
     else
       ROUND_OWN_OUTCOME="D4-IGNORED"
     fi
@@ -1483,7 +1574,7 @@ MEASURED_PATHS=""
 for ROUND in 1 2 3; do
   case "$ROUND" in
     1) R_KIND="$TARGET_KIND"; R_PATH="$TARGET_PATH"; R_HEX="$TARGET_HEX" ;;
-    2) R_KIND="blob-l2"; R_PATH="$BLOB_L2"; R_HEX="$L2_HEX" ;;
+    2) R_KIND="blob-l1"; R_PATH="$BLOB_L1"; R_HEX="$L1_HEX" ;;
     3) R_KIND="snapshot-marker"; R_PATH="$SNAPMARK"; R_HEX="$L2_HEX" ;;
   esac
   if [ -z "$R_PATH" ]; then
@@ -1502,6 +1593,10 @@ for ROUND in 1 2 3; do
     POISON_USE="$(printf '%s' "$POISON_FULL" | head -c "$TARGET_SIZE")"
     if [ "$R_KIND" = "snapshot-marker" ]; then
       OFFSET_USE=0
+      POISON_USE="$(printf '%s' "$POISON_FULL" | head -c "$TARGET_SIZE")"
+    elif [ "$R_KIND" = "snapshot-data" ]; then
+      OFFSET_USE=0
+      POISON_USE="g29p"
     elif [ "$TARGET_SIZE" -gt 2097152 ]; then OFFSET_USE=1048576; else OFFSET_USE=$((TARGET_SIZE / 2)); fi
     BASELINE_TARGET_SHA="$(sha256sum "$R_PATH" | awk '{print $1}')"
     cp -a "$R_PATH" "$WORK/backup/target.baseline"
@@ -1521,11 +1616,12 @@ for ROUND in 1 2 3; do
   measure_candidate "$R_KIND" "$R_PATH" "$R_HEX" "$POISON_USE" "$OFFSET_USE" "r$ROUND"
   FINAL_CROSS_OUTCOME="$ROUND_CROSS_OUTCOME"
   FINAL_OWN_OUTCOME="$ROUND_OWN_OUTCOME"
+  FINAL_CROSS_DENIALS="${DENIALS:-0}"
   case "$ROUND_CROSS_OUTCOME" in
-    D2-POISONED-OUTPUT|D3-FAILCLOSED) break ;;
+    POISONED-OUTPUT|D3-FAILCLOSED) break ;;
   esac
   case "$ROUND_OWN_OUTCOME" in
-    D2-POISONED-OUTPUT|D3-FAILCLOSED) break ;;
+    POISONED-OUTPUT|D3-FAILCLOSED) break ;;
   esac
 done
 
@@ -1644,13 +1740,13 @@ dedup_avcs "$EVIDENCE_DIR/m-residual-avcs.txt" "$EVIDENCE_DIR/m-residual-avcs-de
   echo "stand: SELinux Enforcing; candidate module v12 loaded UNCHANGED; G26 MCS delta loaded;"
   echo "       dontaudit off for the whole window; REAL manager + REAL rootlesskit + pinned BuildKit v0.33.0"
   echo "op A: $OPA; op B: $OPB (both REAL manager operations, concurrent, at the ceiling)"
-  echo "input: identical context + Dockerfile for every leg (sha: $(sha256sum "$CTX/Dockerfile" | awk '{print $1}'))"
-  echo "op A baseline build rc: ${A_BUILD_RC:-NA}; op B build 1 rc: ${B1_RC:-NA}; build 2 rc: ${B2_RC:-NA}"
+  echo "input: one Dockerfile rewritten per leg with a nonce (the RUN is a fresh cache-missed execution; the FROM stays a cache hit over the live snapshot chain); nonce-0 pair sha: $(sha256sum "$CTX/Dockerfile" | awk '{print $1}')"
+  echo "op A baseline build rc: ${A_BUILD_RC:-NA}; op B build 1 rc: ${B1_RC:-NA}; build 2 rc: ${B2_RC:-NA}; consume-baseline rc: ${B3_RC:-NA}"
   echo "baseline stable (build 1 vs build 2, no mutation): $BASELINE_STABLE"
   echo "measured candidate (round kind): $FINAL_ROUND"
   echo "measured target: kind=$FINAL_TARGET_KIND path=$FINAL_TARGET_PATH baseline_sha=$FINAL_TARGET_SHA"
   echo "consumption-path identity (export member bytes == tree blob bytes): $(grep 'IDENTITY.*_BLOB_CONSUMED' "$EVIDENCE_DIR/h-identity-checks.txt" 2>/dev/null | tr '\n' '; ' || true)"
-  echo "cross-op mutation: vehicle rc=${CROSS_WRITE_RC:-NA} (POISON-READBACK match in $FINAL_LP-cross-mutation.txt)"
+  echo "cross-op mutation: vehicle rc=${CROSS_WRITE_RC:-NA} (POISON-READBACK match in $FINAL_LP-cross-mutation.txt; deny-count in the window: $FINAL_CROSS_DENIALS)"
   echo "cross-op consumption build rc: ${CROSS_BUILD_RC:-NA}; outcome: ${FINAL_CROSS_OUTCOME:-NONE}"
   echo "own-op mutation: vehicle rc=${OWN_WRITE_RC:-NA}; consumption build rc: ${OWN_BUILD_RC:-NA}; outcome: ${FINAL_OWN_OUTCOME:-NONE}"
   echo "round outcome record: ${ROUND_OUTCOME:-NONE}"
@@ -1683,11 +1779,11 @@ semodule -l 2>/dev/null | grep -E 'docker_helper|gidmap|payload' > "$EVIDENCE_DI
 
 # the terminal measured outcome (the report assigns the verdict)
 RESULT_LINE="INCOMPLETE"
-if [ "${FINAL_CROSS_OUTCOME:-}" = "D2-POISONED-OUTPUT" ]; then
+if [ "${FINAL_CROSS_OUTCOME:-}" = "POISONED-OUTPUT" ]; then
   RESULT_LINE="POISONED-OUTPUT"
 elif [ "${FINAL_CROSS_OUTCOME:-}" = "D3-FAILCLOSED" ]; then
   RESULT_LINE="FAIL-CLOSED"
-elif [ "${FINAL_CROSS_OUTCOME:-}" = "D4-IGNORED" ] && [ "${FINAL_OWN_OUTCOME:-}" = "D2-POISONED-OUTPUT" ]; then
+elif [ "${FINAL_CROSS_OUTCOME:-}" = "D4-IGNORED" ] && [ "${FINAL_OWN_OUTCOME:-}" = "POISONED-OUTPUT" ]; then
   RESULT_LINE="INCONCLUSIVE"
 elif [ "${FINAL_CROSS_OUTCOME:-}" = "D4-IGNORED" ]; then
   RESULT_LINE="IGNORED"
