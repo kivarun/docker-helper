@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 #
 # Guest-side P5-S2g28 BuildKit payload MAC closure for openSUSE
-# Tumbleweed. INVESTIGATION ONLY — run 9 (the enforcing candidate
-# iteration, ledger v9): the candidate payload module carries the
+# Tumbleweed. INVESTIGATION ONLY — run 10 (the enforcing candidate
+# iteration, ledger v10): the candidate payload module carries the
 # run-1/2 harvest-ledger grants PLUS the enforcing-proven deltas (run
 # 2.5: kernel module autoload; run 3: the tap-handoff relabel direction;
 # run 4: the resolver's DNS udp write, the buildkitd socket shutdown
 # unlink, the net-driver teardown sigkill; run 5: the DNS reply recv;
 # run 6: the slirp relay's host-side recv; run 7: the slirp TLS-relay
 # tcp send; run 8: the TLS client's tcp send + the relay teardown
-# shutdown) plus the relabel reshape (snapshot copies relabel to the
-# state tree's own type, keeping the tree uniform for the manager's
-# mandatory cleanup); every flow/payload domain
+# shutdown; run 9: the TLS client's tcp recv) plus the relabel reshape
+# (snapshot copies relabel to the state tree's own type, keeping the
+# tree uniform for the manager's mandatory cleanup); every
+# flow/payload domain
 # stays ENFORCING (no permissive), and the full production composition
 # manager -> rootlesskit -> buildkitd -> readiness -> minimal buildctl
 # build -> STOP runs. Every residual AVC denial is harvested as the next
@@ -58,7 +59,7 @@
 #    granted.
 #
 # This run: the candidate module (v4) carries ONLY per-AVC-evidenced
-# grants (80 allow rules; the run-8 deltas attributed to the run-8
+# grants (81 allow rules; the run-9 delta attributed to the run-9
 # enforcing AVC window); the run harvests the RESIDUAL denials under
 # enforcing with dontaudits unmapped. The relabel puzzle is solved
 # from the loaded policy's constraint dump (the G26 seinfo --constrain
@@ -263,16 +264,16 @@ install -m 0755 /tmp/p5s2-g28-payload-extract/bin/buildkit-runc \
   "$BUILDCTL" --version 2>&1 || true
 } > "$EVIDENCE_DIR/a2-payload.txt" 2>&1
 
-log 'A3: the candidate payload module (v8: the harvest ledger + the run-2.5..7 enforcing deltas, enforcing)'
+log 'A3: the candidate payload module (v10: the harvest ledger + the run-2.5..9 enforcing deltas + the relabel reshape, enforcing)'
 cat > /tmp/payload_mac_diag.te <<'MODEOF'
-module payload_mac_diag 9.0;
+module payload_mac_diag 10.0;
 
-# P5-S2g28 guest-only candidate payload module. RUN 9: the enforcing
+# P5-S2g28 guest-only candidate payload module. RUN 10: the enforcing
 # iteration carrying the per-AVC-evidenced grants from the run-1/2
 # permissive harvest (195 unique (s,t,class,perm) denial tuples over the
-# full production path), the run-2.5..7 enforcing deltas, and the run-8
-# deltas (the TLS client's tcp write; the relay's tcp shutdown) plus the
-# relabel reshape (the snapshot copies now relabel to the state tree's
+# full production path), the run-2.5..7 enforcing deltas, the run-8/9
+# deltas (the TLS client's tcp write, the relay's tcp shutdown, the
+# TLS client's tcp read) plus the relabel reshape (the snapshot copies now relabel to the state tree's
 # OWN type, keeping the tree uniform for the manager's mandatory
 # cleanup). The run-4..7 relabelto
 # AVC (buildkitd's xattr-preserving local-context copy) is SOLVED by
@@ -304,7 +305,7 @@ require {
 	class process { setcap setpgid setsched signal sigkill signull };
 	class sock_file { create getattr setattr unlink };
 	class system { module_request };
-	class tcp_socket { connect create getattr getopt name_connect setopt shutdown write };
+	class tcp_socket { connect create getattr getopt name_connect read setopt shutdown write };
 	class tun_socket { create relabelfrom relabelto };
 	class udp_socket { connect create getattr read setopt write };
 	attribute file_type;
@@ -445,11 +446,11 @@ allow docker_helper_rootlesskit_t docker_helper_builder_runtime_t:file { create 
 allow docker_helper_rootlesskit_t docker_helper_builder_runtime_t:sock_file { create getattr setattr unlink };
 allow docker_helper_rootlesskit_t docker_helper_builder_runtime_t:fifo_file { create open read setattr unlink write };
 # HTTPS pulls and DNS (the resolver inside the userns)
-# RUN-9 DELTA: the TLS client's send (run-8 AVC 1790609087.616:399,
-# scontext=...rootlesskit_t:s0 pid 2875 comm=buildkitd, tclass=tcp_socket
-# perm=write, the connected TLS relay socket — the ClientHello could not
-# be sent, so the pull failed 'connection refused')
-allow docker_helper_rootlesskit_t self:tcp_socket { connect create getattr getopt setopt write };
+# RUN-10 DELTA: the TLS client's recv (run-9 AVC 1790609647.017:399,
+# scontext=...rootlesskit_t:s0 pid 2911 comm=buildkitd,
+# tclass=tcp_socket perm=read, the connected relay socket — the TLS
+# response could not be read, so the pull failed 'connection refused')
+allow docker_helper_rootlesskit_t self:tcp_socket { connect create getattr getopt read setopt write };
 allow docker_helper_rootlesskit_t self:udp_socket { connect create getattr read setopt write };
 allow docker_helper_rootlesskit_t http_port_t:tcp_socket { name_connect };
 # kernel module autoload (RUN-2.5 DELTA, the run-2 permissive AVC
@@ -527,7 +528,7 @@ cat > /tmp/payload_mac_diag.fc <<'FCOF'
 /usr/libexec/docker-helper/buildkit(/.*)?    --    system_u:object_r:payload_buildkit_exec_t:s0
 FCOF
 {
-  echo "=== the candidate payload module (source, run 9: harvest-ledger grants + the run-2.5..8 enforcing deltas + the relabel reshape) ==="
+  echo "=== the candidate payload module (source, run 10: harvest-ledger grants + the run-2.5..9 enforcing deltas + the relabel reshape) ==="
   cat /tmp/payload_mac_diag.te
   echo "=== its file contexts ==="
   cat /tmp/payload_mac_diag.fc
@@ -617,7 +618,7 @@ semanage dontaudit off >>"$EVIDENCE_DIR/te-dontaudit-off.log" 2>&1 || true
 OPH="$(gen_op_id)"
 HV_EPOCH="$(date +%s)"
 {
-  echo "=== P5-S2g28 run 9: the enforcing candidate attempt (ledger v9) ==="
+  echo "=== P5-S2g28 run 10: the enforcing candidate attempt (ledger v10) ==="
   echo "op id: $OPH; epoch: $HV_EPOCH"
   echo "dontaudit rules disabled for the attempt window (semanage dontaudit off)"
   echo "attribution: run 2.5 proved module_request necessary under enforcing;"
@@ -630,9 +631,10 @@ HV_EPOCH="$(date +%s)"
   echo "slirp TLS-relay tcp send (slirp4netns_t tcp write) blocking; the"
   echo "run-4..7 relabelto AVCs were the u1==u2 relabelto constraint against"
   echo "unconfined_u harness context files; run 8 proved the TLS client's tcp"
-  echo "send and the relay teardown shutdown blocking; the state_t-labeled"
-  echo "context now keeps the snapshot tree uniform (the manager's mandatory"
-  echo "cleanup converged)."
+  echo "send and the relay teardown shutdown blocking; run 9 proved the TLS"
+  echo "client's tcp recv blocking; the state_t-labeled context now keeps the"
+  echo "snapshot tree uniform (the manager's mandatory cleanup converged in"
+  echo "run 9: the op trees were empty after STOP)."
   echo "=== manager RPC: START $OPH ==="
 } > "$EVIDENCE_DIR/e-attempt.txt"
 set +e
@@ -678,7 +680,7 @@ CTX="$WORK/ctx"
 mkdir -p "$CTX"
 cat > "$CTX/Dockerfile" <<'EOF'
 FROM alpine:3.20
-RUN mkdir -p /m1 && echo p5s2-g28-run9 > /m1/marker.txt && cat /proc/self/uid_map > /m1/uid_map.txt && id > /m1/id.txt
+RUN mkdir -p /m1 && echo p5s2-g28-run10 > /m1/marker.txt && cat /proc/self/uid_map > /m1/uid_map.txt && id > /m1/id.txt
 EOF
 chcon -u system_u -t docker_helper_builder_state_t "$CTX" "$CTX/Dockerfile"
 {
@@ -693,7 +695,7 @@ DOCKER_CONFIG="$WORK/docker-config" timeout 300 "$BUILDCTL" \
   --addr "unix://$RUNTIME_ROOT/ops/$OPH/buildkitd.sock" build \
   --progress=plain --frontend=dockerfile.v0 \
   --local "context=$CTX" --local "dockerfile=$CTX" \
-  --output "type=docker,name=p5s2g28:run9,dest=$WORK/export/out.tar" \
+  --output "type=docker,name=p5s2g28:run10,dest=$WORK/export/out.tar" \
   > "$EVIDENCE_DIR/e-build.txt" 2>&1
 BUILD_RC=$?
 set -e
@@ -760,5 +762,5 @@ semodule -r payload_mac_diag >/dev/null 2>&1 || true
 semodule -r gidmap_mcsboundary_diag >/dev/null 2>&1 || true
 semodule -l 2>/dev/null | grep -E 'docker_helper|gidmap|payload' > "$EVIDENCE_DIR/g-final-modules.txt" 2>&1 || true
 
-printf '%s P5S2-PAYLOAD-MAC-RESULT=PASS (run 9 completed: enforcing candidate iteration, ledger v9)\n' "$PREFIX" >&2
+printf '%s P5S2-PAYLOAD-MAC-RESULT=PASS (run 10 completed: enforcing candidate iteration, ledger v10)\n' "$PREFIX" >&2
 exit 0
