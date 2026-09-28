@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
 # Guest-side P5-S2g28 BuildKit payload MAC closure for openSUSE
-# Tumbleweed. INVESTIGATION ONLY — run 6 (the enforcing candidate
-# iteration, ledger v6): the candidate payload module carries the
+# Tumbleweed. INVESTIGATION ONLY — run 7 (the enforcing candidate
+# iteration, ledger v7): the candidate payload module carries the
 # run-1/2 harvest-ledger grants PLUS the enforcing-proven deltas (run
 # 2.5: kernel module autoload; run 3: the tap-handoff relabel direction;
 # run 4: the resolver's DNS udp write, the buildkitd socket shutdown
-# unlink, the net-driver teardown sigkill; run 5: the DNS reply recv on
-# both resolver sides); every flow/payload domain
+# unlink, the net-driver teardown sigkill; run 5: the DNS reply recv;
+# run 6: the slirp relay's host-side recv); every flow/payload domain
 # stays ENFORCING (no permissive), and the full production composition
 # manager -> rootlesskit -> buildkitd -> readiness -> minimal buildctl
 # build -> STOP runs. Every residual AVC denial is harvested as the next
@@ -54,10 +54,11 @@
 #    granted.
 #
 # This run: the candidate module (v4) carries ONLY per-AVC-evidenced
-# grants (75 allow rules; the run-5 deltas attributed to the run-5
+# grants (76 allow rules; the run-6 delta attributed to the run-6
 # enforcing AVC window); the run harvests the RESIDUAL denials under
 # enforcing with dontaudits unmapped, and captures the loaded policy's
-# constraint rules for the file-relabel puzzle the run-4 window raised.
+# constraint rules (the G26 seinfo --constrain method) for the
+# file-relabel puzzle the run-4 window raised.
 #
 # The stand is the G27 stand maximally unchanged: REAL manager under the
 # REAL systemd unit (SELinuxContext binding, P4 unit-cgroup boundary,
@@ -254,17 +255,15 @@ install -m 0755 /tmp/p5s2-g28-payload-extract/bin/buildkit-runc \
   "$BUILDCTL" --version 2>&1 || true
 } > "$EVIDENCE_DIR/a2-payload.txt" 2>&1
 
-log 'A3: the candidate payload module (v6: the harvest ledger + the run-2.5/3/4/5 enforcing deltas, enforcing)'
+log 'A3: the candidate payload module (v7: the harvest ledger + the run-2.5..6 enforcing deltas, enforcing)'
 cat > /tmp/payload_mac_diag.te <<'MODEOF'
-module payload_mac_diag 6.0;
+module payload_mac_diag 7.0;
 
-# P5-S2g28 guest-only candidate payload module. RUN 6: the enforcing
+# P5-S2g28 guest-only candidate payload module. RUN 7: the enforcing
 # iteration carrying the per-AVC-evidenced grants from the run-1/2
 # permissive harvest (195 unique (s,t,class,perm) denial tuples over the
-# full production path), the run-2.5/3/4 enforcing deltas (module_request,
-# relabel direction, DNS udp write, socket shutdown unlink, teardown
-# sigkill), and the run-5 deltas (the DNS reply recvfor on both resolver
-# sides). Every rule below is
+# full production path), the run-2.5/3/4/5 enforcing deltas, and the
+# run-6 delta (the slirp DNS-relay host-side recv). Every rule below is
 # attributable to harvested AVC records of the REAL production flow
 # (manager -> rootlesskit -> slirp4netns/net driver -> copy-up ->
 # buildkitd boot -> readiness -> buildctl build -> export) or the
@@ -440,8 +439,13 @@ allow docker_helper_slirp4netns_t self:tcp_socket { connect create setopt };
 # the DNS-proxy relay's outbound sendto (RUN-6 DELTA: run-5 AVCs
 # 1790607009.754:404-407, scontext=...slirp4netns_t:s0 pid 2822
 # comm=slirp4netns, tclass=udp_socket perm=write, the reply relay out of
-# the netns after the tap-side query arrived)
-allow docker_helper_slirp4netns_t self:udp_socket { create getattr setopt write };
+# the netns after the tap-side query arrived) and its host-side recv
+# (RUN-7 DELTA: run-6 AVCs 1790607892.742:4039-4058, scontext=...
+# slirp4netns_t:s0 pid 2913 comm=slirp4netns, tclass=udp_socket perm=read,
+# the DNS proxy's recv on its own relay sockets — the queries were
+# relayed out but the replies could not be received, so the resolver saw
+# 'read: connection refused')
+allow docker_helper_slirp4netns_t self:udp_socket { create getattr read setopt write };
 allow docker_helper_slirp4netns_t http_port_t:tcp_socket { name_connect };
 allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file { ioctl open read write };
 allow docker_helper_slirp4netns_t net_conf_t:file { getattr open read };
@@ -478,7 +482,7 @@ cat > /tmp/payload_mac_diag.fc <<'FCOF'
 /usr/libexec/docker-helper/buildkit(/.*)?    --    system_u:object_r:payload_buildkit_exec_t:s0
 FCOF
 {
-  echo "=== the candidate payload module (source, run 6: harvest-ledger grants + the run-2.5/3/4/5 enforcing deltas) ==="
+  echo "=== the candidate payload module (source, run 7: harvest-ledger grants + the run-2.5..6 enforcing deltas) ==="
   cat /tmp/payload_mac_diag.te
   echo "=== its file contexts ==="
   cat /tmp/payload_mac_diag.fc
@@ -568,7 +572,7 @@ semanage dontaudit off >>"$EVIDENCE_DIR/te-dontaudit-off.log" 2>&1 || true
 OPH="$(gen_op_id)"
 HV_EPOCH="$(date +%s)"
 {
-  echo "=== P5-S2g28 run 6: the enforcing candidate attempt (ledger v6) ==="
+  echo "=== P5-S2g28 run 7: the enforcing candidate attempt (ledger v7) ==="
   echo "op id: $OPH; epoch: $HV_EPOCH"
   echo "dontaudit rules disabled for the attempt window (semanage dontaudit off)"
   echo "attribution: run 2.5 proved module_request necessary under enforcing;"
@@ -576,7 +580,8 @@ HV_EPOCH="$(date +%s)"
   echo "run 4 proved the resolver's DNS udp write, the buildkitd socket shutdown"
   echo "unlink and the net-driver teardown sigkill blocking; run 5 proved the"
   echo "DNS reply recv (rootlesskit_t udp read) and the slirp relay send"
-  echo "(slirp4netns_t udp write) blocking."
+  echo "(slirp4netns_t udp write) blocking; run 6 proved the slirp relay's"
+  echo "host-side recv (slirp4netns_t udp read) blocking."
   echo "=== manager RPC: START $OPH ==="
 } > "$EVIDENCE_DIR/e-attempt.txt"
 set +e
@@ -604,7 +609,7 @@ CTX="$WORK/ctx"
 mkdir -p "$CTX"
 cat > "$CTX/Dockerfile" <<'EOF'
 FROM alpine:3.20
-RUN mkdir -p /m1 && echo p5s2-g28-run6 > /m1/marker.txt && cat /proc/self/uid_map > /m1/uid_map.txt && id > /m1/id.txt
+RUN mkdir -p /m1 && echo p5s2-g28-run7 > /m1/marker.txt && cat /proc/self/uid_map > /m1/uid_map.txt && id > /m1/id.txt
 EOF
 mkdir -p "$WORK/docker-config" "$WORK/export"
 echo '{}' > "$WORK/docker-config/config.json"
@@ -613,7 +618,7 @@ DOCKER_CONFIG="$WORK/docker-config" timeout 300 "$BUILDCTL" \
   --addr "unix://$RUNTIME_ROOT/ops/$OPH/buildkitd.sock" build \
   --progress=plain --frontend=dockerfile.v0 \
   --local "context=$CTX" --local "dockerfile=$CTX" \
-  --output "type=docker,name=p5s2g28:run6,dest=$WORK/export/out.tar" \
+  --output "type=docker,name=p5s2g28:run7,dest=$WORK/export/out.tar" \
   > "$EVIDENCE_DIR/e-build.txt" 2>&1
 BUILD_RC=$?
 set -e
@@ -658,32 +663,9 @@ dedup_avcs "$EVIDENCE_DIR/g-residual-avcs.txt" "$EVIDENCE_DIR/g-residual-avcs-de
 {
   echo "=== sesearch: TE allow rules rootlesskit_t -> user_tmp_t:file ==="
   sesearch --allow -s docker_helper_rootlesskit_t -t user_tmp_t -c file 2>&1 || true
-  echo "=== loaded-policy constraint rules touching the file class ==="
-  python3 - <<'PYEOF' 2>&1 || true
-import setools, traceback
-try:
-    p = setools.SELinuxPolicy('/sys/fs/selinux/policy')
-    try:
-        rules = list(p.constraint_rules())
-    except AttributeError:
-        rules = []
-    print('constraint_rules total:', len(rules))
-    n = 0
-    for r in rules:
-        tc = getattr(r, 'tclass', None)
-        names = list(getattr(tc, 'names', None) or [getattr(tc, 'name', '')])
-        if 'file' not in names:
-            continue
-        n += 1
-        perms = sorted(str(x) for x in getattr(r, 'perms', []) or [])
-        print('CLASS=file perms=', perms)
-        print('EXPRESSION:', getattr(r, 'expression', '?'))
-    print('file-class constraint rules shown:', n)
-except Exception:
-    traceback.print_exc()
-PYEOF
-  echo "=== mcs_constrained_type membership check (the G26 delta made these types constraint-bound) ==="
-  seinfo -a mcs_constrained_type -x 2>/dev/null | grep -A40 'docker_helper' || true
+  echo "=== loaded-policy constraint rules touching the file class (the G26 method: seinfo --constrain) ==="
+  seinfo --constrain 2>&1 | grep -B2 -A6 'relabelto' || true
+  seinfo --constrain 2>&1 | grep -c 'constraint\|mlsconstrain' || true
 } > "$EVIDENCE_DIR/g-relabelto-constraint.txt" 2>&1
 wc -l "$EVIDENCE_DIR/g-residual-avcs.txt" "$EVIDENCE_DIR/g-residual-avcs-dedup.txt" >&2
 
@@ -703,5 +685,5 @@ semodule -r payload_mac_diag >/dev/null 2>&1 || true
 semodule -r gidmap_mcsboundary_diag >/dev/null 2>&1 || true
 semodule -l 2>/dev/null | grep -E 'docker_helper|gidmap|payload' > "$EVIDENCE_DIR/g-final-modules.txt" 2>&1 || true
 
-printf '%s P5S2-PAYLOAD-MAC-RESULT=PASS (run 6 completed: enforcing candidate iteration, ledger v6)\n' "$PREFIX" >&2
+printf '%s P5S2-PAYLOAD-MAC-RESULT=PASS (run 7 completed: enforcing candidate iteration, ledger v7)\n' "$PREFIX" >&2
 exit 0
