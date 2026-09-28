@@ -2106,21 +2106,21 @@ if [ -z "$P5S2G26_RESULT" ]; then
     echo "=== P5-S2g26 Part E: the shared-object surface ==="
     echo "the object-class constraint sets are in g26-domain-surface.txt (sock_file/fifo_file/lnk_file/unix_stream_socket included); the policy-level findings:"
     echo "- the state tree (docker_helper_builder_state_t) is shared at s0 BY DESIGN: both operations' rootlesskit_t domains hold the dir/file/sock_file create+write grants (862-864), the type is NOT in mcs_constrained_type, so the file/dir/sock class constraints (which exist: sock_file constrains getattr/ioctl/read and setattr/write) are EXEMPT for both categories on these types"
-    echo "- the created object's OBSERVED label: the parent dir's type and the level s0 WITHOUT the creator's category (the markers were created by s0:c1/s0:c2 processes and carry user_tmp_t:s0 — the class's default_range/range-transition behavior, not the creator's current level) — the shared tree is category-transparent at the type AND the level"
+    echo "- the created object's OBSERVED label: the parent dir's type and the level s0 WITHOUT the creator's category (the markers were created by s0:c1/s0:c2 processes and carry the parent's level — the policy's own 'default_range file target low' (see the seinfo --default dump in g26-domain-surface.txt) makes every created object inherit the parent directory's LOW level, so the creator's category does not propagate) — the shared tree is category-transparent at the type AND the level"
     echo "- the diag fifos (docker_helper_builder_t) are fd-scoped: the helper's write grant (871/1015/1156) is reachable only through inherited fds, not across operations; fifo_file's mlsconstrain covers OPEN only (h1 dom h2 or t1 != mcs_constrained_type) — an inherited-fd write never re-opens, so the constraint never applies on that path"
     echo "- unix_stream_socket has NO mlsconstrain (policy-level gap): a cross-operation connectto would NOT be MCS-isolated — but the loaded TE has no rootlesskit_t→rootlesskit_t connectto allow (verified in g26-domain-surface.txt), so it is TE-denied, not MCS-reachable"
     echo "=== the prodtype test dir provisioning (relabeled to docker_helper_builder_state_t, the production state type; the vehicles' access comes from the production 862-864 grants, not the diag module) ==="
   } > "$EVIDENCE_DIR/g26-shared-object.txt"
   G26_E_PROD_DIR=/var/tmp/p5s2-g26-e2
   G26_E_PROD_DIR_OK=0
+  echo "prodtype dir pre-chcon label: $(stat -c '%C' "$G26_E_PROD_DIR" 2>&1)" >> "$EVIDENCE_DIR/g26-shared-object.txt"
   if chcon -t docker_helper_builder_state_t "$G26_E_PROD_DIR" 2>>"$EVIDENCE_DIR/g26-shared-object.txt"; then
     G26_E_PROD_DIR_OK=1
   fi
-  {
-    echo "prodtype dir: $G26_E_PROD_DIR pre-label=$(stat -c '%C' "$G26_E_PROD_DIR" 2>&1) chcon-applied=$G26_E_PROD_DIR_OK post-label=$(stat -c '%C' "$G26_E_PROD_DIR" 2>&1)"
-    echo "=== the stand-type test dir (the diag-module-granted tmpfs tree) ==="
-    echo "stand dir: $DIAG_BASE/g26/e-shared label=$(stat -c '%C' "$DIAG_BASE/g26/e-shared" 2>&1)"
-  } >> "$EVIDENCE_DIR/g26-shared-object.txt"
+  echo "prodtype dir: $G26_E_PROD_DIR chcon-applied=$G26_E_PROD_DIR_OK post-label=$(stat -c '%C' "$G26_E_PROD_DIR" 2>&1)" \
+    >> "$EVIDENCE_DIR/g26-shared-object.txt"
+  echo "=== the stand-type test dir (the diag-module-granted tmpfs tree) ===" >> "$EVIDENCE_DIR/g26-shared-object.txt"
+  echo "stand dir: $DIAG_BASE/g26/e-shared label=$(stat -c '%C' "$DIAG_BASE/g26/e-shared" 2>&1)" >> "$EVIDENCE_DIR/g26-shared-object.txt"
   e_leg() {
     local leg="$1" ctx="$2" mode="$3" path="$4" leg_note="$5" rc
     {
