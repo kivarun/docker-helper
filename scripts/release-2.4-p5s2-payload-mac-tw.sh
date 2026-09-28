@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 #
 # Guest-side P5-S2g28 BuildKit payload MAC closure for openSUSE
-# Tumbleweed. INVESTIGATION ONLY — run 8 (the enforcing candidate
-# iteration, ledger v8): the candidate payload module carries the
+# Tumbleweed. INVESTIGATION ONLY — run 9 (the enforcing candidate
+# iteration, ledger v9): the candidate payload module carries the
 # run-1/2 harvest-ledger grants PLUS the enforcing-proven deltas (run
 # 2.5: kernel module autoload; run 3: the tap-handoff relabel direction;
 # run 4: the resolver's DNS udp write, the buildkitd socket shutdown
 # unlink, the net-driver teardown sigkill; run 5: the DNS reply recv;
 # run 6: the slirp relay's host-side recv; run 7: the slirp TLS-relay
-# tcp send); every flow/payload domain
+# tcp send; run 8: the TLS client's tcp send + the relay teardown
+# shutdown) plus the relabel reshape (snapshot copies relabel to the
+# state tree's own type, keeping the tree uniform for the manager's
+# mandatory cleanup); every flow/payload domain
 # stays ENFORCING (no permissive), and the full production composition
 # manager -> rootlesskit -> buildkitd -> readiness -> minimal buildctl
 # build -> STOP runs. Every residual AVC denial is harvested as the next
@@ -55,14 +58,15 @@
 #    granted.
 #
 # This run: the candidate module (v4) carries ONLY per-AVC-evidenced
-# grants (77 allow rules; the run-7 delta attributed to the run-7
+# grants (80 allow rules; the run-8 deltas attributed to the run-8
 # enforcing AVC window); the run harvests the RESIDUAL denials under
-# enforcing with dontaudits unmapped, and the run-4..7 relabelto puzzle
-# is solved from the loaded policy's constraint dump (the G26 seinfo
-# --constrain method): file/dir relabelto is constrained by
-# (u1 == u2 or t1 == can_change_object_identity), so the stand labels
-# its context files system_u the way production's daemon-staged context
-# is labeled.
+# enforcing with dontaudits unmapped. The relabel puzzle is solved
+# from the loaded policy's constraint dump (the G26 seinfo --constrain
+# method): file/dir relabelto is constrained by
+# (u1 == u2 or t1 == can_change_object_identity), and the stand's
+# context files now carry the state tree's own type so the snapshot
+# copies stay tree-uniform (the run-8 manager cleanup failure is the
+# recorded composition evidence).
 #
 # The stand is the G27 stand maximally unchanged: REAL manager under the
 # REAL systemd unit (SELinuxContext binding, P4 unit-cgroup boundary,
@@ -261,13 +265,16 @@ install -m 0755 /tmp/p5s2-g28-payload-extract/bin/buildkit-runc \
 
 log 'A3: the candidate payload module (v8: the harvest ledger + the run-2.5..7 enforcing deltas, enforcing)'
 cat > /tmp/payload_mac_diag.te <<'MODEOF'
-module payload_mac_diag 8.0;
+module payload_mac_diag 9.0;
 
-# P5-S2g28 guest-only candidate payload module. RUN 8: the enforcing
+# P5-S2g28 guest-only candidate payload module. RUN 9: the enforcing
 # iteration carrying the per-AVC-evidenced grants from the run-1/2
 # permissive harvest (195 unique (s,t,class,perm) denial tuples over the
-# full production path), the run-2.5/3/4/5/6 enforcing deltas, and the
-# run-7 delta (the slirp TLS-relay tcp write). The run-4/5/6/7 relabelto
+# full production path), the run-2.5..7 enforcing deltas, and the run-8
+# deltas (the TLS client's tcp write; the relay's tcp shutdown) plus the
+# relabel reshape (the snapshot copies now relabel to the state tree's
+# OWN type, keeping the tree uniform for the manager's mandatory
+# cleanup). The run-4..7 relabelto
 # AVC (buildkitd's xattr-preserving local-context copy) is SOLVED by
 # policy evidence, not by a new grant: the loaded policy constrains
 # file/dir relabelto with (u1 == u2 or t1 == can_change_object_identity)
@@ -297,7 +304,7 @@ require {
 	class process { setcap setpgid setsched signal sigkill signull };
 	class sock_file { create getattr setattr unlink };
 	class system { module_request };
-	class tcp_socket { connect create getattr getopt name_connect setopt write };
+	class tcp_socket { connect create getattr getopt name_connect setopt shutdown write };
 	class tun_socket { create relabelfrom relabelto };
 	class udp_socket { connect create getattr read setopt write };
 	attribute file_type;
@@ -417,7 +424,18 @@ allow docker_helper_rootlesskit_t payload_buildkit_exec_t:file { execute execute
 # ---- buildkitd's own boot/runtime under --root in the state tree ----
 # content store, snapshotter metadata, runc state inside the state tree
 allow docker_helper_rootlesskit_t docker_helper_builder_state_t:dir { create getattr rename reparent rmdir setattr };
-allow docker_helper_rootlesskit_t docker_helper_builder_state_t:file { append execute execute_no_trans getattr ioctl relabelfrom rename setattr unlink mounton open read write };
+# the snapshot-local-context copy's relabel (RUN-9 RESHAPE: the
+# xattr-preserving copy relabels each snapshot copy to the SOURCE file's
+# label; with the composition's state_t-labeled context files the target
+# is the state tree's own type, so the tree stays uniformly state_t and
+# the manager's mandatory op cleanup can unlink everything — the run-8
+# composition (user_tmp_t source labels) instead pulled foreign-typed
+# objects into the tree and the manager's cleanup failed with 'state dir
+# still present after removal' (run-8 AVC 1790609087.679:401, builder_t
+# unlink user_tmp_t:file), leaving the op entry retained; the
+# user_tmp_t:file relabelto grant this ledger carried for the old
+# composition is REMOVED as dead authority)
+allow docker_helper_rootlesskit_t docker_helper_builder_state_t:file { append execute execute_no_trans getattr ioctl relabelfrom relabelto rename setattr unlink mounton open read write };
 allow docker_helper_rootlesskit_t docker_helper_builder_state_t:lnk_file { create getattr read setattr };
 allow docker_helper_rootlesskit_t docker_helper_builder_state_t:chr_file { unlink };
 # per-op runtime tree: the buildkitd socket, the otel socket, runc state,
@@ -427,7 +445,11 @@ allow docker_helper_rootlesskit_t docker_helper_builder_runtime_t:file { create 
 allow docker_helper_rootlesskit_t docker_helper_builder_runtime_t:sock_file { create getattr setattr unlink };
 allow docker_helper_rootlesskit_t docker_helper_builder_runtime_t:fifo_file { create open read setattr unlink write };
 # HTTPS pulls and DNS (the resolver inside the userns)
-allow docker_helper_rootlesskit_t self:tcp_socket { connect create getattr getopt setopt };
+# RUN-9 DELTA: the TLS client's send (run-8 AVC 1790609087.616:399,
+# scontext=...rootlesskit_t:s0 pid 2875 comm=buildkitd, tclass=tcp_socket
+# perm=write, the connected TLS relay socket — the ClientHello could not
+# be sent, so the pull failed 'connection refused')
+allow docker_helper_rootlesskit_t self:tcp_socket { connect create getattr getopt setopt write };
 allow docker_helper_rootlesskit_t self:udp_socket { connect create getattr read setopt write };
 allow docker_helper_rootlesskit_t http_port_t:tcp_socket { name_connect };
 # kernel module autoload (RUN-2.5 DELTA, the run-2 permissive AVC
@@ -442,8 +464,10 @@ allow docker_helper_rootlesskit_t http_port_t:tcp_socket { name_connect };
 # exactly this mechanism). SELinux has no per-module granularity; the
 # breadth is inherent and recorded in the privilege review.
 allow docker_helper_rootlesskit_t kernel_t:system module_request;
-# the export tar's destination file (the harness's user_tmp_t file)
-allow docker_helper_rootlesskit_t user_tmp_t:file { open write setattr relabelto };
+# the export tar's destination file (the harness's user_tmp_t file;
+# write/open/setattr only — the relabelto authority was removed with the
+# state_t-labeled context composition)
+allow docker_helper_rootlesskit_t user_tmp_t:file { open write setattr };
 
 # ---- the slirp4netns helper's own runtime (the net driver) ----
 allow docker_helper_slirp4netns_t self:cap_userns { sys_admin sys_ptrace };
@@ -451,8 +475,12 @@ allow docker_helper_slirp4netns_t self:cap_userns { sys_admin sys_ptrace };
 # 1790608297.159-533:401-408, scontext=...slirp4netns_t:s0 pid 2882
 # comm=slirp4netns, tclass=tcp_socket perm=write, lport/laddr the relay
 # sockets, faddr the resolved registry IPs fport=443 — the relay could
-# connect but not send, so the pull failed 'connection refused')
-allow docker_helper_slirp4netns_t self:tcp_socket { connect create setopt write };
+# connect but not send, so the pull failed 'connection refused') plus its
+# teardown shutdown (RUN-9 DELTA: run-8 AVC 1790609087.616:400,
+# scontext=...slirp4netns_t:s0 pid 2865 comm=slirp4netns,
+# tclass=tcp_socket perm=shutdown — the relay's socket teardown on the
+# relay path, the same close shape every completed relay performs)
+allow docker_helper_slirp4netns_t self:tcp_socket { connect create setopt shutdown write };
 # the DNS-proxy relay's outbound sendto (RUN-6 DELTA: run-5 AVCs
 # 1790607009.754:404-407, scontext=...slirp4netns_t:s0 pid 2822
 # comm=slirp4netns, tclass=udp_socket perm=write, the reply relay out of
@@ -499,7 +527,7 @@ cat > /tmp/payload_mac_diag.fc <<'FCOF'
 /usr/libexec/docker-helper/buildkit(/.*)?    --    system_u:object_r:payload_buildkit_exec_t:s0
 FCOF
 {
-  echo "=== the candidate payload module (source, run 8: harvest-ledger grants + the run-2.5..7 enforcing deltas) ==="
+  echo "=== the candidate payload module (source, run 9: harvest-ledger grants + the run-2.5..8 enforcing deltas + the relabel reshape) ==="
   cat /tmp/payload_mac_diag.te
   echo "=== its file contexts ==="
   cat /tmp/payload_mac_diag.fc
@@ -589,7 +617,7 @@ semanage dontaudit off >>"$EVIDENCE_DIR/te-dontaudit-off.log" 2>&1 || true
 OPH="$(gen_op_id)"
 HV_EPOCH="$(date +%s)"
 {
-  echo "=== P5-S2g28 run 8: the enforcing candidate attempt (ledger v8) ==="
+  echo "=== P5-S2g28 run 9: the enforcing candidate attempt (ledger v9) ==="
   echo "op id: $OPH; epoch: $HV_EPOCH"
   echo "dontaudit rules disabled for the attempt window (semanage dontaudit off)"
   echo "attribution: run 2.5 proved module_request necessary under enforcing;"
@@ -599,10 +627,12 @@ HV_EPOCH="$(date +%s)"
   echo "DNS reply recv (rootlesskit_t udp read) and the slirp relay send"
   echo "(slirp4netns_t udp write) blocking; run 6 proved the slirp relay's"
   echo "host-side recv (slirp4netns_t udp read) blocking; run 7 proved the"
-  echo "slirp TLS-relay tcp send (slirp4netns_t tcp write) blocking, and the"
-  echo "run-4..7 relabelto AVCs were solved as the u1==u2 relabelto"
-  echo "constraint against unconfined_u harness context files (the"
-  echo "composition now labels them system_u like production's staged context)."
+  echo "slirp TLS-relay tcp send (slirp4netns_t tcp write) blocking; the"
+  echo "run-4..7 relabelto AVCs were the u1==u2 relabelto constraint against"
+  echo "unconfined_u harness context files; run 8 proved the TLS client's tcp"
+  echo "send and the relay teardown shutdown blocking; the state_t-labeled"
+  echo "context now keeps the snapshot tree uniform (the manager's mandatory"
+  echo "cleanup converged)."
   echo "=== manager RPC: START $OPH ==="
 } > "$EVIDENCE_DIR/e-attempt.txt"
 set +e
@@ -626,25 +656,33 @@ sleep 4
 cat "$EVIDENCE_DIR/e-processes.txt" >&2
 
 # The minimal real build (the P4A1 pattern; NO Docker Engine needed).
-# The context files are labeled system_u BEFORE the build: production's
-# build context is staged by the daemon (system_u:docker_helper_t creates
-# the staged files in its runtime dir), and the loaded policy constrains
-# file/dir relabelto with (u1 == u2 or t1 == can_change_object_identity)
-# — buildkitd's xattr-preserving local-context copy relabels the
-# snapshot copies to the source's label, so the source files must carry
-# the payload's own user. The run-4/5/6/7 harness composition used
-# unconfined_u context files, which made the relabelto a constraint
-# denial (the TE allow was already present) — a composition artifact,
-# fixed here, NOT a payload grant.
+# The context files are labeled system_u:docker_helper_builder_state_t
+# BEFORE the build: production's build context is staged by the daemon
+# (system_u:docker_helper_t creates the staged files in its runtime dir),
+# and the loaded policy constrains file/dir relabelto with (u1 == u2 or
+# t1 == can_change_object_identity) — buildkitd's xattr-preserving
+# local-context copy relabels the snapshot copies to the source's label,
+# so the source files must carry (a) the payload's own user and (b) a
+# label that keeps the snapshot tree uniform: with the state-tree type
+# the copies relabel to the tree's own type and the manager's mandatory
+# op cleanup can unlink everything (the run-8 composition's
+# unconfined_u/user_tmp_t labels instead pulled a foreign-typed object
+# into the tree and the manager's cleanup failed with 'state dir still
+# present after removal', run-8 AVC 1790609087.679:401 builder_t unlink
+# user_tmp_t:file, leaving the op entry retained). The production
+# mapping (whether the daemon relabels its staged context to the
+# builder's state type before handoff, or the manager gains foreign-type
+# unlink authority) is an explicit decision for the production policy
+# commit, out of this experiment's scope.
 CTX="$WORK/ctx"
 mkdir -p "$CTX"
 cat > "$CTX/Dockerfile" <<'EOF'
 FROM alpine:3.20
-RUN mkdir -p /m1 && echo p5s2-g28-run8 > /m1/marker.txt && cat /proc/self/uid_map > /m1/uid_map.txt && id > /m1/id.txt
+RUN mkdir -p /m1 && echo p5s2-g28-run9 > /m1/marker.txt && cat /proc/self/uid_map > /m1/uid_map.txt && id > /m1/id.txt
 EOF
-chcon -u system_u "$CTX" "$CTX/Dockerfile"
+chcon -u system_u -t docker_helper_builder_state_t "$CTX" "$CTX/Dockerfile"
 {
-  echo "=== the context files' labels after the system_u chcon ==="
+  echo "=== the context files' labels after the system_u/state_t chcon ==="
   stat -c '%C %U:%G %n' "$CTX" "$CTX/Dockerfile" 2>&1
 } > "$EVIDENCE_DIR/e-ctx-labels.txt" 2>&1
 cat "$EVIDENCE_DIR/e-ctx-labels.txt" >&2
@@ -655,7 +693,7 @@ DOCKER_CONFIG="$WORK/docker-config" timeout 300 "$BUILDCTL" \
   --addr "unix://$RUNTIME_ROOT/ops/$OPH/buildkitd.sock" build \
   --progress=plain --frontend=dockerfile.v0 \
   --local "context=$CTX" --local "dockerfile=$CTX" \
-  --output "type=docker,name=p5s2g28:run8,dest=$WORK/export/out.tar" \
+  --output "type=docker,name=p5s2g28:run9,dest=$WORK/export/out.tar" \
   > "$EVIDENCE_DIR/e-build.txt" 2>&1
 BUILD_RC=$?
 set -e
@@ -722,5 +760,5 @@ semodule -r payload_mac_diag >/dev/null 2>&1 || true
 semodule -r gidmap_mcsboundary_diag >/dev/null 2>&1 || true
 semodule -l 2>/dev/null | grep -E 'docker_helper|gidmap|payload' > "$EVIDENCE_DIR/g-final-modules.txt" 2>&1 || true
 
-printf '%s P5S2-PAYLOAD-MAC-RESULT=PASS (run 8 completed: enforcing candidate iteration, ledger v8)\n' "$PREFIX" >&2
+printf '%s P5S2-PAYLOAD-MAC-RESULT=PASS (run 9 completed: enforcing candidate iteration, ledger v9)\n' "$PREFIX" >&2
 exit 0
