@@ -284,11 +284,11 @@ require {
 	class lnk_file { create getattr read setattr unlink };
 	class netlink_route_socket { bind create getattr getopt setopt read write nlmsg_read nlmsg_write };
 	class process { setcap setpgid setsched signal sigkill signull };
-	class sock_file { create getattr setattr };
+	class sock_file { create getattr setattr unlink };
 	class system { module_request };
 	class tcp_socket { connect create getattr getopt name_connect setopt };
 	class tun_socket { create relabelfrom relabelto };
-	class udp_socket { connect create getattr setopt };
+	class udp_socket { connect create getattr setopt write };
 	attribute file_type;
 	type bin_t;
 	type cert_t;
