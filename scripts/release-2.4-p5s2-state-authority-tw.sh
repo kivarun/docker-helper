@@ -196,7 +196,7 @@ STAND_EPOCH_ALL="$(date +%s)"
 } >"$EVIDENCE_DIR/a-toolchain.txt" 2>&1
 zypper --non-interactive install -y checkpolicy container-selinux \
   policycoreutils-python-utils rootlesskit slirp4netns audit socat \
-  setools-console gcc glibc-static util-linux shadow \
+  setools-console gcc glibc-static util-linux shadow libcap-progs \
   >"$EVIDENCE_DIR/zypper-toolchain.log" 2>&1 \
   || note "zypper install of the policy toolchain failed (see zypper-toolchain.log)"
 fail_toolchain=0
@@ -464,6 +464,7 @@ require {
 	type docker_helper_newuidmap_t;
 	type docker_helper_newgidmap_t;
 	type docker_helper_builder_t;
+	type unconfined_t;
 	type $OUT_T;
 	type $BINDIR_T;
 	attribute file_type;
