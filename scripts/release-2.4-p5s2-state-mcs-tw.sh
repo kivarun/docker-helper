@@ -1278,23 +1278,25 @@ PASSWD_SHA0=$(sha256sum "$PASSWD" | awk '{print $1}')
 LOCKF="$SB/root/buildkitd.lock"
 [ -n "$PASSWD" ] || { note "no snapshot file found for the matrix; stand incomplete"; printf '%s P5S2-STATE-MCS-RESULT=INCOMPLETE (no snapshot file)\n' "$PREFIX" >&2; exit 0; }
 cp -a "$PASSWD" "$WORK/passwd.baseline"
-VEH() { runuser -u "$BUILDER_USER" -- runcon "$1" /usr/local/bin/map_probe "${@:2}"; }
-
 leg_out() { echo "--- $* ---" ; }
+mleg() { # ctx mode path — one vehicle leg, full output to the leg file
+  echo "--- ${2} ${3} ---"
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$1" /usr/local/bin/map_probe "$2" "$3" 2>&1 < /dev/null || true
+}
 
 {
   echo "=== Part D: CROSS matrix (A:c1 -> B:c2 tree) ==="
   leg_out "cross read (the snapshot passwd)"
-  VEH "$RK_C1" --read "$PASSWD" 2>&1 | grep -E 'vehicle|READ|ERROR' || true
+  mleg "$RK_C1" --read "$PASSWD"
   leg_out "cross stat (getattr)"
-  VEH "$RK_C1" --stat "$PASSWD" 2>&1 | grep -E 'vehicle|STAT|ERROR' || true
+  mleg "$RK_C1" --stat "$PASSWD"
   leg_out "cross create in the c2 rootlesskit-state dir"
-  VEH "$RK_C1" --write "$SB/rootlesskit-state/d-cross" 2>&1 | grep -E 'vehicle|WRITE|ERROR' || true
+  mleg "$RK_C1" --write "$SB/rootlesskit-state/d-cross"
   leg_out "cross open the snapshot file (the same open path as read)"
   leg_out "cross unlink the snapshot file (dir remove_name + file unlink)"
-  VEH "$RK_C1" --unlink "$PASSWD" 2>&1 | grep -E 'vehicle|UNLINK|ERROR' || true
+  mleg "$RK_C1" --unlink "$PASSWD"
   leg_out "cross flock the buildkitd lock (open O_RDONLY + flock LOCK_EX|NB)"
-  VEH "$RK_C1" --flock "$LOCKF" 2>&1 | grep -E 'vehicle|FLOCK|ERROR' || true
+  mleg "$RK_C1" --flock "$LOCKF"
   echo "created-file exists: $([ -e "$SB/rootlesskit-state/d-cross" ] && echo yes || echo no)"
   echo "passwd still exists: $([ -e "$PASSWD" ] && echo yes || echo no)"
   echo "passwd sha unchanged: $([ "$(sha256sum "$PASSWD" | awk '{print $1}')" = "$PASSWD_SHA0" ] && echo yes || echo no)"
@@ -1305,15 +1307,15 @@ rm -f "$SB/rootlesskit-state/d-cross" 2>/dev/null || true
 {
   echo "=== Part D: OWN matrix (B:c2 -> B:c2 tree) ==="
   leg_out "own read"
-  VEH "$RK_C2" --read "$PASSWD" 2>&1 | grep -E 'vehicle|READ|ERROR' || true
+  mleg "$RK_C2" --read "$PASSWD"
   leg_out "own stat (getattr)"
-  VEH "$RK_C2" --stat "$PASSWD" 2>&1 | grep -E 'vehicle|STAT|ERROR' || true
+  mleg "$RK_C2" --stat "$PASSWD"
   leg_out "own create in the own rootlesskit-state dir"
-  VEH "$RK_C2" --write "$SB/rootlesskit-state/d-own" 2>&1 | grep -E 'vehicle|WRITE|ERROR' || true
+  mleg "$RK_C2" --write "$SB/rootlesskit-state/d-own"
   leg_out "own unlink the just-created disposable file"
-  VEH "$RK_C2" --unlink "$SB/rootlesskit-state/d-own" 2>&1 | grep -E 'vehicle|UNLINK|ERROR' || true
+  mleg "$RK_C2" --unlink "$SB/rootlesskit-state/d-own"
   leg_out "own flock the buildkitd lock (held by the live buildkitd: EWOULDBLOCK expected)"
-  VEH "$RK_C2" --flock "$LOCKF" 2>&1 | grep -E 'vehicle|FLOCK|ERROR' || true
+  mleg "$RK_C2" --flock "$LOCKF"
   echo "created-then-unlinked file gone: $([ -e "$SB/rootlesskit-state/d-own" ] && echo no || echo yes)"
 } > "$EVIDENCE_DIR/d-own-matrix.txt" 2>&1
 cat "$EVIDENCE_DIR/d-own-matrix.txt" >&2
@@ -1325,12 +1327,13 @@ log 'K: Part D — the cross-op process-boundary legs while B is live (signal ma
 {
   echo "=== Part D: the cross-op signal matrix (buildkitd B alive) ==="
   echo "buildkitd B pid: $BK_PID"
-  VEH "$RK_C1" --signal "$BK_PID" 15 2>&1 | grep -E 'vehicle|SIGNAL|ERROR' || true
+  echo "--- cross TERM (sig 15) ---"
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --signal "$BK_PID" 15 2>&1 < /dev/null || true
   echo "buildkitd B still alive: $(kill -0 "$BK_PID" 2>/dev/null && echo yes || echo no)"
-  leg_out "cross sig-0 liveness probe (the unconstrained sig-0: rc=0 expected)"
-  VEH "$RK_C1" --signal "$BK_PID" 0 2>&1 | grep -E 'vehicle|SIGNAL|ERROR' || true
-  leg_out "own sig-0 (same category)"
-  VEH "$RK_C2" --signal "$BK_PID" 0 2>&1 | grep -E 'vehicle|SIGNAL|ERROR' || true
+  echo "--- cross sig-0 liveness probe (the unconstrained sig-0: rc=0 expected) ---"
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --signal "$BK_PID" 0 2>&1 < /dev/null || true
+  echo "--- own sig-0 (same category) ---"
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C2" /usr/local/bin/map_probe --signal "$BK_PID" 0 2>&1 < /dev/null || true
 } > "$EVIDENCE_DIR/d-signal-matrix.txt" 2>&1
 cat "$EVIDENCE_DIR/d-signal-matrix.txt" >&2
 
