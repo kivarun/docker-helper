@@ -1144,7 +1144,14 @@ until [ -S "$RB_SOCK" ] || [ "$B_WAIT" -ge 90 ]; do
   B_WAIT=$((B_WAIT + 1))
 done
 [ -S "$RB_SOCK" ] && RB_READY=1
-BK_PID="$(pgrep -f "buildkitd --rootless --root=$SB/root" | head -1 || true)"
+BUILDER_UID="$(id -u "$BUILDER_USER" 2>/dev/null || echo 475)"
+BK_PID=""
+for bpid in $(pgrep -f "buildkitd --rootless --root=$SB/root" 2>/dev/null || true); do
+  if [ "$(ps -o uid= -p "$bpid" 2>/dev/null | tr -d ' ' || true)" = "$BUILDER_UID" ]; then
+    BK_PID="$bpid"
+    break
+  fi
+done
 {
   echo "=== Part C: op B launch/readiness at s0:c2 ==="
   echo "sock ready: $RB_READY (wait ${B_WAIT}s)"
@@ -1205,8 +1212,8 @@ set -e
 echo "op B build rc: $BUILD0_RC" >&2
 tar_report "$EXPORT0" "$WORK/reports/b1.json" "" \
   > "$EVIDENCE_DIR/c-build0-tar.log" 2>&1 || true
-MARKER_OK0=$(tar -xOf "$EXPORT0" m2/marker.txt 2>/dev/null | grep -c 'p5s2-g29-marker2' || true)
-ID_OK0=$(tar -xOf "$EXPORT0" m2/id.txt 2>/dev/null | grep -c 'uid=0(root)' || true)
+MARKER_OK0=$(python3 -c 'import json,sys;r=json.load(open(sys.argv[1]));print(sum(1 for m in r.get("marker",[]) if m.get("name","").endswith("m2/marker.txt") and "p5s2-g29-marker2" in m.get("content","")))' "$WORK/reports/b1.json" 2>/dev/null || echo 0)
+ID_OK0=$(python3 -c 'import json,sys;r=json.load(open(sys.argv[1]));print(sum(1 for m in r.get("marker",[]) if m.get("name","").endswith("m2/id.txt") and "uid=0(root)" in m.get("content","")))' "$WORK/reports/b1.json" 2>/dev/null || echo 0)
 {
   echo "=== Part C: the build result ==="
   echo "build rc: $BUILD0_RC (exit 0 expected)"
@@ -1343,7 +1350,7 @@ BASE_RC=$BUILD_RC
 set -e
 tar_report "$EXPORT_E" "$WORK/reports/e1.json" "" \
   > "$EVIDENCE_DIR/e-baseline-tar.log" 2>&1 || true
-tar -xOf "$EXPORT_E" m2/id.txt > "$WORK/export/id-baseline.txt" 2>/dev/null || true
+python3 -c 'import json,sys;r=json.load(open(sys.argv[1]));print("".join(m.get("content","") for m in r.get("marker",[]) if m.get("name","").endswith("m2/id.txt")), end="")' "$WORK/reports/e1.json" 2>/dev/null > "$WORK/export/id-baseline.txt" || true
 set +e
 timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --poison "$PASSWD" 0 "g29p" \
   > "$EVIDENCE_DIR/e-cross-poison.txt" 2>&1
@@ -1368,7 +1375,7 @@ POST_RC=$BUILD_RC
 set -e
 tar_report "$EXPORT_E2" "$WORK/reports/e2.json" "" \
   > "$EVIDENCE_DIR/e-postattempt-tar.log" 2>&1 || true
-POST_ID=$(tar -xOf "$EXPORT_E2" m2/id.txt 2>/dev/null | tr '\n' ' ')
+POST_ID=$(python3 -c 'import json,sys;r=json.load(open(sys.argv[1]));print("".join(m.get("content","") for m in r.get("marker",[]) if m.get("name","").endswith("m2/id.txt")).replace("\n"," "))' "$WORK/reports/e2.json" 2>/dev/null || true)
 {
   echo "=== Part E: the post-attempt consume build (B stays baseline) ==="
   echo "build rc: $POST_RC"
@@ -1406,7 +1413,7 @@ CLOS_RC=$BUILD_RC
 set -e
 tar_report "$EXPORT_C" "$WORK/reports/c.json" "" \
   > "$EVIDENCE_DIR/e-closure-tar.log" 2>&1 || true
-CLOS_ID=$(tar -xOf "$EXPORT_C" m2/id.txt 2>/dev/null | tr '\n' ' ')
+CLOS_ID=$(python3 -c 'import json,sys;r=json.load(open(sys.argv[1]));print("".join(m.get("content","") for m in r.get("marker",[]) if m.get("name","").endswith("m2/id.txt")).replace("\n"," "))' "$WORK/reports/c.json" 2>/dev/null || true)
 {
   echo "=== Part E: restore + closure ==="
   echo "restored sha == baseline: $([ "$RESTORED_SHA" = "$PASSWD_SHA0" ] && echo yes || echo no)"
