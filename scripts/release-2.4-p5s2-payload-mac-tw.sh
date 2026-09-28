@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 #
 # Guest-side P5-S2g28 BuildKit payload MAC closure for openSUSE
-# Tumbleweed. INVESTIGATION ONLY — run 7 (the enforcing candidate
-# iteration, ledger v7): the candidate payload module carries the
+# Tumbleweed. INVESTIGATION ONLY — run 8 (the enforcing candidate
+# iteration, ledger v8): the candidate payload module carries the
 # run-1/2 harvest-ledger grants PLUS the enforcing-proven deltas (run
 # 2.5: kernel module autoload; run 3: the tap-handoff relabel direction;
 # run 4: the resolver's DNS udp write, the buildkitd socket shutdown
 # unlink, the net-driver teardown sigkill; run 5: the DNS reply recv;
-# run 6: the slirp relay's host-side recv); every flow/payload domain
+# run 6: the slirp relay's host-side recv; run 7: the slirp TLS-relay
+# tcp send); every flow/payload domain
 # stays ENFORCING (no permissive), and the full production composition
 # manager -> rootlesskit -> buildkitd -> readiness -> minimal buildctl
 # build -> STOP runs. Every residual AVC denial is harvested as the next
@@ -54,11 +55,14 @@
 #    granted.
 #
 # This run: the candidate module (v4) carries ONLY per-AVC-evidenced
-# grants (76 allow rules; the run-6 delta attributed to the run-6
+# grants (77 allow rules; the run-7 delta attributed to the run-7
 # enforcing AVC window); the run harvests the RESIDUAL denials under
-# enforcing with dontaudits unmapped, and captures the loaded policy's
-# constraint rules (the G26 seinfo --constrain method) for the
-# file-relabel puzzle the run-4 window raised.
+# enforcing with dontaudits unmapped, and the run-4..7 relabelto puzzle
+# is solved from the loaded policy's constraint dump (the G26 seinfo
+# --constrain method): file/dir relabelto is constrained by
+# (u1 == u2 or t1 == can_change_object_identity), so the stand labels
+# its context files system_u the way production's daemon-staged context
+# is labeled.
 #
 # The stand is the G27 stand maximally unchanged: REAL manager under the
 # REAL systemd unit (SELinuxContext binding, P4 unit-cgroup boundary,
@@ -255,15 +259,23 @@ install -m 0755 /tmp/p5s2-g28-payload-extract/bin/buildkit-runc \
   "$BUILDCTL" --version 2>&1 || true
 } > "$EVIDENCE_DIR/a2-payload.txt" 2>&1
 
-log 'A3: the candidate payload module (v7: the harvest ledger + the run-2.5..6 enforcing deltas, enforcing)'
+log 'A3: the candidate payload module (v8: the harvest ledger + the run-2.5..7 enforcing deltas, enforcing)'
 cat > /tmp/payload_mac_diag.te <<'MODEOF'
-module payload_mac_diag 7.0;
+module payload_mac_diag 8.0;
 
-# P5-S2g28 guest-only candidate payload module. RUN 7: the enforcing
+# P5-S2g28 guest-only candidate payload module. RUN 8: the enforcing
 # iteration carrying the per-AVC-evidenced grants from the run-1/2
 # permissive harvest (195 unique (s,t,class,perm) denial tuples over the
-# full production path), the run-2.5/3/4/5 enforcing deltas, and the
-# run-6 delta (the slirp DNS-relay host-side recv). Every rule below is
+# full production path), the run-2.5/3/4/5/6 enforcing deltas, and the
+# run-7 delta (the slirp TLS-relay tcp write). The run-4/5/6/7 relabelto
+# AVC (buildkitd's xattr-preserving local-context copy) is SOLVED by
+# policy evidence, not by a new grant: the loaded policy constrains
+# file/dir relabelto with (u1 == u2 or t1 == can_change_object_identity)
+# — the TE allow exists, the subject is system_u, and the stand's
+# harness-created context files were unconfined_u; the composition now
+# labels the context files system_u the way production's daemon-staged
+# context is labeled, so the existing relabelto allow applies. Every
+# rule below is
 # attributable to harvested AVC records of the REAL production flow
 # (manager -> rootlesskit -> slirp4netns/net driver -> copy-up ->
 # buildkitd boot -> readiness -> buildctl build -> export) or the
@@ -285,7 +297,7 @@ require {
 	class process { setcap setpgid setsched signal sigkill signull };
 	class sock_file { create getattr setattr unlink };
 	class system { module_request };
-	class tcp_socket { connect create getattr getopt name_connect setopt };
+	class tcp_socket { connect create getattr getopt name_connect setopt write };
 	class tun_socket { create relabelfrom relabelto };
 	class udp_socket { connect create getattr read setopt write };
 	attribute file_type;
@@ -435,7 +447,12 @@ allow docker_helper_rootlesskit_t user_tmp_t:file { open write setattr relabelto
 
 # ---- the slirp4netns helper's own runtime (the net driver) ----
 allow docker_helper_slirp4netns_t self:cap_userns { sys_admin sys_ptrace };
-allow docker_helper_slirp4netns_t self:tcp_socket { connect create setopt };
+# the TLS relay's outbound send (RUN-8 DELTA: run-7 AVCs
+# 1790608297.159-533:401-408, scontext=...slirp4netns_t:s0 pid 2882
+# comm=slirp4netns, tclass=tcp_socket perm=write, lport/laddr the relay
+# sockets, faddr the resolved registry IPs fport=443 — the relay could
+# connect but not send, so the pull failed 'connection refused')
+allow docker_helper_slirp4netns_t self:tcp_socket { connect create setopt write };
 # the DNS-proxy relay's outbound sendto (RUN-6 DELTA: run-5 AVCs
 # 1790607009.754:404-407, scontext=...slirp4netns_t:s0 pid 2822
 # comm=slirp4netns, tclass=udp_socket perm=write, the reply relay out of
@@ -482,7 +499,7 @@ cat > /tmp/payload_mac_diag.fc <<'FCOF'
 /usr/libexec/docker-helper/buildkit(/.*)?    --    system_u:object_r:payload_buildkit_exec_t:s0
 FCOF
 {
-  echo "=== the candidate payload module (source, run 7: harvest-ledger grants + the run-2.5..6 enforcing deltas) ==="
+  echo "=== the candidate payload module (source, run 8: harvest-ledger grants + the run-2.5..7 enforcing deltas) ==="
   cat /tmp/payload_mac_diag.te
   echo "=== its file contexts ==="
   cat /tmp/payload_mac_diag.fc
@@ -572,7 +589,7 @@ semanage dontaudit off >>"$EVIDENCE_DIR/te-dontaudit-off.log" 2>&1 || true
 OPH="$(gen_op_id)"
 HV_EPOCH="$(date +%s)"
 {
-  echo "=== P5-S2g28 run 7: the enforcing candidate attempt (ledger v7) ==="
+  echo "=== P5-S2g28 run 8: the enforcing candidate attempt (ledger v8) ==="
   echo "op id: $OPH; epoch: $HV_EPOCH"
   echo "dontaudit rules disabled for the attempt window (semanage dontaudit off)"
   echo "attribution: run 2.5 proved module_request necessary under enforcing;"
@@ -581,7 +598,11 @@ HV_EPOCH="$(date +%s)"
   echo "unlink and the net-driver teardown sigkill blocking; run 5 proved the"
   echo "DNS reply recv (rootlesskit_t udp read) and the slirp relay send"
   echo "(slirp4netns_t udp write) blocking; run 6 proved the slirp relay's"
-  echo "host-side recv (slirp4netns_t udp read) blocking."
+  echo "host-side recv (slirp4netns_t udp read) blocking; run 7 proved the"
+  echo "slirp TLS-relay tcp send (slirp4netns_t tcp write) blocking, and the"
+  echo "run-4..7 relabelto AVCs were solved as the u1==u2 relabelto"
+  echo "constraint against unconfined_u harness context files (the"
+  "composition now labels them system_u like production's staged context)."
   echo "=== manager RPC: START $OPH ==="
 } > "$EVIDENCE_DIR/e-attempt.txt"
 set +e
@@ -605,12 +626,28 @@ sleep 4
 cat "$EVIDENCE_DIR/e-processes.txt" >&2
 
 # The minimal real build (the P4A1 pattern; NO Docker Engine needed).
+# The context files are labeled system_u BEFORE the build: production's
+# build context is staged by the daemon (system_u:docker_helper_t creates
+# the staged files in its runtime dir), and the loaded policy constrains
+# file/dir relabelto with (u1 == u2 or t1 == can_change_object_identity)
+# — buildkitd's xattr-preserving local-context copy relabels the
+# snapshot copies to the source's label, so the source files must carry
+# the payload's own user. The run-4/5/6/7 harness composition used
+# unconfined_u context files, which made the relabelto a constraint
+# denial (the TE allow was already present) — a composition artifact,
+# fixed here, NOT a payload grant.
 CTX="$WORK/ctx"
 mkdir -p "$CTX"
 cat > "$CTX/Dockerfile" <<'EOF'
 FROM alpine:3.20
-RUN mkdir -p /m1 && echo p5s2-g28-run7 > /m1/marker.txt && cat /proc/self/uid_map > /m1/uid_map.txt && id > /m1/id.txt
+RUN mkdir -p /m1 && echo p5s2-g28-run8 > /m1/marker.txt && cat /proc/self/uid_map > /m1/uid_map.txt && id > /m1/id.txt
 EOF
+chcon -u system_u "$CTX" "$CTX/Dockerfile"
+{
+  echo "=== the context files' labels after the system_u chcon ==="
+  stat -c '%C %U:%G %n' "$CTX" "$CTX/Dockerfile" 2>&1
+} > "$EVIDENCE_DIR/e-ctx-labels.txt" 2>&1
+cat "$EVIDENCE_DIR/e-ctx-labels.txt" >&2
 mkdir -p "$WORK/docker-config" "$WORK/export"
 echo '{}' > "$WORK/docker-config/config.json"
 set +e
@@ -618,7 +655,7 @@ DOCKER_CONFIG="$WORK/docker-config" timeout 300 "$BUILDCTL" \
   --addr "unix://$RUNTIME_ROOT/ops/$OPH/buildkitd.sock" build \
   --progress=plain --frontend=dockerfile.v0 \
   --local "context=$CTX" --local "dockerfile=$CTX" \
-  --output "type=docker,name=p5s2g28:run7,dest=$WORK/export/out.tar" \
+  --output "type=docker,name=p5s2g28:run8,dest=$WORK/export/out.tar" \
   > "$EVIDENCE_DIR/e-build.txt" 2>&1
 BUILD_RC=$?
 set -e
@@ -685,5 +722,5 @@ semodule -r payload_mac_diag >/dev/null 2>&1 || true
 semodule -r gidmap_mcsboundary_diag >/dev/null 2>&1 || true
 semodule -l 2>/dev/null | grep -E 'docker_helper|gidmap|payload' > "$EVIDENCE_DIR/g-final-modules.txt" 2>&1 || true
 
-printf '%s P5S2-PAYLOAD-MAC-RESULT=PASS (run 7 completed: enforcing candidate iteration, ledger v7)\n' "$PREFIX" >&2
+printf '%s P5S2-PAYLOAD-MAC-RESULT=PASS (run 8 completed: enforcing candidate iteration, ledger v8)\n' "$PREFIX" >&2
 exit 0
