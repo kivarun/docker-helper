@@ -1,0 +1,65 @@
+name: Release 2.4 P5-S2 cross-op state poisoning experiment
+
+# One-off investigation job (P5-S2g29): the paired causal measurement of
+# the LAST open G27 criterion. G28 proved the payload MAC surface and the
+# cross-op write-link into another operation's state tree; G29 answers
+# whether a cross-op write into ONE BuildKit state object of operation B
+# (chosen from the real post-build inventory of ops/<B>/root) causally
+# changes operation B's build result, through a paired runtime
+# measurement: baseline pair (build + repeat, no mutation) -> cross-op
+# mutation from op A's category (production-like, candidate-policy
+# access only, no root writes) -> consumption build -> paired own-op
+# control (B's own category performs the identical mutation) -> the
+# short G26 regression guards. G29 does NOT commit production policy,
+# does NOT change manager/BuildKit/docker-helper sources, does NOT fix
+# any found poisoning path, and does NOT start production implementation.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - p3
+    paths:
+      - .github/workflows/release-2.4-p5s2-state-poison-tw.yml
+      - scripts/release-2.4-p5s2-state-poison-tw.sh
+      - scripts/release-2.4-p5s2-state-poison-tw-vm.sh
+      - packaging/selinux/docker-helper.te
+      - packaging/selinux/docker-helper.fc
+      - builder_manager.go
+
+permissions:
+  contents: read
+
+jobs:
+  state-poison-tumbleweed:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+
+      - name: Build the real docker-helper binary from the proof commit
+        run: go build -o docker-helper .
+
+      - name: Install QEMU and cloud-image tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage
+
+      - name: Run Tumbleweed state-poisoning measurement
+        run: |
+          UAT_REPO_DIR="${{ github.workspace }}" \
+          STATE_POISON_EVIDENCE_DIR="$RUNNER_TEMP/release-2.4-p5s2-state-poison-evidence" \
+            scripts/release-2.4-p5s2-state-poison-tw-vm.sh
+
+      - name: Upload experiment evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-2.4-p5s2-state-poison-tw-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-2.4-p5s2-state-poison-evidence
+          if-no-files-found: warn
