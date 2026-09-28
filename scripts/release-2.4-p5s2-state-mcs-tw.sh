@@ -1240,7 +1240,7 @@ log 'J2: Part C — the descendant label inventory (the category deeper in the t
   echo ""
   echo "metadata objects (the top of the buildkitd root):"
   for f in "$SB/root/buildkitd.lock" "$SB/root/cache.db" "$SB/root/history.db"; do
-    [ -e "$f" ] && stat -c '%C %U:%G %a %n' "$f"
+    [ -e "$f" ] && stat -c '%C %U:%G %a %n' "$f" || true
   done
   echo ""
   echo "rootlesskit-state objects:"
@@ -1248,11 +1248,11 @@ log 'J2: Part C — the descendant label inventory (the category deeper in the t
   echo ""
   echo "content blob (one representative):"
   CB=$(find "$SB/root/runc-overlayfs/content/blobs" -type f 2>/dev/null | head -1)
-  [ -n "$CB" ] && stat -c '%C %U:%G %a %n' "$CB"
+  [ -n "$CB" ] && stat -c '%C %U:%G %a %n' "$CB" || true
   echo ""
   echo "snapshot directory + regular file (the G29 target selection):"
   PASSWD="$(find "$SB/root/runc-overlayfs/snapshots" -type f -path '*/fs/etc/passwd' 2>/dev/null | head -1 || true)"
-  [ -n "$PASSWD" ] && { SD="$(dirname "$(dirname "$PASSWD")")"; stat -c '%C %U:%G %a %n' "$SD" "$SD/fs" "$PASSWD"; }
+  [ -n "$PASSWD" ] && { SD="$(dirname "$(dirname "$(dirname "$PASSWD")")")"; stat -c '%C %U:%G %a %n' "$SD" "$SD/fs" "$PASSWD" || true; }
   echo ""
   echo "every distinct scontext in the operation state tree:"
   find "$SB" -exec stat -c '%C' {} \; 2>/dev/null | sort | uniq -c | sort -rn
