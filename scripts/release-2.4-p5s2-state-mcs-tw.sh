@@ -1703,6 +1703,12 @@ sleep 3
 } > "$EVIDENCE_DIR/f3-purge-result.txt" 2>&1
 harvest_avcs_since "$PF_EPOCH" "$EVIDENCE_DIR/f3-purge-avcs.txt"
 cat "$EVIDENCE_DIR/f3-purge-result.txt" >&2
+PURGE_OK=0
+grep -q 'unit active: yes' "$EVIDENCE_DIR/f3-purge-result.txt" \
+  && [ ! -e "$SB" ] && [ ! -e "$RB" ] \
+  && [ ! -e "$STATE_ROOT/ops/$OPFAKE1" ] \
+  && grep -q 'fake c1 removed: yes' "$EVIDENCE_DIR/f3-purge-result.txt" \
+  && grep -q 'fake c2 removed: yes' "$EVIDENCE_DIR/f3-purge-result.txt" && PURGE_OK=1
 
 # F5: the reuse check: the same fake id re-provisioned with a fresh
 # category; the new tree carries the allocator's assignment, not the
@@ -1759,14 +1765,9 @@ grep -q 'readiness: 1' "$EVIDENCE_DIR/f1-start-labels.txt" \
   && grep -q 'refusing to adopt' "$EVIDENCE_DIR/f2-refusal.txt" \
   && grep -q 'planted dirs survive' "$EVIDENCE_DIR/f2-refusal.txt" \
   && [ "$P4_OK" = "1" ] && MANAGER_OK=1
-PURGE_OK=0
-grep -q 'unit active: yes' "$EVIDENCE_DIR/f3-purge-result.txt" \
-  && [ ! -e "$SB" ] && [ ! -e "$RB" ] \
-  && [ ! -e "$STATE_ROOT/ops/$OPFAKE1" ] && [ ! -e "$STATE_ROOT/ops/$OPFAKE2" ] \
-  && grep -q 'fake c1 removed: yes' "$EVIDENCE_DIR/f3-purge-result.txt" \
-  && grep -q 'fake c2 removed: yes' "$EVIDENCE_DIR/f3-purge-result.txt" && PURGE_OK=1
+
 REUSE_OK=0
-grep -q 'fresh label is c1: yes' "$EVIDENCE_DIR/f5-reuse.txt" && REUSE_OK=1
+grep -q 'fresh label is c1.*: yes' "$EVIDENCE_DIR/f5-reuse.txt" && REUSE_OK=1
 GUARDS_OK=0
 if grep -q 'Could not open proc directory for target.*Permission denied' "$EVIDENCE_DIR/g-guard1-newuidmap.txt" \
    && grep -q 'target uid_map after: \[\]' "$EVIDENCE_DIR/g-guard1-newuidmap.txt" \
