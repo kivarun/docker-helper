@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
 #
 # Guest-side P5-S2g28 BuildKit payload MAC closure for openSUSE
-# Tumbleweed. INVESTIGATION ONLY — run 2 (the enforcing candidate
-# iteration): the candidate payload module (the run-1/2 harvest's
-# grant-ledger rules) is loaded, every flow/payload domain stays
-# ENFORCING (no permissive), and the full production composition
-# manager -> rootlesskit -> buildkitd -> readiness -> minimal buildctl
-# build -> STOP runs. Every residual AVC denial is harvested as the next
-# iteration's ledger delta.
+# Tumbleweed. INVESTIGATION ONLY — run 3 (the enforcing candidate
+# iteration, ledger v3): the candidate payload module carries the
+# run-1/2 harvest-ledger grants PLUS the one grant the run-2 enforcing
+# attempt proved missing (kernel module autoload for the tun driver);
+# every flow/payload domain stays ENFORCING (no permissive), and the
+# full production composition manager -> rootlesskit -> buildkitd ->
+# readiness -> minimal buildctl build -> STOP runs. Every residual AVC
+# denial is harvested as the next iteration's ledger delta; base-policy
+# dontaudit rules are disabled for the attempt window so no hidden
+# denial can mask the ledger source (re-enabled at teardown).
 #
-# Starting point (runs 1/2 = CI 36420911926/36423428498):
+# Starting point (runs 1/2 = CI 36420911926/36423428498, enforcing
+# attempt = run 2.5 = CI 36426082065):
 #  - Part A baseline recorded: the production flow's exact enforcing
 #    stop at the gid-map capability boundary (newgidmap_t cap_userns
 #    sys_admin + capability setgid), plus the auxiliary boundaries the
@@ -23,10 +27,23 @@
 #  - A real FROM alpine:3.20 HTTPS build COMPLETED under permissive
 #    (buildctl exit 0, a 3.6MB export tar), proving the composition and
 #    the harvest method.
+#  - Run 2.5 (CI 36426082065, enforcing candidate): the flow passed the
+#    G27 gid-map enforcing boundary (newgidmap_t cap_userns sys_admin +
+#    capability setgid carried it through) and died at rootlesskit's tap
+#    setup — `ip tuntap add` opening /dev/net/tun returned ENODEV with an
+#    EMPTY AVC window. Cause: the run-2 permissive harvest recorded the
+#    tun autoload AVC (docker_helper_rootlesskit_t -> kernel_t:system
+#    module_request, kmod="char-major-10-200", comm="ip", the same
+#    syscall window as the granted tun open/ioctl) but the candidate
+#    module carried only a dontaudit for it; under enforcing the driver
+#    never loads, so the open fails ENODEV ("open: No such device" in
+#    the manager's child-output tail) and the launch aborts. The ledger
+#    delta for run 3 is exactly that one allow.
 #
-# This run: the candidate module carries ONLY per-AVC-evidenced grants
-# (71 allow rules covering the 195 harvest tuples, each attributed in
-# the ledger); the run harvests the RESIDUAL denials under enforcing.
+# This run: the candidate module (v3) carries ONLY per-AVC-evidenced
+# grants (72 allow rules; the module_request allow attributed to the
+# run-2 harvest record + the run-2.5 failure); the run harvests the
+# RESIDUAL denials under enforcing with dontaudits unmapped.
 #
 # The stand is the G27 stand maximally unchanged: REAL manager under the
 # REAL systemd unit (SELinuxContext binding, P4 unit-cgroup boundary,
@@ -75,6 +92,7 @@ cleanup() {
   systemctl daemon-reload >/dev/null 2>&1 || true
   rm -f /usr/bin/docker-helper
   rm -rf /usr/libexec/docker-helper "$STATE_ROOT" "$RUNTIME_ROOT" "$WORK"
+  semanage dontaudit on >/dev/null 2>&1 || true
   for d in "${DOMAINS[@]}"; do
     clear_permissive "$d"
   done
@@ -222,14 +240,15 @@ install -m 0755 /tmp/p5s2-g28-payload-extract/bin/buildkit-runc \
   "$BUILDCTL" --version 2>&1 || true
 } > "$EVIDENCE_DIR/a2-payload.txt" 2>&1
 
-log 'A3: the candidate payload module (v2: the run-1/2 harvest ledger, enforcing)'
+log 'A3: the candidate payload module (v3: the harvest ledger + the run-2.5 module_request delta, enforcing)'
 cat > /tmp/payload_mac_diag.te <<'MODEOF'
-module payload_mac_diag 2.0;
+module payload_mac_diag 3.0;
 
-# P5-S2g28 guest-only candidate payload module. RUN 2: the enforcing
+# P5-S2g28 guest-only candidate payload module. RUN 3: the enforcing
 # iteration carrying the per-AVC-evidenced grants from the run-1/2
-# permissive harvest (the run-1 ledger: 195 unique (s,t,class,perm)
-# denial tuples over the full production path). Every rule below is
+# permissive harvest (195 unique (s,t,class,perm) denial tuples over the
+# full production path) PLUS the single delta the run-2.5 enforcing
+# attempt proved missing (kernel module autoload). Every rule below is
 # attributable to harvested AVC records of the REAL production flow
 # (manager -> rootlesskit -> slirp4netns/net driver -> copy-up ->
 # buildkitd boot -> readiness -> buildctl build -> export) or the
@@ -374,8 +393,18 @@ allow docker_helper_rootlesskit_t docker_helper_builder_runtime_t:fifo_file { cr
 allow docker_helper_rootlesskit_t self:tcp_socket { connect create getattr getopt setopt };
 allow docker_helper_rootlesskit_t self:udp_socket { connect create getattr setopt };
 allow docker_helper_rootlesskit_t http_port_t:tcp_socket { name_connect };
-# kernel module autoload probe (denied silently; no grant — dontaudit only)
-dontaudit docker_helper_rootlesskit_t kernel_t:system module_request;
+# kernel module autoload (RUN-2.5 DELTA, the run-2 permissive AVC
+# 1790599487.322:411: scontext=docker_helper_rootlesskit_t
+# tcontext=kernel_t tclass=system perm=module_request kmod="char-major-10-200",
+# comm="ip", pid 2913, the same syscall window as the granted tun
+# open/ioctl; the run-2.5 enforcing attempt died at the tap open with
+# ENODEV and an empty AVC window because only a dontaudit was loaded).
+# The flow's ONLY path to the tun driver on a module-based distro kernel
+# is the kernel's own autoload triggered by opening /dev/net/tun — the
+# standard container-domain grant (docker_t/container_t carry it for
+# exactly this mechanism). SELinux has no per-module granularity; the
+# breadth is inherent and recorded in the privilege review.
+allow docker_helper_rootlesskit_t kernel_t:system module_request;
 # the export tar's destination file (the harness's user_tmp_t file)
 allow docker_helper_rootlesskit_t user_tmp_t:file { open write setattr relabelto };
 
@@ -414,7 +443,7 @@ cat > /tmp/payload_mac_diag.fc <<'FCOF'
 /usr/libexec/docker-helper/buildkit(/.*)?    --    system_u:object_r:payload_buildkit_exec_t:s0
 FCOF
 {
-  echo "=== the candidate payload module (source, run 2: the harvest-ledger grants) ==="
+  echo "=== the candidate payload module (source, run 3: harvest-ledger grants + the run-2.5 module_request delta) ==="
   cat /tmp/payload_mac_diag.te
   echo "=== its file contexts ==="
   cat /tmp/payload_mac_diag.fc
@@ -497,11 +526,21 @@ if ! stat -c '%C' "$STATE_ROOT" 2>/dev/null | grep -q 'docker_helper_builder_sta
 fi
 
 log 'E: the enforcing candidate attempt — START + readiness + minimal build + STOP'
+# Harvest completeness: disable every dontaudit rule (ours and the base
+# policy's) so NO denial can hide from the ledger harvest; re-enabled at
+# teardown. Guest-only, evidence-driven harvest hygiene.
+semanage dontaudit off >>"$EVIDENCE_DIR/e-attempt.txt" 2>&1 || true
+DOA=$(semanage dontaudit 2>&1 || true)
 OPH="$(gen_op_id)"
 HV_EPOCH="$(date +%s)"
 {
-  echo "=== P5-S2g28 run 2: the enforcing candidate attempt ==="
+  echo "=== P5-S2g28 run 3: the enforcing candidate attempt (ledger v3) ==="
   echo "op id: $OPH; epoch: $HV_EPOCH"
+  echo "dontaudit setting after 'semanage dontaudit off': ${DOA:-unknown}"
+  echo "attribution: the run-2 permissive harvest record 1790599487.322:411"
+  echo "(rootlesskit_t -> kernel_t:system module_request kmod=char-major-10-200)"
+  echo "is the grant behind this attempt's tap-open step; run 2.5 proved the"
+  echo "grant necessary under enforcing (ENODEV, empty AVC window)."
   echo "=== manager RPC: START $OPH ==="
 } > "$EVIDENCE_DIR/e-attempt.txt"
 set +e
@@ -529,7 +568,7 @@ CTX="$WORK/ctx"
 mkdir -p "$CTX"
 cat > "$CTX/Dockerfile" <<'EOF'
 FROM alpine:3.20
-RUN mkdir -p /m1 && echo p5s2-g28-run2 > /m1/marker.txt && cat /proc/self/uid_map > /m1/uid_map.txt && id > /m1/id.txt
+RUN mkdir -p /m1 && echo p5s2-g28-run3 > /m1/marker.txt && cat /proc/self/uid_map > /m1/uid_map.txt && id > /m1/id.txt
 EOF
 mkdir -p "$WORK/docker-config" "$WORK/export"
 echo '{}' > "$WORK/docker-config/config.json"
@@ -538,7 +577,7 @@ DOCKER_CONFIG="$WORK/docker-config" timeout 300 "$BUILDCTL" \
   --addr "unix://$RUNTIME_ROOT/ops/$OPH/buildkitd.sock" build \
   --progress=plain --frontend=dockerfile.v0 \
   --local "context=$CTX" --local "dockerfile=$CTX" \
-  --output "type=docker,name=p5s2g28:run2,dest=$WORK/export/out.tar" \
+  --output "type=docker,name=p5s2g28:run3,dest=$WORK/export/out.tar" \
   > "$EVIDENCE_DIR/e-build.txt" 2>&1
 BUILD_RC=$?
 set -e
@@ -579,6 +618,7 @@ dedup_avcs "$EVIDENCE_DIR/g-residual-avcs.txt" "$EVIDENCE_DIR/g-residual-avcs-de
 wc -l "$EVIDENCE_DIR/g-residual-avcs.txt" "$EVIDENCE_DIR/g-residual-avcs-dedup.txt" >&2
 
 log 'teardown + cleanup (enforcing everywhere; temporary modules removed)'
+semanage dontaudit on >/dev/null 2>&1 || true
 pkill -KILL -f 'rootlesskit --net=' 2>/dev/null || true
 pkill -KILL -f 'buildkitd --rootless' 2>/dev/null || true
 pkill -KILL -f 'buildctl --addr' 2>/dev/null || true
@@ -593,5 +633,5 @@ semodule -r payload_mac_diag >/dev/null 2>&1 || true
 semodule -r gidmap_mcsboundary_diag >/dev/null 2>&1 || true
 semodule -l 2>/dev/null | grep -E 'docker_helper|gidmap|payload' > "$EVIDENCE_DIR/g-final-modules.txt" 2>&1 || true
 
-printf '%s P5S2-PAYLOAD-MAC-RESULT=PASS (run 2 completed: enforcing candidate iteration)\n' "$PREFIX" >&2
+printf '%s P5S2-PAYLOAD-MAC-RESULT=PASS (run 3 completed: enforcing candidate iteration, ledger v3)\n' "$PREFIX" >&2
 exit 0
