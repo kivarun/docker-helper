@@ -30,6 +30,17 @@
 # parent-role newuidmap can still write B's empty uid_map across the
 # categories, and whether the own-child write still works.
 #
+# Phase H reuses the same stand for the P5-S2g25 feasibility proof: the
+# ONLY policy delta is a guest-only module that adds
+# docker_helper_newuidmap_t to the shipped base's mcs_constrained_type
+# attribute (no allow/grant/transition changes). It answers whether that
+# single membership yields the required semantics: the cross-operation
+# c1→c2 uid_map write denied by exactly the MCS constraint, the own-child
+# c1→c1 write still allowed, and the flow reaching the same production
+# gid_map boundary with no new blocking denials. An unassignable
+# category, a delta that fails to load, or an unverifiable membership is
+# recorded and stops the phase.
+#
 # Two scenarios, both invoking the REAL /usr/bin/newgidmap with the PID of
 # a FRESH target child B (uid_map set, gid_map empty) and the flow's valid
 # subgid arguments:
@@ -97,6 +108,7 @@ cleanup() {
   done
   semodule -r gidmap_capsetgid_diag >/dev/null 2>&1 || true
   semodule -r gidmap_capuserns_diag >/dev/null 2>&1 || true
+  semodule -r gidmap_mcsconstrained_diag >/dev/null 2>&1 || true
   semodule -r gidmap_probe_diag >/dev/null 2>&1 || true
   semodule -r docker_helper >/dev/null 2>&1 || true
 }
@@ -262,7 +274,7 @@ log 'B: barrier fifos + probe vehicle'
 mkfifo "$DIAG_BASE/fifos"/bfifo-s1 "$DIAG_BASE/fifos/bfifo-s2" \
        "$DIAG_BASE/fifos/bfifo-s3p" "$DIAG_BASE/fifos/bfifo-s3w1" \
        "$DIAG_BASE/fifos/bfifo-s3w2" "$DIAG_BASE/fifos/bfifo-g23" \
-       "$DIAG_BASE/fifos/bfifo-g24" \
+       "$DIAG_BASE/fifos/bfifo-g24" "$DIAG_BASE/fifos/bfifo-g25" \
        "$DIAG_BASE/fifos/gofifo-s3w1" "$DIAG_BASE/fifos/gofifo-s3w2"
 chmod 666 "$DIAG_BASE/fifos"/*
 # The per-stage rootlesskit state dirs are created up front: the module
@@ -272,10 +284,11 @@ chmod 666 "$DIAG_BASE/fifos"/*
 # starts.
 mkdir -p "$DIAG_BASE/s1/a1-state" "$DIAG_BASE/s2/a1-state" \
          "$DIAG_BASE/s3/a1-state" "$DIAG_BASE/s3/a2-state" \
-         "$DIAG_BASE/g23/a1-state" "$DIAG_BASE/g24/a1-state"
+         "$DIAG_BASE/g23/a1-state" "$DIAG_BASE/g24/a1-state" \
+         "$DIAG_BASE/g25/a1-state"
 chown "$BUILDER_USER:$BUILDER_USER" "$DIAG_BASE/s1/a1-state" "$DIAG_BASE/s2/a1-state" \
       "$DIAG_BASE/s3/a1-state" "$DIAG_BASE/s3/a2-state" "$DIAG_BASE/g23/a1-state" \
-      "$DIAG_BASE/g24/a1-state"
+      "$DIAG_BASE/g24/a1-state" "$DIAG_BASE/g25/a1-state"
 FIFO_LABEL="$(stat -c '%C' "$DIAG_BASE/fifos/bfifo-s1" 2>/dev/null || true)"
 FIFO_T="$(printf '%s' "$FIFO_LABEL" | cut -d: -f3)"
 RUNNER_CTX="$(tr -d '\0' < /proc/self/attr/current 2>/dev/null || true)"
@@ -296,7 +309,8 @@ WALK_DIRS=(/tmp "$DIAG_BASE" "$DIAG_BASE/fifos" \
            "$DIAG_BASE/s1" "$DIAG_BASE/s1/a1-state" "$DIAG_BASE/s2" "$DIAG_BASE/s2/a1-state" \
            "$DIAG_BASE/s3" "$DIAG_BASE/s3/a1-state" "$DIAG_BASE/s3/a2-state" \
            "$DIAG_BASE/g23" "$DIAG_BASE/g23/a1-state" \
-           "$DIAG_BASE/g24" "$DIAG_BASE/g24/a1-state")
+           "$DIAG_BASE/g24" "$DIAG_BASE/g24/a1-state" \
+           "$DIAG_BASE/g25" "$DIAG_BASE/g25/a1-state")
 DIR_TYPE_LIST=""
 STATE_TYPE_LIST=""
 for d in "${WALK_DIRS[@]}"; do
@@ -1288,6 +1302,146 @@ else
 fi
 P5S2G24_RESULT="${P5S2G24_RESULT:-the g24 phase did not complete its measurement}"
 printf '%s P5S2-G24-MCS-CROSSOP-RESULT=COMPLETED (%s)\n' "$PREFIX" "$P5S2G24_RESULT" >&2
+
+log 'H: P5-S2g25 — constrained MCS feasibility proof (newuidmap_t membership in mcs_constrained_type)'
+# The pairing with g24 is the attribution argument: the SAME cross-op
+# call succeeded in phase G (the constraint exempted the helper domain)
+# and is retried here with the single membership delta loaded, so any
+# new denial on the same contexts is caused by the delta, not by
+# something else. The delta is a guest-only module; it is removed at
+# cleanup.
+{
+  echo "=== loaded policy modules at the g25 phase start ==="
+  semodule -l | grep -a 'docker_helper\|gidmap' || true
+  echo "=== the shipped policy's MCS/MLS constraint set (the mechanism under test) ==="
+  echo "--- seinfo --constrain file ---"
+  seinfo --constrain file 2>&1 || true
+  echo "--- seinfo --constrain process ---"
+  seinfo --constrain process 2>&1 || true
+  echo "--- seinfo --constrain dir ---"
+  seinfo --constrain dir 2>&1 || true
+  echo "=== the production .te's uid_map rules (the TE layer, unchanged) ==="
+  grep -an 'uid_map' "$TRANSFERRED/docker-helper.te" || true
+} > "$EVIDENCE_DIR/g25-production-surface.txt" 2>&1
+seinfo -a mcs_constrained_type -x 2>/dev/null \
+  > "$EVIDENCE_DIR/g25-mcs-members-before.txt" || true
+G25_MEMB_BEFORE=0
+if grep -aq 'docker_helper_newuidmap_t' "$EVIDENCE_DIR/g25-mcs-members-before.txt"; then
+  G25_MEMB_BEFORE=1
+  note "g25: docker_helper_newuidmap_t is ALREADY a member of mcs_constrained_type before the delta (unexpected production state)"
+fi
+cat > /tmp/gidmap_mcsconstrained_diag.te <<'DELTAEOF'
+module gidmap_mcsconstrained_diag 1.0;
+
+# P5-S2g25 guest-only policy delta: the ONLY change vs the production
+# policy is the membership of docker_helper_newuidmap_t in the shipped
+# base's mcs_constrained_type attribute. No allow/grant/transition rules
+# are added. Loaded only for this experiment; removed at cleanup.
+require {
+  attribute mcs_constrained_type;
+  type docker_helper_newuidmap_t;
+}
+typeattribute docker_helper_newuidmap_t mcs_constrained_type;
+DELTAEOF
+{
+  echo "=== the exact policy delta (the guest-only module's source) ==="
+  cat /tmp/gidmap_mcsconstrained_diag.te
+  echo "=== compile/package/load log ==="
+} > "$EVIDENCE_DIR/g25-policy-delta.txt"
+DELTA_OK=0
+if checkmodule -M -m -o /tmp/gidmap_mcsconstrained_diag.tmp /tmp/gidmap_mcsconstrained_diag.te 2>>"$EVIDENCE_DIR/g25-policy-delta.txt" &&
+   semodule_package -o /tmp/gidmap_mcsconstrained_diag.pp -m /tmp/gidmap_mcsconstrained_diag.tmp 2>>"$EVIDENCE_DIR/g25-policy-delta.txt" &&
+   semodule -i /tmp/gidmap_mcsconstrained_diag.pp 2>>"$EVIDENCE_DIR/g25-policy-delta.txt"; then
+  DELTA_OK=1
+fi
+G25_MEMB_AFTER=0
+if [ "$DELTA_OK" = 1 ]; then
+  seinfo -a mcs_constrained_type -x 2>/dev/null \
+    > "$EVIDENCE_DIR/g25-mcs-members-after.txt" || true
+  if grep -aq 'docker_helper_newuidmap_t' "$EVIDENCE_DIR/g25-mcs-members-after.txt"; then G25_MEMB_AFTER=1; fi
+fi
+{
+  echo "=== mcs_constrained_type membership ==="
+  echo "before the delta: member=$G25_MEMB_BEFORE (full dump: g25-mcs-members-before.txt)"
+  echo "delta loaded: $DELTA_OK"
+  echo "after the delta: member=$G25_MEMB_AFTER (full dump: g25-mcs-members-after.txt)"
+  echo "=== the categories and contexts A/B (assignment re-verification) ==="
+  echo "runner attr/current: $(tr -d '\0' < /proc/self/attr/current 2>/dev/null || true)"
+  echo "builder context: $(runuser -u "$BUILDER_USER" -- id -Z 2>/dev/null || echo UNAVAILABLE)"
+  echo "=== assignment probe A: runuser+runcon to $RK_EXEC_T_A ==="
+  runuser -u "$BUILDER_USER" -- runcon "$RK_EXEC_T_A" /usr/local/bin/map_probe --facts || true
+  echo "=== assignment probe B: runuser+runcon to $RK_EXEC_T_B ==="
+  runuser -u "$BUILDER_USER" -- runcon "$RK_EXEC_T_B" /usr/local/bin/map_probe --facts || true
+} > "$EVIDENCE_DIR/g25-assignment.txt" 2>&1
+cat "$EVIDENCE_DIR/g25-assignment.txt" >&2
+G25_ASSIGN_OK=0
+if grep -aq 'PROBE selinux=system_u:system_r:docker_helper_rootlesskit_t:s0:c1' "$EVIDENCE_DIR/g25-assignment.txt" &&
+   grep -aq 'PROBE selinux=system_u:system_r:docker_helper_rootlesskit_t:s0:c2' "$EVIDENCE_DIR/g25-assignment.txt"; then G25_ASSIGN_OK=1; fi
+P5S2G25_RESULT=""
+if [ "$DELTA_OK" = 0 ] || [ "$G25_MEMB_AFTER" = 0 ]; then
+  note "g25 OBSTACLE: the guest-only MCS delta could not be loaded or its membership is not verifiable (see g25-policy-delta.txt and g25-mcs-members-after.txt) — the phase stops"
+  P5S2G25_RESULT="INCONCLUSIVE: the guest-only MCS delta could not be loaded or its membership is not verifiable (see g25-policy-delta.txt and g25-mcs-members-after.txt)"
+elif [ "$G25_ASSIGN_OK" = 0 ]; then
+  note "g25 OBSTACLE: the existing policy does not allow assigning the required MCS categories (see g25-assignment.txt) — the phase stops without the cross-operation attempt"
+  P5S2G25_RESULT="INCONCLUSIVE: the existing policy does not allow assigning the required MCS categories (see g25-assignment.txt)"
+fi
+if [ -z "$P5S2G25_RESULT" ]; then
+  G25_EPOCH="$(date +%s)"
+  B_G25="$(make_target_b "$DIAG_BASE/fifos/bfifo-g25" "$RK_EXEC_T_B" || true)"
+  if [ -z "${B_G25:-}" ]; then
+    note "g25: the target child B could not be created (recorded as a finding)"
+    P5S2G25_RESULT="INCONCLUSIVE: the target child B could not be created (see stand-failure-g25-target.txt)"
+    diagnose_stand_failure g25-target "$G25_EPOCH" "$DIAG_BASE/b-target.out" "$EVIDENCE_DIR/g25-b-facts.txt"
+  else
+    collect_b_facts "$B_G25" "$EVIDENCE_DIR/g25-b-facts.txt" "g25 target B (category c2) before"
+    RK_INVOKER_CTX="$RK_EXEC_T_A"
+    G25_ATTEMPT_RC=0
+    if ! parent_role_attempt "$DIAG_BASE/fifos/bfifo-g25" "$B_G25" \
+         "$EVIDENCE_DIR/g25-parent-attempt.txt" "$EVIDENCE_DIR/g25-parent-avcs.txt" \
+         /usr/bin/newuidmap uid_map "${U_MAP_ARGS[@]}"; then
+      G25_ATTEMPT_RC=1
+    fi
+    RK_INVOKER_CTX="$RK_EXEC_T"
+    # Scenario 1 attribution: the same call succeeded in phase G (the
+    # exempt subject), so with the membership loaded a file-class write
+    # denial or a dir-class search denial on the c1→c2 contexts IS the
+    # MCS mechanism (the dir search denies the path traversal that the
+    # production TE grants, before the map write itself is reached).
+    G25_LEG1=0
+    G25_BLOCK_CAUSE=""
+    if [ "$G25_ATTEMPT_RC" -eq 1 ]; then
+      if grep -aq 'scontext=system_u:system_r:docker_helper_newuidmap_t:s0:c1 ' "$EVIDENCE_DIR/g25-parent-avcs.txt" 2>/dev/null &&
+         { grep -aq 'tcontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c2 tclass=file' "$EVIDENCE_DIR/g25-parent-avcs.txt" 2>/dev/null ||
+           grep -aq 'tcontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c2 tclass=dir' "$EVIDENCE_DIR/g25-parent-avcs.txt" 2>/dev/null; }; then
+        G25_LEG1=1
+        G25_BLOCK_CAUSE="the MCS constraint on the dir search and/or the file write for the c1→c2 contexts"
+      else
+        P5S2G25_RESULT="INCONCLUSIVE: the cross-operation write failed under the constrained membership but the denial is not the MCS mechanism — see g25-parent-attempt.txt and g25-parent-avcs.txt for the exact cause"
+      fi
+    fi
+    if [ -z "$P5S2G25_RESULT" ]; then
+      # Scenario 2: the own-child control, the same deterministic machinery.
+      run_own_child_uid_control "$RK_EXEC_T_A" "g25" "g25"
+      G25_LEG2=0
+      if grep -aq 'uid_map content: \[ *0' "$EVIDENCE_DIR/g25-control-child-maps.txt" 2>/dev/null; then G25_LEG2=1; fi
+      # Scenario 3: the control flow's whole AVC window must contain only
+      # the known-benign shapes (the tolerated passwd getattrs and the
+      # gid step's production boundary denials).
+      G25_LEG3=0
+      G25_NONBENIGN="$(grep -a 'type=AVC' "$EVIDENCE_DIR/g25-control-avcs.txt" 2>/dev/null | grep -av 'passwd_file_t' | grep -av 'tclass=cap_userns' | grep -av 'tclass=capability' | wc -l || true)"
+      if grep -aq 'write to gid_map failed' "$EVIDENCE_DIR/g25-control.txt" 2>/dev/null && [ "${G25_NONBENIGN:-999}" -eq 0 ]; then G25_LEG3=1; fi
+      if [ "$G25_ATTEMPT_RC" -eq 0 ]; then
+        P5S2G25_RESULT="FAIL: the MCS-constrained newuidmap_t still wrote the cross-operation uid_map (see g25-parent-attempt.txt)"
+      elif [ "$G25_LEG2" = 0 ] || [ "$G25_LEG3" = 0 ]; then
+        P5S2G25_RESULT="FAIL: the own flow broke under the constrained membership (leg2/leg3 evidence: g25-control-child-maps.txt, g25-control.txt, g25-control-avcs.txt)"
+      else
+        P5S2G25_RESULT="PASS: c1→c2 uid_map write denied by the MCS constraint ($G25_BLOCK_CAUSE); the c1→c1 own-child write still succeeds (g25-control-child-maps.txt); the flow reaches the same production gid_map boundary with no new blocking denials (g25-control-avcs.txt)"
+      fi
+    fi
+  fi
+fi
+P5S2G25_RESULT="${P5S2G25_RESULT:-the g25 phase did not complete its measurement}"
+printf '%s P5S2-G25-MCS-CONSTRAINED-RESULT=COMPLETED (%s)\n' "$PREFIX" "$P5S2G25_RESULT" >&2
 
 log 'teardown'
 pkill -KILL -f 'rootlesskit --net=none' 2>/dev/null || true
