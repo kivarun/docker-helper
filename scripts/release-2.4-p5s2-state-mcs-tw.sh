@@ -1061,6 +1061,9 @@ provision_tree() {
   mkdir -p "$RUNTIME_ROOT/ops" 2>/dev/null || true
   chown "$BUILDER_USER":"$BUILDER_USER" "$RUNTIME_ROOT/ops" 2>/dev/null || true
   chmod 700 "$RUNTIME_ROOT/ops" 2>/dev/null || true
+  mkdir -p "$STATE_ROOT/ops" 2>/dev/null || true
+  chown "$BUILDER_USER":"$BUILDER_USER" "$STATE_ROOT/ops" 2>/dev/null || true
+  chmod 700 "$STATE_ROOT/ops" 2>/dev/null || true
   mkdir -p "$RUNTIME_ROOT/ops/$op" "$STATE_ROOT/ops/$op/rootlesskit-state" "$STATE_ROOT/ops/$op/root"
   chown "$BUILDER_USER":"$BUILDER_USER" "$RUNTIME_ROOT/ops/$op" "$STATE_ROOT/ops/$op" \
         "$STATE_ROOT/ops/$op/rootlesskit-state" "$STATE_ROOT/ops/$op/root"
