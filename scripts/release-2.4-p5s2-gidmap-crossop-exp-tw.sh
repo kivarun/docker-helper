@@ -1474,6 +1474,7 @@ cat "$EVIDENCE_DIR/f-newgidmap-avcs-all.txt" >&2
 log 'cleanup (temporary modules removed; the candidate module stays until the VM is disposed)'
 semodule -r gidmap_capsetgid_diag >/dev/null 2>&1 || true
 semodule -r gidmap_capuserns_diag >/dev/null 2>&1 || true
+semodule -r gidmap_mcsconstrained_diag >/dev/null 2>&1 || true
 semodule -r gidmap_probe_diag >/dev/null 2>&1 || true
 semodule -l 2>/dev/null | grep -E 'docker_helper|gidmap' > "$EVIDENCE_DIR/f-final-modules.txt" 2>&1 || true
 
