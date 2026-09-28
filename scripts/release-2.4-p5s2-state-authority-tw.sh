@@ -471,6 +471,7 @@ require {
 	class file { entrypoint read open execute execute_no_trans getattr map append write create setattr };
 	class fd { use };
 	class process { transition siginh };
+	class unix_stream_socket { connectto };
 }
 type state_probe_exec_t;
 typeattribute state_probe_exec_t file_type;
