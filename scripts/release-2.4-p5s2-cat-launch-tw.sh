@@ -651,11 +651,13 @@ require {
 	type docker_helper_builder_t;
 	type docker_helper_builder_state_t;
 	type bin_t;
-	class file { execute execute_no_trans open read getattr map relabelfrom relabelto };
+	type security_t;
+	class file { execute execute_no_trans getattr open read map write relabelfrom relabelto };
 	class dir { relabelfrom relabelto };
 	class process { setexec };
 }
 allow docker_helper_builder_t bin_t:file { execute execute_no_trans open read getattr map };
+allow docker_helper_builder_t security_t:file { getattr read write };
 allow docker_helper_builder_t self:process { setexec };
 allow docker_helper_builder_t docker_helper_builder_state_t:file { relabelfrom relabelto };
 allow docker_helper_builder_t docker_helper_builder_state_t:dir { relabelfrom relabelto };
