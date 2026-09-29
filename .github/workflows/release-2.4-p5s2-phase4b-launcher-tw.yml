@@ -56,6 +56,7 @@ jobs:
         run: |
           UAT_REPO_DIR="${{ github.workspace }}" \
           PHASE4B_PROOF_SRC="${{ github.workspace }}/proof-src" \
+          PHASE4B_HELPER_BIN="${{ github.workspace }}/proof-src/docker-helper" \
           PHASE4B_EVIDENCE_DIR="$RUNNER_TEMP/release-2.4-p5s2-phase4b-launcher-evidence" \
             scripts/release-2.4-p5s2-phase4b-launcher-tw-vm.sh
 
