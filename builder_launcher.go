@@ -103,13 +103,56 @@ func builderValidateLaunchArgv(argv []string) ([]string, error) {
 // exec must run on the same OS thread — see runBuilderLaunchExec.
 const builderProcattrExecPath = "/proc/thread-self/attr/exec"
 
+// builderProcattrOpen, builderProcattrWrite and builderProcattrClose are
+// the launcher procattr syscall seams (production: the unix syscalls on
+// the fixed procattr pathname). Package-global; tests restore them.
+var (
+	builderProcattrOpen = func(path string, flags int, perm uint32) (int, error) {
+		return unix.Open(path, flags, perm)
+	}
+	builderProcattrWrite = func(fd int, payload []byte) (int, error) {
+		return unix.Write(fd, payload)
+	}
+	builderProcattrClose = func(fd int) error {
+		return unix.Close(fd)
+	}
+)
+
 // builderWriteProcattrExec writes the forced exec context to the pinned
-// calling thread's /proc/thread-self/attr/exec — the fixed procattr
+// calling thread's /proc/thread-self/attr/exec in the upstream
+// setexeccon_raw wire form: the exact context text plus one terminal NUL
+// (no trailing newline — that is the legacy alternative form whose
+// setprocattr handler strips the newline and reports a short count),
+// opened O_RDWR|O_CLOEXEC, written in one logical write retried only on
+// EINTR, and requiring the full payload length: a short write, a write
+// error, an open failure, or a close failure after a committed write all
+// fail the launch closed (the write error is authoritative; the close
+// path never turns a failed write into success). The fixed procattr
 // pathname, no pid parameter, no libselinux, no security_check_context
-// round-trip: the kernel write is the authoritative validation. Injectable
-// for tests.
+// round-trip: the kernel write is the authoritative validation.
+// Injectable for tests through the syscall seams above.
 var builderWriteProcattrExec = func(context string) error {
-	return os.WriteFile(builderProcattrExecPath, []byte(context+"\n"), 0)
+	payload := append([]byte(context), 0)
+	fd, err := builderProcattrOpen(builderProcattrExecPath, unix.O_RDWR|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("cannot open the forced exec procattr %s: %w", builderProcattrExecPath, err)
+	}
+	n, err := builderProcattrWrite(fd, payload)
+	for err == unix.EINTR {
+		n, err = builderProcattrWrite(fd, payload)
+	}
+	if err != nil {
+		_ = builderProcattrClose(fd)
+		return fmt.Errorf("cannot write the forced exec context %q (tid %d, requested %d bytes, wrote %d): %w", context, unix.Gettid(), len(payload), n, err)
+	}
+	if n != len(payload) {
+		_ = builderProcattrClose(fd)
+		return fmt.Errorf("short write of the forced exec context %q (tid %d, requested %d bytes, wrote %d)", context, unix.Gettid(), len(payload), n)
+	}
+	if err := builderProcattrClose(fd); err != nil {
+		return fmt.Errorf("cannot close the forced exec procattr after writing %q (tid %d): %w", context, unix.Gettid(), err)
+	}
+	return nil
 }
 
 // builderReadProcattrExec reads back the pinned calling thread's
@@ -130,18 +173,20 @@ var builderReadProcattrExec = func() ([]byte, error) {
 // encoding, or mismatch fails closed — the launch dies before the execve
 // instead of entering the flow domain with a wrong or missing context
 // (the Phase 4B-R3 live evidence: a silent forced-context loss produced an
-// uncategorized flow entry).
+// uncategorized flow entry). The failure messages carry the boundary
+// telemetry (thread id, raw length, escaped raw bytes) for the proof
+// evidence; the success path prints nothing.
 func builderVerifyProcattrExec(target string) error {
 	raw, err := builderReadProcattrExec()
 	if err != nil {
-		return fmt.Errorf("cannot read back the forced exec context: %w", err)
+		return fmt.Errorf("cannot read back the forced exec context (tid %d): %w", unix.Gettid(), err)
 	}
 	got, err := decodeSELinuxXattrContext(raw)
 	if err != nil {
-		return fmt.Errorf("the forced exec context read back malformed: %w", err)
+		return fmt.Errorf("the forced exec context read back malformed (tid %d, %d raw bytes %q): %w", unix.Gettid(), len(raw), raw, err)
 	}
 	if got != target {
-		return fmt.Errorf("the forced exec context did not stick: want %q, got %q", target, got)
+		return fmt.Errorf("the forced exec context did not stick (tid %d): want %q, got %q (%d raw bytes %q)", unix.Gettid(), target, got, len(raw), raw)
 	}
 	return nil
 }

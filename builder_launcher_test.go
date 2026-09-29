@@ -11,6 +11,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -252,6 +253,124 @@ func TestBuilderLauncherSetExecThenExecFixedTarget(t *testing.T) {
 	}
 	if !slices.Equal(execEvent.env, os.Environ()) {
 		t.Fatalf("exec env must be the inherited environment verbatim")
+	}
+}
+
+// TestBuilderProcattrWriteWireContract proves the forced-context writer's
+// exact wire form (the upstream setexeccon_raw semantics without
+// libselinux): the fixed thread-local procattr pathname opened
+// O_RDWR|O_CLOEXEC, the payload equal to the exact target context plus
+// one terminal NUL (never a newline), one logical write retried only on
+// EINTR, the full payload length required (short writes rejected), write
+// errors rejected, and the close path never turning a failed write into
+// success (the write error is authoritative; a close failure after a
+// committed write is reported). The syscall seams are the contract's
+// only injectable surface; the production write logic itself is
+// exercised.
+func TestBuilderProcattrWriteWireContract(t *testing.T) {
+	const target = "system_u:system_r:docker_helper_rootlesskit_t:s0:c1"
+	wantPayload := append([]byte(target), 0)
+
+	origOpen, origWrite, origClose := builderProcattrOpen, builderProcattrWrite, builderProcattrClose
+	t.Cleanup(func() {
+		builderProcattrOpen, builderProcattrWrite, builderProcattrClose = origOpen, origWrite, origClose
+	})
+
+	for _, tc := range []struct {
+		name       string
+		openErr    error
+		writeErr   error
+		writeN     int // the returned n when writeErr == nil; -1 = full success
+		eintrFirst bool
+		closeErr   error
+		wantErrSub string
+		wantWrites int
+		wantCloses int
+	}{
+		{"successful full write", nil, nil, -1, false, nil, "", 1, 1},
+		{"EINTR retried once", nil, nil, -1, true, nil, "", 2, 1},
+		{"short write rejected", nil, nil, len(wantPayload) - 1, false, nil, "short write", 1, 1},
+		{"write error rejected", nil, unix.EACCES, 0, false, nil, "cannot write", 1, 1},
+		{"open error", unix.EACCES, nil, 0, false, nil, "cannot open", 0, 0},
+		{"close failure after committed write", nil, nil, -1, false, unix.EACCES, "cannot close", 1, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var opens []string
+			var writes [][]byte
+			var closes []int
+			writeCalls := 0
+			builderProcattrOpen = func(path string, flags int, _ uint32) (int, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				opens = append(opens, fmt.Sprintf("%s|0x%x", path, flags))
+				if tc.openErr != nil {
+					return -1, tc.openErr
+				}
+				return 7, nil
+			}
+			builderProcattrWrite = func(_ int, p []byte) (int, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				writeCalls++
+				writes = append(writes, append([]byte(nil), p...))
+				if tc.eintrFirst && writeCalls == 1 {
+					return 0, unix.EINTR
+				}
+				if tc.writeErr != nil {
+					return tc.writeN, tc.writeErr
+				}
+				if tc.writeN >= 0 {
+					return tc.writeN, nil
+				}
+				return len(p), nil
+			}
+			builderProcattrClose = func(fd int) error {
+				mu.Lock()
+				defer mu.Unlock()
+				closes = append(closes, fd)
+				return tc.closeErr
+			}
+
+			err := builderWriteProcattrExec(target)
+			if tc.wantErrSub == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
+				t.Fatalf("err = %v, want it to name %q", err, tc.wantErrSub)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(opens) != 1 {
+				t.Fatalf("open calls = %v, want exactly one", opens)
+			}
+			if opens[0] != fmt.Sprintf("%s|0x%x", builderProcattrExecPath, unix.O_RDWR|unix.O_CLOEXEC) {
+				t.Fatalf("open call = %q, want the fixed procattr path with O_RDWR|O_CLOEXEC", opens[0])
+			}
+			if len(writes) != tc.wantWrites {
+				t.Fatalf("write calls = %d, want %d", len(writes), tc.wantWrites)
+			}
+			for i, p := range writes {
+				if !slices.Equal(p, wantPayload) {
+					t.Fatalf("write call %d payload = %q, want the exact target plus one terminal NUL (%q)", i+1, p, wantPayload)
+				}
+				if strings.ContainsRune(string(p), '\n') {
+					t.Fatalf("write call %d payload must not contain a newline: %q", i+1, p)
+				}
+				if p[len(p)-1] != 0 || p[len(p)-2] == 0 {
+					t.Fatalf("write call %d payload must carry exactly one terminal NUL: %q", i+1, p)
+				}
+			}
+			if len(closes) != tc.wantCloses {
+				t.Fatalf("close calls = %d, want %d", len(closes), tc.wantCloses)
+			}
+			for _, fd := range closes {
+				if fd != 7 {
+					t.Fatalf("close called with fd %d, want the opened descriptor", fd)
+				}
+			}
+		})
 	}
 }
 
