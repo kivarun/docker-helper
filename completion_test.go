@@ -1265,15 +1265,17 @@ func TestCompletionAfterHelpFlags(t *testing.T) {
 // under the same parser-tree == help-tree == completion-tree invariants.
 
 // completionTreeClasses walks the real Command tree and classifies every
-// non-root node by dispatch shape. A node must be exactly one of:
+// non-root VISIBLE node by dispatch shape. A node must be exactly one of:
 // branch (subcommands, no NewInvocation) or leaf (NewInvocation, no
 // subcommands). A hybrid node would be unreachable by dispatch and invisible
-// to the generated completion model.
+// to the generated completion model. Hidden internal commands are excluded
+// from the walk: they are deliberately absent from every completion
+// surface, so the completion-contract tests treat them as non-targets.
 func completionTreeClasses(t *testing.T) (leaves, branches [][]string) {
 	t.Helper()
 	var walk func(cmd *Command, path []string)
 	walk = func(cmd *Command, path []string) {
-		for _, sub := range cmd.Subcommands {
+		for _, sub := range cmd.visibleSubcommands() {
 			subPath := append(append([]string{}, path...), sub.Name)
 			isLeaf := sub.NewInvocation != nil
 			hasSubs := len(sub.Subcommands) > 0
@@ -1394,7 +1396,7 @@ func TestCompletionTreeBranchSubcommands(t *testing.T) {
 			t.Fatalf("branch path %q not resolvable", strings.Join(path, " "))
 		}
 		want := make([]string, 0, len(cmd.Subcommands))
-		for _, sub := range cmd.Subcommands {
+		for _, sub := range cmd.visibleSubcommands() {
 			want = append(want, sub.Name)
 		}
 		slices.Sort(want)

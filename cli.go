@@ -77,6 +77,26 @@ type Command struct {
 	// never be reinterpreted as docker-helper flags. Every other command
 	// keeps the interspersed grammar (parseCommandFlags).
 	FlagsStopAtPositional bool
+
+	// Hidden marks an internal command: it is resolved and dispatched by
+	// the production dispatcher but excluded from every presentation
+	// surface (help listing, completion, the man-page tree walk). Only
+	// production code composes its invocation.
+	Hidden bool
+}
+
+// visibleSubcommands returns the non-hidden subcommands in registration
+// order — the single visibility filter for every presentation surface
+// (help listing, completion, the man-page tree walk). Resolution and
+// dispatch are unaffected: hidden commands stay dispatchable.
+func (c *Command) visibleSubcommands() []*Command {
+	visible := make([]*Command, 0, len(c.Subcommands))
+	for _, sub := range c.Subcommands {
+		if !sub.Hidden {
+			visible = append(visible, sub)
+		}
+	}
+	return visible
 }
 
 // resolveSubcommand finds a direct subcommand by name.
@@ -355,9 +375,9 @@ func (c *Command) printArgError(stderr io.Writer, path []string, msg string) {
 }
 
 func (c *Command) printSubcommandRequired(stderr io.Writer, path []string) {
-	subNames := make([]string, len(c.Subcommands))
-	for i, sub := range c.Subcommands {
-		subNames[i] = sub.Name
+	subNames := make([]string, 0, len(c.Subcommands))
+	for _, sub := range c.visibleSubcommands() {
+		subNames = append(subNames, sub.Name)
 	}
 	fmt.Fprintf(stderr, "error: %s subcommand required (%s)\n", c.Name, strings.Join(subNames, ", "))
 	fmt.Fprintln(stderr)
@@ -385,7 +405,7 @@ func (c *Command) printHelp(w io.Writer, path []string) {
 			c.printGroupedSubcommands(w)
 		} else {
 			fmt.Fprintln(w, "Subcommands:")
-			for _, sub := range c.Subcommands {
+			for _, sub := range c.visibleSubcommands() {
 				fmt.Fprintf(w, "  %-10s %s\n", sub.Name, sub.Summary)
 			}
 			fmt.Fprintln(w)
@@ -443,7 +463,7 @@ var generalCommandNames = map[string]struct{}{
 
 func (c *Command) printGroupedSubcommands(w io.Writer) {
 	var agentCmds, operatorCmds, generalCmds []*Command
-	for _, sub := range c.Subcommands {
+	for _, sub := range c.visibleSubcommands() {
 		if _, ok := agentCommandNames[sub.Name]; ok {
 			agentCmds = append(agentCmds, sub)
 		} else if _, ok := generalCommandNames[sub.Name]; ok {
@@ -541,6 +561,42 @@ var builderCommand = &Command{
 	Summary: "Builder backend service (operator/service command)",
 	Subcommands: []*Command{
 		builderServeCommand,
+		// The internal launch child of the categorized launch chain
+		// (G32 r3 §5): resolved and dispatched by the production
+		// dispatcher, excluded from every presentation surface.
+		builderLaunchExecCommand,
+	},
+}
+
+// builderLaunchExecCommand is the hidden internal launch child: the
+// SELinux manager re-execs the shared binary with this subcommand and the
+// instance's record category; the leaf validates the canonical category
+// token and the exact canonical rootlesskit argv, writes its own forced
+// exec context, and execs the fixed rootlesskit entry file (an execve
+// replacement). See builder_launcher.go for the chain's owner.
+var builderLaunchExecCommand = &Command{
+	Name:    "launch-exec",
+	Summary: "Internal launch child: re-exec one operation's rootlesskit flow in its operation context",
+	Usage:   "docker-helper builder launch-exec <category> <rootlesskit args...>",
+
+	Hidden: true,
+
+	// The launcher argv carries rootlesskit's own flags verbatim after
+	// the category token: stop flag parsing at the first positional so
+	// rootlesskit flags are never reinterpreted as docker-helper flags.
+	FlagsStopAtPositional: true,
+
+	MinPosArgs: 2,
+	MaxPosArgs: -1,
+
+	Presentation: exceptionPresentation("internal launch child: execve replacement, not a finite command result"),
+
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		return Invocation{
+			Run: func(stdout, stderr io.Writer) int {
+				return runBuilderLaunchExec(fs.Args(), stderr)
+			},
+		}
 	},
 }
 

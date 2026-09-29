@@ -332,10 +332,9 @@ func TestBuilderManagerFailedStartKeepsCategoryUntilConvergence(t *testing.T) {
 	// The launch of the FIRST op fails: the spawn seam resolves it to a
 	// missing executable; every other op gets the normal fake leader.
 	orig := builderNewRootlessKitCommand
-	builderNewRootlessKitCommand = func(seamOpID, rtDir, stDir string, env []string) *exec.Cmd {
+	builderNewRootlessKitCommand = func(seamOpID string, _ builderCategory, rtDir, stDir string, _ []string, _ bool) *exec.Cmd {
 		_ = rtDir
 		_ = stDir
-		_ = env
 		if seamOpID == opID {
 			return exec.Command("/nonexistent/rootlesskit")
 		}

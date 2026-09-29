@@ -113,22 +113,26 @@ var (
 	builderLaunchHold func(opID string)
 )
 
-// builderNewRootlessKitCommand constructs the RootlessKit leader command
-// for one operation. Injectable for tests: tests mount a synthetic
-// session-leader process tree through the production spawn owner; the
-// production seam builds the manager-owned immutable argv.
-var builderNewRootlessKitCommand = func(opID string, rtDir, stDir string, env []string) *exec.Cmd {
-	args := []string{
-		"--net=slirp4netns",
-		"--copy-up=/etc",
-		"--disable-host-loopback",
-		"--state-dir=" + filepath.Join(stDir, "rootlesskit-state"),
-		builderManagerBuildkitd,
-		"--rootless",
-		"--root=" + filepath.Join(stDir, "root"),
-		"--addr=unix://" + opSocketPath(opID),
+// builderNewRootlessKitCommand is the launch command-construction owner
+// for one operation, and its test seam: tests mount a synthetic
+// session-leader process tree through the production spawn owner.
+//
+// Enforcing SELinux routes through the internal launcher chain: the
+// manager re-execs the fixed packaged binary with the hidden internal
+// launch-exec subcommand and the instance's record category, whose exec
+// transitions into docker_helper_builder_launcher_t (G32 r3 §5). Any
+// other backend keeps the direct rootlesskit exec unchanged. The
+// provision decision is the SAME gate evaluation the provisioning ran on
+// — it is passed in, never re-detected here — and the argv spelling is
+// the single canonical owner (builderRootlessKitArgv).
+var builderNewRootlessKitCommand = func(opID string, category builderCategory, rtDir, stDir string, env []string, provision bool) *exec.Cmd {
+	if provision {
+		args := append([]string{"builder", "launch-exec", category.String()}, builderRootlessKitArgv(opID, rtDir, stDir)...)
+		cmd := exec.Command(builderManagerSelfBinary, args...)
+		cmd.Env = env
+		return cmd
 	}
-	cmd := exec.Command(builderManagerRootlessKit, args...)
+	cmd := exec.Command(builderManagerRootlessKit, builderRootlessKitArgv(opID, rtDir, stDir)...)
 	cmd.Env = env
 	return cmd
 }
@@ -551,7 +555,7 @@ func (m *builderManager) launchInstance(inst *builderInstance) bool {
 	}
 	env = append(env, caEnv...)
 
-	cmd := builderNewRootlessKitCommand(opID, rtDir, stDir, env)
+	cmd := builderNewRootlessKitCommand(opID, inst.category, rtDir, stDir, env, provision)
 	cmd.Stdin = nil
 	cmd.Stdout = inst.diag
 	cmd.Stderr = inst.diag

@@ -9,9 +9,12 @@ import (
 
 // walkCommandPaths returns every registered command path (including each
 // top-level command and every nested subcommand) from the parser tree.
+// Hidden internal commands are excluded: the tree-contract tests above
+// compare walked paths against the presentation surfaces, and hidden
+// commands are deliberately absent from every presentation surface.
 func walkCommandPaths(cmd *Command, prefix []string) [][]string {
 	var paths [][]string
-	for _, sub := range cmd.Subcommands {
+	for _, sub := range cmd.visibleSubcommands() {
 		path := append(append([]string{}, prefix...), sub.Name)
 		paths = append(paths, path)
 		paths = append(paths, walkCommandPaths(sub, path)...)
@@ -42,7 +45,8 @@ func TestCompletionTreeMatchesParser(t *testing.T) {
 		}
 	}
 
-	// Branch paths must list exactly the registered subcommands.
+	// Branch paths must list exactly the registered (visible)
+	// subcommands: hidden internal commands are excluded from completion.
 	for _, path := range paths {
 		cmd := completionCommandPath(path)
 		if cmd == nil || len(cmd.Subcommands) == 0 {
@@ -50,7 +54,7 @@ func TestCompletionTreeMatchesParser(t *testing.T) {
 		}
 		joined := strings.Join(path, " ")
 		var want []string
-		for _, sub := range cmd.Subcommands {
+		for _, sub := range cmd.visibleSubcommands() {
 			want = append(want, sub.Name)
 		}
 		line := "\"" + joined + "\") echo \"" + strings.Join(want, " ") + "\" ;;"

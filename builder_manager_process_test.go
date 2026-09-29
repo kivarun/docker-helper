@@ -71,12 +71,11 @@ func processTestManager(t *testing.T) (*builderManager, string, string) {
 func fakeLeaderSeam(t *testing.T, ready bool) {
 	t.Helper()
 	orig := builderNewRootlessKitCommand
-	builderNewRootlessKitCommand = func(opID, rtDir, stDir string, env []string) *exec.Cmd {
+	builderNewRootlessKitCommand = func(opID string, _ builderCategory, rtDir, stDir string, _ []string, _ bool) *exec.Cmd {
 		cmd := exec.Command("sh", "-c", boundedSleepScript())
 		_ = opID
 		_ = rtDir
 		_ = stDir
-		_ = env
 		_ = ready
 		return cmd
 	}
@@ -374,11 +373,10 @@ func TestBuilderManagerUnexpectedExitReleasesCeiling(t *testing.T) {
 
 	// Leader that exits immediately after spawning.
 	orig := builderNewRootlessKitCommand
-	builderNewRootlessKitCommand = func(opID, rtDir, stDir string, env []string) *exec.Cmd {
+	builderNewRootlessKitCommand = func(opID string, _ builderCategory, rtDir, stDir string, _ []string, _ bool) *exec.Cmd {
 		_ = opID
 		_ = rtDir
 		_ = stDir
-		_ = env
 		return exec.Command("sh", "-c", "exit 3")
 	}
 	t.Cleanup(func() { builderNewRootlessKitCommand = orig })
@@ -405,11 +403,10 @@ func TestBuilderManagerStartFailureReleasesCeiling(t *testing.T) {
 	seamCA(t)
 
 	orig := builderNewRootlessKitCommand
-	builderNewRootlessKitCommand = func(opID, rtDir, stDir string, env []string) *exec.Cmd {
+	builderNewRootlessKitCommand = func(opID string, _ builderCategory, rtDir, stDir string, _ []string, _ bool) *exec.Cmd {
 		_ = opID
 		_ = rtDir
 		_ = stDir
-		_ = env
 		return exec.Command("/nonexistent/rootlesskit")
 	}
 	t.Cleanup(func() { builderNewRootlessKitCommand = orig })
@@ -489,12 +486,11 @@ func TestBuilderManagerStopBeforeSpawn(t *testing.T) {
 
 	spawnBlocker := make(chan struct{})
 	orig := builderNewRootlessKitCommand
-	builderNewRootlessKitCommand = func(opID, rtDir, stDir string, env []string) *exec.Cmd {
+	builderNewRootlessKitCommand = func(opID string, _ builderCategory, rtDir, stDir string, _ []string, _ bool) *exec.Cmd {
 		<-spawnBlocker // hold the launch inside the spawn window
 		_ = opID
 		_ = rtDir
 		_ = stDir
-		_ = env
 		return exec.Command("sh", "-c", boundedSleepScript())
 	}
 	t.Cleanup(func() { builderNewRootlessKitCommand = orig })
@@ -656,11 +652,10 @@ func TestBuilderManagerRealProcessTreeTeardown(t *testing.T) {
 	seamCA(t)
 
 	orig := builderNewRootlessKitCommand
-	builderNewRootlessKitCommand = func(opID, rtDir, stDir string, env []string) *exec.Cmd {
+	builderNewRootlessKitCommand = func(opID string, _ builderCategory, rtDir, stDir string, _ []string, _ bool) *exec.Cmd {
 		_ = opID
 		_ = rtDir
 		_ = stDir
-		_ = env
 		// Session leader: sh (Setsid by the production owner) spawning a
 		// child sh which spawns a grandchild sh; all busy-wait.
 		cmd := exec.Command("sh", "-c",
@@ -1536,11 +1531,10 @@ func TestBuilderManagerStopGroupSurvivalEscalation(t *testing.T) {
 	seamCA(t)
 
 	orig := builderNewRootlessKitCommand
-	builderNewRootlessKitCommand = func(opID, rtDir, stDir string, env []string) *exec.Cmd {
+	builderNewRootlessKitCommand = func(opID string, _ builderCategory, rtDir, stDir string, _ []string, _ bool) *exec.Cmd {
 		_ = opID
 		_ = rtDir
 		_ = stDir
-		_ = env
 		// Leader busy-waits (dies on SIGTERM); its child traps SIGTERM
 		// and survives the graceful window, forcing the escalation. The
 		// loops are sleep-free so every group member is long-lived and
@@ -1656,11 +1650,10 @@ func TestBuilderManagerStopSelfExitRace(t *testing.T) {
 
 	flag := filepath.Join(t.TempDir(), "leader-exit-flag")
 	orig := builderNewRootlessKitCommand
-	builderNewRootlessKitCommand = func(opID, rtDir, stDir string, env []string) *exec.Cmd {
+	builderNewRootlessKitCommand = func(opID string, _ builderCategory, rtDir, stDir string, _ []string, _ bool) *exec.Cmd {
 		_ = opID
 		_ = rtDir
 		_ = stDir
-		_ = env
 		// Sleep-free loops: stable group identity; the child inherits the
 		// leader's stdout/stderr (the diagnostic pipes) with no redirect.
 		return exec.Command("sh", "-c", `while :; do :; done & while [ ! -f `+flag+` ]; do :; done`)
@@ -1723,11 +1716,10 @@ func TestBuilderManagerSelfExitSettlesDescendantsBeforeDirs(t *testing.T) {
 
 	orig := builderNewRootlessKitCommand
 	exitFlag := filepath.Join(t.TempDir(), "leader-exit-flag")
-	builderNewRootlessKitCommand = func(opID, rtDir, stDir string, env []string) *exec.Cmd {
+	builderNewRootlessKitCommand = func(opID string, _ builderCategory, rtDir, stDir string, _ []string, _ bool) *exec.Cmd {
 		_ = opID
 		_ = rtDir
 		_ = stDir
-		_ = env
 		// Leader forks a middle sh which forks a grandchild and
 		// busy-waits; the leader stays alive until the test's exit flag,
 		// then self-exits, leaving both descendants alive in its process
@@ -2072,11 +2064,10 @@ func TestBuilderManagerSelfExitInheritedPipesUnblocksWaitOwner(t *testing.T) {
 
 	flag := filepath.Join(t.TempDir(), "leader-exit-flag")
 	orig := builderNewRootlessKitCommand
-	builderNewRootlessKitCommand = func(opID, rtDir, stDir string, env []string) *exec.Cmd {
+	builderNewRootlessKitCommand = func(opID string, _ builderCategory, rtDir, stDir string, _ []string, _ bool) *exec.Cmd {
 		_ = opID
 		_ = rtDir
 		_ = stDir
-		_ = env
 		// The leader busy-waits on the flag (no transient sleep children:
 		// stable group identity); its child is sleep-free, stays in the
 		// group, and inherits the leader's diagnostic pipe ends.

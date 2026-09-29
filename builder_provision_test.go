@@ -80,11 +80,11 @@ func newProvisionFixture(t *testing.T) *provisionFixture {
 func (f *provisionFixture) observeCommandCreation(t *testing.T) {
 	t.Helper()
 	orig := builderNewRootlessKitCommand
-	builderNewRootlessKitCommand = func(opID, rtDir, stDir string, env []string) *exec.Cmd {
+	builderNewRootlessKitCommand = func(opID string, category builderCategory, rtDir, stDir string, env []string, provision bool) *exec.Cmd {
 		f.mu.Lock()
 		f.log = append(f.log, provisionLogEntry{kind: "spawn", path: opID})
 		f.mu.Unlock()
-		return orig(opID, rtDir, stDir, env)
+		return orig(opID, category, rtDir, stDir, env, provision)
 	}
 	t.Cleanup(func() { builderNewRootlessKitCommand = orig })
 }
@@ -224,10 +224,9 @@ func provisionFailureCase(t *testing.T, opID string, force func(f *provisionFixt
 	// The failing op must never reach command creation; later
 	// admissions (the post-failure reuse proof) launch normally.
 	orig := builderNewRootlessKitCommand
-	builderNewRootlessKitCommand = func(seamOpID, rtDir, stDir string, env []string) *exec.Cmd {
+	builderNewRootlessKitCommand = func(seamOpID string, _ builderCategory, rtDir, stDir string, _ []string, _ bool) *exec.Cmd {
 		_ = rtDir
 		_ = stDir
-		_ = env
 		if seamOpID == opID {
 			t.Error("spawn reached despite the provisioning failure")
 		}

@@ -548,10 +548,11 @@ func completionCommandPath(path []string) *Command {
 	return current
 }
 
-// collectAllCommandPaths recursively collects all command paths in the tree.
+// collectAllCommandPaths recursively collects all command paths in the
+// tree (hidden internal commands excluded: they are never completed).
 func collectAllCommandPaths(cmd *Command, prefix []string) []string {
 	var paths []string
-	for _, sub := range cmd.Subcommands {
+	for _, sub := range cmd.visibleSubcommands() {
 		path := append([]string{}, prefix...)
 		path = append(path, sub.Name)
 		paths = append(paths, strings.Join(path, " "))
@@ -1414,7 +1415,7 @@ func generateBashCompletion(w io.Writer) {
 		cmd := completionCommandPath(strings.Split(path, " "))
 		if cmd != nil && len(cmd.Subcommands) > 0 {
 			var subNames []string
-			for _, sub := range cmd.Subcommands {
+			for _, sub := range cmd.visibleSubcommands() {
 				subNames = append(subNames, sub.Name)
 			}
 			fmt.Fprintf(w, "        \"%s\") echo \"%s\" ;;\n", path, strings.Join(subNames, " "))
@@ -2028,26 +2029,28 @@ func quoteWords(words []string) []string {
 	return quoted
 }
 
-// collectAllFlags recursively collects flags for each command path.
+// collectAllFlags recursively collects flags for each command path
+// (hidden internal commands excluded).
 func collectAllFlags(cmd *Command, path []string, flags map[string][]string) {
 	if cmd.NewInvocation != nil {
 		cmdPath := strings.Join(path, " ")
 		flags[cmdPath] = collectFlagsForCommand(cmd)
 	}
-	for _, sub := range cmd.Subcommands {
+	for _, sub := range cmd.visibleSubcommands() {
 		newPath := append([]string{}, path...)
 		newPath = append(newPath, sub.Name)
 		collectAllFlags(sub, newPath, flags)
 	}
 }
 
-// collectAllBoolFlags recursively collects boolean flag names for each command path.
+// collectAllBoolFlags recursively collects boolean flag names for each
+// command path (hidden internal commands excluded).
 func collectAllBoolFlags(cmd *Command, path []string, flags map[string][]string) {
 	if cmd.NewInvocation != nil {
 		cmdPath := strings.Join(path, " ")
 		flags[cmdPath] = collectBoolFlagNames(cmd)
 	}
-	for _, sub := range cmd.Subcommands {
+	for _, sub := range cmd.visibleSubcommands() {
 		newPath := append([]string{}, path...)
 		newPath = append(newPath, sub.Name)
 		collectAllBoolFlags(sub, newPath, flags)
@@ -2055,13 +2058,13 @@ func collectAllBoolFlags(cmd *Command, path []string, flags map[string][]string)
 }
 
 // collectAllRepeatableFlags recursively collects repeatable flag names for
-// each command path.
+// each command path (hidden internal commands excluded).
 func collectAllRepeatableFlags(cmd *Command, path []string, flags map[string][]string) {
 	if cmd.NewInvocation != nil {
 		cmdPath := strings.Join(path, " ")
 		flags[cmdPath] = collectRepeatableFlagNames(cmd)
 	}
-	for _, sub := range cmd.Subcommands {
+	for _, sub := range cmd.visibleSubcommands() {
 		newPath := append([]string{}, path...)
 		newPath = append(newPath, sub.Name)
 		collectAllRepeatableFlags(sub, newPath, flags)

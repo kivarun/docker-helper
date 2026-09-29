@@ -178,7 +178,7 @@ func TestBuilderManagerStartWithoutCABundleFailsClosed(t *testing.T) {
 
 	spawned := false
 	origSpawn := builderNewRootlessKitCommand
-	builderNewRootlessKitCommand = func(string, string, string, []string) *exec.Cmd {
+	builderNewRootlessKitCommand = func(_ string, _ builderCategory, _, _ string, _ []string, _ bool) *exec.Cmd {
 		spawned = true
 		return exec.Command("true")
 	}
@@ -219,8 +219,8 @@ func TestBuilderManagerChildReceivesSelectedCABundleEnv(t *testing.T) {
 	// production seam's environment assignment is kept, only the binary
 	// is retargeted to the bounded synthetic leader child.
 	orig := builderNewRootlessKitCommand
-	builderNewRootlessKitCommand = func(opID, rtDir, stDir string, env []string) *exec.Cmd {
-		cmd := orig(opID, rtDir, stDir, env)
+	builderNewRootlessKitCommand = func(opID string, _ builderCategory, rtDir, stDir string, env []string, _ bool) *exec.Cmd {
+		cmd := orig(opID, 0, rtDir, stDir, env, false)
 		cmd.Path = "/bin/sh"
 		cmd.Args = []string{"/bin/sh", "-c", boundedSleepScript()}
 		return cmd

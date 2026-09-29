@@ -393,6 +393,25 @@ func TestSELinuxPolicyLauncherDomainSurface(t *testing.T) {
 			t.Errorf("the launcher domain must not receive a grant toward %s", forbidden)
 		}
 	}
+	// The setexec authority is launcher-owned: exactly one self:process
+	// setexec rule exists in the module and it names the launcher domain
+	// (the manager must never gain setexec — its range never changes).
+	setexecRules := 0
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(trimmed, "self:process { setexec };") {
+			setexecRules++
+			if !strings.HasPrefix(trimmed, "allow docker_helper_builder_launcher_t self:process { setexec };") {
+				t.Errorf("the setexec authority must stay launcher-owned: %s", trimmed)
+			}
+		}
+	}
+	if setexecRules != 1 {
+		t.Errorf("exactly one setexec rule may exist (launcher-owned), found %d", setexecRules)
+	}
 }
 
 // TestSELinuxPolicyBuilderRootTypes verifies the G32 r3 root split: the
