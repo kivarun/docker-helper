@@ -1,0 +1,71 @@
+name: Release 2.4 P5-S2 per-op category launch lifecycle experiment
+
+# One-off investigation job (P5-S2g31): the proof that the shared
+# production manager can safely assign a unique MCS category to each
+# live Build Operation, create the categorized state tree, and launch
+# the first per-op process in the same range while staying a shared
+# control-plane process, and that the full lifecycle (allocate ->
+# provision -> launch -> inherit -> STOP/PURGE -> release -> safe reuse)
+# holds for concurrent operations. The build step applies the GUEST-ONLY
+# experimental patch (scripts/release-2.4-p5s2-cat-launch.patch) to the
+# manager sources before compiling and restores the sources afterwards:
+# the patch adds the per-instance category allocation stand-in, the
+# state-tree labeling at provisioning, and the runcon launch wrap. G31
+# does NOT commit production policy, does NOT implement the production
+# allocator, does NOT fix the known sock_file unlink finding, and does
+# NOT open the Release GO.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - p3
+    paths:
+      - .github/workflows/release-2.4-p5s2-cat-launch-tw.yml
+      - scripts/release-2.4-p5s2-cat-launch.patch
+      - scripts/release-2.4-p5s2-cat-launch-tw.sh
+      - scripts/release-2.4-p5s2-cat-launch-tw-vm.sh
+      - packaging/selinux/docker-helper.te
+      - packaging/selinux/docker-helper.fc
+      - builder_manager.go
+
+permissions:
+  contents: read
+
+jobs:
+  cat-launch-tumbleweed:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+
+      - name: Build the experimental manager binary (the guest-only G31 patch)
+        run: |
+          git apply scripts/release-2.4-p5s2-cat-launch.patch
+          go build -o docker-helper .
+          git checkout -- builder_manager.go
+          git status --porcelain builder_manager.go
+
+      - name: Install QEMU and cloud-image tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage
+
+      - name: Run Tumbleweed category launch lifecycle measurement
+        run: |
+          UAT_REPO_DIR="${{ github.workspace }}" \
+          CAT_LAUNCH_EVIDENCE_DIR="$RUNNER_TEMP/release-2.4-p5s2-cat-launch-evidence" \
+            scripts/release-2.4-p5s2-cat-launch-tw-vm.sh
+
+      - name: Upload experiment evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-2.4-p5s2-cat-launch-tw-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-2.4-p5s2-cat-launch-evidence
+          if-no-files-found: warn

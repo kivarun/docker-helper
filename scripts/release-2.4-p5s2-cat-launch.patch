@@ -1,0 +1,107 @@
+diff --git a/builder_manager.go b/builder_manager.go
+index ec1123f..4cc2462 100644
+--- a/builder_manager.go
++++ b/builder_manager.go
+@@ -117,7 +117,7 @@ var (
+ // for one operation. Injectable for tests: tests mount a synthetic
+ // session-leader process tree through the production spawn owner; the
+ // production seam builds the manager-owned immutable argv.
+-var builderNewRootlessKitCommand = func(opID string, rtDir, stDir string, env []string) *exec.Cmd {
++var builderNewRootlessKitCommand = func(opID, category string, rtDir, stDir string, env []string) *exec.Cmd {
+ 	args := []string{
+ 		"--net=slirp4netns",
+ 		"--copy-up=/etc",
+@@ -128,7 +128,19 @@ var builderNewRootlessKitCommand = func(opID string, rtDir, stDir string, env []
+ 		"--root=" + filepath.Join(stDir, "root"),
+ 		"--addr=unix://" + opSocketPath(opID),
+ 	}
+-	cmd := exec.Command(builderManagerRootlessKit, args...)
++	var cmd *exec.Cmd
++	if category != "" {
++		// G31 experimental launch boundary: the per-launch helper
++		// (runcon) writes its OWN setexeccon and execs the production
++		// rootlesskit argv at the operation's category. The manager's
++		// own process context never changes; the helper is a fresh,
++		// single-threaded, per-launch child that dies at the exec, so
++		// concurrent launches cannot bleed categories.
++		launchCtx := "system_u:system_r:docker_helper_rootlesskit_t:s0:" + category
++		cmd = exec.Command("/usr/bin/runcon", append([]string{launchCtx, builderManagerRootlessKit}, args...)...)
++	} else {
++		cmd = exec.Command(builderManagerRootlessKit, args...)
++	}
+ 	cmd.Env = env
+ 	return cmd
+ }
+@@ -210,6 +222,11 @@ const (
+ type builderInstance struct {
+ 	operationID string
+ 
++	// category is the G31 experimental allocator stand-in's binding:
++	// the operation's MCS category (the state tree and the flow run in
++	// it). Empty means the uncategorized production shape.
++	category string
++
+ 	mu          sync.Mutex
+ 	phase       builderInstancePhase
+ 	leader      *exec.Cmd // the setsid RootlessKit session/process-group leader
+@@ -421,6 +438,29 @@ func (m *builderManager) start(opID string, settled func()) string {
+ 		launchDone:  make(chan struct{}),
+ 		reaped:      make(chan struct{}),
+ 	}
++	// G31 experimental allocator stand-in (NOT the production
++	// allocator): the lowest free category from the fixed pool, scoped
++	// to the live instances under the manager lock, so two live
++	// operations can never hold one category. Exhaustion refuses the
++	// START (fail closed; no s0 fallback).
++	cats := []string{"c1", "c2", "c3", "c4"}
++	used := map[string]bool{}
++	for _, other := range m.instances {
++		used[other.category] = true
++	}
++	inst.category = ""
++	for _, c := range cats {
++		if !used[c] {
++			inst.category = c
++			break
++		}
++	}
++	if inst.category == "" {
++		delete(m.instances, opID)
++		close(fence)
++		m.mu.Unlock()
++		return builderManagerRespAtCeiling
++	}
+ 	m.instances[opID] = inst
+ 	close(fence)
+ 	m.mu.Unlock()
+@@ -476,6 +516,21 @@ func (m *builderManager) launchInstance(inst *builderInstance) bool {
+ 			return false
+ 		}
+ 	}
++	if inst.category != "" {
++		// G31 experimental provisioning: bind the category to the
++		// operation's state tree BEFORE any flow process starts, so the
++		// state tree and the first per-op process share the same
++		// category (state/process parity) and every descendant inherits
++		// it through the policy's default-range TARGET_LOW rule.
++		label := "system_u:object_r:docker_helper_builder_state_t:s0:" + inst.category
++		for _, dir := range []string{stDir, filepath.Join(stDir, "rootlesskit-state"), filepath.Join(stDir, "root")} {
++			if err := unix.Setxattr(dir, "security.selinux", []byte(label), 0); err != nil {
++				m.managerDiagf("START %s: cannot label state tree: %v", opID, err)
++				m.removeReservation(inst)
++				return false
++			}
++		}
++	}
+ 
+ 	// CA bundle (backend mechanics; fail closed when required and absent).
+ 	caEnv, caOK := builderResolveSystemCAFunc()
+@@ -500,7 +555,7 @@ func (m *builderManager) launchInstance(inst *builderInstance) bool {
+ 	}
+ 	env = append(env, caEnv...)
+ 
+-	cmd := builderNewRootlessKitCommand(opID, rtDir, stDir, env)
++	cmd := builderNewRootlessKitCommand(opID, inst.category, rtDir, stDir, env)
+ 	cmd.Stdin = nil
+ 	cmd.Stdout = inst.diag
+ 	cmd.Stderr = inst.diag
