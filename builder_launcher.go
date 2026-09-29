@@ -112,6 +112,40 @@ var builderWriteProcattrExec = func(context string) error {
 	return os.WriteFile(builderProcattrExecPath, []byte(context+"\n"), 0)
 }
 
+// builderReadProcattrExec reads back the pinned calling thread's
+// /proc/thread-self/attr/exec raw bytes (the same fixed procattr pathname,
+// no pid parameter). The kernel returns the stored context text verbatim
+// when a forced exec context is set and an empty read when it is not, so
+// the read-back raw bytes carry exactly the canonical-context encodings
+// decodeSELinuxXattrContext accepts. Injectable for tests.
+var builderReadProcattrExec = func() ([]byte, error) {
+	return os.ReadFile(builderProcattrExecPath)
+}
+
+// builderVerifyProcattrExec is the mandatory read-back verification of the
+// forced exec context, run on the same pinned OS thread as the write and
+// the exec (the exec context is per-thread kernel state): the raw
+// read-back is decoded by the shared canonical-context decoder and must
+// equal the requested target context exactly. Any read failure, malformed
+// encoding, or mismatch fails closed — the launch dies before the execve
+// instead of entering the flow domain with a wrong or missing context
+// (the Phase 4B-R3 live evidence: a silent forced-context loss produced an
+// uncategorized flow entry).
+func builderVerifyProcattrExec(target string) error {
+	raw, err := builderReadProcattrExec()
+	if err != nil {
+		return fmt.Errorf("cannot read back the forced exec context: %w", err)
+	}
+	got, err := decodeSELinuxXattrContext(raw)
+	if err != nil {
+		return fmt.Errorf("the forced exec context read back malformed: %w", err)
+	}
+	if got != target {
+		return fmt.Errorf("the forced exec context did not stick: want %q, got %q", target, got)
+	}
+	return nil
+}
+
 // builderExecve replaces the launcher process with the fixed executable
 // (production: unix.Exec). It runs on the same pinned OS thread the
 // procattr write used (see runBuilderLaunchExec). The execve REPLACEMENT
@@ -125,18 +159,22 @@ var builderExecve = func(path string, argv []string, env []string) error {
 // runBuilderLaunchExec is the launcher child's entry: validate the
 // canonical category token and the exact canonical rootlesskit argv, pin
 // the calling OS thread, write the fixed target context to that thread's
-// procattr, then exec the fixed rootlesskit entry file on the same
-// thread. The pin is mandatory: the Go runtime is already multi-threaded
+// procattr, read the procattr back and verify it carries the exact target
+// context, then exec the fixed rootlesskit entry file on the same thread.
+// The pin is mandatory: the Go runtime is already multi-threaded
 // when the launcher runs, and the exec context is per-thread state read
 // at the execve of the writing thread (the same contract upstream
 // setexeccon keeps) — an OS-thread migration between the procattr write
 // and the exec would leave the exec reading a different thread's exec
-// context. Any validation refusal exits 2; any procattr or exec failure
-// unlocks the thread and exits 1; neither ever falls back to a direct
-// launch. The successful Exec replaces the pinned calling thread's
-// process image and never returns, so the unlock defer fires only on the
-// failure returns; the manager's pid anchors are unaffected (the spawned
-// pid becomes the rootlesskit process).
+// context. The read-back verification is mandatory for the same reason:
+// a write that does not stick must fail the launch closed, not enter the
+// flow domain with the inherited uncategorized range (the R3 live
+// blocker). Any validation refusal exits 2; any procattr write, read-back
+// verification, or exec failure unlocks the thread and exits 1; neither
+// ever falls back to a direct launch. The successful Exec replaces the
+// pinned calling thread's process image and never returns, so the unlock
+// defer fires only on the failure returns; the manager's pid anchors are
+// unaffected (the spawned pid becomes the rootlesskit process).
 func runBuilderLaunchExec(args []string, stderr io.Writer) int {
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "error: launch-exec requires the operation category token")
@@ -154,8 +192,13 @@ func runBuilderLaunchExec(args []string, stderr io.Writer) int {
 	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	if err := builderWriteProcattrExec(builderProcessTargetContext(category)); err != nil {
+	target := builderProcessTargetContext(category)
+	if err := builderWriteProcattrExec(target); err != nil {
 		fmt.Fprintf(stderr, "error: cannot set the forced exec context: %v\n", err)
+		return 1
+	}
+	if err := builderVerifyProcattrExec(target); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
 	if err := builderExecve(builderManagerRootlessKit, append([]string{builderManagerRootlessKit}, argv...), os.Environ()); err != nil {

@@ -85,15 +85,16 @@ func parseSELinuxType(ctx string) (string, error) {
 // context nor that context with exactly one terminal NUL.
 var errSELinuxXattrEncoding = errors.New("malformed security.selinux context encoding")
 
-// decodeSELinuxXattrContext is the single owner of the security.selinux
-// xattr decoding semantics shared by every production xattr reader. It
-// accepts exactly two raw encodings — the canonical textual context with
-// no NUL, and that context with exactly one terminal NUL (the kernel
-// xattr convention) — and returns the same canonical textual form for
-// both. Empty, NUL-only, embedded-NUL, and multi-NUL values are malformed
-// and fail closed. Nothing else is normalized: whitespace, newlines, and
-// case are preserved, and the validity of the context text itself is the
-// caller's concern (exact comparison or parseSELinuxType).
+// decodeSELinuxXattrContext is the single owner of the raw SELinux
+// context encoding semantics (the canonical textual context, or that
+// context with exactly one terminal NUL — the kernel xattr/procattr
+// convention) shared by every production xattr reader and by the
+// launcher's forced-exec-context read-back. It returns the same canonical
+// textual form for both encodings. Empty, NUL-only, embedded-NUL, and
+// multi-NUL values are malformed and fail closed. Nothing else is
+// normalized: whitespace, newlines, and case are preserved, and the
+// validity of the context text itself is the caller's concern (exact
+// comparison or parseSELinuxType).
 func decodeSELinuxXattrContext(raw []byte) (string, error) {
 	ctx := raw
 	if len(ctx) > 0 && ctx[len(ctx)-1] == 0 {

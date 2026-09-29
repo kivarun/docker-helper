@@ -2,10 +2,11 @@ package main
 
 // builder_launcher_test.go pins the Phase 4A categorized launcher chain
 // (G32 r3 §5): the fixed target context, the single canonical argv
-// grammar, the validate -> thread pin -> procattr -> exec ordering with no
-// intermediate spawn owner, the fail-closed failure semantics, the
-// manager's single composition decision, and the internal command's
-// invisibility on every presentation surface.
+// grammar, the validate -> thread pin -> procattr write -> read-back
+// verification -> exec ordering with no intermediate spawn owner, the
+// fail-closed failure semantics, the manager's single composition
+// decision, and the internal command's invisibility on every presentation
+// surface.
 
 import (
 	"bytes"
@@ -23,39 +24,59 @@ import (
 
 // launcherEvent is one observed launcher action.
 type launcherEvent struct {
-	kind string // "procattr", "exec"
+	kind string // "procattr" (write), "procattr-read", "exec"
 	path string // the procattr pathname or the exec target
-	ctx  string // the procattr value
+	ctx  string // the procattr write value or the raw read-back value
 	tid  int    // the OS thread the action ran on
 	argv []string
 	env  []string
 }
 
-// launcherSeams installs the procattr/exec observation seams; failures
-// are forced per test through the returned struct. Package-global seams:
-// no t.Parallel around them. The seams record unix.Gettid() at both legs:
-// the production run holds runtime.LockOSThread across the procattr/exec
-// boundary, so both seam calls run on the same goroutine's pinned OS
-// thread and the recorded tids must be equal.
+// launcherSeams installs the procattr write/read/exec observation seams;
+// failures and read-back values are forced per test through the returned
+// struct. Package-global seams: no t.Parallel around them. The seams
+// record unix.Gettid() at all three legs: the production run holds
+// runtime.LockOSThread across the procattr/exec boundary, so every leg
+// runs on the same goroutine's pinned OS thread and the recorded tids
+// must be equal. The read seam defaults to echoing the written context
+// (the kernel's own read-back behavior); tests override the raw bytes or
+// the read error per case.
 type launcherSeams struct {
-	mu          sync.Mutex
-	events      []launcherEvent
-	procattrErr error
-	execErr     error
+	mu              sync.Mutex
+	events          []launcherEvent
+	procattrErr     error
+	procattrRaw     []byte
+	procattrReadErr error
+	execErr         error
+	written         string
 }
 
 func installLauncherSeams(t *testing.T) *launcherSeams {
 	t.Helper()
 	s := &launcherSeams{}
-	origProcattr, origExec := builderWriteProcattrExec, builderExecve
+	origProcattr, origRead, origExec := builderWriteProcattrExec, builderReadProcattrExec, builderExecve
 	builderWriteProcattrExec = func(context string) error {
 		s.mu.Lock()
+		s.written = context
 		s.events = append(s.events, launcherEvent{kind: "procattr", path: builderProcattrExecPath, ctx: context, tid: unix.Gettid()})
 		s.mu.Unlock()
 		if s.procattrErr != nil {
 			return s.procattrErr
 		}
 		return nil
+	}
+	builderReadProcattrExec = func() ([]byte, error) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		raw := s.procattrRaw
+		if raw == nil {
+			raw = []byte(s.written)
+		}
+		s.events = append(s.events, launcherEvent{kind: "procattr-read", path: builderProcattrExecPath, ctx: string(raw), tid: unix.Gettid()})
+		if s.procattrReadErr != nil {
+			return nil, s.procattrReadErr
+		}
+		return append([]byte(nil), raw...), nil
 	}
 	builderExecve = func(path string, argv []string, env []string) error {
 		s.mu.Lock()
@@ -66,7 +87,9 @@ func installLauncherSeams(t *testing.T) *launcherSeams {
 		}
 		return nil
 	}
-	t.Cleanup(func() { builderWriteProcattrExec, builderExecve = origProcattr, origExec })
+	t.Cleanup(func() {
+		builderWriteProcattrExec, builderReadProcattrExec, builderExecve = origProcattr, origRead, origExec
+	})
 	return s
 }
 
@@ -170,11 +193,12 @@ func TestBuilderLauncherRejectsInvalidArgv(t *testing.T) {
 // TestBuilderLauncherSetExecThenExecFixedTarget proves the launcher's
 // successful chain: the canonical argv is accepted, the procattr write
 // happens with the exact fixed target context on the fixed thread-local
-// procattr pathname, and the exec REPLACES the launcher with the fixed
-// rootlesskit entry file — validate, then pin, then write, then exec,
-// with no intermediate spawn owner. The procattr and exec legs must run
-// on the same OS thread: the exec context is per-thread kernel state
-// read at the execve of the writing thread.
+// procattr pathname, the mandatory read-back on the same procattr returns
+// the exact target context, and the exec REPLACES the launcher with the
+// fixed rootlesskit entry file — validate, then pin, then write, then
+// read back, then exec, with no intermediate spawn owner. All three legs
+// must run on the same OS thread: the exec context is per-thread kernel
+// state read at the execve of the writing thread.
 func TestBuilderLauncherSetExecThenExecFixedTarget(t *testing.T) {
 	if builderProcattrExecPath != "/proc/thread-self/attr/exec" {
 		t.Fatalf("procattr path = %q, want the fixed thread-local /proc/thread-self/attr/exec", builderProcattrExecPath)
@@ -190,27 +214,35 @@ func TestBuilderLauncherSetExecThenExecFixedTarget(t *testing.T) {
 		t.Fatalf("launch-exec exit %d (stderr: %q), want the successful exec replacement", code, stderr.String())
 	}
 	events := s.snapshot()
-	if len(events) != 2 {
-		t.Fatalf("observed %d events, want exactly procattr then exec", len(events))
+	if len(events) != 3 {
+		t.Fatalf("observed %d events, want exactly procattr, procattr-read, exec", len(events))
 	}
-	procattr, execEvent := events[0], events[1]
+	procattr, readBack, execEvent := events[0], events[1], events[2]
 	if procattr.kind != "procattr" || procattr.ctx != "system_u:system_r:docker_helper_rootlesskit_t:s0:c1" {
 		t.Fatalf("procattr event = %+v, want the fixed c1 target context", procattr)
 	}
 	if procattr.path != builderProcattrExecPath {
 		t.Fatalf("procattr path = %q, want %s", procattr.path, builderProcattrExecPath)
 	}
-	if procattr.tid <= 0 {
-		t.Fatalf("procattr leg recorded no OS thread: %+v", procattr)
+	if readBack.kind != "procattr-read" {
+		t.Fatalf("second event kind = %q, want procattr-read", readBack.kind)
+	}
+	if readBack.path != builderProcattrExecPath {
+		t.Fatalf("read-back path = %q, want the same fixed thread-local pathname", readBack.path)
+	}
+	if readBack.ctx != procattr.ctx {
+		t.Fatalf("read-back context = %q, want the exact written target %q", readBack.ctx, procattr.ctx)
+	}
+	for i, e := range events {
+		if e.tid <= 0 {
+			t.Fatalf("event %d (%s) recorded no OS thread: %+v", i, e.kind, e)
+		}
+		if e.tid != procattr.tid {
+			t.Fatalf("%s ran on OS thread %d, want the write/read/exec legs pinned to one thread (%d): the exec context is per-thread state and must be written, read back, and execed on the same thread", e.kind, e.tid, procattr.tid)
+		}
 	}
 	if execEvent.kind != "exec" {
-		t.Fatalf("second event kind = %q, want exec", execEvent.kind)
-	}
-	if execEvent.tid <= 0 {
-		t.Fatalf("exec leg recorded no OS thread: %+v", execEvent)
-	}
-	if procattr.tid != execEvent.tid {
-		t.Fatalf("procattr and exec ran on different OS threads (%d vs %d): the exec context is per-thread state and must be written on the execing thread", procattr.tid, execEvent.tid)
+		t.Fatalf("third event kind = %q, want exec", execEvent.kind)
 	}
 	if execEvent.path != builderManagerRootlessKit {
 		t.Fatalf("exec target = %q, want the fixed %s (no PATH lookup)", execEvent.path, builderManagerRootlessKit)
@@ -224,7 +256,8 @@ func TestBuilderLauncherSetExecThenExecFixedTarget(t *testing.T) {
 }
 
 // TestBuilderLauncherProcattrFailureNoExec proves the procattr failure is
-// fatal before any exec: the launcher exits non-zero and never execs.
+// fatal before any exec: the launcher exits non-zero and never execs
+// (nor reads back — the verification runs only after a successful write).
 func TestBuilderLauncherProcattrFailureNoExec(t *testing.T) {
 	_, _, _ = processTestManager(t)
 	s := installLauncherSeams(t)
@@ -242,9 +275,72 @@ func TestBuilderLauncherProcattrFailureNoExec(t *testing.T) {
 	}
 }
 
+// TestBuilderLauncherProcattrReadBackVerification proves the mandatory
+// read-back verification gates the exec on the exact categorized target
+// context: the accepted raw encodings are the canonical context text and
+// that context with exactly one terminal NUL (the shared decoder owner's
+// contract); an empty, bare-s0, wrong-category, malformed, or failed
+// read-back fails the launch closed before any exec — never an
+// uncategorized flow entry.
+func TestBuilderLauncherProcattrReadBackVerification(t *testing.T) {
+	_, _, _ = processTestManager(t)
+
+	opID := "op_0123456789abcdef0123456789abcdef"
+	argv := builderRootlessKitArgv(opID, opRuntimeDir(opID), opStateDir(opID))
+	const c1 = "system_u:system_r:docker_helper_rootlesskit_t:s0:c1"
+
+	for _, tc := range []struct {
+		name       string
+		raw        []byte
+		readErr    error
+		wantCode   int
+		wantExec   bool
+		wantStderr string
+	}{
+		{"exact context", []byte(c1), nil, 0, true, ""},
+		{"context with one terminal NUL", []byte(c1 + "\x00"), nil, 0, true, ""},
+		{"empty read-back", []byte{}, nil, 1, false, "read back malformed"},
+		{"bare s0 read-back", []byte("system_u:system_r:docker_helper_rootlesskit_t:s0"), nil, 1, false, "did not stick"},
+		{"wrong category c2", []byte("system_u:system_r:docker_helper_rootlesskit_t:s0:c2"), nil, 1, false, "did not stick"},
+		{"embedded NUL", []byte(c1 + "\x00trailing"), nil, 1, false, "read back malformed"},
+		{"two terminal NULs", []byte(c1 + "\x00\x00"), nil, 1, false, "read back malformed"},
+		{"read error", nil, errors.New("procattr read denied"), 1, false, "cannot read back the forced exec context"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := installLauncherSeams(t)
+			s.procattrRaw = tc.raw
+			s.procattrReadErr = tc.readErr
+
+			var stderr bytes.Buffer
+			code := runBuilderLaunchExec(append([]string{"c1"}, argv...), &stderr)
+			if code != tc.wantCode {
+				t.Fatalf("read-back %q: exit %d, want %d (stderr: %q)", string(tc.raw), code, tc.wantCode, stderr.String())
+			}
+			events := s.snapshot()
+			wantEvents := 2
+			if tc.wantExec {
+				wantEvents = 3
+				if events[len(events)-1].kind != "exec" || events[len(events)-1].path != builderManagerRootlessKit {
+					t.Fatalf("verified read-back must exec the fixed rootlesskit target, got %+v", events)
+				}
+			}
+			if len(events) != wantEvents {
+				t.Fatalf("observed %d events (%+v), want %d (procattr write, read-back%s)", len(events), events, wantEvents, map[bool]string{true: ", exec", false: ", no exec"}[tc.wantExec])
+			}
+			if tc.wantStderr != "" && !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Fatalf("fail-closed stderr = %q, want it to name the %q failure class", stderr.String(), tc.wantStderr)
+			}
+			if !tc.wantExec && stderr.String() == "" {
+				t.Fatal("the fail-closed read-back refusal must report why on stderr")
+			}
+		})
+	}
+}
+
 // TestBuilderLauncherExecFailureNoFallback proves an exec failure exits
-// non-zero with no fallback: exactly one fixed-target exec attempt, and
-// never a second (legacy or retry) exec path.
+// non-zero with no fallback: the verified read-back precedes it, and
+// there is exactly one fixed-target exec attempt — never a second
+// (legacy or retry) exec path.
 func TestBuilderLauncherExecFailureNoFallback(t *testing.T) {
 	_, _, _ = processTestManager(t)
 	s := installLauncherSeams(t)
@@ -258,8 +354,8 @@ func TestBuilderLauncherExecFailureNoFallback(t *testing.T) {
 		t.Fatalf("launch-exec exit %d (stderr: %q), want 1", code, stderr.String())
 	}
 	events := s.snapshot()
-	if len(events) != 2 || events[1].path != builderManagerRootlessKit {
-		t.Fatalf("observed %+v, want procattr then exactly one fixed-target exec", events)
+	if len(events) != 3 || events[2].path != builderManagerRootlessKit {
+		t.Fatalf("observed %+v, want procattr, verified read-back, then exactly one fixed-target exec", events)
 	}
 }
 
