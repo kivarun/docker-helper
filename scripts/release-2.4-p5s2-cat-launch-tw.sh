@@ -1250,9 +1250,23 @@ log 'J: Part C — the per-operation descendant inventories (the no-bleed check)
   find "$SB" -exec stat -c '%C' {} \; 2>/dev/null | sort | uniq -c | sort -rn
 } > "$EVIDENCE_DIR/c-tree-uniformity.txt" 2>&1
 {
-  echo "=== the uncategorized objects inside each state tree (expect at most the noise-free run) ==="
-  echo "--- op A ---"; find "$SA" -exec stat -c '%C %n' {} \; 2>/dev/null | grep -av "s0:$CAT_A" || echo none
-  echo "--- op B ---"; find "$SB" -exec stat -c '%C %n' {} \; 2>/dev/null | grep -av "s0:$CAT_B" || echo none
+  echo "=== the uncategorized objects inside each state tree ==="
+  CTX_INO=$(stat -c %i "$CTX/Dockerfile" 2>/dev/null || echo 0)
+  echo "the context mount's Dockerfile inode: $CTX_INO"
+  for op_tree in "$SA:$CAT_A" "$SB:$CAT_B"; do
+    tree="${op_tree%%:*}"
+    cat_="${op_tree##*:}"
+    echo "--- ${tree##*/} (category $cat_) ---"
+    unc="$(find "$tree" -exec stat -c '%C %n' {} \; 2>/dev/null | grep -av "s0:$cat_" || true)"
+    if [ -n "$unc" ]; then
+      echo "$unc"
+      u_ino="$(echo "$unc" | awk '{print $NF}' | while read -r up; do stat -c %i "$up" 2>/dev/null; done | head -1)"
+      echo "the uncategorized object's inode: ${u_ino:-none}"
+      echo "it is the context mount's own inode (the build's input seen through the overlay lower): $([ "$u_ino" = "$CTX_INO" ] && echo yes || echo no)"
+    else
+      echo none
+    fi
+  done
 } > "$EVIDENCE_DIR/c-tree-uncategorized.txt" 2>&1
 cat "$EVIDENCE_DIR/c-tree-uncategorized.txt" >&2
 
@@ -1539,8 +1553,9 @@ if [ "$RA_READY" = "1" ] && [ "$RB_READY" = "1" ] \
    && echo "$B_SECTION" | grep -aq "s0:$CAT_B" \
    && ! echo "$A_SECTION" | grep -aq "s0:$CAT_B" \
    && ! echo "$B_SECTION" | grep -aq "s0:$CAT_A" \
-   && ! echo "$A_SECTION" | grep -aq "builder_state_t:s0$" \
-   && ! echo "$B_SECTION" | grep -aq "builder_state_t:s0$"; then TWO_LIVE_OK=1; fi
+   && [ "$(echo "$A_SECTION" | grep -avc "s0:$CAT_A\|state_t:s0" || true)" = "0" ] \
+   && [ "$(echo "$B_SECTION" | grep -avc "s0:$CAT_B\|state_t:s0" || true)" = "0" ] \
+   && grep -aq "it is the context mount's own inode (the build's input seen through the overlay lower): yes" "$EVIDENCE_DIR/c-tree-uncategorized.txt"; then TWO_LIVE_OK=1; fi
 BUILDS_OK=0
 [ "$BUILD_A_RC" = "0" ] && [ "$A_ID_OK" = "1" ] && [ "$BUILD_B_RC" = "0" ] && [ "$B_ID_OK" = "1" ] && BUILDS_OK=1
 COLLISION_OK=0
