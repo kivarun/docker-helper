@@ -900,11 +900,16 @@ allow docker_helper_builder_t security_t:file { read open getattr };
 # composition is structurally unreachable. No category application without
 # the launcher; no setexec authority for the manager.
 #
-# The grant set below is the structural chain skeleton only (G32 §6.E):
-# the entry/loader grants of both hops, the setexeccon permission, and the
-# two transition pairs. Evidence-dependent additions (the launcher child's
-# Go-runtime startup reads, its diagnostic-pipe access) land with the live
-# implementation gate, not before.
+# The grant set below is the structural chain skeleton plus the two
+# R2-live-evidence startup grants (Phase 4B run 36605086350, three
+# launcher-domain AVCs under Enforcing, permissive=0): the missing
+# execute on the shared entry image (the post-transition executable
+# mapping never completed — the launch died with SIGSEGV before any
+# application code ran) and the write on the inherited inst.diag pipe
+# (the manager's stdout/stderr fifo, whose exec-time inherited-fd check
+# otherwise closes the fd and silences the launcher's own failure
+# output — the same fd-use shape the rootlesskit mirror below covers).
+# No other additions: the launcher stays authority-free.
 type docker_helper_builder_launcher_t, domain;
 role system_r types docker_helper_builder_launcher_t;
 
@@ -912,14 +917,23 @@ role system_r types docker_helper_builder_launcher_t;
 # The entry file is the shared binary; the source-side exec/bprm checks are
 # already granted (the builder domain's own entry rule); the target side
 # needs entrypoint plus the loader access (same shape the daemon's own
-# entry rule carries).
+# entry rule carries) plus execute — the live-proven R2 startup grant for
+# the shared image's own executable mapping after the transition.
 type_transition docker_helper_builder_t docker_helper_exec_t:process docker_helper_builder_launcher_t;
 allow docker_helper_builder_t docker_helper_builder_launcher_t:process { transition };
-allow docker_helper_builder_launcher_t docker_helper_exec_t:file { entrypoint read open getattr map };
+allow docker_helper_builder_launcher_t docker_helper_exec_t:file { entrypoint read open getattr map execute };
 
 # The launcher child's only authority: its own forced-context write
 # (setexeccon). The manager domain deliberately does NOT carry setexec.
 allow docker_helper_builder_launcher_t self:process { setexec };
+
+# The launcher inherits the manager's inst.diag output pipe exactly like
+# the rootlesskit child below (live R2 evidence: denied { write } on the
+# manager fifo from the launcher domain, twice); the inherited-fd check
+# would otherwise close the fd and lose the launcher's failure output.
+# Write only — the manager keeps the read end; this is the same
+# launcher-stage mirror of the rootlesskit diag contract.
+allow docker_helper_builder_launcher_t docker_helper_builder_t:fifo_file { write };
 
 # Hop 2: the ONLY transition into the flow domain (G32 r3 I9). The forced
 # setexeccon context (rootlesskit_t:s0:cX) is checked by the same

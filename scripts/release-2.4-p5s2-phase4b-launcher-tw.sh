@@ -596,6 +596,12 @@ START_OUT="$(printf 'START %s\n' "$OP_ID" | timeout 120 socat - UNIX-CONNECT:"$M
 } > "$EVIDENCE_DIR/04-launch-window.txt"
 cat "$EVIDENCE_DIR/04-launch-window.txt" >&2
 
+# ---- manager context AFTER the launch attempt: captured immediately,
+# ---- before any gate branching, so an early-stopped leg still carries
+# ---- the manager-context evidence (R1/R2 lost it twice this way).
+MGR_AFTER="$(process_context "$MG_PID")"
+echo "$MGR_AFTER" > "$EVIDENCE_DIR/07-manager-after.txt"
+
 # Give the sampler its grace, then collect.
 for i in $(seq 1 100); do
   [ -f /tmp/p4b-work/sampler.done ] && break
@@ -669,9 +675,8 @@ else
   finish FAIL; exit 0
 fi
 
-# ---- manager context AFTER the launch attempt
-MGR_AFTER="$(process_context "$MG_PID")"
-echo "$MGR_AFTER" > "$EVIDENCE_DIR/07-manager-after.txt"
+# ---- manager context AFTER the launch attempt (captured above, right
+# ---- after START returned; only the gate reads it here)
 if [ "$MGR_AFTER" = "$BUILDER_T" ]; then
   marker "MANAGER-CONTEXT-AFTER=$BUILDER_T"
   marker "MANAGER-CONTEXT=PASS"

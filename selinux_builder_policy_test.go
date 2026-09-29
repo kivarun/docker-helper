@@ -226,9 +226,13 @@ func TestSELinuxPolicyLauncherChainRootlesskitTransition(t *testing.T) {
 		// Hop 1: the manager's self-reexec transitions into the launcher domain.
 		"type_transition docker_helper_builder_t docker_helper_exec_t:process docker_helper_builder_launcher_t;",
 		"allow docker_helper_builder_t docker_helper_builder_launcher_t:process { transition };",
-		"allow docker_helper_builder_launcher_t docker_helper_exec_t:file { entrypoint read open getattr map };",
+		// The R2 live startup grants: execute on the shared entry image and
+		// the inherited inst.diag pipe write (launcher-stage mirror of the
+		// rootlesskit diag contract below).
+		"allow docker_helper_builder_launcher_t docker_helper_exec_t:file { entrypoint read open getattr map execute };",
 		// The launcher's own forced-context write; the manager carries none.
 		"allow docker_helper_builder_launcher_t self:process { setexec };",
+		"allow docker_helper_builder_launcher_t docker_helper_builder_t:fifo_file { write };",
 		// Hop 2: the only transition into the flow domain.
 		"type_transition docker_helper_builder_launcher_t docker_helper_rootlesskit_exec_t:process docker_helper_rootlesskit_t;",
 		"allow docker_helper_builder_launcher_t docker_helper_rootlesskit_t:process { transition };",
@@ -363,8 +367,10 @@ func TestSELinuxPolicyMCSMembership(t *testing.T) {
 // TestSELinuxPolicyLauncherDomainSurface verifies the launcher domain is
 // authority-free by construction: its only grants are the structural chain
 // surface (its own entry file, the rootlesskit entry file's exec checks, its
-// own setexec, and the two transitions), it receives no grant toward any
-// forbidden surface, and it is not an MCS member.
+// own setexec, and the two transitions) plus the two R2-live-evidence
+// startup grants (execute on the shared entry image and the inherited
+// inst.diag fifo write), it receives no grant toward any forbidden surface,
+// and it is not an MCS member.
 func TestSELinuxPolicyLauncherDomainSurface(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
 	for _, line := range strings.Split(policy, "\n") {
@@ -377,8 +383,12 @@ func TestSELinuxPolicyLauncherDomainSurface(t *testing.T) {
 			continue
 		}
 		switch {
-		case trimmed == "allow docker_helper_builder_launcher_t docker_helper_exec_t:file { entrypoint read open getattr map };",
+		case trimmed == "allow docker_helper_builder_launcher_t docker_helper_exec_t:file { entrypoint read open getattr map execute };",
 			trimmed == "allow docker_helper_builder_launcher_t docker_helper_rootlesskit_exec_t:file { execute read open getattr };",
+			// The launcher-stage mirror of the rootlesskit inst.diag contract
+			// (R2 live evidence); exactly this rule and nothing else toward
+			// the builder domain.
+			trimmed == "allow docker_helper_builder_launcher_t docker_helper_builder_t:fifo_file { write };",
 			// The structural chain's transitions (hop 2 lives here).
 			trimmed == "allow docker_helper_builder_launcher_t docker_helper_rootlesskit_t:process { transition };":
 			// The structural chain's entry/bprm/transition grants.
@@ -386,6 +396,27 @@ func TestSELinuxPolicyLauncherDomainSurface(t *testing.T) {
 			// The launcher's own forced-context write (self rule).
 		default:
 			t.Errorf("unexpected launcher-domain grant (the launcher stays authority-free): %s", trimmed)
+		}
+	}
+	// The launcher may complete the shared entry image's own mapping
+	// startup (execute), but it must never exec the docker-helper binary
+	// and REMAIN in the launcher domain: no execute_no_trans on the
+	// docker-helper exec type.
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.Contains(trimmed, "docker_helper_builder_launcher_t docker_helper_exec_t:file") &&
+			strings.Contains(trimmed, "execute_no_trans") {
+			t.Errorf("the launcher must not carry execute_no_trans on the shared binary (the only in-domain exec is the rootlesskit entry): %s", trimmed)
+		}
+	}
+	// The launcher's only grant toward the builder domain is the inherited
+	// diag pipe write: every launcher_t -> docker_helper_builder_t rule must
+	// be exactly that fifo_file write.
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "allow docker_helper_builder_launcher_t docker_helper_builder_t:") &&
+			trimmed != "allow docker_helper_builder_launcher_t docker_helper_builder_t:fifo_file { write };" {
+			t.Errorf("the launcher's builder-domain surface is exactly the diag fifo write: %s", trimmed)
 		}
 	}
 	for _, forbidden := range forbiddenBuilderTargets {
