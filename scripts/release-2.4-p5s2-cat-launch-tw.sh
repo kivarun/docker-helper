@@ -651,15 +651,11 @@ require {
 	type docker_helper_builder_t;
 	type docker_helper_builder_state_t;
 	type bin_t;
-	type security_t;
-	class security { check_context };
-	class file { execute execute_no_trans getattr open read write map relabelfrom relabelto };
+	class file { execute open read getattr map relabelfrom relabelto };
 	class dir { relabelfrom relabelto };
 	class process { setexec };
 }
-allow docker_helper_builder_t bin_t:file { execute execute_no_trans open read getattr map };
-allow docker_helper_builder_t security_t:file { getattr open read write };
-allow docker_helper_builder_t security_t:security check_context;
+allow docker_helper_builder_t bin_t:file { execute open read getattr map };
 allow docker_helper_builder_t self:process { setexec };
 allow docker_helper_builder_t docker_helper_builder_state_t:file { relabelfrom relabelto };
 allow docker_helper_builder_t docker_helper_builder_state_t:dir { relabelfrom relabelto };
@@ -1181,8 +1177,18 @@ RB_READY=$(wait_sock "$RB/buildkitd.sock" 120)
   echo "manager pid: $MG_PID"
   echo "manager attr/current: $(tr -d '\0' < "/proc/$MG_PID/attr/current" 2>/dev/null || true)"
 } > "$EVIDENCE_DIR/c-launch-results.txt" 2>&1
+# The stand does not assume WHICH category each operation received (the
+# concurrent RPC order is racy): every leg derives each operation's
+# category from that operation's own tree label and asserts the
+# state/process parity against it.
+CAT_A=$(stat -c '%C' "$SA" 2>/dev/null | sed 's/.*s0://' || true)
+CAT_B=$(stat -c '%C' "$SB" 2>/dev/null | sed 's/.*s0://' || true)
+{
+  echo "derived categories: A=$CAT_A B=$CAT_B"
+  echo "categories distinct (unique-live-category): $([ -n "$CAT_A" ] && [ "$CAT_A" != "$CAT_B" ] && echo yes || echo no)"
+} >> "$EVIDENCE_DIR/c-launch-results.txt" 2>&1
 cat "$EVIDENCE_DIR/c-launch-results.txt" >&2
-if [ "$RA_READY" != "1" ] || [ "$RB_READY" != "1" ]; then
+if [ "$RA_READY" != "1" ] || [ "$RB_READY" != "1" ] || [ -z "$CAT_A" ] || [ "$CAT_A" = "$CAT_B" ]; then
   note "the concurrent launch pair failed; the experiment cannot proceed"
   harvest_avcs_since "$HV_EPOCH" "$EVIDENCE_DIR/c-launch-avcs.txt"
   grep -a "avc:  denied" "$EVIDENCE_DIR/c-launch-avcs.txt" | head -20 >&2 || true
@@ -1239,7 +1245,112 @@ log 'J: Part C — the per-operation descendant inventories (the no-bleed check)
   echo "--- op B's state tree ---"
   find "$SB" -exec stat -c '%C' {} \; 2>/dev/null | sort | uniq -c | sort -rn
 } > "$EVIDENCE_DIR/c-tree-uniformity.txt" 2>&1
-cat "$EVIDENCE_DIR/c-tree-uniformity.txt" >&2
+{
+  echo "=== the uncategorized objects inside each state tree (expect at most the noise-free run) ==="
+  echo "--- op A ---"; find "$SA" -exec stat -c '%C %n' {} \; 2>/dev/null | grep -av "s0:$CAT_A" || echo none
+  echo "--- op B ---"; find "$SB" -exec stat -c '%C %n' {} \; 2>/dev/null | grep -av "s0:$CAT_B" || echo none
+} > "$EVIDENCE_DIR/c-tree-uncategorized.txt" 2>&1
+cat "$EVIDENCE_DIR/c-tree-uncategorized.txt" >&2
+
+log 'G: Part G — the exact security regression at two live operations (both ops live here)'
+# guard 1: cross-op newuidmap (the B-category subject -> the A-category target)
+FIFO_G1="$WORK/probe/fifo-g1"
+mkfifo "$FIFO_G1"
+chmod 666 "$FIFO_G1"
+timeout 120 runuser -u "$BUILDER_USER" -- runcon "$RK_CTX:s0:$CAT_B" /usr/local/bin/map_probe --be-target "$FIFO_G1" \
+  >"$WORK/probe/b-g1.out" 2>&1 < /dev/null &
+exec 3<>"$FIFO_G1"
+BPID_G1=""
+if IFS= read -r -t 60 line <&3; then
+  case "$line" in PID=[0-9]*) BPID_G1="${line#PID=}" ;; esac
+fi
+exec 3<&-
+{
+  echo "=== guard 1: cross-op newuidmap s0:$CAT_B -> s0:$CAT_A uid_map write (expect MCS-BLOCKED) ==="
+  echo "target pid: ${BPID_G1:-NONE}"
+  echo "target uid_map before: [$(cat "/proc/$BPID_G1/uid_map" 2>/dev/null || true)]"
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_CTX:s0:$CAT_A" /usr/local/bin/map_probe \
+    --invoke-helper /usr/bin/newuidmap "$BPID_G1" 0 475 1 1 165536 65536 2>&1 < /dev/null || echo "helper attempt rc=$?"
+  echo "target uid_map after: [$(cat "/proc/$BPID_G1/uid_map" 2>/dev/null || true)]"
+} > "$EVIDENCE_DIR/g-guard1-newuidmap.txt" 2>&1
+cat "$EVIDENCE_DIR/g-guard1-newuidmap.txt" >&2
+pkill -KILL -f 'map_probe --be-target' 2>/dev/null || true
+# guard 2: cross-op TERM/KILL to a categorized vehicle
+FIFO_G2="$WORK/probe/fifo-g2"
+mkfifo "$FIFO_G2"
+chmod 666 "$FIFO_G2"
+timeout 120 runuser -u "$BUILDER_USER" -- runcon "$RK_CTX:s0:$CAT_B" /usr/local/bin/map_probe --be-target "$FIFO_G2" \
+  >"$WORK/probe/b-g2.out" 2>&1 < /dev/null &
+exec 3<>"$FIFO_G2"
+BPID_G2=""
+if IFS= read -r -t 60 line <&3; then
+  case "$line" in PID=[0-9]*) BPID_G2="${line#PID=}" ;; esac
+fi
+exec 3<&-
+{
+  echo "=== guard 2: cross-op TERM/KILL s0:$CAT_A -> s0:$CAT_B (expect MCS-BLOCKED, target alive) ==="
+  echo "target pid: ${BPID_G2:-NONE}"
+  for sigspec in 15 9; do
+    timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_CTX:s0:$CAT_A" /usr/local/bin/map_probe --signal "$BPID_G2" "$sigspec" 2>&1 < /dev/null || true
+  done
+  echo "target alive after the cross-op signals: $(kill -0 "$BPID_G2" 2>/dev/null && echo YES || echo NO) (the runner's unconfined check)"
+} > "$EVIDENCE_DIR/g-guard2-signals.txt" 2>&1
+cat "$EVIDENCE_DIR/g-guard2-signals.txt" >&2
+pkill -KILL -f 'map_probe --be-target' 2>/dev/null || true
+# guard 3: cross-op connect to a live operation's buildkitd.sock
+{
+  echo "=== guard 3: cross-op connect to op A's live buildkitd.sock (expect EACCES) ==="
+  echo "socket: $(stat -c '%C %U:%G %a' "$RA/buildkitd.sock" 2>&1)"
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_CTX:s0:$CAT_B" /usr/local/bin/map_probe --connect "$RA/buildkitd.sock" 2>&1 < /dev/null || true
+} > "$EVIDENCE_DIR/g-guard3-sockconnect.txt" 2>&1
+cat "$EVIDENCE_DIR/g-guard3-sockconnect.txt" >&2
+# guard 4: the operation category cannot reach the manager's authority
+MG_PID="$(systemctl show -p MainPID --value "$UNIT")"
+{
+  echo "=== guard 4: the op cannot reach the manager's authority (manager.sock connect + signal) ==="
+  echo "manager.sock: $(stat -c '%C %U:%G %a' "$MANAGER_SOCK" 2>&1)"
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_CTX:s0:$CAT_B" /usr/local/bin/map_probe --connect "$MANAGER_SOCK" 2>&1 < /dev/null || true
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_CTX:s0:$CAT_B" /usr/local/bin/map_probe --signal "$MG_PID" 15 2>&1 < /dev/null || true
+  echo "manager alive after the signal attempt: $(kill -0 "$MG_PID" 2>/dev/null && echo YES || echo NO)"
+} > "$EVIDENCE_DIR/g-guard4-manager.txt" 2>&1
+cat "$EVIDENCE_DIR/g-guard4-manager.txt" >&2
+# guard 5: the exact G29 snapshot write (the B-category subject -> the
+# A-category tree's FROM-snapshot /etc/passwd)
+G29_OK=0
+A_PASSWORD_TARGET="$(find "$SA/root/runc-overlayfs/snapshots" -type f -path '*/fs/etc/passwd' 2>/dev/null | head -1 || true)"
+if [ -n "$A_PASSWORD_TARGET" ]; then
+  PW_SHA0=$(sha256sum "$A_PASSWORD_TARGET" | awk '{print $1}')
+  set +e
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_CTX:s0:$CAT_B" /usr/local/bin/map_probe \
+    --poison "$A_PASSWORD_TARGET" 0 "g29p" > "$EVIDENCE_DIR/g-guard5-attempt.txt" 2>&1
+  set -e
+  PW_SHA1=$(sha256sum "$A_PASSWORD_TARGET" 2>/dev/null | awk '{print $1}')
+  {
+    echo "=== guard 5: the exact G29 snapshot write (s0:$CAT_B -> the s0:$CAT_A tree) ==="
+    echo "target: $A_PASSWORD_TARGET"
+    cat "$EVIDENCE_DIR/g-guard5-attempt.txt"
+    echo "file unchanged: $([ "$PW_SHA0" = "$PW_SHA1" ] && echo yes || echo no)"
+  } > "$EVIDENCE_DIR/g-guard5.txt" 2>&1
+  [ "$PW_SHA0" = "$PW_SHA1" ] && G29_OK=1
+else
+  echo "no FROM-snapshot passwd found in the live c2 tree" > "$EVIDENCE_DIR/g-guard5.txt"
+fi
+cat "$EVIDENCE_DIR/g-guard5.txt" >&2
+# the own-operation equivalents (the B-category subject -> its own tree)
+{
+  echo "=== guard 6: the own-operation equivalents (s0:$CAT_B -> its own tree) ==="
+} > "$EVIDENCE_DIR/g-guard6-own.txt" 2>&1
+SB_PW_TARGET="$(find "$SB/root/runc-overlayfs/snapshots" -type f -path '*/fs/etc/passwd' 2>/dev/null | head -1 || true)"
+if [ -n "$SB_PW_TARGET" ]; then
+  set +e
+  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_CTX:s0:$CAT_B" /usr/local/bin/map_probe \
+    --read "$SB_PW_TARGET" >> "$EVIDENCE_DIR/g-guard6-own.txt" 2>&1
+  set -e
+  echo "own read rc above (rc=3 errno=0 expected)" >> "$EVIDENCE_DIR/g-guard6-own.txt"
+fi
+cat "$EVIDENCE_DIR/g-guard6-own.txt" >&2
+harvest_avcs_since "$HV_EPOCH" "$EVIDENCE_DIR/g-guard-avcs.txt"
+dedup_avcs "$EVIDENCE_DIR/g-guard-avcs.txt" "$EVIDENCE_DIR/g-guard-avcs-dedup.txt"
 
 log 'K: Part D — the allocation collision proof (the third live operation)'
 OPC="$(gen_op_id)"
@@ -1268,8 +1379,8 @@ until [ ! -e "$SA" ] || [ "$E_WAIT" -ge 240 ]; do
 done
 [ ! -e "$SA" ] && E_OK=1
 {
-  echo "A trees converged (removed): $E_OK"
-  echo "c1 processes remaining: $(pgrep -cf "s0:c1" 2>/dev/null || echo 0)"
+  echo "A trees converged (removed): $E_OK (the freed category: s0:$CAT_A)"
+  echo "$CAT_A processes remaining: $(pgrep -cf "s0:$CAT_A" 2>/dev/null || echo 0)"
 } >> "$EVIDENCE_DIR/e-release.txt" 2>&1
 cat "$EVIDENCE_DIR/e-release.txt" >&2
 OPD="$(gen_op_id)"
@@ -1283,7 +1394,7 @@ sleep 1
   echo "new op: $OPD readiness: $RD_READY"
   echo "new tree labels:"
   stat -c '%C %n' "$SD" "$SD/rootlesskit-state" "$SD/root" 2>&1 || true
-  echo "new tree label is s0:c1 (the freed category reused): $(stat -c '%C' "$SD" 2>/dev/null | grep -q 's0:c1' && echo yes || echo no)"
+  echo "new tree label is s0:$CAT_A (the freed category reused): $(stat -c '%C' "$SD" 2>/dev/null | grep -q "s0:$CAT_A" && echo yes || echo no)"
 } >> "$EVIDENCE_DIR/e-release.txt" 2>&1
 cat "$EVIDENCE_DIR/e-release.txt" >&2
 # the new op builds (the reuse works end to end)
@@ -1332,9 +1443,11 @@ SE="$STATE_ROOT/ops/$OPE"
 RE="$RUNTIME_ROOT/ops/$OPE"
 rpc_call START "$OPE" "$EVIDENCE_DIR/f-abnormal.txt"
 RE_READY=$(wait_sock "$RE/buildkitd.sock" 120)
+sleep 1
+CAT_E=$(stat -c '%C' "$SE" 2>/dev/null | sed 's/.*s0://' || true)
 ELE_PID=""
 for pid in $(pgrep -f "rootlesskit --net=slirp4netns" 2>/dev/null || true); do
-  if tr -d '\0' < "/proc/$pid/attr/current" 2>/dev/null | grep -q "s0:c1"; then
+  if tr -d '\0' < "/proc/$pid/attr/current" 2>/dev/null | grep -q "s0:$CAT_E"; then
     ELE_PID="$pid"
     break
   fi
@@ -1369,7 +1482,7 @@ sleep 1
   echo "=== Part F: the next operation does NOT reuse the retained category ==="
   echo "next op: $OPE2 readiness: $RE2_READY"
   echo "next tree: $(stat -c '%C' "$STATE_ROOT/ops/$OPE2" 2>&1)"
-  echo "next tree got a DIFFERENT category than the retained one: $(stat -c '%C' "$STATE_ROOT/ops/$OPE2" 2>/dev/null | grep -q 's0:c1' && echo NO || echo yes)"
+  echo "next tree got a DIFFERENT category than the retained one (s0:$CAT_E): $(stat -c '%C' "$STATE_ROOT/ops/$OPE2" 2>/dev/null | grep -q "s0:$CAT_E" && echo NO || echo yes)"
 } >> "$EVIDENCE_DIR/f-abnormal.txt" 2>&1
 # the recovery: the flow's own-authority socket cleanup, then the PURGE retry
 {
@@ -1377,7 +1490,7 @@ sleep 1
 } >> "$EVIDENCE_DIR/f-abnormal.txt" 2>&1
 if [ -e "$SE/rootlesskit-state/api.sock" ]; then
   set +e
-  timeout 60 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe \
+  timeout 60 runuser -u "$BUILDER_USER" -- runcon "$RK_CTX:s0:$CAT_E" /usr/local/bin/map_probe \
     --unlink "$SE/rootlesskit-state/api.sock" >> "$EVIDENCE_DIR/f-abnormal.txt" 2>&1
   set -e
 fi
@@ -1392,109 +1505,9 @@ done
 {
   echo "residue converged after the flow-side cleanup + PURGE retry: $G_OK"
   echo "the manager journal window:"
-  journalctl -u "$UNIT" --since "@$F_EPOCH2" --no-pager 2>/dev/null | grep -a 'purge\|residue\|refus\|cleanup\|unexpected' | head -12 || true
+  journalctl -u "$UNIT" --since "@$F_EPOCH2" --no-pager 2>/dev/null | grep -a 'purge\|residue\|refus\|cleanup\|unexpected' | head -12
 } >> "$EVIDENCE_DIR/f-abnormal.txt" 2>&1
 cat "$EVIDENCE_DIR/f-abnormal.txt" >&2
-
-log 'N: Part G — the exact security regression at two live operations'
-# guard 1: cross-op newuidmap c1 -> c2 (the G28 E1 shape)
-FIFO_G1="$WORK/probe/fifo-g1"
-mkfifo "$FIFO_G1"
-chmod 666 "$FIFO_G1"
-timeout 120 runuser -u "$BUILDER_USER" -- runcon "$RK_C2" /usr/local/bin/map_probe --be-target "$FIFO_G1" \
-  >"$WORK/probe/b-g1.out" 2>&1 < /dev/null &
-exec 3<>"$FIFO_G1"
-BPID_G1=""
-if IFS= read -r -t 60 line <&3; then
-  case "$line" in PID=[0-9]*) BPID_G1="${line#PID=}" ;; esac
-fi
-exec 3<&-
-{
-  echo "=== guard 1: cross-op newuidmap c1 -> c2 uid_map write (expect MCS-BLOCKED) ==="
-  echo "target pid: ${BPID_G1:-NONE}"
-  echo "target uid_map before: [$(cat "/proc/$BPID_G1/uid_map" 2>/dev/null || true)]"
-  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe \
-    --invoke-helper /usr/bin/newuidmap "$BPID_G1" 0 475 1 1 165536 65536 2>&1 < /dev/null || echo "helper attempt rc=$?"
-  echo "target uid_map after: [$(cat "/proc/$BPID_G1/uid_map" 2>/dev/null || true)]"
-} > "$EVIDENCE_DIR/g-guard1-newuidmap.txt" 2>&1
-cat "$EVIDENCE_DIR/g-guard1-newuidmap.txt" >&2
-pkill -KILL -f 'map_probe --be-target' 2>/dev/null || true
-# guard 2: cross-op TERM/KILL to a categorized vehicle
-FIFO_G2="$WORK/probe/fifo-g2"
-mkfifo "$FIFO_G2"
-chmod 666 "$FIFO_G2"
-timeout 120 runuser -u "$BUILDER_USER" -- runcon "$RK_C2" /usr/local/bin/map_probe --be-target "$FIFO_G2" \
-  >"$WORK/probe/b-g2.out" 2>&1 < /dev/null &
-exec 3<>"$FIFO_G2"
-BPID_G2=""
-if IFS= read -r -t 60 line <&3; then
-  case "$line" in PID=[0-9]*) BPID_G2="${line#PID=}" ;; esac
-fi
-exec 3<&-
-{
-  echo "=== guard 2: cross-op TERM/KILL c1 -> c2 (expect MCS-BLOCKED, target alive) ==="
-  echo "target pid: ${BPID_G2:-NONE}"
-  for sigspec in 15 9; do
-    timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --signal "$BPID_G2" "$sigspec" 2>&1 < /dev/null || true
-  done
-  echo "target alive after the cross-op signals: $(kill -0 "$BPID_G2" 2>/dev/null && echo YES || echo NO) (the runner's unconfined check)"
-} > "$EVIDENCE_DIR/g-guard2-signals.txt" 2>&1
-cat "$EVIDENCE_DIR/g-guard2-signals.txt" >&2
-pkill -KILL -f 'map_probe --be-target' 2>/dev/null || true
-# guard 3: cross-op connect to a live operation's buildkitd.sock
-{
-  echo "=== guard 3: cross-op connect to op B's live buildkitd.sock (expect EACCES) ==="
-  echo "socket: $(stat -c '%C %U:%G %a' "$RB/buildkitd.sock" 2>&1)"
-  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --connect "$RB/buildkitd.sock" 2>&1 < /dev/null || true
-} > "$EVIDENCE_DIR/g-guard3-sockconnect.txt" 2>&1
-cat "$EVIDENCE_DIR/g-guard3-sockconnect.txt" >&2
-# guard 4: the operation category cannot reach the manager's authority
-{
-  echo "=== guard 4: the op cannot reach the manager's authority (manager.sock connect + signal) ==="
-  echo "manager.sock: $(stat -c '%C %U:%G %a' "$MANAGER_SOCK" 2>&1)"
-  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --connect "$MANAGER_SOCK" 2>&1 < /dev/null || true
-  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe --signal "$MG_PID" 15 2>&1 < /dev/null || true
-  echo "manager alive after A's signal attempt: $(kill -0 "$MG_PID" 2>/dev/null && echo YES || echo NO)"
-} > "$EVIDENCE_DIR/g-guard4-manager.txt" 2>&1
-cat "$EVIDENCE_DIR/g-guard4-manager.txt" >&2
-# guard 5: the exact G29 snapshot write (a c1 subject -> the live op's c2
-# tree; the poisoner context is c1, the target tree is the live OPE2's
-# categorized tree)
-SE2="$STATE_ROOT/ops/$OPE2"
-G29_OK=0
-B_PASSWORD_TARGET="$(find "$SE2/root/runc-overlayfs/snapshots" -type f -path '*/fs/etc/passwd' 2>/dev/null | head -1 || true)"
-if [ -n "$B_PASSWORD_TARGET" ]; then
-  PW_SHA0=$(sha256sum "$B_PASSWORD_TARGET" | awk '{print $1}')
-  set +e
-  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C1" /usr/local/bin/map_probe \
-    --poison "$B_PASSWORD_TARGET" 0 "g29p" > "$EVIDENCE_DIR/g-guard5-attempt.txt" 2>&1
-  set -e
-  PW_SHA1=$(sha256sum "$B_PASSWORD_TARGET" 2>/dev/null | awk '{print $1}')
-  {
-    echo "=== guard 5: the exact G29 snapshot write (c1 -> the live c2 tree) ==="
-    echo "target: $B_PASSWORD_TARGET"
-    cat "$EVIDENCE_DIR/g-guard5-attempt.txt"
-    echo "file unchanged: $([ "$PW_SHA0" = "$PW_SHA1" ] && echo yes || echo no)"
-  } > "$EVIDENCE_DIR/g-guard5.txt" 2>&1
-  [ "$PW_SHA0" = "$PW_SHA1" ] && G29_OK=1
-else
-  echo "no FROM-snapshot passwd found in the live c2 tree" > "$EVIDENCE_DIR/g-guard5.txt"
-fi
-# the own-operation equivalents (a c2 subject -> its own live tree)
-{
-  echo "=== guard 6: the own-operation equivalents (c2 -> its own live tree) ==="
-} > "$EVIDENCE_DIR/g-guard6-own.txt" 2>&1
-SB_PW_TARGET="$(find "$SE2/root/runc-overlayfs/snapshots" -type f -path '*/fs/etc/passwd' 2>/dev/null | head -1 || true)"
-if [ -n "$SB_PW_TARGET" ]; then
-  set +e
-  timeout 90 runuser -u "$BUILDER_USER" -- runcon "$RK_C2" /usr/local/bin/map_probe \
-    --read "$SB_PW_TARGET" >> "$EVIDENCE_DIR/g-guard6-own.txt" 2>&1
-  set -e
-  echo "own read rc above (rc=3 errno=0 expected)" >> "$EVIDENCE_DIR/g-guard6-own.txt"
-fi
-cat "$EVIDENCE_DIR/g-guard6-own.txt" >&2
-harvest_avcs_since "$HV_EPOCH" "$EVIDENCE_DIR/g-guard-avcs.txt"
-dedup_avcs "$EVIDENCE_DIR/g-guard-avcs.txt" "$EVIDENCE_DIR/g-guard-avcs-dedup.txt"
 
 log 'O: the final harvest + the leg summary'
 harvest_avcs_since "$HV_EPOCH" "$EVIDENCE_DIR/h-avcs-all.txt"
@@ -1502,7 +1515,7 @@ harvest_avcs_since "$HV_EPOCH" "$EVIDENCE_DIR/h-avcs-all.txt"
   echo "=== the residual AVC ledger (deduped) ==="
   grep -a "avc:  denied" "$EVIDENCE_DIR/h-avcs-all.txt" \
     | sed -E 's/.*denied  \{ ([^}]*) \}.*scontext=(\S+) tcontext=(\S+) tclass=(\S+) permissive=.*/\1 | \2 -> \3 (\4)/' \
-    | sort | uniq -c | sort -rn | head -40 || true
+    | sort | uniq -c | sort -rn | head -40
 } > "$EVIDENCE_DIR/h-residual-avcs-dedup.txt" 2>&1
 cat "$EVIDENCE_DIR/h-residual-avcs-dedup.txt" >&2 || true
 
@@ -1510,16 +1523,18 @@ cat "$EVIDENCE_DIR/h-residual-avcs-dedup.txt" >&2 || true
 LAUNCH_OK=0
 if grep -aq "manager attr/current: system_u:system_r:docker_helper_builder_t:s0" "$EVIDENCE_DIR/a-launch-boundary.txt" \
    && grep -aq "manager attr/current: system_u:system_r:docker_helper_builder_t:s0" "$EVIDENCE_DIR/c-launch-results.txt" \
-   && grep -aq "docker_helper_rootlesskit_t:s0:c1" "$EVIDENCE_DIR/c-launch-results.txt" \
-   && grep -aq "docker_helper_rootlesskit_t:s0:c2" "$EVIDENCE_DIR/c-launch-results.txt"; then LAUNCH_OK=1; fi
+   && grep -aq "docker_helper_rootlesskit_t:s0:$CAT_A" "$EVIDENCE_DIR/c-launch-results.txt" \
+   && grep -aq "docker_helper_rootlesskit_t:s0:$CAT_B" "$EVIDENCE_DIR/c-launch-results.txt"; then LAUNCH_OK=1; fi
 TWO_LIVE_OK=0
 A_SECTION=$(sed -n "/op A's state tree/,/op B's state tree/p" "$EVIDENCE_DIR/c-tree-uniformity.txt" 2>/dev/null | grep -av "state tree" || true)
 B_SECTION=$(sed -n "/op B's state tree/,$ p" "$EVIDENCE_DIR/c-tree-uniformity.txt" 2>/dev/null | grep -av "state tree" || true)
 if [ "$RA_READY" = "1" ] && [ "$RB_READY" = "1" ] \
-   && echo "$A_SECTION" | grep -aq "s0:c1" \
-   && echo "$B_SECTION" | grep -aq "s0:c2" \
-   && ! echo "$A_SECTION" | grep -aq "s0:c2" \
-   && ! echo "$B_SECTION" | grep -aq "s0:c1"; then TWO_LIVE_OK=1; fi
+   && echo "$A_SECTION" | grep -aq "s0:$CAT_A" \
+   && echo "$B_SECTION" | grep -aq "s0:$CAT_B" \
+   && ! echo "$A_SECTION" | grep -aq "s0:$CAT_B" \
+   && ! echo "$B_SECTION" | grep -aq "s0:$CAT_A" \
+   && ! echo "$A_SECTION" | grep -aq "builder_state_t:s0$" \
+   && ! echo "$B_SECTION" | grep -aq "builder_state_t:s0$"; then TWO_LIVE_OK=1; fi
 BUILDS_OK=0
 [ "$BUILD_A_RC" = "0" ] && [ "$A_ID_OK" = "1" ] && [ "$BUILD_B_RC" = "0" ] && [ "$B_ID_OK" = "1" ] && BUILDS_OK=1
 COLLISION_OK=0
@@ -1539,7 +1554,7 @@ if grep -q 'Could not open proc directory for target.*Permission denied' "$EVIDE
    && grep -q 'target uid_map after: \[\]' "$EVIDENCE_DIR/g-guard1-newuidmap.txt" \
    && grep -q 'rc=-1 errno=13' "$EVIDENCE_DIR/g-guard3-sockconnect.txt" \
    && grep -q 'rc=-1 errno=13' "$EVIDENCE_DIR/g-guard4-manager.txt" \
-   && grep -q "manager alive after A's signal attempt: YES" "$EVIDENCE_DIR/g-guard4-manager.txt" \
+   && grep -q "manager alive after the signal attempt: YES" "$EVIDENCE_DIR/g-guard4-manager.txt" \
    && grep -q 'target alive after the cross-op signals: YES' "$EVIDENCE_DIR/g-guard2-signals.txt"; then GUARDS_OK=1; fi
 G29_OK_SUM=$G29_OK
 {
