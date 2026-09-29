@@ -1509,7 +1509,7 @@ done
 {
   echo "residue converged after the flow-side cleanup + PURGE retry: $G_OK"
   echo "the manager journal window:"
-  journalctl -u "$UNIT" --since "@$F_EPOCH2" --no-pager 2>/dev/null | grep -a 'purge\|residue\|refus\|cleanup\|unexpected' | head -12
+  journalctl -u "$UNIT" --since "@$F_EPOCH2" --no-pager 2>/dev/null | grep -a 'purge\|residue\|refus\|cleanup\|unexpected' | head -12 || true
 } >> "$EVIDENCE_DIR/f-abnormal.txt" 2>&1
 cat "$EVIDENCE_DIR/f-abnormal.txt" >&2 || true
 note "M-leg done; entering the final harvest"
@@ -1521,7 +1521,7 @@ note "final AVC harvest done"
   echo "=== the residual AVC ledger (deduped) ==="
   grep -a "avc:  denied" "$EVIDENCE_DIR/h-avcs-all.txt" \
     | sed -E 's/.*denied  \{ ([^}]*) \}.*scontext=(\S+) tcontext=(\S+) tclass=(\S+) permissive=.*/\1 | \2 -> \3 (\4)/' \
-    | sort | uniq -c | sort -rn | head -40
+    | sort | uniq -c | sort -rn | head -40 || true
 } > "$EVIDENCE_DIR/h-residual-avcs-dedup.txt" 2>&1
 cat "$EVIDENCE_DIR/h-residual-avcs-dedup.txt" >&2 || true
 
