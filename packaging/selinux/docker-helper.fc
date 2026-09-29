@@ -33,11 +33,25 @@
 /usr/bin/newgidmap                  --  system_u:object_r:docker_helper_newgidmap_exec_t:s0
 /etc/docker-helper(/.*)?                system_u:object_r:docker_helper_config_t:s0
 /var/lib/docker-helper(/.*)?            system_u:object_r:docker_helper_state_t:s0
+# P5-S2 G32 r3: the daemon's per-op build staging area (the staged build
+# context handed to buildctl; the ingress relabel that types it and applies
+# the operation's MCS category is a later phase). Listed ahead of the
+# generic runtime rule: the specific stem wins under the file-context
+# ranking, and the specific-first spelling keeps that true for both the
+# ranking and any first-match reading.
+/run/docker-helper/builds(/.*)?         system_u:object_r:docker_helper_builder_context_t:s0
 /run/docker-helper(/.*)?                system_u:object_r:docker_helper_runtime_t:s0
 /run/docker-helper/trusted-ca(/.*)?     system_u:object_r:docker_helper_trusted_ca_t:s0
-# P5-S1: builder-owned runtime/state trees. Deliberately separate types
-# from the daemon's trees (the builder holds no daemon authority); the
-# trees live only under these exact stems, so no ordering overrides the
-# daemon rules above.
-/var/lib/docker-helper-builder(/.*)?    system_u:object_r:docker_helper_builder_state_t:s0
-/run/docker-helper-builder(/.*)?        system_u:object_r:docker_helper_builder_runtime_t:s0
+# P5-S1/P5-S2 G32 r3: builder-owned runtime/state trees, split into root
+# and per-op types. The tree ROOTS and the shared ops containers carry the
+# dedicated root types (operation processes get traversal only); ONLY the
+# children of ops/ carry the per-op tree types (each per-op directory
+# receives its per-op type and the operation's MCS category at
+# provisioning — a later phase). The ops/.* rules match children only
+# (the path never ends in a slash and the regex requires the literal
+# /ops/ prefix), so the shared ops container stays on the root type and
+# the generic fallback rules below it stay root-typed.
+/var/lib/docker-helper-builder/ops/.*   system_u:object_r:docker_helper_builder_state_t:s0
+/var/lib/docker-helper-builder(/.*)?    system_u:object_r:docker_helper_builder_state_root_t:s0
+/run/docker-helper-builder/ops/.*       system_u:object_r:docker_helper_builder_runtime_t:s0
+/run/docker-helper-builder(/.*)?        system_u:object_r:docker_helper_builder_runtime_root_t:s0

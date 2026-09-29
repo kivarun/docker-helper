@@ -56,7 +56,7 @@
 # Remove:
 #   sudo semodule -r docker_helper
 
-module docker_helper 1.1;
+module docker_helper 1.2;
 
 	require {
 		attribute domain;
@@ -118,7 +118,7 @@ module docker_helper 1.1;
 		class capability2 { wake_alarm kill };
 		class user_namespace { create };
 		class cap_userns { sys_admin };
-		class process { transition siginh noatsecure rlimitinh sigkill };
+		class process { transition siginh noatsecure rlimitinh sigkill setexec };
 		class process2 { nnp_transition };
 	}
 
@@ -611,8 +611,27 @@ role system_r types docker_helper_builder_t;
 # daemon's docker_helper_runtime_t/docker_helper_state_t: the builder's
 # persistent trees carry their own types, and the daemon's access to
 # them is limited to the manager-socket transport below.
+#
+# P5-S2 G32 r3 root split: the tree ROOTS and the shared ops containers
+# carry dedicated root types. Operation processes get traversal only
+# toward them (no create/add_name/unlink), which closes the root-plane
+# write surfaces (the state root's $HOME/.config injection path, the
+# runtime root's manager.sock replacement path, sibling top-level op
+# entries). Only the CHILDREN of ops/ carry the per-op tree types; the
+# per-op directories receive their per-op type AND the operation's MCS
+# category at provisioning (a later phase).
 type docker_helper_builder_runtime_t, file_type;
 type docker_helper_builder_state_t, file_type;
+type docker_helper_builder_runtime_root_t, file_type;
+type docker_helper_builder_state_root_t, file_type;
+
+# P5-S2 G32 r3 context type: the daemon's per-op build staging area (the
+# staged build context handed to buildctl and materialized by buildkitd
+# inside the per-op state tree). Declared as the fc/structural foundation
+# only; the daemon's ingress relabel grant-set and its access surface land
+# with the ingress implementation phase. The daemon keeps ZERO grants on
+# docker_helper_builder_state_t.
+type docker_helper_builder_context_t, file_type;
 
 # Dedicated exec type for the distro rootlesskit binary. The builder
 # manager execs it in its own domain (no transition) as the launch
@@ -692,6 +711,18 @@ allow init_t docker_helper_builder_t:process { transition siginh };
 # for the dedicated builder identity the chown is real and requires setattr.
 # Stop cleanup unlinks the directory contents (the manager socket, pid
 # files, op residue) before rmdir.
+# The G32 r3 root split re-points the systemd ROOT operations to the
+# dedicated root types (the roots and the shared ops containers); the
+# per-op tree types below keep the proven P5-S1 unlink surface for the
+# per-op entries. The state side keeps the observed asymmetry: no
+# sock_file unlink (the G30 finding; observe-first, AGENTS.md §13).
+allow init_t docker_helper_builder_runtime_root_t:dir { create rmdir write remove_name setattr };
+allow init_t docker_helper_builder_state_root_t:dir { create rmdir write remove_name setattr };
+allow init_t docker_helper_builder_runtime_root_t:file { unlink };
+allow init_t docker_helper_builder_runtime_root_t:lnk_file { unlink };
+allow init_t docker_helper_builder_runtime_root_t:sock_file { unlink };
+allow init_t docker_helper_builder_state_root_t:file { unlink };
+allow init_t docker_helper_builder_state_root_t:lnk_file { unlink };
 allow init_t docker_helper_builder_runtime_t:dir { create rmdir write remove_name setattr };
 allow init_t docker_helper_builder_state_t:dir { create rmdir write remove_name setattr };
 allow init_t docker_helper_builder_runtime_t:file { unlink };
@@ -706,7 +737,9 @@ allow init_t docker_helper_builder_state_t:lnk_file { unlink };
 #   scontext=system_u:system_r:init_t:s0
 #   tcontext=system_u:object_r:docker_helper_builder_runtime_t:s0 tclass=dir
 #   denied { mounton } path=/run/systemd/mount-rootfs/run/docker-helper-builder
-allow init_t docker_helper_builder_runtime_t:dir { mounton };
+# G32 r3: the mounted path is the unit ROOT, which now carries the root
+# type (re-pointed, not duplicated).
+allow init_t docker_helper_builder_runtime_root_t:dir { mounton };
 
 # The ReadWritePaths bind over the state tree needs the same mount-on grant
 # (live manager journal, same run; the runtime-dir mounton grant above moved
@@ -715,7 +748,8 @@ allow init_t docker_helper_builder_runtime_t:dir { mounton };
 #   /var/lib/docker-helper-builder to
 #   /run/systemd/mount-rootfs/var/lib/docker-helper-builder: Permission denied
 #   -> Failed to set up mount namespacing -> status=226/NAMESPACE
-allow init_t docker_helper_builder_state_t:dir { mounton };
+# G32 r3: re-pointed to the state ROOT type (the mounted path is the root).
+allow init_t docker_helper_builder_state_root_t:dir { mounton };
 
 # journald: the manager writes its operational diagnostics to the
 # inherited systemd journal stream socket (StandardOutput=journal,
@@ -737,6 +771,20 @@ allow docker_helper_builder_t docker_helper_builder_runtime_t:file { create read
 # manager).
 allow docker_helper_builder_t docker_helper_builder_state_t:dir { getattr search read open write add_name remove_name create rmdir setattr };
 allow docker_helper_builder_t docker_helper_builder_state_t:file { create read write open getattr setattr unlink };
+
+# G32 r3 root split: the manager's ROOT-level operations re-pointed to the
+# root types. Exactly the operations the manager performs at root level:
+# startup lstat/verify of both roots, the ops-container lifecycle (create,
+# per-op entry add/remove, listing for startup purge), and — on the runtime
+# root — the manager.sock create/setattr/unlink/getattr. rmdir covers the
+# pre-provisioning window: a per-op directory created before its
+# provisioning relabel inherits the root type, and the manager's cleanup
+# (the START failure convergence) must remove it. The manager does not
+# rmdir/setattr the roots or the ops containers themselves; no root-level
+# file surface exists.
+allow docker_helper_builder_t docker_helper_builder_runtime_root_t:dir { getattr search read open write add_name remove_name create rmdir };
+allow docker_helper_builder_t docker_helper_builder_runtime_root_t:sock_file { create getattr setattr unlink };
+allow docker_helper_builder_t docker_helper_builder_state_root_t:dir { getattr search read open write add_name remove_name create rmdir };
 
 # Identity guard: the startup execution-identity verification resolves
 # the builder user through /etc/passwd (same access the daemon needs
@@ -789,44 +837,93 @@ allow docker_helper_builder_t cert_t:dir { search getattr };
 allow docker_helper_builder_t cert_t:lnk_file { getattr read };
 allow docker_helper_builder_t cert_t:file { getattr open read };
 
-# The manager's launch vehicle: exec the distro rootlesskit binary. The
-# exec TRANSITIONS into the dedicated child domain (the type_transition
-# below). The bprm open/read checks run in the SOURCE domain (live
-# enforcing AVC, P5-S2 run 36187436760 P6 window: comm="docker-helper"
-# denied { read open } on /usr/bin/rootlesskit, permissive=0 — the exec
-# never started until these were granted), so the manager needs execute
-# plus the bprm read/open; the loader-side checks (entrypoint/map) run in
-# the child domain. The helper execs (newuidmap/newgidmap/slirp4netns) are
-# reachable only through their dedicated exec types (the child domain's
-# pointed transitions; the manager may exec none of them), and the bundled
-# buildkitd remains ungranted for BOTH domains (the deliberate P5-S2
-# boundary).
-allow docker_helper_builder_t docker_helper_rootlesskit_exec_t:file { execute read open };
+# --- docker_helper_builder_launcher_t: the per-launch category child (G32 r3 §5) ---
+#
+# Launch chain: the manager (docker_helper_builder_t, s0 — it never changes
+# its own range) re-execs the SHARED binary with the hidden internal
+# launcher subcommand; THAT exec transitions into this dedicated
+# authority-free domain. The launcher child validates the canonical
+# category token, writes its OWN /proc/self/attr/exec (setexeccon) with the
+# FIXED target context (docker_helper_rootlesskit_t:s0:cX — the type,
+# identity, and role are constants; the category is the only variable) and
+# execs the rootlesskit entry file. The child dies at the execve, so two
+# concurrent launches cannot bleed categories (the G31-measured mechanic;
+# the G31 stand used the distro runcon binary as this child — the r3
+# review replaced it with the project-owned launcher because relabeling the
+# distro runcon binary would make its inode label a host-global policy
+# contract).
+#
+# Structural fail-closed property (I9): the ONLY path into the flow domain
+# is the launcher edge. The legacy direct launch rules were removed (the
+# manager's rootlesskit exec grant and the direct
+# builder_t -> rootlesskit_t transition): an OLD binary under the NEW
+# policy cannot launch the flow at all — its legacy direct exec of
+# rootlesskit_exec_t from builder_t is denied (no transition, no
+# execute/execute_no_trans), so the uncategorized rootlesskit_t:s0
+# composition is structurally unreachable. No category application without
+# the launcher; no setexec authority for the manager.
+#
+# The grant set below is the structural chain skeleton only (G32 §6.E):
+# the entry/loader grants of both hops, the setexeccon permission, and the
+# two transition pairs. Evidence-dependent additions (the launcher child's
+# Go-runtime startup reads, its diagnostic-pipe access) land with the live
+# implementation gate, not before.
+type docker_helper_builder_launcher_t, domain;
+role system_r types docker_helper_builder_launcher_t;
+
+# Hop 1: the manager's self-reexec transitions into the launcher domain.
+# The entry file is the shared binary; the source-side exec/bprm checks are
+# already granted (the builder domain's own entry rule); the target side
+# needs entrypoint plus the loader access (same shape the daemon's own
+# entry rule carries).
+type_transition docker_helper_builder_t docker_helper_exec_t:process docker_helper_builder_launcher_t;
+allow docker_helper_builder_t docker_helper_builder_launcher_t:process { transition };
+allow docker_helper_builder_launcher_t docker_helper_exec_t:file { entrypoint read open getattr map };
+
+# The launcher child's only authority: its own forced-context write
+# (setexeccon). The manager domain deliberately does NOT carry setexec.
+allow docker_helper_builder_launcher_t self:process { setexec };
+
+# Hop 2: the ONLY transition into the flow domain (G32 r3 I9). The forced
+# setexeccon context (rootlesskit_t:s0:cX) is checked by the same
+# transition machinery: the transition permission toward the target type,
+# the target domain's entrypoint grant (below, keyed to the target domain),
+# the same-user constrain, and the mcs escape for the non-constrained
+# launcher domain. The transition permission is required for the forced
+# context too.
+type_transition docker_helper_builder_launcher_t docker_helper_rootlesskit_exec_t:process docker_helper_rootlesskit_t;
+allow docker_helper_builder_launcher_t docker_helper_rootlesskit_t:process { transition };
+
+# The launcher's source-side exec checks for hop 2 (the bprm open/read +
+# the pre-exec getattr; the loader-side checks run in the flow domain,
+# whose entry rule carries entrypoint/read/open/execute/execute_no_trans/
+# getattr/map). No execute_no_trans in the source: the exec transitions.
+allow docker_helper_builder_launcher_t docker_helper_rootlesskit_exec_t:file { execute read open getattr };
 
 # --- docker_helper_rootlesskit_t: the rootlesskit child domain (P5-S2) ---
 #
-# The manager's launch vehicle execs the distro rootlesskit binary; the
-# child runs in this dedicated domain via a pointed type_transition from
-# docker_helper_builder_t on the existing docker_helper_rootlesskit_exec_t
-# label. The shared docker-helper binary is untouched (executing
-# docker_helper_exec_t has no transition rule into this domain), and the
-# unit's SELinuxContext= binding still owns the builder domain. The child
-# domain holds the rootlesskit-owned state-tree access moved from the
-# manager by AVC evidence, the Go-runtime startup reads, and the pointed
-# exec-type transitions for its own helper launches (slirp4netns,
-# newuidmap, newgidmap — each entered only from this child domain). It
-# gets NO manager rights, no PLAIN capability grant (its only capability
-# surfaces are the evidenced in-namespace sys_admin bit and the userns
-# create), and no buildkitd/bin_t execution: those stay deliberate
+# The launcher child (docker_helper_builder_launcher_t) execs the distro
+# rootlesskit binary with the forced operation context; the flow runs in
+# this dedicated domain. The shared docker-helper binary is untouched for
+# the daemon (executing docker_helper_exec_t has no transition rule into
+# this domain), and the unit's SELinuxContext= binding still owns the
+# builder domain. The child domain holds the rootlesskit-owned state-tree
+# access moved from the manager by AVC evidence, the Go-runtime startup
+# reads, and the pointed exec-type transitions for its own helper launches
+# (slirp4netns, newuidmap, newgidmap — each entered only from this child
+# domain). It gets NO manager rights, no PLAIN capability grant (its only
+# capability surfaces are the evidenced in-namespace sys_admin bit and the
+# userns create), and no buildkitd/bin_t execution: those stay deliberate
 # boundaries needing their own evidence.
 type docker_helper_rootlesskit_t, domain;
 role system_r types docker_helper_rootlesskit_t;
 
-# Pointed exec transition: the ONLY path into this domain.
-type_transition docker_helper_builder_t docker_helper_rootlesskit_exec_t:process docker_helper_rootlesskit_t;
-allow docker_helper_builder_t docker_helper_rootlesskit_t:process { transition };
+# The transition into this domain lives in the launcher section above
+# (hop 2): the launcher child's exec of the rootlesskit entry type is the
+# ONLY path in (G32 r3 I9; the legacy direct builder_t transition was
+# removed with the G32 r3 review).
 
-# The child's own entry file: entrypoint for the transition plus the
+# The child's own entry file: entrypoint for that transition plus the
 # loader access, and execute_no_trans for rootlesskit's stage-2 re-exec of
 # ITSELF (live permissive harvest AVC, run 36187436760: comm="rootlesskit"
 # denied { execute_no_trans } on /usr/bin/rootlesskit from
@@ -1271,11 +1368,45 @@ allow docker_helper_rootlesskit_t self:user_namespace create;
 # the manager and slirp4netns domains get no cap_userns rights at all.
 allow docker_helper_rootlesskit_t self:cap_userns sys_admin;
 
+# --- MCS operation isolation: constrained-domain membership (G32 r3 §6.A) ---
+#
+# The four flow-side domains join the mcs_constrained_type attribute: the
+# three-domain G26 minimal set (rootlesskit child + the two uid/gid map
+# helpers; the G26 Parts C/D pairing proved the cross-operation uid-map
+# and process-control closures) plus slirp4netns — a G26 exclusion whose
+# premise (the domain is unreachable under enforcing policy) was removed by
+# G28, which runs slirp4netns live in the full flow; including it closes
+# the subject-side MCS exemption class. Every flow surface of these
+# domains is same-category by construction.
+#
+# Deliberately NOT members: docker_helper_t and docker_helper_builder_t
+# (the trusted control planes — their cross-category reachability is the
+# measured escape mechanics the launch chain and the lifecycle depend on),
+# docker_helper_builder_launcher_t (the authority-free launch child must
+# reach ANY operation's category), and docker_helper_container_t (the
+# separate managed-container boundary, already a member by its own
+# design).
+typeattribute docker_helper_rootlesskit_t mcs_constrained_type;
+typeattribute docker_helper_newuidmap_t mcs_constrained_type;
+typeattribute docker_helper_newgidmap_t mcs_constrained_type;
+typeattribute docker_helper_slirp4netns_t mcs_constrained_type;
+
+# The flow's minimal traversal toward the root types (G32 r3 §4.1): the
+# rootlesskit child walks through the roots and the shared ops containers
+# to reach its own per-op trees. Search only — no create/add_name/unlink
+# on the root plane (I8); getattr stays ungranted until live evidence.
+allow docker_helper_rootlesskit_t docker_helper_builder_state_root_t:dir { search };
+allow docker_helper_rootlesskit_t docker_helper_builder_runtime_root_t:dir { search };
+
 # Daemon transport to the builder manager (P5-S1 item 4): the daemon
 # dials manager.sock and the per-op buildkitd sockets, and nothing
 # else. This is the ONLY access the daemon gets into the builder trees;
 # the builder domain gets no mirror-image access into any daemon-owned
-# type.
+# type. G32 r3: manager.sock lives in the runtime ROOT (root type); the
+# per-op buildkitd sockets stay on the per-op runtime type. The daemon
+# keeps ZERO grants on docker_helper_builder_state_t.
+allow docker_helper_t docker_helper_builder_runtime_root_t:dir { search };
+allow docker_helper_t docker_helper_builder_runtime_root_t:sock_file { getattr open read write };
 allow docker_helper_t docker_helper_builder_runtime_t:dir { search };
 allow docker_helper_t docker_helper_builder_runtime_t:sock_file { getattr open read write };
 allow docker_helper_t docker_helper_builder_t:unix_stream_socket { connectto };

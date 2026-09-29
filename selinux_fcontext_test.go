@@ -164,9 +164,11 @@ func TestSELinuxPolicyInitTAndSystemPermissions(t *testing.T) {
 	// Regression for the live enforcing AVC:
 	//   scontext=init_t tcontext=docker_helper_t tclass=process denied { siginh }
 	// The process class declaration and the init_t -> docker_helper_t process
-	// rule must both carry siginh.
-	if !strings.Contains(content, "class process { transition siginh noatsecure rlimitinh sigkill };") {
-		t.Error("process class declaration must include siginh (and the kernel-required noatsecure/rlimitinh/sigkill)")
+	// rule must both carry siginh. G32 r3 adds setexec: the launcher child's
+	// own forced-context write is the only setexec surface (the manager
+	// domain carries none).
+	if !strings.Contains(content, "class process { transition siginh noatsecure rlimitinh sigkill setexec };") {
+		t.Error("process class declaration must include siginh (and the kernel-required noatsecure/rlimitinh/sigkill) plus the launcher's setexec")
 	}
 	if !strings.Contains(content, "allow init_t docker_helper_t:process { transition siginh };") {
 		t.Error("init_t -> docker_helper_t process rule must include siginh")

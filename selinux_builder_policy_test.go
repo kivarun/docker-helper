@@ -12,6 +12,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -46,11 +47,9 @@ func TestSELinuxPolicyBuilderDomainTypes(t *testing.T) {
 
 // TestSELinuxPolicyBuilderNoGlobalExecTransition verifies the policy adds NO
 // type_transition INTO the builder domain: the unit file's SELinuxContext= is
-// the single binding owner. The destination token of a process-class
-// transition is what would auto-flip execs into the builder domain; a
-// transition whose SOURCE is the builder domain (the P5-S2 rootlesskit
-// launch vehicle) is a different, legitimate shape and does not violate the
-// invariant.
+// the single binding owner. A transition whose SOURCE is the builder domain
+// (the G32 r3 launcher self-reexec) is a different, legitimate shape and does
+// not violate the invariant.
 func TestSELinuxPolicyBuilderNoGlobalExecTransition(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
 	for _, line := range strings.Split(policy, "\n") {
@@ -71,12 +70,16 @@ func TestSELinuxPolicyBuilderNoGlobalExecTransition(t *testing.T) {
 
 // TestSELinuxPolicyBuilderDaemonTransportExact verifies the daemon's access
 // into the builder trees is exactly the manager-socket transport: directory
-// traversal, the socket-file open/read/write/getattr for manager.sock and the
-// per-op buildkitd sockets, and the connectto toward the builder domain — and
-// no other docker_helper_t grant touches a builder type.
+// traversal, the socket-file open/read/write/getattr for manager.sock (the
+// runtime ROOT type after the G32 r3 root split) and the per-op buildkitd
+// sockets (the per-op runtime type), and the connectto toward the builder
+// domain — and no other docker_helper_t grant touches a builder type. The
+// daemon keeps zero grants on the operation state type.
 func TestSELinuxPolicyBuilderDaemonTransportExact(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
 	want := []string{
+		"allow docker_helper_t docker_helper_builder_runtime_root_t:dir { search };",
+		"allow docker_helper_t docker_helper_builder_runtime_root_t:sock_file { getattr open read write };",
 		"allow docker_helper_t docker_helper_builder_runtime_t:dir { search };",
 		"allow docker_helper_t docker_helper_builder_runtime_t:sock_file { getattr open read write };",
 		"allow docker_helper_t docker_helper_builder_t:unix_stream_socket { connectto };",
@@ -207,45 +210,76 @@ func TestSELinuxPolicyBuilderStateRules(t *testing.T) {
 	}
 }
 
-// TestSELinuxPolicyRootlesskitDomainTransition verifies the P5-S2 exec
-// transition: exactly one type_transition into the dedicated child domain,
-// only from the builder domain on the rootlesskit exec type; the child's
-// entry file carries the entrypoint plus loader access. The shared
-// docker-helper binary (docker_helper_exec_t) has no transition into either
-// special domain — the unit's SELinuxContext= stays the single builder
-// binding owner.
-func TestSELinuxPolicyRootlesskitDomainTransition(t *testing.T) {
+// TestSELinuxPolicyLauncherChainRootlesskitTransition verifies the G32 r3
+// launch chain: the only production transition into the flow domain is the
+// launcher edge (builder_t self-reexec -> docker_helper_builder_launcher_t
+// -> rootlesskit_t, the forced setexeccon context), the legacy direct
+// launch rules are gone, and the launcher domain carries exactly the
+// structural chain grants.
+func TestSELinuxPolicyLauncherChainRootlesskitTransition(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
 	for _, want := range []string{
 		"type docker_helper_rootlesskit_t, domain;",
 		"role system_r types docker_helper_rootlesskit_t;",
-		"type_transition docker_helper_builder_t docker_helper_rootlesskit_exec_t:process docker_helper_rootlesskit_t;",
-		"allow docker_helper_builder_t docker_helper_rootlesskit_t:process { transition };",
+		"type docker_helper_builder_launcher_t, domain;",
+		"role system_r types docker_helper_builder_launcher_t;",
+		// Hop 1: the manager's self-reexec transitions into the launcher domain.
+		"type_transition docker_helper_builder_t docker_helper_exec_t:process docker_helper_builder_launcher_t;",
+		"allow docker_helper_builder_t docker_helper_builder_launcher_t:process { transition };",
+		"allow docker_helper_builder_launcher_t docker_helper_exec_t:file { entrypoint read open getattr map };",
+		// The launcher's own forced-context write; the manager carries none.
+		"allow docker_helper_builder_launcher_t self:process { setexec };",
+		// Hop 2: the only transition into the flow domain.
+		"type_transition docker_helper_builder_launcher_t docker_helper_rootlesskit_exec_t:process docker_helper_rootlesskit_t;",
+		"allow docker_helper_builder_launcher_t docker_helper_rootlesskit_t:process { transition };",
+		"allow docker_helper_builder_launcher_t docker_helper_rootlesskit_exec_t:file { execute read open getattr };",
+		// The flow domain's own entry file (keyed to the target domain; reused
+		// unchanged by the launcher edge).
 		"allow docker_helper_rootlesskit_t docker_helper_rootlesskit_exec_t:file { entrypoint read open execute execute_no_trans getattr map };",
 	} {
 		if !strings.Contains(policy, want) {
-			t.Errorf("SELinux policy must carry the rootlesskit transition rule: %q", want)
+			t.Errorf("SELinux policy must carry the launch-chain rule: %q", want)
 		}
 	}
-	// Exactly one type_transition may target the child domain.
-	transitions := 0
+	// The legacy direct launch path must be GONE (G32 r3 I9): no manager
+	// rootlesskit exec grant, no direct builder_t -> rootlesskit_t transition.
+	for _, gone := range []string{
+		"allow docker_helper_builder_t docker_helper_rootlesskit_exec_t:file { execute read open };",
+		"type_transition docker_helper_builder_t docker_helper_rootlesskit_exec_t:process docker_helper_rootlesskit_t;",
+		"allow docker_helper_builder_t docker_helper_rootlesskit_t:process { transition };",
+		"allow docker_helper_builder_t docker_helper_rootlesskit_exec_t:file { read open execute execute_no_trans getattr map };",
+	} {
+		if strings.Contains(policy, gone) {
+			t.Errorf("the legacy direct launch rule must not exist: %q", gone)
+		}
+	}
+	// The manager must hold no setexec authority and no execute grant on the
+	// rootlesskit entry type: the launch path is launcher-only.
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "type_transition") && strings.HasSuffix(trimmed, ":process docker_helper_rootlesskit_t;") {
-			transitions++
+		if strings.HasPrefix(trimmed, "allow docker_helper_builder_t self:process") {
+			t.Errorf("the manager domain must hold no self:process grant (setexec is launcher-only): %s", trimmed)
+		}
+		if strings.HasPrefix(trimmed, "allow docker_helper_builder_t docker_helper_rootlesskit_exec_t") {
+			t.Errorf("the manager domain must hold no rootlesskit exec grant: %s", trimmed)
 		}
 	}
-	if transitions != 1 {
-		t.Errorf("exactly one type_transition into the rootlesskit child domain may exist, found %d", transitions)
+	// Single-entrypoint inventory: exactly one production type_transition
+	// targets the flow domain, and it is the launcher edge on the
+	// rootlesskit exec type.
+	_, transitions := parseSELinuxRules(policy)
+	rootlesskitTransitions := 0
+	for _, tr := range transitions {
+		if tr.dest != "docker_helper_rootlesskit_t" {
+			continue
+		}
+		rootlesskitTransitions++
+		if tr.source != "docker_helper_builder_launcher_t" || tr.entry != "docker_helper_rootlesskit_exec_t" || tr.class != "process" {
+			t.Errorf("the only transition into the flow domain is the launcher edge, got: type_transition %s %s:%s %s", tr.source, tr.entry, tr.class, tr.dest)
+		}
 	}
-	// The manager's rootlesskit exec grant is transition-shaped: execute plus
-	// the bprm read/open (the open/read checks run in the source domain), no
-	// execute_no_trans (dead under the transition rule), no loader perms.
-	if !strings.Contains(policy, "allow docker_helper_builder_t docker_helper_rootlesskit_exec_t:file { execute read open };") {
-		t.Error("the manager's rootlesskit exec grant must be exactly { execute read open } under the transition rule")
-	}
-	if strings.Contains(policy, "allow docker_helper_builder_t docker_helper_rootlesskit_exec_t:file { read open execute execute_no_trans getattr map };") {
-		t.Error("the manager's old no-transition rootlesskit exec grant must be gone")
+	if rootlesskitTransitions != 1 {
+		t.Errorf("exactly one type_transition into the flow domain may exist, found %d", rootlesskitTransitions)
 	}
 }
 
@@ -267,6 +301,204 @@ func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
 	} {
 		if !strings.Contains(policy, want) {
 			t.Errorf("the rootlesskit child domain's moved access must be exact: %q", want)
+		}
+	}
+}
+
+// TestSELinuxPolicyMCSMembership verifies the G32 r3 §6.A constrained
+// membership: the managed-container domain (its own accepted boundary) and
+// exactly the four flow-side domains are members of mcs_constrained_type
+// (the G26 minimal set plus the G28-revised slirp4netns), and the trusted
+// control planes / launch child stay OUT — their cross-category
+// reachability is the measured escape mechanics the launch chain and the
+// lifecycle depend on.
+func TestSELinuxPolicyMCSMembership(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	want := []string{
+		"docker_helper_container_t",
+		"docker_helper_rootlesskit_t",
+		"docker_helper_newuidmap_t",
+		"docker_helper_newgidmap_t",
+		"docker_helper_slirp4netns_t",
+	}
+	var members []string
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "typeattribute ") {
+			continue
+		}
+		if !strings.HasSuffix(trimmed, " mcs_constrained_type;") {
+			continue
+		}
+		members = append(members, strings.Fields(strings.TrimSuffix(trimmed, " mcs_constrained_type;"))[1])
+	}
+	if len(members) != len(want) {
+		t.Errorf("exactly %d domains may be mcs_constrained_type members, found %d: %v", len(want), len(members), members)
+	}
+	for _, domain := range want {
+		found := false
+		for _, member := range members {
+			if member == domain {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("the flow-side domain must be a mcs_constrained_type member: %s", domain)
+		}
+	}
+	for _, excluded := range []string{
+		"docker_helper_t",
+		"docker_helper_builder_t",
+		"docker_helper_builder_launcher_t",
+	} {
+		for _, member := range members {
+			if member == excluded {
+				t.Errorf("the trusted control plane / launch child must NOT be mcs_constrained: %s", excluded)
+			}
+		}
+	}
+}
+
+// TestSELinuxPolicyLauncherDomainSurface verifies the launcher domain is
+// authority-free by construction: its only grants are the structural chain
+// surface (its own entry file, the rootlesskit entry file's exec checks, its
+// own setexec, and the two transitions), it receives no grant toward any
+// forbidden surface, and it is not an MCS member.
+func TestSELinuxPolicyLauncherDomainSurface(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		target := allowTargetToken(trimmed, "allow docker_helper_builder_launcher_t ")
+		if target == "" {
+			continue
+		}
+		switch {
+		case trimmed == "allow docker_helper_builder_launcher_t docker_helper_exec_t:file { entrypoint read open getattr map };",
+			trimmed == "allow docker_helper_builder_launcher_t docker_helper_rootlesskit_exec_t:file { execute read open getattr };",
+			// The structural chain's transitions (hop 2 lives here).
+			trimmed == "allow docker_helper_builder_launcher_t docker_helper_rootlesskit_t:process { transition };":
+			// The structural chain's entry/bprm/transition grants.
+		case target == "self" && trimmed == "allow docker_helper_builder_launcher_t self:process { setexec };":
+			// The launcher's own forced-context write (self rule).
+		default:
+			t.Errorf("unexpected launcher-domain grant (the launcher stays authority-free): %s", trimmed)
+		}
+	}
+	for _, forbidden := range forbiddenBuilderTargets {
+		if strings.Contains(policy, "allow docker_helper_builder_launcher_t "+forbidden+":") {
+			t.Errorf("the launcher domain must not receive a grant toward %s", forbidden)
+		}
+	}
+}
+
+// TestSELinuxPolicyBuilderRootTypes verifies the G32 r3 root split: the
+// dedicated root types exist; the manager's root-level surface is exactly
+// the roots' verify/ops-container/manager.sock operations; systemd's root
+// mirrors exist; and the flow child gets exactly traversal (search) — no
+// create/add_name/unlink on the root plane.
+func TestSELinuxPolicyBuilderRootTypes(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	for _, want := range []string{
+		"type docker_helper_builder_state_root_t, file_type;",
+		"type docker_helper_builder_runtime_root_t, file_type;",
+		// The manager's root-level surface (rmdir covers the
+		// pre-provisioning window: a per-op dir created before its relabel
+		// inherits the root type and the manager's cleanup must remove it).
+		"allow docker_helper_builder_t docker_helper_builder_runtime_root_t:dir { getattr search read open write add_name remove_name create rmdir };",
+		"allow docker_helper_builder_t docker_helper_builder_runtime_root_t:sock_file { create getattr setattr unlink };",
+		"allow docker_helper_builder_t docker_helper_builder_state_root_t:dir { getattr search read open write add_name remove_name create rmdir };",
+		// systemd's root mirrors (the root dirs carry the unit directory
+		// operations; the mounton grants were re-pointed by the split).
+		"allow init_t docker_helper_builder_runtime_root_t:dir { create rmdir write remove_name setattr };",
+		"allow init_t docker_helper_builder_state_root_t:dir { create rmdir write remove_name setattr };",
+		"allow init_t docker_helper_builder_runtime_root_t:file { unlink };",
+		"allow init_t docker_helper_builder_runtime_root_t:lnk_file { unlink };",
+		"allow init_t docker_helper_builder_runtime_root_t:sock_file { unlink };",
+		"allow init_t docker_helper_builder_state_root_t:file { unlink };",
+		"allow init_t docker_helper_builder_state_root_t:lnk_file { unlink };",
+		"allow init_t docker_helper_builder_runtime_root_t:dir { mounton };",
+		"allow init_t docker_helper_builder_state_root_t:dir { mounton };",
+		// The flow child's minimal traversal.
+		"allow docker_helper_rootlesskit_t docker_helper_builder_state_root_t:dir { search };",
+		"allow docker_helper_rootlesskit_t docker_helper_builder_runtime_root_t:dir { search };",
+	} {
+		if !strings.Contains(policy, want) {
+			t.Errorf("the root-split policy surface is missing: %q", want)
+		}
+	}
+	// The flow child's root-plane surface stays traversal-only: every
+	// rootlesskit_t rule toward a root type must carry exactly { search }.
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t docker_helper_builder_") {
+			continue
+		}
+		if !strings.Contains(trimmed, "_root_t:") {
+			continue
+		}
+		if trimmed != "allow docker_helper_rootlesskit_t docker_helper_builder_state_root_t:dir { search };" &&
+			trimmed != "allow docker_helper_rootlesskit_t docker_helper_builder_runtime_root_t:dir { search };" {
+			t.Errorf("the flow child's root-plane surface must stay traversal-only: %s", trimmed)
+		}
+	}
+}
+
+// TestSELinuxPolicyBuilderContextFoundation verifies the context type is
+// declared as the G32 r3 foundation: the type and its fc rule exist, no
+// access grant names it yet (the ingress grant-set lands with the ingress
+// implementation), and the daemon holds zero grants on the operation state
+// type.
+func TestSELinuxPolicyBuilderContextFoundation(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	if !strings.Contains(policy, "type docker_helper_builder_context_t, file_type;") {
+		t.Error("SELinux policy must declare docker_helper_builder_context_t")
+	}
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(trimmed, "docker_helper_builder_context_t:") {
+			t.Errorf("no access grant may name the context type before the ingress implementation: %s", trimmed)
+		}
+		if strings.HasPrefix(trimmed, "allow docker_helper_t docker_helper_builder_state_t") {
+			t.Errorf("the daemon must keep zero grants on the operation state type: %s", trimmed)
+		}
+	}
+}
+
+// TestSELinuxPolicyManagerFlowSignalVocabulary pins the launch/signal
+// separation: any manager grant toward a flow-side process class must be
+// the STOP-path signal vocabulary only, never a transition (the launch
+// path is launcher-only). The signal grants themselves arrive with the
+// payload-ledger phase (G28 manager control-plane rules); until then the
+// invariant holds vacuously on the allow rules and structurally on the
+// transitions.
+func TestSELinuxPolicyManagerFlowSignalVocabulary(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		for _, flowDomain := range []string{"docker_helper_rootlesskit_t", "docker_helper_slirp4netns_t", "docker_helper_newuidmap_t", "docker_helper_newgidmap_t"} {
+			prefix := "allow docker_helper_builder_t " + flowDomain + ":process "
+			if !strings.HasPrefix(trimmed, prefix) {
+				continue
+			}
+			perms := strings.TrimSuffix(strings.TrimPrefix(trimmed, prefix), ";")
+			for _, perm := range strings.Fields(strings.Trim(perms, "{} ")) {
+				switch perm {
+				case "sigkill", "signal", "signull":
+					// STOP-path vocabulary.
+				default:
+					t.Errorf("manager grants toward a flow process must stay the STOP-path signal vocabulary: %s", trimmed)
+				}
+			}
 		}
 	}
 }
@@ -1119,13 +1351,17 @@ func TestSELinuxPolicyRootlesskitIsolation(t *testing.T) {
 }
 
 // TestSELinuxFCBuilderTrees verifies the .fc labels the builder-owned trees
-// with the dedicated types and keeps the shared binary on docker_helper_exec_t
+// with the G32 r3 split geometry: the tree roots AND the shared ops
+// containers carry the dedicated root types, ONLY the children of ops/ carry
+// the per-op tree types, and the shared binary keeps docker_helper_exec_t
 // (the unit's SELinuxContext= binding never needs a second binary label).
 func TestSELinuxFCBuilderTrees(t *testing.T) {
 	fc := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.fc")
 	for _, want := range []string{
-		"/var/lib/docker-helper-builder(/.*)?    system_u:object_r:docker_helper_builder_state_t:s0",
-		"/run/docker-helper-builder(/.*)?        system_u:object_r:docker_helper_builder_runtime_t:s0",
+		"/var/lib/docker-helper-builder/ops/.*   system_u:object_r:docker_helper_builder_state_t:s0",
+		"/var/lib/docker-helper-builder(/.*)?    system_u:object_r:docker_helper_builder_state_root_t:s0",
+		"/run/docker-helper-builder/ops/.*       system_u:object_r:docker_helper_builder_runtime_t:s0",
+		"/run/docker-helper-builder(/.*)?        system_u:object_r:docker_helper_builder_runtime_root_t:s0",
 		"/usr/bin/rootlesskit                --  system_u:object_r:docker_helper_rootlesskit_exec_t:s0",
 	} {
 		if !strings.Contains(fc, want) {
@@ -1135,6 +1371,20 @@ func TestSELinuxFCBuilderTrees(t *testing.T) {
 	// The shared binary keeps its single daemon-exec label.
 	if !strings.Contains(fc, "/usr/bin/docker-helper              --  system_u:object_r:docker_helper_exec_t:s0") {
 		t.Error("the shared binary must stay labeled docker_helper_exec_t")
+	}
+	// The per-op regex must require the /ops/ literal prefix: a bare
+	// ops(/.*)? form would match the SHARED ops container and hand the flow
+	// child create/add_name on it (the G32 r2 geometry bug; regression for
+	// the shared container).
+	for _, line := range strings.Split(fc, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.Contains(trimmed, "docker-helper-builder/ops") {
+			continue
+		}
+		pattern := strings.Fields(trimmed)[0]
+		if strings.Contains(pattern, "/ops(/.*)") || !strings.Contains(pattern, "/ops/") {
+			t.Errorf("the per-op fc pattern must match children of ops only (require the /ops/ prefix): %s", pattern)
+		}
 	}
 	// The builder-owned trees must never be labeled with daemon-owned types.
 	for _, line := range strings.Split(fc, "\n") {
@@ -1149,6 +1399,116 @@ func TestSELinuxFCBuilderTrees(t *testing.T) {
 			if strings.Contains(trimmed, "object_r:"+daemonType) {
 				t.Errorf("builder tree must not carry the daemon-owned type: %s", trimmed)
 			}
+		}
+	}
+}
+
+// TestSELinuxFCFirstMatchShape evaluates the shipped .fc rules over the
+// representative path shapes of the G32 r3 geometry: roots and shared ops
+// containers land on the root types, per-op children land on the per-op
+// tree types, the daemon staging area lands on the context type ahead of
+// the generic daemon-runtime rule, and foreign paths are untouched. The
+// evaluation models the real file-context ranking (libselinux selabel_file:
+// exact non-meta rules first, then regex rules by longest literal stem,
+// file order within a stem) — a naive file-order first match is NOT the
+// real semantics (the shipped trusted-ca rule outranks the generic daemon
+// runtime rule by stem length). This is the static/textual shape gate; the
+// real loaded-policy lookup (matchpathcon/selabel_lookup) stays the VM
+// implementation gate (G32 r3 §9.5).
+func TestSELinuxFCFirstMatchShape(t *testing.T) {
+	fc := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.fc")
+	type fcRule struct {
+		pattern  string
+		fileType string
+		stem     string // literal prefix up to the first regex metacharacter
+		exact    bool   // no metacharacters: exact-match rule
+	}
+	parse := func(pattern string) fcRule {
+		stem := pattern
+		for i, r := range stem {
+			if strings.ContainsRune(`.+?[]()|^$\`, r) {
+				stem = stem[:i]
+				break
+			}
+		}
+		return fcRule{
+			pattern:  pattern,
+			stem:     stem,
+			exact:    stem == pattern,
+			fileType: "",
+		}
+	}
+	var rules []fcRule
+	for _, line := range strings.Split(fc, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || trimmed == "" {
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		if len(fields) < 2 {
+			continue
+		}
+		typeToken := fields[1]
+		if typeToken == "--" {
+			if len(fields) < 3 {
+				continue
+			}
+			typeToken = fields[2]
+		}
+		rule := parse(fields[0])
+		rule.fileType = strings.TrimSuffix(strings.TrimPrefix(typeToken, "system_u:object_r:"), ":s0")
+		rules = append(rules, rule)
+	}
+	if len(rules) == 0 {
+		t.Fatal("no file-context rules parsed")
+	}
+	lookup := func(t *testing.T, path string) string {
+		t.Helper()
+		for _, rule := range rules {
+			if rule.exact && rule.pattern == path {
+				return rule.fileType
+			}
+		}
+		best := -1
+		bestRule := fcRule{}
+		for i, rule := range rules {
+			if rule.exact {
+				continue
+			}
+			re, err := regexp.Compile("^" + rule.pattern + "$")
+			if err != nil {
+				t.Fatalf("unparseable fc pattern %q: %v", rule.pattern, err)
+			}
+			if !re.MatchString(path) {
+				continue
+			}
+			if best == -1 || len(rule.stem) > len(bestRule.stem) {
+				best, bestRule = i, rule
+			}
+		}
+		return bestRule.fileType
+	}
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{"/var/lib/docker-helper-builder", "docker_helper_builder_state_root_t"},
+		{"/var/lib/docker-helper-builder/ops", "docker_helper_builder_state_root_t"},
+		{"/var/lib/docker-helper-builder/ops/op_ac4cbdc1ae4d4d3fa39943de5fcf2e6f", "docker_helper_builder_state_t"},
+		{"/var/lib/docker-helper-builder/ops/op_ac4cbdc1ae4d4d3fa39943de5fcf2e6f/root", "docker_helper_builder_state_t"},
+		{"/var/lib/docker-helper-builder/ops/op_ac4cbdc1ae4d4d3fa39943de5fcf2e6f/rootlesskit-state", "docker_helper_builder_state_t"},
+		{"/var/lib/docker-helper-builder/.config/buildkit/buildkitd.toml", "docker_helper_builder_state_root_t"},
+		{"/run/docker-helper-builder", "docker_helper_builder_runtime_root_t"},
+		{"/run/docker-helper-builder/ops", "docker_helper_builder_runtime_root_t"},
+		{"/run/docker-helper-builder/ops/op_ac4cbdc1ae4d4d3fa39943de5fcf2e6f", "docker_helper_builder_runtime_t"},
+		{"/run/docker-helper-builder/ops/op_ac4cbdc1ae4d4d3fa39943de5fcf2e6f/buildkitd.sock", "docker_helper_builder_runtime_t"},
+		{"/run/docker-helper-builder/manager.sock", "docker_helper_builder_runtime_root_t"},
+		{"/run/docker-helper/builds/op_ac4cbdc1ae4d4d3fa39943de5fcf2e6f/context/Dockerfile", "docker_helper_builder_context_t"},
+		{"/run/docker-helper/builds/op_ac4cbdc1ae4d4d3fa39943de5fcf2e6f/context", "docker_helper_builder_context_t"},
+		{"/run/docker-helper/manager.sock", "docker_helper_runtime_t"},
+	} {
+		if got := lookup(t, tc.path); got != tc.want {
+			t.Errorf("fc first-match for %q: got %q, want %q", tc.path, got, tc.want)
 		}
 	}
 }
