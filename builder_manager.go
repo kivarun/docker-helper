@@ -210,6 +210,15 @@ const (
 type builderInstance struct {
 	operationID string
 
+	// category is the operation's MCS category (G32 r3 §4.1): bound by
+	// the START admission under the manager lock at reservation and
+	// held through the full lifecycle — stopping, TERM, KILL, reap,
+	// partial cleanup, and retained-for-retry entries all keep it. It
+	// releases exactly when the terminal convergence removes this
+	// record from the manager map; the map is the single occupancy
+	// source, so no separate free-list can desynchronize.
+	category builderCategory
+
 	mu          sync.Mutex
 	phase       builderInstancePhase
 	leader      *exec.Cmd // the setsid RootlessKit session/process-group leader
@@ -253,6 +262,14 @@ type builderManager struct {
 	uid, gid    int
 	diag        *boundedBuffer // manager-level operational diagnostics
 
+	// categoryPoolMax is the category allocation upper bound. Production
+	// construction always sets the canonical pool bound
+	// (builderCategoryPoolMax); tests construct the manager and shrink
+	// the field to exercise pool exhaustion without 1023 live
+	// instances. It is not runtime configuration: no setter, no config
+	// surface, no protocol exposure, no re-read beyond allocation.
+	categoryPoolMax builderCategory
+
 	// stderr mirrors the operational diagnostics to the service's
 	// journal (systemd StandardError=journal). nil in tests that build
 	// the manager directly; the buffer remains the programmatic owner.
@@ -261,12 +278,13 @@ type builderManager struct {
 
 func newBuilderManager(uid, gid int) *builderManager {
 	return &builderManager{
-		instances:   map[string]*builderInstance{},
-		startFences: map[string]chan struct{}{},
-		ingress:     builderIngress{pending: map[int]chan struct{}{}},
-		uid:         uid,
-		gid:         gid,
-		diag:        newBoundedBuffer(builderInstanceDiagMaxBytes),
+		instances:       map[string]*builderInstance{},
+		startFences:     map[string]chan struct{}{},
+		ingress:         builderIngress{pending: map[int]chan struct{}{}},
+		uid:             uid,
+		gid:             gid,
+		diag:            newBoundedBuffer(builderInstanceDiagMaxBytes),
+		categoryPoolMax: builderCategoryPoolMax,
 	}
 }
 
@@ -402,10 +420,11 @@ func (m *builderManager) start(opID string, settled func()) string {
 		builderStartFenceHold(opID)
 	}
 
-	// Reservation: validate the ceiling and reserve the map entry in the
-	// same critical section, then settle the fence — a waiting STOP
-	// re-checks the map after this and converges the reserved instance
-	// through the ONE stop owner.
+	// Reservation: validate the ceiling, allocate the operation's MCS
+	// category (lowest free of the pool, G32 r3 §4.1), and reserve the map
+	// entry in the same critical section, then settle the fence — a
+	// waiting STOP re-checks the map after this and converges the
+	// reserved instance through the ONE stop owner.
 	m.mu.Lock()
 	delete(m.startFences, opID)
 	if len(m.instances) >= m.ceiling() {
@@ -413,8 +432,20 @@ func (m *builderManager) start(opID string, settled func()) string {
 		m.mu.Unlock()
 		return builderManagerRespAtCeiling
 	}
+	category, ok := m.allocateCategoryLocked()
+	if !ok {
+		// Unreachable in production (the pool exceeds the ceiling by
+		// orders of magnitude); diagnostic-only cause, the protocol
+		// keeps the existing refusal contract. The fence closes on the
+		// refusal path too, so a waiting STOP reports OK absent.
+		m.managerDiagf("START %s: operation category pool exhausted", opID)
+		close(fence)
+		m.mu.Unlock()
+		return builderManagerRespAtCeiling
+	}
 	inst := &builderInstance{
 		operationID: opID,
+		category:    category,
 		phase:       builderInstanceStarting,
 		diag:        newBoundedBuffer(builderInstanceDiagMaxBytes),
 		done:        make(chan struct{}),
@@ -614,6 +645,28 @@ func (m *builderManager) removeReservation(inst *builderInstance) {
 		delete(m.instances, inst.operationID)
 	}
 	m.mu.Unlock()
+}
+
+// allocateCategoryLocked selects the lowest free category of the pool for
+// a new reservation (G32 r3 §4.1). m.mu must be held: the occupancy source
+// is the manager map itself — live and retained entries both hold their
+// record's category — so a collision is structurally impossible under the
+// lock, and a category releases exactly when the terminal convergence
+// removes the record (removeReservation is the single map-delete owner).
+// The returned false is the pool-exhaustion refusal: it carries no
+// filesystem or process side effects and the caller surfaces the existing
+// at-ceiling contract.
+func (m *builderManager) allocateCategoryLocked() (builderCategory, bool) {
+	occupied := make(map[builderCategory]struct{}, len(m.instances))
+	for _, inst := range m.instances {
+		occupied[inst.category] = struct{}{}
+	}
+	for c := builderCategoryPoolMin; c <= m.categoryPoolMax; c++ {
+		if _, taken := occupied[c]; !taken {
+			return c, true
+		}
+	}
+	return 0, false
 }
 
 // convergeFailedStart is the START failure convergence for the launch's
