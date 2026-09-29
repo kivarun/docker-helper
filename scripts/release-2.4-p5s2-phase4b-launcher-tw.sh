@@ -227,25 +227,48 @@ if [ "$fail_toolchain" = 1 ]; then
 fi
 
 # The shipped module is compiled from the transferred candidate sources and
-# loaded UNMODIFIED (the composition's policy identity is the tree's).
+# loaded UNMODIFIED (the composition's policy identity is the tree's). The
+# module VERSION identity is carried by the manifest hash chain: the
+# orchestrator hashes the proof-commit checkout's inputs; the transferred
+# files must hash identically (the source tree carries
+# `module docker_helper 1.2;`). Modern libsemanage's semodule -l has no
+# version column, so the loaded-module check is presence + the hash chain.
 {
   echo "=== transferred composition manifest ==="
   cat "$TRANSFERRED/manifest.txt" 2>/dev/null || echo "(no manifest recorded)"
-  echo "=== input hashes ==="
+  echo "=== input hashes (must match the manifest) ==="
   sha256sum "$TRANSFERRED/docker-helper" "$TRANSFERRED/docker-helper.te" \
     "$TRANSFERRED/docker-helper.fc" "$TRANSFERRED/docker-helper-builder.service" \
     "$TRANSFERRED/provision-builder.sh" 2>/dev/null || true
 } > "$EVIDENCE_DIR/01-composition-inputs.txt" 2>&1
+while IFS='=' read -r key want; do
+  case "$key" in
+    binary_sha256) file="$TRANSFERRED/docker-helper" ;;
+    te_sha256) file="$TRANSFERRED/docker-helper.te" ;;
+    fc_sha256) file="$TRANSFERRED/docker-helper.fc" ;;
+    unit_sha256) file="$TRANSFERRED/docker-helper-builder.service" ;;
+    provision_sha256) file="$TRANSFERRED/provision-builder.sh" ;;
+    *) continue ;;
+  esac
+  got="$(sha256sum "$file" 2>/dev/null | awk '{print $1}')"
+  if [ "$got" != "$want" ]; then
+    note "composition input $file hashes $got, manifest says $want; the transferred composition is not the proof-commit tree"
+    finish INCOMPLETE; exit 0
+  fi
+done < "$TRANSFERRED/manifest.txt"
+grep -q '^module docker_helper 1.2;' "$TRANSFERRED/docker-helper.te" \
+  || { note "the shipped module source does not declare module docker_helper 1.2"; finish INCOMPLETE; exit 0; }
 checkmodule -M -m -o /tmp/p4b-work/docker_helper.tmp "$TRANSFERRED/docker-helper.te" 2>>"$EVIDENCE_DIR/01-composition-inputs.txt" \
   || { note "checkmodule of the shipped module failed"; finish INCOMPLETE; exit 0; }
 semodule_package -o /tmp/p4b-work/docker_helper.pp -m /tmp/p4b-work/docker_helper.tmp -f "$TRANSFERRED/docker-helper.fc" 2>>"$EVIDENCE_DIR/01-composition-inputs.txt" \
   || { note "semodule_package failed"; finish INCOMPLETE; exit 0; }
 semodule -i /tmp/p4b-work/docker_helper.pp 2>>"$EVIDENCE_DIR/01-composition-inputs.txt" \
   || { note "semodule -i of the shipped module failed"; finish INCOMPLETE; exit 0; }
-if ! semodule -l 2>/dev/null | awk '{print $1, $2}' | grep -aqx 'docker_helper 1.2'; then
-  note "the loaded docker_helper module is not version 1.2"
+if ! semodule -l 2>/dev/null | awk '{print $1}' | grep -aqx docker_helper; then
+  note "the docker_helper module is not loaded after install"
   finish INCOMPLETE; exit 0
 fi
+marker "POLICY-IDENTITY=docker_helper-module-1.2-sha"
 restorecon /usr/bin/docker-helper /usr/bin/rootlesskit /usr/bin/slirp4netns \
   /usr/bin/newuidmap /usr/bin/newgidmap 2>>"$EVIDENCE_DIR/01-composition-inputs.txt" || true
 {
@@ -258,7 +281,6 @@ restorecon /usr/bin/docker-helper /usr/bin/rootlesskit /usr/bin/slirp4netns \
   semodule -l | sort
 } >> "$EVIDENCE_DIR/01-composition-inputs.txt" 2>&1
 cat "$EVIDENCE_DIR/01-composition-inputs.txt" >&2
-marker "POLICY-IDENTITY=docker_helper-1.2"
 
 # The REAL builder identity + the REAL unit + the pinned payload (P4-A1 shape).
 log 'A2: builder identity + REAL unit + pinned payload install'
@@ -359,13 +381,23 @@ PREFLIGHT_OK=1
     fi
   done
 
+  echo "=== sesearch tool sanity (the loaded module's own rules must be visible) ==="
+  echo "--- launcher_t entry allow (known rule):"
+  sesearch --allow -s "$LAUNCHER_DOMAIN" -t docker_helper_exec_t -c file /sys/fs/selinux/policy || true
+  if sesearch --allow -s "$LAUNCHER_DOMAIN" -t docker_helper_exec_t -c file /sys/fs/selinux/policy 2>/dev/null | grep -aq entrypoint; then
+    echo "PASS: sesearch sees the loaded module's rules"
+  else
+    echo "FAIL: sesearch cannot query the loaded policy (tool error — every other sesearch result here is vacuous)"
+    PREFLIGHT_OK=0
+  fi
+
   echo "=== I9 negative: builder_t -> rootlesskit_t process transition (must be zero) ==="
   echo "--- type_transition rules:"
-  sesearch -ST -s docker_helper_builder_t -t "$RK_DOMAIN" -c process || true
+  sesearch --type_trans -s docker_helper_builder_t -t "$RK_DOMAIN" -c process /sys/fs/selinux/policy || true
   echo "--- allow transition rules:"
-  sesearch -A -s docker_helper_builder_t -t "$RK_DOMAIN" -c process -p transition || true
-  if sesearch -ST -s docker_helper_builder_t -t "$RK_DOMAIN" -c process 2>/dev/null | grep -q . \
-    || sesearch -A -s docker_helper_builder_t -t "$RK_DOMAIN" -c process -p transition 2>/dev/null | grep -q .; then
+  sesearch --allow -s docker_helper_builder_t -t "$RK_DOMAIN" -c process -p transition /sys/fs/selinux/policy || true
+  if sesearch --type_trans -s docker_helper_builder_t -t "$RK_DOMAIN" -c process /sys/fs/selinux/policy 2>/dev/null | grep -q . \
+    || sesearch --allow -s docker_helper_builder_t -t "$RK_DOMAIN" -c process -p transition /sys/fs/selinux/policy 2>/dev/null | grep -q .; then
     echo "FAIL: a builder_t -> rootlesskit_t process transition exists"
     PREFLIGHT_OK=0
   else
@@ -374,13 +406,13 @@ PREFLIGHT_OK=1
 
   echo "=== I9 negative: builder_t on rootlesskit_exec_t:file execute/execute_no_trans (must be zero) ==="
   echo "--- execute:"
-  sesearch -A -s docker_helper_builder_t -t docker_helper_rootlesskit_exec_t -c file -p execute || true
+  sesearch --allow -s docker_helper_builder_t -t docker_helper_rootlesskit_exec_t -c file -p execute /sys/fs/selinux/policy || true
   echo "--- execute_no_trans:"
-  sesearch -A -s docker_helper_builder_t -t docker_helper_rootlesskit_exec_t -c file -p execute_no_trans || true
+  sesearch --allow -s docker_helper_builder_t -t docker_helper_rootlesskit_exec_t -c file -p execute_no_trans /sys/fs/selinux/policy || true
   echo "--- every builder_t rule on rootlesskit_exec_t (inventory):"
-  sesearch -A -s docker_helper_builder_t -t docker_helper_rootlesskit_exec_t || true
-  if sesearch -A -s docker_helper_builder_t -t docker_helper_rootlesskit_exec_t -c file -p execute 2>/dev/null | grep -q . \
-    || sesearch -A -s docker_helper_builder_t -t docker_helper_rootlesskit_exec_t -c file -p execute_no_trans 2>/dev/null | grep -q .; then
+  sesearch --allow -s docker_helper_builder_t -t docker_helper_rootlesskit_exec_t /sys/fs/selinux/policy || true
+  if sesearch --allow -s docker_helper_builder_t -t docker_helper_rootlesskit_exec_t -c file -p execute /sys/fs/selinux/policy 2>/dev/null | grep -q . \
+    || sesearch --allow -s docker_helper_builder_t -t docker_helper_rootlesskit_exec_t -c file -p execute_no_trans /sys/fs/selinux/policy 2>/dev/null | grep -q .; then
     echo "FAIL: builder_t holds execute authority on rootlesskit_exec_t"
     PREFLIGHT_OK=0
   else
@@ -389,11 +421,11 @@ PREFLIGHT_OK=1
 
   echo "=== I9 positive: exactly ONE process transition into rootlesskit_t (launcher_t) ==="
   echo "--- type_transition rules into rootlesskit_t:"
-  sesearch -ST -t "$RK_DOMAIN" -c process || true
+  sesearch --type_trans -t "$RK_DOMAIN" -c process /sys/fs/selinux/policy || true
   echo "--- allow transition rules toward rootlesskit_t:"
-  sesearch -A -t "$RK_DOMAIN" -c process -p transition || true
-  if [ "$(sesearch -ST -t "$RK_DOMAIN" -c process 2>/dev/null | grep -c . || true)" = 1 ] \
-    && sesearch -ST -t "$RK_DOMAIN" -c process 2>/dev/null | grep -aq "docker_helper_builder_launcher_t"; then
+  sesearch --allow -t "$RK_DOMAIN" -c process -p transition /sys/fs/selinux/policy || true
+  if [ "$(sesearch --type_trans -t "$RK_DOMAIN" -c process /sys/fs/selinux/policy 2>/dev/null | grep -c . || true)" = 1 ] \
+    && sesearch --type_trans -t "$RK_DOMAIN" -c process /sys/fs/selinux/policy 2>/dev/null | grep -aq "docker_helper_builder_launcher_t"; then
     echo "PASS: exactly one transition into rootlesskit_t, source launcher_t"
   else
     echo "FAIL: the rootlesskit_t entry set is not exactly the launcher edge"
@@ -401,9 +433,9 @@ PREFLIGHT_OK=1
   fi
 
   echo "=== I9 hop 1: exactly ONE transition into launcher_t (builder_t) ==="
-  sesearch -ST -t "$LAUNCHER_DOMAIN" -c process || true
-  if [ "$(sesearch -ST -t "$LAUNCHER_DOMAIN" -c process 2>/dev/null | grep -c . || true)" = 1 ] \
-    && sesearch -ST -t "$LAUNCHER_DOMAIN" -c process 2>/dev/null | grep -aq "docker_helper_builder_t"; then
+  sesearch --type_trans -t "$LAUNCHER_DOMAIN" -c process /sys/fs/selinux/policy || true
+  if [ "$(sesearch --type_trans -t "$LAUNCHER_DOMAIN" -c process /sys/fs/selinux/policy 2>/dev/null | grep -c . || true)" = 1 ] \
+    && sesearch --type_trans -t "$LAUNCHER_DOMAIN" -c process /sys/fs/selinux/policy 2>/dev/null | grep -aq "docker_helper_builder_t"; then
     echo "PASS: exactly one transition into launcher_t, source builder_t"
   else
     echo "FAIL: the launcher_t entry set is not exactly the manager edge"
@@ -412,13 +444,13 @@ PREFLIGHT_OK=1
 
   echo "=== setexec split: launcher_t has self:setexec; builder_t has none ==="
   echo "--- launcher_t:"
-  sesearch -A -s "$LAUNCHER_DOMAIN" -c process -p setexec || true
+  sesearch --allow -s "$LAUNCHER_DOMAIN" -c process -p setexec /sys/fs/selinux/policy || true
   echo "--- builder_t:"
-  sesearch -A -s docker_helper_builder_t -c process -p setexec || true
+  sesearch --allow -s docker_helper_builder_t -c process -p setexec /sys/fs/selinux/policy || true
   echo "--- every domain holding setexec (inventory):"
-  sesearch -A -c process -p setexec || true
-  if sesearch -A -s "$LAUNCHER_DOMAIN" -c process -p setexec 2>/dev/null | grep -aq self \
-    && ! sesearch -A -s docker_helper_builder_t -c process -p setexec 2>/dev/null | grep -q .; then
+  sesearch --allow -c process -p setexec /sys/fs/selinux/policy || true
+  if sesearch --allow -s "$LAUNCHER_DOMAIN" -c process -p setexec /sys/fs/selinux/policy 2>/dev/null | grep -aq self \
+    && ! sesearch --allow -s docker_helper_builder_t -c process -p setexec /sys/fs/selinux/policy 2>/dev/null | grep -q .; then
     echo "PASS: the setexec split holds"
   else
     echo "FAIL: the setexec split does not hold"
@@ -426,8 +458,8 @@ PREFLIGHT_OK=1
   fi
 
   echo "=== launcher entry/loader facts (recorded for the AVC inventory) ==="
-  sesearch -A -s "$LAUNCHER_DOMAIN" -t docker_helper_exec_t -c file || true
-  sesearch -A -s "$LAUNCHER_DOMAIN" -t docker_helper_rootlesskit_exec_t -c file || true
+  sesearch --allow -s "$LAUNCHER_DOMAIN" -t docker_helper_exec_t -c file /sys/fs/selinux/policy || true
+  sesearch --allow -s "$LAUNCHER_DOMAIN" -t docker_helper_rootlesskit_exec_t -c file /sys/fs/selinux/policy || true
 } > "$EVIDENCE_DIR/02-preflight.txt" 2>&1
 cat "$EVIDENCE_DIR/02-preflight.txt" >&2
 if [ "$PREFLIGHT_OK" != 1 ]; then
