@@ -8,7 +8,7 @@
 #   2. a tracked text file that does not end with a final newline
 #      (repository rule: text files must end with a newline).
 #
-# Explicit, narrow byte exception (never widen it):
+# Explicit, narrow byte exceptions (never widen them):
 #
 #   testdata/semanage-fcontext-producer-capture.txt
 #
@@ -17,6 +17,13 @@
 #     padding, including the captured trailing spaces, is part of the
 #     captured producer bytes; "cleaning" them would silently invalidate the
 #     byte-verified fixture.
+#
+#   scripts/release-2.4-p5s2-cat-launch.patch
+#
+#     A unified git diff (the P5-S2g31 guest-only experimental manager
+#     patch). A unified diff's context lines carry exactly one trailing
+#     space byte by format definition; "cleaning" them would break
+#     `git apply`.
 #
 # Exit 0 = gate passed; exit 1 = gate failed.
 
@@ -27,7 +34,8 @@ cd "$(dirname "$0")/.." || exit 1
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 EXCEPTION="testdata/semanage-fcontext-producer-capture.txt"
-EXCLUSION_PATHSPEC=":!$EXCEPTION"
+EXCEPTION2="scripts/release-2.4-p5s2-cat-launch.patch"
+EXCLUSION_PATHSPEC=(":!$EXCEPTION" ":!$EXCEPTION2")
 
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   fail "must run inside the docker-helper git work tree"
@@ -38,7 +46,7 @@ fi
 # pathspec exclusion is the only intentional byte exception above. Both
 # hygiene classes are reported in one run before the gate fails.
 FAILED=0
-TRAILING="$(git grep -nE '[[:blank:]]$' -- . "$EXCLUSION_PATHSPEC" 2>/dev/null || true)"
+TRAILING="$(git grep -nE '[[:blank:]]$' -- . "${EXCLUSION_PATHSPEC[@]}" 2>/dev/null || true)"
 if [ -n "$TRAILING" ]; then
   printf 'error: tracked text files carry trailing whitespace:\n%s\n' "$TRAILING" >&2
   FAILED=1
