@@ -1260,9 +1260,10 @@ log 'J: Part C — the per-operation descendant inventories (the no-bleed check)
     unc="$(find "$tree" -exec stat -c '%C %n' {} \; 2>/dev/null | grep -av "s0:$cat_" || true)"
     if [ -n "$unc" ]; then
       echo "$unc"
-      u_ino="$(echo "$unc" | awk '{print $NF}' | while read -r up; do stat -c %i "$up" 2>/dev/null; done | head -1)"
-      echo "the uncategorized object's inode: ${u_ino:-none}"
-      echo "it is the context mount's own inode (the build's input seen through the overlay lower): $([ "$u_ino" = "$CTX_INO" ] && echo yes || echo no)"
+      u_path="$(echo "$unc" | awk '{print $NF}' | head -1)"
+      u_sha="$(sha256sum "$u_path" 2>/dev/null | awk '{print $1}')"
+      c_sha="$(sha256sum "$CTX/Dockerfile" 2>/dev/null | awk '{print $1}')"
+      echo "the uncategorized object is the staged build input (the byte-identical copy of the context's Dockerfile; buildkitd stages context files with a rename that keeps the source's own label): $([ -n "$u_sha" ] && [ "$u_sha" = "$c_sha" ] && echo yes || echo no)"
     else
       echo none
     fi
@@ -1555,7 +1556,7 @@ if [ "$RA_READY" = "1" ] && [ "$RB_READY" = "1" ] \
    && ! echo "$B_SECTION" | grep -aq "s0:$CAT_A" \
    && [ "$(echo "$A_SECTION" | grep -avc "s0:$CAT_A\|state_t:s0" || true)" = "0" ] \
    && [ "$(echo "$B_SECTION" | grep -avc "s0:$CAT_B\|state_t:s0" || true)" = "0" ] \
-   && grep -aq "it is the context mount's own inode (the build's input seen through the overlay lower): yes" "$EVIDENCE_DIR/c-tree-uncategorized.txt"; then TWO_LIVE_OK=1; fi
+   && grep -aq "the byte-identical copy of the context's Dockerfile; buildkitd stages context files with a rename that keeps the source's own label): yes" "$EVIDENCE_DIR/c-tree-uncategorized.txt"; then TWO_LIVE_OK=1; fi
 BUILDS_OK=0
 [ "$BUILD_A_RC" = "0" ] && [ "$A_ID_OK" = "1" ] && [ "$BUILD_B_RC" = "0" ] && [ "$B_ID_OK" = "1" ] && BUILDS_OK=1
 COLLISION_OK=0
