@@ -857,13 +857,30 @@ allow docker_helper_builder_t cert_t:dir { search getattr };
 allow docker_helper_builder_t cert_t:lnk_file { getattr read };
 allow docker_helper_builder_t cert_t:file { getattr open read };
 
+# Per-START MAC-backend detection for the categorized provisioning gate
+# (P5-S2 Phase 4B-R1 live evidence, run 36598995674): every START's
+# provision gate (builderProvisionGate -> detectLSM -> selinuxEnabled)
+# reads /sys/fs/selinux/enforce before any provisioning or launch step,
+# and a failed detection fails the START closed. The enforcing run showed
+# the exact missing surface (the manager's own diagnostic, no AVC: the
+# base policy dontaudits domain security_t:file reads):
+#   START <op>: MAC backend detection failed: cannot determine SELinux
+#   status: cannot read /sys/fs/selinux/enforce: open
+#   /sys/fs/selinux/enforce: permission denied
+# Exactly the daemon's proven grant shape (the daemon's own MAC
+# detection); read/open/getattr only, and only for the manager domain —
+# the launcher and the flow domain receive no security_t grant from this
+# correction.
+allow docker_helper_builder_t security_t:file { read open getattr };
+
 # --- docker_helper_builder_launcher_t: the per-launch category child (G32 r3 §5) ---
 #
 # Launch chain: the manager (docker_helper_builder_t, s0 — it never changes
 # its own range) re-execs the SHARED binary with the hidden internal
 # launcher subcommand; THAT exec transitions into this dedicated
 # authority-free domain. The launcher child validates the canonical
-# category token, writes its OWN /proc/self/attr/exec (setexeccon) with the
+# category token, writes its OWN /proc/thread-self/attr/exec (setexeccon)
+# with the
 # FIXED target context (docker_helper_rootlesskit_t:s0:cX — the type,
 # identity, and role are constants; the category is the only variable) and
 # execs the rootlesskit entry file. The child dies at the execve, so two

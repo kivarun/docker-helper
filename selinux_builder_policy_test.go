@@ -414,6 +414,46 @@ func TestSELinuxPolicyLauncherDomainSurface(t *testing.T) {
 	}
 }
 
+// TestSELinuxPolicyBuilderSELinuxStatusRead pins the Phase 4B-R1
+// correction: the manager's per-START MAC-backend detection
+// (builderProvisionGate -> detectLSM -> selinuxEnabled -> the
+// /sys/fs/selinux/enforce read; Phase 4B run 36598995674 live evidence,
+// the manager's own EACCES diagnostic) carries exactly the daemon's
+// proven grant shape — and the correction widens nothing: exactly one
+// builder_t security_t rule exists in the module, and the launcher and
+// the flow domain receive no security_t grant from it.
+func TestSELinuxPolicyBuilderSELinuxStatusRead(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	want := "allow docker_helper_builder_t security_t:file { read open getattr };"
+	if !strings.Contains(policy, want) {
+		t.Errorf("the builder MAC-detection grant must be exact: %q", want)
+	}
+	found := 0
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "allow docker_helper_builder_t security_t:") {
+			found++
+			if trimmed != want {
+				t.Errorf("the builder security_t surface is exactly the status read; unexpected rule: %s", trimmed)
+			}
+		}
+	}
+	if found != 1 {
+		t.Errorf("exactly one builder_t security_t rule may exist, found %d", found)
+	}
+	for _, subject := range []string{"docker_helper_builder_launcher_t", "docker_helper_rootlesskit_t"} {
+		for _, line := range strings.Split(policy, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "allow "+subject+" security_t:") {
+				t.Errorf("%s must receive no security_t grant from the MAC-detection correction: %s", subject, trimmed)
+			}
+		}
+	}
+}
+
 // TestSELinuxPolicyBuilderRootTypes verifies the G32 r3 root split: the
 // dedicated root types exist; the manager's root-level surface is exactly
 // the roots' verify/ops-container/manager.sock operations; systemd's root
