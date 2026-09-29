@@ -1,0 +1,68 @@
+name: Release 2.4 P5-S2 Phase 4B live launcher/provisioning proof
+
+# One-off investigation job (Phase 4B): the live Tumbleweed proof of the
+# Phase 3 categorized provisioning and the Phase 4A launcher self-reexec
+# chain under the SHIPPED policy, on the clean production composition (the
+# binary, the module 1.2, the unit, and the provisioning script built from
+# the tested proof commit; rootlesskit + the pinned bundled buildkitd). No
+# guest allow-module, no policy or code change; a pre-boundary launcher
+# blocker or a denied provisioning relabel is recorded and the phase
+# stops. The Release GO stays closed.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - p3
+    paths:
+      - .github/workflows/release-2.4-p5s2-phase4b-launcher-tw.yml
+      - scripts/release-2.4-p5s2-phase4b-launcher-tw.sh
+      - scripts/release-2.4-p5s2-phase4b-launcher-tw-vm.sh
+
+permissions:
+  contents: read
+
+jobs:
+  phase4b-launcher-tumbleweed:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Check out the tested proof commit for the composition
+        env:
+          PHASE4B_PROOF_REF: '52803850e8c22cc2246be748485182697cc6183a'
+        run: |
+          git fetch --no-tags origin "$PHASE4B_PROOF_REF"
+          PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
+          echo "proof ref: $PROOF_REF"
+          git worktree add "$GITHUB_WORKSPACE/proof-src" "$PROOF_REF"
+          echo "$PROOF_REF" > "$GITHUB_WORKSPACE/proof-src/.phase4b-proof-ref"
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: proof-src/go.mod
+
+      - name: Build the production binary from the tested proof commit
+        run: (cd proof-src && go build -o docker-helper .)
+
+      - name: Install QEMU and cloud-image tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage
+
+      - name: Run the Phase 4B Tumbleweed launcher/provisioning proof
+        run: |
+          UAT_REPO_DIR="${{ github.workspace }}" \
+          PHASE4B_PROOF_SRC="${{ github.workspace }}/proof-src" \
+          PHASE4B_EVIDENCE_DIR="$RUNNER_TEMP/release-2.4-p5s2-phase4b-launcher-evidence" \
+            scripts/release-2.4-p5s2-phase4b-launcher-tw-vm.sh
+
+      - name: Upload experiment evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-2.4-p5s2-phase4b-launcher-tw-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-2.4-p5s2-phase4b-launcher-evidence
+          if-no-files-found: warn
