@@ -1511,10 +1511,12 @@ done
   echo "the manager journal window:"
   journalctl -u "$UNIT" --since "@$F_EPOCH2" --no-pager 2>/dev/null | grep -a 'purge\|residue\|refus\|cleanup\|unexpected' | head -12
 } >> "$EVIDENCE_DIR/f-abnormal.txt" 2>&1
-cat "$EVIDENCE_DIR/f-abnormal.txt" >&2
+cat "$EVIDENCE_DIR/f-abnormal.txt" >&2 || true
+note "M-leg done; entering the final harvest"
 
 log 'O: the final harvest + the leg summary'
-harvest_avcs_since "$HV_EPOCH" "$EVIDENCE_DIR/h-avcs-all.txt"
+harvest_avcs_since "$HV_EPOCH" "$EVIDENCE_DIR/h-avcs-all.txt" || true
+note "final AVC harvest done"
 {
   echo "=== the residual AVC ledger (deduped) ==="
   grep -a "avc:  denied" "$EVIDENCE_DIR/h-avcs-all.txt" \
@@ -1545,13 +1547,13 @@ COLLISION_OK=0
 if grep -aq "builder_at_ceiling" "$EVIDENCE_DIR/d-collision.txt" \
    && grep -aq "C tree created: no" "$EVIDENCE_DIR/d-collision.txt"; then COLLISION_OK=1; fi
 RELEASE_OK=0
-if [ "$E_OK" = "1" ] && grep -aq "new tree label is s0:c1 (the freed category reused): yes" "$EVIDENCE_DIR/e-release.txt" \
+if [ "$E_OK" = "1" ] && grep -aq "new tree label is s0:$CAT_A (the freed category reused): yes" "$EVIDENCE_DIR/e-release.txt" \
    && [ "$BUILD_D_RC" = "0" ] && [ "$D_ID_OK" = "1" ] \
    && grep -aq "sock appeared: no" "$EVIDENCE_DIR/e-release.txt" \
    && grep -aq "planted dirs survive: yes" "$EVIDENCE_DIR/e-release.txt"; then RELEASE_OK=1; fi
 ABNORM_OK=0
 if grep -aq "manager's own cleanup converged: 0" "$EVIDENCE_DIR/f-abnormal.txt" \
-   && grep -aq "next tree got a DIFFERENT category than the retained one: yes" "$EVIDENCE_DIR/f-abnormal.txt" \
+   && grep -aq "next tree got a DIFFERENT category than the retained one (s0:$CAT_E): yes" "$EVIDENCE_DIR/f-abnormal.txt" \
    && grep -aq "residue converged after the flow-side cleanup + PURGE retry: 1" "$EVIDENCE_DIR/f-abnormal.txt"; then ABNORM_OK=1; fi
 GUARDS_OK=0
 if grep -q 'Could not open proc directory for target.*Permission denied' "$EVIDENCE_DIR/g-guard1-newuidmap.txt" \
