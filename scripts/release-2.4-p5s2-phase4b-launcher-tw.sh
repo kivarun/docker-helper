@@ -774,12 +774,14 @@ systemd-run --collect --wait --unit="$LEGACY_UNIT_A" \
   echo "=== its rootlesskit_exec_t AVCs ==="
   ausearch -m AVC,SELINUX_ERR -ts "$T_LEGACY_A" --raw 2>/dev/null | grep -a 'tcontext=system_u:object_r:docker_helper_rootlesskit_exec_t' || echo "(no rootlesskit_exec_t AVC)"
 } >> "$EVIDENCE_DIR/13-i9-legacy.txt" 2>&1
-# The I9 negative's PASS evidence (the R5 harness correction): the runtime
-# direct-exec refusal, the loaded-policy static proof of the absent
-# allowed path, or a recorded AVC — the AVC is saved when present but is
-# not required: the loaded policy's dontaudit rules legitimately silence
-# the builder-domain denial (dontaudit is not disabled and the production
-# policy is not changed for audit visibility).
+# The I9 negative's PASS composition (the 4C-2 harness correction): the
+# runtime direct-exec refusal AND the loaded-policy static proof of the
+# absent allowed path are BOTH required; a recorded AVC is optional
+# supporting evidence (the loaded policy's dontaudit rules legitimately
+# silence the builder-domain denial; dontaudit is not disabled and the
+# production policy is not changed for audit visibility). A vehicle
+# attempt that never ran (no unit start evidence) is INCONCLUSIVE, never
+# a PASS from the static check alone.
 I9_A_AVC=0
 if ausearch -m AVC -ts "$T_LEGACY_A" --raw 2>/dev/null | grep -a 'rootlesskit_exec_t' | grep -aq .; then
   I9_A_AVC=1
@@ -793,10 +795,18 @@ I9_A_STATIC=0
 if ! sesearch --allow -s docker_helper_builder_t -t docker_helper_rootlesskit_exec_t -c file 2>/dev/null | grep -aq 'execute'; then
   I9_A_STATIC=1
 fi
-if [ "$I9_A_AVC" = 1 ] || [ "$I9_A_RUNTIME" = 1 ] || [ "$I9_A_STATIC" = 1 ]; then
-  echo "PASS: the direct rootlesskit exec path is dead (runtime refusal=$I9_A_RUNTIME, AVC evidence=$I9_A_AVC, loaded-policy static negative=$I9_A_STATIC)" >> "$EVIDENCE_DIR/13-i9-legacy.txt"
+I9_A_RAN=0
+if grep -aq "Running as unit" "$EVIDENCE_DIR/f-vehicle-a.txt" \
+  || journalctl -u "$LEGACY_UNIT_A" --no-pager 2>/dev/null | grep -aq "Started \["; then
+  I9_A_RAN=1
+fi
+if [ "$I9_A_RAN" != 1 ]; then
+  echo "INCONCLUSIVE: the direct-exec vehicle attempt never ran (no unit start evidence)" >> "$EVIDENCE_DIR/13-i9-legacy.txt"
+  I9_OK=2
+elif [ "$I9_A_RUNTIME" = 1 ] && [ "$I9_A_STATIC" = 1 ]; then
+  echo "PASS: the direct rootlesskit exec path is dead (runtime refusal AND loaded-policy static negative; AVC evidence=$I9_A_AVC)" >> "$EVIDENCE_DIR/13-i9-legacy.txt"
 else
-  echo "FAIL: the direct rootlesskit exec attempt showed no runtime refusal, no AVC, and no loaded-policy static negative" >> "$EVIDENCE_DIR/13-i9-legacy.txt"
+  echo "FAIL: the direct rootlesskit exec negative needs BOTH the runtime refusal and the static negative (runtime=$I9_A_RUNTIME, static=$I9_A_STATIC, AVC=$I9_A_AVC)" >> "$EVIDENCE_DIR/13-i9-legacy.txt"
   I9_OK=0
 fi
 
@@ -832,10 +842,12 @@ if ausearch -m AVC -ts "$T_LEGACY_B" --raw 2>/dev/null | grep -a 'perm=setexec' 
 else
   I9_B_AVC=0
 fi
-# The same three-form PASS evidence as vehicle A (the R5 harness
-# correction): the launcher's own runtime refusal (its fail-closed stderr
-# through the unit journal), the loaded-policy static proof (no builder_t
-# self:process setexec grant), or the AVC when one is recorded.
+# The same AND-composition as vehicle A (the 4C-2 harness correction): the
+# launcher's runtime refusal (its fail-closed stderr through the unit
+# journal or the --wait output) AND the loaded-policy static proof (no
+# builder_t self:process setexec grant) are BOTH required; the AVC is
+# optional supporting evidence; an attempt that never ran is
+# INCONCLUSIVE.
 I9_B_RUNTIME=0
 if grep -aq "cannot set the forced exec context" "$EVIDENCE_DIR/f-vehicle-b.txt" \
   || journalctl -u "$LEGACY_UNIT_B" --no-pager 2>/dev/null | grep -aq "cannot set the forced exec context"; then
@@ -845,10 +857,18 @@ I9_B_STATIC=0
 if ! sesearch --allow -s docker_helper_builder_t -t docker_helper_builder_t -c process 2>/dev/null | grep -aq 'setexec'; then
   I9_B_STATIC=1
 fi
-if [ "$I9_B_AVC" = 1 ] || [ "$I9_B_RUNTIME" = 1 ] || [ "$I9_B_STATIC" = 1 ]; then
-  echo "PASS: the launch-exec leaf in builder_t cannot reach the forced-context write (runtime refusal=$I9_B_RUNTIME, AVC evidence=$I9_B_AVC, loaded-policy static negative=$I9_B_STATIC)" >> "$EVIDENCE_DIR/13-i9-legacy.txt"
+I9_B_RAN=0
+if grep -aq "Running as unit" "$EVIDENCE_DIR/f-vehicle-b.txt" \
+  || journalctl -u "$LEGACY_UNIT_B" --no-pager 2>/dev/null | grep -aq "Started \["; then
+  I9_B_RAN=1
+fi
+if [ "$I9_B_RAN" != 1 ]; then
+  echo "INCONCLUSIVE: the launch-exec vehicle attempt never ran (no unit start evidence)" >> "$EVIDENCE_DIR/13-i9-legacy.txt"
+  I9_OK=2
+elif [ "$I9_B_RUNTIME" = 1 ] && [ "$I9_B_STATIC" = 1 ]; then
+  echo "PASS: the launch-exec leaf in builder_t cannot reach the forced-context write (runtime refusal AND loaded-policy static negative; AVC evidence=$I9_B_AVC)" >> "$EVIDENCE_DIR/13-i9-legacy.txt"
 else
-  echo "FAIL: the launch-exec leaf in builder_t showed no runtime refusal, no setexec AVC, and no loaded-policy static negative" >> "$EVIDENCE_DIR/13-i9-legacy.txt"
+  echo "FAIL: the launch-exec leaf's setexec negative needs BOTH the runtime refusal and the static negative (runtime=$I9_B_RUNTIME, static=$I9_B_STATIC, AVC=$I9_B_AVC)" >> "$EVIDENCE_DIR/13-i9-legacy.txt"
   I9_OK=0
 fi
 cat "$EVIDENCE_DIR/13-i9-legacy.txt" >&2
@@ -860,7 +880,13 @@ if ausearch -m AVC -ts "$T_LEGACY_A" --raw 2>/dev/null | grep -aq "scontext=syst
   marker "I9-DIRECT-EXEC=FAIL"
   finish FAIL; exit 0
 fi
-marker "I9-DIRECT-EXEC=$([ "$I9_OK" = 1 ] && echo PASS || echo FAIL)"
+I9_VERDICT=FAIL
+if [ "$I9_OK" = 1 ]; then
+  I9_VERDICT=PASS
+elif [ "$I9_OK" = 2 ]; then
+  I9_VERDICT=INCONCLUSIVE
+fi
+marker "I9-DIRECT-EXEC=$I9_VERDICT"
 
 # ============================================================
 # G: no uncategorized flow in the whole window
@@ -893,7 +919,7 @@ preflight: PASS
 provisioning: PASS
 manager-context: PASS
 launcher-chain: PASS
-i9-legacy-vehicles: $([ "$I9_OK" = 1 ] && echo PASS || echo FAIL)
+i9-legacy-vehicles: $I9_VERDICT
 no-uncategorized: PASS
 first downstream boundary: $(cat "$EVIDENCE_DIR/10-avc-first-downstream.txt")
 EOF
@@ -903,6 +929,11 @@ if [ "$I9_OK" = 1 ]; then
   # next step, not a Phase 4B failure: the G28 ledger is deliberately not
   # transferred here.
   finish PASS; exit 0
+fi
+if [ "$I9_OK" = 2 ]; then
+  marker "BLOCKER=i9 legacy vehicles inconclusive (the attempt evidence is missing; see 13-i9-legacy.txt)"
+  finish INCOMPLETE
+  exit 0
 fi
 marker "BLOCKER=unresolved I9 vehicle failure (see 13-i9-legacy.txt)"
 finish FAIL

@@ -1123,14 +1123,14 @@ func TestSELinuxPolicyNewgidmapDomainTransition(t *testing.T) {
 }
 
 // newgidmapDomainSurface is the EXACT allow-rule surface of the GID-map
-// helper domain: the entry/loader rule plus the five live-AVC-evidenced
+// helper domain: the entry/loader rule plus the six live-AVC-evidenced
 // runtime grants (the inherited-stdio fifo write, the /proc
 // target-directory read-open-getattr-search, the gid_map file write-open,
-// the getpwuid passwd read-open, and the in-namespace sys_admin
-// cap_userns bit — the R5 gid_map write's capability boundary). The
-// domain holds NO plain capability surface: no userdb fallback, no passwd
-// getattr, no file read/append, no self:capability/capability2 rule (the
-// out-of-namespace setgid check is the next enforcing boundary; the
+// the getpwuid passwd read-open, the in-namespace sys_admin cap_userns
+// bit — the R5 gid_map write's capability boundary — and the
+// out-of-namespace setgid capability bit — the 4C-1 run's next boundary).
+// The domain holds NO other capability surface: no userdb fallback, no
+// passwd getattr, no file read/append, no setuid, no capability2 (the
 // privilege model otherwise stays the distro's chkstat-applied cap_setgid
 // file capability). Any additional or widened rule is a policy regression.
 var newgidmapDomainSurface = []string{
@@ -1140,6 +1140,7 @@ var newgidmapDomainSurface = []string{
 	"allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:file { write open };",
 	"allow docker_helper_newgidmap_t passwd_file_t:file { read open };",
 	"allow docker_helper_newgidmap_t self:cap_userns sys_admin;",
+	"allow docker_helper_newgidmap_t self:capability setgid;",
 }
 
 // newgidmapDomainPolicyViolations scans the module's parsed rules against
@@ -1148,10 +1149,10 @@ var newgidmapDomainSurface = []string{
 //   - the domain's allow-rule surface is EXACTLY newgidmapDomainSurface
 //     (source-scoped, full-line equality, so widened permission sets and
 //     extra grants both violate);
-//   - the domain's only self-targeted grant is the evidenced
-//     self:cap_userns sys_admin bit (any other self-targeted rule — a
-//     plain capability, capability2, or another cap_userns shape —
-//     violates);
+//   - the domain's only self-targeted grants are the evidenced
+//     self:cap_userns sys_admin bit and the self:capability setgid bit
+//     (any other self-targeted rule — setuid, a widened set, capability2,
+//     or another cap_userns shape — violates);
 //   - the domain's only runtime grants toward docker_helper_rootlesskit_t
 //     are the inherited-stdio fifo { write }, the /proc target-dir
 //     { read open getattr search }, and the gid_map file { write open }
@@ -1187,8 +1188,9 @@ func newgidmapDomainPolicyViolations(policy string) []string {
 				violations = append(violations, fmt.Sprintf("the GID-map helper domain's surface is exact; unexpected rule: %s", trimmed))
 			}
 			if strings.HasPrefix(trimmed, "allow docker_helper_newgidmap_t self:") {
-				if trimmed != "allow docker_helper_newgidmap_t self:cap_userns sys_admin;" {
-					violations = append(violations, fmt.Sprintf("the GID-map helper domain's only self-targeted grant is the evidenced cap_userns sys_admin bit (no plain capability, capability2, or other cap_userns surface): %s", trimmed))
+				if trimmed != "allow docker_helper_newgidmap_t self:cap_userns sys_admin;" &&
+					trimmed != "allow docker_helper_newgidmap_t self:capability setgid;" {
+					violations = append(violations, fmt.Sprintf("the GID-map helper domain's only self-targeted grants are the evidenced cap_userns sys_admin bit and the capability setgid bit (no setuid, no widened sets, no capability2): %s", trimmed))
 				}
 			}
 			if target, class, ok := strings.Cut(strings.TrimPrefix(trimmed, "allow docker_helper_newgidmap_t "), ":"); ok {
@@ -1256,10 +1258,10 @@ func newgidmapDomainPolicyViolations(policy string) []string {
 // grant's narrowing (each perm dropped), removal and widening, the fifo
 // widening/removal, forbidden surfaces (builder state, daemon runtime,
 // Docker socket, workspace), widened entry sets, process ptrace/signal
-// toward the child, and any self-targeted grant beyond the single
-// evidenced cap_userns bit (a setgid capability, a widened/extra
-// cap_userns shape, a duplicate identical rule, a capability2 grant) must
-// trip the invariants.
+// toward the child, and any self-targeted grant beyond the two evidenced
+// bits (a setuid capability, a widened setgid set, an extra capability
+// bit, a widened/extra cap_userns shape, a duplicate identical rule, a
+// capability2 grant) must trip the invariants.
 func TestSELinuxPolicyNewgidmapDomainSurface(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
 	if violations := newgidmapDomainPolicyViolations(policy); len(violations) > 0 {
@@ -1283,16 +1285,16 @@ func TestSELinuxPolicyNewgidmapDomainSurface(t *testing.T) {
 		{"regressed entry map permission", "allow docker_helper_newgidmap_t docker_helper_newgidmap_exec_t:file { entrypoint read open execute getattr };", "", "unexpected rule"},
 		{"widened fifo grant (getattr added)", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:fifo_file { write getattr };", "", "rootlesskit-child surface is exactly"},
 		{"widened fifo grant (append added)", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:fifo_file { write append };", "", "rootlesskit-child surface is exactly"},
-		{"removed fifo grant", "", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:fifo_file { write };\n", "must carry exactly 6 allow rule"},
+		{"removed fifo grant", "", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:fifo_file { write };\n", "must carry exactly 7 allow rule"},
 		{"regressed proc-dir read grant", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:dir { open getattr search };", "", "rootlesskit-child surface is exactly"},
 		{"regressed proc-dir open grant", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:dir { read getattr search };", "", "rootlesskit-child surface is exactly"},
 		{"regressed proc-dir getattr grant", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:dir { read open search };", "", "rootlesskit-child surface is exactly"},
 		{"regressed proc-dir search grant", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:dir { read open getattr };", "", "rootlesskit-child surface is exactly"},
-		{"removed proc-dir grant", "", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:dir { read open getattr search };\n", "must carry exactly 6 allow rule"},
+		{"removed proc-dir grant", "", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:dir { read open getattr search };\n", "must carry exactly 7 allow rule"},
 		{"widened proc-dir grant", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:dir { read open getattr search write };", "", "rootlesskit-child surface is exactly"},
 		{"regressed gid_map file grant (open dropped)", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:file { write };", "", "rootlesskit-child surface is exactly"},
 		{"regressed gid_map file grant (write dropped)", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:file { open };", "", "rootlesskit-child surface is exactly"},
-		{"removed gid_map file grant", "", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:file { write open };\n", "must carry exactly 6 allow rule"},
+		{"removed gid_map file grant", "", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:file { write open };\n", "must carry exactly 7 allow rule"},
 		{"widened gid_map file grant (append added)", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:file { write open append };", "", "rootlesskit-child surface is exactly"},
 		{"widened gid_map file grant (getattr added)", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:file { write open getattr };", "", "rootlesskit-child surface is exactly"},
 		{"process ptrace toward the child domain", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:process ptrace;", "", "no process-class grant toward the rootlesskit child domain"},
@@ -1300,18 +1302,21 @@ func TestSELinuxPolicyNewgidmapDomainSurface(t *testing.T) {
 		{"regressed passwd read grant", "allow docker_helper_newgidmap_t passwd_file_t:file { read };", "", "unexpected rule"},
 		{"regressed passwd open grant", "allow docker_helper_newgidmap_t passwd_file_t:file { open };", "", "unexpected rule"},
 		{"widened passwd grant (getattr added)", "allow docker_helper_newgidmap_t passwd_file_t:file { read open getattr };", "", "unexpected rule"},
-		{"removed passwd grant", "", "allow docker_helper_newgidmap_t passwd_file_t:file { read open };\n", "must carry exactly 6 allow rule"},
+		{"removed passwd grant", "", "allow docker_helper_newgidmap_t passwd_file_t:file { read open };\n", "must carry exactly 7 allow rule"},
 		{"userdb fallback dir search", "allow docker_helper_newgidmap_t init_var_run_t:dir { search };", "", "unexpected target type"},
-		{"userdb fallback unix_dgram_socket", "allow docker_helper_newgidmap_t self:unix_dgram_socket { create };", "", "only self-targeted grant"},
+		{"userdb fallback unix_dgram_socket", "allow docker_helper_newgidmap_t self:unix_dgram_socket { create };", "", "only self-targeted grants"},
 		{"builder state tree", "allow docker_helper_newgidmap_t docker_helper_builder_state_t:file { write };", "", "unexpected target type"},
 		{"daemon runtime tree", "allow docker_helper_newgidmap_t docker_helper_runtime_t:file { read };", "", "unexpected target type"},
 		{"Docker socket", "allow docker_helper_newgidmap_t container_var_run_t:sock_file { write };", "", "unexpected target type"},
 		{"Session workspace", "allow docker_helper_newgidmap_t docker_helper_workspace_t:file { read };", "", "unexpected target type"},
-		{"setgid capability", "allow docker_helper_newgidmap_t self:capability setgid;", "", "only self-targeted grant"},
+		{"setuid capability", "allow docker_helper_newgidmap_t self:capability setuid;", "", "only self-targeted grants"},
+		{"widened setgid capability set", "allow docker_helper_newgidmap_t self:capability { setgid setuid };", "", "only self-targeted grants"},
+		{"extra capability bit", "allow docker_helper_newgidmap_t self:capability dac_override;", "", "only self-targeted grants"},
+		{"duplicate setgid capability", "allow docker_helper_newgidmap_t self:capability setgid;", "", "must carry exactly 7 allow rule"},
 		{"widened cap_userns grant", "allow docker_helper_newgidmap_t self:cap_userns { sys_admin setuid };", "", "surface is exact"},
 		{"extra cap_userns permission", "allow docker_helper_newgidmap_t self:cap_userns setuid;", "", "surface is exact"},
-		{"duplicate cap_userns grant", "allow docker_helper_newgidmap_t self:cap_userns sys_admin;", "", "must carry exactly 6 allow rule"},
-		{"capability2 grant", "allow docker_helper_newgidmap_t self:capability2 kill;", "", "only self-targeted grant"},
+		{"duplicate cap_userns grant", "allow docker_helper_newgidmap_t self:cap_userns sys_admin;", "", "must carry exactly 7 allow rule"},
+		{"capability2 grant", "allow docker_helper_newgidmap_t self:capability2 kill;", "", "only self-targeted grants"},
 	} {
 		var mutated string
 		if mut.removeRule != "" {
@@ -1331,30 +1336,32 @@ func TestSELinuxPolicyNewgidmapDomainSurface(t *testing.T) {
 	}
 }
 
-// TestSELinuxPolicyCapUsernsShape verifies the global cap_userns invariant:
-// the module carries EXACTLY THREE cap_userns rules — the rootlesskit
-// child domain's, the UID-map helper domain's, and the GID-map helper
-// domain's evidenced self:cap_userns sys_admin bits (all in-namespace
-// capability checks on the P5-S2 flow, the GID bit being the R5
-// gid_map-write boundary). The manager, the launcher, the slirp4netns
-// helper, and every other subject hold no cap_userns rules. The plain
-// capability carve-out is narrow: ONLY the UID-map helper's evidenced
-// self:capability setuid (the uid_map write's out-of-namespace check) may
-// exist; the rootlesskit child and the GID-map helper keep a zero plain
-// self:capability surface and all three subjects keep zero
-// self:capability2 surfaces. Mutations prove the carve-out is narrow: a
-// setuid or sys_admin grant for the rootlesskit child, a widened helper
-// capability set, helper capability2 grants, and any capability-class
-// grant for the GID-map helper or cap_userns grants for the
-// control-plane subjects all trip.
+// TestSELinuxPolicyCapUsernsShape verifies the global capability-shape
+// invariant: the module carries EXACTLY THREE cap_userns rules — the
+// rootlesskit child domain's, the UID-map helper domain's, and the GID-map
+// helper domain's evidenced self:cap_userns sys_admin bits (all
+// in-namespace capability checks on the P5-S2 flow) — and EXACTLY TWO
+// plain self:capability rules: the UID-map helper's evidenced setuid (the
+// uid_map write's out-of-namespace check) and the GID-map helper's
+// evidenced setgid (the gid_map write's out-of-namespace check, the 4C-1
+// boundary). The manager, the launcher, the slirp4netns helper, and every
+// other subject hold no cap_userns rules; the rootlesskit child keeps a
+// zero plain self:capability surface; newuidmap keeps exactly setuid (no
+// setgid) and newgidmap keeps exactly setgid (no setuid); and all three
+// subjects keep zero self:capability2 surfaces. Mutations prove the
+// carve-out is narrow: any capability-class grant for the rootlesskit
+// child, a setgid grant for the UID-map helper, a setuid grant for the
+// GID-map helper, widened/extra helper capability sets, helper
+// capability2 grants, and cap_userns grants for the control-plane
+// subjects all trip.
 func TestSELinuxPolicyCapUsernsShape(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
 	// capUsernsShapeViolations returns one violation per line of text that
 	// breaks the shape invariant: a cap_userns rule beyond the three
-	// evidenced sys_admin grants, a plain capability grant that is not the
-	// UID-map helper's single evidenced setuid bit (the other flow
-	// subjects keep zero), or any capability2 grant on the three
-	// cap_userns subjects.
+	// evidenced sys_admin grants, a plain capability grant that is not one
+	// of the two helpers' single evidenced bits (setuid for the UID-map
+	// helper, setgid for the GID-map helper; the rootlesskit child keeps
+	// zero), or any capability2 grant on the three cap_userns subjects.
 	capUsernsShapeViolations := func(text string) []string {
 		var violations []string
 		for _, line := range strings.Split(text, "\n") {
@@ -1371,10 +1378,10 @@ func TestSELinuxPolicyCapUsernsShape(t *testing.T) {
 				}
 			case strings.Contains(trimmed, ":capability ") && strings.Contains(trimmed, "docker_helper_rootlesskit_t"):
 				violations = append(violations, fmt.Sprintf("the rootlesskit child domain must keep zero plain self:capability surfaces: %s", trimmed))
-			case strings.Contains(trimmed, ":capability ") && strings.Contains(trimmed, "docker_helper_newgidmap_t"):
-				violations = append(violations, fmt.Sprintf("the GID-map helper domain must keep zero plain self:capability surfaces (the out-of-namespace setgid check is the next enforcing boundary): %s", trimmed))
+			case strings.Contains(trimmed, ":capability ") && strings.Contains(trimmed, "docker_helper_newgidmap_t") && trimmed != "allow docker_helper_newgidmap_t self:capability setgid;":
+				violations = append(violations, fmt.Sprintf("the GID-map helper's only plain capability grant is the evidenced setgid bit (no setuid, no widened sets): %s", trimmed))
 			case strings.Contains(trimmed, ":capability ") && strings.Contains(trimmed, "docker_helper_newuidmap_t") && trimmed != "allow docker_helper_newuidmap_t self:capability setuid;":
-				violations = append(violations, fmt.Sprintf("the UID-map helper's only plain capability grant is the evidenced setuid bit: %s", trimmed))
+				violations = append(violations, fmt.Sprintf("the UID-map helper's only plain capability grant is the evidenced setuid bit (no setgid, no widened sets): %s", trimmed))
 			case strings.Contains(trimmed, ":capability2 ") && (strings.Contains(trimmed, "docker_helper_rootlesskit_t") || strings.Contains(trimmed, "docker_helper_newuidmap_t") || strings.Contains(trimmed, "docker_helper_newgidmap_t")):
 				violations = append(violations, fmt.Sprintf("the cap_userns subjects must keep zero plain self:capability2 surfaces: %s", trimmed))
 			}
@@ -1388,9 +1395,11 @@ func TestSELinuxPolicyCapUsernsShape(t *testing.T) {
 		"allow docker_helper_rootlesskit_t self:cap_userns sys_admin;",
 		"allow docker_helper_newuidmap_t self:cap_userns sys_admin;",
 		"allow docker_helper_newgidmap_t self:cap_userns sys_admin;",
+		"allow docker_helper_newuidmap_t self:capability setuid;",
+		"allow docker_helper_newgidmap_t self:capability setgid;",
 	} {
 		if !strings.Contains(policy, rule) {
-			t.Errorf("the evidenced cap_userns grant must be present: %q", rule)
+			t.Errorf("the evidenced capability grant must be present: %q", rule)
 		}
 	}
 	for _, mut := range []struct {
@@ -1399,10 +1408,12 @@ func TestSELinuxPolicyCapUsernsShape(t *testing.T) {
 	}{
 		{"setuid capability for the rootlesskit child", "allow docker_helper_rootlesskit_t self:capability setuid;"},
 		{"plain capability for the rootlesskit child", "allow docker_helper_rootlesskit_t self:capability sys_admin;"},
-		{"widened helper capability set", "allow docker_helper_newuidmap_t self:capability { setuid sys_admin };"},
-		{"additional helper capability bit", "allow docker_helper_newuidmap_t self:capability dac_override;"},
-		{"capability2 for the helper", "allow docker_helper_newuidmap_t self:capability2 kill;"},
-		{"setgid capability for the GID-map helper", "allow docker_helper_newgidmap_t self:capability setgid;"},
+		{"setgid capability for the UID-map helper", "allow docker_helper_newuidmap_t self:capability setgid;"},
+		{"widened UID-map helper capability set", "allow docker_helper_newuidmap_t self:capability { setuid setgid };"},
+		{"additional UID-map helper capability bit", "allow docker_helper_newuidmap_t self:capability dac_override;"},
+		{"setuid capability for the GID-map helper", "allow docker_helper_newgidmap_t self:capability setuid;"},
+		{"widened GID-map helper capability set", "allow docker_helper_newgidmap_t self:capability { setgid setuid };"},
+		{"capability2 for the UID-map helper", "allow docker_helper_newuidmap_t self:capability2 kill;"},
 		{"capability2 for the GID-map helper", "allow docker_helper_newgidmap_t self:capability2 kill;"},
 		{"cap_userns for the manager", "allow docker_helper_builder_t self:cap_userns sys_admin;"},
 		{"cap_userns for the launcher", "allow docker_helper_builder_launcher_t self:cap_userns sys_admin;"},

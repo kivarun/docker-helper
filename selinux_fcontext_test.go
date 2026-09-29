@@ -2347,7 +2347,7 @@ func TestSELinuxPolicyBindfsProjectionMount(t *testing.T) {
 		"allow docker_helper_t self:capability fowner;",
 		"allow docker_helper_t mount_var_run_t:dir { search };",
 		"allow docker_helper_t mount_var_run_t:file { getattr read open };",
-		"class capability { dac_read_search dac_override sys_admin fowner setuid };",
+		"class capability { dac_read_search dac_override sys_admin fowner setuid setgid };",
 	} {
 		if !strings.Contains(content, rule) {
 			t.Errorf("SELinux policy must grant: %s", rule)

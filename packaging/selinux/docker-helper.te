@@ -114,7 +114,7 @@ module docker_helper 1.2;
 		class tcp_socket { create setopt bind node_bind listen accept getattr read write connect getopt name_connect };
 		class unix_stream_socket { connectto getattr ioctl read write };
 		class udp_socket { create setopt connect getattr read write };
-		class capability { dac_read_search dac_override sys_admin fowner setuid };
+		class capability { dac_read_search dac_override sys_admin fowner setuid setgid };
 		class capability2 { wake_alarm kill };
 		class user_namespace { create };
 		class cap_userns { sys_admin };
@@ -1400,12 +1400,45 @@ allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:file { write open };
 # The domain stays mcs_constrained_type: the operation scope of the
 # gid-map write path is owned by the categorized process/object MCS
 # boundary (own-category procfs files), not by any capability permission.
-# SCOPE — READ CAREFULLY: like every helper grant this is a DOMAIN-PAIR
-# rule, NOT an operation-scoped one; all build operations share the one
-# builder identity and this one SELinux domain, and per-operation
-# isolation is invocation discipline only (the open architectural risk
-# tracked for the final security review).
+# This is a domain-wide SELF permission, not a domain-pair rule: it
+# applies to every process in docker_helper_newgidmap_t, and the
+# operation separation is still owned by the categorized process/object
+# MCS boundary on the process/object path, not by the capability grant.
+# SCOPE — READ CAREFULLY: all build operations share the one builder
+# identity and this one SELinux domain, and per-operation isolation is
+# invocation discipline only (the open architectural risk tracked for the
+# final security review).
 allow docker_helper_newgidmap_t self:cap_userns sys_admin;
+
+# The helper's OUT-OF-NAMESPACE capability check at the same gid_map write
+# (P5-S2 Phase 4C-2): with the in-namespace sys_admin bit granted (Phase
+# 4C-1), the write advanced past the capability layer it was stopped at in
+# the R5 run and reached the kernel's next capability check. Live
+# enforcing AVC evidence (Phase 4C-1 run 36620968307's launch window,
+# record 400: denied { setgid } for pid=2868 comm="newgidmap"
+# capability=6
+# scontext=system_u:system_r:docker_helper_newgidmap_t:s0:c1
+# tcontext=system_u:system_r:docker_helper_newgidmap_t:s0:c1
+# tclass=capability permissive=0, followed in the same window by the
+# helper's own failure output "newgidmap: write to gid_map failed:
+# Operation not permitted" and rootlesskit's "failed to setup UID/GID
+# map" — the direct causal chain to the 4C-1 START failure) — the GID-side
+# mirror of the proven newuidmap out-of-namespace boundary, grounded in
+# THIS domain's own live evidence, not the UID grant by symmetry: the
+# mapping the helper writes extends beyond the caller's own gid
+# ([0 475 1 1 165536 65536]), so the kernel requires CAP_SETGID in the
+# helper's OWN (initial) user namespace, mediated as the plain
+# self:capability setgid check. The grant covers only the USE of the
+# distro's file-cap-backed CAP_SETGID: docker-helper itself sets no file
+# capabilities, never touches a bounding set, and grants no setgid to the
+# manager, the launcher, the flow, slirp4netns, or newuidmap (newuidmap
+# keeps exactly its evidenced setuid and receives no setgid). The
+# domain-wide SELF permission applies to every process in
+# docker_helper_newgidmap_t, and the operation separation is still owned
+# by the categorized process/object MCS boundary on the process/object
+# path, not by the capability grant. The next enforcing boundary after
+# this grant is the next deliberate step.
+allow docker_helper_newgidmap_t self:capability setgid;
 
 # The getpwuid passwd lookup of the caller's user name (P5-S2), granted
 # read-open with live enforcing AVC evidence: the read (run 36303567126
