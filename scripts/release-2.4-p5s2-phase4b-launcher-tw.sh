@@ -124,7 +124,7 @@ context_of() { stat -c '%C' "$1" 2>/dev/null || true; }
 process_context() { tr -d '\0' < "/proc/$1/attr/current" 2>/dev/null || true; }
 
 # harvest_avcs_since: the audit-log slice + kernel journal slice since an
-# epoch (the G31 evidence pattern).
+# epoch (the G31 evidence pattern) plus the kernel ring buffer.
 harvest_avcs_since() {
   local since="$1" out="$2"
   {
@@ -136,6 +136,8 @@ harvest_avcs_since() {
     ausearch -m AVC,USER_AVC,SELINUX_ERR -ts "$since" --raw 2>/dev/null || true
     echo "=== journalctl -k avc window ==="
     journalctl -k --since "@$since" --no-pager 2>/dev/null | grep -a 'avc:' || true
+    echo "=== kernel ring buffer (dmesg) avc tail ==="
+    dmesg 2>/dev/null | grep -a 'avc:' | tail -40 || true
   } > "$out" 2>&1
 }
 
@@ -467,6 +469,14 @@ PREFLIGHT_OK=1
     PREFLIGHT_OK=0
   fi
 
+  echo "=== builder_t security_t facts (the /sys/fs/selinux read surface; recorded for the live-verdict causal chain) ==="
+  echo "--- allow (expected: none):"
+  sesearch --allow -s docker_helper_builder_t -t security_t /sys/fs/selinux/policy || true
+  echo "--- dontaudit rules on security_t:file (any subject):"
+  sesearch --dontaudit -t security_t -c file /sys/fs/selinux/policy || true
+  echo "--- the daemon's own security_t grant (the known reference grant):"
+  sesearch --allow -s docker_helper_t -t security_t -c file /sys/fs/selinux/policy || true
+
   echo "=== launcher entry/loader facts (recorded for the AVC inventory) ==="
   sesearch --allow -s "$LAUNCHER_DOMAIN" -t docker_helper_exec_t -c file /sys/fs/selinux/policy || true
   sesearch --allow -s "$LAUNCHER_DOMAIN" -t docker_helper_rootlesskit_exec_t -c file /sys/fs/selinux/policy || true
@@ -485,12 +495,25 @@ marker "PREFLIGHT=PASS"
 # ============================================================
 log 'C: audit window'
 systemctl enable --now auditd > /dev/null 2>&1 || true
+{
+  echo "=== auditd state ==="
+  systemctl is-active auditd || true
+  systemctl status auditd --no-pager -l 2>/dev/null | head -12 || true
+  echo "=== audit subsystem settings (lost counters at window start) ==="
+  auditctl -s 2>&1 || true
+} > "$EVIDENCE_DIR/audit-channel.txt" 2>&1
+if systemctl is-active --quiet auditd 2>/dev/null; then
+  log "auditd is consuming the evidence channel"
+else
+  note "auditd is NOT active; the audit-log slices will be empty unless the kernel printk's the records (the auditctl lost counters decide)"
+fi
 if command -v auditctl >/dev/null 2>&1; then
   auditctl -e 1 > /dev/null 2>&1 || true
-  log "auditd enforcing the evidence channel"
+  log "audit rules enforcement on"
 fi
 T0="$(date +%s)"
 echo "$T0" > "$EVIDENCE_DIR/window-start-epoch"
+auditctl -s > "$EVIDENCE_DIR/audit-status-window-start.txt" 2>&1 || true
 
 # ============================================================
 # D: the live START with a concurrent kernel-label sampler
@@ -583,6 +606,7 @@ wait "$SAMPLER_PID" 2>/dev/null || true
 
 # ---- the window's audit slice (before anything converges further)
 harvest_avcs_since "$T0" "$EVIDENCE_DIR/09-avc-window.txt"
+auditctl -s > "$EVIDENCE_DIR/audit-status-window-end.txt" 2>&1 || true
 
 # ---- manager diagnostics of the window (procattr/exec failures surface here)
 {
