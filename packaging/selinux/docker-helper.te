@@ -625,12 +625,16 @@ type docker_helper_builder_state_t, file_type;
 type docker_helper_builder_runtime_root_t, file_type;
 type docker_helper_builder_state_root_t, file_type;
 
-# P5-S2 G32 r3 context type: the daemon's per-op build staging area (the
-# staged build context handed to buildctl and materialized by buildkitd
-# inside the per-op state tree). Declared as the fc/structural foundation
-# only; the daemon's ingress relabel grant-set and its access surface land
-# with the ingress implementation phase. The daemon keeps ZERO grants on
-# docker_helper_builder_state_t.
+# P5-S2 G32 r3 context type: the daemon's handoff material typed at
+# ingress — the staged build context subtree that buildctl reads and
+# buildkitd materializes inside the per-op state tree. Declared as the
+# policy foundation only: the ONLY assignment owner is the Phase 5 runtime
+# ingress relabel (type plus the operation's MCS category, applied after a
+# successful START); there is deliberately NO fc rule for it (a broad fc
+# pattern would pre-type the staging tree and widen the context grant
+# surface ahead of the implementation), and the daemon's access grant-set
+# lands with the ingress implementation phase. The daemon keeps ZERO
+# grants on docker_helper_builder_state_t.
 type docker_helper_builder_context_t, file_type;
 
 # Dedicated exec type for the distro rootlesskit binary. The builder

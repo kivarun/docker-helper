@@ -448,14 +448,26 @@ func TestSELinuxPolicyBuilderRootTypes(t *testing.T) {
 }
 
 // TestSELinuxPolicyBuilderContextFoundation verifies the context type is
-// declared as the G32 r3 foundation: the type and its fc rule exist, no
-// access grant names it yet (the ingress grant-set lands with the ingress
-// implementation), and the daemon holds zero grants on the operation state
-// type.
+// declared as the G32 r3 policy foundation: the type exists, NO fc rule
+// assigns it (the Phase 5 runtime ingress relabel — type plus the
+// operation's MCS category, after a successful START — is the only
+// assignment owner; a broad fc pattern would pre-type the staging tree and
+// widen the context grant surface), no access grant names it yet, and the
+// daemon holds zero grants on the operation state type.
 func TestSELinuxPolicyBuilderContextFoundation(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
 	if !strings.Contains(policy, "type docker_helper_builder_context_t, file_type;") {
 		t.Error("SELinux policy must declare docker_helper_builder_context_t")
+	}
+	fc := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.fc")
+	for _, line := range strings.Split(fc, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(trimmed, "docker_helper_builder_context_t") {
+			t.Errorf("the fc must not assign the context type (the Phase 5 runtime relabel owns the assignment): %s", trimmed)
+		}
 	}
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -1406,8 +1418,9 @@ func TestSELinuxFCBuilderTrees(t *testing.T) {
 // TestSELinuxFCFirstMatchShape evaluates the shipped .fc rules over the
 // representative path shapes of the G32 r3 geometry: roots and shared ops
 // containers land on the root types, per-op children land on the per-op
-// tree types, the daemon staging area lands on the context type ahead of
-// the generic daemon-runtime rule, and foreign paths are untouched. The
+// tree types, the daemon's ordinary staging tree keeps the pre-existing
+// daemon runtime type (the context type is assigned by the Phase 5 runtime
+// ingress relabel, never by fc), and foreign paths are untouched. The
 // evaluation models the real file-context ranking (libselinux selabel_file:
 // exact non-meta rules first, then regex rules by longest literal stem,
 // file order within a stem) — a naive file-order first match is NOT the
@@ -1503,8 +1516,9 @@ func TestSELinuxFCFirstMatchShape(t *testing.T) {
 		{"/run/docker-helper-builder/ops/op_ac4cbdc1ae4d4d3fa39943de5fcf2e6f", "docker_helper_builder_runtime_t"},
 		{"/run/docker-helper-builder/ops/op_ac4cbdc1ae4d4d3fa39943de5fcf2e6f/buildkitd.sock", "docker_helper_builder_runtime_t"},
 		{"/run/docker-helper-builder/manager.sock", "docker_helper_builder_runtime_root_t"},
-		{"/run/docker-helper/builds/op_ac4cbdc1ae4d4d3fa39943de5fcf2e6f/context/Dockerfile", "docker_helper_builder_context_t"},
-		{"/run/docker-helper/builds/op_ac4cbdc1ae4d4d3fa39943de5fcf2e6f/context", "docker_helper_builder_context_t"},
+		{"/run/docker-helper/builds/op_ac4cbdc1ae4d4d3fa39943de5fcf2e6f/context/Dockerfile", "docker_helper_runtime_t"},
+		{"/run/docker-helper/builds/op_ac4cbdc1ae4d4d3fa39943de5fcf2e6f/context", "docker_helper_runtime_t"},
+		{"/run/docker-helper/builds", "docker_helper_runtime_t"},
 		{"/run/docker-helper/manager.sock", "docker_helper_runtime_t"},
 	} {
 		if got := lookup(t, tc.path); got != tc.want {
