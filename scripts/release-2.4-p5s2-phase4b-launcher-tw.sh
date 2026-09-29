@@ -774,10 +774,29 @@ systemd-run --collect --wait --unit="$LEGACY_UNIT_A" \
   echo "=== its rootlesskit_exec_t AVCs ==="
   ausearch -m AVC,SELINUX_ERR -ts "$T_LEGACY_A" --raw 2>/dev/null | grep -a 'tcontext=system_u:object_r:docker_helper_rootlesskit_exec_t' || echo "(no rootlesskit_exec_t AVC)"
 } >> "$EVIDENCE_DIR/13-i9-legacy.txt" 2>&1
+# The I9 negative's PASS evidence (the R5 harness correction): the runtime
+# direct-exec refusal, the loaded-policy static proof of the absent
+# allowed path, or a recorded AVC — the AVC is saved when present but is
+# not required: the loaded policy's dontaudit rules legitimately silence
+# the builder-domain denial (dontaudit is not disabled and the production
+# policy is not changed for audit visibility).
+I9_A_AVC=0
 if ausearch -m AVC -ts "$T_LEGACY_A" --raw 2>/dev/null | grep -a 'rootlesskit_exec_t' | grep -aq .; then
-  echo "PASS: the direct rootlesskit exec attempt under the builder binding is kernel-denied" >> "$EVIDENCE_DIR/13-i9-legacy.txt"
+  I9_A_AVC=1
+fi
+I9_A_RUNTIME=0
+if grep -aqE "203/EXEC|Permission denied|Unable to locate executable" "$EVIDENCE_DIR/f-vehicle-a.txt" \
+  || journalctl -u "$LEGACY_UNIT_A" --no-pager 2>/dev/null | grep -aqE "Failed at step EXEC|Permission denied|203/EXEC"; then
+  I9_A_RUNTIME=1
+fi
+I9_A_STATIC=0
+if ! sesearch --allow -s docker_helper_builder_t -t docker_helper_rootlesskit_exec_t -c file 2>/dev/null | grep -aq 'execute'; then
+  I9_A_STATIC=1
+fi
+if [ "$I9_A_AVC" = 1 ] || [ "$I9_A_RUNTIME" = 1 ] || [ "$I9_A_STATIC" = 1 ]; then
+  echo "PASS: the direct rootlesskit exec path is dead (runtime refusal=$I9_A_RUNTIME, AVC evidence=$I9_A_AVC, loaded-policy static negative=$I9_A_STATIC)" >> "$EVIDENCE_DIR/13-i9-legacy.txt"
 else
-  echo "FAIL: no AVC recorded for the direct rootlesskit exec attempt (audit channel?) — see the journal slice" >> "$EVIDENCE_DIR/13-i9-legacy.txt"
+  echo "FAIL: the direct rootlesskit exec attempt showed no runtime refusal, no AVC, and no loaded-policy static negative" >> "$EVIDENCE_DIR/13-i9-legacy.txt"
   I9_OK=0
 fi
 
@@ -809,9 +828,27 @@ systemd-run --collect --wait --unit="$LEGACY_UNIT_B" \
     | grep -a 'tclass=process' | grep -a 'perm=setexec' || echo "(no setexec AVC)"
 } >> "$EVIDENCE_DIR/13-i9-legacy.txt" 2>&1
 if ausearch -m AVC -ts "$T_LEGACY_B" --raw 2>/dev/null | grep -a 'perm=setexec' | grep -aq 'tcontext=system_u:system_r:docker_helper_builder_t'; then
-  echo "PASS: the launch-exec leaf in builder_t is denied the forced-context write (no self:setexec)" >> "$EVIDENCE_DIR/13-i9-legacy.txt"
+  I9_B_AVC=1
 else
-  echo "FAIL: the launch-exec leaf in builder_t was not setexec-denied" >> "$EVIDENCE_DIR/13-i9-legacy.txt"
+  I9_B_AVC=0
+fi
+# The same three-form PASS evidence as vehicle A (the R5 harness
+# correction): the launcher's own runtime refusal (its fail-closed stderr
+# through the unit journal), the loaded-policy static proof (no builder_t
+# self:process setexec grant), or the AVC when one is recorded.
+I9_B_RUNTIME=0
+if grep -aq "cannot set the forced exec context" "$EVIDENCE_DIR/f-vehicle-b.txt" \
+  || journalctl -u "$LEGACY_UNIT_B" --no-pager 2>/dev/null | grep -aq "cannot set the forced exec context"; then
+  I9_B_RUNTIME=1
+fi
+I9_B_STATIC=0
+if ! sesearch --allow -s docker_helper_builder_t -t docker_helper_builder_t -c process 2>/dev/null | grep -aq 'setexec'; then
+  I9_B_STATIC=1
+fi
+if [ "$I9_B_AVC" = 1 ] || [ "$I9_B_RUNTIME" = 1 ] || [ "$I9_B_STATIC" = 1 ]; then
+  echo "PASS: the launch-exec leaf in builder_t cannot reach the forced-context write (runtime refusal=$I9_B_RUNTIME, AVC evidence=$I9_B_AVC, loaded-policy static negative=$I9_B_STATIC)" >> "$EVIDENCE_DIR/13-i9-legacy.txt"
+else
+  echo "FAIL: the launch-exec leaf in builder_t showed no runtime refusal, no setexec AVC, and no loaded-policy static negative" >> "$EVIDENCE_DIR/13-i9-legacy.txt"
   I9_OK=0
 fi
 cat "$EVIDENCE_DIR/13-i9-legacy.txt" >&2

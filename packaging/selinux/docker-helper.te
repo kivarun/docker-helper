@@ -1271,12 +1271,13 @@ allow docker_helper_newuidmap_t passwd_file_t:file { read open };
 # entry rule carries the transition-required entrypoint plus the loader
 # access (the newuidmap entry shape). The runtime surface granted so far:
 # the inherited-stdio fifo write, the /proc target-dir
-# read-open-getattr-search, the getpwuid passwd read-open, and the
-# gid_map file write-open (each with its own enforcing AVC evidence,
-# below). NO userdb fallback, no passwd getattr, no capability surface,
-# no cap_userns: the NEXT enforcing boundary inside this domain is the
-# next deliberate step. No transition or allow rule points into the
-# domain from the manager or the daemon.
+# read-open-getattr-search, the getpwuid passwd read-open, the gid_map
+# file write-open, and the in-namespace sys_admin capability bit (each
+# with its own enforcing AVC evidence, below). NO userdb fallback, no
+# passwd getattr, and no PLAIN self:capability surface: the NEXT
+# enforcing boundary inside this domain is the next deliberate step. No
+# transition or allow rule points into the domain from the manager or the
+# daemon.
 type_transition docker_helper_rootlesskit_t docker_helper_newgidmap_exec_t:process docker_helper_newgidmap_t;
 allow docker_helper_rootlesskit_t docker_helper_newgidmap_t:process { transition };
 
@@ -1370,11 +1371,41 @@ allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:dir { read open geta
 # review). The interoperation risk is accepted FOR DEVELOPMENT ONLY, NOT
 # for release (Release GO stays closed until the isolation model is
 # decided). NOT granted on this pair: read/append/getattr/setattr, any
-# capability surface (the write(2) still needs the kernel's in-namespace
-# capability chain — that is the next enforcing boundary and is decided
-# separately), the mem file (the ptrace layer stays closed), and the
-# setgroups write-open (the kernel state rule).
+# PLAIN self:capability surface (the in-namespace sys_admin bit IS
+# granted below with the live R5 evidence; the out-of-namespace setgid
+# check is the NEXT enforcing boundary and is decided separately), the
+# mem file (the ptrace layer stays closed), and the setgroups write-open
+# (the kernel state rule).
 allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:file { write open };
+
+# The helper's IN-NAMESPACE capability check at the same gid_map write
+# (P5-S2 Phase 4C-1): with the file write-open granted, the write reached
+# the kernel's capability layer and failed there with EPERM. Live
+# enforcing AVC evidence (Phase 4B run 36617327970's launch window,
+# record 402: denied { sys_admin } for pid=2870 comm="newgidmap"
+# capability=21
+# scontext=system_u:system_r:docker_helper_newgidmap_t:s0:c1
+# tcontext=system_u:system_r:docker_helper_newgidmap_t:s0:c1
+# tclass=cap_userns permissive=0, followed in the same window by the
+# helper's own failure output "newgidmap: write to gid_map failed:
+# Operation not permitted" and rootlesskit's "failed to setup UID/GID
+# map" — the direct causal chain to the R5 START failure) — the GID-side
+# mirror of the proven newuidmap in-namespace boundary: the kernel
+# mediated a capability check the helper performs inside a NON-INITIAL
+# user namespace, so the class is cap_userns. Grant ONLY the in-namespace
+# sys_admin bit: the manager, the launcher, the flow, slirp4netns, and
+# newuidmap receive no cap_userns rights from this correction, and the
+# plain self:capability surface (setgid, the out-of-namespace side of the
+# same write) stays deliberately closed as the next enforcing boundary.
+# The domain stays mcs_constrained_type: the operation scope of the
+# gid-map write path is owned by the categorized process/object MCS
+# boundary (own-category procfs files), not by any capability permission.
+# SCOPE — READ CAREFULLY: like every helper grant this is a DOMAIN-PAIR
+# rule, NOT an operation-scoped one; all build operations share the one
+# builder identity and this one SELinux domain, and per-operation
+# isolation is invocation discipline only (the open architectural risk
+# tracked for the final security review).
+allow docker_helper_newgidmap_t self:cap_userns sys_admin;
 
 # The getpwuid passwd lookup of the caller's user name (P5-S2), granted
 # read-open with live enforcing AVC evidence: the read (run 36303567126
