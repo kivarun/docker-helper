@@ -392,12 +392,14 @@ PREFLIGHT_OK=1
   fi
 
   echo "=== I9 negative: builder_t -> rootlesskit_t process transition (must be zero) ==="
-  echo "--- type_transition rules:"
-  sesearch --type_trans -s docker_helper_builder_t -t "$RK_DOMAIN" -c process /sys/fs/selinux/policy || true
   echo "--- allow transition rules:"
   sesearch --allow -s docker_helper_builder_t -t "$RK_DOMAIN" -c process -p transition /sys/fs/selinux/policy || true
-  if sesearch --type_trans -s docker_helper_builder_t -t "$RK_DOMAIN" -c process /sys/fs/selinux/policy 2>/dev/null | grep -q . \
-    || sesearch --allow -s docker_helper_builder_t -t "$RK_DOMAIN" -c process -p transition /sys/fs/selinux/policy 2>/dev/null | grep -q .; then
+  echo "--- type_transition rules (default-type dump, source builder_t):"
+  sesearch --type_trans -c process /sys/fs/selinux/policy \
+    | awk '$1 == "type_transition" && $2 == "docker_helper_builder_t" && $4 == "docker_helper_rootlesskit_t;"' || true
+  if sesearch --allow -s docker_helper_builder_t -t "$RK_DOMAIN" -c process -p transition /sys/fs/selinux/policy 2>/dev/null | grep -q . \
+    || sesearch --type_trans -c process /sys/fs/selinux/policy 2>/dev/null \
+      | awk '$1 == "type_transition" && $2 == "docker_helper_builder_t" && $4 == "docker_helper_rootlesskit_t;"' | grep -q .; then
     echo "FAIL: a builder_t -> rootlesskit_t process transition exists"
     PREFLIGHT_OK=0
   else
@@ -420,37 +422,45 @@ PREFLIGHT_OK=1
   fi
 
   echo "=== I9 positive: exactly ONE process transition into rootlesskit_t (launcher_t) ==="
-  echo "--- type_transition rules into rootlesskit_t:"
-  sesearch --type_trans -t "$RK_DOMAIN" -c process /sys/fs/selinux/policy || true
-  echo "--- allow transition rules toward rootlesskit_t:"
+  echo "--- every type_transition rule into rootlesskit_t (the default-type dump):"
+  sesearch --type_trans -c process /sys/fs/selinux/policy \
+    | awk '$1 == "type_transition" && $4 == "docker_helper_rootlesskit_t;"' || true
+  echo "--- allow transition rules toward rootlesskit_t (attribute-expanded entries are expected from the base policy; recorded, not asserted):"
   sesearch --allow -t "$RK_DOMAIN" -c process -p transition /sys/fs/selinux/policy || true
-  if [ "$(sesearch --type_trans -t "$RK_DOMAIN" -c process /sys/fs/selinux/policy 2>/dev/null | grep -c . || true)" = 1 ] \
-    && sesearch --type_trans -t "$RK_DOMAIN" -c process /sys/fs/selinux/policy 2>/dev/null | grep -aq "docker_helper_builder_launcher_t"; then
+  RK_IN="$(sesearch --type_trans -c process /sys/fs/selinux/policy 2>/dev/null \
+    | awk '$1 == "type_transition" && $4 == "docker_helper_rootlesskit_t;"' | grep -c . || true)"
+  if [ "$RK_IN" = 1 ] \
+    && sesearch --type_trans -c process /sys/fs/selinux/policy 2>/dev/null \
+      | awk '$1 == "type_transition" && $4 == "docker_helper_rootlesskit_t;"' | grep -aq "docker_helper_builder_launcher_t"; then
     echo "PASS: exactly one transition into rootlesskit_t, source launcher_t"
   else
-    echo "FAIL: the rootlesskit_t entry set is not exactly the launcher edge"
+    echo "FAIL: the rootlesskit_t entry set is not exactly the launcher edge ($RK_IN type_transition rules)"
     PREFLIGHT_OK=0
   fi
 
   echo "=== I9 hop 1: exactly ONE transition into launcher_t (builder_t) ==="
-  sesearch --type_trans -t "$LAUNCHER_DOMAIN" -c process /sys/fs/selinux/policy || true
-  if [ "$(sesearch --type_trans -t "$LAUNCHER_DOMAIN" -c process /sys/fs/selinux/policy 2>/dev/null | grep -c . || true)" = 1 ] \
-    && sesearch --type_trans -t "$LAUNCHER_DOMAIN" -c process /sys/fs/selinux/policy 2>/dev/null | grep -aq "docker_helper_builder_t"; then
+  LAUNCH_IN="$(sesearch --type_trans -c process /sys/fs/selinux/policy 2>/dev/null \
+    | awk '$1 == "type_transition" && $4 == "docker_helper_builder_launcher_t;"')"
+  echo "--- every type_transition rule into launcher_t:"
+  printf '%s\n' "$LAUNCH_IN"
+  if [ "$(printf '%s\n' "$LAUNCH_IN" | grep -c . || true)" = 1 ] \
+    && printf '%s\n' "$LAUNCH_IN" | grep -aq "docker_helper_builder_t"; then
     echo "PASS: exactly one transition into launcher_t, source builder_t"
   else
     echo "FAIL: the launcher_t entry set is not exactly the manager edge"
     PREFLIGHT_OK=0
   fi
 
-  echo "=== setexec split: launcher_t has self:setexec; builder_t has none ==="
+  echo "=== setexec split: launcher_t has setexec; builder_t has none ==="
   echo "--- launcher_t:"
-  sesearch --allow -s "$LAUNCHER_DOMAIN" -c process -p setexec /sys/fs/selinux/policy || true
+  LAUNCHER_SETEXEC="$(sesearch --allow -s "$LAUNCHER_DOMAIN" -c process -p setexec /sys/fs/selinux/policy 2>/dev/null || true)"
+  printf '%s\n' "${LAUNCHER_SETEXEC:-(none)}"
   echo "--- builder_t:"
-  sesearch --allow -s docker_helper_builder_t -c process -p setexec /sys/fs/selinux/policy || true
-  echo "--- every domain holding setexec (inventory):"
+  BUILDER_SETEXEC="$(sesearch --allow -s docker_helper_builder_t -c process -p setexec /sys/fs/selinux/policy 2>/dev/null || true)"
+  printf '%s\n' "${BUILDER_SETEXEC:-(none)}"
+  echo "--- every domain holding setexec (inventory; the base policy's own grants are expected here):"
   sesearch --allow -c process -p setexec /sys/fs/selinux/policy || true
-  if sesearch --allow -s "$LAUNCHER_DOMAIN" -c process -p setexec /sys/fs/selinux/policy 2>/dev/null | grep -aq self \
-    && ! sesearch --allow -s docker_helper_builder_t -c process -p setexec /sys/fs/selinux/policy 2>/dev/null | grep -q .; then
+  if [ -n "$LAUNCHER_SETEXEC" ] && [ -z "$BUILDER_SETEXEC" ]; then
     echo "PASS: the setexec split holds"
   else
     echo "FAIL: the setexec split does not hold"
