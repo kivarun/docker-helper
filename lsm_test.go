@@ -337,6 +337,70 @@ func TestParseSELinuxType(t *testing.T) {
 	}
 }
 
+// --- decodeSELinuxXattrContext ---
+
+// TestDecodeSELinuxXattrContext pins the shared xattr decoding semantics:
+// the canonical no-NUL form and the kernel one-terminal-NUL form decode to
+// the identical canonical context; empty, NUL-only, embedded-NUL,
+// embedded-plus-terminal-NUL, and multi-trailing-NUL values fail closed.
+func TestDecodeSELinuxXattrContext(t *testing.T) {
+	const ctx = "system_u:object_r:docker_helper_builder_state_t:s0:c1"
+	tests := []struct {
+		name    string
+		raw     string
+		want    string
+		wantErr bool
+	}{
+		{"canonical without NUL", ctx, ctx, false},
+		{"one terminal NUL", ctx + "\x00", ctx, false},
+		{"empty", "", "", true},
+		{"only NUL", "\x00", "", true},
+		{"embedded NUL", "con\x00text", "", true},
+		{"embedded plus terminal NUL", "con\x00text\x00", "", true},
+		{"two trailing NULs", ctx + "\x00\x00", "", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := decodeSELinuxXattrContext([]byte(tc.raw))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("decode(%q) = %q, want an error", tc.raw, got)
+				}
+				if !errors.Is(err, errSELinuxXattrEncoding) {
+					t.Fatalf("decode(%q) error = %v, want errSELinuxXattrEncoding", tc.raw, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("decode(%q): unexpected error: %v", tc.raw, err)
+			}
+			if got != tc.want {
+				t.Errorf("decode(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDecodeSELinuxXattrContextNormalizesNothingElse pins that the decoder
+// performs no normalization beyond the NUL rule: whitespace, newlines, and
+// case are preserved byte for byte; context-text validity is downstream.
+func TestDecodeSELinuxXattrContextNormalizesNothingElse(t *testing.T) {
+	for _, raw := range []string{
+		" con text ",
+		"con\ntext",
+		"SYSTEM_U:OBJECT_R:X_T:S0",
+		"tab\tsep",
+	} {
+		got, err := decodeSELinuxXattrContext([]byte(raw))
+		if err != nil {
+			t.Fatalf("decode(%q): unexpected error: %v", raw, err)
+		}
+		if got != raw {
+			t.Errorf("decode(%q) = %q, want byte-for-byte preservation", raw, got)
+		}
+	}
+}
+
 // --- SELinux confinement with TYPE parsing ---
 
 func TestSELinuxConfinementTypeVariants(t *testing.T) {

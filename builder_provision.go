@@ -67,15 +67,30 @@ var builderSetObjectXattr = func(path, value string) error {
 // contexts are far shorter).
 const builderObjectContextReadCeiling = 256
 
-// builderGetObjectXattr is the injectable seam around the security.selinux
-// xattr read-back (production: unix.Getxattr on the path).
-var builderGetObjectXattr = func(path string) (string, error) {
+// builderGetRawObjectXattr is the injectable seam around the raw
+// security.selinux xattr read-back (production: unix.Getxattr on the path,
+// bounded by builderObjectContextReadCeiling — an oversized context is the
+// xattr error, never a partial value).
+var builderGetRawObjectXattr = func(path string) ([]byte, error) {
 	buf := make([]byte, builderObjectContextReadCeiling)
 	n, err := unix.Getxattr(path, "security.selinux", buf)
 	if err != nil {
+		return nil, err
+	}
+	return buf[:n], nil
+}
+
+// builderGetObjectXattr reads the path's security.selinux xattr and returns
+// its canonical textual context through the shared xattr decoder: the
+// kernel's one-terminal-NUL convention and the no-NUL form are the same
+// canonical value, and any other encoding is a read failure that fails the
+// provisioning closed.
+func builderGetObjectXattr(path string) (string, error) {
+	raw, err := builderGetRawObjectXattr(path)
+	if err != nil {
 		return "", err
 	}
-	return string(buf[:n]), nil
+	return decodeSELinuxXattrContext(raw)
 }
 
 // builderProvisionGate reports whether the active MAC backend requires

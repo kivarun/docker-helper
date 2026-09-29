@@ -11,6 +11,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -24,9 +25,11 @@ type provisionLogEntry struct {
 }
 
 // provisionFixture installs the logging xattr seams over the current
-// command seam. setErr/getErr/getOverride key forced failures and forced
-// read-back values by path; the stored set values back the read-back
-// seam. The seams restore on cleanup (package-global seams: no
+// command seam. The read seam is the RAW xattr seam: the production
+// read-back canonicalization (the shared xattr decoder) runs unchanged
+// over every forced value. setErr/getErr/getOverride key forced failures
+// and forced raw read-back values by path; the stored set values back the
+// read-back seam. The seams restore on cleanup (package-global seams: no
 // t.Parallel in these tests).
 type provisionFixture struct {
 	mu          sync.Mutex
@@ -45,7 +48,7 @@ func newProvisionFixture(t *testing.T) *provisionFixture {
 		getErr:      map[string]error{},
 		getOverride: map[string]string{},
 	}
-	origSet, origGet := builderSetObjectXattr, builderGetObjectXattr
+	origSet, origGet := builderSetObjectXattr, builderGetRawObjectXattr
 	builderSetObjectXattr = func(path, value string) error {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -56,21 +59,21 @@ func newProvisionFixture(t *testing.T) *provisionFixture {
 		f.stored[path] = value
 		return nil
 	}
-	builderGetObjectXattr = func(path string) (string, error) {
+	builderGetRawObjectXattr = func(path string) ([]byte, error) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		if err := f.getErr[path]; err != nil {
 			f.log = append(f.log, provisionLogEntry{kind: "get", path: path})
-			return "", err
+			return nil, err
 		}
 		value := f.getOverride[path]
 		if value == "" {
 			value = f.stored[path]
 		}
 		f.log = append(f.log, provisionLogEntry{kind: "get", path: path, value: value})
-		return value, nil
+		return []byte(value), nil
 	}
-	t.Cleanup(func() { builderSetObjectXattr, builderGetObjectXattr = origSet, origGet })
+	t.Cleanup(func() { builderSetObjectXattr, builderGetRawObjectXattr = origSet, origGet })
 	return f
 }
 
@@ -262,6 +265,74 @@ func TestBuilderProvisioningMismatchFailsClosed(t *testing.T) {
 	opID := "op_0123456789abcdef0123456789abcdef"
 	provisionFailureCase(t, opID, func(f *provisionFixture) {
 		f.getOverride[provisionMatrixPaths(opID)[2].path] = builderObjectContext(builderRuntimeObjectType, builderCategory(1))
+	})
+}
+
+// TestBuilderProvisioningReadBackTerminalNULCanonicalizes proves the
+// production read-back canonicalization end to end: the kernel xattr
+// convention (exactly one terminal NUL on every security.selinux read)
+// decodes to the same canonical context, so the provisioned START
+// converges and the launch continues; the written values stay exact.
+func TestBuilderProvisioningReadBackTerminalNULCanonicalizes(t *testing.T) {
+	m, _, _ := processTestManager(t)
+	seamCA(t)
+	seamLSMBackend(t, LSMSELinux)
+	fakeLeaderSeam(t, true)
+	f := newProvisionFixture(t)
+	f.observeCommandCreation(t)
+
+	opID := "op_0123456789abcdef0123456789abcdef"
+	// The first admission binds c1 (asserted after reservation); the
+	// kernel read-back convention is forced for all four paths up front so
+	// the terminal-NUL path is deterministic.
+	paths := provisionMatrixPaths(opID)
+	for _, p := range paths {
+		f.getOverride[p.path] = builderObjectContext(p.objectType, builderCategory(1)) + "\x00"
+	}
+
+	respCh := make(chan string, 1)
+	go func() { respCh <- m.start(opID, nil) }()
+	if !waitInstance(t, m, opID, true) {
+		t.Fatal("START did not reserve")
+	}
+	recordCategory, _ := builderManagerCategoryOf(t, m, opID)
+	if recordCategory != builderCategory(1) {
+		t.Fatalf("record category = %s, want c1 (the forced NUL overrides must match the record)", recordCategory)
+	}
+	bindFakeBuildkitdSocket(t, opID)
+	if resp := <-respCh; resp != builderManagerRespOK {
+		t.Fatalf("START = %q, want OK (terminal-NUL read-back must canonicalize)", resp)
+	}
+
+	entries := f.entries()
+	if len(entries) != 9 {
+		t.Fatalf("observed %d events, want 8 provisioning events + 1 spawn", len(entries))
+	}
+	if last := entries[len(entries)-1]; last.kind != "spawn" {
+		t.Fatalf("last event = %q at %q, want the spawn after full verification", last.kind, last.path)
+	}
+	for i, e := range entries {
+		switch e.kind {
+		case "set":
+			if strings.Contains(e.value, "\x00") {
+				t.Errorf("set event %d wrote a NUL: %q", i, e.value)
+			}
+		case "get":
+			if !strings.HasSuffix(e.value, "\x00") {
+				t.Errorf("get event %d did not exercise the terminal-NUL form: %q", i, e.value)
+			}
+		}
+	}
+}
+
+// TestBuilderProvisioningWrongContextWithNULFailsClosed: a read-back that
+// carries the canonical wrong type in the kernel's terminal-NUL encoding
+// is still an exact mismatch after decoding — the START fails closed.
+func TestBuilderProvisioningWrongContextWithNULFailsClosed(t *testing.T) {
+	opID := "op_0123456789abcdef0123456789abcdef"
+	provisionFailureCase(t, opID, func(f *provisionFixture) {
+		f.getOverride[provisionMatrixPaths(opID)[2].path] =
+			builderObjectContext(builderRuntimeObjectType, builderCategory(1)) + "\x00"
 	})
 }
 

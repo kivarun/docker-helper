@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -77,6 +78,31 @@ func parseSELinuxType(ctx string) (string, error) {
 		return "", fmt.Errorf("malformed SELinux context %q (expected USER:ROLE:TYPE[:RANGE])", ctx)
 	}
 	return parts[2], nil
+}
+
+// errSELinuxXattrEncoding is the typed fail-closed error for a raw
+// security.selinux xattr value that is neither the canonical textual
+// context nor that context with exactly one terminal NUL.
+var errSELinuxXattrEncoding = errors.New("malformed security.selinux context encoding")
+
+// decodeSELinuxXattrContext is the single owner of the security.selinux
+// xattr decoding semantics shared by every production xattr reader. It
+// accepts exactly two raw encodings — the canonical textual context with
+// no NUL, and that context with exactly one terminal NUL (the kernel
+// xattr convention) — and returns the same canonical textual form for
+// both. Empty, NUL-only, embedded-NUL, and multi-NUL values are malformed
+// and fail closed. Nothing else is normalized: whitespace, newlines, and
+// case are preserved, and the validity of the context text itself is the
+// caller's concern (exact comparison or parseSELinuxType).
+func decodeSELinuxXattrContext(raw []byte) (string, error) {
+	ctx := raw
+	if len(ctx) > 0 && ctx[len(ctx)-1] == 0 {
+		ctx = ctx[:len(ctx)-1]
+	}
+	if len(ctx) == 0 || bytes.IndexByte(ctx, 0) >= 0 {
+		return "", errSELinuxXattrEncoding
+	}
+	return string(ctx), nil
 }
 
 // detectLSM determines which MAC backend is active on the host.

@@ -172,13 +172,31 @@ func unmountOwnedStalePin(path string) error {
 	return nil
 }
 
-func getxattrSELinux(path string) (string, error) {
+// getxattrSELinuxRaw is the injectable seam around the raw security.selinux
+// xattr read (production: unix.Getxattr with the fixed 256-byte buffer).
+var getxattrSELinuxRaw = func(path string) ([]byte, error) {
 	buf := make([]byte, 256)
 	size, err := unix.Getxattr(path, selinuxXattrName, buf)
 	if err != nil {
+		return nil, err
+	}
+	return buf[:size], nil
+}
+
+// getxattrSELinux returns the canonical textual security.selinux context of
+// path through the shared xattr decoder: the kernel one-terminal-NUL
+// convention and the no-NUL form are the same canonical value, and any
+// other encoding is a read failure (never a silently decoded context).
+func getxattrSELinux(path string) (string, error) {
+	raw, err := getxattrSELinuxRaw(path)
+	if err != nil {
 		return "", fmt.Errorf("cannot read SELinux context of %s: %w", path, err)
 	}
-	return strings.TrimRight(string(buf[:size]), "\x00"), nil
+	ctx, err := decodeSELinuxXattrContext(raw)
+	if err != nil {
+		return "", fmt.Errorf("cannot read SELinux context of %s: %w", path, err)
+	}
+	return ctx, nil
 }
 
 // bindfsWorker is one helper-owned bindfs projection worker. It is a child

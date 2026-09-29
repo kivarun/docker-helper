@@ -2950,3 +2950,48 @@ func TestC3ProcfsUsableForRestoreconAcceptsRealProcfs(t *testing.T) {
 		t.Fatalf("real procfs must be accepted, got: %v", err)
 	}
 }
+
+// TestReadPathSELinuxTypeCanonicalNULForms drives the production reader
+// through the shared xattr decoder: the no-NUL and one-terminal-NUL raw
+// forms extract the identical type, while empty, NUL-only, embedded-NUL,
+// and multi-NUL raw values are refused instead of silently decoded.
+func TestReadPathSELinuxTypeCanonicalNULForms(t *testing.T) {
+	orig := lgetxattrSELinuxRaw
+	t.Cleanup(func() { lgetxattrSELinuxRaw = orig })
+
+	const fullContext = "system_u:object_r:docker_helper_workspace_t:s0:c1"
+	cases := []struct {
+		name    string
+		raw     string
+		want    string
+		wantErr bool
+	}{
+		{"canonical without NUL", fullContext, "docker_helper_workspace_t", false},
+		{"one terminal NUL", fullContext + "\x00", "docker_helper_workspace_t", false},
+		{"empty", "", "", true},
+		{"only NUL", "\x00", "", true},
+		{"embedded NUL", "system_u\x00:object_r:docker_helper_workspace_t:s0:c1", "", true},
+		{"two trailing NULs", fullContext + "\x00\x00", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			lgetxattrSELinuxRaw = func(string) ([]byte, error) { return []byte(tc.raw), nil }
+			got, err := readPathSELinuxType("/labeled")
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("readPathSELinuxType(raw %q) = %q, want an error", tc.raw, got)
+				}
+				if !errors.Is(err, errSELinuxXattrEncoding) {
+					t.Fatalf("readPathSELinuxType(raw %q) error = %v, want errSELinuxXattrEncoding", tc.raw, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("readPathSELinuxType(raw %q): unexpected error: %v", tc.raw, err)
+			}
+			if got != tc.want {
+				t.Errorf("readPathSELinuxType(raw %q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}

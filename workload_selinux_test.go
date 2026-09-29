@@ -9,6 +9,52 @@ import (
 	"testing"
 )
 
+// TestSELinuxWorkloadEffectiveTypeCanonicalNULForms drives the production
+// effective-type proof (productionMountOps.selinuxTypeOf over the shared
+// xattr decoder): the no-NUL and one-terminal-NUL raw forms yield the
+// identical type, while empty, NUL-only, embedded-NUL, and multi-NUL raw
+// values fail closed instead of being silently decoded.
+func TestSELinuxWorkloadEffectiveTypeCanonicalNULForms(t *testing.T) {
+	orig := getxattrSELinuxRaw
+	t.Cleanup(func() { getxattrSELinuxRaw = orig })
+
+	const fullContext = "system_u:object_r:docker_helper_ro_projection_t:s0"
+	cases := []struct {
+		name    string
+		raw     string
+		want    string
+		wantErr bool
+	}{
+		{"canonical without NUL", fullContext, "docker_helper_ro_projection_t", false},
+		{"one terminal NUL", fullContext + "\x00", "docker_helper_ro_projection_t", false},
+		{"empty", "", "", true},
+		{"only NUL", "\x00", "", true},
+		{"embedded NUL", "system_u\x00:object_r:docker_helper_ro_projection_t:s0", "", true},
+		{"two trailing NULs", fullContext + "\x00\x00", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			getxattrSELinuxRaw = func(string) ([]byte, error) { return []byte(tc.raw), nil }
+			got, err := productionMountOpsValue.selinuxTypeOf("/projection")
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("selinuxTypeOf(raw %q) = %q, want an error", tc.raw, got)
+				}
+				if !errors.Is(err, errSELinuxXattrEncoding) {
+					t.Fatalf("selinuxTypeOf(raw %q) error = %v, want errSELinuxXattrEncoding", tc.raw, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("selinuxTypeOf(raw %q): unexpected error: %v", tc.raw, err)
+			}
+			if got != tc.want {
+				t.Errorf("selinuxTypeOf(raw %q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestSELinuxWorkloadPrepareDirectoryProjection drives the production SELinux
 // backend through a read-only directory exposure: the bindfs worker must run
 // against the pinned source with the exact projection context, the proof

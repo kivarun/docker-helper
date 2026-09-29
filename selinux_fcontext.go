@@ -168,36 +168,49 @@ func acquireSELinuxFcontextLockAt(lockPath string) (func() error, error) {
 	}, nil
 }
 
-// readPathSELinuxType returns the SELinux type component of the given path's
-// current label by reading the security.selinux xattr. This reads the ACTUAL
-// on-disk label, not the policy-default context.
-//
-// Uses the two-call Lgetxattr pattern: query required size, allocate, read.
-func readPathSELinuxType(path string) (string, error) {
+// lgetxattrSELinuxRaw is the injectable seam around the raw two-call
+// security.selinux Lgetxattr read (production: the size query, the 4096
+// allocation bound, and the bounded second call on the path's own inode).
+var lgetxattrSELinuxRaw = func(path string) ([]byte, error) {
 	// Query required size.
 	n, err := unix.Lgetxattr(path, "security.selinux", nil)
 	if err != nil {
 		if errors.Is(err, unix.ENODATA) {
-			return "", fmt.Errorf("no SELinux xattr on %s", path)
+			return nil, fmt.Errorf("no SELinux xattr on %s", path)
 		}
-		return "", fmt.Errorf("cannot query SELinux xattr size for %s: %w", path, err)
+		return nil, fmt.Errorf("cannot query SELinux xattr size for %s: %w", path, err)
 	}
 	if n == 0 {
-		return "", fmt.Errorf("empty SELinux xattr on %s", path)
+		return nil, fmt.Errorf("empty SELinux xattr on %s", path)
 	}
 	// Bounded allocation: SELinux contexts are typically < 256 bytes.
 	if n > 4096 {
-		return "", fmt.Errorf("SELinux xattr on %s exceeds maximum size %d", path, n)
+		return nil, fmt.Errorf("SELinux xattr on %s exceeds maximum size %d", path, n)
 	}
 	buf := make([]byte, n)
 	n, err = unix.Lgetxattr(path, "security.selinux", buf)
 	if err != nil {
-		return "", fmt.Errorf("cannot read SELinux xattr for %s: %w", path, err)
+		return nil, fmt.Errorf("cannot read SELinux xattr for %s: %w", path, err)
 	}
-	// Handle trailing NUL safely.
-	ctx := string(buf[:n])
-	if len(ctx) > 0 && ctx[len(ctx)-1] == 0 {
-		ctx = ctx[:len(ctx)-1]
+	return buf[:n], nil
+}
+
+// readPathSELinuxType returns the SELinux type component of the given path's
+// current label by reading the security.selinux xattr. This reads the ACTUAL
+// on-disk label, not the policy-default context.
+//
+// The raw two-call Lgetxattr read is decoded through the shared xattr
+// decoder (the kernel one-terminal-NUL convention and the no-NUL form are
+// the same canonical value; any other encoding is malformed) before the
+// type is parsed.
+func readPathSELinuxType(path string) (string, error) {
+	raw, err := lgetxattrSELinuxRaw(path)
+	if err != nil {
+		return "", err
+	}
+	ctx, err := decodeSELinuxXattrContext(raw)
+	if err != nil {
+		return "", fmt.Errorf("malformed SELinux xattr on %s: %w", path, err)
 	}
 	return parseSELinuxType(ctx)
 }
