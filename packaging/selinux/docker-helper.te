@@ -768,6 +768,18 @@ allow docker_helper_builder_t docker_helper_builder_runtime_t:dir { getattr sear
 allow docker_helper_builder_t docker_helper_builder_runtime_t:sock_file { create getattr setattr unlink };
 allow docker_helper_builder_t docker_helper_builder_runtime_t:file { create read write open getattr setattr unlink };
 
+# G32 r3 §4.2 provisioning relabel (P5-S2 Phase 3): the manager assigns
+# each required top-level per-op directory its exact FULL context —
+# per-op type plus the operation's MCS category — by writing
+# security.selinux (the setxattr path checks setattr on the object, the
+# relabelto permission toward the NEW type, and the filesystem assoc;
+# setattr/getattr are granted above). The relabel is the root-type ->
+# per-op-type cross-type transition on the manager's own freshly created
+# directories; the roots and the shared ops containers stay root-typed,
+# and the flow child never gains relabel authority.
+allow docker_helper_builder_t docker_helper_builder_runtime_t:dir { relabelto };
+allow docker_helper_builder_t docker_helper_builder_state_t:dir { relabelto };
+
 # State root and per-op state dirs: startup purge scan + removal, and the
 # START-time rootlesskit-state/root directory creation. The rootlesskit
 # state-lock flock moved to the child domain (P5-S2; the enforcing P5-S1

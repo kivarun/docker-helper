@@ -1545,6 +1545,57 @@ func TestBuilderUnitSELinuxContextBinding(t *testing.T) {
 	}
 }
 
+// TestSELinuxPolicyProvisioningRelabelShape pins the Phase 3 provisioning
+// relabel surface (G32 r3 §4.2): the manager holds relabelto toward the
+// two per-op DIR types exactly (the cross-type relabel of its own freshly
+// created directories), no root type and no non-dir class carries a
+// relabelto grant, and the flow child never gains relabel authority.
+func TestSELinuxPolicyProvisioningRelabelShape(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	for _, want := range []string{
+		"allow docker_helper_builder_t docker_helper_builder_runtime_t:dir { relabelto };",
+		"allow docker_helper_builder_t docker_helper_builder_state_t:dir { relabelto };",
+	} {
+		if !strings.Contains(policy, want) {
+			t.Errorf("the provisioning relabel grant is missing: %q", want)
+		}
+	}
+	// The provisioning relabel surface is the manager's two per-op dir
+	// grants; any other manager-subject relabelto is a violation. (The
+	// daemon's pre-existing trusted-CA relabelto rules are a different,
+	// already-pinned owner and out of scope here.)
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || !strings.HasPrefix(trimmed, "allow docker_helper_builder_t ") {
+			continue
+		}
+		if !strings.Contains(trimmed, "relabelto") {
+			continue
+		}
+		if trimmed != "allow docker_helper_builder_t docker_helper_builder_runtime_t:dir { relabelto };" &&
+			trimmed != "allow docker_helper_builder_t docker_helper_builder_state_t:dir { relabelto };" {
+			t.Errorf("unexpected manager relabelto grant (the provisioning surface is exact): %s", trimmed)
+		}
+	}
+	// No relabel authority may name a root type (the roots stay
+	// root-typed), and the flow child never gains relabel authority.
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || !strings.HasPrefix(trimmed, "allow ") {
+			continue
+		}
+		if !strings.Contains(trimmed, "relabelto") {
+			continue
+		}
+		if strings.Contains(trimmed, "_root_t:") {
+			t.Errorf("relabel authority must not name a root type: %s", trimmed)
+		}
+		if strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t") {
+			t.Errorf("the flow child must never gain relabel authority: %s", trimmed)
+		}
+	}
+}
+
 // TestDeploymentLifecycleIsOnlyBuilderRelabelOwner verifies the builder-owned
 // path relabels live ONLY in the existing deployment lifecycle (RPM %posttrans
 // scriptlet + tarball install-system.sh) and in no other script (no parallel

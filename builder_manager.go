@@ -508,6 +508,26 @@ func (m *builderManager) launchInstance(inst *builderInstance) bool {
 		}
 	}
 
+	// Categorized provisioning (G32 r3 §4.2): under enforcing SELinux
+	// every required top-level per-op path receives its exact full
+	// context with mandatory read-back verification — strictly between
+	// directory creation and every launch step. Any failure is a failed
+	// START before the process spawn, converged by the existing owner
+	// (the mixed relabeled/unrelabeled tree is removed and the record
+	// releases its category only at that removal). A detection error
+	// fails closed; AppArmor and no-backend keep the unlabeled mkdir
+	// semantics.
+	provision, err := builderProvisionGate()
+	if err != nil {
+		m.managerDiagf("START %s: MAC backend detection failed: %v", opID, err)
+		m.convergeFailedStart(inst)
+		return false
+	}
+	if provision && !m.provisionCategoryContexts(inst, opID, rtDir, stDir) {
+		m.convergeFailedStart(inst)
+		return false
+	}
+
 	// CA bundle (backend mechanics; fail closed when required and absent).
 	caEnv, caOK := builderResolveSystemCAFunc()
 	if !caOK {
