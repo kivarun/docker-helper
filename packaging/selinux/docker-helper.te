@@ -771,12 +771,16 @@ allow docker_helper_builder_t docker_helper_builder_runtime_t:file { create read
 # G32 r3 §4.2 provisioning relabel (P5-S2 Phase 3): the manager assigns
 # each required top-level per-op directory its exact FULL context —
 # per-op type plus the operation's MCS category — by writing
-# security.selinux (the setxattr path checks setattr on the object, the
-# relabelto permission toward the NEW type, and the filesystem assoc;
-# setattr/getattr are granted above). The relabel is the root-type ->
-# per-op-type cross-type transition on the manager's own freshly created
-# directories; the roots and the shared ops containers stay root-typed,
-# and the flow child never gains relabel authority.
+# security.selinux. The kernel's setxattr relabel path checks BOTH
+# sides: the source-side relabelfrom on the OLD type (the freshly
+# created directories inherit the root types), the target-side
+# relabelto toward the NEW type (the per-op types), plus setattr on the
+# object and the filesystem assoc (setattr/getattr granted above). The
+# relabel is the root-type -> per-op-type cross-type transition on the
+# manager's own directories; the roots and the shared ops containers
+# stay root-typed, and the flow child never gains relabel authority.
+allow docker_helper_builder_t docker_helper_builder_runtime_root_t:dir { relabelfrom };
+allow docker_helper_builder_t docker_helper_builder_state_root_t:dir { relabelfrom };
 allow docker_helper_builder_t docker_helper_builder_runtime_t:dir { relabelto };
 allow docker_helper_builder_t docker_helper_builder_state_t:dir { relabelto };
 

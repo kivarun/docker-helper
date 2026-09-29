@@ -1546,52 +1546,88 @@ func TestBuilderUnitSELinuxContextBinding(t *testing.T) {
 }
 
 // TestSELinuxPolicyProvisioningRelabelShape pins the Phase 3 provisioning
-// relabel surface (G32 r3 §4.2): the manager holds relabelto toward the
-// two per-op DIR types exactly (the cross-type relabel of its own freshly
-// created directories), no root type and no non-dir class carries a
-// relabelto grant, and the flow child never gains relabel authority.
+// relabel surface (G32 r3 §4.2): the manager holds the exact relabel pair —
+// the source-side relabelfrom on the two root DIR types (the freshly
+// created directories inherit them) and the target-side relabelto on the
+// two per-op DIR types — and nothing else. Negative invariants: root types
+// carry no relabelto, per-op types receive no manager relabelfrom, non-dir
+// classes receive no provisioning relabel authority, the flow child gains
+// neither permission, the daemon keeps zero grants on the operation state
+// type, and the legacy direct-launch denial (I9) remains.
 func TestSELinuxPolicyProvisioningRelabelShape(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
-	for _, want := range []string{
+	want := []string{
+		// Source side: the old types (root types) relabeled FROM.
+		"allow docker_helper_builder_t docker_helper_builder_runtime_root_t:dir { relabelfrom };",
+		"allow docker_helper_builder_t docker_helper_builder_state_root_t:dir { relabelfrom };",
+		// Target side: the new types (per-op types) relabeled TO.
 		"allow docker_helper_builder_t docker_helper_builder_runtime_t:dir { relabelto };",
 		"allow docker_helper_builder_t docker_helper_builder_state_t:dir { relabelto };",
-	} {
-		if !strings.Contains(policy, want) {
-			t.Errorf("the provisioning relabel grant is missing: %q", want)
+	}
+	for _, line := range want {
+		if !strings.Contains(policy, line) {
+			t.Errorf("the provisioning relabel grant is missing: %q", line)
 		}
 	}
-	// The provisioning relabel surface is the manager's two per-op dir
-	// grants; any other manager-subject relabelto is a violation. (The
-	// daemon's pre-existing trusted-CA relabelto rules are a different,
-	// already-pinned owner and out of scope here.)
+	// The manager's provisioning relabel surface is exactly the four
+	// grants above; any other manager-subject relabelto/relabelfrom —
+	// root-type relabelto, per-op relabelfrom, or any non-dir class — is a
+	// violation. (The daemon's pre-existing trusted-CA relabelto rules are
+	// a different, already-pinned owner and out of scope here.)
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "#") || !strings.HasPrefix(trimmed, "allow docker_helper_builder_t ") {
 			continue
 		}
-		if !strings.Contains(trimmed, "relabelto") {
+		relabelFrom := strings.Contains(trimmed, " relabelfrom")
+		relabelTo := strings.Contains(trimmed, " relabelto")
+		if !relabelFrom && !relabelTo {
 			continue
 		}
-		if trimmed != "allow docker_helper_builder_t docker_helper_builder_runtime_t:dir { relabelto };" &&
-			trimmed != "allow docker_helper_builder_t docker_helper_builder_state_t:dir { relabelto };" {
-			t.Errorf("unexpected manager relabelto grant (the provisioning surface is exact): %s", trimmed)
+		permitted := false
+		for _, w := range want {
+			if trimmed == w {
+				permitted = true
+				break
+			}
+		}
+		if !permitted {
+			t.Errorf("unexpected manager relabel grant (the provisioning surface is exact): %s", trimmed)
 		}
 	}
-	// No relabel authority may name a root type (the roots stay
-	// root-typed), and the flow child never gains relabel authority.
+	// No relabel authority may name a root type as its relabelto target,
+	// and the flow child never gains either permission.
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "#") || !strings.HasPrefix(trimmed, "allow ") {
 			continue
 		}
-		if !strings.Contains(trimmed, "relabelto") {
+		if !strings.Contains(trimmed, "relabelto") && !strings.Contains(trimmed, "relabelfrom") {
 			continue
 		}
-		if strings.Contains(trimmed, "_root_t:") {
-			t.Errorf("relabel authority must not name a root type: %s", trimmed)
+		if strings.Contains(trimmed, "relabelto") && strings.Contains(trimmed, "_root_t:") {
+			t.Errorf("relabelto authority must not name a root type: %s", trimmed)
 		}
-		if strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t") {
+		if strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t") &&
+			(strings.Contains(trimmed, "relabelto") || strings.Contains(trimmed, "relabelfrom")) {
 			t.Errorf("the flow child must never gain relabel authority: %s", trimmed)
+		}
+	}
+	// The daemon keeps zero grants on the operation state type.
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "allow docker_helper_t docker_helper_builder_state_t") {
+			t.Errorf("the daemon must keep zero grants on the operation state type: %s", trimmed)
+		}
+	}
+	// I9: the legacy direct launch rules stay gone.
+	for _, gone := range []string{
+		"type_transition docker_helper_builder_t docker_helper_rootlesskit_exec_t:process docker_helper_rootlesskit_t;",
+		"allow docker_helper_builder_t docker_helper_rootlesskit_t:process { transition };",
+		"allow docker_helper_builder_t docker_helper_rootlesskit_exec_t:file { execute read open };",
+	} {
+		if strings.Contains(policy, gone) {
+			t.Errorf("the legacy direct launch rule must not exist: %q", gone)
 		}
 	}
 }
