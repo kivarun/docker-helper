@@ -80,8 +80,10 @@ type Command struct {
 
 	// Hidden marks an internal command: it is resolved and dispatched by
 	// the production dispatcher but excluded from every presentation
-	// surface (help listing, completion, the man-page tree walk). Only
-	// production code composes its invocation.
+	// surface — help listings, completion, the man-page tree walk, and
+	// the direct help surfaces (a -h/--help request on the node itself is
+	// refused as an unknown subcommand, and the help command refuses to
+	// resolve it). Only production code composes its invocation.
 	Hidden bool
 }
 
@@ -189,6 +191,14 @@ func (c *Command) dispatchBranch(args []string, path []string, stdout, stderr io
 	// Find matching subcommand
 	sub := c.resolveSubcommand(args[0])
 	if sub != nil {
+		// A hidden node has no help surface: a direct help request on it
+		// is refused with the branch's unknown-subcommand error, so the
+		// internal help text is never rendered. Resolution and dispatch
+		// of production invocations are unaffected.
+		if sub.Hidden && len(args) > 1 && (args[1] == "-h" || args[1] == "--help") {
+			c.printUnknownSubcommand(stderr, path, sub.Name)
+			return 2
+		}
 		newPath := path
 		// Don't include root command name in path
 		if c != rootCommand {
@@ -204,13 +214,23 @@ func (c *Command) dispatchBranch(args []string, path []string, stdout, stderr io
 		fmt.Fprintln(stderr, "Run the following for usage information:")
 		fmt.Fprintln(stderr, "  docker-helper help")
 	} else {
-		fmt.Fprintf(stderr, "error: unknown %s subcommand %q\n", c.Name, args[0])
-		fmt.Fprintln(stderr)
-		prefix := buildPrefix(path)
-		fmt.Fprintf(stderr, "Run the following for usage information:\n")
-		fmt.Fprintf(stderr, "  %s %s --help\n", prefix, c.Name)
+		c.printUnknownSubcommand(stderr, path, args[0])
 	}
 	return 2
+}
+
+// printUnknownSubcommand renders the canonical unknown-subcommand error of
+// the non-root branch `c` (whose own path prefix is `path`): the error
+// line, then the branch's usage hint. Shared by the branch's own
+// unknown-subcommand path and the hidden-node direct-help refusal, so a
+// help request on a hidden node is indistinguishable from a request for a
+// command that does not exist.
+func (c *Command) printUnknownSubcommand(stderr io.Writer, path []string, name string) {
+	fmt.Fprintf(stderr, "error: unknown %s subcommand %q\n", c.Name, name)
+	fmt.Fprintln(stderr)
+	prefix := buildPrefix(path)
+	fmt.Fprintf(stderr, "Run the following for usage information:\n")
+	fmt.Fprintf(stderr, "  %s %s --help\n", prefix, c.Name)
 }
 
 func (c *Command) dispatchLeaf(args []string, path []string, stdout, stderr io.Writer) int {
@@ -965,7 +985,10 @@ help.`,
 
 				// Resolve the command using the shared lookup primitive
 				cmd, path := rootCommand.resolveCommandPath(args)
-				if cmd == nil {
+				// A hidden node has no help surface: the help command
+				// refuses to resolve it, the same way it refuses an
+				// unknown command.
+				if cmd == nil || cmd.Hidden {
 					fmt.Fprintf(stderr, "error: unknown command %q\n", strings.Join(args, " "))
 					return 2
 				}

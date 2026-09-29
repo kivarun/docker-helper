@@ -2,7 +2,7 @@ package main
 
 // builder_launcher_test.go pins the Phase 4A categorized launcher chain
 // (G32 r3 §5): the fixed target context, the single canonical argv
-// grammar, the validate -> procattr -> exec ordering with no
+// grammar, the validate -> thread pin -> procattr -> exec ordering with no
 // intermediate spawn owner, the fail-closed failure semantics, the
 // manager's single composition decision, and the internal command's
 // invisibility on every presentation surface.
@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 // launcherEvent is one observed launcher action.
@@ -24,13 +26,17 @@ type launcherEvent struct {
 	kind string // "procattr", "exec"
 	path string // the procattr pathname or the exec target
 	ctx  string // the procattr value
+	tid  int    // the OS thread the action ran on
 	argv []string
 	env  []string
 }
 
 // launcherSeams installs the procattr/exec observation seams; failures
 // are forced per test through the returned struct. Package-global seams:
-// no t.Parallel around them.
+// no t.Parallel around them. The seams record unix.Gettid() at both legs:
+// the production run holds runtime.LockOSThread across the procattr/exec
+// boundary, so both seam calls run on the same goroutine's pinned OS
+// thread and the recorded tids must be equal.
 type launcherSeams struct {
 	mu          sync.Mutex
 	events      []launcherEvent
@@ -44,7 +50,7 @@ func installLauncherSeams(t *testing.T) *launcherSeams {
 	origProcattr, origExec := builderWriteProcattrExec, builderExecve
 	builderWriteProcattrExec = func(context string) error {
 		s.mu.Lock()
-		s.events = append(s.events, launcherEvent{kind: "procattr", path: "/proc/self/attr/exec", ctx: context})
+		s.events = append(s.events, launcherEvent{kind: "procattr", path: builderProcattrExecPath, ctx: context, tid: unix.Gettid()})
 		s.mu.Unlock()
 		if s.procattrErr != nil {
 			return s.procattrErr
@@ -53,7 +59,7 @@ func installLauncherSeams(t *testing.T) *launcherSeams {
 	}
 	builderExecve = func(path string, argv []string, env []string) error {
 		s.mu.Lock()
-		s.events = append(s.events, launcherEvent{kind: "exec", path: path, argv: append([]string(nil), argv...), env: append([]string(nil), env...)})
+		s.events = append(s.events, launcherEvent{kind: "exec", path: path, tid: unix.Gettid(), argv: append([]string(nil), argv...), env: append([]string(nil), env...)})
 		s.mu.Unlock()
 		if s.execErr != nil {
 			return s.execErr
@@ -163,10 +169,16 @@ func TestBuilderLauncherRejectsInvalidArgv(t *testing.T) {
 
 // TestBuilderLauncherSetExecThenExecFixedTarget proves the launcher's
 // successful chain: the canonical argv is accepted, the procattr write
-// happens with the exact fixed target context, and the exec REPLACES the
-// launcher with the fixed rootlesskit entry file — validate, then write,
-// then exec, with no intermediate spawn owner.
+// happens with the exact fixed target context on the fixed thread-local
+// procattr pathname, and the exec REPLACES the launcher with the fixed
+// rootlesskit entry file — validate, then pin, then write, then exec,
+// with no intermediate spawn owner. The procattr and exec legs must run
+// on the same OS thread: the exec context is per-thread kernel state
+// read at the execve of the writing thread.
 func TestBuilderLauncherSetExecThenExecFixedTarget(t *testing.T) {
+	if builderProcattrExecPath != "/proc/thread-self/attr/exec" {
+		t.Fatalf("procattr path = %q, want the fixed thread-local /proc/thread-self/attr/exec", builderProcattrExecPath)
+	}
 	_, _, _ = processTestManager(t)
 	s := installLauncherSeams(t)
 
@@ -185,8 +197,20 @@ func TestBuilderLauncherSetExecThenExecFixedTarget(t *testing.T) {
 	if procattr.kind != "procattr" || procattr.ctx != "system_u:system_r:docker_helper_rootlesskit_t:s0:c1" {
 		t.Fatalf("procattr event = %+v, want the fixed c1 target context", procattr)
 	}
+	if procattr.path != builderProcattrExecPath {
+		t.Fatalf("procattr path = %q, want %s", procattr.path, builderProcattrExecPath)
+	}
+	if procattr.tid <= 0 {
+		t.Fatalf("procattr leg recorded no OS thread: %+v", procattr)
+	}
 	if execEvent.kind != "exec" {
 		t.Fatalf("second event kind = %q, want exec", execEvent.kind)
+	}
+	if execEvent.tid <= 0 {
+		t.Fatalf("exec leg recorded no OS thread: %+v", execEvent)
+	}
+	if procattr.tid != execEvent.tid {
+		t.Fatalf("procattr and exec ran on different OS threads (%d vs %d): the exec context is per-thread state and must be written on the execing thread", procattr.tid, execEvent.tid)
 	}
 	if execEvent.path != builderManagerRootlessKit {
 		t.Fatalf("exec target = %q, want the fixed %s (no PATH lookup)", execEvent.path, builderManagerRootlessKit)
@@ -397,9 +421,10 @@ func TestBuilderLauncherFailureRunsFailedStartLifecycle(t *testing.T) {
 }
 
 // TestBuilderLaunchExecHiddenFromPresentation proves the internal command
-// appears on NO presentation surface: root help, builder help, the help
-// command, the missing-subcommand listing, the completion script, and the
-// man-page source.
+// appears on NO discovery/listing surface: root help, builder help, the
+// help command, the missing-subcommand listing, the completion script,
+// and the man-page source. Direct help requests on the hidden node itself
+// are covered separately (TestBuilderLaunchExecDirectHelpRefused).
 func TestBuilderLaunchExecHiddenFromPresentation(t *testing.T) {
 	surfaces := []struct {
 		name string
@@ -444,6 +469,38 @@ func TestBuilderLaunchExecHiddenFromPresentation(t *testing.T) {
 	for _, surface := range surfaces {
 		if text := surface.run(t); strings.Contains(text, "launch-exec") {
 			t.Errorf("presentation surface %q leaks the internal command name", surface.name)
+		}
+	}
+}
+
+// TestBuilderLaunchExecDirectHelpRefused proves the hidden node has no
+// direct help surface either: every help request on the node itself
+// (`builder launch-exec --help` / `-h`, `help builder launch-exec`) is
+// refused like an unknown command — exit 2, and the internal help text
+// (the usage grammar, the internal summary, the flags section) is never
+// rendered.
+func TestBuilderLaunchExecDirectHelpRefused(t *testing.T) {
+	for _, args := range [][]string{
+		{"builder", "launch-exec", "--help"},
+		{"builder", "launch-exec", "-h"},
+		{"help", "builder", "launch-exec"},
+	} {
+		var out, errOut bytes.Buffer
+		code := runCommandWithWriters(args, &out, &errOut)
+		joined := strings.Join(args, " ")
+		if code != 2 {
+			t.Errorf("%s: exit %d, want the unknown-command refusal 2 (stdout: %q stderr: %q)", joined, code, out.String(), errOut.String())
+		}
+		text := out.String() + errOut.String()
+		for _, leak := range []string{
+			"Internal launch child",
+			"rootlesskit",
+			"Usage: docker-helper builder launch-exec",
+			"Flags:",
+		} {
+			if strings.Contains(text, leak) {
+				t.Errorf("%s: direct help request leaked internal help content %q (output: %q)", joined, leak, text)
+			}
 		}
 	}
 }

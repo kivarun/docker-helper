@@ -5,12 +5,13 @@ package main
 // manager re-execs the shared binary with this subcommand; the exec
 // transitions into docker_helper_builder_launcher_t, the child validates
 // the canonical category token and the exact canonical production
-// rootlesskit argv, writes its OWN /proc/self/attr/exec with the FIXED
-// target context, and execs the fixed rootlesskit entry file as an execve
-// REPLACEMENT — the pid the manager spawned becomes the rootlesskit
-// session leader (the pid all lifecycle anchors use). The launcher is not
-// a runcon clone and not a general-purpose exec: one executable target,
-// one category grammar, one argv grammar.
+// rootlesskit argv, pins its OS thread, writes its OWN
+// /proc/thread-self/attr/exec with the FIXED target context, and execs
+// the fixed rootlesskit entry file as an execve REPLACEMENT — the pid the
+// manager spawned becomes the rootlesskit session leader (the pid all
+// lifecycle anchors use). The launcher is not a runcon clone and not a
+// general-purpose exec: one executable target, one category grammar, one
+// argv grammar.
 
 import (
 	"errors"
@@ -18,6 +19,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -93,29 +95,48 @@ func builderValidateLaunchArgv(argv []string) ([]string, error) {
 	return argv, nil
 }
 
-// builderWriteProcattrExec writes the forced exec context to the
-// launcher's OWN /proc/self/attr/exec — the fixed procattr pathname, no
-// pid parameter, no libselinux, no security_check_context round-trip: the
-// kernel write is the authoritative validation. Injectable for tests.
+// builderProcattrExecPath is the FIXED thread-local exec procattr
+// pathname: /proc/thread-self/attr/exec, the current-thread form upstream
+// libselinux setexeccon writes through (older kernels:
+// /proc/self/task/<tid>/attr/exec). The exec context is per-thread kernel
+// state read at the execve of the writing thread, so the write and the
+// exec must run on the same OS thread — see runBuilderLaunchExec.
+const builderProcattrExecPath = "/proc/thread-self/attr/exec"
+
+// builderWriteProcattrExec writes the forced exec context to the pinned
+// calling thread's /proc/thread-self/attr/exec — the fixed procattr
+// pathname, no pid parameter, no libselinux, no security_check_context
+// round-trip: the kernel write is the authoritative validation. Injectable
+// for tests.
 var builderWriteProcattrExec = func(context string) error {
-	return os.WriteFile("/proc/self/attr/exec", []byte(context+"\n"), 0)
+	return os.WriteFile(builderProcattrExecPath, []byte(context+"\n"), 0)
 }
 
 // builderExecve replaces the launcher process with the fixed executable
-// (production: unix.Exec). The execve REPLACEMENT form is mandatory: a
-// spawned child with its own pid would break the manager's pid anchors
-// (instance.pid, the process-group lifecycle, STOP, stale-identity
-// proofing). Injectable for tests.
+// (production: unix.Exec). It runs on the same pinned OS thread the
+// procattr write used (see runBuilderLaunchExec). The execve REPLACEMENT
+// form is mandatory: a spawned child with its own pid would break the
+// manager's pid anchors (instance.pid, the process-group lifecycle, STOP,
+// stale-identity proofing). Injectable for tests.
 var builderExecve = func(path string, argv []string, env []string) error {
 	return unix.Exec(path, argv, env)
 }
 
 // runBuilderLaunchExec is the launcher child's entry: validate the
-// canonical category token and the exact canonical rootlesskit argv, write
-// the fixed target context to the launcher's own procattr, then exec the
-// fixed rootlesskit entry file. Any validation refusal exits 2; any
-// procattr or exec failure exits 1; neither ever falls back to a direct
-// launch. The successful Exec replaces this process and never returns.
+// canonical category token and the exact canonical rootlesskit argv, pin
+// the calling OS thread, write the fixed target context to that thread's
+// procattr, then exec the fixed rootlesskit entry file on the same
+// thread. The pin is mandatory: the Go runtime is already multi-threaded
+// when the launcher runs, and the exec context is per-thread state read
+// at the execve of the writing thread (the same contract upstream
+// setexeccon keeps) — an OS-thread migration between the procattr write
+// and the exec would leave the exec reading a different thread's exec
+// context. Any validation refusal exits 2; any procattr or exec failure
+// unlocks the thread and exits 1; neither ever falls back to a direct
+// launch. The successful Exec replaces the pinned calling thread's
+// process image and never returns, so the unlock defer fires only on the
+// failure returns; the manager's pid anchors are unaffected (the spawned
+// pid becomes the rootlesskit process).
 func runBuilderLaunchExec(args []string, stderr io.Writer) int {
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "error: launch-exec requires the operation category token")
@@ -131,6 +152,8 @@ func runBuilderLaunchExec(args []string, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 2
 	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	if err := builderWriteProcattrExec(builderProcessTargetContext(category)); err != nil {
 		fmt.Fprintf(stderr, "error: cannot set the forced exec context: %v\n", err)
 		return 1
