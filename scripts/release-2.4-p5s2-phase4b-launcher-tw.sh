@@ -728,6 +728,33 @@ PREFLIGHT_OK=1
     PREFLIGHT_OK=0
   fi
 
+  echo "=== flow cap_userns identity (the 4C-15 composition: exactly { sys_admin sys_ptrace sys_chroot net_admin }, exactly one rule, in-userns only — the plain capability class stays zero) ==="
+  echo "--- raw effective inventory (rootlesskit -> cap_userns; base-policy expansions recorded, not asserted):"
+  sesearch --allow -s docker_helper_rootlesskit_t -c cap_userns /sys/fs/selinux/policy || true
+  echo "--- CONCRETE module contribution (source must be docker_helper_rootlesskit_t; the perm set must be EXACTLY the four evidenced bits):"
+  CAP_CONCRETE="$(sesearch --allow -s docker_helper_rootlesskit_t -c cap_userns /sys/fs/selinux/policy 2>/dev/null | awk '$2 == "docker_helper_rootlesskit_t"' || true)"
+  printf '%s\n' "${CAP_CONCRETE:-(none)}"
+  CAP_SET_OK=0
+  CAP_SET="$(printf '%s\n' "$CAP_CONCRETE" | sed -n 's/.*{ \(.*\) };/\1/p' | tr ' ' '\n' | sort | tr '\n' ' ' || true)"
+  echo "extracted perm set: ${CAP_SET:-(none)}"
+  if [ "$CAP_SET" = "net_admin sys_admin sys_chroot sys_ptrace " ]; then
+    CAP_SET_OK=1
+  fi
+  echo "--- plain capability negatives (rootlesskit self:capability net_admin/net_raw must be absent — the live AVCs name cap_userns, never capability):"
+  sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_admin /sys/fs/selinux/policy || true
+  sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_raw /sys/fs/selinux/policy || true
+  CAP_CAPNEG_OK=0
+  if ! { sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_admin /sys/fs/selinux/policy 2>/dev/null; \
+         sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_raw /sys/fs/selinux/policy 2>/dev/null; } | grep -aq "docker_helper_rootlesskit_t"; then
+    CAP_CAPNEG_OK=1
+  fi
+  if [ "$CAP_SET_OK" = 1 ] && [ "$CAP_CAPNEG_OK" = 1 ]; then
+    echo "PASS: flow cap_userns identity (exactly { sys_admin sys_ptrace sys_chroot net_admin }, exactly one rule; plain capability net_admin/net_raw absent)"
+  else
+    echo "FAIL: flow cap_userns identity (set=$CAP_SET_OK capability-negative=$CAP_CAPNEG_OK)"
+    PREFLIGHT_OK=0
+  fi
+
   echo "=== netlink-route create+setopt+bind+getattr identity (the 4C-10 composition: exactly { create setopt bind getattr }, no other socket permission, no capability surface) ==="
   echo "--- allow rules on netlink_route_socket (expected: the rootlesskit child's create+setopt+bind+getattr only; attribute-generic base-policy rules recorded, not asserted):"
   sesearch --allow -c netlink_route_socket /sys/fs/selinux/policy || true
@@ -1111,6 +1138,45 @@ if [ "$TUN_IOCTL_GONE_OK" = 1 ]; then
 else
   marker "BLOCKER=the 4C-14 TUN ioctl composition did not hold on the loaded policy (see 14-tun-ioctl-gone.txt)"
   marker "TUN-IOCTL-BOUNDARY=FAIL"
+  finish FAIL; exit 0
+fi
+
+# ---- the 4C-15 gate: the in-namespace CAP_NET_ADMIN check is now granted
+# ---- (cap_userns net_admin), so the canonical 4C-14 boundary — denied
+# ---- { net_admin } tclass=cap_userns self->self on the TUNSETIFF path —
+# ---- must be GONE, and the kernel capability-check EPERM at that check
+# ---- must be gone: the flow passed ns_capable(net->user_ns,
+# ---- CAP_NET_ADMIN) and its TUNSETIFF request moved into the driver's
+# ---- next LSM hook. The first new terminal boundary stays recorded by
+# ---- the generic mechanism (10-avc-first-downstream.txt +
+# ---- DOWNSTREAM-BOUNDARY marker); nothing downstream (tun_socket,
+# ---- nlmsg, plain capability) is pre-granted here.
+CAP_NETADMIN_GONE_OK=1
+{
+  echo "=== cap_userns AVCs of the window (the 4C-14 net_admin boundary must be absent) ==="
+  CAP_AVC_WINDOW="$(grep -a 'tclass=cap_userns' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null || true)"
+  printf '%s\n' "${CAP_AVC_WINDOW:-(none — no cap_userns denial in the window)}"
+  echo "--- the exact 4C-14 shape (denied { net_admin } comm=ip scontext==tcontext=flow:c1):"
+  OLD_CAP_NETADMIN="$(printf '%s\n' "$CAP_AVC_WINDOW" | grep -a 'denied  *{ net_admin }' | grep -a "scontext=system_u:system_r:$RK_DOMAIN:s0:" || true)"
+  printf '%s\n' "${OLD_CAP_NETADMIN:-(none — the 4C-14 cap_userns net_admin denial is gone)}"
+  echo "--- the manager journal's 4C-14 EPERM shape (must be gone):"
+  MGR_IOCTL_EPERM="$(grep -a 'ioctl(TUNSETIFF): Operation not permitted' "$EVIDENCE_DIR/07-manager-diag.txt" 2>/dev/null || true)"
+  printf '%s\n' "${MGR_IOCTL_EPERM:-(none — the TUNSETIFF capability-check EPERM is gone)}"
+  if [ -n "$OLD_CAP_NETADMIN" ]; then
+    echo "GATE: the 4C-14 cap_userns net_admin boundary reappeared"
+    CAP_NETADMIN_GONE_OK=0
+  fi
+  if [ -n "$MGR_IOCTL_EPERM" ]; then
+    echo "GATE: the flow still dies at the in-namespace CAP_NET_ADMIN check (the journal still shows the 4C-14 EPERM shape)"
+    CAP_NETADMIN_GONE_OK=0
+  fi
+} > "$EVIDENCE_DIR/15-cap-netadmin-gone.txt" 2>&1
+cat "$EVIDENCE_DIR/15-cap-netadmin-gone.txt" >&2
+if [ "$CAP_NETADMIN_GONE_OK" = 1 ]; then
+  marker "CAP-NETADMIN-BOUNDARY=GONE"
+else
+  marker "BLOCKER=the 4C-15 cap_userns net_admin composition did not hold (see 15-cap-netadmin-gone.txt)"
+  marker "CAP-NETADMIN-BOUNDARY=FAIL"
   finish FAIL; exit 0
 fi
 
