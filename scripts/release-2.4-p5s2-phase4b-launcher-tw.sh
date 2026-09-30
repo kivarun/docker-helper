@@ -593,27 +593,30 @@ PREFLIGHT_OK=1
     PREFLIGHT_OK=0
   fi
 
-  echo "=== TUN device-node access identity (the 4C-11 composition: the distro tun_tap_device_t identity, exactly { read write }, no macro, no ioctl, no capability surface) ==="
+  echo "=== TUN device-node access identity (the 4C-12 composition: the distro tun_tap_device_t identity, exactly { read write open }, no ioctl, no capability surface) ==="
+  # NOTE (4C-12 harness-mechanics correction): a refpolicy macro's NAME
+  # does not exist after policy compilation — sesearch sees only the
+  # resulting AV rules — so macro provenance (the corenet_rw_tun_tap_dev
+  # ban) is asserted at SOURCE level by the Go policy test, never by
+  # sesearch here. This preflight asserts ONLY the effective concrete
+  # permission surface.
   echo "--- the stand probe (02-tun-probe.txt):"
   cat "$EVIDENCE_DIR/02-tun-probe.txt" 2>/dev/null || true
   echo "--- raw effective inventory (rootlesskit -> tun_tap_device_t chr_file; base-policy expansions recorded, not asserted):"
   sesearch --allow -s docker_helper_rootlesskit_t -t tun_tap_device_t -c chr_file /sys/fs/selinux/policy || true
-  echo "--- CONCRETE module contribution (source must be docker_helper_rootlesskit_t; must be exactly read+write):"
+  echo "--- CONCRETE module contribution (source must be docker_helper_rootlesskit_t; must be exactly read+write+open):"
   sesearch --allow -s docker_helper_rootlesskit_t -t tun_tap_device_t -c chr_file /sys/fs/selinux/policy 2>/dev/null | awk '$2 == "docker_helper_rootlesskit_t"' || true
   echo "--- flow-domain capability/cap_userns net_admin/net_raw (must be zero):"
   sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_admin /sys/fs/selinux/policy || true
   sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_raw /sys/fs/selinux/policy || true
   sesearch --allow -s docker_helper_rootlesskit_t -c cap_userns -p net_admin /sys/fs/selinux/policy || true
-  TUN_PAIR_OK=0; TUN_NO_MORE_OK=0; TUN_NO_MACRO_OK=0; TUN_LABEL_OK=0; TUN_NO_NETADMIN_OK=0
+  TUN_PAIR_OK=0; TUN_NO_MORE_OK=0; TUN_LABEL_OK=0; TUN_NO_NETADMIN_OK=0
   TUN_CONCRETE="$(sesearch --allow -s docker_helper_rootlesskit_t -t tun_tap_device_t -c chr_file /sys/fs/selinux/policy 2>/dev/null | awk '$2 == "docker_helper_rootlesskit_t"' || true)"
-  if printf '%s\n' "$TUN_CONCRETE" | grep -aq "read" && printf '%s\n' "$TUN_CONCRETE" | grep -aq "write"; then
+  if printf '%s\n' "$TUN_CONCRETE" | grep -aq "read" && printf '%s\n' "$TUN_CONCRETE" | grep -aq "write" && printf '%s\n' "$TUN_CONCRETE" | grep -aq "open"; then
     TUN_PAIR_OK=1
   fi
-  if ! printf '%s\n' "$TUN_CONCRETE" | grep -aqE "ioctl|append|lock|create|setattr|open|getattr|exec"; then
+  if ! printf '%s\n' "$TUN_CONCRETE" | grep -aqE "ioctl|append|lock|create|setattr|getattr|exec"; then
     TUN_NO_MORE_OK=1
-  fi
-  if ! sesearch --allow -s docker_helper_rootlesskit_t -t tun_tap_device_t /sys/fs/selinux/policy 2>/dev/null | grep -aq "corenet"; then
-    TUN_NO_MACRO_OK=1
   fi
   if [ -e /dev/net/tun ]; then
     if matchpathcon /dev/net/tun 2>/dev/null | grep -aq "object_r:tun_tap_device_t:s0"; then
@@ -630,10 +633,10 @@ PREFLIGHT_OK=1
          sesearch --allow -s docker_helper_rootlesskit_t -c cap_userns -p net_admin /sys/fs/selinux/policy 2>/dev/null; } | grep -aq "docker_helper_rootlesskit_t"; then
     TUN_NO_NETADMIN_OK=1
   fi
-  if [ "$TUN_PAIR_OK" = 1 ] && [ "$TUN_NO_MORE_OK" = 1 ] && [ "$TUN_NO_MACRO_OK" = 1 ] && [ "$TUN_LABEL_OK" = 1 ] && [ "$TUN_NO_NETADMIN_OK" = 1 ]; then
-    echo "PASS: tun device-node access identity (distro tun_tap_device_t + exactly { read write }, no macro, no ioctl, no capability surface)"
+  if [ "$TUN_PAIR_OK" = 1 ] && [ "$TUN_NO_MORE_OK" = 1 ] && [ "$TUN_LABEL_OK" = 1 ] && [ "$TUN_NO_NETADMIN_OK" = 1 ]; then
+    echo "PASS: tun device-node access identity (distro tun_tap_device_t + exactly { read write open }, no ioctl, no capability surface)"
   else
-    echo "FAIL: tun device-node access identity (pair=$TUN_PAIR_OK no-more=$TUN_NO_MORE_OK no-macro=$TUN_NO_MACRO_OK label=$TUN_LABEL_OK no-netadmin=$TUN_NO_NETADMIN_OK)"
+    echo "FAIL: tun device-node access identity (pair=$TUN_PAIR_OK no-more=$TUN_NO_MORE_OK label=$TUN_LABEL_OK no-netadmin=$TUN_NO_NETADMIN_OK)"
     PREFLIGHT_OK=0
   fi
 
