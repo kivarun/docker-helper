@@ -117,6 +117,7 @@ module docker_helper 1.2;
 		class unix_stream_socket { connectto getattr ioctl read write };
 		class udp_socket { create setopt connect getattr read write };
 		class netlink_route_socket { create setopt bind getattr };
+		class tun_socket { create };
 		class capability { dac_read_search dac_override sys_admin fowner setuid setgid };
 		class capability2 { wake_alarm kill };
 		class user_namespace { create };
@@ -1820,6 +1821,41 @@ allow docker_helper_rootlesskit_t self:user_namespace create;
 # ANOTHER operation's namespaces) is NOT proven safe by this grant: it
 # stays an open concurrency/security gate before the Release GO.
 allow docker_helper_rootlesskit_t self:cap_userns { sys_admin sys_ptrace sys_chroot net_admin };
+
+# The flow's TUN-socket object creation (P5-S2 Phase 4C-16): the
+# NEW-device branch of TUNSETIFF. After the proven chr_file ioctl+xperm
+# gate (4C-14) and the in-namespace CAP_NET_ADMIN check (4C-15),
+# tun_set_iff()'s new-interface branch calls security_tun_dev_create() —
+# the kernel hook SELinux maps to self:tun_socket create — before the
+# tap device object is created and registered. Live enforcing AVC
+# evidence (Phase 4C-15 canonical run 36755379800, audit record 422:
+# denied { create } for pid=3058 comm="ip"
+# scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+# tcontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+# tclass=tun_socket permissive=0) with the direct userspace failure
+# "ioctl(TUNSETIFF): Permission denied" (EACCES at this hook; the errno
+# changed again from the 4C-14 capability-check EPERM, and the causal
+# placement is INSIDE the same TUNSETIFF call, past the passed
+# ns_capable(net->user_ns, CAP_NET_ADMIN) check — the request completes
+# SELinux mediation exactly here and must not stop).
+#
+# SCOPE — READ CAREFULLY: exactly ONE permission of the tun_socket
+# class — the NEW-device creation of the flow's own TUNSETIFF path.
+# Deliberately NOT granted: attach_queue (the TUNSETQUEUE /
+# queue-attachment path — security_tun_dev_attach_queue() — a distinct
+# UAPI surface, not this evidenced new-device creation), relabelfrom/
+# relabelto (the attach-to-an-existing-TUN-object path —
+# security_tun_dev_open()'s relabel checks), and NO inherited generic
+# socket permission (no bind/connect/read/write/getopt/setopt/setattr/
+# getattr/lock/append/name_bind/listen/accept/shutdown/map). The
+# distro's create_socket_perms-style socket macros are deliberately NOT
+# used: they expand far beyond the evidenced creation boundary — that
+# is explicitly not this policy's model. Like every flow-domain grant
+# this is a domain-wide SELF permission, not an operation-scoped one;
+# the operation separation is owned by the categorized process/object
+# MCS boundary, and cross-operation namespace targeting stays an open
+# concurrency/security gate before the Release GO.
+allow docker_helper_rootlesskit_t self:tun_socket create;
 
 # --- MCS operation isolation: constrained-domain membership (G32 r3 §6.A) ---
 #

@@ -721,6 +721,99 @@ func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
 			t.Errorf("mutation %q must trip the netlink-route create invariant", mut.name)
 		}
 	}
+	// The 4C-16 TUN-socket create invariant: the require block declares
+	// exactly { create } on tun_socket, and the rootlesskit child domain
+	// holds EXACTLY ONE self:tun_socket allow — the evidenced
+	// security_tun_dev_create() boundary of the NEW-device TUNSETIFF path
+	// (the canonical 4C-15 enforcing run 36755379800, audit record 422:
+	// denied { create } comm="ip" self->self tclass=tun_socket
+	// permissive=0, after the chr_file ioctl+xperm gate and the
+	// cap_userns net_admin check both passed) — no attach_queue (the
+	// TUNSETQUEUE/queue-attachment path, not the new-device creation), no
+	// relabelfrom/relabelto (the attach-to-an-existing-TUN-object path),
+	// no inherited generic socket permission, no distro
+	// create_socket_perms-style macro, and no other subject holds a
+	// tun_socket allow.
+	for _, want := range []string{
+		"class tun_socket { create };",
+		"allow docker_helper_rootlesskit_t self:tun_socket create;",
+	} {
+		if !strings.Contains(policy, want) {
+			t.Errorf("the tun-socket create grant must be present: %q", want)
+		}
+	}
+	tunSocketViolations := func(text string) []string {
+		var violations []string
+		tunSocketRequireDecls := 0
+		rootlesskitTunSocketRules := 0
+		for _, line := range strings.Split(text, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") || trimmed == "" {
+				continue
+			}
+			switch {
+			case strings.Contains(trimmed, "create_socket_perms"):
+				violations = append(violations, "the distro socket macros are banned (create_socket_perms expands far beyond the evidenced new-device creation boundary): "+trimmed)
+			case strings.Contains(trimmed, "class tun_socket "):
+				if trimmed == "class tun_socket { create };" {
+					tunSocketRequireDecls++
+				} else {
+					violations = append(violations, fmt.Sprintf("the require block's tun_socket declaration is exactly the one evidenced creation permission: %s", trimmed))
+				}
+			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, ":tun_socket"):
+				if trimmed == "allow docker_helper_rootlesskit_t self:tun_socket create;" {
+					rootlesskitTunSocketRules++
+				} else {
+					violations = append(violations, fmt.Sprintf("the tun_socket surface is exactly the rootlesskit child's single self-create rule (no attach_queue, no relabel*, no inherited socket permission, no other subject): %s", trimmed))
+				}
+			}
+		}
+		if tunSocketRequireDecls != 1 {
+			violations = append(violations, fmt.Sprintf("the require block must declare tun_socket exactly once as { create } — found %d", tunSocketRequireDecls))
+		}
+		if rootlesskitTunSocketRules != 1 {
+			violations = append(violations, fmt.Sprintf("the rootlesskit child domain must hold exactly one tun_socket rule — the evidenced self:tun_socket create grant — found %d", rootlesskitTunSocketRules))
+		}
+		return violations
+	}
+	if violations := tunSocketViolations(policy); len(violations) > 0 {
+		t.Errorf("the committed policy violates the tun-socket create invariants: %v", violations)
+	}
+	// Regressions: neither the require declaration nor the rule may lose
+	// its evidenced shape.
+	for _, regressed := range []struct {
+		name string
+		pin  string
+	}{
+		{"missing require create", "class tun_socket { create };"},
+		{"missing allow create", "allow docker_helper_rootlesskit_t self:tun_socket create;"},
+	} {
+		mutated := strings.Replace(policy, regressed.pin, "", 1)
+		if len(tunSocketViolations(mutated)) == 0 {
+			t.Errorf("the tun-socket %q regression must trip the create invariant", regressed.name)
+		}
+	}
+	for _, mut := range []struct {
+		name string
+		rule string
+	}{
+		{"duplicate create rule", "allow docker_helper_rootlesskit_t self:tun_socket create;"},
+		{"parallel create rule (braced form)", "allow docker_helper_rootlesskit_t self:tun_socket { create };"},
+		{"widened attach_queue", "allow docker_helper_rootlesskit_t self:tun_socket attach_queue;"},
+		{"widened relabelfrom", "allow docker_helper_rootlesskit_t self:tun_socket relabelfrom;"},
+		{"widened relabelto", "allow docker_helper_rootlesskit_t self:tun_socket relabelto;"},
+		{"distro create_socket_perms macro", "create_socket_perms(docker_helper_rootlesskit_t)"},
+		{"widened require declaration", "class tun_socket { create attach_queue };"},
+		{"tun_socket for the manager", "allow docker_helper_builder_t self:tun_socket create;"},
+		{"tun_socket for the launcher", "allow docker_helper_builder_launcher_t self:tun_socket create;"},
+		{"tun_socket for the network helper", "allow docker_helper_slirp4netns_t self:tun_socket create;"},
+		{"tun_socket for the UID-map helper", "allow docker_helper_newuidmap_t self:tun_socket create;"},
+		{"tun_socket for the GID-map helper", "allow docker_helper_newgidmap_t self:tun_socket create;"},
+	} {
+		if len(tunSocketViolations(policy+"\n"+mut.rule)) == 0 {
+			t.Errorf("mutation %q must trip the tun-socket create invariant", mut.name)
+		}
+	}
 }
 
 // TestSELinuxPolicyMCSMembership verifies the G32 r3 §6.A constrained
