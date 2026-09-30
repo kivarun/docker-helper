@@ -816,6 +816,8 @@ PREFLIGHT_OK=1
   if ! printf '%s\n' "$NL_FLOW_RULES" | grep -aqE "getopt|connect|nlmsg|ioctl|shutdown| read| write"; then
     NL_NO_MORE_OK=1
   fi
+  echo "--- flow-domain dontaudit inventory on netlink_route_socket (audit-suppression provenance; captured BEFORE the 4C-18 diagnostic -DB; the base policy's generic suppressions are expected here):"
+  sesearch --dontaudit -s docker_helper_rootlesskit_t -c netlink_route_socket /sys/fs/selinux/policy || true
   if ! { sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_admin /sys/fs/selinux/policy 2>/dev/null; \
          sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_raw /sys/fs/selinux/policy 2>/dev/null; } | grep -aq "docker_helper_rootlesskit_t"; then
     NL_NO_NETADMIN_OK=1
@@ -878,6 +880,36 @@ if command -v auditctl >/dev/null 2>&1; then
   auditctl -e 1 > /dev/null 2>&1 || true
   log "audit rules enforcement on"
 fi
+# ============================================================
+# 4C-18 diagnostic leg: dontaudit disabled for THIS window only
+# ============================================================
+# ZERO policy semantic delta. `semodule -DB` rebuilds and loads the
+# policy with dontaudit rules REMOVED FROM AUDIT REPORTING ONLY —
+# permit/deny enforcement is unchanged, so the observed syscall path
+# stays the production path; the ONLY difference is audit visibility.
+# The run is therefore diagnostic, NOT canonical: its AVC inventory is
+# supersets the production audit would omit. The baseline (dontaudit
+# enabled) is restored right after the window and verified.
+semodule -DB > "$EVIDENCE_DIR/18-semodule-db-diag.txt" 2>&1 \
+  || { note "semodule -DB (diagnostic) failed"; finish INCOMPLETE; exit 0; }
+{
+  echo "=== 4C-18 diagnostic state after semodule -DB ==="
+  echo "getenforce: $(getenforce 2>/dev/null)"
+  echo "docker_helper permissive domains (must be none):"
+  semanage permissive -l 2>/dev/null | grep -a docker_helper || echo "(none)"
+  echo "flow-domain dontaudit rules on netlink_route_socket AFTER -DB (must be zero — that is the whole point):"
+  sesearch --dontaudit -s docker_helper_rootlesskit_t -c netlink_route_socket /sys/fs/selinux/policy 2>/dev/null || true
+  echo "NOTE: this leg's audit inventory is diagnostic-only; enforcement decisions are unchanged."
+} >> "$EVIDENCE_DIR/18-semodule-db-diag.txt"
+cat "$EVIDENCE_DIR/18-semodule-db-diag.txt" >&2
+# Kernel-side syscall chronology for the live window (audit rules, not
+# ptrace — no SELinux ptrace authority is needed or granted): every
+# socket/socketpair/sendmsg/sendto/recvmsg/recvfrom/ioctl/close is
+# logged with pid, args, and exit code; the report filters by pid.
+auditctl -a always,exit -F arch=b64 \
+  -S socket,socketpair,sendmsg,sendto,recvmsg,recvfrom,ioctl,close \
+  -k p5s2diag > "$EVIDENCE_DIR/18-auditctl-sysrules.txt" 2>&1 \
+  || { note "auditctl syscall-chronology rules failed"; finish INCOMPLETE; exit 0; }
 T0="$(date +%s)"
 echo "$T0" > "$EVIDENCE_DIR/window-start-epoch"
 auditctl -s > "$EVIDENCE_DIR/audit-status-window-start.txt" 2>&1 || true
@@ -920,6 +952,28 @@ log "D: live START $OP_ID (sampler armed)"
       if [ $(( RANDOM % 8 )) -eq 0 ]; then
         ps -eZ 2>/dev/null | awk '$1 ~ /docker_helper_rootlesskit_t/ { print "PS-FLOW " $0 }' >> "$EVIDENCE_DIR/12-uncategorized-ps.txt"
       fi
+      # 4C-18 tap0-lifecycle observer: the namespaces owner is the
+      # leader's child; /proc/<child>/net/dev is the kernel's interface
+      # table OF THE TARGET NETNS, read via host root authority — the
+      # blocked flow's own authority is untouched. On the first hit the
+      # netns-independent detail probe records name/ifindex/state.
+      CHILDREN="$(cat "/proc/$seen_pid/task/$seen_pid/children" 2>/dev/null || true)"
+      for C in $CHILDREN; do
+        TAP_LINE="$(grep -a 'tap0' "/proc/$C/net/dev" 2>/dev/null || true)"
+        if [ -n "$TAP_LINE" ]; then
+          printf 'TAP0-OBSERVED %s child=%s ns=%s ctx=%s dev=%s\n' \
+            "$(date +%s.%N)" "$C" \
+            "$(readlink "/proc/$C/ns/net" 2>/dev/null)" \
+            "$(tr -d '\0' < "/proc/$C/attr/current" 2>/dev/null)" \
+            "$(printf '%s\n' "$TAP_LINE" | head -1 | awk '{print $1, $2}')" \
+            >> "$EVIDENCE_DIR/05-flow-context.txt"
+          if [ ! -f "$EVIDENCE_DIR/20-tap0-detail.done" ]; then
+            nsenter -t "$C" -n -- ip link show tap0 2>&1 \
+              | head -2 > "$EVIDENCE_DIR/20-tap0-detail.txt" || true
+            touch "$EVIDENCE_DIR/20-tap0-detail.done"
+          fi
+        fi
+      done
     fi
     # Batched label sampling: ONE stat call for the four provisioned
     # per-op paths. The sampler's iteration cost is the catch-rate
@@ -994,6 +1048,27 @@ wait "$SAMPLER_PID" 2>/dev/null || true
 # ---- the window's audit slice (before anything converges further)
 harvest_avcs_since "$T0" "$EVIDENCE_DIR/09-avc-window.txt"
 auditctl -s > "$EVIDENCE_DIR/audit-status-window-end.txt" 2>&1 || true
+
+# ---- 4C-18: the syscall-chronology slice for the window, then the
+# ---- diagnostic restore (baseline dontaudit back, audit rules flushed)
+{
+  echo "=== audit.log SYSCALL records (key p5s2diag) since epoch $T0 ==="
+  grep -a 'type=SYSCALL' /var/log/audit/audit.log 2>/dev/null \
+    | grep -a 'p5s2diag' \
+    | awk -v s="$T0" '{ for (i = 1; i <= NF; i++) if ($i ~ /^msg=audit\(/) { ts = substr($i, 11); split(ts, t, "."); if (t[1] + 0 >= s + 0) print; break } }' \
+    || true
+  echo "=== ausearch -k p5s2diag --raw (SYSCALL records) ==="
+  ausearch -k p5s2diag --raw 2>/dev/null | grep -a 'type=SYSCALL' || true
+} > "$EVIDENCE_DIR/18-syscall-chronology.txt" 2>&1
+auditctl -D > /dev/null 2>&1 || true
+semodule -B >> "$EVIDENCE_DIR/18-semodule-db-diag.txt" 2>&1 || true
+{
+  echo "=== 4C-18 diagnostic restore (post-window semodule -B) ==="
+  echo "getenforce: $(getenforce 2>/dev/null)"
+  echo "flow-domain dontaudit rules on netlink_route_socket AFTER the restore (non-zero = the production baseline is back):"
+  sesearch --dontaudit -s docker_helper_rootlesskit_t -c netlink_route_socket /sys/fs/selinux/policy 2>/dev/null || true
+} >> "$EVIDENCE_DIR/18-semodule-db-diag.txt"
+cat "$EVIDENCE_DIR/18-syscall-chronology.txt" >&2
 
 # ---- manager diagnostics of the window (procattr/exec failures surface here)
 {
