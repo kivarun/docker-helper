@@ -791,15 +791,15 @@ PREFLIGHT_OK=1
     PREFLIGHT_OK=0
   fi
 
-  echo "=== netlink-route create+setopt+bind+getattr identity (the 4C-10 composition: exactly { create setopt bind getattr }, no other socket permission, no capability surface) ==="
-  echo "--- allow rules on netlink_route_socket (expected: the rootlesskit child's create+setopt+bind+getattr only; attribute-generic base-policy rules recorded, not asserted):"
+  echo "=== netlink-route send+lookup identity (the 4C-19 composition: exactly { create setopt bind getattr write }, no other socket permission, no capability surface) ==="
+  echo "--- allow rules on netlink_route_socket (expected: the rootlesskit child's create+setopt+bind+getattr+write only; attribute-generic base-policy rules recorded, not asserted):"
   sesearch --allow -c netlink_route_socket /sys/fs/selinux/policy || true
-  echo "--- the flow domain's own netlink_route_socket rules (concrete; must be exactly create+setopt+bind+getattr):"
+  echo "--- the flow domain's own netlink_route_socket rules (concrete; must be exactly create+setopt+bind+getattr+write):"
   sesearch --allow -s docker_helper_rootlesskit_t -c netlink_route_socket /sys/fs/selinux/policy || true
   echo "--- flow-domain plain capability net_admin/net_raw (must be zero; the in-namespace cap_userns net_admin authority lives ONLY in the child's own cap_userns rule — the 4C-15 grant — never in a netlink rule):"
   sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_admin /sys/fs/selinux/policy || true
   sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_raw /sys/fs/selinux/policy || true
-  NL_CREATE_OK=0; NL_SETOPT_OK=0; NL_BIND_OK=0; NL_GETATTR_OK=0; NL_NO_MORE_OK=0; NL_NO_NETADMIN_OK=0
+  NL_CREATE_OK=0; NL_SETOPT_OK=0; NL_BIND_OK=0; NL_GETATTR_OK=0; NL_WRITE_OK=0; NL_NO_MORE_OK=0; NL_NO_NETADMIN_OK=0
   NL_FLOW_RULES="$(sesearch --allow -s docker_helper_rootlesskit_t -c netlink_route_socket /sys/fs/selinux/policy 2>/dev/null || true)"
   if printf '%s\n' "$NL_FLOW_RULES" | grep -aq "create"; then
     NL_CREATE_OK=1
@@ -813,19 +813,48 @@ PREFLIGHT_OK=1
   if printf '%s\n' "$NL_FLOW_RULES" | grep -aq "getattr"; then
     NL_GETATTR_OK=1
   fi
-  if ! printf '%s\n' "$NL_FLOW_RULES" | grep -aqE "getopt|connect|nlmsg|ioctl|shutdown| read| write"; then
+  if printf '%s\n' "$NL_FLOW_RULES" | grep -aq " write"; then
+    NL_WRITE_OK=1
+  fi
+  # The 4C-19 no-more check: read/nlmsg_*/connect/getopt/ioctl/shutdown
+  # and nlmsg forms stay closed (write is now the evidenced surface).
+  if ! printf '%s\n' "$NL_FLOW_RULES" | grep -aqE "getopt|connect|nlmsg|ioctl|shutdown| read"; then
     NL_NO_MORE_OK=1
   fi
-  echo "--- flow-domain dontaudit inventory on netlink_route_socket (audit-suppression provenance; captured BEFORE the 4C-18 diagnostic -DB; the base policy's generic suppressions are expected here):"
+  echo "--- the message-level absence proof (each individually; none may be present):"
+  for denied_perm in nlmsg_read nlmsg_write connect sendto read; do
+    if printf '%s\n' "$NL_FLOW_RULES" | grep -aq "$denied_perm"; then
+      echo "PRESENT (must not be): $denied_perm"
+      NL_NO_MORE_OK=0
+    else
+      echo "absent: $denied_perm"
+    fi
+  done
+  echo "--- flow-domain dontaudit inventory on netlink_route_socket (audit-suppression provenance; captured on the production baseline BEFORE any diagnostic leg):"
   sesearch --dontaudit -s docker_helper_rootlesskit_t -c netlink_route_socket /sys/fs/selinux/policy || true
+  echo "--- live Netlink mediation model (recorded, NOT changed): the policycap state decides how the next message-specific boundary is read"
+  if command -v seinfo >/dev/null 2>&1; then
+    echo "seinfo --polcap:"
+    seinfo --polcap /sys/fs/selinux/policy 2>/dev/null | grep -a -A1 -B1 'netlink' || true
+    echo "--- full polcap list:"
+    seinfo --polcap /sys/fs/selinux/policy 2>/dev/null || true
+    if seinfo --polcap /sys/fs/selinux/policy 2>/dev/null | grep -aq 'netlink_xperm.*[[:space:]]\+on\|netlink_xperm.*true\|netlink_xperm.*enabled'; then
+      echo "NETLINK_XPERM = enabled"
+    else
+      echo "NETLINK_XPERM = disabled"
+    fi
+  else
+    echo "(seinfo unavailable — recording the raw polcap probe)"
+    grep -a netlink_xperm /sys/fs/selinux/policy 2>/dev/null || echo "(no polcap info)"
+  fi
   if ! { sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_admin /sys/fs/selinux/policy 2>/dev/null; \
          sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_raw /sys/fs/selinux/policy 2>/dev/null; } | grep -aq "docker_helper_rootlesskit_t"; then
     NL_NO_NETADMIN_OK=1
   fi
-  if [ "$NL_CREATE_OK" = 1 ] && [ "$NL_SETOPT_OK" = 1 ] && [ "$NL_BIND_OK" = 1 ] && [ "$NL_GETATTR_OK" = 1 ] && [ "$NL_NO_MORE_OK" = 1 ] && [ "$NL_NO_NETADMIN_OK" = 1 ]; then
-    echo "PASS: netlink-route create+setopt+bind+getattr identity (exactly { create setopt bind getattr }, no capability surface)"
+  if [ "$NL_CREATE_OK" = 1 ] && [ "$NL_SETOPT_OK" = 1 ] && [ "$NL_BIND_OK" = 1 ] && [ "$NL_GETATTR_OK" = 1 ] && [ "$NL_WRITE_OK" = 1 ] && [ "$NL_NO_MORE_OK" = 1 ] && [ "$NL_NO_NETADMIN_OK" = 1 ]; then
+    echo "PASS: netlink-route create+setopt+bind+getattr+write identity (exactly the five evidenced permissions, no capability surface)"
   else
-    echo "FAIL: netlink-route create+setopt+bind+getattr identity (create=$NL_CREATE_OK setopt=$NL_SETOPT_OK bind=$NL_BIND_OK getattr=$NL_GETATTR_OK no-more=$NL_NO_MORE_OK no-netadmin=$NL_NO_NETADMIN_OK)"
+    echo "FAIL: netlink-route create+setopt+bind+getattr+write identity (create=$NL_CREATE_OK setopt=$NL_SETOPT_OK bind=$NL_BIND_OK getattr=$NL_GETATTR_OK write=$NL_WRITE_OK no-more=$NL_NO_MORE_OK no-netadmin=$NL_NO_NETADMIN_OK)"
     PREFLIGHT_OK=0
   fi
 
@@ -881,26 +910,21 @@ if command -v auditctl >/dev/null 2>&1; then
   log "audit rules enforcement on"
 fi
 # ============================================================
-# 4C-18 diagnostic leg: dontaudit disabled for THIS window only
+# 4C-19: the CANONICAL window runs PRODUCTION policy — dontaudit
+# ENABLED (no semodule -DB here). The dontaudit-disabled companion
+# window runs after the canonical gates pass (section CC), so the
+# canonical leg's audit behavior stays production-identical and the
+# 4C-18 boundary comparison (canonical vs -DB) is reproduced for the
+# new composition.
 # ============================================================
-# ZERO policy semantic delta. `semodule -DB` rebuilds and loads the
-# policy with dontaudit rules REMOVED FROM AUDIT REPORTING ONLY —
-# permit/deny enforcement is unchanged, so the observed syscall path
-# stays the production path; the ONLY difference is audit visibility.
-# The run is therefore diagnostic, NOT canonical: its AVC inventory is
-# supersets the production audit would omit. The baseline (dontaudit
-# enabled) is restored right after the window and verified.
-semodule -DB > "$EVIDENCE_DIR/18-semodule-db-diag.txt" 2>&1 \
-  || { note "semodule -DB (diagnostic) failed"; finish INCOMPLETE; exit 0; }
 {
-  echo "=== 4C-18 diagnostic state after semodule -DB ==="
+  echo "=== 4C-19 canonical-window baseline (production policy, dontaudit ENABLED) ==="
   echo "getenforce: $(getenforce 2>/dev/null)"
   echo "docker_helper permissive domains (must be none):"
   semanage permissive -l 2>/dev/null | grep -a docker_helper || echo "(none)"
-  echo "flow-domain dontaudit rules on netlink_route_socket AFTER -DB (must be zero — that is the whole point):"
+  echo "flow-domain dontaudit inventory on netlink_route_socket (NON-ZERO = the generic write/read suppression is present, as in the canonical 4C-18 comparison):"
   sesearch --dontaudit -s docker_helper_rootlesskit_t -c netlink_route_socket /sys/fs/selinux/policy 2>/dev/null || true
-  echo "NOTE: this leg's audit inventory is diagnostic-only; enforcement decisions are unchanged."
-} >> "$EVIDENCE_DIR/18-semodule-db-diag.txt"
+} > "$EVIDENCE_DIR/18-semodule-db-diag.txt"
 cat "$EVIDENCE_DIR/18-semodule-db-diag.txt" >&2
 # Kernel-side syscall chronology for the live window (audit rules, not
 # ptrace — no SELinux ptrace authority is needed or granted): every
@@ -1088,15 +1112,6 @@ auditctl -s > "$EVIDENCE_DIR/audit-status-window-end.txt" 2>&1 || true
   echo "=== raw audit.log tail (last 120 lines, unfiltered) ==="
   tail -n 120 /var/log/audit/audit.log 2>/dev/null || true
 } > "$EVIDENCE_DIR/18-syscall-chronology.txt" 2>&1
-auditctl -D > /dev/null 2>&1 || true
-auditctl -a never,task > /dev/null 2>&1 || true
-semodule -B >> "$EVIDENCE_DIR/18-semodule-db-diag.txt" 2>&1 || true
-{
-  echo "=== 4C-18 diagnostic restore (post-window semodule -B) ==="
-  echo "getenforce: $(getenforce 2>/dev/null)"
-  echo "flow-domain dontaudit rules on netlink_route_socket AFTER the restore (non-zero = the production baseline is back):"
-  sesearch --dontaudit -s docker_helper_rootlesskit_t -c netlink_route_socket /sys/fs/selinux/policy 2>/dev/null || true
-} >> "$EVIDENCE_DIR/18-semodule-db-diag.txt"
 cat "$EVIDENCE_DIR/18-syscall-chronology.txt" >&2
 
 # ---- manager diagnostics of the window (procattr/exec failures surface here)
@@ -1404,6 +1419,44 @@ fi
 } > "$EVIDENCE_DIR/17-tuntap-completion.txt" 2>&1
 cat "$EVIDENCE_DIR/17-tuntap-completion.txt" >&2
 
+# ============================================================
+# E: the 4C-19 NETLINK_ROUTE write gate
+# ============================================================
+# The 4C-19 grant: the generic send-side write permission. The gate
+# hard-fails if the proven hidden boundary (the lookup sendmsg EACCES
+# at netlink_route_socket write, hidden in production by the distro
+# base policy's `dontaudit domain domain:netlink_route_socket
+# { read write };` catch-all) still appears in the window. Any OTHER
+# netlink_route_socket denial (the message-class check nlmsg_read/
+# nlmsg_write, or any other) is the EXPECTED next boundary and is
+# recorded, not failed: the fallback datagram creates (unix_dgram/udp)
+# remain visible and un-granted by design — the lookup still fails
+# unless the message-class authority exists, and their chronology is
+# reconstructed by the report from 18-syscall-chronology.txt.
+NL_WRITE_GONE_OK=1
+{
+  echo "=== netlink_route_socket write AVCs of the window (the 4C-19 boundary must be absent) ==="
+  NL_WRITE_AVC="$(grep -a 'tclass=netlink_route_socket' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -a 'denied  *{ write }' || true)"
+  printf '%s\n' "${NL_WRITE_AVC:-(none — the 4C-18 hidden write boundary is gone)}"
+  echo "--- ALL other netlink_route_socket AVCs of the window (the next-boundary evidence; recorded, not failed):"
+  NL_OTHER_AVC="$(grep -a 'tclass=netlink_route_socket' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -av 'denied  *{ write }' || true)"
+  printf '%s\n' "${NL_OTHER_AVC:-(none — no other netlink_route_socket denial appeared)}"
+  echo "--- the userspace tail check: the RTM_GETLINK lookup's failure shape (informational)"
+  grep -a 'Cannot talk to rtnetlink\|Cannot find device' "$EVIDENCE_DIR/07-manager-diag.txt" 2>/dev/null | tail -4 || true
+  if [ -n "$NL_WRITE_AVC" ]; then
+    echo "GATE: the netlink_route_socket write denial still appeared — the 4C-19 grant did not take effect"
+    NL_WRITE_GONE_OK=0
+  fi
+} > "$EVIDENCE_DIR/21-netlink-write-gone.txt" 2>&1
+cat "$EVIDENCE_DIR/21-netlink-write-gone.txt" >&2
+if [ "$NL_WRITE_GONE_OK" = 1 ]; then
+  marker "NETLINK-WRITE-BOUNDARY=GONE"
+else
+  marker "BLOCKER=the 4C-19 netlink_route_socket write composition did not hold (see 21-netlink-write-gone.txt)"
+  marker "NETLINK-WRITE-BOUNDARY=FAIL"
+  finish FAIL; exit 0
+fi
+
 # ---- launcher-domain AVC inventory (raw; the report classifies)
 {
   echo "=== launcher_t AVCs of the window (raw) ==="
@@ -1580,6 +1633,137 @@ else
   marker "NO-UNCATEGORIZED=FAIL"
   finish FAIL; exit 0
 fi
+
+# ============================================================
+# CC: the 4C-19 companion diagnostic window (dontaudit disabled)
+# ============================================================
+# Evidence-only companion for the SAME semantic composition: the 4C-18
+# phase proved the distro base policy's generic
+# `dontaudit domain domain:netlink_route_socket { read write };`
+# catch-all hides NETLINK_ROUTE denials from the canonical window, so
+# after the canonical leg this window reloads the policy with dontaudit
+# reporting removed, reruns the SAME production flow, and records what
+# the message-level mediation now shows. No allow rule is added here;
+# the module itself is unchanged. Enforcement decisions are unchanged
+# (dontaudit only silences audit). The baseline is restored and
+# verified below.
+marker "CC: companion diagnostic window (dontaudit disabled)"
+T1="$(date +%s)"
+# The syscall-chronology rules from the canonical window were already
+# flushed into 18-syscall-chronology.txt; re-arm them for the companion
+# (the never,task catch-all is still out from the canonical window).
+auditctl -a always,exit -F arch=b64 \
+  -S socket,socketpair,sendmsg,sendto,recvmsg,recvfrom,ioctl,close \
+  -k p5s2diag >> "$EVIDENCE_DIR/18-auditctl-sysrules.txt" 2>&1 || true
+# The second diagnostic leg: disable dontaudit reporting AFTER the
+# canonical gates (this is the 4C-18 diagnostic replication for the
+# 4C-19 composition).
+semodule -DB >> "$EVIDENCE_DIR/18-semodule-db-diag.txt" 2>&1 \
+  || { note "the companion leg's semodule -DB failed (evidence-only; recorded)"; }
+{
+  echo "=== 4C-19 companion leg: state after semodule -DB (epoch $T1) ==="
+  echo "getenforce: $(getenforce 2>/dev/null)"
+  echo "docker_helper permissive domains (must be none):"
+  semanage permissive -l 2>/dev/null | grep -a docker_helper || echo "(none)"
+  echo "flow-domain dontaudit rules on netlink_route_socket AFTER -DB (must be zero — that is the whole point):"
+  sesearch --dontaudit -s docker_helper_rootlesskit_t -c netlink_route_socket /sys/fs/selinux/policy 2>/dev/null || true
+  echo "NOTE: this leg's audit inventory is diagnostic-only; enforcement decisions are unchanged."
+} >> "$EVIDENCE_DIR/18-semodule-db-diag.txt"
+cat "$EVIDENCE_DIR/18-semodule-db-diag.txt" >&2
+
+# The companion window reuses the canonical window's mechanics with a
+# NEW op id, its own sampler (the leader-context + tap0 observer
+# subset), and its own harvests; the label-provisioning proofs belong
+# to the canonical window and are not repeated.
+COMP_OP_ID="$(gen_op_id)"
+COMP_RT_OP_DIR="$RUNTIME_ROOT/ops/$COMP_OP_ID"
+COMP_ST_OP_DIR="$STATE_ROOT/ops/$COMP_OP_ID"
+echo "$COMP_OP_ID" > "$EVIDENCE_DIR/companion-op-id"
+log "CC: companion START $COMP_OP_ID (dontaudit disabled)"
+(
+  set +e
+  c_seen_pid=""
+  c_seen_ctx=""
+  c_end=$(( $(date +%s) + 75 ))
+  while [ "$(date +%s)" -lt "$c_end" ]; do
+    if [ -z "$c_seen_pid" ] && [ -s "$COMP_RT_OP_DIR/instance.pid" ]; then
+      c_seen_pid="$(cat "$COMP_RT_OP_DIR/instance.pid" 2>/dev/null)"
+      [ -n "$c_seen_pid" ] && printf 'INSTANCE-PID %s first-seen=%s\n' "$c_seen_pid" "$(date +%s.%N)" >> "$EVIDENCE_DIR/22-companion-flow-context.txt"
+    fi
+    if [ -n "$c_seen_pid" ] && [ -d "/proc/$c_seen_pid" ]; then
+      ctx="$(process_context "$c_seen_pid")"
+      if [ -n "$ctx" ] && ! printf '%s\n' "$c_seen_ctx" | grep -aqx "$ctx"; then
+        c_seen_ctx="$c_seen_ctx$ctx
+"
+        printf 'LEADER-CTX %s pid=%s comm=%s ctx=%s\n' "$(date +%s.%N)" "$c_seen_pid" "$(cat "/proc/$c_seen_pid/comm" 2>/dev/null)" "$ctx" >> "$EVIDENCE_DIR/22-companion-flow-context.txt"
+      fi
+      CHILDREN="$(cat "/proc/$c_seen_pid/task/$c_seen_pid/children" 2>/dev/null || true)"
+      for C in $CHILDREN; do
+        TAP_LINE="$(grep -a 'tap0' "/proc/$C/net/dev" 2>/dev/null || true)"
+        if [ -n "$TAP_LINE" ]; then
+          printf 'TAP0-OBSERVED %s child=%s dev=%s\n' "$(date +%s.%N)" "$C" "$(printf '%s\n' "$TAP_LINE" | head -1 | awk '{print $1, $2}')" >> "$EVIDENCE_DIR/22-companion-flow-context.txt"
+        fi
+      done
+    fi
+    if [ -n "$c_seen_pid" ] && [ ! -d "/proc/$c_seen_pid" ] && [ ! -d "$COMP_RT_OP_DIR" ] && [ ! -d "$COMP_ST_OP_DIR" ]; then
+      printf 'CONVERGED %s\n' "$(date +%s.%N)" >> "$EVIDENCE_DIR/22-companion-flow-context.txt"
+      break
+    fi
+    sleep 0.002
+  done
+  touch /tmp/p4b-work/companion.done
+) &
+COMP_SAMPLER_PID=$!
+COMP_START_RC=0
+COMP_START_OUT="$(printf 'START %s\n' "$COMP_OP_ID" | timeout 120 socat - UNIX-CONNECT:"$MANAGER_SOCK")" || COMP_START_RC=$?
+{
+  echo "window-start: $T1"
+  echo "START: $COMP_OP_ID"
+  echo "response: $COMP_START_OUT (rc=$COMP_START_RC)"
+  echo "window-end: $(date +%s)"
+} > "$EVIDENCE_DIR/22-companion-launch-window.txt"
+cat "$EVIDENCE_DIR/22-companion-launch-window.txt" >&2
+for i in $(seq 1 100); do
+  [ -f /tmp/p4b-work/companion.done ] && break
+  sleep 0.1
+done
+kill "$COMP_SAMPLER_PID" 2>/dev/null || true
+wait "$COMP_SAMPLER_PID" 2>/dev/null || true
+harvest_avcs_since "$T1" "$EVIDENCE_DIR/23-companion-avc-window.txt"
+{
+  echo "=== companion window's audit.log SYSCALL records (key p5s2diag) since epoch $T1 ==="
+  grep -a 'type=SYSCALL' /var/log/audit/audit.log 2>/dev/null \
+    | grep -a 'p5s2diag' \
+    | awk -v s="$T1" '{ for (i = 1; i <= NF; i++) if ($i ~ /^msg=audit\(/) { ts = substr($i, 11); split(ts, t, "."); if (t[1] + 0 >= s + 0) print; break } }' \
+    || true
+} > "$EVIDENCE_DIR/23-companion-syscall-chronology.txt" 2>&1
+{
+  echo "=== the companion window's manager journal (the child tail) ==="
+  grep -a -A6 'child output tail' "$EVIDENCE_DIR/24-companion-manager-diag.txt" 2>/dev/null || true
+  journalctl -u "$UNIT" --since "@$T1" --no-pager 2>/dev/null | tail -60 || true
+} > "$EVIDENCE_DIR/24-companion-manager-diag.txt" 2>&1
+# The companion's own boundary read: every netlink_route_socket denial
+# of the dontaudit-disabled window (the message-level evidence).
+{
+  echo "=== companion (dontaudit disabled): netlink_route_socket AVCs of the window ==="
+  grep -a 'tclass=netlink_route_socket' "$EVIDENCE_DIR/23-companion-avc-window.txt" 2>/dev/null \
+    || echo "(none — no netlink_route_socket denial visible even with dontaudit disabled)"
+  echo "=== companion (dontaudit disabled): the datagram fallback creates of the window ==="
+  grep -a -E 'tclass=(unix_dgram_socket|udp_socket)' "$EVIDENCE_DIR/23-companion-avc-window.txt" 2>/dev/null \
+    || echo "(none — the libc fallback chain did not run)"
+} > "$EVIDENCE_DIR/25-companion-boundary.txt" 2>&1
+cat "$EVIDENCE_DIR/25-companion-boundary.txt" >&2
+# Restore the production baseline and PROVE it.
+auditctl -D > /dev/null 2>&1 || true
+auditctl -a never,task > /dev/null 2>&1 || true
+semodule -B >> "$EVIDENCE_DIR/18-semodule-db-diag.txt" 2>&1 || true
+{
+  echo "=== 4C-19 companion restore (post-window semodule -B) ==="
+  echo "getenforce: $(getenforce 2>/dev/null)"
+  echo "flow-domain dontaudit rules on netlink_route_socket AFTER the restore (non-zero = the production baseline is back):"
+  sesearch --dontaudit -s docker_helper_rootlesskit_t -c netlink_route_socket /sys/fs/selinux/policy 2>/dev/null || true
+} >> "$EVIDENCE_DIR/18-semodule-db-diag.txt"
+marker "CC: companion diagnostic window complete (baseline restored)"
 
 # ============================================================
 # H: verdict
