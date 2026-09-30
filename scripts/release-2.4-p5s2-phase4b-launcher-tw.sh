@@ -883,28 +883,42 @@ log "D: live START $OP_ID (sampler armed)"
         ps -eZ 2>/dev/null | awk '$1 ~ /docker_helper_rootlesskit_t/ { print "PS-FLOW " $0 }' >> "$EVIDENCE_DIR/12-uncategorized-ps.txt"
       fi
     fi
-    for entry in \
-      "$ST_OP_DIR:state-op" \
-      "$ST_OP_DIR/root:state-root" \
-      "$ST_OP_DIR/rootlesskit-state:state-rkstate" \
-      "$RT_OP_DIR:runtime-op"; do
-      path="${entry%%:*}"; label="${entry##*:}"
-      ctx="$(context_of "$path")"
+    # Batched label sampling: ONE stat call for the four provisioned
+    # per-op paths. The sampler's iteration cost is the catch-rate
+    # ceiling: the 4C-15 flow window shrank to ~45ms and a per-path stat
+    # loop (one fork per path) fit only ONE iteration inside such a
+    # window — the parent's stat ran before the tree existed while the
+    # children's ran after, so the parent was never observed and the
+    # provisioning gate false-failed on a pure observation race
+    # (run 36754289051). Batching turns an iteration into a single fork,
+    # so every path is sampled repeatedly inside any >=10ms window. The
+    # first/last/all observation semantics are unchanged.
+    while IFS= read -r line; do
+      path="${line%% *}"; ctx="${line#* }"
+      case "$path" in
+        "$ST_OP_DIR") label=state-op ;;
+        "$ST_OP_DIR/root") label=state-root ;;
+        "$ST_OP_DIR/rootlesskit-state") label=state-rkstate ;;
+        "$RT_OP_DIR") label=runtime-op ;;
+        *) continue ;;
+      esac
       if [ -n "$ctx" ]; then
         [ -s "$EVIDENCE_DIR/first.$label" ] || printf '%s\n' "$ctx" > "$EVIDENCE_DIR/first.$label"
         printf '%s\n' "$ctx" > "$EVIDENCE_DIR/last.$label"
         grep -aqx "$ctx" "$EVIDENCE_DIR/all.$label" 2>/dev/null || printf '%s\n' "$ctx" >> "$EVIDENCE_DIR/all.$label"
       fi
-    done
-    for entry in \
-      "$STATE_ROOT:state-root-container" \
-      "$STATE_ROOT/ops:state-ops-container" \
-      "$RUNTIME_ROOT:runtime-root-container" \
-      "$RUNTIME_ROOT/ops:runtime-ops-container"; do
-      path="${entry%%:*}"; label="${entry##*:}"
-      ctx="$(context_of "$path")"
+    done < <(stat -c '%n %C' "$ST_OP_DIR" "$ST_OP_DIR/root" "$ST_OP_DIR/rootlesskit-state" "$RT_OP_DIR" 2>/dev/null || true)
+    while IFS= read -r line; do
+      path="${line%% *}"; ctx="${line#* }"
+      case "$path" in
+        "$STATE_ROOT") label=state-root-container ;;
+        "$STATE_ROOT/ops") label=state-ops-container ;;
+        "$RUNTIME_ROOT") label=runtime-root-container ;;
+        "$RUNTIME_ROOT/ops") label=runtime-ops-container ;;
+        *) continue ;;
+      esac
       [ -n "$ctx" ] && printf '%s\n' "$ctx" > "$EVIDENCE_DIR/container.$label"
-    done
+    done < <(stat -c '%n %C' "$STATE_ROOT" "$STATE_ROOT/ops" "$RUNTIME_ROOT" "$RUNTIME_ROOT/ops" 2>/dev/null || true)
     if [ -n "$seen_pid" ] && [ ! -d "/proc/$seen_pid" ] && [ ! -d "$RT_OP_DIR" ] && [ ! -d "$ST_OP_DIR" ]; then
       printf 'CONVERGED %s\n' "$(date +%s.%N)" >> "$EVIDENCE_DIR/05-flow-context.txt"
       break
