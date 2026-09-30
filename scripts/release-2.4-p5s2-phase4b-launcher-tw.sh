@@ -329,14 +329,15 @@ cat "$EVIDENCE_DIR/02-nsenter-probe.txt" >&2
 } > "$EVIDENCE_DIR/02-ip-probe.txt" 2>&1
 cat "$EVIDENCE_DIR/02-ip-probe.txt" >&2
 
-# Evidence-only capture (P5-S2 Phase 4C-14): /dev/net/tun — the TUN
+# Evidence-only capture (P5-S2 Phase 4C-17): /dev/net/tun — the TUN
 # ioctl boundary. The flow's `ip tuntap add` path reaches
 # open("/dev/net/tun", O_RDWR) (the granted 4C-11/4C-12 chain) plus the
-# TUNSETIFF ioctl (0x54ca), now mediated by the ordinary { ioctl } bit
-# plus the exact { 0x54ca } allowxperm of the 4C-14 composition. This is
-# a stand-shape capture (actual type, no assumption) + a loaded-policy
-# inventory of the flow domain's tun/tap authority (expected: the 4C-14
-# ordinary + TUNSETIFF xperm contribution, nothing wider).
+# two evidenced ioctls — TUNSETIFF (0x54ca) and TUNSETPERSIST (0x54cb) —
+# mediated by the ordinary { ioctl } bit plus the exact
+# { 0x54ca 0x54cb } allowxperm of the 4C-17 composition. This is a
+# stand-shape capture (actual type, no assumption) + a loaded-policy
+# inventory of the flow domain's tun/tap authority (expected: the
+# 4C-17 ordinary + two-command xperm contribution, nothing wider).
 {
   echo "=== /dev/net/tun evidence-only probe (stand shape + the 4C-14 loaded-policy tun authority inventory) ==="
   echo "--- the device node:"
@@ -354,10 +355,10 @@ cat "$EVIDENCE_DIR/02-ip-probe.txt" >&2
   lsmod | grep -a "^tun" || echo "(tun not listed in lsmod)"
   echo "modinfo tun:"
   modinfo tun 2>&1 | head -8 || true
-  echo "--- loaded-policy inventory: flow domain -> tun/tap authority (expected: the 4C-14 { read write open ioctl } + TUNSETIFF xperm contribution, nothing wider)"
+  echo "--- loaded-policy inventory: flow domain -> tun/tap authority (expected: the 4C-17 { read write open ioctl } + TUNSETIFF+TUNSETPERSIST xperm contribution, nothing wider)"
   TUN_DEV_TYPE="$(matchpathcon /dev/net/tun 2>/dev/null | awk '{print $2}' | cut -d: -f3 || true)"
   echo "stand type from matchpathcon: ${TUN_DEV_TYPE:-(undetermined)}"
-  echo "--- sesearch allow rootlesskit_t -> tun_tap_device_t (expected: the 4C-14 ordinary rule):"
+  echo "--- sesearch allow rootlesskit_t -> tun_tap_device_t (expected: the 4C-17 ordinary rule):"
   sesearch --allow -s docker_helper_rootlesskit_t -t tun_tap_device_t /sys/fs/selinux/policy 2>&1 || true
   if [ -n "${TUN_DEV_TYPE:-}" ] && [ "$TUN_DEV_TYPE" != "tun_tap_device_t" ] && [ "$TUN_DEV_TYPE" != "(undetermined)" ]; then
     echo "--- the stand shows a DIFFERENT device type than tun_tap_device_t; inventory for the actual type:"
@@ -646,8 +647,8 @@ PREFLIGHT_OK=1
   echo "--- the stand probe (02-tun-probe.txt):"
   cat "$EVIDENCE_DIR/02-tun-probe.txt" 2>/dev/null || true
   echo "--- toolchain encoding gate (allowxperm must survive the real toolchain; compile/package/load failures above exit INCOMPLETE before any load):"
-  if grep -aqx 'allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl { 0x54ca };' "$TRANSFERRED/docker-helper.te"; then
-    echo "PASS: the transferred .te carries the exact pinned allowxperm rule; checkmodule 4-24-era semantics accepted it (compile rc=0 recorded in 01-composition-inputs.txt)"
+  if grep -aqx 'allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl { 0x54ca 0x54cb };' "$TRANSFERRED/docker-helper.te"; then
+    echo "PASS: the transferred .te carries the exact pinned two-command allowxperm rule; checkmodule 4-24-era semantics accepted it (compile rc=0 recorded in 01-composition-inputs.txt)"
   else
     echo "FAIL: the transferred .te does not carry the exact pinned allowxperm rule"
     PREFLIGHT_OK=0
