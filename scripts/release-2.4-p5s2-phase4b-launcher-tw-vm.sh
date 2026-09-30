@@ -60,6 +60,8 @@ vm_scp "$PROOF_SRC/packaging/systemd/system/docker-helper-builder.service" \
   opc@127.0.0.1:/tmp/p5s2-phase4b-launcher/docker-helper-builder.service
 vm_scp "$PROOF_SRC/packaging/scripts/lib/provision-builder.sh" \
   opc@127.0.0.1:/tmp/p5s2-phase4b-launcher/provision-builder.sh
+vm_scp "$PROOF_SRC/packaging/modules-load.d/docker-helper-builder.conf" \
+  opc@127.0.0.1:/tmp/p5s2-phase4b-launcher/modules-load.conf
 vm_scp "$SCRIPT_DIR/release-2.4-p5s2-phase4b-launcher-tw.sh" \
   opc@127.0.0.1:/tmp/p5s2-phase4b-launcher/release-2.4-p5s2-phase4b-launcher-tw.sh
 {
@@ -70,6 +72,7 @@ vm_scp "$SCRIPT_DIR/release-2.4-p5s2-phase4b-launcher-tw.sh" \
   echo "fc_sha256=$(sha256sum "$PROOF_SRC/packaging/selinux/docker-helper.fc" | awk '{print $1}')"
   echo "unit_sha256=$(sha256sum "$PROOF_SRC/packaging/systemd/system/docker-helper-builder.service" | awk '{print $1}')"
   echo "provision_sha256=$(sha256sum "$PROOF_SRC/packaging/scripts/lib/provision-builder.sh" | awk '{print $1}')"
+  echo "modules_load_sha256=$(sha256sum "$PROOF_SRC/packaging/modules-load.d/docker-helper-builder.conf" | awk '{print $1}')"
 } > /tmp/p4b-vm-manifest
 vm_scp /tmp/p4b-vm-manifest opc@127.0.0.1:/tmp/p5s2-phase4b-launcher/manifest.txt
 

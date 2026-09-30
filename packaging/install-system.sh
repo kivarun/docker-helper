@@ -40,6 +40,12 @@ BUILDER_UNIT_NAME="${BUILDER_UNIT_NAME:-docker-helper-builder.service}"
 # shipped in the bundle as scripts/provision-builder.sh): executed, never
 # re-implemented.
 PROVISION_BUILDER_SRC="${PROVISION_BUILDER_SRC:-scripts/provision-builder.sh}"
+# Builder TUN kernel facility: the reboot persistence asset (the same
+# package-owned file DEB/RPM ship at /usr/lib/modules-load.d) and its
+# production destination. The current-boot convergence stays owned by the
+# canonical provisioner; the installer places ONLY the asset.
+MODULES_LOAD_SRC="${MODULES_LOAD_SRC:-modules-load.d/docker-helper-builder.conf}"
+MODULES_LOAD_DEST="${MODULES_LOAD_DEST:-/usr/lib/modules-load.d/docker-helper-builder.conf}"
 BUILDKIT_BIN_SRC="${BUILDKIT_BIN_SRC:-buildkit}"
 BUILDKIT_BIN_DEST="${BUILDKIT_BIN_DEST:-/usr/libexec/docker-helper/buildkit}"
 BUILDKIT_DOC_DEST="${BUILDKIT_DOC_DEST:-/usr/share/doc/docker-helper/buildkit}"
@@ -170,6 +176,13 @@ check_bundled_assets() {
 		error "builder provisioning script not found at $provisioner_path"
 		exit 1
 	fi
+	# Builder TUN kernel facility: the reboot persistence asset. A tarball
+	# that lost it fails the preflight BEFORE any system mutation.
+	local modules_load_path="$script_dir/$MODULES_LOAD_SRC"
+	if [[ ! -f "$modules_load_path" ]]; then
+		error "builder modules-load.d asset not found at $modules_load_path"
+		exit 1
+	fi
 	local payload_member
 	for payload_member in buildkitd buildctl buildkit-runc LICENSE MANIFEST; do
 		if [[ ! -s "$script_dir/$BUILDKIT_BIN_SRC/$payload_member" ]]; then
@@ -177,6 +190,17 @@ check_bundled_assets() {
 			exit 1
 		fi
 	done
+}
+
+# The builder feature's TUN facility convergence may need to load the tun
+# module via the canonical provisioner; kmod's modprobe is therefore a
+# required builder prerequisite (checked before any system mutation).
+check_modprobe() {
+	if ! command -v modprobe >/dev/null 2>&1; then
+		error "modprobe (kmod) not found in PATH; the builder TUN facility cannot be converged"
+		error "install kmod (or the distribution equivalent) and re-run"
+		exit 1
+	fi
 }
 
 check_systemctl() {
@@ -493,16 +517,27 @@ install_binary() {
 }
 
 # provision_builder runs the ONE canonical provisioning owner (identity +
-# subordinate-ID ranges, verify-first idempotent, fail-closed). It mutates
-# the account state, so it runs as the first installation mutation, before
-# any package-shaped file is placed; a provisioning failure aborts the
-# installer before the service can be touched.
+# subordinate-ID ranges + the TUN kernel facility current-boot convergence;
+# verify-first idempotent, fail-closed). It mutates the account/host state,
+# so it runs as the first installation mutation, before any package-shaped
+# file is placed; a provisioning failure aborts the installer before the
+# service can be touched.
 provision_builder() {
 	info "Provisioning the builder identity (scripts/provision-builder.sh)"
 	if ! sh "$script_dir/$PROVISION_BUILDER_SRC"; then
 		error "builder identity provisioning failed; installation aborted"
 		exit 1
 	fi
+}
+
+# install_modules_load places the reboot persistence asset for the builder
+# TUN facility at the production destination (the same path DEB/RPM own).
+# It must be in place before the builder service can be started; the
+# current-boot convergence itself stays owned by the provisioner.
+install_modules_load() {
+	info "Installing builder modules-load.d asset to $MODULES_LOAD_DEST"
+	install -d -m 0755 "$(dirname "$MODULES_LOAD_DEST")"
+	install -m 0644 "$script_dir/$MODULES_LOAD_SRC" "$MODULES_LOAD_DEST"
 }
 
 install_builder_unit() {
@@ -756,10 +791,12 @@ main() {
 	check_selected_mac_tools
 	check_docker
 	check_allowed_root
+	check_modprobe
 	detect_existing_install
 	check_active_service
 
 	provision_builder
+	install_modules_load
 	install_binary
 	install_unit
 	install_builder_unit

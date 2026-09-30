@@ -241,7 +241,7 @@ fi
   echo "=== input hashes (must match the manifest) ==="
   sha256sum "$TRANSFERRED/docker-helper" "$TRANSFERRED/docker-helper.te" \
     "$TRANSFERRED/docker-helper.fc" "$TRANSFERRED/docker-helper-builder.service" \
-    "$TRANSFERRED/provision-builder.sh" 2>/dev/null || true
+    "$TRANSFERRED/provision-builder.sh" "$TRANSFERRED/modules-load.conf" 2>/dev/null || true
 } > "$EVIDENCE_DIR/01-composition-inputs.txt" 2>&1
 while IFS='=' read -r key want; do
   case "$key" in
@@ -250,6 +250,7 @@ while IFS='=' read -r key want; do
     fc_sha256) file="$TRANSFERRED/docker-helper.fc" ;;
     unit_sha256) file="$TRANSFERRED/docker-helper-builder.service" ;;
     provision_sha256) file="$TRANSFERRED/provision-builder.sh" ;;
+    modules_load_sha256) file="$TRANSFERRED/modules-load.conf" ;;
     *) continue ;;
   esac
   got="$(sha256sum "$file" 2>/dev/null | awk '{print $1}')"
@@ -327,6 +328,7 @@ cat "$EVIDENCE_DIR/02-ip-probe.txt" >&2
 # inventory proving the flow domain holds NO tun/tap authority yet.
 {
   echo "=== /dev/net/tun evidence-only probe (no grant this phase) ==="
+  echo "--- the device node:"
   if [ -e /dev/net/tun ]; then
     ls -lZ /dev/net/tun
     stat /dev/net/tun
@@ -335,6 +337,12 @@ cat "$EVIDENCE_DIR/02-ip-probe.txt" >&2
     echo "/dev/net/tun absent on the stand (pre-flow state)"
     ls -ldZ /dev/net 2>&1 || true
   fi
+  echo "--- the TUN kernel facility truth (pre-provisioning; P5-S2 Phase 4C-13):"
+  echo "sysfs endpoint: $(cat /sys/class/misc/tun/dev 2>&1 || true)"
+  echo "lsmod tun:"
+  lsmod | grep -a "^tun" || echo "(tun not listed in lsmod)"
+  echo "modinfo tun:"
+  modinfo tun 2>&1 | head -8 || true
   echo "--- loaded-policy inventory: flow domain -> tun/tap authority (expected: zero concrete grants)"
   TUN_DEV_TYPE="$(matchpathcon /dev/net/tun 2>/dev/null | awk '{print $2}' | cut -d: -f3 || true)"
   echo "stand type from matchpathcon: ${TUN_DEV_TYPE:-(undetermined)}"
@@ -349,8 +357,32 @@ cat "$EVIDENCE_DIR/02-tun-probe.txt" >&2
 
 # The REAL builder identity + the REAL unit + the pinned payload (P4-A1 shape).
 log 'A2: builder identity + REAL unit + pinned payload install'
+# The reboot persistence asset is placed at the PRODUCTION destination
+# before provisioning, from the composition's own bytes (P5-S2 Phase
+# 4C-13); the current-boot convergence stays owned by the real
+# provisioner (no ad-hoc harness modprobe).
+install -d -m 0755 /usr/lib/modules-load.d
+install -m 0644 "$TRANSFERRED/modules-load.conf" /usr/lib/modules-load.d/docker-helper-builder.conf
+{
+  echo "=== modules-load.d asset at the production destination ==="
+  stat -c '%n %a %U:%G' /usr/lib/modules-load.d/docker-helper-builder.conf
+  echo "contents:"
+  cat /usr/lib/modules-load.d/docker-helper-builder.conf
+} > "$EVIDENCE_DIR/a2-modules-load.txt" 2>&1
 sh "$TRANSFERRED/provision-builder.sh" > "$EVIDENCE_DIR/a2-provision.txt" 2>&1 \
   || { note "provision-builder.sh failed"; finish INCOMPLETE; exit 0; }
+# The provisioner's third responsibility: the TUN facility must report
+# 10:200 after the REAL provisioner ran (P5-S2 Phase 4C-13).
+TUN_DEV_AFTER="$(cat /sys/class/misc/tun/dev 2>/dev/null || true)"
+if [ "$TUN_DEV_AFTER" != "10:200" ]; then
+  note "the TUN facility did not converge through the real provisioner (/sys/class/misc/tun/dev reports '${TUN_DEV_AFTER:-nothing}', want 10:200)"
+  finish INCOMPLETE; exit 0
+fi
+{
+  echo "=== post-provisioning TUN facility ==="
+  echo "sysfs endpoint: $TUN_DEV_AFTER"
+  lsmod | grep -a "^tun" || true
+} >> "$EVIDENCE_DIR/a2-modules-load.txt" 2>&1
 install -m 0755 "$TRANSFERRED/docker-helper" /usr/bin/docker-helper
 restorecon /usr/bin/docker-helper 2>>"$EVIDENCE_DIR/01-composition-inputs.txt" || true
 install -m 0644 "$TRANSFERRED/docker-helper-builder.service" /etc/systemd/system/"$UNIT".service

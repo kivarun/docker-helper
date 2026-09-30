@@ -34,6 +34,11 @@ UNIT_DEST="${UNIT_DEST:-/etc/systemd/system/docker-helper.service}"
 UNIT_NAME="${UNIT_NAME:-docker-helper.service}"
 BUILDER_UNIT_DEST="${BUILDER_UNIT_DEST:-/etc/systemd/system/docker-helper-builder.service}"
 BUILDER_UNIT_NAME="${BUILDER_UNIT_NAME:-docker-helper-builder.service}"
+# Builder TUN kernel facility: the package-owned reboot persistence asset
+# is removed with the package. The kernel module itself is shared host
+# infrastructure and is never unloaded by this package: kernel-module
+# lifecycle stays a host/deployment responsibility.
+MODULES_LOAD_DEST="${MODULES_LOAD_DEST:-/usr/lib/modules-load.d/docker-helper-builder.conf}"
 BUILDER_IDENTITY="${BUILDER_IDENTITY:-docker-helper-builder}"
 BUILDKIT_BIN_DIR="${BUILDKIT_BIN_DIR:-/usr/libexec/docker-helper/buildkit}"
 BUILDKIT_DOC_DIR="${BUILDKIT_DOC_DIR:-/usr/share/doc/docker-helper/buildkit}"
@@ -178,6 +183,15 @@ remove_unit() {
 	rm -f "$UNIT_DEST"
 	info "Removing systemd unit $BUILDER_UNIT_DEST"
 	rm -f "$BUILDER_UNIT_DEST"
+}
+
+# The package-owned modules-load.d asset is removed with the package; the
+# loaded tun module is deliberately NOT unloaded (shared host
+# infrastructure; the kernel-module lifecycle stays a host/deployment
+# responsibility).
+remove_modules_load() {
+	info "Removing builder modules-load.d asset $MODULES_LOAD_DEST"
+	rm -f "$MODULES_LOAD_DEST"
 }
 
 reload_systemd() {
@@ -436,6 +450,7 @@ main() {
 	stop_builder_service
 	disable_service
 	remove_unit
+	remove_modules_load
 	reload_systemd
 	unload_apparmor_profile
 	remove_apparmor_profile

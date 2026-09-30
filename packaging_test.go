@@ -1133,6 +1133,235 @@ func TestProvisionBuilderScript(t *testing.T) {
 			t.Errorf("%s appears %d times in the provisioning script, want exactly 1 (the read-only constant; the mutation is delegated to usermod)", db, got)
 		}
 	}
+
+	// The TUN facility convergence (P5-S2 Phase 4C-13): the sysfs truth
+	// endpoint, the kmod delegation, the exact 10:200 re-verification, and
+	// the fail-closed shapes. The facility is NEVER probed by opening the
+	// device, never referenced through /dev/net/tun existence, and never
+	// granted to the flow domain.
+	for _, want := range []string{
+		"TUN_SYSFS=\"${TUN_SYSFS:-/sys/class/misc/tun/dev}\"",
+		"TUN_MAJOR_MINOR=10:200",
+		"MODPROBE=\"${MODPROBE:-modprobe}\"",
+		"\"$MODPROBE\" tun || fail \"modprobe tun failed\"",
+		"[ \"$dev\" = \"$TUN_MAJOR_MINOR\" ]",
+		"fail \"modprobe not available; cannot converge the TUN facility ($TUN_SYSFS reports '$dev')\"",
+		"fail \"modprobe tun reported success but $TUN_SYSFS reports '${dev}', want $TUN_MAJOR_MINOR\"",
+		"converge_tun_facility",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("provisioning script must contain %q", want)
+		}
+	}
+	// The device must never be probed from the provisioner through its
+	// /dev path: the sysfs endpoint is the single facility truth (4C-12
+	// proved the node can exist while no driver backs 10:200). Comments may
+	// document the context; executable lines may not reference the node.
+	var executable []string
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		executable = append(executable, trimmed)
+	}
+	if strings.Contains(strings.Join(executable, "\n"), "/dev/net/tun") {
+		t.Errorf("provisioning script must not reference /dev/net/tun outside comments (the sysfs endpoint is the facility truth)")
+	}
+	// The kernel-module lifecycle stays host-owned: the provisioner never
+	// unloads a module and never grants module authority anywhere.
+	for _, forbidden := range []string{"modprobe -r", "rmmod"} {
+		if strings.Contains(content, forbidden) {
+			t.Errorf("provisioning script must never unload kernel modules: %q", forbidden)
+		}
+	}
+	// The production flow runs every stage in order; the stage seam is the
+	// documented test entry point only.
+	for _, want := range []string{
+		"PROVISION_STAGES=\"${PROVISION_STAGES:-identity,subids,tun}\"",
+		"stage_requested identity",
+		"stage_requested subids",
+		"stage_requested tun",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("provisioning script must contain %q", want)
+		}
+	}
+}
+
+// TestProvisionBuilderTunConvergence exercises the REAL production
+// provisioner's TUN facility stage through the script's documented stage
+// seam (PROVISION_STAGES=tun) with fixture seams only: the sysfs endpoint
+// path, the modprobe command, and the fake tool directory. No host account
+// state is touched (the identity/subid stages are not requested; the fake
+// modprobe writes only the fixture sysfs file).
+func TestProvisionBuilderTunConvergence(t *testing.T) {
+	scriptPath := "packaging/scripts/lib/provision-builder.sh"
+	absScript, err := filepath.Abs(scriptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// runOnce executes the production script with the seam environment. The
+	// fake modprobe logs "$@" to stdout, so the call count is observable
+	// from the combined output. MODPROBE points directly at the fake bin
+	// dir entry: an absent fake makes the tool genuinely unavailable (the
+	// host PATH may carry a real modprobe, which must never be invoked).
+	// An empty modprobeScript removes the fake.
+	runOnce := func(t *testing.T, fakeBinDir, tunSysfs, modprobeScript string) (string, error) {
+		t.Helper()
+		fake := filepath.Join(fakeBinDir, "modprobe")
+		if modprobeScript == "" {
+			_ = os.Remove(fake)
+		} else if err := os.WriteFile(fake, []byte(modprobeScript), 0755); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("sh", absScript)
+		cmd.Env = append(os.Environ(),
+			"PROVISION_STAGES=tun",
+			"TUN_SYSFS="+tunSysfs,
+			"MODPROBE="+fake,
+			"PATH="+fakeBinDir+":"+os.Getenv("PATH"),
+		)
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+
+	// fixture builds a fake bin dir + sysfs fixture and returns the paths.
+	fixture := func(t *testing.T, sysfsContent string) (fakeBin, tunSysfs string) {
+		t.Helper()
+		base := t.TempDir()
+		fakeBin = filepath.Join(base, "fakes")
+		if err := os.MkdirAll(fakeBin, 0755); err != nil {
+			t.Fatal(err)
+		}
+		tunSysfs = filepath.Join(base, "sys", "class", "misc", "tun", "dev")
+		if sysfsContent != "" {
+			if err := os.MkdirAll(filepath.Dir(tunSysfs), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(tunSysfs, []byte(sysfsContent), 0444); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return fakeBin, tunSysfs
+	}
+
+	// sysfsWriter returns a modprobe fake body that logs, writes the sysfs
+	// endpoint, and exits with the given code (no write when wantCode != 0
+	// or writeSysfs is false).
+	sysfsWriter := func(tunSysfs string, writeSysfs bool, wantCode int) string {
+		if writeSysfs {
+			return fmt.Sprintf(`#!/bin/sh
+echo "modprobe $@" >> /dev/stdout
+mkdir -p "%s"
+printf '10:200\n' > "%s"
+exit %d
+`, filepath.Dir(tunSysfs), tunSysfs, wantCode)
+		}
+		return fmt.Sprintf(`#!/bin/sh
+echo "modprobe $@" >> /dev/stdout
+exit %d
+`, wantCode)
+	}
+
+	t.Run("already available converges with zero modprobe", func(t *testing.T) {
+		fakeBin, tunSysfs := fixture(t, "10:200\n")
+		// A modprobe that always fails if invoked: the zero-call invariant
+		// would surface as a non-zero exit through the fake, not just a
+		// missing log line.
+		fake := "#!/bin/sh\necho \"modprobe $@\"\nexit 99\n"
+		out, err := runOnce(t, fakeBin, tunSysfs, fake)
+		if err != nil {
+			t.Fatalf("provisioner failed on an already-available facility: %v\n%s", err, out)
+		}
+		if n := strings.Count(out, "modprobe tun"); n != 0 {
+			t.Errorf("an available facility must not invoke modprobe; saw %d calls\n%s", n, out)
+		}
+		if !strings.Contains(out, "TUN facility available") {
+			t.Errorf("the available-facility path must log the verification, output:\n%s", out)
+		}
+	})
+
+	t.Run("unavailable converges with exactly one modprobe tun", func(t *testing.T) {
+		fakeBin, tunSysfs := fixture(t, "")
+		out, err := runOnce(t, fakeBin, tunSysfs, sysfsWriter(tunSysfs, true, 0))
+		if err != nil {
+			t.Fatalf("provisioner failed to converge: %v\n%s", err, out)
+		}
+		if n := strings.Count(out, "modprobe tun"); n != 1 {
+			t.Errorf("convergence must invoke modprobe exactly once; saw %d\n%s", n, out)
+		}
+		if !strings.Contains(out, "TUN facility converged") {
+			t.Errorf("the converged path must log the verification, output:\n%s", out)
+		}
+		data, err := os.ReadFile(tunSysfs)
+		if err != nil || string(data) != "10:200\n" {
+			t.Errorf("the converged sysfs endpoint must report 10:200 (read %q: %v)", string(data), err)
+		}
+	})
+
+	t.Run("re-run after convergence adds zero modprobe calls", func(t *testing.T) {
+		fakeBin, tunSysfs := fixture(t, "")
+		// First run converges (the fake writes the sysfs endpoint).
+		if _, err := runOnce(t, fakeBin, tunSysfs, sysfsWriter(tunSysfs, true, 0)); err != nil {
+			t.Fatalf("first run must converge: %v", err)
+		}
+		// Second run: the fake now fails if invoked; success proves zero
+		// additional calls (verify-first idempotence).
+		out, err := runOnce(t, fakeBin, tunSysfs, "#!/bin/sh\necho \"modprobe $@\"\nexit 99\n")
+		if err != nil {
+			t.Fatalf("re-run after convergence must succeed without modprobe: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, "TUN facility available") {
+			t.Errorf("the re-run must take the verify-first path, output:\n%s", out)
+		}
+	})
+
+	t.Run("modprobe failure fails closed", func(t *testing.T) {
+		fakeBin, tunSysfs := fixture(t, "")
+		out, err := runOnce(t, fakeBin, tunSysfs, sysfsWriter(tunSysfs, false, 1))
+		if err == nil {
+			t.Fatalf("a failing modprobe must fail the provisioning closed\n%s", out)
+		}
+		if !strings.Contains(out, "modprobe tun failed") {
+			t.Errorf("the failure must be actionable, output:\n%s", out)
+		}
+	})
+
+	t.Run("success without convergence fails closed", func(t *testing.T) {
+		fakeBin, tunSysfs := fixture(t, "")
+		out, err := runOnce(t, fakeBin, tunSysfs, sysfsWriter(tunSysfs, false, 0))
+		if err == nil {
+			t.Fatalf("a modprobe success without the sysfs endpoint must fail closed\n%s", out)
+		}
+		if !strings.Contains(out, "want 10:200") {
+			t.Errorf("the failure must name the expected endpoint, output:\n%s", out)
+		}
+	})
+
+	t.Run("wrong major minor fails closed", func(t *testing.T) {
+		fakeBin, tunSysfs := fixture(t, "12:34\n")
+		out, err := runOnce(t, fakeBin, tunSysfs, sysfsWriter(tunSysfs, false, 0))
+		if err == nil {
+			t.Fatalf("a wrong major:minor endpoint must fail the provisioning closed\n%s", out)
+		}
+		if !strings.Contains(out, "want 10:200") {
+			t.Errorf("the failure must name the expected endpoint, output:\n%s", out)
+		}
+	})
+
+	t.Run("modprobe unavailable fails closed", func(t *testing.T) {
+		fakeBin, tunSysfs := fixture(t, "")
+		// An empty fake bin dir: no modprobe anywhere in PATH.
+		out, err := runOnce(t, fakeBin, tunSysfs, "")
+		if err == nil {
+			t.Fatalf("an unavailable modprobe must fail the provisioning closed\n%s", out)
+		}
+		if !strings.Contains(out, "modprobe not available") {
+			t.Errorf("the failure must be actionable, output:\n%s", out)
+		}
+	})
 }
 
 // --- System AppArmor profile tests ---
@@ -1310,9 +1539,31 @@ func TestInstallSystemScriptContent(t *testing.T) {
 		"/etc/apparmor.d/docker-helper-system",
 		"/var/lib/docker-helper/apparmor/managed-boundaries",
 		"/etc/apparmor.d/docker-helper.d/managed-roots",
+		"/usr/lib/modules-load.d/docker-helper-builder.conf",
 	} {
 		if !strings.Contains(content, p) {
 			t.Errorf("install-system.sh must reference path: %s", p)
+		}
+	}
+	// The builder TUN kernel facility: the reboot persistence asset is
+	// installed from the bundle, the current-boot convergence stays owned
+	// by the canonical provisioner, and modprobe is a required prerequisite
+	// (checked before any system mutation).
+	for _, want := range []string{
+		"MODULES_LOAD_SRC=\"${MODULES_LOAD_SRC:-modules-load.d/docker-helper-builder.conf}\"",
+		"MODULES_LOAD_DEST=\"${MODULES_LOAD_DEST:-/usr/lib/modules-load.d/docker-helper-builder.conf}\"",
+		"install_modules_load",
+		"check_modprobe",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("install-system.sh must contain: %s", want)
+		}
+	}
+	// The installer places the asset only; it must never load/unload
+	// kernel modules itself (no duplicate activation paths).
+	for _, forbidden := range []string{"modprobe tun", "modprobe -r", "rmmod"} {
+		if strings.Contains(content, forbidden) {
+			t.Errorf("install-system.sh must not manage kernel modules itself: %q", forbidden)
 		}
 	}
 	// Must not install the agent skill or touch user artifacts.
@@ -1353,6 +1604,96 @@ func TestUninstallSystemScriptContent(t *testing.T) {
 		if strings.Contains(content, p) {
 			t.Errorf("uninstall-system.sh must not touch user path: %s", p)
 		}
+	}
+	// The package-owned modules-load.d asset is removed with the package;
+	// the kernel module is NEVER unloaded (shared host infrastructure).
+	for _, want := range []string{
+		"MODULES_LOAD_DEST=\"${MODULES_LOAD_DEST:-/usr/lib/modules-load.d/docker-helper-builder.conf}\"",
+		"remove_modules_load",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("uninstall-system.sh must contain: %s", want)
+		}
+	}
+	for _, forbidden := range []string{"modprobe -r", "modprobe -r tun", "rmmod", "modprobe"} {
+		if strings.Contains(content, forbidden) {
+			t.Errorf("uninstall-system.sh must never unload the tun module: %q", forbidden)
+		}
+	}
+}
+
+// TestBuilderTunFacilityPackagingParity pins the 4C-13 boot contract across
+// every artifact format: the one immutable asset (exact bytes, production
+// destination, 0644), the DEB/RPM contents entry, the kmod dependency in
+// both package formats, the tarball membership, and the tarball installer
+// handlers.
+func TestBuilderTunFacilityPackagingParity(t *testing.T) {
+	// The asset: exact bytes = "tun\n".
+	assetData, err := os.ReadFile("packaging/modules-load.d/docker-helper-builder.conf")
+	if err != nil {
+		t.Fatalf("modules-load.d asset not found: %v", err)
+	}
+	if string(assetData) != "tun\n" {
+		t.Errorf("modules-load.d asset must be exactly \"tun\\n\", got %q", string(assetData))
+	}
+	info, err := os.Stat("packaging/modules-load.d/docker-helper-builder.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0644 {
+		t.Errorf("modules-load.d asset mode = %o, want 644", info.Mode().Perm())
+	}
+
+	// The DEB/RPM contents entry (nfpm contents are shared across formats)
+	// and the kmod dependency in both formats.
+	nfpmData, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nfpm := string(nfpmData)
+	for _, want := range []string{
+		"src: packaging/modules-load.d/docker-helper-builder.conf",
+		"dst: /usr/lib/modules-load.d/docker-helper-builder.conf",
+	} {
+		if !strings.Contains(nfpm, want) {
+			t.Errorf("nfpm.yaml must carry the modules-load.d contents entry: %s", want)
+		}
+	}
+	debDeps := nfpm[strings.Index(nfpm, "  deb:"):strings.Index(nfpm, "  rpm:")]
+	if !strings.Contains(debDeps, "- kmod") {
+		t.Error("the DEB dependencies must include kmod (the provisioner delegates to modprobe)")
+	}
+	rpmDeps := nfpm[strings.Index(nfpm, "  rpm:"):]
+	if !strings.Contains(rpmDeps, "- kmod") {
+		t.Error("the RPM dependencies must include kmod (the provisioner delegates to modprobe)")
+	}
+
+	// The tarball carries the asset and pins it in the expected-path
+	// inventory; the installers own the placement/removal.
+	for path, wants := range map[string][]string{
+		"build-bundle.sh": {
+			"packaging/modules-load.d/docker-helper-builder.conf",
+			"modules-load.d/docker-helper-builder.conf",
+			"chmod 644 \"$BUNDLE_DIR/modules-load.d/docker-helper-builder.conf\"",
+		},
+	} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range wants {
+			if !strings.Contains(string(data), want) {
+				t.Errorf("%s must carry the modules-load.d contract: %s", path, want)
+			}
+		}
+	}
+	// The expected-path inventory entry (exact tarball member).
+	bundleData, err := os.ReadFile("build-bundle.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(bundleData), "docker-helper-${VERSION}-linux-amd64/modules-load.d/docker-helper-builder.conf") {
+		t.Error("build-bundle.sh must pin the modules-load.d asset in EXPECTED_PATHS")
 	}
 }
 
@@ -1598,6 +1939,15 @@ exit 0
 `, logFile)), 0755); err != nil {
 		t.Fatal(err)
 	}
+	// Standard modprobe: log and succeed (the builder TUN facility
+	// prerequisite check requires the tool to be present).
+	if err := os.WriteFile(filepath.Join(e.fakeBinDir, "modprobe"), []byte(fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$0 $@" >> "$log_file"
+exit 0
+`, logFile)), 0755); err != nil {
+		t.Fatal(err)
+	}
 	// Standard AppArmor LSM status: active; SELinux: not enforcing. The
 	// backend-selection tests override these files as needed.
 	aaDir := filepath.Join(e.destDir, "sys", "module", "apparmor", "parameters")
@@ -1715,6 +2065,13 @@ exit 0
 	if err := os.WriteFile(filepath.Join(e.scriptDir, "apparmor", "docker-helper-system"), []byte("profile docker-helper-system {}"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	// Builder TUN kernel facility: the bundled modules-load.d asset.
+	if err := os.MkdirAll(filepath.Join(e.scriptDir, "modules-load.d"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(e.scriptDir, "modules-load.d", "docker-helper-builder.conf"), []byte("tun\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	e.env = []string{
 		"PATH=" + e.fakeBinDir + ":" + os.Getenv("PATH"),
@@ -1723,6 +2080,7 @@ exit 0
 		"BUILDER_UNIT_DEST=" + e.dest("etc/systemd/system/docker-helper-builder.service"),
 		"BUILDKIT_BIN_DEST=" + e.dest("usr/libexec/docker-helper/buildkit"),
 		"BUILDKIT_DOC_DEST=" + e.dest("usr/share/doc/docker-helper/buildkit"),
+		"MODULES_LOAD_DEST=" + e.dest("usr/lib/modules-load.d/docker-helper-builder.conf"),
 		"AA_PROFILE_DEST=" + e.dest("etc/apparmor.d/docker-helper-system"),
 		"AA_STATE_FILE=" + e.dest("var/lib/docker-helper/apparmor/managed-boundaries"),
 		"AA_LEGACY_FRAGMENT=" + e.dest("etc/apparmor.d/docker-helper.d/managed-roots"),
@@ -1747,6 +2105,14 @@ func newSystemUninstallScriptEnv(t *testing.T) *systemScriptEnv {
 	if err := os.WriteFile(e.dest("bin/docker-helper"), []byte("installed-binary"), 0755); err != nil {
 		t.Fatal(err)
 	}
+	// The installed builder modules-load.d asset (removed by the uninstall).
+	modulesLoadDest := e.dest("usr/lib/modules-load.d/docker-helper-builder.conf")
+	if err := os.MkdirAll(filepath.Dir(modulesLoadDest), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(modulesLoadDest, []byte("tun\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(e.dest("etc/apparmor.d/docker-helper.d/managed-roots"),
 		[]byte("# fixture managed-roots fragment\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -1766,6 +2132,7 @@ func newSystemUninstallScriptEnv(t *testing.T) *systemScriptEnv {
 		"BUILDER_UNIT_DEST=" + e.dest("etc/systemd/system/docker-helper-builder.service"),
 		"BUILDKIT_BIN_DIR=" + e.dest("usr/libexec/docker-helper/buildkit"),
 		"BUILDKIT_DOC_DIR=" + e.dest("usr/share/doc/docker-helper/buildkit"),
+		"MODULES_LOAD_DEST=" + e.dest("usr/lib/modules-load.d/docker-helper-builder.conf"),
 		"BUILDER_STATE_DIR=" + e.dest("var/lib/docker-helper-builder"),
 		"BUILDER_RUNTIME_DIR=" + e.dest("run/docker-helper-builder"),
 		"SUBUID_DB=" + e.subuidDB,
@@ -2183,6 +2550,23 @@ func TestInstallSystemFreshYesEnablesStartsService(t *testing.T) {
 		t.Errorf("AppArmor profile must be loaded before init: parser(%d) init(%d), calls: %v",
 			parserIdx, initIdx, env.calls(t))
 	}
+
+	// The builder modules-load.d asset must be installed at the production
+	// destination with the exact package bytes and mode (P5-S2 Phase 4C-13).
+	installed, err := os.ReadFile(env.dest("usr/lib/modules-load.d/docker-helper-builder.conf"))
+	if err != nil {
+		t.Fatalf("modules-load.d asset not installed: %v", err)
+	}
+	if string(installed) != "tun\n" {
+		t.Errorf("modules-load.d asset must be the exact package bytes \"tun\\n\", got %q", string(installed))
+	}
+	info, err := os.Stat(env.dest("usr/lib/modules-load.d/docker-helper-builder.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0644 {
+		t.Errorf("modules-load.d asset mode = %o, want 644", info.Mode().Perm())
+	}
 }
 
 // --- Behavioral tests for uninstall-system.sh ---
@@ -2232,6 +2616,12 @@ func TestUninstallSystemNormalPreservesConfig(t *testing.T) {
 	}
 	if _, err := os.Stat(env.dest("bin/docker-helper")); !os.IsNotExist(err) {
 		t.Error("binary should be removed")
+	}
+	// The package-owned modules-load.d asset is removed with the package
+	// (the loaded tun module itself is never unloaded — shared host
+	// infrastructure).
+	if _, err := os.Stat(env.dest("usr/lib/modules-load.d/docker-helper-builder.conf")); !os.IsNotExist(err) {
+		t.Error("modules-load.d asset should be removed")
 	}
 }
 

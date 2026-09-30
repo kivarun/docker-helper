@@ -189,6 +189,13 @@ cp "$SCRIPT_DIR/packaging/scripts/lib/provision-builder.sh" \
    "$BUNDLE_DIR/scripts/provision-builder.sh"
 chmod 755 "$BUNDLE_DIR/scripts/provision-builder.sh"
 
+# Builder TUN kernel facility: the reboot persistence asset (the package's
+# modules-load.d contract; the installer places it at the production path)
+mkdir -p "$BUNDLE_DIR/modules-load.d"
+cp "$SCRIPT_DIR/packaging/modules-load.d/docker-helper-builder.conf" \
+   "$BUNDLE_DIR/modules-load.d/docker-helper-builder.conf"
+chmod 644 "$BUNDLE_DIR/modules-load.d/docker-helper-builder.conf"
+
 # AppArmor profiles
 mkdir -p "$BUNDLE_DIR/apparmor/local"
 cp "$SCRIPT_DIR/packaging/apparmor/docker-helper-system" \
@@ -338,6 +345,7 @@ EXPECTED_PATHS=(
   "docker-helper-${VERSION}-linux-amd64/buildkit/LICENSE"
   "docker-helper-${VERSION}-linux-amd64/buildkit/MANIFEST"
   "docker-helper-${VERSION}-linux-amd64/scripts/provision-builder.sh"
+  "docker-helper-${VERSION}-linux-amd64/modules-load.d/docker-helper-builder.conf"
   "docker-helper-${VERSION}-linux-amd64/skills/docker-helper/SKILL.md"
   "docker-helper-${VERSION}-linux-amd64/man/docker-helper.1.gz"
   "docker-helper-${VERSION}-linux-amd64/man/docker-helper-config.5.gz"
@@ -374,6 +382,17 @@ for f in docker-helper install-system.sh uninstall-system.sh \
     echo "OK: $f has executable bit"
   else
     echo "FAIL: $f missing executable bit (got $PERMS)" >&2
+    exit 1
+  fi
+done
+
+# Check the non-executable data files carry exactly 0644.
+for f in modules-load.d/docker-helper-builder.conf; do
+  PERMS=$(tar tzvf "$TARBALL" | grep "docker-helper-${VERSION}-linux-amd64/${f}$" | awk '{print $1}')
+  if [[ "$PERMS" == -rw-r--r--* ]]; then
+    echo "OK: $f is 0644"
+  else
+    echo "FAIL: $f wrong mode (got $PERMS, want -rw-r--r--)" >&2
     exit 1
   fi
 done

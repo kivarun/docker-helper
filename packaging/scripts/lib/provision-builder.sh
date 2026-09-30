@@ -1,36 +1,53 @@
 #!/bin/sh
-# provision-builder.sh — the ONE builder identity + subordinate-ID
-# provisioning owner for Release 2.4 (Release-2.4 implementation plan §6).
-# It is executed (not re-implemented) by the DEB postinst, the RPM %post
-# scriptlet, and the tarball system installer, so every install path
-# provisions the exact same dedicated unprivileged builder identity.
+# provision-builder.sh — the ONE builder host provisioning owner for
+# Release 2.4 (Release-2.4 implementation plan §6). It is executed (not
+# re-implemented) by the DEB postinst, the RPM %post scriptlet, and the
+# tarball system installer, so every install path provisions the exact
+# same builder host state.
 #
 # Canonical resource stem: docker-helper-builder (user, group, unit,
 # runtime dir, state dir — no aliases).
 #
-# Contract (idempotent, fail-closed):
-#   1. when the docker-helper-builder user exists: verify the nologin
-#      shell, that the same-named group exists with the user's primary
-#      gid, and the state-root home; anything else fails closed with an
-#      actionable message;
-#   2. otherwise create it as a system user (no login, no home creation);
-#   3. verify the subordinate-ID databases carry a docker-helper-builder
-#      entry with a range >= 65536 (the smallest RootlessKit needs to run
-#      a full 65536-uid userns mapping);
-#   4. when missing, COMPUTE a collision-free contiguous 65536 range with
+# Responsibilities (idempotent, fail-closed, verify-first):
+#   1. builder identity: when the docker-helper-builder user exists,
+#      verify the nologin shell, that the same-named group exists with
+#      the user's primary gid, and the state-root home; anything else
+#      fails closed with an actionable message; otherwise create it as a
+#      system user (no login, no home creation);
+#   2. subordinate IDs: verify the subordinate-ID databases carry a
+#      docker-helper-builder entry with a range >= 65536 (the smallest
+#      RootlessKit needs to run a full 65536-uid userns mapping); when
+#      missing, COMPUTE a collision-free contiguous 65536 range with
 #      integer arithmetic over every existing [start, start+count)
 #      interval read from BOTH subid databases (one range is written to
 #      both, so it must be free in both), and then DELEGATE THE MUTATION
-#      to upstream account tooling: `usermod --add-subuids
-#      --add-subgids`. docker-helper NEVER writes or rewrites the
-#      subid databases directly: the passwd/subid database WRITER is
-#      upstream shadow-utils exclusively;
-#   5. ambiguous state (duplicate entries, an entry smaller than the
-#      required range, overlapping allocations, usermod failure) fails
-#      closed and prints the conflict — the package scriptlet aborts and
-#      reports the failure to the operator;
-#   6. a re-run of the same version is a no-op: every step verifies
+#      to upstream account tooling: `usermod --add-subuids --add-subgids`.
+#      docker-helper NEVER writes or rewrites the subid databases
+#      directly: the passwd/subid database WRITER is upstream
+#      shadow-utils exclusively. Ambiguous state (duplicate entries, an
+#      entry smaller than the required range, overlapping allocations,
+#      usermod failure) fails closed and prints the conflict — the
+#      package scriptlet aborts and reports the failure to the operator;
+#   3. the TUN kernel facility (P5-S2 Phase 4C-13): the builder flow's
+#      tap setup opens the global /dev/net/tun device node, whose driver
+#      (char major:minor 10:200) must already be available on the host.
+#      Kernel-module lifecycle stays a HOST/DEPLOYMENT responsibility:
+#      this script only verifies the runtime condition
+#      (/sys/class/misc/tun/dev == 10:200) and, when it is absent,
+#      converges it by delegating to the upstream kmod tool (`modprobe
+#      tun`) and re-verifying the sysfs endpoint. It never opens the
+#      device to "test" it, never grants the flow domain module-load
+#      authority, and never depends on /dev/net/tun's mere existence
+#      (the node can exist while no driver backs 10:200). The reboot
+#      persistence for the same facility is owned by the package's
+#      modules-load.d/docker-helper-builder.conf asset; this script owns
+#      the CURRENT-boot convergence (no duplicate activation paths);
+#   4. a re-run of the same version is a no-op: every step verifies
 #      first and mutates only when missing.
+#
+# Test seam (stages): the stage selection below exists so the script's
+# own test suite can exercise one stage without touching host account
+# state. The production default runs every stage, in order, unmodified.
 
 set -eu
 
@@ -41,25 +58,60 @@ SUBID_COUNT=65536
 # Subordinate-ID allocations conventionally start above the classic static
 # uid space (both supported targets' shadow-utils default SUB_UID_MIN).
 SUBID_BASE=100000
-SUBUID_DB=/etc/subuid
-SUBGID_DB=/etc/subgid
+SUBUID_DB="${SUBUID_DB:-/etc/subuid}"
+SUBGID_DB="${SUBGID_DB:-/etc/subgid}"
+PW_DB="${PW_DB:-/etc/passwd}"
+# TUN facility truth: the sysfs endpoint that reports the char device's
+# major:minor when the driver is present (built-in or loaded). `tun` is
+# char-major 10:200.
+TUN_SYSFS="${TUN_SYSFS:-/sys/class/misc/tun/dev}"
+TUN_MAJOR_MINOR=10:200
+MODPROBE="${MODPROBE:-modprobe}"
+PROVISION_STAGES="${PROVISION_STAGES:-identity,subids,tun}"
 
 log()  { printf 'provision-builder: %s\n' "$*"; }
 fail() { printf 'provision-builder: FAILED: %s\n' "$*" >&2; exit 1; }
 
-# --- toolchain preconditions ----------------------------------------------
-command -v useradd >/dev/null 2>&1 || fail "useradd (shadow-utils) not available"
-command -v usermod >/dev/null 2>&1 || fail "usermod (shadow-utils) not available"
-command -v awk >/dev/null 2>&1     || fail "awk not available"
-[ -e "$BUILDER_SHELL" ] || fail "login shell $BUILDER_SHELL does not exist on this system"
+stage_requested() {
+    case ",$PROVISION_STAGES," in
+        *,"$1",*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
-# --- identity ---------------------------------------------------------------
+# --- stage 3: the TUN kernel facility (current-boot convergence) -----------
+# Prints the sysfs endpoint value, or "absent" when the endpoint does not
+# exist; always exits 0 (the caller decides what the value means).
+tun_sysfs_dev() {
+    if [ -r "$TUN_SYSFS" ]; then
+        cat "$TUN_SYSFS"
+    else
+        echo absent
+    fi
+}
+
+converge_tun_facility() {
+    dev="$(tun_sysfs_dev)"
+    if [ "$dev" = "$TUN_MAJOR_MINOR" ]; then
+        log "TUN facility available ($TUN_SYSFS = $TUN_MAJOR_MINOR); nothing to do"
+        return 0
+    fi
+    command -v "$MODPROBE" >/dev/null 2>&1 \
+        || fail "modprobe not available; cannot converge the TUN facility ($TUN_SYSFS reports '$dev')"
+    "$MODPROBE" tun || fail "modprobe tun failed"
+    dev="$(tun_sysfs_dev)"
+    [ "$dev" = "$TUN_MAJOR_MINOR" ] \
+        || fail "modprobe tun reported success but $TUN_SYSFS reports '${dev}', want $TUN_MAJOR_MINOR"
+    log "TUN facility converged ($TUN_SYSFS = $TUN_MAJOR_MINOR)"
+}
+
+# --- stage 1: builder identity ---------------------------------------------
 user_shell() {
-    awk -F: -v u="$1" '$1 == u { print $7; found = 1 } END { if (!found) exit 1 }' /etc/passwd
+    awk -F: -v u="$1" '$1 == u { print $7; found = 1 } END { if (!found) exit 1 }' "$PW_DB"
 }
 
 user_gid() {
-    awk -F: -v u="$1" '$1 == u { print $4; found = 1 } END { if (!found) exit 1 }' /etc/passwd
+    awk -F: -v u="$1" '$1 == u { print $4; found = 1 } END { if (!found) exit 1 }' "$PW_DB"
 }
 
 group_gid() {
@@ -77,17 +129,23 @@ verify_identity() {
     # absent at provisioning time. Nothing to verify beyond the account.
 }
 
-if id "$IDENTITY" >/dev/null 2>&1; then
-    log "user $IDENTITY exists; verifying"
-    verify_identity
-else
-    log "creating system user $IDENTITY (home $BUILDER_HOME, shell $BUILDER_SHELL)"
-    useradd --system --home "$BUILDER_HOME" --shell "$BUILDER_SHELL" "$IDENTITY" \
-        || fail "useradd failed for $IDENTITY"
-    verify_identity
-fi
+converge_identity() {
+    command -v useradd >/dev/null 2>&1 || fail "useradd (shadow-utils) not available"
+    [ -e "$BUILDER_SHELL" ] || fail "login shell $BUILDER_SHELL does not exist on this system"
+    if id "$IDENTITY" >/dev/null 2>&1; then
+        log "user $IDENTITY exists; verifying"
+        verify_identity
+    else
+        log "creating system user $IDENTITY (home $BUILDER_HOME, shell $BUILDER_SHELL)"
+        useradd --system --home "$BUILDER_HOME" --shell "$BUILDER_SHELL" "$IDENTITY" \
+            || fail "useradd failed for $IDENTITY"
+        verify_identity
+    fi
+    uid="$(awk -F: -v u="$IDENTITY" '$1 == u { print $3; found = 1 } END { if (!found) exit 1 }' "$PW_DB")"
+    log "provisioned $IDENTITY (uid $uid, subids $SUBID_COUNT)"
+}
 
-# --- subordinate-ID verification --------------------------------------------
+# --- stage 2: subordinate-ID verification -----------------------------------
 # Prints "<start> <count>" for the identity's FIRST entry; fails when more
 # than one entry exists (ambiguous provisioning state).
 subid_entry() {
@@ -117,21 +175,6 @@ verify_subid() {
     [ "$count" -ge "$SUBID_COUNT" ] || fail "$db holds $IDENTITY with count $count < $SUBID_COUNT; extend or remove the entry manually and re-run"
     return 0
 }
-
-need_uid=1
-need_gid=1
-if verify_subid "$SUBUID_DB"; then
-    need_uid=0
-    log "$SUBUID_DB: $(grep "^$IDENTITY:" "$SUBUID_DB")"
-fi
-if verify_subid "$SUBGID_DB"; then
-    need_gid=0
-    log "$SUBGID_DB: $(grep "^$IDENTITY:" "$SUBGID_DB")"
-fi
-if [ "$need_uid" = 0 ] && [ "$need_gid" = 0 ]; then
-    log "subordinate ranges verified; nothing to do"
-    exit 0
-fi
 
 # --- collision-free range computation ---------------------------------------
 # Every existing [start, start+count) interval from BOTH databases (one
@@ -179,16 +222,23 @@ compute_free_start() {
     '
 }
 
-if [ "$need_uid" = 1 ]; then
-    need_range=1
-else
-    need_range=0
-fi
-if [ "$need_gid" = 1 ]; then
-    need_range=1
-fi
-
-if [ "$need_range" = 1 ]; then
+converge_subids() {
+    command -v usermod >/dev/null 2>&1 || fail "usermod (shadow-utils) not available"
+    command -v awk >/dev/null 2>&1     || fail "awk not available"
+    need_uid=1
+    need_gid=1
+    if verify_subid "$SUBUID_DB"; then
+        need_uid=0
+        log "$SUBUID_DB: $(grep "^$IDENTITY:" "$SUBUID_DB")"
+    fi
+    if verify_subid "$SUBGID_DB"; then
+        need_gid=0
+        log "$SUBGID_DB: $(grep "^$IDENTITY:" "$SUBGID_DB")"
+    fi
+    if [ "$need_uid" = 0 ] && [ "$need_gid" = 0 ]; then
+        log "subordinate ranges verified"
+        return 0
+    fi
     validate_subid_db "$SUBUID_DB"
     validate_subid_db "$SUBGID_DB"
     start="$(compute_free_start)"
@@ -202,8 +252,16 @@ if [ "$need_range" = 1 ]; then
     verify_subid "$SUBGID_DB" || fail "$SUBGID_DB does not hold the expected $IDENTITY range after usermod"
     log "$SUBUID_DB: $(grep "^$IDENTITY:" "$SUBUID_DB")"
     log "$SUBGID_DB: $(grep "^$IDENTITY:" "$SUBGID_DB")"
-fi
+}
 
-uid="$(awk -F: -v u="$IDENTITY" '$1 == u { print $3; found = 1 } END { if (!found) exit 1 }' /etc/passwd)"
-log "provisioned $IDENTITY (uid $uid, subids $SUBID_COUNT)"
+# --- production flow: every stage, in order ---------------------------------
+if stage_requested identity; then
+    converge_identity
+fi
+if stage_requested subids; then
+    converge_subids
+fi
+if stage_requested tun; then
+    converge_tun_facility
+fi
 exit 0

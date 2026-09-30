@@ -13,6 +13,9 @@ overrides:
       - apparmor
       # Builder identity + subordinate-ID provisioning (useradd/usermod).
       - passwd
+      # Builder TUN kernel facility: the canonical provisioner converges
+      # the current boot by delegating to the upstream kmod tool.
+      - kmod
       # Builder backend runtime (distro-owned; the pinned BuildKit payload
       # is product-shipped, rootlesskit/slirp4netns/newuidmap are not).
       - rootlesskit
@@ -51,6 +54,9 @@ overrides:
       # Builder backend runtime on openSUSE Tumbleweed: shadow (useradd/
       # usermod AND newuidmap/newgidmap), rootlesskit, slirp4netns.
       - shadow
+      # Builder TUN kernel facility: the canonical provisioner converges
+      # the current boot by delegating to the upstream kmod tool.
+      - kmod
       - rootlesskit
       - slirp4netns
     scripts:
@@ -83,6 +89,15 @@ contents:
 
   - src: packaging/scripts/lib/provision-builder.sh
     dst: /usr/share/docker-helper/lib/provision-builder.sh
+    file_info:
+      mode: 0644
+
+  # Builder TUN kernel facility: the reboot persistence contract. Loaded
+  # by systemd-modules-load before ordinary services need it; the current
+  # boot is converged by the canonical provisioner. /usr/lib is the
+  # vendor/package-owned configuration root (not operator /etc).
+  - src: packaging/modules-load.d/docker-helper-builder.conf
+    dst: /usr/lib/modules-load.d/docker-helper-builder.conf
     file_info:
       mode: 0644
 
