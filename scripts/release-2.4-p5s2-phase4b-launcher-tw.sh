@@ -338,7 +338,7 @@ cat "$EVIDENCE_DIR/02-ip-probe.txt" >&2
 # inventory of the flow domain's tun/tap authority (expected: the 4C-14
 # ordinary + TUNSETIFF xperm contribution, nothing wider).
 {
-  echo "=== /dev/net/tun evidence-only probe (no grant this phase) ==="
+  echo "=== /dev/net/tun evidence-only probe (stand shape + the 4C-14 loaded-policy tun authority inventory) ==="
   echo "--- the device node:"
   if [ -e /dev/net/tun ]; then
     ls -lZ /dev/net/tun
