@@ -753,6 +753,36 @@ PREFLIGHT_OK=1
     PREFLIGHT_OK=0
   fi
 
+  echo "=== flow tun_socket identity (the 4C-16 composition: the concrete contribution must be exactly { create } — the security_tun_dev_create() boundary of the NEW-device TUNSETIFF path; no attach_queue/relabel*, no inherited socket permission) ==="
+  echo "--- raw effective inventory (rootlesskit -> tun_socket; base-policy/attribute expansions recorded, not asserted):"
+  sesearch --allow -s docker_helper_rootlesskit_t -c tun_socket /sys/fs/selinux/policy || true
+  echo "--- CONCRETE module contribution (source must be docker_helper_rootlesskit_t; must be exactly create):"
+  TS_CONCRETE="$(sesearch --allow -s docker_helper_rootlesskit_t -c tun_socket /sys/fs/selinux/policy 2>/dev/null | awk '$2 == "docker_helper_rootlesskit_t"' || true)"
+  printf '%s\n' "${TS_CONCRETE:-(none)}"
+  TS_EXACT_OK=0
+  if [ "$(printf '%s\n' "$TS_CONCRETE" | grep -ac . || true)" = 1 ] \
+    && printf '%s\n' "$TS_CONCRETE" | grep -aqE ':tun_socket (\{ )?create( \})?;' \
+    && ! printf '%s\n' "$TS_CONCRETE" | grep -aqE 'attach_queue|relabelfrom|relabelto'; then
+    TS_EXACT_OK=1
+  fi
+  echo "--- EFFECTIVE negative check (attach_queue/relabelfrom/relabelto must be absent from the whole effective surface — base-policy/attribute-derived contributions count; an extra one is a STOP):"
+  TS_EFFECTIVE_EXTRA="$(sesearch --allow -s docker_helper_rootlesskit_t -c tun_socket /sys/fs/selinux/policy 2>/dev/null | grep -aE 'attach_queue|relabelfrom|relabelto' || true)"
+  TS_EFFECTIVE_NEG_OK=0
+  if [ -z "$TS_EFFECTIVE_EXTRA" ]; then
+    echo "PASS: no effective attach_queue/relabelfrom/relabelto authority"
+    TS_EFFECTIVE_NEG_OK=1
+  else
+    echo "STOP: the effective tun_socket surface contains attach_queue/relabelfrom/relabelto (base-policy/attribute-derived):"
+    printf '%s\n' "$TS_EFFECTIVE_EXTRA"
+    PREFLIGHT_OK=0
+  fi
+  if [ "$TS_EXACT_OK" = 1 ] && [ "$TS_EFFECTIVE_NEG_OK" = 1 ]; then
+    echo "PASS: flow tun_socket identity (exactly { create }, exactly one rule; no attach_queue/relabel* authority)"
+  else
+    echo "FAIL: flow tun_socket identity (exact=$TS_EXACT_OK effective-negative=$TS_EFFECTIVE_NEG_OK)"
+    PREFLIGHT_OK=0
+  fi
+
   echo "=== netlink-route create+setopt+bind+getattr identity (the 4C-10 composition: exactly { create setopt bind getattr }, no other socket permission, no capability surface) ==="
   echo "--- allow rules on netlink_route_socket (expected: the rootlesskit child's create+setopt+bind+getattr only; attribute-generic base-policy rules recorded, not asserted):"
   sesearch --allow -c netlink_route_socket /sys/fs/selinux/policy || true
@@ -1113,27 +1143,33 @@ PERMS_FIRST="$(printf '%s\n' "$RAW_FIRST" | sed -n 's/.*denied  *{ \([^}]*\) }.*
 SUMMARY_FIRST="$(printf '%s\n' "$RAW_FIRST" | sed -n 's/.*scontext=\([^ ]*\) tcontext=\([^ ]*\) tclass=\([a-z_]*\).*/scontext=\1 tcontext=\2 tclass=\3/p' || true)"
 marker "DOWNSTREAM-BOUNDARY=${SUMMARY_FIRST:-none} perms=${PERMS_FIRST:-none}"
 
-# ---- the 4C-14 gate: the TUN ioctl boundary is now SELinux-mediated by
-# ---- the ordinary { ioctl } bit + the exact { 0x54ca } allowxperm, so
-# ---- the canonical 4C-13 boundary (denied { ioctl } ioctlcmd=0x54ca on
-# ---- tun_tap_device_t) must be GONE, and NO tun_tap_device_t denial may
-# ---- appear in the window at all: any tun denial — a read/write/open
-# ---- regression, a 0x54ca replay, or an ioctlcmd=0x54cb TUNSETPERSIST
-# ---- denial — would mean the loaded composition's TUN surface did not
-# ---- hold exactly as pinned (a 0x54cb denial would additionally mean
-# ---- the flow got further than the composition's own authority allows).
+# ---- the 4C-14 gate (updated for the 4C-16 composition): the TUN ioctl
+# ---- boundary is SELinux-mediated by the ordinary { ioctl } bit + the
+# ---- exact { 0x54ca } allowxperm. HARD FAILURES: any tun_tap_device_t
+# ---- denial of the granted ordinary surface (read/write/open — or any
+# ---- never-granted ordinary bit: getattr/append/lock/create/setattr),
+# ---- and the canonical 4C-13 shape (denied { ioctl } ioctlcmd=0x54ca).
+# ---- NOT a failure — the gate holding as pinned: an ioctl denial with
+# ---- ioctlcmd=0x54cb (TUNSETPERSIST, the predicted 4C-17 boundary) or
+# ---- any other non-whitelisted command — the xperm mediation denied
+# ---- exactly what the composition does not grant; it is RECORDED as
+# ---- the next terminal boundary evidence.
 TUN_IOCTL_GONE_OK=1
 {
-  echo "=== tun_tap_device_t AVCs of the window (the 4C-13 ioctl boundary must be absent; ANY tun denial fails the 4C-14 composition) ==="
+  echo "=== tun_tap_device_t AVCs of the window (4C-16 composition: the granted surface must not regress; 0x54ca must stay gone; non-whitelisted ioctl commands must be denied and are recorded) ==="
   TUN_AVC_WINDOW="$(grep -a 'tcontext=system_u:object_r:tun_tap_device_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null || true)"
   printf '%s\n' "${TUN_AVC_WINDOW:-(none — no tun_tap_device_t denial in the window)}"
   echo "--- the exact 4C-13 shape (denied ioctl, ioctlcmd=0x54ca = TUNSETIFF):"
   OLD_TUN_IOCTL="$(printf '%s\n' "$TUN_AVC_WINDOW" | grep -a 'ioctlcmd=0x54ca' || true)"
   printf '%s\n' "${OLD_TUN_IOCTL:-(none — the 4C-13 ioctl(TUNSETIFF) denial is gone)}"
-  echo "--- any tun ioctlcmd inventory (raw; 0x54cb must never be allowed):"
-  printf '%s\n' "$TUN_AVC_WINDOW" | grep -a 'ioctlcmd=' || echo "(none)"
-  if [ -n "$TUN_AVC_WINDOW" ]; then
-    echo "GATE: a tun_tap_device_t denial appeared in the window — the loaded TUN surface did not hold exactly as pinned"
+  echo "--- granted-surface regressions (read/write/open/never-granted ordinary bits — must be zero):"
+  TUN_REGRESSION="$(printf '%s\n' "$TUN_AVC_WINDOW" | grep -aE 'denied  *{ (read|write|open|getattr|append|lock|create|setattr)' || true)"
+  printf '%s\n' "${TUN_REGRESSION:-(none — the granted ordinary surface held)}"
+  echo "--- xperm-mediated denials of non-whitelisted commands (the gate holding; the recorded next-boundary evidence, e.g. 0x54cb = TUNSETPERSIST):"
+  XP_DENIALS="$(printf '%s\n' "$TUN_AVC_WINDOW" | grep -a 'denied  *{ ioctl }' | grep -a 'ioctlcmd=' | grep -av 'ioctlcmd=0x54ca' || true)"
+  printf '%s\n' "${XP_DENIALS:-(none — no non-whitelisted ioctl command was attempted)}"
+  if [ -n "$TUN_REGRESSION" ]; then
+    echo "GATE: a tun_tap_device_t denial hit the granted ordinary surface — the loaded TUN surface did not hold exactly as pinned"
     TUN_IOCTL_GONE_OK=0
   fi
   if [ -n "$OLD_TUN_IOCTL" ]; then
@@ -1187,6 +1223,42 @@ if [ "$CAP_NETADMIN_GONE_OK" = 1 ]; then
 else
   marker "BLOCKER=the 4C-15 cap_userns net_admin composition did not hold (see 15-cap-netadmin-gone.txt)"
   marker "CAP-NETADMIN-BOUNDARY=FAIL"
+  finish FAIL; exit 0
+fi
+
+# ---- the 4C-16 gate: the NEW-device TUNSETIFF creation hook is now
+# ---- granted (self:tun_socket create), so the canonical 4C-15
+# ---- boundary — denied { create } tclass=tun_socket self->self — must
+# ---- be GONE, and the journal must no longer show the TUNSETIFF EACCES
+# ---- shape: TUNSETIFF completes past security_tun_dev_create(). The
+# ---- next boundary (per the iproute2 tap_add_ioctl() sequence,
+# ---- predicted TUNSETPERSIST 0x54cb) is NOT granted and is recorded by
+# ---- the 14-gate's xperm-denial inventory and the generic
+# ---- DOWNSTREAM-BOUNDARY mechanism; no route/nlmsg/attach authority is
+# ---- pre-granted here.
+TS_CREATE_GONE_OK=1
+{
+  echo "=== tun_socket AVCs of the window (the 4C-15 create boundary must be absent) ==="
+  TS_AVC_WINDOW="$(grep -a 'tclass=tun_socket' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null || true)"
+  printf '%s\n' "${TS_AVC_WINDOW:-(none — no tun_socket denial in the window)}"
+  echo "--- the manager journal's TUNSETIFF EACCES shape (must be gone — TUNSETIFF completes past security_tun_dev_create()):"
+  MGR_TUNSETIFF_EACCES="$(grep -a 'ioctl(TUNSETIFF): Permission denied' "$EVIDENCE_DIR/07-manager-diag.txt" 2>/dev/null || true)"
+  printf '%s\n' "${MGR_TUNSETIFF_EACCES:-(none — the TUNSETIFF SELinux-hook EACCES is gone)}"
+  if [ -n "$TS_AVC_WINDOW" ]; then
+    echo "GATE: a tun_socket denial appeared in the window — the 4C-16 create grant did not take effect"
+    TS_CREATE_GONE_OK=0
+  fi
+  if [ -n "$MGR_TUNSETIFF_EACCES" ]; then
+    echo "GATE: the flow still dies inside TUNSETIFF (the journal still shows the SELinux-hook EACCES shape)"
+    TS_CREATE_GONE_OK=0
+  fi
+} > "$EVIDENCE_DIR/16-tunsocket-create-gone.txt" 2>&1
+cat "$EVIDENCE_DIR/16-tunsocket-create-gone.txt" >&2
+if [ "$TS_CREATE_GONE_OK" = 1 ]; then
+  marker "TUN-SOCKET-CREATE-BOUNDARY=GONE"
+else
+  marker "BLOCKER=the 4C-16 tun_socket create composition did not hold (see 16-tunsocket-create-gone.txt)"
+  marker "TUN-SOCKET-CREATE-BOUNDARY=FAIL"
   finish FAIL; exit 0
 fi
 
