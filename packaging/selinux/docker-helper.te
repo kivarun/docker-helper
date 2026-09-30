@@ -1172,26 +1172,55 @@ allow docker_helper_rootlesskit_t ifconfig_exec_t:file { execute read open execu
 # two sequential hooks of one causal syscall, and `open` completes the
 # evidenced open() chain here.
 #
-# SCOPE — READ CAREFULLY: this grant covers read/write on the TUN/TAP
-# device node for the flow's own open — NOTHING more. Deliberately NOT
-# granted: getattr/append/ioctl/lock/create/setattr (each requires
-# its own enforcing evidence; if the effective base policy separately
-# provides getattr that is a loaded-policy fact, not a reason to
-# copy it here), and NO capability surface (self:capability
-# net_admin/net_raw and cap_userns net_admin stay ungranted — the TUN
-# driver's ns_capable(net->user_ns, CAP_NET_ADMIN) check inside
-# tun_set_iff() must remain a separate live enforcing boundary). The
-# distro corenet_rw_tun_tap_dev() macro is deliberately NOT used: its
-# rw_chr_file_perms expansion carries getattr/append/ioctl/lock —
-# beyond the observed { read write open } chain. ioctl in particular
-# stays closed until its own live evidence. Like every flow-domain
-# grant this is a domain-wide permission on the distro device TYPE (not
-# path-exclusive — tun_tap_device_t is a distro device type), not an
-# operation-scoped one; the operation separation is owned by the
-# categorized process/object MCS boundary, and cross-operation
-# namespace targeting stays an open concurrency/security gate before
-# the Release GO.
-allow docker_helper_rootlesskit_t tun_tap_device_t:chr_file { read write open };
+# SCOPE — READ CAREFULLY: this grant covers the TUN/TAP device-node
+# open(O_RDWR) chain and the ONE evidenced ioctl command for the flow's
+# own tap creation — NOTHING more. Deliberately NOT granted:
+# getattr/append/lock/create/setattr (each requires its own enforcing
+# evidence; if the effective base policy separately provides getattr
+# that is a loaded-policy fact, not a reason to copy it here), and NO
+# capability surface (self:capability net_admin/net_raw and cap_userns
+# net_admin stay ungranted — the TUN driver's ns_capable(net->user_ns,
+# CAP_NET_ADMIN) check inside tun_set_iff() must remain a separate live
+# enforcing boundary). The distro corenet_rw_tun_tap_dev() macro
+# remains deliberately NOT used: its rw_chr_file_perms expansion
+# carries getattr/append/ioctl/lock — beyond the observed chain — and
+# a macro expansion carries NO allowxperm, so importing it would make
+# the flow's ioctl authority UNRESTRICTED at the exact command
+# boundary this policy pins. Like every flow-domain grant this is a
+# domain-wide permission on the distro device TYPE (not path-exclusive
+# — tun_tap_device_t is a distro device type), not an operation-scoped
+# one; the operation separation is owned by the categorized
+# process/object MCS boundary, and cross-operation namespace targeting
+# stays an open concurrency/security gate before the Release GO.
+#
+# ioctl (P5-S2 Phase 4C-14): the flow's tap creation issues its first
+# chr_file ioctl immediately after the proven open(O_RDWR) chain — the
+# canonical 4C-13 enforcing run (36731429729, PASS) terminated at the
+# exact boundary denied { ioctl } comm="ip" path="/dev/net/tun"
+# ioctlcmd=0x54ca
+# tcontext=system_u:object_r:tun_tap_device_t:s0 tclass=chr_file
+# permissive=0, with the direct userspace failure "ioctl(TUNSETIFF):
+# Permission denied". 0x54ca IS TUNSETIFF, the create-the-interface
+# command of the TUN UAPI. chr_file ioctl is mediated as a SELinux
+# EXTENDED permission (kernel 4.4+): the ordinary `ioctl` bit and the
+# allowxperm bitmap are ONE authority unit — an ordinary ioctl bit
+# with NO allowxperm for the tuple is UNRESTRICTED command authority
+# (the all-or-nothing grant this policy must never create), and an
+# allowxperm bitmap without the ordinary bit is not class-level
+# permission. The grant is therefore exactly TWO lines below — one
+# ordinary rule carrying { read write open ioctl } and one allowxperm
+# rule carrying { 0x54ca } — no range (0x5400-0x54ff and
+# 0x54ca-0x54cb stay closed), no complement (~0x54ca stays closed),
+# no second command: TUNSETPERSIST (0x54cb, the adjacent UAPI command)
+# and every other chr_file ioctl command stay denied, each requiring
+# its own live evidence. The EFFECTIVE loaded-policy xperm union for
+# this tuple must be exactly { 0x54ca }: base-policy and
+# attribute-derived allowxperm contributions count toward the
+# effective verdict, and the enforcing harness proves the union with
+# a sesearch allowxperm inventory — an extra effective command there
+# is a STOP, not a silent accept.
+allow docker_helper_rootlesskit_t tun_tap_device_t:chr_file { read write open ioctl };
+allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl { 0x54ca };
 
 # The flow's NETLINK_ROUTE socket creation + socket-option operations +
 # local bind (P5-S2 Phases 4C-7/4C-8/4C-9): the first kernel actions of
