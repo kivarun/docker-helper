@@ -908,8 +908,17 @@ cat "$EVIDENCE_DIR/18-semodule-db-diag.txt" >&2
 # logged with pid, args, and exit code; the report filters by pid.
 auditctl -a always,exit -F arch=b64 \
   -S socket,socketpair,sendmsg,sendto,recvmsg,recvfrom,ioctl,close \
-  -k p5s2diag > "$EVIDENCE_DIR/18-auditctl-sysrules.txt" 2>&1 \
+  -k p5s2diag >> "$EVIDENCE_DIR/18-auditctl-sysrules.txt" 2>&1 \
   || { note "auditctl syscall-chronology rules failed"; finish INCOMPLETE; exit 0; }
+# The 4C-18 rerun instrumentation: read the kernel's rule table back so
+# the evidence proves the rules were ACTUALLY loaded during the window.
+{
+  echo "=== auditctl -l (the kernel rule table after the add) ==="
+  auditctl -l 2>&1 || true
+  echo "=== auditctl -s (counters before the window) ==="
+  auditctl -s 2>&1 || true
+} >> "$EVIDENCE_DIR/18-auditctl-sysrules.txt"
+cat "$EVIDENCE_DIR/18-auditctl-sysrules.txt" >&2
 T0="$(date +%s)"
 echo "$T0" > "$EVIDENCE_DIR/window-start-epoch"
 auditctl -s > "$EVIDENCE_DIR/audit-status-window-start.txt" 2>&1 || true
@@ -1015,7 +1024,7 @@ log "D: live START $OP_ID (sampler armed)"
       printf 'CONVERGED %s\n' "$(date +%s.%N)" >> "$EVIDENCE_DIR/05-flow-context.txt"
       break
     fi
-    sleep 0.005
+    sleep 0.002
   done
   touch /tmp/p4b-work/sampler.done
 ) &
@@ -1057,8 +1066,18 @@ auditctl -s > "$EVIDENCE_DIR/audit-status-window-end.txt" 2>&1 || true
     | grep -a 'p5s2diag' \
     | awk -v s="$T0" '{ for (i = 1; i <= NF; i++) if ($i ~ /^msg=audit\(/) { ts = substr($i, 11); split(ts, t, "."); if (t[1] + 0 >= s + 0) print; break } }' \
     || true
+  echo "=== audit.log SYSCALL records (ANY key) since epoch $T0 ==="
+  grep -a 'type=SYSCALL' /var/log/audit/audit.log 2>/dev/null \
+    | awk -v s="$T0" '{ for (i = 1; i <= NF; i++) if ($i ~ /^msg=audit\(/) { ts = substr($i, 11); split(ts, t, "."); if (t[1] + 0 >= s + 0) print; break } }' \
+    || true
   echo "=== ausearch -k p5s2diag --raw (SYSCALL records) ==="
   ausearch -k p5s2diag --raw 2>/dev/null | grep -a 'type=SYSCALL' || true
+  echo "=== auditctl -s (counters AT HARVEST: lost/backlog prove kernel->auditd delivery) ==="
+  auditctl -s 2>&1 || true
+  echo "=== auditctl -l (rule table AT HARVEST, before the flush) ==="
+  auditctl -l 2>&1 || true
+  echo "=== raw audit.log tail (last 120 lines, unfiltered) ==="
+  tail -n 120 /var/log/audit/audit.log 2>/dev/null || true
 } > "$EVIDENCE_DIR/18-syscall-chronology.txt" 2>&1
 auditctl -D > /dev/null 2>&1 || true
 semodule -B >> "$EVIDENCE_DIR/18-semodule-db-diag.txt" 2>&1 || true
