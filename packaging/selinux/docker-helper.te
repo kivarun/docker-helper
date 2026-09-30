@@ -74,6 +74,7 @@ module docker_helper 1.2;
 		type container_runtime_exec_t;
 		type container_runtime_t;
 		type passwd_file_t;
+		type tun_tap_device_t;
 		type container_var_run_t;
 		type user_home_dir_t;
 		type fs_t;
@@ -1134,6 +1135,56 @@ allow docker_helper_rootlesskit_t docker_helper_nsenter_exec_t:file { execute re
 # ioctl/lock (no evidence; the distro can_exec() macro's generic
 # expansion carries them — deliberately not used).
 allow docker_helper_rootlesskit_t ifconfig_exec_t:file { execute read open execute_no_trans getattr map };
+
+# The flow's TUN device node access (P5-S2 Phase 4C-11): the executed
+# distro ip's `tuntap add` path (do_iptuntap() -> tap_add_ioctl()) opens
+# the global distro device node /dev/net/tun with open(O_RDWR) as the
+# first step of creating the flow's tap0 device, before any TUNSETIFF/
+# TUNSETPERSIST ioctl.
+#
+# The distro already labels /dev/net/tun with its own device identity —
+# tun_tap_device_t (the kernel module's shared TUN/TAP device type; the
+# 4C-10 stand probe + live 4C-10 AVC named it) — so the distro-owned
+# type is USED, no custom file type is added, and the shipped .fc
+# carries NO delta for it: relabeling the global device node with a
+# private type would globally replace distro policy semantics for that
+# inode. The node itself does not carry per-operation MCS categories;
+# operation isolation stays owned by the categorized flow process, the
+# user namespace, the network namespace, and the subsequent
+# capability/kernel checks (part of the required c1-vs-c2 proof).
+#
+# Live enforcing AVC evidence (Phase 4C-10 run 36706718459,
+# launch-window record 402: denied { read write } for pid=2961 comm="ip"
+# name="tun" dev="devtmpfs" tcontext=system_u:object_r:tun_tap_device_t:s0
+# tclass=chr_file permissive=0) with the direct userspace failure
+# "open: Permission denied", rootlesskit's "failed to setup network ...
+# setting up tap tap0: ... exit status 1", the child EOF, and the
+# instance death — the direct causal chain to the 4C-10 flow death, one
+# stage after the full rtnl_open_byproto() completed. The observed
+# access vector { read write } is treated as ONE causal unit — the exact
+# open(O_RDWR) step — not artificially split into separate read/write
+# phases; it is recorded here verbatim, no permission added beyond it.
+#
+# SCOPE — READ CAREFULLY: this grant covers read/write on the TUN/TAP
+# device node for the flow's own open — NOTHING more. Deliberately NOT
+# granted: open/getattr/append/ioctl/lock/create/setattr (each requires
+# its own enforcing evidence; if the effective base policy separately
+# provides open/getattr that is a loaded-policy fact, not a reason to
+# copy it here), and NO capability surface (self:capability
+# net_admin/net_raw and cap_userns net_admin stay ungranted — the TUN
+# driver's ns_capable(net->user_ns, CAP_NET_ADMIN) check inside
+# tun_set_iff() must remain a separate live enforcing boundary). The
+# distro corenet_rw_tun_tap_dev() macro is deliberately NOT used: its
+# rw_chr_file_perms expansion carries open/getattr/append/ioctl/lock —
+# far beyond the observed { read write } pair. ioctl in particular
+# stays closed until its own live evidence. Like every flow-domain
+# grant this is a domain-wide permission on the distro device TYPE (not
+# path-exclusive — tun_tap_device_t is a distro device type), not an
+# operation-scoped one; the operation separation is owned by the
+# categorized process/object MCS boundary, and cross-operation
+# namespace targeting stays an open concurrency/security gate before
+# the Release GO.
+allow docker_helper_rootlesskit_t tun_tap_device_t:chr_file { read write };
 
 # The flow's NETLINK_ROUTE socket creation + socket-option operations +
 # local bind (P5-S2 Phases 4C-7/4C-8/4C-9): the first kernel actions of
