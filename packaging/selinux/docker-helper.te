@@ -117,7 +117,7 @@ module docker_helper 1.2;
 		class capability { dac_read_search dac_override sys_admin fowner setuid setgid };
 		class capability2 { wake_alarm kill };
 		class user_namespace { create };
-		class cap_userns { sys_admin };
+		class cap_userns { sys_admin sys_ptrace };
 		class process { transition siginh noatsecure rlimitinh sigkill setexec };
 		class process2 { nnp_transition };
 	}
@@ -989,9 +989,9 @@ allow docker_helper_builder_launcher_t docker_helper_rootlesskit_exec_t:file { e
 # reads, and the pointed exec-type transitions for its own helper launches
 # (slirp4netns, newuidmap, newgidmap — each entered only from this child
 # domain). It gets NO manager rights, no PLAIN capability grant (its only
-# capability surfaces are the evidenced in-namespace sys_admin bit and the
-# userns create), and no buildkitd/bin_t execution: those stay deliberate
-# boundaries needing their own evidence.
+# capability surfaces are the evidenced in-namespace sys_admin and
+# sys_ptrace bits and the userns create), and no buildkitd/bin_t
+# execution: those stay deliberate boundaries needing their own evidence.
 type docker_helper_rootlesskit_t, domain;
 role system_r types docker_helper_rootlesskit_t;
 
@@ -1511,22 +1511,56 @@ allow docker_helper_newgidmap_t passwd_file_t:file { read open };
 # comm="rootlesskit" scontext=system_u:system_r:docker_helper_rootlesskit_t:s0
 # tcontext=...docker_helper_rootlesskit_t:s0 tclass=user_namespace
 # permissive=0). Grant ONLY the create to the child domain: no equivalent
-# manager grant, no extra capabilities (cap_userns / self:capability stay
-# ungranted), no in-userns surface — those are separate boundaries.
+# manager grant, and no plain self:capability surface — the child's
+# capability surface is granted separately below (the two evidenced
+# in-namespace bits, each with its own enforcing AVC evidence).
 allow docker_helper_rootlesskit_t self:user_namespace create;
 
-# The child's in-namespace capability system call after the userns is
-# created: the same rootlesskit flow re-executes its binary inside the new
-# userns, which requires the in-namespace sys_admin bit for the
-# namespace-entry operations. Live enforcing AVC evidence (P5-S1 Tumbleweed
-# run 36225231523 P6 window: denied { sys_admin } capability=21
-# comm="rootlesskit" scontext=system_u:system_r:docker_helper_rootlesskit_t:s0
-# tcontext=system_u:system_r:docker_helper_rootlesskit_t:s0
-# tclass=cap_userns permissive=0). Exactly ONE cap_userns grant: the
-# child's sys_admin in its OWN namespace. No plain self:capability grant is
-# added (the out-of-namespace system capability set stays ungranted), and
-# the manager and slirp4netns domains get no cap_userns rights at all.
-allow docker_helper_rootlesskit_t self:cap_userns sys_admin;
+# The child's in-namespace capability checks inside the flow's own user
+# namespace. Exactly ONE cap_userns rule for the child domain, with the two
+# evidenced bits, each with its own live causal provenance:
+#
+#   self:cap_userns { sys_admin sys_ptrace }
+#
+#   - sys_admin (capability 21): the same rootlesskit flow re-executes its
+#     binary inside the new userns and performs the namespace-entry
+#     operations. Live enforcing AVC evidence (P5-S1 Tumbleweed run
+#     36225231523 P6 window: denied { sys_admin } capability=21
+#     comm="rootlesskit" scontext=system_u:system_r:docker_helper_rootlesskit_t:s0
+#     tcontext=system_u:system_r:docker_helper_rootlesskit_t:s0
+#     tclass=cap_userns permissive=0).
+#   - sys_ptrace (capability 19): the flow's namespace-exec helper nsenter
+#     re-associates into the flow's own namespaces (setns after
+#     "nsenter -t <pid> -n -m -U"); the kernel's ptrace_may_access()/
+#     setns path toward the target process requires CAP_SYS_PTRACE in the
+#     (non-initial) user namespace, mediated as cap_userns — NOT the plain
+#     capability class. Live enforcing AVC evidence (Phase 4C-3 run
+#     36666540157, launch-window records 402/403: denied { sys_ptrace }
+#     for pid=2886 comm="nsenter" capability=19
+#     scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+#     tcontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+#     tclass=cap_userns permissive=0, followed in the same window by
+#     nsenter's own failure "nsenter: reassociate to namespaces failed:
+#     Operation not permitted" and rootlesskit's "failed to setup network
+#     ... setting up tap tap0: executing [[nsenter -t 2858 ...]]: exit
+#     status 1" — the direct causal chain to the 4C-3 flow death). This is
+#     not a debugger/ptrace surface: the permission is exactly the
+#     namespace-authority check nsenter's setns path performs on the
+#     flow's own target process.
+#
+# SCOPE — READ CAREFULLY: this is a domain-wide SELF permission, NOT an
+# operation-scoped one: it applies to every process running in
+# docker_helper_rootlesskit_t, it does NOT by itself provide operation
+# isolation, and the operation separation is owned by the categorized
+# process/object MCS boundary (mcs_constrained_type), not by the
+# capability grant. The surface is IN-USERNS ONLY: no plain self:capability
+# grant is added (the out-of-namespace system capability set — plain
+# CAP_SYS_PTRACE included — stays ungranted), and the manager, the
+# launcher, and slirp4netns domains get no cap_userns rights at all.
+# Cross-operation namespace targeting (a flow process reaching ANOTHER
+# operation's namespaces) is NOT proven safe by this grant: it stays an
+# open concurrency/security gate before the Release GO.
+allow docker_helper_rootlesskit_t self:cap_userns { sys_admin sys_ptrace };
 
 # --- MCS operation isolation: constrained-domain membership (G32 r3 §6.A) ---
 #

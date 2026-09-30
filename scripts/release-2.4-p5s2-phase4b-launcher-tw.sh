@@ -299,6 +299,26 @@ cat "$EVIDENCE_DIR/01-composition-inputs.txt" >&2
 } > "$EVIDENCE_DIR/02-nsenter-probe.txt" 2>&1
 cat "$EVIDENCE_DIR/02-nsenter-probe.txt" >&2
 
+# The flow's next-executable stand probe (the 4C-4 conditional capture, the
+# §8 hypothesis: after the sys_ptrace correction the namespace
+# reassociation may succeed and the next boundary may be the ip binary the
+# nsenter network setup execs). Evidence-only: this records the packaged
+# path, its package owner, and its label — it grants NOTHING and changes
+# no policy surface.
+{
+  echo "=== ip packaged path probe (the next-boundary capture) ==="
+  IP_BIN="$(command -v ip 2>/dev/null || true)"
+  echo "command -v:   ${IP_BIN:-(not found)}"
+  if [ -n "$IP_BIN" ]; then
+    IP_REAL="$(readlink -f "$IP_BIN" 2>&1)"
+    echo "readlink -f:  $IP_REAL"
+    echo "rpm -qf:      $(rpm -qf "$IP_REAL" 2>&1)"
+    ls -lZ "$IP_BIN" "$IP_REAL" 2>&1
+    echo "matchpathcon: $(matchpathcon "$IP_REAL" 2>&1)"
+  fi
+} > "$EVIDENCE_DIR/02-ip-probe.txt" 2>&1
+cat "$EVIDENCE_DIR/02-ip-probe.txt" >&2
+
 # The REAL builder identity + the REAL unit + the pinned payload (P4-A1 shape).
 log 'A2: builder identity + REAL unit + pinned payload install'
 sh "$TRANSFERRED/provision-builder.sh" > "$EVIDENCE_DIR/a2-provision.txt" 2>&1 \
