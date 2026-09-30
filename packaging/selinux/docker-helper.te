@@ -1163,20 +1163,27 @@ allow docker_helper_rootlesskit_t ifconfig_exec_t:file { execute read open execu
 # stage after the full rtnl_open_byproto() completed. The observed
 # access vector { read write } is treated as ONE causal unit — the exact
 # open(O_RDWR) step — not artificially split into separate read/write
-# phases; it is recorded here verbatim, no permission added beyond it.
+# phases. Phase 4C-11 (run 36711330835, launch-window record 401:
+# denied { open } for pid=2981 comm="ip" path="/dev/net/tun" same
+# tcontext/tclass) then proved the SECOND selinux hook of the SAME
+# open(O_RDWR) syscall — selinux_file_open() -> open_file_to_av() checks
+# `open` after selinux_inode_permission() passed the { read write }
+# stage — with the same userspace failure; the two runs' AVCs are the
+# two sequential hooks of one causal syscall, and `open` completes the
+# evidenced open() chain here.
 #
 # SCOPE — READ CAREFULLY: this grant covers read/write on the TUN/TAP
 # device node for the flow's own open — NOTHING more. Deliberately NOT
-# granted: open/getattr/append/ioctl/lock/create/setattr (each requires
+# granted: getattr/append/ioctl/lock/create/setattr (each requires
 # its own enforcing evidence; if the effective base policy separately
-# provides open/getattr that is a loaded-policy fact, not a reason to
+# provides getattr that is a loaded-policy fact, not a reason to
 # copy it here), and NO capability surface (self:capability
 # net_admin/net_raw and cap_userns net_admin stay ungranted — the TUN
 # driver's ns_capable(net->user_ns, CAP_NET_ADMIN) check inside
 # tun_set_iff() must remain a separate live enforcing boundary). The
 # distro corenet_rw_tun_tap_dev() macro is deliberately NOT used: its
-# rw_chr_file_perms expansion carries open/getattr/append/ioctl/lock —
-# far beyond the observed { read write } pair. ioctl in particular
+# rw_chr_file_perms expansion carries getattr/append/ioctl/lock —
+# beyond the observed { read write open } chain. ioctl in particular
 # stays closed until its own live evidence. Like every flow-domain
 # grant this is a domain-wide permission on the distro device TYPE (not
 # path-exclusive — tun_tap_device_t is a distro device type), not an
@@ -1184,7 +1191,7 @@ allow docker_helper_rootlesskit_t ifconfig_exec_t:file { execute read open execu
 # categorized process/object MCS boundary, and cross-operation
 # namespace targeting stays an open concurrency/security gate before
 # the Release GO.
-allow docker_helper_rootlesskit_t tun_tap_device_t:chr_file { read write };
+allow docker_helper_rootlesskit_t tun_tap_device_t:chr_file { read write open };
 
 # The flow's NETLINK_ROUTE socket creation + socket-option operations +
 # local bind (P5-S2 Phases 4C-7/4C-8/4C-9): the first kernel actions of
