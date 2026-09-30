@@ -636,7 +636,7 @@ PREFLIGHT_OK=1
     PREFLIGHT_OK=0
   fi
 
-  echo "=== TUN device-node access identity (the 4C-14 composition: the distro tun_tap_device_t identity, exactly { read write open ioctl } ordinary + the exact TUNSETIFF xperm { 0x54ca }, no other ioctl command, no capability surface) ==="
+  echo "=== TUN device-node access identity (the 4C-17 composition: the distro tun_tap_device_t identity, exactly { read write open ioctl } ordinary + the exact TUNSETIFF+TUNSETPERSIST xperm { 0x54ca 0x54cb }, no third ioctl command, no capability surface) ==="
   # NOTE (4C-12 harness-mechanics correction, still current): a refpolicy
   # macro's NAME does not exist after policy compilation — sesearch sees
   # only the resulting AV rules — so macro provenance (the
@@ -678,19 +678,26 @@ PREFLIGHT_OK=1
   XP_UNION="$(printf '%s\n' "$XP_RAW" | grep -aoE '0x[0-9a-fA-F]+' | tr 'A-F' 'a-f' | sort -u | tr '\n' ' ' || true)"
   echo "effective union: ${XP_UNION:-(empty)}"
   XP_EXACT_OK=0
-  if [ "$XP_UNION" = "0x54ca " ]; then
-    echo "PASS: effective xperm union is EXACTLY { 0x54ca } (TUNSETIFF)"
+  if [ "$XP_UNION" = "0x54ca 0x54cb " ]; then
+    echo "PASS: effective xperm union is EXACTLY { 0x54ca 0x54cb } (TUNSETIFF + TUNSETPERSIST)"
     XP_EXACT_OK=1
   else
-    echo "FAIL: effective xperm union is not exactly { 0x54ca } (got: ${XP_UNION:-(empty)})"
+    echo "FAIL: effective xperm union is not exactly { 0x54ca 0x54cb } (got: ${XP_UNION:-(empty)})"
     PREFLIGHT_OK=0
   fi
-  echo "--- explicit TUNSETPERSIST negative (0x54cb must NOT be inside the effective union):"
-  if printf '%s\n' "$XP_UNION" | grep -aq '0x54cb'; then
-    echo "FAIL: 0x54cb (TUNSETPERSIST) is inside the effective xperm union"
-    PREFLIGHT_OK=0
+  echo "--- explicit beyond-the-two negatives (no third TUN ioctl command):"
+  THIRD_CMD_OK=1
+  for tok in $XP_UNION; do
+    case "$tok" in
+      0x54ca|0x54cb) ;;
+      *) THIRD_CMD_OK=0; echo "extra effective command: $tok" ;;
+    esac
+  done
+  if [ "$THIRD_CMD_OK" = 1 ]; then
+    echo "PASS: no effective command beyond { 0x54ca, 0x54cb } (TUNSETOWNER/TUNSETGROUP/TUNSETLINK/TUNGETFEATURES/TUNSETOFFLOAD/TUNSETQUEUE and every other command stay denied)"
   else
-    echo "PASS: 0x54cb (TUNSETPERSIST) is NOT allowed"
+    echo "FAIL: an effective ioctl command beyond { 0x54ca 0x54cb } is present"
+    PREFLIGHT_OK=0
   fi
   echo "--- flow-domain plain capability net_admin/net_raw (must be zero; the in-namespace cap_userns net_admin authority lives ONLY in the child's own cap_userns rule — the 4C-15 grant — never in a TUN rule; asserted positively by the flow cap_userns identity section):"
   sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_admin /sys/fs/selinux/policy || true
@@ -720,7 +727,7 @@ PREFLIGHT_OK=1
     TUN_NO_NETADMIN_OK=1
   fi
   if [ "$TUN_PAIR_OK" = 1 ] && [ "$TUN_NO_MORE_OK" = 1 ] && [ "$TUN_LABEL_OK" = 1 ] && [ "$TUN_NO_NETADMIN_OK" = 1 ]; then
-    echo "PASS: tun device-node access identity (distro tun_tap_device_t + exactly { read write open ioctl } + effective xperm union exactly { 0x54ca }, TUNSETPERSIST 0x54cb denied, no capability surface)"
+    echo "PASS: tun device-node access identity (distro tun_tap_device_t + exactly { read write open ioctl } + effective xperm union exactly { 0x54ca 0x54cb }, no third command, no capability surface)"
   else
     echo "FAIL: tun device-node access identity (pair=$TUN_PAIR_OK no-more=$TUN_NO_MORE_OK label=$TUN_LABEL_OK no-netadmin=$TUN_NO_NETADMIN_OK xperm-union=$XP_EXACT_OK toolchain-blocked=$TUN_TOOLCHAIN_BLOCKED)"
     PREFLIGHT_OK=0
@@ -1143,30 +1150,37 @@ PERMS_FIRST="$(printf '%s\n' "$RAW_FIRST" | sed -n 's/.*denied  *{ \([^}]*\) }.*
 SUMMARY_FIRST="$(printf '%s\n' "$RAW_FIRST" | sed -n 's/.*scontext=\([^ ]*\) tcontext=\([^ ]*\) tclass=\([a-z_]*\).*/scontext=\1 tcontext=\2 tclass=\3/p' || true)"
 marker "DOWNSTREAM-BOUNDARY=${SUMMARY_FIRST:-none} perms=${PERMS_FIRST:-none}"
 
-# ---- the 4C-14 gate (updated for the 4C-16 composition): the TUN ioctl
+# ---- the 4C-14 gate (updated for the 4C-17 composition): the TUN ioctl
 # ---- boundary is SELinux-mediated by the ordinary { ioctl } bit + the
-# ---- exact { 0x54ca } allowxperm. HARD FAILURES: any tun_tap_device_t
-# ---- denial of the granted ordinary surface (read/write/open — or any
-# ---- never-granted ordinary bit: getattr/append/lock/create/setattr),
-# ---- and the canonical 4C-13 shape (denied { ioctl } ioctlcmd=0x54ca).
-# ---- NOT a failure — the gate holding as pinned: an ioctl denial with
-# ---- ioctlcmd=0x54cb (TUNSETPERSIST, the predicted 4C-17 boundary) or
-# ---- any other non-whitelisted command — the xperm mediation denied
-# ---- exactly what the composition does not grant; it is RECORDED as
-# ---- the next terminal boundary evidence.
+# ---- exact { 0x54ca 0x54cb } allowxperm. HARD FAILURES: any
+# ---- tun_tap_device_t denial of the granted ordinary surface
+# ---- (read/write/open — or any never-granted ordinary bit:
+# ---- getattr/append/lock/create/setattr), the canonical 4C-13 shape
+# ---- (ioctlcmd=0x54ca), and the canonical 4C-16 shape
+# ---- (ioctlcmd=0x54cb) — the whole evidenced two-command surface must
+# ---- hold. NOT a failure — the gate holding as pinned: an ioctl denial
+# ---- with any OTHER ioctlcmd (e.g. TUNSETOWNER if one were attempted) —
+# ---- the xperm mediation denied exactly what the composition does not
+# ---- grant; it is RECORDED as next-boundary evidence.
 TUN_IOCTL_GONE_OK=1
 {
-  echo "=== tun_tap_device_t AVCs of the window (4C-16 composition: the granted surface must not regress; 0x54ca must stay gone; non-whitelisted ioctl commands must be denied and are recorded) ==="
+  echo "=== tun_tap_device_t AVCs of the window (4C-17 composition: the granted surface must not regress; 0x54ca and 0x54cb denials must be gone; non-whitelisted ioctl commands must be denied and are recorded) ==="
   TUN_AVC_WINDOW="$(grep -a 'tcontext=system_u:object_r:tun_tap_device_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null || true)"
   printf '%s\n' "${TUN_AVC_WINDOW:-(none — no tun_tap_device_t denial in the window)}"
   echo "--- the exact 4C-13 shape (denied ioctl, ioctlcmd=0x54ca = TUNSETIFF):"
   OLD_TUN_IOCTL="$(printf '%s\n' "$TUN_AVC_WINDOW" | grep -a 'ioctlcmd=0x54ca' || true)"
   printf '%s\n' "${OLD_TUN_IOCTL:-(none — the 4C-13 ioctl(TUNSETIFF) denial is gone)}"
+  echo "--- the exact 4C-16 shape (denied ioctl, ioctlcmd=0x54cb = TUNSETPERSIST):"
+  OLD_PERSIST_IOCTL="$(printf '%s\n' "$TUN_AVC_WINDOW" | grep -a 'ioctlcmd=0x54cb' || true)"
+  printf '%s\n' "${OLD_PERSIST_IOCTL:-(none — the 4C-16 ioctl(TUNSETPERSIST) denial is gone)}"
+  echo "--- the manager journal's 4C-16 EACCES shape (must be gone — TUNSETPERSIST completes):"
+  MGR_SETPERSIST_EACCES="$(grep -a 'ioctl(TUNSETPERSIST): Permission denied' "$EVIDENCE_DIR/07-manager-diag.txt" 2>/dev/null || true)"
+  printf '%s\n' "${MGR_SETPERSIST_EACCES:-(none — the TUNSETPERSIST SELinux-hook EACCES is gone)}"
   echo "--- granted-surface regressions (read/write/open/never-granted ordinary bits — must be zero):"
   TUN_REGRESSION="$(printf '%s\n' "$TUN_AVC_WINDOW" | grep -aE 'denied  *{ (read|write|open|getattr|append|lock|create|setattr)' || true)"
   printf '%s\n' "${TUN_REGRESSION:-(none — the granted ordinary surface held)}"
-  echo "--- xperm-mediated denials of non-whitelisted commands (the gate holding; the recorded next-boundary evidence, e.g. 0x54cb = TUNSETPERSIST):"
-  XP_DENIALS="$(printf '%s\n' "$TUN_AVC_WINDOW" | grep -a 'denied  *{ ioctl }' | grep -a 'ioctlcmd=' | grep -av 'ioctlcmd=0x54ca' || true)"
+  echo "--- xperm-mediated denials of non-whitelisted commands (the gate holding; the recorded next-boundary evidence):"
+  XP_DENIALS="$(printf '%s\n' "$TUN_AVC_WINDOW" | grep -a 'denied  *{ ioctl }' | grep -a 'ioctlcmd=' | grep -av 'ioctlcmd=0x54ca' | grep -av 'ioctlcmd=0x54cb' || true)"
   printf '%s\n' "${XP_DENIALS:-(none — no non-whitelisted ioctl command was attempted)}"
   if [ -n "$TUN_REGRESSION" ]; then
     echo "GATE: a tun_tap_device_t denial hit the granted ordinary surface — the loaded TUN surface did not hold exactly as pinned"
@@ -1174,6 +1188,14 @@ TUN_IOCTL_GONE_OK=1
   fi
   if [ -n "$OLD_TUN_IOCTL" ]; then
     echo "GATE: the exact 4C-13 ioctl(TUNSETIFF) boundary reappeared"
+    TUN_IOCTL_GONE_OK=0
+  fi
+  if [ -n "$OLD_PERSIST_IOCTL" ]; then
+    echo "GATE: the exact 4C-16 ioctl(TUNSETPERSIST) boundary reappeared"
+    TUN_IOCTL_GONE_OK=0
+  fi
+  if [ -n "$MGR_SETPERSIST_EACCES" ]; then
+    echo "GATE: the journal still shows the 4C-16 TUNSETPERSIST EACCES shape"
     TUN_IOCTL_GONE_OK=0
   fi
 } > "$EVIDENCE_DIR/14-tun-ioctl-gone.txt" 2>&1
@@ -1261,6 +1283,21 @@ else
   marker "TUN-SOCKET-CREATE-BOUNDARY=FAIL"
   finish FAIL; exit 0
 fi
+
+# ---- evidence-only capture (the 4C-17 first-tuntap-completion proof):
+# ---- the manager journal's child-output tail must have moved past the
+# ---- tuntap command (no ioctl(TUNSETIFF/TUNSETPERSIST) error in the
+# ---- tail — the failing step is now the NEXT command of the setup),
+# ---- and a persisted TAP's devtmpfs node (if the kernel created one —
+# ---- /dev/tap* is netns-independent) is recorded as direct tap0
+# ---- evidence when present.
+{
+  echo "=== the child output tail (the last failing step of the network setup) ==="
+  grep -a -A4 'child output tail' "$EVIDENCE_DIR/07-manager-diag.txt" 2>/dev/null | head -8 || true
+  echo "=== /dev/tap* nodes (persisted-TAP devtmpfs evidence; netns-independent) ==="
+  ls -lZ /dev/tap* 2>/dev/null || echo "(no /dev/tap* node recorded)"
+} > "$EVIDENCE_DIR/17-tuntap-completion.txt" 2>&1
+cat "$EVIDENCE_DIR/17-tuntap-completion.txt" >&2
 
 # ---- launcher-domain AVC inventory (raw; the report classifies)
 {
