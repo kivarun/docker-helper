@@ -115,7 +115,7 @@ module docker_helper 1.2;
 		class tcp_socket { create setopt bind node_bind listen accept getattr read write connect getopt name_connect };
 		class unix_stream_socket { connectto getattr ioctl read write };
 		class udp_socket { create setopt connect getattr read write };
-		class netlink_route_socket { create setopt };
+		class netlink_route_socket { create setopt bind };
 		class capability { dac_read_search dac_override sys_admin fowner setuid setgid };
 		class capability2 { wake_alarm kill };
 		class user_namespace { create };
@@ -1135,12 +1135,12 @@ allow docker_helper_rootlesskit_t docker_helper_nsenter_exec_t:file { execute re
 # expansion carries them — deliberately not used).
 allow docker_helper_rootlesskit_t ifconfig_exec_t:file { execute read open execute_no_trans getattr map };
 
-# The flow's NETLINK_ROUTE socket creation + socket-option operations
-# (P5-S2 Phases 4C-7/4C-8): the first kernel actions of the executed ip —
-# iproute2's rtnl_open_byproto() opens with
-# socket(AF_NETLINK, SOCK_RAW|SOCK_CLOEXEC, NETLINK_ROUTE) and then sets
-# the mandatory socket options (SO_SNDBUF, SO_RCVBUF,
-# NETLINK_EXT_ACK via setsockopt) BEFORE any bind/message work.
+# The flow's NETLINK_ROUTE socket creation + socket-option operations +
+# local bind (P5-S2 Phases 4C-7/4C-8/4C-9): the first kernel actions of
+# the executed ip — iproute2's rtnl_open_byproto() opens with
+# socket(AF_NETLINK, SOCK_RAW|SOCK_CLOEXEC, NETLINK_ROUTE), sets the
+# mandatory socket options (SO_SNDBUF, SO_RCVBUF, NETLINK_EXT_ACK via
+# setsockopt), and binds the socket — all BEFORE any route-message work.
 # Live enforcing AVC evidence, each permission from its own run:
 #
 #   - create (Phase 4C-6 run 36698129661, launch-window record 400:
@@ -1156,26 +1156,33 @@ allow docker_helper_rootlesskit_t ifconfig_exec_t:file { execute read open execu
 #     setsockopt() after the (now granted) socket creation — and
 #     rootlesskit's "failed to setup network ... exit status 1": the
 #     direct causal chain to the 4C-7 flow death.
+#   - bind (Phase 4C-8 run 36702978808, launch-window record 401:
+#     denied { bind } for pid=2957 comm="ip" self->self
+#     tclass=netlink_route_socket permissive=0) with the direct userspace
+#     failure "Cannot bind netlink socket: Permission denied" — the
+#     bind() after the (now granted) setopt sequence — and rootlesskit's
+#     "failed to setup network ... exit status 1": the direct causal
+#     chain to the 4C-8 flow death.
 #
-# SCOPE — READ CAREFULLY: these grants cover socket instantiation and
-# socket-option operations on the flow's own NETLINK_ROUTE sockets in the
-# current namespaces — NOTHING more. They are NOT route-mutation
-# authority: no nlmsg_write/nlmsg_read, no bind/connect/read/write, no
-# getattr/getopt, no ioctl/shutdown, and NO capability surface
-# (self:capability net_admin/net_raw and cap_userns net_admin stay
-# ungranted — capability mediation is a separate live boundary, the AVCs
-# name only the socket class). NOTE: SO_SNDBUF, SO_RCVBUF, and
-# NETLINK_EXT_ACK are all mediated by the ONE class-level `setopt`
-# permission — the grant covers every socket-option operation of this
-# domain/class pair; it is deliberately NOT described as "SO_SNDBUF-only".
-# The actual network-mutation boundary remains closed; every further
-# bind/route-message/capability permission requires its own enforcing
-# evidence. Like every flow-domain grant this is a domain-wide SELF
-# permission, not an operation-scoped one; the operation separation is
-# owned by the categorized process/object MCS boundary, and
-# cross-operation namespace targeting stays an open concurrency/security
-# gate before the Release GO.
-allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt };
+# SCOPE — READ CAREFULLY: these grants cover socket instantiation,
+# socket-option operations, and the LOCAL BIND of the flow's own
+# NETLINK_ROUTE sockets in the current namespaces — NOTHING more. They
+# are NOT route-mutation authority: no nlmsg_write/nlmsg_read, no
+# connect/read/write, no getattr/getopt, no ioctl/shutdown, and NO
+# capability surface (self:capability net_admin/net_raw and cap_userns
+# net_admin stay ungranted — capability mediation is a separate live
+# boundary, the AVCs name only the socket class). NOTE: SO_SNDBUF,
+# SO_RCVBUF, and NETLINK_EXT_ACK are all mediated by the ONE class-level
+# `setopt` permission — the grant covers every socket-option operation
+# of this domain/class pair; it is deliberately NOT described as
+# "SO_SNDBUF-only". The actual network-mutation boundary remains closed;
+# every further getsockname/route-message/capability permission requires
+# its own enforcing evidence. Like every flow-domain grant this is a
+# domain-wide SELF permission, not an operation-scoped one; the
+# operation separation is owned by the categorized process/object MCS
+# boundary, and cross-operation namespace targeting stays an open
+# concurrency/security gate before the Release GO.
+allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind };
 
 # --- docker_helper_slirp4netns_t: the rootlesskit user-network helper domain (P5-S2) ---
 #

@@ -565,16 +565,16 @@ PREFLIGHT_OK=1
     PREFLIGHT_OK=0
   fi
 
-  echo "=== netlink-route create+setopt identity (the 4C-8 composition: exactly { create setopt }, no other socket permission, no capability surface) ==="
-  echo "--- allow rules on netlink_route_socket (expected: the rootlesskit child's create+setopt only; attribute-generic base-policy rules recorded, not asserted):"
+  echo "=== netlink-route create+setopt+bind identity (the 4C-9 composition: exactly { create setopt bind }, no other socket permission, no capability surface) ==="
+  echo "--- allow rules on netlink_route_socket (expected: the rootlesskit child's create+setopt+bind only; attribute-generic base-policy rules recorded, not asserted):"
   sesearch --allow -c netlink_route_socket /sys/fs/selinux/policy || true
-  echo "--- the flow domain's own netlink_route_socket rules (concrete; must be exactly create+setopt):"
+  echo "--- the flow domain's own netlink_route_socket rules (concrete; must be exactly create+setopt+bind):"
   sesearch --allow -s docker_helper_rootlesskit_t -c netlink_route_socket /sys/fs/selinux/policy || true
   echo "--- flow-domain capability/cap_userns net_admin/net_raw (must be zero):"
   sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_admin /sys/fs/selinux/policy || true
   sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_raw /sys/fs/selinux/policy || true
   sesearch --allow -s docker_helper_rootlesskit_t -c cap_userns -p net_admin /sys/fs/selinux/policy || true
-  NL_CREATE_OK=0; NL_SETOPT_OK=0; NL_NO_MORE_OK=0; NL_NO_NETADMIN_OK=0
+  NL_CREATE_OK=0; NL_SETOPT_OK=0; NL_BIND_OK=0; NL_NO_MORE_OK=0; NL_NO_NETADMIN_OK=0
   NL_FLOW_RULES="$(sesearch --allow -s docker_helper_rootlesskit_t -c netlink_route_socket /sys/fs/selinux/policy 2>/dev/null || true)"
   if printf '%s\n' "$NL_FLOW_RULES" | grep -aq "create"; then
     NL_CREATE_OK=1
@@ -582,7 +582,10 @@ PREFLIGHT_OK=1
   if printf '%s\n' "$NL_FLOW_RULES" | grep -aq "setopt"; then
     NL_SETOPT_OK=1
   fi
-  if ! printf '%s\n' "$NL_FLOW_RULES" | grep -aqE "bind|connect|nlmsg|getattr|getopt|ioctl|shutdown| read| write"; then
+  if printf '%s\n' "$NL_FLOW_RULES" | grep -aq "bind"; then
+    NL_BIND_OK=1
+  fi
+  if ! printf '%s\n' "$NL_FLOW_RULES" | grep -aqE "getattr|getopt|connect|nlmsg|ioctl|shutdown| read| write"; then
     NL_NO_MORE_OK=1
   fi
   if ! { sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_admin /sys/fs/selinux/policy 2>/dev/null; \
@@ -590,10 +593,10 @@ PREFLIGHT_OK=1
          sesearch --allow -s docker_helper_rootlesskit_t -c cap_userns -p net_admin /sys/fs/selinux/policy 2>/dev/null; } | grep -aq "docker_helper_rootlesskit_t"; then
     NL_NO_NETADMIN_OK=1
   fi
-  if [ "$NL_CREATE_OK" = 1 ] && [ "$NL_SETOPT_OK" = 1 ] && [ "$NL_NO_MORE_OK" = 1 ] && [ "$NL_NO_NETADMIN_OK" = 1 ]; then
-    echo "PASS: netlink-route create+setopt identity (exactly { create setopt }, no capability surface)"
+  if [ "$NL_CREATE_OK" = 1 ] && [ "$NL_SETOPT_OK" = 1 ] && [ "$NL_BIND_OK" = 1 ] && [ "$NL_NO_MORE_OK" = 1 ] && [ "$NL_NO_NETADMIN_OK" = 1 ]; then
+    echo "PASS: netlink-route create+setopt+bind identity (exactly { create setopt bind }, no capability surface)"
   else
-    echo "FAIL: netlink-route create+setopt identity (create=$NL_CREATE_OK setopt=$NL_SETOPT_OK no-more=$NL_NO_MORE_OK no-netadmin=$NL_NO_NETADMIN_OK)"
+    echo "FAIL: netlink-route create+setopt+bind identity (create=$NL_CREATE_OK setopt=$NL_SETOPT_OK bind=$NL_BIND_OK no-more=$NL_NO_MORE_OK no-netadmin=$NL_NO_NETADMIN_OK)"
     PREFLIGHT_OK=0
   fi
 
