@@ -906,6 +906,15 @@ cat "$EVIDENCE_DIR/18-semodule-db-diag.txt" >&2
 # ptrace — no SELinux ptrace authority is needed or granted): every
 # socket/socketpair/sendmsg/sendto/recvmsg/recvfrom/ioctl/close is
 # logged with pid, args, and exit code; the report filters by pid.
+#
+# Run 36769407676 root cause: openSUSE ships `-a never,task` as the
+# FIRST rule in the kernel table (loaded at auditd start from
+# /etc/audit/rules.d/). A never,task match tags the task "never audit"
+# at creation, so NO exit rules ever fire for it — that is why the
+# always,exit rules produced zero records while AVCs still appeared
+# (denials audit through a different path). Remove the catch-all for
+# the window; restore it with the baseline.
+auditctl -d never,task >> "$EVIDENCE_DIR/18-auditctl-sysrules.txt" 2>&1 || true
 auditctl -a always,exit -F arch=b64 \
   -S socket,socketpair,sendmsg,sendto,recvmsg,recvfrom,ioctl,close \
   -k p5s2diag >> "$EVIDENCE_DIR/18-auditctl-sysrules.txt" 2>&1 \
@@ -1080,6 +1089,7 @@ auditctl -s > "$EVIDENCE_DIR/audit-status-window-end.txt" 2>&1 || true
   tail -n 120 /var/log/audit/audit.log 2>/dev/null || true
 } > "$EVIDENCE_DIR/18-syscall-chronology.txt" 2>&1
 auditctl -D > /dev/null 2>&1 || true
+auditctl -a never,task > /dev/null 2>&1 || true
 semodule -B >> "$EVIDENCE_DIR/18-semodule-db-diag.txt" 2>&1 || true
 {
   echo "=== 4C-18 diagnostic restore (post-window semodule -B) ==="
