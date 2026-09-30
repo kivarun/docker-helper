@@ -193,11 +193,23 @@ check_bundled_assets() {
 }
 
 # The builder feature's TUN facility convergence may need to load the tun
-# module via the canonical provisioner; kmod's modprobe is therefore a
-# required builder prerequisite (checked before any system mutation).
+# module via the canonical provisioner; kmod's modprobe is therefore
+# required ONLY when the facility is not already available. The same
+# read-only fact the provisioner verifies decides this: a host whose TUN
+# implementation is built-in or already loaded passes without the tool.
+# The installer never invokes modprobe itself — the current-boot
+# convergence is owned exclusively by provision-builder.sh.
+TUN_SYSFS="${TUN_SYSFS:-/sys/class/misc/tun/dev}"
+# The modprobe command is the same overridable seam family the provisioner
+# uses; the installer only CHECKS availability, never invokes it.
+MODPROBE="${MODPROBE:-modprobe}"
 check_modprobe() {
-	if ! command -v modprobe >/dev/null 2>&1; then
-		error "modprobe (kmod) not found in PATH; the builder TUN facility cannot be converged"
+	if [ -r "$TUN_SYSFS" ] && [ "$(cat "$TUN_SYSFS" 2>/dev/null)" = "10:200" ]; then
+		info "TUN facility already available ($TUN_SYSFS = 10:200); modprobe not required"
+		return 0
+	fi
+	if ! command -v "$MODPROBE" >/dev/null 2>&1; then
+		error "modprobe (kmod) not available and the TUN facility is not present ($TUN_SYSFS reports '$(cat "$TUN_SYSFS" 2>/dev/null || echo absent)')"
 		error "install kmod (or the distribution equivalent) and re-run"
 		exit 1
 	fi

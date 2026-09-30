@@ -45,15 +45,16 @@
 #   4. a re-run of the same version is a no-op: every step verifies
 #      first and mutates only when missing.
 #
-# Test seam (stages): the stage selection below exists so the script's
-# own test suite can exercise one stage without touching host account
-# state. The production default runs every stage, in order, unmodified.
+# The account and subordinate-ID database paths are read through
+# environment-overridable constants so the script's own test suite can
+# execute the COMPLETE production flow against fixture databases without
+# touching host account state.
 
 set -eu
 
 IDENTITY=docker-helper-builder
-BUILDER_HOME=/var/lib/docker-helper-builder
-BUILDER_SHELL=/usr/sbin/nologin
+BUILDER_HOME="${BUILDER_HOME:-/var/lib/docker-helper-builder}"
+BUILDER_SHELL="${BUILDER_SHELL:-/usr/sbin/nologin}"
 SUBID_COUNT=65536
 # Subordinate-ID allocations conventionally start above the classic static
 # uid space (both supported targets' shadow-utils default SUB_UID_MIN).
@@ -61,23 +62,16 @@ SUBID_BASE=100000
 SUBUID_DB="${SUBUID_DB:-/etc/subuid}"
 SUBGID_DB="${SUBGID_DB:-/etc/subgid}"
 PW_DB="${PW_DB:-/etc/passwd}"
+GROUP_DB="${GROUP_DB:-/etc/group}"
 # TUN facility truth: the sysfs endpoint that reports the char device's
 # major:minor when the driver is present (built-in or loaded). `tun` is
 # char-major 10:200.
 TUN_SYSFS="${TUN_SYSFS:-/sys/class/misc/tun/dev}"
 TUN_MAJOR_MINOR=10:200
 MODPROBE="${MODPROBE:-modprobe}"
-PROVISION_STAGES="${PROVISION_STAGES:-identity,subids,tun}"
 
 log()  { printf 'provision-builder: %s\n' "$*"; }
 fail() { printf 'provision-builder: FAILED: %s\n' "$*" >&2; exit 1; }
-
-stage_requested() {
-    case ",$PROVISION_STAGES," in
-        *,"$1",*) return 0 ;;
-        *) return 1 ;;
-    esac
-}
 
 # --- stage 3: the TUN kernel facility (current-boot convergence) -----------
 # Prints the sysfs endpoint value, or "absent" when the endpoint does not
@@ -115,7 +109,7 @@ user_gid() {
 }
 
 group_gid() {
-    awk -F: -v g="$1" '$1 == g { print $3; found = 1 } END { if (!found) exit 1 }' /etc/group
+    awk -F: -v g="$1" '$1 == g { print $3; found = 1 } END { if (!found) exit 1 }' "$GROUP_DB"
 }
 
 verify_identity() {
@@ -254,14 +248,10 @@ converge_subids() {
     log "$SUBGID_DB: $(grep "^$IDENTITY:" "$SUBGID_DB")"
 }
 
-# --- production flow: every stage, in order ---------------------------------
-if stage_requested identity; then
-    converge_identity
-fi
-if stage_requested subids; then
-    converge_subids
-fi
-if stage_requested tun; then
-    converge_tun_facility
-fi
+# --- production flow: every stage, in order, unconditionally. The stage
+# order is fixed by the fail-closed contract; no environment switch may
+# omit a mandatory responsibility.
+converge_identity
+converge_subids
+converge_tun_facility
 exit 0

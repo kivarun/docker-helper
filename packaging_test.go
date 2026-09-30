@@ -1110,8 +1110,8 @@ func TestProvisionBuilderScript(t *testing.T) {
 	for _, want := range []string{
 		"set -eu",
 		"IDENTITY=docker-helper-builder",
-		"BUILDER_HOME=/var/lib/docker-helper-builder",
-		"BUILDER_SHELL=/usr/sbin/nologin",
+		"BUILDER_HOME=\"${BUILDER_HOME:-/var/lib/docker-helper-builder}\"",
+		"BUILDER_SHELL=\"${BUILDER_SHELL:-/usr/sbin/nologin}\"",
 		"SUBID_COUNT=65536",
 		"useradd --system --home \"$BUILDER_HOME\" --shell \"$BUILDER_SHELL\" \"$IDENTITY\"",
 		"usermod --add-subuids",
@@ -1175,26 +1175,31 @@ func TestProvisionBuilderScript(t *testing.T) {
 			t.Errorf("provisioning script must never unload kernel modules: %q", forbidden)
 		}
 	}
-	// The production flow runs every stage in order; the stage seam is the
-	// documented test entry point only.
+	// The production flow is UNCONDITIONAL and fixed-order (the 4C-13
+	// correction): no environment switch may omit a mandatory stage — the
+	// stage-selection seam is a production bypass and must not exist.
 	for _, want := range []string{
-		"PROVISION_STAGES=\"${PROVISION_STAGES:-identity,subids,tun}\"",
-		"stage_requested identity",
-		"stage_requested subids",
-		"stage_requested tun",
+		"GROUP_DB=\"${GROUP_DB:-/etc/group}\"",
+		"converge_identity\nconverge_subids\nconverge_tun_facility\nexit 0",
 	} {
 		if !strings.Contains(content, want) {
-			t.Errorf("provisioning script must contain %q", want)
+			t.Errorf("provisioning script must contain the unconditional production tail: %q", want)
+		}
+	}
+	for _, forbidden := range []string{"PROVISION_STAGES", "stage_requested"} {
+		if strings.Contains(content, forbidden) {
+			t.Errorf("provisioning script must not carry the stage-selection bypass: %q", forbidden)
 		}
 	}
 }
 
-// TestProvisionBuilderTunConvergence exercises the REAL production
-// provisioner's TUN facility stage through the script's documented stage
-// seam (PROVISION_STAGES=tun) with fixture seams only: the sysfs endpoint
-// path, the modprobe command, and the fake tool directory. No host account
-// state is touched (the identity/subid stages are not requested; the fake
-// modprobe writes only the fixture sysfs file).
+// TestProvisionBuilderTunConvergence exercises the COMPLETE real
+// production provisioner (no stage seam exists) with fixture databases
+// that make the identity and subordinate-ID stages verify-only no-ops,
+// and fixture seams for the TUN facility facts (the sysfs endpoint path
+// and the modprobe command). No host account state is touched: every
+// account database is a fixture, the fake id consults the fixture passwd,
+// and the fake modprobe writes only the fixture sysfs file.
 func TestProvisionBuilderTunConvergence(t *testing.T) {
 	scriptPath := "packaging/scripts/lib/provision-builder.sh"
 	absScript, err := filepath.Abs(scriptPath)
@@ -1202,38 +1207,58 @@ func TestProvisionBuilderTunConvergence(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// runOnce executes the production script with the seam environment. The
-	// fake modprobe logs "$@" to stdout, so the call count is observable
-	// from the combined output. MODPROBE points directly at the fake bin
-	// dir entry: an absent fake makes the tool genuinely unavailable (the
-	// host PATH may carry a real modprobe, which must never be invoked).
-	// An empty modprobeScript removes the fake.
-	runOnce := func(t *testing.T, fakeBinDir, tunSysfs, modprobeScript string) (string, error) {
-		t.Helper()
-		fake := filepath.Join(fakeBinDir, "modprobe")
-		if modprobeScript == "" {
-			_ = os.Remove(fake)
-		} else if err := os.WriteFile(fake, []byte(modprobeScript), 0755); err != nil {
-			t.Fatal(err)
-		}
-		cmd := exec.Command("sh", absScript)
-		cmd.Env = append(os.Environ(),
-			"PROVISION_STAGES=tun",
-			"TUN_SYSFS="+tunSysfs,
-			"MODPROBE="+fake,
-			"PATH="+fakeBinDir+":"+os.Getenv("PATH"),
-		)
-		out, err := cmd.CombinedOutput()
-		return string(out), err
-	}
-
-	// fixture builds a fake bin dir + sysfs fixture and returns the paths.
-	fixture := func(t *testing.T, sysfsContent string) (fakeBin, tunSysfs string) {
+	// fixture builds the complete verify-only environment: fixture passwd/
+	// group/subid databases (the canonical identity already provisioned),
+	// a fake id that consults the fixture passwd, silent fakes for
+	// useradd/usermod (their invocation would be observable), and a sysfs
+	// endpoint pre-seeded when sysfsContent != "".
+	fixture := func(t *testing.T, sysfsContent string) (fakeBin, tunSysfs string, env []string) {
 		t.Helper()
 		base := t.TempDir()
 		fakeBin = filepath.Join(base, "fakes")
 		if err := os.MkdirAll(fakeBin, 0755); err != nil {
 			t.Fatal(err)
+		}
+		passwdDB := filepath.Join(base, "passwd")
+		shellPath := filepath.Join(base, "sbin", "nologin")
+		if err := os.MkdirAll(filepath.Dir(shellPath), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(shellPath, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(passwdDB, []byte(fmt.Sprintf("docker-helper-builder:x:475:475::/var/lib/docker-helper-builder:%s\n", shellPath)), 0644); err != nil {
+			t.Fatal(err)
+		}
+		groupDB := filepath.Join(base, "group")
+		if err := os.WriteFile(groupDB, []byte("docker-helper-builder:x:475:\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		subuidDB := filepath.Join(base, "subuid")
+		if err := os.WriteFile(subuidDB, []byte("docker-helper-builder:100000:65536\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		subgidDB := filepath.Join(base, "subgid")
+		if err := os.WriteFile(subgidDB, []byte("docker-helper-builder:100000:65536\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		// The fake id resolves the identity against the fixture passwd.
+		idFake := fmt.Sprintf(`#!/bin/sh
+grep -q "^$1:" "%s"
+`, passwdDB)
+		if err := os.WriteFile(filepath.Join(fakeBin, "id"), []byte(idFake), 0755); err != nil {
+			t.Fatal(err)
+		}
+		// useradd/usermod fakes: any invocation is loudly observable (and
+		// would mutate only the fixtures); the verify-only tests must see
+		// none.
+		for _, name := range []string{"useradd", "usermod"} {
+			if err := os.WriteFile(filepath.Join(fakeBin, name), []byte(fmt.Sprintf(`#!/bin/sh
+echo "%s: INVOKED $@" >&2
+exit 1
+`, name)), 0755); err != nil {
+				t.Fatal(err)
+			}
 		}
 		tunSysfs = filepath.Join(base, "sys", "class", "misc", "tun", "dev")
 		if sysfsContent != "" {
@@ -1244,37 +1269,86 @@ func TestProvisionBuilderTunConvergence(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		return fakeBin, tunSysfs
+		env = append(os.Environ(),
+			"PW_DB="+passwdDB,
+			"GROUP_DB="+groupDB,
+			"SUBUID_DB="+subuidDB,
+			"SUBGID_DB="+subgidDB,
+			"TUN_SYSFS="+tunSysfs,
+			"BUILDER_SHELL="+shellPath,
+			"PATH="+fakeBin+":"+os.Getenv("PATH"),
+		)
+		return fakeBin, tunSysfs, env
+	}
+
+	// runOnce executes the production script (all three stages,
+	// unconditionally). MODPROBE points directly at the fake bin dir entry:
+	// an absent fake makes the tool genuinely unavailable (the host PATH
+	// may carry a real modprobe, which must never be invoked). An empty
+	// modprobeScript removes the fake.
+	runOnce := func(t *testing.T, fakeBinDir, tunSysfs, modprobeScript string, env []string) (string, error) {
+		t.Helper()
+		fake := filepath.Join(fakeBinDir, "modprobe")
+		if modprobeScript == "" {
+			_ = os.Remove(fake)
+		} else if err := os.WriteFile(fake, []byte(modprobeScript), 0755); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("sh", absScript)
+		cmd.Env = append(env, "MODPROBE="+fake)
+		out, err := cmd.CombinedOutput()
+		return string(out), err
 	}
 
 	// sysfsWriter returns a modprobe fake body that logs, writes the sysfs
-	// endpoint, and exits with the given code (no write when wantCode != 0
-	// or writeSysfs is false).
+	// endpoint, and exits with the given code (no write when writeSysfs is
+	// false).
 	sysfsWriter := func(tunSysfs string, writeSysfs bool, wantCode int) string {
 		if writeSysfs {
 			return fmt.Sprintf(`#!/bin/sh
-echo "modprobe $@" >> /dev/stdout
+echo "modprobe $@"
 mkdir -p "%s"
 printf '10:200\n' > "%s"
 exit %d
 `, filepath.Dir(tunSysfs), tunSysfs, wantCode)
 		}
 		return fmt.Sprintf(`#!/bin/sh
-echo "modprobe $@" >> /dev/stdout
+echo "modprobe $@"
 exit %d
 `, wantCode)
 	}
 
+	// assertVerifyOnlyStagesRan proves stages 1 and 2 really executed
+	// (verify-only) in the observed output, not merely that the exit
+	// status was zero.
+	assertVerifyOnlyStagesRan := func(t *testing.T, out string) {
+		t.Helper()
+		for _, want := range []string{
+			"user docker-helper-builder exists; verifying",
+			"subordinate ranges verified",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("the verify-only stage evidence is missing from the output: %q\n%s", want, out)
+			}
+		}
+		for _, forbidden := range []string{"useradd: INVOKED", "usermod: INVOKED"} {
+			if strings.Contains(out, forbidden) {
+				t.Errorf("the verify-only fixture state must not trigger account mutation: %s\n%s", forbidden, out)
+			}
+		}
+	}
+
 	t.Run("already available converges with zero modprobe", func(t *testing.T) {
-		fakeBin, tunSysfs := fixture(t, "10:200\n")
+		fakeBin, tunSysfs, env := fixture(t, "10:200\n")
 		// A modprobe that always fails if invoked: the zero-call invariant
 		// would surface as a non-zero exit through the fake, not just a
 		// missing log line.
 		fake := "#!/bin/sh\necho \"modprobe $@\"\nexit 99\n"
-		out, err := runOnce(t, fakeBin, tunSysfs, fake)
+		out, err := runOnce(t, fakeBin, tunSysfs, fake, env)
 		if err != nil {
 			t.Fatalf("provisioner failed on an already-available facility: %v\n%s", err, out)
 		}
+		assertVerifyOnlyStagesRan(t, out)
 		if n := strings.Count(out, "modprobe tun"); n != 0 {
 			t.Errorf("an available facility must not invoke modprobe; saw %d calls\n%s", n, out)
 		}
@@ -1284,11 +1358,12 @@ exit %d
 	})
 
 	t.Run("unavailable converges with exactly one modprobe tun", func(t *testing.T) {
-		fakeBin, tunSysfs := fixture(t, "")
-		out, err := runOnce(t, fakeBin, tunSysfs, sysfsWriter(tunSysfs, true, 0))
+		fakeBin, tunSysfs, env := fixture(t, "")
+		out, err := runOnce(t, fakeBin, tunSysfs, sysfsWriter(tunSysfs, true, 0), env)
 		if err != nil {
 			t.Fatalf("provisioner failed to converge: %v\n%s", err, out)
 		}
+		assertVerifyOnlyStagesRan(t, out)
 		if n := strings.Count(out, "modprobe tun"); n != 1 {
 			t.Errorf("convergence must invoke modprobe exactly once; saw %d\n%s", n, out)
 		}
@@ -1302,25 +1377,26 @@ exit %d
 	})
 
 	t.Run("re-run after convergence adds zero modprobe calls", func(t *testing.T) {
-		fakeBin, tunSysfs := fixture(t, "")
+		fakeBin, tunSysfs, env := fixture(t, "")
 		// First run converges (the fake writes the sysfs endpoint).
-		if _, err := runOnce(t, fakeBin, tunSysfs, sysfsWriter(tunSysfs, true, 0)); err != nil {
+		if _, err := runOnce(t, fakeBin, tunSysfs, sysfsWriter(tunSysfs, true, 0), env); err != nil {
 			t.Fatalf("first run must converge: %v", err)
 		}
 		// Second run: the fake now fails if invoked; success proves zero
-		// additional calls (verify-first idempotence).
-		out, err := runOnce(t, fakeBin, tunSysfs, "#!/bin/sh\necho \"modprobe $@\"\nexit 99\n")
+		// additional calls (verify-first idempotence) across all stages.
+		out, err := runOnce(t, fakeBin, tunSysfs, "#!/bin/sh\necho \"modprobe $@\"\nexit 99\n", env)
 		if err != nil {
 			t.Fatalf("re-run after convergence must succeed without modprobe: %v\n%s", err, out)
 		}
+		assertVerifyOnlyStagesRan(t, out)
 		if !strings.Contains(out, "TUN facility available") {
 			t.Errorf("the re-run must take the verify-first path, output:\n%s", out)
 		}
 	})
 
 	t.Run("modprobe failure fails closed", func(t *testing.T) {
-		fakeBin, tunSysfs := fixture(t, "")
-		out, err := runOnce(t, fakeBin, tunSysfs, sysfsWriter(tunSysfs, false, 1))
+		fakeBin, tunSysfs, env := fixture(t, "")
+		out, err := runOnce(t, fakeBin, tunSysfs, sysfsWriter(tunSysfs, false, 1), env)
 		if err == nil {
 			t.Fatalf("a failing modprobe must fail the provisioning closed\n%s", out)
 		}
@@ -1330,8 +1406,8 @@ exit %d
 	})
 
 	t.Run("success without convergence fails closed", func(t *testing.T) {
-		fakeBin, tunSysfs := fixture(t, "")
-		out, err := runOnce(t, fakeBin, tunSysfs, sysfsWriter(tunSysfs, false, 0))
+		fakeBin, tunSysfs, env := fixture(t, "")
+		out, err := runOnce(t, fakeBin, tunSysfs, sysfsWriter(tunSysfs, false, 0), env)
 		if err == nil {
 			t.Fatalf("a modprobe success without the sysfs endpoint must fail closed\n%s", out)
 		}
@@ -1341,8 +1417,8 @@ exit %d
 	})
 
 	t.Run("wrong major minor fails closed", func(t *testing.T) {
-		fakeBin, tunSysfs := fixture(t, "12:34\n")
-		out, err := runOnce(t, fakeBin, tunSysfs, sysfsWriter(tunSysfs, false, 0))
+		fakeBin, tunSysfs, env := fixture(t, "12:34\n")
+		out, err := runOnce(t, fakeBin, tunSysfs, sysfsWriter(tunSysfs, false, 0), env)
 		if err == nil {
 			t.Fatalf("a wrong major:minor endpoint must fail the provisioning closed\n%s", out)
 		}
@@ -1352,9 +1428,9 @@ exit %d
 	})
 
 	t.Run("modprobe unavailable fails closed", func(t *testing.T) {
-		fakeBin, tunSysfs := fixture(t, "")
-		// An empty fake bin dir: no modprobe anywhere in PATH.
-		out, err := runOnce(t, fakeBin, tunSysfs, "")
+		fakeBin, tunSysfs, env := fixture(t, "")
+		// No modprobe fake: the tool is genuinely unavailable.
+		out, err := runOnce(t, fakeBin, tunSysfs, "", env)
 		if err == nil {
 			t.Fatalf("an unavailable modprobe must fail the provisioning closed\n%s", out)
 		}
@@ -1552,6 +1628,8 @@ func TestInstallSystemScriptContent(t *testing.T) {
 	for _, want := range []string{
 		"MODULES_LOAD_SRC=\"${MODULES_LOAD_SRC:-modules-load.d/docker-helper-builder.conf}\"",
 		"MODULES_LOAD_DEST=\"${MODULES_LOAD_DEST:-/usr/lib/modules-load.d/docker-helper-builder.conf}\"",
+		"TUN_SYSFS=\"${TUN_SYSFS:-/sys/class/misc/tun/dev}\"",
+		"MODPROBE=\"${MODPROBE:-modprobe}\"",
 		"install_modules_load",
 		"check_modprobe",
 	} {
@@ -2072,6 +2150,16 @@ exit 0
 	if err := os.WriteFile(filepath.Join(e.scriptDir, "modules-load.d", "docker-helper-builder.conf"), []byte("tun\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	// The TUN facility fact fixture: the sysfs endpoint reports 10:200
+	// (already available) — the no-modprobe-needed preflight path. The
+	// modprobe-prereq tests override TUN_SYSFS as needed.
+	tunSysfs := e.dest("sys/class/misc/tun/dev")
+	if err := os.MkdirAll(filepath.Dir(tunSysfs), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tunSysfs, []byte("10:200\n"), 0444); err != nil {
+		t.Fatal(err)
+	}
 
 	e.env = []string{
 		"PATH=" + e.fakeBinDir + ":" + os.Getenv("PATH"),
@@ -2081,6 +2169,7 @@ exit 0
 		"BUILDKIT_BIN_DEST=" + e.dest("usr/libexec/docker-helper/buildkit"),
 		"BUILDKIT_DOC_DEST=" + e.dest("usr/share/doc/docker-helper/buildkit"),
 		"MODULES_LOAD_DEST=" + e.dest("usr/lib/modules-load.d/docker-helper-builder.conf"),
+		"TUN_SYSFS=" + tunSysfs,
 		"AA_PROFILE_DEST=" + e.dest("etc/apparmor.d/docker-helper-system"),
 		"AA_STATE_FILE=" + e.dest("var/lib/docker-helper/apparmor/managed-boundaries"),
 		"AA_LEGACY_FRAGMENT=" + e.dest("etc/apparmor.d/docker-helper.d/managed-roots"),
@@ -2567,6 +2656,83 @@ func TestInstallSystemFreshYesEnablesStartsService(t *testing.T) {
 	if info.Mode().Perm() != 0644 {
 		t.Errorf("modules-load.d asset mode = %o, want 644", info.Mode().Perm())
 	}
+}
+
+// TestInstallSystemModprobePrereq pins the conditional modprobe
+// prerequisite (the 4C-13 correction): the same read-only facility fact
+// the canonical provisioner verifies decides whether the tool must exist
+// — an already-available or built-in TUN passes without modprobe, an
+// unavailable facility requires it before any installer mutation — and
+// the installer itself NEVER invokes modprobe (the current-boot
+// convergence is owned exclusively by the provisioner).
+func TestInstallSystemModprobePrereq(t *testing.T) {
+	t.Run("built-in or already loaded facility passes without modprobe", func(t *testing.T) {
+		env := newSystemInstallScriptEnv(t)
+		env.removeFakeTool(t, "modprobe")
+
+		out, err := env.run(t, "--yes --allowed-root "+t.TempDir(), "")
+		if err != nil {
+			t.Fatalf("install with an available facility must pass without modprobe: %v\n%s", err, out)
+		}
+		provisionerRan := false
+		for _, c := range env.calls(t) {
+			if strings.Contains(c, "provision-builder:") {
+				provisionerRan = true
+			}
+		}
+		if !provisionerRan {
+			t.Errorf("the canonical provisioner must be invoked, calls: %v", env.calls(t))
+		}
+	})
+
+	t.Run("unavailable facility without modprobe fails before mutation", func(t *testing.T) {
+		env := newSystemInstallScriptEnv(t)
+		env.removeFakeTool(t, "modprobe")
+		env.env = append(env.env,
+			"TUN_SYSFS="+filepath.Join(t.TempDir(), "absent"),
+			"MODPROBE="+filepath.Join(env.fakeBinDir, "modprobe"),
+		)
+
+		out, err := env.run(t, "--yes --allowed-root "+t.TempDir(), "")
+		if err == nil {
+			t.Fatalf("an unavailable facility without modprobe must fail the install\n%s", out)
+		}
+		if !strings.Contains(out, "modprobe (kmod) not available") {
+			t.Errorf("the failure must carry an actionable kmod/modprobe diagnostic, output:\n%s", out)
+		}
+		// Fail BEFORE installation mutation: the canonical provisioner must
+		// not have been invoked.
+		for _, c := range env.calls(t) {
+			if strings.Contains(c, "provision-builder:") {
+				t.Errorf("the provisioner must not run after a failed preflight, calls: %v", env.calls(t))
+			}
+		}
+	})
+
+	t.Run("unavailable facility with modprobe present: installer does not invoke it", func(t *testing.T) {
+		env := newSystemInstallScriptEnv(t)
+		env.env = append(env.env,
+			"TUN_SYSFS="+filepath.Join(t.TempDir(), "absent"),
+			"MODPROBE="+filepath.Join(env.fakeBinDir, "modprobe"),
+		)
+
+		out, err := env.run(t, "--yes --allowed-root "+t.TempDir(), "")
+		if err != nil {
+			t.Fatalf("install with modprobe present must pass: %v\n%s", err, out)
+		}
+		provisionerRan := false
+		for _, c := range env.calls(t) {
+			if strings.Contains(c, "provision-builder:") {
+				provisionerRan = true
+			}
+			if strings.Contains(c, "modprobe") {
+				t.Errorf("the installer itself must not invoke modprobe (the provisioner owns the invocation), calls: %v", env.calls(t))
+			}
+		}
+		if !provisionerRan {
+			t.Errorf("the canonical provisioner must be invoked, calls: %v", env.calls(t))
+		}
+	})
 }
 
 // --- Behavioral tests for uninstall-system.sh ---
