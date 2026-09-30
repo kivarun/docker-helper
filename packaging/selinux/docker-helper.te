@@ -120,7 +120,7 @@ module docker_helper 1.2;
 		class capability { dac_read_search dac_override sys_admin fowner setuid setgid };
 		class capability2 { wake_alarm kill };
 		class user_namespace { create };
-		class cap_userns { sys_admin sys_ptrace sys_chroot };
+		class cap_userns { sys_admin sys_ptrace sys_chroot net_admin };
 		class process { transition siginh noatsecure rlimitinh sigkill setexec };
 		class process2 { nnp_transition };
 	}
@@ -1177,11 +1177,13 @@ allow docker_helper_rootlesskit_t ifconfig_exec_t:file { execute read open execu
 # own tap creation — NOTHING more. Deliberately NOT granted:
 # getattr/append/lock/create/setattr (each requires its own enforcing
 # evidence; if the effective base policy separately provides getattr
-# that is a loaded-policy fact, not a reason to copy it here), and NO
-# capability surface (self:capability net_admin/net_raw and cap_userns
-# net_admin stay ungranted — the TUN driver's ns_capable(net->user_ns,
-# CAP_NET_ADMIN) check inside tun_set_iff() must remain a separate live
-# enforcing boundary). The distro corenet_rw_tun_tap_dev() macro
+# that is a loaded-policy fact, not a reason to copy it here). NO plain
+# capability surface either: self:capability net_admin/net_raw stay
+# ungranted, and cap_userns net_admin is NOT granted by any TUN rule —
+# the TUN driver's ns_capable(net->user_ns, CAP_NET_ADMIN) check inside
+# tun_set_iff() is carried by the child domain's OWN cap_userns rule
+# below (its 4C-15 evidenced net_admin bit); the initial-userns plain
+# capability set stays zero. The distro corenet_rw_tun_tap_dev() macro
 # remains deliberately NOT used: its rw_chr_file_perms expansion
 # carries getattr/append/ioctl/lock — beyond the observed chain — and
 # a macro expansion carries NO allowxperm, so importing it would make
@@ -1263,10 +1265,12 @@ allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl { 0x54ca 
 # (getsockname) of the flow's own NETLINK_ROUTE sockets in the current
 # namespaces — NOTHING more. They
 # are NOT route-mutation authority: no nlmsg_write/nlmsg_read, no
-# connect/read/write, no getopt, no ioctl/shutdown, and NO
-# capability surface (self:capability net_admin/net_raw and cap_userns
-# net_admin stay ungranted — capability mediation is a separate live
-# boundary, the AVCs name only the socket class). NOTE: SO_SNDBUF,
+# connect/read/write, no getopt, no ioctl/shutdown, and NO capability
+# surface HERE (self:capability net_admin/net_raw stay ungranted; the
+# child's in-namespace cap_userns surface — including the 4C-15
+# net_admin bit — lives in the child's own cap_userns rule, never in a
+# netlink rule; the AVCs of these boundaries name only the socket
+# class). NOTE: SO_SNDBUF,
 # SO_RCVBUF, and NETLINK_EXT_ACK are all mediated by the ONE class-level
 # `setopt` permission — the grant covers every socket-option operation
 # of this domain/class pair; it is deliberately NOT described as
@@ -1708,15 +1712,15 @@ allow docker_helper_newgidmap_t passwd_file_t:file { read open };
 # tcontext=...docker_helper_rootlesskit_t:s0 tclass=user_namespace
 # permissive=0). Grant ONLY the create to the child domain: no equivalent
 # manager grant, and no plain self:capability surface — the child's
-# capability surface is granted separately below (the two evidenced
+# capability surface is granted separately below (the four evidenced
 # in-namespace bits, each with its own enforcing AVC evidence).
 allow docker_helper_rootlesskit_t self:user_namespace create;
 
 # The child's in-namespace capability checks inside the flow's own user
 # namespace. Exactly ONE cap_userns rule for the child domain, with the
-# three evidenced bits, each with its own live causal provenance:
+# four evidenced bits, each with its own live causal provenance:
 #
-#   self:cap_userns { sys_admin sys_ptrace sys_chroot }
+#   self:cap_userns { sys_admin sys_ptrace sys_chroot net_admin }
 #
 #   - sys_admin (capability 21): the same rootlesskit flow re-executes its
 #     binary inside the new userns and performs the namespace-entry
@@ -1763,6 +1767,44 @@ allow docker_helper_rootlesskit_t self:user_namespace create;
 #     ... setting up tap tap0: executing [[nsenter -t 2873 ...]]: exit
 #     status 1" — the direct causal chain to the 4C-4 flow death; the
 #     earlier sys_ptrace boundary no longer occurs in that window).
+#   - net_admin (capability 12): the flow's tap creation — after the
+#     granted TUNSETIFF ioctl (the 4C-14 exact xperm) — enters
+#     tun_set_iff()'s new-interface branch, whose first check is
+#     ns_capable(net->user_ns, CAP_NET_ADMIN) in the flow's own
+#     non-initial user namespace, mediated as cap_userns — NOT the plain
+#     capability class. Live enforcing AVC evidence (Phase 4C-14 run
+#     36747365595, audit record 421: denied { net_admin } for pid=3044
+#     comm="ip" capability=12
+#     scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+#     tcontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+#     tclass=cap_userns permissive=0) with the direct userspace failure
+#     "ioctl(TUNSETIFF): Operation not permitted" — the SAME ioctl
+#     changed its errno from the 4C-13 SELinux ioctl-gate EACCES
+#     ("Permission denied") to the kernel capability-check EPERM, which
+#     is the direct proof the request passed chr_file:ioctl + allowxperm
+#     { 0x54ca } and entered tun_set_iff(). This is NOT TUN-only
+#     authority — see the net_admin scope note below. The downstream TUN
+#     LSM authority (the tun_socket create the kernel's
+#     security_tun_dev_create() would map next) is deliberately NOT
+#     folded into this grant.
+#
+# net_admin SCOPE — READ CAREFULLY: cap_userns net_admin is materially
+# BROADER than "permission to create tap0" — it is domain-wide
+# network-administration authority inside every user namespace where
+# the process satisfies the kernel namespace relationship, and this
+# policy does NOT describe it as TUN-only. What makes it acceptable at
+# this phase is narrower: the live kernel path requires it (the
+# recorded ns_capable(net->user_ns, CAP_NET_ADMIN) denial is the
+# direct evidence), it is the cap_userns class (in the flow's own
+# non-initial user namespace), NOT the initial-userns plain capability
+# (which stays zero), and the flow is categorized. Cross-operation
+# namespace reachability is NOT resolved by this grant — the gate is
+# now MORE important: the flow domain carries in-namespace
+# network-admin authority alongside the sys_admin/sys_ptrace/sys_chroot
+# entry authority, and the final c1-vs-c2 proof must demonstrate that a
+# c1 flow cannot use its namespace-entry + network-admin authority
+# against another operation's namespaces/processes (still an open
+# concurrency/security gate before the Release GO).
 #
 # SCOPE — READ CAREFULLY: this is a domain-wide SELF permission, NOT an
 # operation-scoped one: it applies to every process running in
@@ -1777,7 +1819,7 @@ allow docker_helper_rootlesskit_t self:user_namespace create;
 # at all. Cross-operation namespace targeting (a flow process reaching
 # ANOTHER operation's namespaces) is NOT proven safe by this grant: it
 # stays an open concurrency/security gate before the Release GO.
-allow docker_helper_rootlesskit_t self:cap_userns { sys_admin sys_ptrace sys_chroot };
+allow docker_helper_rootlesskit_t self:cap_userns { sys_admin sys_ptrace sys_chroot net_admin };
 
 # --- MCS operation isolation: constrained-domain membership (G32 r3 §6.A) ---
 #
