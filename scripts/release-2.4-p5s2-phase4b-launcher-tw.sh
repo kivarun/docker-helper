@@ -271,6 +271,15 @@ if ! semodule -l 2>/dev/null | awk '{print $1}' | grep -aqx docker_helper; then
   note "the docker_helper module is not loaded after install"
   finish INCOMPLETE; exit 0
 fi
+{
+  echo "=== 4C-14 xperm toolchain gate (all four steps must hold before the live run) ==="
+  echo "gate 1 checkmodule accepts allowxperm: the shipped .te (carrying the pinned allowxperm rule) compiled with rc=0 — the compile failure path above exits INCOMPLETE before any load"
+  echo "gate 2 semodule_package succeeds: rc=0 recorded above"
+  echo "gate 3 semodule load succeeds: rc=0 + the module presence check above"
+  echo "gate 4 sesearch exposes the xperm rule: proven by the preflight allowxperm inventory (02-preflight.txt)"
+  echo "the pinned allowxperm rule in the transferred source:"
+  grep -an '^allowxperm docker_helper_rootlesskit_t' "$TRANSFERRED/docker-helper.te" || true
+} >> "$EVIDENCE_DIR/01-composition-inputs.txt"
 marker "POLICY-IDENTITY=docker_helper-module-1.2-sha"
 restorecon /usr/bin/docker-helper /usr/bin/rootlesskit /usr/bin/slirp4netns \
   /usr/bin/newuidmap /usr/bin/newgidmap /usr/bin/nsenter 2>>"$EVIDENCE_DIR/01-composition-inputs.txt" || true
@@ -320,12 +329,14 @@ cat "$EVIDENCE_DIR/02-nsenter-probe.txt" >&2
 } > "$EVIDENCE_DIR/02-ip-probe.txt" 2>&1
 cat "$EVIDENCE_DIR/02-ip-probe.txt" >&2
 
-# Evidence-only capture (P5-S2 Phase 4C-10): /dev/net/tun — the predicted
-# NEXT boundary after the (now granted) getsockname(). The flow's
-# `ip tuntap add` path reaches open("/dev/net/tun", O_RDWR) + TUNSETIFF/
-# TUNSETPERSIST ioctls. NOTHING is granted for it in this phase: this is
+# Evidence-only capture (P5-S2 Phase 4C-14): /dev/net/tun — the TUN
+# ioctl boundary. The flow's `ip tuntap add` path reaches
+# open("/dev/net/tun", O_RDWR) (the granted 4C-11/4C-12 chain) plus the
+# TUNSETIFF ioctl (0x54ca), now mediated by the ordinary { ioctl } bit
+# plus the exact { 0x54ca } allowxperm of the 4C-14 composition. This is
 # a stand-shape capture (actual type, no assumption) + a loaded-policy
-# inventory proving the flow domain holds NO tun/tap authority yet.
+# inventory of the flow domain's tun/tap authority (expected: the 4C-14
+# ordinary + TUNSETIFF xperm contribution, nothing wider).
 {
   echo "=== /dev/net/tun evidence-only probe (no grant this phase) ==="
   echo "--- the device node:"
@@ -343,10 +354,10 @@ cat "$EVIDENCE_DIR/02-ip-probe.txt" >&2
   lsmod | grep -a "^tun" || echo "(tun not listed in lsmod)"
   echo "modinfo tun:"
   modinfo tun 2>&1 | head -8 || true
-  echo "--- loaded-policy inventory: flow domain -> tun/tap authority (expected: zero concrete grants)"
+  echo "--- loaded-policy inventory: flow domain -> tun/tap authority (expected: the 4C-14 { read write open ioctl } + TUNSETIFF xperm contribution, nothing wider)"
   TUN_DEV_TYPE="$(matchpathcon /dev/net/tun 2>/dev/null | awk '{print $2}' | cut -d: -f3 || true)"
   echo "stand type from matchpathcon: ${TUN_DEV_TYPE:-(undetermined)}"
-  echo "--- sesearch allow rootlesskit_t -> tun_tap_device_t (expected: zero concrete rules):"
+  echo "--- sesearch allow rootlesskit_t -> tun_tap_device_t (expected: the 4C-14 ordinary rule):"
   sesearch --allow -s docker_helper_rootlesskit_t -t tun_tap_device_t /sys/fs/selinux/policy 2>&1 || true
   if [ -n "${TUN_DEV_TYPE:-}" ] && [ "$TUN_DEV_TYPE" != "tun_tap_device_t" ] && [ "$TUN_DEV_TYPE" != "(undetermined)" ]; then
     echo "--- the stand shows a DIFFERENT device type than tun_tap_device_t; inventory for the actual type:"
@@ -625,29 +636,74 @@ PREFLIGHT_OK=1
     PREFLIGHT_OK=0
   fi
 
-  echo "=== TUN device-node access identity (the 4C-12 composition: the distro tun_tap_device_t identity, exactly { read write open }, no ioctl, no capability surface) ==="
-  # NOTE (4C-12 harness-mechanics correction): a refpolicy macro's NAME
-  # does not exist after policy compilation — sesearch sees only the
-  # resulting AV rules — so macro provenance (the corenet_rw_tun_tap_dev
-  # ban) is asserted at SOURCE level by the Go policy test, never by
-  # sesearch here. This preflight asserts ONLY the effective concrete
-  # permission surface.
+  echo "=== TUN device-node access identity (the 4C-14 composition: the distro tun_tap_device_t identity, exactly { read write open ioctl } ordinary + the exact TUNSETIFF xperm { 0x54ca }, no other ioctl command, no capability surface) ==="
+  # NOTE (4C-12 harness-mechanics correction, still current): a refpolicy
+  # macro's NAME does not exist after policy compilation — sesearch sees
+  # only the resulting AV rules — so macro provenance (the
+  # corenet_rw_tun_tap_dev ban) is asserted at SOURCE level by the Go
+  # policy test, never by sesearch here. This preflight asserts the
+  # effective concrete permission surface.
   echo "--- the stand probe (02-tun-probe.txt):"
   cat "$EVIDENCE_DIR/02-tun-probe.txt" 2>/dev/null || true
-  echo "--- raw effective inventory (rootlesskit -> tun_tap_device_t chr_file; base-policy expansions recorded, not asserted):"
+  echo "--- toolchain encoding gate (allowxperm must survive the real toolchain; compile/package/load failures above exit INCOMPLETE before any load):"
+  if grep -aqx 'allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl { 0x54ca };' "$TRANSFERRED/docker-helper.te"; then
+    echo "PASS: the transferred .te carries the exact pinned allowxperm rule; checkmodule 4-24-era semantics accepted it (compile rc=0 recorded in 01-composition-inputs.txt)"
+  else
+    echo "FAIL: the transferred .te does not carry the exact pinned allowxperm rule"
+    PREFLIGHT_OK=0
+  fi
+  echo "--- STEP 1: ordinary effective surface BEFORE dispatch (rootlesskit -> tun_tap_device_t chr_file; base-policy expansions recorded, not asserted):"
   sesearch --allow -s docker_helper_rootlesskit_t -t tun_tap_device_t -c chr_file /sys/fs/selinux/policy || true
-  echo "--- CONCRETE module contribution (source must be docker_helper_rootlesskit_t; must be exactly read+write+open):"
+  echo "--- STEP 1 CONCRETE module contribution (source must be docker_helper_rootlesskit_t; must be exactly read+write+open+ioctl):"
   sesearch --allow -s docker_helper_rootlesskit_t -t tun_tap_device_t -c chr_file /sys/fs/selinux/policy 2>/dev/null | awk '$2 == "docker_helper_rootlesskit_t"' || true
+  echo "--- STEP 2: allowxperm rules queried SEPARATELY (raw xperm inventory; stderr kept apart for the toolchain gate):"
+  XP_TOOL_ERR=/tmp/p4b-work/sesearch-xperm.stderr
+  XP_RAW="$(sesearch --allowxperm -s docker_helper_rootlesskit_t -t tun_tap_device_t -c chr_file /sys/fs/selinux/policy 2>"$XP_TOOL_ERR" || true)"
+  if [ -s "$XP_TOOL_ERR" ]; then
+    echo "sesearch --allowxperm stderr:"
+    cat "$XP_TOOL_ERR"
+  fi
+  if grep -aqE 'invalid option|unrecognized|unknown option|Usage:' "$XP_TOOL_ERR" 2>/dev/null; then
+    echo "TOOLCHAIN-GATE: this stand's sesearch cannot query allowxperm rules — the xperm authority cannot be proven on the loaded policy; STOP with no verdict and NO broad ioctl fallback"
+    TUN_TOOLCHAIN_BLOCKED=1
+    PREFLIGHT_OK=0
+  elif [ -n "$XP_RAW" ]; then
+    printf '%s\n' "$XP_RAW"
+    echo "PASS: sesearch exposes the loaded xperm rule (toolchain query gate)"
+  else
+    echo "FAIL: sesearch --allowxperm returned ZERO rules — the loaded policy does not carry the module's TUNSETIFF xperm rule"
+    PREFLIGHT_OK=0
+  fi
+  echo "--- STEP 2 effective xperm union (every hex command value across the raw inventory — attribute-derived/base-policy contributions count; the security verdict):"
+  XP_UNION="$(printf '%s\n' "$XP_RAW" | grep -aoE '0x[0-9a-fA-F]+' | tr 'A-F' 'a-f' | sort -u | tr '\n' ' ' || true)"
+  echo "effective union: ${XP_UNION:-(empty)}"
+  XP_EXACT_OK=0
+  if [ "$XP_UNION" = "0x54ca " ]; then
+    echo "PASS: effective xperm union is EXACTLY { 0x54ca } (TUNSETIFF)"
+    XP_EXACT_OK=1
+  else
+    echo "FAIL: effective xperm union is not exactly { 0x54ca } (got: ${XP_UNION:-(empty)})"
+    PREFLIGHT_OK=0
+  fi
+  echo "--- explicit TUNSETPERSIST negative (0x54cb must NOT be inside the effective union):"
+  if printf '%s\n' "$XP_UNION" | grep -aq '0x54cb'; then
+    echo "FAIL: 0x54cb (TUNSETPERSIST) is inside the effective xperm union"
+    PREFLIGHT_OK=0
+  else
+    echo "PASS: 0x54cb (TUNSETPERSIST) is NOT allowed"
+  fi
   echo "--- flow-domain capability/cap_userns net_admin/net_raw (must be zero):"
   sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_admin /sys/fs/selinux/policy || true
   sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_raw /sys/fs/selinux/policy || true
   sesearch --allow -s docker_helper_rootlesskit_t -c cap_userns -p net_admin /sys/fs/selinux/policy || true
   TUN_PAIR_OK=0; TUN_NO_MORE_OK=0; TUN_LABEL_OK=0; TUN_NO_NETADMIN_OK=0
+  TUN_TOOLCHAIN_BLOCKED=0
   TUN_CONCRETE="$(sesearch --allow -s docker_helper_rootlesskit_t -t tun_tap_device_t -c chr_file /sys/fs/selinux/policy 2>/dev/null | awk '$2 == "docker_helper_rootlesskit_t"' || true)"
-  if printf '%s\n' "$TUN_CONCRETE" | grep -aq "read" && printf '%s\n' "$TUN_CONCRETE" | grep -aq "write" && printf '%s\n' "$TUN_CONCRETE" | grep -aq "open"; then
+  if printf '%s\n' "$TUN_CONCRETE" | grep -aq "read" && printf '%s\n' "$TUN_CONCRETE" | grep -aq "write" \
+    && printf '%s\n' "$TUN_CONCRETE" | grep -aq "open" && printf '%s\n' "$TUN_CONCRETE" | grep -aq "ioctl"; then
     TUN_PAIR_OK=1
   fi
-  if ! printf '%s\n' "$TUN_CONCRETE" | grep -aqE "ioctl|append|lock|create|setattr|getattr|exec"; then
+  if ! printf '%s\n' "$TUN_CONCRETE" | grep -aqE "append|lock|create|setattr|getattr|exec"; then
     TUN_NO_MORE_OK=1
   fi
   if [ -e /dev/net/tun ]; then
@@ -666,9 +722,9 @@ PREFLIGHT_OK=1
     TUN_NO_NETADMIN_OK=1
   fi
   if [ "$TUN_PAIR_OK" = 1 ] && [ "$TUN_NO_MORE_OK" = 1 ] && [ "$TUN_LABEL_OK" = 1 ] && [ "$TUN_NO_NETADMIN_OK" = 1 ]; then
-    echo "PASS: tun device-node access identity (distro tun_tap_device_t + exactly { read write open }, no ioctl, no capability surface)"
+    echo "PASS: tun device-node access identity (distro tun_tap_device_t + exactly { read write open ioctl } + effective xperm union exactly { 0x54ca }, TUNSETPERSIST 0x54cb denied, no capability surface)"
   else
-    echo "FAIL: tun device-node access identity (pair=$TUN_PAIR_OK no-more=$TUN_NO_MORE_OK label=$TUN_LABEL_OK no-netadmin=$TUN_NO_NETADMIN_OK)"
+    echo "FAIL: tun device-node access identity (pair=$TUN_PAIR_OK no-more=$TUN_NO_MORE_OK label=$TUN_LABEL_OK no-netadmin=$TUN_NO_NETADMIN_OK xperm-union=$XP_EXACT_OK toolchain-blocked=$TUN_TOOLCHAIN_BLOCKED)"
     PREFLIGHT_OK=0
   fi
 
@@ -723,6 +779,15 @@ PREFLIGHT_OK=1
   sesearch --allow -s "$LAUNCHER_DOMAIN" -t docker_helper_rootlesskit_exec_t -c file /sys/fs/selinux/policy || true
 } > "$EVIDENCE_DIR/02-preflight.txt" 2>&1
 cat "$EVIDENCE_DIR/02-preflight.txt" >&2
+if [ "${TUN_TOOLCHAIN_BLOCKED:-0}" = 1 ]; then
+  # The 4C-14 toolchain gate: if the real Tumbleweed toolchain cannot
+  # encode or query the xperm rule safely, STOP — no verdict is issued
+  # and there is NO broad ioctl fallback.
+  note "the Tumbleweed toolchain cannot prove the TUNSETIFF xperm rule on the loaded policy (see 02-preflight.txt); stopping without a verdict and without any fallback grant"
+  marker "PREFLIGHT=INCOMPLETE"
+  marker "BLOCKER=sesearch allowxperm tooling unavailable on this stand (see 02-preflight.txt)"
+  finish INCOMPLETE; exit 0
+fi
 if [ "$PREFLIGHT_OK" != 1 ]; then
   note "loaded-policy preflight FAILED; the loaded policy is not the shipped one"
   marker "PREFLIGHT=FAIL"
@@ -1010,6 +1075,44 @@ RAW_FIRST="$(grep -a "scontext=system_u:system_r:$RK_DOMAIN:s0:" "$EVIDENCE_DIR/
 PERMS_FIRST="$(printf '%s\n' "$RAW_FIRST" | sed -n 's/.*denied  *{ \([^}]*\) }.*/\1/p' || true)"
 SUMMARY_FIRST="$(printf '%s\n' "$RAW_FIRST" | sed -n 's/.*scontext=\([^ ]*\) tcontext=\([^ ]*\) tclass=\([a-z_]*\).*/scontext=\1 tcontext=\2 tclass=\3/p' || true)"
 marker "DOWNSTREAM-BOUNDARY=${SUMMARY_FIRST:-none} perms=${PERMS_FIRST:-none}"
+
+# ---- the 4C-14 gate: the TUN ioctl boundary is now SELinux-mediated by
+# ---- the ordinary { ioctl } bit + the exact { 0x54ca } allowxperm, so
+# ---- the canonical 4C-13 boundary (denied { ioctl } ioctlcmd=0x54ca on
+# ---- tun_tap_device_t) must be GONE, and NO tun_tap_device_t denial may
+# ---- appear in the window at all: any tun denial — a read/write/open
+# ---- regression, a 0x54ca replay, or an ioctlcmd=0x54cb TUNSETPERSIST
+# ---- denial — would mean the loaded composition's TUN surface did not
+# ---- hold exactly as pinned (a 0x54cb denial would additionally mean
+# ---- the flow got further than the composition's own authority allows).
+TUN_IOCTL_GONE_OK=1
+{
+  echo "=== tun_tap_device_t AVCs of the window (the 4C-13 ioctl boundary must be absent; ANY tun denial fails the 4C-14 composition) ==="
+  TUN_AVC_WINDOW="$(grep -a 'tcontext=system_u:object_r:tun_tap_device_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null || true)"
+  printf '%s\n' "${TUN_AVC_WINDOW:-(none — no tun_tap_device_t denial in the window)}"
+  echo "--- the exact 4C-13 shape (denied ioctl, ioctlcmd=0x54ca = TUNSETIFF):"
+  OLD_TUN_IOCTL="$(printf '%s\n' "$TUN_AVC_WINDOW" | grep -a 'ioctlcmd=0x54ca' || true)"
+  printf '%s\n' "${OLD_TUN_IOCTL:-(none — the 4C-13 ioctl(TUNSETIFF) denial is gone)}"
+  echo "--- any tun ioctlcmd inventory (raw; 0x54cb must never be allowed):"
+  printf '%s\n' "$TUN_AVC_WINDOW" | grep -a 'ioctlcmd=' || echo "(none)"
+  if [ -n "$TUN_AVC_WINDOW" ]; then
+    echo "GATE: a tun_tap_device_t denial appeared in the window — the loaded TUN surface did not hold exactly as pinned"
+    TUN_IOCTL_GONE_OK=0
+  fi
+  if [ -n "$OLD_TUN_IOCTL" ]; then
+    echo "GATE: the exact 4C-13 ioctl(TUNSETIFF) boundary reappeared"
+    TUN_IOCTL_GONE_OK=0
+  fi
+} > "$EVIDENCE_DIR/14-tun-ioctl-gone.txt" 2>&1
+cat "$EVIDENCE_DIR/14-tun-ioctl-gone.txt" >&2
+if [ "$TUN_IOCTL_GONE_OK" = 1 ]; then
+  marker "TUN-IOCTL-BOUNDARY=GONE"
+  marker "TUN-DEVICE-ACCESS=CLEAN"
+else
+  marker "BLOCKER=the 4C-14 TUN ioctl composition did not hold on the loaded policy (see 14-tun-ioctl-gone.txt)"
+  marker "TUN-IOCTL-BOUNDARY=FAIL"
+  finish FAIL; exit 0
+fi
 
 # ---- launcher-domain AVC inventory (raw; the report classifies)
 {
