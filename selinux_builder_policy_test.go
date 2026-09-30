@@ -940,13 +940,14 @@ func TestSELinuxPolicyNewuidmapIsolation(t *testing.T) {
 		}
 	}
 	// The module's cap_userns rules are EXACTLY the three evidenced grants:
-	// the rootlesskit child's { sys_admin sys_ptrace } pair, the UID-map
-	// helper's sys_admin bit, and the GID-map helper's sys_admin bit (all
-	// in-namespace, all self-targeted; the GID bit is the R5 gid_map-write
-	// boundary, and the child's sys_ptrace bit is the 4C-3 nsenter
-	// setns/ptrace_may_access boundary). No other subject — the manager,
-	// the launcher, slirp4netns, the daemon, or any other helper — gets a
-	// cap_userns rule.
+	// the rootlesskit child's { sys_admin sys_ptrace sys_chroot } set, the
+	// UID-map helper's sys_admin bit, and the GID-map helper's sys_admin
+	// bit (all in-namespace, all self-targeted; the GID bit is the R5
+	// gid_map-write boundary, the child's sys_ptrace bit is the 4C-3 nsenter
+	// ptrace_may_access boundary, and its sys_chroot bit is the 4C-4
+	// mount-namespace reassociation boundary). No other subject — the
+	// manager, the launcher, slirp4netns, the daemon, or any other helper —
+	// gets a cap_userns rule.
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "#") {
@@ -954,11 +955,11 @@ func TestSELinuxPolicyNewuidmapIsolation(t *testing.T) {
 		}
 		if strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, ":cap_userns ") {
 			switch trimmed {
-			case "allow docker_helper_rootlesskit_t self:cap_userns { sys_admin sys_ptrace };",
+			case "allow docker_helper_rootlesskit_t self:cap_userns { sys_admin sys_ptrace sys_chroot };",
 				"allow docker_helper_newuidmap_t self:cap_userns sys_admin;",
 				"allow docker_helper_newgidmap_t self:cap_userns sys_admin;":
 			default:
-				t.Errorf("no cap_userns grant may exist beyond the three evidenced in-namespace grants (rootlesskit { sys_admin sys_ptrace }, UID-map helper sys_admin, GID-map helper sys_admin): %s", trimmed)
+				t.Errorf("no cap_userns grant may exist beyond the three evidenced in-namespace grants (rootlesskit { sys_admin sys_ptrace sys_chroot }, UID-map helper sys_admin, GID-map helper sys_admin): %s", trimmed)
 			}
 		}
 	}
@@ -1405,37 +1406,40 @@ func TestSELinuxPolicyNewgidmapDomainSurface(t *testing.T) {
 
 // TestSELinuxPolicyCapUsernsShape verifies the global capability-shape
 // invariant: the module carries EXACTLY THREE cap_userns rules — the
-// rootlesskit child domain's evidenced { sys_admin sys_ptrace } pair (the
-// P5-S1 userns re-exec boundary and the 4C-3 nsenter setns/ptrace_may_access
-// boundary), the UID-map helper domain's evidenced sys_admin bit (the
-// uid_map write's in-namespace check), and the GID-map helper domain's
-// evidenced sys_admin bit (the gid_map write's in-namespace check, the 4C-1
-// boundary) — with the require block declaring exactly
-// { sys_admin sys_ptrace } on cap_userns. EXACTLY TWO plain self:capability
-// rules: the UID-map helper's evidenced setuid (the uid_map write's
-// out-of-namespace check) and the GID-map helper's evidenced setgid (the
-// gid_map write's out-of-namespace check, the 4C-1 boundary). The manager,
-// the launcher, the slirp4netns helper, and every other subject hold no
-// cap_userns rules; the rootlesskit child keeps exactly one cap_userns rule
-// (no duplicate/parallel rule) and a zero plain self:capability surface —
-// plain CAP_SYS_PTRACE in particular stays closed because the live AVC
-// names cap_userns, not capability; newuidmap keeps exactly setuid (no
-// setgid, no sys_ptrace) and newgidmap keeps exactly setgid (no setuid, no
-// sys_ptrace); all three subjects keep zero self:capability2 surfaces; and
-// the module carries no process:ptrace grant and no capability2 grant at
-// all, while the rootlesskit child domain stays an mcs_constrained_type
-// member. Mutations prove the carve-out is narrow: any capability-class
-// grant for the rootlesskit child, a setgid grant for the UID-map helper, a
-// setuid grant for the GID-map helper, widened/extra helper capability
-// sets, helper capability2 grants, duplicate/parallel rootlesskit
-// cap_userns rules, a missing-rootlesskit-sys_ptrace regression, a widened
-// require declaration, process:ptrace grants, and cap_userns grants for the
-// control-plane subjects all trip.
+// rootlesskit child domain's evidenced { sys_admin sys_ptrace sys_chroot }
+// set (the P5-S1 userns re-exec boundary, the 4C-3 nsenter
+// ptrace_may_access boundary, and the 4C-4 mount-namespace reassociation
+// boundary of the composite setns), the UID-map helper domain's evidenced
+// sys_admin bit (the uid_map write's in-namespace check), and the GID-map
+// helper domain's evidenced sys_admin bit (the gid_map write's
+// in-namespace check, the 4C-1 boundary) — with the require block declaring
+// exactly { sys_admin sys_ptrace sys_chroot } on cap_userns. EXACTLY TWO
+// plain self:capability rules: the UID-map helper's evidenced setuid (the
+// uid_map write's out-of-namespace check) and the GID-map helper's
+// evidenced setgid (the gid_map write's out-of-namespace check, the 4C-1
+// boundary). The manager, the launcher, the slirp4netns helper, and every
+// other subject hold no cap_userns rules; the rootlesskit child keeps
+// exactly one cap_userns rule (no duplicate/parallel rule) and a zero
+// plain self:capability surface — plain CAP_SYS_PTRACE and plain
+// CAP_SYS_CHROOT in particular stay closed because the live AVCs name
+// cap_userns, not capability; newuidmap keeps exactly setuid (no setgid,
+// no sys_ptrace, no sys_chroot) and newgidmap keeps exactly setgid (no
+// setuid, no sys_ptrace, no sys_chroot); all three subjects keep zero
+// self:capability2 surfaces; and the module carries no process:ptrace
+// grant and no capability2 grant at all, while the rootlesskit child
+// domain stays an mcs_constrained_type member. Mutations prove the
+// carve-out is narrow: any capability-class grant for the rootlesskit
+// child, a setgid grant for the UID-map helper, a setuid grant for the
+// GID-map helper, widened/extra helper capability sets, helper capability2
+// grants, duplicate/parallel rootlesskit cap_userns rules, the
+// missing-sys_ptrace and missing-sys_chroot regressions, a fourth
+// cap_userns bit, a widened require declaration, process:ptrace grants,
+// and cap_userns grants for the control-plane subjects all trip.
 func TestSELinuxPolicyCapUsernsShape(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
 	// capUsernsShapeViolations returns one violation per line of text that
 	// breaks the shape invariant: a cap_userns rule beyond the three
-	// evidenced grants, a cap_userns require declaration beyond the two
+	// evidenced grants, a cap_userns require declaration beyond the three
 	// evidenced bits, a plain capability grant that is not one of the two
 	// helpers' single evidenced bits (setuid for the UID-map helper, setgid
 	// for the GID-map helper; the rootlesskit child keeps zero), any
@@ -1451,24 +1455,24 @@ func TestSELinuxPolicyCapUsernsShape(t *testing.T) {
 			}
 			switch {
 			case strings.Contains(trimmed, "class cap_userns "):
-				if trimmed != "class cap_userns { sys_admin sys_ptrace };" {
-					violations = append(violations, fmt.Sprintf("the require block's cap_userns declaration is exactly the two evidenced in-namespace bits: %s", trimmed))
+				if trimmed != "class cap_userns { sys_admin sys_ptrace sys_chroot };" {
+					violations = append(violations, fmt.Sprintf("the require block's cap_userns declaration is exactly the three evidenced in-namespace bits: %s", trimmed))
 				}
 			case strings.Contains(trimmed, ":cap_userns "):
 				switch trimmed {
-				case "allow docker_helper_rootlesskit_t self:cap_userns { sys_admin sys_ptrace };":
+				case "allow docker_helper_rootlesskit_t self:cap_userns { sys_admin sys_ptrace sys_chroot };":
 					rootlesskitCapUsernsRules++
 				case "allow docker_helper_newuidmap_t self:cap_userns sys_admin;",
 					"allow docker_helper_newgidmap_t self:cap_userns sys_admin;":
 				default:
-					violations = append(violations, fmt.Sprintf("no cap_userns rule may exist beyond the three evidenced in-namespace grants (rootlesskit { sys_admin sys_ptrace }, newuidmap sys_admin, newgidmap sys_admin; the manager, the launcher, slirp4netns, and other subjects get none): %s", trimmed))
+					violations = append(violations, fmt.Sprintf("no cap_userns rule may exist beyond the three evidenced in-namespace grants (rootlesskit { sys_admin sys_ptrace sys_chroot }, newuidmap sys_admin, newgidmap sys_admin; the manager, the launcher, slirp4netns, and other subjects get none): %s", trimmed))
 				}
 			case strings.Contains(trimmed, ":capability ") && strings.Contains(trimmed, "docker_helper_rootlesskit_t"):
-				violations = append(violations, fmt.Sprintf("the rootlesskit child domain must keep zero plain self:capability surfaces (no plain sys_ptrace: the live AVC names cap_userns): %s", trimmed))
+				violations = append(violations, fmt.Sprintf("the rootlesskit child domain must keep zero plain self:capability surfaces (no plain sys_ptrace/sys_chroot: the live AVCs name cap_userns): %s", trimmed))
 			case strings.Contains(trimmed, ":capability ") && strings.Contains(trimmed, "docker_helper_newgidmap_t") && trimmed != "allow docker_helper_newgidmap_t self:capability setgid;":
-				violations = append(violations, fmt.Sprintf("the GID-map helper's only plain capability grant is the evidenced setgid bit (no setuid, no sys_ptrace, no widened sets): %s", trimmed))
+				violations = append(violations, fmt.Sprintf("the GID-map helper's only plain capability grant is the evidenced setgid bit (no setuid, no sys_ptrace, no sys_chroot, no widened sets): %s", trimmed))
 			case strings.Contains(trimmed, ":capability ") && strings.Contains(trimmed, "docker_helper_newuidmap_t") && trimmed != "allow docker_helper_newuidmap_t self:capability setuid;":
-				violations = append(violations, fmt.Sprintf("the UID-map helper's only plain capability grant is the evidenced setuid bit (no setgid, no sys_ptrace, no widened sets): %s", trimmed))
+				violations = append(violations, fmt.Sprintf("the UID-map helper's only plain capability grant is the evidenced setuid bit (no setgid, no sys_ptrace, no sys_chroot, no widened sets): %s", trimmed))
 			case strings.Contains(trimmed, ":capability2 ") && strings.HasPrefix(trimmed, "allow "):
 				violations = append(violations, fmt.Sprintf("no capability2 grant may exist (the capability2 surface stays unchanged): %s", trimmed))
 			case strings.Contains(trimmed, ":process ") && strings.Contains(trimmed, "ptrace"):
@@ -1476,7 +1480,7 @@ func TestSELinuxPolicyCapUsernsShape(t *testing.T) {
 			}
 		}
 		if rootlesskitCapUsernsRules != 1 {
-			violations = append(violations, fmt.Sprintf("the rootlesskit child domain must hold exactly one cap_userns rule — the evidenced { sys_admin sys_ptrace } pair — found %d", rootlesskitCapUsernsRules))
+			violations = append(violations, fmt.Sprintf("the rootlesskit child domain must hold exactly one cap_userns rule — the evidenced { sys_admin sys_ptrace sys_chroot } set — found %d", rootlesskitCapUsernsRules))
 		}
 		return violations
 	}
@@ -1484,8 +1488,8 @@ func TestSELinuxPolicyCapUsernsShape(t *testing.T) {
 		t.Errorf("the committed policy violates the cap_userns/capability shape invariants: %v", violations)
 	}
 	for _, rule := range []string{
-		"class cap_userns { sys_admin sys_ptrace };",
-		"allow docker_helper_rootlesskit_t self:cap_userns { sys_admin sys_ptrace };",
+		"class cap_userns { sys_admin sys_ptrace sys_chroot };",
+		"allow docker_helper_rootlesskit_t self:cap_userns { sys_admin sys_ptrace sys_chroot };",
 		"allow docker_helper_newuidmap_t self:cap_userns sys_admin;",
 		"allow docker_helper_newgidmap_t self:cap_userns sys_admin;",
 		"allow docker_helper_newuidmap_t self:capability setuid;",
@@ -1503,11 +1507,17 @@ func TestSELinuxPolicyCapUsernsShape(t *testing.T) {
 		{"setuid capability for the rootlesskit child", "allow docker_helper_rootlesskit_t self:capability setuid;"},
 		{"plain capability for the rootlesskit child", "allow docker_helper_rootlesskit_t self:capability sys_admin;"},
 		{"plain sys_ptrace capability for the rootlesskit child", "allow docker_helper_rootlesskit_t self:capability sys_ptrace;"},
-		{"widened rootlesskit cap_userns set", "allow docker_helper_rootlesskit_t self:cap_userns { sys_admin sys_ptrace net_admin };"},
-		{"duplicate rootlesskit cap_userns rule", "allow docker_helper_rootlesskit_t self:cap_userns { sys_admin sys_ptrace };"},
-		{"parallel rootlesskit cap_userns rule", "allow docker_helper_rootlesskit_t self:cap_userns sys_ptrace;"},
+		{"plain sys_chroot capability for the rootlesskit child", "allow docker_helper_rootlesskit_t self:capability sys_chroot;"},
+		{"widened rootlesskit cap_userns set", "allow docker_helper_rootlesskit_t self:cap_userns { sys_admin sys_ptrace sys_chroot net_admin };"},
+		{"duplicate rootlesskit cap_userns rule", "allow docker_helper_rootlesskit_t self:cap_userns { sys_admin sys_ptrace sys_chroot };"},
+		{"parallel rootlesskit cap_userns rule", "allow docker_helper_rootlesskit_t self:cap_userns sys_chroot;"},
+		{"sys_chroot cap_userns for the UID-map helper", "allow docker_helper_newuidmap_t self:cap_userns sys_chroot;"},
+		{"sys_chroot cap_userns for the GID-map helper", "allow docker_helper_newgidmap_t self:cap_userns sys_chroot;"},
 		{"sys_ptrace cap_userns for the UID-map helper", "allow docker_helper_newuidmap_t self:cap_userns sys_ptrace;"},
 		{"sys_ptrace cap_userns for the GID-map helper", "allow docker_helper_newgidmap_t self:cap_userns sys_ptrace;"},
+		{"sys_chroot cap_userns for the manager", "allow docker_helper_builder_t self:cap_userns sys_chroot;"},
+		{"sys_chroot cap_userns for the launcher", "allow docker_helper_builder_launcher_t self:cap_userns sys_chroot;"},
+		{"sys_chroot cap_userns for slirp4netns", "allow docker_helper_slirp4netns_t self:cap_userns sys_chroot;"},
 		{"sys_ptrace cap_userns for the manager", "allow docker_helper_builder_t self:cap_userns sys_ptrace;"},
 		{"sys_ptrace cap_userns for the launcher", "allow docker_helper_builder_launcher_t self:cap_userns sys_ptrace;"},
 		{"sys_ptrace cap_userns for slirp4netns", "allow docker_helper_slirp4netns_t self:cap_userns sys_ptrace;"},
@@ -1517,7 +1527,7 @@ func TestSELinuxPolicyCapUsernsShape(t *testing.T) {
 		{"setuid capability for the GID-map helper", "allow docker_helper_newgidmap_t self:capability setuid;"},
 		{"widened GID-map helper capability set", "allow docker_helper_newgidmap_t self:capability { setgid setuid };"},
 		{"process ptrace grant", "allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:process ptrace;"},
-		{"widened cap_userns require declaration", "class cap_userns { sys_admin sys_ptrace net_admin };"},
+		{"widened cap_userns require declaration", "class cap_userns { sys_admin sys_ptrace sys_chroot net_admin };"},
 		{"capability2 for the UID-map helper", "allow docker_helper_newuidmap_t self:capability2 kill;"},
 		{"capability2 for the GID-map helper", "allow docker_helper_newgidmap_t self:capability2 kill;"},
 		{"cap_userns for the manager", "allow docker_helper_builder_t self:cap_userns sys_admin;"},
@@ -1528,14 +1538,22 @@ func TestSELinuxPolicyCapUsernsShape(t *testing.T) {
 			t.Errorf("mutation %q must fail the cap_userns/capability shape invariant", mut.name)
 		}
 	}
-	// The missing-sys_ptrace regression (the pre-4C-4 rootlesskit rule
-	// shape) must fail the shape invariant: the replacement is not the
-	// evidenced pair.
-	regressed := strings.Replace(policy,
-		"allow docker_helper_rootlesskit_t self:cap_userns { sys_admin sys_ptrace };",
-		"allow docker_helper_rootlesskit_t self:cap_userns sys_admin;", 1)
-	if violations := capUsernsShapeViolations(regressed); len(violations) == 0 {
-		t.Error("the pre-4C-4 rootlesskit cap_userns shape (sys_admin without sys_ptrace) must fail the shape invariant")
+	// The missing-bit regressions (the pre-4C-4 and pre-4C-5 rootlesskit
+	// rule shapes) must fail the shape invariant: neither replacement is
+	// the evidenced three-bit set.
+	for _, regressed := range []struct {
+		name    string
+		oldRule string
+	}{
+		{"missing sys_ptrace", "allow docker_helper_rootlesskit_t self:cap_userns sys_admin;"},
+		{"missing sys_chroot", "allow docker_helper_rootlesskit_t self:cap_userns { sys_admin sys_ptrace };"},
+	} {
+		mutated := strings.Replace(policy,
+			"allow docker_helper_rootlesskit_t self:cap_userns { sys_admin sys_ptrace sys_chroot };",
+			regressed.oldRule, 1)
+		if violations := capUsernsShapeViolations(mutated); len(violations) == 0 {
+			t.Errorf("the %q rootlesskit cap_userns shape must fail the shape invariant", regressed.name)
+		}
 	}
 }
 
