@@ -692,10 +692,9 @@ PREFLIGHT_OK=1
   else
     echo "PASS: 0x54cb (TUNSETPERSIST) is NOT allowed"
   fi
-  echo "--- flow-domain capability/cap_userns net_admin/net_raw (must be zero):"
+  echo "--- flow-domain plain capability net_admin/net_raw (must be zero; the in-namespace cap_userns net_admin authority lives ONLY in the child's own cap_userns rule — the 4C-15 grant — never in a TUN rule; asserted positively by the flow cap_userns identity section):"
   sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_admin /sys/fs/selinux/policy || true
   sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_raw /sys/fs/selinux/policy || true
-  sesearch --allow -s docker_helper_rootlesskit_t -c cap_userns -p net_admin /sys/fs/selinux/policy || true
   TUN_PAIR_OK=0; TUN_NO_MORE_OK=0; TUN_LABEL_OK=0; TUN_NO_NETADMIN_OK=0
   TUN_TOOLCHAIN_BLOCKED=0
   TUN_CONCRETE="$(sesearch --allow -s docker_helper_rootlesskit_t -t tun_tap_device_t -c chr_file /sys/fs/selinux/policy 2>/dev/null | awk '$2 == "docker_helper_rootlesskit_t"' || true)"
@@ -717,8 +716,7 @@ PREFLIGHT_OK=1
     TUN_LABEL_OK=1
   fi
   if ! { sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_admin /sys/fs/selinux/policy 2>/dev/null; \
-         sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_raw /sys/fs/selinux/policy 2>/dev/null; \
-         sesearch --allow -s docker_helper_rootlesskit_t -c cap_userns -p net_admin /sys/fs/selinux/policy 2>/dev/null; } | grep -aq "docker_helper_rootlesskit_t"; then
+         sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_raw /sys/fs/selinux/policy 2>/dev/null; } | grep -aq "docker_helper_rootlesskit_t"; then
     TUN_NO_NETADMIN_OK=1
   fi
   if [ "$TUN_PAIR_OK" = 1 ] && [ "$TUN_NO_MORE_OK" = 1 ] && [ "$TUN_LABEL_OK" = 1 ] && [ "$TUN_NO_NETADMIN_OK" = 1 ]; then
@@ -760,10 +758,9 @@ PREFLIGHT_OK=1
   sesearch --allow -c netlink_route_socket /sys/fs/selinux/policy || true
   echo "--- the flow domain's own netlink_route_socket rules (concrete; must be exactly create+setopt+bind+getattr):"
   sesearch --allow -s docker_helper_rootlesskit_t -c netlink_route_socket /sys/fs/selinux/policy || true
-  echo "--- flow-domain capability/cap_userns net_admin/net_raw (must be zero):"
+  echo "--- flow-domain plain capability net_admin/net_raw (must be zero; the in-namespace cap_userns net_admin authority lives ONLY in the child's own cap_userns rule — the 4C-15 grant — never in a netlink rule):"
   sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_admin /sys/fs/selinux/policy || true
   sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_raw /sys/fs/selinux/policy || true
-  sesearch --allow -s docker_helper_rootlesskit_t -c cap_userns -p net_admin /sys/fs/selinux/policy || true
   NL_CREATE_OK=0; NL_SETOPT_OK=0; NL_BIND_OK=0; NL_GETATTR_OK=0; NL_NO_MORE_OK=0; NL_NO_NETADMIN_OK=0
   NL_FLOW_RULES="$(sesearch --allow -s docker_helper_rootlesskit_t -c netlink_route_socket /sys/fs/selinux/policy 2>/dev/null || true)"
   if printf '%s\n' "$NL_FLOW_RULES" | grep -aq "create"; then
@@ -782,8 +779,7 @@ PREFLIGHT_OK=1
     NL_NO_MORE_OK=1
   fi
   if ! { sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_admin /sys/fs/selinux/policy 2>/dev/null; \
-         sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_raw /sys/fs/selinux/policy 2>/dev/null; \
-         sesearch --allow -s docker_helper_rootlesskit_t -c cap_userns -p net_admin /sys/fs/selinux/policy 2>/dev/null; } | grep -aq "docker_helper_rootlesskit_t"; then
+         sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_raw /sys/fs/selinux/policy 2>/dev/null; } | grep -aq "docker_helper_rootlesskit_t"; then
     NL_NO_NETADMIN_OK=1
   fi
   if [ "$NL_CREATE_OK" = 1 ] && [ "$NL_SETOPT_OK" = 1 ] && [ "$NL_BIND_OK" = 1 ] && [ "$NL_GETATTR_OK" = 1 ] && [ "$NL_NO_MORE_OK" = 1 ] && [ "$NL_NO_NETADMIN_OK" = 1 ]; then
