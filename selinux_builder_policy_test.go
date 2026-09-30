@@ -291,7 +291,17 @@ func TestSELinuxPolicyLauncherChainRootlesskitTransition(t *testing.T) {
 // non-state grants are exactly the rootlesskit-attributed evidence surface:
 // the Go-runtime startup reads mirrored from the proven manager rules
 // (cgroup2 walk, net sysctl, passwd identity resolution), the
-// user-namespace limit read, and the inst.diag output pipe. Nothing else.
+// user-namespace limit read, the inst.diag output pipe, and the 4C-3
+// same-domain nsenter exec grant. The nsenter block is the exec-identity
+// structural invariant: the dedicated type exists, the grant is exactly
+// the 4C-2 boundary's source-side set (execute/read/open/execute_no_trans/
+// getattr/map, NO entrypoint), nsenter stays IN the flow domain (no
+// type_transition, no docker_helper_nsenter_t domain anywhere), no other
+// subject holds an nsenter_exec_t allow, and no generic bin_t execution
+// exists for the child (getsubids stays closed). Mutations prove the
+// shape: a type_transition, an entrypoint addition, a widened perm set,
+// a generic bin_t execute grant, and an nsenter exec grant for another
+// subject all trip.
 func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
 	for _, want := range []string{
@@ -302,9 +312,64 @@ func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
 		"allow docker_helper_rootlesskit_t passwd_file_t:file { read open getattr };",
 		"allow docker_helper_rootlesskit_t sysctl_t:file { read open getattr };",
 		"allow docker_helper_rootlesskit_t docker_helper_builder_t:fifo_file { write };",
+		"allow docker_helper_rootlesskit_t docker_helper_nsenter_exec_t:file { execute read open execute_no_trans getattr map };",
 	} {
 		if !strings.Contains(policy, want) {
 			t.Errorf("the rootlesskit child domain's moved access must be exact: %q", want)
+		}
+	}
+	if !strings.Contains(policy, "type docker_helper_nsenter_exec_t, file_type;") {
+		t.Error("SELinux policy must declare docker_helper_nsenter_exec_t")
+	}
+	// nsenterViolations returns one violation per line of module text that
+	// breaks the nsenter exec-identity invariants: no nsenter process
+	// domain may exist, no transition may involve the nsenter exec type,
+	// no generic bin_t execution for the flow child (getsubids stays
+	// closed), and the nsenter exec grant is unique to the rootlesskit
+	// child domain and exact.
+	nsenterViolations := func(text string) []string {
+		var violations []string
+		for _, line := range strings.Split(text, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			if strings.Contains(trimmed, "type docker_helper_nsenter_t") {
+				violations = append(violations, "nsenter must stay in the flow domain: no nsenter process domain may exist")
+			}
+			if strings.HasPrefix(trimmed, "type_transition ") && strings.Contains(trimmed, "docker_helper_nsenter") {
+				violations = append(violations, "nsenter exec must not transition (execute_no_trans, same domain)")
+			}
+			if strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t bin_t:file") {
+				violations = append(violations, "no generic bin_t execution for the flow child (getsubids stays closed)")
+			}
+			if strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, "docker_helper_nsenter_exec_t:") &&
+				trimmed != "allow docker_helper_rootlesskit_t docker_helper_nsenter_exec_t:file { execute read open execute_no_trans getattr map };" {
+				violations = append(violations, "the nsenter exec grant is unique to the rootlesskit child domain and must be exact")
+			}
+		}
+		return violations
+	}
+	if violations := nsenterViolations(policy); len(violations) > 0 {
+		t.Errorf("the committed policy violates the nsenter exec-identity invariants: %v", violations)
+	}
+	for _, mut := range []struct {
+		name string
+		rule string
+	}{
+		{"transition to a separate nsenter domain", "type_transition docker_helper_rootlesskit_t docker_helper_nsenter_exec_t:process docker_helper_nsenter_t;"},
+		{"transition on the same-domain identity", "type_transition docker_helper_rootlesskit_t docker_helper_nsenter_exec_t:process docker_helper_rootlesskit_t;"},
+		{"entrypoint addition", "allow docker_helper_rootlesskit_t docker_helper_nsenter_exec_t:file { execute read open execute_no_trans getattr map entrypoint };"},
+		{"widened nsenter perms", "allow docker_helper_rootlesskit_t docker_helper_nsenter_exec_t:file { execute read open execute_no_trans getattr map setattr };"},
+		{"generic bin_t execute", "allow docker_helper_rootlesskit_t bin_t:file { execute };"},
+		{"nsenter exec for the manager", "allow docker_helper_builder_t docker_helper_nsenter_exec_t:file { execute read open execute_no_trans getattr map };"},
+		{"nsenter exec for the launcher", "allow docker_helper_builder_launcher_t docker_helper_nsenter_exec_t:file { execute read open };"},
+		{"nsenter exec for the UID-map helper", "allow docker_helper_newuidmap_t docker_helper_nsenter_exec_t:file { execute };"},
+		{"nsenter exec for the GID-map helper", "allow docker_helper_newgidmap_t docker_helper_nsenter_exec_t:file { execute };"},
+		{"nsenter exec for the network helper", "allow docker_helper_slirp4netns_t docker_helper_nsenter_exec_t:file { execute };"},
+	} {
+		if len(nsenterViolations(policy+"\n"+mut.rule)) == 0 {
+			t.Errorf("mutation %q must trip the nsenter exec-identity invariant", mut.name)
 		}
 	}
 }
@@ -1504,10 +1569,29 @@ func TestSELinuxFCBuilderTrees(t *testing.T) {
 		"/run/docker-helper-builder/ops/.*       system_u:object_r:docker_helper_builder_runtime_t:s0",
 		"/run/docker-helper-builder(/.*)?        system_u:object_r:docker_helper_builder_runtime_root_t:s0",
 		"/usr/bin/rootlesskit                --  system_u:object_r:docker_helper_rootlesskit_exec_t:s0",
+		"/usr/bin/nsenter                    --  system_u:object_r:docker_helper_nsenter_exec_t:s0",
 	} {
 		if !strings.Contains(fc, want) {
 			t.Errorf("file contexts must carry the builder rule: %q", want)
 		}
+	}
+	// The nsenter file-context rule binds exactly the verified packaged
+	// path (the 4C-3 stand probe: Tumbleweed ships nsenter only at
+	// /usr/bin/nsenter): no wildcard, no alias form.
+	nsenterFcLines := 0
+	for _, line := range strings.Split(fc, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || !strings.Contains(trimmed, "docker_helper_nsenter_exec_t") {
+			continue
+		}
+		nsenterFcLines++
+		pattern := strings.Fields(trimmed)[0]
+		if pattern != "/usr/bin/nsenter" {
+			t.Errorf("the nsenter fc rule must bind exactly the verified packaged path, no wildcard: %s", trimmed)
+		}
+	}
+	if nsenterFcLines != 1 {
+		t.Errorf("exactly one nsenter fc rule must exist, found %d", nsenterFcLines)
 	}
 	// The shared binary keeps its single daemon-exec label.
 	if !strings.Contains(fc, "/usr/bin/docker-helper              --  system_u:object_r:docker_helper_exec_t:s0") {

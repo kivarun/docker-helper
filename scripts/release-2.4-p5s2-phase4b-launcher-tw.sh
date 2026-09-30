@@ -272,17 +272,32 @@ if ! semodule -l 2>/dev/null | awk '{print $1}' | grep -aqx docker_helper; then
 fi
 marker "POLICY-IDENTITY=docker_helper-module-1.2-sha"
 restorecon /usr/bin/docker-helper /usr/bin/rootlesskit /usr/bin/slirp4netns \
-  /usr/bin/newuidmap /usr/bin/newgidmap 2>>"$EVIDENCE_DIR/01-composition-inputs.txt" || true
+  /usr/bin/newuidmap /usr/bin/newgidmap /usr/bin/nsenter 2>>"$EVIDENCE_DIR/01-composition-inputs.txt" || true
 {
   echo "=== binary labels (the dedicated exec types) ==="
   for p in /usr/bin/docker-helper /usr/bin/rootlesskit /usr/bin/slirp4netns \
-    /usr/bin/newuidmap /usr/bin/newgidmap; do
+    /usr/bin/newuidmap /usr/bin/newgidmap /usr/bin/nsenter; do
     echo "$p -> $(context_of "$p")"
   done
   echo "=== loaded modules (after install) ==="
   semodule -l | sort
 } >> "$EVIDENCE_DIR/01-composition-inputs.txt" 2>&1
 cat "$EVIDENCE_DIR/01-composition-inputs.txt" >&2
+
+# The nsenter packaged-path probe (the 4C-3 .fc authority): the exact real
+# executable path, its package, and its label after restorecon. The .fc
+# binds exactly this verified path (no wildcard); the preflight below
+# fails if the packaged path or its label drifts from the composition.
+{
+  echo "=== nsenter packaged path probe ==="
+  echo "command -v:   $(command -v nsenter)"
+  NSENTER_REAL="$(readlink -f "$(command -v nsenter)")"
+  echo "readlink -f:  $NSENTER_REAL"
+  echo "rpm -qf:      $(rpm -qf "$NSENTER_REAL" 2>&1)"
+  ls -lZ "$(command -v nsenter)" "$NSENTER_REAL" 2>&1
+  echo "matchpathcon: $(matchpathcon "$NSENTER_REAL" 2>&1)"
+} > "$EVIDENCE_DIR/02-nsenter-probe.txt" 2>&1
+cat "$EVIDENCE_DIR/02-nsenter-probe.txt" >&2
 
 # The REAL builder identity + the REAL unit + the pinned payload (P4-A1 shape).
 log 'A2: builder identity + REAL unit + pinned payload install'
@@ -466,6 +481,33 @@ PREFLIGHT_OK=1
     echo "PASS: the setexec split holds"
   else
     echo "FAIL: the setexec split does not hold"
+    PREFLIGHT_OK=0
+  fi
+
+  echo "=== nsenter exec identity (the 4C-3 composition: the dedicated type, the exact packaged path, same-domain exec) ==="
+  echo "--- the stand probe (02-nsenter-probe.txt):"
+  cat "$EVIDENCE_DIR/02-nsenter-probe.txt" 2>/dev/null || true
+  echo "--- loaded-policy facts:"
+  echo "type inventory (docker_helper_nsenter_exec_t must be declared; docker_helper_nsenter_t must NOT exist):"
+  seinfo -t /sys/fs/selinux/policy 2>/dev/null | grep -a "docker_helper_nsenter" || true
+  echo "allow rules on nsenter_exec_t (expected: the rootlesskit child's same-domain exec only):"
+  sesearch --allow -t docker_helper_nsenter_exec_t /sys/fs/selinux/policy || true
+  echo "type_transition rules mentioning nsenter_exec_t (must be zero):"
+  sesearch --type_trans /sys/fs/selinux/policy 2>/dev/null | awk '$3 ~ /docker_helper_nsenter_exec_t/' || true
+  NSENTER_PATH_OK=0; NSENTER_LABEL_OK=0; NSENTER_TRANS_OK=0
+  if grep -aq "readlink -f:  /usr/bin/nsenter" "$EVIDENCE_DIR/02-nsenter-probe.txt" 2>/dev/null; then
+    NSENTER_PATH_OK=1
+  fi
+  if matchpathcon /usr/bin/nsenter 2>/dev/null | grep -aq "object_r:docker_helper_nsenter_exec_t:s0"; then
+    NSENTER_LABEL_OK=1
+  fi
+  if ! sesearch --type_trans /sys/fs/selinux/policy 2>/dev/null | grep -aq "docker_helper_nsenter"; then
+    NSENTER_TRANS_OK=1
+  fi
+  if [ "$NSENTER_PATH_OK" = 1 ] && [ "$NSENTER_LABEL_OK" = 1 ] && [ "$NSENTER_TRANS_OK" = 1 ]; then
+    echo "PASS: nsenter exec identity (exact packaged path + dedicated label + no transition)"
+  else
+    echo "FAIL: nsenter exec identity (path=$NSENTER_PATH_OK label=$NSENTER_LABEL_OK transition-absent=$NSENTER_TRANS_OK)"
     PREFLIGHT_OK=0
   fi
 
@@ -691,12 +733,43 @@ fi
 # ---- procattr failure in the manager diagnostics
 CHAIN_OK=1
 FLOW_CTX_SEEN="$(grep -a 'LEADER-CTX' "$EVIDENCE_DIR/05-flow-context.txt" 2>/dev/null | grep -a "$RK_DOMAIN:s0:c" | tail -1 || true)"
+# The 4C-3 proof-harness correction: a short-lived leader can die before
+# the sampler's first /proc/<pid>/attr/current read, which produced a
+# false chain FAIL on a run whose kernel audit records still proved the
+# categorized entry. A kernel-originated AVC/audit record with a
+# categorized rootlesskit_t:s0:c* scontext counts as positive evidence
+# that the flow existed in the categorized domain; the two accepted
+# forms are (a) the /proc attr/current observation or (b) the kernel
+# audit record. The no-bare scan stays a separate mandatory check below:
+# an audit context may prove a categorized flow exists, but it never
+# replaces the no-bare scan.
+CHAIN_AVC_SEEN=0
+if grep -a "scontext=system_u:system_r:$RK_DOMAIN:s0:c" "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -aq ':[0-9]\+ '; then
+  CHAIN_AVC_SEEN=1
+fi
 PROCATTR_FAILED="$(grep -a 'cannot set the forced exec context' "$EVIDENCE_DIR/07-manager-diag.txt" 2>/dev/null || true)"
+CHAIN_FORM=none
 if [ -n "$FLOW_CTX_SEEN" ]; then
+  CHAIN_FORM=proc-attr
+elif [ "$CHAIN_AVC_SEEN" = 1 ]; then
+  CHAIN_FORM=kernel-avc
+fi
+if [ -n "$FLOW_CTX_SEEN" ] || [ "$CHAIN_AVC_SEEN" = 1 ]; then
   echo "$FLOW_CTX_SEEN" > "$EVIDENCE_DIR/flow-context-final.txt"
+  grep -a "scontext=system_u:system_r:$RK_DOMAIN:s0:c" "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | head -3 >> "$EVIDENCE_DIR/flow-context-final.txt" || true
 else
   echo "(no rootlesskit_t:s0:c* observation)" > "$EVIDENCE_DIR/flow-context-final.txt"
   CHAIN_OK=0
+fi
+# The separate mandatory no-bare check for the chain window: no
+# rootlesskit_t:s0 WITHOUT a category in the window's kernel records or
+# process-table samples. A bare context here means the forced-context
+# application did not happen even once.
+BARE_IN_WINDOW="$(grep -a "scontext=system_u:system_r:$RK_DOMAIN:s0 " "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | wc -l || true)"
+PS_BARE_IN_WINDOW="$(awk '/docker_helper_rootlesskit_t:s0( |$)/ { n++ } END { print n+0 }' "$EVIDENCE_DIR/12-uncategorized-ps.txt" 2>/dev/null || echo 0)"
+if [ "$BARE_IN_WINDOW" != 0 ] || [ "$PS_BARE_IN_WINDOW" != 0 ]; then
+  CHAIN_OK=0
+  echo "BARE: bare rootlesskit_t:s0 context in the chain window (avc=$BARE_IN_WINDOW ps=$PS_BARE_IN_WINDOW)" > "$EVIDENCE_DIR/chain-bare.txt"
 fi
 [ -n "$PROCATTR_FAILED" ] && { CHAIN_OK=0; echo "$PROCATTR_FAILED" > "$EVIDENCE_DIR/procattr-failure.txt"; }
 {
@@ -704,6 +777,10 @@ fi
   cat "$EVIDENCE_DIR/05-flow-context.txt" 2>/dev/null || echo "(no observation)"
   echo "=== the final flow context ==="
   cat "$EVIDENCE_DIR/flow-context-final.txt"
+  echo "=== the proof form ==="
+  echo "chain-form: $CHAIN_FORM (proc-attr observation or kernel audit record; no-bare scan ran separately)"
+  echo "=== bare-scan (separate mandatory check) ==="
+  echo "avc-bare-count=$BARE_IN_WINDOW ps-bare-count=$PS_BARE_IN_WINDOW"
   echo "=== procattr failure? ==="
   cat "$EVIDENCE_DIR/procattr-failure.txt" 2>/dev/null || echo "(none recorded)"
 } > "$EVIDENCE_DIR/11-chain-evidence.txt" 2>&1
@@ -711,7 +788,9 @@ cat "$EVIDENCE_DIR/11-chain-evidence.txt" >&2
 if [ "$CHAIN_OK" = 1 ]; then
   marker "LAUNCHER-CHAIN=PASS"
 else
-  if grep -aq "scontext=system_u:system_r:$LAUNCHER_DOMAIN" "$EVIDENCE_DIR/09-avc-window.txt"; then
+  if [ -f "$EVIDENCE_DIR/chain-bare.txt" ]; then
+    marker "BLOCKER=a bare rootlesskit_t:s0 context appeared in the chain window (see chain-bare.txt, 09-avc-window.txt)"
+  elif grep -aq "scontext=system_u:system_r:$LAUNCHER_DOMAIN" "$EVIDENCE_DIR/09-avc-window.txt"; then
     marker "BLOCKER=launcher_t denial before the rootlesskit_t:s0:c1 entry (exact AVC: 08-avc-launcher.txt)"
   else
     marker "BLOCKER=the chain did not reach rootlesskit_t:s0:c1 (no launcher_t AVC; see 07-manager-diag.txt, 05-flow-context.txt)"

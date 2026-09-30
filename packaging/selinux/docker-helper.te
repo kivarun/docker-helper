@@ -692,6 +692,32 @@ type docker_helper_newgidmap_exec_t, file_type;
 type docker_helper_newgidmap_t, domain;
 role system_r types docker_helper_newgidmap_t;
 
+# Dedicated exec type for the distro nsenter binary (P5-S2 Phase 4C-3).
+# RootlessKit's network setup runs nsenter to create the tap device inside
+# the flow's namespaces; live enforcing AVC evidence (Phase 4C-2 run
+# 36626399836, launch-window record 402: denied { execute }
+# comm="rootlesskit" name="nsenter" tcontext=system_u:object_r:bin_t:s0
+# tclass=file permissive=0, followed in the same window by rootlesskit's
+# own failure "failed to setup network ...: setting up tap tap0:
+# executing [[nsenter -t 2845 -n -m -U --preserve-credentials ip tuntap
+# add name tap0 mode tap] [nsenter -t 2845 -n -m -U
+# --preserve-credentials ip link set tap0 up]]: exec: \"nsenter\":
+# executable file not found in $PATH" — Go's exec.LookPath turns the
+# SELinux EACCES execute denial into ErrNotFound — and then the child's
+# EOF and the instance death) names /usr/bin/nsenter as the actual path:
+# Tumbleweed ships nsenter ONLY at /usr/bin/nsenter (the util-linux
+# packaged file list; the stand probe records command -v / readlink -f /
+# rpm -qf / ls -lZ / matchpathcon as the live authority). The type keeps
+# the grant to exactly this binary; nsenter stays IN the rootlesskit
+# child domain (execute_no_trans, no separate domain, no entrypoint): the
+# helper uses the flow's own namespace/capability authority, a separate
+# privilege owner is not yet evidence-required, and the same-domain exec
+# naturally keeps the operation category. The next executable the flow
+# runs (ip) stays a separate live boundary and receives NO grant here;
+# nsenter also receives NO generic bin_t execution — getsubids (the other
+# bin_t execute denial of the same window, record 398) stays closed.
+type docker_helper_nsenter_exec_t, file_type;
+
 # Entrypoint: the builder unit execs the shared binary
 # (docker_helper_exec_t) under SELinuxContext=, so the builder domain
 # needs the same entrypoint shape the daemon domain has for its own
@@ -1041,6 +1067,25 @@ allow docker_helper_rootlesskit_t sysctl_t:file { read open getattr };
 # deliberately ungranted.
 allow docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:file { execute read open getattr };
 
+# The flow's namespace-exec helper: rootlesskit's network setup runs the
+# distro nsenter binary IN the rootlesskit child domain (execute_no_trans
+# — same domain, no transition, no entrypoint): the helper uses the
+# flow's own namespace/capability authority, a separate privilege owner
+# is not yet evidence-required, and the same-domain exec naturally keeps
+# the operation category. Live enforcing AVC evidence (Phase 4C-2 run
+# 36626399836, launch-window record 402: denied { execute }
+# comm="rootlesskit" name="nsenter" tcontext=system_u:object_r:bin_t:s0
+# tclass=file permissive=0) — the direct userspace failure in the same
+# window: "failed to setup network ...: setting up tap tap0: executing
+# [[nsenter -t 2845 -n -m -U --preserve-credentials ip tuntap add name
+# tap0 mode tap] [nsenter -t 2845 -n -m -U --preserve-credentials ip
+# link set tap0 up]]: exec: \"nsenter\": executable file not found in
+# $PATH". map follows the proven entry-grant loader shape. ip and every
+# other executable the flow runs stay separate live boundaries with no
+# grant here; no generic bin_t execution, no bin_t execute_no_trans, and
+# no separate nsenter domain (no type_transition, no entrypoint).
+allow docker_helper_rootlesskit_t docker_helper_nsenter_exec_t:file { execute read open execute_no_trans getattr map };
+
 # --- docker_helper_slirp4netns_t: the rootlesskit user-network helper domain (P5-S2) ---
 #
 # RootlessKit forks and execs the distro slirp4netns binary as its
@@ -1202,7 +1247,7 @@ allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:file { write open };
 # self:capability surface is granted separately below, ONLY for the
 # evidenced out-of-namespace setuid check (the same write's next kernel
 # boundary). SCOPE — READ CAREFULLY: like every helper
-# grant this is a DOMAIN-PAIR rule, NOT an operation-scoped one; all build
+# grant this is a domain-wide SELF permission, NOT an operation-scoped one; all build
 # operations share the one builder UID and this one SELinux domain, and
 # per-operation isolation is invocation discipline only (the open
 # architectural risk tracked for the final security review).

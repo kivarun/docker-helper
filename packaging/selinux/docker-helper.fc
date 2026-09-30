@@ -31,6 +31,12 @@
 # chkstat-applied cap_setgid file capability is its privilege mechanism;
 # execution allowed only from the rootlesskit child domain).
 /usr/bin/newgidmap                  --  system_u:object_r:docker_helper_newgidmap_exec_t:s0
+# P5-S2 Phase 4C-3: the flow's namespace-exec helper (distro util-linux;
+# Tumbleweed ships nsenter only at /usr/bin/nsenter — see the stand probe
+# evidence). Execution allowed ONLY from the rootlesskit child domain and
+# stays in that domain (execute_no_trans — no separate nsenter domain);
+# see the comment in docker-helper.te.
+/usr/bin/nsenter                    --  system_u:object_r:docker_helper_nsenter_exec_t:s0
 /etc/docker-helper(/.*)?                system_u:object_r:docker_helper_config_t:s0
 /var/lib/docker-helper(/.*)?            system_u:object_r:docker_helper_state_t:s0
 /run/docker-helper(/.*)?                system_u:object_r:docker_helper_runtime_t:s0
