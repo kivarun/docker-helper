@@ -96,6 +96,7 @@ module docker_helper 1.2;
 		type semanage_t;
 		type semanage_exec_t;
 		type bin_t;
+		type ifconfig_exec_t;
 		type var_lock_t;
 		type fusefs_t;
 		type fuse_device_t;
@@ -1080,11 +1081,58 @@ allow docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:file { execut
 # [[nsenter -t 2845 -n -m -U --preserve-credentials ip tuntap add name
 # tap0 mode tap] [nsenter -t 2845 -n -m -U --preserve-credentials ip
 # link set tap0 up]]: exec: \"nsenter\": executable file not found in
-# $PATH". map follows the proven entry-grant loader shape. ip and every
-# other executable the flow runs stay separate live boundaries with no
-# grant here; no generic bin_t execution, no bin_t execute_no_trans, and
-# no separate nsenter domain (no type_transition, no entrypoint).
+# $PATH". map follows the proven entry-grant loader shape. Every OTHER
+# executable the flow runs stays a separate live boundary with no grant
+# here (ip received its own same-domain grant below, the 4C-5 live
+# boundary, over the distro's ifconfig_exec_t identity); no generic bin_t
+# execution, no bin_t execute_no_trans, and no separate nsenter domain
+# (no type_transition, no entrypoint).
 allow docker_helper_rootlesskit_t docker_helper_nsenter_exec_t:file { execute read open execute_no_trans getattr map };
+
+# The flow's network-setup executable: after the mount-namespace
+# reassociation the same nsenter invocation execs the distro ip binary to
+# create and bring up the tap device inside the flow's namespaces. The
+# distro already labels /usr/sbin/ip with its own executable identity —
+# ifconfig_exec_t (the sysnetwork module's shared network-tool exec type;
+# the 4C-4 stand probe + live 4C-5 AVC named it) — so the distro-owned
+# type is USED, no custom file type is added, and the shipped .fc carries
+# NO delta for it: relabeling a standard system binary with a private
+# type would globally replace distro policy semantics for that inode.
+#
+# Execution model (4C-6): SAME-DOMAIN execute_no_trans, exactly the
+# accepted nsenter shape — the executable stays in the already categorized
+# caller domain (rootlesskit_t:s0:c*), never transitioning into the
+# distro's ifconfig_t administration domain. ifconfig_t is a broad
+# generic administration domain (pre-existing capability/netlink/tun/
+# sysctl/BPF surface); importing it as this flow's privilege owner would
+# grant authority no live evidence requires. The flow keeps using its own
+# namespace/capability authority; additional kernel/network powers stay
+# absent until separately granted by live evidence. Accordingly there is
+# deliberately NO type_transition, no ifconfig_t:process transition grant,
+# no entrypoint, no role addition, and no range_transition for ifconfig_t
+# anywhere in this module.
+#
+# The type is NOT unique to ip: distro policy maps the shared
+# ifconfig_exec_t to the standard networking utilities it owns (ifconfig,
+# ethtool, iw, tc, and siblings). Recorded as the executable-identity
+# scope: the grant authorizes same-domain execution of that distro type
+# from the categorized flow domain only — it does NOT claim path-level
+# exclusivity and grants no network authority.
+#
+# Live enforcing AVC evidence (Phase 4C-5 run 36693180238, launch-window
+# records 401/402: denied { execute } for pid=2909 comm="nsenter"
+# name="ip" tcontext=system_u:object_r:ifconfig_exec_t:s0 tclass=file
+# permissive=0, twice in one window — the two nsenter invocations of the
+# tap setup pair) with the direct userspace failure "nsenter: failed to
+# execute ip: Permission denied", rootlesskit's "failed to setup network
+# ... setting up tap tap0: executing [[nsenter -t 2882 ... ip tuntap add
+# name tap0 mode tap] ...]: exit status 126", the child EOF, and the
+# instance death — the direct causal chain to the 4C-5 flow death, one
+# stage after the composite setns completed. read/open/getattr/map follow
+# the proven same-domain loader shape (the nsenter entry grant); no
+# ioctl/lock (no evidence; the distro can_exec() macro's generic
+# expansion carries them — deliberately not used).
+allow docker_helper_rootlesskit_t ifconfig_exec_t:file { execute read open execute_no_trans getattr map };
 
 # --- docker_helper_slirp4netns_t: the rootlesskit user-network helper domain (P5-S2) ---
 #

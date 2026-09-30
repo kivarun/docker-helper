@@ -531,6 +531,38 @@ PREFLIGHT_OK=1
     PREFLIGHT_OK=0
   fi
 
+  echo "=== ip execution identity (the 4C-6 composition: the distro ifconfig_exec_t identity, same-domain exec, NO ifconfig_t transition) ==="
+  echo "--- the stand probe (02-ip-probe.txt):"
+  cat "$EVIDENCE_DIR/02-ip-probe.txt" 2>/dev/null || true
+  echo "--- loaded-policy facts:"
+  echo "allow rules on ifconfig_exec_t (expected: the rootlesskit child's same-domain exec only):"
+  sesearch --allow -t ifconfig_exec_t /sys/fs/selinux/policy || true
+  echo "type_transition rules from the flow domain on ifconfig_exec_t (must be zero):"
+  sesearch --type_trans /sys/fs/selinux/policy 2>/dev/null | awk '$2 == "docker_helper_rootlesskit_t" && $3 ~ /ifconfig_exec_t/' || true
+  echo "flow-domain rules toward the distro ifconfig_t domain (must be zero):"
+  sesearch --allow -s docker_helper_rootlesskit_t -t ifconfig_t /sys/fs/selinux/policy || true
+  echo "--- the distro's shared network-tool type (fcontext inventory of ifconfig_exec_t):"
+  semanage fcontext -l 2>/dev/null | grep -a "ifconfig_exec_t" || true
+  IP_PATH_OK=0; IP_LABEL_OK=0; IP_TRANS_OK=0; IP_NOTRANS_T_OK=0
+  if grep -aq "readlink -f:  /usr/sbin/ip" "$EVIDENCE_DIR/02-ip-probe.txt" 2>/dev/null; then
+    IP_PATH_OK=1
+  fi
+  if matchpathcon /usr/sbin/ip 2>/dev/null | grep -aq "object_r:ifconfig_exec_t:s0"; then
+    IP_LABEL_OK=1
+  fi
+  if ! sesearch --type_trans /sys/fs/selinux/policy 2>/dev/null | awk '$2 == "docker_helper_rootlesskit_t" && $3 ~ /ifconfig_exec_t/' | grep -aq .; then
+    IP_TRANS_OK=1
+  fi
+  if ! sesearch --allow -s docker_helper_rootlesskit_t -t ifconfig_t /sys/fs/selinux/policy 2>/dev/null | grep -aq .; then
+    IP_NOTRANS_T_OK=1
+  fi
+  if [ "$IP_PATH_OK" = 1 ] && [ "$IP_LABEL_OK" = 1 ] && [ "$IP_TRANS_OK" = 1 ] && [ "$IP_NOTRANS_T_OK" = 1 ]; then
+    echo "PASS: ip execution identity (distro ifconfig_exec_t + same-domain exec + no ifconfig_t transition)"
+  else
+    echo "FAIL: ip execution identity (path=$IP_PATH_OK label=$IP_LABEL_OK transition-absent=$IP_TRANS_OK no-ifconfig_t=$IP_NOTRANS_T_OK)"
+    PREFLIGHT_OK=0
+  fi
+
   echo "=== builder_t security_t facts (the /sys/fs/selinux read surface; recorded for the live-verdict causal chain) ==="
   echo "--- allow (expected: none):"
   sesearch --allow -s docker_helper_builder_t -t security_t /sys/fs/selinux/policy || true

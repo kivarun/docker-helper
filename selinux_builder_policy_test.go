@@ -291,17 +291,28 @@ func TestSELinuxPolicyLauncherChainRootlesskitTransition(t *testing.T) {
 // non-state grants are exactly the rootlesskit-attributed evidence surface:
 // the Go-runtime startup reads mirrored from the proven manager rules
 // (cgroup2 walk, net sysctl, passwd identity resolution), the
-// user-namespace limit read, the inst.diag output pipe, and the 4C-3
-// same-domain nsenter exec grant. The nsenter block is the exec-identity
-// structural invariant: the dedicated type exists, the grant is exactly
-// the 4C-2 boundary's source-side set (execute/read/open/execute_no_trans/
-// getattr/map, NO entrypoint), nsenter stays IN the flow domain (no
-// type_transition, no docker_helper_nsenter_t domain anywhere), no other
-// subject holds an nsenter_exec_t allow, and no generic bin_t execution
-// exists for the child (getsubids stays closed). Mutations prove the
-// shape: a type_transition, an entrypoint addition, a widened perm set,
-// a generic bin_t execute grant, and an nsenter exec grant for another
-// subject all trip.
+// user-namespace limit read, the inst.diag output pipe, the 4C-3
+// same-domain nsenter exec grant, and the 4C-6 same-domain ip execution
+// grant over the DISTRO's ifconfig_exec_t identity. The nsenter block is
+// the exec-identity structural invariant: the dedicated type exists, the
+// grant is exactly the 4C-2 boundary's source-side set (execute/read/open/
+// execute_no_trans/getattr/map, NO entrypoint), nsenter stays IN the flow
+// domain (no type_transition, no docker_helper_nsenter_t domain anywhere),
+// no other subject holds an nsenter_exec_t allow, and no generic bin_t
+// execution exists for the child (getsubids stays closed). The ip block is
+// the second exec-identity structural invariant: the distro ifconfig_exec_t
+// type is required, the grant is exactly the proven same-domain loader set,
+// the shipped .fc carries NO delta for it (no custom ip exec type, no
+// relabel of the distro inode), the module contains ZERO ifconfig_t
+// references (no transition into the distro's broad administration domain,
+// no entrypoint, no role addition, no range_transition, no copied
+// capability/socket/tun/sysctl rules), no other subject holds an
+// ifconfig_exec_t allow, no generic bin_t execution exists, and the child
+// domain stays an mcs_constrained_type member. Mutations prove both
+// shapes: type_transitions, entrypoint additions, widened perm sets
+// (+entrypoint/+ioctl/+lock/+setattr), the missing execute and missing
+// execute_no_trans regressions, generic bin_t execute grants, and grants
+// for another subject all trip.
 func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
 	for _, want := range []string{
@@ -313,6 +324,12 @@ func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
 		"allow docker_helper_rootlesskit_t sysctl_t:file { read open getattr };",
 		"allow docker_helper_rootlesskit_t docker_helper_builder_t:fifo_file { write };",
 		"allow docker_helper_rootlesskit_t docker_helper_nsenter_exec_t:file { execute read open execute_no_trans getattr map };",
+		// The 4C-6 same-domain ip execution over the DISTRO's shared
+		// network-tool exec type; the require block must declare it.
+		"type ifconfig_exec_t;",
+		"allow docker_helper_rootlesskit_t ifconfig_exec_t:file { execute read open execute_no_trans getattr map };",
+		// The domain's isolation shape (§6/§7 pins).
+		"typeattribute docker_helper_rootlesskit_t mcs_constrained_type;",
 	} {
 		if !strings.Contains(policy, want) {
 			t.Errorf("the rootlesskit child domain's moved access must be exact: %q", want)
@@ -370,6 +387,93 @@ func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
 	} {
 		if len(nsenterViolations(policy+"\n"+mut.rule)) == 0 {
 			t.Errorf("mutation %q must trip the nsenter exec-identity invariant", mut.name)
+		}
+	}
+	// ipExecViolations returns one violation per line of module text that
+	// breaks the ip execution-identity invariants: the distro ifconfig_t
+	// administration domain must receive ZERO semantic references from
+	// this module (no process transition, no entrypoint, no role addition,
+	// no range_transition, no copied capability/socket/tun/sysctl rules —
+	// the same-domain model only), no custom ip exec type may exist, no
+	// generic bin_t execution for the flow child, the .fc must carry no
+	// ip/ifconfig relabel, and the ifconfig_exec_t allow is unique to the
+	// rootlesskit child domain and exact.
+	fc := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.fc")
+	if strings.Contains(fc, "ifconfig") {
+		t.Errorf("the shipped .fc must carry no delta for the distro ip/ifconfig identity (the distro label stands): %q", "ifconfig")
+	}
+	ipExecViolations := func(text string) []string {
+		var violations []string
+		for _, line := range strings.Split(text, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			// "ifconfig_t" is not a substring of "ifconfig_exec_t", so this
+			// matches exactly the distro administration-domain references.
+			if strings.Contains(trimmed, "ifconfig_t") {
+				violations = append(violations, "the module must hold zero ifconfig_t references (same-domain execution, never the distro administration domain): "+trimmed)
+			}
+			if strings.Contains(trimmed, "docker_helper_ip_exec_t") {
+				violations = append(violations, "no custom ip exec type may exist (the distro ifconfig_exec_t identity is used)")
+			}
+			if (strings.HasPrefix(trimmed, "type_transition ") || strings.HasPrefix(trimmed, "range_transition ")) &&
+				strings.Contains(trimmed, "ifconfig_exec_t") {
+				violations = append(violations, "the ip executable must not transition or carry a range_transition (execute_no_trans, same domain)")
+			}
+			if strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t bin_t:file") {
+				violations = append(violations, "no generic bin_t execution for the flow child (the ip grant stays pointed)")
+			}
+			if strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, "ifconfig_exec_t:") &&
+				trimmed != "allow docker_helper_rootlesskit_t ifconfig_exec_t:file { execute read open execute_no_trans getattr map };" {
+				violations = append(violations, "the ip execution grant is unique to the rootlesskit child domain and must be exact")
+			}
+		}
+		return violations
+	}
+	if violations := ipExecViolations(policy); len(violations) > 0 {
+		t.Errorf("the committed policy violates the ip execution-identity invariants: %v", violations)
+	}
+	// Missing-perm regressions: neither shortened shape is the evidenced
+	// same-domain loader set.
+	for _, regressed := range []struct {
+		name string
+		rule string
+	}{
+		{"missing execute", "allow docker_helper_rootlesskit_t ifconfig_exec_t:file { read open execute_no_trans getattr map };"},
+		{"missing execute_no_trans", "allow docker_helper_rootlesskit_t ifconfig_exec_t:file { execute read open getattr map };"},
+	} {
+		mutated := strings.Replace(policy,
+			"allow docker_helper_rootlesskit_t ifconfig_exec_t:file { execute read open execute_no_trans getattr map };",
+			regressed.rule, 1)
+		if len(ipExecViolations(mutated)) == 0 {
+			t.Errorf("the ip grant %q regression must trip the exec-identity invariant", regressed.name)
+		}
+	}
+	for _, mut := range []struct {
+		name string
+		rule string
+	}{
+		{"transition into the distro ifconfig_t domain", "type_transition docker_helper_rootlesskit_t ifconfig_exec_t:process ifconfig_t;"},
+		{"process transition grant toward ifconfig_t", "allow docker_helper_rootlesskit_t ifconfig_t:process transition;"},
+		{"entrypoint grant for ifconfig_t", "allow docker_helper_rootlesskit_t ifconfig_t:file entrypoint;"},
+		{"role addition for ifconfig_t", "role system_r types ifconfig_t;"},
+		{"range_transition into ifconfig_t", "range_transition docker_helper_rootlesskit_t ifconfig_exec_t:process s0;"},
+		{"copied ifconfig_t netlink rule", "allow ifconfig_t self:netlink_route_socket { create };"},
+		{"entrypoint addition", "allow docker_helper_rootlesskit_t ifconfig_exec_t:file { execute read open execute_no_trans getattr map entrypoint };"},
+		{"ioctl addition", "allow docker_helper_rootlesskit_t ifconfig_exec_t:file { execute read open execute_no_trans getattr map ioctl };"},
+		{"lock addition", "allow docker_helper_rootlesskit_t ifconfig_exec_t:file { execute read open execute_no_trans getattr map lock };"},
+		{"setattr addition", "allow docker_helper_rootlesskit_t ifconfig_exec_t:file { execute read open execute_no_trans getattr map setattr };"},
+		{"custom ip exec type", "type docker_helper_ip_exec_t, file_type;"},
+		{"generic bin_t execute", "allow docker_helper_rootlesskit_t bin_t:file { execute };"},
+		{"ip exec for the manager", "allow docker_helper_builder_t ifconfig_exec_t:file { execute read open execute_no_trans getattr map };"},
+		{"ip exec for the launcher", "allow docker_helper_builder_launcher_t ifconfig_exec_t:file { execute read open };"},
+		{"ip exec for the UID-map helper", "allow docker_helper_newuidmap_t ifconfig_exec_t:file { execute };"},
+		{"ip exec for the GID-map helper", "allow docker_helper_newgidmap_t ifconfig_exec_t:file { execute };"},
+		{"ip exec for the network helper", "allow docker_helper_slirp4netns_t ifconfig_exec_t:file { execute };"},
+	} {
+		if len(ipExecViolations(policy+"\n"+mut.rule)) == 0 {
+			t.Errorf("mutation %q must trip the ip exec-identity invariant", mut.name)
 		}
 	}
 }
