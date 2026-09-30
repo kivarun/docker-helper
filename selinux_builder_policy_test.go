@@ -476,36 +476,39 @@ func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
 			t.Errorf("mutation %q must trip the ip exec-identity invariant", mut.name)
 		}
 	}
-	// The 4C-11/4C-12/4C-14 TUN/TAP device-node invariant: the require
-	// block declares the DISTRO-owned type tun_tap_device_t (unchanged;
-	// chr_file already required ioctl — require delta zero), and the
-	// rootlesskit child domain holds EXACTLY ONE allow on it — the
-	// evidenced open(O_RDWR) chain EXTENDED by the 4C-14 ordinary ioctl
-	// bit ({ read write open ioctl }; selinux_inode_permission() passed
+	// The 4C-11/4C-12/4C-14/4C-17 TUN/TAP device-node invariant: the
+	// require block declares the DISTRO-owned type tun_tap_device_t
+	// (unchanged; chr_file already required ioctl — require delta zero),
+	// and the rootlesskit child domain holds EXACTLY ONE allow on it —
+	// the evidenced open(O_RDWR) chain EXTENDED by the ordinary ioctl bit
+	// ({ read write open ioctl }; selinux_inode_permission() passed
 	// { read write }, selinux_file_open() -> open_file_to_av() needed
 	// `open`, and the canonical 4C-13 enforcing run 36731429729 proved
 	// the ioctl gate at ioctlcmd=0x54ca = TUNSETIFF) — plus EXACTLY ONE
 	// allowxperm rule pinning the extended-permission command authority
-	// to { 0x54ca } (TUNSETIFF only: TUNSETPERSIST 0x54cb and every
-	// other chr_file ioctl command stay closed — no second value, no
-	// range 0x5400-0x54ff / 0x54ca-0x54cb, no complement ~0x54ca; an
-	// ordinary ioctl bit with no allowxperm for the tuple would be
-	// UNRESTRICTED command authority). No other permission of chr_file
-	// (getattr/append/lock/create/setattr all stay closed), no distro
-	// macro import (corenet_rw_tun_tap_dev() expands far beyond the
-	// observed chain AND carries no allowxperm — a macro import would
-	// grant unrestricted ioctl), no custom tun device type, no .fc
-	// relabel of the global node, no capability surface (the TUN
-	// driver's ns_capable(..., CAP_NET_ADMIN) check stays a separate
-	// live boundary), and no other subject holds a tun_tap_device_t
-	// allow or xperm rule.
+	// to { 0x54ca 0x54cb } (TUNSETIFF + TUNSETPERSIST, the two
+	// live-proven create-the-tap commands: TUNSETIFF at the 4C-13
+	// boundary and TUNSETPERSIST at the 4C-16 boundary — the iproute2
+	// tap_add_ioctl() sequence's only two ioctls for this invocation;
+	// every other chr_file ioctl command stays closed — no third value,
+	// no range 0x5400-0x54ff / 0x54ca-0x54cc, no complement
+	// ~{ 0x54ca 0x54cb }; an ordinary ioctl bit with no allowxperm for
+	// the tuple would be UNRESTRICTED command authority). No other
+	// permission of chr_file (getattr/append/lock/create/setattr all stay
+	// closed), no distro macro import (corenet_rw_tun_tap_dev() expands
+	// far beyond the observed chain AND carries no allowxperm — a macro
+	// import would grant unrestricted ioctl), no custom tun device type,
+	// no .fc relabel of the global node, no capability surface (the TUN
+	// driver's ns_capable check is carried by the child's own cap_userns
+	// rule), and no other subject holds a tun_tap_device_t allow or xperm
+	// rule.
 	for _, want := range []string{
 		"type tun_tap_device_t;",
 		"allow docker_helper_rootlesskit_t tun_tap_device_t:chr_file { read write open ioctl };",
-		"allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl { 0x54ca };",
+		"allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl { 0x54ca 0x54cb };",
 	} {
 		if !strings.Contains(policy, want) {
-			t.Errorf("the tun-tap device-node { read write open ioctl } + TUNSETIFF xperm grant must be present: %q", want)
+			t.Errorf("the tun-tap device-node { read write open ioctl } + TUNSETIFF/TUNSETPERSIST xperm grant must be present: %q", want)
 		}
 	}
 	if strings.Contains(fc, "/dev/net/tun") {
@@ -526,10 +529,10 @@ func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
 			case strings.Contains(trimmed, "docker_helper_tun_exec_t") || strings.Contains(trimmed, "docker_helper_tun_device_t"):
 				violations = append(violations, "no custom tun device type may exist (the distro tun_tap_device_t identity is used): "+trimmed)
 			case strings.HasPrefix(trimmed, "allowxperm ") && strings.Contains(trimmed, "tun_tap_device_t"):
-				if trimmed == "allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl { 0x54ca };" {
+				if trimmed == "allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl { 0x54ca 0x54cb };" {
 					rootlesskitTunXpermRules++
 				} else {
-					violations = append(violations, fmt.Sprintf("the tun_tap_device_t ioctl xperm surface is exactly the rootlesskit child's single { 0x54ca } TUNSETIFF rule (no other command, no range, no complement, no other subject): %s", trimmed))
+					violations = append(violations, fmt.Sprintf("the tun_tap_device_t ioctl xperm surface is exactly the rootlesskit child's single { 0x54ca 0x54cb } TUNSETIFF+TUNSETPERSIST rule (no third command, no range, no complement, no other subject): %s", trimmed))
 				}
 			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, "tun_tap_device_t:chr_file"):
 				if trimmed == "allow docker_helper_rootlesskit_t tun_tap_device_t:chr_file { read write open ioctl };" {
@@ -545,7 +548,7 @@ func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
 			violations = append(violations, fmt.Sprintf("the rootlesskit child domain must hold exactly one tun_tap_device_t rule — the evidenced { read write open ioctl } grant — found %d", rootlesskitTunRules))
 		}
 		if rootlesskitTunXpermRules != 1 {
-			violations = append(violations, fmt.Sprintf("the rootlesskit child domain must hold exactly one tun_tap_device_t ioctl xperm rule — the evidenced { 0x54ca } TUNSETIFF rule — found %d", rootlesskitTunXpermRules))
+			violations = append(violations, fmt.Sprintf("the rootlesskit child domain must hold exactly one tun_tap_device_t ioctl xperm rule — the evidenced { 0x54ca 0x54cb } TUNSETIFF+TUNSETPERSIST rule — found %d", rootlesskitTunXpermRules))
 		}
 		return violations
 	}
@@ -570,18 +573,20 @@ func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
 			t.Errorf("the tun grant %q regression must trip the device-node invariant", regressed.name)
 		}
 	}
-	// Xperm regressions: the TUNSETIFF xperm rule must exist exactly
-	// once, exactly as pinned — removal, a wrong value, a duplicate, and
-	// a parallel rule all destroy the exact TUNSETIFF-only authority.
+	// Xperm regressions: the TUNSETIFF+TUNSETPERSIST xperm rule must
+	// exist exactly once, exactly as pinned — removal, a missing
+	// 0x54ca, a missing 0x54cb (the pre-4C-17 shape), and a wrong value
+	// all destroy the exact two-command authority.
 	for _, regressed := range []struct {
 		name string
 		rule string
 	}{
 		{"missing allowxperm", ""},
 		{"missing 0x54ca", "allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl { 0x54c8 };"},
+		{"missing 0x54cb (the pre-4C-17 { 0x54ca } shape must trip again)", "allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl { 0x54ca };"},
 	} {
 		mutated := strings.Replace(policy,
-			"allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl { 0x54ca };",
+			"allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl { 0x54ca 0x54cb };",
 			regressed.rule, 1)
 		if len(tunViolations(mutated)) == 0 {
 			t.Errorf("the tun xperm grant %q regression must trip the device-node invariant", regressed.name)
@@ -596,15 +601,16 @@ func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
 		{"widened lock", "allow docker_helper_rootlesskit_t tun_tap_device_t:chr_file { read write open ioctl lock };"},
 		{"widened create", "allow docker_helper_rootlesskit_t tun_tap_device_t:chr_file { read write open ioctl create };"},
 		{"widened setattr", "allow docker_helper_rootlesskit_t tun_tap_device_t:chr_file { read write open ioctl setattr };"},
-		{"xperm duplicate rule", "allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl { 0x54ca };"},
-		{"xperm parallel rule (0x54cc)", "allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl 0x54cc;"},
-		{"xperm widened +0x54cb (TUNSETPERSIST)", "allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl 0x54cb;"},
+		{"xperm duplicate rule", "allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl { 0x54ca 0x54cb };"},
+		{"xperm parallel 0x54ca rule", "allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl 0x54ca;"},
+		{"xperm parallel 0x54cb rule", "allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl 0x54cb;"},
 		{"xperm widened +0x54c8", "allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl 0x54c8;"},
 		{"xperm widened +0x54c9", "allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl 0x54c9;"},
-		{"xperm widened set { 0x54ca 0x54cb }", "allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl { 0x54ca 0x54cb };"},
+		{"xperm widened +0x54cc (any third command)", "allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl 0x54cc;"},
+		{"xperm widened set +0x54cc", "allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl { 0x54ca 0x54cb 0x54cc };"},
 		{"xperm widened range 0x5400-0x54ff", "allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl 0x5400-0x54ff;"},
-		{"xperm widened range 0x54ca-0x54cb", "allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl 0x54ca-0x54cb;"},
-		{"xperm widened complement ~0x54ca", "allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl ~0x54ca;"},
+		{"xperm widened range 0x54ca-0x54cc", "allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl 0x54ca-0x54cc;"},
+		{"xperm widened complement ~{ 0x54ca 0x54cb }", "allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl ~{ 0x54ca 0x54cb };"},
 		{"distro macro import", "corenet_rw_tun_tap_dev(docker_helper_rootlesskit_t)"},
 		{"custom tun device type", "type docker_helper_tun_device_t, file_type;"},
 		{"custom tun device rule", "allow docker_helper_rootlesskit_t docker_helper_tun_device_t:chr_file { read write open ioctl };"},

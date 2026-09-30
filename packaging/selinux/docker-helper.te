@@ -1196,9 +1196,9 @@ allow docker_helper_rootlesskit_t ifconfig_exec_t:file { execute read open execu
 # process/object MCS boundary, and cross-operation namespace targeting
 # stays an open concurrency/security gate before the Release GO.
 #
-# ioctl (P5-S2 Phase 4C-14): the flow's tap creation issues its first
-# chr_file ioctl immediately after the proven open(O_RDWR) chain — the
-# canonical 4C-13 enforcing run (36731429729, PASS) terminated at the
+# ioctl (P5-S2 Phase 4C-14 + 4C-17): the flow's tap creation issues its
+# first chr_file ioctl immediately after the proven open(O_RDWR) chain —
+# the canonical 4C-13 enforcing run (36731429729, PASS) terminated at the
 # exact boundary denied { ioctl } comm="ip" path="/dev/net/tun"
 # ioctlcmd=0x54ca
 # tcontext=system_u:object_r:tun_tap_device_t:s0 tclass=chr_file
@@ -1212,18 +1212,33 @@ allow docker_helper_rootlesskit_t ifconfig_exec_t:file { execute read open execu
 # allowxperm bitmap without the ordinary bit is not class-level
 # permission. The grant is therefore exactly TWO lines below — one
 # ordinary rule carrying { read write open ioctl } and one allowxperm
-# rule carrying { 0x54ca } — no range (0x5400-0x54ff and
-# 0x54ca-0x54cb stay closed), no complement (~0x54ca stays closed),
-# no second command: TUNSETPERSIST (0x54cb, the adjacent UAPI command)
-# and every other chr_file ioctl command stay denied, each requiring
-# its own live evidence. The EFFECTIVE loaded-policy xperm union for
-# this tuple must be exactly { 0x54ca }: base-policy and
-# attribute-derived allowxperm contributions count toward the
-# effective verdict, and the enforcing harness proves the union with
-# a sesearch allowxperm inventory — an extra effective command there
-# is a STOP, not a silent accept.
+# rule carrying the exact evidenced command set.
+#
+# The SECOND command (P5-S2 Phase 4C-17): after the whole 4C-16 chain
+# (ioctl+xperm 0x54ca → cap_userns net_admin → tun_socket create)
+# completed, the canonical 4C-16 enforcing run (36758547073, PASS)
+# stopped at the next boundary — audit record 421: denied { ioctl }
+# for pid=3059 comm="ip" path="/dev/net/tun" ioctlcmd=0x54cb
+# tcontext=system_u:object_r:tun_tap_device_t:s0 tclass=chr_file
+# permissive=0, with the direct userspace failure "ioctl(TUNSETPERSIST):
+# Permission denied". 0x54cb IS TUNSETPERSIST, the
+# mark-the-device-persistent command iproute2's tap_add_ioctl() issues
+# unconditionally right after a successful TUNSETIFF when no owner/
+# group was given (the persisted device is what keeps the tap0 the
+# buildkitd payload reattaches to). The xperm whitelist becomes exactly
+# { 0x54ca 0x54cb } — both live-proven create-the-tap commands — no
+# range (0x5400-0x54ff and 0x54ca-0x54cc stay closed), no complement
+# (~{ 0x54ca 0x54cb } stays closed), no third command: TUNSETOWNER/
+# TUNSETGROUP (the current invocation passes no user/group), TUNSETLINK/
+# TUNGETFEATURES/TUNSETOFFLOAD/TUNSETQUEUE and every other chr_file
+# ioctl command stay denied, each requiring its own live evidence. The
+# EFFECTIVE loaded-policy xperm union for this tuple must be exactly
+# { 0x54ca 0x54cb }: base-policy and attribute-derived allowxperm
+# contributions count toward the effective verdict, and the enforcing
+# harness proves the union with a sesearch allowxperm inventory — an
+# extra effective command there is a STOP, not a silent accept.
 allow docker_helper_rootlesskit_t tun_tap_device_t:chr_file { read write open ioctl };
-allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl { 0x54ca };
+allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl { 0x54ca 0x54cb };
 
 # The flow's NETLINK_ROUTE socket creation + socket-option operations +
 # local bind (P5-S2 Phases 4C-7/4C-8/4C-9): the first kernel actions of
