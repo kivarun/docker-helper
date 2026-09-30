@@ -115,6 +115,7 @@ module docker_helper 1.2;
 		class tcp_socket { create setopt bind node_bind listen accept getattr read write connect getopt name_connect };
 		class unix_stream_socket { connectto getattr ioctl read write };
 		class udp_socket { create setopt connect getattr read write };
+		class netlink_route_socket { create };
 		class capability { dac_read_search dac_override sys_admin fowner setuid setgid };
 		class capability2 { wake_alarm kill };
 		class user_namespace { create };
@@ -1133,6 +1134,33 @@ allow docker_helper_rootlesskit_t docker_helper_nsenter_exec_t:file { execute re
 # ioctl/lock (no evidence; the distro can_exec() macro's generic
 # expansion carries them — deliberately not used).
 allow docker_helper_rootlesskit_t ifconfig_exec_t:file { execute read open execute_no_trans getattr map };
+
+# The flow's NETLINK_ROUTE socket creation (P5-S2 Phase 4C-7): the first
+# kernel action of the executed ip — iproute2's rtnl_open_byproto() opens
+# with socket(AF_NETLINK, SOCK_RAW|SOCK_CLOEXEC, NETLINK_ROUTE) before any
+# setsockopt/bind/message work. Live enforcing AVC evidence (Phase 4C-6 run
+# 36698129661, launch-window record 400: denied { create } for pid=2936
+# comm="ip" scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+# tcontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+# tclass=netlink_route_socket permissive=0) with the direct userspace
+# failure "Cannot open netlink socket: Permission denied" and rootlesskit's
+# "failed to setup network ... exit status 1" — the direct causal chain to
+# the 4C-6 flow death, one stage after the ip exec itself succeeded.
+#
+# SCOPE — READ CAREFULLY: this grants ONLY the socket instantiation for a
+# process already running in docker_helper_rootlesskit_t:s0:c* in its
+# CURRENT namespaces. It is NOT route-mutation authority: no nlmsg_write/
+# nlmsg_read, no bind/connect/read/write, no getattr/getopt/setopt, no
+# ioctl/shutdown, and NO capability surface (self:capability net_admin/
+# net_raw and cap_userns net_admin stay ungranted — capability mediation is
+# a separate live boundary, the AVC names only the socket class). The
+# actual network-mutation boundary remains closed; every further
+# route-message/capability permission requires its own enforcing evidence.
+# Like every flow-domain grant this is a domain-wide SELF permission, not
+# an operation-scoped one; the operation separation is owned by the
+# categorized process/object MCS boundary, and cross-operation namespace
+# targeting stays an open concurrency/security gate before the Release GO.
+allow docker_helper_rootlesskit_t self:netlink_route_socket create;
 
 # --- docker_helper_slirp4netns_t: the rootlesskit user-network helper domain (P5-S2) ---
 #

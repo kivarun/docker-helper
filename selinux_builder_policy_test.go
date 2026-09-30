@@ -476,6 +476,80 @@ func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
 			t.Errorf("mutation %q must trip the ip exec-identity invariant", mut.name)
 		}
 	}
+	// The 4C-7 NETLINK_ROUTE socket-creation invariant: the require block
+	// declares exactly { create }, the rootlesskit child domain holds
+	// EXACTLY ONE netlink_route_socket allow — the evidenced create-only
+	// rule — no other permission of the class, no capability surface
+	// (net_admin/net_raw stay closed; capability mediation is a separate
+	// live boundary), and no other subject holds a netlink_route_socket
+	// allow. This is the module's first explicit route-netlink object
+	// surface: create alone is not route-mutation authority.
+	for _, want := range []string{
+		"class netlink_route_socket { create };",
+		"allow docker_helper_rootlesskit_t self:netlink_route_socket create;",
+	} {
+		if !strings.Contains(policy, want) {
+			t.Errorf("the netlink-route create grant must be present: %q", want)
+		}
+	}
+	netlinkViolations := func(text string) []string {
+		var violations []string
+		rootlesskitNetlinkRules := 0
+		for _, line := range strings.Split(text, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			switch {
+			case strings.Contains(trimmed, "class netlink_route_socket "):
+				if trimmed != "class netlink_route_socket { create };" {
+					violations = append(violations, fmt.Sprintf("the require block's netlink_route_socket declaration is exactly the one evidenced permission: %s", trimmed))
+				}
+			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, ":netlink_route_socket"):
+				if trimmed == "allow docker_helper_rootlesskit_t self:netlink_route_socket create;" {
+					rootlesskitNetlinkRules++
+				} else {
+					violations = append(violations, fmt.Sprintf("the netlink_route_socket surface is exactly the rootlesskit child's create-only rule (no other permission, no other subject): %s", trimmed))
+				}
+			case strings.Contains(trimmed, "docker_helper_rootlesskit_t") && (strings.Contains(trimmed, "capability net_admin") || strings.Contains(trimmed, "capability net_raw") || strings.Contains(trimmed, "cap_userns net_admin")):
+				violations = append(violations, fmt.Sprintf("no capability surface accompanies the socket create (capability mediation is a separate live boundary): %s", trimmed))
+			}
+		}
+		if rootlesskitNetlinkRules != 1 {
+			violations = append(violations, fmt.Sprintf("the rootlesskit child domain must hold exactly one netlink_route_socket rule — the create-only grant — found %d", rootlesskitNetlinkRules))
+		}
+		return violations
+	}
+	if violations := netlinkViolations(policy); len(violations) > 0 {
+		t.Errorf("the committed policy violates the netlink-route create invariants: %v", violations)
+	}
+	for _, mut := range []struct {
+		name string
+		rule string
+	}{
+		{"widened setopt", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt };"},
+		{"widened bind", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create bind };"},
+		{"widened read", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create read };"},
+		{"widened write", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create write };"},
+		{"widened getattr", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create getattr };"},
+		{"widened getopt", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create getopt };"},
+		{"widened nlmsg_read", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create nlmsg_read };"},
+		{"widened nlmsg_write", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create nlmsg_write };"},
+		{"widened ioctl", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create ioctl };"},
+		{"widened require declaration", "class netlink_route_socket { create setopt };"},
+		{"cap_userns net_admin for the flow domain", "allow docker_helper_rootlesskit_t self:cap_userns net_admin;"},
+		{"plain capability net_admin for the flow domain", "allow docker_helper_rootlesskit_t self:capability net_admin;"},
+		{"plain capability net_raw for the flow domain", "allow docker_helper_rootlesskit_t self:capability net_raw;"},
+		{"netlink create for the manager", "allow docker_helper_builder_t self:netlink_route_socket create;"},
+		{"netlink create for the launcher", "allow docker_helper_builder_launcher_t self:netlink_route_socket create;"},
+		{"netlink create for the UID-map helper", "allow docker_helper_newuidmap_t self:netlink_route_socket create;"},
+		{"netlink create for the GID-map helper", "allow docker_helper_newgidmap_t self:netlink_route_socket create;"},
+		{"netlink create for the network helper", "allow docker_helper_slirp4netns_t self:netlink_route_socket create;"},
+	} {
+		if len(netlinkViolations(policy+"\n"+mut.rule)) == 0 {
+			t.Errorf("mutation %q must trip the netlink-route create invariant", mut.name)
+		}
+	}
 }
 
 // TestSELinuxPolicyMCSMembership verifies the G32 r3 §6.A constrained
