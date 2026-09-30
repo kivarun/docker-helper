@@ -32,7 +32,7 @@ jobs:
 
       - name: Check out the tested proof commit for the composition
         env:
-          PHASE4B_PROOF_REF: '422cd0dad0d064c4bd61a8de6fd21b20caa8d0fd'
+          PHASE4B_PROOF_REF: 'e89dfcb3246781a6779fc1ba6ae9284ac0bb46bf'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
