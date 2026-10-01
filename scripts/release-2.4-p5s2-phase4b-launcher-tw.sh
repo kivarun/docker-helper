@@ -967,7 +967,7 @@ PREFLIGHT_OK=1
   sesearch --allow -s docker_helper_slirp4netns_t -t docker_helper_slirp4netns_exec_t /sys/fs/selinux/policy || true
   echo "--- the helper's whole -c dir sweep (RECORDED ONLY: the distro's domain template grants generic dir access through attribute expansion; the module's own authority is the single rootlesskit-target rule below):"
   sesearch --allow -s docker_helper_slirp4netns_t -c dir /sys/fs/selinux/policy || true
-  echo "--- the helper's capability/cap_userns surface (the 4C-25 grant: EXACTLY one self:cap_userns sys_ptrace rule; no other cap bit, no plain capability):"
+  echo "--- the helper's capability/cap_userns surface (the 4C-30 namespace-join widening: EXACTLY one self:cap_userns { sys_ptrace sys_admin } rule; no other cap bit, no plain capability):"
   sesearch --allow -s docker_helper_slirp4netns_t -c capability /sys/fs/selinux/policy || true
   sesearch --allow -s docker_helper_slirp4netns_t -c cap_userns /sys/fs/selinux/policy || true
   SL_OK=0; SL_DIR_COUNT_OK=0; SL_DIR_SHAPE_OK=0; SL_LNK_COUNT_OK=0; SL_LNK_SHAPE_OK=0; SL_FILE_COUNT_OK=0; SL_FILE_SHAPE_OK=0; SL_NO_EXTRA_OK=0; SL_CAP_COUNT_OK=0; SL_CAP_SHAPE_OK=0; SL_NO_CAP_OK=0
@@ -998,7 +998,16 @@ PREFLIGHT_OK=1
   if [ "$(printf '%s\n' "$SL_CAP_RULES" | grep -ac .)" = 1 ]; then
     SL_CAP_COUNT_OK=1
   fi
-  if printf '%s\n' "$SL_CAP_RULES" | grep -aq 'cap_userns sys_ptrace;'; then
+  # Order-independent shape: the single rule's perm set must fold to
+  # exactly { sys_admin sys_ptrace } (setools renders perm sets
+  # alphabetically — the 4C-29 run proved the rendering; the 4C-30
+  # widening's sys_admin member must be present and nothing else).
+  SL_CAP_SET="$(printf '%s\n' "$SL_CAP_RULES" \
+    | sed -n 's/.*:cap_userns {\(.*\)};$/\1/p' \
+    | sed 's/^[{ ]*//; s/[} ]*$//' \
+    | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
+  echo "helper cap_userns effective perm set: ${SL_CAP_SET:-(none)}"
+  if [ "$SL_CAP_SET" = "sys_admin sys_ptrace " ]; then
     SL_CAP_SHAPE_OK=1
   fi
   # The helper's capability surface after 4C-25: no PLAIN capability/
@@ -1009,7 +1018,7 @@ PREFLIGHT_OK=1
     SL_NO_CAP_OK=1
   fi
   if [ -n "$SL_TGT_RULES" ] && [ "$SL_DIR_COUNT_OK" = 1 ] && [ "$SL_DIR_SHAPE_OK" = 1 ] && [ "$SL_LNK_COUNT_OK" = 1 ] && [ "$SL_LNK_SHAPE_OK" = 1 ] && [ "$SL_FILE_COUNT_OK" = 1 ] && [ "$SL_FILE_SHAPE_OK" = 1 ] && [ "$SL_NO_EXTRA_OK" = 1 ] && [ "$SL_CAP_COUNT_OK" = 1 ] && [ "$SL_CAP_SHAPE_OK" = 1 ] && [ "$SL_NO_CAP_OK" = 1 ]; then
-    echo "PASS: slirp4netns helper cross-domain inventory (exactly one dir-search, one lnk_file-read, and one file-read rule toward the rootlesskit target, exactly one self:cap_userns sys_ptrace rule, no other capability surface)"
+    echo "PASS: slirp4netns helper cross-domain inventory (exactly one dir-search, one lnk_file-read, and one file-read rule toward the rootlesskit target, exactly one self:cap_userns rule whose perm set is exactly { sys_ptrace sys_admin }, no other capability surface)"
     SL_OK=1
   else
     echo "FAIL: slirp4netns helper cross-domain inventory (dir-count=$SL_DIR_COUNT_OK dir-shape=$SL_DIR_SHAPE_OK lnk-count=$SL_LNK_COUNT_OK lnk-shape=$SL_LNK_SHAPE_OK file-count=$SL_FILE_COUNT_OK file-shape=$SL_FILE_SHAPE_OK no-extra=$SL_NO_EXTRA_OK cap-count=$SL_CAP_COUNT_OK cap-shape=$SL_CAP_SHAPE_OK no-cap=$SL_NO_CAP_OK)"
@@ -2089,6 +2098,48 @@ fi
   awk -f /tmp/p4b-work/decode.awk "$EVIDENCE_DIR/30-trace-window.txt" "$EVIDENCE_DIR/09-avc-window.txt" 2>&1 || true
 } > "$EVIDENCE_DIR/34-avc-trace-decode.txt" 2>&1
 cat "$EVIDENCE_DIR/34-avc-trace-decode.txt" >&2
+
+# ============================================================
+# E8: the 4C-30 slirp4netns namespace-join sys_admin gate
+# ============================================================
+# The 4C-30 grant: the helper's self:cap_userns sys_admin — the
+# namespace-join authority (the 4C-29 fatal netns setns boundary;
+# the ignored CLONE_NEWUSER attempt shares the permission and its
+# denials are non-terminal effects). The gate hard-fails if ANY
+# slirp4netns_t cap_userns denial of a GRANTED permission (sys_admin or
+# sys_ptrace) still appears; a DIFFERENT cap_userns permission
+# (sys_chroot/net_admin — ungranted) is the EXPECTED next boundary and
+# is recorded, not failed. Other helper-domain AVCs are recorded.
+SL_NSJOIN_GONE_OK=1
+{
+  echo "=== slirp4netns_t cap_userns AVCs of granted perms (the 4C-25 sys_ptrace and 4C-30 sys_admin boundaries must be absent) ==="
+  SL_NSJOIN_AVC="$(grep -a 'tclass=cap_userns' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' | grep -aE 'denied  *\{ [^}]*\b(sys_ptrace|sys_admin)\b' || true)"
+  printf '%s\n' "${SL_NSJOIN_AVC:-(none — the namespace-join sys_admin boundary is gone)}"
+  echo "--- ALL other slirp4netns_t cap_userns AVCs (ungranted perms — the next-boundary evidence; recorded, not failed):"
+  SL_NSJOIN_OTHER_CAP="$(grep -a 'tclass=cap_userns' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' | grep -avE 'denied  *\{ [^}]*\b(sys_ptrace|sys_admin)\b' || true)"
+  printf '%s\n' "${SL_NSJOIN_OTHER_CAP:-(none — no ungranted cap_userns permission was attempted)}"
+  echo "--- ALL other slirp4netns-domain AVCs of the window (recorded, not failed):"
+  SL_NSJOIN_NONCAP_AVC="$(grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -av 'tclass=cap_userns' || true)"
+  printf '%s\n' "${SL_NSJOIN_NONCAP_AVC:-(none — no other slirp4netns-domain denial appeared)}"
+  echo "--- the helper's userspace failure shape (informational)"
+  grep -a 'slirp4netns\|waiting for ready fd' "$EVIDENCE_DIR/07-manager-diag.txt" 2>/dev/null | tail -4 || true
+  if [ -n "$SL_NSJOIN_AVC" ]; then
+    echo "GATE: a slirp4netns_t cap_userns sys_ptrace/sys_admin denial still appeared — the 4C-25/4C-30 grants did not take effect"
+    SL_NSJOIN_GONE_OK=0
+  fi
+} > "$EVIDENCE_DIR/37-slirp-nsjoin-sysadmin-gone.txt" 2>&1
+cat "$EVIDENCE_DIR/37-slirp-nsjoin-sysadmin-gone.txt" >&2
+if [ "$SL_NSJOIN_GONE_OK" = 1 ]; then
+  marker "SLIRP-NSJOIN-SYSADMIN-BOUNDARY=GONE"
+  SL_NSJOIN_NEXT="$(printf '%s\n' "$SL_NSJOIN_OTHER_CAP" | head -1 || true)"
+  SL_NSJOIN_NEXT_PERMS="$(printf '%s\n' "$SL_NSJOIN_NEXT" | sed -n 's/.*denied  *{ \([^}]*\) }.*/\1/p' || true)"
+  SL_NSJOIN_NEXT_SUMMARY="$(printf '%s\n' "$SL_NSJOIN_NEXT" | sed -n 's/.*scontext=\([^ ]*\) tcontext=\([^ ]*\) tclass=\([a-z_]*\).*/scontext=\1 tcontext=\2 tclass=\3/p' || true)"
+  marker "SLIRP-NSJOIN-NEXT-BOUNDARY=${SL_NSJOIN_NEXT_SUMMARY:-none} perms=${SL_NSJOIN_NEXT_PERMS:-none}"
+else
+  marker "BLOCKER=the 4C-30 slirp4netns namespace-join sys_admin composition did not hold (see 37-slirp-nsjoin-sysadmin-gone.txt)"
+  marker "SLIRP-NSJOIN-SYSADMIN-BOUNDARY=FAIL"
+  finish FAIL; exit 0
+fi
 
 # ---- launcher-domain AVC inventory (raw; the report classifies)
 {
