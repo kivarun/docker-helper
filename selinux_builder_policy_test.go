@@ -1299,6 +1299,46 @@ func helperDomainPolicyViolations(policy string) []string {
 	if slirpEntryFileRules != 1 {
 		violations = append(violations, fmt.Sprintf("exactly one entry-file rule may exist for the helper domain, found %d", slirpEntryFileRules))
 	}
+	// The 4C-28 nsfs namespace-handle read grant: exactly ONE allow line
+	// may name slirp4netns_t -> nsfs_t:file, in the exact bare-read shape
+	// (no brace form, no extra perms, no second grant). nsfs_t is
+	// globally labelled; the categorized proc-target layer is what must
+	// keep the access pointed (see the .te scope note).
+	slirpNsfsFileLines := 0
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "allow docker_helper_slirp4netns_t nsfs_t:file") {
+			slirpNsfsFileLines++
+			if trimmed != "allow docker_helper_slirp4netns_t nsfs_t:file read;" {
+				violations = append(violations, fmt.Sprintf("the helper's nsfs namespace-handle grant must be the exact bare-read shape (no brace form, no extra perms): %s", trimmed))
+			}
+		}
+	}
+	if slirpNsfsFileLines != 1 {
+		violations = append(violations, fmt.Sprintf("exactly one nsfs:file-read grant may exist from the helper toward the namespace magic-link target, found %d", slirpNsfsFileLines))
+	}
+	// The 4C-28 distro-nsfs-macro exclusion, identified structurally at
+	// SOURCE level (a macro's name does not exist after policy
+	// compilation — sesearch sees only the expanded rules — the same
+	// rationale as the 4C-12 macro-provenance note): the module is
+	// standalone-compiled and the distro fs_read_nsfs_files() interface
+	// (and its read_file_perms expansion, { open getattr read ioctl
+	// lock }) is materially broader than the evidenced nsfs_t:file
+	// read. Any use of the interface name in the module text is a
+	// widening; comment mentions document the exclusion and are
+	// skipped.
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(trimmed, "fs_read_nsfs_files") {
+			violations = append(violations, fmt.Sprintf("the distro fs_read_nsfs_files interface must not be used (its read_file_perms expansion is broader than the evidenced nsfs_t:file read): %s", trimmed))
+		}
+	}
 	// The 4C-25 helper capability invariant: the helper's ONLY
 	// cap_userns rule is its own self:cap_userns sys_ptrace (the
 	// proc-magic-link dereference's ptrace-may-access prerequisite).
@@ -1338,11 +1378,12 @@ func helperDomainPolicyViolations(policy string) []string {
 				violations = append(violations, fmt.Sprintf("the helper domain holds no lnk_file authority toward any target other than the rootlesskit namespace target: allow %s %s:%s", rule.source, rule.target, rule.class))
 			}
 			// The helper's FILE authority is its own entry type plus the
-			// single target-SID ptrace READ rule (count and exact shape
-			// enforced by the count clause and the slirp4netns test's
-			// string scans); a file grant toward any OTHER target is a
+			// single target-SID ptrace READ rule and the nsfs
+			// namespace-handle read (count and exact shape enforced by
+			// the count clauses and the slirp4netns test's string
+			// scans); a file grant toward any OTHER target is a
 			// pre-grant of an unproven boundary.
-			if rule.class == "file" && rule.target != "docker_helper_slirp4netns_exec_t" && rule.target != "docker_helper_rootlesskit_t" {
+			if rule.class == "file" && rule.target != "docker_helper_slirp4netns_exec_t" && rule.target != "docker_helper_rootlesskit_t" && rule.target != "nsfs_t" {
 				violations = append(violations, fmt.Sprintf("the helper domain's file authority is only its own entry type plus the rootlesskit target-SID read (no other file target): allow %s %s:%s", rule.source, rule.target, rule.class))
 			}
 			// The helper's capability surface: no plain capability/
@@ -1384,6 +1425,8 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		"allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:dir search;",
 		"allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:lnk_file read;",
 		"allow docker_helper_slirp4netns_t self:cap_userns sys_ptrace;",
+		"allow docker_helper_slirp4netns_t nsfs_t:file read;",
+		"type nsfs_t;",
 	} {
 		if !strings.Contains(policy, want) {
 			t.Errorf("SELinux policy must contain exactly this rule: %s", want)
@@ -1399,6 +1442,8 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 	pinnedLnkRule := "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:lnk_file read;"
 	pinnedCapRule := "allow docker_helper_slirp4netns_t self:cap_userns sys_ptrace;"
 	pinnedFileRule := "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:file read;"
+	pinnedNsfsRule := "allow docker_helper_slirp4netns_t nsfs_t:file read;"
+	pinnedNsfsRequire := "type nsfs_t;"
 	countPinned := func(text, rule string) int {
 		n := 0
 		for _, line := range strings.Split(text, "\n") {
@@ -1420,6 +1465,12 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 	if countPinned(policy, pinnedFileRule) != 1 {
 		t.Errorf("the helper's target-SID ptrace READ authority must be exactly one `rootlesskit_t:file read` rule, found %d", countPinned(policy, pinnedFileRule))
 	}
+	if countPinned(policy, pinnedNsfsRule) != 1 {
+		t.Errorf("the helper's namespace-handle read must be exactly one `nsfs_t:file read` rule (the magic-link target's VFS read), found %d", countPinned(policy, pinnedNsfsRule))
+	}
+	if countPinned(policy, pinnedNsfsRequire) != 1 {
+		t.Errorf("the module's external-type require set must declare nsfs_t exactly once, found %d", countPinned(policy, pinnedNsfsRequire))
+	}
 	// Regression: each grant must exist; removing it, or replacing it
 	// with a wrong-shape, must break the exactly-one invariant the count
 	// guard asserts.
@@ -1436,6 +1487,9 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		{"missing sys_ptrace (sys_chroot-only shape)", pinnedCapRule, "allow docker_helper_slirp4netns_t self:cap_userns sys_chroot;"},
 		{"missing target-file rule", pinnedFileRule, ""},
 		{"missing target-file read (getattr-only shape)", pinnedFileRule, "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:file getattr;"},
+		{"missing nsfs namespace-handle rule", pinnedNsfsRule, ""},
+		{"missing nsfs read (getattr-only shape)", pinnedNsfsRule, "allow docker_helper_slirp4netns_t nsfs_t:file getattr;"},
+		{"missing nsfs_t require declaration", pinnedNsfsRequire, ""},
 	} {
 		mutated := strings.Replace(policy, regressed.old, regressed.rule, 1)
 		if countPinned(mutated, regressed.old) == 1 {
@@ -1467,6 +1521,15 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		{"lnk_file widened { read ioctl }", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:lnk_file { read ioctl };"},
 		{"lnk_file widened { read lock }", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:lnk_file { read lock };"},
 		{"nsfs-like file pre-grant", "allow docker_helper_slirp4netns_t nsfs_t:file { read open };"},
+		{"nsfs structural: duplicate identical namespace-handle rule", "allow docker_helper_slirp4netns_t nsfs_t:file read;"},
+		{"nsfs structural: parallel read rule (brace form)", "allow docker_helper_slirp4netns_t nsfs_t:file { read };"},
+		{"nsfs widened { read getattr }", "allow docker_helper_slirp4netns_t nsfs_t:file { read getattr };"},
+		{"nsfs widened { read ioctl }", "allow docker_helper_slirp4netns_t nsfs_t:file { read ioctl };"},
+		{"nsfs widened { read lock }", "allow docker_helper_slirp4netns_t nsfs_t:file { read lock };"},
+		{"nsfs widened { read write }", "allow docker_helper_slirp4netns_t nsfs_t:file { read write };"},
+		{"nsfs widened { read map }", "allow docker_helper_slirp4netns_t nsfs_t:file { read map };"},
+		{"nsfs distro-macro expansion equivalent", "allow docker_helper_slirp4netns_t nsfs_t:file { open getattr read ioctl lock };"},
+		{"nsfs distro-macro use (fs_read_nsfs_files interface call)", "fs_read_nsfs_files(docker_helper_slirp4netns_t);"},
 		{"cap_userns pre-grant toward the target", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:cap_userns sys_admin;"},
 		{"plain capability pre-grant for the helper", "allow docker_helper_slirp4netns_t self:capability sys_admin;"},
 		{"cap_userns structural: duplicate identical sys_ptrace rule", "allow docker_helper_slirp4netns_t self:cap_userns sys_ptrace;"},
