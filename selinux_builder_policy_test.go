@@ -659,8 +659,8 @@ func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
 	// only explicit route-netlink object surface: send+lookup+receive is
 	// still not route-mutation authority.
 	for _, want := range []string{
-		"class netlink_route_socket { create setopt bind getattr write nlmsg_read read };",
-		"allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind getattr write nlmsg_read read };",
+		"class netlink_route_socket { create setopt bind getattr write nlmsg_read read nlmsg_write };",
+		"allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind getattr write nlmsg_read read nlmsg_write };",
 	} {
 		if !strings.Contains(policy, want) {
 			t.Errorf("the netlink-route send+lookup+receive-surface grant must be present: %q", want)
@@ -676,21 +676,21 @@ func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
 			}
 			switch {
 			case strings.Contains(trimmed, "class netlink_route_socket "):
-				if trimmed != "class netlink_route_socket { create setopt bind getattr write nlmsg_read read };" {
-					violations = append(violations, fmt.Sprintf("the require block's netlink_route_socket declaration is exactly the seven evidenced permissions: %s", trimmed))
+				if trimmed != "class netlink_route_socket { create setopt bind getattr write nlmsg_read read nlmsg_write };" {
+					violations = append(violations, fmt.Sprintf("the require block's netlink_route_socket declaration is exactly the eight evidenced permissions: %s", trimmed))
 				}
 			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, ":netlink_route_socket"):
-				if trimmed == "allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind getattr write nlmsg_read read };" {
+				if trimmed == "allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind getattr write nlmsg_read read nlmsg_write };" {
 					rootlesskitNetlinkRules++
 				} else {
-					violations = append(violations, fmt.Sprintf("the netlink_route_socket surface is exactly the rootlesskit child's create+setopt+bind+getattr+write+nlmsg_read+read rule (no other permission, no other subject): %s", trimmed))
+					violations = append(violations, fmt.Sprintf("the netlink_route_socket surface is exactly the rootlesskit child's create+setopt+bind+getattr+write+nlmsg_read+read+nlmsg_write rule (no other permission, no other subject): %s", trimmed))
 				}
 			case strings.Contains(trimmed, "docker_helper_rootlesskit_t") && (strings.Contains(trimmed, "capability net_admin") || strings.Contains(trimmed, "capability net_raw") || strings.Contains(trimmed, "cap_userns net_admin")):
 				violations = append(violations, fmt.Sprintf("no capability surface accompanies the socket create (capability mediation is a separate live boundary): %s", trimmed))
 			}
 		}
 		if rootlesskitNetlinkRules != 1 {
-			violations = append(violations, fmt.Sprintf("the rootlesskit child domain must hold exactly one netlink_route_socket rule — the evidenced create+setopt+bind+getattr+write+nlmsg_read+read grant — found %d", rootlesskitNetlinkRules))
+			violations = append(violations, fmt.Sprintf("the rootlesskit child domain must hold exactly one netlink_route_socket rule — the evidenced create+setopt+bind+getattr+write+nlmsg_read+read+nlmsg_write grant — found %d", rootlesskitNetlinkRules))
 		}
 		return violations
 	}
@@ -698,21 +698,22 @@ func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
 		t.Errorf("the committed policy violates the netlink-route invariants: %v", violations)
 	}
 	// Missing-perm regressions: no shortened shape is the evidenced
-	// create+setopt+bind+getattr+write+nlmsg_read+read surface.
+	// create+setopt+bind+getattr+write+nlmsg_read+read+nlmsg_write surface.
 	for _, regressed := range []struct {
 		name string
 		rule string
 	}{
-		{"missing read (the pre-4C-21 six-permission shape must trip again)", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind getattr write nlmsg_read };"},
-		{"missing nlmsg_read", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind getattr write read };"},
-		{"missing write", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind getattr nlmsg_read read };"},
-		{"missing getattr", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind write nlmsg_read read };"},
-		{"missing bind", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt getattr write nlmsg_read read };"},
-		{"missing setopt", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create bind getattr write nlmsg_read read };"},
-		{"missing create", "allow docker_helper_rootlesskit_t self:netlink_route_socket { setopt bind getattr write nlmsg_read read };"},
+		{"missing nlmsg_write (the pre-4C-22 seven-permission shape must trip again)", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind getattr write nlmsg_read read };"},
+		{"missing read (the pre-4C-21 six-permission shape must trip again)", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind getattr write nlmsg_read nlmsg_write };"},
+		{"missing nlmsg_read", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind getattr write read nlmsg_write };"},
+		{"missing write", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind getattr nlmsg_read read nlmsg_write };"},
+		{"missing getattr", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind write nlmsg_read read nlmsg_write };"},
+		{"missing bind", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt getattr write nlmsg_read read nlmsg_write };"},
+		{"missing setopt", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create bind getattr write nlmsg_read read nlmsg_write };"},
+		{"missing create", "allow docker_helper_rootlesskit_t self:netlink_route_socket { setopt bind getattr write nlmsg_read read nlmsg_write };"},
 	} {
 		mutated := strings.Replace(policy,
-			"allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind getattr write nlmsg_read read };",
+			"allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind getattr write nlmsg_read read nlmsg_write };",
 			regressed.rule, 1)
 		if len(netlinkViolations(mutated)) == 0 {
 			t.Errorf("the netlink grant %q regression must trip the create invariant", regressed.name)
@@ -722,13 +723,13 @@ func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
 		name string
 		rule string
 	}{
-		{"widened getopt", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind getattr write nlmsg_read read getopt };"},
-		{"widened connect", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind getattr write nlmsg_read read connect };"},
-		{"widened ioctl", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind getattr write nlmsg_read read ioctl };"},
-		{"widened nlmsg_write", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind getattr write nlmsg_read read nlmsg_write };"},
-		{"widened shutdown", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind getattr write nlmsg_read read shutdown };"},
-		{"widened require declaration", "class netlink_route_socket { create setopt bind getattr write nlmsg_read read getopt };"},
-		{"duplicate exact netlink send rule", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind getattr write nlmsg_read read };"},
+		{"widened getopt", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind getattr write nlmsg_read read nlmsg_write getopt };"},
+		{"widened connect", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind getattr write nlmsg_read read nlmsg_write connect };"},
+		{"widened ioctl", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind getattr write nlmsg_read read nlmsg_write ioctl };"},
+		{"widened shutdown", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind getattr write nlmsg_read read nlmsg_write shutdown };"},
+		{"widened require declaration", "class netlink_route_socket { create setopt bind getattr write nlmsg_read read nlmsg_write getopt };"},
+		{"duplicate exact netlink send rule", "allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind getattr write nlmsg_read read nlmsg_write };"},
+		{"parallel netlink nlmsg_write rule", "allow docker_helper_rootlesskit_t self:netlink_route_socket nlmsg_write;"},
 		{"parallel netlink read rule", "allow docker_helper_rootlesskit_t self:netlink_route_socket read;"},
 		{"parallel netlink write rule", "allow docker_helper_rootlesskit_t self:netlink_route_socket write;"},
 		{"parallel netlink nlmsg_read rule", "allow docker_helper_rootlesskit_t self:netlink_route_socket nlmsg_read;"},
@@ -742,6 +743,7 @@ func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
 		{"netlink send for the GID-map helper", "allow docker_helper_newgidmap_t self:netlink_route_socket write;"},
 		{"netlink send for the network helper", "allow docker_helper_slirp4netns_t self:netlink_route_socket write;"},
 		{"netlink lookup for the manager", "allow docker_helper_builder_t self:netlink_route_socket nlmsg_read;"},
+		{"netlink mutation for the launcher", "allow docker_helper_builder_launcher_t self:netlink_route_socket nlmsg_write;"},
 	} {
 		if len(netlinkViolations(policy+"\n"+mut.rule)) == 0 {
 			t.Errorf("mutation %q must trip the netlink-route create invariant", mut.name)
