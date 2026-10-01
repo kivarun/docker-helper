@@ -1087,6 +1087,78 @@ PREFLIGHT_OK=1
     echo "FAIL: slirp4netns helper nsfs namespace-handle inventory (count=$SL_NSFS_COUNT_OK shape=$SL_NSFS_SHAPE_OK union=$SL_NSFS_UNION_OK class=$SL_NSFS_CLASS_OK no-flow-grant=$SL_NSFS_NO_FLOW_GRANT_OK)"
     PREFLIGHT_OK=0
   fi
+  echo "=== slirp4netns helper TUN device-node inventory (the 4C-31 composition: the EFFECTIVE helper -> tun_tap_device_t authority must be EXACTLY chr_file { read write } — no open/ioctl/getattr/append/lock/create/setattr, no helper allowxperm, no helper tun_socket grant, from ANY source, distro attribute expansion included; an effective extra is a STOP, not a pin violation) ==="
+  echo "--- raw effective inventory (slirp4netns -> tun_tap_device_t; attribute/base-policy expansions recorded, not asserted per-rule):"
+  sesearch --allow -s docker_helper_slirp4netns_t -t tun_tap_device_t /sys/fs/selinux/policy || true
+  echo "--- CONCRETE module contribution (source must be docker_helper_slirp4netns_t; must be EXACTLY one tun_tap_device_t:chr_file rule whose perm set folds to { read write }):"
+  SL_TUN_RULES="$(sesearch --allow -s docker_helper_slirp4netns_t -t tun_tap_device_t /sys/fs/selinux/policy 2>/dev/null | awk '$2 == "docker_helper_slirp4netns_t"' || true)"
+  printf '%s\n' "${SL_TUN_RULES:-(none)}"
+  SL_TUN_COUNT_OK=0; SL_TUN_SHAPE_OK=0; SL_TUN_UNION_OK=0; SL_TUN_CLASS_OK=0; SL_TUN_NO_XPERM_OK=0; SL_TUN_NO_TS_OK=0
+  SL_TUN_CONCRETE_COUNT="$(printf '%s\n' "$SL_TUN_RULES" | grep -ac . || true)"
+  SL_TUN_CONCRETE_SET="$(printf '%s\n' "$SL_TUN_RULES" \
+    | sed -n 's/^allow [^ ]* tun_tap_device_t:chr_file {\(.*\)};$/\1/p' \
+    | sed 's/^[{ ]*//; s/[} ]*$//' \
+    | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
+  echo "concrete rule's perm token set: ${SL_TUN_CONCRETE_SET:-(empty)}"
+  if [ "$SL_TUN_CONCRETE_COUNT" = 1 ] && [ "$SL_TUN_CONCRETE_SET" = "read write " ]; then
+    SL_TUN_COUNT_OK=1
+    SL_TUN_SHAPE_OK=1
+  fi
+  # The effective perm union across the WHOLE helper -> tun_tap_device_t
+  # surface: chr_file single-perm rules render bare, multi-perm rules in
+  # braces; both fold into one token set which must be exactly
+  # { read write } (sorted) — any other permission (the named negatives
+  # open/ioctl/getattr/append/lock/create/setattr included) breaks the
+  # equality.
+  SL_TUN_UNION="$(sesearch --allow -s docker_helper_slirp4netns_t -t tun_tap_device_t /sys/fs/selinux/policy 2>/dev/null \
+    | grep -a 'tun_tap_device_t:chr_file' \
+    | sed -n 's/^allow [^ ]* tun_tap_device_t:chr_file \(.*\);$/\1/p' \
+    | sed 's/^[{ ]*//; s/[} ]*$//' \
+    | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
+  echo "effective helper -> tun_tap_device_t:chr_file perm union: ${SL_TUN_UNION:-(empty)}"
+  if [ "$SL_TUN_UNION" = "read write " ]; then
+    SL_TUN_UNION_OK=1
+  fi
+  # Any EFFECTIVE tun_tap_device_t authority in a NON-chr_file class is
+  # an extra too.
+  SL_TUN_OTHER_CLASS="$(sesearch --allow -s docker_helper_slirp4netns_t -t tun_tap_device_t /sys/fs/selinux/policy 2>/dev/null | grep -av 'tun_tap_device_t:chr_file' || true)"
+  if [ -z "$SL_TUN_OTHER_CLASS" ]; then
+    SL_TUN_CLASS_OK=1
+  else
+    echo "STOP: the effective helper -> tun_tap_device_t surface contains a non-chr_file class:"
+    printf '%s\n' "$SL_TUN_OTHER_CLASS"
+  fi
+  # No helper xperm authority on the TUN node: the allowxperm query must
+  # be empty. Ordering dependence, RECORDED: the rootlesskit TUN section
+  # above already ran the same allowxperm query against its known-good
+  # rule and would have STOPPED on an unsupported sesearch build, so an
+  # empty result here is an absence proof, not a tool limitation.
+  SL_TUN_XPERM="$(sesearch --allowxperm -s docker_helper_slirp4netns_t -t tun_tap_device_t -c chr_file /sys/fs/selinux/policy 2>/dev/null || true)"
+  printf '%s\n' "${SL_TUN_XPERM:-(none — the helper holds NO tun_tap_device_t ioctl command authority)}"
+  if [ -z "$SL_TUN_XPERM" ]; then
+    SL_TUN_NO_XPERM_OK=1
+  fi
+  # No helper tun_socket rule of ANY target (the helper attaches an
+  # existing TAP via the device node; tun_socket authority — create/
+  # attach_queue/relabel* — is a separate live boundary).
+  SL_TUN_TS="$(sesearch --allow -s docker_helper_slirp4netns_t -c tun_socket /sys/fs/selinux/policy 2>/dev/null | grep -a 'docker_helper_slirp4netns_t' || true)"
+  printf '%s\n' "${SL_TUN_TS:-(none — the helper holds NO tun_socket rule)}"
+  if [ -z "$SL_TUN_TS" ]; then
+    SL_TUN_NO_TS_OK=1
+  fi
+  # (The helper's cap_userns net_admin and plain capability net_admin
+  # negatives are the cross-domain inventory's existing equality checks:
+  # the cap set folds to exactly { sys_admin sys_ptrace } and the plain
+  # capability class is empty.)
+  echo "--- the helper's dontaudit surface toward tun_tap_device_t (RECORDED SEPARATELY per the 4C-28 preflight contract; never merged into the allow verdict):"
+  SL_TUN_DONTAUDIT="$(sesearch --dontaudit -s docker_helper_slirp4netns_t -t tun_tap_device_t /sys/fs/selinux/policy 2>/dev/null || true)"
+  printf '%s\n' "${SL_TUN_DONTAUDIT:-(none — no dontaudit rule hides helper -> tun_tap_device_t denials)}"
+  if [ "$SL_TUN_COUNT_OK" = 1 ] && [ "$SL_TUN_SHAPE_OK" = 1 ] && [ "$SL_TUN_UNION_OK" = 1 ] && [ "$SL_TUN_CLASS_OK" = 1 ] && [ "$SL_TUN_NO_XPERM_OK" = 1 ] && [ "$SL_TUN_NO_TS_OK" = 1 ]; then
+    echo "PASS: slirp4netns helper TUN device-node inventory (exactly one tun_tap_device_t:chr_file { read write } rule; the effective union is exactly { read write }; no non-chr_file class; no helper xperm; no helper tun_socket rule)"
+  else
+    echo "FAIL: slirp4netns helper TUN device-node inventory (count=$SL_TUN_COUNT_OK shape=$SL_TUN_SHAPE_OK union=$SL_TUN_UNION_OK class=$SL_TUN_CLASS_OK no-xperm=$SL_TUN_NO_XPERM_OK no-tun-socket=$SL_TUN_NO_TS_OK)"
+    PREFLIGHT_OK=0
+  fi
   echo "--- live Netlink mediation model (recorded; FAIL CLOSED if it unexpectedly changes):"
   NL_XPERM_FACT="unknown"
   if command -v seinfo >/dev/null 2>&1; then
@@ -1246,6 +1318,12 @@ if [ -d "$TRACING/events/capability/cap_capable" ]; then
   echo 1 > "$TRACING/events/syscalls/sys_enter_setns/enable" 2>/dev/null || true
   echo 1 > "$TRACING/events/syscalls/sys_exit_setns/enable" 2>/dev/null || true
   echo 1 > "$TRACING/events/syscalls/sys_enter_socket/enable" 2>/dev/null || true
+  # 4C-31: the ioctl syscall tracepoints — the existing-TAP attach path
+  # issues ioctl(fd, TUNSETIFF) right after the device open; the events
+  # carry the NUMERIC command (fd/cmd/arg, exit adds ret) so a reached
+  # TUNSETIFF is recorded as 0x54ca WITHOUT granting it.
+  echo 1 > "$TRACING/events/syscalls/sys_enter_ioctl/enable" 2>/dev/null || true
+  echo 1 > "$TRACING/events/syscalls/sys_exit_ioctl/enable" 2>/dev/null || true
   # 4C-29: the SELinux decision tracepoint (avc:selinux_audited) —
   # independent of auditd's userspace log harvest (run 36864816648
   # showed launch-period SYSCALL+AVC records absent with lost=0, so
@@ -1261,8 +1339,11 @@ if [ -d "$TRACING/events/capability/cap_capable" ]; then
     echo "=== 4C-27 tracefs collector armed ==="
     echo "cap_capable enabled: $TRACE_ENABLED"
     echo "avc/selinux_audited available: $TRACE_AVC_ENABLED"
+    echo "sys_enter_ioctl/sys_exit_ioctl available: $([ -d "$TRACING/events/syscalls/sys_exit_ioctl" ] && echo yes || echo no) (4C-31: the TUNSETIFF command is recorded numerically, not granted)"
     echo "=== 4C-29 selinux_audited tracepoint format (recorded verbatim) ==="
     cat "$TRACING/events/avc/selinux_audited/format" 2>/dev/null || echo "(format file unavailable)"
+    echo "=== 4C-31 sys_exit_ioctl tracepoint format (recorded verbatim: fd/cmd/arg/ret) ==="
+    cat "$TRACING/events/syscalls/sys_exit_ioctl/format" 2>/dev/null || echo "(format file unavailable)"
     echo "=== 4C-29 live class/permission mapping evidence (RECORDED, not hardcoded — decode validation uses co-captured AVC records) ==="
     echo "--- /sys/fs/selinux/class file-class perms listing (as the kernel presents it):"
     ls /sys/fs/selinux/class/file/perms 2>/dev/null || true
@@ -1434,6 +1515,8 @@ if [ "$TRACE_ENABLED" = 1 ]; then
   echo 0 > "$TRACING/events/syscalls/sys_enter_setns/enable" 2>/dev/null || true
   echo 0 > "$TRACING/events/syscalls/sys_exit_setns/enable" 2>/dev/null || true
   echo 0 > "$TRACING/events/syscalls/sys_enter_socket/enable" 2>/dev/null || true
+  echo 0 > "$TRACING/events/syscalls/sys_enter_ioctl/enable" 2>/dev/null || true
+  echo 0 > "$TRACING/events/syscalls/sys_exit_ioctl/enable" 2>/dev/null || true
   echo 0 > "$TRACING/events/avc/selinux_audited/enable" 2>/dev/null || true
   grep -a -E 'slirp4netns|rootlesskit| ns/net|ns/user|/dev/net/tun|cap_capable|selinux_audited' "$EVIDENCE_DIR/30-trace-window.txt" \
     > "$EVIDENCE_DIR/30-trace-relevant.txt" 2>/dev/null || true
@@ -1672,7 +1755,7 @@ TUN_IOCTL_GONE_OK=1
   echo "--- granted-surface regressions (the ROOTLESSKIT flow domain's granted ordinary bits — must be zero; the 4C-30 correction: this gate owns the ROOTLESSKIT domain's TUN surface only, another domain's tun_tap_device_t denial is its own staircase and is recorded below, not failed):"
   TUN_REGRESSION="$(printf '%s\n' "$TUN_AVC_WINDOW" | grep -a 'scontext=system_u:system_r:docker_helper_rootlesskit_t' | grep -aE 'denied  *\{ (read|write|open|getattr|append|lock|create|setattr)' || true)"
   printf '%s\n' "${TUN_REGRESSION:-(none — the granted ordinary surface held)}"
-  echo "--- OTHER domains' tun_tap_device_t denials (their independent TUN staircases — recorded, not failed; the slirp helper has ZERO tun authority and its open_tap() denial is the recorded next-boundary evidence):"
+  echo "--- OTHER domains' tun_tap_device_t denials (their independent TUN staircases — recorded, not failed; the slirp helper's granted surface is only the 4C-31 { read write } and its denials are owned by the helper TUN gate below, not by this gate):"
   TUN_OTHER_DOMAIN="$(printf '%s\n' "$TUN_AVC_WINDOW" | grep -av 'scontext=system_u:system_r:docker_helper_rootlesskit_t' || true)"
   printf '%s\n' "${TUN_OTHER_DOMAIN:-(none — no other-domain TUN denial appeared)}"
   echo "--- xperm-mediated denials of non-whitelisted commands (the gate holding; the recorded next-boundary evidence):"
@@ -1699,8 +1782,10 @@ cat "$EVIDENCE_DIR/14-tun-ioctl-gone.txt" >&2
 if [ "$TUN_IOCTL_GONE_OK" = 1 ]; then
   marker "TUN-IOCTL-BOUNDARY=GONE"
   marker "TUN-DEVICE-ACCESS=CLEAN"
-  # The 4C-30 next-boundary record: another domain's (the slirp
-  # helper's) independent TUN staircase denial, if one appeared.
+  # The 4C-30 next-boundary record, carried over: a NON-rootlesskit
+  # domain's tun_tap_device_t denial, if one appeared. The slirp
+  # helper's own TUN denials are owned by the 4C-31 helper gate below
+  # (38-slirp-tun-rw-gone.txt); this raw record is informational only.
   TUN_OTHER_FIRST="$(printf '%s\n' "$TUN_OTHER_DOMAIN" | head -1 || true)"
   TUN_OTHER_PERMS="$(printf '%s\n' "$TUN_OTHER_FIRST" | sed -n 's/.*denied  *{ \([^}]*\) }.*/\1/p' || true)"
   TUN_OTHER_SUMMARY="$(printf '%s\n' "$TUN_OTHER_FIRST" | sed -n 's/.*scontext=\([^ ]*\) tcontext=\([^ ]*\) tclass=\([a-z_]*\).*/scontext=\1 tcontext=\2 tclass=\3/p' || true)"
@@ -2147,6 +2232,48 @@ if [ "$SL_NSJOIN_GONE_OK" = 1 ]; then
 else
   marker "BLOCKER=the 4C-30 slirp4netns namespace-join sys_admin composition did not hold (see 37-slirp-nsjoin-sysadmin-gone.txt)"
   marker "SLIRP-NSJOIN-SYSADMIN-BOUNDARY=FAIL"
+  finish FAIL; exit 0
+fi
+
+# ============================================================
+# 4C-31: the slirp4netns helper TUN device-node gate (SLIRP-TUN-RW-BOUNDARY)
+# ============================================================
+# The 4C-31 grant: the helper's tun_tap_device_t:chr_file { read write }
+# — the 4C-30 open("/dev/net/tun", O_RDWR) boundary. The gate owns ONLY
+# the helper domain's TUN surface (the 4C-14 gate above owns the
+# RootlessKit surface): it hard-fails if any slirp4netns_t
+# tun_tap_device_t:chr_file denial of a GRANTED permission (read or
+# write) still appears. A DIFFERENT helper TUN permission (open/
+# getattr/append/lock/create/setattr — ungranted) is the EXPECTED next
+# boundary and is recorded, not failed.
+SL_TUN_GONE_OK=1
+{
+  echo "=== slirp4netns_t tun_tap_device_t AVCs of granted perms (the 4C-31 read/write device-node boundary must be absent) ==="
+  SL_TUN_AVC="$(grep -a 'tcontext=system_u:object_r:tun_tap_device_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' | grep -aE 'denied  *\{ [^}]*\b(read|write)\b' || true)"
+  printf '%s\n' "${SL_TUN_AVC:-(none — the 4C-31 TUN read/write boundary is gone)}"
+  echo "--- ALL other slirp4netns_t tun_tap_device_t AVCs (ungranted perms — the next-boundary evidence; recorded, not failed):"
+  SL_TUN_OTHER_TUN="$(grep -a 'tcontext=system_u:object_r:tun_tap_device_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' | grep -avE 'denied  *\{ [^}]*\b(read|write)\b' || true)"
+  printf '%s\n' "${SL_TUN_OTHER_TUN:-(none — no ungranted helper TUN permission was attempted)}"
+  echo "--- the tracepoint decode's helper TUN decisions (34-avc-trace-decode.txt; informational, uncalibrated events stay raw):"
+  grep -a 'HELPER' "$EVIDENCE_DIR/34-avc-trace-decode.txt" 2>/dev/null | grep -a 'tclass=chr_file' || true
+  echo "--- the helper's userspace failure shape (informational)"
+  grep -a 'slirp4netns\|waiting for ready fd' "$EVIDENCE_DIR/07-manager-diag.txt" 2>/dev/null | tail -4 || true
+  if [ -n "$SL_TUN_AVC" ]; then
+    echo "GATE: a slirp4netns_t tun_tap_device_t read/write denial still appeared — the 4C-31 grant did not take effect"
+    SL_TUN_GONE_OK=0
+  fi
+} > "$EVIDENCE_DIR/38-slirp-tun-rw-gone.txt" 2>&1
+cat "$EVIDENCE_DIR/38-slirp-tun-rw-gone.txt" >&2
+if [ "$SL_TUN_GONE_OK" = 1 ]; then
+  marker "SLIRP-TUN-RW-BOUNDARY=GONE"
+  SL_TUN_NEXT_FIRST="$(printf '%s\n' "$SL_TUN_OTHER_TUN" | head -1 || true)"
+  SL_TUN_NEXT_PERMS="$(printf '%s\n' "$SL_TUN_NEXT_FIRST" | sed -n 's/.*denied  *{ \([^}]*\) }.*/\1/p' || true)"
+  SL_TUN_NEXT_SUMMARY="$(printf '%s\n' "$SL_TUN_NEXT_FIRST" | sed -n 's/.*scontext=\([^ ]*\) tcontext=\([^ ]*\) tclass=\([a-z_]*\).*/scontext=\1 tcontext=\2 tclass=\3/p' || true)"
+  SL_TUN_NEXT_IOCTL="$(printf '%s\n' "$SL_TUN_NEXT_FIRST" | sed -n 's/.*ioctlcmd=\([0-9a-fx]*\).*/\1/p' || true)"
+  marker "SLIRP-TUN-NEXT-BOUNDARY=${SL_TUN_NEXT_SUMMARY:-none} perms=${SL_TUN_NEXT_PERMS:-none} ioctlcmd=${SL_TUN_NEXT_IOCTL:-none}"
+else
+  marker "BLOCKER=the 4C-31 slirp4netns TUN read/write composition did not hold (see 38-slirp-tun-rw-gone.txt)"
+  marker "SLIRP-TUN-RW-BOUNDARY=FAIL"
   finish FAIL; exit 0
 fi
 
