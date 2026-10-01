@@ -1615,14 +1615,29 @@ allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:file read;
 # MANDATORY property of the final c1-vs-c2 proof — that gate stays open
 # and Release GO stays closed.
 #
-# Deliberately NOT granted: nsfs_t:file open/getattr/ioctl/lock/write/
-# map (the AVC proves only read; each owns its own phase if it
-# materializes), the distro fs_read_nsfs_files() interface and any
+# Deliberately NOT granted: nsfs_t:file getattr/ioctl/lock/write/map/
+# execute (the AVCs prove read and open only; each owns its own phase
+# if it materializes), the distro fs_read_nsfs_files() interface and any
 # other read-file macro (read_file_perms expands to materially broader
-# authority — { open getattr read ioctl lock } — that is NOT the
-# evidenced surface), and any widening of the helper's frozen surfaces
-# below (rootlesskit_t:dir/lnk_file/file, fifo_file, cap_userns).
-allow docker_helper_slirp4netns_t nsfs_t:file read;
+# authority — { open getattr read ioctl lock } — two of whose members
+# are now evidenced, which does NOT collapse the remaining three into
+# this phase), and any widening of the helper's frozen surfaces below
+# (rootlesskit_t:dir/lnk_file/file, fifo_file, cap_userns).
+#
+# 4C-29 WIDENING — EXACTLY { read open }: the 4C-28 canonical rerun's
+# first new terminal boundary (canonical run 36863680132, audit record
+# 1473) is denied { open } for pid=3187 comm="slirp4netns"
+# path="net:[4026532270]" dev="nsfs" ino=4026532270 — the SAME namespace
+# inode the 4C-27 record's read denial carried and the same inode the
+# tap0-lifecycle observer ties to the c1 RootlessKit target child 3155
+# (net:[4026532270]) — on the SAME openat("/proc/3155/ns/net", O_RDONLY)
+# (syscall 257, exit=-13 EACCES) whose proc-target traversal, magic-link
+# read, CAP_SYS_PTRACE commoncap, target-SID FILE__READ, and nsfs read
+# checks all passed. The VFS open completion now requires the separate
+# FILE__OPEN permission on the nsfs object. The grant is widened IN
+# PLACE (no parallel open rule): read+open are the two evidenced VFS
+# members; getattr/ioctl/lock are NOT evidenced and stay out.
+allow docker_helper_slirp4netns_t nsfs_t:file { read open };
 
 # --- docker_helper_newuidmap_t: the rootlesskit UID-map helper domain (P5-S2) ---
 #
