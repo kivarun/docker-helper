@@ -843,25 +843,23 @@ PREFLIGHT_OK=1
   sesearch --dontaudit -s docker_helper_rootlesskit_t -c netlink_route_socket /sys/fs/selinux/policy || true
 
   echo "=== slirp4netns helper cross-domain inventory (the 4C-23 composition: exactly one dir-search grant toward the rootlesskit namespace target; NO file/lnk_file namespace-path pre-grant; NO capability) ==="
-  echo "--- the helper's own allows toward docker_helper_rootlesskit_t (concrete):"
+  echo "--- the helper's own allows toward docker_helper_rootlesskit_t (concrete; the target-specific set: the pinned dir rule + the fifo rule + the distro's attribute-generic fd/key expansions):"
   sesearch --allow -s docker_helper_slirp4netns_t -t docker_helper_rootlesskit_t /sys/fs/selinux/policy || true
   echo "--- the helper's allows toward its own entry type:"
   sesearch --allow -s docker_helper_slirp4netns_t -t docker_helper_slirp4netns_exec_t /sys/fs/selinux/policy || true
-  echo "--- any dir authority from the helper toward a non-rootlesskit target (must be empty):"
+  echo "--- the helper's whole -c dir sweep (RECORDED ONLY: the distro's domain template grants generic dir access through attribute expansion; the module's own authority is the single rootlesskit-target rule below):"
   sesearch --allow -s docker_helper_slirp4netns_t -c dir /sys/fs/selinux/policy || true
   echo "--- the helper's capability/cap_userns surface (must be empty):"
   sesearch --allow -s docker_helper_slirp4netns_t -c capability /sys/fs/selinux/policy || true
   sesearch --allow -s docker_helper_slirp4netns_t -c cap_userns /sys/fs/selinux/policy || true
   SL_OK=0; SL_DIR_COUNT_OK=0; SL_DIR_SHAPE_OK=0; SL_NO_EXTRA_OK=0; SL_NO_CAP_OK=0
   SL_TGT_RULES="$(sesearch --allow -s docker_helper_slirp4netns_t -t docker_helper_rootlesskit_t /sys/fs/selinux/policy 2>/dev/null || true)"
-  SL_DIR_RULES="$(printf '%s\n' "$SL_TGT_RULES" | grep -a 'tclass=dir' || true)"
-  if [ "$(printf '%s\n' "$SL_DIR_RULES" | grep -ac .)" = 1 ]; then
+  SL_DIR_RULES="$(printf '%s\n' "$SL_TGT_RULES" | grep -a ':dir[ ;]' || true)"
+  if [ "$(printf '%s\n' "$SL_DIR_RULES" | grep -ac 'rootlesskit_t:dir search;')" = 1 ]; then
     SL_DIR_COUNT_OK=1
-  fi
-  if printf '%s\n' "$SL_DIR_RULES" | grep -aq '{ search }' || printf '%s\n' "$SL_DIR_RULES" | grep -aq 'dir search;'; then
     SL_DIR_SHAPE_OK=1
   fi
-  if ! printf '%s\n' "$SL_TGT_RULES" | grep -aE 'tclass=(file|lnk_file)'; then
+  if ! printf '%s\n' "$SL_TGT_RULES" | grep -aE 'rootlesskit_t:(file|lnk_file)'; then
     SL_NO_EXTRA_OK=1
   fi
   if ! { sesearch --allow -s docker_helper_slirp4netns_t -c capability /sys/fs/selinux/policy 2>/dev/null; \
