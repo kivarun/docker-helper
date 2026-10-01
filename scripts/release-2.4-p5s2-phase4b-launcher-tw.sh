@@ -819,7 +819,7 @@ PREFLIGHT_OK=1
   if printf '%s\n' "$NL_FLOW_RULES" | grep -aq "nlmsg_read"; then
     NL_NLMSG_READ_OK=1
   fi
-  if printf '%s\n' "$NL_FLOW_RULES" | grep -aqE "(^| )read(;| }|;)"; then
+  if printf '%s\n' "$NL_FLOW_RULES" | grep -aqw "read"; then
     NL_READ_OK=1
   fi
   # The 4C-21 no-more check: the mutation class, connect/getopt/ioctl/
@@ -829,7 +829,7 @@ PREFLIGHT_OK=1
   fi
   echo "--- the message-level absence proof (each individually; none may be present):"
   for denied_perm in nlmsg_write connect sendto; do
-    if printf '%s\n' "$NL_FLOW_RULES" | grep -aqE "(^| )$denied_perm(;| }|;)"; then
+    if printf '%s\n' "$NL_FLOW_RULES" | grep -aqw "$denied_perm"; then
       echo "PRESENT (must not be): $denied_perm"
       NL_NO_MORE_OK=0
     else
