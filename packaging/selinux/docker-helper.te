@@ -1534,6 +1534,48 @@ allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:lnk_file read;
 # and owns the next phase).
 allow docker_helper_slirp4netns_t self:cap_userns sys_ptrace;
 
+# The helper's target-SID ptrace READ authority: after the capability
+# prerequisite passes, ptrace_may_access() calls
+# security_ptrace_access_check(target, PTRACE_MODE_READ_FSCREDS), which
+# SELinux maps to the FILE class's read permission BETWEEN the two
+# process types. Live enforcing evidence, canonical 4C-25 run
+# 36849052587, audit record 1414: denied { read } for pid=3138
+# comm="slirp4netns" scontext=...docker_helper_slirp4netns_t:s0:c1
+# tcontext=...docker_helper_rootlesskit_t:s0:c1 tclass=file
+# permissive=0 — the SAME audit event as the failing
+# openat("/proc/3102/ns/net", O_RDONLY) (syscall 257, exit=-13):
+# open(ns/user) and setns() were never reached; the flow died inside
+# the first open's ptrace check chain.
+#
+# RATIONALE SCOPE — RECORD ACCURATELY: the TE authority is the
+# type/class tuple slirp4netns_t → rootlesskit_t:file read — it applies
+# WHEREVER an object or check resolves to that target type and class,
+# not only the namespace-link path. The concrete live reason for adding
+# it is the namespace-link ptrace introspection chain. Do NOT describe
+# this rule as merely "permission to open /proc/<pid>/ns/net".
+#
+# THE FOUR DISTINCT AUTHORITIES (never collapse into "slirp needs
+# access to the namespace"):
+#   rootlesskit_t:lnk_file read
+#       = the proc namespace magic-link read/follow permission
+#   self:cap_userns sys_ptrace
+#       = the Linux ptrace-may-access capability prerequisite
+#   rootlesskit_t:file read
+#       = the SELinux PTRACE_MODE_READ target-SID check
+#   self:cap_userns sys_admin
+#       = a possible LATER userns_install() authority (not granted here;
+#         the first open(ns/net) has not yet completed and there is no
+#         live setns evidence)
+#
+# Deliberately NOT granted: file open/getattr/ioctl (the AVC proves only
+# read; if the VFS completion after the ptrace hook produces another
+# file/nsfs check, that is a separate boundary), any nsfs_t authority
+# (the magic-link ultimately jumps to an nsfs object — a further check
+# is possible but has not materialized), any cap_userns widening
+# (sys_admin/sys_chroot/net_admin), any plain capability, and any other
+# target-specific surface.
+allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:file read;
+
 # --- docker_helper_newuidmap_t: the rootlesskit UID-map helper domain (P5-S2) ---
 #
 # RootlessKit forks and execs the distro newuidmap binary (the shadow
