@@ -1857,35 +1857,46 @@ fi
 # The 4C-28 grant: the helper's nsfs_t:file read — the VFS open of the
 # FOLLOWED namespace inode (nsfs_t:s0, globally labelled, NO MCS
 # category) after the categorized proc-target chain (dir search, lnk
-# read, target-SID file read) passes. The gate hard-fails if that
-# proven boundary still appears. Any OTHER helper-domain AVC (a further
-# nsfs permission — open/getattr shapes, each owning its own phase —
-# the setns cap_userns sys_admin check, or /dev/net/tun) is the
-# EXPECTED next boundary and is recorded, not failed. The rootlesskit
-# domain's separate nsfs getattr denial (the 4C-27 candidate boundary)
-# was deliberately NOT granted; its reappearance is recorded, not
-# failed.
+# read, target-SID file read) passes. The gate hard-fails ONLY when the
+# GRANTED { read } surface itself is denied again (the grant did not
+# take effect). A FURTHER nsfs permission (the predicted Case A:
+# the VFS open's own { open } requirement — or a getattr shape) is the
+# EXPECTED next boundary: it is recorded with its exact shape and the
+# phase stops there with no further grant. The rootlesskit domain's
+# separate nsfs getattr denial (the 4C-27 candidate boundary) was
+# deliberately NOT granted; its reappearance is recorded, not failed.
 SL_NSFS_GONE_OK=1
 {
-  echo "=== slirp4netns_t -> nsfs_t AVCs of the window (the 4C-28 boundary must be absent) ==="
-  SL_NSFS_AVC="$(grep -a 'tcontext=system_u:object_r:nsfs_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' || true)"
-  printf '%s\n' "${SL_NSFS_AVC:-(none — the 4C-28 namespace-handle read boundary is gone)}"
-  echo "--- ALL other slirp4netns-domain AVCs of the window (the next-boundary evidence; recorded, not failed):"
-  SL_NSFS_OTHER_AVC="$(grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -av 'tcontext=system_u:object_r:nsfs_t' || true)"
-  printf '%s\n' "${SL_NSFS_OTHER_AVC:-(none — no other slirp4netns-domain denial appeared)}"
+  echo "=== slirp4netns_t -> nsfs_t:file { read } AVCs of the window (the 4C-28 granted surface must be absent) ==="
+  SL_NSFS_READ_AVC="$(grep -a 'tcontext=system_u:object_r:nsfs_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' | grep -a 'denied  *{ [^}]*read' || true)"
+  printf '%s\n' "${SL_NSFS_READ_AVC:-(none — the 4C-28 namespace-handle read boundary is gone)}"
+  echo "--- ALL other slirp4netns_t -> nsfs_t AVCs of the window (the next-boundary evidence — a further nsfs permission owns its own phase; recorded, not failed):"
+  SL_NSFS_OTHER_AVC="$(grep -a 'tcontext=system_u:object_r:nsfs_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' | grep -av 'denied  *{ [^}]*read' || true)"
+  printf '%s\n' "${SL_NSFS_OTHER_AVC:-(none — no further nsfs permission was attempted)}"
+  echo "--- ALL other slirp4netns-domain AVCs of the window (recorded, not failed):"
+  SL_NSFS_NONNSFS_AVC="$(grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -av 'tcontext=system_u:object_r:nsfs_t' || true)"
+  printf '%s\n' "${SL_NSFS_NONNSFS_AVC:-(none — no other slirp4netns-domain denial appeared)}"
   echo "--- the rootlesskit domain's nsfs AVCs of the window (the separate getattr candidate boundary stays UNGRANTED; recorded, not failed):"
   RK_NSFS_AVC="$(grep -a 'tcontext=system_u:object_r:nsfs_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -a 'scontext=system_u:system_r:docker_helper_rootlesskit_t' || true)"
   printf '%s\n' "${RK_NSFS_AVC:-(none — no rootlesskit_t -> nsfs_t denial in the window)}"
   echo "--- the helper's userspace failure shape (informational)"
   grep -a 'slirp4netns\|waiting for ready fd' "$EVIDENCE_DIR/07-manager-diag.txt" 2>/dev/null | tail -4 || true
-  if [ -n "$SL_NSFS_AVC" ]; then
-    echo "GATE: the slirp4netns_t -> nsfs_t denial still appeared — the 4C-28 grant did not take effect"
+  if [ -n "$SL_NSFS_READ_AVC" ]; then
+    echo "GATE: the slirp4netns_t -> nsfs_t:file read denial still appeared — the 4C-28 grant did not take effect"
     SL_NSFS_GONE_OK=0
   fi
 } > "$EVIDENCE_DIR/32-slirp-nsfs-read-gone.txt" 2>&1
 cat "$EVIDENCE_DIR/32-slirp-nsfs-read-gone.txt" >&2
 if [ "$SL_NSFS_GONE_OK" = 1 ]; then
   marker "SLIRP-NSFS-READ-BOUNDARY=GONE"
+  # The next nsfs boundary from the recorded evidence (the predicted
+  # Case A shape: a further permission on the same nsfs object); the
+  # phase STOPS here — the boundary owns the next phase and is granted
+  # by nothing in this composition.
+  SL_NSFS_NEXT="$(printf '%s\n' "$SL_NSFS_OTHER_AVC" | head -1 || true)"
+  SL_NSFS_NEXT_PERMS="$(printf '%s\n' "$SL_NSFS_NEXT" | sed -n 's/.*denied  *{ \([^}]*\) }.*/\1/p' || true)"
+  SL_NSFS_NEXT_SUMMARY="$(printf '%s\n' "$SL_NSFS_NEXT" | sed -n 's/.*scontext=\([^ ]*\) tcontext=\([^ ]*\) tclass=\([a-z_]*\).*/scontext=\1 tcontext=\2 tclass=\3/p' || true)"
+  marker "SLIRP-NSFS-NEXT-BOUNDARY=${SL_NSFS_NEXT_SUMMARY:-none} perms=${SL_NSFS_NEXT_PERMS:-none}"
 else
   marker "BLOCKER=the 4C-28 slirp4netns nsfs namespace-handle read composition did not hold (see 32-slirp-nsfs-read-gone.txt)"
   marker "SLIRP-NSFS-READ-BOUNDARY=FAIL"
