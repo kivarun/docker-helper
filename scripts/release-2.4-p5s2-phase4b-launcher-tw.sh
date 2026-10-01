@@ -928,6 +928,61 @@ PREFLIGHT_OK=1
     echo "FAIL: slirp4netns helper cross-domain inventory (dir-count=$SL_DIR_COUNT_OK dir-shape=$SL_DIR_SHAPE_OK lnk-count=$SL_LNK_COUNT_OK lnk-shape=$SL_LNK_SHAPE_OK file-count=$SL_FILE_COUNT_OK file-shape=$SL_FILE_SHAPE_OK no-extra=$SL_NO_EXTRA_OK cap-count=$SL_CAP_COUNT_OK cap-shape=$SL_CAP_SHAPE_OK no-cap=$SL_NO_CAP_OK)"
     PREFLIGHT_OK=0
   fi
+
+  echo "=== slirp4netns helper nsfs namespace-handle inventory (the 4C-28 composition: the EFFECTIVE helper -> nsfs authority must be EXACTLY { read } — no open/getattr/ioctl/lock/write/map from ANY source, distro attribute expansion included; an effective extra is a STOP, not a pin violation) ==="
+  echo "--- raw effective inventory (slirp4netns -> nsfs; attribute/base-policy expansions recorded, not asserted per-rule):"
+  sesearch --allow -s docker_helper_slirp4netns_t -t nsfs_t /sys/fs/selinux/policy || true
+  echo "--- CONCRETE module contribution (source must be docker_helper_slirp4netns_t; must be EXACTLY one nsfs_t:file read rule):"
+  SL_NSFS_RULES="$(sesearch --allow -s docker_helper_slirp4netns_t -t nsfs_t /sys/fs/selinux/policy 2>/dev/null | awk '$2 == "docker_helper_slirp4netns_t"' || true)"
+  printf '%s\n' "${SL_NSFS_RULES:-(none)}"
+  SL_NSFS_COUNT_OK=0; SL_NSFS_SHAPE_OK=0; SL_NSFS_UNION_OK=0; SL_NSFS_CLASS_OK=0; SL_NSFS_NO_FLOW_GRANT_OK=0
+  if [ "$(printf '%s\n' "$SL_NSFS_RULES" | grep -ac .)" = 1 ] && printf '%s\n' "$SL_NSFS_RULES" | grep -aq 'nsfs_t:file read;'; then
+    SL_NSFS_COUNT_OK=1
+    SL_NSFS_SHAPE_OK=1
+  fi
+  # The effective perm union across the WHOLE helper -> nsfs surface:
+  # single-perm rules render bare, multi-perm rules render in braces;
+  # both forms fold into one token set which must be exactly `read`.
+  SL_NSFS_UNION="$(sesearch --allow -s docker_helper_slirp4netns_t -t nsfs_t /sys/fs/selinux/policy 2>/dev/null \
+    | grep -a 'nsfs_t:file' \
+    | sed -n 's/^allow [^ ]* nsfs_t:file \(.*\);$/\1/p' \
+    | sed 's/^[{ ]*//; s/[} ]*$//' \
+    | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
+  echo "effective helper -> nsfs:file perm union: ${SL_NSFS_UNION:-(empty)}"
+  if [ "$SL_NSFS_UNION" = "read " ]; then
+    SL_NSFS_UNION_OK=1
+  fi
+  # Any EFFECTIVE nsfs authority in a NON-file class is an extra too.
+  SL_NSFS_OTHER_CLASS="$(sesearch --allow -s docker_helper_slirp4netns_t -t nsfs_t /sys/fs/selinux/policy 2>/dev/null | grep -av 'nsfs_t:file' || true)"
+  if [ -z "$SL_NSFS_OTHER_CLASS" ]; then
+    SL_NSFS_CLASS_OK=1
+  else
+    echo "STOP: the effective helper -> nsfs surface contains a non-file class:"
+    printf '%s\n' "$SL_NSFS_OTHER_CLASS"
+  fi
+  echo "--- the helper's dontaudit surface toward nsfs (RECORDED SEPARATELY per the 4C-28 preflight contract; never merged into the allow verdict):"
+  SL_NSFS_DONTAUDIT="$(sesearch --dontaudit -s docker_helper_slirp4netns_t -t nsfs_t /sys/fs/selinux/policy 2>/dev/null || true)"
+  printf '%s\n' "${SL_NSFS_DONTAUDIT:-(none — no dontaudit rule hides helper -> nsfs denials)}"
+  echo "--- the flow domain's effective nsfs surface (the 4C-27-observed docker_helper_rootlesskit_t -> nsfs_t:file getattr denial stays UNGRANTED — a separate candidate boundary, not this phase's grant):"
+  sesearch --allow -s docker_helper_rootlesskit_t -t nsfs_t /sys/fs/selinux/policy || true
+  RK_NSFS_CONCRETE="$(sesearch --allow -s docker_helper_rootlesskit_t -t nsfs_t /sys/fs/selinux/policy 2>/dev/null | awk '$2 == "docker_helper_rootlesskit_t"' || true)"
+  printf '%s\n' "${RK_NSFS_CONCRETE:-(none — the module contributes NO rootlesskit -> nsfs rule)}"
+  if [ -z "$RK_NSFS_CONCRETE" ]; then
+    SL_NSFS_NO_FLOW_GRANT_OK=1
+  fi
+  echo "--- the transferred source's macro-exclusion gate (fs_read_nsfs_files must not appear outside comments; macro names do not exist post-compilation, so this is asserted at source level, like the 4C-12 xperm provenance):"
+  if grep -av '^[[:space:]]*#' "$TRANSFERRED/docker-helper.te" | grep -aq 'fs_read_nsfs_files'; then
+    echo "FAIL: the transferred .te uses the distro fs_read_nsfs_files interface (its read_file_perms expansion is broader than the evidenced read)"
+    PREFLIGHT_OK=0
+  else
+    echo "PASS: no fs_read_nsfs_files interface use outside comments"
+  fi
+  if [ "$SL_NSFS_COUNT_OK" = 1 ] && [ "$SL_NSFS_SHAPE_OK" = 1 ] && [ "$SL_NSFS_UNION_OK" = 1 ] && [ "$SL_NSFS_CLASS_OK" = 1 ] && [ "$SL_NSFS_NO_FLOW_GRANT_OK" = 1 ]; then
+    echo "PASS: slirp4netns helper nsfs namespace-handle inventory (exactly one nsfs_t:file read rule; the effective union is exactly { read }; no non-file class; no rootlesskit -> nsfs grant)"
+  else
+    echo "FAIL: slirp4netns helper nsfs namespace-handle inventory (count=$SL_NSFS_COUNT_OK shape=$SL_NSFS_SHAPE_OK union=$SL_NSFS_UNION_OK class=$SL_NSFS_CLASS_OK no-flow-grant=$SL_NSFS_NO_FLOW_GRANT_OK)"
+    PREFLIGHT_OK=0
+  fi
   echo "--- live Netlink mediation model (recorded; FAIL CLOSED if it unexpectedly changes):"
   NL_XPERM_FACT="unknown"
   if command -v seinfo >/dev/null 2>&1; then
@@ -1796,6 +1851,47 @@ else
   finish FAIL; exit 0
 fi
 
+# ============================================================
+# E6: the 4C-28 slirp4netns nsfs namespace-handle read gate
+# ============================================================
+# The 4C-28 grant: the helper's nsfs_t:file read — the VFS open of the
+# FOLLOWED namespace inode (nsfs_t:s0, globally labelled, NO MCS
+# category) after the categorized proc-target chain (dir search, lnk
+# read, target-SID file read) passes. The gate hard-fails if that
+# proven boundary still appears. Any OTHER helper-domain AVC (a further
+# nsfs permission — open/getattr shapes, each owning its own phase —
+# the setns cap_userns sys_admin check, or /dev/net/tun) is the
+# EXPECTED next boundary and is recorded, not failed. The rootlesskit
+# domain's separate nsfs getattr denial (the 4C-27 candidate boundary)
+# was deliberately NOT granted; its reappearance is recorded, not
+# failed.
+SL_NSFS_GONE_OK=1
+{
+  echo "=== slirp4netns_t -> nsfs_t AVCs of the window (the 4C-28 boundary must be absent) ==="
+  SL_NSFS_AVC="$(grep -a 'tcontext=system_u:object_r:nsfs_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' || true)"
+  printf '%s\n' "${SL_NSFS_AVC:-(none — the 4C-28 namespace-handle read boundary is gone)}"
+  echo "--- ALL other slirp4netns-domain AVCs of the window (the next-boundary evidence; recorded, not failed):"
+  SL_NSFS_OTHER_AVC="$(grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -av 'tcontext=system_u:object_r:nsfs_t' || true)"
+  printf '%s\n' "${SL_NSFS_OTHER_AVC:-(none — no other slirp4netns-domain denial appeared)}"
+  echo "--- the rootlesskit domain's nsfs AVCs of the window (the separate getattr candidate boundary stays UNGRANTED; recorded, not failed):"
+  RK_NSFS_AVC="$(grep -a 'tcontext=system_u:object_r:nsfs_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -a 'scontext=system_u:system_r:docker_helper_rootlesskit_t' || true)"
+  printf '%s\n' "${RK_NSFS_AVC:-(none — no rootlesskit_t -> nsfs_t denial in the window)}"
+  echo "--- the helper's userspace failure shape (informational)"
+  grep -a 'slirp4netns\|waiting for ready fd' "$EVIDENCE_DIR/07-manager-diag.txt" 2>/dev/null | tail -4 || true
+  if [ -n "$SL_NSFS_AVC" ]; then
+    echo "GATE: the slirp4netns_t -> nsfs_t denial still appeared — the 4C-28 grant did not take effect"
+    SL_NSFS_GONE_OK=0
+  fi
+} > "$EVIDENCE_DIR/32-slirp-nsfs-read-gone.txt" 2>&1
+cat "$EVIDENCE_DIR/32-slirp-nsfs-read-gone.txt" >&2
+if [ "$SL_NSFS_GONE_OK" = 1 ]; then
+  marker "SLIRP-NSFS-READ-BOUNDARY=GONE"
+else
+  marker "BLOCKER=the 4C-28 slirp4netns nsfs namespace-handle read composition did not hold (see 32-slirp-nsfs-read-gone.txt)"
+  marker "SLIRP-NSFS-READ-BOUNDARY=FAIL"
+  finish FAIL; exit 0
+fi
+
 # ---- launcher-domain AVC inventory (raw; the report classifies)
 {
   echo "=== launcher_t AVCs of the window (raw) ==="
@@ -2077,6 +2173,8 @@ harvest_avcs_since "$T1" "$EVIDENCE_DIR/23-companion-avc-window.txt"
     | grep -a 'p5s2diag' \
     | awk -v s="$T1" '{ for (i = 1; i <= NF; i++) if ($i ~ /^msg=audit\(/) { ts = substr($i, 11); split(ts, t, "."); if (t[1] + 0 >= s + 0) print; break } }' \
     || true
+  echo "=== auditctl -s (companion-window counters AT HARVEST: backlog_limit/lost/backlog decide whether a missing AVC slice is an absence proof or an audit-loss; the 4C-21 contract) ==="
+  auditctl -s 2>&1 || true
 } > "$EVIDENCE_DIR/23-companion-syscall-chronology.txt" 2>&1
 {
   echo "=== the companion window's manager journal (the child tail) ==="
