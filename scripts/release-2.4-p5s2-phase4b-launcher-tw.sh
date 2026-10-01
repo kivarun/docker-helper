@@ -172,6 +172,93 @@ harvest_avcs_since() {
   } > "$out" 2>&1
 }
 
+# 4C-29 AVC-tracepoint decoder: joins the kernel's avc:selinux_audited
+# trace events (raw access-vector masks) against the canonical audit
+# slice's symbolic AVC records, calibrating mask->permission pairs from
+# co-captured (pid, tclass) evidence. NO hardcoded bit map: only masks
+# whose symbolic perm-set is established live by co-capture in the same
+# window decode an event; everything else is reported raw.
+cat > /tmp/p4b-work/decode.awk <<'AWK'
+FNR == NR {
+	if ($0 !~ /selinux_audited:/) next
+	n = split($1, seg, "-"); pid = seg[n]
+	requested = ""; denied = ""; audited = ""; result = ""; sctx = ""; tctx = ""; tc = ""
+	for (i = 1; i <= NF; i++) {
+		if ($i ~ /^requested=/) { requested = $i; sub(/^requested=/, "", requested) }
+		else if ($i ~ /^denied=/) { denied = $i; sub(/^denied=/, "", denied) }
+		else if ($i ~ /^audited=/) { audited = $i; sub(/^audited=/, "", audited) }
+		else if ($i ~ /^result=/) { result = $i; sub(/^result=/, "", result) }
+		else if ($i ~ /^tclass=/) { tc = $i; sub(/^tclass=/, "", tc) }
+		else if ($i ~ /^scontext=/) { sctx = $i; sub(/^scontext=/, "", sctx) }
+		else if ($i ~ /^tcontext=/) { tctx = $i; sub(/^tcontext=/, "", tctx) }
+	}
+	if (tc == "" || pid !~ /^[0-9]+$/) next
+	key = pid "|" tc
+	nevents[key]++
+	tmask[key "|" denied]++
+	evorder[++evn] = pid "|" tc "|" requested "|" denied "|" audited "|" result "|" sctx "|" tctx
+	next
+}
+{
+	if ($0 !~ /type=AVC/) next
+	pid = ""; tc = ""
+	for (i = 1; i <= NF; i++) {
+		if ($i ~ /^pid=/) { pid = $i; sub(/^pid=/, "", pid) }
+		else if ($i ~ /^tclass=/) { tc = $i; sub(/^tclass=/, "", tc) }
+	}
+	perms = ""
+	if (match($0, /denied[ \t]+\{[^}]*\}/)) {
+		perms = substr($0, RSTART, RLENGTH)
+		sub(/denied[ \t]+\{[ \t]*/, "", perms)
+		sub(/[ \t]*\}$/, "", perms)
+		gsub(/[ \t]+/, " ", perms)
+	}
+	if (tc == "" || pid !~ /^[0-9]+$/ || perms == "") next
+	key = pid "|" tc
+	avcpairs[key "|" perms]++
+}
+END {
+	print "--- calibration pairs (co-captured: the same pid+tclass captured by BOTH channels with a unique mask and a unique perm-set) ---"
+	for (key in nevents) {
+		nm = 0; np = 0; themask = ""; theperms = ""
+		for (k in tmask) {
+			if (index(k, key "|") == 1) { nm++; themask = substr(k, length(key) + 2) }
+		}
+		for (k in avcpairs) {
+			if (index(k, key "|") == 1) { np++; theperms = substr(k, length(key) + 2) }
+		}
+		split(key, kp, "|")
+		if (nm == 1 && np == 1) {
+			printf "CALIBRATED %s: denied-mask %s <-> perms { %s }\n", key, themask, theperms
+			if (classpair[kp[2] "|" themask] != "" && classpair[kp[2] "|" themask] != theperms) {
+				printf "CONFLICT at class level: mask %s maps to both { %s } and { %s } — dropped from class decode\n", themask, classpair[kp[2] "|" themask], theperms
+				delete classpair[kp[2] "|" themask]
+			} else {
+				classpair[kp[2] "|" themask] = theperms
+			}
+		} else {
+			printf "AMBIGUOUS %s: %d distinct trace mask(s), %d distinct AVC perm-set(s) — not a calibration pair\n", key, nm, np
+		}
+	}
+	print "--- class-level decode table (live-derived in this window; the kernel maps class+bit -> perm name identically for every subject) ---"
+	for (k in classpair) {
+		split(k, kp, "|")
+		printf "tclass=%s denied-mask=%s -> perms { %s }\n", kp[1], kp[2], classpair[k]
+	}
+	print "--- decoded trace events (docker_helper_* subjects; UNDECODED when no co-captured pair covers the mask) ---"
+	for (e = 1; e <= evn; e++) {
+		split(evorder[e], ee, "|")
+		if (ee[7] !~ /docker_helper_(slirp4netns|rootlesskit|newuidmap|newgidmap)_t/) continue
+		decoded = "(uncalibrated in this window)"
+		ckey = ee[2] "|" ee[4]
+		if (ckey in classpair) decoded = "{ " classpair[ckey] " }"
+		if (ee[7] ~ /slirp4netns/) who = "HELPER"; else who = "FLOW"
+		printf "%s pid=%s tclass=%s requested=%s denied=%s audited=%s result=%s -> denied-perms %s\n", who, ee[1], ee[2], ee[3], ee[4], ee[5], ee[6], decoded
+		printf "    scontext=%s tcontext=%s\n", ee[7], ee[8]
+	}
+}
+AWK
+
 cleanup() {
   log 'cleanup: converge, stop the unit, remove the composition'
   printf 'PURGE\n' | timeout 240 socat - UNIX-CONNECT:"$MANAGER_SOCK" >> "$EVIDENCE_DIR/99-cleanup.txt" 2>&1 || true
@@ -1131,6 +1218,7 @@ auditctl -s > "$EVIDENCE_DIR/audit-status-window-start.txt" 2>&1 || true
 # namespace-path syscalls' exits (openat/setns/socket) for the helper.
 TRACING=/sys/kernel/tracing
 TRACE_ENABLED=0
+TRACE_AVC_ENABLED=0
 if [ -d "$TRACING/events/capability/cap_capable" ]; then
   echo 0 > "$TRACING/tracing_on" 2>/dev/null || true
   echo > "$TRACING/trace" 2>/dev/null || true
@@ -1141,12 +1229,32 @@ if [ -d "$TRACING/events/capability/cap_capable" ]; then
   echo 1 > "$TRACING/events/syscalls/sys_enter_setns/enable" 2>/dev/null || true
   echo 1 > "$TRACING/events/syscalls/sys_exit_setns/enable" 2>/dev/null || true
   echo 1 > "$TRACING/events/syscalls/sys_enter_socket/enable" 2>/dev/null || true
-  echo 1 > "$TRACING/tracing_on" 2>/dev/null || true
+  # 4C-29: the SELinux decision tracepoint (avc:selinux_audited) —
+  # independent of auditd's userspace log harvest (run 36864816648
+  # showed launch-period SYSCALL+AVC records absent with lost=0, so
+  # userspace audit absence alone is no absence proof). The trace line
+  # carries the raw requested/denied/audited MASKS, the result, the
+  # contexts, and the kernel-decoded symbolic tclass.
+  if [ -d "$TRACING/events/avc/selinux_audited" ]; then
+    echo 1 > "$TRACING/events/avc/selinux_audited/enable" 2>/dev/null || true \
+      && TRACE_AVC_ENABLED=1
+  fi
   {
     echo "=== 4C-27 tracefs collector armed ==="
     echo "cap_capable enabled: $TRACE_ENABLED"
-    grep -a -E '^(current_tracer|trace_...)' /dev/null 2>/dev/null || true
+    echo "avc/selinux_audited available: $TRACE_AVC_ENABLED"
+    echo "=== 4C-29 selinux_audited tracepoint format (recorded verbatim) ==="
+    cat "$TRACING/events/avc/selinux_audited/format" 2>/dev/null || echo "(format file unavailable)"
+    echo "=== 4C-29 live class/permission mapping evidence (RECORDED, not hardcoded — decode validation uses co-captured AVC records) ==="
+    echo "--- /sys/fs/selinux/class file-class perms listing (as the kernel presents it):"
+    ls /sys/fs/selinux/class/file/perms 2>/dev/null || true
+    echo "--- seinfo class expansion attempt (whatever the tooling exposes):"
+    seinfo -c -x /sys/fs/selinux/policy 2>&1 | sed -n '1,30p' || true
+    echo "--- sedismod class-map attempt (interactive tool, piped; output recorded as evidence only):"
+    printf 'q\n' | timeout 5 sedismod /sys/fs/selinux/policy 2>&1 | head -15 || true
+    echo "=== cap tracepoint state ==="
     cat "$TRACING/events/capability/cap_capable/enable" 2>/dev/null
+    cat "$TRACING/events/avc/selinux_audited/enable" 2>/dev/null || true
   } > "$EVIDENCE_DIR/30-trace-arm.txt" 2>&1
 else
   note "tracefs capability tracepoint unavailable"
@@ -1295,6 +1403,8 @@ cat "$EVIDENCE_DIR/04-launch-window.txt" >&2
 # ---- 4C-27: read the trace ring IMMEDIATELY after the manager's
 # ---- response (the flow has exited by then; the sampler's later fork
 # ---- volume would otherwise overwrite the ring).
+# ---- 4C-29: the ring now also carries avc/selinux_audited decisions;
+# ---- the disable sweep must cover the avc event too.
 if [ "$TRACE_ENABLED" = 1 ]; then
   echo 0 > "$TRACING/tracing_on" 2>/dev/null || true
   cat "$TRACING/trace" > "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true
@@ -1304,7 +1414,8 @@ if [ "$TRACE_ENABLED" = 1 ]; then
   echo 0 > "$TRACING/events/syscalls/sys_enter_setns/enable" 2>/dev/null || true
   echo 0 > "$TRACING/events/syscalls/sys_exit_setns/enable" 2>/dev/null || true
   echo 0 > "$TRACING/events/syscalls/sys_enter_socket/enable" 2>/dev/null || true
-  grep -a -E 'slirp4netns|rootlesskit| ns/net|ns/user|/dev/net/tun|cap_capable' "$EVIDENCE_DIR/30-trace-window.txt" \
+  echo 0 > "$TRACING/events/avc/selinux_audited/enable" 2>/dev/null || true
+  grep -a -E 'slirp4netns|rootlesskit| ns/net|ns/user|/dev/net/tun|cap_capable|selinux_audited' "$EVIDENCE_DIR/30-trace-window.txt" \
     > "$EVIDENCE_DIR/30-trace-relevant.txt" 2>/dev/null || true
 else
   : > "$EVIDENCE_DIR/30-trace-window.txt"
@@ -1903,6 +2014,25 @@ else
   finish FAIL; exit 0
 fi
 
+# ============================================================
+# 4C-29: decode the avc:selinux_audited tracepoint against the
+# canonical audit slice (the audit-observation gap of run 36864816648
+# makes userspace audit absence alone unusable; the kernel tracepoint
+# records the SELinux decision independently). The decode CALIBRATES
+# the numeric access-vector masks against co-captured symbolic AVC
+# records in the same window — NO hardcoded bit map; uncalibrated
+# events are reported raw.
+# ============================================================
+{
+  echo "=== 4C-29 avc/selinux_audited availability (30-trace-arm.txt carries the format + the recorded class/perm mapping evidence) ==="
+  echo "armed: $TRACE_AVC_ENABLED"
+  echo "=== raw selinux_audited events of the canonical window (tracefs; independent of auditd) ==="
+  grep -a 'selinux_audited:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || echo "(none — tracepoint unavailable or no audited decisions in the ring)"
+  echo "=== calibration + decode (co-captured pid+tclass pairs; unpaired events stay raw) ==="
+  awk -f /tmp/p4b-work/decode.awk "$EVIDENCE_DIR/30-trace-window.txt" "$EVIDENCE_DIR/09-avc-window.txt" 2>&1 || true
+} > "$EVIDENCE_DIR/34-avc-trace-decode.txt" 2>&1
+cat "$EVIDENCE_DIR/34-avc-trace-decode.txt" >&2
+
 # ---- launcher-domain AVC inventory (raw; the report classifies)
 {
   echo "=== launcher_t AVCs of the window (raw) ==="
@@ -2162,6 +2292,18 @@ log "CC: companion START $COMP_OP_ID (dontaudit disabled)"
   touch /tmp/p4b-work/companion.done
 ) &
 COMP_SAMPLER_PID=$!
+# 4C-29: re-arm the avc/selinux_audited tracepoint for the companion
+# window with a FRESH ring (the canonical content is already saved in
+# 30-trace-window.txt) — the tracepoint records the SELinux decisions
+# independently of auditd's userspace harvest.
+COMP_TRACE_AVC_ENABLED=0
+if [ "$TRACE_AVC_ENABLED" = 1 ]; then
+  echo 0 > "$TRACING/tracing_on" 2>/dev/null || true
+  echo > "$TRACING/trace" 2>/dev/null || true
+  echo 1 > "$TRACING/events/avc/selinux_audited/enable" 2>/dev/null || true \
+    && COMP_TRACE_AVC_ENABLED=1
+  echo 1 > "$TRACING/tracing_on" 2>/dev/null || true
+fi
 COMP_START_RC=0
 COMP_START_OUT="$(printf 'START %s\n' "$COMP_OP_ID" | timeout 120 socat - UNIX-CONNECT:"$MANAGER_SOCK")" || COMP_START_RC=$?
 {
@@ -2178,6 +2320,25 @@ done
 kill "$COMP_SAMPLER_PID" 2>/dev/null || true
 wait "$COMP_SAMPLER_PID" 2>/dev/null || true
 harvest_avcs_since "$T1" "$EVIDENCE_DIR/23-companion-avc-window.txt"
+# 4C-29: read + disable the companion trace ring, then decode it
+# against the companion's audit slice (same calibration method; the
+# dontaudit-disabled leg makes the userspace channel MORE complete, so
+# the calibration here validates the masks for the flow's denials).
+if [ "$COMP_TRACE_AVC_ENABLED" = 1 ]; then
+  echo 0 > "$TRACING/tracing_on" 2>/dev/null || true
+  cat "$TRACING/trace" > "$EVIDENCE_DIR/35-companion-avc-trace.txt" 2>/dev/null || true
+  echo 0 > "$TRACING/events/avc/selinux_audited/enable" 2>/dev/null || true
+  {
+    echo "=== 4C-29 companion (dontaudit disabled): raw selinux_audited events ==="
+    grep -a 'selinux_audited:' "$EVIDENCE_DIR/35-companion-avc-trace.txt" 2>/dev/null || echo "(none in the ring)"
+    echo "=== calibration + decode against the companion audit slice ==="
+    awk -f /tmp/p4b-work/decode.awk "$EVIDENCE_DIR/35-companion-avc-trace.txt" "$EVIDENCE_DIR/23-companion-avc-window.txt" 2>&1 || true
+  } > "$EVIDENCE_DIR/36-companion-avc-trace-decode.txt" 2>&1
+  cat "$EVIDENCE_DIR/36-companion-avc-trace-decode.txt" >&2
+else
+  : > "$EVIDENCE_DIR/35-companion-avc-trace.txt"
+  : > "$EVIDENCE_DIR/36-companion-avc-trace-decode.txt"
+fi
 {
   echo "=== companion window's audit.log SYSCALL records (key p5s2diag) since epoch $T1 ==="
   grep -a 'type=SYSCALL' /var/log/audit/audit.log 2>/dev/null \
