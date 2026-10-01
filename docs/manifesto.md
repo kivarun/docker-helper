@@ -102,6 +102,22 @@ Consolidate or delete representations whose distinction is no longer supported
 by evidence. Architecture should avoid increasing entropy and reduce it as the
 code evolves.
 
+## Principles are tools, not commandments
+
+Design principles exist to improve the product, reduce complexity, and protect
+users. They are not axioms to defend at the expense of a demonstrated workflow.
+
+When a principle appears to conflict with an observed user need, identify the
+goal the principle protects and choose the smallest bounded solution that
+preserves that goal without pushing avoidable complexity or inconvenience onto
+the user. Minimalism, scope, abstraction boundaries, and consistency are means,
+not ends.
+
+An exception is not permission for ad hoc design: it must be explicit,
+evidence-based, and narrow. If repeated evidence shows that a principle
+consistently produces worse outcomes, change the principle instead of forcing
+the product to conform to it.
+
 ## Local agent workloads, not production orchestration
 
 docker-helper is designed for local and small shared-host agent workflows where
