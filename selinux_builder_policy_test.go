@@ -1299,11 +1299,12 @@ func helperDomainPolicyViolations(policy string) []string {
 	if slirpEntryFileRules != 1 {
 		violations = append(violations, fmt.Sprintf("exactly one entry-file rule may exist for the helper domain, found %d", slirpEntryFileRules))
 	}
-	// The 4C-28 nsfs namespace-handle read grant: exactly ONE allow line
-	// may name slirp4netns_t -> nsfs_t:file, in the exact bare-read shape
-	// (no brace form, no extra perms, no second grant). nsfs_t is
-	// globally labelled; the categorized proc-target layer is what must
-	// keep the access pointed (see the .te scope note).
+	// The 4C-29 nsfs namespace-handle { read open } grant: exactly ONE
+	// allow line may name slirp4netns_t -> nsfs_t:file, in the exact
+	// brace shape { read open } (no bare read, no bare open, no split
+	// into two rules, no extra perms). nsfs_t is globally labelled; the
+	// categorized proc-target layer is what must keep the access
+	// pointed (see the .te scope note).
 	slirpNsfsFileLines := 0
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -1312,8 +1313,8 @@ func helperDomainPolicyViolations(policy string) []string {
 		}
 		if strings.HasPrefix(trimmed, "allow docker_helper_slirp4netns_t nsfs_t:file") {
 			slirpNsfsFileLines++
-			if trimmed != "allow docker_helper_slirp4netns_t nsfs_t:file read;" {
-				violations = append(violations, fmt.Sprintf("the helper's nsfs namespace-handle grant must be the exact bare-read shape (no brace form, no extra perms): %s", trimmed))
+			if trimmed != "allow docker_helper_slirp4netns_t nsfs_t:file { read open };" {
+				violations = append(violations, fmt.Sprintf("the helper's nsfs namespace-handle grant must be the exact { read open } shape (no bare-read, no bare-open, no split rules, no extra perms): %s", trimmed))
 			}
 		}
 	}
@@ -1425,7 +1426,7 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		"allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:dir search;",
 		"allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:lnk_file read;",
 		"allow docker_helper_slirp4netns_t self:cap_userns sys_ptrace;",
-		"allow docker_helper_slirp4netns_t nsfs_t:file read;",
+		"allow docker_helper_slirp4netns_t nsfs_t:file { read open };",
 		"type nsfs_t;",
 	} {
 		if !strings.Contains(policy, want) {
@@ -1442,7 +1443,7 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 	pinnedLnkRule := "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:lnk_file read;"
 	pinnedCapRule := "allow docker_helper_slirp4netns_t self:cap_userns sys_ptrace;"
 	pinnedFileRule := "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:file read;"
-	pinnedNsfsRule := "allow docker_helper_slirp4netns_t nsfs_t:file read;"
+	pinnedNsfsRule := "allow docker_helper_slirp4netns_t nsfs_t:file { read open };"
 	pinnedNsfsRequire := "type nsfs_t;"
 	countPinned := func(text, rule string) int {
 		n := 0
@@ -1466,7 +1467,7 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		t.Errorf("the helper's target-SID ptrace READ authority must be exactly one `rootlesskit_t:file read` rule, found %d", countPinned(policy, pinnedFileRule))
 	}
 	if countPinned(policy, pinnedNsfsRule) != 1 {
-		t.Errorf("the helper's namespace-handle read must be exactly one `nsfs_t:file read` rule (the magic-link target's VFS read), found %d", countPinned(policy, pinnedNsfsRule))
+		t.Errorf("the helper's namespace-handle authority must be exactly one `nsfs_t:file { read open }` rule (the magic-link target's VFS read+open), found %d", countPinned(policy, pinnedNsfsRule))
 	}
 	if countPinned(policy, pinnedNsfsRequire) != 1 {
 		t.Errorf("the module's external-type require set must declare nsfs_t exactly once, found %d", countPinned(policy, pinnedNsfsRequire))
@@ -1488,7 +1489,8 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		{"missing target-file rule", pinnedFileRule, ""},
 		{"missing target-file read (getattr-only shape)", pinnedFileRule, "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:file getattr;"},
 		{"missing nsfs namespace-handle rule", pinnedNsfsRule, ""},
-		{"missing nsfs read (getattr-only shape)", pinnedNsfsRule, "allow docker_helper_slirp4netns_t nsfs_t:file getattr;"},
+		{"missing nsfs open (pre-4C-29 bare-read shape)", pinnedNsfsRule, "allow docker_helper_slirp4netns_t nsfs_t:file read;"},
+		{"missing nsfs read (bare-open-only shape)", pinnedNsfsRule, "allow docker_helper_slirp4netns_t nsfs_t:file open;"},
 		{"missing nsfs_t require declaration", pinnedNsfsRequire, ""},
 	} {
 		mutated := strings.Replace(policy, regressed.old, regressed.rule, 1)
@@ -1520,14 +1522,16 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		{"lnk_file widened { read write }", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:lnk_file { read write };"},
 		{"lnk_file widened { read ioctl }", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:lnk_file { read ioctl };"},
 		{"lnk_file widened { read lock }", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:lnk_file { read lock };"},
-		{"nsfs-like file pre-grant", "allow docker_helper_slirp4netns_t nsfs_t:file { read open };"},
-		{"nsfs structural: duplicate identical namespace-handle rule", "allow docker_helper_slirp4netns_t nsfs_t:file read;"},
+		{"nsfs structural: duplicate identical namespace-handle rule", "allow docker_helper_slirp4netns_t nsfs_t:file { read open };"},
 		{"nsfs structural: parallel read rule (brace form)", "allow docker_helper_slirp4netns_t nsfs_t:file { read };"},
-		{"nsfs widened { read getattr }", "allow docker_helper_slirp4netns_t nsfs_t:file { read getattr };"},
-		{"nsfs widened { read ioctl }", "allow docker_helper_slirp4netns_t nsfs_t:file { read ioctl };"},
-		{"nsfs widened { read lock }", "allow docker_helper_slirp4netns_t nsfs_t:file { read lock };"},
-		{"nsfs widened { read write }", "allow docker_helper_slirp4netns_t nsfs_t:file { read write };"},
-		{"nsfs widened { read map }", "allow docker_helper_slirp4netns_t nsfs_t:file { read map };"},
+		{"nsfs structural: parallel open rule", "allow docker_helper_slirp4netns_t nsfs_t:file open;"},
+		{"nsfs structural: read/open split across two rules", "allow docker_helper_slirp4netns_t nsfs_t:file read;\nallow docker_helper_slirp4netns_t nsfs_t:file open;"},
+		{"nsfs widened { read open getattr }", "allow docker_helper_slirp4netns_t nsfs_t:file { read open getattr };"},
+		{"nsfs widened { read open ioctl }", "allow docker_helper_slirp4netns_t nsfs_t:file { read open ioctl };"},
+		{"nsfs widened { read open lock }", "allow docker_helper_slirp4netns_t nsfs_t:file { read open lock };"},
+		{"nsfs widened { read open write }", "allow docker_helper_slirp4netns_t nsfs_t:file { read open write };"},
+		{"nsfs widened { read open map }", "allow docker_helper_slirp4netns_t nsfs_t:file { read open map };"},
+		{"nsfs widened { read open execute }", "allow docker_helper_slirp4netns_t nsfs_t:file { read open execute };"},
 		{"nsfs distro-macro expansion equivalent", "allow docker_helper_slirp4netns_t nsfs_t:file { open getattr read ioctl lock };"},
 		{"nsfs distro-macro use (fs_read_nsfs_files interface call)", "fs_read_nsfs_files(docker_helper_slirp4netns_t);"},
 		{"cap_userns pre-grant toward the target", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:cap_userns sys_admin;"},
