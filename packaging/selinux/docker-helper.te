@@ -75,6 +75,7 @@ module docker_helper 1.2;
 		type container_runtime_t;
 		type passwd_file_t;
 		type tun_tap_device_t;
+		type nsfs_t;
 		type container_var_run_t;
 		type user_home_dir_t;
 		type fs_t;
@@ -1575,6 +1576,53 @@ allow docker_helper_slirp4netns_t self:cap_userns sys_ptrace;
 # (sys_admin/sys_chroot/net_admin), any plain capability, and any other
 # target-specific surface.
 allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:file read;
+
+# The helper's namespace-handle read: after the target-SID ptrace check
+# passes, the openat of /proc/<target-pid>/ns/net|ns/user resolves the
+# magic link to the target namespace's nsfs inode, and the VFS open asks
+# SELinux for a FILE read on that nsfs object. Live enforcing evidence,
+# canonical 4C-27 run 36854286258, audit record 1705: denied { read }
+# for syscall=257 (openat) success=no exit=-13, pid=3139 ppid=3138
+# comm="slirp4netns" exe="/usr/bin/slirp4netns"
+# scontext=...docker_helper_slirp4netns_t:s0:c1
+# tcontext=system_u:object_r:nsfs_t:s0 tclass=file, dev="nsfs"
+# ino=4026532270 — the same serial carries the AVC and its own syscall
+# record, and the tap0-lifecycle observer (05-flow-context.txt) shows
+# the tap0 owner namespace is net:[4026532270] in domain
+# docker_helper_rootlesskit_t:s0:c1. The kernel chronology at the same
+# moment (30-trace-window.txt): sys_openat
+# filename="/proc/3122/ns/net" flags=O_RDONLY → the two passing
+# cap_capable cap=19 (CAP_SYS_PTRACE) checks inside
+# proc_ns_get_link()'s ptrace_may_access → openat → 0xfffffffffffffff3.
+# open(ns/user), setns(CLONE_NEWUSER), setns(CLONE_NEWNET), and
+# open("/dev/net/tun") were never reached; the flow died at the FIRST
+# namespace handle.
+#
+# SCOPE NOTE — RECORD ACCURATELY: nsfs_t is globally labelled
+# (system_u:object_r:nsfs_t:s0) with no per-operation MCS category, so
+# this allow is NOT category-scoped namespace-object authority. The
+# security chain that reaches this object is:
+#   categorized proc target acquisition
+#       /proc/<rootlesskit_t:s0:cX>/...
+#   ↓ MCS + target-SID checks (dir search, lnk_file read, file read)
+#   ↓ namespace magic-link dereference
+#   ↓ global nsfs_t:s0 inode
+# Once the nsfs object is reached, this allow no longer distinguishes
+# c1 from c2. That does not by itself invalidate the design:
+# acquisition of another operation's namespace handle must stay blocked
+# at the categorized proc-target layer (the MCS constraints on the
+# rootlesskit_t proc objects), and blocking it there becomes a
+# MANDATORY property of the final c1-vs-c2 proof — that gate stays open
+# and Release GO stays closed.
+#
+# Deliberately NOT granted: nsfs_t:file open/getattr/ioctl/lock/write/
+# map (the AVC proves only read; each owns its own phase if it
+# materializes), the distro fs_read_nsfs_files() interface and any
+# other read-file macro (read_file_perms expands to materially broader
+# authority — { open getattr read ioctl lock } — that is NOT the
+# evidenced surface), and any widening of the helper's frozen surfaces
+# below (rootlesskit_t:dir/lnk_file/file, fifo_file, cap_userns).
+allow docker_helper_slirp4netns_t nsfs_t:file read;
 
 # --- docker_helper_newuidmap_t: the rootlesskit UID-map helper domain (P5-S2) ---
 #
