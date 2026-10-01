@@ -1726,9 +1726,9 @@ func TestSELinuxPolicyNewuidmapIsolation(t *testing.T) {
 			case "allow docker_helper_rootlesskit_t self:cap_userns { sys_admin sys_ptrace sys_chroot net_admin };",
 				"allow docker_helper_newuidmap_t self:cap_userns sys_admin;",
 				"allow docker_helper_newgidmap_t self:cap_userns sys_admin;",
-				"allow docker_helper_slirp4netns_t self:cap_userns sys_ptrace;":
+				"allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace sys_admin };":
 			default:
-				t.Errorf("no cap_userns grant may exist beyond the four evidenced in-namespace grants (rootlesskit { sys_admin sys_ptrace sys_chroot net_admin }, UID-map helper sys_admin, GID-map helper sys_admin, slirp4netns sys_ptrace): %s", trimmed)
+				t.Errorf("no cap_userns grant may exist beyond the four evidenced in-namespace grants (rootlesskit { sys_admin sys_ptrace sys_chroot net_admin }, UID-map helper sys_admin, GID-map helper sys_admin, slirp4netns { sys_ptrace sys_admin }): %s", trimmed)
 			}
 		}
 	}
@@ -2240,9 +2240,9 @@ func TestSELinuxPolicyCapUsernsShape(t *testing.T) {
 					rootlesskitCapUsernsRules++
 				case "allow docker_helper_newuidmap_t self:cap_userns sys_admin;",
 					"allow docker_helper_newgidmap_t self:cap_userns sys_admin;",
-					"allow docker_helper_slirp4netns_t self:cap_userns sys_ptrace;":
+					"allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace sys_admin };":
 				default:
-					violations = append(violations, fmt.Sprintf("no cap_userns rule may exist beyond the four evidenced in-namespace grants (rootlesskit { sys_admin sys_ptrace sys_chroot net_admin }, newuidmap sys_admin, newgidmap sys_admin, slirp4netns sys_ptrace; the manager, the launcher, and other subjects get none): %s", trimmed))
+					violations = append(violations, fmt.Sprintf("no cap_userns rule may exist beyond the four evidenced in-namespace grants (rootlesskit { sys_admin sys_ptrace sys_chroot net_admin }, newuidmap sys_admin, newgidmap sys_admin, slirp4netns { sys_ptrace sys_admin }; the manager, the launcher, and other subjects get none): %s", trimmed))
 				}
 			case strings.Contains(trimmed, ":capability ") && strings.Contains(trimmed, "docker_helper_rootlesskit_t"):
 				violations = append(violations, fmt.Sprintf("the rootlesskit child domain must keep zero plain self:capability surfaces (no plain sys_ptrace/sys_chroot: the live AVCs name cap_userns): %s", trimmed))
