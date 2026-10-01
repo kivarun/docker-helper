@@ -1277,6 +1277,28 @@ func helperDomainPolicyViolations(policy string) []string {
 	if slirpTargetLnkRules != 1 {
 		violations = append(violations, fmt.Sprintf("exactly one lnk_file-read grant may exist from the helper toward the rootlesskit namespace target, found %d", slirpTargetLnkRules))
 	}
+	// The 4C-26 target-SID ptrace READ grant exists exactly once per its
+	// triple; a duplicate (even byte-identical) rule also violates.
+	slirpTargetFileRules := 0
+	for _, rule := range allows {
+		if rule.source == "docker_helper_slirp4netns_t" && rule.target == "docker_helper_rootlesskit_t" && rule.class == "file" {
+			slirpTargetFileRules++
+		}
+	}
+	if slirpTargetFileRules != 1 {
+		violations = append(violations, fmt.Sprintf("exactly one file-read grant may exist from the helper toward the rootlesskit namespace target (the PTRACE_MODE_READ target-SID check), found %d", slirpTargetFileRules))
+	}
+	// The helper's own entry-file rule exists exactly once per its triple;
+	// a widened duplicate also violates.
+	slirpEntryFileRules := 0
+	for _, rule := range allows {
+		if rule.source == "docker_helper_slirp4netns_t" && rule.target == "docker_helper_slirp4netns_exec_t" && rule.class == "file" {
+			slirpEntryFileRules++
+		}
+	}
+	if slirpEntryFileRules != 1 {
+		violations = append(violations, fmt.Sprintf("exactly one entry-file rule may exist for the helper domain, found %d", slirpEntryFileRules))
+	}
 	// The 4C-25 helper capability invariant: the helper's ONLY
 	// cap_userns rule is its own self:cap_userns sys_ptrace (the
 	// proc-magic-link dereference's ptrace-may-access prerequisite).
@@ -1303,23 +1325,25 @@ func helperDomainPolicyViolations(policy string) []string {
 					violations = append(violations, fmt.Sprintf("the helper domain must not receive a grant toward %s: allow %s %s:%s", forbidden, rule.source, rule.target, rule.class))
 				}
 			}
-			// The 4C-23/4C-24 namespace-target authority: dir search
-			// (the traversal) and lnk_file read (the magic-link open)
-			// toward the rootlesskit target, exactly; any other dir
-			// shape (widened perms, another target domain) is a
-			// widening.
+			// The 4C-23/4C-24/4C-26 namespace-target authority: dir
+			// search (the traversal), lnk_file read (the magic-link
+			// open), and file read (the SELinux ptrace READ target-SID
+			// check) toward the rootlesskit target, exactly; any other
+			// dir/lnk shape (widened perms, another target domain) is
+			// a widening.
 			if rule.class == "dir" && rule.target != "docker_helper_rootlesskit_t" {
 				violations = append(violations, fmt.Sprintf("the helper domain holds no dir authority toward any target other than the rootlesskit namespace target: allow %s %s:%s", rule.source, rule.target, rule.class))
 			}
 			if rule.class == "lnk_file" && rule.target != "docker_helper_rootlesskit_t" {
 				violations = append(violations, fmt.Sprintf("the helper domain holds no lnk_file authority toward any target other than the rootlesskit namespace target: allow %s %s:%s", rule.source, rule.target, rule.class))
 			}
-			// The helper's FILE authority is only its own entry type;
-			// a namespace-path open on the target (rootlesskit_t:file)
-			// or any other file target is a pre-grant of the NEXT live
-			// boundary.
-			if rule.class == "file" && rule.target != "docker_helper_slirp4netns_exec_t" {
-				violations = append(violations, fmt.Sprintf("the helper domain's file authority is only its own entry type (no namespace-path open, no other file target): allow %s %s:%s", rule.source, rule.target, rule.class))
+			// The helper's FILE authority is its own entry type plus the
+			// single target-SID ptrace READ rule (count and exact shape
+			// enforced by the count clause and the slirp4netns test's
+			// string scans); a file grant toward any OTHER target is a
+			// pre-grant of an unproven boundary.
+			if rule.class == "file" && rule.target != "docker_helper_slirp4netns_exec_t" && rule.target != "docker_helper_rootlesskit_t" {
+				violations = append(violations, fmt.Sprintf("the helper domain's file authority is only its own entry type plus the rootlesskit target-SID read (no other file target): allow %s %s:%s", rule.source, rule.target, rule.class))
 			}
 			// The helper's capability surface: no plain capability/
 			// capability2 grant of any target; the only cap_userns
@@ -1374,6 +1398,7 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 	pinnedDirRule := "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:dir search;"
 	pinnedLnkRule := "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:lnk_file read;"
 	pinnedCapRule := "allow docker_helper_slirp4netns_t self:cap_userns sys_ptrace;"
+	pinnedFileRule := "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:file read;"
 	countPinned := func(text, rule string) int {
 		n := 0
 		for _, line := range strings.Split(text, "\n") {
@@ -1392,6 +1417,9 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 	if countPinned(policy, pinnedCapRule) != 1 {
 		t.Errorf("the helper's ptrace-may-access prerequisite must be exactly one `self:cap_userns sys_ptrace` rule, found %d", countPinned(policy, pinnedCapRule))
 	}
+	if countPinned(policy, pinnedFileRule) != 1 {
+		t.Errorf("the helper's target-SID ptrace READ authority must be exactly one `rootlesskit_t:file read` rule, found %d", countPinned(policy, pinnedFileRule))
+	}
 	// Regression: each grant must exist; removing it, or replacing it
 	// with a wrong-shape, must break the exactly-one invariant the count
 	// guard asserts.
@@ -1406,10 +1434,12 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		{"missing lnk_file read (getattr-only shape)", pinnedLnkRule, "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:lnk_file getattr;"},
 		{"missing cap_userns rule", pinnedCapRule, ""},
 		{"missing sys_ptrace (sys_chroot-only shape)", pinnedCapRule, "allow docker_helper_slirp4netns_t self:cap_userns sys_chroot;"},
+		{"missing target-file rule", pinnedFileRule, ""},
+		{"missing target-file read (getattr-only shape)", pinnedFileRule, "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:file getattr;"},
 	} {
 		mutated := strings.Replace(policy, regressed.old, regressed.rule, 1)
 		if countPinned(mutated, regressed.old) == 1 {
-			t.Errorf("the traversal/lnk/cap regression %q was not applied", regressed.name)
+			t.Errorf("the traversal/lnk/cap/file regression %q was not applied", regressed.name)
 		}
 	}
 	// Structural and widening mutations: appended or replacement rules
@@ -1445,6 +1475,16 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		{"cap_userns widened +sys_chroot", "allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace sys_chroot };"},
 		{"cap_userns widened +net_admin", "allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace net_admin };"},
 		{"plain capability sys_ptrace for the helper", "allow docker_helper_slirp4netns_t self:capability sys_ptrace;"},
+		{"file-read structural: duplicate identical target rule", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:file read;"},
+		{"file-read structural: parallel read rule (brace form)", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:file { read };"},
+		{"file widened { read open }", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:file { read open };"},
+		{"file widened { read getattr }", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:file { read getattr };"},
+		{"file widened { read write }", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:file { read write };"},
+		{"file widened { read ioctl }", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:file { read ioctl };"},
+		{"file widened { read execute }", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:file { read execute };"},
+		{"file widened { read map }", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:file { read map };"},
+		{"file widened for the entry type", "allow docker_helper_slirp4netns_t docker_helper_slirp4netns_exec_t:file { entrypoint read open execute getattr map ioctl };"},
+		{"wrong-target file read toward the uid-map helper", "allow docker_helper_slirp4netns_t docker_helper_newuidmap_t:file read;"},
 	} {
 		mutated := policy + "\n" + mut.rule
 		violations := helperDomainPolicyViolations(mutated)
@@ -1519,6 +1559,35 @@ func TestSELinuxPolicyNewuidmapDomainTransition(t *testing.T) {
 	}
 	if newuidTransitions != 1 {
 		t.Errorf("exactly one transition may enter the UID-map helper domain, found %d", newuidTransitions)
+	}
+	// The UID-map helper's target file surface toward the rootlesskit
+	// namespace owner is exactly { write open }; a read/widened variant
+	// trips (the 4C-26 target-SID ptrace READ rule is the network
+	// helper's boundary, not this domain's).
+	newuidPinnedFile := "allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:file { write open };"
+	countNewuidFile := func(text string) int {
+		n := 0
+		for _, line := range strings.Split(text, "\n") {
+			if strings.TrimSpace(line) == newuidPinnedFile {
+				n++
+			}
+		}
+		return n
+	}
+	if countNewuidFile(policy) != 1 {
+		t.Errorf("the UID-map helper's target file grant must be exactly one `{ write open }` rule, found %d", countNewuidFile(policy))
+	}
+	for _, wrong := range []struct {
+		name string
+		rule string
+	}{
+		{"file read variant", "allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:file read;"},
+		{"file widened read variant", "allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:file { read open write };"},
+	} {
+		mutated := strings.Replace(policy, newuidPinnedFile, wrong.rule, 1)
+		if countNewuidFile(mutated) == 1 {
+			t.Errorf("the UID-map helper's target-file regression %q was not applied", wrong.name)
+		}
 	}
 	// The manager must not gain the right to execute newuidmap.
 	if strings.Contains(policy, "allow docker_helper_builder_t docker_helper_newuidmap_exec_t") {
