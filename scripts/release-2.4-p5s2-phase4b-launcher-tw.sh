@@ -870,7 +870,7 @@ PREFLIGHT_OK=1
     || printf '%s\n' "$SL_LNK_RULES" | grep -aq 'rootlesskit_t:lnk_file read;'; then
     SL_NO_EXTRA_OK=1
   fi
-  SL_CAP_RULES="$(sesearch --allow -s docker_helper_slirp4netns_t -c cap_userns /sys/fs/selinux/policy 2>/dev/null | grep -a 'self:cap_userns' || true)"
+  SL_CAP_RULES="$(sesearch --allow -s docker_helper_slirp4netns_t -c cap_userns /sys/fs/selinux/policy 2>/dev/null | grep -a 'docker_helper_slirp4netns_t:cap_userns' || true)"
   if [ "$(printf '%s\n' "$SL_CAP_RULES" | grep -ac .)" = 1 ]; then
     SL_CAP_COUNT_OK=1
   fi
