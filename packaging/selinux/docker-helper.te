@@ -116,7 +116,7 @@ module docker_helper 1.2;
 		class tcp_socket { create setopt bind node_bind listen accept getattr read write connect getopt name_connect };
 		class unix_stream_socket { connectto getattr ioctl read write };
 		class udp_socket { create setopt connect getattr read write };
-		class netlink_route_socket { create setopt bind getattr write nlmsg_read read };
+		class netlink_route_socket { create setopt bind getattr write nlmsg_read read nlmsg_write };
 		class tun_socket { create };
 		class capability { dac_read_search dac_override sys_admin fowner setuid setgid };
 		class capability2 { wake_alarm kill };
@@ -1327,35 +1327,59 @@ allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl { 0x54ca 
 #     "netlink receive error Permission denied (13)" + "Cannot find
 #     device tap0". The libc fallback datagram creations remained
 #     fallback-only effects and receive NO grants.
+#   - nlmsg_write (Phase 4C-22; the boundary surfaced in the canonical
+#     4C-21 run 36828609086, audit record 1230: denied { nlmsg_write }
+#     for pid=3094 comm="ip" self->self tclass=netlink_route_socket
+#     permissive=0, on the SECOND sendmsg of `ip link set tap0 up` —
+#     fd 3, the main rtnl handle — after the fd-4 lookup completed
+#     (sendmsg(fd 4) exit=52 success; recvmsg(fd 4) exit=44 success
+#     twice; the "Cannot find device tap0" message gone; the libc
+#     fallback datagram chain absent). Placement identifies the request
+#     as the RTM_NEWLINK-class mutation of `iplink_modify()`. The same
+#     denial re-appeared in the run's -DB companion window (record
+#     31606, pid 3410). The message-class check is audible canonically
+#     (the distro dontaudit catch-all covers only the read/write pair).
+#
+# SCOPE OF nlmsg_write — RECORD ACCURATELY: with the live policycap
+# state NETLINK_XPERM = disabled, nlmsg_write is a LEGACY CLASS-LEVEL
+# Netlink permission. It authorizes the kernel's write-class NETLINK_ROUTE
+# messages as a class — NOT a single exact nlmsg_type. The live
+# enforcing evidence justifying the grant is specifically the
+# RTM_NEWLINK-placement mutation that `ip link set tap0 up` requires
+# (the TAP link-state set in the flow's own namespace), but the grant
+# itself has broader message-class scope: ANY write-class route
+# message sent from this domain's own sockets in reachable namespaces
+# is authorized by it. This asymmetry between the evidenced operation
+# and the granted scope is exactly why the cross-operation c1-vs-c2
+# gate stays mandatory before any Release GO.
 #
 # SCOPE — READ CAREFULLY: these grants cover socket instantiation,
 # socket-option operations, the LOCAL BIND, socket metadata query
 # (getsockname), the GENERIC SEND side, the LOOKUP-CLASS message check,
-# and the GENERIC RECEIVE side of the flow's own NETLINK_ROUTE sockets
-# in the current namespaces — NOTHING more. The read grant is the
-# generic socket-level permission the recvmsg reply path requires; it
-# is NOT mutation-class authority: no nlmsg_write (the kernel's
-# message-class check for RTM_NEWLINK-class requests — the actual
-# `ip link set tap0 up` mutation — owns the next live boundary), no
-# connect/getopt, no ioctl/shutdown, no second/parallel rule, and NO
-# capability surface HERE (self:capability net_admin/net_raw
-# stay ungranted; the child's in-namespace cap_userns surface —
-# including the 4C-15 net_admin bit — lives in the child's own
-# cap_userns rule, never in a netlink rule; the AVCs of these
-# boundaries name only the socket class). NOTE: SO_SNDBUF,
+# the GENERIC RECEIVE side, and the MUTATION-CLASS message check of the
+# flow's own NETLINK_ROUTE sockets in the current namespaces — NOTHING
+# more. Still closed on this class: connect/getopt, ioctl/shutdown, any
+# second/parallel rule, and NO capability surface HERE
+# (self:capability net_admin/net_raw stay ungranted; the child's
+# in-namespace cap_userns surface — including the 4C-15 net_admin bit —
+# lives in the child's own cap_userns rule, never in a netlink rule;
+# the AVCs of these boundaries name only the socket class). NOTE: SO_SNDBUF,
 # SO_RCVBUF, and NETLINK_EXT_ACK are all mediated by the ONE class-level
 # `setopt` permission — the grant covers every socket-option operation
 # of this domain/class pair; it is deliberately NOT described as
-# "SO_SNDBUF-only". The send-side, lookup-class, and receive-side
-# permissions together still do NOT make the flow a route-mutation
-# authority: the mutation-class check (nlmsg_write for RTM_NEWLINK-class
-# requests) remains ungranted and owns the next live boundary. Like
-# every flow-domain grant this is a
+# "SO_SNDBUF-only". The send/receive/lookup/mutation permissions
+# together complete the evidenced NETLINK_ROUTE socket chain for the
+# flow's own route sockets; each permission remains traceable to its
+# own live boundary (they are deliberately NOT collapsed into a
+# generic "the flow needs Netlink access" rationale). The route
+# mutation authority is class-level (see the nlmsg_write scope note
+# above), and the cross-operation c1-vs-c2 gate stays mandatory before
+# any Release GO. Like every flow-domain grant this is a
 # domain-wide SELF permission, not an operation-scoped one; the
 # operation separation is owned by the categorized process/object MCS
 # boundary, and cross-operation namespace targeting stays an open
 # concurrency/security gate before the Release GO.
-allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind getattr write nlmsg_read read };
+allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind getattr write nlmsg_read read nlmsg_write };
 
 # --- docker_helper_slirp4netns_t: the rootlesskit user-network helper domain (P5-S2) ---
 #
