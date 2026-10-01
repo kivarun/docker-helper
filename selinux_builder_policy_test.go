@@ -500,8 +500,11 @@ func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
 	// import would grant unrestricted ioctl), no custom tun device type,
 	// no .fc relabel of the global node, no capability surface (the TUN
 	// driver's ns_capable check is carried by the child's own cap_userns
-	// rule), and no other subject holds a tun_tap_device_t allow or xperm
-	// rule.
+	// rule), no other subject holds a tun_tap_device_t ioctl xperm rule,
+	// and no subject beyond the two TUN users holds a tun_tap_device_t
+	// allow rule — the 4C-31 helper's independent { read write } TUN
+	// staircase is owned by the slirp4netns helper test, not by this
+	// rootlesskit surface's owner.
 	for _, want := range []string{
 		"type tun_tap_device_t;",
 		"allow docker_helper_rootlesskit_t tun_tap_device_t:chr_file { read write open ioctl };",
@@ -535,10 +538,15 @@ func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
 					violations = append(violations, fmt.Sprintf("the tun_tap_device_t ioctl xperm surface is exactly the rootlesskit child's single { 0x54ca 0x54cb } TUNSETIFF+TUNSETPERSIST rule (no third command, no range, no complement, no other subject): %s", trimmed))
 				}
 			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, "tun_tap_device_t:chr_file"):
-				if trimmed == "allow docker_helper_rootlesskit_t tun_tap_device_t:chr_file { read write open ioctl };" {
+				switch trimmed {
+				case "allow docker_helper_rootlesskit_t tun_tap_device_t:chr_file { read write open ioctl };":
 					rootlesskitTunRules++
-				} else {
-					violations = append(violations, fmt.Sprintf("the tun_tap_device_t surface is exactly the rootlesskit child's { read write open ioctl } rule plus its single TUNSETIFF xperm rule (no other permission, no other subject): %s", trimmed))
+				case "allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file { read write };":
+					// The 4C-31 helper rule: an independent TUN
+					// staircase owned by the slirp4netns helper test
+					// (not re-pinned here — no shared TUN abstraction).
+				default:
+					violations = append(violations, fmt.Sprintf("the tun_tap_device_t surface is exactly the two TUN users' own pinned rules — the rootlesskit child's { read write open ioctl } plus its xperm and the 4C-31 helper { read write } — no other permission, no other subject: %s", trimmed))
 				}
 			case strings.Contains(trimmed, "docker_helper_rootlesskit_t") && (strings.Contains(trimmed, "capability net_admin") || strings.Contains(trimmed, "capability net_raw") || strings.Contains(trimmed, "cap_userns net_admin")):
 				violations = append(violations, fmt.Sprintf("no capability surface accompanies the tun open (the TUN driver's ns_capable check stays a separate live boundary): %s", trimmed))
@@ -1234,10 +1242,18 @@ func parseSELinuxRules(policy string) ([]builderPolicyAllowRule, []builderPolicy
 //     pointed rootlesskit-child path;
 //   - the helper domain holds no bin_t grant and no forbidden-surface grant
 //     (Docker socket, admin token, config/state/runtime, Session workspace);
-//   - the manager and the helper domains hold no capability, capability2,
-//     or cap_userns grants. The rootlesskit child domain is deliberately
-//     NOT frozen here: its cap_userns surface is owned by the dedicated
-//     cap_userns shape test, not by this helper-invariant owner.
+//   - the helper's TUN device-node authority is exactly one
+//     tun_tap_device_t:chr_file { read write } allow (the 4C-31
+//     open_tap() grant; no open/ioctl/getattr/append/lock/create/setattr,
+//     no helper allowxperm, no helper tun_socket grant — the RootlessKit
+//     TUN staircase is owned by the rootlesskit test's tun owner);
+//   - the manager domain holds no capability, capability2, or cap_userns
+//     grants, and the helper domain holds no plain capability or
+//     capability2 grant (the helper's single self:cap_userns rule is
+//     pinned by the slirp4netns test's string scan). The rootlesskit
+//     child domain is deliberately NOT frozen here: its cap_userns
+//     surface is owned by the dedicated cap_userns shape test, not by
+//     this helper-invariant owner.
 func helperDomainPolicyViolations(policy string) []string {
 	var violations []string
 	allows, transitions := parseSELinuxRules(policy)
@@ -1321,6 +1337,32 @@ func helperDomainPolicyViolations(policy string) []string {
 	if slirpNsfsFileLines != 1 {
 		violations = append(violations, fmt.Sprintf("exactly one nsfs:file-read grant may exist from the helper toward the namespace magic-link target, found %d", slirpNsfsFileLines))
 	}
+	// The 4C-31 TUN device-node grant: exactly ONE allow line may name
+	// slirp4netns_t -> tun_tap_device_t:chr_file, in the exact brace
+	// shape { read write } (no bare read/write, no split into two rules,
+	// no open/ioctl/getattr/append/lock/create/setattr). tun_tap_device_t
+	// is globally labelled; the rule is NOT operation/category scoped
+	// (see the .te scope note). The independent RootlessKit TUN surface
+	// is owned by the rootlesskit test's tun owner.
+	slirpTunFileLines := 0
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file") {
+			slirpTunFileLines++
+			if trimmed != "allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file { read write };" {
+				violations = append(violations, fmt.Sprintf("the helper's tun_tap_device_t grant must be the exact { read write } shape (no bare-read, no bare-write, no split rules, no open/ioctl/getattr/append/lock/create/setattr): %s", trimmed))
+			}
+		}
+		if strings.HasPrefix(trimmed, "allowxperm docker_helper_slirp4netns_t") {
+			violations = append(violations, fmt.Sprintf("the helper domain holds no allowxperm rule (its evidenced TUN surface is the ordinary { read write } device-node grant; any ioctl command authority is a separate live boundary): %s", trimmed))
+		}
+	}
+	if slirpTunFileLines != 1 {
+		violations = append(violations, fmt.Sprintf("exactly one tun_tap_device_t:chr_file grant may exist for the helper domain, found %d", slirpTunFileLines))
+	}
 	// The 4C-28 distro-nsfs-macro exclusion, identified structurally at
 	// SOURCE level (a macro's name does not exist after policy
 	// compilation — sesearch sees only the expanded rules — the same
@@ -1397,6 +1439,13 @@ func helperDomainPolicyViolations(policy string) []string {
 			if rule.class == "cap_userns" && rule.target != "self" {
 				violations = append(violations, fmt.Sprintf("the helper domain holds no cap_userns authority toward any target other than itself: allow %s %s:%s", rule.source, rule.target, rule.class))
 			}
+			// The 4C-31 scope: the helper's TUN path attaches an
+			// existing TAP via the device node; any tun_socket
+			// authority (create/attach_queue/relabel*) is a separate
+			// live boundary and stays closed for the helper.
+			if rule.class == "tun_socket" {
+				violations = append(violations, fmt.Sprintf("the helper domain holds no tun_socket grant: allow %s %s:%s", rule.source, rule.target, rule.class))
+			}
 		}
 		if rule.source == "docker_helper_rootlesskit_t" && rule.target == "docker_helper_slirp4netns_t" && rule.class == "dir" {
 			violations = append(violations, fmt.Sprintf("no reversed proc-traversal direction (the target child gains no dir authority over the helper domain): allow %s %s:%s", rule.source, rule.target, rule.class))
@@ -1427,6 +1476,7 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		"allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:lnk_file read;",
 		"allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace sys_admin };",
 		"allow docker_helper_slirp4netns_t nsfs_t:file { read open };",
+		"allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file { read write };",
 		"type nsfs_t;",
 	} {
 		if !strings.Contains(policy, want) {
@@ -1444,6 +1494,7 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 	pinnedCapRule := "allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace sys_admin };"
 	pinnedFileRule := "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:file read;"
 	pinnedNsfsRule := "allow docker_helper_slirp4netns_t nsfs_t:file { read open };"
+	pinnedTunRule := "allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file { read write };"
 	pinnedNsfsRequire := "type nsfs_t;"
 	countPinned := func(text, rule string) int {
 		n := 0
@@ -1472,6 +1523,9 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 	if countPinned(policy, pinnedNsfsRequire) != 1 {
 		t.Errorf("the module's external-type require set must declare nsfs_t exactly once, found %d", countPinned(policy, pinnedNsfsRequire))
 	}
+	if countPinned(policy, pinnedTunRule) != 1 {
+		t.Errorf("the helper's TUN device-node authority must be exactly one `tun_tap_device_t:chr_file { read write }` rule (the 4C-31 open_tap() grant), found %d", countPinned(policy, pinnedTunRule))
+	}
 	// Regression: each grant must exist; removing it, or replacing it
 	// with a wrong-shape, must break the exactly-one invariant the count
 	// guard asserts.
@@ -1493,6 +1547,9 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		{"missing nsfs open (pre-4C-29 bare-read shape)", pinnedNsfsRule, "allow docker_helper_slirp4netns_t nsfs_t:file read;"},
 		{"missing nsfs read (bare-open-only shape)", pinnedNsfsRule, "allow docker_helper_slirp4netns_t nsfs_t:file open;"},
 		{"missing nsfs_t require declaration", pinnedNsfsRequire, ""},
+		{"missing helper TUN device-node rule", pinnedTunRule, ""},
+		{"missing TUN read ({ write }-only shape)", pinnedTunRule, "allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file write;"},
+		{"missing TUN write ({ read }-only shape)", pinnedTunRule, "allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file read;"},
 	} {
 		mutated := strings.Replace(policy, regressed.old, regressed.rule, 1)
 		if countPinned(mutated, regressed.old) == 1 {
@@ -1535,6 +1592,24 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		{"nsfs widened { read open execute }", "allow docker_helper_slirp4netns_t nsfs_t:file { read open execute };"},
 		{"nsfs distro-macro expansion equivalent", "allow docker_helper_slirp4netns_t nsfs_t:file { open getattr read ioctl lock };"},
 		{"nsfs distro-macro use (fs_read_nsfs_files interface call)", "fs_read_nsfs_files(docker_helper_slirp4netns_t);"},
+		{"tun structural: duplicate identical device-node rule", "allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file { read write };"},
+		{"tun structural: parallel read rule (brace form)", "allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file { read };"},
+		{"tun structural: parallel write rule", "allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file write;"},
+		{"tun structural: read/write split across two rules", "allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file read;\nallow docker_helper_slirp4netns_t tun_tap_device_t:chr_file write;"},
+		{"tun widened +open (the RootlessKit staircase's second hook — not evidenced for the helper)", "allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file { read write open };"},
+		{"tun widened +ioctl", "allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file { read write ioctl };"},
+		{"tun widened +getattr", "allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file { read write getattr };"},
+		{"tun widened +append", "allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file { read write append };"},
+		{"tun widened +lock", "allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file { read write lock };"},
+		{"tun widened +create", "allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file { read write create };"},
+		{"tun widened +setattr", "allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file { read write setattr };"},
+		{"helper TUNSETIFF xperm pre-grant (0x54ca)", "allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl 0x54ca;"},
+		{"helper TUN xperm set pre-grant ({ 0x54ca 0x54cb })", "allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl { 0x54ca 0x54cb };"},
+		{"helper tun_socket create pre-grant", "allow docker_helper_slirp4netns_t self:tun_socket create;"},
+		{"helper tun_socket attach_queue pre-grant", "allow docker_helper_slirp4netns_t self:tun_socket attach_queue;"},
+		{"helper tun_socket relabel pre-grant", "allow docker_helper_slirp4netns_t self:tun_socket { relabelfrom relabelto };"},
+		{"cap_userns net_admin copy from the RootlessKit path", "allow docker_helper_slirp4netns_t self:cap_userns net_admin;"},
+		{"plain capability net_admin for the helper", "allow docker_helper_slirp4netns_t self:capability net_admin;"},
 		{"cap_userns pre-grant toward the target", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:cap_userns sys_admin;"},
 		{"plain capability pre-grant for the helper", "allow docker_helper_slirp4netns_t self:capability sys_admin;"},
 		{"cap_userns structural: duplicate identical namespace-join rule", "allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace sys_admin };"},
@@ -1575,6 +1650,9 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		{"duplicate identical transition into helper", "type_transition docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:process docker_helper_slirp4netns_t;", "exactly one transition may enter the helper domain"},
 		{"cap_userns for manager", "allow docker_helper_builder_t self:cap_userns sys_admin;", "docker_helper_builder_t must hold no capability"},
 		{"cap_userns sys_admin for helper", "allow docker_helper_slirp4netns_t self:cap_userns sys_admin;", "exactly one self:cap_userns rule may exist for the helper domain"},
+		{"helper TUNSETIFF xperm pre-grant", "allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl 0x54ca;", "holds no allowxperm rule"},
+		{"helper tun_socket pre-grant", "allow docker_helper_slirp4netns_t self:tun_socket create;", "holds no tun_socket grant"},
+		{"helper plain capability net_admin", "allow docker_helper_slirp4netns_t self:capability net_admin;", "must hold no plain capability/capability2 grants"},
 	} {
 		mutated := policy + "\n" + mut.rule
 		violations := helperDomainPolicyViolations(mutated)
