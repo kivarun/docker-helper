@@ -1277,6 +1277,21 @@ func helperDomainPolicyViolations(policy string) []string {
 	if slirpTargetLnkRules != 1 {
 		violations = append(violations, fmt.Sprintf("exactly one lnk_file-read grant may exist from the helper toward the rootlesskit namespace target, found %d", slirpTargetLnkRules))
 	}
+	// The 4C-25 helper capability invariant: the helper's ONLY
+	// cap_userns rule is its own self:cap_userns sys_ptrace (the
+	// proc-magic-link dereference's ptrace-may-access prerequisite).
+	// The exact { sys_ptrace } shape is asserted by the string scan in
+	// the slirp4netns test; here the triple count and the forbidden
+	// class forms are enforced.
+	slirpSelfCapUsernsRules := 0
+	for _, rule := range allows {
+		if rule.source == "docker_helper_slirp4netns_t" && rule.target == "self" && rule.class == "cap_userns" {
+			slirpSelfCapUsernsRules++
+		}
+	}
+	if slirpSelfCapUsernsRules != 1 {
+		violations = append(violations, fmt.Sprintf("exactly one self:cap_userns rule may exist for the helper domain, found %d", slirpSelfCapUsernsRules))
+	}
 	for _, rule := range allows {
 		switch rule.source {
 		case "docker_helper_slirp4netns_t":
@@ -1306,6 +1321,16 @@ func helperDomainPolicyViolations(policy string) []string {
 			if rule.class == "file" && rule.target != "docker_helper_slirp4netns_exec_t" {
 				violations = append(violations, fmt.Sprintf("the helper domain's file authority is only its own entry type (no namespace-path open, no other file target): allow %s %s:%s", rule.source, rule.target, rule.class))
 			}
+			// The helper's capability surface: no plain capability/
+			// capability2 grant of any target; the only cap_userns
+			// authority is self (the exact sys_ptrace-only shape is
+			// pinned by the slirp4netns test's string scan).
+			if rule.class == "capability" || rule.class == "capability2" {
+				violations = append(violations, fmt.Sprintf("the helper domain must hold no plain capability/capability2 grants: allow %s %s:%s", rule.source, rule.target, rule.class))
+			}
+			if rule.class == "cap_userns" && rule.target != "self" {
+				violations = append(violations, fmt.Sprintf("the helper domain holds no cap_userns authority toward any target other than itself: allow %s %s:%s", rule.source, rule.target, rule.class))
+			}
 		}
 		if rule.source == "docker_helper_rootlesskit_t" && rule.target == "docker_helper_slirp4netns_t" && rule.class == "dir" {
 			violations = append(violations, fmt.Sprintf("no reversed proc-traversal direction (the target child gains no dir authority over the helper domain): allow %s %s:%s", rule.source, rule.target, rule.class))
@@ -1313,12 +1338,10 @@ func helperDomainPolicyViolations(policy string) []string {
 		if rule.target == "docker_helper_slirp4netns_t" && rule.class == "dir" {
 			violations = append(violations, fmt.Sprintf("no proc-traversal authority into the helper domain's own proc tree from any subject: allow %s %s:%s", rule.source, rule.target, rule.class))
 		}
-		if rule.source == "docker_helper_builder_t" || rule.source == "docker_helper_slirp4netns_t" {
-			if rule.target == "self" || rule.class == "cap_userns" {
-				switch rule.class {
-				case "capability", "capability2", "cap_userns":
-					violations = append(violations, fmt.Sprintf("%s must hold no capability/capability2/cap_userns grants: allow %s %s:%s", rule.source, rule.source, rule.target, rule.class))
-				}
+		if rule.source == "docker_helper_builder_t" && rule.target == "self" {
+			switch rule.class {
+			case "capability", "capability2", "cap_userns":
+				violations = append(violations, fmt.Sprintf("%s must hold no capability/capability2/cap_userns grants: allow %s %s:%s", rule.source, rule.source, rule.target, rule.class))
 			}
 		}
 	}
@@ -1335,6 +1358,8 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		"allow docker_helper_slirp4netns_t docker_helper_slirp4netns_exec_t:file { entrypoint read open execute getattr map };",
 		"allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:fifo_file { write getattr };",
 		"allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:dir search;",
+		"allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:lnk_file read;",
+		"allow docker_helper_slirp4netns_t self:cap_userns sys_ptrace;",
 	} {
 		if !strings.Contains(policy, want) {
 			t.Errorf("SELinux policy must contain exactly this rule: %s", want)
@@ -1348,6 +1373,7 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 	// target, in the exact pinned shapes.
 	pinnedDirRule := "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:dir search;"
 	pinnedLnkRule := "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:lnk_file read;"
+	pinnedCapRule := "allow docker_helper_slirp4netns_t self:cap_userns sys_ptrace;"
 	countPinned := func(text, rule string) int {
 		n := 0
 		for _, line := range strings.Split(text, "\n") {
@@ -1363,6 +1389,9 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 	if countPinned(policy, pinnedLnkRule) != 1 {
 		t.Errorf("the helper's namespace magic-link open must be exactly one `lnk_file read` rule toward the rootlesskit target, found %d", countPinned(policy, pinnedLnkRule))
 	}
+	if countPinned(policy, pinnedCapRule) != 1 {
+		t.Errorf("the helper's ptrace-may-access prerequisite must be exactly one `self:cap_userns sys_ptrace` rule, found %d", countPinned(policy, pinnedCapRule))
+	}
 	// Regression: each grant must exist; removing it, or replacing it
 	// with a wrong-shape, must break the exactly-one invariant the count
 	// guard asserts.
@@ -1375,10 +1404,12 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		{"missing search (getattr-only shape)", pinnedDirRule, "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:dir getattr;"},
 		{"missing lnk_file rule", pinnedLnkRule, ""},
 		{"missing lnk_file read (getattr-only shape)", pinnedLnkRule, "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:lnk_file getattr;"},
+		{"missing cap_userns rule", pinnedCapRule, ""},
+		{"missing sys_ptrace (sys_chroot-only shape)", pinnedCapRule, "allow docker_helper_slirp4netns_t self:cap_userns sys_chroot;"},
 	} {
 		mutated := strings.Replace(policy, regressed.old, regressed.rule, 1)
 		if countPinned(mutated, regressed.old) == 1 {
-			t.Errorf("the traversal/lnk regression %q was not applied", regressed.name)
+			t.Errorf("the traversal/lnk/cap regression %q was not applied", regressed.name)
 		}
 	}
 	// Structural and widening mutations: appended or replacement rules
@@ -1408,6 +1439,12 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		{"nsfs-like file pre-grant", "allow docker_helper_slirp4netns_t nsfs_t:file { read open };"},
 		{"cap_userns pre-grant toward the target", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:cap_userns sys_admin;"},
 		{"plain capability pre-grant for the helper", "allow docker_helper_slirp4netns_t self:capability sys_admin;"},
+		{"cap_userns structural: duplicate identical sys_ptrace rule", "allow docker_helper_slirp4netns_t self:cap_userns sys_ptrace;"},
+		{"cap_userns structural: parallel sys_ptrace rule (brace form)", "allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace };"},
+		{"cap_userns widened +sys_admin", "allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace sys_admin };"},
+		{"cap_userns widened +sys_chroot", "allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace sys_chroot };"},
+		{"cap_userns widened +net_admin", "allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace net_admin };"},
+		{"plain capability sys_ptrace for the helper", "allow docker_helper_slirp4netns_t self:capability sys_ptrace;"},
 	} {
 		mutated := policy + "\n" + mut.rule
 		violations := helperDomainPolicyViolations(mutated)
@@ -1427,7 +1464,7 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		{"manager-side transition into helper", "type_transition docker_helper_builder_t docker_helper_slirp4netns_exec_t:process docker_helper_slirp4netns_t;", "the only transition into the helper domain"},
 		{"duplicate identical transition into helper", "type_transition docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:process docker_helper_slirp4netns_t;", "exactly one transition may enter the helper domain"},
 		{"cap_userns for manager", "allow docker_helper_builder_t self:cap_userns sys_admin;", "docker_helper_builder_t must hold no capability"},
-		{"cap_userns for helper", "allow docker_helper_slirp4netns_t self:cap_userns sys_admin;", "docker_helper_slirp4netns_t must hold no capability"},
+		{"cap_userns sys_admin for helper", "allow docker_helper_slirp4netns_t self:cap_userns sys_admin;", "exactly one self:cap_userns rule may exist for the helper domain"},
 	} {
 		mutated := policy + "\n" + mut.rule
 		violations := helperDomainPolicyViolations(mutated)
@@ -1527,16 +1564,19 @@ func TestSELinuxPolicyNewuidmapIsolation(t *testing.T) {
 			}
 		}
 	}
-	// The module's cap_userns rules are EXACTLY the three evidenced grants:
-	// the rootlesskit child's { sys_admin sys_ptrace sys_chroot net_admin }
-	// set, the UID-map helper's sys_admin bit, and the GID-map helper's
-	// sys_admin bit (all in-namespace, all self-targeted; the GID bit is
-	// the R5 gid_map-write boundary, the child's sys_ptrace bit is the
-	// 4C-3 nsenter ptrace_may_access boundary, its sys_chroot bit is the
-	// 4C-4 mount-namespace reassociation boundary, and its net_admin bit
-	// is the 4C-15 tun_set_iff() CAP_NET_ADMIN boundary). No other subject
-	// — the manager, the launcher, slirp4netns, the daemon, or any other
-	// helper — gets a cap_userns rule.
+	// The module's cap_userns rules are EXACTLY the four evidenced
+	// grants: the rootlesskit child's { sys_admin sys_ptrace sys_chroot
+	// net_admin } set, the UID-map helper's sys_admin bit, the GID-map
+	// helper's sys_admin bit, and the slirp4netns helper's sys_ptrace
+	// bit (all in-namespace, all self-targeted; the GID bit is the R5
+	// gid_map-write boundary, the child's sys_ptrace bit is the 4C-3
+	// nsenter ptrace_may_access boundary, its sys_chroot bit is the 4C-4
+	// mount-namespace reassociation boundary, its net_admin bit is the
+	// 4C-15 tun_set_iff() CAP_NET_ADMIN boundary, and the helper's
+	// sys_ptrace bit is the 4C-25 proc-namespace-link dereference's
+	// ptrace-may-access prerequisite). No other subject — the manager,
+	// the launcher, the daemon, or any other helper — gets a cap_userns
+	// rule.
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "#") {
@@ -1546,9 +1586,10 @@ func TestSELinuxPolicyNewuidmapIsolation(t *testing.T) {
 			switch trimmed {
 			case "allow docker_helper_rootlesskit_t self:cap_userns { sys_admin sys_ptrace sys_chroot net_admin };",
 				"allow docker_helper_newuidmap_t self:cap_userns sys_admin;",
-				"allow docker_helper_newgidmap_t self:cap_userns sys_admin;":
+				"allow docker_helper_newgidmap_t self:cap_userns sys_admin;",
+				"allow docker_helper_slirp4netns_t self:cap_userns sys_ptrace;":
 			default:
-				t.Errorf("no cap_userns grant may exist beyond the three evidenced in-namespace grants (rootlesskit { sys_admin sys_ptrace sys_chroot net_admin }, UID-map helper sys_admin, GID-map helper sys_admin): %s", trimmed)
+				t.Errorf("no cap_userns grant may exist beyond the four evidenced in-namespace grants (rootlesskit { sys_admin sys_ptrace sys_chroot net_admin }, UID-map helper sys_admin, GID-map helper sys_admin, slirp4netns sys_ptrace): %s", trimmed)
 			}
 		}
 	}
@@ -2059,9 +2100,10 @@ func TestSELinuxPolicyCapUsernsShape(t *testing.T) {
 				case "allow docker_helper_rootlesskit_t self:cap_userns { sys_admin sys_ptrace sys_chroot net_admin };":
 					rootlesskitCapUsernsRules++
 				case "allow docker_helper_newuidmap_t self:cap_userns sys_admin;",
-					"allow docker_helper_newgidmap_t self:cap_userns sys_admin;":
+					"allow docker_helper_newgidmap_t self:cap_userns sys_admin;",
+					"allow docker_helper_slirp4netns_t self:cap_userns sys_ptrace;":
 				default:
-					violations = append(violations, fmt.Sprintf("no cap_userns rule may exist beyond the three evidenced in-namespace grants (rootlesskit { sys_admin sys_ptrace sys_chroot net_admin }, newuidmap sys_admin, newgidmap sys_admin; the manager, the launcher, slirp4netns, and other subjects get none): %s", trimmed))
+					violations = append(violations, fmt.Sprintf("no cap_userns rule may exist beyond the four evidenced in-namespace grants (rootlesskit { sys_admin sys_ptrace sys_chroot net_admin }, newuidmap sys_admin, newgidmap sys_admin, slirp4netns sys_ptrace; the manager, the launcher, and other subjects get none): %s", trimmed))
 				}
 			case strings.Contains(trimmed, ":capability ") && strings.Contains(trimmed, "docker_helper_rootlesskit_t"):
 				violations = append(violations, fmt.Sprintf("the rootlesskit child domain must keep zero plain self:capability surfaces (no plain sys_ptrace/sys_chroot: the live AVCs name cap_userns): %s", trimmed))
@@ -2130,7 +2172,6 @@ func TestSELinuxPolicyCapUsernsShape(t *testing.T) {
 		{"sys_chroot cap_userns for slirp4netns", "allow docker_helper_slirp4netns_t self:cap_userns sys_chroot;"},
 		{"sys_ptrace cap_userns for the manager", "allow docker_helper_builder_t self:cap_userns sys_ptrace;"},
 		{"sys_ptrace cap_userns for the launcher", "allow docker_helper_builder_launcher_t self:cap_userns sys_ptrace;"},
-		{"sys_ptrace cap_userns for slirp4netns", "allow docker_helper_slirp4netns_t self:cap_userns sys_ptrace;"},
 		{"setgid capability for the UID-map helper", "allow docker_helper_newuidmap_t self:capability setgid;"},
 		{"widened UID-map helper capability set", "allow docker_helper_newuidmap_t self:capability { setuid setgid };"},
 		{"additional UID-map helper capability bit", "allow docker_helper_newuidmap_t self:capability dac_override;"},
