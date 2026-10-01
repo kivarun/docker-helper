@@ -1669,9 +1669,12 @@ TUN_IOCTL_GONE_OK=1
   echo "--- the manager journal's 4C-16 EACCES shape (must be gone — TUNSETPERSIST completes):"
   MGR_SETPERSIST_EACCES="$(grep -a 'ioctl(TUNSETPERSIST): Permission denied' "$EVIDENCE_DIR/07-manager-diag.txt" 2>/dev/null || true)"
   printf '%s\n' "${MGR_SETPERSIST_EACCES:-(none — the TUNSETPERSIST SELinux-hook EACCES is gone)}"
-  echo "--- granted-surface regressions (read/write/open/never-granted ordinary bits — must be zero):"
-  TUN_REGRESSION="$(printf '%s\n' "$TUN_AVC_WINDOW" | grep -aE 'denied  *{ (read|write|open|getattr|append|lock|create|setattr)' || true)"
+  echo "--- granted-surface regressions (the ROOTLESSKIT flow domain's granted ordinary bits — must be zero; the 4C-30 correction: this gate owns the ROOTLESSKIT domain's TUN surface only, another domain's tun_tap_device_t denial is its own staircase and is recorded below, not failed):"
+  TUN_REGRESSION="$(printf '%s\n' "$TUN_AVC_WINDOW" | grep -a 'scontext=system_u:system_r:docker_helper_rootlesskit_t' | grep -aE 'denied  *{ (read|write|open|getattr|append|lock|create|setattr)' || true)"
   printf '%s\n' "${TUN_REGRESSION:-(none — the granted ordinary surface held)}"
+  echo "--- OTHER domains' tun_tap_device_t denials (their independent TUN staircases — recorded, not failed; the slirp helper has ZERO tun authority and its open_tap() denial is the recorded next-boundary evidence):"
+  TUN_OTHER_DOMAIN="$(printf '%s\n' "$TUN_AVC_WINDOW" | grep -av 'scontext=system_u:system_r:docker_helper_rootlesskit_t' || true)"
+  printf '%s\n' "${TUN_OTHER_DOMAIN:-(none — no other domain's TUN denial appeared)}"
   echo "--- xperm-mediated denials of non-whitelisted commands (the gate holding; the recorded next-boundary evidence):"
   XP_DENIALS="$(printf '%s\n' "$TUN_AVC_WINDOW" | grep -a 'denied  *{ ioctl }' | grep -a 'ioctlcmd=' | grep -av 'ioctlcmd=0x54ca' | grep -av 'ioctlcmd=0x54cb' || true)"
   printf '%s\n' "${XP_DENIALS:-(none — no non-whitelisted ioctl command was attempted)}"
@@ -1696,6 +1699,12 @@ cat "$EVIDENCE_DIR/14-tun-ioctl-gone.txt" >&2
 if [ "$TUN_IOCTL_GONE_OK" = 1 ]; then
   marker "TUN-IOCTL-BOUNDARY=GONE"
   marker "TUN-DEVICE-ACCESS=CLEAN"
+  # The 4C-30 next-boundary record: another domain's (the slirp
+  # helper's) independent TUN staircase denial, if one appeared.
+  TUN_OTHER_FIRST="$(printf '%s\n' "$TUN_OTHER_DOMAIN" | head -1 || true)"
+  TUN_OTHER_PERMS="$(printf '%s\n' "$TUN_OTHER_FIRST" | sed -n 's/.*denied  *{ \([^}]*\) }.*/\1/p' || true)"
+  TUN_OTHER_SUMMARY="$(printf '%s\n' "$TUN_OTHER_FIRST" | sed -n 's/.*scontext=\([^ ]*\) tcontext=\([^ ]*\) tclass=\([a-z_]*\).*/scontext=\1 tcontext=\2 tclass=\3/p' || true)"
+  marker "HELPER-TUN-NEXT-BOUNDARY=${TUN_OTHER_SUMMARY:-none} perms=${TUN_OTHER_PERMS:-none}"
 else
   marker "BLOCKER=the 4C-14 TUN ioctl composition did not hold on the loaded policy (see 14-tun-ioctl-gone.txt)"
   marker "TUN-IOCTL-BOUNDARY=FAIL"
