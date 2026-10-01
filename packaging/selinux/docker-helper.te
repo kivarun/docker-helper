@@ -1495,6 +1495,45 @@ allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:dir search;
 # rootlesskit authority mirroring.
 allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:lnk_file read;
 
+# The helper's ptrace-may-access capability prerequisite while
+# dereferencing the namespace magic-links. Live enforcing evidence,
+# canonical 4C-24 run 36843958481, audit record 1323: denied
+# { sys_ptrace } (capability=19) for pid=3136 comm="slirp4netns"
+# scontext=...docker_helper_slirp4netns_t:s0:c1 tcontext=THE SAME
+# docker_helper_slirp4netns_t:s0:c1 tclass=cap_userns permissive=0 —
+# the magic-link read grant took effect and the helper's
+# namespace-entering child proceeded INTO the open's magic-link
+# resolution: open("/proc/<target-pid>/ns/net", O_RDONLY) →
+# proc_ns_get_link() → ptrace_may_access(target,
+# PTRACE_MODE_READ_FSCREDS) → the capability/DAC prerequisite — the
+# SELinux cap_userns check fires against the CALLER's own domain
+# (tcontext = the helper's own type, NOT the target's).
+#
+# ATTRIBUTION — CORRECTED (this boundary is NOT a setns boundary):
+# actual setns() of a user namespace later reaches userns_install(),
+# whose privilege check is ns_capable(target_user_ns, CAP_SYS_ADMIN) —
+# NOT CAP_SYS_PTRACE. The sys_ptrace check observed here belongs to the
+# proc namespace-link DEREERENCE path (ptrace-may-access while
+# resolving /proc/<pid>/ns/*). No SLIRP-SETNS terminology may be used
+# for this boundary; its owner is the proc namespace-link dereference.
+#
+# SCOPE — READ CAREFULLY: this grant is BROADER than "may open
+# /proc/<this-pid>/ns/net". SELinux sees only
+# slirp4netns_t self:cap_userns sys_ptrace — it does NOT encode the
+# target PID or the pathname. It permits the helper domain to pass
+# SELinux's CAP_SYS_PTRACE mediation wherever Linux capability
+# semantics already consider it capable in a non-init user namespace.
+# Deliberately NOT granted: cap_userns sys_admin (the userns_install()
+# authority — no live evidence yet; if setns(CLONE_NEWUSER) is later
+# reached, its own boundary materializes), cap_userns sys_chroot/
+# net_admin, any PLAIN capability (the AVC is specifically cap_userns,
+# not the init-userns capability class), and the SELinux ptrace READ
+# access check against the TARGET SID (security_ptrace_access_check
+# maps a PTRACE_MODE_READ check to slirp4netns_t → rootlesskit_t:file
+# read — the strongest next hypothesis — which must materialize live
+# and owns the next phase).
+allow docker_helper_slirp4netns_t self:cap_userns sys_ptrace;
+
 # --- docker_helper_newuidmap_t: the rootlesskit UID-map helper domain (P5-S2) ---
 #
 # RootlessKit forks and execs the distro newuidmap binary (the shadow
