@@ -1247,6 +1247,7 @@ if [ -d "$TRACING/events/capability/cap_capable" ]; then
     echo 1 > "$TRACING/events/avc/selinux_audited/enable" 2>/dev/null || true \
       && TRACE_AVC_ENABLED=1
   fi
+  echo 1 > "$TRACING/tracing_on" 2>/dev/null || true
   {
     echo "=== 4C-27 tracefs collector armed ==="
     echo "cap_capable enabled: $TRACE_ENABLED"
@@ -1261,8 +1262,10 @@ if [ -d "$TRACING/events/capability/cap_capable" ]; then
     echo "--- sedismod class-map attempt (interactive tool, piped; output recorded as evidence only):"
     printf 'q\n' | timeout 5 sedismod /sys/fs/selinux/policy 2>&1 | head -15 || true
     echo "=== cap tracepoint state ==="
-    cat "$TRACING/events/capability/cap_capable/enable" 2>/dev/null
+    cat "$TRACING/events/capability/cap_capable/enable" 2>/dev/null || true
     cat "$TRACING/events/avc/selinux_audited/enable" 2>/dev/null || true
+    echo "tracing_on (must be 1 after arming — a 0 here means the collector never ran):"
+    cat "$TRACING/tracing_on" 2>/dev/null || true
   } > "$EVIDENCE_DIR/30-trace-arm.txt" 2>&1
 else
   note "tracefs capability tracepoint unavailable"
