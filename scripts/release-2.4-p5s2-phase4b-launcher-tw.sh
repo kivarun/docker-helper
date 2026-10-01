@@ -1019,11 +1019,17 @@ PREFLIGHT_OK=1
   echo "=== slirp4netns helper nsfs namespace-handle inventory (the 4C-29 composition: the EFFECTIVE helper -> nsfs authority must be EXACTLY { read open } — no getattr/ioctl/lock/write/map/execute from ANY source, distro attribute expansion included; an effective extra is a STOP, not a pin violation) ==="
   echo "--- raw effective inventory (slirp4netns -> nsfs; attribute/base-policy expansions recorded, not asserted per-rule):"
   sesearch --allow -s docker_helper_slirp4netns_t -t nsfs_t /sys/fs/selinux/policy || true
-  echo "--- CONCRETE module contribution (source must be docker_helper_slirp4netns_t; must be EXACTLY one nsfs_t:file { read open } rule):"
+  echo "--- CONCRETE module contribution (source must be docker_helper_slirp4netns_t; must be EXACTLY one nsfs_t:file rule whose perm set folds to { open read }; NOTE: setools renders perm sets alphabetically — the 4C-29 run proved { read open } source renders as { open read }):"
   SL_NSFS_RULES="$(sesearch --allow -s docker_helper_slirp4netns_t -t nsfs_t /sys/fs/selinux/policy 2>/dev/null | awk '$2 == "docker_helper_slirp4netns_t"' || true)"
   printf '%s\n' "${SL_NSFS_RULES:-(none)}"
   SL_NSFS_COUNT_OK=0; SL_NSFS_SHAPE_OK=0; SL_NSFS_UNION_OK=0; SL_NSFS_CLASS_OK=0; SL_NSFS_NO_FLOW_GRANT_OK=0
-  if [ "$(printf '%s\n' "$SL_NSFS_RULES" | grep -ac .)" = 1 ] && printf '%s\n' "$SL_NSFS_RULES" | grep -aq 'nsfs_t:file { read open };'; then
+  SL_NSFS_CONCRETE_COUNT="$(printf '%s\n' "$SL_NSFS_RULES" | grep -ac . || true)"
+  SL_NSFS_CONCRETE_SET="$(printf '%s\n' "$SL_NSFS_RULES" \
+    | sed -n 's/^allow [^ ]* nsfs_t:file {\(.*\)};$/\1/p' \
+    | sed 's/^[{ ]*//; s/[} ]*$//' \
+    | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
+  echo "concrete rule's perm token set: ${SL_NSFS_CONCRETE_SET:-(empty)}"
+  if [ "$SL_NSFS_CONCRETE_COUNT" = 1 ] && [ "$SL_NSFS_CONCRETE_SET" = "open read " ]; then
     SL_NSFS_COUNT_OK=1
     SL_NSFS_SHAPE_OK=1
   fi
