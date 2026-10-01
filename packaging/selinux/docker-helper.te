@@ -1532,8 +1532,61 @@ allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:lnk_file read;
 # access check against the TARGET SID (security_ptrace_access_check
 # maps a PTRACE_MODE_READ check to slirp4netns_t → rootlesskit_t:file
 # read — the strongest next hypothesis — which must materialize live
-# and owns the next phase).
-allow docker_helper_slirp4netns_t self:cap_userns sys_ptrace;
+# and owns the next phase). The sys_ptrace member of the helper's
+# cap_userns surface is granted by the SINGLE rule below; the 4C-30
+# widening added the namespace-join sys_admin member to that same
+# rule (its comment owns the causal record) — there is no separate
+# sys_ptrace rule.
+
+# 4C-30 WIDENING — EXACTLY { sys_ptrace sys_admin }: the 4C-29 canonical
+# rerun's first causal terminal boundary (canonical run 36878162747,
+# audit records 2445/2447 + the avc:selinux_audited tracepoint) is
+# denied { sys_admin } (capability=21) for the helper's
+# namespace-joining child pid 3205, twice at the same moment — the two
+# setns() calls of the namespace-entry sequence. With both namespace
+# handles open (fd 6 = ns/net, fd 7 = ns/user), each setns reaches
+# SELinux's cap_userns mediation after the Linux capability check
+# PASSES (cap_capable cap=21 ret=0 on the tracepoint — commoncap is not
+# the failure): the cap_userns permission check on the CALLER's own
+# domain (scontext=tcontext=slirp4netns_t:s0:c1) is denied and setns
+# returns -1/EACCES.
+#
+# CAUSAL OWNERSHIP — RECORD ACCURATELY (do NOT collapse to "needed by
+# userns_install()"): the SAME permission occurs in TWO distinct paths.
+# The kernel's ns_capable() walks the LSM capable hooks: the commoncap
+# cap_capable tracepoint (the Linux capability verdict) AND SELinux's
+# cred_has_capability() (the cap_userns AVC, scontext = tcontext = the
+# CALLER's own domain). 4C-29's tracepoint proved, for BOTH setns
+# calls: commoncap cap=21 ret=0 — the Linux capability check PASSES —
+# then SELinux denies sys_admin and setns returns -1/EACCES.
+# The release-relevant grant-owning boundary is the FATAL netns join;
+# the userns join's failure is recorded as a non-terminal effect.
+# Upstream netns_install() carries a SECOND ns_capable
+# (nsset->cred->user_ns) after the first — 4C-29 reached only the
+# first (SELinux denied it and the || short-circuited); after this
+# grant both are newly observable and the canonical rerun must record
+# BOTH before any "the netns capability check passed" claim.
+#
+# SCOPE — THIS IS A BROAD GRANT, RECORD IT AS SUCH: self:cap_userns
+# sys_admin is NOT "permission to setns into tap0's netns". It is
+# domain-wide SELinux CAP_SYS_ADMIN mediation inside user namespaces
+# wherever Linux namespace/capability relationships permit it. It
+# encodes neither the target operation nor a category. After this
+# widening the helper's exact cap_userns surface is
+# { sys_ptrace sys_admin } — materially broader than one syscall,
+# which materially increases the weight of the (still open, Release
+# GO blocked) c1-vs-c2 cross-operation proof: the nsfs authority is
+# already global, and sys_admin now rides on top of it. No claim of
+# operation-scoped authority.
+#
+# Deliberately NOT granted: cap_userns sys_chroot/net_admin (not
+# evidenced for this boundary), any PLAIN capability (the AVC is
+# specifically cap_userns — the init-userns capability class stays
+# closed), any target-relative cap_userns rule, and any TUN/netlink/
+# socket surface (the helper's TUN staircase, if the netns join
+# completes, starts at /dev/net/tun with ZERO tun authority and owns
+# its own phases).
+allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace sys_admin };
 
 # The helper's target-SID ptrace READ authority: after the capability
 # prerequisite passes, ptrace_may_access() calls
@@ -1564,17 +1617,17 @@ allow docker_helper_slirp4netns_t self:cap_userns sys_ptrace;
 #   rootlesskit_t:file read
 #       = the SELinux PTRACE_MODE_READ target-SID check
 #   self:cap_userns sys_admin
-#       = a possible LATER userns_install() authority (not granted here;
-#         the first open(ns/net) has not yet completed and there is no
-#         live setns evidence)
+#       = the namespace-join authority (granted by the 4C-30 widening
+#         of the single cap_userns rule above; the fatal netns join is
+#         its grant-owning boundary)
 #
 # Deliberately NOT granted: file open/getattr/ioctl (the AVC proves only
 # read; if the VFS completion after the ptrace hook produces another
-# file/nsfs check, that is a separate boundary), any nsfs_t authority
-# (the magic-link ultimately jumps to an nsfs object — a further check
-# is possible but has not materialized), any cap_userns widening
-# (sys_admin/sys_chroot/net_admin), any plain capability, and any other
-# target-specific surface.
+# file/nsfs check, that is a separate boundary — it materialized as the
+# nsfs read/open pair granted by the 4C-28/4C-29 rules below), any
+# FURTHER cap_userns widening beyond the 4C-30 namespace-join sys_admin
+# (sys_chroot/net_admin stay ungranted), any plain capability, and any
+# other target-specific surface.
 allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:file read;
 
 # The helper's namespace-handle read: after the target-SID ptrace check
