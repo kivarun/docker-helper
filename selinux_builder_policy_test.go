@@ -1340,12 +1340,12 @@ func helperDomainPolicyViolations(policy string) []string {
 			violations = append(violations, fmt.Sprintf("the distro fs_read_nsfs_files interface must not be used (its read_file_perms expansion is broader than the evidenced nsfs_t:file read): %s", trimmed))
 		}
 	}
-	// The 4C-25 helper capability invariant: the helper's ONLY
-	// cap_userns rule is its own self:cap_userns sys_ptrace (the
-	// proc-magic-link dereference's ptrace-may-access prerequisite).
-	// The exact { sys_ptrace } shape is asserted by the string scan in
-	// the slirp4netns test; here the triple count and the forbidden
-	// class forms are enforced.
+	// The 4C-25/4C-30 helper capability invariant: the helper's ONLY
+	// cap_userns rule is the single self:cap_userns rule widened to
+	// { sys_ptrace sys_admin } by 4C-30 (the namespace-join authority).
+	// The exact shape is asserted by the string scan in the slirp4netns
+	// test; here the triple count and the forbidden class forms are
+	// enforced.
 	slirpSelfCapUsernsRules := 0
 	for _, rule := range allows {
 		if rule.source == "docker_helper_slirp4netns_t" && rule.target == "self" && rule.class == "cap_userns" {
@@ -1425,7 +1425,7 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		"allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:fifo_file { write getattr };",
 		"allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:dir search;",
 		"allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:lnk_file read;",
-		"allow docker_helper_slirp4netns_t self:cap_userns sys_ptrace;",
+		"allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace sys_admin };",
 		"allow docker_helper_slirp4netns_t nsfs_t:file { read open };",
 		"type nsfs_t;",
 	} {
@@ -1441,7 +1441,7 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 	// target, in the exact pinned shapes.
 	pinnedDirRule := "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:dir search;"
 	pinnedLnkRule := "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:lnk_file read;"
-	pinnedCapRule := "allow docker_helper_slirp4netns_t self:cap_userns sys_ptrace;"
+	pinnedCapRule := "allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace sys_admin };"
 	pinnedFileRule := "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:file read;"
 	pinnedNsfsRule := "allow docker_helper_slirp4netns_t nsfs_t:file { read open };"
 	pinnedNsfsRequire := "type nsfs_t;"
@@ -1461,7 +1461,7 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		t.Errorf("the helper's namespace magic-link open must be exactly one `lnk_file read` rule toward the rootlesskit target, found %d", countPinned(policy, pinnedLnkRule))
 	}
 	if countPinned(policy, pinnedCapRule) != 1 {
-		t.Errorf("the helper's ptrace-may-access prerequisite must be exactly one `self:cap_userns sys_ptrace` rule, found %d", countPinned(policy, pinnedCapRule))
+		t.Errorf("the helper's capability surface must be exactly one `self:cap_userns { sys_ptrace sys_admin }` rule (the namespace-join widening, 4C-30), found %d", countPinned(policy, pinnedCapRule))
 	}
 	if countPinned(policy, pinnedFileRule) != 1 {
 		t.Errorf("the helper's target-SID ptrace READ authority must be exactly one `rootlesskit_t:file read` rule, found %d", countPinned(policy, pinnedFileRule))
@@ -1485,7 +1485,8 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		{"missing lnk_file rule", pinnedLnkRule, ""},
 		{"missing lnk_file read (getattr-only shape)", pinnedLnkRule, "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:lnk_file getattr;"},
 		{"missing cap_userns rule", pinnedCapRule, ""},
-		{"missing sys_ptrace (sys_chroot-only shape)", pinnedCapRule, "allow docker_helper_slirp4netns_t self:cap_userns sys_chroot;"},
+		{"missing sys_admin (pre-4C-30 ptrace-only shape)", pinnedCapRule, "allow docker_helper_slirp4netns_t self:cap_userns sys_ptrace;"},
+		{"missing sys_ptrace (sys_admin-only shape)", pinnedCapRule, "allow docker_helper_slirp4netns_t self:cap_userns sys_admin;"},
 		{"missing target-file rule", pinnedFileRule, ""},
 		{"missing target-file read (getattr-only shape)", pinnedFileRule, "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:file getattr;"},
 		{"missing nsfs namespace-handle rule", pinnedNsfsRule, ""},
@@ -1536,11 +1537,13 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		{"nsfs distro-macro use (fs_read_nsfs_files interface call)", "fs_read_nsfs_files(docker_helper_slirp4netns_t);"},
 		{"cap_userns pre-grant toward the target", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:cap_userns sys_admin;"},
 		{"plain capability pre-grant for the helper", "allow docker_helper_slirp4netns_t self:capability sys_admin;"},
-		{"cap_userns structural: duplicate identical sys_ptrace rule", "allow docker_helper_slirp4netns_t self:cap_userns sys_ptrace;"},
-		{"cap_userns structural: parallel sys_ptrace rule (brace form)", "allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace };"},
-		{"cap_userns widened +sys_admin", "allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace sys_admin };"},
-		{"cap_userns widened +sys_chroot", "allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace sys_chroot };"},
-		{"cap_userns widened +net_admin", "allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace net_admin };"},
+		{"cap_userns structural: duplicate identical namespace-join rule", "allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace sys_admin };"},
+		{"cap_userns structural: parallel sys_ptrace rule", "allow docker_helper_slirp4netns_t self:cap_userns sys_ptrace;"},
+		{"cap_userns structural: parallel sys_admin rule", "allow docker_helper_slirp4netns_t self:cap_userns sys_admin;"},
+		{"cap_userns structural: sys_ptrace/sys_admin split across two rules", "allow docker_helper_slirp4netns_t self:cap_userns sys_ptrace;\nallow docker_helper_slirp4netns_t self:cap_userns sys_admin;"},
+		{"cap_userns structural: parallel rule (brace form)", "allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace };"},
+		{"cap_userns widened +sys_chroot", "allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace sys_admin sys_chroot };"},
+		{"cap_userns widened +net_admin", "allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace sys_admin net_admin };"},
 		{"plain capability sys_ptrace for the helper", "allow docker_helper_slirp4netns_t self:capability sys_ptrace;"},
 		{"file-read structural: duplicate identical target rule", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:file read;"},
 		{"file-read structural: parallel read rule (brace form)", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:file { read };"},
