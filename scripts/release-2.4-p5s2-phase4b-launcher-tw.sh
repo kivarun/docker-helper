@@ -842,8 +842,8 @@ PREFLIGHT_OK=1
   echo "--- flow-domain dontaudit inventory on netlink_route_socket (audit-suppression provenance; captured on the production baseline BEFORE any diagnostic leg):"
   sesearch --dontaudit -s docker_helper_rootlesskit_t -c netlink_route_socket /sys/fs/selinux/policy || true
 
-  echo "=== slirp4netns helper cross-domain inventory (the 4C-23 composition: exactly one dir-search grant toward the rootlesskit namespace target; NO file/lnk_file namespace-path pre-grant; NO capability) ==="
-  echo "--- the helper's own allows toward docker_helper_rootlesskit_t (concrete; the target-specific set: the pinned dir rule + the fifo rule + the distro's attribute-generic fd/key expansions):"
+  echo "=== slirp4netns helper cross-domain inventory (the 4C-24 composition: exactly one dir-search + exactly one lnk_file-read grant toward the rootlesskit namespace target; NO file namespace-path pre-grant; NO capability) ==="
+  echo "--- the helper's own allows toward docker_helper_rootlesskit_t (concrete; the target-specific set: the pinned dir+lnk_file rules + the fifo rule + the distro's attribute-generic fd/key expansions):"
   sesearch --allow -s docker_helper_slirp4netns_t -t docker_helper_rootlesskit_t /sys/fs/selinux/policy || true
   echo "--- the helper's allows toward its own entry type:"
   sesearch --allow -s docker_helper_slirp4netns_t -t docker_helper_slirp4netns_exec_t /sys/fs/selinux/policy || true
@@ -852,15 +852,34 @@ PREFLIGHT_OK=1
   echo "--- the helper's capability/cap_userns surface (must be empty):"
   sesearch --allow -s docker_helper_slirp4netns_t -c capability /sys/fs/selinux/policy || true
   sesearch --allow -s docker_helper_slirp4netns_t -c cap_userns /sys/fs/selinux/policy || true
-  SL_OK=0; SL_DIR_COUNT_OK=0; SL_DIR_SHAPE_OK=0; SL_NO_EXTRA_OK=0; SL_NO_CAP_OK=0
+  SL_OK=0; SL_DIR_COUNT_OK=0; SL_DIR_SHAPE_OK=0; SL_LNK_COUNT_OK=0; SL_LNK_SHAPE_OK=0; SL_NO_EXTRA_OK=0; SL_NO_CAP_OK=0
   SL_TGT_RULES="$(sesearch --allow -s docker_helper_slirp4netns_t -t docker_helper_rootlesskit_t /sys/fs/selinux/policy 2>/dev/null || true)"
   SL_DIR_RULES="$(printf '%s\n' "$SL_TGT_RULES" | grep -a ':dir[ ;]' || true)"
   if [ "$(printf '%s\n' "$SL_DIR_RULES" | grep -ac 'rootlesskit_t:dir search;')" = 1 ]; then
     SL_DIR_COUNT_OK=1
     SL_DIR_SHAPE_OK=1
   fi
-  if ! printf '%s\n' "$SL_TGT_RULES" | grep -aE 'rootlesskit_t:(file|lnk_file)'; then
+  SL_LNK_RULES="$(printf '%s\n' "$SL_TGT_RULES" | grep -a ':lnk_file[ ;]' || true)"
+  if [ "$(printf '%s\n' "$SL_LNK_RULES" | grep -ac 'rootlesskit_t:lnk_file read;')" = 1 ]; then
+    SL_LNK_COUNT_OK=1
+    SL_LNK_SHAPE_OK=1
+  fi
+  # No extra target-specific file-class authority: no file grant at all,
+  # and no lnk_file grant beyond the single read rule.
+  if ! printf '%s\n' "$SL_TGT_RULES" | grep -aE 'rootlesskit_t:(file|lnk_file)' \
+    || printf '%s\n' "$SL_LNK_RULES" | grep -aq 'rootlesskit_t:lnk_file read;'; then
     SL_NO_EXTRA_OK=1
+  fi
+  if ! { sesearch --allow -s docker_helper_slirp4netns_t -c capability /sys/fs/selinux/policy 2>/dev/null; \
+         sesearch --allow -s docker_helper_slirp4netns_t -c cap_userns /sys/fs/selinux/policy 2>/dev/null; } | grep -aq 'docker_helper_slirp4netns_t'; then
+    SL_NO_CAP_OK=1
+  fi
+  if [ -n "$SL_TGT_RULES" ] && [ "$SL_DIR_COUNT_OK" = 1 ] && [ "$SL_DIR_SHAPE_OK" = 1 ] && [ "$SL_LNK_COUNT_OK" = 1 ] && [ "$SL_LNK_SHAPE_OK" = 1 ] && [ "$SL_NO_EXTRA_OK" = 1 ] && [ "$SL_NO_CAP_OK" = 1 ]; then
+    echo "PASS: slirp4netns helper cross-domain inventory (exactly one dir-search and one lnk_file-read rule toward the rootlesskit target, no file pre-grant, no capability surface)"
+    SL_OK=1
+  else
+    echo "FAIL: slirp4netns helper cross-domain inventory (dir-count=$SL_DIR_COUNT_OK dir-shape=$SL_DIR_SHAPE_OK lnk-count=$SL_LNK_COUNT_OK lnk-shape=$SL_LNK_SHAPE_OK no-extra=$SL_NO_EXTRA_OK no-cap=$SL_NO_CAP_OK)"
+    PREFLIGHT_OK=0
   fi
   if ! { sesearch --allow -s docker_helper_slirp4netns_t -c capability /sys/fs/selinux/policy 2>/dev/null; \
          sesearch --allow -s docker_helper_slirp4netns_t -c cap_userns /sys/fs/selinux/policy 2>/dev/null; } | grep -aq 'docker_helper_slirp4netns_t'; then
@@ -1542,6 +1561,40 @@ if [ "$SL_SEARCH_GONE_OK" = 1 ]; then
 else
   marker "BLOCKER=the 4C-23 slirp4netns proc-traversal composition did not hold (see 26-slirp-proc-search-gone.txt)"
   marker "SLIRP-PROC-SEARCH-BOUNDARY=FAIL"
+  finish FAIL; exit 0
+fi
+
+# ============================================================
+# E3: the 4C-24 slirp4netns namespace magic-link read gate
+# ============================================================
+# The 4C-24 grant: the helper's lnk_file-read authority over the
+# categorized rootlesskit target's proc magic-links (/proc/<pid>/ns/net
+# and /proc/<pid>/ns/user on this kernel/policy pair are labeled as the
+# target's lnk_file). The gate hard-fails if that proven boundary still
+# appears. Any OTHER helper-domain AVC (the setns capability check, an
+# nsfs/file object behind the magic link, a further proc shape) is the
+# EXPECTED next boundary and is recorded, not failed.
+SL_LNK_GONE_OK=1
+{
+  echo "=== slirp4netns_t -> rootlesskit_t lnk_file AVCs of the window (the 4C-24 boundary must be absent) ==="
+  SL_LNK_AVC="$(grep -a 'tclass=lnk_file' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' | grep -a 'tcontext=system_u:system_r:docker_helper_rootlesskit_t' || true)"
+  printf '%s\n' "${SL_LNK_AVC:-(none — the 4C-24 /proc/<target-pid>/ns magic-link read boundary is gone)}"
+  echo "--- ALL other slirp4netns-domain AVCs of the window (the next-boundary evidence; recorded, not failed):"
+  SL_LNK_OTHER_AVC="$(grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -av 'tclass=lnk_file' || true)"
+  printf '%s\n' "${SL_LNK_OTHER_AVC:-(none — no other slirp4netns-domain denial appeared)}"
+  echo "--- the helper's userspace failure shape (informational)"
+  grep -a 'slirp4netns\|waiting for ready fd' "$EVIDENCE_DIR/07-manager-diag.txt" 2>/dev/null | tail -4 || true
+  if [ -n "$SL_LNK_AVC" ]; then
+    echo "GATE: the slirp4netns_t -> rootlesskit_t lnk_file denial still appeared — the 4C-24 grant did not take effect"
+    SL_LNK_GONE_OK=0
+  fi
+} > "$EVIDENCE_DIR/27-slirp-nslink-read-gone.txt" 2>&1
+cat "$EVIDENCE_DIR/27-slirp-nslink-read-gone.txt" >&2
+if [ "$SL_LNK_GONE_OK" = 1 ]; then
+  marker "SLIRP-NSLINK-READ-BOUNDARY=GONE"
+else
+  marker "BLOCKER=the 4C-24 slirp4netns namespace magic-link read composition did not hold (see 27-slirp-nslink-read-gone.txt)"
+  marker "SLIRP-NSLINK-READ-BOUNDARY=FAIL"
   finish FAIL; exit 0
 fi
 
