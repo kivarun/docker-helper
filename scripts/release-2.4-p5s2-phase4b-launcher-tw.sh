@@ -791,15 +791,15 @@ PREFLIGHT_OK=1
     PREFLIGHT_OK=0
   fi
 
-  echo "=== netlink-route send+lookup+receive identity (the 4C-21 composition: exactly { create setopt bind getattr write nlmsg_read read }, no other socket permission, no capability surface) ==="
+  echo "=== netlink-route send+lookup+receive+mutation identity (the 4C-22 composition: exactly { create setopt bind getattr write nlmsg_read read nlmsg_write }, no other socket permission, no capability surface) ==="
   echo "--- allow rules on netlink_route_socket (expected: the rootlesskit child's create+setopt+bind+getattr+write+nlmsg_read only; attribute-generic base-policy rules recorded, not asserted):"
   sesearch --allow -c netlink_route_socket /sys/fs/selinux/policy || true
-  echo "--- the flow domain's own netlink_route_socket rules (concrete; must be exactly create+setopt+bind+getattr+write+nlmsg_read+read):"
+  echo "--- the flow domain's own netlink_route_socket rules (concrete; must be exactly create+setopt+bind+getattr+write+nlmsg_read+read+nlmsg_write):"
   sesearch --allow -s docker_helper_rootlesskit_t -c netlink_route_socket /sys/fs/selinux/policy || true
   echo "--- flow-domain plain capability net_admin/net_raw (must be zero; the in-namespace cap_userns net_admin authority lives ONLY in the child's own cap_userns rule — the 4C-15 grant — never in a netlink rule):"
   sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_admin /sys/fs/selinux/policy || true
   sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_raw /sys/fs/selinux/policy || true
-  NL_CREATE_OK=0; NL_SETOPT_OK=0; NL_BIND_OK=0; NL_GETATTR_OK=0; NL_WRITE_OK=0; NL_NLMSG_READ_OK=0; NL_READ_OK=0; NL_NO_MORE_OK=0; NL_NO_NETADMIN_OK=0
+  NL_CREATE_OK=0; NL_SETOPT_OK=0; NL_BIND_OK=0; NL_GETATTR_OK=0; NL_WRITE_OK=0; NL_NLMSG_READ_OK=0; NL_READ_OK=0; NL_NLMSG_WRITE_OK=0; NL_NO_MORE_OK=0; NL_NO_NETADMIN_OK=0
   NL_FLOW_RULES="$(sesearch --allow -s docker_helper_rootlesskit_t -c netlink_route_socket /sys/fs/selinux/policy 2>/dev/null || true)"
   if printf '%s\n' "$NL_FLOW_RULES" | grep -aq "create"; then
     NL_CREATE_OK=1
@@ -822,13 +822,16 @@ PREFLIGHT_OK=1
   if printf '%s\n' "$NL_FLOW_RULES" | grep -aqw "read"; then
     NL_READ_OK=1
   fi
-  # The 4C-21 no-more check: the mutation class, connect/getopt/ioctl/
-  # shutdown stay closed (read and nlmsg_read are now evidenced).
-  if ! printf '%s\n' "$NL_FLOW_RULES" | grep -aqE "getopt|connect|ioctl|shutdown|nlmsg_write"; then
+  if printf '%s\n' "$NL_FLOW_RULES" | grep -aqw "nlmsg_write"; then
+    NL_NLMSG_WRITE_OK=1
+  fi
+  # The 4C-22 no-more check: connect/getopt/ioctl/shutdown stay closed
+  # (read, nlmsg_read, and nlmsg_write are now evidenced).
+  if ! printf '%s\n' "$NL_FLOW_RULES" | grep -aqE "getopt|connect|ioctl|shutdown"; then
     NL_NO_MORE_OK=1
   fi
   echo "--- the message-level absence proof (each individually; none may be present):"
-  for denied_perm in nlmsg_write connect sendto; do
+  for denied_perm in connect ioctl getopt shutdown; do
     if printf '%s\n' "$NL_FLOW_RULES" | grep -aqw "$denied_perm"; then
       echo "PRESENT (must not be): $denied_perm"
       NL_NO_MORE_OK=0
@@ -863,10 +866,10 @@ PREFLIGHT_OK=1
          sesearch --allow -s docker_helper_rootlesskit_t -c capability -p net_raw /sys/fs/selinux/policy 2>/dev/null; } | grep -aq "docker_helper_rootlesskit_t"; then
     NL_NO_NETADMIN_OK=1
   fi
-  if [ "$NL_CREATE_OK" = 1 ] && [ "$NL_SETOPT_OK" = 1 ] && [ "$NL_BIND_OK" = 1 ] && [ "$NL_GETATTR_OK" = 1 ] && [ "$NL_WRITE_OK" = 1 ] && [ "$NL_NLMSG_READ_OK" = 1 ] && [ "$NL_READ_OK" = 1 ] && [ "$NL_NO_MORE_OK" = 1 ] && [ "$NL_NO_NETADMIN_OK" = 1 ]; then
-    echo "PASS: netlink-route create+setopt+bind+getattr+write+nlmsg_read+read identity (exactly the seven evidenced permissions, no capability surface)"
+  if [ "$NL_CREATE_OK" = 1 ] && [ "$NL_SETOPT_OK" = 1 ] && [ "$NL_BIND_OK" = 1 ] && [ "$NL_GETATTR_OK" = 1 ] && [ "$NL_WRITE_OK" = 1 ] && [ "$NL_NLMSG_READ_OK" = 1 ] && [ "$NL_READ_OK" = 1 ] && [ "$NL_NLMSG_WRITE_OK" = 1 ] && [ "$NL_NO_MORE_OK" = 1 ] && [ "$NL_NO_NETADMIN_OK" = 1 ]; then
+    echo "PASS: netlink-route create+setopt+bind+getattr+write+nlmsg_read+read+nlmsg_write identity (exactly the eight evidenced permissions, no capability surface)"
   else
-    echo "FAIL: netlink-route create+setopt+bind+getattr+write+nlmsg_read+read identity (create=$NL_CREATE_OK setopt=$NL_SETOPT_OK bind=$NL_BIND_OK getattr=$NL_GETATTR_OK write=$NL_WRITE_OK nlmsg_read=$NL_NLMSG_READ_OK read=$NL_READ_OK no-more=$NL_NO_MORE_OK no-netadmin=$NL_NO_NETADMIN_OK)"
+    echo "FAIL: netlink-route create+setopt+bind+getattr+write+nlmsg_read+read+nlmsg_write identity (create=$NL_CREATE_OK setopt=$NL_SETOPT_OK bind=$NL_BIND_OK getattr=$NL_GETATTR_OK write=$NL_WRITE_OK nlmsg_read=$NL_NLMSG_READ_OK read=$NL_READ_OK nlmsg_write=$NL_NLMSG_WRITE_OK no-more=$NL_NO_MORE_OK no-netadmin=$NL_NO_NETADMIN_OK)"
     PREFLIGHT_OK=0
   fi
 
@@ -1447,16 +1450,16 @@ cat "$EVIDENCE_DIR/17-tuntap-completion.txt" >&2
 # companion window (section CC).
 NL_WRITE_GONE_OK=1
 {
-  echo "=== netlink_route_socket write + nlmsg_read + read AVCs of the window (all three proven boundaries must be absent) ==="
-  NL_WRITE_AVC="$(grep -a 'tclass=netlink_route_socket' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -aE 'denied  *\{ (write|nlmsg_read|read) \}' || true)"
-  printf '%s\n' "${NL_WRITE_AVC:-(none — the 4C-19 write, 4C-20 nlmsg_read, and 4C-21 read boundaries are all gone)}"
+  echo "=== netlink_route_socket write + nlmsg_read + read + nlmsg_write AVCs of the window (all four proven boundaries must be absent) ==="
+  NL_WRITE_AVC="$(grep -a 'tclass=netlink_route_socket' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -aE 'denied  *\{ (write|nlmsg_read|read|nlmsg_write) \}' || true)"
+  printf '%s\n' "${NL_WRITE_AVC:-(none — the 4C-19 write, 4C-20 nlmsg_read, 4C-21 read, and 4C-22 nlmsg_write boundaries are all gone)}"
   echo "--- ALL other netlink_route_socket AVCs of the window (the next-boundary evidence; recorded, not failed):"
   NL_OTHER_AVC="$(grep -a 'tclass=netlink_route_socket' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -avE 'denied  *\{ (write|nlmsg_read) \}' || true)"
   printf '%s\n' "${NL_OTHER_AVC:-(none — no other netlink_route_socket denial appeared)}"
   echo "--- the userspace tail check: the lookup's failure shape (informational)"
   grep -a 'Cannot talk to rtnetlink\|Cannot find device' "$EVIDENCE_DIR/07-manager-diag.txt" 2>/dev/null | tail -4 || true
   if [ -n "$NL_WRITE_AVC" ]; then
-    echo "GATE: a write, nlmsg_read, or read netlink denial still appeared — the 4C-19/4C-20/4C-21 grants did not take effect"
+    echo "GATE: a write, nlmsg_read, read, or nlmsg_write netlink denial still appeared — the 4C-19/4C-20/4C-21/4C-22 grants did not take effect"
     NL_WRITE_GONE_OK=0
   fi
 } > "$EVIDENCE_DIR/21-netlink-write-gone.txt" 2>&1
@@ -1465,11 +1468,13 @@ if [ "$NL_WRITE_GONE_OK" = 1 ]; then
   marker "NETLINK-WRITE-BOUNDARY=GONE"
   marker "NETLINK-LOOKUP-CLASS-BOUNDARY=GONE"
   marker "NETLINK-RECEIVE-READ-BOUNDARY=GONE"
+  marker "NETLINK-MUTATION-CLASS-BOUNDARY=GONE"
 else
-  marker "BLOCKER=the 4C-21 netlink_route_socket receive-side read composition did not hold (see 21-netlink-write-gone.txt)"
+  marker "BLOCKER=the 4C-22 netlink_route_socket mutation-class composition did not hold (see 21-netlink-write-gone.txt)"
   marker "NETLINK-WRITE-BOUNDARY=FAIL"
   marker "NETLINK-LOOKUP-CLASS-BOUNDARY=FAIL"
   marker "NETLINK-RECEIVE-READ-BOUNDARY=FAIL"
+  marker "NETLINK-MUTATION-CLASS-BOUNDARY=FAIL"
   finish FAIL; exit 0
 fi
 
