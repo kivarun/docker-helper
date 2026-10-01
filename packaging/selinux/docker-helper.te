@@ -1466,6 +1466,35 @@ allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:fifo_file { write 
 # authority mirroring — the helper's staircase starts independently.
 allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:dir search;
 
+# The helper's namespace magic-link read: the next step after traversing
+# /proc/<target-pid>/ is opening the namespace handles
+# /proc/<target-pid>/ns/net and /proc/<target-pid>/ns/user — on this
+# kernel/policy pair the proc magic-link is mediated as the TARGET
+# process's lnk_file (procfs labels the followed link with the target's
+# SID), NOT as an nsfs_t file object. Live enforcing evidence, canonical
+# 4C-23 run 36841019772, audit record 1332: denied { read } for
+# pid=3117 comm="slirp4netns" name="net" dev="proc" ino=19684
+# scontext=...docker_helper_slirp4netns_t:s0:c1
+# tcontext=...docker_helper_rootlesskit_t:s0:c1 tclass=lnk_file
+# permissive=0 — the traversal grant took effect (the /proc/<pid>/ dir
+# search denial is gone) and the helper's namespace-entering child died
+# opening the FIRST magic link (name="net") before any setns attempt.
+#
+# SCOPE — READ CAREFULLY: this is a TYPE-TO-TYPE rule, NOT generic proc
+# read. It grants the helper's lnk_file-read authority over the
+# categorized rootlesskit target's proc magic-links — expected to cover
+# BOTH ns/net and ns/user opens (the same target, the same type/class
+# tuple; live behavior is proven in the enforcing run, not assumed).
+# Deliberately NOT granted: any other lnk_file permission (getattr/
+# write/ioctl/lock), any rootlesskit_t:file or nsfs_t:file access (if
+# following the magic link exposes another object/class, that boundary
+# materializes live and owns the next phase), any setns-related
+# capability (cap_userns sys_admin or plain — the helper keeps its
+# zero-capability surface until a live setns boundary proves a
+# requirement), any proc_t/domain-attribute/macro form, and no
+# rootlesskit authority mirroring.
+allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:lnk_file read;
+
 # --- docker_helper_newuidmap_t: the rootlesskit UID-map helper domain (P5-S2) ---
 #
 # RootlessKit forks and execs the distro newuidmap binary (the shadow
