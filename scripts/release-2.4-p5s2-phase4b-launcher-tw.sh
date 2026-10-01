@@ -849,10 +849,10 @@ PREFLIGHT_OK=1
   sesearch --allow -s docker_helper_slirp4netns_t -t docker_helper_slirp4netns_exec_t /sys/fs/selinux/policy || true
   echo "--- the helper's whole -c dir sweep (RECORDED ONLY: the distro's domain template grants generic dir access through attribute expansion; the module's own authority is the single rootlesskit-target rule below):"
   sesearch --allow -s docker_helper_slirp4netns_t -c dir /sys/fs/selinux/policy || true
-  echo "--- the helper's capability/cap_userns surface (must be empty):"
+  echo "--- the helper's capability/cap_userns surface (the 4C-25 grant: EXACTLY one self:cap_userns sys_ptrace rule; no other cap bit, no plain capability):"
   sesearch --allow -s docker_helper_slirp4netns_t -c capability /sys/fs/selinux/policy || true
   sesearch --allow -s docker_helper_slirp4netns_t -c cap_userns /sys/fs/selinux/policy || true
-  SL_OK=0; SL_DIR_COUNT_OK=0; SL_DIR_SHAPE_OK=0; SL_LNK_COUNT_OK=0; SL_LNK_SHAPE_OK=0; SL_NO_EXTRA_OK=0; SL_NO_CAP_OK=0
+  SL_OK=0; SL_DIR_COUNT_OK=0; SL_DIR_SHAPE_OK=0; SL_LNK_COUNT_OK=0; SL_LNK_SHAPE_OK=0; SL_NO_EXTRA_OK=0; SL_CAP_COUNT_OK=0; SL_CAP_SHAPE_OK=0; SL_NO_CAP_OK=0
   SL_TGT_RULES="$(sesearch --allow -s docker_helper_slirp4netns_t -t docker_helper_rootlesskit_t /sys/fs/selinux/policy 2>/dev/null || true)"
   SL_DIR_RULES="$(printf '%s\n' "$SL_TGT_RULES" | grep -a ':dir[ ;]' || true)"
   if [ "$(printf '%s\n' "$SL_DIR_RULES" | grep -ac 'rootlesskit_t:dir search;')" = 1 ]; then
@@ -870,26 +870,25 @@ PREFLIGHT_OK=1
     || printf '%s\n' "$SL_LNK_RULES" | grep -aq 'rootlesskit_t:lnk_file read;'; then
     SL_NO_EXTRA_OK=1
   fi
-  if ! { sesearch --allow -s docker_helper_slirp4netns_t -c capability /sys/fs/selinux/policy 2>/dev/null; \
-         sesearch --allow -s docker_helper_slirp4netns_t -c cap_userns /sys/fs/selinux/policy 2>/dev/null; } | grep -aq 'docker_helper_slirp4netns_t'; then
+  SL_CAP_RULES="$(sesearch --allow -s docker_helper_slirp4netns_t -c cap_userns /sys/fs/selinux/policy 2>/dev/null | grep -a 'self:cap_userns' || true)"
+  if [ "$(printf '%s\n' "$SL_CAP_RULES" | grep -ac .)" = 1 ]; then
+    SL_CAP_COUNT_OK=1
+  fi
+  if printf '%s\n' "$SL_CAP_RULES" | grep -aq 'cap_userns sys_ptrace;'; then
+    SL_CAP_SHAPE_OK=1
+  fi
+  # The helper's capability surface after 4C-25: no PLAIN capability/
+  # capability2 rule, and no cap_userns rule beyond the one
+  # self:cap_userns sys_ptrace grant.
+  if ! sesearch --allow -s docker_helper_slirp4netns_t -c capability /sys/fs/selinux/policy 2>/dev/null | grep -aq 'docker_helper_slirp4netns_t' \
+    && [ "$SL_CAP_COUNT_OK" = 1 ] && [ "$SL_CAP_SHAPE_OK" = 1 ]; then
     SL_NO_CAP_OK=1
   fi
-  if [ -n "$SL_TGT_RULES" ] && [ "$SL_DIR_COUNT_OK" = 1 ] && [ "$SL_DIR_SHAPE_OK" = 1 ] && [ "$SL_LNK_COUNT_OK" = 1 ] && [ "$SL_LNK_SHAPE_OK" = 1 ] && [ "$SL_NO_EXTRA_OK" = 1 ] && [ "$SL_NO_CAP_OK" = 1 ]; then
-    echo "PASS: slirp4netns helper cross-domain inventory (exactly one dir-search and one lnk_file-read rule toward the rootlesskit target, no file pre-grant, no capability surface)"
+  if [ -n "$SL_TGT_RULES" ] && [ "$SL_DIR_COUNT_OK" = 1 ] && [ "$SL_DIR_SHAPE_OK" = 1 ] && [ "$SL_LNK_COUNT_OK" = 1 ] && [ "$SL_LNK_SHAPE_OK" = 1 ] && [ "$SL_NO_EXTRA_OK" = 1 ] && [ "$SL_CAP_COUNT_OK" = 1 ] && [ "$SL_CAP_SHAPE_OK" = 1 ] && [ "$SL_NO_CAP_OK" = 1 ]; then
+    echo "PASS: slirp4netns helper cross-domain inventory (exactly one dir-search and one lnk_file-read rule toward the rootlesskit target, exactly one self:cap_userns sys_ptrace rule, no file pre-grant, no other capability surface)"
     SL_OK=1
   else
-    echo "FAIL: slirp4netns helper cross-domain inventory (dir-count=$SL_DIR_COUNT_OK dir-shape=$SL_DIR_SHAPE_OK lnk-count=$SL_LNK_COUNT_OK lnk-shape=$SL_LNK_SHAPE_OK no-extra=$SL_NO_EXTRA_OK no-cap=$SL_NO_CAP_OK)"
-    PREFLIGHT_OK=0
-  fi
-  if ! { sesearch --allow -s docker_helper_slirp4netns_t -c capability /sys/fs/selinux/policy 2>/dev/null; \
-         sesearch --allow -s docker_helper_slirp4netns_t -c cap_userns /sys/fs/selinux/policy 2>/dev/null; } | grep -aq 'docker_helper_slirp4netns_t'; then
-    SL_NO_CAP_OK=1
-  fi
-  if [ -n "$SL_TGT_RULES" ] && [ "$SL_DIR_COUNT_OK" = 1 ] && [ "$SL_DIR_SHAPE_OK" = 1 ] && [ "$SL_NO_EXTRA_OK" = 1 ] && [ "$SL_NO_CAP_OK" = 1 ]; then
-    echo "PASS: slirp4netns helper cross-domain inventory (exactly one dir-search rule toward the rootlesskit target, no file/lnk_file pre-grant, no capability surface)"
-    SL_OK=1
-  else
-    echo "FAIL: slirp4netns helper cross-domain inventory (dir-count=$SL_DIR_COUNT_OK dir-shape=$SL_DIR_SHAPE_OK no-extra=$SL_NO_EXTRA_OK no-cap=$SL_NO_CAP_OK)"
+    echo "FAIL: slirp4netns helper cross-domain inventory (dir-count=$SL_DIR_COUNT_OK dir-shape=$SL_DIR_SHAPE_OK lnk-count=$SL_LNK_COUNT_OK lnk-shape=$SL_LNK_SHAPE_OK no-extra=$SL_NO_EXTRA_OK cap-count=$SL_CAP_COUNT_OK cap-shape=$SL_CAP_SHAPE_OK no-cap=$SL_NO_CAP_OK)"
     PREFLIGHT_OK=0
   fi
   echo "--- live Netlink mediation model (recorded; FAIL CLOSED if it unexpectedly changes):"
@@ -1005,6 +1004,12 @@ cat "$EVIDENCE_DIR/18-semodule-db-diag.txt" >&2
 # (denials audit through a different path). Remove the catch-all for
 # the window; restore it with the baseline.
 auditctl -d never,task >> "$EVIDENCE_DIR/18-auditctl-sysrules.txt" 2>&1 || true
+# Raise the kernel's audit backlog for the window: the shipped default
+# (backlog_limit 64) dropped the flow's own syscall records under the
+# sampler's fork load in the 4C-22 runs (the slice held only the
+# harness's own processes). 8192 keeps the whole window's records
+# deliverable; restored with the baseline below.
+auditctl -b 8192 >> "$EVIDENCE_DIR/18-auditctl-sysrules.txt" 2>&1 || true
 auditctl -a always,exit -F arch=b64 \
   -S socket,socketpair,sendmsg,sendto,recvmsg,recvfrom,ioctl,close \
   -k p5s2diag >> "$EVIDENCE_DIR/18-auditctl-sysrules.txt" 2>&1 \
@@ -1043,6 +1048,7 @@ log "D: live START $OP_ID (sampler armed)"
 (
   set +e
   seen_pid=""
+  TAP_HITS=0
   seen_ctx=""
   end=$(( $(date +%s) + 75 ))
   while [ "$(date +%s)" -lt "$end" ]; do
@@ -1063,22 +1069,26 @@ log "D: live START $OP_ID (sampler armed)"
       # 4C-18 tap0-lifecycle observer: the namespaces owner is the
       # leader's child; /proc/<child>/net/dev is the kernel's interface
       # table OF THE TARGET NETNS, read via host root authority — the
-      # blocked flow's own authority is untouched. On the first hit the
-      # netns-independent detail probe records name/ifindex/state.
+      # blocked flow's own authority is untouched. The OBSERVED-line
+      # logging is throttled to the first 3 hits (the 4C-22 run's
+      # per-iteration logging flooded the kernel's audit queue and
+      # helped drop the flow's own syscall records); the detail probe
+      # still retries until it captures a non-empty ifindex/state line.
       CHILDREN="$(cat "/proc/$seen_pid/task/$seen_pid/children" 2>/dev/null || true)"
       for C in $CHILDREN; do
         TAP_LINE="$(grep -a 'tap0' "/proc/$C/net/dev" 2>/dev/null || true)"
-        if [ -n "$TAP_LINE" ]; then
+        if [ -n "$TAP_LINE" ] && [ "$TAP_HITS" -lt 3 ]; then
+          TAP_HITS=$((TAP_HITS + 1))
           printf 'TAP0-OBSERVED %s child=%s ns=%s ctx=%s dev=%s\n' \
             "$(date +%s.%N)" "$C" \
             "$(readlink "/proc/$C/ns/net" 2>/dev/null)" \
             "$(tr -d '\0' < "/proc/$C/attr/current" 2>/dev/null)" \
             "$(printf '%s\n' "$TAP_LINE" | head -1 | awk '{print $1, $2}')" \
             >> "$EVIDENCE_DIR/05-flow-context.txt"
-          if [ ! -s "$EVIDENCE_DIR/20-tap0-detail.txt" ]; then
-            nsenter -t "$C" -n -- ip link show tap0 2>&1 \
-              | head -2 > "$EVIDENCE_DIR/20-tap0-detail.txt" || true
-          fi
+        fi
+        if [ -n "$TAP_LINE" ] && [ ! -s "$EVIDENCE_DIR/20-tap0-detail.txt" ]; then
+          nsenter -t "$C" -n -- ip link show tap0 2>&1 \
+            | head -2 > "$EVIDENCE_DIR/20-tap0-detail.txt" || true
         fi
       done
     fi
@@ -1571,9 +1581,11 @@ fi
 # categorized rootlesskit target's proc magic-links (/proc/<pid>/ns/net
 # and /proc/<pid>/ns/user on this kernel/policy pair are labeled as the
 # target's lnk_file). The gate hard-fails if that proven boundary still
-# appears. Any OTHER helper-domain AVC (the setns capability check, an
-# nsfs/file object behind the magic link, a further proc shape) is the
-# EXPECTED next boundary and is recorded, not failed.
+# appears. Any OTHER helper-domain AVC (the SELinux ptrace READ access
+# check against the target SID — security_ptrace_access_check maps a
+# PTRACE_MODE_READ check to slirp4netns_t -> rootlesskit_t:file read —
+# an nsfs/file object behind the magic link, or a further proc shape)
+# is the EXPECTED next boundary and is recorded, not failed.
 SL_LNK_GONE_OK=1
 {
   echo "=== slirp4netns_t -> rootlesskit_t lnk_file AVCs of the window (the 4C-24 boundary must be absent) ==="
@@ -1595,6 +1607,46 @@ if [ "$SL_LNK_GONE_OK" = 1 ]; then
 else
   marker "BLOCKER=the 4C-24 slirp4netns namespace magic-link read composition did not hold (see 27-slirp-nslink-read-gone.txt)"
   marker "SLIRP-NSLINK-READ-BOUNDARY=FAIL"
+  finish FAIL; exit 0
+fi
+
+# ============================================================
+# E4: the 4C-25 slirp4netns namespace-link ptrace gate
+# ============================================================
+# The 4C-25 grant: the helper's self:cap_userns sys_ptrace — the
+# ptrace-may-access CAPABILITY prerequisite inside
+# open("/proc/<target-pid>/ns/net", O_RDONLY) → proc_ns_get_link() →
+# ptrace_may_access(target, PTRACE_MODE_READ_FSCREDS). ATTRIBUTION
+# (corrected, mandatory): this is the proc namespace-link dereference
+# boundary, NOT a setns boundary — a real setns(CLONE_NEWUSER) later
+# reaches userns_install() whose privilege check is
+# ns_capable(target_user_ns, CAP_SYS_ADMIN), not CAP_SYS_PTRACE. The
+# gate hard-fails if the sys_ptrace cap_userns denial still appears.
+# The next boundary candidates (recorded, not failed): the SELinux
+# ptrace READ access check against the TARGET SID
+# (slirp4netns_t -> rootlesskit_t:file read), the userns_install
+# cap_userns sys_admin check, or another object behind the magic link.
+SL_PTRACE_GONE_OK=1
+{
+  echo "=== slirp4netns_t self cap_userns sys_ptrace AVCs of the window (the 4C-25 boundary must be absent) ==="
+  SL_PTRACE_AVC="$(grep -a 'tclass=cap_userns' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' | grep -a 'sys_ptrace' || true)"
+  printf '%s\n' "${SL_PTRACE_AVC:-(none — the 4C-25 namespace-link dereference ptrace-may-access boundary is gone)}"
+  echo "--- ALL other slirp4netns-domain AVCs of the window (the next-boundary evidence; recorded, not failed):"
+  SL_PTRACE_OTHER_AVC="$(grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -av 'tclass=cap_userns' || true)"
+  printf '%s\n' "${SL_PTRACE_OTHER_AVC:-(none — no other slirp4netns-domain denial appeared)}"
+  echo "--- the helper's userspace failure shape (informational)"
+  grep -a 'slirp4netns\|waiting for ready fd' "$EVIDENCE_DIR/07-manager-diag.txt" 2>/dev/null | tail -4 || true
+  if [ -n "$SL_PTRACE_AVC" ]; then
+    echo "GATE: the slirp4netns_t self cap_userns sys_ptrace denial still appeared — the 4C-25 grant did not take effect"
+    SL_PTRACE_GONE_OK=0
+  fi
+} > "$EVIDENCE_DIR/28-slirp-nslink-ptrace-gone.txt" 2>&1
+cat "$EVIDENCE_DIR/28-slirp-nslink-ptrace-gone.txt" >&2
+if [ "$SL_PTRACE_GONE_OK" = 1 ]; then
+  marker "SLIRP-NSLINK-PTRACE-BOUNDARY=GONE"
+else
+  marker "BLOCKER=the 4C-25 slirp4netns namespace-link ptrace composition did not hold (see 28-slirp-nslink-ptrace-gone.txt)"
+  marker "SLIRP-NSLINK-PTRACE-BOUNDARY=FAIL"
   finish FAIL; exit 0
 fi
 
@@ -1798,7 +1850,9 @@ auditctl -a always,exit -F arch=b64 \
   -k p5s2diag >> "$EVIDENCE_DIR/18-auditctl-sysrules.txt" 2>&1 || true
 # The second diagnostic leg: disable dontaudit reporting AFTER the
 # canonical gates (this is the 4C-18 diagnostic replication for the
-# 4C-19 composition).
+# current composition). The backlog stays raised across both windows
+# (the never,task catch-all and the syscall rules were not flushed
+# between them).
 semodule -DB >> "$EVIDENCE_DIR/18-semodule-db-diag.txt" 2>&1 \
   || { note "the companion leg's semodule -DB failed (evidence-only; recorded)"; }
 {
@@ -1897,6 +1951,7 @@ cat "$EVIDENCE_DIR/25-companion-boundary.txt" >&2
 # Restore the production baseline and PROVE it.
 auditctl -D > /dev/null 2>&1 || true
 auditctl -a never,task > /dev/null 2>&1 || true
+auditctl -b 64 > /dev/null 2>&1 || true
 semodule -B >> "$EVIDENCE_DIR/18-semodule-db-diag.txt" 2>&1 || true
 {
   echo "=== 4C-19 companion restore (post-window semodule -B) ==="
