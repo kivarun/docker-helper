@@ -852,7 +852,7 @@ PREFLIGHT_OK=1
   echo "--- the helper's capability/cap_userns surface (the 4C-25 grant: EXACTLY one self:cap_userns sys_ptrace rule; no other cap bit, no plain capability):"
   sesearch --allow -s docker_helper_slirp4netns_t -c capability /sys/fs/selinux/policy || true
   sesearch --allow -s docker_helper_slirp4netns_t -c cap_userns /sys/fs/selinux/policy || true
-  SL_OK=0; SL_DIR_COUNT_OK=0; SL_DIR_SHAPE_OK=0; SL_LNK_COUNT_OK=0; SL_LNK_SHAPE_OK=0; SL_NO_EXTRA_OK=0; SL_CAP_COUNT_OK=0; SL_CAP_SHAPE_OK=0; SL_NO_CAP_OK=0
+  SL_OK=0; SL_DIR_COUNT_OK=0; SL_DIR_SHAPE_OK=0; SL_LNK_COUNT_OK=0; SL_LNK_SHAPE_OK=0; SL_FILE_COUNT_OK=0; SL_FILE_SHAPE_OK=0; SL_NO_EXTRA_OK=0; SL_CAP_COUNT_OK=0; SL_CAP_SHAPE_OK=0; SL_NO_CAP_OK=0
   SL_TGT_RULES="$(sesearch --allow -s docker_helper_slirp4netns_t -t docker_helper_rootlesskit_t /sys/fs/selinux/policy 2>/dev/null || true)"
   SL_DIR_RULES="$(printf '%s\n' "$SL_TGT_RULES" | grep -a ':dir[ ;]' || true)"
   if [ "$(printf '%s\n' "$SL_DIR_RULES" | grep -ac 'rootlesskit_t:dir search;')" = 1 ]; then
@@ -864,10 +864,16 @@ PREFLIGHT_OK=1
     SL_LNK_COUNT_OK=1
     SL_LNK_SHAPE_OK=1
   fi
-  # No extra target-specific file-class authority: no file grant at all,
-  # and no lnk_file grant beyond the single read rule.
-  if ! printf '%s\n' "$SL_TGT_RULES" | grep -aE 'rootlesskit_t:(file|lnk_file)' \
-    || printf '%s\n' "$SL_LNK_RULES" | grep -aq 'rootlesskit_t:lnk_file read;'; then
+  SL_FILE_RULES="$(printf '%s\n' "$SL_TGT_RULES" | grep -a ':file[ ;]' || true)"
+  if [ "$(printf '%s\n' "$SL_FILE_RULES" | grep -ac 'rootlesskit_t:file read;')" = 1 ]; then
+    SL_FILE_COUNT_OK=1
+    SL_FILE_SHAPE_OK=1
+  fi
+  # No extra target-specific file-class authority: the file set must be
+  # EXACTLY the single read rule (no open/getattr/write), and the lnk
+  # set exactly the single read rule.
+  if [ "$SL_FILE_COUNT_OK" = 1 ] && [ "$SL_FILE_SHAPE_OK" = 1 ] && [ "$(printf '%s\n' "$SL_FILE_RULES" | grep -ac .)" = 1 ] \
+    && [ "$(printf '%s\n' "$SL_LNK_RULES" | grep -ac .)" = 1 ]; then
     SL_NO_EXTRA_OK=1
   fi
   SL_CAP_RULES="$(sesearch --allow -s docker_helper_slirp4netns_t -c cap_userns /sys/fs/selinux/policy 2>/dev/null | grep -a 'docker_helper_slirp4netns_t:cap_userns' || true)"
@@ -884,11 +890,11 @@ PREFLIGHT_OK=1
     && [ "$SL_CAP_COUNT_OK" = 1 ] && [ "$SL_CAP_SHAPE_OK" = 1 ]; then
     SL_NO_CAP_OK=1
   fi
-  if [ -n "$SL_TGT_RULES" ] && [ "$SL_DIR_COUNT_OK" = 1 ] && [ "$SL_DIR_SHAPE_OK" = 1 ] && [ "$SL_LNK_COUNT_OK" = 1 ] && [ "$SL_LNK_SHAPE_OK" = 1 ] && [ "$SL_NO_EXTRA_OK" = 1 ] && [ "$SL_CAP_COUNT_OK" = 1 ] && [ "$SL_CAP_SHAPE_OK" = 1 ] && [ "$SL_NO_CAP_OK" = 1 ]; then
-    echo "PASS: slirp4netns helper cross-domain inventory (exactly one dir-search and one lnk_file-read rule toward the rootlesskit target, exactly one self:cap_userns sys_ptrace rule, no file pre-grant, no other capability surface)"
+  if [ -n "$SL_TGT_RULES" ] && [ "$SL_DIR_COUNT_OK" = 1 ] && [ "$SL_DIR_SHAPE_OK" = 1 ] && [ "$SL_LNK_COUNT_OK" = 1 ] && [ "$SL_LNK_SHAPE_OK" = 1 ] && [ "$SL_FILE_COUNT_OK" = 1 ] && [ "$SL_FILE_SHAPE_OK" = 1 ] && [ "$SL_NO_EXTRA_OK" = 1 ] && [ "$SL_CAP_COUNT_OK" = 1 ] && [ "$SL_CAP_SHAPE_OK" = 1 ] && [ "$SL_NO_CAP_OK" = 1 ]; then
+    echo "PASS: slirp4netns helper cross-domain inventory (exactly one dir-search, one lnk_file-read, and one file-read rule toward the rootlesskit target, exactly one self:cap_userns sys_ptrace rule, no other capability surface)"
     SL_OK=1
   else
-    echo "FAIL: slirp4netns helper cross-domain inventory (dir-count=$SL_DIR_COUNT_OK dir-shape=$SL_DIR_SHAPE_OK lnk-count=$SL_LNK_COUNT_OK lnk-shape=$SL_LNK_SHAPE_OK no-extra=$SL_NO_EXTRA_OK cap-count=$SL_CAP_COUNT_OK cap-shape=$SL_CAP_SHAPE_OK no-cap=$SL_NO_CAP_OK)"
+    echo "FAIL: slirp4netns helper cross-domain inventory (dir-count=$SL_DIR_COUNT_OK dir-shape=$SL_DIR_SHAPE_OK lnk-count=$SL_LNK_COUNT_OK lnk-shape=$SL_LNK_SHAPE_OK file-count=$SL_FILE_COUNT_OK file-shape=$SL_FILE_SHAPE_OK no-extra=$SL_NO_EXTRA_OK cap-count=$SL_CAP_COUNT_OK cap-shape=$SL_CAP_SHAPE_OK no-cap=$SL_NO_CAP_OK)"
     PREFLIGHT_OK=0
   fi
   echo "--- live Netlink mediation model (recorded; FAIL CLOSED if it unexpectedly changes):"
@@ -1647,6 +1653,40 @@ if [ "$SL_PTRACE_GONE_OK" = 1 ]; then
 else
   marker "BLOCKER=the 4C-25 slirp4netns namespace-link ptrace composition did not hold (see 28-slirp-nslink-ptrace-gone.txt)"
   marker "SLIRP-NSLINK-PTRACE-BOUNDARY=FAIL"
+  finish FAIL; exit 0
+fi
+
+# ============================================================
+# E5: the 4C-26 slirp4netns target-SID ptrace file-read gate
+# ============================================================
+# The 4C-26 grant: the helper's file-read authority toward the
+# rootlesskit target — the SELinux PTRACE_MODE_READ target-SID check
+# (security_ptrace_access_check). The gate hard-fails if that proven
+# boundary still appears. Any OTHER helper-domain AVC (a further
+# VFS/SELinux check on the followed namespace object — nsfs/file
+# shapes, a getattr/open completion, or the userns_install sys_admin
+# check) is the EXPECTED next boundary and is recorded, not failed.
+SL_FILE_GONE_OK=1
+{
+  echo "=== slirp4netns_t -> rootlesskit_t file AVCs of the window (the 4C-26 boundary must be absent) ==="
+  SL_FILE_AVC="$(grep -a 'tclass=file' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' | grep -a 'tcontext=system_u:system_r:docker_helper_rootlesskit_t' || true)"
+  printf '%s\n' "${SL_FILE_AVC:-(none — the 4C-26 ptrace target-SID file-read boundary is gone)}"
+  echo "--- ALL other slirp4netns-domain AVCs of the window (the next-boundary evidence; recorded, not failed):"
+  SL_FILE_OTHER_AVC="$(grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -av 'tclass=file' || true)"
+  printf '%s\n' "${SL_FILE_OTHER_AVC:-(none — no other slirp4netns-domain denial appeared)}"
+  echo "--- the helper's userspace failure shape (informational)"
+  grep -a 'slirp4netns\|waiting for ready fd' "$EVIDENCE_DIR/07-manager-diag.txt" 2>/dev/null | tail -4 || true
+  if [ -n "$SL_FILE_AVC" ]; then
+    echo "GATE: the slirp4netns_t -> rootlesskit_t file denial still appeared — the 4C-26 grant did not take effect"
+    SL_FILE_GONE_OK=0
+  fi
+} > "$EVIDENCE_DIR/29-slirp-ptrace-file-read-gone.txt" 2>&1
+cat "$EVIDENCE_DIR/29-slirp-ptrace-file-read-gone.txt" >&2
+if [ "$SL_FILE_GONE_OK" = 1 ]; then
+  marker "SLIRP-PTRACE-FILE-READ-BOUNDARY=GONE"
+else
+  marker "BLOCKER=the 4C-26 slirp4netns target-SID ptrace file-read composition did not hold (see 29-slirp-ptrace-file-read-gone.txt)"
+  marker "SLIRP-PTRACE-FILE-READ-BOUNDARY=FAIL"
   finish FAIL; exit 0
 fi
 
