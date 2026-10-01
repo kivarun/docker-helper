@@ -1431,6 +1431,41 @@ allow docker_helper_slirp4netns_t docker_helper_slirp4netns_exec_t:file { entryp
 # required for the inherited fds to survive the exec at all).
 allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:fifo_file { write getattr };
 
+# The helper's namespace-target traversal: slirp4netns resolves the
+# RootlessKit target child's network namespace by opening
+# /proc/<target-pid>/ns/net (and ns/user) — the FIRST kernel-level step
+# is the directory traversal of /proc/<target-pid>/ itself, which
+# carries the TARGET process's domain and category as its procfs
+# labeling. Live enforcing evidence, canonical 4C-22 run 36835708818,
+# audit record 1282: denied { search } for pid=3116 comm="slirp4netns"
+# name="3083" dev="proc" scontext=...docker_helper_slirp4netns_t:s0:c1
+# tcontext=...docker_helper_rootlesskit_t:s0:c1 tclass=dir
+# permissive=0 — the helper crossed the RootlessKit PrepareTap()
+# phase (both ip commands exited 0, tap0 ifindex 2 with IFF_UP set)
+# and died resolving the target child's proc directory (pid 3083 = the
+# nsenter target = the namespaces owner) BEFORE any namespace file was
+# opened.
+#
+# SCOPE — READ CAREFULLY: this is a TYPE-TO-TYPE rule, NOT generic
+# /proc access. The source rule is domain-wide: it grants
+# docker_helper_slirp4netns_t dir-search authority over directories
+# labeled docker_helper_rootlesskit_t (the categorized target
+# process's procfs dirs — procfs labels /proc/<pid>/ and /proc/<pid>/ns/
+# with the target's SID, so ONE search permission may cover traversal
+# through both components; that is the same tuple doing one kind of
+# work, not a second grant). Category separation is NOT claimed by this
+# rule: the live pair is slirp4netns_t:s0:c1 → rootlesskit_t:s0:c1 and
+# the MCS constraints are what keep a c1 helper out of a c2 target's
+# proc tree — the cross-operation c1-vs-c2 gate covers exactly that and
+# stays mandatory before any Release GO. Deliberately NOT granted
+# here: any proc_t/proc-type-attribute or domain-attribute form, any
+# proc macro, any file/lnk_file/nsfs access on the namespace paths
+# (the open of /proc/<pid>/ns/net|user is the NEXT boundary and must
+# materialize live), any setns-related authority, any capability
+# (cap_userns or plain), any socket/TUN surface, and NO rootlesskit
+# authority mirroring — the helper's staircase starts independently.
+allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:dir search;
+
 # --- docker_helper_newuidmap_t: the rootlesskit UID-map helper domain (P5-S2) ---
 #
 # RootlessKit forks and execs the distro newuidmap binary (the shadow
