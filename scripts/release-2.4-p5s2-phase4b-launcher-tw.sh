@@ -125,15 +125,34 @@ process_context() { tr -d '\0' < "/proc/$1/attr/current" 2>/dev/null || true; }
 
 # 4C-27 process/credential snapshot (diagnostic host observation):
 # SELinux context, Uid/Gid, the five capability sets, and the user/net
-# namespace identities of one pid.
+# namespace identities of one pid. The function OWNS its destination
+# path (the third argument) — the 4C-27 dispatch passed the path as an
+# ignored argument and produced no files.
 proc_snapshot() {
+  pid="$1"
+  ctx="$2"
+  out="$3"
   {
-    echo "=== pid=$1 ctx=$2 at $(date +%s.%N) ==="
-    grep -a -E '^(Uid|Gid|CapInh|CapPrm|CapEff|CapBnd|CapAmb|NSpid|PPid):' "/proc/$1/status" 2>/dev/null || true
-    echo "ns/user: $(readlink "/proc/$1/ns/user" 2>/dev/null)"
-    echo "ns/net:  $(readlink "/proc/$1/ns/net" 2>/dev/null)"
-  }
+    echo "=== pid=$pid ctx=$ctx at $(date +%s.%N) ==="
+    grep -a -E '^(Uid|Gid|CapInh|CapPrm|CapEff|CapBnd|CapAmb|NSpid|PPid):' "/proc/$pid/status" 2>/dev/null || true
+    echo "ns/user: $(readlink "/proc/$pid/ns/user" 2>/dev/null)"
+    echo "ns/net:  $(readlink "/proc/$pid/ns/net" 2>/dev/null)"
+  } > "$out"
 }
+
+# 4C-28 writer sanity: prove the snapshot writer itself is functional
+# (a live long-lived pid must produce a non-empty file with the
+# snapshot's header shape) BEFORE the window, so a snapshot absence can
+# be classified as an actual race instead of a dead writer.
+proc_snapshot 1 "sanity" "$EVIDENCE_DIR/31-writer-sanity.txt"
+if [ ! -s "$EVIDENCE_DIR/31-writer-sanity.txt" ]; then
+  echo "BLOCKER=the snapshot writer produced an empty sanity file (pid 1)" >&2
+  exit 1
+fi
+if ! grep -aq '^=== pid=1 ctx=sanity at ' "$EVIDENCE_DIR/31-writer-sanity.txt"; then
+  echo "BLOCKER=the snapshot writer's sanity file does not carry the snapshot header shape" >&2
+  exit 1
+fi
 
 # harvest_avcs_since: the audit-log slice + kernel journal slice since an
 # epoch (the G31 evidence pattern) plus the kernel ring buffer.
