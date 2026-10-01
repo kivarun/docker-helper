@@ -123,6 +123,18 @@ context_of() { stat -c '%C' "$1" 2>/dev/null || true; }
 # process_context: /proc/<pid>/attr/current, newline-safe.
 process_context() { tr -d '\0' < "/proc/$1/attr/current" 2>/dev/null || true; }
 
+# 4C-27 process/credential snapshot (diagnostic host observation):
+# SELinux context, Uid/Gid, the five capability sets, and the user/net
+# namespace identities of one pid.
+proc_snapshot() {
+  {
+    echo "=== pid=$1 ctx=$2 at $(date +%s.%N) ==="
+    grep -a -E '^(Uid|Gid|CapInh|CapPrm|CapEff|CapBnd|CapAmb|NSpid|PPid):' "/proc/$1/status" 2>/dev/null || true
+    echo "ns/user: $(readlink "/proc/$1/ns/user" 2>/dev/null)"
+    echo "ns/net:  $(readlink "/proc/$1/ns/net" 2>/dev/null)"
+  }
+}
+
 # harvest_avcs_since: the audit-log slice + kernel journal slice since an
 # epoch (the G31 evidence pattern) plus the kernel ring buffer.
 harvest_avcs_since() {
@@ -1034,6 +1046,40 @@ echo "$T0" > "$EVIDENCE_DIR/window-start-epoch"
 auditctl -s > "$EVIDENCE_DIR/audit-status-window-start.txt" 2>&1 || true
 
 # ============================================================
+# 4C-27: kernel-side diagnostic tracepoints (policy delta = ZERO)
+# ============================================================
+# The audit syscall rules cannot observe the nsenter'd leaf processes
+# (established across the 4C-22/4C-26 runs); the tracefs path is
+# separate and needs no policy authority. Collected: the capability
+# capable-check results (capability:cap_capable — the Linux capability
+# verdict including negative commoncap results, distinguishing the
+# SELinux cap_userns AVC from the actual capability outcome) and the
+# namespace-path syscalls' exits (openat/setns/socket) for the helper.
+TRACING=/sys/kernel/tracing
+TRACE_ENABLED=0
+if [ -d "$TRACING/events/capability/cap_capable" ]; then
+  echo 0 > "$TRACING/tracing_on" 2>/dev/null || true
+  echo > "$TRACING/trace" 2>/dev/null || true
+  echo 1 > "$TRACING/events/capability/cap_capable/enable" 2>/dev/null || true \
+    && TRACE_ENABLED=1
+  echo 1 > "$TRACING/events/syscalls/sys_enter_openat/enable" 2>/dev/null || true
+  echo 1 > "$TRACING/events/syscalls/sys_exit_openat/enable" 2>/dev/null || true
+  echo 1 > "$TRACING/events/syscalls/sys_enter_setns/enable" 2>/dev/null || true
+  echo 1 > "$TRACING/events/syscalls/sys_exit_setns/enable" 2>/dev/null || true
+  echo 1 > "$TRACING/events/syscalls/sys_enter_socket/enable" 2>/dev/null || true
+  echo 1 > "$TRACING/tracing_on" 2>/dev/null || true
+  {
+    echo "=== 4C-27 tracefs collector armed ==="
+    echo "cap_capable enabled: $TRACE_ENABLED"
+    grep -a -E '^(current_tracer|trace_...)' /dev/null 2>/dev/null || true
+    cat "$TRACING/events/capability/cap_capable/enable" 2>/dev/null
+  } > "$EVIDENCE_DIR/30-trace-arm.txt" 2>&1
+else
+  note "tracefs capability tracepoint unavailable"
+  : > "$EVIDENCE_DIR/30-trace-arm.txt"
+fi
+
+# ============================================================
 # D: the live START with a concurrent kernel-label sampler
 # ============================================================
 OP_ID="$(gen_op_id)"
@@ -1072,16 +1118,34 @@ log "D: live START $OP_ID (sampler armed)"
       if [ $(( RANDOM % 8 )) -eq 0 ]; then
         ps -eZ 2>/dev/null | awk '$1 ~ /docker_helper_rootlesskit_t/ { print "PS-FLOW " $0 }' >> "$EVIDENCE_DIR/12-uncategorized-ps.txt"
       fi
-      # 4C-18 tap0-lifecycle observer: the namespaces owner is the
-      # leader's child; /proc/<child>/net/dev is the kernel's interface
-      # table OF THE TARGET NETNS, read via host root authority — the
-      # blocked flow's own authority is untouched. The OBSERVED-line
-      # logging is throttled to the first 3 hits (the 4C-22 run's
-      # per-iteration logging flooded the kernel's audit queue and
-      # helped drop the flow's own syscall records); the detail probe
-      # still retries until it captures a non-empty ifindex/state line.
+      # 4C-27 process/credential snapshot: one shot per helper/target
+      # pid (diagnostic host observation; no flow authority touched).
       CHILDREN="$(cat "/proc/$seen_pid/task/$seen_pid/children" 2>/dev/null || true)"
       for C in $CHILDREN; do
+        snap_shot="$C"
+        snap_ctx="$(tr -d '\0' < "/proc/$C/attr/current" 2>/dev/null || true)"
+        case "$snap_ctx" in
+          docker_helper_slirp4netns_t:*)
+            if [ ! -s "$EVIDENCE_DIR/31-slirp-snap-$snap_shot.txt" ]; then
+              proc_snapshot "$snap_shot" "$snap_ctx" "$EVIDENCE_DIR/31-slirp-snap-$snap_shot.txt"
+            fi
+            for C2 in $(cat "/proc/$snap_shot/task/$snap_shot/children" 2>/dev/null || true); do
+              snap_ctx2="$(tr -d '\0' < "/proc/$C2/attr/current" 2>/dev/null || true)"
+              case "$snap_ctx2" in
+                docker_helper_slirp4netns_t:*)
+                  if [ ! -s "$EVIDENCE_DIR/31-slirp-snap-$C2.txt" ]; then
+                    proc_snapshot "$C2" "$snap_ctx2" "$EVIDENCE_DIR/31-slirp-snap-$C2.txt"
+                  fi
+                  ;;
+              esac
+            done
+            ;;
+          docker_helper_rootlesskit_t:*)
+            if [ ! -s "$EVIDENCE_DIR/31-rk-target-snap-$snap_shot.txt" ]; then
+              proc_snapshot "$snap_shot" "$snap_ctx" "$EVIDENCE_DIR/31-rk-target-snap-$snap_shot.txt"
+            fi
+            ;;
+        esac
         TAP_LINE="$(grep -a 'tap0' "/proc/$C/net/dev" 2>/dev/null || true)"
         if [ -n "$TAP_LINE" ] && [ "$TAP_HITS" -lt 3 ]; then
           TAP_HITS=$((TAP_HITS + 1))
@@ -1153,6 +1217,29 @@ START_OUT="$(printf 'START %s\n' "$OP_ID" | timeout 120 socat - UNIX-CONNECT:"$M
   echo "window-end: $(date +%s)"
 } > "$EVIDENCE_DIR/04-launch-window.txt"
 cat "$EVIDENCE_DIR/04-launch-window.txt" >&2
+
+# ---- 4C-27: read the trace ring IMMEDIATELY after the manager's
+# ---- response (the flow has exited by then; the sampler's later fork
+# ---- volume would otherwise overwrite the ring).
+if [ "$TRACE_ENABLED" = 1 ]; then
+  echo 0 > "$TRACING/tracing_on" 2>/dev/null || true
+  cat "$TRACING/trace" > "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true
+  echo 0 > "$TRACING/events/capability/cap_capable/enable" 2>/dev/null || true
+  echo 0 > "$TRACING/events/syscalls/sys_enter_openat/enable" 2>/dev/null || true
+  echo 0 > "$TRACING/events/syscalls/sys_exit_openat/enable" 2>/dev/null || true
+  echo 0 > "$TRACING/events/syscalls/sys_enter_setns/enable" 2>/dev/null || true
+  echo 0 > "$TRACING/events/syscalls/sys_exit_setns/enable" 2>/dev/null || true
+  echo 0 > "$TRACING/events/syscalls/sys_enter_socket/enable" 2>/dev/null || true
+  grep -a -E 'slirp4netns|rootlesskit| ns/net|ns/user|/dev/net/tun|cap_capable' "$EVIDENCE_DIR/30-trace-window.txt" \
+    > "$EVIDENCE_DIR/30-trace-relevant.txt" 2>/dev/null || true
+else
+  : > "$EVIDENCE_DIR/30-trace-window.txt"
+  : > "$EVIDENCE_DIR/30-trace-relevant.txt"
+fi
+{
+  echo "=== 4C-27 relevant trace lines (helper/namespace/capability events of the window) ==="
+  cat "$EVIDENCE_DIR/30-trace-relevant.txt"
+} >&2
 
 # ---- manager context AFTER the launch attempt: captured immediately,
 # ---- before any gate branching, so an early-stopped leg still carries
@@ -2000,6 +2087,10 @@ semodule -B >> "$EVIDENCE_DIR/18-semodule-db-diag.txt" 2>&1 || true
   sesearch --dontaudit -s docker_helper_rootlesskit_t -c netlink_route_socket /sys/fs/selinux/policy 2>/dev/null || true
 } >> "$EVIDENCE_DIR/18-semodule-db-diag.txt"
 marker "CC: companion diagnostic window complete (baseline restored)"
+# 4C-27 neutral diagnostic marker (NOT a policy-boundary gate — the
+# outcome may not be an SELinux boundary at all; the evidence lives in
+# the 30-*/31-* files).
+marker "SLIRP-STARTUP-DIAG=collected (tracefs + snapshots; see 30-*/31-*)"
 
 # ============================================================
 # H: verdict
