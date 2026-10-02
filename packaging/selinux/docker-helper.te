@@ -118,7 +118,7 @@ module docker_helper 1.2;
 		class unix_stream_socket { connectto getattr ioctl read write };
 		class udp_socket { create setopt connect getattr read write };
 		class netlink_route_socket { create setopt bind getattr write nlmsg_read read nlmsg_write };
-		class tun_socket { create relabelfrom };
+		class tun_socket { create relabelfrom relabelto };
 		class capability { dac_read_search dac_override sys_admin fowner setuid setgid };
 		class capability2 { wake_alarm kill };
 		class user_namespace { create };
@@ -1799,16 +1799,18 @@ allow docker_helper_slirp4netns_t nsfs_t:file { read open };
 # open("/dev/net/tun", O_RDWR) + ioctl(fd, TUNSETIFF, &ifr). The
 # existing-TAP attach path is security-DISTINCT from new-device creation
 # — it drives security_tun_dev_open() and the TAP's stored TUN security
-# SID: Phase 4C-35 grants the ONE live-evidenced cross-domain step of
-# that attach mediation (the tun_socket relabelfrom below — the 4C-34
-# canonical run's terminal boundary, record 2339); relabelto,
-# attach_queue, and every other socket permission stay ungranted — each
-# requires its own live evidence. The helper has successfully JOINED
-# the target user/net namespace, so its capability state differs from
-# RootlessKit's earlier creation path: cap_userns net_admin (RootlessKit's
-# 4C-15 grant) is NOT copied; if an existing-TAP operation later performs
-# a capability check, the capability:cap_capable tracepoint captures it
-# and the exact class/permission is decided on its own evidence.
+# SID: Phase 4C-35 grants the cross-domain relabelfrom step of that
+# attach mediation (the rule below — the 4C-34 canonical run's terminal
+# boundary, record 2339) and Phase 4C-36 grants its SELF-targeted
+# relabelto step (the 4C-35 canonical run's terminal boundary, record
+# 2309); attach_queue and every other socket permission stay ungranted
+# — each requires its own live evidence. The helper has successfully
+# JOINED the target user/net namespace, so its capability state differs
+# from RootlessKit's earlier creation path: cap_userns net_admin
+# (RootlessKit's 4C-15 grant) is NOT copied; if an existing-TAP
+# operation later performs a capability check, the
+# capability:cap_capable tracepoint captures it and the exact
+# class/permission is decided on its own evidence.
 #
 # SCOPE — RECORD ACCURATELY: tun_tap_device_t:s0 is a GLOBAL distro
 # device-node label with no per-operation MCS category on the node, so
@@ -1825,8 +1827,9 @@ allow docker_helper_slirp4netns_t nsfs_t:file { read open };
 #
 # Deliberately NOT granted: 0x54cb (TUNSETPERSIST — the creator's
 # command, not the attach path's) and every other ioctl command, any
-# further chr_file permission, tun_socket create/attach_queue/relabelto,
-# plain capability net_admin/net_raw, cap_userns net_admin, and
+# further chr_file permission, tun_socket create/attach_queue and any
+# rootlesskit_t->helper relabel permission, plain capability
+# net_admin/net_raw, cap_userns net_admin, and
 # getattr/append/lock/create/setattr (none evidenced for the helper).
 allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file { read write open ioctl };
 allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl 0x54ca;
@@ -1860,10 +1863,11 @@ allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl 0x54ca;
 #   docker_helper_slirp4netns_t -> docker_helper_rootlesskit_t:tun_socket
 #       = { relabelfrom }
 #
-# NOT granted with it (each a distinct tun_socket hook): relabelto,
-# attach_queue, create, and every other socket permission; the rule's
-# subject is the helper domain, so the rootlesskit child's own
-# self:tun_socket create rule (P5-S2) is unchanged.
+# NOT granted with it (each a distinct tun_socket hook): the self
+# relabelto (granted by the NEXT phase, 4C-36, on this run's own
+# evidence), attach_queue, create, and every other socket permission;
+# the rule's subject is the helper domain, so the rootlesskit child's
+# own self:tun_socket create rule (P5-S2) is unchanged.
 #
 # CROSS-OPERATION NOTE — the recorded boundary was c1-vs-c1 (scontext
 # c1, tcontext c1: the same instance's rootlesskit child labelled the
@@ -1872,6 +1876,49 @@ allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl 0x54ca;
 # apply; that attack proof remains the OPEN cross-operation gate's own
 # evidence, not this phase's (Release GO stays closed).
 allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:tun_socket relabelfrom;
+
+# --- THE ATTACH PATH'S RELABEL-TO STEP, SELF-TARGETED (P5-S2 Phase 4C-36) ---
+#
+# The 4C-35 canonical run (36994059437) proved the OLD relabelfrom
+# boundary GONE (three channels: no symbolic relabelfrom AVC, no
+# calibrated decode record, no raw 0x80 kernel event) and delivered the
+# attach path's NEXT terminal boundary INSIDE the same sys_ioctl(TUNSETIFF)
+# window —
+#
+#   denied { relabelto } for pid=3301 comm="slirp4netns"
+#     scontext=docker_helper_slirp4netns_t:s0:c1
+#     tcontext=docker_helper_slirp4netns_t:s0:c1  tclass=tun_socket
+#
+#   (audit record 2309; the kernel tracepoints captured the same decision
+#   on avc:selinux_audited with masks requested=0x100 denied=0x100
+#   audited=0x100 result=-13 inside sys_enter_ioctl(fd 6,
+#   cmd 0x400454ca) .. sys_exit_ioctl(ret -13), decode CALIBRATED
+#   0x100 <-> { relabelto } against the co-captured symbolic record)
+#
+# CRITICAL — the recorded shape is a SELF-TARGETED relabelto: BOTH the
+# scontext and the tcontext are the helper's own SID (slirp4netns_t:s0:c1),
+# NOT the reverse-direction cross-domain grant. The attach path's relabel
+# stage on this platform checks relabelto toward the attaching context's
+# OWN SID (the new socket SID the attach will install), so the grant is
+# EXACTLY the evidenced permission on the evidenced self pair:
+#
+#   docker_helper_slirp4netns_t -> self:tun_socket = { relabelto }
+#
+# The cross-domain relabelfrom rule above is unchanged; the rootlesskit
+# child's own self:tun_socket create rule (P5-S2) is unchanged; the
+# rootlesskit_t -> slirp4netns_t direction is NOT granted (no reverse
+# relabel permission exists in the evidence).
+#
+# CROSS-OPERATION NOTE — with both relabel stages granted the attach
+# completes a security-state transfer of the socket object: the OLD
+# socket SID is docker_helper_rootlesskit_t:s0:c1 (the rootlesskit
+# child's creation label, record 2339 of run 36990969572) and the NEW
+# socket SID the attach installs is docker_helper_slirp4netns_t:s0:c1
+# (record 2309's tcontext). Both recorded transitions are c1-vs-c1,
+# same-instance; a separate c1->c2 attack proof is NOT part of this
+# phase — the OPEN cross-operation gate owns it (Release GO stays
+# closed).
+allow docker_helper_slirp4netns_t self:tun_socket relabelto;
 
 # --- docker_helper_newuidmap_t: the rootlesskit UID-map helper domain (P5-S2) ---
 #
