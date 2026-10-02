@@ -2688,10 +2688,15 @@ else
     echo "restored ctx:    $PROBE_RESTORED_CTX"
     echo "original mode:   $PROBE_ORIG_MODE"
     echo "restored mode:   $(stat -c '%a %U:%G' /usr/bin/slirp4netns 2>/dev/null)"
-    if [ "$PROBE_RESTORED_SHA" = "$PROBE_ORIG_SHA" ] && [ "$PROBE_RESTORED_CTX" = "$PROBE_ORIG_CTX" ]; then
-      echo "PASS: the shipped flow binary is restored byte- and label-identical"
+    # Byte- and TYPE-identical (run 37000093955 proved this system's
+    # restorecon writes unconfined_u as the user part of the restored
+    # label; the exec transition and the entry rule are type-based).
+    PROBE_RESTORED_TYPE="$(printf '%s' "$PROBE_RESTORED_CTX" | cut -d: -f3)"
+    PROBE_ORIG_TYPE="$(printf '%s' "$PROBE_ORIG_CTX" | cut -d: -f3)"
+    if [ "$PROBE_RESTORED_SHA" = "$PROBE_ORIG_SHA" ] && [ "$PROBE_RESTORED_TYPE" = "$PROBE_ORIG_TYPE" ] && [ "$(stat -c '%a %U:%G' /usr/bin/slirp4netns 2>/dev/null)" = "$PROBE_ORIG_MODE" ]; then
+      echo "PASS: the shipped flow binary is restored byte-, type-, and mode-identical (restored user part: $PROBE_RESTORED_TYPE; full restored ctx: $PROBE_RESTORED_CTX)"
     else
-      echo "FAIL: the shipped flow binary did NOT restore byte- and label-identical — the composition integrity is broken"
+      echo "FAIL: the shipped flow binary did NOT restore byte/type/mode-identical — the composition integrity is broken"
     fi
   } > "$EVIDENCE_DIR/41-slirp-tun-command-filter.txt" 2>&1
   cat "$EVIDENCE_DIR/41-slirp-tun-command-filter.txt" >&2
