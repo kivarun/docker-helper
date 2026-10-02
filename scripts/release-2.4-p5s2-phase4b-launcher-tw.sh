@@ -3248,6 +3248,9 @@ else
     echo "=== the vehicle's step/verdict lines (stderr via the flow's child output) ==="
     journalctl -u "$UNIT" --since "@$CROSS_T0" --no-pager 2>/dev/null | grep -aE 'VEHICLE-(STEP|VERDICT)' | head -40 || true
     echo "(end of vehicle lines)"
+    echo "=== the window's journal RAW tail (managerDiagf lines + the rootlesskit parent error; the verdict's fallback source) ==="
+    journalctl -u "$UNIT" --since "@$CROSS_T0" --no-pager 2>/dev/null | tail -30 || true
+    echo "(end of raw journal tail)"
     echo "=== the vehicle's syscall/audit trace lines (the causal chain; NOT mixed with the cap_capable flood) ==="
     grep -a 'slirp4netns' /tmp/p4b-work/cross-trace.txt 2>/dev/null \
       | grep -aE '/proc/[0-9]+/ns/|setns|/dev/net/tun|sys_ioctl|selinux_audited' | head -60 || true
@@ -3277,6 +3280,8 @@ else
     fi
   } > "$EVIDENCE_DIR/45-cross-op-isolation.txt" 2>&1
   cat "$EVIDENCE_DIR/45-cross-op-isolation.txt" >&2
+  cp /tmp/p4b-work/cross-trace.txt "$EVIDENCE_DIR/47-cross-op-trace-raw.txt" 2>/dev/null || true
+  cp /tmp/p4b-work/cross-avc-slice.txt "$EVIDENCE_DIR/48-cross-op-avc-raw.txt" 2>/dev/null || true
   grep -aq "PASS: the shipped flow binary is restored byte-identical" "$EVIDENCE_DIR/45-cross-op-isolation.txt" \
     || { marker "BLOCKER=the cross-op window failed to restore the shipped flow binary (see 45-cross-op-isolation.txt)"
          finish FAIL; exit 0; }
