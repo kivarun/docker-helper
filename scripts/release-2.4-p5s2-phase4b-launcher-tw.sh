@@ -2412,11 +2412,12 @@ POSTTUN_NPRE=0; POSTTUN_NAT=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIME
   # a flow member).
   POSTTUN_WINDOW_TS="${POSTTUN_FIRST_FAIL_TS:-$POSTTUN_FIRST_DEATH_TS}"
   if [ -n "$POSTTUN_WINDOW_TS" ]; then
-    echo "--- the failure's ±0.25s causal window (all comms, the lifetime-relevant events, ordered; anchored at T0 so pre-T0 launch noise cannot fill the cap):"
+    echo "--- the failure's ±0.25s causal window (all comms, the lifetime-relevant events, ordered; anchored AT T0 — the attach's own pre-T0 steps live in the flow-domain extract):"
     awk -v t0="$POSTTUN_T0_TRACE_TS" -v td="$POSTTUN_WINDOW_TS" '
       { ts = $4; sub(/:$/, "", ts)
-        lo = (t0 != "") ? t0 - 0.02 : td - 0.25
-        if (ts + 0 >= lo && ts + 0 <= td + 0.25) print }
+        if (t0 != "") { if (ts + 0 < t0 + 0) next } else { if (ts + 0 < td - 0.25) next }
+        if (ts + 0 > td + 0.25) next
+        print }
     ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
       | grep -aE 'sched_process_fork:|sched_process_exit:|signal_generate:|signal_deliver:|selinux_audited:|sys_(kill|tkill|tgkill|pidfd_send_signal|wait4|waitid|exit|exit_group)' | head -150 || true
     echo "(end of the failure-window records)"
