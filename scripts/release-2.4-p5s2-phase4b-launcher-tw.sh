@@ -1486,6 +1486,69 @@ log "D: live START $OP_ID (sampler armed)"
   TAP_HITS=0
   seen_ctx=""
   end=$(( $(date +%s) + 75 ))
+  # Label sampling, batched: ONE stat call per group per iteration. The
+  # sampler's iteration cost is the catch-rate ceiling: the 4C-15 flow
+  # window shrank to ~45ms and a per-path stat loop (one fork per path)
+  # fit only ONE iteration inside such a window — the parent's stat ran
+  # before the tree existed while the children's ran after, so the parent
+  # was never observed and the provisioning gate false-failed on a pure
+  # observation race (run 36754289051). Batching turns an iteration into
+  # a single fork, so every path is sampled repeatedly inside any >=10ms
+  # window. The first/last/all observation semantics are unchanged.
+  #
+  # Each observation is written ATOMICALLY and only when it changes: the
+  # parent kills this subshell once the 10s evidence grace expires (a
+  # live canonical leg never converges), and a SIGTERM landing between a
+  # printf's redirection truncation and its write used to leave a
+  # zero-byte observation file behind — the provisioning gate then
+  # false-failed on the empty sample while every other observation of
+  # the same window was intact (run 37040610571: only
+  # container.state-root-container, the first full-overwrite printf of
+  # the iteration, was truncated). A killed subshell can now only leave
+  # a complete file, and the steady-state iteration cost stays at the
+  # batched two stat forks.
+  declare -A OBSERVED=()
+  observe() { # kind label ctx — atomic write, on change only
+    [ "${OBSERVED[$1.$2]:-}" = "$3" ] && return 0
+    if printf '%s\n' "$3" > "$EVIDENCE_DIR/.write-$1-$2" \
+       && mv -f "$EVIDENCE_DIR/.write-$1-$2" "$EVIDENCE_DIR/$1.$2"; then
+      OBSERVED[$1.$2]="$3"
+    fi
+    return 0
+  }
+  sample_ops() {
+    while IFS= read -r line; do
+      path="${line%% *}"; ctx="${line#* }"
+      case "$path" in
+        "$ST_OP_DIR") label=state-op ;;
+        "$ST_OP_DIR/root") label=state-root ;;
+        "$ST_OP_DIR/rootlesskit-state") label=state-rkstate ;;
+        "$RT_OP_DIR") label=runtime-op ;;
+        *) continue ;;
+      esac
+      if [ -n "$ctx" ]; then
+        [ -s "$EVIDENCE_DIR/first.$label" ] || printf '%s\n' "$ctx" > "$EVIDENCE_DIR/first.$label"
+        observe last "$label" "$ctx"
+        grep -aqx "$ctx" "$EVIDENCE_DIR/all.$label" 2>/dev/null || printf '%s\n' "$ctx" >> "$EVIDENCE_DIR/all.$label"
+      fi
+    done < <(stat -c '%n %C' "$ST_OP_DIR" "$ST_OP_DIR/root" "$ST_OP_DIR/rootlesskit-state" "$RT_OP_DIR" 2>/dev/null || true)
+    return 0
+  }
+  sample_containers() {
+    while IFS= read -r line; do
+      path="${line%% *}"; ctx="${line#* }"
+      case "$path" in
+        "$STATE_ROOT") label=state-root-container ;;
+        "$STATE_ROOT/ops") label=state-ops-container ;;
+        "$RUNTIME_ROOT") label=runtime-root-container ;;
+        "$RUNTIME_ROOT/ops") label=runtime-ops-container ;;
+        *) continue ;;
+      esac
+      [ -n "$ctx" ] && observe container "$label" "$ctx"
+    done < <(stat -c '%n %C' "$STATE_ROOT" "$STATE_ROOT/ops" "$RUNTIME_ROOT" "$RUNTIME_ROOT/ops" 2>/dev/null || true)
+    return 0
+  }
+  sample_containers
   while [ "$(date +%s)" -lt "$end" ]; do
     if [ -z "$seen_pid" ] && [ -s "$RT_OP_DIR/instance.pid" ]; then
       seen_pid="$(cat "$RT_OP_DIR/instance.pid" 2>/dev/null)"
@@ -1545,42 +1608,8 @@ log "D: live START $OP_ID (sampler armed)"
         fi
       done
     fi
-    # Batched label sampling: ONE stat call for the four provisioned
-    # per-op paths. The sampler's iteration cost is the catch-rate
-    # ceiling: the 4C-15 flow window shrank to ~45ms and a per-path stat
-    # loop (one fork per path) fit only ONE iteration inside such a
-    # window — the parent's stat ran before the tree existed while the
-    # children's ran after, so the parent was never observed and the
-    # provisioning gate false-failed on a pure observation race
-    # (run 36754289051). Batching turns an iteration into a single fork,
-    # so every path is sampled repeatedly inside any >=10ms window. The
-    # first/last/all observation semantics are unchanged.
-    while IFS= read -r line; do
-      path="${line%% *}"; ctx="${line#* }"
-      case "$path" in
-        "$ST_OP_DIR") label=state-op ;;
-        "$ST_OP_DIR/root") label=state-root ;;
-        "$ST_OP_DIR/rootlesskit-state") label=state-rkstate ;;
-        "$RT_OP_DIR") label=runtime-op ;;
-        *) continue ;;
-      esac
-      if [ -n "$ctx" ]; then
-        [ -s "$EVIDENCE_DIR/first.$label" ] || printf '%s\n' "$ctx" > "$EVIDENCE_DIR/first.$label"
-        printf '%s\n' "$ctx" > "$EVIDENCE_DIR/last.$label"
-        grep -aqx "$ctx" "$EVIDENCE_DIR/all.$label" 2>/dev/null || printf '%s\n' "$ctx" >> "$EVIDENCE_DIR/all.$label"
-      fi
-    done < <(stat -c '%n %C' "$ST_OP_DIR" "$ST_OP_DIR/root" "$ST_OP_DIR/rootlesskit-state" "$RT_OP_DIR" 2>/dev/null || true)
-    while IFS= read -r line; do
-      path="${line%% *}"; ctx="${line#* }"
-      case "$path" in
-        "$STATE_ROOT") label=state-root-container ;;
-        "$STATE_ROOT/ops") label=state-ops-container ;;
-        "$RUNTIME_ROOT") label=runtime-root-container ;;
-        "$RUNTIME_ROOT/ops") label=runtime-ops-container ;;
-        *) continue ;;
-      esac
-      [ -n "$ctx" ] && printf '%s\n' "$ctx" > "$EVIDENCE_DIR/container.$label"
-    done < <(stat -c '%n %C' "$STATE_ROOT" "$STATE_ROOT/ops" "$RUNTIME_ROOT" "$RUNTIME_ROOT/ops" 2>/dev/null || true)
+    sample_ops
+    sample_containers
     if [ -n "$seen_pid" ] && [ ! -d "/proc/$seen_pid" ] && [ ! -d "$RT_OP_DIR" ] && [ ! -d "$ST_OP_DIR" ]; then
       printf 'CONVERGED %s\n' "$(date +%s.%N)" >> "$EVIDENCE_DIR/05-flow-context.txt"
       break
@@ -1642,6 +1671,9 @@ for i in $(seq 1 100); do
 done
 kill "$SAMPLER_PID" 2>/dev/null || true
 wait "$SAMPLER_PID" 2>/dev/null || true
+# A sampler killed between an atomic write's temp and its rename leaves
+# the temp behind; nothing consumes it.
+rm -f "$EVIDENCE_DIR"/.write-* 2>/dev/null || true
 
 # ---- the window's audit slice (before anything converges further)
 harvest_avcs_since "$T0" "$EVIDENCE_DIR/09-avc-window.txt"
