@@ -14,31 +14,29 @@
  * open ioctl } + allowxperm { 0x54ca } device surface, and the two TUN
  * socket-relabel grants (cross-domain relabelfrom + self relabelto).
  *
-// The attack targets are delivered inside the vehicle's OWN binary: the
-// harness appends the line `CROSS-OP-TARGETS <pidA> <pidB>` to the staged
-// binary before renaming it into /usr/bin/slirp4netns (the appender works
-// on the staged inode; the mv-swap rename is unaffected, and the loader
-// ignores the tail). The helper's EXISTING entry-file read/open authority
-// covers /usr/bin/slirp4netns: no new permission, no tmpfs grant, no
-// relabel step. The pidA = operation A's rootlesskit netns-owner pid
-// (category c1); pidB = operation B's (category c2).
-//
-// Legs, each step printed to stderr (the SID/class/perm facts are proven
-// by the harness's kernel trace + audit channels):
+// THE SLOT LAYOUT (the product's own concurrency fact, proven live in the
+// 4C-37 diagnosis runs: `maxConcurrentBuildsGlobal = 2`, and RETAINED
+// entries still count toward it): this vehicle runs as the SECOND
+// operation's helper. Operation A (the canonical leg) is a REAL flow that
+// stays alive with its attached TAP; the vehicle (operation B) is the
+// second live operation. Its legs:
 //   CONTROL: the production nsjoin+attach path against the vehicle's own
 //     parent (the rootlesskit child that holds its own target user/net
-//     namespaces): open /proc/<ppid>/ns/{net,user}, setns(CLONE_NEWUSER),
-//     setns(CLONE_NEWNET), open /dev/net/tun, TUNSETIFF — must return 0.
-//   ATTACK A->B: the SAME production path against B's pid; step by step;
-//     the FIRST failing syscall (SELinux EACCES/EPERM or any other real
-//     boundary errno) STOPS the leg and is reported as BOUNDARY. An
-//     ENOENT on the proc path is NOT a boundary — it means the target
-//     identity was stale (reported as IDENTITY-FAIL).
-//   ATTACK B->A: symmetric, against A's pid.
+//     namespaces AND its own freshly created tap0): the full chain must
+//     return 0 — the same-operation baseline INSIDE this very run.
+//   ATTACK B->A: the SAME production path against operation A's
+//     rootlesskit netns-owner pid; step by step; the FIRST failing
+//     syscall (SELinux EACCES/EPERM or any other real boundary errno)
+//     STOPS the leg and is reported as BOUNDARY. An ENOENT on the proc
+//     path is NOT a boundary — it means the target identity was stale
+//     (reported as IDENTITY-FAIL). The A→B mirror direction is NOT
+//     runnable in this window: a third concurrent operation exceeds the
+//     product's ceiling of 2 — the single live cross direction plus the
+//     symmetric record set is the phase's scope.
 //
-// Exit codes: 0 = control succeeded AND both attack legs stopped at real
-// boundaries; 5 = the control leg failed (the baseline is broken);
-// 6 = CROSS-OPERATION ISOLATION BROKEN (an attack leg completed the whole
+// Exit codes: 0 = control succeeded AND the attack leg stopped at a real
+// boundary; 5 = the control leg failed (the baseline is broken);
+// 6 = CROSS-OPERATION ISOLATION BROKEN (the attack leg completed the whole
 // attach path); 7 = the target delivery is broken; 9 = other.
  */
 #define _GNU_SOURCE
@@ -157,9 +155,9 @@ int main(void) {
 		(void)write(2, "VEHICLE-VERDICT TARGETS=MARKER-ABSENT\n", 37);
 		return 7;
 	}
-	int pid_a = 0, pid_b = 0;
-	(void)sscanf(mark, "CROSS-OP-TARGETS %d %d", &pid_a, &pid_b);
-	if (pid_a <= 0 || pid_b <= 0 || pid_a == pid_b) {
+	int pid_a = 0;
+	(void)sscanf(mark, "CROSS-OP-TARGETS %d", &pid_a);
+	if (pid_a <= 0) {
 		(void)write(2, "VEHICLE-VERDICT TARGETS=BINDING-FAIL\n", 36);
 		return 7;
 	}
@@ -172,14 +170,16 @@ int main(void) {
 	}
 	(void)write(2, "VEHICLE-VERDICT CONTROL=SUCCESS\n", 31);
 
-	int shape_a = attach_leg("attack-b", pid_b);
-	int shape_b = attach_leg("attack-a", pid_a);
-	if (shape_a == 0 || shape_b == 0) {
+	/* ATTACK B->A: the vehicle is operation B (the second slot, c2);
+	 * operation A is the first slot (c1), alive with its attached TAP.
+	 */
+	int shape_a = attach_leg("attack-a", pid_a);
+	if (shape_a == 0) {
 		(void)write(2, "VEHICLE-VERDICT CROSS-OPERATION-ISOLATION=BROKEN\n", 48);
 		return 6;
 	}
-	if (shape_a == 2 || shape_b == 2) {
-		(void)write(2, "VEHICLE-VERDICT ATTACK-TARGETS=IDENTITY-FAIL\n", 44);
+	if (shape_a == 2) {
+		(void)write(2, "VEHICLE-VERDICT ATTACK-TARGET=IDENTITY-FAIL\n", 43);
 		return 9;
 	}
 	(void)write(2, "VEHICLE-VERDICT CROSS-OPERATION-ISOLATION=HOLDS\n", 47);

@@ -3115,6 +3115,249 @@ else
 fi
 
 # ============================================================
+# 4C-37: the cross-operation TUN isolation proof (proof-only)
+# ============================================================
+# ZERO policy delta. The proof establishes, on the LIVE production paths
+# of two simultaneously alive Build Operations with different MCS
+# categories, that the helper domain's authority performs the same-
+# operation attach (the 4C-36 clean chain) but stops at a REAL causal
+# boundary when applied to the other operation's namespace/socket state.
+# The vehicle is the composition's own entry path: a static helper
+# binary swapped by rename (the 4C-36 mechanism), which runs the control
+# leg against its own parent and the attack leg against operation A's
+# rootlesskit netns-owner pid, delivered inside the vehicle's own
+# binary tail (read via the helper's existing entry-file authority).
+# Lifecycle noise (the retained-flow signull/sigkill/signal denials of
+# 4C-36) is inventoried separately and never gates this phase.
+marker "CROSS-OP: isolation proof window start"
+CROSS_T0="$(date +%s)"
+# PID capture: the canonical helper's nsjoin opens /proc/<pid>/ns/user;
+# that pid is operation A's rootlesskit netns-owner process. The vehicle
+# runs as the SECOND slot (the product's concurrency ceiling is 2 and
+# retained entries count toward it — proven live in the 4C-37 diagnosis
+# runs), so its attack target is operation A only.
+CROSS_A_PID="$(grep -aoE '/proc/[0-9]+/ns/user' "$EVIDENCE_DIR/30-trace-relevant.txt" 2>/dev/null | head -1 | grep -aoE '[0-9]+' || true)"
+echo "cross-op identities: A(exe-pid)=$CROSS_A_PID"
+CROSS_PIDS_OK=1
+case "$CROSS_A_PID" in ''|*[!0-9]*) CROSS_PIDS_OK=0;; esac
+if [ "$CROSS_PIDS_OK" = 1 ] && [ ! -e "$TRANSFERRED/tun-cross-op-vehicle" ]; then
+  note "the transferred cross-op vehicle binary is missing — the isolation proof cannot run"
+  CROSS_PIDS_OK=0
+fi
+if [ "$CROSS_PIDS_OK" != 1 ]; then
+  marker "CROSS-OPERATION-ISOLATION=NOT_PROVEN"
+  marker "BLOCKER=the cross-op proof could not bind its identities (see 45-cross-op-isolation.txt)"
+else
+  # Stage the vehicle inside /usr/bin and append the target line, then
+  # swap by rename (an alive helper holds the path's inode open). The
+  # helper reads the targets from its OWN installed binary via the
+  # existing entry-file read authority.
+  cp "$TRANSFERRED/tun-cross-op-vehicle" /usr/bin/.cross-op-vehicle \
+    || { note "the cross-op window could not stage the vehicle"; finish INCOMPLETE; exit 0; }
+  printf 'CROSS-OP-TARGETS %s\n' "$CROSS_A_PID" >> /usr/bin/.cross-op-vehicle
+  # The expected sha is the STAGED inode's (with the appended target line
+  # — the 4C-37 vehicle reads its targets from its own binary tail).
+  CROSS_EXPECTED_SHA="$(sha256sum /usr/bin/.cross-op-vehicle 2>/dev/null | awk '{print $1}')"
+  mv /usr/bin/.cross-op-vehicle /usr/bin/slirp4netns \
+    || { note "the cross-op window could not rename the vehicle into place"; finish INCOMPLETE; exit 0; }
+  restorecon /usr/bin/slirp4netns 2>/dev/null || true
+  CROSS_PLACED_SHA="$(sha256sum /usr/bin/slirp4netns 2>/dev/null | awk '{print $1}')"
+  CROSS_PLACED_CTX="$(context_of /usr/bin/slirp4netns)"
+  CROSS_PLACED_TYPE="$(printf '%s' "$CROSS_PLACED_CTX" | cut -d: -f3)"
+  echo "placed vehicle sha256: $CROSS_PLACED_SHA (expected $CROSS_EXPECTED_SHA)"
+  echo "placed vehicle label:  $CROSS_PLACED_CTX"
+  if [ "$CROSS_PLACED_SHA" != "$CROSS_EXPECTED_SHA" ] || [ "$CROSS_PLACED_TYPE" != "docker_helper_slirp4netns_exec_t" ]; then
+    note "the cross-op vehicle placement failed its byte/label check"
+    mv /usr/bin/.cross-op-vehicle /usr/bin/slirp4netns 2>/dev/null || true
+    restorecon /usr/bin/slirp4netns 2>/dev/null || true
+    marker "CROSS-OPERATION-ISOLATION=NOT_PROVEN"
+    marker "BLOCKER=the cross-op vehicle placement failed (see 45-cross-op-isolation.txt)"
+    finish INCOMPLETE; exit 0
+  fi
+  # Re-arm a FRESH trace ring for the cross-op window: the syscall
+  # tracepoints (openat/setns/ioctl enter/exit with the numeric results)
+  # + capability/cap_capable + avc/selinux_audited — the vehicle's every
+  # step is causally recorded with its scontext/tcontext.
+  CROSS_TRACE_ENABLED=0
+  if [ "$TRACE_ENABLED" = 1 ]; then
+    echo 0 > "$TRACING/tracing_on" 2>/dev/null || true
+    echo > "$TRACING/trace" 2>/dev/null || true
+    echo 16384 > "$TRACING/buffer_size_kb" 2>/dev/null || true
+    echo 1 > "$TRACING/events/capability/cap_capable/enable" 2>/dev/null || true
+    echo 1 > "$TRACING/events/syscalls/sys_enter_openat/enable" 2>/dev/null || true
+    echo 1 > "$TRACING/events/syscalls/sys_exit_openat/enable" 2>/dev/null || true
+    echo 1 > "$TRACING/events/syscalls/sys_enter_setns/enable" 2>/dev/null || true
+    echo 1 > "$TRACING/events/syscalls/sys_exit_setns/enable" 2>/dev/null || true
+    echo 1 > "$TRACING/events/syscalls/sys_enter_ioctl/enable" 2>/dev/null || true
+    echo 1 > "$TRACING/events/syscalls/sys_exit_ioctl/enable" 2>/dev/null || true
+    if [ -d "$TRACING/events/avc/selinux_audited" ]; then
+      echo 1 > "$TRACING/events/avc/selinux_audited/enable" 2>/dev/null || true
+    fi
+    echo 1 > "$TRACING/tracing_on" 2>/dev/null || true \
+      && CROSS_TRACE_ENABLED=1
+  fi
+  # START in the background; the vehicle's window is the first ~1s; the
+  # harvest is bounded BEFORE the manager's readiness-loop poll flood.
+  CROSS_OP_ID="$(gen_op_id)"
+  CROSS_RT_OP_DIR="$RUNTIME_ROOT/ops/$CROSS_OP_ID"
+  CROSS_ST_OP_DIR="$STATE_ROOT/ops/$CROSS_OP_ID"
+  printf 'START %s\n' "$CROSS_OP_ID" | timeout 120 socat - UNIX-CONNECT:"$MANAGER_SOCK" \
+    > /tmp/p4b-work/cross-start-out.txt 2>/dev/null &
+  CROSS_START_PID=$!
+  sleep 3
+  if [ "$CROSS_TRACE_ENABLED" = 1 ]; then
+    echo 0 > "$TRACING/tracing_on" 2>/dev/null || true
+    cat "$TRACING/trace" > /tmp/p4b-work/cross-trace.txt 2>/dev/null || true
+    echo 0 > "$TRACING/events/capability/cap_capable/enable" 2>/dev/null || true
+    echo 0 > "$TRACING/events/syscalls/sys_enter_openat/enable" 2>/dev/null || true
+    echo 0 > "$TRACING/events/syscalls/sys_exit_openat/enable" 2>/dev/null || true
+    echo 0 > "$TRACING/events/syscalls/sys_enter_setns/enable" 2>/dev/null || true
+    echo 0 > "$TRACING/events/syscalls/sys_exit_setns/enable" 2>/dev/null || true
+    echo 0 > "$TRACING/events/syscalls/sys_enter_ioctl/enable" 2>/dev/null || true
+    echo 0 > "$TRACING/events/syscalls/sys_exit_ioctl/enable" 2>/dev/null || true
+    echo 0 > "$TRACING/events/avc/selinux_audited/enable" 2>/dev/null || true
+  else
+    : > /tmp/p4b-work/cross-trace.txt
+  fi
+  wait "$CROSS_START_PID" 2>/dev/null || true
+  CROSS_START_OUT="$(cat /tmp/p4b-work/cross-start-out.txt 2>/dev/null || true)"
+  # The bounded convergence wait for the cross op's cleanup (orders the
+  # AVC slice after the op tree is gone).
+  CROSS_PID=""
+  CROSS_END=$(( $(date +%s) + 75 ))
+  while [ "$(date +%s)" -lt "$CROSS_END" ]; do
+    if [ -z "$CROSS_PID" ] && [ -s "$CROSS_RT_OP_DIR/instance.pid" ]; then
+      CROSS_PID="$(cat "$CROSS_RT_OP_DIR/instance.pid" 2>/dev/null)"
+    fi
+    if [ -n "$CROSS_PID" ] && [ ! -d "/proc/$CROSS_PID" ] && [ ! -d "$CROSS_RT_OP_DIR" ] && [ ! -d "$CROSS_ST_OP_DIR" ]; then
+      break
+    fi
+    sleep 0.05
+  done
+  harvest_avcs_since "$CROSS_T0" /tmp/p4b-work/cross-avc-slice.txt
+  {
+    echo "=== 4C-37 cross-operation isolation window (vehicle in the helper domain; ZERO policy delta) ==="
+    echo "window-start: $CROSS_T0"
+    echo "START: $CROSS_OP_ID (response: $CROSS_START_OUT)"
+    echo "window-end: $(date +%s)"
+    echo "identity bindings: A(exe-pid)=$CROSS_A_PID vehicle-op=$CROSS_OP_ID instance-pid=${CROSS_PID:-(not observed)}"
+    echo "placed vehicle sha256: $CROSS_PLACED_SHA"
+    echo "placed vehicle label:  $CROSS_PLACED_CTX"
+    echo "=== the vehicle's step/verdict lines (stderr via the flow's child output) ==="
+    journalctl -u "$UNIT" --since "@$CROSS_T0" --no-pager 2>/dev/null | grep -aE 'VEHICLE-(STEP|VERDICT)' | head -40 || true
+    echo "(end of vehicle lines)"
+    echo "=== the vehicle's syscall/audit trace lines (the causal chain; NOT mixed with the cap_capable flood) ==="
+    grep -a 'slirp4netns' /tmp/p4b-work/cross-trace.txt 2>/dev/null \
+      | grep -aE '/proc/[0-9]+/ns/|setns|/dev/net/tun|sys_ioctl|selinux_audited' | head -60 || true
+    echo "(end of cross-op syscall/audit lines)"
+    echo "--- the vehicle's FAILED cap_capable lines (recorded; the cap boundary's own evidence):"
+    grep -a 'slirp4netns' /tmp/p4b-work/cross-trace.txt 2>/dev/null \
+      | grep -a 'cap_capable:' | grep -av ' ret 0' | head -12 || true
+    echo "(end of failed-cap_capable lines)"
+    echo "=== the cross-op window's AVC slice: helper-domain records of the attack classes (lifecycle signull/process records inventoried SEPARATELY in 46) ==="
+    grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' /tmp/p4b-work/cross-avc-slice.txt 2>/dev/null \
+      | grep -avE 'tclass=process' | head -20 || true
+    echo "(end of cross-op AVC records)"
+    echo "=== restore check ==="
+    mv /usr/bin/slirp4netns /usr/bin/.cross-op-vehicle-installed \
+      || echo "FAIL: the vehicle could not be renamed out of the path"
+    mv /usr/bin/.slirp4netns.probe-installed /usr/bin/slirp4netns \
+      || echo "FAIL: the original binary could not be renamed back into the path"
+    restorecon /usr/bin/slirp4netns 2>/dev/null || true
+    CROSS_RESTORED_SHA="$(sha256sum /usr/bin/slirp4netns 2>/dev/null | awk '{print $1}')"
+    echo "original sha256: $PROBE_ORIG_SHA"
+    echo "restored sha256: $CROSS_RESTORED_SHA"
+    echo "restored ctx:    $(context_of /usr/bin/slirp4netns)"
+    if [ "$CROSS_RESTORED_SHA" = "$PROBE_ORIG_SHA" ]; then
+      echo "PASS: the shipped flow binary is restored byte-identical"
+    else
+      echo "FAIL: the shipped flow binary did NOT restore byte-identical — the composition integrity is broken"
+    fi
+  } > "$EVIDENCE_DIR/45-cross-op-isolation.txt" 2>&1
+  cat "$EVIDENCE_DIR/45-cross-op-isolation.txt" >&2
+  grep -aq "PASS: the shipped flow binary is restored byte-identical" "$EVIDENCE_DIR/45-cross-op-isolation.txt" \
+    || { marker "BLOCKER=the cross-op window failed to restore the shipped flow binary (see 45-cross-op-isolation.txt)"
+         finish FAIL; exit 0; }
+  # The lifecycle-noise inventory (RECORDED, NOT GATED — the 4C-36 shape:
+  # builder_t/rootlesskit_t process denials against the retained alive
+  # helpers; their own staircase owns any widening).
+  {
+    echo "=== lifecycle-noise inventory (the 4C-36 flow-lifecycle denials; NOT cross-operation proof; recorded, not gated) ==="
+    grep -a 'tclass=process' /tmp/p4b-work/cross-avc-slice.txt 2>/dev/null | head -20 || true
+    echo "(end of lifecycle-noise records)"
+  } > "$EVIDENCE_DIR/46-cross-op-lifecycle-noise.txt" 2>&1
+  cat "$EVIDENCE_DIR/46-cross-op-lifecycle-noise.txt" >&2
+  # ---- the verdict. PASS requires ALL of: (a) the control leg succeeded
+  # ---- (the vehicle's own production chain: journal CONTROL=SUCCESS and
+  # ---- the kernel trace's TUNSETIFF ret 0); (b) both attack legs stopped
+  # ---- at REAL boundaries (journal VEHICLE-VERDICT
+  # ---- CROSS-OPERATION-ISOLATION=HOLDS and the kernel trace's
+  # ---- selinux_audited helper decisions in the attack legs); (c) the
+  # ---- identity bindings held (no IDENTITY-FAIL/ENOENT stop); (d) the
+  # ---- attack denials carry CROSS-CATEGORY contexts (the tcontext of
+  # ---- the A/B-targeted decisions). If the vehicle reports BROKEN —
+  # ---- STOP immediately: CROSS-OPERATION-ISOLATION=BROKEN, finish FAIL,
+  # ---- no compensating changes.
+  CROSS_OK=1
+  {
+    echo "=== 4C-37 verdict ==="
+    CROSS_VERDICT_LINE="$(journalctl -u "$UNIT" --since "@$CROSS_T0" --no-pager 2>/dev/null | grep -a 'VEHICLE-VERDICT' | tail -1 || true)"
+    echo "the vehicle's final verdict: ${CROSS_VERDICT_LINE:-(ABSENT — the vehicle verdict was never delivered)}"
+    echo "--- control channel 2: the kernel trace's vehicle TUNSETIFF window (fd/cmd/ret):"
+    CROSS_CONTROL_TRACE="$(grep -a 'slirp4netns' /tmp/p4b-work/cross-trace.txt 2>/dev/null | grep -a 'sys_ioctl' | grep -a 'cmd: 0x400454ca' | tail -1 || true)"
+    printf '%s\n' "${CROSS_CONTROL_TRACE:-(absent in the kernel trace)}"
+    echo "--- attack channel 2: the kernel trace's helper SELinux decisions in the vehicle window:"
+    CROSS_ATTACK_TRACE="$(grep -a 'slirp4netns' /tmp/p4b-work/cross-trace.txt 2>/dev/null | grep -a 'selinux_audited:' | grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' | head -8 || true)"
+    printf '%s\n' "${CROSS_ATTACK_TRACE:-(none — no helper SELinux decision was audited in the window)}"
+    echo "--- the cross-category bindings (the attack decisions' scontext/tcontext; must show the vehicle's cN against the A/B targets' c1/c2):"
+    grep -a 'slirp4netns' /tmp/p4b-work/cross-trace.txt 2>/dev/null | grep -a 'selinux_audited:' | grep -aoE 'scontext=[^ ]* tcontext=[^ ]* tclass=[a-z_]*' | sort -u || true
+    echo "--- identity checks (any ENOENT-based IDENTITY-FAIL is a harness binding defect, not a boundary):"
+    journalctl -u "$UNIT" --since "@$CROSS_T0" --no-pager 2>/dev/null | grep -a 'IDENTITY-FAIL' | head -3 || echo "(none)"
+    if [ -z "$CROSS_VERDICT_LINE" ]; then
+      echo "GATE: the vehicle's verdict was never delivered — the proof did not run"
+      CROSS_OK=0
+    fi
+    if printf '%s' "$CROSS_VERDICT_LINE" | grep -aq 'CROSS-OPERATION-ISOLATION=BROKEN'; then
+      echo "GATE: the vehicle completed an attack leg — CROSS-OPERATION-ISOLATION=BROKEN"
+      CROSS_OK=0
+      CROSS_BROKEN=1
+    fi
+    if printf '%s' "$CROSS_VERDICT_LINE" | grep -aq 'CONTROL=FAIL'; then
+      echo "GATE: the control leg failed — the same-operation baseline is broken"
+      CROSS_OK=0
+    fi
+    if printf '%s' "$CROSS_VERDICT_LINE" | grep -aq 'IDENTITY-FAIL\|BINDING-FAIL\|UNREADABLE\|MARKER-ABSENT'; then
+      echo "GATE: the identity/target delivery failed — the proof is not executable"
+      CROSS_OK=0
+    fi
+    if ! printf '%s' "$CROSS_VERDICT_LINE" | grep -aq 'CROSS-OPERATION-ISOLATION=HOLDS'; then
+      echo "GATE: the vehicle did not declare CROSS-OPERATION-ISOLATION=HOLDS"
+      CROSS_OK=0
+    fi
+    if [ -z "$CROSS_CONTROL_TRACE" ]; then
+      echo "GATE: the kernel trace has no vehicle TUNSETIFF window — the control leg is not causally bound to the trace"
+      CROSS_OK=0
+    fi
+  } > "$EVIDENCE_DIR/45-cross-op-verdict.txt" 2>&1
+  cat "$EVIDENCE_DIR/45-cross-op-verdict.txt" >&2
+  if [ "$CROSS_OK" = 1 ]; then
+    marker "CROSS-OP-CONTROL=SUCCESS"
+    CROSS_ATTACK_BOUNDARY="$(journalctl -u "$UNIT" --since "@$CROSS_T0" --no-pager 2>/dev/null | grep -aE 'VEHICLE-STEP leg=attack-.*errno=(13|1) ' | head -2 || true)"
+    marker "CROSS-OP-ATTACK-DENIED-AT=$(printf '%s\n' "$CROSS_ATTACK_BOUNDARY" | head -1 | sed -n 's/.*leg=\([a-z-]*\) step=\([a-z-]*\).*/\1:\2/p' || echo 'per-trace')"
+    marker "CROSS-OPERATION-ISOLATION=HOLDS"
+    marker "CROSS-OPERATION-GATE=CLOSED"
+  elif [ "${CROSS_BROKEN:-0}" = 1 ]; then
+    marker "CROSS-OPERATION-ISOLATION=BROKEN"
+    marker "BLOCKER=the cross-operation isolation is broken (see 45-cross-op-isolation.txt, 45-cross-op-verdict.txt)"
+    finish FAIL; exit 0
+  else
+    marker "BLOCKER=the 4C-37 cross-operation isolation proof did not hold (see 45-cross-op-isolation.txt, 45-cross-op-verdict.txt)"
+    marker "CROSS-OPERATION-ISOLATION=NOT_PROVEN"
+    finish INCOMPLETE; exit 0
+  fi
+fi
+
+# ============================================================
 # CC: the 4C-19 companion diagnostic window (dontaudit disabled)
 # ============================================================
 # Evidence-only companion for the SAME semantic composition: the 4C-18
@@ -3276,251 +3519,6 @@ fi
     || echo "(none — the libc fallback chain did not run)"
 } > "$EVIDENCE_DIR/25-companion-boundary.txt" 2>&1
 cat "$EVIDENCE_DIR/25-companion-boundary.txt" >&2
-# ============================================================
-# 4C-37: the cross-operation TUN isolation proof (proof-only)
-# ============================================================
-# ZERO policy delta. The proof establishes, on the LIVE production paths
-# of two simultaneously alive Build Operations with different MCS
-# categories, that the helper domain's authority performs the same-
-# operation attach (the 4C-36 clean chain) but stops at a REAL causal
-# boundary when applied to the other operation's namespace/socket state.
-# The vehicle is the composition's own entry path: a static helper
-# binary swapped by rename (the 4C-36 mechanism), which runs the control
-# leg against its own parent and the two attack legs against A's and B's
-# rootlesskit netns-owner pids, delivered inside the vehicle's own
-# binary tail (read via the helper's existing entry-file authority).
-# Lifecycle noise (the retained-flow signull/sigkill/signal denials of
-# 4C-36) is inventoried separately and never gates this phase.
-marker "CROSS-OP: isolation proof window start"
-CROSS_T0="$(date +%s)"
-# PID capture: the helper's nsjoin opens /proc/<pid>/ns/user inside the
-# canonical (A) and companion (B) windows; the pid is the operation's
-# rootlesskit netns-owner process.
-CROSS_A_PID="$(grep -aoE '/proc/[0-9]+/ns/user' "$EVIDENCE_DIR/30-trace-relevant.txt" 2>/dev/null | head -1 | grep -aoE '[0-9]+' || true)"
-CROSS_B_PID="$(grep -aoE '/proc/[0-9]+/ns/user' "$EVIDENCE_DIR/35-companion-avc-trace.txt" 2>/dev/null | head -1 | grep -aoE '[0-9]+' || true)"
-echo "cross-op identities: A(exe-pid)=$CROSS_A_PID B(exe-pid)=$CROSS_B_PID"
-CROSS_PIDS_OK=1
-case "$CROSS_A_PID" in ''|*[!0-9]*) CROSS_PIDS_OK=0;; esac
-case "$CROSS_B_PID" in ''|*[!0-9]*) CROSS_PIDS_OK=0;; esac
-if [ "$CROSS_PIDS_OK" = 1 ] && [ "$CROSS_A_PID" = "$CROSS_B_PID" ]; then
-  CROSS_PIDS_OK=0
-fi
-if [ "$CROSS_PIDS_OK" = 1 ] && [ ! -e "$TRANSFERRED/tun-cross-op-vehicle" ]; then
-  note "the transferred cross-op vehicle binary is missing — the isolation proof cannot run"
-  CROSS_PIDS_OK=0
-fi
-if [ "$CROSS_PIDS_OK" != 1 ]; then
-  marker "CROSS-OPERATION-ISOLATION=NOT_PROVEN"
-  marker "BLOCKER=the cross-op proof could not bind its identities (see 45-cross-op-isolation.txt)"
-else
-  # Stage the vehicle inside /usr/bin and append the target line, then
-  # swap by rename (an alive helper holds the path's inode open). The
-  # helper reads the targets from its OWN installed binary via the
-  # existing entry-file read authority.
-  cp "$TRANSFERRED/tun-cross-op-vehicle" /usr/bin/.cross-op-vehicle \
-    || { note "the cross-op window could not stage the vehicle"; finish INCOMPLETE; exit 0; }
-  printf 'CROSS-OP-TARGETS %s %s\n' "$CROSS_A_PID" "$CROSS_B_PID" >> /usr/bin/.cross-op-vehicle
-  # The expected sha is the STAGED inode's (with the appended target line
-  # — the 4C-37 vehicle reads its targets from its own binary tail).
-  CROSS_EXPECTED_SHA="$(sha256sum /usr/bin/.cross-op-vehicle 2>/dev/null | awk '{print $1}')"
-  mv /usr/bin/.cross-op-vehicle /usr/bin/slirp4netns \
-    || { note "the cross-op window could not rename the vehicle into place"; finish INCOMPLETE; exit 0; }
-  restorecon /usr/bin/slirp4netns 2>/dev/null || true
-  CROSS_PLACED_SHA="$(sha256sum /usr/bin/slirp4netns 2>/dev/null | awk '{print $1}')"
-  CROSS_PLACED_CTX="$(context_of /usr/bin/slirp4netns)"
-  CROSS_PLACED_TYPE="$(printf '%s' "$CROSS_PLACED_CTX" | cut -d: -f3)"
-  echo "placed vehicle sha256: $CROSS_PLACED_SHA (expected $CROSS_EXPECTED_SHA)"
-  echo "placed vehicle label:  $CROSS_PLACED_CTX"
-  if [ "$CROSS_PLACED_SHA" != "$CROSS_EXPECTED_SHA" ] || [ "$CROSS_PLACED_TYPE" != "docker_helper_slirp4netns_exec_t" ]; then
-    note "the cross-op vehicle placement failed its byte/label check"
-    mv /usr/bin/.cross-op-vehicle /usr/bin/slirp4netns 2>/dev/null || true
-    restorecon /usr/bin/slirp4netns 2>/dev/null || true
-    marker "CROSS-OPERATION-ISOLATION=NOT_PROVEN"
-    marker "BLOCKER=the cross-op vehicle placement failed (see 45-cross-op-isolation.txt)"
-    finish INCOMPLETE; exit 0
-  fi
-  # Re-arm a FRESH trace ring for the cross-op window: the syscall
-  # tracepoints (openat/setns/ioctl enter/exit with the numeric results)
-  # + capability/cap_capable + avc/selinux_audited — the vehicle's every
-  # step is causally recorded with its scontext/tcontext.
-  CROSS_TRACE_ENABLED=0
-  if [ "$TRACE_ENABLED" = 1 ]; then
-    echo 0 > "$TRACING/tracing_on" 2>/dev/null || true
-    echo > "$TRACING/trace" 2>/dev/null || true
-    echo 16384 > "$TRACING/buffer_size_kb" 2>/dev/null || true
-    echo 1 > "$TRACING/events/capability/cap_capable/enable" 2>/dev/null || true
-    echo 1 > "$TRACING/events/syscalls/sys_enter_openat/enable" 2>/dev/null || true
-    echo 1 > "$TRACING/events/syscalls/sys_exit_openat/enable" 2>/dev/null || true
-    echo 1 > "$TRACING/events/syscalls/sys_enter_setns/enable" 2>/dev/null || true
-    echo 1 > "$TRACING/events/syscalls/sys_exit_setns/enable" 2>/dev/null || true
-    echo 1 > "$TRACING/events/syscalls/sys_enter_ioctl/enable" 2>/dev/null || true
-    echo 1 > "$TRACING/events/syscalls/sys_exit_ioctl/enable" 2>/dev/null || true
-    if [ -d "$TRACING/events/avc/selinux_audited" ]; then
-      echo 1 > "$TRACING/events/avc/selinux_audited/enable" 2>/dev/null || true
-    fi
-    echo 1 > "$TRACING/tracing_on" 2>/dev/null || true \
-      && CROSS_TRACE_ENABLED=1
-  fi
-  # START in the background; the vehicle's window is the first ~1s; the
-  # harvest is bounded BEFORE the manager's readiness-loop poll flood.
-  CROSS_OP_ID="$(gen_op_id)"
-  CROSS_RT_OP_DIR="$RUNTIME_ROOT/ops/$CROSS_OP_ID"
-  CROSS_ST_OP_DIR="$STATE_ROOT/ops/$CROSS_OP_ID"
-  printf 'START %s\n' "$CROSS_OP_ID" | timeout 120 socat - UNIX-CONNECT:"$MANAGER_SOCK" \
-    > /tmp/p4b-work/cross-start-out.txt 2>/dev/null &
-  CROSS_START_PID=$!
-  sleep 3
-  if [ "$CROSS_TRACE_ENABLED" = 1 ]; then
-    echo 0 > "$TRACING/tracing_on" 2>/dev/null || true
-    cat "$TRACING/trace" > /tmp/p4b-work/cross-trace.txt 2>/dev/null || true
-    echo 0 > "$TRACING/events/capability/cap_capable/enable" 2>/dev/null || true
-    echo 0 > "$TRACING/events/syscalls/sys_enter_openat/enable" 2>/dev/null || true
-    echo 0 > "$TRACING/events/syscalls/sys_exit_openat/enable" 2>/dev/null || true
-    echo 0 > "$TRACING/events/syscalls/sys_enter_setns/enable" 2>/dev/null || true
-    echo 0 > "$TRACING/events/syscalls/sys_exit_setns/enable" 2>/dev/null || true
-    echo 0 > "$TRACING/events/syscalls/sys_enter_ioctl/enable" 2>/dev/null || true
-    echo 0 > "$TRACING/events/syscalls/sys_exit_ioctl/enable" 2>/dev/null || true
-    echo 0 > "$TRACING/events/avc/selinux_audited/enable" 2>/dev/null || true
-  else
-    : > /tmp/p4b-work/cross-trace.txt
-  fi
-  wait "$CROSS_START_PID" 2>/dev/null || true
-  CROSS_START_OUT="$(cat /tmp/p4b-work/cross-start-out.txt 2>/dev/null || true)"
-  # The bounded convergence wait for the cross op's cleanup (orders the
-  # AVC slice after the op tree is gone).
-  CROSS_PID=""
-  CROSS_END=$(( $(date +%s) + 75 ))
-  while [ "$(date +%s)" -lt "$CROSS_END" ]; do
-    if [ -z "$CROSS_PID" ] && [ -s "$CROSS_RT_OP_DIR/instance.pid" ]; then
-      CROSS_PID="$(cat "$CROSS_RT_OP_DIR/instance.pid" 2>/dev/null)"
-    fi
-    if [ -n "$CROSS_PID" ] && [ ! -d "/proc/$CROSS_PID" ] && [ ! -d "$CROSS_RT_OP_DIR" ] && [ ! -d "$CROSS_ST_OP_DIR" ]; then
-      break
-    fi
-    sleep 0.05
-  done
-  harvest_avcs_since "$CROSS_T0" /tmp/p4b-work/cross-avc-slice.txt
-  {
-    echo "=== 4C-37 cross-operation isolation window (vehicle in the helper domain; ZERO policy delta) ==="
-    echo "window-start: $CROSS_T0"
-    echo "START: $CROSS_OP_ID (response: $CROSS_START_OUT)"
-    echo "window-end: $(date +%s)"
-    echo "identity bindings: A(exe-pid)=$CROSS_A_PID B(exe-pid)=$CROSS_B_PID vehicle-op=$CROSS_OP_ID instance-pid=${CROSS_PID:-(not observed)}"
-    echo "placed vehicle sha256: $CROSS_PLACED_SHA"
-    echo "placed vehicle label:  $CROSS_PLACED_CTX"
-    echo "=== the vehicle's step/verdict lines (stderr via the flow's child output) ==="
-    journalctl -u "$UNIT" --since "@$CROSS_T0" --no-pager 2>/dev/null | grep -aE 'VEHICLE-(STEP|VERDICT)' | head -40 || true
-    echo "(end of vehicle lines)"
-    echo "=== the vehicle's syscall/audit trace lines (the causal chain; NOT mixed with the cap_capable flood) ==="
-    grep -a 'slirp4netns' /tmp/p4b-work/cross-trace.txt 2>/dev/null \
-      | grep -aE '/proc/[0-9]+/ns/|setns|/dev/net/tun|sys_ioctl|selinux_audited' | head -60 || true
-    echo "(end of cross-op syscall/audit lines)"
-    echo "--- the vehicle's FAILED cap_capable lines (recorded; the cap boundary's own evidence):"
-    grep -a 'slirp4netns' /tmp/p4b-work/cross-trace.txt 2>/dev/null \
-      | grep -a 'cap_capable:' | grep -av ' ret 0' | head -12 || true
-    echo "(end of failed-cap_capable lines)"
-    echo "=== the cross-op window's AVC slice: helper-domain records of the attack classes (lifecycle signull/process records inventoried SEPARATELY in 46) ==="
-    grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' /tmp/p4b-work/cross-avc-slice.txt 2>/dev/null \
-      | grep -avE 'tclass=process' | head -20 || true
-    echo "(end of cross-op AVC records)"
-    echo "=== restore check ==="
-    mv /usr/bin/slirp4netns /usr/bin/.cross-op-vehicle-installed \
-      || echo "FAIL: the vehicle could not be renamed out of the path"
-    cp -p /usr/bin/.slirp4netns.orig /usr/bin/slirp4netns \
-      && restorecon /usr/bin/slirp4netns 2>/dev/null || true
-    CROSS_RESTORED_SHA="$(sha256sum /usr/bin/slirp4netns 2>/dev/null | awk '{print $1}')"
-    echo "original sha256: $PROBE_ORIG_SHA"
-    echo "restored sha256: $CROSS_RESTORED_SHA"
-    echo "restored ctx:    $(context_of /usr/bin/slirp4netns)"
-    if [ "$CROSS_RESTORED_SHA" = "$PROBE_ORIG_SHA" ]; then
-      echo "PASS: the shipped flow binary is restored byte-identical"
-    else
-      echo "FAIL: the shipped flow binary did NOT restore byte-identical — the composition integrity is broken"
-    fi
-  } > "$EVIDENCE_DIR/45-cross-op-isolation.txt" 2>&1
-  cat "$EVIDENCE_DIR/45-cross-op-isolation.txt" >&2
-  grep -aq "PASS: the shipped flow binary is restored byte-identical" "$EVIDENCE_DIR/45-cross-op-isolation.txt" \
-    || { marker "BLOCKER=the cross-op window failed to restore the shipped flow binary (see 45-cross-op-isolation.txt)"
-         finish FAIL; exit 0; }
-  # The lifecycle-noise inventory (RECORDED, NOT GATED — the 4C-36 shape:
-  # builder_t/rootlesskit_t process denials against the retained alive
-  # helpers; their own staircase owns any widening).
-  {
-    echo "=== lifecycle-noise inventory (the 4C-36 flow-lifecycle denials; NOT cross-operation proof; recorded, not gated) ==="
-    grep -a 'tclass=process' /tmp/p4b-work/cross-avc-slice.txt 2>/dev/null | head -20 || true
-    echo "(end of lifecycle-noise records)"
-  } > "$EVIDENCE_DIR/46-cross-op-lifecycle-noise.txt" 2>&1
-  cat "$EVIDENCE_DIR/46-cross-op-lifecycle-noise.txt" >&2
-  # ---- the verdict. PASS requires ALL of: (a) the control leg succeeded
-  # ---- (the vehicle's own production chain: journal CONTROL=SUCCESS and
-  # ---- the kernel trace's TUNSETIFF ret 0); (b) both attack legs stopped
-  # ---- at REAL boundaries (journal VEHICLE-VERDICT
-  # ---- CROSS-OPERATION-ISOLATION=HOLDS and the kernel trace's
-  # ---- selinux_audited helper decisions in the attack legs); (c) the
-  # ---- identity bindings held (no IDENTITY-FAIL/ENOENT stop); (d) the
-  # ---- attack denials carry CROSS-CATEGORY contexts (the tcontext of
-  # ---- the A/B-targeted decisions). If the vehicle reports BROKEN —
-  # ---- STOP immediately: CROSS-OPERATION-ISOLATION=BROKEN, finish FAIL,
-  # ---- no compensating changes.
-  CROSS_OK=1
-  {
-    echo "=== 4C-37 verdict ==="
-    CROSS_VERDICT_LINE="$(journalctl -u "$UNIT" --since "@$CROSS_T0" --no-pager 2>/dev/null | grep -a 'VEHICLE-VERDICT' | tail -1 || true)"
-    echo "the vehicle's final verdict: ${CROSS_VERDICT_LINE:-(ABSENT — the vehicle verdict was never delivered)}"
-    echo "--- control channel 2: the kernel trace's vehicle TUNSETIFF window (fd/cmd/ret):"
-    CROSS_CONTROL_TRACE="$(grep -a 'slirp4netns' /tmp/p4b-work/cross-trace.txt 2>/dev/null | grep -a 'sys_ioctl' | grep -a 'cmd: 0x400454ca' | tail -1 || true)"
-    printf '%s\n' "${CROSS_CONTROL_TRACE:-(absent in the kernel trace)}"
-    echo "--- attack channel 2: the kernel trace's helper SELinux decisions in the vehicle window:"
-    CROSS_ATTACK_TRACE="$(grep -a 'slirp4netns' /tmp/p4b-work/cross-trace.txt 2>/dev/null | grep -a 'selinux_audited:' | grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' | head -8 || true)"
-    printf '%s\n' "${CROSS_ATTACK_TRACE:-(none — no helper SELinux decision was audited in the window)}"
-    echo "--- the cross-category bindings (the attack decisions' scontext/tcontext; must show the vehicle's cN against the A/B targets' c1/c2):"
-    grep -a 'slirp4netns' /tmp/p4b-work/cross-trace.txt 2>/dev/null | grep -a 'selinux_audited:' | grep -aoE 'scontext=[^ ]* tcontext=[^ ]* tclass=[a-z_]*' | sort -u || true
-    echo "--- identity checks (any ENOENT-based IDENTITY-FAIL is a harness binding defect, not a boundary):"
-    journalctl -u "$UNIT" --since "@$CROSS_T0" --no-pager 2>/dev/null | grep -a 'IDENTITY-FAIL' | head -3 || echo "(none)"
-    if [ -z "$CROSS_VERDICT_LINE" ]; then
-      echo "GATE: the vehicle's verdict was never delivered — the proof did not run"
-      CROSS_OK=0
-    fi
-    if printf '%s' "$CROSS_VERDICT_LINE" | grep -aq 'CROSS-OPERATION-ISOLATION=BROKEN'; then
-      echo "GATE: the vehicle completed an attack leg — CROSS-OPERATION-ISOLATION=BROKEN"
-      CROSS_OK=0
-      CROSS_BROKEN=1
-    fi
-    if printf '%s' "$CROSS_VERDICT_LINE" | grep -aq 'CONTROL=FAIL'; then
-      echo "GATE: the control leg failed — the same-operation baseline is broken"
-      CROSS_OK=0
-    fi
-    if printf '%s' "$CROSS_VERDICT_LINE" | grep -aq 'IDENTITY-FAIL\|BINDING-FAIL\|UNREADABLE\|MARKER-ABSENT'; then
-      echo "GATE: the identity/target delivery failed — the proof is not executable"
-      CROSS_OK=0
-    fi
-    if ! printf '%s' "$CROSS_VERDICT_LINE" | grep -aq 'CROSS-OPERATION-ISOLATION=HOLDS'; then
-      echo "GATE: the vehicle did not declare CROSS-OPERATION-ISOLATION=HOLDS"
-      CROSS_OK=0
-    fi
-    if [ -z "$CROSS_CONTROL_TRACE" ]; then
-      echo "GATE: the kernel trace has no vehicle TUNSETIFF window — the control leg is not causally bound to the trace"
-      CROSS_OK=0
-    fi
-  } > "$EVIDENCE_DIR/45-cross-op-verdict.txt" 2>&1
-  cat "$EVIDENCE_DIR/45-cross-op-verdict.txt" >&2
-  if [ "$CROSS_OK" = 1 ]; then
-    marker "CROSS-OP-CONTROL=SUCCESS"
-    CROSS_ATTACK_BOUNDARY="$(journalctl -u "$UNIT" --since "@$CROSS_T0" --no-pager 2>/dev/null | grep -aE 'VEHICLE-STEP leg=attack-.*errno=(13|1) ' | head -2 || true)"
-    marker "CROSS-OP-ATTACK-DENIED-AT=$(printf '%s\n' "$CROSS_ATTACK_BOUNDARY" | head -1 | sed -n 's/.*leg=\([a-z-]*\) step=\([a-z-]*\).*/\1:\2/p' || echo 'per-trace')"
-    marker "CROSS-OPERATION-ISOLATION=HOLDS"
-    marker "CROSS-OPERATION-GATE=CLOSED"
-  elif [ "${CROSS_BROKEN:-0}" = 1 ]; then
-    marker "CROSS-OPERATION-ISOLATION=BROKEN"
-    marker "BLOCKER=the cross-operation isolation is broken (see 45-cross-op-isolation.txt, 45-cross-op-verdict.txt)"
-    finish FAIL; exit 0
-  else
-    marker "BLOCKER=the 4C-37 cross-operation isolation proof did not hold (see 45-cross-op-isolation.txt, 45-cross-op-verdict.txt)"
-    marker "CROSS-OPERATION-ISOLATION=NOT_PROVEN"
-    finish INCOMPLETE; exit 0
-  fi
-fi
-
 # Restore the production baseline and PROVE it.
 auditctl -D > /dev/null 2>&1 || true
 auditctl -a never,task > /dev/null 2>&1 || true
