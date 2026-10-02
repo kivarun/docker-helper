@@ -1697,7 +1697,7 @@ SAMPLER_PID=$!
       LC=""
       IFS= read -r LC 2>/dev/null < "$P/comm" || true
       case "$LC" in
-        rootlesskit|slirp4netns|buildkitd|newuidmap|newgidmap) ;;
+        rootlesskit|slirp4netns|buildkitd|newuidmap|newgidmap|exe) ;;
         *) continue ;;
       esac
       PID="${P#/proc/}"
@@ -2307,7 +2307,7 @@ fi
 # established the classification STOPs.
 # The flow-domain comm set is the lifetime subject (rootlesskit parent +
 # child, slirp4netns parent + child, the uid-map shims, the payload).
-POSTTUN_FLOW_COMM_GREP='(rootlesskit|slirp4netns|buildkitd|newuidmap|newgidmap)-[0-9]+ '
+POSTTUN_FLOW_COMM_GREP='(rootlesskit|exe|slirp4netns|buildkitd|newuidmap|newgidmap)-[0-9]+ '
 POSTTUN_TRACE_EVENT_GREP='sched_process_fork:|sched_process_exit:|signal_generate:|signal_deliver:|selinux_audited:|sys_(openat|setns|ioctl|kill|tkill|tgkill|pidfd_send_signal|wait4|waitid|poll|ppoll|select|pselect6|read|write|close|exit|exit_group)'
 
 # The ordered flow-domain extract (the lifetime subject's own records;
@@ -2376,21 +2376,56 @@ POSTTUN_NPRE=0; POSTTUN_NAT=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIME
     echo "first-death: NOT OBSERVED in the window's trace span"
   fi
 
-  # The death's ±0.25s causal window: every relevant event of every comm
-  # (the killer may be the manager, not a flow member).
-  if [ -n "$POSTTUN_FIRST_DEATH_TS" ]; then
-    echo "--- the death's ±0.25s causal window (all comms, the lifetime-relevant events, ordered):"
-    awk -v td="$POSTTUN_FIRST_DEATH_TS" '
-      { ts = $4; sub(/:$/, "", ts); if (ts + 0 >= td - 0.25 && ts + 0 <= td + 0.25) print }
-    ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
-      | grep -aE 'sched_process_fork:|sched_process_exit:|signal_generate:|signal_deliver:|selinux_audited:|sys_(kill|tkill|tgkill|pidfd_send_signal|wait4|waitid|poll|ppoll|select|pselect6|exit|exit_group)' | head -150 || true
-    echo "(end of the death-window records)"
+  # The FIRST FAILING exit: the first flow-domain member whose exit_group
+  # carried a NONZERO exit code after T0. The designed handoff exits
+  # (exit_code 0: the slirp4netns sandbox child's tapfd handoff) are not
+  # failures; the first nonzero exit IS the startup/readiness failure's
+  # terminal boundary and the reference point for the denial classes.
+  POSTTUN_FIRST_FAIL_LINE="$(grep -a 'sys_enter_exit_group(' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
+    | grep -aE "$POSTTUN_FLOW_COMM_GREP" \
+    | grep -av 'error_code: 0)' \
+    | awk -v t0="$POSTTUN_T0_TRACE_TS" '{ ts = $4; sub(/:$/, "", ts); if (t0 != "" && ts + 0 > t0 + 0) { print; exit } }' 2>/dev/null || true)"
+  POSTTUN_FIRST_FAIL_EXIT_CODE="$(printf '%s\n' "$POSTTUN_FIRST_FAIL_LINE" | grep -aoE 'error_code: [0-9]+' | grep -aoE '[0-9]+' | head -1 || true)"
+  POSTTUN_FIRST_FAIL_PID="$(printf '%s\n' "$POSTTUN_FIRST_FAIL_LINE" | awk '{ pid = $1; sub(/ .*/, "", pid); sub(/^[^-]*-/, "", pid); print pid }' 2>/dev/null || true)"
+  POSTTUN_FIRST_FAIL_COMM="$(printf '%s\n' "$POSTTUN_FIRST_FAIL_LINE" | awk '{ c = $1; sub(/ .*/, "", c); sub(/-[0-9]+$/, "", c); print c }' 2>/dev/null || true)"
+  POSTTUN_FIRST_FAIL_TS="$(printf '%s\n' "$POSTTUN_FIRST_FAIL_LINE" | awk '{ ts = $4; sub(/:$/, "", ts); print ts }' 2>/dev/null || true)"
+  POSTTUN_FIRST_FAIL_EPOCH="$(awk -v e="$POSTTUN_READ_EPOCH" -v u="$POSTTUN_READ_UPTIME" -v t="$POSTTUN_FIRST_FAIL_TS" 'BEGIN { if (e != "" && u != "" && t != "") printf "%.3f", e - (u - t) }' 2>/dev/null || true)"
+  POSTTUN_FAIL_EXIT_LINE="$(grep -a 'sched_process_exit:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
+    | grep -aE "$POSTTUN_FLOW_COMM_GREP" \
+    | awk -v pf="$POSTTUN_FIRST_FAIL_PID" '{ if (pf != "" && $1 ~ ("-" pf "$")) { print; exit } }' 2>/dev/null || true)"
+  POSTTUN_T0_TO_FAIL="$(awk -v d="$POSTTUN_FIRST_FAIL_TS" -v t0="$POSTTUN_T0_TRACE_TS" 'BEGIN { if (d != "" && t0 != "") printf "%.3f", d - t0 }' 2>/dev/null || true)"
+  echo "--- the first FAILING exit (the first nonzero exit_group of a flow-domain member after T0):"
+  printf '%s\n' "${POSTTUN_FIRST_FAIL_LINE:-(absent: no flow-domain member exited nonzero inside the trace span of the window)}"
+  printf '%s\n' "${POSTTUN_FAIL_EXIT_LINE:-(its sched_process_exit line: absent)}"
+  if [ -n "$POSTTUN_FIRST_FAIL_PID" ]; then
+    echo "first-failing-exit: pid=$POSTTUN_FIRST_FAIL_PID comm=$POSTTUN_FIRST_FAIL_COMM exit=$POSTTUN_FIRST_FAIL_EXIT_CODE trace-ts=$POSTTUN_FIRST_FAIL_TS at=T0+${POSTTUN_T0_TO_FAIL:-?}s"
+  else
+    echo "first-failing-exit: NOT OBSERVED in the window's trace span"
   fi
 
-  # The delivered signal to the dying pid (the killer's identity = the
+  # The failure's ±0.25s causal window: every relevant event of every
+  # comm, centred on the first failing exit (the lifetime failure) when
+  # observed, else on the first death (the killer may be the manager, not
+  # a flow member).
+  POSTTUN_WINDOW_TS="${POSTTUN_FIRST_FAIL_TS:-$POSTTUN_FIRST_DEATH_TS}"
+  if [ -n "$POSTTUN_WINDOW_TS" ]; then
+    echo "--- the failure's ±0.25s causal window (all comms, the lifetime-relevant events, ordered; anchored at T0 so pre-T0 launch noise cannot fill the cap):"
+    awk -v t0="$POSTTUN_T0_TRACE_TS" -v td="$POSTTUN_WINDOW_TS" '
+      { ts = $4; sub(/:$/, "", ts)
+        lo = (t0 != "") ? t0 - 0.02 : td - 0.25
+        if (ts + 0 >= lo && ts + 0 <= td + 0.25) print }
+    ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
+      | grep -aE 'sched_process_fork:|sched_process_exit:|signal_generate:|signal_deliver:|selinux_audited:|sys_(kill|tkill|tgkill|pidfd_send_signal|wait4|waitid|poll|ppoll|select|pselect6|exit|exit_group)' | head -150 || true
+    echo "(end of the failure-window records)"
+  fi
+
+  # The delivered signal to the dying pids (the killer's identity = the
   # kill-family syscall record's own comm-pid; a delivered signal needs
-  # the syscall's ret 0).
+  # the syscall's ret 0). Checked for the first death and for the first
+  # failing exit separately: the designed handoff exit has no killer, the
+  # failing exit may or may not have one.
   POSTTUN_DELIVERED_KILL=""
+  POSTTUN_DELIVERED_KILL_FAIL=""
   if [ -n "$POSTTUN_FIRST_DEATH_PID" ]; then
     POSTTUN_DELIVERED_KILL="$(awk -v dp="$POSTTUN_FIRST_DEATH_PID" '
       /sys_(kill|tkill|tgkill|pidfd_send_signal)\(/ {
@@ -2405,22 +2440,40 @@ POSTTUN_NPRE=0; POSTTUN_NAT=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIME
       }
     ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true)"
   fi
+  if [ -n "$POSTTUN_FIRST_FAIL_PID" ] && [ "$POSTTUN_FIRST_FAIL_PID" != "$POSTTUN_FIRST_DEATH_PID" ]; then
+    POSTTUN_DELIVERED_KILL_FAIL="$(awk -v dp="$POSTTUN_FIRST_FAIL_PID" '
+      /sys_(kill|tkill|tgkill|pidfd_send_signal)\(/ {
+        if (index($0, "pid: " dp " ") > 0 || index($0, "pid: " dp ",") > 0 || index($0, "tid: " dp " ") > 0 || index($0, "tid: " dp ",") > 0) {
+          pend = 1; pwho = $1; pline = $0; next
+        }
+        next
+      }
+      pend && /sys_(kill|tkill|tgkill|pidfd_send_signal) ->/ && $1 == pwho {
+        if ($NF == "0x0") { print pline; print $0; exit }
+        pend = 0
+      }
+    ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true)"
+  fi
   echo "--- the delivered signal to the dying pid (the killer's syscall + its ret):"
-  printf '%s\n' "${POSTTUN_DELIVERED_KILL:-(none — no delivered kill-family syscall to the dying pid inside the trace span)}"
+  printf '%s\n' "${POSTTUN_DELIVERED_KILL:-(none — no delivered kill-family syscall to the first-dying pid inside the trace span)}"
+  if [ "$POSTTUN_FIRST_FAIL_PID" != "$POSTTUN_FIRST_DEATH_PID" ]; then
+    echo "--- the delivered signal to the first FAILING pid (the lifetime failure's own killer, if any):"
+    printf '%s\n' "${POSTTUN_DELIVERED_KILL_FAIL:-(none — no delivered kill-family syscall to the first-failing pid inside the trace span)}"
+  fi
   if [ -n "$POSTTUN_FIRST_DEATH_PID" ]; then
     if [ -n "$POSTTUN_DELIVERED_KILL" ]; then
       POSTTUN_DEATH_CAUSE="SIG-DELIVERED (a kill-family syscall returned 0 to the dying pid; the killer is the syscall record's own comm-pid)"
     else
-      POSTTUN_DEATH_CAUSE="NO-RECORDED-SIGNAL (no delivered kill-family syscall to the dying pid — voluntary exit, parent-failure, or an unrecorded mechanism; the ordered death-window above is the evidence)"
+      POSTTUN_DEATH_CAUSE="NO-RECORDED-SIGNAL (no delivered kill-family syscall to the dying pid — voluntary exit, parent-failure, or an unrecorded mechanism; the ordered failure-window above is the evidence)"
     fi
   fi
   echo "first-death cause: ${POSTTUN_DEATH_CAUSE:-UNCLASSIFIED (no death observed)}"
 
-  # The ready channel's ordered story (T0..first death): poll/read/write/
-  # close + signal/wait records of the flow-domain members.
-  if [ -n "$POSTTUN_T0_TRACE_TS" ] && [ -n "$POSTTUN_FIRST_DEATH_TS" ]; then
-    echo "--- the ready channel's ordered story (T0..first death; flow-domain comms; poll/read/write/close/signal/wait):"
-    awk -v t0="$POSTTUN_T0_TRACE_TS" -v td="$POSTTUN_FIRST_DEATH_TS" '
+  # The ready channel's ordered story (T0..first failing exit): poll/read/
+  # write/close + signal/wait records of the flow-domain members.
+  if [ -n "$POSTTUN_T0_TRACE_TS" ] && [ -n "$POSTTUN_WINDOW_TS" ]; then
+    echo "--- the ready channel's ordered story (T0..failure; flow-domain comms; poll/read/write/close/signal/wait):"
+    awk -v t0="$POSTTUN_T0_TRACE_TS" -v td="$POSTTUN_WINDOW_TS" '
       { ts = $4; sub(/:$/, "", ts); if (ts + 0 < t0 + 0 || ts + 0 > td + 0) next; print }
     ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
       | grep -aE "$POSTTUN_FLOW_COMM_GREP" \
@@ -2429,11 +2482,11 @@ POSTTUN_NPRE=0; POSTTUN_NAT=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIME
     echo "(end of the ready channel's story)"
   fi
 
-  # The process tree (the fork records from T0 through the death+0.5s).
-  echo "--- the process tree (sched_process_fork; the manager/launcher/root and the flow-domain, T0..death+0.5s):"
+  # The process tree (the fork records from T0 through failure+0.5s).
+  echo "--- the process tree (sched_process_fork; the manager/launcher/root and the flow-domain, T0..failure+0.5s):"
   grep -a 'sched_process_fork:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
-    | grep -aE '(docker-helper|rootlesskit|slirp4netns|buildkitd|newuidmap|newgidmap|ip)-[0-9]+ ' \
-    | awk -v t0="$POSTTUN_T0_TRACE_TS" -v td="$POSTTUN_FIRST_DEATH_TS" '
+    | grep -aE '(docker-helper|rootlesskit|exe|slirp4netns|buildkitd|newuidmap|newgidmap|ip)-[0-9]+ ' \
+    | awk -v t0="$POSTTUN_T0_TRACE_TS" -v td="$POSTTUN_WINDOW_TS" '
       { ts = $4; sub(/:$/, "", ts)
         if (t0 == "") next
         if (ts + 0 < t0 + 0) next
@@ -2442,10 +2495,11 @@ POSTTUN_NPRE=0; POSTTUN_NAT=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIME
         print }' | head -60 || true
   echo "(end of the process-tree records)"
 
-  # The timeline (50) around the death and its per-pid life summary.
-  if [ -n "$POSTTUN_FIRST_DEATH_EPOCH" ] && [ -s "$EVIDENCE_DIR/50-posttun-timeline.txt" ]; then
-    echo "--- the post-TUN timeline around the death (±0.5s; the wallclock clock):"
-    awk -v de="$POSTTUN_FIRST_DEATH_EPOCH" '
+  # The timeline (50) around the failure and its per-pid life summary.
+  POSTTUN_TIMELINE_ANCHOR_EPOCH="${POSTTUN_FIRST_FAIL_EPOCH:-$POSTTUN_FIRST_DEATH_EPOCH}"
+  if [ -n "$POSTTUN_TIMELINE_ANCHOR_EPOCH" ] && [ -s "$EVIDENCE_DIR/50-posttun-timeline.txt" ]; then
+    echo "--- the post-TUN timeline around the failure (±0.5s; the wallclock clock):"
+    awk -v de="$POSTTUN_TIMELINE_ANCHOR_EPOCH" '
       { ts = $1 + 0; if (ts >= de - 0.5 && ts <= de + 0.5) print }
     ' "$EVIDENCE_DIR/50-posttun-timeline.txt" 2>/dev/null | head -80 || true
     echo "(end of the timeline's death window)"
@@ -2484,16 +2538,17 @@ POSTTUN_NPRE=0; POSTTUN_NAT=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIME
 
   # The process denials' temporal classification. The kernel trace is the
   # authoritative channel; the audit slice is corroborating. The classes:
-  # POLLING-ONLY = a recurring (>=2) scontext/tclass/trace-ts shape key
-  # (the manager's readiness polls); the rest are classified by the
-  # record's distance from the first death: PRE-FAILURE (>20ms before),
-  # AT-FAILURE (±20ms), POST-FAILURE/CLEANUP (>20ms after). The
-  # classification covers the records after T0; the pre-T0 records are
-  # the launcher-chain window's scope.
-  echo "--- the trace-side process denials, temporally classified (the first death is the reference point):"
+  # POLLING-ONLY = a recurring (>=2) scontext/tcontext/denied-mask shape
+  # key (the manager's readiness polls); the rest are classified by the
+  # record's distance from the first failing exit (the lifetime
+  # failure's own reference point): PRE-FAILURE (>20ms before it),
+  # AT-FAILURE (within 20ms before it or at it), POST-FAILURE/CLEANUP
+  # (anything after it). The classification covers the records after T0;
+  # the pre-T0 records are the launcher-chain window's scope.
+  echo "--- the trace-side process denials, temporally classified (the first failing exit is the reference point):"
   POSTTUN_TRACE_CLASSIFIED="$(grep -a 'selinux_audited:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
     | grep -a 'tclass=process' \
-    | awk -v t0="$POSTTUN_T0_TRACE_TS" -v td="$POSTTUN_FIRST_DEATH_TS" '
+    | awk -v t0="$POSTTUN_T0_TRACE_TS" -v td="$POSTTUN_WINDOW_TS" '
       function shapeof(s,   a, b, m) {
         # The recurrence key: scontext|tcontext|denied-mask. The record
         # timestamp must NOT be part of the key, or no two records would
@@ -2517,7 +2572,7 @@ POSTTUN_NPRE=0; POSTTUN_NAT=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIME
           cls = ""
           if (n[sh] >= 2) cls = "POLLING-ONLY"
           else if (td == "") cls = "UNTIMED"
-          else { d = ts - td; if (d < -0.02) cls = "PRE-FAILURE"; else if (d <= 0.02) cls = "AT-FAILURE"; else cls = "POST-FAILURE/CLEANUP" }
+          else { d = ts - td; if (d < -0.02) cls = "PRE-FAILURE"; else if (d <= 0) cls = "AT-FAILURE"; else cls = "POST-FAILURE/CLEANUP" }
           printf "class=%s trace-ts=%s shape=%s\n  %s\n", cls, ts, sh, raw
         }
       }' 2>/dev/null || true)"
@@ -2550,6 +2605,11 @@ POSTTUN_NPRE=0; POSTTUN_NAT=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIME
     echo "  first-death cause classified: FAIL (no death observed in the window's trace span)"
   fi
   [ "$POSTTUN_DENIALS_CLASSIFIED" = 1 ] && echo "  all observed process denials temporally classified: PASS" || echo "  all observed process denials temporally classified: FAIL (UNTIMED records remain)"
+  if [ -n "$POSTTUN_FIRST_FAIL_PID" ]; then
+    echo "  first failing exit identified: PASS (pid=$POSTTUN_FIRST_FAIL_PID comm=$POSTTUN_FIRST_FAIL_COMM exit=$POSTTUN_FIRST_FAIL_EXIT_CODE at=T0+${POSTTUN_T0_TO_FAIL:-?}s)"
+  else
+    echo "  first failing exit identified: FAIL (no nonzero exit_group of a flow-domain member in the window's trace span — the lifetime failure did not reproduce)"
+  fi
   if [ -n "$POSTTUN_CLOCK_DRIFT" ]; then
     POSTTUN_DRIFT_ABS="$(awk -v d="$POSTTUN_CLOCK_DRIFT" 'BEGIN { d = d + 0; print (d < 0) ? -d : d }' 2>/dev/null || true)"
     if awk -v d="$POSTTUN_DRIFT_ABS" 'BEGIN { exit !(d <= 1.0) }' 2>/dev/null; then
@@ -2563,18 +2623,38 @@ POSTTUN_NPRE=0; POSTTUN_NAT=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIME
     POSTTUN_DENIALS_CLASSIFIED=0
   fi
 
-  # The primary boundary: the earliest of the first PRE-FAILURE/AT-FAILURE
-  # denial and the classified first death, per the timeline. A delivered
-  # signal with no preceding policy denial is a software/lifecycle
-  # finding; a denial that precedes or sits exactly at the death is the
-  # policy-candidate owner. Nothing is granted here either way.
-  if [ "$POSTTUN_T0_OK" = 1 ] && [ "$POSTTUN_DEATH_PID_OK" = 1 ] && [ "$POSTTUN_DEATH_TS_OK" = 1 ] && [ -n "$POSTTUN_DEATH_CAUSE" ] && [ "$POSTTUN_DENIALS_CLASSIFIED" = 1 ]; then
-    POSTTUN_FIRST_PRE_AT_TS="$(printf '%s\n' "$POSTTUN_TRACE_CLASSIFIED" | grep -a 'class=PRE-FAILURE\|class=AT-FAILURE' | head -1 | sed -n 's/^class=[^ ]* trace-ts=\([0-9.]*\).*/\1/p' || true)"
+  # The primary boundary: the earliest of (a) the first PRE-FAILURE or
+  # AT-FAILURE SELinux decision of ANY tclass relative to the first
+  # failing exit, and (b) the first failing exit itself. A denial that
+  # precedes or sits exactly at the failing exit is the
+  # policy-candidate owner of the next semantic phase; a first failing
+  # exit that no SELinux decision precedes is a software/lifecycle
+  # finding (no policy widening). The known process-kill/signull/sigkill
+  # denials, classified POST-FAILURE or POLLING-ONLY, are cleanup and
+  # polling noise and are not owners. Nothing is granted here either way.
+  if [ "$POSTTUN_T0_OK" = 1 ] && [ "$POSTTUN_DEATH_PID_OK" = 1 ] && [ "$POSTTUN_DEATH_TS_OK" = 1 ] && [ -n "$POSTTUN_DEATH_CAUSE" ] && [ "$POSTTUN_DENIALS_CLASSIFIED" = 1 ] && [ -n "$POSTTUN_FIRST_FAIL_PID" ]; then
+    POSTTUN_REF_DESC="the first failing exit pid=$POSTTUN_FIRST_FAIL_PID comm=$POSTTUN_FIRST_FAIL_COMM exit=$POSTTUN_FIRST_FAIL_EXIT_CODE"
+    POSTTUN_FIRST_PRE_AT_TS="$(grep -a 'selinux_audited:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
+      | awk -v t0="$POSTTUN_T0_TRACE_TS" -v td="$POSTTUN_WINDOW_TS" '
+        {
+          ts = $4; sub(/:$/, "", ts)
+          if (t0 != "" && ts + 0 < t0 + 0) next
+          if (td == "") next
+          d = ts - td
+          if (d < -0.02) { print ts; exit }
+          if (d <= 0) { print ts; exit }
+        }' 2>/dev/null | head -1 || true)"
     if [ -n "$POSTTUN_FIRST_PRE_AT_TS" ]; then
-      POSTTUN_PRE_AT_TO_DEATH="$(awk -v a="$POSTTUN_FIRST_PRE_AT_TS" -v b="$POSTTUN_FIRST_DEATH_TS" 'BEGIN { printf "%.3f", a - b }' 2>/dev/null || true)"
-      POSTTUN_BOUNDARY="POLICY-DENIAL-CANDIDATE (the first PRE/AT process denial at trace-ts=$POSTTUN_FIRST_PRE_AT_TS, ${POSTTUN_PRE_AT_TO_DEATH}s relative to the first death — the denial owns the next semantic phase; see 52-posttun-denials.txt)"
+      POSTTUN_PRE_AT_TO_FAIL="$(awk -v a="$POSTTUN_FIRST_PRE_AT_TS" -v b="$POSTTUN_WINDOW_TS" 'BEGIN { printf "%.3f", a - b }' 2>/dev/null || true)"
+      POSTTUN_PRE_AT_RECORD="$(grep -a 'selinux_audited:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | awk -v ts0="$POSTTUN_FIRST_PRE_AT_TS" '{ ts = $4; sub(/:$/, "", ts); if (ts + 0 == ts0 + 0) { print; exit } }' 2>/dev/null | head -1 || true)"
+      echo "--- the boundary's own denial record:"
+      printf '%s\n' "${POSTTUN_PRE_AT_RECORD:-(record lookup failed)}"
+      echo "--- the dir class's live perms bitmap-order (bit N = the Nth listed perm; the masks decode against this order):"
+      ls /sys/fs/selinux/class/dir/perms 2>/dev/null | tr '\n' ' ' | head -c 500; echo
+      echo "(end of the dir class perms listing)"
+      POSTTUN_BOUNDARY="POLICY-DENIAL-CANDIDATE (a SELinux decision at trace-ts=$POSTTUN_FIRST_PRE_AT_TS, ${POSTTUN_PRE_AT_TO_FAIL}s relative to $POSTTUN_REF_DESC — the denial owns the next semantic phase; see 52-posttun-denials.txt)"
     else
-      POSTTUN_BOUNDARY="SOFTWARE-LIFECYCLE (the first flow-member death pid=$POSTTUN_FIRST_DEATH_PID comm=$POSTTUN_FIRST_DEATH_COMM at=T0+${POSTTUN_T0_TO_DEATH}s, cause: $POSTTUN_DEATH_CAUSE — no process denial precedes it, so no SELinux blocker owns the lifetime failure; the next phase's owner is the software/lifecycle finding)"
+      POSTTUN_BOUNDARY="SOFTWARE-LIFECYCLE ($POSTTUN_REF_DESC at=T0+${POSTTUN_T0_TO_FAIL}s precedes every SELinux decision — no SELinux blocker owns the lifetime failure; the next phase's owner is the software/lifecycle finding)"
     fi
     echo "PRIMARY-BOUNDARY: $POSTTUN_BOUNDARY"
     POSTTUN_ESTABLISHED=1
