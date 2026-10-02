@@ -500,11 +500,13 @@ func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
 	// import would grant unrestricted ioctl), no custom tun device type,
 	// no .fc relabel of the global node, no capability surface (the TUN
 	// driver's ns_capable check is carried by the child's own cap_userns
-	// rule), no other subject holds a tun_tap_device_t ioctl xperm rule,
-	// and no subject beyond the two TUN users holds a tun_tap_device_t
-	// allow rule — the 4C-33 helper's independent { read write open ioctl }
-	// TUN staircase is owned by the slirp4netns helper test, not by this
-	// rootlesskit surface's owner.
+	// rule), no other subject holds a tun_tap_device_t ioctl xperm rule —
+	// the 4C-34 helper's independent single-command { 0x54ca } whitelist
+	// is owned by the slirp4netns helper test, not by this rootlesskit
+	// surface's owner — and no subject beyond the two TUN users holds a
+	// tun_tap_device_t allow rule — the 4C-31/4C-32/4C-33 helper's
+	// independent ordinary staircase is owned by the slirp4netns helper
+	// test.
 	for _, want := range []string{
 		"type tun_tap_device_t;",
 		"allow docker_helper_rootlesskit_t tun_tap_device_t:chr_file { read write open ioctl };",
@@ -532,10 +534,15 @@ func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
 			case strings.Contains(trimmed, "docker_helper_tun_exec_t") || strings.Contains(trimmed, "docker_helper_tun_device_t"):
 				violations = append(violations, "no custom tun device type may exist (the distro tun_tap_device_t identity is used): "+trimmed)
 			case strings.HasPrefix(trimmed, "allowxperm ") && strings.Contains(trimmed, "tun_tap_device_t"):
-				if trimmed == "allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl { 0x54ca 0x54cb };" {
+				switch trimmed {
+				case "allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl { 0x54ca 0x54cb };":
 					rootlesskitTunXpermRules++
-				} else {
-					violations = append(violations, fmt.Sprintf("the tun_tap_device_t ioctl xperm surface is exactly the rootlesskit child's single { 0x54ca 0x54cb } TUNSETIFF+TUNSETPERSIST rule (no third command, no range, no complement, no other subject): %s", trimmed))
+				case "allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl 0x54ca;":
+					// The 4C-34 helper rule: an independent single-command
+					// whitelist owned by the slirp4netns helper test
+					// (not re-pinned here — no shared TUN abstraction).
+				default:
+					violations = append(violations, fmt.Sprintf("the tun_tap_device_t ioctl xperm surface is exactly the two TUN users' own pinned rules — the rootlesskit child's { 0x54ca 0x54cb } and the 4C-34 helper's { 0x54ca } — no third command, no range, no complement, no other subject: %s", trimmed))
 				}
 			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, "tun_tap_device_t:chr_file"):
 				switch trimmed {
@@ -1243,12 +1250,14 @@ func parseSELinuxRules(policy string) ([]builderPolicyAllowRule, []builderPolicy
 //   - the helper domain holds no bin_t grant and no forbidden-surface grant
 //     (Docker socket, admin token, config/state/runtime, Session workspace);
 //   - the helper's TUN device-node authority is exactly one
-//     tun_tap_device_t:chr_file { read write open ioctl } allow (the
-//     4C-31 read/write + 4C-32 open + 4C-33 generic-ioctl grants; no
-//     allowxperm — the command whitelist is its own next owner — and
-//     no getattr/append/lock/create/setattr, no helper tun_socket
-//     grant — the RootlessKit TUN staircase is owned by the
-//     rootlesskit test's tun owner);
+//     tun_tap_device_t:chr_file { read write open ioctl } allow plus
+//     exactly one tun_tap_device_t:chr_file ioctl 0x54ca allowxperm
+//     (the 4C-31 read/write + 4C-32 open + 4C-33 generic-ioctl grants
+//     and the 4C-34 TUNSETIFF command whitelist; no other ioctl
+//     command, no allowxperm on any other type, and no
+//     getattr/append/lock/create/setattr, no helper tun_socket grant
+//     — the RootlessKit TUN staircase is owned by the rootlesskit
+//     test's tun owner);
 //   - the manager domain holds no capability, capability2, or cap_userns
 //     grants, and the helper domain holds no plain capability or
 //     capability2 grant (the helper's single self:cap_userns rule is
@@ -1339,19 +1348,21 @@ func helperDomainPolicyViolations(policy string) []string {
 	if slirpNsfsFileLines != 1 {
 		violations = append(violations, fmt.Sprintf("exactly one nsfs:file-read grant may exist from the helper toward the namespace magic-link target, found %d", slirpNsfsFileLines))
 	}
-	// The 4C-31/4C-32/4C-33 TUN device-node grant: exactly ONE allow
-	// line may name slirp4netns_t -> tun_tap_device_t:chr_file, in the
-	// exact brace shape { read write open ioctl } (no bare
+	// The 4C-31/4C-32/4C-33/4C-34 TUN device-node grant: exactly ONE
+	// allow line may name slirp4netns_t -> tun_tap_device_t:chr_file, in
+	// the exact brace shape { read write open ioctl } (no bare
 	// read/write/open/ioctl, no split into
-	// multiple rules, no getattr/append/lock/create/setattr, and — per
-	// the allowxperm guard below — NO ioctl command whitelist: the
-	// helper's ioctl authority is the generic bit only, the xperm-stage
-	// owner is its own phase).
+	// multiple rules, no getattr/append/lock/create/setattr), and the
+	// allowxperm guard below pins the command whitelist: exactly ONE
+	// allowxperm line, the exact 0x54ca (TUNSETIFF) shape — the 4C-34
+	// hardening of the bitmap-less intermediate the 4C-33 run proved
+	// command-unrestricted.
 	// tun_tap_device_t
 	// is globally labelled; the rule is NOT operation/category scoped
 	// (see the .te scope note). The independent RootlessKit TUN surface
 	// is owned by the rootlesskit test's tun owner.
 	slirpTunFileLines := 0
+	slirpTunXpermLines := 0
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "#") {
@@ -1364,11 +1375,17 @@ func helperDomainPolicyViolations(policy string) []string {
 			}
 		}
 		if strings.HasPrefix(trimmed, "allowxperm docker_helper_slirp4netns_t") {
-			violations = append(violations, fmt.Sprintf("the helper domain holds no allowxperm rule (its evidenced TUN surface is the ordinary { read write open ioctl } device-node grant; any ioctl COMMAND authority is a separate live boundary owned by the next staircase step): %s", trimmed))
+			slirpTunXpermLines++
+			if trimmed != "allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl 0x54ca;" {
+				violations = append(violations, fmt.Sprintf("the helper's allowxperm surface must be exactly one tun_tap_device_t:chr_file ioctl 0x54ca rule (the single live-proven TUNSETIFF command; no 0x54cb, no third command, no range, no complement, no other type): %s", trimmed))
+			}
 		}
 	}
 	if slirpTunFileLines != 1 {
 		violations = append(violations, fmt.Sprintf("exactly one tun_tap_device_t:chr_file grant may exist for the helper domain, found %d", slirpTunFileLines))
+	}
+	if slirpTunXpermLines != 1 {
+		violations = append(violations, fmt.Sprintf("exactly one tun_tap_device_t:chr_file allowxperm rule may exist for the helper domain, found %d", slirpTunXpermLines))
 	}
 	// The 4C-28 distro-nsfs-macro exclusion, identified structurally at
 	// SOURCE level (a macro's name does not exist after policy
@@ -1484,6 +1501,7 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		"allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace sys_admin };",
 		"allow docker_helper_slirp4netns_t nsfs_t:file { read open };",
 		"allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file { read write open ioctl };",
+		"allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl 0x54ca;",
 		"type nsfs_t;",
 	} {
 		if !strings.Contains(policy, want) {
@@ -1502,6 +1520,7 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 	pinnedFileRule := "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:file read;"
 	pinnedNsfsRule := "allow docker_helper_slirp4netns_t nsfs_t:file { read open };"
 	pinnedTunRule := "allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file { read write open ioctl };"
+	pinnedTunXpermRule := "allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl 0x54ca;"
 	pinnedNsfsRequire := "type nsfs_t;"
 	countPinned := func(text, rule string) int {
 		n := 0
@@ -1532,6 +1551,9 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 	}
 	if countPinned(policy, pinnedTunRule) != 1 {
 		t.Errorf("the helper's TUN device-node authority must be exactly one `tun_tap_device_t:chr_file { read write open ioctl }` rule (the 4C-31 read/write + 4C-32 open + 4C-33 generic-ioctl grants, with NO allowxperm), found %d", countPinned(policy, pinnedTunRule))
+	}
+	if countPinned(policy, pinnedTunXpermRule) != 1 {
+		t.Errorf("the helper's TUN command whitelist must be exactly one `allowxperm ... ioctl 0x54ca` rule (the 4C-34 TUNSETIFF hardening; no 0x54cb, no third command), found %d", countPinned(policy, pinnedTunXpermRule))
 	}
 	// Regression: each grant must exist; removing it, or replacing it
 	// with a wrong-shape, must break the exactly-one invariant the count
@@ -1583,6 +1605,24 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 			t.Errorf("the TUN regression %q must fail the helper-domain invariants", regressed.name)
 		}
 	}
+	// The 4C-34 xperm removal regression: the command whitelist must
+	// exist; removing it (the pre-4C-34 bitmap-less shape — live-proven
+	// command-unrestricted) must APPLY and must trip the invariants.
+	for _, regressed := range []struct {
+		name string
+		rule string
+	}{
+		{"missing xperm command rule (the pre-4C-34 bitmap-less shape must trip again)", ""},
+	} {
+		mutated := strings.Replace(policy, pinnedTunXpermRule, regressed.rule, 1)
+		if countPinned(mutated, pinnedTunXpermRule) == 1 {
+			t.Errorf("the TUN xperm regression %q was not applied", regressed.name)
+			continue
+		}
+		if len(helperDomainPolicyViolations(mutated)) == 0 {
+			t.Errorf("the TUN xperm regression %q must fail the helper-domain invariants", regressed.name)
+		}
+	}
 	// Structural and widening mutations: appended or replacement rules
 	// around the single traversal grant must trip.
 	for _, mut := range []struct {
@@ -1632,8 +1672,17 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		{"tun widened +lock", "allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file { read write open ioctl lock };"},
 		{"tun widened +create", "allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file { read write open ioctl create };"},
 		{"tun widened +setattr", "allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file { read write open ioctl setattr };"},
-		{"helper TUNSETIFF xperm pre-grant (0x54ca)", "allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl 0x54ca;"},
-		{"helper TUN xperm set pre-grant ({ 0x54ca 0x54cb })", "allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl { 0x54ca 0x54cb };"},
+		{"xperm structural: duplicate identical TUNSETIFF whitelist rule", "allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl 0x54ca;"},
+		{"xperm structural: parallel TUNSETIFF whitelist rule (brace form)", "allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl { 0x54ca };"},
+		{"xperm structural: TUNSETIFF split across two rules (union = the surface, wrong shape)", "allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl { 0x54ca };\nallowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl 0x54ca;"},
+		{"xperm widened set { 0x54ca 0x54cb } (the RootlessKit set is NOT the helper's)", "allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl { 0x54ca 0x54cb };"},
+		{"xperm widened +0x54cc (any third TUN command)", "allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl { 0x54ca 0x54cc };"},
+		{"xperm widened +0x54c9", "allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl { 0x54ca 0x54c9 };"},
+		{"xperm widened +0x1234 (an arbitrary non-TUN command)", "allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl { 0x54ca 0x1234 };"},
+		{"xperm widened range 0x54ca-0x54cb", "allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl 0x54ca-0x54cb;"},
+		{"xperm widened complement ~{ 0x54ca }", "allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl ~{ 0x54ca };"},
+		{"xperm replaced by 0x54cb only (TUNSETPERSIST)", "allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl 0x54cb;"},
+		{"xperm replaced by 0x54c9 only (wrong single command)", "allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl 0x54c9;"},
 		{"helper tun_socket create pre-grant", "allow docker_helper_slirp4netns_t self:tun_socket create;"},
 		{"helper tun_socket attach_queue pre-grant", "allow docker_helper_slirp4netns_t self:tun_socket attach_queue;"},
 		{"helper tun_socket relabel pre-grant", "allow docker_helper_slirp4netns_t self:tun_socket { relabelfrom relabelto };"},
@@ -1679,7 +1728,7 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		{"duplicate identical transition into helper", "type_transition docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:process docker_helper_slirp4netns_t;", "exactly one transition may enter the helper domain"},
 		{"cap_userns for manager", "allow docker_helper_builder_t self:cap_userns sys_admin;", "docker_helper_builder_t must hold no capability"},
 		{"cap_userns sys_admin for helper", "allow docker_helper_slirp4netns_t self:cap_userns sys_admin;", "exactly one self:cap_userns rule may exist for the helper domain"},
-		{"helper TUNSETIFF xperm pre-grant", "allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl 0x54ca;", "holds no allowxperm rule"},
+		{"helper xperm widened set pre-grant", "allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl { 0x54ca 0x54cb };", "must be exactly one tun_tap_device_t:chr_file ioctl 0x54ca rule"},
 		{"helper tun_socket pre-grant", "allow docker_helper_slirp4netns_t self:tun_socket create;", "holds no tun_socket grant"},
 		{"helper plain capability net_admin", "allow docker_helper_slirp4netns_t self:capability net_admin;", "must hold no plain capability/capability2 grants"},
 	} {
