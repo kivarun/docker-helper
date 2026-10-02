@@ -1089,13 +1089,14 @@ PREFLIGHT_OK=1
     echo "FAIL: slirp4netns helper nsfs namespace-handle inventory (count=$SL_NSFS_COUNT_OK shape=$SL_NSFS_SHAPE_OK union=$SL_NSFS_UNION_OK class=$SL_NSFS_CLASS_OK no-flow-grant=$SL_NSFS_NO_FLOW_GRANT_OK)"
     PREFLIGHT_OK=0
   fi
-  echo "=== slirp4netns helper TUN device-node inventory (the 4C-34 composition: the EFFECTIVE helper -> tun_tap_device_t authority must be EXACTLY chr_file { read write open ioctl } ordinary + allowxperm ioctl { 0x54ca } — the single live-proven TUNSETIFF command; no getattr/append/lock/create/setattr, no second/third ioctl command, no helper tun_socket grant, from ANY source, distro attribute expansion included; an effective extra is a STOP, not a pin violation) ==="
+  echo "=== slirp4netns helper TUN device-node inventory (the 4C-35 composition: the EFFECTIVE helper -> tun_tap_device_t authority must be EXACTLY chr_file { read write open ioctl } ordinary + allowxperm ioctl { 0x54ca } — the single live-proven TUNSETIFF command; no getattr/append/lock/create/setattr, no second/third ioctl command, no helper tun_socket authority beyond the single cross-domain relabelfrom rule, from ANY source, distro attribute expansion included; an effective extra is a STOP, not a pin violation) ==="
   echo "--- raw effective inventory (slirp4netns -> tun_tap_device_t; attribute/base-policy expansions recorded, not asserted per-rule):"
   sesearch --allow -s docker_helper_slirp4netns_t -t tun_tap_device_t /sys/fs/selinux/policy || true
   echo "--- CONCRETE module contribution (source must be docker_helper_slirp4netns_t; must be EXACTLY one tun_tap_device_t:chr_file rule whose perm set folds to { read write open ioctl }; NOTE: setools renders perm sets alphabetically — the 4C-29 run proved { read open } source renders as { open read }, so the 4C-33 set renders as { ioctl open read write }):"
   SL_TUN_RULES="$(sesearch --allow -s docker_helper_slirp4netns_t -t tun_tap_device_t /sys/fs/selinux/policy 2>/dev/null | awk '$2 == "docker_helper_slirp4netns_t"' || true)"
   printf '%s\n' "${SL_TUN_RULES:-(none)}"
-  SL_TUN_COUNT_OK=0; SL_TUN_SHAPE_OK=0; SL_TUN_UNION_OK=0; SL_TUN_CLASS_OK=0; SL_TUN_NO_TS_OK=0
+  SL_TUN_COUNT_OK=0; SL_TUN_SHAPE_OK=0; SL_TUN_UNION_OK=0; SL_TUN_CLASS_OK=0
+  SL_TUNSOCK_COUNT_OK=0; SL_TUNSOCK_SHAPE_OK=0; SL_TUNSOCK_UNION_OK=0; SL_TUNSOCK_NOTARGET_OK=0
   SL_TUN_CONCRETE_COUNT="$(printf '%s\n' "$SL_TUN_RULES" | grep -ac . || true)"
   SL_TUN_CONCRETE_SET="$(printf '%s\n' "$SL_TUN_RULES" \
     | sed -n 's/^allow [^ ]* tun_tap_device_t:chr_file {\(.*\)};$/\1/p' \
@@ -1129,13 +1130,59 @@ PREFLIGHT_OK=1
     echo "STOP: the effective helper -> tun_tap_device_t surface contains a non-chr_file class:"
     printf '%s\n' "$SL_TUN_OTHER_CLASS"
   fi
-  # No helper tun_socket rule of ANY target (the helper attaches an
-  # existing TAP via the device node; tun_socket authority — create/
-  # attach_queue/relabel* — is a separate live boundary).
+  # The 4C-35 cross-domain TUN socket-relabel surface: the helper holds
+  # EXACTLY ONE tun_socket rule — the evidenced relabelfrom toward the
+  # rootlesskit target (the 4C-34 canonical run's terminal boundary,
+  # record 2339). The negatives: relabelto/attach_queue/create and every
+  # other tun_socket permission (the union equality), any rule toward a
+  # non-rootlesskit target, and any SECOND rule toward the rootlesskit
+  # target (split/parallel/duplicate equivalents).
+  echo "--- the helper's tun_socket inventory (raw; the cross-domain attach-relabel surface):"
   SL_TUN_TS="$(sesearch --allow -s docker_helper_slirp4netns_t -c tun_socket /sys/fs/selinux/policy 2>/dev/null | grep -a 'docker_helper_slirp4netns_t' || true)"
   printf '%s\n' "${SL_TUN_TS:-(none — the helper holds NO tun_socket rule)}"
-  if [ -z "$SL_TUN_TS" ]; then
-    SL_TUN_NO_TS_OK=1
+  SL_TUNSOCK_CONCRETE_COUNT="$(printf '%s\n' "$SL_TUN_TS" | grep -ac . || true)"
+  SL_TUNSOCK_CONCRETE_SET="$(printf '%s\n' "$SL_TUN_TS" \
+    | sed -n 's/^allow [^ ]* docker_helper_rootlesskit_t:tun_socket {\(.*\)};$/\1/p' \
+    | sed 's/^[{ ]*//; s/[} ]*$//' \
+    | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
+  SL_TUNSOCK_BARE_SET="$(printf '%s\n' "$SL_TUN_TS" \
+    | sed -n 's/^allow [^ ]* docker_helper_rootlesskit_t:tun_socket \([^{}]*\);$/\1/p' \
+    | sed 's/^[{ ]*//; s/[} ]*$//' \
+    | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
+  echo "cross-domain rule's perm token set: ${SL_TUNSOCK_CONCRETE_SET:-(no braced rule)} / bare: ${SL_TUNSOCK_BARE_SET:-(no bare rule)}"
+  if [ "$SL_TUNSOCK_CONCRETE_COUNT" = 1 ] && [ "$SL_TUNSOCK_BARE_SET" = "relabelfrom " ] && [ -z "$SL_TUNSOCK_CONCRETE_SET" ]; then
+    SL_TUNSOCK_COUNT_OK=1
+    SL_TUNSOCK_SHAPE_OK=1
+  fi
+  # The EFFECTIVE union across the WHOLE helper -> rootlesskit_t:
+  # tun_socket surface: base-policy/attribute-derived contributions
+  # count toward the verdict, and it must fold to EXACTLY { relabelfrom }
+  # (any other socket permission — relabelto/attach_queue/create —
+  # breaks the equality).
+  SL_TUNSOCK_UNION="$(sesearch --allow -s docker_helper_slirp4netns_t -t docker_helper_rootlesskit_t /sys/fs/selinux/policy 2>/dev/null \
+    | grep -a 'tun_socket' \
+    | sed -n 's/^allow [^ ]* docker_helper_rootlesskit_t:tun_socket \(.*\);$/\1/p' \
+    | sed 's/^[{ ]*//; s/[} ]*$//' \
+    | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
+  echo "effective helper -> rootlesskit_t:tun_socket perm union: ${SL_TUNSOCK_UNION:-(empty)}"
+  if [ "$SL_TUNSOCK_UNION" = "relabelfrom " ]; then
+    SL_TUNSOCK_UNION_OK=1
+  fi
+  # Any EFFECTIVE helper tun_socket authority toward a non-rootlesskit
+  # target is an extra too.
+  SL_TUNSOCK_NOTARGET="$(sesearch --allow -s docker_helper_slirp4netns_t -c tun_socket /sys/fs/selinux/policy 2>/dev/null | grep -a 'docker_helper_slirp4netns_t' | grep -av 'docker_helper_rootlesskit_t:tun_socket' || true)"
+  if [ -z "$SL_TUNSOCK_NOTARGET" ]; then
+    SL_TUNSOCK_NOTARGET_OK=1
+  else
+    echo "STOP: the helper's effective tun_socket surface contains a rule toward a non-rootlesskit target:"
+    printf '%s\n' "$SL_TUNSOCK_NOTARGET"
+  fi
+  echo "--- explicit beyond-the-one negatives (relabelto/attach_queue/create must be absent from the effective union):"
+  if [ "$SL_TUNSOCK_UNION_OK" = 1 ]; then
+    echo "PASS: the helper's effective tun_socket union holds no permission beyond { relabelfrom } (relabelto/attach_queue/create and every other socket permission stay denied)"
+  else
+    echo "FAIL: the helper's effective tun_socket union is not exactly { relabelfrom } (got: ${SL_TUNSOCK_UNION:-(empty)}; concrete-rules=$SL_TUNSOCK_CONCRETE_COUNT)"
+    PREFLIGHT_OK=0
   fi
   # The helper's EFFECTIVE allowxperm union (the 4C-34 command filter):
   # every hex command value across ALL allowxperm rules for the helper
@@ -1179,10 +1226,10 @@ PREFLIGHT_OK=1
   echo "--- the helper's dontaudit surface toward tun_tap_device_t (RECORDED SEPARATELY per the 4C-28 preflight contract; never merged into the allow verdict):"
   SL_TUN_DONTAUDIT="$(sesearch --dontaudit -s docker_helper_slirp4netns_t -t tun_tap_device_t /sys/fs/selinux/policy 2>/dev/null || true)"
   printf '%s\n' "${SL_TUN_DONTAUDIT:-(none — no dontaudit rule hides helper -> tun_tap_device_t denials)}"
-  if [ "$SL_TUN_COUNT_OK" = 1 ] && [ "$SL_TUN_SHAPE_OK" = 1 ] && [ "$SL_TUN_UNION_OK" = 1 ] && [ "$SL_TUN_CLASS_OK" = 1 ] && [ "$SL_TUN_NO_TS_OK" = 1 ] && [ "$SL_TUN_XPERM_COUNT_OK" = 1 ] && [ "$SL_TUN_XPERM_UNION_OK" = 1 ] && [ "$SL_TUN_THIRD_CMD_OK" = 1 ]; then
-    echo "PASS: slirp4netns helper TUN device-node inventory (exactly one tun_tap_device_t:chr_file { read write open ioctl } rule; the effective ordinary union is exactly { ioctl open read write }; no non-chr_file class; the effective xperm union is exactly { 0x54ca }; no helper tun_socket rule)"
+  if [ "$SL_TUN_COUNT_OK" = 1 ] && [ "$SL_TUN_SHAPE_OK" = 1 ] && [ "$SL_TUN_UNION_OK" = 1 ] && [ "$SL_TUN_CLASS_OK" = 1 ] && [ "$SL_TUNSOCK_COUNT_OK" = 1 ] && [ "$SL_TUNSOCK_SHAPE_OK" = 1 ] && [ "$SL_TUNSOCK_UNION_OK" = 1 ] && [ "$SL_TUNSOCK_NOTARGET_OK" = 1 ] && [ "$SL_TUN_XPERM_COUNT_OK" = 1 ] && [ "$SL_TUN_XPERM_UNION_OK" = 1 ] && [ "$SL_TUN_THIRD_CMD_OK" = 1 ]; then
+    echo "PASS: slirp4netns helper TUN device-node inventory (exactly one tun_tap_device_t:chr_file { read write open ioctl } rule; the effective ordinary union is exactly { ioctl open read write }; no non-chr_file class; the effective xperm union is exactly { 0x54ca }; exactly one cross-domain tun_socket relabelfrom rule toward the rootlesskit target)"
   else
-    echo "FAIL: slirp4netns helper TUN device-node inventory (count=$SL_TUN_COUNT_OK shape=$SL_TUN_SHAPE_OK union=$SL_TUN_UNION_OK class=$SL_TUN_CLASS_OK no-tun-socket=$SL_TUN_NO_TS_OK xperm-count=$SL_TUN_XPERM_COUNT_OK xperm-union=$SL_TUN_XPERM_UNION_OK third-cmd=$SL_TUN_THIRD_CMD_OK)"
+    echo "FAIL: slirp4netns helper TUN device-node inventory (count=$SL_TUN_COUNT_OK shape=$SL_TUN_SHAPE_OK union=$SL_TUN_UNION_OK class=$SL_TUN_CLASS_OK tunsock-count=$SL_TUNSOCK_COUNT_OK tunsock-shape=$SL_TUNSOCK_SHAPE_OK tunsock-union=$SL_TUNSOCK_UNION_OK tunsock-notarget=$SL_TUNSOCK_NOTARGET_OK xperm-count=$SL_TUN_XPERM_COUNT_OK xperm-union=$SL_TUN_XPERM_UNION_OK third-cmd=$SL_TUN_THIRD_CMD_OK)"
     PREFLIGHT_OK=0
   fi
   echo "--- live Netlink mediation model (recorded; FAIL CLOSED if it unexpectedly changes):"
@@ -2404,7 +2451,7 @@ SL_TUN_IOCTL_GONE_OK=1
   echo "--- ALL other slirp4netns_t tun_tap_device_t AVCs (further ungranted ordinary perms — next-boundary evidence; recorded, not failed):"
   SL_TUN_IOCTL_OTHER_TUN="$(grep -a 'tcontext=system_u:object_r:tun_tap_device_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' | grep -avE 'denied  *\{ [^}]*\b(read|write|open)\b' | grep -av 'denied  *{ ioctl }' || true)"
   printf '%s\n' "${SL_TUN_IOCTL_OTHER_TUN:-(none — no further helper TUN permission was attempted)}"
-  echo "--- the helper's tun_socket + cap_userns AVCs of the window (the DEEPER TUN-attach surface: a tun_socket relabel/attach shape is the existing-TAP attach's socket-relabel mediation — next-boundary evidence, recorded, not failed; a cap_userns shape is the capability boundary — recorded):"
+  echo "--- the helper's tun_socket + cap_userns AVCs of the window (the DEEPER TUN-attach surface: since 4C-35 the relabelfrom grant is owned by 43-slirp-tun-relabel-gone.txt below — any relabelto/attach_queue shape is the next-boundary evidence, recorded, not failed; a cap_userns shape is the capability boundary — recorded):"
   SL_TUN_IOCTL_DEEPER_AVC="$(grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -aE 'tclass=(tun_socket|cap_userns)' || true)"
   printf '%s\n' "${SL_TUN_IOCTL_DEEPER_AVC:-(none — no helper tun_socket/cap_userns AVC appeared)}"
   echo "--- the helper's cap_capable FAILED checks in the trace ring (ret<0 — a reached driver-side capability denial; expected none):"
@@ -2593,15 +2640,7 @@ else
   # ---- chr_file decision + the exit inside the same ioctl window).
   {
     echo "=== the positive path's assertions (the CANONICAL window) ==="
-    echo "--- the helper's tun_socket relabel boundary MUST still be present — channel 1: the symbolic AVC (09-avc-window.txt; absent when the launch-period audit gap fires):"
-    SL_POS_RELABEL="$(grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -a 'tclass=tun_socket' | grep -a 'denied  *{ relabelfrom }' || true)"
-    printf '%s\n' "${SL_POS_RELABEL:-(absent in the userspace slice)}"
-    echo "--- channel 2: the canonical window's kernel trace decision (30-trace-window.txt; the selinux_audited tun_socket decision between the TUNSETIFF ioctl enter and its -13 exit):"
-    SL_POS_RELABEL_TRACE="$(grep -a 'slirp4netns' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -a 'selinux_audited:' | grep -a 'tclass=tun_socket' | grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' || true)"
-    printf '%s\n' "${SL_POS_RELABEL_TRACE:-(absent in the kernel trace)}"
-    echo "--- channel 3: the decode's calibrated helper decision (34-avc-trace-decode.txt; uncalibrated events stay raw):"
-    grep -a 'HELPER' "$EVIDENCE_DIR/34-avc-trace-decode.txt" 2>/dev/null | grep -a 'tclass=tun_socket' || true
-    echo "--- the whitelisted command must NOT be denied (channel 1: no helper chr_file ioctl denial with ioctlcmd=0x54ca in the canonical slice):"
+    echo "--- the 4C-34 TUNSETIFF whitelist must hold (channel 1: no helper chr_file ioctl denial with ioctlcmd=0x54ca in the canonical slice):"
     SL_POS_TUNSETIFF_DENIAL="$(grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -a 'tclass=chr_file' | grep -a 'denied  *{ ioctl }' | grep -a 'ioctlcmd=0x54ca' || true)"
     printf '%s\n' "${SL_POS_TUNSETIFF_DENIAL:-(none — the whitelisted TUNSETIFF command is not denied)}"
     echo "--- the whitelisted command must NOT be denied (channel 2: NO helper chr_file selinux_audited decision in the canonical kernel trace — the TUNSETIFF ioctl passed the SELinux file-ioctl stage):"
@@ -2631,10 +2670,9 @@ else
     echo "--- the probe window's FAILED cap_capable checks (informational; the pre-4C-33 startup shape predates this phase):"
     grep -a 'slirp4netns' /tmp/p4b-work/probe-trace.txt 2>/dev/null | grep -a 'cap_capable:' | grep -av ' ret 0' | head -8 || true
     echo "(end of probe-window failed-cap_capable lines)"
-    if [ -z "$SL_POS_RELABEL" ] && [ -z "$SL_POS_RELABEL_TRACE" ]; then
-      echo "GATE: neither channel shows the canonical window's positive-path terminal boundary (tun_socket relabel) — the positive path changed"
-      SL_TUN_PROBE_OK=0
-    fi
+    # (The 4C-35 relabelfrom-boundary verdicts moved to
+    # 43-slirp-tun-relabel-gone.txt below: the grant removed the old
+    # terminal boundary, so gate 42 owns only the command filter.)
     if [ -n "$SL_POS_TUNSETIFF_DENIAL" ] || [ -n "$SL_POS_TUNSETIFF_TRACE" ]; then
       echo "GATE: the whitelisted TUNSETIFF command was denied in the canonical window — the 4C-34 whitelist membership regressed"
       SL_TUN_PROBE_OK=0
@@ -2652,12 +2690,93 @@ else
   if [ "$SL_TUN_PROBE_OK" = 1 ]; then
     marker "SLIRP-TUN-IOCTL-COMMAND-FILTER=EXACT-{0x54ca}"
     marker "SLIRP-TUN-COMMAND-PROBE=0x54cb-XPERM-DENIED"
-    marker "SLIRP-TUN-SOCKET-RELABEL=STILL-CONFIRMED"
   else
     marker "BLOCKER=the 4C-34 TUN command-filter composition did not hold (see 41-slirp-tun-command-filter.txt, 42-slirp-tun-command-filter-verdict.txt)"
     marker "SLIRP-TUN-IOCTL-COMMAND-FILTER=FAIL"
     finish FAIL; exit 0
   fi
+fi
+
+# ============================================================
+# 4C-35: the slirp4netns helper TUN socket-relabel gate
+# (SLIRP-TUN-SOCKET-RELABELFROM)
+# ============================================================
+# The 4C-35 grant: the helper's cross-domain tun_socket relabelfrom
+# toward the rootlesskit target — the 4C-34 canonical run's terminal
+# boundary (record 2339: denied { relabelfrom } for
+# scontext=slirp4netns_t:s0:c1 tcontext=rootlesskit_t:s0:c1
+# tclass=tun_socket INSIDE the same sys_ioctl(TUNSETIFF) window that had
+# already passed the { 0x54ca } command whitelist; the kernel trace's
+# masks 0x80 were decode-calibrated against the co-captured symbolic
+# record). The gate hard-fails when that relabelfrom denial STILL
+# appears (the grant did not take effect): channel 1 = the symbolic AVC
+# record, channel 2 = the decode's calibrated helper tun_socket
+# decision, channel 3 = the kernel trace's raw 0x80 tun_socket masks
+# (this platform's tun_socket perm-bit order: relabelfrom = 0x80).
+# Any OTHER helper tun_socket decision (relabelto / attach_queue /
+# create / any other perm) is the EXPECTED next boundary — recorded with
+# its full scontext/tcontext (the old socket SID and, for a relabelto
+# shape, the requested target context of the attach), not failed; a
+# reached cap_userns/capability boundary is recorded the same way. The
+# phase stops there with no further grant.
+SL_TUN_RELABEL_GONE_OK=1
+{
+  echo "=== slirp4netns_t tun_socket AVCs of the granted relabelfrom (the 4C-35 cross-domain boundary must be absent) ==="
+  SL_RELABEL_GONE_AVC="$(grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -a 'tclass=tun_socket' | grep -a 'denied  *{ relabelfrom }' || true)"
+  printf '%s\n' "${SL_RELABEL_GONE_AVC:-(none — the 4C-35 tun_socket relabelfrom boundary is gone)}"
+  echo "--- the decode's calibrated helper tun_socket decisions naming relabelfrom (34-avc-trace-decode.txt; uncalibrated events stay raw):"
+  SL_RELABEL_GONE_DECODE="$(grep -a 'HELPER' "$EVIDENCE_DIR/34-avc-trace-decode.txt" 2>/dev/null | grep -a 'tclass=tun_socket' | grep -a 'relabelfrom' || true)"
+  printf '%s\n' "${SL_RELABEL_GONE_DECODE:-(none — no calibrated helper tun_socket relabelfrom decision in the window)}"
+  echo "--- ALL helper tun_socket kernel decisions of the canonical window (30-trace-window.txt; raw masks — 0x80 is the granted relabelfrom, anything else is the next boundary):"
+  SL_RELABEL_KERNEL="$(grep -a 'slirp4netns' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -a 'selinux_audited:' | grep -a 'tclass=tun_socket' || true)"
+  printf '%s\n' "${SL_RELABEL_KERNEL:-(none — no helper tun_socket kernel decision in the window)}"
+  SL_RELABEL_KERNEL_0x80="$(printf '%s\n' "$SL_RELABEL_KERNEL" | grep -a 'requested=0x80' || true)"
+  printf '%s\n' "${SL_RELABEL_KERNEL_0x80:-(none — no raw 0x80 (relabelfrom) kernel decision)}"
+  echo "--- ALL other helper tun_socket AVCs (ungranted perms — the next-boundary evidence; recorded with the full scontext/tcontext, not failed):"
+  SL_RELABEL_NEXT="$(grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -a 'tclass=tun_socket' | grep -av 'denied  *{ relabelfrom }' || true)"
+  printf '%s\n' "${SL_RELABEL_NEXT:-(none — no ungranted helper tun_socket permission was attempted)}"
+  echo "--- ALL helper cap_userns/capability AVCs of the window (the attach path's capability boundary — recorded, not failed):"
+  SL_RELABEL_CAP="$(grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -aE 'tclass=(cap_userns|capability)' || true)"
+  printf '%s\n' "${SL_RELABEL_CAP:-(none — no helper capability AVC appeared)}"
+  echo "--- the helper's FAILED cap_capable checks in the trace ring (ret<0 — a reached capability boundary; recorded, not failed):"
+  grep -a '^     slirp4netns-' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -a 'cap_capable:' | grep -av ' ret 0' || true
+  echo "(end of failed-cap_capable lines)"
+  echo "--- the helper's full TUN trace sequence of the window (openat + ioctl fd/cmd/arg/ret; the causal attach chain):"
+  grep -a 'slirp4netns' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -a '/dev/net/tun\|sys_ioctl' | head -10 || true
+  echo "(end of helper TUN trace lines)"
+  echo "--- the helper's userspace failure shape (informational)"
+  grep -a 'slirp4netns\|waiting for ready fd' "$EVIDENCE_DIR/07-manager-diag.txt" 2>/dev/null | tail -4 || true
+  if [ -n "$SL_RELABEL_GONE_AVC" ]; then
+    echo "GATE: a slirp4netns_t tun_socket relabelfrom denial still appeared — the 4C-35 grant did not take effect"
+    SL_TUN_RELABEL_GONE_OK=0
+  fi
+  if [ -n "$SL_RELABEL_GONE_DECODE" ]; then
+    echo "GATE: the decode shows a calibrated helper tun_socket relabelfrom decision — the 4C-35 grant did not take effect"
+    SL_TUN_RELABEL_GONE_OK=0
+  fi
+  if [ -n "$SL_RELABEL_KERNEL_0x80" ]; then
+    echo "GATE: the kernel trace shows a raw 0x80 tun_socket decision for the helper — the 4C-35 grant did not take effect"
+    SL_TUN_RELABEL_GONE_OK=0
+  fi
+} > "$EVIDENCE_DIR/43-slirp-tun-relabel-gone.txt" 2>&1
+cat "$EVIDENCE_DIR/43-slirp-tun-relabel-gone.txt" >&2
+if [ "$SL_TUN_RELABEL_GONE_OK" = 1 ]; then
+  marker "SLIRP-TUN-SOCKET-RELABELFROM=GONE"
+  SL_TUN_RELABEL_NEXT_FIRST="$(printf '%s\n' "$SL_RELABEL_NEXT" | head -1 || true)"
+  if [ -z "$SL_TUN_RELABEL_NEXT_FIRST" ]; then
+    SL_TUN_RELABEL_NEXT_FIRST="$(printf '%s\n' "$SL_RELABEL_KERNEL" | head -1 || true)"
+  fi
+  if [ -z "$SL_TUN_RELABEL_NEXT_FIRST" ]; then
+    SL_TUN_RELABEL_NEXT_FIRST="$(printf '%s\n' "$SL_RELABEL_CAP" | head -1 || true)"
+  fi
+  SL_TUN_RELABEL_NEXT_PERMS="$(printf '%s\n' "$SL_TUN_RELABEL_NEXT_FIRST" | sed -n 's/.*denied  *{ \([^}]*\) }.*/\1/p' || true)"
+  SL_TUN_RELABEL_NEXT_SUMMARY="$(printf '%s\n' "$SL_TUN_RELABEL_NEXT_FIRST" | sed -n 's/.*scontext=\([^ ]*\) tcontext=\([^ ]*\) tclass=\([a-z_]*\).*/scontext=\1 tcontext=\2 tclass=\3/p' || true)"
+  SL_TUN_RELABEL_NEXT_IOCTL="$(printf '%s\n' "$SL_TUN_RELABEL_NEXT_FIRST" | sed -n 's/.*ioctlcmd=\([0-9a-fx]*\).*/\1/p' || true)"
+  marker "SLIRP-TUN-NEXT-BOUNDARY=${SL_TUN_RELABEL_NEXT_SUMMARY:-none} perms=${SL_TUN_RELABEL_NEXT_PERMS:-none} ioctlcmd=${SL_TUN_RELABEL_NEXT_IOCTL:-none}"
+else
+  marker "BLOCKER=the 4C-35 slirp4netns TUN socket-relabel composition did not hold (see 43-slirp-tun-relabel-gone.txt)"
+  marker "SLIRP-TUN-SOCKET-RELABELFROM=FAIL"
+  finish FAIL; exit 0
 fi
 
 # ---- launcher-domain AVC inventory (raw; the report classifies)
