@@ -2381,7 +2381,10 @@ POSTTUN_NPRE=0; POSTTUN_NAT=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIME
   # (exit_code 0: the slirp4netns sandbox child's tapfd handoff) are not
   # failures; the first nonzero exit IS the startup/readiness failure's
   # terminal boundary and the reference point for the denial classes.
-  POSTTUN_FIRST_FAIL_LINE="$(grep -a 'sys_enter_exit_group(' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
+  # Note the trace's syscall-enter records print as sys_exit_group(...) —
+  # the event's printed shape is the syscall's own name, not the
+  # tracepoint's directory name (sys_enter_exit_group never appears).
+  POSTTUN_FIRST_FAIL_LINE="$(grep -a 'sys_exit_group(' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
     | grep -aE "$POSTTUN_FLOW_COMM_GREP" \
     | grep -av 'error_code: 0)' \
     | awk -v t0="$POSTTUN_T0_TRACE_TS" '{ ts = $4; sub(/:$/, "", ts); if (t0 != "" && ts + 0 > t0 + 0) { print; exit } }' 2>/dev/null || true)"
@@ -2392,7 +2395,7 @@ POSTTUN_NPRE=0; POSTTUN_NAT=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIME
   POSTTUN_FIRST_FAIL_EPOCH="$(awk -v e="$POSTTUN_READ_EPOCH" -v u="$POSTTUN_READ_UPTIME" -v t="$POSTTUN_FIRST_FAIL_TS" 'BEGIN { if (e != "" && u != "" && t != "") printf "%.3f", e - (u - t) }' 2>/dev/null || true)"
   POSTTUN_FAIL_EXIT_LINE="$(grep -a 'sched_process_exit:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
     | grep -aE "$POSTTUN_FLOW_COMM_GREP" \
-    | awk -v pf="$POSTTUN_FIRST_FAIL_PID" '{ if (pf != "" && $1 ~ ("-" pf "$")) { print; exit } }' 2>/dev/null || true)"
+    | awk -v pf="$POSTTUN_FIRST_FAIL_PID" -v tf="$POSTTUN_FIRST_FAIL_TS" '{ ts = $4; sub(/:$/, "", ts); if (pf != "" && tf != "" && $1 ~ ("-" pf "$") && ts + 0 >= tf + 0) { print; exit } }' 2>/dev/null || true)"
   POSTTUN_T0_TO_FAIL="$(awk -v d="$POSTTUN_FIRST_FAIL_TS" -v t0="$POSTTUN_T0_TRACE_TS" 'BEGIN { if (d != "" && t0 != "") printf "%.3f", d - t0 }' 2>/dev/null || true)"
   echo "--- the first FAILING exit (the first nonzero exit_group of a flow-domain member after T0):"
   printf '%s\n' "${POSTTUN_FIRST_FAIL_LINE:-(absent: no flow-domain member exited nonzero inside the trace span of the window)}"
@@ -2415,7 +2418,7 @@ POSTTUN_NPRE=0; POSTTUN_NAT=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIME
         lo = (t0 != "") ? t0 - 0.02 : td - 0.25
         if (ts + 0 >= lo && ts + 0 <= td + 0.25) print }
     ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
-      | grep -aE 'sched_process_fork:|sched_process_exit:|signal_generate:|signal_deliver:|selinux_audited:|sys_(kill|tkill|tgkill|pidfd_send_signal|wait4|waitid|poll|ppoll|select|pselect6|exit|exit_group)' | head -150 || true
+      | grep -aE 'sched_process_fork:|sched_process_exit:|signal_generate:|signal_deliver:|selinux_audited:|sys_(kill|tkill|tgkill|pidfd_send_signal|wait4|waitid|exit|exit_group)' | head -150 || true
     echo "(end of the failure-window records)"
   fi
 
