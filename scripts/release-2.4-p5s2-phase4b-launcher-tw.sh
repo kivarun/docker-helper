@@ -2568,7 +2568,12 @@ else
   PROBE_EXPECTED_SHA="$(sha256sum "$TRANSFERRED/tun-command-probe" 2>/dev/null | awk '{print $1}')"
   echo "placed probe sha256: $PROBE_PLACED_SHA (expected $PROBE_EXPECTED_SHA)"
   echo "placed probe label:  $PROBE_PLACED_CTX"
-  if [ "$PROBE_PLACED_SHA" != "$PROBE_EXPECTED_SHA" ] || [ "$PROBE_PLACED_CTX" != "system_u:object_r:docker_helper_slirp4netns_exec_t:s0" ]; then
+  # Type-only label check: the 4C-34/4C-35 windows proved the exec
+  # transition fires on the TYPE component (this system's restorecon
+  # writes unconfined_u as the user part); the full-context equality
+  # would false-fail on it (run 36999297202: INCOMPLETE).
+  PROBE_PLACED_TYPE="$(printf '%s' "$PROBE_PLACED_CTX" | cut -d: -f3)"
+  if [ "$PROBE_PLACED_SHA" != "$PROBE_EXPECTED_SHA" ] || [ "$PROBE_PLACED_TYPE" != "docker_helper_slirp4netns_exec_t" ]; then
     note "the probe replacement failed its byte/label check — the negative probe cannot run"
     mv /usr/bin/.slirp4netns.orig /usr/bin/slirp4netns 2>/dev/null || true
     restorecon /usr/bin/slirp4netns 2>/dev/null || true
