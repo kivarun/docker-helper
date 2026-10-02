@@ -121,6 +121,11 @@ static int attach_leg(const char *leg, int target_pid) {
 	struct ifreq ifr;
 	memset(&ifr, 0, sizeof ifr);
 	strcpy(ifr.ifr_name, "tap0");
+	/* The production attach shape: the real slirp4netns requests the
+	 * TAP device without the packet-information header. Flags 0 makes
+	 * the kernel's TUNSETIFF return EINVAL before any attachment.
+	 */
+	ifr.ifr_flags = 0x0002 | 0x1000; /* IFF_TAP | IFF_NO_PI */
 	errno = 0;
 	rc = ioctl(fd_tun, TUNSETIFF, &ifr);
 	err = errno;
