@@ -2,10 +2,12 @@
  *
  * Runs in the flow's slirp4netns helper domain through the composition's
  * own entry path (the harness's rename-swap mechanism puts this binary at
- * the labeled /usr/bin/slirp4netns path). It IGNORES argv, so the
- * rootlesskit parent's `slirp4netns --help` version-check invocation
- * performs the whole proof and the flow dies the same way the 4C-34
- * probe's flow did.
+ * the labeled /usr/bin/slirp4netns path). Two invocations reach it: the
+ * rootlesskit parent's `slirp4netns --help` feature-detection probe —
+ * RootlessKit's DetectFeatures requires the literal --netns-type and
+ * --disable-host-loopback feature strings in that combined output and
+ * never parses the version line — and the REAL helper invocation, which
+ * runs the whole proof.
  *
  * Zero policy delta: the vehicle uses ONLY the helper domain's existing
  * production authority — the proc/ns traversal grants, the nsfs
@@ -22,12 +24,13 @@
 // second live operation. Its legs:
 //   VERSION-CHECK invocation (`--help`): the rootlesskit parent runs it
 //     BEFORE its own unshare, in the HOST namespace — the vehicle must
-//     print a fake version line (>= 0.4.0) so the rootlesskit parent
-//     proceeds with the real launch (unshare, tap0 creation, helper
-//     spawn).
+//     print the feature strings RootlessKit's DetectFeatures greps for
+//     (--netns-type; --disable-host-loopback, which the composition's
+//     canonical argv requests) so the rootlesskit parent proceeds with
+//     the real launch (unshare, tap0 creation, helper spawn).
 //   REAL invocation (`--mtu <N> -r <fd> <pid> <tap>`): runs INSIDE the
-//     vehicle's own target namespaces (its parent is the rootlesskit
-//     ns-holder). The control leg joins its own parent's namespaces and
+//     vehicle's own target namespaces (its target is the rootlesskit
+//     ns-holder pid passed as the second-to-last argument). The control
 //     attaches to its own freshly created tap0 (the full production
 //     chain must return 0 — the same-operation baseline INSIDE this very
 //     run). The attack leg repeats the SAME production path against
@@ -133,12 +136,16 @@ int main(int argc, char **argv) {
 	int err;
 
 	/* VERSION-CHECK invocation: the rootlesskit parent runs `--help`
-	 * BEFORE its unshare, in the HOST namespace. Print a fake version
-	 * line so the launch proceeds; the proof belongs to the REAL
-	 * invocation below.
+	 * BEFORE its unshare, in the HOST namespace. The fake help must
+	 * carry the literal feature strings RootlessKit's DetectFeatures
+	 * greps for: --netns-type (the >= v0.4.0 sentinel) and
+	 * --disable-host-loopback (the composition's canonical argv
+	 * requests it); the version line itself is never parsed.
 	 */
 	if (argc == 2 && strcmp(argv[1], "--help") == 0) {
 		(void)printf("slirp4netns version 1.1.2\n");
+		(void)printf("  --netns-type=fd|path\n");
+		(void)printf("  --disable-host-loopback\n");
 		return 0;
 	}
 
@@ -192,6 +199,20 @@ int main(int argc, char **argv) {
 	(void)sscanf(mark, "CROSS-OP-TARGETS %d", &pid_a);
 	if (pid_a <= 0) {
 		(void)write(2, "VEHICLE-VERDICT TARGETS=BINDING-FAIL\n", 36);
+		return 7;
+	}
+	/* The vehicle's identity bindings, recorded before any leg: the
+	 * attack must never target the vehicle's own operation or its own
+	 * parent (a self-targeted binding is a harness defect, not a
+	 * cross-operation result; a stale target is caught by the ENOENT
+	 * stop inside the attack leg itself).
+	 */
+	int idn = snprintf(buf, sizeof buf,
+			   "VEHICLE-ID self-pid=%d parent-pid=%d target-own=%d target-attack=%d\n",
+			   (int)getpid(), (int)getppid(), own_pid, pid_a);
+	if (idn > 0) (void)write(2, buf, (size_t)idn);
+	if (pid_a == own_pid || pid_a == (int)getppid()) {
+		(void)write(2, "VEHICLE-VERDICT TARGETS=SELF-TARGET\n", 35);
 		return 7;
 	}
 

@@ -3140,6 +3140,27 @@ CROSS_A_PID="$(grep -aoE '/proc/[0-9]+/ns/user' "$EVIDENCE_DIR/30-trace-relevant
 echo "cross-op identities: A(exe-pid)=$CROSS_A_PID"
 CROSS_PIDS_OK=1
 case "$CROSS_A_PID" in ''|*[!0-9]*) CROSS_PIDS_OK=0;; esac
+# A-side binding inventory, taken BEFORE the vehicle window: the attack
+# target's live operation identity (pid, namespace inodes, process
+# label/category, tap0 presence in its netns). The vehicle re-checks the
+# target's liveness inside its own attack leg (an ENOENT stop is
+# IDENTITY-FAIL, never a security boundary), and the post-window re-check
+# below detects mid-window PID reuse.
+{
+  echo "=== 4C-37 A-side binding inventory (the attack target, bound before the window) ==="
+  echo "A exe-pid: $CROSS_A_PID"
+  if [ -d "/proc/$CROSS_A_PID" ]; then
+    echo "A alive at binding: YES"
+    echo "A comm:         $(cat "/proc/$CROSS_A_PID/comm" 2>/dev/null)"
+    echo "A ns/user:      $(readlink "/proc/$CROSS_A_PID/ns/user" 2>/dev/null)"
+    echo "A ns/net:       $(readlink "/proc/$CROSS_A_PID/ns/net" 2>/dev/null)"
+    echo "A attr/current: $(cat "/proc/$CROSS_A_PID/attr/current" 2>/dev/null)"
+    echo "A tap0:         $(grep -a 'tap0' "/proc/$CROSS_A_PID/net/dev" 2>/dev/null | head -1)"
+  else
+    echo "A alive at binding: NO (stale target binding — the proof must not run against a stale target)"
+  fi
+} > /tmp/p4b-work/cross-a-inventory.txt
+cat /tmp/p4b-work/cross-a-inventory.txt >&2
 if [ "$CROSS_PIDS_OK" = 1 ] && [ ! -e "$TRANSFERRED/tun-cross-op-vehicle" ]; then
   note "the transferred cross-op vehicle binary is missing — the isolation proof cannot run"
   CROSS_PIDS_OK=0
@@ -3245,10 +3266,36 @@ else
     echo "identity bindings: A(exe-pid)=$CROSS_A_PID vehicle-op=$CROSS_OP_ID instance-pid=${CROSS_PID:-(not observed)}"
     echo "placed vehicle sha256: $CROSS_PLACED_SHA"
     echo "placed vehicle label:  $CROSS_PLACED_CTX"
-    echo "=== the vehicle's step/verdict lines (stderr via the flow's child output) ==="
-    journalctl -u "$UNIT" --since "@$CROSS_T0" --no-pager 2>/dev/null | grep -aE 'VEHICLE-(STEP|VERDICT)' | head -40 || true
-    echo "(end of vehicle lines)"
-    echo "=== the window's journal RAW tail (managerDiagf lines + the rootlesskit parent error; the verdict's fallback source) ==="
+    echo "=== the vehicle's step/verdict lines that reached the journal (informational: rootlesskit wires the helper's stderr into its logrus debug writer, so at the default log level these lines are dropped — the kernel trace below is the authoritative channel) ==="
+    journalctl -u "$UNIT" --since "@$CROSS_T0" --no-pager 2>/dev/null | grep -aE 'VEHICLE-(ID|STEP|VERDICT)' | head -40 || true
+    echo "(end of vehicle journal lines)"
+    echo "=== A-side binding inventory (bound before the window) ==="
+    cat /tmp/p4b-work/cross-a-inventory.txt
+    echo "=== A-side post-window re-check (the PID-reuse guard) ==="
+    if [ -d "/proc/$CROSS_A_PID" ]; then
+      echo "A alive at window end: YES"
+      echo "A ns/user now:      $(readlink "/proc/$CROSS_A_PID/ns/user" 2>/dev/null)"
+      echo "A ns/net  now:      $(readlink "/proc/$CROSS_A_PID/ns/net" 2>/dev/null)"
+      echo "A attr/current now: $(cat "/proc/$CROSS_A_PID/attr/current" 2>/dev/null)"
+    else
+      echo "A alive at window end: NO"
+    fi
+    echo "=== B-side (vehicle) identity from the window's kernel trace ==="
+    CROSS_V_CONTROL_OPEN="$(grep -a 'slirp4netns' /tmp/p4b-work/cross-trace.txt 2>/dev/null | grep -a 'sys_openat(' | grep -aoE '/proc/[0-9]+/ns/net' | head -1 || true)"
+    echo "the vehicle's control openat (its own ns-holder): ${CROSS_V_CONTROL_OPEN:-(absent — the vehicle's real invocation never ran)}"
+    CROSS_B_HOLDER="$(printf '%s' "$CROSS_V_CONTROL_OPEN" | grep -aoE '[0-9]+' || true)"
+    if [ -n "$CROSS_B_HOLDER" ] && [ "$CROSS_B_HOLDER" = "$CROSS_A_PID" ]; then
+      echo "IDENTITY-DEFECT: the vehicle's control target equals the attack target"
+    fi
+    if [ -n "$CROSS_B_HOLDER" ] && [ -d "/proc/$CROSS_B_HOLDER" ]; then
+      echo "B ns-holder alive at window end: YES pid=$CROSS_B_HOLDER"
+      echo "B ns/user:      $(readlink "/proc/$CROSS_B_HOLDER/ns/user" 2>/dev/null)"
+      echo "B ns/net:       $(readlink "/proc/$CROSS_B_HOLDER/ns/net" 2>/dev/null)"
+      echo "B attr/current: $(cat "/proc/$CROSS_B_HOLDER/attr/current" 2>/dev/null)"
+    else
+      echo "B ns-holder: not observable at window end (the vehicle op converges and frees the slot by design)"
+    fi
+    echo "=== the window's journal RAW tail (managerDiagf lines + the rootlesskit parent error; informational — the verdict is trace-based) ==="
     journalctl -u "$UNIT" --since "@$CROSS_T0" --no-pager 2>/dev/null | tail -30 || true
     echo "(end of raw journal tail)"
     echo "=== the vehicle's syscall/audit trace lines (the causal chain; NOT mixed with the cap_capable flood) ==="
@@ -3294,66 +3341,105 @@ else
     echo "(end of lifecycle-noise records)"
   } > "$EVIDENCE_DIR/46-cross-op-lifecycle-noise.txt" 2>&1
   cat "$EVIDENCE_DIR/46-cross-op-lifecycle-noise.txt" >&2
-  # ---- the verdict. PASS requires ALL of: (a) the control leg succeeded
-  # ---- (the vehicle's own production chain: journal CONTROL=SUCCESS and
-  # ---- the kernel trace's TUNSETIFF ret 0); (b) both attack legs stopped
-  # ---- at REAL boundaries (journal VEHICLE-VERDICT
-  # ---- CROSS-OPERATION-ISOLATION=HOLDS and the kernel trace's
-  # ---- selinux_audited helper decisions in the attack legs); (c) the
-  # ---- identity bindings held (no IDENTITY-FAIL/ENOENT stop); (d) the
-  # ---- attack denials carry CROSS-CATEGORY contexts (the tcontext of
-  # ---- the A/B-targeted decisions). If the vehicle reports BROKEN —
-  # ---- STOP immediately: CROSS-OPERATION-ISOLATION=BROKEN, finish FAIL,
-  # ---- no compensating changes.
+  # ---- the verdict. The authoritative channel is the KERNEL TRACE: the
+  # ---- vehicle's stderr is wired to rootlesskit's logrus debug writer
+  # ---- and is dropped at the default log level (the canonical argv has
+  # ---- no --debug), and the helper's exit code is not propagated
+  # ---- (rootlesskit maps every helper failure to its own exit 1). The
+  # ---- trace records every openat/setns/ioctl with the vehicle's
+  # ---- comm-pid, so PASS requires ALL of: (a) the control leg's
+  # ---- TUNSETIFF (0x400454ca) enter+exit pairing with ret 0; (b) the
+  # ---- attack leg STARTED (an A-targeted openat exists in the trace);
+  # ---- (c) the attack leg did NOT complete (no successful attack
+  # ---- TUNSETIFF — else CROSS-OPERATION-ISOLATION=BROKEN, finish FAIL,
+  # ---- no compensating changes); (d) the attack's terminal step failed
+  # ---- with a REAL errno (an ENOENT stop is IDENTITY-FAIL, never a
+  # ---- boundary); (e) the SELinux/cap decisions of the window carry the
+  # ---- cross-category contexts.
   CROSS_OK=1
+  CROSS_BROKEN=0
   {
-    echo "=== 4C-37 verdict ==="
-    CROSS_VERDICT_LINE="$(journalctl -u "$UNIT" --since "@$CROSS_T0" --no-pager 2>/dev/null | grep -a 'VEHICLE-VERDICT' | tail -1 || true)"
-    echo "the vehicle's final verdict: ${CROSS_VERDICT_LINE:-(ABSENT — the vehicle verdict was never delivered)}"
-    echo "--- control channel 2: the kernel trace's vehicle TUNSETIFF window (fd/cmd/ret):"
-    CROSS_CONTROL_TRACE="$(grep -a 'slirp4netns' /tmp/p4b-work/cross-trace.txt 2>/dev/null | grep -a 'sys_ioctl' | grep -a 'cmd: 0x400454ca' | tail -1 || true)"
-    printf '%s\n' "${CROSS_CONTROL_TRACE:-(absent in the kernel trace)}"
-    echo "--- attack channel 2: the kernel trace's helper SELinux decisions in the vehicle window:"
+    echo "=== 4C-37 verdict (trace-based: the vehicle's stderr is dropped by rootlesskit's logrus at the default level; the kernel trace + the launch-death journal line are the live channels) ==="
+    CROSS_DEATH_LINE="$(journalctl -u "$UNIT" --since "@$CROSS_T0" --no-pager 2>/dev/null | grep -a 'exited unexpectedly' | head -1 || true)"
+    echo "the window's launch-death line: ${CROSS_DEATH_LINE:-(absent — the launch did not die in the window)}"
+    echo "--- the vehicle's step lines that reached the journal (informational; empty is the expected shape at the default log level):"
+    journalctl -u "$UNIT" --since "@$CROSS_T0" --no-pager 2>/dev/null | grep -aE 'VEHICLE-(ID|STEP|VERDICT)' | head -20 || true
+    echo "(end of vehicle journal lines)"
+    echo "--- control leg: the vehicle's TUNSETIFF enter/exit pairing from the kernel trace (must exist with ret 0):"
+    CROSS_CONTROL_TSET="$(awk '/slirp4netns-/ && /sys_ioctl\(/ && /cmd: 0x400454ca/ { if (entered == 0) { entered = 1; enter_line = $0; vpid = substr($1, index($1, "-") + 1); next } } entered && substr($1, length($1) - length(vpid) + 1) == vpid && /sys_ioctl ->/ { print enter_line; print $0; done = 1; exit } END { if (entered == 1 && done == 0) { print enter_line; print "(exit line absent — the ring harvested inside the ioctl)" } }' /tmp/p4b-work/cross-trace.txt 2>/dev/null || true)"
+    CROSS_CONTROL_RET="$(printf '%s\n' "$CROSS_CONTROL_TSET" | grep -aoE 'sys_ioctl -> 0x[0-9a-f]+' | tail -1 | awk '{print $NF}')"
+    printf '%s\n' "${CROSS_CONTROL_TSET:-(absent in the kernel trace — the vehicle's legs never ran)}"
+    echo "--- attack leg: the vehicle's traced steps against A's ns-holder pid $CROSS_A_PID (the causal chain; the leg stops at its first failing syscall):"
+    CROSS_ATTACK_SEQ="$(awk -v a="$CROSS_A_PID" '/slirp4netns-/ { if (index($0, "/proc/" a "/ns/") > 0) attack = 1; if (attack) print }' /tmp/p4b-work/cross-trace.txt 2>/dev/null | head -14 || true)"
+    if [ -n "$CROSS_ATTACK_SEQ" ]; then printf '%s\n' "$CROSS_ATTACK_SEQ"; else echo "(ABSENT — the attack leg never issued an A-targeted step in the kernel trace)"; fi
+    echo "--- attack leg's terminal step (the first real boundary's syscall, return and errno):"
+    CROSS_ATTACK_LAST_ENTER="$(printf '%s\n' "$CROSS_ATTACK_SEQ" | grep -aE 'sys_(openat|setns|ioctl)\(' | tail -1 || true)"
+    CROSS_ATTACK_LAST_EXIT="$(printf '%s\n' "$CROSS_ATTACK_SEQ" | grep -aE 'sys_(openat|setns|ioctl) ->' | tail -1 || true)"
+    CROSS_ATTACK_BOUNDARY_STEP="$(printf '%s\n' "$CROSS_ATTACK_LAST_ENTER" | sed -n 's/.*sys_\([a-z]*\)(.*/\1/p' || true)"
+    CROSS_ATTACK_BOUNDARY_TARGET="$(printf '%s\n' "$CROSS_ATTACK_LAST_ENTER" | grep -aoE '"/proc/[^"]*"' | head -1 || true)"
+    CROSS_ATTACK_RET_HEX="$(printf '%s\n' "$CROSS_ATTACK_LAST_EXIT" | awk '{print $NF}')"
+    CROSS_ATTACK_ERRNO=""
+    case "$CROSS_ATTACK_RET_HEX" in
+      0x[0-9a-f]*) CROSS_ATTACK_ERRNO="$(( $CROSS_ATTACK_RET_HEX ))" ;;
+    esac
+    CROSS_ATTACK_ERRNO_NAME=""
+    case "$CROSS_ATTACK_ERRNO" in
+      -13) CROSS_ATTACK_ERRNO_NAME="EACCES" ;;
+      -1) CROSS_ATTACK_ERRNO_NAME="EPERM" ;;
+      -2) CROSS_ATTACK_ERRNO_NAME="ENOENT" ;;
+    esac
+    echo "terminal enter: ${CROSS_ATTACK_LAST_ENTER:-(none)}"
+    echo "terminal exit:  ${CROSS_ATTACK_LAST_EXIT:-(none)}"
+    echo "boundary: step=${CROSS_ATTACK_BOUNDARY_STEP:-(none)} target=${CROSS_ATTACK_BOUNDARY_TARGET:-(none)} ret=${CROSS_ATTACK_RET_HEX:-(none)} errno=${CROSS_ATTACK_ERRNO:-(none)}${CROSS_ATTACK_ERRNO_NAME:+ ($CROSS_ATTACK_ERRNO_NAME)}"
+    echo "--- the attack window's kernel-side SELinux decisions (scontext/tcontext; the cross-category binding):"
     CROSS_ATTACK_TRACE="$(grep -a 'slirp4netns' /tmp/p4b-work/cross-trace.txt 2>/dev/null | grep -a 'selinux_audited:' | grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' | head -8 || true)"
     printf '%s\n' "${CROSS_ATTACK_TRACE:-(none — no helper SELinux decision was audited in the window)}"
-    echo "--- the cross-category bindings (the attack decisions' scontext/tcontext; must show the vehicle's cN against the A/B targets' c1/c2):"
+    echo "--- the cross-category bindings (the decisions' scontext/tcontext; must show the vehicle's cN against the A/B targets' c1/c2):"
     grep -a 'slirp4netns' /tmp/p4b-work/cross-trace.txt 2>/dev/null | grep -a 'selinux_audited:' | grep -aoE 'scontext=[^ ]* tcontext=[^ ]* tclass=[a-z_]*' | sort -u || true
-    echo "--- identity checks (any ENOENT-based IDENTITY-FAIL is a harness binding defect, not a boundary):"
-    journalctl -u "$UNIT" --since "@$CROSS_T0" --no-pager 2>/dev/null | grep -a 'IDENTITY-FAIL' | head -3 || echo "(none)"
-    if [ -z "$CROSS_VERDICT_LINE" ]; then
-      echo "GATE: the vehicle's verdict was never delivered — the proof did not run"
+    echo "--- the attack window's FAILED cap_capable checks (the capability boundary's own evidence; recorded):"
+    grep -a 'slirp4netns' /tmp/p4b-work/cross-trace.txt 2>/dev/null | grep -a 'cap_capable:' | grep -av ' ret 0' | head -8 || true
+    echo "--- a successful attack TUNSETIFF (must be ABSENT — its presence is CROSS-OPERATION-ISOLATION=BROKEN):"
+    CROSS_ATTACK_TUNSETIFF_OK="$(awk -v a="$CROSS_A_PID" '/slirp4netns-/ { if (index($0, "/proc/" a "/ns/") > 0) attack = 1; if (!attack) next; if (/sys_ioctl\(/ && /cmd: 0x400454ca/) { pend = 1; vpid = substr($1, index($1, "-") + 1); next } if (pend && substr($1, length($1) - length(vpid) + 1) == vpid && /sys_ioctl -> 0x0/) { print; exit } }' /tmp/p4b-work/cross-trace.txt 2>/dev/null || true)"
+    printf '%s\n' "${CROSS_ATTACK_TUNSETIFF_OK:-(none — no successful attack TUNSETIFF in the kernel trace)}"
+    echo "--- identity checks (an ENOENT stop on the attack's first A-targeted step is IDENTITY-FAIL, not a boundary):"
+    CROSS_ATTACK_FIRST_EXIT="$(printf '%s\n' "$CROSS_ATTACK_SEQ" | grep -aE 'sys_(openat|setns|ioctl) ->' | head -1 || true)"
+    if printf '%s\n' "$CROSS_ATTACK_FIRST_EXIT" | grep -aqE 'sys_(openat|setns|ioctl) -> 0xfffffffffffffffe'; then
+      echo "IDENTITY-FAIL: the attack's first A-targeted step returned ENOENT — the target binding was stale"
+    else
+      echo "(none — the attack did not stop on ENOENT)"
+    fi
+    if [ -z "$CROSS_CONTROL_TSET" ]; then
+      echo "GATE: the vehicle never issued TUNSETIFF in the window — the proof's legs did not run"
+      CROSS_OK=0
+    elif [ "$CROSS_CONTROL_RET" != "0x0" ]; then
+      echo "GATE: the control leg's TUNSETIFF did not return 0 in the kernel trace — the same-operation baseline is broken"
       CROSS_OK=0
     fi
-    if printf '%s' "$CROSS_VERDICT_LINE" | grep -aq 'CROSS-OPERATION-ISOLATION=BROKEN'; then
-      echo "GATE: the vehicle completed an attack leg — CROSS-OPERATION-ISOLATION=BROKEN"
+    if [ -z "$CROSS_ATTACK_SEQ" ]; then
+      echo "GATE: the attack leg never started (no A-targeted step in the kernel trace) — the cross-operation path was not exercised"
+      CROSS_OK=0
+    fi
+    if [ -n "$CROSS_ATTACK_TUNSETIFF_OK" ]; then
+      echo "GATE: the attack leg completed the attach path — CROSS-OPERATION-ISOLATION=BROKEN"
       CROSS_OK=0
       CROSS_BROKEN=1
     fi
-    if printf '%s' "$CROSS_VERDICT_LINE" | grep -aq 'CONTROL=FAIL'; then
-      echo "GATE: the control leg failed — the same-operation baseline is broken"
+    if printf '%s\n' "$CROSS_ATTACK_FIRST_EXIT" | grep -aqE 'sys_(openat|setns|ioctl) -> 0xfffffffffffffffe'; then
+      echo "GATE: the attack leg stopped on ENOENT — a stale target binding (IDENTITY-FAIL), not a security boundary"
       CROSS_OK=0
     fi
-    if printf '%s' "$CROSS_VERDICT_LINE" | grep -aq 'IDENTITY-FAIL\|BINDING-FAIL\|UNREADABLE\|MARKER-ABSENT'; then
-      echo "GATE: the identity/target delivery failed — the proof is not executable"
-      CROSS_OK=0
-    fi
-    if ! printf '%s' "$CROSS_VERDICT_LINE" | grep -aq 'CROSS-OPERATION-ISOLATION=HOLDS'; then
-      echo "GATE: the vehicle did not declare CROSS-OPERATION-ISOLATION=HOLDS"
-      CROSS_OK=0
-    fi
-    if [ -z "$CROSS_CONTROL_TRACE" ]; then
-      echo "GATE: the kernel trace has no vehicle TUNSETIFF window — the control leg is not causally bound to the trace"
+    if [ -z "$CROSS_ATTACK_SEQ" ] || [ -z "$CROSS_ATTACK_ERRNO" ] || [ "$CROSS_ATTACK_ERRNO" -ge 0 ]; then
+      echo "GATE: the attack leg's terminal step did not fail with a real boundary errno — the proof cannot conclude"
       CROSS_OK=0
     fi
   } > "$EVIDENCE_DIR/45-cross-op-verdict.txt" 2>&1
   cat "$EVIDENCE_DIR/45-cross-op-verdict.txt" >&2
   if [ "$CROSS_OK" = 1 ]; then
     marker "CROSS-OP-CONTROL=SUCCESS"
-    CROSS_ATTACK_BOUNDARY="$(journalctl -u "$UNIT" --since "@$CROSS_T0" --no-pager 2>/dev/null | grep -aE 'VEHICLE-STEP leg=attack-.*errno=(13|1) ' | head -2 || true)"
-    marker "CROSS-OP-ATTACK-DENIED-AT=$(printf '%s\n' "$CROSS_ATTACK_BOUNDARY" | head -1 | sed -n 's/.*leg=\([a-z-]*\) step=\([a-z-]*\).*/\1:\2/p' || echo 'per-trace')"
+    marker "CROSS-OP-ATTACK-DENIED-AT=${CROSS_ATTACK_BOUNDARY_STEP:-unknown}:${CROSS_ATTACK_ERRNO:-unknown}${CROSS_ATTACK_ERRNO_NAME:+ ($CROSS_ATTACK_ERRNO_NAME)} target=${CROSS_ATTACK_BOUNDARY_TARGET:-unknown}"
     marker "CROSS-OPERATION-ISOLATION=HOLDS"
     marker "CROSS-OPERATION-GATE=CLOSED"
-  elif [ "${CROSS_BROKEN:-0}" = 1 ]; then
+  elif [ "$CROSS_BROKEN" = 1 ]; then
     marker "CROSS-OPERATION-ISOLATION=BROKEN"
     marker "BLOCKER=the cross-operation isolation is broken (see 45-cross-op-isolation.txt, 45-cross-op-verdict.txt)"
     finish FAIL; exit 0
