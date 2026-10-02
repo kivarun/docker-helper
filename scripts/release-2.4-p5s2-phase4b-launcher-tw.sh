@@ -103,7 +103,19 @@ LEGACY_UNIT_B=p4b-launcher-setexec
 log()  { printf '%s %s\n' "$PREFIX" "$*"; }
 note() { printf '%s NOTE: %s\n' "$PREFIX" "$*"; }
 marker() { printf 'P5S2-P4B-%s\n' "$*"; }
-finish() { printf '%s P5S2-P4B-RESULT=%s\n' "$PREFIX" "$1"; }
+finish() {
+  # The early finish-exit paths run before the sampler's own grace kill,
+  # so finish stops the sampler itself: an exited script must not leave
+  # a background writer mutating the evidence and work trees while the
+  # cleanup and the packaging run (the post-exit race broke the trap's
+  # exit code, run 37047211779).
+  [ -n "${SAMPLER_PID:-}" ] && {
+    kill "$SAMPLER_PID" 2>/dev/null || true
+    wait "$SAMPLER_PID" 2>/dev/null || true
+    rm -f "$EVIDENCE_DIR"/.write-* 2>/dev/null || true
+  }
+  printf '%s P5S2-P4B-RESULT=%s\n' "$PREFIX" "$1"
+}
 
 rm -rf "$EVIDENCE_DIR" /tmp/p4b-work
 mkdir -p "$EVIDENCE_DIR" /tmp/p4b-work
@@ -268,7 +280,7 @@ cleanup() {
   rm -f /etc/systemd/system/"$UNIT".service
   semodule -r docker_helper >> "$EVIDENCE_DIR/99-cleanup.txt" 2>&1 || true
   rm -f /usr/bin/docker-helper
-  rm -rf /usr/libexec/docker-helper "$STATE_ROOT" "$RUNTIME_ROOT" "$TRANSFERRED" /tmp/p4b-work /tmp/p4b-buildkit-extract
+  rm -rf /usr/libexec/docker-helper "$STATE_ROOT" "$RUNTIME_ROOT" "$TRANSFERRED" /tmp/p4b-work /tmp/p4b-buildkit-extract 2>/dev/null || true
   echo "cleanup done: $(date)" >> "$EVIDENCE_DIR/99-cleanup.txt"
 }
 trap cleanup EXIT
@@ -1664,6 +1676,101 @@ fi
 MGR_AFTER="$(process_context "$MG_PID")"
 echo "$MGR_AFTER" > "$EVIDENCE_DIR/07-manager-after.txt"
 
+
+# ============================================================
+# 4C-37: the cross-operation TUN isolation proof (proof-only)
+# ============================================================
+# ZERO policy delta. The proof establishes, on the LIVE production paths
+# of two simultaneously alive Build Operations with different MCS
+# categories, that the helper domain's authority performs the same-
+# operation attach (the 4C-36 clean chain) but stops at a REAL causal
+# boundary when applied to the other operation's namespace/socket state.
+# The vehicle is the composition's own entry path: a static helper
+# binary swapped by rename (the 4C-36 mechanism), which runs the control
+# leg against its own holder and the attack leg against operation A's
+# attached helper (the live member of A's netns), delivered inside the
+# vehicle's own binary tail (read via the helper's existing entry-file
+# authority).
+# Lifecycle noise (the retained-flow signull/sigkill/signal denials of
+# 4C-36) is inventoried separately and never gates this phase.
+marker "CROSS-OP: isolation proof window start"
+CROSS_T0="$(date +%s)"
+# Attack-target binding: a LIVE member of operation A that holds the
+# netns and its attached tap0. The composition's flow lifetime is far
+# below a minute — the payload's readiness never completes and the whole
+# flow tree is gone within seconds of the attach (the holder pid in run
+# 37042643830, the attached helper in run 37044797662: both already gone
+# at their binding times), so the binding reads the LIVE SYSTEM, not a
+# remembered pid: every live member of the canonical op's flow domains
+# carrying operation A's own category (c1) is inventoried (pid, comm,
+# namespace inodes, label, tap0), and the binding takes the FIRST member
+# that holds tap0 in its own netns — the attached-helper shape. The scan
+# is forkless (plain bash reads) so it lands inside the flow's own short
+# alive window; the trace-derived attached-helper pid is the independent
+# cross-check, recorded here and compared in the verdict against the
+# already-harvested ring.
+CROSS_TRACE_PID="$(awk '
+  $1 ~ /^slirp4netns-/ {
+    n = split($1, seg, "-"); pid = seg[n]
+    if (/sys_ioctl\(/ && /cmd: 0x400454ca/) { pend[pid] = 1; next }
+    if (/sys_ioctl ->/ && pend[pid] && $NF == "0x0") { print pid; pend[pid] = 0 }
+    else if (/sys_ioctl ->/) { pend[pid] = 0 }
+  }
+' "$EVIDENCE_DIR/30-trace-relevant.txt" 2>/dev/null | tail -1 || true)"
+CROSS_A_PID=""
+{
+  echo "=== 4C-37 A-side binding inventory (the attack target, bound from the live system) ==="
+  echo "A operation:      $OP_ID (the canonical leg launched by the provisioning window just above)"
+  echo "A trace helper:   ${CROSS_TRACE_PID:-(absent)} (the attached helper per the provisioning kernel trace)"
+  for P in /proc/[0-9]*; do
+    PID="${P#/proc/}"
+    LCTX=""
+    IFS= read -r LCTX 2>/dev/null < "$P/attr/current" || true
+    case "$LCTX" in
+      *":docker_helper_slirp4netns_t:s0:c1"|*":docker_helper_rootlesskit_t:s0:c1") ;;
+      *) continue ;;
+    esac
+    LCOMM=""
+    IFS= read -r LCOMM 2>/dev/null < "$P/comm" || true
+    echo "A live member: pid=$PID comm=$LCOMM ctx=$LCTX"
+    echo "  ns/user: $(readlink "$P/ns/user" 2>/dev/null || true)"
+    echo "  ns/net:  $(readlink "$P/ns/net" 2>/dev/null || true)"
+    LTAP=""
+    while IFS= read -r DEVLINE; do
+      case "$DEVLINE" in *"tap0:"*) LTAP="$DEVLINE"; break;; esac
+    done 2>/dev/null < "$P/net/dev" || true
+    echo "  tap0:    ${LTAP:-(absent)}"
+    if [ -z "$CROSS_A_PID" ] && [ -n "$LTAP" ]; then
+      CROSS_A_PID="$PID"
+      echo "  binding: SELECTED (the first live c1 member holding tap0)"
+    fi
+  done
+  if [ -n "$CROSS_A_PID" ]; then
+    echo "A bound pid:      $CROSS_A_PID (the first live c1 member holding tap0)"
+  else
+    echo "A bound pid:      NONE (no live c1 member holds the attached tap0)"
+  fi
+} > /tmp/p4b-work/cross-a-inventory.txt
+cat /tmp/p4b-work/cross-a-inventory.txt >&2
+CROSS_PIDS_OK=1
+case "$CROSS_A_PID" in ''|*[!0-9]*) CROSS_PIDS_OK=0;; esac
+if [ "$CROSS_PIDS_OK" = 1 ] && [ ! -e "$TRANSFERRED/tun-cross-op-vehicle" ]; then
+  note "the transferred cross-op vehicle binary is missing — the isolation proof cannot run"
+  CROSS_PIDS_OK=0
+fi
+if [ "$CROSS_PIDS_OK" != 1 ]; then
+  # The binding evidence travels to the evidence set so the marker's
+  # pointer is resolvable; the phase cannot conclude — INCOMPLETE, not
+  # PASS (an unstarted proof is an unfinished phase, never a pass).
+  cp /tmp/p4b-work/cross-a-inventory.txt "$EVIDENCE_DIR/45-cross-op-isolation.txt" 2>/dev/null || true
+  marker "CROSS-OPERATION-ISOLATION=NOT_PROVEN"
+  marker "BLOCKER=the cross-op proof could not bind a live operation-A identity (see 45-cross-op-isolation.txt)"
+  finish INCOMPLETE; exit 0
+fi
+
+# ---- the provisioning window's own audit/journal slices, harvested
+# ---- BEFORE the cross window: the window's expected cross-category
+# ---- denials must not reach the slices the staircase gates scan.
 harvest_avcs_since "$T0" "$EVIDENCE_DIR/09-avc-window.txt"
 auditctl -s > "$EVIDENCE_DIR/audit-status-window-end.txt" 2>&1 || true
 
@@ -1696,99 +1803,11 @@ cat "$EVIDENCE_DIR/18-syscall-chronology.txt" >&2
   journalctl -u "$UNIT" --since "@$T0" --no-pager 2>/dev/null | tail -120 || true
 } > "$EVIDENCE_DIR/07-manager-diag.txt" 2>&1
 
-# ============================================================
-# 4C-37: the cross-operation TUN isolation proof (proof-only)
-# ============================================================
-# ZERO policy delta. The proof establishes, on the LIVE production paths
-# of two simultaneously alive Build Operations with different MCS
-# categories, that the helper domain's authority performs the same-
-# operation attach (the 4C-36 clean chain) but stops at a REAL causal
-# boundary when applied to the other operation's namespace/socket state.
-# The vehicle is the composition's own entry path: a static helper
-# binary swapped by rename (the 4C-36 mechanism), which runs the control
-# leg against its own holder and the attack leg against operation A's
-# attached helper (the live member of A's netns), delivered inside the
-# vehicle's own binary tail (read via the helper's existing entry-file
-# authority).
-# Lifecycle noise (the retained-flow signull/sigkill/signal denials of
-# 4C-36) is inventoried separately and never gates this phase.
-marker "CROSS-OP: isolation proof window start"
-CROSS_T0="$(date +%s)"
-# Attack-target binding: operation A's LIVE netns member. The flow's
-# rootlesskit holder is NOT a stable holder: its payload's readiness
-# never completes and the holder dies seconds after its own successful
-# attach (runs 37042643830/37038971120: the holder pid the helper joined
-# through was already gone at binding time), while the manager's
-# readiness wait runs to its ~+60s stop and the retained entry keeps the
-# op's slot. The LIVE member that still holds operation A's network
-# namespace — and A's attached tap0 — is the canonical leg's ATTACHED
-# HELPER: the provisioning kernel trace records its successful TUNSETIFF
-# (cmd 0x400454ca, ret 0x0), and its /proc/<pid>/ns/net IS operation A's
-# netns until the flow's teardown (the 4C-34 staging comment already
-# relies on the same helper-liveness fact). The binding takes the
-# attached helper's pid from the kernel trace and verifies it live
-# (process alive, tap0 in its netns, ns inodes and label recorded)
-# BEFORE the window arms; an unverifiable binding yields NOT_PROVEN
-# (IDENTITY-FAIL), never an attack against a stale target.
-CROSS_A_PID="$(awk '
-  $1 ~ /^slirp4netns-/ {
-    n = split($1, seg, "-"); pid = seg[n]
-    if (/sys_ioctl\(/ && /cmd: 0x400454ca/) { pend[pid] = 1; next }
-    if (/sys_ioctl ->/ && pend[pid] && $NF == "0x0") { print pid; pend[pid] = 0 }
-    else if (/sys_ioctl ->/) { pend[pid] = 0 }
-  }
-' "$EVIDENCE_DIR/30-trace-relevant.txt" 2>/dev/null | tail -1 || true)"
-echo "cross-op identities: A(attached-helper-pid)=$CROSS_A_PID"
-CROSS_PIDS_OK=1
-case "$CROSS_A_PID" in ''|*[!0-9]*) CROSS_PIDS_OK=0;; esac
-# A-side binding inventory, taken BEFORE the vehicle window: the attack
-# target's live operation identity (operation id, pid, namespace inodes,
-# process label/category, tap0 presence in its netns — the tap0's cN
-# label is created by the relabelled tun socket, whose relabel decision
-# is an already-gated 4C-36 live record). The vehicle re-checks the
-# target's liveness inside its own attack leg (an ENOENT stop is
-# IDENTITY-FAIL, never a security boundary), and the post-window re-check
-# below detects mid-window PID reuse.
-{
-  echo "=== 4C-37 A-side binding inventory (the attack target, bound before the window) ==="
-  echo "A operation:    $OP_ID (the canonical leg launched by the provisioning window just above)"
-  echo "A bound pid:    $CROSS_A_PID (the attached helper; TUNSETIFF ret 0 recorded in the provisioning kernel trace)"
-  if [ -n "$CROSS_A_PID" ] && [ -d "/proc/$CROSS_A_PID" ]; then
-    echo "A alive at binding: YES"
-    echo "A comm:         $(cat "/proc/$CROSS_A_PID/comm" 2>/dev/null)"
-    echo "A ns/user:      $(readlink "/proc/$CROSS_A_PID/ns/user" 2>/dev/null)"
-    echo "A ns/net:       $(readlink "/proc/$CROSS_A_PID/ns/net" 2>/dev/null)"
-    echo "A attr/current: $(cat "/proc/$CROSS_A_PID/attr/current" 2>/dev/null)"
-    A_TAP0="$(grep -a 'tap0' "/proc/$CROSS_A_PID/net/dev" 2>/dev/null | head -1 || true)"
-    echo "A tap0:         ${A_TAP0:-(ABSENT — the bound pid is not a live member of the attached netns)}"
-    if [ -z "$A_TAP0" ]; then
-      echo "A tap0 binding: FAIL (the attack must attach to A's existing tap0; a tap0-less target is an identity mismatch, not a boundary)"
-      CROSS_PIDS_OK=0
-    fi
-  else
-    echo "A alive at binding: NO (stale target binding — the proof must not run against a stale target)"
-    CROSS_PIDS_OK=0
-  fi
-} > /tmp/p4b-work/cross-a-inventory.txt
-cat /tmp/p4b-work/cross-a-inventory.txt >&2
-if [ "$CROSS_PIDS_OK" = 1 ] && [ ! -e "$TRANSFERRED/tun-cross-op-vehicle" ]; then
-  note "the transferred cross-op vehicle binary is missing — the isolation proof cannot run"
-  CROSS_PIDS_OK=0
-fi
-if [ "$CROSS_PIDS_OK" != 1 ]; then
-  # The binding evidence travels to the evidence set so the marker's
-  # pointer is resolvable; the phase cannot conclude — INCOMPLETE, not
-  # PASS (an unstarted proof is an unfinished phase, never a pass).
-  cp /tmp/p4b-work/cross-a-inventory.txt "$EVIDENCE_DIR/45-cross-op-isolation.txt" 2>/dev/null || true
-  marker "CROSS-OPERATION-ISOLATION=NOT_PROVEN"
-  marker "BLOCKER=the cross-op proof could not bind a live operation-A identity (see 45-cross-op-isolation.txt)"
-  finish INCOMPLETE; exit 0
-else
-  # Stage the vehicle inside /usr/bin and append the target line, then
-  # swap by rename (an alive helper holds the path's inode open). The
-  # helper reads the targets from its OWN installed binary via the
-  # existing entry-file read authority.
-  cp -p /usr/bin/slirp4netns /usr/bin/.cross-op-orig \
+# Stage the vehicle inside /usr/bin and append the target line, then
+# swap by rename (an alive helper holds the path's inode open). The
+# helper reads the targets from its OWN installed binary via the
+# existing entry-file read authority.
+cp -p /usr/bin/slirp4netns /usr/bin/.cross-op-orig \
     || { note "the cross-op window could not back up the flow binary"; finish INCOMPLETE; exit 0; }
   # The cross window owns its own restore baseline: the probe windows run
   # AFTER this window now, so their PROBE_ORIG_* variables do not exist
@@ -2025,6 +2044,7 @@ else
     CROSS_ATTACK_TUNSETIFF_OK="$(awk -v a="$CROSS_A_PID" '/slirp4netns-/ { if (index($0, "/proc/" a "/ns/") > 0) attack = 1; if (!attack) next; if (/sys_ioctl\(/ && /cmd: 0x400454ca/) { pend = 1; vpid = substr($1, index($1, "-") + 1); next } if (pend && substr($1, length($1) - length(vpid) + 1) == vpid && /sys_ioctl -> 0x0/) { print; exit } }' /tmp/p4b-work/cross-trace.txt 2>/dev/null || true)"
     printf '%s\n' "${CROSS_ATTACK_TUNSETIFF_OK:-(none — no successful attack TUNSETIFF in the kernel trace)}"
     echo "--- identity checks (an ENOENT stop on the attack's first A-targeted step is IDENTITY-FAIL, not a boundary):"
+    echo "identity cross-check: trace attached-helper pid=${CROSS_TRACE_PID:-(absent)} / bound pid=${CROSS_A_PID:-(absent)}"
     CROSS_ATTACK_FIRST_EXIT="$(printf '%s\n' "$CROSS_ATTACK_SEQ" | grep -aE 'sys_(openat|setns|ioctl) ->' | head -1 || true)"
     if printf '%s\n' "$CROSS_ATTACK_FIRST_EXIT" | grep -aqE 'sys_(openat|setns|ioctl) -> 0xfffffffffffffffe'; then
       echo "IDENTITY-FAIL: the attack's first A-targeted step returned ENOENT — the target binding was stale"
@@ -2071,7 +2091,6 @@ else
     marker "CROSS-OPERATION-ISOLATION=NOT_PROVEN"
     finish INCOMPLETE; exit 0
   fi
-fi
 
 
 # Give the sampler its grace, then collect.
