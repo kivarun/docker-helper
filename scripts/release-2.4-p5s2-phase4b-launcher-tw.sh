@@ -357,13 +357,15 @@ fi
   echo "=== transferred composition manifest ==="
   cat "$TRANSFERRED/manifest.txt" 2>/dev/null || echo "(no manifest recorded)"
   echo "=== input hashes (must match the manifest) ==="
-  sha256sum "$TRANSFERRED/docker-helper" "$TRANSFERRED/docker-helper.te" \
+  sha256sum "$TRANSFERRED/docker-helper" "$TRANSFERRED/tun-command-probe" \
+    "$TRANSFERRED/docker-helper.te" \
     "$TRANSFERRED/docker-helper.fc" "$TRANSFERRED/docker-helper-builder.service" \
     "$TRANSFERRED/provision-builder.sh" "$TRANSFERRED/modules-load.conf" 2>/dev/null || true
 } > "$EVIDENCE_DIR/01-composition-inputs.txt" 2>&1
 while IFS='=' read -r key want; do
   case "$key" in
     binary_sha256) file="$TRANSFERRED/docker-helper" ;;
+    tun_probe_sha256) file="$TRANSFERRED/tun-command-probe" ;;
     te_sha256) file="$TRANSFERRED/docker-helper.te" ;;
     fc_sha256) file="$TRANSFERRED/docker-helper.fc" ;;
     unit_sha256) file="$TRANSFERRED/docker-helper-builder.service" ;;
@@ -1087,13 +1089,13 @@ PREFLIGHT_OK=1
     echo "FAIL: slirp4netns helper nsfs namespace-handle inventory (count=$SL_NSFS_COUNT_OK shape=$SL_NSFS_SHAPE_OK union=$SL_NSFS_UNION_OK class=$SL_NSFS_CLASS_OK no-flow-grant=$SL_NSFS_NO_FLOW_GRANT_OK)"
     PREFLIGHT_OK=0
   fi
-  echo "=== slirp4netns helper TUN device-node inventory (the 4C-33 composition: the EFFECTIVE helper -> tun_tap_device_t authority must be EXACTLY chr_file { read write open ioctl } — the GENERIC ioctl permission with NO allowxperm; no getattr/append/lock/create/setattr, no helper allowxperm, no helper tun_socket grant, from ANY source, distro attribute expansion included; an effective extra is a STOP, not a pin violation) ==="
+  echo "=== slirp4netns helper TUN device-node inventory (the 4C-34 composition: the EFFECTIVE helper -> tun_tap_device_t authority must be EXACTLY chr_file { read write open ioctl } ordinary + allowxperm ioctl { 0x54ca } — the single live-proven TUNSETIFF command; no getattr/append/lock/create/setattr, no second/third ioctl command, no helper tun_socket grant, from ANY source, distro attribute expansion included; an effective extra is a STOP, not a pin violation) ==="
   echo "--- raw effective inventory (slirp4netns -> tun_tap_device_t; attribute/base-policy expansions recorded, not asserted per-rule):"
   sesearch --allow -s docker_helper_slirp4netns_t -t tun_tap_device_t /sys/fs/selinux/policy || true
   echo "--- CONCRETE module contribution (source must be docker_helper_slirp4netns_t; must be EXACTLY one tun_tap_device_t:chr_file rule whose perm set folds to { read write open ioctl }; NOTE: setools renders perm sets alphabetically — the 4C-29 run proved { read open } source renders as { open read }, so the 4C-33 set renders as { ioctl open read write }):"
   SL_TUN_RULES="$(sesearch --allow -s docker_helper_slirp4netns_t -t tun_tap_device_t /sys/fs/selinux/policy 2>/dev/null | awk '$2 == "docker_helper_slirp4netns_t"' || true)"
   printf '%s\n' "${SL_TUN_RULES:-(none)}"
-  SL_TUN_COUNT_OK=0; SL_TUN_SHAPE_OK=0; SL_TUN_UNION_OK=0; SL_TUN_CLASS_OK=0; SL_TUN_NO_XPERM_OK=0; SL_TUN_NO_TS_OK=0
+  SL_TUN_COUNT_OK=0; SL_TUN_SHAPE_OK=0; SL_TUN_UNION_OK=0; SL_TUN_CLASS_OK=0; SL_TUN_NO_TS_OK=0
   SL_TUN_CONCRETE_COUNT="$(printf '%s\n' "$SL_TUN_RULES" | grep -ac . || true)"
   SL_TUN_CONCRETE_SET="$(printf '%s\n' "$SL_TUN_RULES" \
     | sed -n 's/^allow [^ ]* tun_tap_device_t:chr_file {\(.*\)};$/\1/p' \
@@ -1127,16 +1129,6 @@ PREFLIGHT_OK=1
     echo "STOP: the effective helper -> tun_tap_device_t surface contains a non-chr_file class:"
     printf '%s\n' "$SL_TUN_OTHER_CLASS"
   fi
-  # No helper xperm authority on the TUN node: the allowxperm query must
-  # be empty. Ordering dependence, RECORDED: the rootlesskit TUN section
-  # above already ran the same allowxperm query against its known-good
-  # rule and would have STOPPED on an unsupported sesearch build, so an
-  # empty result here is an absence proof, not a tool limitation.
-  SL_TUN_XPERM="$(sesearch --allowxperm -s docker_helper_slirp4netns_t -t tun_tap_device_t -c chr_file /sys/fs/selinux/policy 2>/dev/null || true)"
-  printf '%s\n' "${SL_TUN_XPERM:-(none — the helper holds NO tun_tap_device_t ioctl command authority)}"
-  if [ -z "$SL_TUN_XPERM" ]; then
-    SL_TUN_NO_XPERM_OK=1
-  fi
   # No helper tun_socket rule of ANY target (the helper attaches an
   # existing TAP via the device node; tun_socket authority — create/
   # attach_queue/relabel* — is a separate live boundary).
@@ -1145,6 +1137,41 @@ PREFLIGHT_OK=1
   if [ -z "$SL_TUN_TS" ]; then
     SL_TUN_NO_TS_OK=1
   fi
+  # The helper's EFFECTIVE allowxperm union (the 4C-34 command filter):
+  # every hex command value across ALL allowxperm rules for the helper
+  # tuple must fold to EXACTLY { 0x54ca } (TUNSETIFF, the one live-proven
+  # command — the 4C-32/4C-33 runs' sys_enter/exit_ioctl records). The
+  # RootlessKit staircase's union (exactly { 0x54ca 0x54cb }) stays owned
+  # by its own subject-scoped section above. The toolchain gate (the
+  # rootlesskit section's allowxperm query) already proved the sesearch
+  # build exposes xperm rules, so an empty result here is an absence
+  # proof, not a tool limitation.
+  echo "--- the helper's allowxperm inventory for the tuple (raw; stderr kept apart):"
+  SL_TUN_XP_TOOL_ERR=/tmp/p4b-work/sesearch-sl-tun-xperm.stderr
+  SL_TUN_XP_RAW="$(sesearch --allowxperm -s docker_helper_slirp4netns_t -t tun_tap_device_t -c chr_file /sys/fs/selinux/policy 2>"$SL_TUN_XP_TOOL_ERR" || true)"
+  if [ -s "$SL_TUN_XP_TOOL_ERR" ]; then
+    echo "sesearch --allowxperm stderr:"
+    cat "$SL_TUN_XP_TOOL_ERR"
+  fi
+  printf '%s\n' "${SL_TUN_XP_RAW:-(none)}"
+  SL_TUN_XPERM_UNION_OK=0; SL_TUN_THIRD_CMD_OK=0; SL_TUN_XPERM_COUNT_OK=0
+  SL_TUN_XPERM_CONCRETE_COUNT="$(printf '%s\n' "$SL_TUN_XP_RAW" | awk '$2 == "docker_helper_slirp4netns_t"' | grep -ac . || true)"
+  if [ "$SL_TUN_XPERM_CONCRETE_COUNT" = 1 ]; then
+    SL_TUN_XPERM_COUNT_OK=1
+  fi
+  SL_TUN_XPERM_UNION="$(printf '%s\n' "$SL_TUN_XP_RAW" | grep -aoE '0x[0-9a-fA-F]+' | tr 'A-F' 'a-f' | sort -u | tr '\n' ' ' || true)"
+  echo "effective helper -> tun_tap_device_t:chr_file ioctl xperm union: ${SL_TUN_XPERM_UNION:-(empty)}"
+  if [ "$SL_TUN_XPERM_UNION" = "0x54ca " ]; then
+    SL_TUN_XPERM_UNION_OK=1
+  fi
+  echo "--- explicit beyond-the-one negatives (the helper's SECOND/THIRD command must be absent):"
+  if [ "$SL_TUN_XPERM_UNION_OK" = 1 ]; then
+    SL_TUN_THIRD_CMD_OK=1
+    echo "PASS: no effective command beyond { 0x54ca } (TUNSETPERSIST 0x54cb — the creator's persistence command — TUNSETOWNER/TUNSETGROUP/TUNSETLINK/TUNGETFEATURES/TUNSETOFFLOAD/TUNSETQUEUE and every other command stay denied)"
+  else
+    echo "FAIL: the helper's effective xperm union is not exactly { 0x54ca } (got: ${SL_TUN_XPERM_UNION:-(empty)}; concrete-rules=$SL_TUN_XPERM_CONCRETE_COUNT)"
+    PREFLIGHT_OK=0
+  fi
   # (The helper's cap_userns net_admin and plain capability net_admin
   # negatives are the cross-domain inventory's existing equality checks:
   # the cap set folds to exactly { sys_admin sys_ptrace } and the plain
@@ -1152,10 +1179,10 @@ PREFLIGHT_OK=1
   echo "--- the helper's dontaudit surface toward tun_tap_device_t (RECORDED SEPARATELY per the 4C-28 preflight contract; never merged into the allow verdict):"
   SL_TUN_DONTAUDIT="$(sesearch --dontaudit -s docker_helper_slirp4netns_t -t tun_tap_device_t /sys/fs/selinux/policy 2>/dev/null || true)"
   printf '%s\n' "${SL_TUN_DONTAUDIT:-(none — no dontaudit rule hides helper -> tun_tap_device_t denials)}"
-  if [ "$SL_TUN_COUNT_OK" = 1 ] && [ "$SL_TUN_SHAPE_OK" = 1 ] && [ "$SL_TUN_UNION_OK" = 1 ] && [ "$SL_TUN_CLASS_OK" = 1 ] && [ "$SL_TUN_NO_XPERM_OK" = 1 ] && [ "$SL_TUN_NO_TS_OK" = 1 ]; then
-    echo "PASS: slirp4netns helper TUN device-node inventory (exactly one tun_tap_device_t:chr_file { read write open ioctl } rule; the effective union is exactly { ioctl open read write }; no non-chr_file class; no helper xperm; no helper tun_socket rule)"
+  if [ "$SL_TUN_COUNT_OK" = 1 ] && [ "$SL_TUN_SHAPE_OK" = 1 ] && [ "$SL_TUN_UNION_OK" = 1 ] && [ "$SL_TUN_CLASS_OK" = 1 ] && [ "$SL_TUN_NO_TS_OK" = 1 ] && [ "$SL_TUN_XPERM_COUNT_OK" = 1 ] && [ "$SL_TUN_XPERM_UNION_OK" = 1 ] && [ "$SL_TUN_THIRD_CMD_OK" = 1 ]; then
+    echo "PASS: slirp4netns helper TUN device-node inventory (exactly one tun_tap_device_t:chr_file { read write open ioctl } rule; the effective ordinary union is exactly { ioctl open read write }; no non-chr_file class; the effective xperm union is exactly { 0x54ca }; no helper tun_socket rule)"
   else
-    echo "FAIL: slirp4netns helper TUN device-node inventory (count=$SL_TUN_COUNT_OK shape=$SL_TUN_SHAPE_OK union=$SL_TUN_UNION_OK class=$SL_TUN_CLASS_OK no-xperm=$SL_TUN_NO_XPERM_OK no-tun-socket=$SL_TUN_NO_TS_OK)"
+    echo "FAIL: slirp4netns helper TUN device-node inventory (count=$SL_TUN_COUNT_OK shape=$SL_TUN_SHAPE_OK union=$SL_TUN_UNION_OK class=$SL_TUN_CLASS_OK no-tun-socket=$SL_TUN_NO_TS_OK xperm-count=$SL_TUN_XPERM_COUNT_OK xperm-union=$SL_TUN_XPERM_UNION_OK third-cmd=$SL_TUN_THIRD_CMD_OK)"
     PREFLIGHT_OK=0
   fi
   echo "--- live Netlink mediation model (recorded; FAIL CLOSED if it unexpectedly changes):"
@@ -2416,6 +2443,188 @@ else
   marker "BLOCKER=the 4C-33 slirp4netns TUN generic-ioctl composition did not hold (see 40-slirp-tun-ioctl-gone.txt)"
   marker "SLIRP-TUN-IOCTL-BOUNDARY=FAIL"
   finish FAIL; exit 0
+fi
+
+# ============================================================
+# 4C-34: the negative command probe — the command whitelist's LIVE
+# narrowing proof (SLIRP-TUN-IOCTL-COMMAND-FILTER)
+# ============================================================
+# The 4C-33 canonical run proved the bitmap-less intermediate
+# command-unrestricted (TUNSETIFF passed the SELinux file-ioctl stage
+# into the TUN driver). After the 0x54ca allowxperm grant the helper
+# tuple MUST be command-mediated: a real non-whitelisted TUN ioctl must
+# be xperm-denied with its ioctlcmd= record, while TUNSETIFF keeps
+# passing. The probe vehicle (a VM-local bounded diagnostic window, zero
+# policy delta): the composition's OWN entry path — the transferred
+# static probe ELF temporarily replaces the flow's /usr/bin/slirp4netns
+# and restorecon applies the SHIPPED .fc label (docker_helper_
+# slirp4netns_exec_t), so the rootlesskit child's exec enters the helper
+# domain exactly as the real binary does (the entry rule's own
+# execute/entrypoint grants; no synthetic context). A second START runs
+# the flow; the probe opens /dev/net/tun (granted) and issues ONE
+# ioctl(fd, TUNSETPERSIST, 1) — a real TUN UAPI command, same driver
+# byte 0x54, NOT whitelisted for the helper, SELinux-denied inside
+# selinux_file_ioctl() before the TUN driver sees it (no device state
+# change, no tun_socket/capability hook; the fd is never attached). The
+# original binary is restored byte-verified. The probe's evidence lives
+# in this gate's own audit/trace slices; the CANONICAL window's
+# positive-path assertions run against 09-avc-window.txt unchanged.
+SL_TUN_PROBE_OK=1
+PROBE_ORIG_SHA="$(sha256sum /usr/bin/slirp4netns 2>/dev/null | awk '{print $1}')"
+PROBE_ORIG_CTX="$(context_of /usr/bin/slirp4netns)"
+PROBE_ORIG_MODE="$(stat -c '%a %U:%G' /usr/bin/slirp4netns 2>/dev/null)"
+PROBE_TRACE_ENABLED=0
+if [ ! -e "$TRANSFERRED/tun-command-probe" ]; then
+  note "the transferred tun-command-probe binary is missing — the negative probe cannot run"
+  : > "$EVIDENCE_DIR/41-slirp-tun-command-filter.txt"
+  marker "SLIRP-TUN-COMMAND-FILTER=NOT_PROBED"
+else
+  cp -p /usr/bin/slirp4netns /tmp/p4b-work/slirp4netns.orig \
+    || { note "the probe window could not back up /usr/bin/slirp4netns"; finish INCOMPLETE; exit 0; }
+  cp "$TRANSFERRED/tun-command-probe" /usr/bin/slirp4netns \
+    && restorecon /usr/bin/slirp4netns 2>/dev/null || true
+  PROBE_PLACED_CTX="$(context_of /usr/bin/slirp4netns)"
+  if [ "$PROBE_PLACED_CTX" != "system_u:object_r:docker_helper_slirp4netns_exec_t:s0" ]; then
+    note "the probe replacement's label is $PROBE_PLACED_CTX (expected the shipped exec type)"
+  fi
+  # Re-arm a FRESH tracefs ring for the probe window (the canonical
+  # window's ring was harvested and disabled): the syscall tracepoints
+  # (openat enter/exit + ioctl enter/exit with fd/cmd/arg/ret) +
+  # capability/cap_capable + avc/selinux_audited.
+  if [ "$TRACE_ENABLED" = 1 ]; then
+    echo 0 > "$TRACING/tracing_on" 2>/dev/null || true
+    echo > "$TRACING/trace" 2>/dev/null || true
+    echo 1 > "$TRACING/events/capability/cap_capable/enable" 2>/dev/null || true
+    echo 1 > "$TRACING/events/syscalls/sys_enter_openat/enable" 2>/dev/null || true
+    echo 1 > "$TRACING/events/syscalls/sys_exit_openat/enable" 2>/dev/null || true
+    echo 1 > "$TRACING/events/syscalls/sys_enter_ioctl/enable" 2>/dev/null || true
+    echo 1 > "$TRACING/events/syscalls/sys_exit_ioctl/enable" 2>/dev/null || true
+    if [ -d "$TRACING/events/avc/selinux_audited" ]; then
+      echo 1 > "$TRACING/events/avc/selinux_audited/enable" 2>/dev/null || true
+    fi
+    echo 1 > "$TRACING/tracing_on" 2>/dev/null || true \
+      && PROBE_TRACE_ENABLED=1
+  fi
+  PROBE_T0="$(date +%s)"
+  PROBE_OP_ID="$(gen_op_id)"
+  PROBE_RT_OP_DIR="$RUNTIME_ROOT/ops/$PROBE_OP_ID"
+  PROBE_ST_OP_DIR="$STATE_ROOT/ops/$PROBE_OP_ID"
+  PROBE_START_RC=0
+  PROBE_START_OUT="$(printf 'START %s\n' "$PROBE_OP_ID" | timeout 120 socat - UNIX-CONNECT:"$MANAGER_SOCK")" || PROBE_START_RC=$?
+  PROBE_PID=""
+  PROBE_END=$(( $(date +%s) + 90 ))
+  while [ "$(date +%s)" -lt "$PROBE_END" ]; do
+    if [ -z "$PROBE_PID" ] && [ -s "$PROBE_RT_OP_DIR/instance.pid" ]; then
+      PROBE_PID="$(cat "$PROBE_RT_OP_DIR/instance.pid" 2>/dev/null)"
+    fi
+    if [ -n "$PROBE_PID" ] && [ ! -d "/proc/$PROBE_PID" ] && [ ! -d "$PROBE_RT_OP_DIR" ] && [ ! -d "$PROBE_ST_OP_DIR" ]; then
+      break
+    fi
+    sleep 0.05
+  done
+  if [ "$PROBE_TRACE_ENABLED" = 1 ]; then
+    echo 0 > "$TRACING/tracing_on" 2>/dev/null || true
+    cat "$TRACING/trace" > /tmp/p4b-work/probe-trace.txt 2>/dev/null || true
+    echo 0 > "$TRACING/events/capability/cap_capable/enable" 2>/dev/null || true
+    echo 0 > "$TRACING/events/syscalls/sys_enter_openat/enable" 2>/dev/null || true
+    echo 0 > "$TRACING/events/syscalls/sys_exit_openat/enable" 2>/dev/null || true
+    echo 0 > "$TRACING/events/syscalls/sys_enter_ioctl/enable" 2>/dev/null || true
+    echo 0 > "$TRACING/events/syscalls/sys_exit_ioctl/enable" 2>/dev/null || true
+    echo 0 > "$TRACING/events/avc/selinux_audited/enable" 2>/dev/null || true
+  else
+    : > /tmp/p4b-work/probe-trace.txt
+  fi
+  harvest_avcs_since "$PROBE_T0" /tmp/p4b-work/probe-avc-slice.txt
+  {
+    echo "=== 4C-34 negative command probe window (TUNSETPERSIST 0x54cb on the helper's own tuple) ==="
+    echo "window-start: $PROBE_T0"
+    echo "START: $PROBE_OP_ID (rc=$PROBE_START_RC) response: $PROBE_START_OUT"
+    echo "window-end: $(date +%s)"
+    echo "probe pid: ${PROBE_PID:-(never observed — the flow died before the instance pid file)}"
+    echo "=== the probe's AVC slice (audit records since window-start) ==="
+    grep -a 'type=AVC' /tmp/p4b-work/probe-avc-slice.txt 2>/dev/null \
+      | grep -a 'docker_helper_slirp4netns_t' || true
+    echo "=== the probe's helper TUN + tun_socket/cap_userns AVC records ==="
+    grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' /tmp/p4b-work/probe-avc-slice.txt 2>/dev/null \
+      | grep -aE 'tclass=(chr_file|tun_socket|cap_userns)' || true
+    echo "=== the probe's ioctl trace lines (fd/cmd/arg/ret; any TUN-relevant event of the probe window) ==="
+    grep -a 'slirp4netns' /tmp/p4b-work/probe-trace.txt 2>/dev/null \
+      | grep -a '/dev/net/tun\|sys_ioctl\|selinux_audited\|cap_capable' | head -20 || true
+    echo "(end of probe trace lines)"
+    echo "=== the flow's death shape in the probe window (informational) ==="
+    journalctl -u "$UNIT" --since "@$PROBE_T0" --no-pager 2>/dev/null | tail -6 || true
+    echo "=== restore check ==="
+    cp -p /tmp/p4b-work/slirp4netns.orig /usr/bin/slirp4netns \
+      && restorecon /usr/bin/slirp4netns 2>/dev/null || true
+    PROBE_RESTORED_SHA="$(sha256sum /usr/bin/slirp4netns 2>/dev/null | awk '{print $1}')"
+    PROBE_RESTORED_CTX="$(context_of /usr/bin/slirp4netns)"
+    echo "original sha256: $PROBE_ORIG_SHA"
+    echo "restored sha256: $PROBE_RESTORED_SHA"
+    echo "original ctx:    $PROBE_ORIG_CTX"
+    echo "restored ctx:    $PROBE_RESTORED_CTX"
+    echo "original mode:   $PROBE_ORIG_MODE"
+    echo "restored mode:   $(stat -c '%a %U:%G' /usr/bin/slirp4netns 2>/dev/null)"
+    if [ "$PROBE_RESTORED_SHA" = "$PROBE_ORIG_SHA" ] && [ "$PROBE_RESTORED_CTX" = "$PROBE_ORIG_CTX" ]; then
+      echo "PASS: the shipped flow binary is restored byte- and label-identical"
+    else
+      echo "FAIL: the shipped flow binary did NOT restore byte- and label-identical — the composition integrity is broken"
+    fi
+  } > "$EVIDENCE_DIR/41-slirp-tun-command-filter.txt" 2>&1
+  cat "$EVIDENCE_DIR/41-slirp-tun-command-filter.txt" >&2
+  grep -aq "PASS: the shipped flow binary is restored" "$EVIDENCE_DIR/41-slirp-tun-command-filter.txt" \
+    || { marker "BLOCKER=the negative probe window failed to restore the shipped flow binary (see 41-slirp-tun-command-filter.txt)"
+         finish FAIL; exit 0; }
+
+  # ---- the gate verdicts over the probe window's evidence
+  {
+    echo "=== the positive path's assertions (the CANONICAL window; 09-avc-window.txt) ==="
+    echo "--- the helper's tun_socket relabelfrom boundary MUST still be present (the terminal boundary is unchanged by the command hardening):"
+    SL_POS_RELABEL="$(grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -a 'tclass=tun_socket' | grep -a 'denied  *{ relabelfrom }' || true)"
+    printf '%s\n' "${SL_POS_RELABEL:-(GATE FAILURE — the canonical window has NO helper tun_socket relabelfrom denial: the positive path's terminal boundary changed)}"
+    echo "--- the whitelisted command must NOT be denied (no helper chr_file ioctl denial with ioctlcmd=0x54ca):"
+    SL_POS_TUNSETIFF_DENIAL="$(grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -a 'tclass=chr_file' | grep -a 'denied  *{ ioctl }' | grep -a 'ioctlcmd=0x54ca' || true)"
+    printf '%s\n' "${SL_POS_TUNSETIFF_DENIAL:-(none — the whitelisted TUNSETIFF command is not denied)}"
+    echo "--- the helper's ALL other chr_file TUN denials in the canonical window (must be none; the 38/39/40 gates own them):"
+    grep -a 'tcontext=system_u:object_r:tun_tap_device_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null \
+      | grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' | grep -a 'tclass=chr_file' || true
+    echo "(end of canonical-window helper TUN records)"
+    echo "=== the negative probe's assertions (the probe window's slice) ==="
+    echo "--- the non-whitelisted command MUST be xperm-denied (helper chr_file ioctl denial with ioctlcmd=0x54cb — the command-level record):"
+    SL_NEG_XPERM="$(grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' /tmp/p4b-work/probe-avc-slice.txt 2>/dev/null | grep -a 'tclass=chr_file' | grep -a 'denied  *{ ioctl }' | grep -a 'ioctlcmd=0x54cb' || true)"
+    printf '%s\n' "${SL_NEG_XPERM:-(GATE FAILURE — the probe window has NO helper chr_file ioctlcmd=0x54cb denial: the command whitelist did not enforce)}"
+    echo "--- the probe must NOT reach the deeper TUN hooks (no helper tun_socket/cap_userns AVC in the probe window):"
+    SL_NEG_DEEPER="$(grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' /tmp/p4b-work/probe-avc-slice.txt 2>/dev/null | grep -aE 'tclass=(tun_socket|cap_userns)' || true)"
+    printf '%s\n' "${SL_NEG_DEEPER:-(none — no helper tun_socket/cap_userns AVC in the probe window)}"
+    echo "--- the probe's FAILED cap_capable checks in the probe window (a reached driver-side capability denial; expected none for the probe's ioctl path):"
+    grep -a 'slirp4netns' /tmp/p4b-work/probe-trace.txt 2>/dev/null | grep -a 'cap_capable:' | grep -av ' ret 0' | head -8 || true
+    echo "(end of probe-window failed-cap_capable lines)"
+    if [ -z "$SL_POS_RELABEL" ]; then
+      echo "GATE: the canonical window's positive-path terminal boundary (tun_socket relabelfrom) did not appear — the command hardening changed the positive path"
+      SL_TUN_PROBE_OK=0
+    fi
+    if [ -n "$SL_POS_TUNSETIFF_DENIAL" ]; then
+      echo "GATE: the whitelisted TUNSETIFF command (ioctlcmd=0x54ca) was denied in the canonical window — the 4C-34 whitelist membership regressed"
+      SL_TUN_PROBE_OK=0
+    fi
+    if [ -z "$SL_NEG_XPERM" ]; then
+      echo "GATE: the negative probe's expected xperm denial (ioctlcmd=0x54cb) did not appear — the command filter is not enforcing"
+      SL_TUN_PROBE_OK=0
+    fi
+    if [ -n "$SL_NEG_DEEPER" ]; then
+      echo "GATE: the probe window reached a deeper TUN hook (a helper tun_socket/cap_userns denial) — the command-level denial did not fire first"
+      SL_TUN_PROBE_OK=0
+    fi
+  } > "$EVIDENCE_DIR/42-slirp-tun-command-filter-verdict.txt" 2>&1
+  cat "$EVIDENCE_DIR/42-slirp-tun-command-filter-verdict.txt" >&2
+  if [ "$SL_TUN_PROBE_OK" = 1 ]; then
+    marker "SLIRP-TUN-IOCTL-COMMAND-FILTER=EXACT-{0x54ca}"
+    marker "SLIRP-TUN-COMMAND-PROBE=0x54cb-XPERM-DENIED"
+    marker "SLIRP-TUN-SOCKET-RELABEL=STILL-CONFIRMED"
+  else
+    marker "BLOCKER=the 4C-34 TUN command-filter composition did not hold (see 41-slirp-tun-command-filter.txt, 42-slirp-tun-command-filter-verdict.txt)"
+    marker "SLIRP-TUN-IOCTL-COMMAND-FILTER=FAIL"
+    finish FAIL; exit 0
+  fi
 fi
 
 # ---- launcher-domain AVC inventory (raw; the report classifies)

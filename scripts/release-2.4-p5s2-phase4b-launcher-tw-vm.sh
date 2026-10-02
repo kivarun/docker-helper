@@ -26,6 +26,7 @@ UAT_REPO_DIR="${UAT_REPO_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 EVIDENCE_DIR="${PHASE4B_EVIDENCE_DIR:-/tmp/release-2.4-p5s2-phase4b-launcher-evidence}"
 GUEST_EVIDENCE_DIR='/tmp/release-2.4-p5s2-phase4b-launcher-evidence'
 HELPER_BIN="${PHASE4B_HELPER_BIN:-$UAT_REPO_DIR/docker-helper}"
+TUN_PROBE_BIN="${PHASE4B_TUN_PROBE_BIN:-$UAT_REPO_DIR/tun-command-probe}"
 PROOF_SRC="${PHASE4B_PROOF_SRC:-$UAT_REPO_DIR/proof-src}"
 PROOF_REF="$(cat "$PROOF_SRC/.phase4b-proof-ref" 2>/dev/null || true)"
 
@@ -41,6 +42,7 @@ on_err() {
 trap on_err ERR
 
 [ -x "$HELPER_BIN" ] || fail "docker-helper binary not built at $HELPER_BIN (build it before this orchestrator)"
+[ -x "$TUN_PROBE_BIN" ] || fail "tun-command-probe binary not built at $TUN_PROBE_BIN (build it before this orchestrator)"
 [ -f "$PROOF_SRC/packaging/selinux/docker-helper.te" ] || fail "proof-commit checkout missing at $PROOF_SRC (check out the tested proof commit)"
 [ -n "$PROOF_REF" ] || fail "the proof-commit checkout does not record its own ref (write .phase4b-proof-ref)"
 PROOF_REF="$(cat "$PROOF_SRC/.phase4b-proof-ref")"
@@ -52,6 +54,7 @@ vm_init
 log 'transfer the Phase 4B production composition into the guest'
 vm_ssh 'rm -rf /tmp/p5s2-phase4b-launcher && mkdir -p /tmp/p5s2-phase4b-launcher'
 vm_scp "$HELPER_BIN" opc@127.0.0.1:/tmp/p5s2-phase4b-launcher/docker-helper
+vm_scp "$TUN_PROBE_BIN" opc@127.0.0.1:/tmp/p5s2-phase4b-launcher/tun-command-probe
 vm_scp "$PROOF_SRC/packaging/selinux/docker-helper.te" \
   opc@127.0.0.1:/tmp/p5s2-phase4b-launcher/docker-helper.te
 vm_scp "$PROOF_SRC/packaging/selinux/docker-helper.fc" \
@@ -68,6 +71,7 @@ vm_scp "$SCRIPT_DIR/release-2.4-p5s2-phase4b-launcher-tw.sh" \
   echo "proof_commit=$PROOF_REF"
   echo "script_commit=$SCRIPT_COMMIT"
   echo "binary_sha256=$(sha256sum "$HELPER_BIN" | awk '{print $1}')"
+  echo "tun_probe_sha256=$(sha256sum "$TUN_PROBE_BIN" | awk '{print $1}')"
   echo "te_sha256=$(sha256sum "$PROOF_SRC/packaging/selinux/docker-helper.te" | awk '{print $1}')"
   echo "fc_sha256=$(sha256sum "$PROOF_SRC/packaging/selinux/docker-helper.fc" | awk '{print $1}')"
   echo "unit_sha256=$(sha256sum "$PROOF_SRC/packaging/systemd/system/docker-helper-builder.service" | awk '{print $1}')"
