@@ -1811,16 +1811,20 @@ cat "$EVIDENCE_DIR/18-syscall-chronology.txt" >&2
 # NOT_PROVEN and skip the window's remainder; the phase's own gates
 # below still run.
 if [ "${CROSS_WINDOW_DEAD:-0}" = 0 ]; then
+# The cross window owns its own restore baseline: the shipped binary's
+# sha/type/mode captured BEFORE any staging touches the path. The probe
+# windows run AFTER this window, so their PROBE_ORIG_* variables do not
+# exist here (the unbound reference used to kill the guest at the
+# restore check, run 37042643830). Every restore path below verifies
+# against this record.
+CROSS_ORIG_SHA="$(sha256sum /usr/bin/slirp4netns 2>/dev/null | awk '{print $1}')"
+CROSS_ORIG_CTX="$(context_of /usr/bin/slirp4netns)"
+CROSS_ORIG_MODE="$(stat -c '%a %U:%G' /usr/bin/slirp4netns 2>/dev/null)"
 cp -p /usr/bin/slirp4netns /usr/bin/.cross-op-orig \
   || { note "the cross-op window could not back up the flow binary"
        marker "CROSS-OPERATION-ISOLATION=NOT_PROVEN"
        marker "BLOCKER=the cross-op window could not back up the flow binary (see 45-cross-op-isolation.txt)"
        CROSS_NOT_PROVEN=1; CROSS_WINDOW_DEAD=1; }
-  # The cross window owns its own restore baseline: the probe windows run
-  # AFTER this window now, so their PROBE_ORIG_* variables do not exist
-  # yet here (the unbound reference used to kill the guest at the restore
-  # check, run 37042643830).
-  CROSS_ORIG_SHA="$(sha256sum /usr/bin/.cross-op-orig 2>/dev/null | awk '{print $1}')"
   cp "$TRANSFERRED/tun-cross-op-vehicle" /usr/bin/.cross-op-vehicle \
     || { note "the cross-op window could not stage the vehicle"
          marker "CROSS-OPERATION-ISOLATION=NOT_PROVEN"
@@ -1843,14 +1847,33 @@ cp -p /usr/bin/slirp4netns /usr/bin/.cross-op-orig \
   echo "placed vehicle label:  $CROSS_PLACED_CTX"
   if [ "$CROSS_PLACED_SHA" != "$CROSS_EXPECTED_SHA" ] || [ "$CROSS_PLACED_TYPE" != "docker_helper_slirp4netns_exec_t" ]; then
     note "the cross-op vehicle placement failed its byte/label check"
-    rm -f /usr/bin/slirp4netns
-    mv /usr/bin/.cross-op-orig /usr/bin/slirp4netns 2>/dev/null \
+    # rename(2) atomically replaces the path's inode (an executed file
+    # keeps running); a rm-then-rename would open an ENOENT window for a
+    # concurrent exec instead.
+    mv /usr/bin/.cross-op-orig /usr/bin/slirp4netns \
       || note "FAIL: the original binary could not be renamed back into the path"
     restorecon /usr/bin/slirp4netns 2>/dev/null || true
+    # The failure path's restore is verified against the pre-staging
+    # record: byte (sha256), SELinux type, and mode. A restore that did
+    # not reproduce the original leaves a non-composition binary in the
+    # flow path — that is a FAIL, not a silent NOT_PROVEN.
+    CROSS_RESTORED_SHA="$(sha256sum /usr/bin/slirp4netns 2>/dev/null | awk '{print $1}')"
+    CROSS_RESTORED_CTX="$(context_of /usr/bin/slirp4netns)"
+    CROSS_RESTORED_TYPE="$(printf '%s' "$CROSS_RESTORED_CTX" | cut -d: -f3)"
+    CROSS_ORIG_TYPE="$(printf '%s' "$CROSS_ORIG_CTX" | cut -d: -f3)"
+    CROSS_RESTORED_MODE="$(stat -c '%a %U:%G' /usr/bin/slirp4netns 2>/dev/null)"
+    echo "restored sha256: $CROSS_RESTORED_SHA (expected $CROSS_ORIG_SHA)"
+    echo "restored type:   $CROSS_RESTORED_TYPE (expected $CROSS_ORIG_TYPE)"
+    echo "restored mode:   $CROSS_RESTORED_MODE (expected $CROSS_ORIG_MODE)"
     marker "CROSS-OPERATION-ISOLATION=NOT_PROVEN"
     marker "BLOCKER=the cross-op vehicle placement failed (see 45-cross-op-isolation.txt)"
     CROSS_NOT_PROVEN=1
-    CROSS_WINDOW_DEAD=1
+    if [ "$CROSS_RESTORED_SHA" = "$CROSS_ORIG_SHA" ] && [ "$CROSS_RESTORED_TYPE" = "$CROSS_ORIG_TYPE" ] && [ "$CROSS_RESTORED_MODE" = "$CROSS_ORIG_MODE" ]; then
+      CROSS_WINDOW_DEAD=1
+    else
+      marker "BLOCKER=the cross-op placement failure left a non-original binary in the flow path (restore sha/type/mode mismatch)"
+      finish FAIL; exit 0
+    fi
   fi
 fi
   if [ "${CROSS_WINDOW_DEAD:-0}" = 0 ]; then
@@ -1977,19 +2000,28 @@ fi
       || echo "FAIL: the original binary could not be renamed back into the path"
     restorecon /usr/bin/slirp4netns 2>/dev/null || true
     CROSS_RESTORED_SHA="$(sha256sum /usr/bin/slirp4netns 2>/dev/null | awk '{print $1}')"
+    CROSS_RESTORED_CTX="$(context_of /usr/bin/slirp4netns)"
+    CROSS_RESTORED_TYPE="$(printf '%s' "$CROSS_RESTORED_CTX" | cut -d: -f3)"
+    CROSS_ORIG_TYPE="$(printf '%s' "$CROSS_ORIG_CTX" | cut -d: -f3)"
     echo "original sha256: $CROSS_ORIG_SHA"
     echo "restored sha256: $CROSS_RESTORED_SHA"
-    echo "restored ctx:    $(context_of /usr/bin/slirp4netns)"
-    if [ "$CROSS_RESTORED_SHA" = "$CROSS_ORIG_SHA" ]; then
-      echo "PASS: the shipped flow binary is restored byte-identical"
+    echo "original ctx:    $CROSS_ORIG_CTX"
+    echo "restored ctx:    $CROSS_RESTORED_CTX"
+    echo "original mode:   $CROSS_ORIG_MODE"
+    echo "restored mode:   $(stat -c '%a %U:%G' /usr/bin/slirp4netns 2>/dev/null)"
+    # Byte- and TYPE-identical (run 37000093955 proved this system's
+    # restorecon writes unconfined_u as the user part of the restored
+    # label; the exec transition and the entry rule are type-based).
+    if [ "$CROSS_RESTORED_SHA" = "$CROSS_ORIG_SHA" ] && [ "$CROSS_RESTORED_TYPE" = "$CROSS_ORIG_TYPE" ] && [ "$(stat -c '%a %U:%G' /usr/bin/slirp4netns 2>/dev/null)" = "$CROSS_ORIG_MODE" ]; then
+      echo "PASS: the shipped flow binary is restored byte-, type-, and mode-identical (restored full ctx: $CROSS_RESTORED_CTX)"
     else
-      echo "FAIL: the shipped flow binary did NOT restore byte-identical — the composition integrity is broken"
+      echo "FAIL: the shipped flow binary did NOT restore byte/type/mode-identical — the composition integrity is broken"
     fi
   } > "$EVIDENCE_DIR/45-cross-op-isolation.txt" 2>&1
   cat "$EVIDENCE_DIR/45-cross-op-isolation.txt" >&2
   cp /tmp/p4b-work/cross-trace.txt "$EVIDENCE_DIR/47-cross-op-trace-raw.txt" 2>/dev/null || true
   cp /tmp/p4b-work/cross-avc-slice.txt "$EVIDENCE_DIR/48-cross-op-avc-raw.txt" 2>/dev/null || true
-  grep -aq "PASS: the shipped flow binary is restored byte-identical" "$EVIDENCE_DIR/45-cross-op-isolation.txt" \
+  grep -aq "PASS: the shipped flow binary is restored byte-, type-, and mode-identical" "$EVIDENCE_DIR/45-cross-op-isolation.txt" \
     || { marker "BLOCKER=the cross-op window failed to restore the shipped flow binary (see 45-cross-op-isolation.txt)"
          finish FAIL; exit 0; }
   # The lifecycle-noise inventory (RECORDED, NOT GATED — the 4C-36 shape:
@@ -3024,10 +3056,30 @@ else
   PROBE_PLACED_TYPE="$(printf '%s' "$PROBE_PLACED_CTX" | cut -d: -f3)"
   if [ "$PROBE_PLACED_SHA" != "$PROBE_EXPECTED_SHA" ] || [ "$PROBE_PLACED_TYPE" != "docker_helper_slirp4netns_exec_t" ]; then
     note "the probe replacement failed its byte/label check — the negative probe cannot run"
-    mv /usr/bin/.slirp4netns.orig /usr/bin/slirp4netns 2>/dev/null || true
+    # rename(2) atomically replaces the path's inode (an executed file
+    # keeps running); no rm-then-rename gap a concurrent exec could hit
+    # with ENOENT.
+    mv /usr/bin/.slirp4netns.orig /usr/bin/slirp4netns \
+      || note "FAIL: the original binary could not be renamed back into the path"
     restorecon /usr/bin/slirp4netns 2>/dev/null || true
-    marker "SLIRP-TUN-COMMAND-FILTER=NOT_PROBED"
-    finish INCOMPLETE; exit 0
+    # The failure path's restore is verified against the pre-staging
+    # record: byte (sha256), SELinux type, and mode. A restore that did
+    # not reproduce the original leaves a non-composition binary in the
+    # flow path — that is a FAIL, not a silent INCOMPLETE.
+    PROBE_PLACEMENT_RESTORED_SHA="$(sha256sum /usr/bin/slirp4netns 2>/dev/null | awk '{print $1}')"
+    PROBE_PLACEMENT_RESTORED_CTX="$(context_of /usr/bin/slirp4netns)"
+    PROBE_PLACEMENT_RESTORED_TYPE="$(printf '%s' "$PROBE_PLACEMENT_RESTORED_CTX" | cut -d: -f3)"
+    PROBE_ORIG_TYPE="$(printf '%s' "$PROBE_ORIG_CTX" | cut -d: -f3)"
+    PROBE_PLACEMENT_RESTORED_MODE="$(stat -c '%a %U:%G' /usr/bin/slirp4netns 2>/dev/null)"
+    echo "restored sha256: $PROBE_PLACEMENT_RESTORED_SHA (expected $PROBE_ORIG_SHA)"
+    echo "restored type:   $PROBE_PLACEMENT_RESTORED_TYPE (expected $PROBE_ORIG_TYPE)"
+    echo "restored mode:   $PROBE_PLACEMENT_RESTORED_MODE (expected $PROBE_ORIG_MODE)"
+    if [ "$PROBE_PLACEMENT_RESTORED_SHA" = "$PROBE_ORIG_SHA" ] && [ "$PROBE_PLACEMENT_RESTORED_TYPE" = "$PROBE_ORIG_TYPE" ] && [ "$PROBE_PLACEMENT_RESTORED_MODE" = "$PROBE_ORIG_MODE" ]; then
+      marker "SLIRP-TUN-COMMAND-FILTER=NOT_PROBED"
+      finish INCOMPLETE; exit 0
+    fi
+    marker "BLOCKER=the probe placement failure left a non-original binary in the flow path (restore sha/type/mode mismatch)"
+    finish FAIL; exit 0
   fi
   # Re-arm a FRESH tracefs ring for the probe window (the canonical
   # window's ring was harvested and disabled): the syscall tracepoints
