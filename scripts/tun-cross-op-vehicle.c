@@ -138,7 +138,7 @@ int main(int argc, char **argv) {
 	 * invocation below.
 	 */
 	if (argc == 2 && strcmp(argv[1], "--help") == 0) {
-		(void)printf("slirp4netns version 0.4.0\n");
+		(void)printf("slirp4netns version 1.1.2\n");
 		return 0;
 	}
 
