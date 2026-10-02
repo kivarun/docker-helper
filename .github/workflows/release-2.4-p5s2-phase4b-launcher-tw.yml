@@ -32,7 +32,7 @@ jobs:
 
       - name: Check out the tested proof commit for the composition
         env:
-          PHASE4B_PROOF_REF: '7c19aaf57b3ca5fee01800db2e1e2f3a7ce01ebd'
+          PHASE4B_PROOF_REF: 'd678b58d614768a0bc8985af686347cd338d435b'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
@@ -47,6 +47,9 @@ jobs:
       - name: Build the production binary from the tested proof commit
         run: (cd proof-src && go build -o docker-helper .)
 
+      - name: Build the 4C-34 negative-command probe (static, from the script commit)
+        run: cc -O2 -static -o tun-command-probe scripts/tun-command-probe.c
+
       - name: Install QEMU and cloud-image tools
         run: |
           sudo apt-get update -y
@@ -57,6 +60,7 @@ jobs:
           UAT_REPO_DIR="${{ github.workspace }}" \
           PHASE4B_PROOF_SRC="${{ github.workspace }}/proof-src" \
           PHASE4B_HELPER_BIN="${{ github.workspace }}/proof-src/docker-helper" \
+          PHASE4B_TUN_PROBE_BIN="${{ github.workspace }}/tun-command-probe" \
           PHASE4B_EVIDENCE_DIR="$RUNNER_TEMP/release-2.4-p5s2-phase4b-launcher-evidence" \
             scripts/release-2.4-p5s2-phase4b-launcher-tw-vm.sh
 
