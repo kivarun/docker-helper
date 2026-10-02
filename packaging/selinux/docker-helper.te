@@ -1695,8 +1695,8 @@ allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:file read;
 allow docker_helper_slirp4netns_t nsfs_t:file { read open };
 
 # The helper's TUN device-node access (P5-S2 Phase 4C-31 + 4C-32 +
-# 4C-33): the FIRST boundary of the helper's OWN TUN staircase — a NEW
-# helper-domain rule,
+# 4C-33 + 4C-34): the FIRST boundary of the helper's OWN TUN staircase
+# — a NEW helper-domain rule,
 # independent of the RootlessKit rule above (the two domains own
 # independent TUN staircases; no shared "both TUN users get these
 # permissions" surface).
@@ -1758,20 +1758,37 @@ allow docker_helper_slirp4netns_t nsfs_t:file { read open };
 # cap_userns AVC of any kind: the SELinux file-ioctl check denied
 # BEFORE any TUN driver or capability check ran. The grant is the
 # GENERIC ioctl permission bit, widened IN PLACE — the ordinary member
-# of the RootlessKit rule's evidenced chain — deliberately NOT paired
-# with an allowxperm yet: the helper holds NO allowxperm rule for this
-# tuple, so the exact command whitelist (TUNSETIFF 0x54ca) stays
-# CLOSED and is the NEXT staircase owner, granted only when this
-# phase's canonical run proves the xperm-stage denial causally (the
-# tracepoints carry fd/cmd/arg/ret; the avc/selinux_audited masks and,
-# where auditd delivers it, the symbolic AVC's ioctlcmd= field carry
-# the decision; the loaded-policy preflight proves the granted
-# ordinary union and the empty xperm bitmap, so the generic-ioctl and
-# command-level decision stages are distinguishable by evidence, not
-# assumed). The final composition pairs the ordinary bit with the
-# exact evidenced allowxperm — the RootlessKit rule's two-line unit —
-# once the command boundary's own evidence exists; this phase's
-# bitmap-less intermediate is that staircase step.
+# of the RootlessKit rule's evidenced chain. The 4C-33 canonical run
+# ALSO proved the intermediate's exact posture: with the ordinary bit
+# granted and NO allowxperm bitmap for the tuple, the TUNSETIFF ioctl
+# was NOT command-denied — the syscall passed the SELinux file-ioctl
+# stage entirely and entered the TUN driver (the same run's tun_socket
+# relabel denial fired INSIDE the same sys_ioctl window). A bitmap-less
+# ordinary ioctl bit is live-proven command-unrestricted at the SELinux
+# layer, so the exact command whitelist is REQUIRED authority, not an
+# optimization.
+#
+# The COMMAND WHITELIST (P5-S2 Phase 4C-34): the helper's attach path's
+# one evidenced TUN command is TUNSETIFF — recorded numerically by the
+# 4C-32 run's sys_enter/exit_ioctl tracepoints (fd 6, cmd 0x400454ca =
+# TUNSETIFF's full _IOC encoding, extperm-normalized 0x54ca) and re-proven
+# in the 4C-33 run. The allowxperm rule below whitelists EXACTLY 0x54ca:
+# NOT the RootlessKit set { 0x54ca 0x54cb } — TUNSETPERSIST (0x54cb) is
+# the creator's persistence command (the rootlesskit child's tap_add_ioctl
+# path); upstream slirp4netns's existing-TAP attach issues open + TUNSETIFF
+# ONLY (no persistence manipulation — the tap's persistence was set by its
+# creator), so no second command is live-proven for this domain. Every
+# other driver-0x54 command (TUNSETPERSIST/TUNSETOWNER/TUNSETGROUP/
+# TUNSETLINK/TUNGETFEATURES/TUNSETOFFLOAD/TUNSETQUEUE and the rest) is
+# decided by the extended-permission bitmap and stays closed, each
+# requiring its own live evidence; NO range, NO complement, NO third
+# value. The EFFECTIVE loaded-policy xperm union for this tuple must be
+# exactly { 0x54ca }: base-policy and attribute-derived contributions
+# count toward the verdict, and the enforcing harness proves the union
+# with a sesearch allowxperm inventory plus a live negative-command probe
+# (a real non-whitelisted TUNSETIFF-sibling ioctl must be xperm-denied
+# with its ioctlcmd= record) — an extra effective command there is a
+# STOP, not a silent accept.
 #
 # WHY NOT tun_socket and NOT net_admin: the helper is NOT creating the
 # TAP. RootlessKit already created tap0 (the new-device creation path
@@ -1804,12 +1821,14 @@ allow docker_helper_slirp4netns_t nsfs_t:file { read open };
 # (Release GO stays closed) owns that proof; this device-node rule does
 # not claim it.
 #
-# Deliberately NOT granted: any allowxperm (the exact command whitelist
-# is its own phase), tun_socket
+# Deliberately NOT granted: 0x54cb (TUNSETPERSIST — the creator's
+# command, not the attach path's) and every other ioctl command, any
+# further chr_file permission, tun_socket
 # create/attach_queue/relabelfrom/relabelto, plain capability
 # net_admin/net_raw, cap_userns net_admin, and
 # getattr/append/lock/create/setattr (none evidenced for the helper).
 allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file { read write open ioctl };
+allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl 0x54ca;
 
 # --- docker_helper_newuidmap_t: the rootlesskit UID-map helper domain (P5-S2) ---
 #
