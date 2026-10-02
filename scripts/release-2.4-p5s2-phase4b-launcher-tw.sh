@@ -1842,21 +1842,35 @@ fi
 # ---- boundary — denied { create } tclass=tun_socket self->self — must
 # ---- be GONE, and the journal must no longer show the TUNSETIFF EACCES
 # ---- shape: TUNSETIFF completes past security_tun_dev_create(). The
-# ---- next boundary (per the iproute2 tap_add_ioctl() sequence,
-# ---- predicted TUNSETPERSIST 0x54cb) is NOT granted and is recorded by
-# ---- the 14-gate's xperm-denial inventory and the generic
+# ---- gate owns the ROOTLESSKIT subject's granted create shape only
+# ---- (the 4C-33 correction, mirroring the 4C-30 TUN-gate correction:
+# ---- another domain's tun_socket denial — notably the slirp helper's
+# ---- attach-side relabel surface — is its own staircase's evidence,
+# ---- recorded below and owned by the helper TUN gates, not failed
+# ---- here). The next boundary (per the iproute2 tap_add_ioctl()
+# ---- sequence, predicted TUNSETPERSIST 0x54cb) is NOT granted and is
+# ---- recorded by the 14-gate's xperm-denial inventory and the generic
 # ---- DOWNSTREAM-BOUNDARY mechanism; no route/nlmsg/attach authority is
 # ---- pre-granted here.
 TS_CREATE_GONE_OK=1
 {
-  echo "=== tun_socket AVCs of the window (the 4C-15 create boundary must be absent) ==="
+  echo "=== tun_socket AVCs of the window (raw; the ROOTLESSKIT create regression must be absent) ==="
   TS_AVC_WINDOW="$(grep -a 'tclass=tun_socket' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null || true)"
   printf '%s\n' "${TS_AVC_WINDOW:-(none — no tun_socket denial in the window)}"
+  echo "--- the ROOTLESSKIT subject's tun_socket create denials (the 4C-15/4C-16 boundary shape — must be zero):"
+  TS_RK_CREATE="$(printf '%s\n' "$TS_AVC_WINDOW" | grep -a 'scontext=system_u:system_r:docker_helper_rootlesskit_t' | grep -a 'denied  *{ create }' || true)"
+  printf '%s\n' "${TS_RK_CREATE:-(none — the 4C-16 tun_socket create grant held)}"
+  echo "--- the ROOTLESSKIT subject's OTHER tun_socket denials (its staircase's own next-boundary evidence; recorded, not failed):"
+  TS_RK_OTHER="$(printf '%s\n' "$TS_AVC_WINDOW" | grep -a 'scontext=system_u:system_r:docker_helper_rootlesskit_t' | grep -av 'denied  *{ create }' || true)"
+  printf '%s\n' "${TS_RK_OTHER:-(none)}"
+  echo "--- OTHER subjects' tun_socket denials (their independent tun_socket staircases — recorded, not failed; the slirp helper's attach-side relabel surface is owned by the helper TUN gates below):"
+  TS_OTHER_SUBJECT="$(printf '%s\n' "$TS_AVC_WINDOW" | grep -av 'scontext=system_u:system_r:docker_helper_rootlesskit_t' || true)"
+  printf '%s\n' "${TS_OTHER_SUBJECT:-(none — no other-subject tun_socket denial appeared)}"
   echo "--- the manager journal's TUNSETIFF EACCES shape (must be gone — TUNSETIFF completes past security_tun_dev_create()):"
   MGR_TUNSETIFF_EACCES="$(grep -a 'ioctl(TUNSETIFF): Permission denied' "$EVIDENCE_DIR/07-manager-diag.txt" 2>/dev/null || true)"
   printf '%s\n' "${MGR_TUNSETIFF_EACCES:-(none — the TUNSETIFF SELinux-hook EACCES is gone)}"
-  if [ -n "$TS_AVC_WINDOW" ]; then
-    echo "GATE: a tun_socket denial appeared in the window — the 4C-16 create grant did not take effect"
+  if [ -n "$TS_RK_CREATE" ]; then
+    echo "GATE: the ROOTLESSKIT subject's tun_socket create denial reappeared — the 4C-16 create grant did not take effect"
     TS_CREATE_GONE_OK=0
   fi
   if [ -n "$MGR_TUNSETIFF_EACCES" ]; then
@@ -2363,7 +2377,7 @@ SL_TUN_IOCTL_GONE_OK=1
   echo "--- ALL other slirp4netns_t tun_tap_device_t AVCs (further ungranted ordinary perms — next-boundary evidence; recorded, not failed):"
   SL_TUN_IOCTL_OTHER_TUN="$(grep -a 'tcontext=system_u:object_r:tun_tap_device_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' | grep -avE 'denied  *\{ [^}]*\b(read|write|open)\b' | grep -av 'denied  *{ ioctl }' || true)"
   printf '%s\n' "${SL_TUN_IOCTL_OTHER_TUN:-(none — no further helper TUN permission was attempted)}"
-  echo "--- the helper's tun_socket + cap_userns AVCs of the window (MUST be none — the deeper TUN-driver hooks and capability checks were not reached):"
+  echo "--- the helper's tun_socket + cap_userns AVCs of the window (the DEEPER TUN-attach surface: a tun_socket relabel/attach shape is the existing-TAP attach's socket-relabel mediation — next-boundary evidence, recorded, not failed; a cap_userns shape is the capability boundary — recorded):"
   SL_TUN_IOCTL_DEEPER_AVC="$(grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -aE 'tclass=(tun_socket|cap_userns)' || true)"
   printf '%s\n' "${SL_TUN_IOCTL_DEEPER_AVC:-(none — no helper tun_socket/cap_userns AVC appeared)}"
   echo "--- the helper's cap_capable FAILED checks in the trace ring (ret<0 — a reached driver-side capability denial; expected none):"
@@ -2390,6 +2404,9 @@ if [ "$SL_TUN_IOCTL_GONE_OK" = 1 ]; then
   SL_TUN_IOCTL_NEXT_FIRST="$(printf '%s\n' "$SL_TUN_IOCTL_XPERM_AVC" | head -1 || true)"
   if [ -z "$SL_TUN_IOCTL_NEXT_FIRST" ]; then
     SL_TUN_IOCTL_NEXT_FIRST="$(printf '%s\n' "$SL_TUN_IOCTL_OTHER_TUN" | head -1 || true)"
+  fi
+  if [ -z "$SL_TUN_IOCTL_NEXT_FIRST" ]; then
+    SL_TUN_IOCTL_NEXT_FIRST="$(printf '%s\n' "$SL_TUN_IOCTL_DEEPER_AVC" | head -1 || true)"
   fi
   SL_TUN_IOCTL_NEXT_PERMS="$(printf '%s\n' "$SL_TUN_IOCTL_NEXT_FIRST" | sed -n 's/.*denied  *{ \([^}]*\) }.*/\1/p' || true)"
   SL_TUN_IOCTL_NEXT_SUMMARY="$(printf '%s\n' "$SL_TUN_IOCTL_NEXT_FIRST" | sed -n 's/.*scontext=\([^ ]*\) tcontext=\([^ ]*\) tclass=\([a-z_]*\).*/scontext=\1 tcontext=\2 tclass=\3/p' || true)"
