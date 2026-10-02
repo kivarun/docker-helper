@@ -1403,6 +1403,10 @@ TRACE_AVC_ENABLED=0
 if [ -d "$TRACING/events/capability/cap_capable" ]; then
   echo 0 > "$TRACING/tracing_on" 2>/dev/null || true
   echo > "$TRACING/trace" 2>/dev/null || true
+  # 4C-36: a generous ring — the manager's retained-entry poll denials
+  # (an alive helper is now the expected shape) run at ~100 events/s and
+  # must not eat the window's own syscall/AVC records.
+  echo 16384 > "$TRACING/buffer_size_kb" 2>/dev/null || true
   echo 1 > "$TRACING/events/capability/cap_capable/enable" 2>/dev/null || true \
     && TRACE_ENABLED=1
   echo 1 > "$TRACING/events/syscalls/sys_enter_openat/enable" 2>/dev/null || true
@@ -2545,13 +2549,31 @@ if [ ! -e "$TRANSFERRED/tun-command-probe" ]; then
   : > "$EVIDENCE_DIR/41-slirp-tun-command-filter.txt"
   marker "SLIRP-TUN-COMMAND-FILTER=NOT_PROBED"
 else
-  cp -p /usr/bin/slirp4netns /tmp/p4b-work/slirp4netns.orig \
+  # Stage INSIDE /usr/bin and swap by rename: the 4C-36 runs proved the
+  # canonical flow's helper can now STAY ALIVE (the attach path is
+  # SELinux-clean), and an alive helper holds the /usr/bin/slirp4netns
+  # inode open — a plain `cp` onto the file fails with ETXTBSY and the
+  # `|| true` then silently left the REAL binary in place, so the probe
+  # window ran a real slirp4netns (the 36998362250 diagnosis). rename(2)
+  # over an executed file is allowed; the replaced inode keeps running.
+  cp -p /usr/bin/slirp4netns /usr/bin/.slirp4netns.orig \
     || { note "the probe window could not back up /usr/bin/slirp4netns"; finish INCOMPLETE; exit 0; }
-  cp "$TRANSFERRED/tun-command-probe" /usr/bin/slirp4netns \
-    && restorecon /usr/bin/slirp4netns 2>/dev/null || true
+  cp "$TRANSFERRED/tun-command-probe" /usr/bin/.slirp4netns.probe \
+    || { note "the probe window could not stage the probe binary"; finish INCOMPLETE; exit 0; }
+  mv /usr/bin/.slirp4netns.probe /usr/bin/slirp4netns \
+    || { note "the probe window could not rename the probe binary into place"; finish INCOMPLETE; exit 0; }
+  restorecon /usr/bin/slirp4netns 2>/dev/null || true
+  PROBE_PLACED_SHA="$(sha256sum /usr/bin/slirp4netns 2>/dev/null | awk '{print $1}')"
   PROBE_PLACED_CTX="$(context_of /usr/bin/slirp4netns)"
-  if [ "$PROBE_PLACED_CTX" != "system_u:object_r:docker_helper_slirp4netns_exec_t:s0" ]; then
-    note "the probe replacement's label is $PROBE_PLACED_CTX (expected the shipped exec type)"
+  PROBE_EXPECTED_SHA="$(sha256sum "$TRANSFERRED/tun-command-probe" 2>/dev/null | awk '{print $1}')"
+  echo "placed probe sha256: $PROBE_PLACED_SHA (expected $PROBE_EXPECTED_SHA)"
+  echo "placed probe label:  $PROBE_PLACED_CTX"
+  if [ "$PROBE_PLACED_SHA" != "$PROBE_EXPECTED_SHA" ] || [ "$PROBE_PLACED_CTX" != "system_u:object_r:docker_helper_slirp4netns_exec_t:s0" ]; then
+    note "the probe replacement failed its byte/label check — the negative probe cannot run"
+    mv /usr/bin/.slirp4netns.orig /usr/bin/slirp4netns 2>/dev/null || true
+    restorecon /usr/bin/slirp4netns 2>/dev/null || true
+    marker "SLIRP-TUN-COMMAND-FILTER=NOT_PROBED"
+    finish INCOMPLETE; exit 0
   fi
   # Re-arm a FRESH tracefs ring for the probe window (the canonical
   # window's ring was harvested and disabled): the syscall tracepoints
@@ -2560,6 +2582,7 @@ else
   if [ "$TRACE_ENABLED" = 1 ]; then
     echo 0 > "$TRACING/tracing_on" 2>/dev/null || true
     echo > "$TRACING/trace" 2>/dev/null || true
+    echo 16384 > "$TRACING/buffer_size_kb" 2>/dev/null || true
     echo 1 > "$TRACING/events/capability/cap_capable/enable" 2>/dev/null || true
     echo 1 > "$TRACING/events/syscalls/sys_enter_openat/enable" 2>/dev/null || true
     echo 1 > "$TRACING/events/syscalls/sys_exit_openat/enable" 2>/dev/null || true
@@ -2645,8 +2668,13 @@ else
     echo "=== the flow's death shape in the probe window (informational) ==="
     journalctl -u "$UNIT" --since "@$PROBE_T0" --no-pager 2>/dev/null | tail -6 || true
     echo "=== restore check ==="
-    cp -p /tmp/p4b-work/slirp4netns.orig /usr/bin/slirp4netns \
-      && restorecon /usr/bin/slirp4netns 2>/dev/null || true
+    # Same rename(2) swap: an alive helper can hold the path's inode open,
+    # so the restore must rename, not write onto the file.
+    mv /usr/bin/slirp4netns /usr/bin/.slirp4netns.probe-installed \
+      || echo "FAIL: the probe binary could not be renamed out of the path"
+    mv /usr/bin/.slirp4netns.orig /usr/bin/slirp4netns \
+      || echo "FAIL: the original binary could not be renamed back into the path"
+    restorecon /usr/bin/slirp4netns 2>/dev/null || true
     PROBE_RESTORED_SHA="$(sha256sum /usr/bin/slirp4netns 2>/dev/null | awk '{print $1}')"
     PROBE_RESTORED_CTX="$(context_of /usr/bin/slirp4netns)"
     echo "original sha256: $PROBE_ORIG_SHA"
