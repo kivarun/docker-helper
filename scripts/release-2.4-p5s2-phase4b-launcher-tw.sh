@@ -1765,7 +1765,8 @@ if [ "$CROSS_PIDS_OK" != 1 ]; then
   cp /tmp/p4b-work/cross-a-inventory.txt "$EVIDENCE_DIR/45-cross-op-isolation.txt" 2>/dev/null || true
   marker "CROSS-OPERATION-ISOLATION=NOT_PROVEN"
   marker "BLOCKER=the cross-op proof could not bind a live operation-A identity (see 45-cross-op-isolation.txt)"
-  finish INCOMPLETE; exit 0
+  CROSS_NOT_PROVEN=1
+  CROSS_WINDOW_DEAD=1
 fi
 
 # ---- the provisioning window's own audit/journal slices, harvested
@@ -1806,22 +1807,34 @@ cat "$EVIDENCE_DIR/18-syscall-chronology.txt" >&2
 # Stage the vehicle inside /usr/bin and append the target line, then
 # swap by rename (an alive helper holds the path's inode open). The
 # helper reads the targets from its OWN installed binary via the
-# existing entry-file read authority.
+# existing entry-file read authority. The staging's own failures record
+# NOT_PROVEN and skip the window's remainder; the phase's own gates
+# below still run.
+if [ "${CROSS_WINDOW_DEAD:-0}" = 0 ]; then
 cp -p /usr/bin/slirp4netns /usr/bin/.cross-op-orig \
-    || { note "the cross-op window could not back up the flow binary"; finish INCOMPLETE; exit 0; }
+  || { note "the cross-op window could not back up the flow binary"
+       marker "CROSS-OPERATION-ISOLATION=NOT_PROVEN"
+       marker "BLOCKER=the cross-op window could not back up the flow binary (see 45-cross-op-isolation.txt)"
+       CROSS_NOT_PROVEN=1; CROSS_WINDOW_DEAD=1; }
   # The cross window owns its own restore baseline: the probe windows run
   # AFTER this window now, so their PROBE_ORIG_* variables do not exist
   # yet here (the unbound reference used to kill the guest at the restore
   # check, run 37042643830).
   CROSS_ORIG_SHA="$(sha256sum /usr/bin/.cross-op-orig 2>/dev/null | awk '{print $1}')"
   cp "$TRANSFERRED/tun-cross-op-vehicle" /usr/bin/.cross-op-vehicle \
-    || { note "the cross-op window could not stage the vehicle"; finish INCOMPLETE; exit 0; }
+    || { note "the cross-op window could not stage the vehicle"
+         marker "CROSS-OPERATION-ISOLATION=NOT_PROVEN"
+         marker "BLOCKER=the cross-op window could not stage the vehicle (see 45-cross-op-isolation.txt)"
+         CROSS_NOT_PROVEN=1; CROSS_WINDOW_DEAD=1; }
   printf 'CROSS-OP-TARGETS %s\n' "$CROSS_A_PID" >> /usr/bin/.cross-op-vehicle
   # The expected sha is the STAGED inode's (with the appended target line
   # — the 4C-37 vehicle reads its targets from its own binary tail).
   CROSS_EXPECTED_SHA="$(sha256sum /usr/bin/.cross-op-vehicle 2>/dev/null | awk '{print $1}')"
   mv /usr/bin/.cross-op-vehicle /usr/bin/slirp4netns \
-    || { note "the cross-op window could not rename the vehicle into place"; finish INCOMPLETE; exit 0; }
+    || { note "the cross-op window could not rename the vehicle into place"
+         marker "CROSS-OPERATION-ISOLATION=NOT_PROVEN"
+         marker "BLOCKER=the cross-op window could not rename the vehicle into place (see 45-cross-op-isolation.txt)"
+         CROSS_NOT_PROVEN=1; CROSS_WINDOW_DEAD=1; }
   restorecon /usr/bin/slirp4netns 2>/dev/null || true
   CROSS_PLACED_SHA="$(sha256sum /usr/bin/slirp4netns 2>/dev/null | awk '{print $1}')"
   CROSS_PLACED_CTX="$(context_of /usr/bin/slirp4netns)"
@@ -1830,12 +1843,17 @@ cp -p /usr/bin/slirp4netns /usr/bin/.cross-op-orig \
   echo "placed vehicle label:  $CROSS_PLACED_CTX"
   if [ "$CROSS_PLACED_SHA" != "$CROSS_EXPECTED_SHA" ] || [ "$CROSS_PLACED_TYPE" != "docker_helper_slirp4netns_exec_t" ]; then
     note "the cross-op vehicle placement failed its byte/label check"
-    mv /usr/bin/.cross-op-vehicle /usr/bin/slirp4netns 2>/dev/null || true
+    rm -f /usr/bin/slirp4netns
+    mv /usr/bin/.cross-op-orig /usr/bin/slirp4netns 2>/dev/null \
+      || note "FAIL: the original binary could not be renamed back into the path"
     restorecon /usr/bin/slirp4netns 2>/dev/null || true
     marker "CROSS-OPERATION-ISOLATION=NOT_PROVEN"
     marker "BLOCKER=the cross-op vehicle placement failed (see 45-cross-op-isolation.txt)"
-    finish INCOMPLETE; exit 0
+    CROSS_NOT_PROVEN=1
+    CROSS_WINDOW_DEAD=1
   fi
+fi
+  if [ "${CROSS_WINDOW_DEAD:-0}" = 0 ]; then
   # Re-arm a FRESH trace ring for the cross-op window: the syscall
   # tracepoints (openat/setns/ioctl enter/exit with the numeric results)
   # + capability/cap_capable + avc/selinux_audited — the vehicle's every
@@ -2089,7 +2107,8 @@ cp -p /usr/bin/slirp4netns /usr/bin/.cross-op-orig \
   else
     marker "BLOCKER=the 4C-37 cross-operation isolation proof did not hold (see 45-cross-op-isolation.txt, 45-cross-op-verdict.txt)"
     marker "CROSS-OPERATION-ISOLATION=NOT_PROVEN"
-    finish INCOMPLETE; exit 0
+    CROSS_NOT_PROVEN=1
+  fi
   fi
 
 
@@ -3740,6 +3759,13 @@ if [ "$I9_OK" = 1 ]; then
   # The downstream payload AVC (if any) is the recorded boundary of the
   # next step, not a Phase 4B failure: the G28 ledger is deliberately not
   # transferred here.
+  # The unstarted cross-op proof makes the phase INCOMPLETE even when
+  # every gate of the phase itself passed: the phase's own gates and the
+  # cross-op proof are both mandatory for a PASS.
+  if [ "${CROSS_NOT_PROVEN:-0}" = 1 ]; then
+    finish INCOMPLETE
+    exit 0
+  fi
   finish PASS; exit 0
 fi
 if [ "$I9_OK" = 2 ]; then
