@@ -1694,8 +1694,8 @@ allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:file read;
 # members; getattr/ioctl/lock are NOT evidenced and stay out.
 allow docker_helper_slirp4netns_t nsfs_t:file { read open };
 
-# The helper's TUN device-node access (P5-S2 Phase 4C-31): the FIRST
-# boundary of the helper's OWN TUN staircase — a NEW helper-domain rule,
+# The helper's TUN device-node access (P5-S2 Phase 4C-31 + 4C-32): the
+# FIRST boundary of the helper's OWN TUN staircase — a NEW helper-domain rule,
 # independent of the RootlessKit rule above (the two domains own
 # independent TUN staircases; no shared "both TUN users get these
 # permissions" surface).
@@ -1711,23 +1711,40 @@ allow docker_helper_slirp4netns_t nsfs_t:file { read open };
 # checks cap=21 ret=0). The avc:selinux_audited tracepoint decode
 # (34-avc-trace-decode.txt of that run) independently confirms the same
 # decision: chr_file denied mask 0x6 decoded { read write } by live
-# calibration. Without this grant the helper's open_tap() dies at the
-# device open and the flow never reaches TUNSETIFF.
+# calibration. Without the 4C-31 grant the helper's open_tap() dies at
+# the device open and the flow never reaches the second open hook.
 #
-# WHY EXACTLY { read write } AND NOT open: the 4C-30 boundary's AVC
-# names exactly the read+write vector — selinux_inode_permission()'s
-# check of the O_RDWR open — and the RootlessKit staircase (4C-10/4C-11)
-# proved that the SAME open(O_RDWR) syscall later exposes a SECOND hook,
-# selinux_file_open() -> open_file_to_av()'s separate `open` permission,
-# as its own boundary. Do NOT collapse the two phases: open stays
-# ungranted until the helper's own run materializes it live.
+# The SECOND hook (P5-S2 Phase 4C-32): the canonical 4C-31 rerun
+# (36895617204) stopped at the next boundary — audit record 2820:
+# denied { open } for pid=3230 comm="slirp4netns" path="/dev/net/tun"
+# scontext=system_u:system_r:docker_helper_slirp4netns_t:s0:c1
+# tcontext=system_u:object_r:tun_tap_device_t:s0 tclass=chr_file
+# permissive=0, issued on the SAME open(O_RDWR) after the FULL
+# namespace-join chain completed again (openat("/proc/3212/ns/net",
+# O_RDONLY), openat("/proc/3212/ns/user", O_RDONLY),
+# setns(CLONE_NEWUSER) exit 0, setns(CLONE_NEWNET) exit 0 — every
+# syscall exit recorded by the armed sys_enter/exit tracepoints). The
+# avc:selinux_audited decode (34-avc-trace-decode.txt of that run)
+# independently confirms the same decision: requested=0x40006
+# denied=0x40000 audited=0x40000 result=-13 -> { open }. This is
+# selinux_file_open() -> open_file_to_av()'s separate `open`
+# permission — the SECOND hook of the SAME open(O_RDWR) syscall, after
+# selinux_inode_permission() passed the { read write } stage — exactly
+# the hook ordering the RootlessKit staircase proved for comm="ip" in
+# 4C-10/4C-11. The grant is therefore widened IN PLACE (no parallel
+# open rule): read+write+open are the three evidenced members of the
+# one open(O_RDWR) chain, the same three members the RootlessKit rule
+# carries.
 #
-# WHY NOT ioctl/xperm: the helper has not successfully opened the device
-# and has not reached TUNSETIFF; a helper chr_file ioctl bit — with or
-# without an allowxperm 0x54ca — is a pre-grant of an unproven boundary.
-# If the next boundary is an ioctl denial, it owns its own phase with an
-# exact allowxperm (never an unrestricted ordinary bit without a
-# bitmap).
+# WHY NOT ioctl/xperm: the helper's first chr_file ioctl — the
+# TUNSETIFF of the existing-TAP attach path — is NOT evidenced for this
+# domain. A helper chr_file ioctl bit — with or without an allowxperm
+# 0x54ca — is a pre-grant of an unproven boundary. If the next boundary
+# is an ioctl denial, it owns its own phase with an exact allowxperm
+# (never an unrestricted ordinary bit without a bitmap); the armed
+# sys_enter_ioctl/sys_exit_ioctl tracepoints (fd/cmd/arg/ret) record
+# any reached command numerically so the boundary is decided on
+# evidence, not assumed from the RootlessKit staircase.
 #
 # WHY NOT tun_socket and NOT net_admin: the helper is NOT creating the
 # TAP. RootlessKit already created tap0 (the new-device creation path
@@ -1750,7 +1767,7 @@ allow docker_helper_slirp4netns_t nsfs_t:file { read open };
 # SCOPE — RECORD ACCURATELY: tun_tap_device_t:s0 is a GLOBAL distro
 # device-node label with no per-operation MCS category on the node, so
 # this allow is NOT operation-scoped and does NOT by itself isolate the
-# c1 helper from a c2 helper: both categories read/write the same
+# c1 helper from a c2 helper: both categories read/write/open the same
 # globally labelled node equally. Where the existing-TUN attach path
 # provides per-operation discrimination, it comes from the target
 # network namespace acquisition (the categorized rootlesskit_t proc
@@ -1760,13 +1777,11 @@ allow docker_helper_slirp4netns_t nsfs_t:file { read open };
 # (Release GO stays closed) owns that proof; this device-node rule does
 # not claim it.
 #
-# Deliberately NOT granted: open (the second hook of the same
-# open(O_RDWR), per the RootlessKit staircase's observed hook ordering —
-# its own phase), ioctl and any allowxperm, tun_socket
+# Deliberately NOT granted: ioctl and any allowxperm, tun_socket
 # create/attach_queue/relabelfrom/relabelto, plain capability
 # net_admin/net_raw, cap_userns net_admin, and
 # getattr/append/lock/create/setattr (none evidenced for the helper).
-allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file { read write };
+allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file { read write open };
 
 # --- docker_helper_newuidmap_t: the rootlesskit UID-map helper domain (P5-S2) ---
 #
