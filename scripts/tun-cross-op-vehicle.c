@@ -34,11 +34,14 @@
 //     attaches to its own freshly created tap0 (the full production
 //     chain must return 0 — the same-operation baseline INSIDE this very
 //     run). The attack leg repeats the SAME production path against
-//     operation A's rootlesskit netns-owner pid; step by step; the FIRST
-//     failing syscall (SELinux EACCES/EPERM or any other real boundary
-//     errno) STOPS the leg and is reported as BOUNDARY. An ENOENT on the
-//     proc path is NOT a boundary — it means the target identity was
-//     stale (reported as IDENTITY-FAIL). The A→B mirror direction is NOT
+//     operation A's attached helper — the LIVE member of operation A's
+//     netns (the flow's own holder dies seconds after its attach; the
+//     helper holds the netns and the attached tap0 until the flow's
+//     teardown); step by step; the FIRST failing syscall (SELinux
+//     EACCES/EPERM or any other real boundary errno) STOPS the leg and
+//     is reported as BOUNDARY. An ENOENT on the proc path is NOT a
+//     boundary — it means the target identity was stale (reported as
+//     IDENTITY-FAIL). The A→B mirror direction is NOT
 //     runnable in this window: a third concurrent operation exceeds the
 //     product's ceiling of 2 — the single live cross direction plus the
 //     symmetric record set is the phase's scope.
