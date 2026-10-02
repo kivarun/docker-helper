@@ -3152,6 +3152,8 @@ else
   # swap by rename (an alive helper holds the path's inode open). The
   # helper reads the targets from its OWN installed binary via the
   # existing entry-file read authority.
+  cp -p /usr/bin/slirp4netns /usr/bin/.cross-op-orig \
+    || { note "the cross-op window could not back up the flow binary"; finish INCOMPLETE; exit 0; }
   cp "$TRANSFERRED/tun-cross-op-vehicle" /usr/bin/.cross-op-vehicle \
     || { note "the cross-op window could not stage the vehicle"; finish INCOMPLETE; exit 0; }
   printf 'CROSS-OP-TARGETS %s\n' "$CROSS_A_PID" >> /usr/bin/.cross-op-vehicle
@@ -3261,7 +3263,7 @@ else
     echo "=== restore check ==="
     mv /usr/bin/slirp4netns /usr/bin/.cross-op-vehicle-installed \
       || echo "FAIL: the vehicle could not be renamed out of the path"
-    mv /usr/bin/.slirp4netns.probe-installed /usr/bin/slirp4netns \
+    mv /usr/bin/.cross-op-orig /usr/bin/slirp4netns \
       || echo "FAIL: the original binary could not be renamed back into the path"
     restorecon /usr/bin/slirp4netns 2>/dev/null || true
     CROSS_RESTORED_SHA="$(sha256sum /usr/bin/slirp4netns 2>/dev/null | awk '{print $1}')"

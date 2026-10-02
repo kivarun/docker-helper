@@ -215,5 +215,13 @@ int main(int argc, char **argv) {
 		return 9;
 	}
 	(void)write(2, "VEHICLE-VERDICT CROSS-OPERATION-ISOLATION=HOLDS\n", 47);
-	return 0;
+	/* The rootlesskit parent only logs the helper's captured stderr
+	 * when the helper invocation FAILS (the "command failed" path),
+	 * so the HOLDS verdict leaves the flow with a NON-ZERO exit (30):
+	 * the journal entry is the verdict's delivery channel. The
+	 * version-check invocation has already passed; this exit only
+	 * aborts the ready-fd wait, which then converges and frees the
+	 * slot.
+	 */
+	return 30;
 }
