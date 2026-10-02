@@ -3328,7 +3328,6 @@ else
   restorecon /usr/bin/slirp4netns 2>/dev/null || true
   CROSS_PLACED_SHA="$(sha256sum /usr/bin/slirp4netns 2>/dev/null | awk '{print $1}')"
   CROSS_PLACED_CTX="$(context_of /usr/bin/slirp4netns)"
-  CROSS_EXPECTED_SHA="$(sha256sum "$TRANSFERRED/tun-cross-op-vehicle" 2>/dev/null | awk '{print $1}')"
   CROSS_PLACED_TYPE="$(printf '%s' "$CROSS_PLACED_CTX" | cut -d: -f3)"
   echo "placed vehicle sha256: $CROSS_PLACED_SHA (expected $CROSS_EXPECTED_SHA)"
   echo "placed vehicle label:  $CROSS_PLACED_CTX"
