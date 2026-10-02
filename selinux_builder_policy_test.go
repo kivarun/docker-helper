@@ -778,7 +778,7 @@ func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
 	// create_socket_perms-style macro, and no other subject holds a
 	// tun_socket allow.
 	for _, want := range []string{
-		"class tun_socket { create };",
+		"class tun_socket { create relabelfrom };",
 		"allow docker_helper_rootlesskit_t self:tun_socket create;",
 	} {
 		if !strings.Contains(policy, want) {
@@ -798,16 +798,24 @@ func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
 			case strings.Contains(trimmed, "create_socket_perms"):
 				violations = append(violations, "the distro socket macros are banned (create_socket_perms expands far beyond the evidenced new-device creation boundary): "+trimmed)
 			case strings.Contains(trimmed, "class tun_socket "):
-				if trimmed == "class tun_socket { create };" {
+				if trimmed == "class tun_socket { create relabelfrom };" {
 					tunSocketRequireDecls++
 				} else {
-					violations = append(violations, fmt.Sprintf("the require block's tun_socket declaration is exactly the one evidenced creation permission: %s", trimmed))
+					violations = append(violations, fmt.Sprintf("the require block's tun_socket declaration is exactly the two evidenced socket permissions — the rootlesskit child's evidenced creation permission plus the network helper's evidenced attach relabel permission: %s", trimmed))
 				}
 			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, ":tun_socket"):
-				if trimmed == "allow docker_helper_rootlesskit_t self:tun_socket create;" {
+				switch trimmed {
+				case "allow docker_helper_rootlesskit_t self:tun_socket create;":
 					rootlesskitTunSocketRules++
-				} else {
-					violations = append(violations, fmt.Sprintf("the tun_socket surface is exactly the rootlesskit child's single self-create rule (no attach_queue, no relabel*, no inherited socket permission, no other subject): %s", trimmed))
+				case "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:tun_socket relabelfrom;":
+					// Routed: the network helper's cross-domain attach
+					// relabel surface has its own owner — the helper
+					// domain's tun-socket invariants (count, target,
+					// shape, and every forbidden widening) live in
+					// helperDomainPolicyViolations and the slirp4netns
+					// domain test; this owner must not mask them.
+				default:
+					violations = append(violations, fmt.Sprintf("the tun_socket surface is exactly the rootlesskit child's single self-create rule plus the network helper's single cross-domain relabelfrom rule (no attach_queue, no relabel*, no inherited socket permission, no other subject, no other target): %s", trimmed))
 				}
 			}
 		}
@@ -828,7 +836,7 @@ func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
 		name string
 		pin  string
 	}{
-		{"missing require create", "class tun_socket { create };"},
+		{"missing require create", "class tun_socket { create relabelfrom };"},
 		{"missing allow create", "allow docker_helper_rootlesskit_t self:tun_socket create;"},
 	} {
 		mutated := strings.Replace(policy, regressed.pin, "", 1)
@@ -844,9 +852,13 @@ func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
 		{"parallel create rule (braced form)", "allow docker_helper_rootlesskit_t self:tun_socket { create };"},
 		{"widened attach_queue", "allow docker_helper_rootlesskit_t self:tun_socket attach_queue;"},
 		{"widened relabelfrom", "allow docker_helper_rootlesskit_t self:tun_socket relabelfrom;"},
+		{"reversed cross-domain relabel (rootlesskit source, helper-target socket)", "allow docker_helper_rootlesskit_t docker_helper_slirp4netns_t:tun_socket relabelfrom;"},
 		{"widened relabelto", "allow docker_helper_rootlesskit_t self:tun_socket relabelto;"},
 		{"distro create_socket_perms macro", "create_socket_perms(docker_helper_rootlesskit_t)"},
 		{"widened require declaration", "class tun_socket { create attach_queue };"},
+		{"widened require declaration (relabelfrom only)", "class tun_socket { relabelfrom };"},
+		{"widened require declaration (all three)", "class tun_socket { create relabelfrom attach_queue };"},
+		{"widened require declaration (set-style with relabelto)", "class tun_socket { create relabelfrom relabelto };"},
 		{"tun_socket for the manager", "allow docker_helper_builder_t self:tun_socket create;"},
 		{"tun_socket for the launcher", "allow docker_helper_builder_launcher_t self:tun_socket create;"},
 		{"tun_socket for the network helper", "allow docker_helper_slirp4netns_t self:tun_socket create;"},
@@ -1255,7 +1267,8 @@ func parseSELinuxRules(policy string) ([]builderPolicyAllowRule, []builderPolicy
 //     (the 4C-31 read/write + 4C-32 open + 4C-33 generic-ioctl grants
 //     and the 4C-34 TUNSETIFF command whitelist; no other ioctl
 //     command, no allowxperm on any other type, and no
-//     getattr/append/lock/create/setattr, no helper tun_socket grant
+//     getattr/append/lock/create/setattr, exactly one helper tun_socket
+//     grant: the cross-domain relabelfrom toward the rootlesskit target
 //     — the RootlessKit TUN staircase is owned by the rootlesskit
 //     test's tun owner);
 //   - the manager domain holds no capability, capability2, or cap_userns
@@ -1387,6 +1400,34 @@ func helperDomainPolicyViolations(policy string) []string {
 	if slirpTunXpermLines != 1 {
 		violations = append(violations, fmt.Sprintf("exactly one tun_tap_device_t:chr_file allowxperm rule may exist for the helper domain, found %d", slirpTunXpermLines))
 	}
+	// The 4C-35 cross-domain TUN socket-relabel grant: exactly ONE allow
+	// line may name slirp4netns_t -> docker_helper_rootlesskit_t:
+	// tun_socket, in the exact bare-relabelfrom shape (the 4C-34
+	// canonical run's terminal boundary, record 2339 — the attach
+	// mediation's relabelfrom check on the stored rootlesskit_t socket
+	// SID). relabelto, attach_queue, create, getattr, and every other
+	// socket permission is ungranted; a second/split rule toward the
+	// same target or a rule toward any other target is a pre-grant of an
+	// unproven boundary. The target-scoped class-level count lives in
+	// the rootlesskit test's tun owner (which routes this one rule
+	// explicitly, subject-scoped, so it cannot mask the rootlesskit
+	// child's own invariants).
+	slirpTunSocketLines := 0
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:tun_socket") {
+			slirpTunSocketLines++
+			if trimmed != "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:tun_socket relabelfrom;" {
+				violations = append(violations, fmt.Sprintf("the helper's cross-domain TUN socket grant must be the exact bare-relabelfrom shape (no brace form, no split rules, no relabelto/attach_queue/create/getattr/read/write, no other permission): %s", trimmed))
+			}
+		}
+	}
+	if slirpTunSocketLines != 1 {
+		violations = append(violations, fmt.Sprintf("exactly one cross-domain tun_socket relabelfrom grant may exist from the helper toward the rootlesskit target, found %d", slirpTunSocketLines))
+	}
 	// The 4C-28 distro-nsfs-macro exclusion, identified structurally at
 	// SOURCE level (a macro's name does not exist after policy
 	// compilation — sesearch sees only the expanded rules — the same
@@ -1463,12 +1504,17 @@ func helperDomainPolicyViolations(policy string) []string {
 			if rule.class == "cap_userns" && rule.target != "self" {
 				violations = append(violations, fmt.Sprintf("the helper domain holds no cap_userns authority toward any target other than itself: allow %s %s:%s", rule.source, rule.target, rule.class))
 			}
-			// The 4C-31 scope: the helper's TUN path attaches an
-			// existing TAP via the device node; any tun_socket
-			// authority (create/attach_queue/relabel*) is a separate
-			// live boundary and stays closed for the helper.
-			if rule.class == "tun_socket" {
-				violations = append(violations, fmt.Sprintf("the helper domain holds no tun_socket grant: allow %s %s:%s", rule.source, rule.target, rule.class))
+			// The 4C-35 scope: the helper's attach path mediates the
+			// EXISTING TAP's stored socket SID, so the helper holds
+			// exactly ONE tun_socket authority — the cross-domain
+			// relabelfrom toward the rootlesskit target (the 4C-34
+			// canonical run's terminal boundary, record 2339; the rule's
+			// exact perm shape is pinned by the slirp4netns test's
+			// string scans). A tun_socket grant toward any OTHER
+			// target (self:create, a second domain's socket, anything
+			// else) is a pre-grant of an unproven boundary.
+			if rule.class == "tun_socket" && rule.target != "docker_helper_rootlesskit_t" {
+				violations = append(violations, fmt.Sprintf("the helper domain's tun_socket authority is only the cross-domain relabelfrom toward the rootlesskit target (no other target): allow %s %s:%s", rule.source, rule.target, rule.class))
 			}
 		}
 		if rule.source == "docker_helper_rootlesskit_t" && rule.target == "docker_helper_slirp4netns_t" && rule.class == "dir" {
@@ -1502,6 +1548,7 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		"allow docker_helper_slirp4netns_t nsfs_t:file { read open };",
 		"allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file { read write open ioctl };",
 		"allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl 0x54ca;",
+		"allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:tun_socket relabelfrom;",
 		"type nsfs_t;",
 	} {
 		if !strings.Contains(policy, want) {
@@ -1521,6 +1568,7 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 	pinnedNsfsRule := "allow docker_helper_slirp4netns_t nsfs_t:file { read open };"
 	pinnedTunRule := "allow docker_helper_slirp4netns_t tun_tap_device_t:chr_file { read write open ioctl };"
 	pinnedTunXpermRule := "allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl 0x54ca;"
+	pinnedTunSocketRule := "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:tun_socket relabelfrom;"
 	pinnedNsfsRequire := "type nsfs_t;"
 	countPinned := func(text, rule string) int {
 		n := 0
@@ -1554,6 +1602,9 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 	}
 	if countPinned(policy, pinnedTunXpermRule) != 1 {
 		t.Errorf("the helper's TUN command whitelist must be exactly one `allowxperm ... ioctl 0x54ca` rule (the 4C-34 TUNSETIFF hardening; no 0x54cb, no third command), found %d", countPinned(policy, pinnedTunXpermRule))
+	}
+	if countPinned(policy, pinnedTunSocketRule) != 1 {
+		t.Errorf("the helper's cross-domain TUN socket authority must be exactly one `rootlesskit_t:tun_socket relabelfrom` rule (the 4C-35 attach-path grant; no relabelto, no attach_queue, no create, no second rule), found %d", countPinned(policy, pinnedTunSocketRule))
 	}
 	// Regression: each grant must exist; removing it, or replacing it
 	// with a wrong-shape, must break the exactly-one invariant the count
@@ -1623,6 +1674,28 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 			t.Errorf("the TUN xperm regression %q must fail the helper-domain invariants", regressed.name)
 		}
 	}
+	// The 4C-35 cross-domain TUN socket-relabel removal regressions: each
+	// removal/replacement must APPLY and must actually trip the helper
+	// invariants (the exact-shape/count guards above) — the owner pins
+	// the effective surface, so any other shape fails it.
+	for _, regressed := range []struct {
+		name string
+		rule string
+	}{
+		{"missing whole cross-domain tun_socket rule (the pre-4C-35 boundary must trip again)", ""},
+		{"missing relabelfrom (relabelto-only shape — the ungranted mirror permission)", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:tun_socket relabelto;"},
+		{"missing relabelfrom (attach_queue-only shape)", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:tun_socket attach_queue;"},
+		{"missing relabelfrom (create-only shape — the creator's own grant)", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:tun_socket create;"},
+	} {
+		mutated := strings.Replace(policy, pinnedTunSocketRule, regressed.rule, 1)
+		if countPinned(mutated, pinnedTunSocketRule) == 1 {
+			t.Errorf("the TUN socket regression %q was not applied", regressed.name)
+			continue
+		}
+		if len(helperDomainPolicyViolations(mutated)) == 0 {
+			t.Errorf("the TUN socket regression %q must fail the helper-domain invariants", regressed.name)
+		}
+	}
 	// Structural and widening mutations: appended or replacement rules
 	// around the single traversal grant must trip.
 	for _, mut := range []struct {
@@ -1686,6 +1759,16 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		{"helper tun_socket create pre-grant", "allow docker_helper_slirp4netns_t self:tun_socket create;"},
 		{"helper tun_socket attach_queue pre-grant", "allow docker_helper_slirp4netns_t self:tun_socket attach_queue;"},
 		{"helper tun_socket relabel pre-grant", "allow docker_helper_slirp4netns_t self:tun_socket { relabelfrom relabelto };"},
+		{"cross-domain tun_socket structural: duplicate identical relabel rule", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:tun_socket relabelfrom;"},
+		{"cross-domain tun_socket structural: parallel relabel rule (brace form)", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:tun_socket { relabelfrom };"},
+		{"cross-domain tun_socket structural: relabel split across two rules", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:tun_socket relabelfrom;\nallow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:tun_socket relabelfrom;"},
+		{"cross-domain tun_socket widened +relabelto", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:tun_socket { relabelfrom relabelto };"},
+		{"cross-domain tun_socket widened +attach_queue", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:tun_socket { relabelfrom attach_queue };"},
+		{"cross-domain tun_socket widened +create", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:tun_socket { relabelfrom create };"},
+		{"cross-domain tun_socket widened +getattr", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:tun_socket { relabelfrom getattr };"},
+		{"cross-domain tun_socket widened +read/write", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:tun_socket { relabelfrom read write };"},
+		{"cross-domain tun_socket wrong target (self)", "allow docker_helper_slirp4netns_t self:tun_socket relabelfrom;"},
+		{"cross-domain tun_socket wrong target (uid-map helper)", "allow docker_helper_slirp4netns_t docker_helper_newuidmap_t:tun_socket relabelfrom;"},
 		{"cap_userns net_admin copy from the RootlessKit path", "allow docker_helper_slirp4netns_t self:cap_userns net_admin;"},
 		{"plain capability net_admin for the helper", "allow docker_helper_slirp4netns_t self:capability net_admin;"},
 		{"cap_userns pre-grant toward the target", "allow docker_helper_slirp4netns_t docker_helper_rootlesskit_t:cap_userns sys_admin;"},
@@ -1729,7 +1812,7 @@ func TestSELinuxPolicySlirp4netnsDomain(t *testing.T) {
 		{"cap_userns for manager", "allow docker_helper_builder_t self:cap_userns sys_admin;", "docker_helper_builder_t must hold no capability"},
 		{"cap_userns sys_admin for helper", "allow docker_helper_slirp4netns_t self:cap_userns sys_admin;", "exactly one self:cap_userns rule may exist for the helper domain"},
 		{"helper xperm widened set pre-grant", "allowxperm docker_helper_slirp4netns_t tun_tap_device_t:chr_file ioctl { 0x54ca 0x54cb };", "must be exactly one tun_tap_device_t:chr_file ioctl 0x54ca rule"},
-		{"helper tun_socket pre-grant", "allow docker_helper_slirp4netns_t self:tun_socket create;", "holds no tun_socket grant"},
+		{"helper tun_socket pre-grant", "allow docker_helper_slirp4netns_t self:tun_socket create;", "no other target"},
 		{"helper plain capability net_admin", "allow docker_helper_slirp4netns_t self:capability net_admin;", "must hold no plain capability/capability2 grants"},
 	} {
 		mutated := policy + "\n" + mut.rule
