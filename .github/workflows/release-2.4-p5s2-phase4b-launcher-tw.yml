@@ -50,6 +50,9 @@ jobs:
       - name: Build the 4C-34 negative-command probe (static, from the script commit)
         run: cc -O2 -static -o tun-command-probe scripts/tun-command-probe.c
 
+      - name: Build the 4C-37 cross-operation vehicle (static, from the script commit)
+        run: cc -O2 -static -o tun-cross-op-vehicle scripts/tun-cross-op-vehicle.c
+
       - name: Install QEMU and cloud-image tools
         run: |
           sudo apt-get update -y
@@ -61,6 +64,7 @@ jobs:
           PHASE4B_PROOF_SRC="${{ github.workspace }}/proof-src" \
           PHASE4B_HELPER_BIN="${{ github.workspace }}/proof-src/docker-helper" \
           PHASE4B_TUN_PROBE_BIN="${{ github.workspace }}/tun-command-probe" \
+          PHASE4B_CROSS_VEHICLE_BIN="${{ github.workspace }}/tun-cross-op-vehicle" \
           PHASE4B_EVIDENCE_DIR="$RUNNER_TEMP/release-2.4-p5s2-phase4b-launcher-evidence" \
             scripts/release-2.4-p5s2-phase4b-launcher-tw-vm.sh
 
