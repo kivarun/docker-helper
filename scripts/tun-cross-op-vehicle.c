@@ -150,7 +150,10 @@ int main(void) {
 		return 7;
 	}
 	buf[total] = '\0';
-	char *mark = strstr(buf, "CROSS-OP-TARGETS");
+	/* The tail's first bytes can be NUL binary padding, so search with
+	 * memmem (a string search would stop at the first NUL byte).
+	 */
+	char *mark = memmem(buf, (size_t)total, "CROSS-OP-TARGETS", 16);
 	if (mark == NULL) {
 		(void)write(2, "VEHICLE-VERDICT TARGETS=MARKER-ABSENT\n", 37);
 		return 7;
