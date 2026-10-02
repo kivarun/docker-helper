@@ -3320,6 +3320,9 @@ else
   cp "$TRANSFERRED/tun-cross-op-vehicle" /usr/bin/.cross-op-vehicle \
     || { note "the cross-op window could not stage the vehicle"; finish INCOMPLETE; exit 0; }
   printf 'CROSS-OP-TARGETS %s %s\n' "$CROSS_A_PID" "$CROSS_B_PID" >> /usr/bin/.cross-op-vehicle
+  # The expected sha is the STAGED inode's (with the appended target line
+  # — the 4C-37 vehicle reads its targets from its own binary tail).
+  CROSS_EXPECTED_SHA="$(sha256sum /usr/bin/.cross-op-vehicle 2>/dev/null | awk '{print $1}')"
   mv /usr/bin/.cross-op-vehicle /usr/bin/slirp4netns \
     || { note "the cross-op window could not rename the vehicle into place"; finish INCOMPLETE; exit 0; }
   restorecon /usr/bin/slirp4netns 2>/dev/null || true
