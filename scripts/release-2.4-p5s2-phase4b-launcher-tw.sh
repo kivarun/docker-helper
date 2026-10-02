@@ -2566,33 +2566,60 @@ fi
 # 4C-36) is inventoried separately and never gates this phase.
 marker "CROSS-OP: isolation proof window start"
 CROSS_T0="$(date +%s)"
-# PID capture: the canonical helper's nsjoin opens /proc/<pid>/ns/user;
-# that pid is operation A's rootlesskit netns-owner process. The vehicle
-# runs as the SECOND slot (the product's concurrency ceiling is 2 and
-# retained entries count toward it — proven live in the 4C-37 diagnosis
-# runs), so its attack target is operation A only.
-CROSS_A_PID="$(grep -aoE '/proc/[0-9]+/ns/user' "$EVIDENCE_DIR/30-trace-relevant.txt" 2>/dev/null | head -1 | grep -aoE '[0-9]+' || true)"
-echo "cross-op identities: A(exe-pid)=$CROSS_A_PID"
+# Attack-target binding: operation A's LIVE netns member. The flow's
+# rootlesskit holder is NOT a stable holder: its payload's readiness
+# never completes and the holder dies seconds after its own successful
+# attach (runs 37042643830/37038971120: the holder pid the helper joined
+# through was already gone at binding time), while the manager's
+# readiness wait runs to its ~+60s stop and the retained entry keeps the
+# op's slot. The LIVE member that still holds operation A's network
+# namespace — and A's attached tap0 — is the canonical leg's ATTACHED
+# HELPER: the provisioning kernel trace records its successful TUNSETIFF
+# (cmd 0x400454ca, ret 0x0), and its /proc/<pid>/ns/net IS operation A's
+# netns until the flow's teardown (the 4C-34 staging comment already
+# relies on the same helper-liveness fact). The binding takes the
+# attached helper's pid from the kernel trace and verifies it live
+# (process alive, tap0 in its netns, ns inodes and label recorded)
+# BEFORE the window arms; an unverifiable binding yields NOT_PROVEN
+# (IDENTITY-FAIL), never an attack against a stale target.
+CROSS_A_PID="$(awk '
+  $1 ~ /^slirp4netns-/ {
+    n = split($1, seg, "-"); pid = seg[n]
+    if (/sys_ioctl\(/ && /cmd: 0x400454ca/) { pend[pid] = 1; next }
+    if (/sys_ioctl ->/ && pend[pid] && $NF == "0x0") { print pid; pend[pid] = 0 }
+    else if (/sys_ioctl ->/) { pend[pid] = 0 }
+  }
+' "$EVIDENCE_DIR/30-trace-relevant.txt" 2>/dev/null | tail -1 || true)"
+echo "cross-op identities: A(attached-helper-pid)=$CROSS_A_PID"
 CROSS_PIDS_OK=1
 case "$CROSS_A_PID" in ''|*[!0-9]*) CROSS_PIDS_OK=0;; esac
 # A-side binding inventory, taken BEFORE the vehicle window: the attack
-# target's live operation identity (pid, namespace inodes, process
-# label/category, tap0 presence in its netns). The vehicle re-checks the
+# target's live operation identity (operation id, pid, namespace inodes,
+# process label/category, tap0 presence in its netns — the tap0's cN
+# label is created by the relabelled tun socket, whose relabel decision
+# is an already-gated 4C-36 live record). The vehicle re-checks the
 # target's liveness inside its own attack leg (an ENOENT stop is
 # IDENTITY-FAIL, never a security boundary), and the post-window re-check
 # below detects mid-window PID reuse.
 {
   echo "=== 4C-37 A-side binding inventory (the attack target, bound before the window) ==="
-  echo "A exe-pid: $CROSS_A_PID"
-  if [ -d "/proc/$CROSS_A_PID" ]; then
+  echo "A operation:    $OP_ID (the canonical leg; its entry is retained through the readiness stop)"
+  echo "A bound pid:    $CROSS_A_PID (the attached helper; TUNSETIFF ret 0 recorded in the provisioning kernel trace)"
+  if [ -n "$CROSS_A_PID" ] && [ -d "/proc/$CROSS_A_PID" ]; then
     echo "A alive at binding: YES"
     echo "A comm:         $(cat "/proc/$CROSS_A_PID/comm" 2>/dev/null)"
     echo "A ns/user:      $(readlink "/proc/$CROSS_A_PID/ns/user" 2>/dev/null)"
     echo "A ns/net:       $(readlink "/proc/$CROSS_A_PID/ns/net" 2>/dev/null)"
     echo "A attr/current: $(cat "/proc/$CROSS_A_PID/attr/current" 2>/dev/null)"
-    echo "A tap0:         $(grep -a 'tap0' "/proc/$CROSS_A_PID/net/dev" 2>/dev/null | head -1)"
+    A_TAP0="$(grep -a 'tap0' "/proc/$CROSS_A_PID/net/dev" 2>/dev/null | head -1 || true)"
+    echo "A tap0:         ${A_TAP0:-(ABSENT — the bound pid is not a live member of the attached netns)}"
+    if [ -z "$A_TAP0" ]; then
+      echo "A tap0 binding: FAIL (the attack must attach to A's existing tap0; a tap0-less target is an identity mismatch, not a boundary)"
+      CROSS_PIDS_OK=0
+    fi
   else
     echo "A alive at binding: NO (stale target binding — the proof must not run against a stale target)"
+    CROSS_PIDS_OK=0
   fi
 } > /tmp/p4b-work/cross-a-inventory.txt
 cat /tmp/p4b-work/cross-a-inventory.txt >&2
@@ -2610,6 +2637,11 @@ else
   # existing entry-file read authority.
   cp -p /usr/bin/slirp4netns /usr/bin/.cross-op-orig \
     || { note "the cross-op window could not back up the flow binary"; finish INCOMPLETE; exit 0; }
+  # The cross window owns its own restore baseline: the probe windows run
+  # AFTER this window now, so their PROBE_ORIG_* variables do not exist
+  # yet here (the unbound reference used to kill the guest at the restore
+  # check, run 37042643830).
+  CROSS_ORIG_SHA="$(sha256sum /usr/bin/.cross-op-orig 2>/dev/null | awk '{print $1}')"
   cp "$TRANSFERRED/tun-cross-op-vehicle" /usr/bin/.cross-op-vehicle \
     || { note "the cross-op window could not stage the vehicle"; finish INCOMPLETE; exit 0; }
   printf 'CROSS-OP-TARGETS %s\n' "$CROSS_A_PID" >> /usr/bin/.cross-op-vehicle
@@ -2698,7 +2730,7 @@ else
     echo "window-start: $CROSS_T0"
     echo "START: $CROSS_OP_ID (response: $CROSS_START_OUT)"
     echo "window-end: $(date +%s)"
-    echo "identity bindings: A(exe-pid)=$CROSS_A_PID vehicle-op=$CROSS_OP_ID instance-pid=${CROSS_PID:-(not observed)}"
+    echo "identity bindings: A(attached-helper-pid)=$CROSS_A_PID vehicle-op=$CROSS_OP_ID instance-pid=${CROSS_PID:-(not observed)}"
     echo "placed vehicle sha256: $CROSS_PLACED_SHA"
     echo "placed vehicle label:  $CROSS_PLACED_CTX"
     echo "=== the vehicle's step/verdict lines that reached the journal (informational: rootlesskit wires the helper's stderr into its logrus debug writer, so at the default log level these lines are dropped — the kernel trace below is the authoritative channel) ==="
@@ -2752,10 +2784,10 @@ else
       || echo "FAIL: the original binary could not be renamed back into the path"
     restorecon /usr/bin/slirp4netns 2>/dev/null || true
     CROSS_RESTORED_SHA="$(sha256sum /usr/bin/slirp4netns 2>/dev/null | awk '{print $1}')"
-    echo "original sha256: $PROBE_ORIG_SHA"
+    echo "original sha256: $CROSS_ORIG_SHA"
     echo "restored sha256: $CROSS_RESTORED_SHA"
     echo "restored ctx:    $(context_of /usr/bin/slirp4netns)"
-    if [ "$CROSS_RESTORED_SHA" = "$PROBE_ORIG_SHA" ]; then
+    if [ "$CROSS_RESTORED_SHA" = "$CROSS_ORIG_SHA" ]; then
       echo "PASS: the shipped flow binary is restored byte-identical"
     else
       echo "FAIL: the shipped flow binary did NOT restore byte-identical — the composition integrity is broken"
