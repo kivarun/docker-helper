@@ -2576,10 +2576,20 @@ else
   PROBE_RT_OP_DIR="$RUNTIME_ROOT/ops/$PROBE_OP_ID"
   PROBE_ST_OP_DIR="$STATE_ROOT/ops/$PROBE_OP_ID"
   PROBE_START_RC=0
-  PROBE_START_OUT="$(printf 'START %s\n' "$PROBE_OP_ID" | timeout 120 socat - UNIX-CONNECT:"$MANAGER_SOCK")" || PROBE_START_RC=$?
-  # Harvest the trace ring IMMEDIATELY after the manager's response (the
-  # 4C-27 pattern: the flow has exited by then; further system volume
-  # overwrites the ring), then disable the events.
+  PROBE_START_OUT=""
+  # Issue the START in the background. The 4C-36 run (36995923466) proved
+  # the response can be delayed by the manager's own readiness loop (a
+  # failed flow still waits out the full readiness timeout), during which
+  # the manager's retained-entry poll denials (signull to alive helper
+  # processes) flood the trace ring and eat the probe's own syscall
+  # records. The probe's window is the first ~1s after the START; harvest
+  # the ring EARLY (a bounded wait), then collect the response.
+  printf 'START %s\n' "$PROBE_OP_ID" | timeout 120 socat - UNIX-CONNECT:"$MANAGER_SOCK" \
+    > /tmp/p4b-work/probe-start-out.txt 2>/dev/null &
+  PROBE_START_PID=$!
+  sleep 3
+  # Harvest the trace ring EARLY (before the poll flood can overwrite it),
+  # then disable the events.
   if [ "$PROBE_TRACE_ENABLED" = 1 ]; then
     echo 0 > "$TRACING/tracing_on" 2>/dev/null || true
     cat "$TRACING/trace" > /tmp/p4b-work/probe-trace.txt 2>/dev/null || true
@@ -2592,6 +2602,9 @@ else
   else
     : > /tmp/p4b-work/probe-trace.txt
   fi
+  wait "$PROBE_START_PID" 2>/dev/null || true
+  PROBE_START_RC=$?
+  PROBE_START_OUT="$(cat /tmp/p4b-work/probe-start-out.txt 2>/dev/null || true)"
   # The bounded convergence wait for the probe op's cleanup (the trace
   # ring is already harvested; this wait only orders the AVC slice after
   # the op tree is gone).
@@ -2619,10 +2632,16 @@ else
     echo "=== the probe's helper TUN + tun_socket/cap_userns AVC records ==="
     grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' /tmp/p4b-work/probe-avc-slice.txt 2>/dev/null \
       | grep -aE 'tclass=(chr_file|tun_socket|cap_userns)' || true
-    echo "=== the probe's ioctl trace lines (fd/cmd/arg/ret; any TUN-relevant event of the probe window) ==="
+    echo "=== the probe's syscall/audit trace lines (fd/cmd/arg/ret + SELinux decisions; NOT mixed with the cap_capable startup flood) ==="
     grep -a 'slirp4netns' /tmp/p4b-work/probe-trace.txt 2>/dev/null \
-      | grep -a '/dev/net/tun\|sys_ioctl\|selinux_audited\|cap_capable' | head -20 || true
-    echo "(end of probe trace lines)"
+      | grep -a '/dev/net/tun\|sys_ioctl\|selinux_audited' || true
+    echo "(end of probe syscall/audit trace lines)"
+    echo "--- the probe's FAILED cap_capable lines (the nsjoin startup shape; informational):"
+    grep -a 'slirp4netns' /tmp/p4b-work/probe-trace.txt 2>/dev/null \
+      | grep -a 'cap_capable:' | grep -av ' ret 0' | head -8 || true
+    echo "(end of probe-window failed-cap_capable lines)"
+    echo "=== the probe's own result line (the stderr copy via the flow's child output; the rc/errno fact) ==="
+    journalctl -u "$UNIT" --since "@$PROBE_T0" --no-pager 2>/dev/null | grep -a 'tun-command-probe' | head -4 || true
     echo "=== the flow's death shape in the probe window (informational) ==="
     journalctl -u "$UNIT" --since "@$PROBE_T0" --no-pager 2>/dev/null | tail -6 || true
     echo "=== restore check ==="

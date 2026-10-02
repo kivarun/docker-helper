@@ -42,7 +42,10 @@ int main(void) {
 	if (fd < 0) {
 		char buf[96];
 		int n = snprintf(buf, sizeof buf, "tun-command-probe open rc=-1 errno=%d\n", errno);
-		if (n > 0) (void)write(1, buf, (size_t)n);
+		if (n > 0) {
+			(void)write(1, buf, (size_t)n);
+			(void)write(2, buf, (size_t)n);
+		}
 		return 4;
 	}
 	errno = 0;
@@ -52,7 +55,14 @@ int main(void) {
 	int n = snprintf(buf, sizeof buf,
 			 "tun-command-probe fd=%d cmd=0x%x arg=1 rc=%d errno=%d\n",
 			 fd, (unsigned int)TUNSETPERSIST, rc, err);
-	if (n > 0) (void)write(1, buf, (size_t)n);
+	if (n > 0) {
+		(void)write(1, buf, (size_t)n);
+		/* stderr too: the flow's version check consumes stdout, so the
+		 * journaled child-output capture only sees the stderr copy —
+		 * the phase's kernel-trace rings can be eaten by the manager's
+		 * readiness-poll denials (the 4C-36 run's lost enter lines). */
+		(void)write(2, buf, (size_t)n);
+	}
 	(void)close(fd);
 	if (rc < 0 && err == EACCES) return 42;
 	if (rc == 0) return 7;
