@@ -20,16 +20,22 @@
 // operation's helper. Operation A (the canonical leg) is a REAL flow that
 // stays alive with its attached TAP; the vehicle (operation B) is the
 // second live operation. Its legs:
-//   CONTROL: the production nsjoin+attach path against the vehicle's own
-//     parent (the rootlesskit child that holds its own target user/net
-//     namespaces AND its own freshly created tap0): the full chain must
-//     return 0 — the same-operation baseline INSIDE this very run.
-//   ATTACK B->A: the SAME production path against operation A's
-//     rootlesskit netns-owner pid; step by step; the FIRST failing
-//     syscall (SELinux EACCES/EPERM or any other real boundary errno)
-//     STOPS the leg and is reported as BOUNDARY. An ENOENT on the proc
-//     path is NOT a boundary — it means the target identity was stale
-//     (reported as IDENTITY-FAIL). The A→B mirror direction is NOT
+//   VERSION-CHECK invocation (`--help`): the rootlesskit parent runs it
+//     BEFORE its own unshare, in the HOST namespace — the vehicle must
+//     print a fake version line (>= 0.4.0) so the rootlesskit parent
+//     proceeds with the real launch (unshare, tap0 creation, helper
+//     spawn).
+//   REAL invocation (`--mtu <N> -r <fd> <pid> <tap>`): runs INSIDE the
+//     vehicle's own target namespaces (its parent is the rootlesskit
+//     ns-holder). The control leg joins its own parent's namespaces and
+//     attaches to its own freshly created tap0 (the full production
+//     chain must return 0 — the same-operation baseline INSIDE this very
+//     run). The attack leg repeats the SAME production path against
+//     operation A's rootlesskit netns-owner pid; step by step; the FIRST
+//     failing syscall (SELinux EACCES/EPERM or any other real boundary
+//     errno) STOPS the leg and is reported as BOUNDARY. An ENOENT on the
+//     proc path is NOT a boundary — it means the target identity was
+//     stale (reported as IDENTITY-FAIL). The A→B mirror direction is NOT
 //     runnable in this window: a third concurrent operation exceeds the
 //     product's ceiling of 2 — the single live cross direction plus the
 //     symmetric record set is the phase's scope.
@@ -122,11 +128,35 @@ static int attach_leg(const char *leg, int target_pid) {
 	return 0;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
 	char buf[256];
 	int err;
 
-	/* The attack targets: the tail of this vehicle's own installed
+	/* VERSION-CHECK invocation: the rootlesskit parent runs `--help`
+	 * BEFORE its unshare, in the HOST namespace. Print a fake version
+	 * line so the launch proceeds; the proof belongs to the REAL
+	 * invocation below.
+	 */
+	if (argc == 2 && strcmp(argv[1], "--help") == 0) {
+		(void)printf("slirp4netns version 0.4.0\n");
+		return 0;
+	}
+
+	/* REAL invocation: `--mtu <N> -r <fd> <pid> <tap>` — the pid is the
+	 * vehicle's own rootlesskit ns-holder (its CONTROL target).
+	 */
+	if (argc < 7) {
+		(void)write(2, "VEHICLE-VERDICT INVOCATION=UNRECOGNIZED\n", 39);
+		return 9;
+	}
+	int own_pid = 0;
+	(void)sscanf(argv[argc - 2], "%d", &own_pid);
+	if (own_pid <= 0) {
+		(void)write(2, "VEHICLE-VERDICT INVOCATION=UNRECOGNIZED\n", 39);
+		return 9;
+	}
+
+	/* The attack target: the tail of this vehicle's own installed
 	 * binary (the helper's existing entry-file read authority).
 	 */
 	int fd = open("/usr/bin/slirp4netns", O_RDONLY);
@@ -165,9 +195,8 @@ int main(void) {
 		return 7;
 	}
 
-	/* CONTROL: the production path against the vehicle's own parent. */
-	int ppid = (int)getppid();
-	if (attach_leg("control", ppid) != 0) {
+	/* CONTROL: the production path against the vehicle's own ns-holder. */
+	if (attach_leg("control", own_pid) != 0) {
 		(void)write(2, "VEHICLE-VERDICT CONTROL=FAIL\n", 29);
 		return 5;
 	}
