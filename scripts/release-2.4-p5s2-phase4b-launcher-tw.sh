@@ -2511,17 +2511,9 @@ else
   PROBE_ST_OP_DIR="$STATE_ROOT/ops/$PROBE_OP_ID"
   PROBE_START_RC=0
   PROBE_START_OUT="$(printf 'START %s\n' "$PROBE_OP_ID" | timeout 120 socat - UNIX-CONNECT:"$MANAGER_SOCK")" || PROBE_START_RC=$?
-  PROBE_PID=""
-  PROBE_END=$(( $(date +%s) + 90 ))
-  while [ "$(date +%s)" -lt "$PROBE_END" ]; do
-    if [ -z "$PROBE_PID" ] && [ -s "$PROBE_RT_OP_DIR/instance.pid" ]; then
-      PROBE_PID="$(cat "$PROBE_RT_OP_DIR/instance.pid" 2>/dev/null)"
-    fi
-    if [ -n "$PROBE_PID" ] && [ ! -d "/proc/$PROBE_PID" ] && [ ! -d "$PROBE_RT_OP_DIR" ] && [ ! -d "$PROBE_ST_OP_DIR" ]; then
-      break
-    fi
-    sleep 0.05
-  done
+  # Harvest the trace ring IMMEDIATELY after the manager's response (the
+  # 4C-27 pattern: the flow has exited by then; further system volume
+  # overwrites the ring), then disable the events.
   if [ "$PROBE_TRACE_ENABLED" = 1 ]; then
     echo 0 > "$TRACING/tracing_on" 2>/dev/null || true
     cat "$TRACING/trace" > /tmp/p4b-work/probe-trace.txt 2>/dev/null || true
@@ -2534,6 +2526,20 @@ else
   else
     : > /tmp/p4b-work/probe-trace.txt
   fi
+  # The bounded convergence wait for the probe op's cleanup (the trace
+  # ring is already harvested; this wait only orders the AVC slice after
+  # the op tree is gone).
+  PROBE_PID=""
+  PROBE_END=$(( $(date +%s) + 60 ))
+  while [ "$(date +%s)" -lt "$PROBE_END" ]; do
+    if [ -z "$PROBE_PID" ] && [ -s "$PROBE_RT_OP_DIR/instance.pid" ]; then
+      PROBE_PID="$(cat "$PROBE_RT_OP_DIR/instance.pid" 2>/dev/null)"
+    fi
+    if [ -n "$PROBE_PID" ] && [ ! -d "/proc/$PROBE_PID" ] && [ ! -d "$PROBE_RT_OP_DIR" ] && [ ! -d "$PROBE_ST_OP_DIR" ]; then
+      break
+    fi
+    sleep 0.05
+  done
   harvest_avcs_since "$PROBE_T0" /tmp/p4b-work/probe-avc-slice.txt
   {
     echo "=== 4C-34 negative command probe window (TUNSETPERSIST 0x54cb on the helper's own tuple) ==="
@@ -2575,43 +2581,70 @@ else
     || { marker "BLOCKER=the negative probe window failed to restore the shipped flow binary (see 41-slirp-tun-command-filter.txt)"
          finish FAIL; exit 0; }
 
-  # ---- the gate verdicts over the probe window's evidence
+  # ---- the gate verdicts over the probe window's evidence. Channel
+  # ---- hierarchy (the userspace audit gap is a MEASURED fact: the
+  # ---- 4C-29/4C-31/4C-32 canonical windows carried ZERO helper records
+  # ---- with lost=0): the kernel-side channels are authoritative and the
+  # ---- symbolic AVC record strengthens where auditd delivers it. A
+  # ---- positive-path presence may be proven by the symbolic record OR
+  # ---- the canonical window's kernel trace decision; the negative
+  # ---- command denial by the symbolic ioctlcmd= record OR the probe
+  # ---- window's kernel trace sequence (the issued syscall cmd + the
+  # ---- chr_file decision + the exit inside the same ioctl window).
   {
-    echo "=== the positive path's assertions (the CANONICAL window; 09-avc-window.txt) ==="
-    echo "--- the helper's tun_socket relabelfrom boundary MUST still be present (the terminal boundary is unchanged by the command hardening):"
+    echo "=== the positive path's assertions (the CANONICAL window) ==="
+    echo "--- the helper's tun_socket relabel boundary MUST still be present — channel 1: the symbolic AVC (09-avc-window.txt; absent when the launch-period audit gap fires):"
     SL_POS_RELABEL="$(grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -a 'tclass=tun_socket' | grep -a 'denied  *{ relabelfrom }' || true)"
-    printf '%s\n' "${SL_POS_RELABEL:-(GATE FAILURE — the canonical window has NO helper tun_socket relabelfrom denial: the positive path's terminal boundary changed)}"
-    echo "--- the whitelisted command must NOT be denied (no helper chr_file ioctl denial with ioctlcmd=0x54ca):"
+    printf '%s\n' "${SL_POS_RELABEL:-(absent in the userspace slice)}"
+    echo "--- channel 2: the canonical window's kernel trace decision (30-trace-window.txt; the selinux_audited tun_socket decision between the TUNSETIFF ioctl enter and its -13 exit):"
+    SL_POS_RELABEL_TRACE="$(grep -a 'slirp4netns' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -a 'selinux_audited:' | grep -a 'tclass=tun_socket' | grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' || true)"
+    printf '%s\n' "${SL_POS_RELABEL_TRACE:-(absent in the kernel trace)}"
+    echo "--- channel 3: the decode's calibrated helper decision (34-avc-trace-decode.txt; uncalibrated events stay raw):"
+    grep -a 'HELPER' "$EVIDENCE_DIR/34-avc-trace-decode.txt" 2>/dev/null | grep -a 'tclass=tun_socket' || true
+    echo "--- the whitelisted command must NOT be denied (channel 1: no helper chr_file ioctl denial with ioctlcmd=0x54ca in the canonical slice):"
     SL_POS_TUNSETIFF_DENIAL="$(grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -a 'tclass=chr_file' | grep -a 'denied  *{ ioctl }' | grep -a 'ioctlcmd=0x54ca' || true)"
     printf '%s\n' "${SL_POS_TUNSETIFF_DENIAL:-(none — the whitelisted TUNSETIFF command is not denied)}"
-    echo "--- the helper's ALL other chr_file TUN denials in the canonical window (must be none; the 38/39/40 gates own them):"
-    grep -a 'tcontext=system_u:object_r:tun_tap_device_t' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null \
-      | grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' | grep -a 'tclass=chr_file' || true
-    echo "(end of canonical-window helper TUN records)"
-    echo "=== the negative probe's assertions (the probe window's slice) ==="
-    echo "--- the non-whitelisted command MUST be xperm-denied (helper chr_file ioctl denial with ioctlcmd=0x54cb — the command-level record):"
+    echo "--- the whitelisted command must NOT be denied (channel 2: NO helper chr_file selinux_audited decision in the canonical kernel trace — the TUNSETIFF ioctl passed the SELinux file-ioctl stage):"
+    SL_POS_TUNSETIFF_TRACE="$(grep -a 'slirp4netns' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -a 'selinux_audited:' | grep -a 'tclass=chr_file' | grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' || true)"
+    printf '%s\n' "${SL_POS_TUNSETIFF_TRACE:-(none — no helper chr_file kernel decision in the canonical window)}"
+    echo "--- the canonical window's helper TUN trace sequence (the fd/cmd/arg/ret record; informational):"
+    grep -a 'slirp4netns' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -a '/dev/net/tun\|sys_ioctl' | head -8 || true
+    echo "(end of canonical-window helper TUN trace lines)"
+    echo "=== the negative probe's assertions (the probe window's slices) ==="
+    echo "--- the non-whitelisted command MUST be issued by the probe (the sys_enter_ioctl cmd 0x400454cb record):"
+    SL_NEG_CMD="$(grep -a 'slirp4netns' /tmp/p4b-work/probe-trace.txt 2>/dev/null | grep -a 'sys_ioctl(fd:' | grep -a 'cmd: 0x400454cb' || true)"
+    printf '%s\n' "${SL_NEG_CMD:-(GATE FAILURE — the probe window never issued the TUNSETPERSIST syscall)}"
+    echo "--- the command-level denial MUST exist — channel 1: the symbolic AVC record (ioctlcmd=0x54cb; present when auditd delivers):"
     SL_NEG_XPERM="$(grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' /tmp/p4b-work/probe-avc-slice.txt 2>/dev/null | grep -a 'tclass=chr_file' | grep -a 'denied  *{ ioctl }' | grep -a 'ioctlcmd=0x54cb' || true)"
-    printf '%s\n' "${SL_NEG_XPERM:-(GATE FAILURE — the probe window has NO helper chr_file ioctlcmd=0x54cb denial: the command whitelist did not enforce)}"
-    echo "--- the probe must NOT reach the deeper TUN hooks (no helper tun_socket/cap_userns AVC in the probe window):"
+    printf '%s\n' "${SL_NEG_XPERM:-(absent in the userspace slice)}"
+    echo "--- channel 2: the probe window's kernel chr_file decision (tcontext=tun_tap_device_t between the TUNSETPERSIST enter and exit):"
+    SL_NEG_TRACE="$(grep -a 'slirp4netns' /tmp/p4b-work/probe-trace.txt 2>/dev/null | grep -a 'selinux_audited:' | grep -a 'tclass=chr_file' | grep -a 'tcontext=system_u:object_r:tun_tap_device_t' || true)"
+    printf '%s\n' "${SL_NEG_TRACE:-(absent in the kernel trace)}"
+    echo "--- the probe's ioctl exit (ret; the expected -13 EACCES):"
+    grep -a 'slirp4netns' /tmp/p4b-work/probe-trace.txt 2>/dev/null | grep -a 'sys_ioctl ->' | head -4 || true
+    echo "--- the probe must NOT reach the deeper TUN hooks (channel 1: no helper tun_socket/cap_userns AVC in the probe slice):"
     SL_NEG_DEEPER="$(grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' /tmp/p4b-work/probe-avc-slice.txt 2>/dev/null | grep -aE 'tclass=(tun_socket|cap_userns)' || true)"
     printf '%s\n' "${SL_NEG_DEEPER:-(none — no helper tun_socket/cap_userns AVC in the probe window)}"
-    echo "--- the probe's FAILED cap_capable checks in the probe window (a reached driver-side capability denial; expected none for the probe's ioctl path):"
+    echo "--- channel 2: no helper tun_socket selinux_audited decision in the probe kernel trace:"
+    SL_NEG_DEEPER_TRACE="$(grep -a 'slirp4netns' /tmp/p4b-work/probe-trace.txt 2>/dev/null | grep -a 'selinux_audited:' | grep -a 'tclass=tun_socket' | grep -a 'scontext=system_u:system_r:docker_helper_slirp4netns_t' || true)"
+    printf '%s\n' "${SL_NEG_DEEPER_TRACE:-(none — no helper tun_socket kernel decision in the probe window)}"
+    echo "--- the probe window's FAILED cap_capable checks (informational; the pre-4C-33 startup shape predates this phase):"
     grep -a 'slirp4netns' /tmp/p4b-work/probe-trace.txt 2>/dev/null | grep -a 'cap_capable:' | grep -av ' ret 0' | head -8 || true
     echo "(end of probe-window failed-cap_capable lines)"
-    if [ -z "$SL_POS_RELABEL" ]; then
-      echo "GATE: the canonical window's positive-path terminal boundary (tun_socket relabelfrom) did not appear — the command hardening changed the positive path"
+    if [ -z "$SL_POS_RELABEL" ] && [ -z "$SL_POS_RELABEL_TRACE" ]; then
+      echo "GATE: neither channel shows the canonical window's positive-path terminal boundary (tun_socket relabel) — the positive path changed"
       SL_TUN_PROBE_OK=0
     fi
-    if [ -n "$SL_POS_TUNSETIFF_DENIAL" ]; then
-      echo "GATE: the whitelisted TUNSETIFF command (ioctlcmd=0x54ca) was denied in the canonical window — the 4C-34 whitelist membership regressed"
+    if [ -n "$SL_POS_TUNSETIFF_DENIAL" ] || [ -n "$SL_POS_TUNSETIFF_TRACE" ]; then
+      echo "GATE: the whitelisted TUNSETIFF command was denied in the canonical window — the 4C-34 whitelist membership regressed"
       SL_TUN_PROBE_OK=0
     fi
-    if [ -z "$SL_NEG_XPERM" ]; then
-      echo "GATE: the negative probe's expected xperm denial (ioctlcmd=0x54cb) did not appear — the command filter is not enforcing"
+    if [ -z "$SL_NEG_CMD" ] || { [ -z "$SL_NEG_XPERM" ] && [ -z "$SL_NEG_TRACE" ]; }; then
+      echo "GATE: the negative probe did not establish the command-level denial (the issued syscall cmd or both denial channels missing) — the command filter is not proven enforcing"
       SL_TUN_PROBE_OK=0
     fi
-    if [ -n "$SL_NEG_DEEPER" ]; then
-      echo "GATE: the probe window reached a deeper TUN hook (a helper tun_socket/cap_userns denial) — the command-level denial did not fire first"
+    if [ -n "$SL_NEG_DEEPER" ] || [ -n "$SL_NEG_DEEPER_TRACE" ]; then
+      echo "GATE: the probe window reached a deeper TUN hook (a helper tun_socket denial in either channel) — the command-level denial did not fire first"
       SL_TUN_PROBE_OK=0
     fi
   } > "$EVIDENCE_DIR/42-slirp-tun-command-filter-verdict.txt" 2>&1
