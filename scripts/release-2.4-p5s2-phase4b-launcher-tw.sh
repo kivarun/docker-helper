@@ -982,6 +982,32 @@ PREFLIGHT_OK=1
     PREFLIGHT_OK=0
   fi
 
+  echo "=== flow tmp copy-up identity (the 4C-40 grant: the module's own rootlesskit -> tmp_t contribution must be exactly the one bare dir-write rule; the EFFECTIVE union = the base policy's standing tmp surface + write — the 4C-39 run's boundary mask 0x20000004 proved the standing surface carries search, and the union is NOT required to be exactly { write }; any permission beyond write contributed BY OUR MODULE is a STOP) ==="
+  echo "--- raw effective inventory (rootlesskit -> tmp_t, every class; base-policy/attribute expansions recorded, not asserted):"
+  RK_TMP_RAW="$(sesearch --allow -s docker_helper_rootlesskit_t -t tmp_t /sys/fs/selinux/policy 2>/dev/null || true)"
+  printf '%s\n' "${RK_TMP_RAW:-(none)}"
+  echo "--- CONCRETE module contribution (source must be docker_helper_rootlesskit_t; must be exactly one bare dir write rule):"
+  RK_TMP_CONCRETE="$(printf '%s\n' "$RK_TMP_RAW" | awk '$2 == "docker_helper_rootlesskit_t"' || true)"
+  printf '%s\n' "${RK_TMP_CONCRETE:-(none)}"
+  echo "--- the base policy's standing tmp surface (the effective union minus the granted write — the effective_before record; the 4C-39 run 37101080574's boundary mask 0x20000004 names search as a proven member):"
+  RK_TMP_STANDING="$(printf '%s\n' "$RK_TMP_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* tmp_t:[^ ]* \(.*\);$/\1/p' | sed 's/[{}]//g' | tr ' ' '\n' | grep -av '^write$' | sort -u | tr '\n' ' ' || true)"
+  printf '%s\n' "${RK_TMP_STANDING:-(none — the standing surface is empty)}"
+  RK_TMP_DIR_UNION="$(printf '%s\n' "$RK_TMP_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* tmp_t:dir \(.*\);$/\1/p' | sed 's/[{}]//g' | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
+  echo "effective dir perm union: ${RK_TMP_DIR_UNION:-(none)}"
+  RK_TMP_OK=0
+  if [ "$(printf '%s\n' "$RK_TMP_CONCRETE" | grep -ac . || true)" = 1 ] \
+    && printf '%s\n' "$RK_TMP_CONCRETE" | grep -aqx 'allow docker_helper_rootlesskit_t tmp_t:dir write;' \
+    && printf '%s\n' "$RK_TMP_DIR_UNION" | tr ' ' '\n' | grep -aqx 'write' \
+    && printf '%s\n' "$RK_TMP_DIR_UNION" | tr ' ' '\n' | grep -aqx 'search'; then
+    RK_TMP_OK=1
+  fi
+  if [ "$RK_TMP_OK" = 1 ]; then
+    echo "PASS: flow tmp copy-up identity (module contribution exactly { write }; effective dir union = the base policy's standing surface + write — search is the proven standing member; no module-borne permission beyond write)"
+  else
+    echo "FAIL: flow tmp copy-up identity (concrete-rules=$(printf '%s\n' "$RK_TMP_CONCRETE" | grep -ac . || true) union=${RK_TMP_DIR_UNION:-(none)})"
+    PREFLIGHT_OK=0
+  fi
+
   echo "=== netlink-route send+lookup+receive+mutation identity (the 4C-22 composition: exactly { create setopt bind getattr write nlmsg_read read nlmsg_write }, no other socket permission, no capability surface) ==="
   echo "--- allow rules on netlink_route_socket (expected: the rootlesskit child's create+setopt+bind+getattr+write+nlmsg_read only; attribute-generic base-policy rules recorded, not asserted):"
   sesearch --allow -c netlink_route_socket /sys/fs/selinux/policy || true
@@ -1507,6 +1533,10 @@ if [ -d "$TRACING/events/capability/cap_capable" ]; then
   # families: the mount propagation on / (the granted dir:mounton
   # operation) and the following mount/execve stages are the startup
   # story between the ready byte and the next startup boundary.
+  # 4C-40 adds the mkdir/mkdirat families: the copy-up setup's
+  # os.MkdirTemp("/tmp", "rootlesskit-b*") is the next granted stage's
+  # own operation — the trace records carry the pathname, which binds
+  # the boundary to the MkdirTemp call (not to another /tmp access).
   # No comm filters: the event field
   # shapes vary by kernel and a wrong filter would silently drop the
   # evidence; the volume is bounded by the ring and post-filtered at the
@@ -1527,7 +1557,9 @@ if [ -d "$TRACING/events/capability/cap_capable" ]; then
             syscalls/sys_enter_read syscalls/sys_enter_write syscalls/sys_enter_close \
             syscalls/sys_enter_exit syscalls/sys_enter_exit_group \
             syscalls/sys_enter_mount syscalls/sys_exit_mount \
-            syscalls/sys_enter_execve syscalls/sys_exit_execve; do
+            syscalls/sys_enter_execve syscalls/sys_exit_execve \
+            syscalls/sys_enter_mkdir syscalls/sys_exit_mkdir \
+            syscalls/sys_enter_mkdirat syscalls/sys_exit_mkdirat; do
     [ -d "$TRACING/events/$ev" ] && echo 1 > "$TRACING/events/$ev/enable" 2>/dev/null || true
   done
   # 4C-29: the SELinux decision tracepoint (avc:selinux_audited) —
@@ -1560,7 +1592,8 @@ if [ -d "$TRACING/events/capability/cap_capable" ]; then
               syscalls/sys_enter_wait4 syscalls/sys_enter_waitid syscalls/sys_enter_poll syscalls/sys_enter_ppoll \
               syscalls/sys_enter_select syscalls/sys_enter_pselect6 syscalls/sys_enter_read syscalls/sys_enter_write \
               syscalls/sys_enter_close syscalls/sys_enter_exit syscalls/sys_enter_exit_group \
-              syscalls/sys_enter_mount syscalls/sys_exit_mount syscalls/sys_enter_execve syscalls/sys_exit_execve; do
+              syscalls/sys_enter_mount syscalls/sys_exit_mount syscalls/sys_enter_execve syscalls/sys_exit_execve \
+              syscalls/sys_enter_mkdir syscalls/sys_exit_mkdir syscalls/sys_enter_mkdirat syscalls/sys_exit_mkdirat; do
       echo "$ev: $([ -d "$TRACING/events/$ev" ] && echo yes || echo no)"
     done
     echo "=== 4C-29 live class/permission mapping evidence (RECORDED, not hardcoded — decode validation uses co-captured AVC records) ==="
@@ -1842,7 +1875,9 @@ if [ "$TRACE_ENABLED" = 1 ]; then
             syscalls/sys_enter_read syscalls/sys_enter_write syscalls/sys_enter_close \
             syscalls/sys_enter_exit syscalls/sys_enter_exit_group \
             syscalls/sys_enter_mount syscalls/sys_exit_mount \
-            syscalls/sys_enter_execve syscalls/sys_exit_execve; do
+            syscalls/sys_enter_execve syscalls/sys_exit_execve \
+            syscalls/sys_enter_mkdir syscalls/sys_exit_mkdir \
+            syscalls/sys_enter_mkdirat syscalls/sys_exit_mkdirat; do
     [ -d "$TRACING/events/$ev" ] && echo 0 > "$TRACING/events/$ev/enable" 2>/dev/null || true
   done
   grep -a -E 'slirp4netns|rootlesskit| ns/net|ns/user|/dev/net/tun|cap_capable|selinux_audited' "$EVIDENCE_DIR/30-trace-window.txt" \
@@ -2364,18 +2399,21 @@ fi
 # is already proven (POST-TUN-T0 above; TUNSETIFF 0x54ca -> 0). This
 # verdict reconstructs the causal chain between the attach and the
 # operation's FIRST death from the kernel trace (fork/exit/signal/wait/
-# poll/read-write-close/mount/execve), the post-TUN timeline (50), the
-# audit slice and the manager journal. The 4C-39 grant
-# (rootlesskit_t -> root_t:dir mounton) must have REMOVED the 4C-38
-# boundary; the run's own decisions are classified TEMPORALLY against
-# the first failing exit — only the first STARTUP-CAUSAL denial may own
-# the next semantic phase, and the phase STOPs there. A window with no
-# nonzero flow-domain exit is the stable-lifetime outcome. Nothing is
-# granted in this phase beyond the 4C-39 mounton rule itself.
+# poll/read-write-close/mount/mkdir/execve), the post-TUN timeline (50),
+# the audit slice and the manager journal. The 4C-40 grant
+# (rootlesskit_t -> tmp_t:dir write) must have REMOVED the 4C-39
+# boundary, and the 4C-39 grant (rootlesskit_t -> root_t:dir mounton)
+# must have stayed in effect (the old mounton boundary stays GONE — a
+# regression is a phase failure); the run's own decisions are classified
+# TEMPORALLY against the first failing exit — only the first
+# STARTUP-CAUSAL denial may own the next semantic phase, and the phase
+# STOPs there. A window with no nonzero flow-domain exit is the
+# stable-lifetime outcome. Nothing is granted in this phase beyond the
+# 4C-40 write rule itself.
 # The flow-domain comm set is the lifetime subject (rootlesskit parent +
 # child, slirp4netns parent + child, the uid-map shims, the payload).
 POSTTUN_FLOW_COMM_GREP='(rootlesskit|exe|slirp4netns|buildkitd|newuidmap|newgidmap)-[0-9]+ '
-POSTTUN_TRACE_EVENT_GREP='sched_process_fork:|sched_process_exit:|signal_generate:|signal_deliver:|selinux_audited:|sys_(openat|setns|ioctl|kill|tkill|tgkill|pidfd_send_signal|wait4|waitid|poll|ppoll|select|pselect6|read|write|close|exit|exit_group|mount|execve)'
+POSTTUN_TRACE_EVENT_GREP='sched_process_fork:|sched_process_exit:|signal_generate:|signal_deliver:|selinux_audited:|sys_(openat|setns|ioctl|kill|tkill|tgkill|pidfd_send_signal|wait4|waitid|poll|ppoll|select|pselect6|read|write|close|exit|exit_group|mount|mkdir|mkdirat|execve)'
 
 # The ordered flow-domain extract (the lifetime subject's own records;
 # chronology-preserving; capped).
@@ -2410,7 +2448,7 @@ POSTTUN_NSTARTUP=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIMED=0
 POSTTUN_OLD_BOUNDARY_PRESENT=0
 POSTTUN_BND_SYMBOLIC=""
 {
-  echo "=== 4C-38/4C-39 post-TUN lifetime/readiness causal verdict (the 4C-39 run carries exactly the rootlesskit_t -> root_t:dir mounton grant) ==="
+  echo "=== 4C-38/4C-39/4C-40 post-TUN lifetime/readiness causal verdict (the 4C-40 run carries exactly the rootlesskit_t -> tmp_t:dir write grant) ==="
   echo "POST-TUN-T0: ${POSTTUN_T0_EPOCH:-(not derived)}"
   echo "  derivation: trace-ts=$POSTTUN_T0_TRACE_TS attach-executor=${POSTTUN_ATTACH_WHO:-(none)} read-epoch=$POSTTUN_READ_EPOCH read-uptime=$POSTTUN_READ_UPTIME ring-last-ts=${POSTTUN_RING_LAST_TS:-(none)} clock-drift=${POSTTUN_CLOCK_DRIFT:-?}s"
   echo "--- the attach pair (the T0 anchor; the attach executor's own TUNSETIFF):"
@@ -2560,19 +2598,21 @@ POSTTUN_BND_SYMBOLIC=""
     echo "(end of the ready channel's story)"
   fi
 
-  # The post-TUN mount/execve story (the 4C-39 stage evidence): the
-  # granted mount propagation on "/", its result, and the following
-  # mount/execve stages between the ready byte and the next startup
-  # boundary (or the span's end in the stable case).
+  # The post-TUN mount/execve/mkdir story (the 4C-39 + 4C-40 stage
+  # evidence): the granted mount propagation on "/", its result, and the
+  # following mount/execve/mkdir stages between the ready byte and the
+  # next startup boundary (or the span's end in the stable case) — the
+  # copy-up setup's MkdirTemp records with their pathnames (the 4C-40
+  # stage's own operation; the pathname binds the boundary to MkdirTemp).
   if [ -n "$POSTTUN_T0_TRACE_TS" ] && [ -n "$POSTTUN_STORY_END_TS" ]; then
-    echo "--- the post-TUN mount/execve story (T0..${POSTTUN_STORY_END_TS}; flow-domain comms; sys_mount/sys_execve records with their results):"
+    echo "--- the post-TUN mount/execve/mkdir story (T0..${POSTTUN_STORY_END_TS}; flow-domain comms; sys_mount/sys_execve/sys_mkdir/sys_mkdirat records with their results and pathnames):"
     awk -v t0="$POSTTUN_T0_TRACE_TS" -v td="$POSTTUN_STORY_END_TS" '
       { ts = $4; sub(/:$/, "", ts); if (ts + 0 < t0 + 0 || ts + 0 > td + 0) next; print }
     ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
       | grep -aE "$POSTTUN_FLOW_COMM_GREP" \
-      | grep -aE 'sys_mount\(|sys_mount ->|sys_execve\(|sys_execve ->' \
+      | grep -aE 'sys_mount\(|sys_mount ->|sys_execve\(|sys_execve ->|sys_mkdirat\(|sys_mkdirat ->|sys_mkdir\(|sys_mkdir ->' \
       | head -80 || true
-    echo "(end of the mount/execve story)"
+    echo "(end of the mount/execve/mkdir story)"
   fi
 
   # The process tree (the fork records from T0 through failure+0.5s).
@@ -2699,7 +2739,8 @@ POSTTUN_BND_SYMBOLIC=""
   # root_t:dir, denied mask 0x10000 = mounton) anywhere in the window's
   # trace span. A record here means the 4C-39 grant did not take effect
   # on the loaded policy: STOP and report the actual behavior (no rule
-  # widening).
+  # widening). In the 4C-40 phase this check stays as the STANDING
+  # regression guard for the 4C-39 grant.
   POSTTUN_OLD_MOUNTON_PRESENT="$(grep -a 'selinux_audited:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
     | grep -a 'scontext=system_u:system_r:docker_helper_rootlesskit_t' \
     | grep -a 'tcontext=system_u:object_r:root_t:s0' \
@@ -2711,6 +2752,29 @@ POSTTUN_BND_SYMBOLIC=""
     POSTTUN_OLD_BOUNDARY_PRESENT=1
   else
     echo "OLD-BOUNDARY: GONE (no rootlesskit_t -> root_t:dir mounton (0x10000) decision in the window's trace span)"
+  fi
+
+  # 4C-40: the SAME contract for the phase's own grant — the OLD primary
+  # boundary (docker_helper_rootlesskit_t -> tmp_t:dir, denied mask 0x4 =
+  # write; the 4C-39 run's canonical record) must be GONE anywhere in the
+  # window's trace span. The masks are matched exactly (0x4 is not
+  # 0x40000's substring — open's mask and every other 0x4* prefix are
+  # excluded), and the target context is matched to the type boundary
+  # (tmp_t is not user_tmp_t's substring — the distro labels /tmp
+  # tmp_t). A record here means the 4C-40 grant did not take effect on
+  # the loaded policy: STOP and report the actual behavior (no rule
+  # widening).
+  POSTTUN_OLD_TMPWRITE_PRESENT="$(grep -a 'selinux_audited:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
+    | grep -a 'scontext=system_u:system_r:docker_helper_rootlesskit_t' \
+    | grep -aE 'tcontext=system_u:object_r:tmp_t:s0([ \t]|$)' \
+    | grep -a 'tclass=dir' \
+    | grep -aE 'denied=0x4([^0-9a-fA-F]|$)' || true)"
+  if [ -n "$POSTTUN_OLD_TMPWRITE_PRESENT" ]; then
+    echo "OLD-WRITE-BOUNDARY: STILL-PRESENT — the 4C-40 write grant did not take effect (STOP; no rule widening):"
+    printf '%s\n' "$POSTTUN_OLD_TMPWRITE_PRESENT"
+    POSTTUN_OLD_TMPWRITE_PRESENT=1
+  else
+    echo "OLD-WRITE-BOUNDARY: GONE (no rootlesskit_t -> tmp_t:dir write (0x4) decision in the window's trace span)"
   fi
 
   # The gates.
@@ -2825,19 +2889,27 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
     marker "4C-39=INCOMPLETE/GRANT-DID-NOT-TAKE-EFFECT"
   else
     marker "4C-39-OLD-MOUNTON-BOUNDARY=GONE"
+    marker "4C-39=PASS/NEXT-BOUNDARY-CONFIRMED"
+  fi
+  if [ "$POSTTUN_OLD_TMPWRITE_PRESENT" = 1 ]; then
+    marker "4C-40-OLD-WRITE-BOUNDARY=STILL-PRESENT"
+    marker "4C-40=INCOMPLETE/GRANT-DID-NOT-TAKE-EFFECT"
+  else
+    marker "4C-40-OLD-WRITE-BOUNDARY=GONE"
     if [ -n "$POSTTUN_FIRST_FAIL_PID" ]; then
-      marker "4C-39-OUTCOME=NEXT-STARTUP-BOUNDARY-CONFIRMED"
-      marker "4C-39=PASS/NEXT-BOUNDARY-CONFIRMED"
+      marker "4C-40-OUTCOME=NEXT-STARTUP-BOUNDARY-CONFIRMED"
+      marker "4C-40=PASS/NEXT-BOUNDARY-CONFIRMED"
     else
-      marker "4C-39-OUTCOME=POST-TUN-LIFETIME-STABLE"
+      marker "4C-40-OUTCOME=POST-TUN-LIFETIME-STABLE"
       marker "TARGET-LIFETIME-BLOCKER=GONE"
-      marker "4C-39=PASS/POST-TUN-LIFETIME-STABLE"
+      marker "4C-40=PASS/POST-TUN-LIFETIME-STABLE"
     fi
   fi
   marker "4C-38=PROVEN/PRIMARY-BOUNDARY-ESTABLISHED"
 else
   marker "4C-38=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-39=INCOMPLETE/ORDER_NOT_ESTABLISHED"
+  marker "4C-40=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   POSTTUN_NOT_ESTABLISHED=1
 fi
 
@@ -4513,9 +4585,16 @@ if [ "$I9_OK" = 1 ]; then
   # cross-op proof are both mandatory for a PASS. The 4C-38 lifetime
   # proof rides the same rule: an unestablished causal order keeps the
   # phase INCOMPLETE (no guessing).
-  # A still-present old mounton boundary is a hard phase failure (the
-  # grant demonstrably did not take effect); it outranks the cross-op
-  # INCOMPLETE.
+  # A still-present old boundary is a hard phase failure (the grant
+  # demonstrably did not take effect); it outranks the cross-op
+  # INCOMPLETE. Both standing gone-gates apply: the 4C-40 write boundary
+  # (the phase's own grant) and the 4C-39 mounton boundary (the standing
+  # regression guard).
+  if [ "${POSTTUN_OLD_TMPWRITE_PRESENT:-0}" = 1 ]; then
+    marker "BLOCKER=the 4C-40 write grant did not remove the old rootlesskit_t -> tmp_t:dir write boundary (see 53-posttun-verdict.txt)"
+    finish FAIL
+    exit 0
+  fi
   if [ "${POSTTUN_OLD_BOUNDARY_PRESENT:-0}" = 1 ]; then
     marker "BLOCKER=the 4C-39 mounton grant did not remove the old rootlesskit_t -> root_t:dir mounton boundary (see 53-posttun-verdict.txt)"
     finish FAIL
