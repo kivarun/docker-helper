@@ -1475,27 +1475,54 @@ allow docker_helper_rootlesskit_t root_t:dir mounton;
 #     empty in that window too (the same userspace-audit gap); a next
 #     symbolic AVC record, when captured, is the confirming decode.
 #
-# SCOPE — READ CAREFULLY: exactly THREE permissions of the dir class —
-# the write, add_name, and create checks of the ONE mkdir(2) that
-# MkdirTemp issues on /tmp; each permission is traceable to its own
-# run's boundary above. Deliberately NOT granted: mounton (the bind
-# mount target hook — the NEXT boundary, hypothesized as
-# mount(<copy-up-source>, "/tmp/rootlesskit-b*", MS_BIND|MS_REC) but
-# NOT assumed; NOT granted even if the next denial names it),
-# remove_name/rmdir (the failed launches' cleanup surface — the
-# manager purge owns removal), setattr, rename, and every other dir
-# permission; NO tmp_t file/lnk_file/sock_file/fifo_file surface (the
-# bind0 mounts' inner objects materialize later, each its own
-# boundary); no filesystem-class grant; no process/capability
-# surface; no other subject; the lifecycle signal surface stays
-# closed (the post-failure cleanup kill follows the holder's exit —
-# never precedes it). Like every flow-domain grant this is a
-# domain-wide permission on the distro /tmp type (no .fc delta: the
-# distro labels /tmp with its own tmp_t), not an operation-scoped
-# one; the operation separation is owned by the categorized
-# process/object MCS boundary, and cross-operation targeting stays
-# the open concurrency/security gate before the Release GO.
-allow docker_helper_rootlesskit_t tmp_t:dir { write add_name create };
+#   mounton (4C-43): with the trio granted, the canonical 4C-42 run
+#     37109745209 saw mkdirat SUCCEED (sys_mkdirat("/tmp/rootlesskit-
+#     b145856764", 0700) -> 0x0 — the ROOTLESSKIT-BIND0-CREATE
+#     milestone; the residue probe confirmed the created dir's real
+#     SID system_u:object_r:tmp_t:s0, mode drwx------) and moved the
+#     failure to the copy-up BIND MOUNT:
+#       sys_mount(dev_name: "/etc", dir_name:
+#       "/tmp/rootlesskit-b145856764", type: "", flags: 0x5000
+#       MS_BIND|MS_REC, data: 0) -> 0xfffffffffffffff3
+#     with the denial INSIDE the mount(2) window, trace-ts 277.042370
+#     (175µs before the holder's exit(1) at trace-ts 277.042545; T0 =
+#     the attach at trace-ts 277.037740):
+#       requested=0x10000 denied=0x10000 audited=0x10000 result=-13
+#       (EACCES)
+#       scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+#       tcontext=system_u:object_r:tmp_t:s0 tclass=dir
+#     The decode is dir:mounton = 0x10000 (bit 16 of the kernel's
+#     static classmap — the SAME bit position the 4C-38 root_t
+#     boundary proved, but on the NEW tmp_t pair, which needs its own
+#     live evidence and its own grant). The audit slice was empty in
+#     that window too (the same userspace-audit gap). The failed
+#     launch's RemoveAll noise (tmp_t:dir remove_name, tmp_t:dir read)
+#     sits AFTER the failing mount — classified POST-FAILURE/CLEANUP,
+#     never granted.
+#
+# SCOPE — READ CAREFULLY: exactly FOUR permissions of the dir class —
+# the write, add_name, create, and mounton checks of the ONE copy-up
+# path rootlesskit runs on /tmp (the MkdirTemp mkdir(2) and the bind
+# mount onto the created temp dir); each permission is traceable to
+# its own run's boundary above. Deliberately NOT granted:
+# remove_name/read/rmdir (the failed launches' RemoveAll cleanup
+# surface — the manager purge owns removal; the residue dir is a
+# policy-observable fact, not cleanup authority), setattr, rename,
+# and every other dir permission; NO tmp_t file/lnk_file/sock_file/
+# fifo_file surface (the bind mounts' inner objects materialize
+# later, each its own boundary); NO filesystem-class grant and NO
+# permission toward the NEXT stage (the tmpfs mount over the
+# copy-up source and the .ro/MS_MOVE/scan steps — each is a live
+# boundary of its own); no process/capability surface; no other
+# subject; the lifecycle signal surface stays closed (the
+# post-failure cleanup kill follows the holder's exit — never
+# precedes it). Like every flow-domain grant this is a domain-wide
+# permission on the distro /tmp type (no .fc delta: the distro
+# labels /tmp with its own tmp_t), not an operation-scoped one; the
+# operation separation is owned by the categorized process/object
+# MCS boundary, and cross-operation targeting stays the open
+# concurrency/security gate before the Release GO.
+allow docker_helper_rootlesskit_t tmp_t:dir { write add_name create mounton };
 
 # --- docker_helper_slirp4netns_t: the rootlesskit user-network helper domain (P5-S2) ---
 #
