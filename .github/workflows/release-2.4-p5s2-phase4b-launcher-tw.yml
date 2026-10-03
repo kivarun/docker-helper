@@ -32,13 +32,13 @@ jobs:
 
       - name: Check out the tested proof commit for the composition
         env:
-          # 4C-43: the composition's module now carries the rootlesskit
-          # child's copy-up tmp_t:dir { write add_name create mounton }
-          # grant (the 4C-42 boundary's semantic fix, widened in place);
-          # the proof ref advances from the 4C-42-era pin to the commit
-          # carrying that module (399e995 — identical Go sources, so the
-          # binary is the same program).
-          PHASE4B_PROOF_REF: '399e995e8f3a6af7a686bcf834e35593bc319eb3'
+          # 4C-44: the composition's module now carries the rootlesskit
+          # child's copy-up etc_t:dir mounton grant (the 4C-43 boundary's
+          # semantic fix — the tmpfs mount over /etc's OWN distro label,
+          # a NEW evidenced pair); the proof ref advances from the
+          # 4C-43-era pin to the commit carrying that module (2118a40 —
+          # identical Go sources, so the binary is the same program).
+          PHASE4B_PROOF_REF: '2118a40b322ac5e86f43ce8c7cc614b3431fdcdf'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
