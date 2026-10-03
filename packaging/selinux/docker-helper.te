@@ -1407,45 +1407,78 @@ allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind
 # second rule, no other subject.
 allow docker_helper_rootlesskit_t root_t:dir mounton;
 
-# The copy-up /tmp directory write (P5-S2 Phase 4C-40): with the root
-# mount propagation granted (4C-39), the child's copy-up setup —
-# rootlesskit's bind0/bind1 directory creation under /tmp — issues
-# os.MkdirTemp("/tmp", "rootlesskit-b*") and the mkdir(2) on the /tmp
-# parent fails the SELinux dir write check. Live enforcing boundary,
-# canonical 4C-39 run 37101080574, trace-ts 274.305359 (T0 = the helper's
-# granted TUNSETIFF attach at trace-ts 274.301943; 62µs before the
-# holder's exit(1) at trace-ts 274.305421):
-#   requested=0x20000004 denied=0x4 audited=0x4 result=-13 (EACCES)
-#   scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
-#   tcontext=system_u:object_r:tmp_t:s0 tclass=dir
-# with the direct userspace failure "[rootlesskit:child ] error: creating
-# bind0 directory under /tmp" — the direct causal chain to the 4C-39
-# holder death. The decode is the kernel's own static classmap
-# (dir:write = 0x4, bit 2 of COMMON_FILE_SOCK_PERMS; the 4C-39 decoder
-# rework): the SAME record's requested mask carries 0x20000000
-# (dir:search) NOT denied — search PASSED on the base policy's standing
-# surface and must NOT be interpreted as a grant mandate for this
-# module. The audit slice was empty in the canonical window (the
-# measured userspace-audit gap), so the boundary is named by the raw
-# kernel decision plus the holder's own stderr; a next symbolic AVC
-# record for the same shape, when captured, is the confirming decode.
+# The copy-up /tmp directory write (P5-S2 Phase 4C-40) and the mkdir
+# name mediation of the same mkdir(2) (P5-S2 Phase 4C-41): the child's
+# copy-up setup — rootlesskit's bind0/bind1 directory creation under
+# /tmp — issues os.MkdirTemp("/tmp", "rootlesskit-b*") and the mkdir(2)
+# on the /tmp parent is mediated by TWO dir permissions, each added
+# from its own live enforcing boundary.
 #
-# SCOPE — READ CAREFULLY: exactly ONE permission of the dir class — the
-# write check of the mkdir(2) that MkdirTemp issues on /tmp. Deliberately
-# NOT granted: add_name/create/remove_name/rmdir (mkdir(2)'s remaining
-# dir surface — each SELinux hook of the copy-up creation materializes
-# live and owns its own phase), setattr, mounton, and every other dir
-# permission; NO tmp_t file/lnk_file/sock_file/fifo_file surface (the
-# bind0 mounts' inner objects materialize later, each its own boundary);
-# no filesystem-class grant; no process/capability surface; no other
-# subject; the lifecycle signal surface stays closed (the post-failure
-# cleanup kill follows the holder's exit — never precedes it). Like every
-# flow-domain grant this is a domain-wide permission on the distro /tmp
-# type (no .fc delta: the distro labels /tmp with its own tmp_t), not an
+#   write (4C-40): live enforcing boundary, canonical 4C-39 run
+#     37101080574, trace-ts 274.305359 (T0 = the helper's granted
+#     TUNSETIFF attach at trace-ts 274.301943; 62µs before the holder's
+#     exit(1) at trace-ts 274.305421):
+#       requested=0x20000004 denied=0x4 audited=0x4 result=-13 (EACCES)
+#       scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+#       tcontext=system_u:object_r:tmp_t:s0 tclass=dir
+#     with the direct userspace failure "[rootlesskit:child ] error:
+#     creating bind0 directory under /tmp". The decode is the kernel's
+#     own static classmap (dir:write = 0x4, bit 2 of
+#     COMMON_FILE_SOCK_PERMS; the 4C-39 decoder rework): the SAME
+#     record's requested mask carries 0x20000000 (dir:search) NOT
+#     denied — search PASSED on the base policy's standing surface and
+#     must NOT be interpreted as a grant mandate for this module. The
+#     audit slice was empty in the canonical window (the measured
+#     userspace-audit gap), so the boundary is named by the raw kernel
+#     decision plus the holder's own stderr.
+#
+#   add_name (4C-41): with write granted, the canonical 4C-40 run
+#     37104707444 moved the failure to the mkdir's NEXT SELinux hook —
+#     the same sys_mkdirat window, trace-ts 278.170941 (42µs before the
+#     holder's exit(1) at trace-ts 278.170983; T0 = the attach at
+#     trace-ts 278.168733):
+#       requested=0x24000000 denied=0x4000000 audited=0x4000000
+#       result=-13 (EACCES)
+#       scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+#       tcontext=system_u:object_r:tmp_t:s0 tclass=dir
+#     inside sys_mkdirat(dfd=AT_FDCWD, pathname=
+#     "/tmp/rootlesskit-b1515496009", mode=0x1c0=0700) — the direct
+#     userspace failure is again "[rootlesskit:child ] error: creating
+#     bind0 directory under /tmp". The decode is the kernel's own
+#     static classmap (dir:add_name = 0x4000000, bit 26; dir:search =
+#     0x20000000, bit 29 — the same record's requested mask names the
+#     standing search that PASSED): a mkdir(2)'s name-creation
+#     mediation, the exact next check after the granted write. The
+#     audit slice was empty in that window too (the same
+#     userspace-audit gap); the raw kernel decision plus the path-shape
+#     consistency name the boundary (the perms-file numbering would
+#     claim 1<<26 for "watch_reads" — inotify family, impossible on a
+#     mkdir path), and a next symbolic AVC record, when captured, is
+#     the confirming decode.
+#
+# SCOPE — READ CAREFULLY: exactly TWO permissions of the dir class —
+# the write check and the add_name check of the ONE mkdir(2) that
+# MkdirTemp issues on /tmp; each permission is traceable to its own
+# run's boundary above. Deliberately NOT granted: create (the
+# new-directory-object hook — the NEXT boundary; its target type is NOT
+# assumed to be tmp_t: the type the kernel labels the new
+# /tmp/rootlesskit-b* dir with must materialize live — a type
+# transition or default labeling may name another type, and the next
+# phase uses exactly that pair), remove_name/rmdir (the failed
+# launches' cleanup surface — the manager purge owns removal),
+# setattr, mounton, and every other dir permission; NO tmp_t
+# file/lnk_file/sock_file/fifo_file surface (the bind0 mounts' inner
+# objects materialize later, each its own boundary); no filesystem-class
+# grant; no process/capability surface; no other subject; the lifecycle
+# signal surface stays closed (the post-failure cleanup kill follows
+# the holder's exit — never precedes it). Like every flow-domain grant
+# this is a domain-wide permission on the distro /tmp type (no .fc
+# delta: the distro labels /tmp with its own tmp_t), not an
 # operation-scoped one; the operation separation is owned by the
-# categorized process/object MCS boundary, and cross-operation targeting
-# stays the open concurrency/security gate before the Release GO.
-allow docker_helper_rootlesskit_t tmp_t:dir write;
+# categorized process/object MCS boundary, and cross-operation
+# targeting stays the open concurrency/security gate before the
+# Release GO.
+allow docker_helper_rootlesskit_t tmp_t:dir { write add_name };
 
 # --- docker_helper_slirp4netns_t: the rootlesskit user-network helper domain (P5-S2) ---
 #
