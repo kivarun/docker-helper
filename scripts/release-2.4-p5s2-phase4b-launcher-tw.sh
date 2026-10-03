@@ -955,25 +955,30 @@ PREFLIGHT_OK=1
     PREFLIGHT_OK=0
   fi
 
-  echo "=== flow root mount-propagation identity (the 4C-39 grant: the EFFECTIVE rootlesskit -> root_t:dir authority must be exactly { mounton }; a relabelto — the 4C-38 decoder misread — or any other dir permission, a second rule, or any extra subject is a STOP) ==="
+  echo "=== flow root mount-propagation identity (the 4C-39 grant: the module's own rootlesskit -> root_t:dir contribution must be exactly the one bare mounton rule; the EFFECTIVE union may carry only that plus the base policy's standing domain-attribute trio { ioctl lock read }; any other dir permission — relabelto, the 4C-38 decoder misread, included — is a STOP) ==="
   echo "--- raw effective inventory (rootlesskit -> root_t:dir; base-policy/attribute expansions recorded, not asserted):"
   RK_ROOTDIR_RAW="$(sesearch --allow -s docker_helper_rootlesskit_t -t root_t -c dir /sys/fs/selinux/policy 2>/dev/null || true)"
   printf '%s\n' "${RK_ROOTDIR_RAW:-(none)}"
+  echo "--- CONCRETE module contribution (source must be docker_helper_rootlesskit_t; must be exactly one bare mounton rule):"
+  RK_ROOTDIR_CONCRETE="$(printf '%s\n' "$RK_ROOTDIR_RAW" | awk '$2 == "docker_helper_rootlesskit_t"' || true)"
+  printf '%s\n' "${RK_ROOTDIR_CONCRETE:-(none)}"
   echo "--- the dir class's numeric permission map (value -> name from the perms files' contents; the LOADED POLICY's own numbering — the recorded interface fact, never the kernel's AVC-mask decode):"
   numeric_perms_map dir || true
   RK_ROOTDIR_UNION="$(printf '%s\n' "$RK_ROOTDIR_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* root_t:dir \(.*\);$/\1/p' | sed 's/[{}]//g' | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
   echo "effective dir perm union: ${RK_ROOTDIR_UNION:-(none)}"
-  echo "--- the misread negative (relabelto must be absent from the whole effective surface):"
-  RK_ROOTDIR_RELABELTO="$(printf '%s\n' "$RK_ROOTDIR_RAW" | grep -a 'relabelto' || true)"
-  printf '%s\n' "${RK_ROOTDIR_RELABELTO:-(none — no relabelto authority)}"
+  echo "--- the forbidden-new-perms negative (everything beyond the base policy's standing { ioctl lock read } and the granted mounton must be absent from the whole effective surface; relabelto named first — the 4C-38 decoder misread):"
+  RK_ROOTDIR_FORBIDDEN="$(printf '%s\n' "$RK_ROOTDIR_UNION" | grep -avE '^(ioctl|lock|mounton|read)$' || true)"
+  printf '%s\n' "${RK_ROOTDIR_FORBIDDEN:-(none — no extra dir permission)}"
   RK_ROOTDIR_OK=0
-  if [ "$RK_ROOTDIR_UNION" = "mounton " ] && [ -z "$RK_ROOTDIR_RELABELTO" ]; then
+  if [ "$(printf '%s\n' "$RK_ROOTDIR_CONCRETE" | grep -ac . || true)" = 1 ] \
+    && printf '%s\n' "$RK_ROOTDIR_CONCRETE" | grep -aqx 'allow docker_helper_rootlesskit_t root_t:dir mounton;' \
+    && [ -z "$RK_ROOTDIR_FORBIDDEN" ]; then
     RK_ROOTDIR_OK=1
   fi
   if [ "$RK_ROOTDIR_OK" = 1 ]; then
-    echo "PASS: flow root mount-propagation identity (effective root_t:dir authority exactly { mounton }; no relabelto)"
+    echo "PASS: flow root mount-propagation identity (module contribution exactly { mounton }; effective union = the base policy's standing { ioctl lock read } + mounton; no relabelto)"
   else
-    echo "FAIL: flow root mount-propagation identity (union=${RK_ROOTDIR_UNION:-(none)} relabelto-present=$([ -n "$RK_ROOTDIR_RELABELTO" ] && echo yes || echo no))"
+    echo "FAIL: flow root mount-propagation identity (concrete-rules=$(printf '%s\n' "$RK_ROOTDIR_CONCRETE" | grep -ac . || true) union=${RK_ROOTDIR_UNION:-(none)})"
     PREFLIGHT_OK=0
   fi
 
