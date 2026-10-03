@@ -1668,15 +1668,38 @@ allow docker_helper_rootlesskit_t tmpfs_t:filesystem mount;
 # that window too (the same userspace-audit gap); a next symbolic AVC
 # record, when captured, is the confirming decode.
 #
+# 4C-47 WIDENS THIS RULE IN PLACE (+ mounton): with the create granted,
+# the canonical 4C-46 run 37151310682 saw the .ro mkdirat SUCCEED
+# (-> 0x0 — the 4C-46 grant took effect directly, zero tmpfs_t:dir
+# create AVCs) and the FIRST next production step — the move-mount of
+# the bind0 original tree onto the fresh .ro dir — fail at ITS OWN
+# target-dir mediation:
+#   sys_mount(dev_name: "/tmp/rootlesskit-b806505358",
+#   dir_name: "/etc/.ro1982736738", type: "", flags: 0x2000 (MS_MOVE),
+#   data: 0) -> 0xfffffffffffffff3
+# with the denial INSIDE the mount(2) window, trace-ts 242.375018
+# (25µs before the first failing syscall exit at trace-ts 242.375043;
+# T0 = the attach at trace-ts 242.373493):
+#   requested=0x10000 denied=0x10000 audited=0x10000 result=-13 (EACCES)
+#   scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+#   tcontext=system_u:object_r:tmpfs_t:s0 tclass=dir
+#
+# THE PERM IS THE LIVE-PROVEN PAIR — NOT ASSUMED: the move-mount's
+# target-dir check names mounton (bit 16 of the kernel's static dir
+# classmap — the same dir:mounton mediation the 4C-43/44 grants proved
+# for tmp_t and etc_t, now on the MOVED-mount target's own label
+# tmpfs_t). SAME PAIR (tmpfs_t:dir), different perm — the rule widens
+# IN PLACE rather than a second rule/owner for one pair.
+#
 # Deliberately NOT granted: add_name/write/remove_name/rmdir/read/
-# mounton/setattr/rename/relabel* on this pair (add_name/remove_name/
-# write are already STANDING base-policy authority — this module must
-# not copy them), any file/lnk_file/blk/chr surface of the tmpfs
+# setattr/rename/relabel* on this pair (add_name/remove_name/write are
+# already STANDING base-policy authority — this module must not copy
+# them), any file/lnk_file/blk/chr surface of the tmpfs
 # (the rebuild stages' target types materialize live), any second dir
 # rule, any filesystem-class permission (the mount grant's own owner
 # is 4C-45), process/capability surfaces, other subjects; the .fc and
 # the module version stay untouched.
-allow docker_helper_rootlesskit_t tmpfs_t:dir create;
+allow docker_helper_rootlesskit_t tmpfs_t:dir { create mounton };
 
 # --- docker_helper_slirp4netns_t: the rootlesskit user-network helper domain (P5-S2) ---
 #
