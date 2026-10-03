@@ -2679,6 +2679,148 @@ func TestSELinuxPolicyRootlesskitUsernsCreate(t *testing.T) {
 	}
 }
 
+// TestSELinuxPolicyRootlesskitRootMounton owns the exact surface of the
+// 4C-39 root mount-propagation grant: docker_helper_rootlesskit_t ->
+// root_t:dir { mounton }. The grant exists because the rootlesskit
+// child's mount-namespace setup issues mount("none", "/", ...) — the
+// "share mount point: /" step — and the canonical 4C-38 run's primary
+// boundary was exactly this check (denied 0x10000, result=-13, 39µs
+// before the holder's exit(1), rootlesskit's "failed to share mount
+// point: /: permission denied"). The surface is exact: one rule, one
+// permission. relabelto is the 4C-38 DECODER MISREAD of the same
+// record's 0x10000 mask (dir:relabelto is 0x100, dir:mounton is
+// 0x10000 — see TestSELinuxPermissionNumericValues) and must never
+// become policy; no other domain may receive root_t authority from
+// this module, and the flow child's dir-mounton authority is unique to
+// the root mount.
+func TestSELinuxPolicyRootlesskitRootMounton(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	for _, want := range []string{
+		"type root_t;",
+		"allow docker_helper_rootlesskit_t root_t:dir mounton;",
+	} {
+		if !strings.Contains(policy, want) {
+			t.Errorf("the rootlesskit child domain's root mount-propagation surface must be exact: %q", want)
+		}
+	}
+	pinnedRootMounton := "allow docker_helper_rootlesskit_t root_t:dir mounton;"
+	countExact := func(text, rule string) int {
+		n := 0
+		for _, line := range strings.Split(text, "\n") {
+			if strings.TrimSpace(line) == rule {
+				n++
+			}
+		}
+		return n
+	}
+	// rootMountonViolations returns one violation per line of module text
+	// that breaks the grant's invariants: exactly one allow rule may name
+	// docker_helper_rootlesskit_t -> root_t, in the exact bare-mounton
+	// dir shape (no brace form, no split rules, no duplicates); no other
+	// permission (relabelto first) and no other class may ride the
+	// rootlesskit_t -> root_t pair; no other subject may receive root_t
+	// authority from this module; and the flow child's dir-mounton
+	// authority is unique to the root mount (no parallel target).
+	rootMountonViolations := func(text string) []string {
+		var violations []string
+		count := 0
+		for _, line := range strings.Split(text, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			switch {
+			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t root_t:"):
+				count++
+				if trimmed != pinnedRootMounton {
+					violations = append(violations, "the root mount-propagation grant must be the exact bare-mounton dir shape (no brace form, no split rules, no second permission — relabelto is the 4C-38 decoder misread and must never become policy): "+trimmed)
+				}
+			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, " root_t:"):
+				violations = append(violations, "root_t authority is unique to the rootlesskit child domain: "+trimmed)
+			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t ") &&
+				strings.Contains(trimmed, ":dir ") && strings.Contains(trimmed, "mounton"):
+				violations = append(violations, "the flow child's dir mounton authority is unique to the root mount: "+trimmed)
+			}
+		}
+		if count == 0 {
+			violations = append(violations, "the root mount-propagation grant (rootlesskit_t -> root_t:dir mounton) is missing")
+		} else if count > 1 {
+			violations = append(violations, fmt.Sprintf("exactly one root_t grant may exist for the rootlesskit child domain, found %d", count))
+		}
+		return violations
+	}
+	if violations := rootMountonViolations(policy); len(violations) > 0 {
+		t.Errorf("the committed policy violates the root mount-propagation invariants: %v", violations)
+	}
+	// The replacement regressions: each replacement must APPLY (the
+	// pinned rule's count changes) and must actually trip the
+	// invariants — the owner pins the effective surface, so any other
+	// shape fails it.
+	for _, regressed := range []struct {
+		name string
+		rule string
+	}{
+		{"missing whole rule", ""},
+		{"missing mounton (relabelto-only shape — the 4C-38 decoder misread)", "allow docker_helper_rootlesskit_t root_t:dir relabelto;"},
+		{"relabelto instead of mounton", "allow docker_helper_rootlesskit_t root_t:dir relabelto;"},
+		{"mounton + relabelto brace set", "allow docker_helper_rootlesskit_t root_t:dir { mounton relabelto };"},
+		{"duplicate identical rule", pinnedRootMounton + "\n" + pinnedRootMounton},
+		{"parallel mounton rule (brace form)", pinnedRootMounton + "\nallow docker_helper_rootlesskit_t root_t:dir { mounton };"},
+		{"equivalent brace-single-perm shape", "allow docker_helper_rootlesskit_t root_t:dir { mounton };"},
+		{"wrong target type", "allow docker_helper_rootlesskit_t var_t:dir mounton;"},
+	} {
+		mutated := strings.Replace(policy, pinnedRootMounton, regressed.rule, 1)
+		applied := func() bool {
+			if regressed.rule == "" {
+				return countExact(mutated, pinnedRootMounton) == 0
+			}
+			return strings.Contains(mutated, regressed.rule)
+		}
+		if !applied() {
+			t.Errorf("the root-mounton regression %q was not applied", regressed.name)
+			continue
+		}
+		if len(rootMountonViolations(mutated)) == 0 {
+			t.Errorf("the root-mounton regression %q must fail the root mount-propagation invariants", regressed.name)
+		}
+	}
+	// The widening sweep: { mounton <X> } for every other dir permission
+	// — relabelto first — must fail the invariants in every case.
+	for _, extra := range []string{
+		"relabelto", "setattr", "write", "create", "search", "add_name",
+		"remove_name", "rmdir", "reparent", "getattr", "open", "read",
+		"ioctl", "lock", "link", "unlink", "rename", "map",
+		"execmod", "audit_access",
+	} {
+		mutated := strings.Replace(policy, pinnedRootMounton,
+			fmt.Sprintf("allow docker_helper_rootlesskit_t root_t:dir { mounton %s };", extra), 1)
+		if countExact(mutated, pinnedRootMounton) == 1 {
+			t.Errorf("the root-mounton widening +%s was not applied", extra)
+			continue
+		}
+		if len(rootMountonViolations(mutated)) == 0 {
+			t.Errorf("the root-mounton widening +%s must fail the root mount-propagation invariants", extra)
+		}
+	}
+	// The subject regressions: no other domain may gain root_t authority
+	// (the manager/launcher/helper shapes, the misread's relabelto
+	// included), appended beside the real grant.
+	for _, mut := range []struct {
+		name string
+		rule string
+	}{
+		{"root mounton for the manager", "allow docker_helper_builder_t root_t:dir mounton;"},
+		{"root mounton for the launcher", "allow docker_helper_builder_launcher_t root_t:dir mounton;"},
+		{"root mounton for the network helper", "allow docker_helper_slirp4netns_t root_t:dir mounton;"},
+		{"root relabelto for the manager (the misdecode widened)", "allow docker_helper_builder_t root_t:dir relabelto;"},
+		{"root relabelto for the network helper", "allow docker_helper_slirp4netns_t root_t:dir relabelto;"},
+	} {
+		if len(rootMountonViolations(policy+"\n"+mut.rule)) == 0 {
+			t.Errorf("mutation %q must trip the root mount-propagation invariants", mut.name)
+		}
+	}
+}
+
 // TestSELinuxPolicyRootlesskitIsolation verifies the rootlesskit child
 // domain receives no grant toward any forbidden surface (the same set the
 // builder domain is denied), carries no plain capability grants, and — for
