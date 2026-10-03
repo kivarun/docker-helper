@@ -1625,6 +1625,59 @@ allow docker_helper_rootlesskit_t etc_t:dir mounton;
 # the module version stay untouched.
 allow docker_helper_rootlesskit_t tmpfs_t:filesystem mount;
 
+# The copy-up `.ro` directory creation (P5-S2 Phase 4C-46): with the
+# tmpfs_t:filesystem mount granted (4C-45), the canonical 4C-45 run
+# 37147831964 saw the copy-up chain pass A (propagation -> 0x0), the
+# bind0 mkdirat (-> 0x0), B (bind mount -> 0x0) AND the C tmpfs mount
+# (-> 0x0, with ZERO filesystem-class AVCs — the 4C-45 grant took
+# effect directly) and reach the FIRST post-mount production step:
+#   sys_mkdirat(dfd: AT_FDCWD, pathname: "/etc/.ro1295760542", mode: 0700)
+#   -> 0xfffffffffffffff3
+# with the denial INSIDE the mkdirat(2) window, trace-ts 267.671243
+# (25µs before the first failing syscall exit at trace-ts 267.671268;
+# T0 = the attach at trace-ts 267.668098):
+#   requested=0x8 denied=0x8 audited=0x8 result=-13 (EACCES)
+#   scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+#   tcontext=system_u:object_r:tmpfs_t:s0 tclass=dir
+#
+# THE TARGET IS THE LIVE-PROVEN PAIR — NOT ASSUMED: the `.ro` child's
+# SID is inherited from the tmpfs root's own label tmpfs_t:s0 (the
+# kernel's own tcontext), exactly the materialized-labes-not-assumed
+# rule. THE CLASS IS THE EVIDENCE — a DIR permission: mask 0x8 on dir
+# is create (bit 3 of the kernel's static classmap — the
+# may_create()/dir-create mediation of the NEW child dir), granted as
+# its OWN dir-class rule and NEVER folded into the tmpfs_t:filesystem
+# mount rule (a different class, a different hook, a different
+# provenance).
+#
+# NOTE — THE PARENT-CHECK SIDE IS ALREADY STANDING: the base policy's
+# attribute surface grants docker_helper_rootlesskit_t tmpfs_t:dir
+# { add_name remove_name write ... } (the 4C-45 preflight inventory's
+# recorded standing residual); only the child-label create check was
+# denied. This rule adds exactly that missing create — it does NOT
+# duplicate or copy the base policy's standing dir authority into this
+# module.
+#
+# SCOPE NOTE — GLOBAL TYPE, NOT OPERATION-SCOPED: tmpfs_t:s0 carries no
+# per-operation MCS category, so this allow is not operation-scoped
+# (the nsfs_t/tmpfs-filesystem scope shape); the in-namespace
+# capability layer and the MCS-constrained subject stay the abuse
+# gates, and the cross-operation reachability gate stays OPEN.
+#
+# The decode is dir:create = 0x8 (bit 3). The audit slice was empty in
+# that window too (the same userspace-audit gap); a next symbolic AVC
+# record, when captured, is the confirming decode.
+#
+# Deliberately NOT granted: add_name/write/remove_name/rmdir/read/
+# mounton/setattr/rename/relabel* on this pair (add_name/remove_name/
+# write are already STANDING base-policy authority — this module must
+# not copy them), any file/lnk_file/blk/chr surface of the tmpfs
+# (the rebuild stages' target types materialize live), any second dir
+# rule, any filesystem-class permission (the mount grant's own owner
+# is 4C-45), process/capability surfaces, other subjects; the .fc and
+# the module version stay untouched.
+allow docker_helper_rootlesskit_t tmpfs_t:dir create;
+
 # --- docker_helper_slirp4netns_t: the rootlesskit user-network helper domain (P5-S2) ---
 #
 # RootlessKit forks and execs the distro slirp4netns binary as its
