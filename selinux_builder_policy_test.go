@@ -2821,6 +2821,158 @@ func TestSELinuxPolicyRootlesskitRootMounton(t *testing.T) {
 	}
 }
 
+// TestSELinuxPolicyRootlesskitTmpDirWrite owns the exact surface of the
+// 4C-40 tmp copy-up grant: docker_helper_rootlesskit_t -> tmp_t:dir
+// { write }. The grant exists because the rootlesskit child's copy-up
+// setup — the bind0/bind1 directory creation under /tmp — issues
+// os.MkdirTemp("/tmp", "rootlesskit-b*") and the canonical 4C-39 run's
+// (37101080574) next causal boundary was exactly this check (denied 0x4,
+// result=-13, 62µs before the holder's exit(1), rootlesskit's "creating
+// bind0 directory under /tmp"). The surface is exact: one rule, one
+// permission. The SAME record's requested mask carried 0x20000000
+// (dir:search) NOT denied — search passed on the base policy's standing
+// surface and must NOT ride this grant (a search member in the effective
+// union is the recorded standing fact, not a widening this module may
+// make). mkdir(2)'s remaining dir surface (add_name/create/remove_name/
+// rmdir) must NOT ride this grant either; no other class may be granted
+// on tmp_t from this module; no other subject may receive tmp_t
+// authority; and a confusable sibling target (user_tmp_t) is not the
+// evidenced pair.
+func TestSELinuxPolicyRootlesskitTmpDirWrite(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	for _, want := range []string{
+		"type tmp_t;",
+		"allow docker_helper_rootlesskit_t tmp_t:dir write;",
+	} {
+		if !strings.Contains(policy, want) {
+			t.Errorf("the rootlesskit child domain's tmp copy-up surface must be exact: %q", want)
+		}
+	}
+	pinnedTmpDirWrite := "allow docker_helper_rootlesskit_t tmp_t:dir write;"
+	countExact := func(text, rule string) int {
+		n := 0
+		for _, line := range strings.Split(text, "\n") {
+			if strings.TrimSpace(line) == rule {
+				n++
+			}
+		}
+		return n
+	}
+	// tmpDirWriteViolations returns one violation per line of module text
+	// that breaks the grant's invariants: exactly one allow rule may name
+	// docker_helper_rootlesskit_t -> tmp_t, in the exact bare dir-write
+	// shape (no brace form, no split rules, no second permission —
+	// search/add_name/create ride the base policy or stay ungranted); no
+	// other class (file/lnk_file/sock_file/...) may ride the
+	// rootlesskit_t -> tmp_t pair; no other subject may receive tmp_t
+	// authority from this module; and a rootlesskit-subject rule naming a
+	// tmp_t-suffixed sibling target (user_tmp_t) is a confusable shape
+	// the evidenced pair does not cover.
+	tmpDirWriteViolations := func(text string) []string {
+		var violations []string
+		count := 0
+		for _, line := range strings.Split(text, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			switch {
+			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t tmp_t:"):
+				count++
+				if trimmed != pinnedTmpDirWrite {
+					violations = append(violations, "the tmp copy-up grant must be the exact bare dir-write shape (no brace form, no split rules, no second permission — search/add_name/create must not ride this grant): "+trimmed)
+				}
+			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, " tmp_t:"):
+				violations = append(violations, "tmp_t authority is unique to the rootlesskit child domain: "+trimmed)
+			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t ") &&
+				strings.Contains(trimmed, "tmp_t:") && !strings.Contains(trimmed, " tmp_t:"):
+				violations = append(violations, "the flow child's tmp copy-up authority names a confusable sibling target (user_tmp_t is not the evidenced tmp_t): "+trimmed)
+			}
+		}
+		if count == 0 {
+			violations = append(violations, "the tmp copy-up grant (rootlesskit_t -> tmp_t:dir write) is missing")
+		} else if count > 1 {
+			violations = append(violations, fmt.Sprintf("exactly one tmp_t grant may exist for the rootlesskit child domain, found %d", count))
+		}
+		return violations
+	}
+	if violations := tmpDirWriteViolations(policy); len(violations) > 0 {
+		t.Errorf("the committed policy violates the tmp copy-up invariants: %v", violations)
+	}
+	// The replacement regressions: each replacement must APPLY (the
+	// pinned rule's count changes) and must actually trip the
+	// invariants — the owner pins the effective surface, so any other
+	// shape fails it.
+	for _, regressed := range []struct {
+		name string
+		rule string
+	}{
+		{"missing whole rule", ""},
+		{"missing write (search-only shape — the base policy's standing member)", "allow docker_helper_rootlesskit_t tmp_t:dir search;"},
+		{"search instead of write", "allow docker_helper_rootlesskit_t tmp_t:dir search;"},
+		{"add_name instead of write", "allow docker_helper_rootlesskit_t tmp_t:dir add_name;"},
+		{"write + add_name brace set", "allow docker_helper_rootlesskit_t tmp_t:dir { write add_name };"},
+		{"write + create brace set", "allow docker_helper_rootlesskit_t tmp_t:dir { write create };"},
+		{"duplicate identical rule", pinnedTmpDirWrite + "\n" + pinnedTmpDirWrite},
+		{"parallel write rule (brace form)", pinnedTmpDirWrite + "\nallow docker_helper_rootlesskit_t tmp_t:dir { write };"},
+		{"equivalent brace-single-perm shape", "allow docker_helper_rootlesskit_t tmp_t:dir { write };"},
+		{"wrong target type", "allow docker_helper_rootlesskit_t var_t:dir write;"},
+		{"confusable sibling target (user_tmp_t)", "allow docker_helper_rootlesskit_t user_tmp_t:dir write;"},
+	} {
+		mutated := strings.Replace(policy, pinnedTmpDirWrite, regressed.rule, 1)
+		applied := func() bool {
+			if regressed.rule == "" {
+				return countExact(mutated, pinnedTmpDirWrite) == 0
+			}
+			return strings.Contains(mutated, regressed.rule)
+		}
+		if !applied() {
+			t.Errorf("the tmp-dir-write regression %q was not applied", regressed.name)
+			continue
+		}
+		if len(tmpDirWriteViolations(mutated)) == 0 {
+			t.Errorf("the tmp-dir-write regression %q must fail the tmp copy-up invariants", regressed.name)
+		}
+	}
+	// The widening sweep: { write <X> } for every other dir permission —
+	// the mkdir(2) surface first — must fail the invariants in every
+	// case.
+	for _, extra := range []string{
+		"add_name", "create", "remove_name", "rmdir", "search", "setattr",
+		"reparent", "getattr", "open", "read", "ioctl", "lock", "link",
+		"unlink", "rename", "map", "relabelfrom", "relabelto", "mounton",
+		"execmod", "audit_access",
+	} {
+		mutated := strings.Replace(policy, pinnedTmpDirWrite,
+			fmt.Sprintf("allow docker_helper_rootlesskit_t tmp_t:dir { write %s };", extra), 1)
+		if countExact(mutated, pinnedTmpDirWrite) == 1 {
+			t.Errorf("the tmp-dir-write widening +%s was not applied", extra)
+			continue
+		}
+		if len(tmpDirWriteViolations(mutated)) == 0 {
+			t.Errorf("the tmp-dir-write widening +%s must fail the tmp copy-up invariants", extra)
+		}
+	}
+	// The subject regressions: no other domain may gain tmp_t authority
+	// (the manager/launcher/helper shapes), appended beside the real
+	// grant.
+	for _, mut := range []struct {
+		name string
+		rule string
+	}{
+		{"tmp dir write for the manager", "allow docker_helper_builder_t tmp_t:dir write;"},
+		{"tmp dir write for the launcher", "allow docker_helper_builder_launcher_t tmp_t:dir write;"},
+		{"tmp dir write for the network helper", "allow docker_helper_slirp4netns_t tmp_t:dir write;"},
+		{"tmp dir write for the uid-map helper", "allow docker_helper_newuidmap_t tmp_t:dir write;"},
+		{"tmp dir write for the gid-map helper", "allow docker_helper_newgidmap_t tmp_t:dir write;"},
+		{"tmp file write for the flow child (no other class rides the pair)", "allow docker_helper_rootlesskit_t tmp_t:file write;"},
+	} {
+		if len(tmpDirWriteViolations(policy+"\n"+mut.rule)) == 0 {
+			t.Errorf("mutation %q must trip the tmp copy-up invariants", mut.name)
+		}
+	}
+}
+
 // TestSELinuxPolicyRootlesskitIsolation verifies the rootlesskit child
 // domain receives no grant toward any forbidden surface (the same set the
 // builder domain is denied), carries no plain capability grants, and — for
