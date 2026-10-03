@@ -1577,6 +1577,54 @@ allow docker_helper_rootlesskit_t tmp_t:dir { write add_name create mounton };
 # before the Release GO.
 allow docker_helper_rootlesskit_t etc_t:dir mounton;
 
+# The copy-up tmpfs superblock's filesystem mount (P5-S2 Phase 4C-45):
+# with the etc_t:dir mounton granted (4C-44), the canonical 4C-44 run
+# 37145319964 saw the C request PASS the target-dir mounton stage and
+# enter the superblock mediation — the failure moved to the NEW
+# superblock's own filesystem-class check:
+#   sys_mount(dev_name: "none", dir_name: "/etc", type: "tmpfs",
+#   flags: 0, data: 0) -> 0xfffffffffffffff3
+# with the denial INSIDE the mount(2) window, trace-ts 175.074992
+# (14µs before the first failing syscall exit at trace-ts 175.075006;
+# T0 = the attach at trace-ts 175.072792, epoch 1791053307.245):
+#   requested=0x1 denied=0x1 audited=0x1 result=-13 (EACCES)
+#   scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+#   tcontext=system_u:object_r:tmpfs_t:s0 tclass=filesystem
+#
+# THE CLASS IS THE EVIDENCE — NOT A DIR PERMISSION: the deny is the
+# FILESYSTEM class's mount permission (bit 0 of the kernel's static
+# classmap — the may_mount()/sb creation mediation of the NEW tmpfs
+# superblock), checked on the superblock's OWN type tmpfs_t. This is
+# the class change the copy-up stage map predicted; it is granted as
+# its OWN filesystem-class rule and is never folded into a dir
+# mounton rule.
+#
+# SCOPE NOTE — THIS IS A GLOBAL-TYPE GRANT, RECORD IT AS SUCH:
+# tmpfs_t:s0 is a GLOBAL filesystem label with no per-operation MCS
+# category, so this allow is NOT operation-scoped: the flow domain
+# may mount NEW tmpfs filesystems anywhere kernel/DAC/namespace
+# capability relationships already permit. The security chain that
+# gates abuse stays at the kernel capability layer (in-namespace
+# CAP_SYS_ADMIN via cap_userns sys_admin) and the MCS-constrained
+# subject; cross-operation reachability stays the OPEN
+# concurrency/security gate before the Release GO (same scope shape
+# as the nsfs_t read/open pair).
+#
+# The decode is filesystem:mount = 0x1 (bit 0). The audit slice was
+# empty in that window too (the same userspace-audit gap); a next
+# symbolic AVC record, when captured, is the confirming decode.
+#
+# Deliberately NOT granted: remount/unmount/getattr/associate/
+# mounton/relabelfrom/relabelto on this pair (each a distinct
+# filesystem hook), any second filesystem rule, any etc_t/tmp_t/root_t
+# dir permission, any file/lnk_file class surface (the .ro creation
+# and the scan/rebuild steps are the NEXT boundaries, whose target
+# types materialize live — after the tmpfs mount the labels are NOT
+# assumed to be etc_t/tmp_t), process/capability surfaces, other
+# subjects; the lifecycle signal surface stays closed. The .fc and
+# the module version stay untouched.
+allow docker_helper_rootlesskit_t tmpfs_t:filesystem mount;
+
 # --- docker_helper_slirp4netns_t: the rootlesskit user-network helper domain (P5-S2) ---
 #
 # RootlessKit forks and execs the distro slirp4netns binary as its
