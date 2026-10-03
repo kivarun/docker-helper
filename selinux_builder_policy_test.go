@@ -2721,7 +2721,10 @@ func TestSELinuxPolicyRootlesskitRootMounton(t *testing.T) {
 	// permission (relabelto first) and no other class may ride the
 	// rootlesskit_t -> root_t pair; no other subject may receive root_t
 	// authority from this module; and the flow child's dir-mounton
-	// authority is unique to the root mount (no parallel target).
+	// authority is granted on exactly TWO targets — root_t (this rule,
+	// 4C-39) and tmp_t (the copy-up bind-mount target, owned by
+	// TestSELinuxPolicyRootlesskitTmpDirWrite since 4C-43) — any other
+	// target stays ungranted.
 	rootMountonViolations := func(text string) []string {
 		var violations []string
 		count := 0
@@ -2739,8 +2742,9 @@ func TestSELinuxPolicyRootlesskitRootMounton(t *testing.T) {
 			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, " root_t:"):
 				violations = append(violations, "root_t authority is unique to the rootlesskit child domain: "+trimmed)
 			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t ") &&
-				strings.Contains(trimmed, ":dir ") && strings.Contains(trimmed, "mounton"):
-				violations = append(violations, "the flow child's dir mounton authority is unique to the root mount: "+trimmed)
+				strings.Contains(trimmed, ":dir ") && strings.Contains(trimmed, "mounton") &&
+				!strings.Contains(trimmed, " tmp_t:"):
+				violations = append(violations, "the flow child's dir mounton authority is granted only on root_t (4C-39) and tmp_t (the copy-up owner) — any other target is ungranted: "+trimmed)
 			}
 		}
 		if count == 0 {
