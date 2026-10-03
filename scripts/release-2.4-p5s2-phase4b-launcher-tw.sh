@@ -1052,32 +1052,35 @@ PREFLIGHT_OK=1
     PREFLIGHT_OK=0
   fi
 
-  echo "=== flow tmpfs .ro dir-create identity (the 4C-46 grant: the module's own rootlesskit -> tmpfs_t:dir contribution must be exactly the one bare dir-create rule — the .ro mkdirat's child-SID check on the tmpfs root's own label tmpfs_t, the LIVE-PROVEN pair from the canonical 4C-45 run's denial record; the class is the evidence — a dir permission, never the 4C-45 filesystem pair; the parent-side add_name/remove_name/write are STANDING base-policy attribute authority and must NOT be copied into the module; every dir permission beyond the standing surface and the granted create is a STOP; the rebuild/MS_MOVE surfaces stay ungranted) ==="
+  echo "=== flow tmpfs .ro dir identity (the 4C-46/4C-47 grants: the module's own rootlesskit -> tmpfs_t:dir contribution must be exactly the one brace-pair dir rule { create mounton } — the .ro mkdirat's child-SID create (4C-46, the canonical 4C-45 run's denial) and the move-mount's target-dir mounton (4C-47, the canonical 4C-46 run's denial); SAME pair, one rule; the class is the evidence — dir, never the 4C-45 filesystem pair; the parent-side add_name/remove_name/write are STANDING base-policy attribute authority and must NOT be copied into the module; every dir permission beyond the standing surface and the granted pair is a STOP; the rebuild surfaces stay ungranted) ==="
   echo "--- raw effective inventory (rootlesskit -> tmpfs_t, every class; base-policy/attribute expansions recorded, not asserted):"
   RK_TMPFSDIR_RAW="$(sesearch --allow -s docker_helper_rootlesskit_t -t tmpfs_t /sys/fs/selinux/policy 2>/dev/null || true)"
   printf '%s\n' "${RK_TMPFSDIR_RAW:-(none)}"
-  echo "--- CONCRETE module contribution (source must be docker_helper_rootlesskit_t AND class dir — tmpfs_t now carries two owned rules across classes, the 4C-46 dir-create and the 4C-45 filesystem mount; must be exactly one bare dir create rule):"
+  echo "--- CONCRETE module contribution (source must be docker_helper_rootlesskit_t AND class dir — tmpfs_t now carries two owned rules across classes, the 4C-46/47 dir pair and the 4C-45 filesystem mount; must be exactly one brace-pair dir rule):"
   RK_TMPFSDIR_CONCRETE="$(printf '%s\n' "$RK_TMPFSDIR_RAW" | awk '$2 == "docker_helper_rootlesskit_t" && $0 ~ /:dir/' || true)"
   printf '%s\n' "${RK_TMPFSDIR_CONCRETE:-(none)}"
-  echo "--- the base policy's standing tmpfs_t:dir surface (the effective inventory minus the granted create — the effective_before record; attribute-derived, recorded not asserted; the 4C-45 run's inventory expected { add_name getattr open remove_name search write } — do NOT assume, this run's own inventory is the fact):"
-  RK_TMPFSDIR_STANDING="$(printf '%s\n' "$RK_TMPFSDIR_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:[^ ]* \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | grep -av '^create$' | sort -u | tr '\n' ' ' || true)"
+  echo "--- the base policy's standing tmpfs_t:dir surface (the effective inventory minus the granted pair — the effective_before record; attribute-derived, recorded not asserted; the 4C-46 run's inventory showed { add_name getattr ioctl lock open read remove_name search write } — do NOT assume, this run's own inventory is the fact):"
+  RK_TMPFSDIR_STANDING="$(printf '%s\n' "$RK_TMPFSDIR_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:[^ ]* \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | grep -avE '^(create|mounton)$' | sort -u | tr '\n' ' ' || true)"
   printf '%s\n' "${RK_TMPFSDIR_STANDING:-(none — the standing surface is empty)}"
   RK_TMPFSDIR_DIR_UNION="$(printf '%s\n' "$RK_TMPFSDIR_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:dir \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
   echo "effective dir perm union: ${RK_TMPFSDIR_DIR_UNION:-(none)}"
-  echo "--- the forbidden-dir-perms negative (everything beyond the base policy's standing surface and the granted create must be absent from the whole effective dir surface; the standing set is this run's own inventory fact; the RemoveAll/rebuild surfaces must not ride):"
-  RK_TMPFSDIR_FORBIDDEN="$(printf '%s\n' "$RK_TMPFSDIR_DIR_UNION" | tr ' ' '\n' | grep -avE "^(create|$(printf '%s' "$RK_TMPFSDIR_STANDING" | tr ' ' '|'))$" || true)"
+  echo "--- the forbidden-dir-perms negative (everything beyond the base policy's standing surface and the granted pair must be absent from the whole effective dir surface; the standing set is this run's own inventory fact; the RemoveAll/rebuild surfaces must not ride):"
+  RK_TMPFSDIR_FORBIDDEN="$(printf '%s\n' "$RK_TMPFSDIR_DIR_UNION" | tr ' ' '\n' | grep -avE "^(create|mounton|$(printf '%s' "$RK_TMPFSDIR_STANDING" | tr ' ' '|'))$" || true)"
   printf '%s\n' "${RK_TMPFSDIR_FORBIDDEN:-(none — no extra dir permission)}"
+  RK_TMPFSDIR_NORM="$(printf '%s\n' "$RK_TMPFSDIR_CONCRETE" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:[^ ]* {\(.*\)};$/\1/p' | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//' || true)"
   RK_TMPFSDIR_OK=0
   if [ "$(printf '%s\n' "$RK_TMPFSDIR_CONCRETE" | grep -ac . || true)" = 1 ] \
-    && printf '%s\n' "$RK_TMPFSDIR_CONCRETE" | grep -aqx 'allow docker_helper_rootlesskit_t tmpfs_t:dir create;' \
+    && printf '%s\n' "$RK_TMPFSDIR_CONCRETE" | grep -aq 'allow docker_helper_rootlesskit_t tmpfs_t:dir' \
+    && [ "$RK_TMPFSDIR_NORM" = "create mounton" ] \
     && printf '%s\n' "$RK_TMPFSDIR_DIR_UNION" | tr ' ' '\n' | grep -aqx 'create' \
+    && printf '%s\n' "$RK_TMPFSDIR_DIR_UNION" | tr ' ' '\n' | grep -aqx 'mounton' \
     && [ -z "$RK_TMPFSDIR_FORBIDDEN" ]; then
     RK_TMPFSDIR_OK=1
   fi
   if [ "$RK_TMPFSDIR_OK" = 1 ]; then
-    echo "PASS: flow tmpfs .ro dir-create identity (module contribution exactly { create }; effective dir union = the base policy's standing surface + create — the standing residual recorded above; no module-borne permission beyond create)"
+    echo "PASS: flow tmpfs .ro dir identity (module contribution exactly { create mounton }; effective dir union = the base policy's standing surface + the pair — the standing residual recorded above; no module-borne permission beyond the pair)"
   else
-    echo "FAIL: flow tmpfs .ro dir-create identity (concrete-rules=$(printf '%s\n' "$RK_TMPFSDIR_CONCRETE" | grep -ac . || true) union=${RK_TMPFSDIR_DIR_UNION:-(none)})"
+    echo "FAIL: flow tmpfs .ro dir identity (concrete-rules=$(printf '%s\n' "$RK_TMPFSDIR_CONCRETE" | grep -ac . || true) norm=${RK_TMPFSDIR_NORM:-(none)} union=${RK_TMPFSDIR_DIR_UNION:-(none)})"
     PREFLIGHT_OK=0
   fi
 
@@ -1664,7 +1667,17 @@ if [ -d "$TRACING/events/capability/cap_capable" ]; then
             syscalls/sys_enter_mkdirat syscalls/sys_exit_mkdirat \
             syscalls/sys_enter_umount2 syscalls/sys_exit_umount2 \
             syscalls/sys_enter_umount syscalls/sys_exit_umount \
-            syscalls/sys_enter_rename syscalls/sys_exit_rename; do
+            syscalls/sys_enter_rename syscalls/sys_exit_rename \
+            syscalls/sys_enter_getdents64 syscalls/sys_exit_getdents64 \
+            syscalls/sys_enter_openat2 syscalls/sys_exit_openat2 \
+            syscalls/sys_enter_newfstatat syscalls/sys_exit_newfstatat \
+            syscalls/sys_enter_statx syscalls/sys_exit_statx \
+            syscalls/sys_enter_unlink syscalls/sys_exit_unlink \
+            syscalls/sys_enter_unlinkat syscalls/sys_exit_unlinkat \
+            syscalls/sys_enter_rmdir syscalls/sys_exit_rmdir \
+            syscalls/sys_enter_symlink syscalls/sys_exit_symlink \
+            syscalls/sys_enter_symlinkat syscalls/sys_exit_symlinkat \
+            syscalls/sys_enter_readlink syscalls/sys_exit_readlink; do
     [ -d "$TRACING/events/$ev" ] && echo 1 > "$TRACING/events/$ev/enable" 2>/dev/null || true
   done
   # 4C-29: the SELinux decision tracepoint (avc:selinux_audited) —
@@ -1700,7 +1713,17 @@ if [ -d "$TRACING/events/capability/cap_capable" ]; then
               syscalls/sys_enter_mount syscalls/sys_exit_mount syscalls/sys_enter_execve syscalls/sys_exit_execve \
               syscalls/sys_enter_mkdir syscalls/sys_exit_mkdir syscalls/sys_enter_mkdirat syscalls/sys_exit_mkdirat \
               syscalls/sys_enter_umount2 syscalls/sys_exit_umount2 syscalls/sys_enter_umount syscalls/sys_exit_umount \
-              syscalls/sys_enter_rename syscalls/sys_exit_rename; do
+              syscalls/sys_enter_rename syscalls/sys_exit_rename \
+              syscalls/sys_enter_getdents64 syscalls/sys_exit_getdents64 \
+              syscalls/sys_enter_openat2 syscalls/sys_exit_openat2 \
+              syscalls/sys_enter_newfstatat syscalls/sys_exit_newfstatat \
+              syscalls/sys_enter_statx syscalls/sys_exit_statx \
+              syscalls/sys_enter_unlink syscalls/sys_exit_unlink \
+              syscalls/sys_enter_unlinkat syscalls/sys_exit_unlinkat \
+              syscalls/sys_enter_rmdir syscalls/sys_exit_rmdir \
+              syscalls/sys_enter_symlink syscalls/sys_exit_symlink \
+              syscalls/sys_enter_symlinkat syscalls/sys_exit_symlinkat \
+              syscalls/sys_enter_readlink syscalls/sys_exit_readlink; do
       echo "$ev: $([ -d "$TRACING/events/$ev" ] && echo yes || echo no)"
     done
     echo "=== 4C-29 live class/permission mapping evidence (RECORDED, not hardcoded — decode validation uses co-captured AVC records) ==="
@@ -1987,7 +2010,17 @@ if [ "$TRACE_ENABLED" = 1 ]; then
             syscalls/sys_enter_mkdirat syscalls/sys_exit_mkdirat \
             syscalls/sys_enter_umount2 syscalls/sys_exit_umount2 \
             syscalls/sys_enter_umount syscalls/sys_exit_umount \
-            syscalls/sys_enter_rename syscalls/sys_exit_rename; do
+            syscalls/sys_enter_rename syscalls/sys_exit_rename \
+            syscalls/sys_enter_getdents64 syscalls/sys_exit_getdents64 \
+            syscalls/sys_enter_openat2 syscalls/sys_exit_openat2 \
+            syscalls/sys_enter_newfstatat syscalls/sys_exit_newfstatat \
+            syscalls/sys_enter_statx syscalls/sys_exit_statx \
+            syscalls/sys_enter_unlink syscalls/sys_exit_unlink \
+            syscalls/sys_enter_unlinkat syscalls/sys_exit_unlinkat \
+            syscalls/sys_enter_rmdir syscalls/sys_exit_rmdir \
+            syscalls/sys_enter_symlink syscalls/sys_exit_symlink \
+            syscalls/sys_enter_symlinkat syscalls/sys_exit_symlinkat \
+            syscalls/sys_enter_readlink syscalls/sys_exit_readlink; do
     [ -d "$TRACING/events/$ev" ] && echo 0 > "$TRACING/events/$ev/enable" 2>/dev/null || true
   done
   grep -a -E 'slirp4netns|rootlesskit| ns/net|ns/user|/dev/net/tun|cap_capable|selinux_audited' "$EVIDENCE_DIR/30-trace-window.txt" \
@@ -2571,7 +2604,7 @@ POSTTUN_NSTARTUP=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIMED=0
 POSTTUN_OLD_BOUNDARY_PRESENT=0
 POSTTUN_BND_SYMBOLIC=""
 {
-  echo "=== 4C-38..4C-46 post-TUN lifetime/readiness causal verdict (the 4C-46 run carries exactly the rootlesskit_t -> tmpfs_t:dir create grant) ==="
+  echo "=== 4C-38..4C-47 post-TUN lifetime/readiness causal verdict (the 4C-47 run carries exactly the rootlesskit_t -> tmpfs_t:dir { create mounton } grant) ==="
   echo "POST-TUN-T0: ${POSTTUN_T0_EPOCH:-(not derived)}"
   echo "  derivation: trace-ts=$POSTTUN_T0_TRACE_TS attach-executor=${POSTTUN_ATTACH_WHO:-(none)} read-epoch=$POSTTUN_READ_EPOCH read-uptime=$POSTTUN_READ_UPTIME ring-last-ts=${POSTTUN_RING_LAST_TS:-(none)} clock-drift=${POSTTUN_CLOCK_DRIFT:-?}s"
   echo "--- the attach pair (the T0 anchor; the attach executor's own TUNSETIFF):"
@@ -3067,6 +3100,28 @@ POSTTUN_BND_SYMBOLIC=""
     echo "OLD-TMPDIRCREATE-BOUNDARY: GONE (no rootlesskit_t -> tmpfs_t:dir create (0x8) decision in the window's trace span)"
   fi
 
+  # 4C-47: the SAME contract for the phase's own grant — the OLD primary
+  # boundary (docker_helper_rootlesskit_t -> tmpfs_t:dir, denied mask
+  # 0x10000 = mounton, bit 16 of the kernel's static dir classmap; the
+  # canonical 4C-46 run's record inside the move-mount window) must be
+  # GONE anywhere in the window's trace span. The tcontext=tmpfs_t
+  # anchor separates this gate from the tmp_t/etc_t/root_t dir mounton
+  # standing gates (different target types). A record here means the
+  # 4C-47 grant did not take effect on the loaded policy: STOP and
+  # report the actual behavior (no rule widening).
+  POSTTUN_OLD_TMPDIRMOUNTON_PRESENT="$(grep -a 'selinux_audited:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
+    | grep -a 'scontext=system_u:system_r:docker_helper_rootlesskit_t' \
+    | grep -aE 'tcontext=system_u:object_r:tmpfs_t:s0([ \t]|$)' \
+    | grep -a 'tclass=dir' \
+    | grep -aE 'denied=0x10000([^0-9a-fA-F]|$)' || true)"
+  if [ -n "$POSTTUN_OLD_TMPDIRMOUNTON_PRESENT" ]; then
+    echo "OLD-TMPDIRMOUNTON-BOUNDARY: STILL-PRESENT — the 4C-47 move-mount target mounton grant did not take effect (STOP; no rule widening):"
+    printf '%s\n' "$POSTTUN_OLD_TMPDIRMOUNTON_PRESENT"
+    POSTTUN_OLD_TMPDIRMOUNTON_PRESENT=1
+  else
+    echo "OLD-TMPDIRMOUNTON-BOUNDARY: GONE (no rootlesskit_t -> tmpfs_t:dir mounton (0x10000) decision in the window's trace span)"
+  fi
+
   # The 4C-42 milestone: a flow-domain mkdirat AFTER T0 returning 0x0
   # means the copy-up temp dir was CREATED — the kernel-stated type of
   # the create hook (tmp_t) now carries the object. Recorded as the
@@ -3441,6 +3496,22 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
       marker "4C-46=PASS/POST-TUN-LIFETIME-STABLE"
     fi
   fi
+  if [ "$POSTTUN_OLD_TMPDIRMOUNTON_PRESENT" = 1 ]; then
+    marker "4C-47-OLD-TMPDIRMOUNTON-BOUNDARY=STILL-PRESENT"
+    marker "4C-47=INCOMPLETE/GRANT-DID-NOT-TAKE-EFFECT"
+  else
+    marker "4C-47-OLD-TMPDIRMOUNTON-BOUNDARY=GONE"
+    [ "$POSTTUN_MOVEMOUNT_OK" = 1 ] && marker "ROOTLESSKIT-COPYUP-MOVE-MOUNT=OK"
+    if [ -n "$POSTTUN_FIRST_FAIL_PID" ]; then
+      marker "4C-47-OUTCOME=NEXT-STARTUP-BOUNDARY-CONFIRMED"
+      marker "4C-47=PASS/NEXT-BOUNDARY-CONFIRMED"
+    else
+      marker "4C-47-OUTCOME=POST-TUN-LIFETIME-STABLE"
+      marker "TARGET-LIFETIME-BLOCKER=GONE"
+      marker "POST-TUN-LIFETIME=STABLE"
+      marker "4C-47=PASS/POST-TUN-LIFETIME-STABLE"
+    fi
+  fi
   marker "4C-38=PROVEN/PRIMARY-BOUNDARY-ESTABLISHED"
 else
   marker "4C-38=INCOMPLETE/ORDER_NOT_ESTABLISHED"
@@ -3452,6 +3523,7 @@ else
   marker "4C-44=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-45=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-46=INCOMPLETE/ORDER_NOT_ESTABLISHED"
+  marker "4C-47=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   POSTTUN_NOT_ESTABLISHED=1
 fi
 
@@ -5129,12 +5201,17 @@ if [ "$I9_OK" = 1 ]; then
   # phase INCOMPLETE (no guessing).
   # A still-present old boundary is a hard phase failure (the grant
   # demonstrably did not take effect); it outranks the cross-op
-  # INCOMPLETE. All eight standing gone-gates apply: the 4C-46 .ro
-  # dir-create boundary (the phase's own grant), the 4C-45 tmpfs
-  # filesystem-mount boundary, the 4C-44 etc mounton boundary, the
-  # 4C-43 tmp mounton, the 4C-42 create, the 4C-41 add_name, the
-  # 4C-40 write and the 4C-39 mounton boundaries (the standing
-  # regression guards).
+  # INCOMPLETE. All nine standing gone-gates apply: the 4C-47 move-mount
+  # target mounton boundary (the phase's own grant), the 4C-46 .ro
+  # dir-create boundary, the 4C-45 tmpfs filesystem-mount boundary, the
+  # 4C-44 etc mounton boundary, the 4C-43 tmp mounton, the 4C-42
+  # create, the 4C-41 add_name, the 4C-40 write and the 4C-39 mounton
+  # boundaries (the standing regression guards).
+  if [ "${POSTTUN_OLD_TMPDIRMOUNTON_PRESENT:-0}" = 1 ]; then
+    marker "BLOCKER=the 4C-47 move-mount mounton grant did not remove the old rootlesskit_t -> tmpfs_t:dir mounton boundary (see 53-posttun-verdict.txt)"
+    finish FAIL
+    exit 0
+  fi
   if [ "${POSTTUN_OLD_TMPDIRCREATE_PRESENT:-0}" = 1 ]; then
     marker "BLOCKER=the 4C-46 .ro dir create grant did not remove the old rootlesskit_t -> tmpfs_t:dir create boundary (see 53-posttun-verdict.txt)"
     finish FAIL
