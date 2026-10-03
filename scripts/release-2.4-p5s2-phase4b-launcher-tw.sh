@@ -982,27 +982,31 @@ PREFLIGHT_OK=1
     PREFLIGHT_OK=0
   fi
 
-  echo "=== flow tmp copy-up identity (the 4C-40 grant: the module's own rootlesskit -> tmp_t contribution must be exactly the one bare dir-write rule; the EFFECTIVE union = the base policy's standing tmp surface + write — the 4C-39 run's boundary mask 0x20000004 proved the standing surface carries search, and the union is NOT required to be exactly { write }; any permission beyond write contributed BY OUR MODULE is a STOP) ==="
+  echo "=== flow tmp copy-up identity (the 4C-40 grant: the module's own rootlesskit -> tmp_t contribution must be exactly the one bare dir-write rule; the EFFECTIVE dir union = the base policy's standing tmp surface + write — the standing rules are ATTRIBUTE-derived (the base policy writes base_file_type/tmpfile, not tmp_t literally), and the 4C-39 run's boundary mask 0x20000004 proved the standing surface carries search; the union is NOT required to be exactly { write }, but every dir permission beyond the standing { getattr open search } and write is a STOP) ==="
   echo "--- raw effective inventory (rootlesskit -> tmp_t, every class; base-policy/attribute expansions recorded, not asserted):"
   RK_TMP_RAW="$(sesearch --allow -s docker_helper_rootlesskit_t -t tmp_t /sys/fs/selinux/policy 2>/dev/null || true)"
   printf '%s\n' "${RK_TMP_RAW:-(none)}"
   echo "--- CONCRETE module contribution (source must be docker_helper_rootlesskit_t; must be exactly one bare dir write rule):"
   RK_TMP_CONCRETE="$(printf '%s\n' "$RK_TMP_RAW" | awk '$2 == "docker_helper_rootlesskit_t"' || true)"
   printf '%s\n' "${RK_TMP_CONCRETE:-(none)}"
-  echo "--- the base policy's standing tmp surface (the effective union minus the granted write — the effective_before record; the 4C-39 run 37101080574's boundary mask 0x20000004 names search as a proven member):"
-  RK_TMP_STANDING="$(printf '%s\n' "$RK_TMP_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* tmp_t:[^ ]* \(.*\);$/\1/p' | sed 's/[{}]//g' | tr ' ' '\n' | grep -av '^write$' | sort -u | tr '\n' ' ' || true)"
+  echo "--- the base policy's standing tmp surface (the effective inventory minus the granted write — the effective_before record; the 4C-39 run 37101080574's boundary mask 0x20000004 names search as a proven member; the standing rules are attribute-derived — the base policy writes base_file_type/tmpfile/file_type, not tmp_t literally):"
+  RK_TMP_STANDING="$(printf '%s\n' "$RK_TMP_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:[^ ]* \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | grep -av '^write$' | sort -u | tr '\n' ' ' || true)"
   printf '%s\n' "${RK_TMP_STANDING:-(none — the standing surface is empty)}"
-  RK_TMP_DIR_UNION="$(printf '%s\n' "$RK_TMP_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* tmp_t:dir \(.*\);$/\1/p' | sed 's/[{}]//g' | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
+  RK_TMP_DIR_UNION="$(printf '%s\n' "$RK_TMP_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:dir \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
   echo "effective dir perm union: ${RK_TMP_DIR_UNION:-(none)}"
+  echo "--- the forbidden-dir-perms negative (everything beyond the base policy's standing { getattr open search } and the granted write must be absent from the whole effective dir surface; the standing set is this run's own inventory fact):"
+  RK_TMP_FORBIDDEN="$(printf '%s\n' "$RK_TMP_DIR_UNION" | tr ' ' '\n' | grep -avE '^(getattr|open|search|write)$' || true)"
+  printf '%s\n' "${RK_TMP_FORBIDDEN:-(none — no extra dir permission)}"
   RK_TMP_OK=0
   if [ "$(printf '%s\n' "$RK_TMP_CONCRETE" | grep -ac . || true)" = 1 ] \
     && printf '%s\n' "$RK_TMP_CONCRETE" | grep -aqx 'allow docker_helper_rootlesskit_t tmp_t:dir write;' \
     && printf '%s\n' "$RK_TMP_DIR_UNION" | tr ' ' '\n' | grep -aqx 'write' \
-    && printf '%s\n' "$RK_TMP_DIR_UNION" | tr ' ' '\n' | grep -aqx 'search'; then
+    && printf '%s\n' "$RK_TMP_DIR_UNION" | tr ' ' '\n' | grep -aqx 'search' \
+    && [ -z "$RK_TMP_FORBIDDEN" ]; then
     RK_TMP_OK=1
   fi
   if [ "$RK_TMP_OK" = 1 ]; then
-    echo "PASS: flow tmp copy-up identity (module contribution exactly { write }; effective dir union = the base policy's standing surface + write — search is the proven standing member; no module-borne permission beyond write)"
+    echo "PASS: flow tmp copy-up identity (module contribution exactly { write }; effective dir union = the base policy's standing { getattr open search } + write — search is the proven standing member; no module-borne permission beyond write)"
   else
     echo "FAIL: flow tmp copy-up identity (concrete-rules=$(printf '%s\n' "$RK_TMP_CONCRETE" | grep -ac . || true) union=${RK_TMP_DIR_UNION:-(none)})"
     PREFLIGHT_OK=0
