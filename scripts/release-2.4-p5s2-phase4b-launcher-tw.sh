@@ -135,6 +135,53 @@ context_of() { stat -c '%C' "$1" 2>/dev/null || true; }
 # process_context: /proc/<pid>/attr/current, newline-safe.
 process_context() { tr -d '\0' < "/proc/$1/attr/current" 2>/dev/null || true; }
 
+# 4C-39 numeric SELinux permission decoder. The symbolic decode of a raw
+# access-vector mask comes from the SYSTEM'S OWN numeric interface: every
+# /sys/fs/selinux/class/<class>/perms/<permission> file carries that
+# permission's bit index, and mask bit 1<<index names that permission.
+# The directory listing only FINDS the files; a listing's ORDER is never
+# a decode input — the 4C-38 boundary decode read the 0x10000 dir mask
+# as relabelto off the listing order (the real name is mounton), and the
+# numeric decoder is the correction. A perms file whose content is not a
+# plain decimal index is recorded as an interface fact and excluded
+# from the decode — no guessing about an unverified form.
+numeric_perms_map() { # $1 = class; prints "<name>=<index> (0x<mask>)" lines
+  local class="$1" permsdir f name idx
+  permsdir="/sys/fs/selinux/class/$class/perms"
+  [ -d "$permsdir" ] || { echo "(selinuxfs perms dir for $class unavailable)"; return 0; }
+  for f in "$permsdir"/*; do
+    [ -f "$f" ] || continue
+    name="${f##*/}"
+    idx="$(tr -d '[:space:]' < "$f" 2>/dev/null)" || continue
+    case "$idx" in
+      ''|*[!0-9]*) printf '%s: (non-numeric content %q — the interface form is recorded, not decoded)\n' "$name" "$idx"; continue ;;
+    esac
+    printf '%s=%s (0x%x)\n' "$name" "$idx" "$((1 << idx))"
+  done
+}
+
+numeric_decode() { # $1 = class, $2 = mask (0x-hex or decimal); prints "{ names }" or a not-decodable note
+  local class="$1" mask="$2" permsdir f name idx bit out=""
+  case "$mask" in
+    ''|*[!0-9a-fA-FxX]*) echo "(unparsable mask: $mask)"; return 0 ;;
+  esac
+  permsdir="/sys/fs/selinux/class/$class/perms"
+  [ -d "$permsdir" ] || { echo "(no selinuxfs perms dir for $class — the mask stays raw: $mask)"; return 0; }
+  for f in "$permsdir"/*; do
+    [ -f "$f" ] || continue
+    name="${f##*/}"
+    idx="$(tr -d '[:space:]' < "$f" 2>/dev/null)" || continue
+    case "$idx" in ''|*[!0-9]*) continue ;; esac
+    bit=$((1 << idx))
+    [ $((mask & bit)) -ne 0 ] && out="$out $name"
+  done
+  if [ -n "$out" ]; then
+    echo "{${out} }"
+  else
+    echo "(mask $mask decodes to no named permission of $class — the map is incomplete or the mask form differs)"
+  fi
+}
+
 # 4C-27 process/credential snapshot (diagnostic host observation):
 # SELinux context, Uid/Gid, the five capability sets, and the user/net
 # namespace identities of one pid. The function OWNS its destination
@@ -2653,12 +2700,30 @@ POSTTUN_NPRE=0; POSTTUN_NAT=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIME
       POSTTUN_PRE_AT_RECORD="$(grep -a 'selinux_audited:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | awk -v ts0="$POSTTUN_FIRST_PRE_AT_TS" '{ ts = $4; sub(/:$/, "", ts); if (ts + 0 == ts0 + 0) { print; exit } }' 2>/dev/null | head -1 || true)"
       echo "--- the boundary's own denial record:"
       printf '%s\n' "${POSTTUN_PRE_AT_RECORD:-(record lookup failed)}"
-      echo "--- the dir class's live perms bitmap-order (bit N = the Nth listed perm; the masks decode against this order):"
-      ls /sys/fs/selinux/class/dir/perms 2>/dev/null | tr '\n' ' ' | head -c 500; echo
-      echo "(end of the dir class perms listing)"
-      POSTTUN_BOUNDARY="POLICY-DENIAL-CANDIDATE (a SELinux decision at trace-ts=$POSTTUN_FIRST_PRE_AT_TS, ${POSTTUN_PRE_AT_TO_FAIL}s relative to $POSTTUN_REF_DESC — the denial owns the next semantic phase; see 52-posttun-denials.txt)"
+      POSTTUN_BND_TC="$(printf '%s\n' "$POSTTUN_PRE_AT_RECORD" 2>/dev/null | grep -aoE 'tclass=[a-z_0-9]+' | head -1 | cut -d= -f2 || true)"
+      POSTTUN_BND_MASK="$(printf '%s\n' "$POSTTUN_PRE_AT_RECORD" 2>/dev/null | grep -aoE 'denied=0x[0-9a-fA-F]+' | head -1 | cut -d= -f2 || true)"
+      POSTTUN_BND_SYMBOLIC=""
+      if [ -n "$POSTTUN_BND_TC" ] && [ -n "$POSTTUN_BND_MASK" ]; then
+        echo "--- the boundary's symbolic decode (the system's own numeric permission values, /sys/fs/selinux/class/$POSTTUN_BND_TC/perms/<permission> file contents; a directory-listing order is never a decode input — the 4C-38 relabelto misread of the 0x10000 dir mask was a listing-order decode):"
+        numeric_perms_map "$POSTTUN_BND_TC" || true
+        POSTTUN_BND_DECODED="$(numeric_decode "$POSTTUN_BND_TC" "$POSTTUN_BND_MASK" || true)"
+        echo "denied=$POSTTUN_BND_MASK (tclass=$POSTTUN_BND_TC) -> $POSTTUN_BND_DECODED"
+        case "$POSTTUN_BND_DECODED" in
+          '{'*)
+            POSTTUN_BND_SCTX_TYPE="$(printf '%s\n' "$POSTTUN_PRE_AT_RECORD" | grep -aoE 'scontext=[^ ]+' | head -1 | sed -e 's/^scontext=//' -e 's/^[^:]*:[^:]*://' -e 's/:.*$//' || true)"
+            POSTTUN_BND_TCTX_TYPE="$(printf '%s\n' "$POSTTUN_PRE_AT_RECORD" | grep -aoE 'tcontext=[^ ]+' | head -1 | sed -e 's/^tcontext=//' -e 's/^[^:]*:[^:]*://' -e 's/:.*$//' || true)"
+            if [ -n "$POSTTUN_BND_SCTX_TYPE" ] && [ -n "$POSTTUN_BND_TCTX_TYPE" ]; then
+              POSTTUN_BND_SYMBOLIC="$POSTTUN_BND_SCTX_TYPE -> $POSTTUN_BND_TCTX_TYPE:$POSTTUN_BND_TC $POSTTUN_BND_DECODED"
+            fi
+            ;;
+        esac
+      else
+        echo "(the boundary record lacks a tclass/denied-mask pair — the symbolic decode stays raw)"
+      fi
+      POSTTUN_BOUNDARY="POLICY-DENIAL-CANDIDATE (${POSTTUN_BND_SYMBOLIC:+$POSTTUN_BND_SYMBOLIC; }a SELinux decision at trace-ts=$POSTTUN_FIRST_PRE_AT_TS, ${POSTTUN_PRE_AT_TO_FAIL}s relative to $POSTTUN_REF_DESC — the denial owns the next semantic phase; see 52-posttun-denials.txt)"
     else
       POSTTUN_BOUNDARY="SOFTWARE-LIFECYCLE ($POSTTUN_REF_DESC at=T0+${POSTTUN_T0_TO_FAIL}s precedes every SELinux decision — no SELinux blocker owns the lifetime failure; the next phase's owner is the software/lifecycle finding)"
+      POSTTUN_BND_SYMBOLIC="SOFTWARE-LIFECYCLE (no SELinux decision precedes the first failing exit)"
     fi
     echo "PRIMARY-BOUNDARY: $POSTTUN_BOUNDARY"
     POSTTUN_ESTABLISHED=1
@@ -2670,7 +2735,7 @@ cat "$EVIDENCE_DIR/53-posttun-verdict.txt" >&2
 if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
   marker "POSTTUN-FIRST-DEATH=pid=${POSTTUN_FIRST_DEATH_PID:-none} comm=${POSTTUN_FIRST_DEATH_COMM:-none} at=T0+${POSTTUN_T0_TO_DEATH:-?}s cause=${POSTTUN_DEATH_CAUSE%% *}"
   marker "POSTTUN-PROCESS-DENIALS=PRE=$POSTTUN_NPRE AT=$POSTTUN_NAT POST=$POSTTUN_NPOST POLLING=$POSTTUN_NPOLL UNTIMED=$POSTTUN_NUNTIMED"
-  marker "POSTTUN-PRIMARY-BOUNDARY=${POSTTUN_BOUNDARY%% *}"
+  marker "POSTTUN-PRIMARY-BOUNDARY=${POSTTUN_BND_SYMBOLIC:-(undecoded — see 53-posttun-verdict.txt)}"
   marker "4C-38=PROVEN/PRIMARY-BOUNDARY-ESTABLISHED"
 else
   marker "4C-38=INCOMPLETE/ORDER_NOT_ESTABLISHED"

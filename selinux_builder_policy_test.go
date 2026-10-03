@@ -12,7 +12,9 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -3092,6 +3094,146 @@ func TestSELinuxCheckCoversBuilderTrees(t *testing.T) {
 	for _, want := range []string{"/var/lib/docker-helper-builder", "/run/docker-helper-builder"} {
 		if !found[want] {
 			t.Errorf("selinux check must verify the builder tree %s", want)
+		}
+	}
+}
+
+// TestSELinuxPermissionNumericValues pins the calibrated permission values
+// against the system's own selinuxfs interface: every
+// /sys/fs/selinux/class/<class>/perms/<permission> file carries that
+// permission's bit index, and the mask is 1<<index. The pinned pairs are
+// the TUN staircase's decode facts: dir:relabelto = 0x100 and
+// dir:mounton = 0x10000 (the 4C-38 boundary pair — the 0x10000 dir mask
+// was misread as relabelto from a directory-listing order), and
+// tun_socket:relabelfrom = 0x80 / tun_socket:relabelto = 0x100 (the
+// cross-domain attach and self-targeted relabel grants' masks). The test
+// runs only where SELinuxfs exists; elsewhere there is no runtime
+// interface to check, and the decode contract is pinned by
+// TestSELinuxPermissionDecodeFromContents instead.
+func TestSELinuxPermissionNumericValues(t *testing.T) {
+	permsRoot := "/sys/fs/selinux/class"
+	if _, err := os.Stat(filepath.Join(permsRoot, "dir", "perms")); err != nil {
+		t.Skipf("selinuxfs class perms unavailable on this host: %v", err)
+	}
+	classValueOf := func(t *testing.T, class, name string) uint64 {
+		t.Helper()
+		b, err := os.ReadFile(filepath.Join(permsRoot, class, "perms", name))
+		if err != nil {
+			t.Fatalf("the selinuxfs perms file %s/%s/%s must exist: %v", class, "perms", name, err)
+		}
+		idx, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 8)
+		if err != nil {
+			t.Fatalf("the selinuxfs perms file %s/%s/%s must carry a decimal bit index, got %q: %v", class, "perms", name, strings.TrimSpace(string(b)), err)
+		}
+		return uint64(1) << idx
+	}
+	if got := classValueOf(t, "dir", "relabelto"); got != 0x100 {
+		t.Errorf("dir:relabelto must be 0x100, got %#x", got)
+	}
+	if got := classValueOf(t, "dir", "mounton"); got != 0x10000 {
+		t.Errorf("dir:mounton must be 0x10000, got %#x", got)
+	}
+	if got := classValueOf(t, "tun_socket", "relabelfrom"); got != 0x80 {
+		t.Errorf("tun_socket:relabelfrom must be 0x80, got %#x", got)
+	}
+	if got := classValueOf(t, "tun_socket", "relabelto"); got != 0x100 {
+		t.Errorf("tun_socket:relabelto must be 0x100, got %#x", got)
+	}
+}
+
+// TestSELinuxPermissionDecodeFromContents verifies the decode rule the
+// phase-4B harness's numeric decoder implements: a permission's value
+// comes from its selinuxfs perms FILE's numeric content (the bit index),
+// never from a directory listing's order. The fixture carries the
+// kernel's own permission indexes for the two calibrated classes (dir
+// inherits the common file permission bits; tun_socket inherits the
+// common socket bits); TestSELinuxPermissionNumericValues verifies these
+// indexes against a real SELinuxfs wherever one exists. The 4C-38
+// boundary pair must decode the corrected way in BOTH directions: the
+// dir mask 0x10000 is mounton (not relabelto) and the dir mask 0x100 is
+// relabelto (not mounton) — the listing-order misread must not come
+// back in either direction.
+func TestSELinuxPermissionDecodeFromContents(t *testing.T) {
+	fixtures := []struct {
+		class string
+		index map[string]int
+	}{
+		{
+			class: "dir",
+			index: map[string]int{
+				"ioctl": 0, "read": 1, "write": 2, "create": 3, "getattr": 4,
+				"setattr": 5, "lock": 6, "relabelfrom": 7, "relabelto": 8,
+				"append": 9, "unlink": 10, "link": 11, "rename": 12,
+				"execute": 13, "swapon": 14, "quotaoff": 15, "mounton": 16,
+				"add_name": 17, "remove_name": 18, "reparent": 19, "search": 20,
+				"rmdir": 21, "open": 22, "audit_access": 23, "execmod": 24,
+			},
+		},
+		{
+			class: "tun_socket",
+			index: map[string]int{
+				"ioctl": 0, "read": 1, "write": 2, "create": 3, "getattr": 4,
+				"setattr": 5, "lock": 6, "relabelfrom": 7, "relabelto": 8,
+				"append": 9, "map": 10, "bind": 11, "connect": 12, "listen": 13,
+				"accept": 14, "shutdown": 15, "recvfrom": 16, "sendto": 17,
+				"recvmsg": 18, "sendmsg": 19, "name_bind": 20, "attach_queue": 21,
+			},
+		},
+	}
+	decode := func(class string, index map[string]int, mask uint64) []string {
+		perms := filepath.Join(t.TempDir(), class, "perms")
+		if err := os.MkdirAll(perms, 0o755); err != nil {
+			t.Fatalf("fixture perms dir: %v", err)
+		}
+		for name, idx := range index {
+			if err := os.WriteFile(filepath.Join(perms, name), []byte(strconv.Itoa(idx)+"\n"), 0o644); err != nil {
+				t.Fatalf("fixture perms file %s: %v", name, err)
+			}
+		}
+		var decoded []string
+		for name, idx := range index {
+			if mask&(uint64(1)<<uint(idx)) != 0 {
+				decoded = append(decoded, name)
+			}
+		}
+		return decoded
+	}
+	dirDecode := func(mask uint64) []string { return decode("dir", fixtures[0].index, mask) }
+	tunDecode := func(mask uint64) []string { return decode("tun_socket", fixtures[1].index, mask) }
+	if got := dirDecode(0x10000); len(got) != 1 || got[0] != "mounton" {
+		t.Errorf("dir mask 0x10000 must decode to exactly { mounton } (the corrected 4C-38 boundary), got %v", got)
+	}
+	if got := dirDecode(0x100); len(got) != 1 || got[0] != "relabelto" {
+		t.Errorf("dir mask 0x100 must decode to exactly { relabelto }, got %v", got)
+	}
+	if got := tunDecode(0x80); len(got) != 1 || got[0] != "relabelfrom" {
+		t.Errorf("tun_socket mask 0x80 must decode to exactly { relabelfrom }, got %v", got)
+	}
+	if got := tunDecode(0x100); len(got) != 1 || got[0] != "relabelto" {
+		t.Errorf("tun_socket mask 0x100 must decode to exactly { relabelto }, got %v", got)
+	}
+}
+
+// TestPhase4BVerdictDecodesFromSelinuxfsContents pins the phase-4B
+// harness's boundary decode to the selinuxfs numeric interface: the
+// verdict must build its value->name mapping from the perms files'
+// numeric contents, and the removed 4C-38 decode-from-listing-order
+// claim must not come back.
+func TestPhase4BVerdictDecodesFromSelinuxfsContents(t *testing.T) {
+	data, err := os.ReadFile("scripts/release-2.4-p5s2-phase4b-launcher-tw.sh")
+	if err != nil {
+		t.Fatalf("the phase-4B harness not found: %v", err)
+	}
+	script := string(data)
+	if !strings.Contains(script, `"/sys/fs/selinux/class/$class/perms"`) {
+		t.Error("the harness's numeric decoder must build its permission mapping from the selinuxfs perms files' contents")
+	}
+	for _, gone := range []string{
+		"the Nth listed perm",
+		"bitmap-order",
+	} {
+		if strings.Contains(script, gone) {
+			t.Errorf("the harness must not decode permissions from a directory-listing order (the 4C-38 misread): %q", gone)
 		}
 	}
 }
