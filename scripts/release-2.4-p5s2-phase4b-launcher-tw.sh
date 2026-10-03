@@ -135,16 +135,21 @@ context_of() { stat -c '%C' "$1" 2>/dev/null || true; }
 # process_context: /proc/<pid>/attr/current, newline-safe.
 process_context() { tr -d '\0' < "/proc/$1/attr/current" 2>/dev/null || true; }
 
-# 4C-39 numeric SELinux permission decoder. The symbolic decode of a raw
-# access-vector mask comes from the SYSTEM'S OWN numeric interface: every
-# /sys/fs/selinux/class/<class>/perms/<permission> file carries that
-# permission's bit index, and mask bit 1<<index names that permission.
-# The directory listing only FINDS the files; a listing's ORDER is never
-# a decode input — the 4C-38 boundary decode read the 0x10000 dir mask
-# as relabelto off the listing order (the real name is mounton), and the
-# numeric decoder is the correction. A perms file whose content is not a
-# plain decimal index is recorded as an interface fact and excluded
-# from the decode — no guessing about an unverified form.
+# 4C-39 numeric SELinux permission map — THE LOADED POLICY'S OWN NUMBERING.
+# Every /sys/fs/selinux/class/<class>/perms/<permission> file carries that
+# permission's index in the LOADED POLICY's class definition (decimal
+# content, one past the policy's zero-based index). This map is the
+# recorded interface fact; it is NOT the kernel's AVC-mask decode: the
+# kernel's access decisions and the selinux_audited tracepoint use the
+# KERNEL'S OWN STATIC class/perm numbering, and the two numberings differ
+# on this kernel/policy pair (live proof in the project's own runs: the
+# kernel's audit records calibrate dir:search to the AVC mask 0x20000000
+# (run 37050894858) and name mounton for the rootlesskit child's
+# mount("/") denial while the perms files number search 31 and mounton
+# 18). A symbolic AVC decode therefore comes ONLY from the kernel's own
+# symbolic statements — the co-captured calibration pairs and the audit
+# slice's same-shape records — never from a directory-listing order (the
+# 4C-38 relabelto misread) and never from this map.
 numeric_perms_map() { # $1 = class; prints "<name>=<index> (0x<mask>)" lines
   local class="$1" permsdir f name idx
   permsdir="/sys/fs/selinux/class/$class/perms"
@@ -156,30 +161,8 @@ numeric_perms_map() { # $1 = class; prints "<name>=<index> (0x<mask>)" lines
     case "$idx" in
       ''|*[!0-9]*) printf '%s: (non-numeric content %q — the interface form is recorded, not decoded)\n' "$name" "$idx"; continue ;;
     esac
-    printf '%s=%s (0x%x)\n' "$name" "$idx" "$((1 << idx))"
+    printf '%s=%s (1<<%s)\n' "$name" "$idx" "$idx"
   done
-}
-
-numeric_decode() { # $1 = class, $2 = mask (0x-hex or decimal); prints "{ names }" or a not-decodable note
-  local class="$1" mask="$2" permsdir f name idx bit out=""
-  case "$mask" in
-    ''|*[!0-9a-fA-FxX]*) echo "(unparsable mask: $mask)"; return 0 ;;
-  esac
-  permsdir="/sys/fs/selinux/class/$class/perms"
-  [ -d "$permsdir" ] || { echo "(no selinuxfs perms dir for $class — the mask stays raw: $mask)"; return 0; }
-  for f in "$permsdir"/*; do
-    [ -f "$f" ] || continue
-    name="${f##*/}"
-    idx="$(tr -d '[:space:]' < "$f" 2>/dev/null)" || continue
-    case "$idx" in ''|*[!0-9]*) continue ;; esac
-    bit=$((1 << idx))
-    [ $((mask & bit)) -ne 0 ] && out="$out $name"
-  done
-  if [ -n "$out" ]; then
-    echo "{${out} }"
-  else
-    echo "(mask $mask decodes to no named permission of $class — the map is incomplete or the mask form differs)"
-  fi
 }
 
 # 4C-27 process/credential snapshot (diagnostic host observation):
@@ -976,7 +959,7 @@ PREFLIGHT_OK=1
   echo "--- raw effective inventory (rootlesskit -> root_t:dir; base-policy/attribute expansions recorded, not asserted):"
   RK_ROOTDIR_RAW="$(sesearch --allow -s docker_helper_rootlesskit_t -t root_t -c dir /sys/fs/selinux/policy 2>/dev/null || true)"
   printf '%s\n' "${RK_ROOTDIR_RAW:-(none)}"
-  echo "--- the dir class's numeric permission map (value -> name from the perms files' numeric contents; the decode never uses a listing order):"
+  echo "--- the dir class's numeric permission map (value -> name from the perms files' contents; the LOADED POLICY's own numbering — the recorded interface fact, never the kernel's AVC-mask decode):"
   numeric_perms_map dir || true
   RK_ROOTDIR_UNION="$(printf '%s\n' "$RK_ROOTDIR_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* root_t:dir \(.*\);$/\1/p' | sed 's/[{}]//g' | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
   echo "effective dir perm union: ${RK_ROOTDIR_UNION:-(none)}"
@@ -2790,19 +2773,22 @@ POSTTUN_BND_SYMBOLIC=""
       POSTTUN_BND_MASK="$(printf '%s\n' "$POSTTUN_PRE_AT_RECORD" 2>/dev/null | grep -aoE 'denied=0x[0-9a-fA-F]+' | head -1 | cut -d= -f2 || true)"
       POSTTUN_BND_SYMBOLIC=""
       if [ -n "$POSTTUN_BND_TC" ] && [ -n "$POSTTUN_BND_MASK" ]; then
-        echo "--- the boundary's symbolic decode (the system's own numeric permission values, /sys/fs/selinux/class/$POSTTUN_BND_TC/perms/<permission> file contents; a directory-listing order is never a decode input — the 4C-38 relabelto misread of the 0x10000 dir mask was a listing-order decode):"
+        echo "--- the boundary's symbolic decode — the kernel's own symbolic records for the same shape (the audit slice; the AVC's perm names are the kernel's own decode of this mask):"
+        POSTTUN_BND_TCTX_FULL="$(printf '%s\n' "$POSTTUN_PRE_AT_RECORD" | grep -aoE 'tcontext=[^ ]+' | head -1 | cut -d= -f2 || true)"
+        POSTTUN_BND_SHAPE_AVC="$(grep -a 'type=AVC' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -a "tclass=$POSTTUN_BND_TC" | grep -aF "tcontext=$POSTTUN_BND_TCTX_FULL" | grep -a 'denied' || true)"
+        printf '%s\n' "${POSTTUN_BND_SHAPE_AVC:-(none — the audit slice carries no same-shape record; the boundary stays raw, no symbolic name is claimed from any other source)}"
+        POSTTUN_BND_PERMS="$(printf '%s\n' "$POSTTUN_BND_SHAPE_AVC" | grep -aoE 'denied[ \t]+\{[^}]*\}' | sed 's/denied[ \t]*{[ \t]*//; s/[ \t]*}$//' | tr ' ' '\n' | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//' | sort -u || true)"
+        POSTTUN_BND_DECODED_SETS="$(printf '%s\n' "$POSTTUN_BND_SHAPE_AVC" | grep -aoE 'denied[ \t]+\{[^}]*\}' | sort -u | grep -ac . || true)"
+        if [ -n "$POSTTUN_BND_PERMS" ] && [ "$POSTTUN_BND_DECODED_SETS" = 1 ]; then
+          echo "denied=$POSTTUN_BND_MASK (tclass=$POSTTUN_BND_TC) -> { ${POSTTUN_BND_PERMS} } (the kernel's own name)"
+          POSTTUN_BND_SCTX_TYPE="$(printf '%s\n' "$POSTTUN_PRE_AT_RECORD" | grep -aoE 'scontext=[^ ]+' | head -1 | sed -e 's/^scontext=//' -e 's/^[^:]*:[^:]*://' -e 's/:.*$//' || true)"
+          POSTTUN_BND_TCTX_TYPE="$(printf '%s\n' "$POSTTUN_BND_TCTX_FULL" | sed -e 's/^[^:]*:[^:]*://' -e 's/:.*$//' || true)"
+          if [ -n "$POSTTUN_BND_SCTX_TYPE" ] && [ -n "$POSTTUN_BND_TCTX_TYPE" ]; then
+            POSTTUN_BND_SYMBOLIC="$POSTTUN_BND_SCTX_TYPE -> $POSTTUN_BND_TCTX_TYPE:$POSTTUN_BND_TC { ${POSTTUN_BND_PERMS} }"
+          fi
+        fi
+        echo "--- the loaded policy's own numeric permission map (value -> name from the perms files' contents; the POLICY's numbering — the recorded interface fact, never the AVC decode):"
         numeric_perms_map "$POSTTUN_BND_TC" || true
-        POSTTUN_BND_DECODED="$(numeric_decode "$POSTTUN_BND_TC" "$POSTTUN_BND_MASK" || true)"
-        echo "denied=$POSTTUN_BND_MASK (tclass=$POSTTUN_BND_TC) -> $POSTTUN_BND_DECODED"
-        case "$POSTTUN_BND_DECODED" in
-          '{'*)
-            POSTTUN_BND_SCTX_TYPE="$(printf '%s\n' "$POSTTUN_PRE_AT_RECORD" | grep -aoE 'scontext=[^ ]+' | head -1 | sed -e 's/^scontext=//' -e 's/^[^:]*:[^:]*://' -e 's/:.*$//' || true)"
-            POSTTUN_BND_TCTX_TYPE="$(printf '%s\n' "$POSTTUN_PRE_AT_RECORD" | grep -aoE 'tcontext=[^ ]+' | head -1 | sed -e 's/^tcontext=//' -e 's/^[^:]*:[^:]*://' -e 's/:.*$//' || true)"
-            if [ -n "$POSTTUN_BND_SCTX_TYPE" ] && [ -n "$POSTTUN_BND_TCTX_TYPE" ]; then
-              POSTTUN_BND_SYMBOLIC="$POSTTUN_BND_SCTX_TYPE -> $POSTTUN_BND_TCTX_TYPE:$POSTTUN_BND_TC $POSTTUN_BND_DECODED"
-            fi
-            ;;
-        esac
       else
         echo "(the boundary record lacks a tclass/denied-mask pair — the symbolic decode stays raw)"
       fi

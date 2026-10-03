@@ -3240,142 +3240,169 @@ func TestSELinuxCheckCoversBuilderTrees(t *testing.T) {
 	}
 }
 
-// TestSELinuxPermissionNumericValues pins the calibrated permission values
-// against the system's own selinuxfs interface: every
-// /sys/fs/selinux/class/<class>/perms/<permission> file carries that
-// permission's bit index, and the mask is 1<<index. The pinned pairs are
-// the TUN staircase's decode facts: dir:relabelto = 0x100 and
-// dir:mounton = 0x10000 (the 4C-38 boundary pair — the 0x10000 dir mask
-// was misread as relabelto from a directory-listing order), and
-// tun_socket:relabelfrom = 0x80 / tun_socket:relabelto = 0x100 (the
-// cross-domain attach and self-targeted relabel grants' masks). The test
+// TestSELinuxPermsFilesArePolicyNumbering verifies the runtime interface
+// form the harness's numeric permission map is built from: every
+// /sys/fs/selinux/class/<class>/perms/<permission> file carries a decimal
+// index of the LOADED POLICY's class definition, and the staircase's
+// permission names exist as files. The perms files are the recorded
+// interface fact — they are NOT the kernel's AVC-mask decode (the two
+// numberings differ on the target kernel/policy pair; the kernel's own
+// calibrated records pin that: dir:search = 0x20000000 and
+// dir:mounton = 0x10000 as AVC masks while the perms files number search
+// 31 and mounton 18, run 37099264752's preflight inventory). The test
 // runs only where SELinuxfs exists; elsewhere there is no runtime
-// interface to check, and the decode contract is pinned by
-// TestSELinuxPermissionDecodeFromContents instead.
-func TestSELinuxPermissionNumericValues(t *testing.T) {
+// interface to check.
+func TestSELinuxPermsFilesArePolicyNumbering(t *testing.T) {
 	permsRoot := "/sys/fs/selinux/class"
 	if _, err := os.Stat(filepath.Join(permsRoot, "dir", "perms")); err != nil {
 		t.Skipf("selinuxfs class perms unavailable on this host: %v", err)
 	}
-	classValueOf := func(t *testing.T, class, name string) uint64 {
-		t.Helper()
-		b, err := os.ReadFile(filepath.Join(permsRoot, class, "perms", name))
+	for _, want := range []string{"mounton", "relabelto", "search"} {
+		b, err := os.ReadFile(filepath.Join(permsRoot, "dir", "perms", want))
 		if err != nil {
-			t.Fatalf("the selinuxfs perms file %s/%s/%s must exist: %v", class, "perms", name, err)
+			t.Fatalf("the dir class's perms file for %s must exist: %v", want, err)
 		}
-		idx, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 8)
-		if err != nil {
-			t.Fatalf("the selinuxfs perms file %s/%s/%s must carry a decimal bit index, got %q: %v", class, "perms", name, strings.TrimSpace(string(b)), err)
+		if _, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64); err != nil {
+			t.Errorf("the dir class's perms file for %s must carry a decimal index, got %q: %v", want, strings.TrimSpace(string(b)), err)
 		}
-		return uint64(1) << idx
 	}
-	if got := classValueOf(t, "dir", "relabelto"); got != 0x100 {
-		t.Errorf("dir:relabelto must be 0x100, got %#x", got)
-	}
-	if got := classValueOf(t, "dir", "mounton"); got != 0x10000 {
-		t.Errorf("dir:mounton must be 0x10000, got %#x", got)
-	}
-	if got := classValueOf(t, "tun_socket", "relabelfrom"); got != 0x80 {
-		t.Errorf("tun_socket:relabelfrom must be 0x80, got %#x", got)
-	}
-	if got := classValueOf(t, "tun_socket", "relabelto"); got != 0x100 {
-		t.Errorf("tun_socket:relabelto must be 0x100, got %#x", got)
+	for _, want := range []string{"relabelfrom", "relabelto"} {
+		if _, err := os.Stat(filepath.Join(permsRoot, "tun_socket", "perms", want)); err != nil {
+			t.Fatalf("the tun_socket class's perms file for %s must exist: %v", want, err)
+		}
 	}
 }
 
-// TestSELinuxPermissionDecodeFromContents verifies the decode rule the
-// phase-4B harness's numeric decoder implements: a permission's value
-// comes from its selinuxfs perms FILE's numeric content (the bit index),
-// never from a directory listing's order. The fixture carries the
-// kernel's own permission indexes for the two calibrated classes (dir
-// inherits the common file permission bits; tun_socket inherits the
-// common socket bits); TestSELinuxPermissionNumericValues verifies these
-// indexes against a real SELinuxfs wherever one exists. The 4C-38
-// boundary pair must decode the corrected way in BOTH directions: the
-// dir mask 0x10000 is mounton (not relabelto) and the dir mask 0x100 is
-// relabelto (not mounton) — the listing-order misread must not come
-// back in either direction.
-func TestSELinuxPermissionDecodeFromContents(t *testing.T) {
+// TestSELinuxPermissionKernelClassmapDecode verifies the AVC-mask decode
+// rule: the masks the kernel's access decisions and the selinux_audited
+// tracepoint carry follow the KERNEL'S OWN STATIC class/perm numbering
+// (security/selinux/include/classmap.h), and the staircase's decode facts
+// are each pinned by the kernel's own records. The fixture carries the
+// kernel's class lists for dir, file, and tun_socket; the asserted decodes
+// are the calibrated facts: dir:relabelto = 0x100 and dir:mounton =
+// 0x10000 (run 37050894858's audit slice names mounton for the
+// rootlesskit child's mount("/") denial — the 4C-38 boundary pair), and
+// tun_socket:relabelfrom = 0x80 / tun_socket:relabelto = 0x100 (the
+// 4C-35/4C-36 co-captured pairs), with dir:search = 0x20000000 and
+// file:getattr = 0x10 as the same-numbering cross-checks. The corrected
+// direction must hold in BOTH directions: the 4C-38 listing-order misread
+// (0x10000 as relabelto) and the policy's own perms-file numbering
+// (mounton indexed 18 on the target's loaded policy) must never come
+// back as AVC decodes.
+func TestSELinuxPermissionKernelClassmapDecode(t *testing.T) {
 	fixtures := []struct {
 		class string
 		index map[string]int
 	}{
 		{
+			// The kernel's dir class: COMMON_FILE_PERMS (11 common
+			// file/sock perms + 15 file-only perms) + dir's own five.
 			class: "dir",
 			index: map[string]int{
 				"ioctl": 0, "read": 1, "write": 2, "create": 3, "getattr": 4,
 				"setattr": 5, "lock": 6, "relabelfrom": 7, "relabelto": 8,
-				"append": 9, "unlink": 10, "link": 11, "rename": 12,
-				"execute": 13, "swapon": 14, "quotaoff": 15, "mounton": 16,
-				"add_name": 17, "remove_name": 18, "reparent": 19, "search": 20,
-				"rmdir": 21, "open": 22, "audit_access": 23, "execmod": 24,
+				"append": 9, "map": 10, "unlink": 11, "link": 12, "rename": 13,
+				"execute": 14, "quotaon": 15, "mounton": 16, "audit_access": 17,
+				"open": 18, "execmod": 19, "watch": 20, "watch_mount": 21,
+				"watch_sb": 22, "watch_with_perm": 23, "watch_reads": 24,
+				"watch_mountns": 25, "add_name": 26, "remove_name": 27,
+				"reparent": 28, "search": 29, "rmdir": 30,
 			},
 		},
 		{
+			// The kernel's file class: COMMON_FILE_PERMS +
+			// execute_no_trans + entrypoint.
+			class: "file",
+			index: map[string]int{
+				"ioctl": 0, "read": 1, "write": 2, "create": 3, "getattr": 4,
+				"setattr": 5, "lock": 6, "relabelfrom": 7, "relabelto": 8,
+				"append": 9, "map": 10, "unlink": 11, "link": 12, "rename": 13,
+				"execute": 14, "quotaon": 15, "mounton": 16, "audit_access": 17,
+				"open": 18, "execmod": 19, "watch": 20, "watch_mount": 21,
+				"watch_sb": 22, "watch_with_perm": 23, "watch_reads": 24,
+				"watch_mountns": 25, "execute_no_trans": 26, "entrypoint": 27,
+			},
+		},
+		{
+			// The kernel's tun_socket class: COMMON_SOCK_PERMS +
+			// attach_queue.
 			class: "tun_socket",
 			index: map[string]int{
 				"ioctl": 0, "read": 1, "write": 2, "create": 3, "getattr": 4,
 				"setattr": 5, "lock": 6, "relabelfrom": 7, "relabelto": 8,
 				"append": 9, "map": 10, "bind": 11, "connect": 12, "listen": 13,
-				"accept": 14, "shutdown": 15, "recvfrom": 16, "sendto": 17,
-				"recvmsg": 18, "sendmsg": 19, "name_bind": 20, "attach_queue": 21,
+				"accept": 14, "getopt": 15, "setopt": 16, "shutdown": 17,
+				"recvfrom": 18, "sendto": 19, "name_bind": 20, "attach_queue": 21,
 			},
 		},
 	}
-	decode := func(class string, index map[string]int, mask uint64) []string {
-		perms := filepath.Join(t.TempDir(), class, "perms")
-		if err := os.MkdirAll(perms, 0o755); err != nil {
-			t.Fatalf("fixture perms dir: %v", err)
+	classmap := map[string]map[string]uint64{}
+	for _, f := range fixtures {
+		m := make(map[string]uint64, len(f.index))
+		for name, idx := range f.index {
+			m[name] = uint64(1) << uint(idx)
 		}
-		for name, idx := range index {
-			if err := os.WriteFile(filepath.Join(perms, name), []byte(strconv.Itoa(idx)+"\n"), 0o644); err != nil {
-				t.Fatalf("fixture perms file %s: %v", name, err)
-			}
-		}
+		classmap[f.class] = m
+	}
+	decode := func(class string, mask uint64) []string {
 		var decoded []string
-		for name, idx := range index {
-			if mask&(uint64(1)<<uint(idx)) != 0 {
+		for name, value := range classmap[class] {
+			if mask&value != 0 {
 				decoded = append(decoded, name)
 			}
 		}
 		return decoded
 	}
-	dirDecode := func(mask uint64) []string { return decode("dir", fixtures[0].index, mask) }
-	tunDecode := func(mask uint64) []string { return decode("tun_socket", fixtures[1].index, mask) }
-	if got := dirDecode(0x10000); len(got) != 1 || got[0] != "mounton" {
-		t.Errorf("dir mask 0x10000 must decode to exactly { mounton } (the corrected 4C-38 boundary), got %v", got)
+	one := func(class string, mask uint64, want string) {
+		t.Helper()
+		got := decode(class, mask)
+		if len(got) != 1 || got[0] != want {
+			t.Errorf("%s mask %#x must decode to exactly { %s } (the kernel's own static classmap), got %v", class, mask, want, got)
+		}
 	}
-	if got := dirDecode(0x100); len(got) != 1 || got[0] != "relabelto" {
-		t.Errorf("dir mask 0x100 must decode to exactly { relabelto }, got %v", got)
+	one("dir", 0x10000, "mounton")
+	one("dir", 0x100, "relabelto")
+	one("dir", 0x20000000, "search")
+	one("tun_socket", 0x80, "relabelfrom")
+	one("tun_socket", 0x100, "relabelto")
+	one("file", 0x10, "getattr")
+	one("file", 0x4000, "execute")
+	if got := decode("dir", 0x10000); len(got) == 1 && got[0] == "relabelto" {
+		t.Error("the 4C-38 listing-order misread must not come back: dir mask 0x10000 is mounton, not relabelto")
 	}
-	if got := tunDecode(0x80); len(got) != 1 || got[0] != "relabelfrom" {
-		t.Errorf("tun_socket mask 0x80 must decode to exactly { relabelfrom }, got %v", got)
-	}
-	if got := tunDecode(0x100); len(got) != 1 || got[0] != "relabelto" {
-		t.Errorf("tun_socket mask 0x100 must decode to exactly { relabelto }, got %v", got)
+	if got := decode("dir", 0x100); len(got) == 1 && got[0] == "mounton" {
+		t.Error("dir mask 0x100 is relabelto, not mounton")
 	}
 }
 
-// TestPhase4BVerdictDecodesFromSelinuxfsContents pins the phase-4B
-// harness's boundary decode to the selinuxfs numeric interface: the
-// verdict must build its value->name mapping from the perms files'
-// numeric contents, and the removed 4C-38 decode-from-listing-order
-// claim must not come back.
-func TestPhase4BVerdictDecodesFromSelinuxfsContents(t *testing.T) {
+// TestPhase4BVerdictBoundaryDecodeKernelSourced pins the phase-4B
+// harness's boundary decode to the kernel's own symbolic statements: the
+// verdict names a boundary only from a same-shape AVC record in the audit
+// slice, records the loaded policy's numeric perms-file map as the
+// policy-numbering interface fact, and the removed decode-from-listing
+// order claim and the deleted perms-file mask decoder stay removed.
+func TestPhase4BVerdictBoundaryDecodeKernelSourced(t *testing.T) {
 	data, err := os.ReadFile("scripts/release-2.4-p5s2-phase4b-launcher-tw.sh")
 	if err != nil {
 		t.Fatalf("the phase-4B harness not found: %v", err)
 	}
 	script := string(data)
-	if !strings.Contains(script, `"/sys/fs/selinux/class/$class/perms"`) {
-		t.Error("the harness's numeric decoder must build its permission mapping from the selinuxfs perms files' contents")
+	for _, want := range []string{
+		`"/sys/fs/selinux/class/$class/perms"`,
+		"the kernel's own symbolic records for the same shape",
+		"numeric_perms_map",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("the harness's boundary decode must carry the kernel-sourced decode machinery: %q", want)
+		}
 	}
 	for _, gone := range []string{
 		"the Nth listed perm",
 		"bitmap-order",
+		"numeric_decode",
 	} {
 		if strings.Contains(script, gone) {
-			t.Errorf("the harness must not decode permissions from a directory-listing order (the 4C-38 misread): %q", gone)
+			t.Errorf("the harness must not decode AVC masks from a listing order or from the policy's perms-file numbering (the 4C-38 misread and its perms-file twin): %q", gone)
 		}
 	}
 }
