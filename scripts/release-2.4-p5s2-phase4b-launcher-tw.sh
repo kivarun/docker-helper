@@ -1035,8 +1035,8 @@ PREFLIGHT_OK=1
   printf '%s\n' "${RK_ETC_STANDING:-(none — the standing surface is empty)}"
   RK_ETC_DIR_UNION="$(printf '%s\n' "$RK_ETC_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:dir \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
   echo "effective dir perm union: ${RK_ETC_DIR_UNION:-(none)}"
-  echo "--- the forbidden-dir-perms negative (everything beyond the base policy's standing { getattr open search } and the granted mounton must be absent from the whole effective dir surface; the standing set is this run's own inventory fact; the .ro/scan surfaces must not ride):"
-  RK_ETC_FORBIDDEN="$(printf '%s\n' "$RK_ETC_DIR_UNION" | tr ' ' '\n' | grep -avE '^(getattr|open|search|mounton)$' || true)"
+  echo "--- the forbidden-dir-perms negative (everything beyond the base policy's standing { getattr ioctl lock open read search } — the base_file_type trio plus the base_ro_file_type trio, both attribute-derived — and the granted mounton must be absent from the whole effective dir surface; the standing set is the 4C-44 preflight inventory's own fact, run 37144848669; the .ro/scan surfaces must not ride):"
+  RK_ETC_FORBIDDEN="$(printf '%s\n' "$RK_ETC_DIR_UNION" | tr ' ' '\n' | grep -avE '^(getattr|ioctl|lock|open|read|search|mounton)$' || true)"
   printf '%s\n' "${RK_ETC_FORBIDDEN:-(none — no extra dir permission)}"
   RK_ETC_OK=0
   if [ "$(printf '%s\n' "$RK_ETC_CONCRETE" | grep -ac . || true)" = 1 ] \
