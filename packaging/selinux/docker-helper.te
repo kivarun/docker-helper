@@ -92,6 +92,7 @@ module docker_helper 1.2;
 		type kernel_t;
 		type root_t;
 		type tmp_t;
+		type etc_t;
 		type setfiles_exec_t;
 		type selinux_config_t;
 		type default_context_t;
@@ -1523,6 +1524,58 @@ allow docker_helper_rootlesskit_t root_t:dir mounton;
 # MCS boundary, and cross-operation targeting stays the open
 # concurrency/security gate before the Release GO.
 allow docker_helper_rootlesskit_t tmp_t:dir { write add_name create mounton };
+
+# The copy-up tmpfs mount's target mounton (P5-S2 Phase 4C-44): with the
+# tmp copy-up quartet granted (4C-43), the canonical 4C-43 run
+# 37143508859 saw the copy-up BIND MOUNT succeed
+# (sys_mount("/etc", "/tmp/rootlesskit-b396561303", MS_BIND|MS_REC) ->
+# 0x0 — the ROOTLESSKIT-BIND0-BIND-MOUNT milestone) and moved the
+# failure to the copy-up flow's NEXT stage — the tmpfs mount OVER the
+# copy-up source directory:
+#   sys_mount(dev_name: "none", dir_name: "/etc", type: "tmpfs",
+#   flags: 0, data: 0) -> 0xfffffffffffffff3
+# with the denial INSIDE the mount(2) window, trace-ts 273.936981
+# (21µs before the first failing syscall exit at trace-ts 273.937002;
+# T0 = the attach at trace-ts 273.934089, epoch 1791051689.047):
+#   requested=0x10000 denied=0x10000 audited=0x10000 result=-13 (EACCES)
+#   scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+#   tcontext=system_u:object_r:etc_t:s0 tclass=dir
+#
+# THE TARGET TYPE IS THE EVIDENCE — NOT AN ASSUMPTION: /etc on
+# Tumbleweed is labeled etc_t (the distro's own /etc directory type) —
+# NOT root_t (whose mounton the 4C-39 grant covers for the propagation
+# mount "/") and NOT tmp_t (whose mounton the 4C-43 grant covers for
+# the bind0 target). This is a NEW evidenced pair, granted here as its
+# OWN rule — never folded into the root or tmp mounton rules; the
+# three mounton targets stay three distinct evidenced pairs.
+#
+# The decode is dir:mounton = 0x10000 (bit 16 of the kernel's static
+# classmap — the same bit position both prior mounton boundaries
+# proved). The audit slice was empty in that window too (the same
+# userspace-audit gap); a next symbolic AVC record, when captured, is
+# the confirming decode.
+#
+# SCOPE — READ CAREFULLY: exactly ONE permission of the dir class on
+# exactly this pair — the mounton check of the copy-up flow's tmpfs
+# mount over /etc. Deliberately NOT granted: etc_t:dir
+# write/add_name/create (the .ro directory creation INSIDE the tmpfs
+# mount — the NEXT boundaries, whose target types materialize live),
+# etc_t:dir read/remove_name/rmdir/setattr/rename (the scan/rebuild
+# steps — each its own boundary), tmpfs_t:filesystem mount or any
+# other filesystem-class permission (if the mount path next mediates
+# the new superblock, that hook materializes live and owns its own
+# phase — never auto-converted from a dir permission), every other
+# etc_t permission, any new tmp_t/root_t grant, file/lnk_file/
+# sock_file classes, process/capability surfaces, other subjects; the
+# lifecycle signal surface stays closed (the post-failure cleanup
+# kill follows the holder's exit — never precedes it). Like every
+# flow-domain grant this is a domain-wide permission on the distro
+# /etc directory type (no .fc delta: the distro labels /etc with its
+# own etc_t), not an operation-scoped one; the operation separation
+# is owned by the categorized process/object MCS boundary, and
+# cross-operation targeting stays the open concurrency/security gate
+# before the Release GO.
+allow docker_helper_rootlesskit_t etc_t:dir mounton;
 
 # --- docker_helper_slirp4netns_t: the rootlesskit user-network helper domain (P5-S2) ---
 #
