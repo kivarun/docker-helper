@@ -32,15 +32,15 @@ jobs:
 
       - name: Check out the tested proof commit for the composition
         env:
-          # 4C-45: the composition's module now carries the rootlesskit
-          # child's copy-up tmpfs superblock grant (the 4C-44 boundary's
-          # semantic fix — the NEW tmpfs superblock's own filesystem-class
-          # mount, a NEW evidenced pair; tmpfs_t:s0 is a global label, so
-          # the cross-operation gate stays mandatory); the proof ref
-          # advances from the 4C-44-era pin to the commit carrying that
-          # module (1adba17 — identical Go sources, so the binary is the
-          # same program).
-          PHASE4B_PROOF_REF: '1adba175e2d96bf0b5cf4d15b0e7f12b9a92aa7f'
+          # 4C-46: the composition's module now carries the rootlesskit
+          # child's copy-up `.ro` dir-create grant (the 4C-45 boundary's
+          # semantic fix — the child SID inherited from the tmpfs root's
+          # own label tmpfs_t, the live-proven pair; tmpfs_t:s0 is a
+          # global label, so the cross-operation gate stays mandatory);
+          # the proof ref advances from the 4C-45-era pin to the commit
+          # carrying that module (d9cbe9b — identical Go sources, so the
+          # binary is the same program).
+          PHASE4B_PROOF_REF: 'd9cbe9bb603c38b79221be8de8956b893a3f055a'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
