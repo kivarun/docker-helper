@@ -967,7 +967,7 @@ PREFLIGHT_OK=1
   RK_ROOTDIR_UNION="$(printf '%s\n' "$RK_ROOTDIR_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* root_t:dir \(.*\);$/\1/p' | sed 's/[{}]//g' | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
   echo "effective dir perm union: ${RK_ROOTDIR_UNION:-(none)}"
   echo "--- the forbidden-new-perms negative (everything beyond the base policy's standing { ioctl lock read } and the granted mounton must be absent from the whole effective surface; relabelto named first — the 4C-38 decoder misread):"
-  RK_ROOTDIR_FORBIDDEN="$(printf '%s\n' "$RK_ROOTDIR_UNION" | grep -avE '^(ioctl|lock|mounton|read)$' || true)"
+  RK_ROOTDIR_FORBIDDEN="$(printf '%s\n' "$RK_ROOTDIR_UNION" | tr ' ' '\n' | grep -avE '^(ioctl|lock|mounton|read)$' || true)"
   printf '%s\n' "${RK_ROOTDIR_FORBIDDEN:-(none — no extra dir permission)}"
   RK_ROOTDIR_OK=0
   if [ "$(printf '%s\n' "$RK_ROOTDIR_CONCRETE" | grep -ac . || true)" = 1 ] \
