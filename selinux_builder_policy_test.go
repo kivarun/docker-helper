@@ -3145,6 +3145,158 @@ func TestSELinuxPolicyRootlesskitEtcMounton(t *testing.T) {
 	}
 }
 
+// TestSELinuxPolicyRootlesskitTmpfsFilesystemMount owns the exact surface
+// of the 4C-45 tmpfs superblock grant: docker_helper_rootlesskit_t ->
+// tmpfs_t:filesystem { mount }. The grant exists because the copy-up
+// flow's tmpfs mount over /etc — after PASSING the granted etc_t:dir
+// mounton stage (4C-44's progression proof) — is denied at the NEW
+// superblock's own filesystem-class check: the canonical 4C-44 run
+// (37145319964) recorded requested=0x1 denied=0x1 result=-13
+// tcontext=tmpfs_t:s0 tclass=filesystem INSIDE the C-mount window
+// (mount("none", "/etc", "tmpfs", 0) -> -13), 14µs before the first
+// failing syscall exit. The class is the evidence — filesystem, never a
+// dir permission; the target is the superblock's own type tmpfs_t.
+// SCOPE — a GLOBAL-TYPE grant: tmpfs_t:s0 carries no per-operation MCS
+// category, so this allow is not operation-scoped (the nsfs_t scope
+// shape); the cross-operation gate stays mandatory. The surface is
+// exact: one rule, one permission. Deliberately NOT granted:
+// remount/unmount/getattr/associate/mounton/relabelfrom/relabelto on
+// this pair, any second filesystem rule, any dir/file surface of the
+// next copy-up steps (their target types materialize live — after the
+// tmpfs mount the labels are NOT assumed), any other class, any other
+// subject.
+func TestSELinuxPolicyRootlesskitTmpfsFilesystemMount(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	for _, want := range []string{
+		"allow docker_helper_rootlesskit_t tmpfs_t:filesystem mount;",
+	} {
+		if !strings.Contains(policy, want) {
+			t.Errorf("the rootlesskit child domain's tmpfs superblock surface must be exact: %q", want)
+		}
+	}
+	pinnedTmpfsMount := "allow docker_helper_rootlesskit_t tmpfs_t:filesystem mount;"
+	countExact := func(text, rule string) int {
+		n := 0
+		for _, line := range strings.Split(text, "\n") {
+			if strings.TrimSpace(line) == rule {
+				n++
+			}
+		}
+		return n
+	}
+	// tmpfsMountViolations returns one violation per line of module text
+	// that breaks the grant's invariants: exactly one allow rule may name
+	// docker_helper_rootlesskit_t -> tmpfs_t:filesystem, in the exact
+	// bare-mount shape (no brace form, no split rules, no second
+	// filesystem permission — remount/unmount/getattr/associate/mounton/
+	// relabel* are distinct hooks); no tmpfs_t:dir mounton may ride (the
+	// dir-class confusion); no other subject may receive tmpfs_t
+	// filesystem authority from this module.
+	tmpfsMountViolations := func(text string) []string {
+		var violations []string
+		count := 0
+		for _, line := range strings.Split(text, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			switch {
+			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t tmpfs_t:filesystem"):
+				count++
+				if trimmed != pinnedTmpfsMount {
+					violations = append(violations, "the tmpfs superblock grant must be the exact bare-mount filesystem shape (no brace form, no split rules, no second permission — remount/unmount/getattr/associate/mounton/relabel* are distinct hooks): "+trimmed)
+				}
+			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, " tmpfs_t:filesystem"):
+				// The daemon's own getattr grant (the trusted-CA era,
+				// pre-existing) is the one other tmpfs_t:filesystem
+				// rule; any other subject or a widened daemon rule is
+				// module-borne authority beyond the two evidenced
+				// surfaces.
+				if trimmed != "allow docker_helper_t tmpfs_t:filesystem { getattr };" {
+					violations = append(violations, "tmpfs_t filesystem authority outside the two evidenced rules (the flow child's mount and the daemon's getattr) is forbidden: "+trimmed)
+				}
+			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t tmpfs_t:"):
+				violations = append(violations, "the flow child's tmpfs_t authority is filesystem-mount only (no dir/other-class surface rides this pair): "+trimmed)
+			}
+		}
+		if count == 0 {
+			violations = append(violations, "the tmpfs superblock grant (rootlesskit_t -> tmpfs_t:filesystem mount) is missing")
+		} else if count > 1 {
+			violations = append(violations, fmt.Sprintf("exactly one tmpfs_t:filesystem grant may exist for the rootlesskit child domain, found %d", count))
+		}
+		return violations
+	}
+	if violations := tmpfsMountViolations(policy); len(violations) > 0 {
+		t.Errorf("the committed policy violates the tmpfs superblock invariants: %v", violations)
+	}
+	// The replacement regressions: each replacement must APPLY and must
+	// actually trip the invariants.
+	for _, regressed := range []struct {
+		name string
+		rule string
+	}{
+		{"missing whole rule", ""},
+		{"missing mount (getattr-only shape)", "allow docker_helper_rootlesskit_t tmpfs_t:filesystem getattr;"},
+		{"remount instead of mount", "allow docker_helper_rootlesskit_t tmpfs_t:filesystem remount;"},
+		{"mount remount brace set", "allow docker_helper_rootlesskit_t tmpfs_t:filesystem { mount remount };"},
+		{"mount unmount brace set", "allow docker_helper_rootlesskit_t tmpfs_t:filesystem { mount unmount };"},
+		{"mount getattr brace set", "allow docker_helper_rootlesskit_t tmpfs_t:filesystem { mount getattr };"},
+		{"mount associate brace set", "allow docker_helper_rootlesskit_t tmpfs_t:filesystem { mount associate };"},
+		{"duplicate identical rule", pinnedTmpfsMount + "\n" + pinnedTmpfsMount},
+		{"parallel mount rule (brace form)", pinnedTmpfsMount + "\nallow docker_helper_rootlesskit_t tmpfs_t:filesystem { mount };"},
+		{"equivalent brace-single-perm shape", "allow docker_helper_rootlesskit_t tmpfs_t:filesystem { mount };"},
+		{"wrong target filesystem type (fs_t)", "allow docker_helper_rootlesskit_t fs_t:filesystem mount;"},
+		{"wrong class (tmpfs_t:dir mounton)", "allow docker_helper_rootlesskit_t tmpfs_t:dir mounton;"},
+	} {
+		mutated := strings.Replace(policy, pinnedTmpfsMount, regressed.rule, 1)
+		applied := func() bool {
+			if regressed.rule == "" {
+				return countExact(mutated, pinnedTmpfsMount) == 0
+			}
+			return strings.Contains(mutated, regressed.rule)
+		}
+		if !applied() {
+			t.Errorf("the tmpfs-mount regression %q was not applied", regressed.name)
+			continue
+		}
+		if len(tmpfsMountViolations(mutated)) == 0 {
+			t.Errorf("the tmpfs-mount regression %q must fail the tmpfs superblock invariants", regressed.name)
+		}
+	}
+	// The widening sweep: { mount <X> } for every other filesystem
+	// permission must fail the invariants in every case.
+	for _, extra := range []string{
+		"remount", "unmount", "getattr", "associate", "mounton",
+		"relabelfrom", "relabelto",
+	} {
+		mutated := strings.Replace(policy, pinnedTmpfsMount,
+			fmt.Sprintf("allow docker_helper_rootlesskit_t tmpfs_t:filesystem { mount %s };", extra), 1)
+		if countExact(mutated, pinnedTmpfsMount) == 1 {
+			t.Errorf("the tmpfs-mount widening +%s was not applied", extra)
+			continue
+		}
+		if len(tmpfsMountViolations(mutated)) == 0 {
+			t.Errorf("the tmpfs-mount widening +%s must fail the tmpfs superblock invariants", extra)
+		}
+	}
+	// The subject regressions: no other domain may gain tmpfs_t
+	// filesystem authority (the manager/launcher/helper shapes and the
+	// dir-class confusion), appended beside the real grant.
+	for _, mut := range []struct {
+		name string
+		rule string
+	}{
+		{"tmpfs filesystem mount for the manager", "allow docker_helper_builder_t tmpfs_t:filesystem mount;"},
+		{"tmpfs filesystem mount for the launcher", "allow docker_helper_builder_launcher_t tmpfs_t:filesystem mount;"},
+		{"tmpfs filesystem mount for the network helper", "allow docker_helper_slirp4netns_t tmpfs_t:filesystem mount;"},
+		{"tmpfs dir mounton for the flow child (the class confusion)", "allow docker_helper_rootlesskit_t tmpfs_t:dir mounton;"},
+	} {
+		if len(tmpfsMountViolations(policy+"\n"+mut.rule)) == 0 {
+			t.Errorf("mutation %q must trip the tmpfs superblock invariants", mut.name)
+		}
+	}
+}
+
 // TestSELinuxPolicyRootlesskitIsolation verifies the rootlesskit child
 // domain receives no grant toward any forbidden surface (the same set the
 // builder domain is denied), carries no plain capability grants, and — for
