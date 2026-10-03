@@ -1456,29 +1456,46 @@ allow docker_helper_rootlesskit_t root_t:dir mounton;
 #     mkdir path), and a next symbolic AVC record, when captured, is
 #     the confirming decode.
 #
-# SCOPE — READ CAREFULLY: exactly TWO permissions of the dir class —
-# the write check and the add_name check of the ONE mkdir(2) that
+#   create (4C-42): with write+add_name granted, the canonical 4C-41
+#     run 37107847258 moved the failure to the mkdir's object-creation
+#     hook — the same sys_mkdirat window, trace-ts 223.832943 (74µs
+#     before the holder's exit(1) at trace-ts 223.833032; T0 = the
+#     attach at trace-ts 223.832147):
+#       requested=0x8 denied=0x8 audited=0x8 result=-13 (EACCES)
+#       scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+#       tcontext=system_u:object_r:tmp_t:s0 tclass=dir
+#     inside sys_mkdirat(dfd=AT_FDCWD, pathname=
+#     "/tmp/rootlesskit-b3151144429", mode=0x1c0=0700). The target
+#     type is LIVE-PROVEN as tmp_t (the create hook checked the new
+#     dir against tmp_t:s0 — the inherited parent label; no type
+#     transition was observed). The decode is the kernel's own static
+#     classmap (dir:create = 0x8, bit 3 of COMMON_FILE_SOCK_PERMS) —
+#     the object-creation permission of may_create()'s
+#     avc_has_perm(sid, NEWSID, DIR__CREATE). The audit slice was
+#     empty in that window too (the same userspace-audit gap); a next
+#     symbolic AVC record, when captured, is the confirming decode.
+#
+# SCOPE — READ CAREFULLY: exactly THREE permissions of the dir class —
+# the write, add_name, and create checks of the ONE mkdir(2) that
 # MkdirTemp issues on /tmp; each permission is traceable to its own
-# run's boundary above. Deliberately NOT granted: create (the
-# new-directory-object hook — the NEXT boundary; its target type is NOT
-# assumed to be tmp_t: the type the kernel labels the new
-# /tmp/rootlesskit-b* dir with must materialize live — a type
-# transition or default labeling may name another type, and the next
-# phase uses exactly that pair), remove_name/rmdir (the failed
-# launches' cleanup surface — the manager purge owns removal),
-# setattr, mounton, and every other dir permission; NO tmp_t
-# file/lnk_file/sock_file/fifo_file surface (the bind0 mounts' inner
-# objects materialize later, each its own boundary); no filesystem-class
-# grant; no process/capability surface; no other subject; the lifecycle
-# signal surface stays closed (the post-failure cleanup kill follows
-# the holder's exit — never precedes it). Like every flow-domain grant
-# this is a domain-wide permission on the distro /tmp type (no .fc
-# delta: the distro labels /tmp with its own tmp_t), not an
-# operation-scoped one; the operation separation is owned by the
-# categorized process/object MCS boundary, and cross-operation
-# targeting stays the open concurrency/security gate before the
-# Release GO.
-allow docker_helper_rootlesskit_t tmp_t:dir { write add_name };
+# run's boundary above. Deliberately NOT granted: mounton (the bind
+# mount target hook — the NEXT boundary, hypothesized as
+# mount(<copy-up-source>, "/tmp/rootlesskit-b*", MS_BIND|MS_REC) but
+# NOT assumed; NOT granted even if the next denial names it),
+# remove_name/rmdir (the failed launches' cleanup surface — the
+# manager purge owns removal), setattr, rename, and every other dir
+# permission; NO tmp_t file/lnk_file/sock_file/fifo_file surface (the
+# bind0 mounts' inner objects materialize later, each its own
+# boundary); no filesystem-class grant; no process/capability
+# surface; no other subject; the lifecycle signal surface stays
+# closed (the post-failure cleanup kill follows the holder's exit —
+# never precedes it). Like every flow-domain grant this is a
+# domain-wide permission on the distro /tmp type (no .fc delta: the
+# distro labels /tmp with its own tmp_t), not an operation-scoped
+# one; the operation separation is owned by the categorized
+# process/object MCS boundary, and cross-operation targeting stays
+# the open concurrency/security gate before the Release GO.
+allow docker_helper_rootlesskit_t tmp_t:dir { write add_name create };
 
 # --- docker_helper_slirp4netns_t: the rootlesskit user-network helper domain (P5-S2) ---
 #
