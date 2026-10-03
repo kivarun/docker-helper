@@ -2744,8 +2744,9 @@ func TestSELinuxPolicyRootlesskitRootMounton(t *testing.T) {
 				violations = append(violations, "root_t authority is unique to the rootlesskit child domain: "+trimmed)
 			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t ") &&
 				strings.Contains(trimmed, ":dir ") && strings.Contains(trimmed, "mounton") &&
-				!strings.Contains(trimmed, " tmp_t:") && !strings.Contains(trimmed, " etc_t:"):
-				violations = append(violations, "the flow child's dir mounton authority is granted only on root_t (4C-39), tmp_t (the copy-up owner) and etc_t (the tmpfs-mount owner) — any other target is ungranted: "+trimmed)
+				!strings.Contains(trimmed, " tmp_t:") && !strings.Contains(trimmed, " etc_t:") &&
+				!strings.Contains(trimmed, " tmpfs_t:"):
+				violations = append(violations, "the flow child's dir mounton authority is granted only on root_t (4C-39), tmp_t (the copy-up owner), etc_t (the tmpfs-mount owner) and tmpfs_t (the 4C-47 move-mount owner) — any other target is ungranted: "+trimmed)
 			}
 		}
 		if count == 0 {
@@ -3219,7 +3220,7 @@ func TestSELinuxPolicyRootlesskitTmpfsFilesystemMount(t *testing.T) {
 				!strings.Contains(trimmed, " tmpfs_t:dir "):
 				// The dir-class surface of tmpfs_t has its own owner
 				// (the 4C-46 .ro create grant — TestSELinuxPolicy-
-				// RootlesskitTmpfsDirCreate); this filesystem pair's
+				// RootlesskitTmpfsDir); this filesystem pair's
 				// invariant is only that no OTHER-class surface rides
 				// here.
 				violations = append(violations, "the flow child's tmpfs_t authority beyond the evidenced filesystem-mount and dir-create pairs is forbidden: "+trimmed)
@@ -3302,46 +3303,53 @@ func TestSELinuxPolicyRootlesskitTmpfsFilesystemMount(t *testing.T) {
 	}
 }
 
-// TestSELinuxPolicyRootlesskitTmpfsDirCreate owns the exact surface of
-// the 4C-46 copy-up `.ro` grant: docker_helper_rootlesskit_t ->
-// tmpfs_t:dir { create }. The grant exists because the copy-up flow's
-// FIRST post-tmpfs-mount step — the `.ro` mkdirat — is denied at the
-// NEW child dir's own create check: the canonical 4C-45 run
-// (37147831964) recorded requested=0x8 denied=0x8 result=-13
-// tcontext=tmpfs_t:s0 tclass=dir INSIDE the mkdirat window
-// (mkdirat(AT_FDCWD, "/etc/.ro1295760542", 0700) -> -13), 25µs before
-// the first failing syscall exit. The target is the live-proven pair —
-// the child SID inherited from the tmpfs root's own label tmpfs_t:s0,
-// NOT an assumed etc_t/tmp_t. The class is the evidence — a dir
-// permission, never the filesystem pair's rule; the two grants stay
-// separate owners (different classes, different hooks, different
-// provenance). The parent-side add_name/remove_name/write are already
-// STANDING base-policy attribute authority — this module must not copy
-// them. SCOPE — a GLOBAL-TYPE grant (tmpfs_t:s0): not operation-scoped
-// (the nsfs_t scope shape); the cross-operation gate stays mandatory.
+// TestSELinuxPolicyRootlesskitTmpfsDir owns the whole evidenced module
+// surface of the copy-up `.ro` dir pair: docker_helper_rootlesskit_t ->
+// tmpfs_t:dir = exactly { create mounton }. Provenance stays per-perm:
+//
+//   - create — the canonical 4C-45 run (37147831964) recorded
+//     requested=0x8 denied=0x8 result=-13 tcontext=tmpfs_t:s0
+//     tclass=dir INSIDE the .ro mkdirat window
+//     (mkdirat(AT_FDCWD, "/etc/.ro1295760542", 0700) -> -13), 25µs
+//     before the first failing syscall exit; the child SID is
+//     inherited from the tmpfs root's own label tmpfs_t:s0 (the
+//     live-proven pair, NOT an assumed etc_t/tmp_t); added by 4C-46.
+//   - mounton — the canonical 4C-46 run (37151310682) recorded
+//     requested=0x10000 denied=0x10000 result=-13 tcontext=tmpfs_t:s0
+//     tclass=dir INSIDE the move-mount window
+//     (mount("/tmp/rootlesskit-b806505358", "/etc/.ro1982736738", "",
+//     MS_MOVE, 0) -> -13), 25µs before the first failing syscall
+//     exit; the target-dir mediation of the moved mount's own label;
+//     added by 4C-47.
+//
+// The class is the evidence — a dir pair, never the filesystem pair's
+// rule (4C-45's separate owner); the two tmpfs_t rules stay separate
+// owners (different classes, different hooks, different provenance).
+// The parent-side add_name/remove_name/write are already STANDING
+// base-policy attribute authority — this module must not copy them.
+// SCOPE — a GLOBAL-TYPE grant (tmpfs_t:s0): not operation-scoped (the
+// nsfs_t scope shape); the cross-operation gate stays mandatory.
 // Deliberately NOT granted: add_name/write/remove_name/rmdir/read/
-// mounton/setattr/rename/relabel* on this pair, any file/lnk_file/
-// blk/chr surface of the tmpfs (the rebuild stages' target types
-// materialize live), any second dir rule, any filesystem-class
-// permission (the 4C-45 mount owner), any other class, any other
-// subject.
-func TestSELinuxPolicyRootlesskitTmpfsDirCreate(t *testing.T) {
+// setattr/rename/relabel* on this pair, any file/lnk_file/blk/chr
+// surface of the tmpfs (the rebuild stages' target types materialize
+// live), any second dir rule, any filesystem-class permission, any
+// other class, any other subject.
+func TestSELinuxPolicyRootlesskitTmpfsDir(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
-	pinnedTmpfsDirCreate := "allow docker_helper_rootlesskit_t tmpfs_t:dir create;"
+	pinnedTmpfsDirCreate := "allow docker_helper_rootlesskit_t tmpfs_t:dir { create mounton };"
 	if !strings.Contains(policy, pinnedTmpfsDirCreate) {
 		t.Fatalf("the rootlesskit child domain's .ro dir-create surface must be exact: %q", pinnedTmpfsDirCreate)
 	}
-	// tmpfsDirCreateViolations returns one violation per line of module
-	// text that breaks the grant's invariants: exactly one allow rule may
-	// name docker_helper_rootlesskit_t -> tmpfs_t:dir, in the exact
-	// bare-create shape (no brace form, no split rules, no second dir
-	// permission — add_name/write/remove_name/rmdir/read/mounton/
-	// setattr/rename/relabel* are distinct hooks; the first three are
-	// STANDING base-policy authority and must not be copied into this
-	// module); no other subject may receive tmpfs_t:dir authority from
-	// this module; no tmpfs_t:filesystem create may ride (the class
-	// confusion).
-	tmpfsDirCreateViolations := func(text string) []string {
+	// tmpfsDirViolations returns one violation per line of module text
+	// that breaks the grant's invariants: exactly one allow rule may name
+	// docker_helper_rootlesskit_t -> tmpfs_t:dir, in the exact brace-pair
+	// shape { create mounton } (no split rules, no second dir permission
+	// — add_name/write/remove_name/rmdir/read/setattr/rename/relabel*
+	// are distinct hooks; the first three are STANDING base-policy
+	// authority and must not be copied into this module); no other
+	// subject may receive tmpfs_t:dir authority from this module; no
+	// tmpfs_t:filesystem create/mounton may ride (the class confusion).
+	tmpfsDirViolations := func(text string) []string {
 		var violations []string
 		count := 0
 		for _, line := range strings.Split(text, "\n") {
@@ -3353,23 +3361,25 @@ func TestSELinuxPolicyRootlesskitTmpfsDirCreate(t *testing.T) {
 			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t tmpfs_t:dir"):
 				count++
 				if trimmed != pinnedTmpfsDirCreate {
-					violations = append(violations, "the .ro dir-create grant must be the exact bare-create dir shape (no brace form, no split rules, no second permission — add_name/write/remove_name/rmdir/read/mounton/setattr/rename/relabel* are distinct hooks; the first three are standing base-policy authority, not module content): "+trimmed)
+					violations = append(violations, "the .ro dir grant must be the exact brace-pair shape { create mounton } (no split rules, no second permission — add_name/write/remove_name/rmdir/read/setattr/rename/relabel* are distinct hooks; the first three are standing base-policy authority, not module content): "+trimmed)
 				}
 			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, " tmpfs_t:dir"):
-				violations = append(violations, "tmpfs_t dir authority is unique to the rootlesskit child domain's pinned create rule: "+trimmed)
+				violations = append(violations, "tmpfs_t dir authority is unique to the rootlesskit child domain's pinned pair rule: "+trimmed)
 			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t tmpfs_t:filesystem") && strings.Contains(trimmed, " create"):
 				violations = append(violations, "the class confusion is forbidden — create is a dir-class permission, the filesystem pair's rule stays bare-mount: "+trimmed)
+			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t tmpfs_t:filesystem") && strings.Contains(trimmed, " mounton"):
+				violations = append(violations, "the class confusion is forbidden — mounton is a dir-class permission here, the filesystem pair's rule stays bare-mount: "+trimmed)
 			}
 		}
 		if count == 0 {
-			violations = append(violations, "the .ro dir-create grant (rootlesskit_t -> tmpfs_t:dir create) is missing")
+			violations = append(violations, "the .ro dir grant (rootlesskit_t -> tmpfs_t:dir { create mounton }) is missing")
 		} else if count > 1 {
 			violations = append(violations, fmt.Sprintf("exactly one tmpfs_t:dir grant may exist for the rootlesskit child domain, found %d", count))
 		}
 		return violations
 	}
-	if violations := tmpfsDirCreateViolations(policy); len(violations) > 0 {
-		t.Errorf("the committed policy violates the .ro dir-create invariants: %v", violations)
+	if violations := tmpfsDirViolations(policy); len(violations) > 0 {
+		t.Errorf("the committed policy violates the .ro dir invariants: %v", violations)
 	}
 	// The replacement regressions: each replacement must APPLY and must
 	// actually trip the invariants.
@@ -3378,19 +3388,25 @@ func TestSELinuxPolicyRootlesskitTmpfsDirCreate(t *testing.T) {
 		rule string
 	}{
 		{"missing whole rule", ""},
-		{"missing create (add_name-only shape)", "allow docker_helper_rootlesskit_t tmpfs_t:dir add_name;"},
-		{"write instead of create", "allow docker_helper_rootlesskit_t tmpfs_t:dir write;"},
-		{"mounton instead of create", "allow docker_helper_rootlesskit_t tmpfs_t:dir mounton;"},
-		{"create add_name brace set", "allow docker_helper_rootlesskit_t tmpfs_t:dir { create add_name };"},
-		{"create write brace set", "allow docker_helper_rootlesskit_t tmpfs_t:dir { create write };"},
-		{"create remove_name brace set", "allow docker_helper_rootlesskit_t tmpfs_t:dir { create remove_name };"},
-		{"create mounton brace set", "allow docker_helper_rootlesskit_t tmpfs_t:dir { create mounton };"},
+		{"pre-4C-47 shape (create only)", "allow docker_helper_rootlesskit_t tmpfs_t:dir { create };"},
+		{"pre-4C-47 shape (bare create)", "allow docker_helper_rootlesskit_t tmpfs_t:dir create;"},
+		{"missing create (mounton-only)", "allow docker_helper_rootlesskit_t tmpfs_t:dir { mounton };"},
+		{"missing mounton (create-only)", "allow docker_helper_rootlesskit_t tmpfs_t:dir { create };"},
+		{"mounton-only bare shape", "allow docker_helper_rootlesskit_t tmpfs_t:dir mounton;"},
+		{"relabelto instead of mounton", "allow docker_helper_rootlesskit_t tmpfs_t:dir { create relabelto };"},
+		{"widened add_name", "allow docker_helper_rootlesskit_t tmpfs_t:dir { create mounton add_name };"},
+		{"widened write", "allow docker_helper_rootlesskit_t tmpfs_t:dir { create mounton write };"},
+		{"widened remove_name", "allow docker_helper_rootlesskit_t tmpfs_t:dir { create mounton remove_name };"},
+		{"widened setattr", "allow docker_helper_rootlesskit_t tmpfs_t:dir { create mounton setattr };"},
+		{"widened rename", "allow docker_helper_rootlesskit_t tmpfs_t:dir { create mounton rename };"},
 		{"duplicate identical rule", pinnedTmpfsDirCreate + "\n" + pinnedTmpfsDirCreate},
-		{"parallel create rule (brace form)", pinnedTmpfsDirCreate + "\nallow docker_helper_rootlesskit_t tmpfs_t:dir { create };"},
-		{"equivalent brace-single-perm shape", "allow docker_helper_rootlesskit_t tmpfs_t:dir { create };"},
+		{"parallel old-shape rule", pinnedTmpfsDirCreate + "\nallow docker_helper_rootlesskit_t tmpfs_t:dir { create };"},
+		{"split into two bare rules", "allow docker_helper_rootlesskit_t tmpfs_t:dir create;\nallow docker_helper_rootlesskit_t tmpfs_t:dir mounton;"},
+		{"split into two bare rules (reversed)", "allow docker_helper_rootlesskit_t tmpfs_t:dir mounton;\nallow docker_helper_rootlesskit_t tmpfs_t:dir create;"},
 		{"wrong target type (tmp_t — the standing quartet's own pair)", "allow docker_helper_rootlesskit_t tmp_t:dir create;"},
 		{"wrong target type (etc_t)", "allow docker_helper_rootlesskit_t etc_t:dir create;"},
 		{"wrong class (tmpfs_t:filesystem create)", "allow docker_helper_rootlesskit_t tmpfs_t:filesystem create;"},
+		{"wrong class (tmpfs_t:filesystem mounton)", "allow docker_helper_rootlesskit_t tmpfs_t:filesystem mounton;"},
 	} {
 		mutated := strings.Replace(policy, pinnedTmpfsDirCreate, regressed.rule, 1)
 		applied := func() bool {
@@ -3400,29 +3416,29 @@ func TestSELinuxPolicyRootlesskitTmpfsDirCreate(t *testing.T) {
 			return strings.Contains(mutated, regressed.rule)
 		}
 		if !applied() {
-			t.Errorf("the .ro dir-create regression %q was not applied", regressed.name)
+			t.Errorf("the .ro dir regression %q was not applied", regressed.name)
 			continue
 		}
-		if len(tmpfsDirCreateViolations(mutated)) == 0 {
-			t.Errorf("the .ro dir-create regression %q must fail the .ro dir-create invariants", regressed.name)
+		if len(tmpfsDirViolations(mutated)) == 0 {
+			t.Errorf("the .ro dir regression %q must fail the .ro dir invariants", regressed.name)
 		}
 	}
-	// The widening sweep: { create <X> } for every other dir permission
-	// must fail the invariants in every case.
+	// The widening sweep: { create mounton <X> } for every other dir
+	// permission must fail the invariants in every case.
 	for _, extra := range []string{
-		"add_name", "remove_name", "rmdir", "read", "mounton", "setattr",
+		"add_name", "remove_name", "rmdir", "read", "setattr",
 		"rename", "write", "unlink", "symlink", "search", "getattr",
 		"relabelto", "reparent", "watch", "watch_reads", "quotaget",
 		"quotamod", "ioctl", "lock", "execmod",
 	} {
 		mutated := strings.Replace(policy, pinnedTmpfsDirCreate,
-			fmt.Sprintf("allow docker_helper_rootlesskit_t tmpfs_t:dir { create %s };", extra), 1)
-		if !strings.Contains(mutated, fmt.Sprintf("allow docker_helper_rootlesskit_t tmpfs_t:dir { create %s };", extra)) {
-			t.Errorf("the .ro dir-create widening +%s was not applied", extra)
+			fmt.Sprintf("allow docker_helper_rootlesskit_t tmpfs_t:dir { create mounton %s };", extra), 1)
+		if !strings.Contains(mutated, fmt.Sprintf("allow docker_helper_rootlesskit_t tmpfs_t:dir { create mounton %s };", extra)) {
+			t.Errorf("the .ro dir widening +%s was not applied", extra)
 			continue
 		}
-		if len(tmpfsDirCreateViolations(mutated)) == 0 {
-			t.Errorf("the .ro dir-create widening +%s must fail the .ro dir-create invariants", extra)
+		if len(tmpfsDirViolations(mutated)) == 0 {
+			t.Errorf("the .ro dir widening +%s must fail the .ro dir invariants", extra)
 		}
 	}
 	// The subject regressions: no other domain may gain tmpfs_t dir
@@ -3431,13 +3447,13 @@ func TestSELinuxPolicyRootlesskitTmpfsDirCreate(t *testing.T) {
 		name string
 		rule string
 	}{
-		{"tmpfs dir create for the manager", "allow docker_helper_builder_t tmpfs_t:dir create;"},
-		{"tmpfs dir create for the launcher", "allow docker_helper_builder_launcher_t tmpfs_t:dir create;"},
-		{"tmpfs dir create for the network helper", "allow docker_helper_slirp4netns_t tmpfs_t:dir create;"},
-		{"tmpfs dir create for the daemon", "allow docker_helper_t tmpfs_t:dir create;"},
+		{"tmpfs dir pair for the manager", "allow docker_helper_builder_t tmpfs_t:dir { create mounton };"},
+		{"tmpfs dir pair for the launcher", "allow docker_helper_builder_launcher_t tmpfs_t:dir { create mounton };"},
+		{"tmpfs dir pair for the network helper", "allow docker_helper_slirp4netns_t tmpfs_t:dir { create mounton };"},
+		{"tmpfs dir pair for the daemon", "allow docker_helper_t tmpfs_t:dir { create mounton };"},
 	} {
-		if len(tmpfsDirCreateViolations(policy+"\n"+mut.rule)) == 0 {
-			t.Errorf("mutation %q must trip the .ro dir-create invariants", mut.name)
+		if len(tmpfsDirViolations(policy+"\n"+mut.rule)) == 0 {
+			t.Errorf("mutation %q must trip the .ro dir invariants", mut.name)
 		}
 	}
 }
