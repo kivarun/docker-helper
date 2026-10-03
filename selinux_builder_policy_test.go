@@ -2721,10 +2721,11 @@ func TestSELinuxPolicyRootlesskitRootMounton(t *testing.T) {
 	// permission (relabelto first) and no other class may ride the
 	// rootlesskit_t -> root_t pair; no other subject may receive root_t
 	// authority from this module; and the flow child's dir-mounton
-	// authority is granted on exactly TWO targets — root_t (this rule,
-	// 4C-39) and tmp_t (the copy-up bind-mount target, owned by
-	// TestSELinuxPolicyRootlesskitTmpDirWrite since 4C-43) — any other
-	// target stays ungranted.
+	// authority is granted on exactly THREE targets — root_t (this rule,
+	// 4C-39), tmp_t (the copy-up bind-mount target, owned by
+	// TestSELinuxPolicyRootlesskitTmpDirWrite since 4C-43) and etc_t (the
+	// tmpfs-mount target, owned by TestSELinuxPolicyRootlesskitEtcMounton
+	// since 4C-44) — any other target stays ungranted.
 	rootMountonViolations := func(text string) []string {
 		var violations []string
 		count := 0
@@ -2743,8 +2744,8 @@ func TestSELinuxPolicyRootlesskitRootMounton(t *testing.T) {
 				violations = append(violations, "root_t authority is unique to the rootlesskit child domain: "+trimmed)
 			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t ") &&
 				strings.Contains(trimmed, ":dir ") && strings.Contains(trimmed, "mounton") &&
-				!strings.Contains(trimmed, " tmp_t:"):
-				violations = append(violations, "the flow child's dir mounton authority is granted only on root_t (4C-39) and tmp_t (the copy-up owner) — any other target is ungranted: "+trimmed)
+				!strings.Contains(trimmed, " tmp_t:") && !strings.Contains(trimmed, " etc_t:"):
+				violations = append(violations, "the flow child's dir mounton authority is granted only on root_t (4C-39), tmp_t (the copy-up owner) and etc_t (the tmpfs-mount owner) — any other target is ungranted: "+trimmed)
 			}
 		}
 		if count == 0 {
@@ -2995,6 +2996,151 @@ func TestSELinuxPolicyRootlesskitTmpDirWrite(t *testing.T) {
 	} {
 		if len(tmpDirWriteViolations(policy+"\n"+mut.rule)) == 0 {
 			t.Errorf("mutation %q must trip the tmp copy-up invariants", mut.name)
+		}
+	}
+}
+
+// TestSELinuxPolicyRootlesskitEtcMounton owns the exact surface of the
+// 4C-44 etc copy-up grant: docker_helper_rootlesskit_t -> etc_t:dir
+// { mounton }. The grant exists because the copy-up flow's tmpfs mount
+// over the source directory issues mount("none", "/etc", "tmpfs", 0)
+// and the canonical 4C-43 run's (37143508859) next causal boundary was
+// exactly this check (requested=0x10000 denied=0x10000, result=-13,
+// tcontext=etc_t:s0, INSIDE the C-mount's sys_mount window, 21µs before
+// the first failing syscall exit, T0+3ms). The target type is the
+// distro's own /etc label etc_t — NOT root_t and NOT tmp_t; a NEW
+// evidenced pair granted as its OWN rule (the three mounton targets —
+// root_t/tmp_t/etc_t — stay three distinct evidenced pairs). The
+// surface is exact: one rule, one permission. Deliberately NOT granted:
+// etc_t:dir write/add_name/create (the .ro creation — the NEXT
+// boundaries, whose target types materialize live), read/remove_name/
+// rmdir/setattr/rename (the scan/rebuild steps), any filesystem-class
+// permission (a superblock hook, if reached, owns its own phase —
+// never auto-converted), every other etc_t permission, any new
+// tmp_t/root_t grant, any other class, any other subject.
+func TestSELinuxPolicyRootlesskitEtcMounton(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	for _, want := range []string{
+		"type etc_t;",
+		"allow docker_helper_rootlesskit_t etc_t:dir mounton;",
+	} {
+		if !strings.Contains(policy, want) {
+			t.Errorf("the rootlesskit child domain's etc copy-up surface must be exact: %q", want)
+		}
+	}
+	pinnedEtcMounton := "allow docker_helper_rootlesskit_t etc_t:dir mounton;"
+	countExact := func(text, rule string) int {
+		n := 0
+		for _, line := range strings.Split(text, "\n") {
+			if strings.TrimSpace(line) == rule {
+				n++
+			}
+		}
+		return n
+	}
+	// etcMountonViolations returns one violation per line of module text
+	// that breaks the grant's invariants: exactly one allow rule may name
+	// docker_helper_rootlesskit_t -> etc_t, in the exact bare-mounton
+	// dir shape (no brace form, no split rules, no second permission);
+	// no other subject may receive etc_t authority from this module; and
+	// the sibling-family confusion (user_tmp_t-style confusables have no
+	// etc_t sibling here, but a root_t/tmp_t target mixed into the rule
+	// would be a different pair's authority) is covered by the exact
+	// line pin.
+	etcMountonViolations := func(text string) []string {
+		var violations []string
+		count := 0
+		for _, line := range strings.Split(text, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			switch {
+			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t etc_t:"):
+				count++
+				if trimmed != pinnedEtcMounton {
+					violations = append(violations, "the etc copy-up grant must be the exact bare-mounton dir shape (no brace form, no split rules, no second permission — the .ro/scan steps are the NEXT boundaries): "+trimmed)
+				}
+			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, " etc_t:"):
+				violations = append(violations, "etc_t authority is unique to the rootlesskit child domain: "+trimmed)
+			}
+		}
+		if count == 0 {
+			violations = append(violations, "the etc copy-up grant (rootlesskit_t -> etc_t:dir mounton) is missing")
+		} else if count > 1 {
+			violations = append(violations, fmt.Sprintf("exactly one etc_t grant may exist for the rootlesskit child domain, found %d", count))
+		}
+		return violations
+	}
+	if violations := etcMountonViolations(policy); len(violations) > 0 {
+		t.Errorf("the committed policy violates the etc copy-up invariants: %v", violations)
+	}
+	// The replacement regressions: each replacement must APPLY and must
+	// actually trip the invariants.
+	for _, regressed := range []struct {
+		name string
+		rule string
+	}{
+		{"missing whole rule", ""},
+		{"missing mounton (mounton-less standing-only shape)", "allow docker_helper_rootlesskit_t etc_t:dir getattr;"},
+		{"relabelto instead of mounton", "allow docker_helper_rootlesskit_t etc_t:dir relabelto;"},
+		{"mounton relabelto brace set", "allow docker_helper_rootlesskit_t etc_t:dir { mounton relabelto };"},
+		{"duplicate identical rule", pinnedEtcMounton + "\n" + pinnedEtcMounton},
+		{"parallel mounton rule (brace form)", pinnedEtcMounton + "\nallow docker_helper_rootlesskit_t etc_t:dir { mounton };"},
+		{"equivalent brace-single-perm shape", "allow docker_helper_rootlesskit_t etc_t:dir { mounton };"},
+		{"wrong target type (root_t)", "allow docker_helper_rootlesskit_t root_t:dir mounton;"},
+		{"wrong target type (tmp_t)", "allow docker_helper_rootlesskit_t tmp_t:dir mounton;"},
+		{"wrong target type (var_t)", "allow docker_helper_rootlesskit_t var_t:dir mounton;"},
+	} {
+		mutated := strings.Replace(policy, pinnedEtcMounton, regressed.rule, 1)
+		applied := func() bool {
+			if regressed.rule == "" {
+				return countExact(mutated, pinnedEtcMounton) == 0
+			}
+			return strings.Contains(mutated, regressed.rule)
+		}
+		if !applied() {
+			t.Errorf("the etc-mounton regression %q was not applied", regressed.name)
+			continue
+		}
+		if len(etcMountonViolations(mutated)) == 0 {
+			t.Errorf("the etc-mounton regression %q must fail the etc copy-up invariants", regressed.name)
+		}
+	}
+	// The widening sweep: { mounton <X> } for every other dir permission
+	// — the .ro/scan surfaces first — must fail the invariants in every
+	// case.
+	for _, extra := range []string{
+		"write", "add_name", "create", "remove_name", "read", "rmdir",
+		"search", "setattr", "reparent", "getattr", "open", "ioctl",
+		"lock", "link", "unlink", "rename", "map", "relabelfrom",
+		"relabelto", "execmod", "audit_access",
+	} {
+		mutated := strings.Replace(policy, pinnedEtcMounton,
+			fmt.Sprintf("allow docker_helper_rootlesskit_t etc_t:dir { mounton %s };", extra), 1)
+		if countExact(mutated, pinnedEtcMounton) == 1 {
+			t.Errorf("the etc-mounton widening +%s was not applied", extra)
+			continue
+		}
+		if len(etcMountonViolations(mutated)) == 0 {
+			t.Errorf("the etc-mounton widening +%s must fail the etc copy-up invariants", extra)
+		}
+	}
+	// The subject regressions: no other domain may gain etc_t authority
+	// (the manager/launcher/helper shapes), appended beside the real
+	// grant.
+	for _, mut := range []struct {
+		name string
+		rule string
+	}{
+		{"etc mounton for the manager", "allow docker_helper_builder_t etc_t:dir mounton;"},
+		{"etc mounton for the launcher", "allow docker_helper_builder_launcher_t etc_t:dir mounton;"},
+		{"etc mounton for the network helper", "allow docker_helper_slirp4netns_t etc_t:dir mounton;"},
+		{"etc mounton for the uid-map helper", "allow docker_helper_newuidmap_t etc_t:dir mounton;"},
+		{"etc mounton for the gid-map helper", "allow docker_helper_newgidmap_t etc_t:dir mounton;"},
+	} {
+		if len(etcMountonViolations(policy+"\n"+mut.rule)) == 0 {
+			t.Errorf("mutation %q must trip the etc copy-up invariants", mut.name)
 		}
 	}
 }
