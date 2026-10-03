@@ -2823,40 +2823,41 @@ func TestSELinuxPolicyRootlesskitRootMounton(t *testing.T) {
 }
 
 // TestSELinuxPolicyRootlesskitTmpDirWrite owns the exact surface of the
-// tmp copy-up grant as widened by 4C-41: docker_helper_rootlesskit_t ->
-// tmp_t:dir { write add_name }. The grant exists because the rootlesskit
-// child's copy-up setup — the bind0/bind1 directory creation under /tmp —
-// issues os.MkdirTemp("/tmp", "rootlesskit-b*") and the mkdir(2) on the
-// /tmp parent is mediated by exactly these two dir permissions, each from
-// its own live enforcing boundary: write was the canonical 4C-39 run's
-// (37101080574) causal boundary (denied 0x4), add_name the canonical
-// 4C-40 run's (37104707444) — denied 0x4000000 inside the SAME
-// sys_mkdirat window (pathname /tmp/rootlesskit-b1515496009, mode 0700),
-// 42µs before the holder's exit(1); both raw kernel decisions, the audit
-// slice silent in both windows (the measured userspace-audit gap), both
-// decodes pinned by the kernel's own static classmap
+// tmp copy-up grant as widened by 4C-42: docker_helper_rootlesskit_t ->
+// tmp_t:dir { write add_name create }. The grant exists because the
+// rootlesskit child's copy-up setup — the bind0/bind1 directory creation
+// under /tmp — issues os.MkdirTemp("/tmp", "rootlesskit-b*") and the
+// mkdir(2) on the /tmp parent is mediated by exactly these three dir
+// permissions, each from its own live enforcing boundary: write was the
+// canonical 4C-39 run's (37101080574) causal boundary (denied 0x4),
+// add_name the canonical 4C-40 run's (37104707444) — denied 0x4000000
+// inside the SAME sys_mkdirat window, create the canonical 4C-41 run's
+// (37107847258) — denied 0x8 in the same window with the target type
+// LIVE-PROVEN as tmp_t (the inherited parent label, no type transition);
+// 42-74µs before the holder's exit(1) each. All raw kernel decisions,
+// the audit slice silent in all windows (the measured userspace-audit
+// gap), all decodes pinned by the kernel's own static classmap
 // (TestSELinuxPermissionKernelClassmapDecode). The surface is exact: one
-// rule, exactly these two permissions. The SAME record's requested mask
-// carried 0x20000000 (dir:search) NOT denied — search passed on the base
-// policy's standing surface and must NOT ride this grant (a search
-// member in the effective union is the recorded standing fact, not a
-// widening this module may make). mkdir(2)'s remaining dir surface
-// (create/remove_name/rmdir) must NOT ride this grant — create's target
-// type is NOT assumed to be tmp_t; no other class may be granted on
-// tmp_t from this module; no other subject may receive tmp_t authority;
-// and a confusable sibling target (user_tmp_t) is not the evidenced
-// pair.
+// rule, exactly these three permissions. The SAME records' requested
+// masks carried 0x20000000 (dir:search) NOT denied — search passed on
+// the base policy's standing surface and must NOT ride this grant.
+// mkdir(2)'s remaining dir surface (remove_name/rmdir) must NOT ride
+// this grant; mounton is the NEXT boundary (the bind0 copy-up mount
+// target) and must NOT be granted even if the next denial names it; no
+// other class may be granted on tmp_t from this module; no other
+// subject may receive tmp_t authority; and a confusable sibling target
+// (user_tmp_t) is not the evidenced pair.
 func TestSELinuxPolicyRootlesskitTmpDirWrite(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
 	for _, want := range []string{
 		"type tmp_t;",
-		"allow docker_helper_rootlesskit_t tmp_t:dir { write add_name };",
+		"allow docker_helper_rootlesskit_t tmp_t:dir { write add_name create };",
 	} {
 		if !strings.Contains(policy, want) {
 			t.Errorf("the rootlesskit child domain's tmp copy-up surface must be exact: %q", want)
 		}
 	}
-	pinnedTmpDirWrite := "allow docker_helper_rootlesskit_t tmp_t:dir { write add_name };"
+	pinnedTmpDirWrite := "allow docker_helper_rootlesskit_t tmp_t:dir { write add_name create };"
 	countExact := func(text, rule string) int {
 		n := 0
 		for _, line := range strings.Split(text, "\n") {
@@ -2869,10 +2870,10 @@ func TestSELinuxPolicyRootlesskitTmpDirWrite(t *testing.T) {
 	// tmpDirWriteViolations returns one violation per line of module text
 	// that breaks the grant's invariants: exactly one allow rule may name
 	// docker_helper_rootlesskit_t -> tmp_t, in the exact brace dir shape
-	// { write add_name } (no split rules, no duplicates, no third
-	// permission — search/create/remove_name/rmdir must not ride this
-	// grant: search rides the base policy's standing surface, create is
-	// the NEXT boundary with its own live evidence); no other class
+	// { write add_name create } (no split rules, no duplicates, no fourth
+	// permission — search rides the base policy's standing surface,
+	// remove_name/rmdir are the purge's cleanup surface, mounton is the
+	// NEXT boundary's target hook and must not ride); no other class
 	// (file/lnk_file/sock_file/...) may ride the rootlesskit_t -> tmp_t
 	// pair; no other subject may receive tmp_t authority from this
 	// module; and a rootlesskit-subject rule naming a tmp_t-suffixed
@@ -2890,7 +2891,7 @@ func TestSELinuxPolicyRootlesskitTmpDirWrite(t *testing.T) {
 			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t tmp_t:"):
 				count++
 				if trimmed != pinnedTmpDirWrite {
-					violations = append(violations, "the tmp copy-up grant must be the exact { write add_name } dir shape (no split rules, no duplicates, no third permission — search rides the standing base surface, create owns the next phase): "+trimmed)
+					violations = append(violations, "the tmp copy-up grant must be the exact { write add_name create } dir shape (no split rules, no duplicates, no fourth permission — search rides the standing base surface, mounton owns the next phase): "+trimmed)
 				}
 			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, " tmp_t:"):
 				violations = append(violations, "tmp_t authority is unique to the rootlesskit child domain: "+trimmed)
@@ -2900,7 +2901,7 @@ func TestSELinuxPolicyRootlesskitTmpDirWrite(t *testing.T) {
 			}
 		}
 		if count == 0 {
-			violations = append(violations, "the tmp copy-up grant (rootlesskit_t -> tmp_t:dir { write add_name }) is missing")
+			violations = append(violations, "the tmp copy-up grant (rootlesskit_t -> tmp_t:dir { write add_name create }) is missing")
 		} else if count > 1 {
 			violations = append(violations, fmt.Sprintf("exactly one tmp_t grant may exist for the rootlesskit child domain, found %d", count))
 		}
@@ -2918,19 +2919,22 @@ func TestSELinuxPolicyRootlesskitTmpDirWrite(t *testing.T) {
 		rule string
 	}{
 		{"missing whole rule", ""},
-		{"missing write (add_name-only shape)", "allow docker_helper_rootlesskit_t tmp_t:dir add_name;"},
-		{"missing add_name (the pre-4C-41 { write } shape)", "allow docker_helper_rootlesskit_t tmp_t:dir write;"},
-		{"add_name-only", "allow docker_helper_rootlesskit_t tmp_t:dir add_name;"},
-		{"search instead of add_name", "allow docker_helper_rootlesskit_t tmp_t:dir { write search };"},
-		{"create instead of add_name", "allow docker_helper_rootlesskit_t tmp_t:dir { write create };"},
-		{"write add_name create brace set", "allow docker_helper_rootlesskit_t tmp_t:dir { write add_name create };"},
-		{"write add_name remove_name brace set", "allow docker_helper_rootlesskit_t tmp_t:dir { write add_name remove_name };"},
+		{"missing write", "allow docker_helper_rootlesskit_t tmp_t:dir { add_name create };"},
+		{"missing add_name", "allow docker_helper_rootlesskit_t tmp_t:dir { write create };"},
+		{"missing create (the pre-4C-42 { write add_name } shape)", "allow docker_helper_rootlesskit_t tmp_t:dir { write add_name };"},
+		{"create-only", "allow docker_helper_rootlesskit_t tmp_t:dir create;"},
+		{"mounton instead of create", "allow docker_helper_rootlesskit_t tmp_t:dir { write add_name mounton };"},
+		{"write add_name create mounton brace set", "allow docker_helper_rootlesskit_t tmp_t:dir { write add_name create mounton };"},
+		{"write add_name create remove_name brace set", "allow docker_helper_rootlesskit_t tmp_t:dir { write add_name create remove_name };"},
+		{"write add_name create rmdir brace set", "allow docker_helper_rootlesskit_t tmp_t:dir { write add_name create rmdir };"},
+		{"write add_name create setattr brace set", "allow docker_helper_rootlesskit_t tmp_t:dir { write add_name create setattr };"},
+		{"write add_name create rename brace set", "allow docker_helper_rootlesskit_t tmp_t:dir { write add_name create rename };"},
 		{"duplicate identical rule", pinnedTmpDirWrite + "\n" + pinnedTmpDirWrite},
-		{"parallel add_name rule (bare form)", pinnedTmpDirWrite + "\nallow docker_helper_rootlesskit_t tmp_t:dir add_name;"},
-		{"split write + add_name rules", "allow docker_helper_rootlesskit_t tmp_t:dir write;\nallow docker_helper_rootlesskit_t tmp_t:dir add_name;"},
-		{"structural brace-single equivalent", "allow docker_helper_rootlesskit_t tmp_t:dir { write };\nallow docker_helper_rootlesskit_t tmp_t:dir { add_name };"},
-		{"wrong target type", "allow docker_helper_rootlesskit_t var_t:dir { write add_name };"},
-		{"confusable sibling target (user_tmp_t)", "allow docker_helper_rootlesskit_t user_tmp_t:dir { write add_name };"},
+		{"parallel create rule (bare form)", pinnedTmpDirWrite + "\nallow docker_helper_rootlesskit_t tmp_t:dir create;"},
+		{"split three bare rules", "allow docker_helper_rootlesskit_t tmp_t:dir write;\nallow docker_helper_rootlesskit_t tmp_t:dir add_name;\nallow docker_helper_rootlesskit_t tmp_t:dir create;"},
+		{"structural brace-single equivalent", "allow docker_helper_rootlesskit_t tmp_t:dir { write };\nallow docker_helper_rootlesskit_t tmp_t:dir { add_name };\nallow docker_helper_rootlesskit_t tmp_t:dir { create };"},
+		{"wrong target type", "allow docker_helper_rootlesskit_t var_t:dir { write add_name create };"},
+		{"confusable sibling target (user_tmp_t)", "allow docker_helper_rootlesskit_t user_tmp_t:dir { write add_name create };"},
 	} {
 		mutated := strings.Replace(policy, pinnedTmpDirWrite, regressed.rule, 1)
 		applied := func() bool {
@@ -2947,17 +2951,17 @@ func TestSELinuxPolicyRootlesskitTmpDirWrite(t *testing.T) {
 			t.Errorf("the tmp-dir-write regression %q must fail the tmp copy-up invariants", regressed.name)
 		}
 	}
-	// The widening sweep: { write add_name <X> } for every other dir
-	// permission — the mkdir(2) surface first — must fail the invariants
-	// in every case.
+	// The widening sweep: { write add_name create <X> } for every other
+	// dir permission — the bind0 mount target first — must fail the
+	// invariants in every case.
 	for _, extra := range []string{
-		"create", "remove_name", "rmdir", "search", "setattr", "reparent",
+		"mounton", "remove_name", "rmdir", "search", "setattr", "reparent",
 		"getattr", "open", "read", "ioctl", "lock", "link", "unlink",
-		"rename", "map", "relabelfrom", "relabelto", "mounton", "execmod",
+		"rename", "map", "relabelfrom", "relabelto", "execmod",
 		"audit_access",
 	} {
 		mutated := strings.Replace(policy, pinnedTmpDirWrite,
-			fmt.Sprintf("allow docker_helper_rootlesskit_t tmp_t:dir { write add_name %s };", extra), 1)
+			fmt.Sprintf("allow docker_helper_rootlesskit_t tmp_t:dir { write add_name create %s };", extra), 1)
 		if countExact(mutated, pinnedTmpDirWrite) == 1 {
 			t.Errorf("the tmp-dir-write widening +%s was not applied", extra)
 			continue
@@ -2973,13 +2977,14 @@ func TestSELinuxPolicyRootlesskitTmpDirWrite(t *testing.T) {
 		name string
 		rule string
 	}{
-		{"tmp dir write+add_name for the manager", "allow docker_helper_builder_t tmp_t:dir { write add_name };"},
-		{"tmp dir write+add_name for the launcher", "allow docker_helper_builder_launcher_t tmp_t:dir { write add_name };"},
-		{"tmp dir write+add_name for the network helper", "allow docker_helper_slirp4netns_t tmp_t:dir { write add_name };"},
-		{"tmp dir write+add_name for the uid-map helper", "allow docker_helper_newuidmap_t tmp_t:dir { write add_name };"},
-		{"tmp dir write+add_name for the gid-map helper", "allow docker_helper_newgidmap_t tmp_t:dir { write add_name };"},
+		{"tmp dir write+add_name+create for the manager", "allow docker_helper_builder_t tmp_t:dir { write add_name create };"},
+		{"tmp dir write+add_name+create for the launcher", "allow docker_helper_builder_launcher_t tmp_t:dir { write add_name create };"},
+		{"tmp dir write+add_name+create for the network helper", "allow docker_helper_slirp4netns_t tmp_t:dir { write add_name create };"},
+		{"tmp dir write+add_name+create for the uid-map helper", "allow docker_helper_newuidmap_t tmp_t:dir { write add_name create };"},
+		{"tmp dir write+add_name+create for the gid-map helper", "allow docker_helper_newgidmap_t tmp_t:dir { write add_name create };"},
 		{"tmp file write for the flow child (no other class rides the pair)", "allow docker_helper_rootlesskit_t tmp_t:file write;"},
-		{"parallel add_name-only rule (bare)", "allow docker_helper_rootlesskit_t tmp_t:dir add_name;"},
+		{"parallel create-only rule (bare)", "allow docker_helper_rootlesskit_t tmp_t:dir create;"},
+		{"tmp dir mounton for the flow child (the NEXT boundary, not granted)", "allow docker_helper_rootlesskit_t tmp_t:dir mounton;"},
 	} {
 		if len(tmpDirWriteViolations(policy+"\n"+mut.rule)) == 0 {
 			t.Errorf("mutation %q must trip the tmp copy-up invariants", mut.name)
@@ -3454,7 +3459,11 @@ func TestSELinuxPermsFilesArePolicyNumbering(t *testing.T) {
 // dir:add_name = 0x4000000 — the 4C-41 boundary of the canonical 4C-40
 // run 37104707444 (denied 0x4000000 inside
 // sys_mkdirat("/tmp/rootlesskit-b1515496009", 0700), the mkdir's
-// name-creation mediation after the granted write). The corrected
+// name-creation mediation after the granted write), and dir:create =
+// 0x8 — the 4C-42 boundary of the canonical 4C-41 run 37107847258
+// (denied 0x8 in the same window, the new-directory-object hook with the
+// target type live-proven as tmp_t — the inherited parent label, no type
+// transition). The corrected
 // direction must hold in BOTH directions: the 4C-38 listing-order misread
 // (0x10000 as relabelto) and the policy's own perms-file numbering
 // (mounton indexed 18 on the target's loaded policy; 1<<26 claimed as
@@ -3534,6 +3543,7 @@ func TestSELinuxPermissionKernelClassmapDecode(t *testing.T) {
 	one("dir", 0x100, "relabelto")
 	one("dir", 0x20000000, "search")
 	one("dir", 0x4000000, "add_name")
+	one("dir", 0x8, "create")
 	one("tun_socket", 0x80, "relabelfrom")
 	one("tun_socket", 0x100, "relabelto")
 	one("file", 0x10, "getattr")
