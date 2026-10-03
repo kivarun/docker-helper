@@ -986,9 +986,10 @@ PREFLIGHT_OK=1
   echo "--- raw effective inventory (rootlesskit -> tmp_t, every class; base-policy/attribute expansions recorded, not asserted):"
   RK_TMP_RAW="$(sesearch --allow -s docker_helper_rootlesskit_t -t tmp_t /sys/fs/selinux/policy 2>/dev/null || true)"
   printf '%s\n' "${RK_TMP_RAW:-(none)}"
-  echo "--- CONCRETE module contribution (source must be docker_helper_rootlesskit_t; must be exactly one { write add_name } dir rule):"
+  echo "--- CONCRETE module contribution (source must be docker_helper_rootlesskit_t; must be exactly one dir rule contributing exactly { add_name write } — the SET is checked, sesearch normalizes the brace order):"
   RK_TMP_CONCRETE="$(printf '%s\n' "$RK_TMP_RAW" | awk '$2 == "docker_helper_rootlesskit_t"' || true)"
   printf '%s\n' "${RK_TMP_CONCRETE:-(none)}"
+  RK_TMP_CONCRETE_NORM="$(printf '%s\n' "$RK_TMP_CONCRETE" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:[^ ]* {\(.*\)};$/\1/p' | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//' || true)"
   echo "--- the base policy's standing tmp surface (the effective inventory minus the granted pair — the effective_before record; the 4C-39 run 37101080574's boundary mask 0x20000004 names search as a proven member; the standing rules are attribute-derived — the base policy writes base_file_type/tmpfile/file_type, not tmp_t literally):"
   RK_TMP_STANDING="$(printf '%s\n' "$RK_TMP_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:[^ ]* \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | grep -avE '^(write|add_name)$' | sort -u | tr '\n' ' ' || true)"
   printf '%s\n' "${RK_TMP_STANDING:-(none — the standing surface is empty)}"
@@ -999,7 +1000,8 @@ PREFLIGHT_OK=1
   printf '%s\n' "${RK_TMP_FORBIDDEN:-(none — no extra dir permission)}"
   RK_TMP_OK=0
   if [ "$(printf '%s\n' "$RK_TMP_CONCRETE" | grep -ac . || true)" = 1 ] \
-    && printf '%s\n' "$RK_TMP_CONCRETE" | grep -aqx 'allow docker_helper_rootlesskit_t tmp_t:dir { write add_name };' \
+    && printf '%s\n' "$RK_TMP_CONCRETE" | grep -aq 'allow docker_helper_rootlesskit_t tmp_t:dir' \
+    && [ "$RK_TMP_CONCRETE_NORM" = "add_name write" ] \
     && printf '%s\n' "$RK_TMP_DIR_UNION" | tr ' ' '\n' | grep -aqx 'write' \
     && printf '%s\n' "$RK_TMP_DIR_UNION" | tr ' ' '\n' | grep -aqx 'add_name' \
     && printf '%s\n' "$RK_TMP_DIR_UNION" | tr ' ' '\n' | grep -aqx 'search' \
