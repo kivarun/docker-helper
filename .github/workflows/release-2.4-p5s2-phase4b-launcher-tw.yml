@@ -32,7 +32,12 @@ jobs:
 
       - name: Check out the tested proof commit for the composition
         env:
-          PHASE4B_PROOF_REF: 'a7cd24fd88df0d535ca30d42c608dabc055216e4'
+          # 4C-39: the composition's module now carries the rootlesskit
+          # child's root mount-propagation mounton grant (the 4C-38
+          # boundary's semantic fix); the proof ref advances from the
+          # 4C-36-era pin to the commit carrying that module (bc35073 —
+          # identical Go sources, so the binary is the same program).
+          PHASE4B_PROOF_REF: 'bc35073c931bc94d452b667a442c9ec10eb7e8f2'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
