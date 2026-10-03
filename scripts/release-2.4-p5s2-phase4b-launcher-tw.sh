@@ -972,6 +972,28 @@ PREFLIGHT_OK=1
     PREFLIGHT_OK=0
   fi
 
+  echo "=== flow root mount-propagation identity (the 4C-39 grant: the EFFECTIVE rootlesskit -> root_t:dir authority must be exactly { mounton }; a relabelto — the 4C-38 decoder misread — or any other dir permission, a second rule, or any extra subject is a STOP) ==="
+  echo "--- raw effective inventory (rootlesskit -> root_t:dir; base-policy/attribute expansions recorded, not asserted):"
+  RK_ROOTDIR_RAW="$(sesearch --allow -s docker_helper_rootlesskit_t -t root_t -c dir /sys/fs/selinux/policy 2>/dev/null || true)"
+  printf '%s\n' "${RK_ROOTDIR_RAW:-(none)}"
+  echo "--- the dir class's numeric permission map (value -> name from the perms files' numeric contents; the decode never uses a listing order):"
+  numeric_perms_map dir || true
+  RK_ROOTDIR_UNION="$(printf '%s\n' "$RK_ROOTDIR_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* root_t:dir \(.*\);$/\1/p' | sed 's/[{}]//g' | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
+  echo "effective dir perm union: ${RK_ROOTDIR_UNION:-(none)}"
+  echo "--- the misread negative (relabelto must be absent from the whole effective surface):"
+  RK_ROOTDIR_RELABELTO="$(printf '%s\n' "$RK_ROOTDIR_RAW" | grep -a 'relabelto' || true)"
+  printf '%s\n' "${RK_ROOTDIR_RELABELTO:-(none — no relabelto authority)}"
+  RK_ROOTDIR_OK=0
+  if [ "$RK_ROOTDIR_UNION" = "mounton " ] && [ -z "$RK_ROOTDIR_RELABELTO" ]; then
+    RK_ROOTDIR_OK=1
+  fi
+  if [ "$RK_ROOTDIR_OK" = 1 ]; then
+    echo "PASS: flow root mount-propagation identity (effective root_t:dir authority exactly { mounton }; no relabelto)"
+  else
+    echo "FAIL: flow root mount-propagation identity (union=${RK_ROOTDIR_UNION:-(none)} relabelto-present=$([ -n "$RK_ROOTDIR_RELABELTO" ] && echo yes || echo no))"
+    PREFLIGHT_OK=0
+  fi
+
   echo "=== netlink-route send+lookup+receive+mutation identity (the 4C-22 composition: exactly { create setopt bind getattr write nlmsg_read read nlmsg_write }, no other socket permission, no capability surface) ==="
   echo "--- allow rules on netlink_route_socket (expected: the rootlesskit child's create+setopt+bind+getattr+write+nlmsg_read only; attribute-generic base-policy rules recorded, not asserted):"
   sesearch --allow -c netlink_route_socket /sys/fs/selinux/policy || true
@@ -1493,7 +1515,11 @@ if [ -d "$TRACING/events/capability/cap_capable" ]; then
   # the killer's own identity comes from the co-timed kill-family
   # syscall records), the wait family (the parent's reap and its
   # result), the poll family (readiness waits) and read/write/close (the
-  # ready channel's own records). No comm filters: the event field
+  # ready channel's own records). 4C-39 adds the mount and execve
+  # families: the mount propagation on / (the granted dir:mounton
+  # operation) and the following mount/execve stages are the startup
+  # story between the ready byte and the next startup boundary.
+  # No comm filters: the event field
   # shapes vary by kernel and a wrong filter would silently drop the
   # evidence; the volume is bounded by the ring and post-filtered at the
   # harvest. Each enable is best-effort; the arm file records what the
@@ -1511,7 +1537,9 @@ if [ -d "$TRACING/events/capability/cap_capable" ]; then
             syscalls/sys_enter_select syscalls/sys_exit_select \
             syscalls/sys_enter_pselect6 syscalls/sys_exit_pselect6 \
             syscalls/sys_enter_read syscalls/sys_enter_write syscalls/sys_enter_close \
-            syscalls/sys_enter_exit syscalls/sys_enter_exit_group; do
+            syscalls/sys_enter_exit syscalls/sys_enter_exit_group \
+            syscalls/sys_enter_mount syscalls/sys_exit_mount \
+            syscalls/sys_enter_execve syscalls/sys_exit_execve; do
     [ -d "$TRACING/events/$ev" ] && echo 1 > "$TRACING/events/$ev/enable" 2>/dev/null || true
   done
   # 4C-29: the SELinux decision tracepoint (avc:selinux_audited) —
@@ -1543,7 +1571,8 @@ if [ -d "$TRACING/events/capability/cap_capable" ]; then
               syscalls/sys_enter_kill syscalls/sys_enter_tkill syscalls/sys_enter_tgkill syscalls/sys_enter_pidfd_send_signal \
               syscalls/sys_enter_wait4 syscalls/sys_enter_waitid syscalls/sys_enter_poll syscalls/sys_enter_ppoll \
               syscalls/sys_enter_select syscalls/sys_enter_pselect6 syscalls/sys_enter_read syscalls/sys_enter_write \
-              syscalls/sys_enter_close syscalls/sys_enter_exit syscalls/sys_enter_exit_group; do
+              syscalls/sys_enter_close syscalls/sys_enter_exit syscalls/sys_enter_exit_group \
+              syscalls/sys_enter_mount syscalls/sys_exit_mount syscalls/sys_enter_execve syscalls/sys_exit_execve; do
       echo "$ev: $([ -d "$TRACING/events/$ev" ] && echo yes || echo no)"
     done
     echo "=== 4C-29 live class/permission mapping evidence (RECORDED, not hardcoded — decode validation uses co-captured AVC records) ==="
@@ -1823,7 +1852,9 @@ if [ "$TRACE_ENABLED" = 1 ]; then
             syscalls/sys_enter_select syscalls/sys_exit_select \
             syscalls/sys_enter_pselect6 syscalls/sys_exit_pselect6 \
             syscalls/sys_enter_read syscalls/sys_enter_write syscalls/sys_enter_close \
-            syscalls/sys_enter_exit syscalls/sys_enter_exit_group; do
+            syscalls/sys_enter_exit syscalls/sys_enter_exit_group \
+            syscalls/sys_enter_mount syscalls/sys_exit_mount \
+            syscalls/sys_enter_execve syscalls/sys_exit_execve; do
     [ -d "$TRACING/events/$ev" ] && echo 0 > "$TRACING/events/$ev/enable" 2>/dev/null || true
   done
   grep -a -E 'slirp4netns|rootlesskit| ns/net|ns/user|/dev/net/tun|cap_capable|selinux_audited' "$EVIDENCE_DIR/30-trace-window.txt" \
@@ -2339,23 +2370,24 @@ fi
 
 
 # ============================================================
-# 4C-38: the post-TUN lifetime/readiness causal proof (ZERO policy delta)
+# 4C-38/4C-39: the post-TUN lifetime/readiness causal proof
 # ============================================================
 # The provisioning window's own operation is the subject: its TUN attach
 # is already proven (POST-TUN-T0 above; TUNSETIFF 0x54ca -> 0). This
 # verdict reconstructs the causal chain between the attach and the
 # operation's FIRST death from the kernel trace (fork/exit/signal/wait/
-# poll/read-write-close), the post-TUN timeline (50), the audit slice and
-# the manager journal. The known process denials (rootlesskit_t ->
-# slirp4netns_t kill; builder_t -> slirp4netns_t signull/signal/sigkill)
-# are classified TEMPORALLY against the first death; only a PRE-FAILURE
-# or exact AT-FAILURE denial may own the next semantic phase. Nothing is
-# granted in this phase; once the first causal terminal boundary is
-# established the classification STOPs.
+# poll/read-write-close/mount/execve), the post-TUN timeline (50), the
+# audit slice and the manager journal. The 4C-39 grant
+# (rootlesskit_t -> root_t:dir mounton) must have REMOVED the 4C-38
+# boundary; the run's own decisions are classified TEMPORALLY against
+# the first failing exit — only the first STARTUP-CAUSAL denial may own
+# the next semantic phase, and the phase STOPs there. A window with no
+# nonzero flow-domain exit is the stable-lifetime outcome. Nothing is
+# granted in this phase beyond the 4C-39 mounton rule itself.
 # The flow-domain comm set is the lifetime subject (rootlesskit parent +
 # child, slirp4netns parent + child, the uid-map shims, the payload).
 POSTTUN_FLOW_COMM_GREP='(rootlesskit|exe|slirp4netns|buildkitd|newuidmap|newgidmap)-[0-9]+ '
-POSTTUN_TRACE_EVENT_GREP='sched_process_fork:|sched_process_exit:|signal_generate:|signal_deliver:|selinux_audited:|sys_(openat|setns|ioctl|kill|tkill|tgkill|pidfd_send_signal|wait4|waitid|poll|ppoll|select|pselect6|read|write|close|exit|exit_group)'
+POSTTUN_TRACE_EVENT_GREP='sched_process_fork:|sched_process_exit:|signal_generate:|signal_deliver:|selinux_audited:|sys_(openat|setns|ioctl|kill|tkill|tgkill|pidfd_send_signal|wait4|waitid|poll|ppoll|select|pselect6|read|write|close|exit|exit_group|mount|execve)'
 
 # The ordered flow-domain extract (the lifetime subject's own records;
 # chronology-preserving; capped).
@@ -2368,13 +2400,13 @@ POSTTUN_TRACE_EVENT_GREP='sched_process_fork:|sched_process_exit:|signal_generat
 
 # The denial records (both channels; the classification lives in the verdict).
 {
-  echo "=== 4C-38 the window's SELinux process-denial records ==="
-  echo "--- the kernel trace's selinux_audited tclass=process records (the trace clock; the authoritative channel):"
-  grep -a 'selinux_audited:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -a 'tclass=process' | head -100 || true
-  echo "(end of the trace's process records)"
-  echo "--- the audit slice's tclass=process records (wallclock epochs; may be empty — the measured userspace-audit gap):"
-  grep -a 'tclass=process' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -a 'denied' | head -60 || true
-  echo "(end of the audit slice's process records)"
+  echo "=== 4C-38/4C-39 the window's SELinux decision records (every tclass) ==="
+  echo "--- the kernel trace's selinux_audited records (the trace clock; the authoritative channel):"
+  grep -a 'selinux_audited:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | head -200 || true
+  echo "(end of the trace's SELinux decision records)"
+  echo "--- the audit slice's SELinux records (wallclock epochs; may be empty — the measured userspace-audit gap):"
+  grep -a 'type=AVC' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -a 'denied' | head -60 || true
+  echo "(end of the audit slice's records)"
 } > "$EVIDENCE_DIR/52-posttun-denials.txt" 2>&1
 
 POSTTUN_T0_OK=0
@@ -2386,9 +2418,11 @@ POSTTUN_DENIALS_CLASSIFIED=0
 POSTTUN_BOUNDARY=""
 POSTTUN_ESTABLISHED=0
 POSTTUN_NOT_ESTABLISHED=0
-POSTTUN_NPRE=0; POSTTUN_NAT=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIMED=0
+POSTTUN_NSTARTUP=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIMED=0
+POSTTUN_OLD_BOUNDARY_PRESENT=0
+POSTTUN_BND_SYMBOLIC=""
 {
-  echo "=== 4C-38 post-TUN lifetime/readiness causal verdict (ZERO policy delta) ==="
+  echo "=== 4C-38/4C-39 post-TUN lifetime/readiness causal verdict (the 4C-39 run carries exactly the rootlesskit_t -> root_t:dir mounton grant) ==="
   echo "POST-TUN-T0: ${POSTTUN_T0_EPOCH:-(not derived)}"
   echo "  derivation: trace-ts=$POSTTUN_T0_TRACE_TS attach-executor=${POSTTUN_ATTACH_WHO:-(none)} read-epoch=$POSTTUN_READ_EPOCH read-uptime=$POSTTUN_READ_UPTIME ring-last-ts=${POSTTUN_RING_LAST_TS:-(none)} clock-drift=${POSTTUN_CLOCK_DRIFT:-?}s"
   echo "--- the attach pair (the T0 anchor; the attach executor's own TUNSETIFF):"
@@ -2520,17 +2554,37 @@ POSTTUN_NPRE=0; POSTTUN_NAT=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIME
   fi
   echo "first-death cause: ${POSTTUN_DEATH_CAUSE:-UNCLASSIFIED (no death observed)}"
 
-  # The ready channel's ordered story (T0..first failing exit): poll/read/
+  # The story span: to the first failing exit when one exists, else to
+  # the ring's own last timestamp (the stable-lifetime case — the story
+  # covers the whole observed span).
+  POSTTUN_STORY_END_TS="${POSTTUN_WINDOW_TS:-$POSTTUN_RING_LAST_TS}"
+
+  # The ready channel's ordered story (T0..story end): poll/read/
   # write/close + signal/wait records of the flow-domain members.
-  if [ -n "$POSTTUN_T0_TRACE_TS" ] && [ -n "$POSTTUN_WINDOW_TS" ]; then
-    echo "--- the ready channel's ordered story (T0..failure; flow-domain comms; poll/read/write/close/signal/wait):"
-    awk -v t0="$POSTTUN_T0_TRACE_TS" -v td="$POSTTUN_WINDOW_TS" '
+  if [ -n "$POSTTUN_T0_TRACE_TS" ] && [ -n "$POSTTUN_STORY_END_TS" ]; then
+    echo "--- the ready channel's ordered story (T0..${POSTTUN_STORY_END_TS}; flow-domain comms; poll/read/write/close/signal/wait):"
+    awk -v t0="$POSTTUN_T0_TRACE_TS" -v td="$POSTTUN_STORY_END_TS" '
       { ts = $4; sub(/:$/, "", ts); if (ts + 0 < t0 + 0 || ts + 0 > td + 0) next; print }
     ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
       | grep -aE "$POSTTUN_FLOW_COMM_GREP" \
       | grep -aE 'signal_generate:|signal_deliver:|sys_(read|write|close|poll|ppoll|select|pselect6|wait4|waitid)\(|sys_(read|write|close|poll|ppoll|select|pselect6|wait4|waitid) ->' \
       | head -120 || true
     echo "(end of the ready channel's story)"
+  fi
+
+  # The post-TUN mount/execve story (the 4C-39 stage evidence): the
+  # granted mount propagation on "/", its result, and the following
+  # mount/execve stages between the ready byte and the next startup
+  # boundary (or the span's end in the stable case).
+  if [ -n "$POSTTUN_T0_TRACE_TS" ] && [ -n "$POSTTUN_STORY_END_TS" ]; then
+    echo "--- the post-TUN mount/execve story (T0..${POSTTUN_STORY_END_TS}; flow-domain comms; sys_mount/sys_execve records with their results):"
+    awk -v t0="$POSTTUN_T0_TRACE_TS" -v td="$POSTTUN_STORY_END_TS" '
+      { ts = $4; sub(/:$/, "", ts); if (ts + 0 < t0 + 0 || ts + 0 > td + 0) next; print }
+    ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
+      | grep -aE "$POSTTUN_FLOW_COMM_GREP" \
+      | grep -aE 'sys_mount\(|sys_mount ->|sys_execve\(|sys_execve ->' \
+      | head -80 || true
+    echo "(end of the mount/execve story)"
   fi
 
   # The process tree (the fork records from T0 through failure+0.5s).
@@ -2546,7 +2600,9 @@ POSTTUN_NPRE=0; POSTTUN_NAT=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIME
         print }' | head -60 || true
   echo "(end of the process-tree records)"
 
-  # The timeline (50) around the failure and its per-pid life summary.
+  # The timeline (50) around the failure, and its per-pid life summary
+  # (printed whenever the timeline exists — in the stable-lifetime case
+  # it is the aliveness evidence itself).
   POSTTUN_TIMELINE_ANCHOR_EPOCH="${POSTTUN_FIRST_FAIL_EPOCH:-$POSTTUN_FIRST_DEATH_EPOCH}"
   if [ -n "$POSTTUN_TIMELINE_ANCHOR_EPOCH" ] && [ -s "$EVIDENCE_DIR/50-posttun-timeline.txt" ]; then
     echo "--- the post-TUN timeline around the failure (±0.5s; the wallclock clock):"
@@ -2554,6 +2610,8 @@ POSTTUN_NPRE=0; POSTTUN_NAT=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIME
       { ts = $1 + 0; if (ts >= de - 0.5 && ts <= de + 0.5) print }
     ' "$EVIDENCE_DIR/50-posttun-timeline.txt" 2>/dev/null | head -80 || true
     echo "(end of the timeline's death window)"
+  fi
+  if [ -s "$EVIDENCE_DIR/50-posttun-timeline.txt" ]; then
     echo "--- the timeline's per-pid life summary (first/last seen, state, ppid, ns inodes, tap0):"
     awk '
       $2 == "FD-SNAPSHOT" { next }
@@ -2580,25 +2638,30 @@ POSTTUN_NPRE=0; POSTTUN_NAT=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIME
     echo "(end of the timeline's per-pid summary)"
   fi
 
-  # The manager journal's causal slice (T0..T0+3s, wallclock).
+  # The manager journal's causal slice (T0..T0+15s, wallclock; covers
+  # the whole post-TUN window — the failure case's own slice and the
+  # stable case's op-state evidence).
   if [ -n "$POSTTUN_T0_EPOCH" ]; then
-    echo "--- the manager journal's causal slice (T0..T0+3s; T0 = $(date -d "@${POSTTUN_T0_EPOCH%.*}" 2>/dev/null || true)):"
-    journalctl -u "$UNIT" --since "@${POSTTUN_T0_EPOCH%.*}" --until "@$(( ${POSTTUN_T0_EPOCH%.*} + 3 ))" --no-pager 2>/dev/null | head -60 || true
+    echo "--- the manager journal's causal slice (T0..T0+15s; T0 = $(date -d "@${POSTTUN_T0_EPOCH%.*}" 2>/dev/null || true)):"
+    journalctl -u "$UNIT" --since "@${POSTTUN_T0_EPOCH%.*}" --until "@$(( ${POSTTUN_T0_EPOCH%.*} + 15 ))" --no-pager 2>/dev/null | head -60 || true
     echo "(end of the journal's causal slice)"
   fi
 
-  # The process denials' temporal classification. The kernel trace is the
-  # authoritative channel; the audit slice is corroborating. The classes:
+  # The SELinux decisions' temporal classification. The kernel trace is
+  # the authoritative channel; the audit slice is corroborating. The
+  # classes (the 4C-39 vocabulary):
+  # STARTUP-CAUSAL = at or before the first failing exit (the lifetime
+  #   failure's own reference point) — only the FIRST such blocker owns
+  #   the next phase (the boundary search below takes the earliest);
+  # POST-FAILURE/CLEANUP = anything after it (teardown/reap/kill noise);
   # POLLING-ONLY = a recurring (>=2) scontext/tcontext/denied-mask shape
-  # key (the manager's readiness polls); the rest are classified by the
-  # record's distance from the first failing exit (the lifetime
-  # failure's own reference point): PRE-FAILURE (>20ms before it),
-  # AT-FAILURE (within 20ms before it or at it), POST-FAILURE/CLEANUP
-  # (anything after it). The classification covers the records after T0;
-  # the pre-T0 records are the launcher-chain window's scope.
-  echo "--- the trace-side process denials, temporally classified (the first failing exit is the reference point):"
+  #   key (the manager's readiness polls);
+  # UNTIMED = the window reference is absent (a classification defect).
+  # The classification covers EVERY tclass after T0 (the startup story's
+  # own dir/file/socket denials included); the pre-T0 records are the
+  # launcher-chain window's scope.
+  echo "--- the trace-side SELinux decisions, temporally classified (the first failing exit is the reference point):"
   POSTTUN_TRACE_CLASSIFIED="$(grep -a 'selinux_audited:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
-    | grep -a 'tclass=process' \
     | awk -v t0="$POSTTUN_T0_TRACE_TS" -v td="$POSTTUN_WINDOW_TS" '
       function shapeof(s,   a, b, m) {
         # The recurrence key: scontext|tcontext|denied-mask. The record
@@ -2614,20 +2677,20 @@ POSTTUN_NPRE=0; POSTTUN_NAT=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIME
         ts = $4; sub(/:$/, "", ts)
         if (t0 != "" && ts + 0 < t0 + 0) next
         n[shapeof($0)]++
-        line[NR] = ts "\t" shapeof($0) "\t" $0
+        line[++c] = ts "\t" shapeof($0) "\t" $0
       }
       END {
-        for (i = 1; i <= NR; i++) {
+        for (i = 1; i <= c; i++) {
           split(line[i], f, "\t")
           ts = f[1]; sh = f[2]; raw = f[3]
           cls = ""
           if (n[sh] >= 2) cls = "POLLING-ONLY"
           else if (td == "") cls = "UNTIMED"
-          else { d = ts - td; if (d < -0.02) cls = "PRE-FAILURE"; else if (d <= 0) cls = "AT-FAILURE"; else cls = "POST-FAILURE/CLEANUP" }
+          else { d = ts - td; if (d <= 0) cls = "STARTUP-CAUSAL"; else cls = "POST-FAILURE/CLEANUP" }
           printf "class=%s trace-ts=%s shape=%s\n  %s\n", cls, ts, sh, raw
         }
       }' 2>/dev/null || true)"
-  printf '%s\n' "${POSTTUN_TRACE_CLASSIFIED:-(none — no process-class SELinux decision was recorded after T0)}"
+  printf '%s\n' "${POSTTUN_TRACE_CLASSIFIED:-(none — no SELinux decision was recorded after T0)}"
 
   if [ -n "$POSTTUN_TRACE_CLASSIFIED" ]; then
     case "$(printf '%s\n' "$POSTTUN_TRACE_CLASSIFIED" | grep -ao 'class=[A-Z/-]*' | sort -u)" in
@@ -2637,12 +2700,30 @@ POSTTUN_NPRE=0; POSTTUN_NAT=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIME
   else
     POSTTUN_DENIALS_CLASSIFIED=1
   fi
-  POSTTUN_NPRE="$(printf '%s\n' "$POSTTUN_TRACE_CLASSIFIED" | grep -ac 'class=PRE-FAILURE' || true)"
-  POSTTUN_NAT="$(printf '%s\n' "$POSTTUN_TRACE_CLASSIFIED" | grep -ac 'class=AT-FAILURE' || true)"
+  POSTTUN_NSTARTUP="$(printf '%s\n' "$POSTTUN_TRACE_CLASSIFIED" | grep -ac 'class=STARTUP-CAUSAL' || true)"
   POSTTUN_NPOST="$(printf '%s\n' "$POSTTUN_TRACE_CLASSIFIED" | grep -ac 'class=POST-FAILURE/CLEANUP' || true)"
   POSTTUN_NPOLL="$(printf '%s\n' "$POSTTUN_TRACE_CLASSIFIED" | grep -ac 'class=POLLING-ONLY' || true)"
   POSTTUN_NUNTIMED="$(printf '%s\n' "$POSTTUN_TRACE_CLASSIFIED" | grep -ac 'class=UNTIMED' || true)"
-  echo "denial classes: PRE-FAILURE=$POSTTUN_NPRE AT-FAILURE=$POSTTUN_NAT POST-FAILURE/CLEANUP=$POSTTUN_NPOST POLLING-ONLY=$POSTTUN_NPOLL UNTIMED=$POSTTUN_NUNTIMED"
+  echo "denial classes: STARTUP-CAUSAL=$POSTTUN_NSTARTUP POST-FAILURE/CLEANUP=$POSTTUN_NPOST POLLING-ONLY=$POSTTUN_NPOLL UNTIMED=$POSTTUN_NUNTIMED"
+
+  # 4C-39: the OLD primary boundary must be GONE — no selinux_audited
+  # record naming the exact triple (docker_helper_rootlesskit_t ->
+  # root_t:dir, denied mask 0x10000 = mounton) anywhere in the window's
+  # trace span. A record here means the 4C-39 grant did not take effect
+  # on the loaded policy: STOP and report the actual behavior (no rule
+  # widening).
+  POSTTUN_OLD_MOUNTON_PRESENT="$(grep -a 'selinux_audited:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
+    | grep -a 'scontext=system_u:system_r:docker_helper_rootlesskit_t' \
+    | grep -a 'tcontext=system_u:object_r:root_t:s0' \
+    | grep -a 'tclass=dir' \
+    | grep -a 'denied=0x10000' || true)"
+  if [ -n "$POSTTUN_OLD_MOUNTON_PRESENT" ]; then
+    echo "OLD-BOUNDARY: STILL-PRESENT — the 4C-39 mounton grant did not take effect (STOP; no rule widening):"
+    printf '%s\n' "$POSTTUN_OLD_MOUNTON_PRESENT"
+    POSTTUN_OLD_BOUNDARY_PRESENT=1
+  else
+    echo "OLD-BOUNDARY: GONE (no rootlesskit_t -> root_t:dir mounton (0x10000) decision in the window's trace span)"
+  fi
 
   # The gates.
   echo "GATES:"
@@ -2655,9 +2736,11 @@ POSTTUN_NPRE=0; POSTTUN_NAT=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIME
   else
     echo "  first-death cause classified: FAIL (no death observed in the window's trace span)"
   fi
-  [ "$POSTTUN_DENIALS_CLASSIFIED" = 1 ] && echo "  all observed process denials temporally classified: PASS" || echo "  all observed process denials temporally classified: FAIL (UNTIMED records remain)"
+  [ "$POSTTUN_DENIALS_CLASSIFIED" = 1 ] && echo "  all observed SELinux decisions temporally classified: PASS" || echo "  all observed SELinux decisions temporally classified: FAIL (UNTIMED records remain)"
   if [ -n "$POSTTUN_FIRST_FAIL_PID" ]; then
     echo "  first failing exit identified: PASS (pid=$POSTTUN_FIRST_FAIL_PID comm=$POSTTUN_FIRST_FAIL_COMM exit=$POSTTUN_FIRST_FAIL_EXIT_CODE at=T0+${POSTTUN_T0_TO_FAIL:-?}s)"
+  elif [ "$POSTTUN_T0_OK" = 1 ] && [ "$POSTTUN_DENIALS_CLASSIFIED" = 1 ]; then
+    echo "  first failing exit identified: PASS (none — no flow-domain member exited nonzero in the window's trace span; the lifetime held)"
   else
     echo "  first failing exit identified: FAIL (no nonzero exit_group of a flow-domain member in the window's trace span — the lifetime failure did not reproduce)"
   fi
@@ -2674,16 +2757,19 @@ POSTTUN_NPRE=0; POSTTUN_NAT=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIME
     POSTTUN_DENIALS_CLASSIFIED=0
   fi
 
-  # The primary boundary: the earliest of (a) the first PRE-FAILURE or
-  # AT-FAILURE SELinux decision of ANY tclass relative to the first
-  # failing exit, and (b) the first failing exit itself. A denial that
-  # precedes or sits exactly at the failing exit is the
-  # policy-candidate owner of the next semantic phase; a first failing
-  # exit that no SELinux decision precedes is a software/lifecycle
-  # finding (no policy widening). The known process-kill/signull/sigkill
-  # denials, classified POST-FAILURE or POLLING-ONLY, are cleanup and
-  # polling noise and are not owners. Nothing is granted here either way.
-  if [ "$POSTTUN_T0_OK" = 1 ] && [ "$POSTTUN_DEATH_PID_OK" = 1 ] && [ "$POSTTUN_DEATH_TS_OK" = 1 ] && [ -n "$POSTTUN_DEATH_CAUSE" ] && [ "$POSTTUN_DENIALS_CLASSIFIED" = 1 ] && [ -n "$POSTTUN_FIRST_FAIL_PID" ]; then
+  # The primary boundary: the earliest of (a) the first STARTUP-CAUSAL
+  # SELinux decision of ANY tclass relative to the first failing exit,
+  # and (b) the first failing exit itself. A denial that precedes or
+  # sits exactly at the failing exit is the policy-candidate owner of
+  # the next semantic phase; a first failing exit that no SELinux
+  # decision precedes is a software/lifecycle finding (no policy
+  # widening). The lifecycle kill/signull/sigkill denials, classified
+  # POST-FAILURE/CLEANUP or POLLING-ONLY, are cleanup and polling noise
+  # and are not owners. Nothing is granted here either way. With no
+  # nonzero flow-domain exit in the span, the lifetime held — the 4C-39
+  # stable outcome, no new boundary in this window.
+  if [ "$POSTTUN_T0_OK" = 1 ] && [ "$POSTTUN_DEATH_PID_OK" = 1 ] && [ "$POSTTUN_DEATH_TS_OK" = 1 ] && [ -n "$POSTTUN_DEATH_CAUSE" ] && [ "$POSTTUN_DENIALS_CLASSIFIED" = 1 ]; then
+    if [ -n "$POSTTUN_FIRST_FAIL_PID" ]; then
     POSTTUN_REF_DESC="the first failing exit pid=$POSTTUN_FIRST_FAIL_PID comm=$POSTTUN_FIRST_FAIL_COMM exit=$POSTTUN_FIRST_FAIL_EXIT_CODE"
     POSTTUN_FIRST_PRE_AT_TS="$(grep -a 'selinux_audited:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
       | awk -v t0="$POSTTUN_T0_TRACE_TS" -v td="$POSTTUN_WINDOW_TS" '
@@ -2726,7 +2812,14 @@ POSTTUN_NPRE=0; POSTTUN_NAT=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIME
       POSTTUN_BND_SYMBOLIC="SOFTWARE-LIFECYCLE (no SELinux decision precedes the first failing exit)"
     fi
     echo "PRIMARY-BOUNDARY: $POSTTUN_BOUNDARY"
-    POSTTUN_ESTABLISHED=1
+  else
+    POSTTUN_BOUNDARY="POST-TUN-LIFETIME-STABLE (no nonzero exit of any flow-domain member in the window's trace span T0..${POSTTUN_RING_LAST_TS:-(none)}; no new startup boundary in this window)"
+    POSTTUN_BND_SYMBOLIC="POST-TUN-LIFETIME-STABLE (no nonzero flow-domain exit in the span)"
+    echo "PRIMARY-BOUNDARY: $POSTTUN_BOUNDARY"
+    echo "TARGET-LIFETIME-BLOCKER: GONE (the flow's lifetime failure did not reproduce in this window)"
+    echo "  the aliveness evidence: the timeline's per-pid life summary above (holder/userns/netns/tap0 first-vs-last-seen), the post-TUN mount/execve story above (the granted propagation on / and the following stages), and the manager journal slice above (the op's entry state across the window)"
+  fi
+  POSTTUN_ESTABLISHED=1
   else
     echo "PRIMARY-BOUNDARY: NOT_ESTABLISHED (the causal order could not be established from the window's evidence — no guessing)"
   fi
@@ -2734,11 +2827,26 @@ POSTTUN_NPRE=0; POSTTUN_NAT=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIME
 cat "$EVIDENCE_DIR/53-posttun-verdict.txt" >&2
 if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
   marker "POSTTUN-FIRST-DEATH=pid=${POSTTUN_FIRST_DEATH_PID:-none} comm=${POSTTUN_FIRST_DEATH_COMM:-none} at=T0+${POSTTUN_T0_TO_DEATH:-?}s cause=${POSTTUN_DEATH_CAUSE%% *}"
-  marker "POSTTUN-PROCESS-DENIALS=PRE=$POSTTUN_NPRE AT=$POSTTUN_NAT POST=$POSTTUN_NPOST POLLING=$POSTTUN_NPOLL UNTIMED=$POSTTUN_NUNTIMED"
+  marker "POSTTUN-DENIALS=STARTUP-CAUSAL=$POSTTUN_NSTARTUP POST-FAILURE/CLEANUP=$POSTTUN_NPOST POLLING-ONLY=$POSTTUN_NPOLL UNTIMED=$POSTTUN_NUNTIMED"
   marker "POSTTUN-PRIMARY-BOUNDARY=${POSTTUN_BND_SYMBOLIC:-(undecoded — see 53-posttun-verdict.txt)}"
+  if [ "$POSTTUN_OLD_BOUNDARY_PRESENT" = 1 ]; then
+    marker "4C-39-OLD-MOUNTON-BOUNDARY=STILL-PRESENT"
+    marker "4C-39=INCOMPLETE/GRANT-DID-NOT-TAKE-EFFECT"
+  else
+    marker "4C-39-OLD-MOUNTON-BOUNDARY=GONE"
+    if [ -n "$POSTTUN_FIRST_FAIL_PID" ]; then
+      marker "4C-39-OUTCOME=NEXT-STARTUP-BOUNDARY-CONFIRMED"
+      marker "4C-39=PASS/NEXT-BOUNDARY-CONFIRMED"
+    else
+      marker "4C-39-OUTCOME=POST-TUN-LIFETIME-STABLE"
+      marker "TARGET-LIFETIME-BLOCKER=GONE"
+      marker "4C-39=PASS/POST-TUN-LIFETIME-STABLE"
+    fi
+  fi
   marker "4C-38=PROVEN/PRIMARY-BOUNDARY-ESTABLISHED"
 else
   marker "4C-38=INCOMPLETE/ORDER_NOT_ESTABLISHED"
+  marker "4C-39=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   POSTTUN_NOT_ESTABLISHED=1
 fi
 
@@ -4414,6 +4522,14 @@ if [ "$I9_OK" = 1 ]; then
   # cross-op proof are both mandatory for a PASS. The 4C-38 lifetime
   # proof rides the same rule: an unestablished causal order keeps the
   # phase INCOMPLETE (no guessing).
+  # A still-present old mounton boundary is a hard phase failure (the
+  # grant demonstrably did not take effect); it outranks the cross-op
+  # INCOMPLETE.
+  if [ "${POSTTUN_OLD_BOUNDARY_PRESENT:-0}" = 1 ]; then
+    marker "BLOCKER=the 4C-39 mounton grant did not remove the old rootlesskit_t -> root_t:dir mounton boundary (see 53-posttun-verdict.txt)"
+    finish FAIL
+    exit 0
+  fi
   if [ "${CROSS_NOT_PROVEN:-0}" = 1 ] || [ "${POSTTUN_NOT_ESTABLISHED:-0}" = 1 ]; then
     finish INCOMPLETE
     exit 0
