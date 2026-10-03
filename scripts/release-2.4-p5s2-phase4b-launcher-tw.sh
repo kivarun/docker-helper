@@ -982,31 +982,38 @@ PREFLIGHT_OK=1
     PREFLIGHT_OK=0
   fi
 
-  echo "=== flow tmp copy-up identity (the 4C-41 grant: the module's own rootlesskit -> tmp_t contribution must be exactly the one { write add_name } dir rule — the 4C-41 add_name widened the 4C-40 write IN PLACE; the EFFECTIVE dir union = the base policy's standing tmp surface + { write add_name } — the standing rules are ATTRIBUTE-derived (the base policy writes base_file_type/tmpfile, not tmp_t literally), and the 4C-39 run's boundary mask 0x20000004 proved the standing surface carries search; the union is NOT required to be exactly the pair, but every dir permission beyond the standing { getattr open search } and the granted { write add_name } is a STOP) ==="
+  echo "=== flow tmp copy-up identity (the 4C-42 grant: the module's own rootlesskit -> tmp_t contribution must be exactly the one { write add_name create } dir rule — the 4C-42 create widened the 4C-41 pair IN PLACE; the EFFECTIVE dir union = the base policy's standing tmp surface + the trio — the standing rules are ATTRIBUTE-derived (the base policy writes base_file_type/tmpfile, not tmp_t literally), and the 4C-39 run's boundary mask 0x20000004 proved the standing surface carries search; the union is NOT required to be exactly the trio, but every dir permission beyond the standing { getattr open search } and the granted trio is a STOP; mounton is the NEXT boundary and must not ride) ==="
   echo "--- raw effective inventory (rootlesskit -> tmp_t, every class; base-policy/attribute expansions recorded, not asserted):"
   RK_TMP_RAW="$(sesearch --allow -s docker_helper_rootlesskit_t -t tmp_t /sys/fs/selinux/policy 2>/dev/null || true)"
   printf '%s\n' "${RK_TMP_RAW:-(none)}"
-  echo "--- CONCRETE module contribution (source must be docker_helper_rootlesskit_t; must be exactly one dir rule contributing exactly { add_name write } — the SET is checked, sesearch normalizes the brace order):"
+  echo "--- CONCRETE module contribution (source must be docker_helper_rootlesskit_t; must be exactly one dir rule contributing exactly { add_name create write } — the SET is checked, sesearch normalizes the brace order):"
   RK_TMP_CONCRETE="$(printf '%s\n' "$RK_TMP_RAW" | awk '$2 == "docker_helper_rootlesskit_t"' || true)"
   printf '%s\n' "${RK_TMP_CONCRETE:-(none)}"
   RK_TMP_CONCRETE_NORM="$(printf '%s\n' "$RK_TMP_CONCRETE" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:[^ ]* {\(.*\)};$/\1/p' | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//' || true)"
-  echo "--- the base policy's standing tmp surface (the effective inventory minus the granted pair — the effective_before record; the 4C-39 run 37101080574's boundary mask 0x20000004 names search as a proven member; the standing rules are attribute-derived — the base policy writes base_file_type/tmpfile/file_type, not tmp_t literally):"
-  RK_TMP_STANDING="$(printf '%s\n' "$RK_TMP_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:[^ ]* \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | grep -avE '^(write|add_name)$' | sort -u | tr '\n' ' ' || true)"
+  echo "--- the base policy's standing tmp surface (the effective inventory minus the granted trio — the effective_before record; the 4C-39 run 37101080574's boundary mask 0x20000004 names search as a proven member; the standing rules are attribute-derived — the base policy writes base_file_type/tmpfile/file_type, not tmp_t literally):"
+  RK_TMP_STANDING="$(printf '%s\n' "$RK_TMP_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:[^ ]* \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | grep -avE '^(write|add_name|create)$' | sort -u | tr '\n' ' ' || true)"
   printf '%s\n' "${RK_TMP_STANDING:-(none — the standing surface is empty)}"
   RK_TMP_DIR_UNION="$(printf '%s\n' "$RK_TMP_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:dir \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
   echo "effective dir perm union: ${RK_TMP_DIR_UNION:-(none)}"
-  echo "--- the forbidden-dir-perms negative (everything beyond the base policy's standing { getattr open search } and the granted { write add_name } must be absent from the whole effective dir surface; the standing set is this run's own inventory fact; create is the NEXT boundary and must not ride):"
-  RK_TMP_FORBIDDEN="$(printf '%s\n' "$RK_TMP_DIR_UNION" | tr ' ' '\n' | grep -avE '^(getattr|open|search|write|add_name)$' || true)"
+  echo "--- the forbidden-dir-perms negative (everything beyond the base policy's standing { getattr open search } and the granted { write add_name create } must be absent from the whole effective dir surface; the standing set is this run's own inventory fact; mounton is the NEXT boundary and must not ride):"
+  RK_TMP_FORBIDDEN="$(printf '%s\n' "$RK_TMP_DIR_UNION" | tr ' ' '\n' | grep -avE '^(getattr|open|search|write|add_name|create)$' || true)"
   printf '%s\n' "${RK_TMP_FORBIDDEN:-(none — no extra dir permission)}"
   RK_TMP_OK=0
   if [ "$(printf '%s\n' "$RK_TMP_CONCRETE" | grep -ac . || true)" = 1 ] \
     && printf '%s\n' "$RK_TMP_CONCRETE" | grep -aq 'allow docker_helper_rootlesskit_t tmp_t:dir' \
-    && [ "$RK_TMP_CONCRETE_NORM" = "add_name write" ] \
+    && [ "$RK_TMP_CONCRETE_NORM" = "add_name create write" ] \
     && printf '%s\n' "$RK_TMP_DIR_UNION" | tr ' ' '\n' | grep -aqx 'write' \
     && printf '%s\n' "$RK_TMP_DIR_UNION" | tr ' ' '\n' | grep -aqx 'add_name' \
+    && printf '%s\n' "$RK_TMP_DIR_UNION" | tr ' ' '\n' | grep -aqx 'create' \
     && printf '%s\n' "$RK_TMP_DIR_UNION" | tr ' ' '\n' | grep -aqx 'search' \
     && [ -z "$RK_TMP_FORBIDDEN" ]; then
     RK_TMP_OK=1
+  fi
+  if [ "$RK_TMP_OK" = 1 ]; then
+    echo "PASS: flow tmp copy-up identity (module contribution exactly { write add_name create }; effective dir union = the base policy's standing { getattr open search } + the trio — search is the proven standing member; no module-borne permission beyond the trio)"
+  else
+    echo "FAIL: flow tmp copy-up identity (concrete-rules=$(printf '%s\n' "$RK_TMP_CONCRETE" | grep -ac . || true) union=${RK_TMP_DIR_UNION:-(none)})"
+    PREFLIGHT_OK=0
   fi
   if [ "$RK_TMP_OK" = 1 ]; then
     echo "PASS: flow tmp copy-up identity (module contribution exactly { write add_name }; effective dir union = the base policy's standing { getattr open search } + { write add_name } — search is the proven standing member; no module-borne permission beyond the pair)"
@@ -1566,7 +1573,10 @@ if [ -d "$TRACING/events/capability/cap_capable" ]; then
             syscalls/sys_enter_mount syscalls/sys_exit_mount \
             syscalls/sys_enter_execve syscalls/sys_exit_execve \
             syscalls/sys_enter_mkdir syscalls/sys_exit_mkdir \
-            syscalls/sys_enter_mkdirat syscalls/sys_exit_mkdirat; do
+            syscalls/sys_enter_mkdirat syscalls/sys_exit_mkdirat \
+            syscalls/sys_enter_umount2 syscalls/sys_exit_umount2 \
+            syscalls/sys_enter_umount syscalls/sys_exit_umount \
+            syscalls/sys_enter_rename syscalls/sys_exit_rename; do
     [ -d "$TRACING/events/$ev" ] && echo 1 > "$TRACING/events/$ev/enable" 2>/dev/null || true
   done
   # 4C-29: the SELinux decision tracepoint (avc:selinux_audited) —
@@ -1600,7 +1610,9 @@ if [ -d "$TRACING/events/capability/cap_capable" ]; then
               syscalls/sys_enter_select syscalls/sys_enter_pselect6 syscalls/sys_enter_read syscalls/sys_enter_write \
               syscalls/sys_enter_close syscalls/sys_enter_exit syscalls/sys_enter_exit_group \
               syscalls/sys_enter_mount syscalls/sys_exit_mount syscalls/sys_enter_execve syscalls/sys_exit_execve \
-              syscalls/sys_enter_mkdir syscalls/sys_exit_mkdir syscalls/sys_enter_mkdirat syscalls/sys_exit_mkdirat; do
+              syscalls/sys_enter_mkdir syscalls/sys_exit_mkdir syscalls/sys_enter_mkdirat syscalls/sys_exit_mkdirat \
+              syscalls/sys_enter_umount2 syscalls/sys_exit_umount2 syscalls/sys_enter_umount syscalls/sys_exit_umount \
+              syscalls/sys_enter_rename syscalls/sys_exit_rename; do
       echo "$ev: $([ -d "$TRACING/events/$ev" ] && echo yes || echo no)"
     done
     echo "=== 4C-29 live class/permission mapping evidence (RECORDED, not hardcoded — decode validation uses co-captured AVC records) ==="
@@ -1884,7 +1896,10 @@ if [ "$TRACE_ENABLED" = 1 ]; then
             syscalls/sys_enter_mount syscalls/sys_exit_mount \
             syscalls/sys_enter_execve syscalls/sys_exit_execve \
             syscalls/sys_enter_mkdir syscalls/sys_exit_mkdir \
-            syscalls/sys_enter_mkdirat syscalls/sys_exit_mkdirat; do
+            syscalls/sys_enter_mkdirat syscalls/sys_exit_mkdirat \
+            syscalls/sys_enter_umount2 syscalls/sys_exit_umount2 \
+            syscalls/sys_enter_umount syscalls/sys_exit_umount \
+            syscalls/sys_enter_rename syscalls/sys_exit_rename; do
     [ -d "$TRACING/events/$ev" ] && echo 0 > "$TRACING/events/$ev/enable" 2>/dev/null || true
   done
   grep -a -E 'slirp4netns|rootlesskit| ns/net|ns/user|/dev/net/tun|cap_capable|selinux_audited' "$EVIDENCE_DIR/30-trace-window.txt" \
@@ -2400,23 +2415,24 @@ fi
 
 
 # ============================================================
-# 4C-38/4C-39/4C-40/4C-41: the post-TUN lifetime/readiness causal proof
+# 4C-38..4C-42: the post-TUN lifetime/readiness causal proof
 # ============================================================
 # The provisioning window's own operation is the subject: its TUN attach
 # is already proven (POST-TUN-T0 above; TUNSETIFF 0x54ca -> 0). This
 # verdict reconstructs the causal chain between the attach and the
 # operation's FIRST death from the kernel trace (fork/exit/signal/wait/
 # poll/read-write-close/mount/mkdir/execve), the post-TUN timeline (50),
-# the audit slice and the manager journal. The 4C-41 grant
-# (rootlesskit_t -> tmp_t:dir { write add_name }) must have REMOVED the
-# 4C-40 boundary, and the 4C-40/4C-39 grants must have stayed in effect
-# (the old tmp-write and root-mounton boundaries stay GONE — a
-# regression is a phase failure); the run's own decisions are classified
-# TEMPORALLY against the first failing exit — only the first
-# STARTUP-CAUSAL denial may own the next semantic phase, and the phase
-# STOPs there. A window with no nonzero flow-domain exit is the
-# stable-lifetime outcome. Nothing is granted in this phase beyond the
-# 4C-41 add_name member of the existing tmp dir rule.
+# the audit slice and the manager journal. The 4C-42 grant
+# (rootlesskit_t -> tmp_t:dir { write add_name create }) must have
+# REMOVED the 4C-41 boundary, and the 4C-41/4C-40/4C-39 grants must have
+# stayed in effect (the old add_name/tmp-write/root-mounton boundaries
+# stay GONE — a regression is a phase failure); the run's own decisions
+# are classified TEMPORALLY against the first failing exit — only the
+# first STARTUP-CAUSAL denial may own the next semantic phase, and the
+# phase STOPs there. A window with no nonzero flow-domain exit is the
+# stable-lifetime outcome. A mkdirat success in the window is the
+# ROOTLESSKIT-BIND0-CREATE=OK milestone. Nothing is granted in this
+# phase beyond the 4C-42 create member of the existing tmp dir rule.
 # The flow-domain comm set is the lifetime subject (rootlesskit parent +
 # child, slirp4netns parent + child, the uid-map shims, the payload).
 POSTTUN_FLOW_COMM_GREP='(rootlesskit|exe|slirp4netns|buildkitd|newuidmap|newgidmap)-[0-9]+ '
@@ -2455,7 +2471,7 @@ POSTTUN_NSTARTUP=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIMED=0
 POSTTUN_OLD_BOUNDARY_PRESENT=0
 POSTTUN_BND_SYMBOLIC=""
 {
-  echo "=== 4C-38..4C-41 post-TUN lifetime/readiness causal verdict (the 4C-41 run carries exactly the rootlesskit_t -> tmp_t:dir { write add_name } grant) ==="
+  echo "=== 4C-38..4C-42 post-TUN lifetime/readiness causal verdict (the 4C-42 run carries exactly the rootlesskit_t -> tmp_t:dir { write add_name create } grant) ==="
   echo "POST-TUN-T0: ${POSTTUN_T0_EPOCH:-(not derived)}"
   echo "  derivation: trace-ts=$POSTTUN_T0_TRACE_TS attach-executor=${POSTTUN_ATTACH_WHO:-(none)} read-epoch=$POSTTUN_READ_EPOCH read-uptime=$POSTTUN_READ_UPTIME ring-last-ts=${POSTTUN_RING_LAST_TS:-(none)} clock-drift=${POSTTUN_CLOCK_DRIFT:-?}s"
   echo "--- the attach pair (the T0 anchor; the attach executor's own TUNSETIFF):"
@@ -2805,6 +2821,53 @@ POSTTUN_BND_SYMBOLIC=""
     echo "OLD-ADDNAME-BOUNDARY: GONE (no rootlesskit_t -> tmp_t:dir add_name (0x4000000) decision in the window's trace span)"
   fi
 
+  # 4C-42: the SAME contract for the phase's own grant — the OLD primary
+  # boundary (docker_helper_rootlesskit_t -> tmp_t:dir, denied mask 0x8
+  # = create; the canonical 4C-41 run's record inside
+  # sys_mkdirat("/tmp/rootlesskit-b...", 0700)) must be GONE anywhere in
+  # the window's trace span. The mask is matched exactly (0x8 is not
+  # 0x80's or 0x8000000's substring — tun_socket relabelfrom and dir
+  # remove_name are excluded); the sigkill cleanup denial carries the
+  # SAME mask 0x8 but on tclass=process — the class grep excludes it. A
+  # record here means the 4C-42 grant did not take effect on the loaded
+  # policy: STOP and report the actual behavior (no rule widening).
+  POSTTUN_OLD_CREATE_PRESENT="$(grep -a 'selinux_audited:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
+    | grep -a 'scontext=system_u:system_r:docker_helper_rootlesskit_t' \
+    | grep -aE 'tcontext=system_u:object_r:tmp_t:s0([ \t]|$)' \
+    | grep -a 'tclass=dir' \
+    | grep -aE 'denied=0x8([^0-9a-fA-F]|$)' || true)"
+  if [ -n "$POSTTUN_OLD_CREATE_PRESENT" ]; then
+    echo "OLD-CREATE-BOUNDARY: STILL-PRESENT — the 4C-42 create grant did not take effect (STOP; no rule widening):"
+    printf '%s\n' "$POSTTUN_OLD_CREATE_PRESENT"
+    POSTTUN_OLD_CREATE_PRESENT=1
+  else
+    echo "OLD-CREATE-BOUNDARY: GONE (no rootlesskit_t -> tmp_t:dir create (0x8) decision in the window's trace span)"
+  fi
+
+  # The 4C-42 milestone: a flow-domain mkdirat AFTER T0 returning 0x0
+  # means the copy-up temp dir was CREATED — the kernel-stated type of
+  # the create hook (tmp_t) now carries the object. Recorded as the
+  # ROOTLESSKIT-BIND0-CREATE milestone marker, plus the residue probe
+  # (the holder's cleanup may already have removed the dir — its absence
+  # is then the cleanup fact, not a milestone refutation).
+  POSTTUN_MKDIRAT_OK="$(awk -v t0="$POSTTUN_T0_TRACE_TS" '
+    /sys_mkdirat -> / && t0 != "" {
+      ts = $4; sub(/:$/, "", ts)
+      if (ts + 0 > t0 + 0) print
+    }' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
+    | grep -aE "$POSTTUN_FLOW_COMM_GREP" \
+    | grep -a '0x0' || true)"
+  if [ -n "$POSTTUN_MKDIRAT_OK" ]; then
+    echo "MILESTONE: ROOTLESSKIT-BIND0-CREATE=OK — a flow-domain mkdirat returned success:"
+    printf '%s\n' "$POSTTUN_MKDIRAT_OK"
+  else
+    echo "MILESTONE: ROOTLESSKIT-BIND0-CREATE=NOT-REACHED (no successful flow-domain mkdirat in the window's trace span)"
+  fi
+  echo "--- the /tmp/rootlesskit-b* residue probe at harvest (SID/type/mode when the holder's cleanup has not removed it):"
+  ls -ldZ /tmp/rootlesskit-b* 2>/dev/null | head -5 || true
+  ls -ld /tmp/rootlesskit-b* 2>/dev/null | head -5 || true
+  echo "(end of the residue probe)"
+
   # The gates.
   echo "GATES:"
   [ "$POSTTUN_T0_OK" = 1 ] && echo "  POST-TUN-T0 observed: PASS" || echo "  POST-TUN-T0 observed: FAIL"
@@ -2931,13 +2994,21 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
     marker "4C-41=INCOMPLETE/GRANT-DID-NOT-TAKE-EFFECT"
   else
     marker "4C-41-OLD-ADDNAME-BOUNDARY=GONE"
+    marker "4C-41=PASS/NEXT-BOUNDARY-CONFIRMED"
+  fi
+  if [ "$POSTTUN_OLD_CREATE_PRESENT" = 1 ]; then
+    marker "4C-42-OLD-CREATE-BOUNDARY=STILL-PRESENT"
+    marker "4C-42=INCOMPLETE/GRANT-DID-NOT-TAKE-EFFECT"
+  else
+    marker "4C-42-OLD-CREATE-BOUNDARY=GONE"
+    [ -n "$POSTTUN_MKDIRAT_OK" ] && marker "ROOTLESSKIT-BIND0-CREATE=OK"
     if [ -n "$POSTTUN_FIRST_FAIL_PID" ]; then
-      marker "4C-41-OUTCOME=NEXT-STARTUP-BOUNDARY-CONFIRMED"
-      marker "4C-41=PASS/NEXT-BOUNDARY-CONFIRMED"
+      marker "4C-42-OUTCOME=NEXT-STARTUP-BOUNDARY-CONFIRMED"
+      marker "4C-42=PASS/NEXT-BOUNDARY-CONFIRMED"
     else
-      marker "4C-41-OUTCOME=POST-TUN-LIFETIME-STABLE"
+      marker "4C-42-OUTCOME=POST-TUN-LIFETIME-STABLE"
       marker "TARGET-LIFETIME-BLOCKER=GONE"
-      marker "4C-41=PASS/POST-TUN-LIFETIME-STABLE"
+      marker "4C-42=PASS/POST-TUN-LIFETIME-STABLE"
     fi
   fi
   marker "4C-38=PROVEN/PRIMARY-BOUNDARY-ESTABLISHED"
@@ -2946,6 +3017,7 @@ else
   marker "4C-39=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-40=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-41=INCOMPLETE/ORDER_NOT_ESTABLISHED"
+  marker "4C-42=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   POSTTUN_NOT_ESTABLISHED=1
 fi
 
@@ -4623,9 +4695,15 @@ if [ "$I9_OK" = 1 ]; then
   # phase INCOMPLETE (no guessing).
   # A still-present old boundary is a hard phase failure (the grant
   # demonstrably did not take effect); it outranks the cross-op
-  # INCOMPLETE. All three standing gone-gates apply: the 4C-41 add_name
-  # boundary (the phase's own grant), the 4C-40 write boundary and the
-  # 4C-39 mounton boundary (the standing regression guards).
+  # INCOMPLETE. All four standing gone-gates apply: the 4C-42 create
+  # boundary (the phase's own grant), the 4C-41 add_name, the 4C-40
+  # write and the 4C-39 mounton boundaries (the standing regression
+  # guards).
+  if [ "${POSTTUN_OLD_CREATE_PRESENT:-0}" = 1 ]; then
+    marker "BLOCKER=the 4C-42 create grant did not remove the old rootlesskit_t -> tmp_t:dir create boundary (see 53-posttun-verdict.txt)"
+    finish FAIL
+    exit 0
+  fi
   if [ "${POSTTUN_OLD_ADDNAME_PRESENT:-0}" = 1 ]; then
     marker "BLOCKER=the 4C-41 add_name grant did not remove the old rootlesskit_t -> tmp_t:dir add_name boundary (see 53-posttun-verdict.txt)"
     finish FAIL
