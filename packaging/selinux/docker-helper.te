@@ -90,6 +90,7 @@ module docker_helper 1.2;
 		type sysctl_net_t;
 		type sysctl_t;
 		type kernel_t;
+		type root_t;
 		type setfiles_exec_t;
 		type selinux_config_t;
 		type default_context_t;
@@ -1381,6 +1382,29 @@ allowxperm docker_helper_rootlesskit_t tun_tap_device_t:chr_file ioctl { 0x54ca 
 # boundary, and cross-operation namespace targeting stays an open
 # concurrency/security gate before the Release GO.
 allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind getattr write nlmsg_read read nlmsg_write };
+
+# Root mount-propagation mounton (P5-S2 Phase 4C-39): the rootlesskit
+# child's mount-namespace setup issues mount("none", "/", ..., MS_REC|
+# MS_SLAVE) right after its network driver reports completion —
+# rootlesskit's "share mount point: /" step. Live enforcing boundary,
+# canonical 4C-38 run 37063277489, record at trace-ts 276.470125:
+# requested=0x10000 denied=0x10000 audited=0x10000 result=-13 (EACCES)
+# for scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+# tcontext=system_u:object_r:root_t:s0 tclass=dir, 39µs before the
+# holder's exit(1); the harness's post-TUN causal proof named this
+# record the primary boundary (NO other SELinux decision preceded the
+# failing exit), and rootlesskit's own stderr carries the direct
+# failure "[rootlesskit:child ] error: failed to share mount point: /:
+# permission denied". The symbolic decode is the system's own
+# selinuxfs numeric value: /sys/fs/selinux/class/dir/perms/mounton
+# carries the bit index whose mask is 0x10000 (the 4C-38 relabelto
+# reading was a decode-from-listing-order error — dir:relabelto is
+# 0x100 — corrected by the numeric decoder). The grant is exactly ONE
+# permission on the one evidenced tuple: no relabelto (the misread must
+# never become policy), no mount/remount, no setattr/write/create/
+# search or any other dir permission, no filesystem-class grant, no
+# second rule, no other subject.
+allow docker_helper_rootlesskit_t root_t:dir mounton;
 
 # --- docker_helper_slirp4netns_t: the rootlesskit user-network helper domain (P5-S2) ---
 #
