@@ -1052,6 +1052,35 @@ PREFLIGHT_OK=1
     PREFLIGHT_OK=0
   fi
 
+  echo "=== flow tmpfs superblock identity (the 4C-45 grant: the module's own rootlesskit -> tmpfs_t contribution must be exactly the one bare filesystem-mount rule — the copy-up tmpfs mount over /etc creates a NEW tmpfs superblock whose OWN filesystem-class check gates its creation; the class is the evidence — filesystem, never a dir permission; tmpfs_t:s0 is a GLOBAL label, so this grant is NOT operation-scoped — the nsfs_t scope shape; the standing tmpfs_t:filesystem surface is RECORDED, not asserted; every filesystem permission beyond the standing surface and the granted mount is a STOP; the .ro/MS_MOVE/scan surfaces stay ungranted) ==="
+  echo "--- raw effective inventory (rootlesskit -> tmpfs_t, every class; base-policy/attribute expansions recorded, not asserted):"
+  RK_TMPFS_RAW="$(sesearch --allow -s docker_helper_rootlesskit_t -t tmpfs_t /sys/fs/selinux/policy 2>/dev/null || true)"
+  printf '%s\n' "${RK_TMPFS_RAW:-(none)}"
+  echo "--- CONCRETE module contribution (source must be docker_helper_rootlesskit_t; must be exactly one bare filesystem mount rule):"
+  RK_TMPFS_CONCRETE="$(printf '%s\n' "$RK_TMPFS_RAW" | awk '$2 == "docker_helper_rootlesskit_t"' || true)"
+  printf '%s\n' "${RK_TMPFS_CONCRETE:-(none)}"
+  echo "--- the base policy's standing tmpfs_t:filesystem surface (the effective inventory minus the granted mount — the effective_before record; attribute-derived, recorded not asserted):"
+  RK_TMPFS_STANDING="$(printf '%s\n' "$RK_TMPFS_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:[^ ]* \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | grep -av '^mount$' | sort -u | tr '\n' ' ' || true)"
+  printf '%s\n' "${RK_TMPFS_STANDING:-(none — the standing surface is empty)}"
+  RK_TMPFS_FS_UNION="$(printf '%s\n' "$RK_TMPFS_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:filesystem \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
+  echo "effective filesystem perm union: ${RK_TMPFS_FS_UNION:-(none)}"
+  echo "--- the forbidden-fs-perms negative (everything beyond the base policy's standing surface and the granted mount must be absent from the whole effective filesystem surface; the standing set is this run's own inventory fact; the remount/unmount/.ro hook surfaces must not ride):"
+  RK_TMPFS_FORBIDDEN="$(printf '%s\n' "$RK_TMPFS_FS_UNION" | tr ' ' '\n' | grep -avE "^(mount|$(printf '%s' "$RK_TMPFS_STANDING" | tr ' ' '|'))$" || true)"
+  printf '%s\n' "${RK_TMPFS_FORBIDDEN:-(none — no extra filesystem permission)}"
+  RK_TMPFS_OK=0
+  if [ "$(printf '%s\n' "$RK_TMPFS_CONCRETE" | grep -ac . || true)" = 1 ] \
+    && printf '%s\n' "$RK_TMPFS_CONCRETE" | grep -aqx 'allow docker_helper_rootlesskit_t tmpfs_t:filesystem mount;' \
+    && printf '%s\n' "$RK_TMPFS_FS_UNION" | tr ' ' '\n' | grep -aqx 'mount' \
+    && [ -z "$RK_TMPFS_FORBIDDEN" ]; then
+    RK_TMPFS_OK=1
+  fi
+  if [ "$RK_TMPFS_OK" = 1 ]; then
+    echo "PASS: flow tmpfs superblock identity (module contribution exactly { mount }; effective filesystem union = the base policy's standing surface + mount — the standing residual recorded above; no module-borne permission beyond mount)"
+  else
+    echo "FAIL: flow tmpfs superblock identity (concrete-rules=$(printf '%s\n' "$RK_TMPFS_CONCRETE" | grep -ac . || true) union=${RK_TMPFS_FS_UNION:-(none)})"
+    PREFLIGHT_OK=0
+  fi
+
   echo "=== netlink-route send+lookup+receive+mutation identity (the 4C-22 composition: exactly { create setopt bind getattr write nlmsg_read read nlmsg_write }, no other socket permission, no capability surface) ==="
   echo "--- allow rules on netlink_route_socket (expected: the rootlesskit child's create+setopt+bind+getattr+write+nlmsg_read only; attribute-generic base-policy rules recorded, not asserted):"
   sesearch --allow -c netlink_route_socket /sys/fs/selinux/policy || true
@@ -2960,6 +2989,31 @@ POSTTUN_BND_SYMBOLIC=""
     echo "OLD-ETCMOUNTON-BOUNDARY: GONE (no rootlesskit_t -> etc_t:dir mounton (0x10000) decision in the window's trace span)"
   fi
 
+  # 4C-45: the SAME contract for the phase's own grant — the OLD primary
+  # boundary (docker_helper_rootlesskit_t -> tmpfs_t:filesystem, denied
+  # mask 0x1 = mount, bit 0 of the filesystem class's common perms; the
+  # canonical 4C-44 run's record inside the same
+  # sys_mount("none", "/etc", "tmpfs", 0) window) must be GONE anywhere
+  # in the window's trace span. The mask anchor is pinned to the literal
+  # 0x1 followed by a non-hex/edge (0x10/0x100/0x10000-class masks are
+  # different perms); the tclass=filesystem anchor separates this gate
+  # from any file-class ioctl mask (0x1 on file/dir is a different
+  # class's decision). A record here means the 4C-45 grant did not take
+  # effect on the loaded policy: STOP and report the actual behavior
+  # (no rule widening).
+  POSTTUN_OLD_FSMOUNT_PRESENT="$(grep -a 'selinux_audited:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
+    | grep -a 'scontext=system_u:system_r:docker_helper_rootlesskit_t' \
+    | grep -aE 'tcontext=system_u:object_r:tmpfs_t:s0([ \t]|$)' \
+    | grep -a 'tclass=filesystem' \
+    | grep -aE 'denied=0x1([^0-9a-fA-F]|$)' || true)"
+  if [ -n "$POSTTUN_OLD_FSMOUNT_PRESENT" ]; then
+    echo "OLD-FSMOUNT-BOUNDARY: STILL-PRESENT — the 4C-45 tmpfs filesystem mount grant did not take effect (STOP; no rule widening):"
+    printf '%s\n' "$POSTTUN_OLD_FSMOUNT_PRESENT"
+    POSTTUN_OLD_FSMOUNT_PRESENT=1
+  else
+    echo "OLD-FSMOUNT-BOUNDARY: GONE (no rootlesskit_t -> tmpfs_t:filesystem mount (0x1) decision in the window's trace span)"
+  fi
+
   # The 4C-42 milestone: a flow-domain mkdirat AFTER T0 returning 0x0
   # means the copy-up temp dir was CREATED — the kernel-stated type of
   # the create hook (tmp_t) now carries the object. Recorded as the
@@ -3045,8 +3099,8 @@ POSTTUN_BND_SYMBOLIC=""
   # "tmpfs", flags 0, source "none"), paired with ITS OWN exit — a 0x0
   # ret makes ROOTLESSKIT-COPYUP-TMPFS-MOUNT=OK. The exact syscall
   # SHAPE keys the gate (fstype+target), not the mount-call order; the
-  # phase's PASS needs B ok AND C ok AND the etc_t:dir mounton gate
-  # clean.
+  # phase's PASS needs B ok AND C ok AND the tmpfs_t:filesystem mount
+  # gate clean (the 4C-45 grant's own boundary must not reappear).
   POSTTUN_TMPFSMOUNT_PAIR="$(awk -v t0="$POSTTUN_T0_TRACE_TS" '
     /sys_mount\(dev_name:/ && t0 != "" {
       ts = $4; sub(/:$/, "", ts)
@@ -3238,6 +3292,22 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
       marker "4C-44=PASS/POST-TUN-LIFETIME-STABLE"
     fi
   fi
+  if [ "$POSTTUN_OLD_FSMOUNT_PRESENT" = 1 ]; then
+    marker "4C-45-OLD-FSMOUNT-BOUNDARY=STILL-PRESENT"
+    marker "4C-45=INCOMPLETE/GRANT-DID-NOT-TAKE-EFFECT"
+  else
+    marker "4C-45-OLD-FSMOUNT-BOUNDARY=GONE"
+    [ "$POSTTUN_TMPFSMOUNT_OK" = 1 ] && marker "ROOTLESSKIT-COPYUP-TMPFS-MOUNT=OK"
+    if [ -n "$POSTTUN_FIRST_FAIL_PID" ]; then
+      marker "4C-45-OUTCOME=NEXT-STARTUP-BOUNDARY-CONFIRMED"
+      marker "4C-45=PASS/NEXT-BOUNDARY-CONFIRMED"
+    else
+      marker "4C-45-OUTCOME=POST-TUN-LIFETIME-STABLE"
+      marker "TARGET-LIFETIME-BLOCKER=GONE"
+      marker "POST-TUN-LIFETIME=STABLE"
+      marker "4C-45=PASS/POST-TUN-LIFETIME-STABLE"
+    fi
+  fi
   marker "4C-38=PROVEN/PRIMARY-BOUNDARY-ESTABLISHED"
 else
   marker "4C-38=INCOMPLETE/ORDER_NOT_ESTABLISHED"
@@ -3247,6 +3317,7 @@ else
   marker "4C-42=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-43=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-44=INCOMPLETE/ORDER_NOT_ESTABLISHED"
+  marker "4C-45=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   POSTTUN_NOT_ESTABLISHED=1
 fi
 
@@ -4924,10 +4995,16 @@ if [ "$I9_OK" = 1 ]; then
   # phase INCOMPLETE (no guessing).
   # A still-present old boundary is a hard phase failure (the grant
   # demonstrably did not take effect); it outranks the cross-op
-  # INCOMPLETE. All six standing gone-gates apply: the 4C-44 etc
-  # mounton boundary (the phase's own grant), the 4C-43 tmp mounton,
-  # the 4C-42 create, the 4C-41 add_name, the 4C-40 write and the
-  # 4C-39 mounton boundaries (the standing regression guards).
+  # INCOMPLETE. All seven standing gone-gates apply: the 4C-45 tmpfs
+  # filesystem-mount boundary (the phase's own grant), the 4C-44 etc
+  # mounton boundary, the 4C-43 tmp mounton, the 4C-42 create, the
+  # 4C-41 add_name, the 4C-40 write and the 4C-39 mounton boundaries
+  # (the standing regression guards).
+  if [ "${POSTTUN_OLD_FSMOUNT_PRESENT:-0}" = 1 ]; then
+    marker "BLOCKER=the 4C-45 tmpfs filesystem mount grant did not remove the old rootlesskit_t -> tmpfs_t:filesystem mount boundary (see 53-posttun-verdict.txt)"
+    finish FAIL
+    exit 0
+  fi
   if [ "${POSTTUN_OLD_ETCMOUNTON_PRESENT:-0}" = 1 ]; then
     marker "BLOCKER=the 4C-44 etc mounton grant did not remove the old rootlesskit_t -> etc_t:dir mounton boundary (see 53-posttun-verdict.txt)"
     finish FAIL
