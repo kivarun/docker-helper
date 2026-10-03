@@ -1023,6 +1023,35 @@ PREFLIGHT_OK=1
     PREFLIGHT_OK=0
   fi
 
+  echo "=== flow etc copy-up identity (the 4C-44 grant: the module's own rootlesskit -> etc_t contribution must be exactly the one bare dir-mounton rule — the copy-up tmpfs mount over /etc's OWN distro label etc_t, a NEW evidenced pair distinct from root_t and tmp_t; the standing etc_t surface is ATTRIBUTE-derived and RECORDED, not asserted; every dir permission beyond the standing { getattr open search } and the granted mounton is a STOP; the .ro/scan surfaces stay ungranted) ==="
+  echo "--- raw effective inventory (rootlesskit -> etc_t, every class; base-policy/attribute expansions recorded, not asserted):"
+  RK_ETC_RAW="$(sesearch --allow -s docker_helper_rootlesskit_t -t etc_t /sys/fs/selinux/policy 2>/dev/null || true)"
+  printf '%s\n' "${RK_ETC_RAW:-(none)}"
+  echo "--- CONCRETE module contribution (source must be docker_helper_rootlesskit_t; must be exactly one bare dir mounton rule):"
+  RK_ETC_CONCRETE="$(printf '%s\n' "$RK_ETC_RAW" | awk '$2 == "docker_helper_rootlesskit_t"' || true)"
+  printf '%s\n' "${RK_ETC_CONCRETE:-(none)}"
+  echo "--- the base policy's standing etc_t surface (the effective inventory minus the granted mounton — the effective_before record; attribute-derived, recorded not asserted):"
+  RK_ETC_STANDING="$(printf '%s\n' "$RK_ETC_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:[^ ]* \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | grep -av '^mounton$' | sort -u | tr '\n' ' ' || true)"
+  printf '%s\n' "${RK_ETC_STANDING:-(none — the standing surface is empty)}"
+  RK_ETC_DIR_UNION="$(printf '%s\n' "$RK_ETC_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:dir \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
+  echo "effective dir perm union: ${RK_ETC_DIR_UNION:-(none)}"
+  echo "--- the forbidden-dir-perms negative (everything beyond the base policy's standing { getattr open search } and the granted mounton must be absent from the whole effective dir surface; the standing set is this run's own inventory fact; the .ro/scan surfaces must not ride):"
+  RK_ETC_FORBIDDEN="$(printf '%s\n' "$RK_ETC_DIR_UNION" | tr ' ' '\n' | grep -avE '^(getattr|open|search|mounton)$' || true)"
+  printf '%s\n' "${RK_ETC_FORBIDDEN:-(none — no extra dir permission)}"
+  RK_ETC_OK=0
+  if [ "$(printf '%s\n' "$RK_ETC_CONCRETE" | grep -ac . || true)" = 1 ] \
+    && printf '%s\n' "$RK_ETC_CONCRETE" | grep -aqx 'allow docker_helper_rootlesskit_t etc_t:dir mounton;' \
+    && printf '%s\n' "$RK_ETC_DIR_UNION" | tr ' ' '\n' | grep -aqx 'mounton' \
+    && [ -z "$RK_ETC_FORBIDDEN" ]; then
+    RK_ETC_OK=1
+  fi
+  if [ "$RK_ETC_OK" = 1 ]; then
+    echo "PASS: flow etc copy-up identity (module contribution exactly { mounton }; effective dir union = the base policy's standing surface + mounton — the standing residual recorded above; no module-borne permission beyond mounton)"
+  else
+    echo "FAIL: flow etc copy-up identity (concrete-rules=$(printf '%s\n' "$RK_ETC_CONCRETE" | grep -ac . || true) union=${RK_ETC_DIR_UNION:-(none)})"
+    PREFLIGHT_OK=0
+  fi
+
   echo "=== netlink-route send+lookup+receive+mutation identity (the 4C-22 composition: exactly { create setopt bind getattr write nlmsg_read read nlmsg_write }, no other socket permission, no capability surface) ==="
   echo "--- allow rules on netlink_route_socket (expected: the rootlesskit child's create+setopt+bind+getattr+write+nlmsg_read only; attribute-generic base-policy rules recorded, not asserted):"
   sesearch --allow -c netlink_route_socket /sys/fs/selinux/policy || true
@@ -2416,22 +2445,22 @@ fi
 
 
 # ============================================================
-# 4C-38..4C-43: the post-TUN lifetime/readiness causal proof
+# 4C-38..4C-44: the post-TUN lifetime/readiness causal proof
 # ============================================================
 # The provisioning window's own operation is the subject: its TUN attach
 # is already proven (POST-TUN-T0 above; TUNSETIFF 0x54ca -> 0). This
 # verdict reconstructs the causal chain between the attach and the
 # operation's FIRST death from the kernel trace (fork/exit/signal/wait/
 # poll/read-write-close/mount/mkdir/execve), the post-TUN timeline (50),
-# the audit slice and the manager journal. The 4C-43 grant
-# (rootlesskit_t -> tmp_t:dir { write add_name create mounton }) must
-# have REMOVED the 4C-42 boundary AND made the copy-up bind mount
-# (mount("/etc", "/tmp/rootlesskit-b*", MS_BIND|MS_REC)) succeed —
-# mounton-absence without a successful syscall is not a PASS (§7);
-# the 4C-42/4C-41/4C-40/4C-39 grants must have stayed in effect (the
-# old create/add_name/write/root-mounton boundaries stay GONE — a
-# regression is a phase failure); the run's own decisions are classified
-# TEMPORALLY against the first failing SYSCALL exit (the 4C-42 report's
+# the audit slice and the manager journal. The 4C-44 grant
+# (rootlesskit_t -> etc_t:dir mounton) must have REMOVED the 4C-43
+# boundary AND made the copy-up tmpfs mount (mount("none", "/etc",
+# "tmpfs", 0)) succeed — the C milestone requires B ok AND C ok AND no
+# etc_t:dir mounton denial (mounton-absence without a successful
+# syscall is not a PASS); the 4C-43/4C-42/4C-41/4C-40/4C-39 grants must
+# have stayed in effect (the old boundaries stay GONE — a regression is
+# a phase failure); the run's own decisions are classified TEMPORALLY
+# against the first failing SYSCALL exit (the 4C-42 report's
 # correction: the RemoveAll cleanup-path denials of a failed launch sit
 # AFTER the failing syscall but BEFORE the terminal exit, so the old
 # exit-anchored classification mislabeled them STARTUP-CAUSAL; the
@@ -2443,8 +2472,9 @@ fi
 # nonzero flow-domain exit is the stable-lifetime outcome. The mkdirat
 # success is the ROOTLESSKIT-BIND0-CREATE milestone; the successful
 # MS_BIND|MS_REC mount("/etc" -> bind0) is the ROOTLESSKIT-BIND0-BIND-
-# MOUNT milestone. Nothing is granted in this phase beyond the 4C-43
-# mounton member of the existing tmp dir rule.
+# MOUNT milestone; the successful tmpfs mount over /etc is the
+# ROOTLESSKIT-COPYUP-TMPFS-MOUNT milestone. Nothing is granted in this
+# phase beyond the 4C-44 etc_t mounton rule itself.
 # The flow-domain comm set is the lifetime subject (rootlesskit parent +
 # child, slirp4netns parent + child, the uid-map shims, the payload).
 POSTTUN_FLOW_COMM_GREP='(rootlesskit|exe|slirp4netns|buildkitd|newuidmap|newgidmap)-[0-9]+ '
@@ -2483,7 +2513,7 @@ POSTTUN_NSTARTUP=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIMED=0
 POSTTUN_OLD_BOUNDARY_PRESENT=0
 POSTTUN_BND_SYMBOLIC=""
 {
-  echo "=== 4C-38..4C-43 post-TUN lifetime/readiness causal verdict (the 4C-43 run carries exactly the rootlesskit_t -> tmp_t:dir { write add_name create mounton } grant) ==="
+  echo "=== 4C-38..4C-44 post-TUN lifetime/readiness causal verdict (the 4C-44 run carries exactly the rootlesskit_t -> etc_t:dir mounton grant) ==="
   echo "POST-TUN-T0: ${POSTTUN_T0_EPOCH:-(not derived)}"
   echo "  derivation: trace-ts=$POSTTUN_T0_TRACE_TS attach-executor=${POSTTUN_ATTACH_WHO:-(none)} read-epoch=$POSTTUN_READ_EPOCH read-uptime=$POSTTUN_READ_UPTIME ring-last-ts=${POSTTUN_RING_LAST_TS:-(none)} clock-drift=${POSTTUN_CLOCK_DRIFT:-?}s"
   echo "--- the attach pair (the T0 anchor; the attach executor's own TUNSETIFF):"
@@ -2910,6 +2940,26 @@ POSTTUN_BND_SYMBOLIC=""
     echo "OLD-TMPMOUNTON-BOUNDARY: GONE (no rootlesskit_t -> tmp_t:dir mounton (0x10000) decision in the window's trace span)"
   fi
 
+  # 4C-44: the SAME contract for the phase's own grant — the OLD primary
+  # boundary (docker_helper_rootlesskit_t -> etc_t:dir, denied mask
+  # 0x10000 = mounton; the canonical 4C-43 run's record inside
+  # sys_mount("none", "/etc", "tmpfs", 0)) must be GONE anywhere in the
+  # window's trace span. A record here means the 4C-44 grant did not
+  # take effect on the loaded policy: STOP and report the actual
+  # behavior (no rule widening).
+  POSTTUN_OLD_ETCMOUNTON_PRESENT="$(grep -a 'selinux_audited:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
+    | grep -a 'scontext=system_u:system_r:docker_helper_rootlesskit_t' \
+    | grep -aE 'tcontext=system_u:object_r:etc_t:s0([ \t]|$)' \
+    | grep -a 'tclass=dir' \
+    | grep -aE 'denied=0x10000([^0-9a-fA-F]|$)' || true)"
+  if [ -n "$POSTTUN_OLD_ETCMOUNTON_PRESENT" ]; then
+    echo "OLD-ETCMOUNTON-BOUNDARY: STILL-PRESENT — the 4C-44 etc mounton grant did not take effect (STOP; no rule widening):"
+    printf '%s\n' "$POSTTUN_OLD_ETCMOUNTON_PRESENT"
+    POSTTUN_OLD_ETCMOUNTON_PRESENT=1
+  else
+    echo "OLD-ETCMOUNTON-BOUNDARY: GONE (no rootlesskit_t -> etc_t:dir mounton (0x10000) decision in the window's trace span)"
+  fi
+
   # The 4C-42 milestone: a flow-domain mkdirat AFTER T0 returning 0x0
   # means the copy-up temp dir was CREATED — the kernel-stated type of
   # the create hook (tmp_t) now carries the object. Recorded as the
@@ -2941,7 +2991,7 @@ POSTTUN_BND_SYMBOLIC=""
   # "/tmp/rootlesskit-b*", MS_BIND|MS_REC) — the 4C-43 grant's owner);
   # C = the tmpfs mount over the copy-up source (the NEXT stage, its
   # own live boundary); D = any other shape.
-  echo "--- the window's mount operations, shape-classified (A=propagation B=bind0-copy-up C=tmpfs D=other; enter lines carry source/target/fstype/flags):"
+  echo "--- the window's mount operations, shape-classified (A=propagation B=bind0-copy-up C=tmpfs-over-copy-up-source D=other-mount incl. MS_MOVE; enter lines carry source/target/fstype/flags):"
   awk -v t0="$POSTTUN_T0_TRACE_TS" '
     { ts = $4; sub(/:$/, "", ts)
       if (t0 == "" || ts + 0 <= t0 + 0) next
@@ -2954,7 +3004,7 @@ POSTTUN_BND_SYMBOLIC=""
           lab = "D(other-mount)"
           if ($0 ~ /"none"/ && $0 ~ /dir_name: [^,]*"\/"/ && $0 ~ /flags: 0x44000/) lab = "A(propagation)"
           else if ($0 ~ /"\/etc"/ && $0 ~ /"\/tmp\/rootlesskit-b/ && $0 ~ /flags: 0x5000/) lab = "B(bind0-copy-up)"
-          else if ($0 ~ /"tmpfs"/) lab = "C(tmpfs)"
+          else if ($0 ~ /type: [^,]*"tmpfs"/ && $0 ~ /dir_name: [^,]*"\/etc",/) lab = "C(tmpfs-over-/etc)"
           print lab " | " $0
         } else {
           print "    ret | " $0
@@ -2989,6 +3039,35 @@ POSTTUN_BND_SYMBOLIC=""
     echo "MILESTONE: ROOTLESSKIT-BIND0-BIND-MOUNT=NOT-REACHED (ret=${POSTTUN_BINDMOUNT_RET:-(the B-shaped mount was never recorded)}):"
     printf '%s\n' "${POSTTUN_BINDMOUNT_PAIR:-(the B-shaped mount pair was never recorded)}"
     POSTTUN_BINDMOUNT_OK=0
+  fi
+
+  # The C milestone: the flow-domain tmpfs mount OVER /etc (fstype
+  # "tmpfs", flags 0, source "none"), paired with ITS OWN exit — a 0x0
+  # ret makes ROOTLESSKIT-COPYUP-TMPFS-MOUNT=OK. The exact syscall
+  # SHAPE keys the gate (fstype+target), not the mount-call order; the
+  # phase's PASS needs B ok AND C ok AND the etc_t:dir mounton gate
+  # clean.
+  POSTTUN_TMPFSMOUNT_PAIR="$(awk -v t0="$POSTTUN_T0_TRACE_TS" '
+    /sys_mount\(dev_name:/ && t0 != "" {
+      ts = $4; sub(/:$/, "", ts)
+      if (ts + 0 > t0 + 0 && $0 ~ /type: [^,]*"tmpfs"/ && $0 ~ /dir_name: [^,]*"\/etc",/) {
+        pend = 1; pwho = $1; pline = $0; next
+      }
+      next
+    }
+    pend && /sys_mount -> / && $1 == pwho {
+      print pline; print $0; exit
+    }
+  ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true)"
+  POSTTUN_TMPFSMOUNT_RET="$(printf '%s\n' "$POSTTUN_TMPFSMOUNT_PAIR" | tail -1 | awk '{print $NF}' 2>/dev/null || true)"
+  if [ "$POSTTUN_TMPFSMOUNT_RET" = "0x0" ]; then
+    echo "MILESTONE: ROOTLESSKIT-COPYUP-TMPFS-MOUNT=OK — the copy-up tmpfs mount returned success:"
+    printf '%s\n' "$POSTTUN_TMPFSMOUNT_PAIR"
+    POSTTUN_TMPFSMOUNT_OK=1
+  else
+    echo "MILESTONE: ROOTLESSKIT-COPYUP-TMPFS-MOUNT=NOT-REACHED (ret=${POSTTUN_TMPFSMOUNT_RET:-(the C-shaped mount was never recorded)}):"
+    printf '%s\n' "${POSTTUN_TMPFSMOUNT_PAIR:-(the C-shaped mount pair was never recorded)}"
+    POSTTUN_TMPFSMOUNT_OK=0
   fi
   echo "--- the mountinfo probe at harvest (any process whose mount table still carries the bind0 mount point; best-effort — the holder's namespace dies with it):"
   for mp in /proc/[0-9]*/mountinfo; do
@@ -3142,13 +3221,21 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
   else
     marker "4C-43-OLD-TMPMOUNTON-BOUNDARY=GONE"
     [ "$POSTTUN_BINDMOUNT_OK" = 1 ] && marker "ROOTLESSKIT-BIND0-BIND-MOUNT=OK"
+    marker "4C-43=PASS/NEXT-BOUNDARY-CONFIRMED"
+  fi
+  if [ "$POSTTUN_OLD_ETCMOUNTON_PRESENT" = 1 ]; then
+    marker "4C-44-OLD-ETCMOUNTON-BOUNDARY=STILL-PRESENT"
+    marker "4C-44=INCOMPLETE/GRANT-DID-NOT-TAKE-EFFECT"
+  else
+    marker "4C-44-OLD-ETCMOUNTON-BOUNDARY=GONE"
+    [ "$POSTTUN_TMPFSMOUNT_OK" = 1 ] && marker "ROOTLESSKIT-COPYUP-TMPFS-MOUNT=OK"
     if [ -n "$POSTTUN_FIRST_FAIL_PID" ]; then
-      marker "4C-43-OUTCOME=NEXT-STARTUP-BOUNDARY-CONFIRMED"
-      marker "4C-43=PASS/NEXT-BOUNDARY-CONFIRMED"
+      marker "4C-44-OUTCOME=NEXT-STARTUP-BOUNDARY-CONFIRMED"
+      marker "4C-44=PASS/NEXT-BOUNDARY-CONFIRMED"
     else
-      marker "4C-43-OUTCOME=POST-TUN-LIFETIME-STABLE"
+      marker "4C-44-OUTCOME=POST-TUN-LIFETIME-STABLE"
       marker "TARGET-LIFETIME-BLOCKER=GONE"
-      marker "4C-43=PASS/POST-TUN-LIFETIME-STABLE"
+      marker "4C-44=PASS/POST-TUN-LIFETIME-STABLE"
     fi
   fi
   marker "4C-38=PROVEN/PRIMARY-BOUNDARY-ESTABLISHED"
@@ -3159,6 +3246,7 @@ else
   marker "4C-41=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-42=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-43=INCOMPLETE/ORDER_NOT_ESTABLISHED"
+  marker "4C-44=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   POSTTUN_NOT_ESTABLISHED=1
 fi
 
@@ -4836,10 +4924,15 @@ if [ "$I9_OK" = 1 ]; then
   # phase INCOMPLETE (no guessing).
   # A still-present old boundary is a hard phase failure (the grant
   # demonstrably did not take effect); it outranks the cross-op
-  # INCOMPLETE. All five standing gone-gates apply: the 4C-43 tmp
-  # mounton boundary (the phase's own grant), the 4C-42 create, the
-  # 4C-41 add_name, the 4C-40 write and the 4C-39 mounton boundaries
-  # (the standing regression guards).
+  # INCOMPLETE. All six standing gone-gates apply: the 4C-44 etc
+  # mounton boundary (the phase's own grant), the 4C-43 tmp mounton,
+  # the 4C-42 create, the 4C-41 add_name, the 4C-40 write and the
+  # 4C-39 mounton boundaries (the standing regression guards).
+  if [ "${POSTTUN_OLD_ETCMOUNTON_PRESENT:-0}" = 1 ]; then
+    marker "BLOCKER=the 4C-44 etc mounton grant did not remove the old rootlesskit_t -> etc_t:dir mounton boundary (see 53-posttun-verdict.txt)"
+    finish FAIL
+    exit 0
+  fi
   if [ "${POSTTUN_OLD_TMPMOUNTON_PRESENT:-0}" = 1 ]; then
     marker "BLOCKER=the 4C-43 mounton grant did not remove the old rootlesskit_t -> tmp_t:dir mounton boundary (see 53-posttun-verdict.txt)"
     finish FAIL
