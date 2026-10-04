@@ -2745,8 +2745,8 @@ func TestSELinuxPolicyRootlesskitRootMounton(t *testing.T) {
 			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t ") &&
 				strings.Contains(trimmed, ":dir ") && strings.Contains(trimmed, "mounton") &&
 				!strings.Contains(trimmed, " tmp_t:") && !strings.Contains(trimmed, " etc_t:") &&
-				!strings.Contains(trimmed, " tmpfs_t:"):
-				violations = append(violations, "the flow child's dir mounton authority is granted only on root_t (4C-39), tmp_t (the copy-up owner), etc_t (the tmpfs-mount owner) and tmpfs_t (the 4C-47 move-mount owner) — any other target is ungranted: "+trimmed)
+				!strings.Contains(trimmed, " tmpfs_t:") && !strings.Contains(trimmed, " cgroup_t:"):
+				violations = append(violations, "the flow child's dir mounton authority is granted only on root_t (4C-39), tmp_t (the copy-up owner), etc_t (the tmpfs-mount owner), tmpfs_t (the 4C-47 move-mount owner) and cgroup_t (the 4C-49 cgroup-preservation move owner) — any other target is ungranted: "+trimmed)
 			}
 		}
 		if count == 0 {
@@ -3596,6 +3596,171 @@ func TestSELinuxPolicyRootlesskitTmpfsSymlinkCreate(t *testing.T) {
 	} {
 		if len(symlinkCreateViolations(policy+"\n"+mut.rule)) == 0 {
 			t.Errorf("mutation %q must trip the rebuild-symlink invariants", mut.name)
+		}
+	}
+}
+
+// TestSELinuxPolicyRootlesskitCgroupMounton pins the cgroup preservation
+// move-mount's own grant: the rootlesskit child domain's move of its rksys
+// bind onto /sys/fs/cgroup (the canonical 4C-48 run's denial: the MS_MOVE
+// window's cgroup_t:dir mounton, mask 0x10000 = bit 16 of the kernel's
+// static dir classmap, 12us before the failing exit). This is a NEW
+// global target type pair with its own security scope, so the grant gets
+// its own rule — never folded into the module's own standing cgroup_t:dir
+// { search } rule (the P5-S1 cgroup2-root-walk contribution) or into any
+// other mounton surface. cgroup_t:s0 is a global label and mounton is
+// path-insensitive TE authority; the confinement of the observed mount
+// side effect is the production holder's own mount namespace (the 4C-49
+// gate's live proof), not this rule.
+func TestSELinuxPolicyRootlesskitCgroupMounton(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	pinnedCgroupMounton := "allow docker_helper_rootlesskit_t cgroup_t:dir mounton;"
+	pinnedCgroupSearch := "allow docker_helper_rootlesskit_t cgroup_t:dir { search };"
+	pinnedCgroupFilePair := "allow docker_helper_rootlesskit_t cgroup_t:file { read open };"
+	if !strings.Contains(policy, pinnedCgroupMounton) {
+		t.Fatalf("the rootlesskit child domain's cgroup move-mount surface must be exact: %q", pinnedCgroupMounton)
+	}
+	if !strings.Contains(policy, pinnedCgroupSearch) {
+		t.Fatalf("the module's own standing cgroup2-root-walk rule must stay intact: %q", pinnedCgroupSearch)
+	}
+	if !strings.Contains(policy, pinnedCgroupFilePair) {
+		t.Fatalf("the module's own standing cgroup file pair must stay intact: %q", pinnedCgroupFilePair)
+	}
+	// cgroupMountonViolations returns one violation per line of module
+	// text that breaks the grant invariants: exactly one allow rule may
+	// name docker_helper_rootlesskit_t -> cgroup_t:dir with the mounton
+	// permission, in the exact bare shape (no brace form, no split
+	// rules, no second mounton-naming rule — write/add_name/create/
+	// remove_name/rmdir/rename/setattr/relabel* are distinct hooks);
+	// no other subject may receive the cgroup_t:dir MOUNTON shape (the
+	// module's own standing cgroup search/read surfaces for the daemon
+	// and the builder are prior live-evidenced contributions, not part
+	// of this grant); the standing search rule and the file pair must
+	// each appear exactly once; no cgroup_t:file permission beyond the
+	// standing pairs and no cgroup_t:filesystem surface may ride (the
+	// class confusion).
+	cgroupMountonViolations := func(text string) []string {
+		var violations []string
+		mountonCount := 0
+		searchCount := 0
+		fileCount := 0
+		for _, line := range strings.Split(text, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			switch {
+			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t cgroup_t:dir"):
+				if strings.Contains(trimmed, "mounton") {
+					mountonCount++
+					if trimmed != pinnedCgroupMounton {
+						violations = append(violations, "the cgroup move-mount grant must be the exact bare mounton shape (no brace form, no split rules, no second mounton permission — write/add_name/create/remove_name/rmdir/rename/setattr/relabel* are distinct hooks): "+trimmed)
+					}
+				} else if trimmed == pinnedCgroupSearch {
+					searchCount++
+				} else {
+					violations = append(violations, "the standing cgroup2-root-walk rule is the only other cgroup_t:dir surface this module may carry: "+trimmed)
+				}
+			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, " cgroup_t:dir") && strings.Contains(trimmed, "mounton"):
+				violations = append(violations, "the cgroup_t:dir mounton shape is unique to the rootlesskit child domain's pinned grant: "+trimmed)
+			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t cgroup_t:file"):
+				fileCount++
+				if trimmed != pinnedCgroupFilePair {
+					violations = append(violations, "the standing cgroup file pair { read open } is the module's only cgroup_t:file surface for the rootlesskit child: "+trimmed)
+				}
+			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, " cgroup_t:file") && strings.Contains(trimmed, "mounton"):
+				violations = append(violations, "no cgroup_t:file mounton shape may exist for any subject: "+trimmed)
+			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, " cgroup_t:filesystem"):
+				violations = append(violations, "the class confusion is forbidden — the filesystem class surface of cgroup_t (mount/remount/unmount) is not this grant: "+trimmed)
+			}
+		}
+		if mountonCount == 0 {
+			violations = append(violations, "the cgroup move-mount grant (rootlesskit_t -> cgroup_t:dir mounton) is missing")
+		} else if mountonCount > 1 {
+			violations = append(violations, fmt.Sprintf("exactly one cgroup_t:dir mounton grant may exist for the rootlesskit child domain, found %d", mountonCount))
+		}
+		if searchCount != 1 {
+			violations = append(violations, fmt.Sprintf("the module's own standing cgroup2-root-walk rule must appear exactly once, found %d", searchCount))
+		}
+		if fileCount != 1 {
+			violations = append(violations, fmt.Sprintf("the module's own standing cgroup file pair must appear exactly once, found %d", fileCount))
+		}
+		return violations
+	}
+	if violations := cgroupMountonViolations(policy); len(violations) > 0 {
+		t.Errorf("the committed policy violates the cgroup move-mount invariants: %v", violations)
+	}
+	// The replacement regressions: each replacement must APPLY and must
+	// actually trip the invariants.
+	for _, regressed := range []struct {
+		name string
+		rule string
+	}{
+		{"missing whole rule", ""},
+		{"missing mounton (write-only shape)", "allow docker_helper_rootlesskit_t cgroup_t:dir write;"},
+		{"write instead of mounton", "allow docker_helper_rootlesskit_t cgroup_t:dir write;"},
+		{"relabelto instead of mounton", "allow docker_helper_rootlesskit_t cgroup_t:dir relabelto;"},
+		{"create instead of mounton", "allow docker_helper_rootlesskit_t cgroup_t:dir create;"},
+		{"setattr instead of mounton", "allow docker_helper_rootlesskit_t cgroup_t:dir setattr;"},
+		{"mounton relabelto brace set", "allow docker_helper_rootlesskit_t cgroup_t:dir { mounton relabelto };"},
+		{"mounton write brace set", "allow docker_helper_rootlesskit_t cgroup_t:dir { mounton write };"},
+		{"mounton create brace set", "allow docker_helper_rootlesskit_t cgroup_t:dir { mounton create };"},
+		{"duplicate identical rule", pinnedCgroupMounton + "\n" + pinnedCgroupMounton},
+		{"parallel mounton rule (brace form)", pinnedCgroupMounton + "\nallow docker_helper_rootlesskit_t cgroup_t:dir { mounton };"},
+		{"equivalent brace-single-perm shape", "allow docker_helper_rootlesskit_t cgroup_t:dir { mounton };"},
+		{"wrong class (cgroup_t:filesystem mount)", "allow docker_helper_rootlesskit_t cgroup_t:filesystem mount;"},
+		{"wrong class (cgroup_t:file mounton)", "allow docker_helper_rootlesskit_t cgroup_t:file mounton;"},
+		{"wrong target type (root_t)", "allow docker_helper_rootlesskit_t root_t:dir mounton;"},
+		{"wrong target type (tmp_t)", "allow docker_helper_rootlesskit_t tmp_t:dir mounton;"},
+		{"wrong target type (etc_t)", "allow docker_helper_rootlesskit_t etc_t:dir mounton;"},
+		{"wrong target type (tmpfs_t)", "allow docker_helper_rootlesskit_t tmpfs_t:dir mounton;"},
+	} {
+		mutated := strings.Replace(policy, pinnedCgroupMounton, regressed.rule, 1)
+		applied := func() bool {
+			if regressed.rule == "" {
+				return !strings.Contains(mutated, pinnedCgroupMounton)
+			}
+			return strings.Contains(mutated, regressed.rule)
+		}
+		if !applied() {
+			t.Errorf("the cgroup move-mount regression %q was not applied", regressed.name)
+			continue
+		}
+		if len(cgroupMountonViolations(mutated)) == 0 {
+			t.Errorf("the cgroup move-mount regression %q must fail the cgroup move-mount invariants", regressed.name)
+		}
+	}
+	// The widening sweep: { mounton <X> } for every other dir permission
+	// must fail the invariants in every case.
+	for _, extra := range []string{
+		"read", "write", "getattr", "setattr", "lock", "open", "append",
+		"map", "execmod", "audit_access", "execute", "reparent", "create",
+		"rmdir", "add_name", "remove_name", "rename", "relabelfrom",
+		"relabelto", "search", "watch", "audit",
+	} {
+		mutated := strings.Replace(policy, pinnedCgroupMounton,
+			fmt.Sprintf("allow docker_helper_rootlesskit_t cgroup_t:dir { mounton %s };", extra), 1)
+		if !strings.Contains(mutated, fmt.Sprintf("allow docker_helper_rootlesskit_t cgroup_t:dir { mounton %s };", extra)) {
+			t.Errorf("the cgroup move-mount widening +%s was not applied", extra)
+			continue
+		}
+		if len(cgroupMountonViolations(mutated)) == 0 {
+			t.Errorf("the cgroup move-mount widening +%s must fail the cgroup move-mount invariants", extra)
+		}
+	}
+	// The subject regressions: no other domain may gain cgroup_t dir
+	// authority, appended beside the real grant.
+	for _, mut := range []struct {
+		name string
+		rule string
+	}{
+		{"cgroup dir mounton for the manager", "allow docker_helper_builder_t cgroup_t:dir mounton;"},
+		{"cgroup dir mounton for the launcher", "allow docker_helper_builder_launcher_t cgroup_t:dir mounton;"},
+		{"cgroup dir mounton for the network helper", "allow docker_helper_slirp4netns_t cgroup_t:dir mounton;"},
+		{"cgroup dir mounton for the daemon", "allow docker_helper_t cgroup_t:dir mounton;"},
+	} {
+		if len(cgroupMountonViolations(policy+"\n"+mut.rule)) == 0 {
+			t.Errorf("mutation %q must trip the cgroup move-mount invariants", mut.name)
 		}
 	}
 }
