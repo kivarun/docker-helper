@@ -2048,8 +2048,14 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
       GPID="${GP#/proc/}"
       GCTX=""
       IFS= read -r GCTX < "$GP/attr/current" 2>/dev/null || true
+      # The context is the FULL kernel-issued string (user:role:type:
+      # level), so the patterns must match it as a substring — a bare
+      # docker_helper_rootlesskit_t:* pattern would demand the string
+      # START with the type (the canonical gate run's own lesson: the
+      # unstarred patterns matched nothing and the watcher recorded
+      # zero holders).
       case "$GCTX" in
-        docker_helper_rootlesskit_t:*|docker_helper_slirp4netns_t:*) ;;
+        *docker_helper_rootlesskit_t:*|*docker_helper_slirp4netns_t:*) ;;
         *) continue ;;
       esac
       G_ALIVE=$(( G_ALIVE + 1 ))
