@@ -3094,19 +3094,31 @@ POSTTUN_BND_SYMBOLIC=""
         shp[sh]++
         cls = ""
         if (a != 0) {
-          owncand = ""; best = -1; ownclean = 0
+          owncand = ""; ownwho = ""; best = -1; ownclean = 0
           for (p = 1; p <= pc; p++) {
             if (pwho[p] != dwho) continue
             if (pets[p] + 0 > ts + 0 || pxts[p] + 0 < ts + 0) continue
-            if (pets[p] + 0 > best) { best = pets[p] + 0; owncand = pxts[p]; ownclean = pclean[p] }
+            if (pets[p] + 0 > best) { best = pets[p] + 0; owncand = pxts[p]; ownwho = pwho[p]; ownclean = pclean[p] }
           }
           if (ownclean) cls = "POST-FAILURE/CLEANUP"
           else if (owncand != "") {
-            for (j = 1; j <= m; j++) {
-              ii = pre[j]
-              if (ii == a) continue
-              split(cand[ii], g, "\t")
-              if (g[1] == owncand) { cls = "HANDLED/NON-TERMINAL"; break }
+            # The anchor own denial outranks the polling shape: a
+            # denial whose owning window IS the terminal anchor own
+            # syscall window is the anchor own boundary — never a
+            # polling shape, never a handled failure (the canonical
+            # 4C-49 run /etc/hosts openat: the recurring tmpfs_t
+            # lnk_file mask shape stole the anchor own denial into
+            # POLLING-ONLY and hid the boundary behind a
+            # SOFTWARE-LIFECYCLE verdict).
+            split(cand[a], g, "\t")
+            if (owncand == g[1] && ownwho == g[2]) cls = "STARTUP-CAUSAL"
+            else {
+              for (j = 1; j <= m; j++) {
+                ii = pre[j]
+                if (ii == a) continue
+                split(cand[ii], g, "\t")
+                if (g[1] == owncand) { cls = "HANDLED/NON-TERMINAL"; break }
+              }
             }
           }
         }
