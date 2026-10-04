@@ -1139,23 +1139,23 @@ PREFLIGHT_OK=1
     PREFLIGHT_OK=0
   fi
 
-  echo "=== flow cgroup preservation identity (the 4C-49 grant: the module's own rootlesskit -> cgroup_t:dir contribution must be the STANDING search rule + exactly one NEW bare dir-mounton rule — the rksys move-mount target /sys/fs/cgroup's OWN global label cgroup_t, a NEW evidenced pair whose confinement is proven by this run's own 4C-49 confinement-gate section (the holder's distinct mount namespace, the recursive-private propagation order, the exact-source/destination binding); cgroup_t:s0 is a GLOBAL label and mounton is path-insensitive TE authority — the grant is NOT operation-scoped and the cross-operation reachability gate stays OPEN; the standing surface: the module's OWN earlier cgroup2-root-walk pair { dir search } + { file read open } (recorded, prior contributions) plus the base policy's attribute-derived residual; every dir permission beyond the standing surface and the granted mounton is a STOP; the sysfs mount attempts stay UNGRANTED (the tolerated flow behavior)) ==="
+  echo "=== flow cgroup preservation identity (the 4C-49 grant: the module's own rootlesskit -> cgroup_t:dir contribution = the STANDING search rule widened by exactly the phase's bare mounton rule — the rksys move-mount target /sys/fs/cgroup's OWN global label cgroup_t, the evidenced pair whose confinement is proven by this run's own 4C-49 confinement-gate section (the holder's distinct mount namespace, the recursive-private propagation order, the exact-source/destination binding); cgroup_t:s0 is a GLOBAL label and mounton is path-insensitive TE authority — the grant is NOT operation-scoped and the cross-operation reachability gate stays OPEN; the LOADED-POLICY REPRESENTATION FACT: the kernel's policy avtab COALESCES the module's two same-key rules (the standing { dir search } and the phase's bare dir mounton) into ONE rule carrying the perm UNION — the canonical run 37190799297's own inventory proved the coalesced form; the SOURCE-level separation (two .te rules, two owners) stays the module source's contract, enforced by the committed owner tests, and is invisible in the loaded form; the loaded contract: the dir inventory = exactly ONE coalesced rule { mounton search } with NO other dir permission; the standing surface: the module's OWN earlier cgroup2-root-walk file pair { read open } (recorded, a prior contribution) plus the base policy's attribute-derived residual (the canonical run's inventory showed it EMPTY for dir); the sysfs mount attempts stay UNGRANTED (the tolerated flow behavior)) ==="
   echo "--- raw effective inventory (rootlesskit -> cgroup_t, every class; base-policy/attribute expansions recorded, not asserted):"
   RK_CGROUP_RAW="$(sesearch --allow -s docker_helper_rootlesskit_t -t cgroup_t /sys/fs/selinux/policy 2>/dev/null || true)"
   printf '%s\n' "${RK_CGROUP_RAW:-(none)}"
-  echo "--- CONCRETE module contribution (source must be docker_helper_rootlesskit_t AND class dir — cgroup_t may carry multiple owned rules across classes; the NEW mounton rule must be exactly one bare dir-mounton rule beside the standing bare search rule):"
+  echo "--- CONCRETE module contribution (source must be docker_helper_rootlesskit_t AND class dir — the loaded form carries the kernel's coalesced union of the module's standing search rule and the phase's mounton rule; must be exactly one coalesced { mounton search } rule):"
   RK_CGROUP_DIR_CONCRETE="$(printf '%s\n' "$RK_CGROUP_RAW" | awk '$2 == "docker_helper_rootlesskit_t" && $0 ~ /:dir/' || true)"
   printf '%s\n' "${RK_CGROUP_DIR_CONCRETE:-(none)}"
   RK_CGROUP_MOUNTON_RULES="$(printf '%s\n' "$RK_CGROUP_DIR_CONCRETE" | grep -a 'mounton' || true)"
-  echo "--- the NEW rule (the only concrete dir rule naming mounton — must be exactly one bare mounton rule):"
+  echo "--- the mounton-carrying rule (the only concrete dir rule naming mounton):"
   printf '%s\n' "${RK_CGROUP_MOUNTON_RULES:-(none)}"
   echo "--- the base policy's standing cgroup_t:dir surface (the effective inventory's NON-concrete rules — source other than docker_helper_rootlesskit_t, the attribute-derived standing; recorded not asserted):"
   RK_CGROUP_STANDING="$(printf '%s\n' "$RK_CGROUP_RAW" | grep -av '^allow docker_helper_rootlesskit_t ' | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:dir \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
   printf '%s\n' "${RK_CGROUP_STANDING:-(none — the attribute-derived standing surface is empty)}"
   RK_CGROUP_DIR_UNION="$(printf '%s\n' "$RK_CGROUP_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:dir \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
   echo "effective dir perm union: ${RK_CGROUP_DIR_UNION:-(none)}"
-  echo "--- the forbidden-dir-perms negative (everything beyond the standing surface and the granted mounton must be absent from the whole effective dir surface; the standing set is this run's own inventory fact):"
-  RK_CGROUP_FORBIDDEN="$(printf '%s\n' "$RK_CGROUP_DIR_UNION" | tr ' ' '\n' | grep -avE "^(mounton|$(printf '%s' "$RK_CGROUP_STANDING" | tr ' ' '|'))$" || true)"
+  echo "--- the forbidden-dir-perms negative (everything beyond the module's own declared dir pair { search mounton } and the attribute-derived standing must be absent from the whole effective dir surface; the standing set is this run's own inventory fact):"
+  RK_CGROUP_FORBIDDEN="$(printf '%s\n' "$RK_CGROUP_DIR_UNION" | tr ' ' '\n' | grep -avE "^(mounton|search|$(printf '%s' "$RK_CGROUP_STANDING" | tr ' ' '|'))$" || true)"
   printf '%s\n' "${RK_CGROUP_FORBIDDEN:-(none — no extra dir permission)}"
   echo "--- the non-dir class surfaces of cgroup_t (the standing file pair { read open } is the module's own prior contribution; the filesystem and any other class carry NO module rule — their surfaces are RECORDED, not asserted; the MOUNTON negative below is the class-confusion gate):"
   RK_CGROUP_FILE_CONCRETE="$(printf '%s\n' "$RK_CGROUP_RAW" | awk '$2 == "docker_helper_rootlesskit_t" && $0 ~ /:file/' || true)"
@@ -1170,18 +1170,19 @@ PREFLIGHT_OK=1
   RK_CGROUP_MOUNTON_CLASSES="$(printf '%s\n' "$RK_CGROUP_RAW" | grep -a 'mounton' | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:\([^ ]*\) .*/\1/p' | sort -u | tr '\n' ' ' || true)"
   echo "mounton-naming classes: ${RK_CGROUP_MOUNTON_CLASSES:-(none)}"
   RK_CGROUP_OK=0
-  if [ "$(printf '%s\n' "$RK_CGROUP_DIR_CONCRETE" | grep -ac . || true)" = 2 ] \
-    && printf '%s\n' "$RK_CGROUP_DIR_CONCRETE" | grep -aqx 'allow docker_helper_rootlesskit_t cgroup_t:dir mounton;' \
-    && printf '%s\n' "$RK_CGROUP_DIR_CONCRETE" | grep -aqx 'allow docker_helper_rootlesskit_t cgroup_t:dir search;' \
+  if [ "$(printf '%s\n' "$RK_CGROUP_DIR_CONCRETE" | grep -ac . || true)" = 1 ] \
+    && printf '%s\n' "$RK_CGROUP_DIR_CONCRETE" | grep -aqx 'allow docker_helper_rootlesskit_t cgroup_t:dir { mounton search };' \
     && printf '%s\n' "$RK_CGROUP_DIR_UNION" | tr ' ' '\n' | grep -aqx 'mounton' \
     && printf '%s\n' "$RK_CGROUP_DIR_UNION" | tr ' ' '\n' | grep -aqx 'search' \
+    && [ -z "$RK_CGROUP_FORBIDDEN" ] \
     && [ "$(printf '%s\n' "$RK_CGROUP_FILE_CONCRETE" | grep -ac . || true)" = 1 ] \
-    && printf '%s\n' "$RK_CGROUP_FILE_CONCRETE" | grep -aqx 'allow docker_helper_rootlesskit_t cgroup_t:file { read open };' \
-    && [ "$RK_CGROUP_MOUNTON_CLASSES" = "dir" ]; then
+    && printf '%s\n' "$RK_CGROUP_FILE_CONCRETE" | grep -aqx 'allow docker_helper_rootlesskit_t cgroup_t:file { open read };' \
+    && [ "$(printf '%s\n' "$RK_CGROUP_MOUNTON_CLASSES" | tr ' ' '\n' | grep -ac . || true)" = 1 ] \
+    && printf '%s\n' "$RK_CGROUP_MOUNTON_CLASSES" | tr ' ' '\n' | grep -aqx 'dir'; then
     RK_CGROUP_OK=1
   fi
   if [ "$RK_CGROUP_OK" = 1 ]; then
-    echo "PASS: flow cgroup preservation identity (the NEW contribution exactly { mounton } beside the module's own standing { search } rule; the module's own file pair { read open } unchanged; mounton named by no other class; the attribute-derived standing residual recorded above; no module-borne permission beyond mounton)"
+    echo "PASS: flow cgroup preservation identity (the loaded dir inventory = exactly ONE coalesced { mounton search } rule — the module's standing search + the phase's mounton, the source-level separation owned by the module source; the file pair { open read } unchanged; mounton named by no other class; the attribute standing empty per this run's own inventory; no module-borne permission beyond mounton)"
   else
     echo "FAIL: flow cgroup preservation identity (dir-rules=$(printf '%s\n' "$RK_CGROUP_DIR_CONCRETE" | grep -ac . || true) dir-union=${RK_CGROUP_DIR_UNION:-(none)} mounton-rules=$(printf '%s\n' "$RK_CGROUP_MOUNTON_RULES" | grep -ac . || true) file-rules=$(printf '%s\n' "${RK_CGROUP_FILE_CONCRETE:-(none)}" | grep -ac . || true) mounton-classes=${RK_CGROUP_MOUNTON_CLASSES:-(none)})"
     PREFLIGHT_OK=0
