@@ -1767,6 +1767,77 @@ allow docker_helper_rootlesskit_t tmpfs_t:dir { create mounton };
 # other subjects; the .fc and the module version stay untouched.
 allow docker_helper_rootlesskit_t tmpfs_t:lnk_file create;
 
+# The cgroup preservation move-mount (P5-S2 Phase 4C-49): with the whole
+# copy-up/rebuild chain granted (4C-39..4C-48), the canonical 4C-48 run
+# 37184659973 saw the flow's cgroup-preservation stage fail at ITS OWN
+# target-dir mediation. The stage: the holder creates /tmp/rksys<random>,
+# bind-mounts /sys/fs/cgroup onto it (MS_BIND|MS_REC -> 0x0) and then
+# moves that bind onto the exact /sys/fs/cgroup mountpoint:
+#   sys_mount(dev_name: "/tmp/rksys735648849",
+#   dir_name: "/sys/fs/cgroup", type: "", flags: 0x2000 (MS_MOVE),
+#   data: 0) -> 0xfffffffffffffff3
+# with the denial INSIDE the mount(2) window, trace-ts 215.569241
+# (12µs before the failing exit at trace-ts 215.569253; T0 = the attach
+# at trace-ts 215.562308):
+#   requested=0x10000 denied=0x10000 audited=0x10000 result=-13 (EACCES)
+#   scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+#   tcontext=system_u:object_r:cgroup_t:s0 tclass=dir
+# The flow's own stderr names the failure and the exit:
+#   "[rootlesskit:child ] error: failed to move mount point from
+#   /tmp/rksys... to /sys/fs/cgroup" -> exit_group(1).
+#
+# THE PERM IS THE LIVE-PROVEN PAIR — NOT ASSUMED: mounton = 0x10000
+# (bit 16 of the kernel's static dir classmap — the same dir:mounton
+# mediation the 4C-43/44/47 grants proved for tmp_t, etc_t and tmpfs_t,
+# now on the move-mount target's own label cgroup_t). This is a NEW
+# pair (a new global target type): it gets its OWN rule — never folded
+# into the standing cgroup_t:dir { search } rule (the module's own
+# P5-S1 cgroup2-root-walk contribution) or into any other mounton
+# surface.
+#
+# THE PRE-GRANT CONFINEMENT GATE (the 4C-49 phase contract) PASSED LIVE
+# before this rule was added — canonical gate run 37189443606, all
+# seven items: (A) the holder's mount-namespace identity was observed
+# live (the gate watcher's first-seen record, pid + starttime); (B)
+# that mount namespace mnt:[4026532271] differs from every manager-side
+# reference — the harness/init mnt:[4026531832] and the manager daemon
+# + rootlesskit parent mnt:[4026532272] (the daemon itself holds its
+# own mount namespace; three distinct values are involved); (C) the
+# propagation mount mount("none", "/", MS_REC|MS_PRIVATE) -> 0x0
+# belongs to the SAME trace pid that performs the cgroup move-mount;
+# (D) the move attempt is trace-clock-after the propagation success;
+# (E) the move's source /tmp/rksys* was bound FROM /sys/fs/cgroup by
+# the same holder flow earlier (the MS_BIND|MS_REC pair -> 0x0); (F)
+# the move's destination is exactly /sys/fs/cgroup; (G) the host-side
+# mount table (init and the harness namespace) is untouched across the
+# window (the before/after mountinfo diff is clean). The mount side
+# effect of this authority is therefore confined by the production
+# holder's own mount namespace and its recursive-private propagation
+# state — NOT by the TE rule itself.
+#
+# PROVEN / NOT PROVEN (the phase contract's own formulation):
+#   PROVEN: the production RootlessKit requires
+#   docker_helper_rootlesskit_t -> cgroup_t:dir mounton for
+#   namespace-local restoration of /sys/fs/cgroup.
+#   NOT PROVEN: that the type-wide cgroup_t mounton authority is
+#   cross-operation safe. SELinux authority remains type-wide for
+#   cgroup_t; the cross-operation gate stays OPEN/Critical and the
+#   Release GO stays CLOSED.
+#
+# Deliberately NOT granted: write/add_name/remove_name/create/rmdir/
+# rename/setattr/relabelto/relabelfrom or any other dir permission on
+# this pair (each a distinct hook; search/mounton are the only dir
+# surfaces this module carries), any cgroup_t:file permission beyond
+# the standing { read open } pair (the module's own P5-S1
+# contribution), any cgroup_t:filesystem surface (mount/remount/
+# unmount are distinct hooks), any sysfs_t permission (the tolerated
+# sysfs mount attempts — RootlessKit warning-logs their failures and
+# continues; the machinery classifies them HANDLED/NON-TERMINAL and
+# they receive NO authority), any nsfs/setns/process/capability
+# surface, other subjects; the .fc and the module version stay
+# untouched; no require delta (cgroup_t is already required).
+allow docker_helper_rootlesskit_t cgroup_t:dir mounton;
+
 # --- docker_helper_slirp4netns_t: the rootlesskit user-network helper domain (P5-S2) ---
 #
 # RootlessKit forks and execs the distro slirp4netns binary as its
