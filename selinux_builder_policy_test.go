@@ -3969,6 +3969,31 @@ func TestSELinuxPermissionKernelClassmapDecode(t *testing.T) {
 			},
 		},
 		{
+			// The kernel's lnk_file class: COMMON_FILE_PERMS (the
+			// same common layout as the file class — symlinks carry
+			// the full common perm set including read/write at the
+			// shared indices, even when those perms are rarely
+			// exercised on a symlink object). The 4C-48 asserted
+			// decodes pin the common neighbors for anti-shift:
+			// lnk_file:create = 0x8 — the canonical 4C-47 run
+			// (37153317223) recorded requested=0x8 denied=0x8
+			// tcontext=tmpfs_t:s0 tclass=lnk_file INSIDE the
+			// symlinkat(".ro2286969802/.pwd.lock" -> "/etc/.pwd.lock")
+			// window, 16µs before its failing exit — the symlink
+			// object's own creation check on the inherited parent
+			// label.
+			class: "lnk_file",
+			index: map[string]int{
+				"ioctl": 0, "read": 1, "write": 2, "create": 3, "getattr": 4,
+				"setattr": 5, "lock": 6, "relabelfrom": 7, "relabelto": 8,
+				"append": 9, "map": 10, "unlink": 11, "link": 12, "rename": 13,
+				"execute": 14, "quotaon": 15, "mounton": 16, "audit_access": 17,
+				"open": 18, "execmod": 19, "watch": 20, "watch_mount": 21,
+				"watch_sb": 22, "watch_with_perm": 23, "watch_reads": 24,
+				"watch_mountns": 25, "execute_no_trans": 26, "entrypoint": 27,
+			},
+		},
+		{
 			// The kernel's tun_socket class: COMMON_SOCK_PERMS +
 			// attach_queue.
 			class: "tun_socket",
@@ -4014,6 +4039,13 @@ func TestSELinuxPermissionKernelClassmapDecode(t *testing.T) {
 	one("tun_socket", 0x100, "relabelto")
 	one("file", 0x10, "getattr")
 	one("file", 0x4000, "execute")
+	// The 4C-48 lnk_file decodes: the common neighbors pinned for
+	// anti-shift (the symlink object's own creation check was the
+	// canonical 4C-47 run's boundary record).
+	one("lnk_file", 0x4, "write")
+	one("lnk_file", 0x8, "create")
+	one("lnk_file", 0x10, "getattr")
+	one("lnk_file", 0x20, "setattr")
 	// The 4C-41 boundary's full requested mask: the canonical 4C-40 run
 	// 37104707444's record (inside sys_mkdirat("/tmp/rootlesskit-b...",
 	// 0700)) carried requested=0x24000000 denied=0x4000000 — the
