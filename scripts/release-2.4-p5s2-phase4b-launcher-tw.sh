@@ -1944,6 +1944,24 @@ SAMPLER_PID=$!
   set +e
   declare -A FDSEEN=()
   obs_end=$(( $(date +%s) + 12 ))
+  # The 4C-49 confinement-gate identities (recorded once, before the
+  # START): the manager-side mount-namespace inodes — the holder's ns/mnt
+  # must DIFFER from each of them (gate item B): the harness subshell
+  # (this observer's own process), the init process, and the manager
+  # daemon (the flow's own parent chain root).
+  printf '%s MGR-IDENTITY pid=%s ctx=%s ns/mnt=%s ns/user=%s ns/net=%s\n' \
+    "$(date +%s.%N)" "$$" "$(tr -d '\0' < /proc/self/attr/current 2>/dev/null || echo none)" \
+    "$(readlink /proc/self/ns/mnt 2>/dev/null || echo none)" \
+    "$(readlink /proc/self/ns/user 2>/dev/null || echo none)" \
+    "$(readlink /proc/self/ns/net 2>/dev/null || echo none)"
+  printf '%s MGR-IDENTITY-INIT pid=1 ctx=%s ns/mnt=%s\n' \
+    "$(date +%s.%N)" "$(tr -d '\0' < /proc/1/attr/current 2>/dev/null || echo none)" \
+    "$(readlink /proc/1/ns/mnt 2>/dev/null || echo none)"
+  printf '%s MGR-IDENTITY-DAEMON pid=%s ctx=%s ns/mnt=%s ns/user=%s\n' \
+    "$(date +%s.%N)" "${MG_PID:-none}" \
+    "$(tr -d '\0' < "/proc/$MG_PID/attr/current" 2>/dev/null || echo none)" \
+    "$(readlink "/proc/$MG_PID/ns/mnt" 2>/dev/null || echo none)" \
+    "$(readlink "/proc/$MG_PID/ns/user" 2>/dev/null || echo none)"
   while [ "$(date +%s)" -lt "$obs_end" ]; do
     TS="$(date +%s.%N)"
     for P in /proc/[0-9]*; do
@@ -1959,13 +1977,19 @@ SAMPLER_PID=$!
       LCTX="$(tr -d '\0' < "$P/attr/current" 2>/dev/null || true)"
       LNSU="$(readlink "$P/ns/user" 2>/dev/null || true)"
       LNSN="$(readlink "$P/ns/net" 2>/dev/null || true)"
+      LNSM="$(readlink "$P/ns/mnt" 2>/dev/null || true)"
+      # The process start time (field 22 of /proc/<pid>/stat — the field
+      # AFTER the comm field's closing paren; the awk finds the
+      # paren-SUFFIXED comm field and takes its 20th successor) — the
+      # holder-identity fact for the 4C-49 confinement gate.
+      LSTIME="$(awk '{ for (i = 1; i <= NF; i++) if ($i ~ /\)$/) { print $(i+20); break } }' "$P/stat" 2>/dev/null || true)"
       LTAP=""
       while IFS= read -r DEVLINE; do
         case "$DEVLINE" in *"tap0:"*) LTAP="$DEVLINE"; break ;; esac
       done 2>/dev/null < "$P/net/dev" || true
       if [ -n "$LTAP" ]; then TAPST="present:$LTAP"; else TAPST=absent; fi
-      printf '%s pid=%s comm=%s state=%s ppid=%s ctx=%s ns/user=%s ns/net=%s tap0=%s\n' \
-        "$TS" "$PID" "$LC" "$S3" "$S4" "$LCTX" "${LNSU:-(none)}" "${LNSN:-(none)}" "$TAPST"
+      printf '%s pid=%s comm=%s state=%s ppid=%s ctx=%s ns/user=%s ns/net=%s ns/mnt=%s starttime=%s tap0=%s\n' \
+        "$TS" "$PID" "$LC" "$S3" "$S4" "$LCTX" "${LNSU:-(none)}" "${LNSN:-(none)}" "${LNSM:-(none)}" "${LSTIME:-(none)}" "$TAPST"
       if [ -z "${FDSEEN[$PID]:-}" ]; then
         FDSEEN[$PID]=1
         for F in "$P"/fd/[0-9]*; do
@@ -1980,6 +2004,118 @@ SAMPLER_PID=$!
 ) > "$EVIDENCE_DIR/50-posttun-timeline.txt" 2>&1 &
 POSTTUN_OBSERVER_PID=$!
 log "D: 4C-38 post-TUN lifetime observer armed (pid $POSTTUN_OBSERVER_PID)"
+
+# ---- 4C-49: the confinement-gate watcher. The post-TUN observer's
+# ---- observed cadence is ~90ms (its per-pid fork volume dominates the
+# ---- 20ms sleep) — the canonical 4C-48 run PROVED it can miss the
+# ---- mount-dancing holder entirely (the holder exe-3676 lived 47.5ms
+# ---- and appears in zero timeline lines). The gate needs the holder's
+# ---- mount-namespace inode and its mountinfo DURING the mount dance,
+# ---- so this watcher scans /proc FORKLESS at a ~2-4ms cadence (builtin
+# ---- reads only; the fifo-clock read -t paces without a fork; the
+# ---- expensive ns/mnt and mountinfo probes run only for the few
+# ---- flow-domain pids) and records:
+# ----   GATE-HOLDER-FIRST  the first-seen identity of every flow-domain
+# ----                      pid (pid, comm, ppid, ctx, ns/mnt, ns/user,
+# ----                      starttime — the gate's holder identity facts);
+# ----   GATE-NSMNT         each DISTINCT ns/mnt value of a tracked pid
+# ----                      (the unshare transition — the new mount
+# ----                      namespace's creation is live-proven here);
+# ----   GATE-MOUNTINFO     each DISTINCT mountinfo content of a tracked
+# ----                      rootlesskit_t pid (best-effort: the dance's
+# ----                      own mount stack — bind0/tmpfs/rksys — and the
+# ----                      propagation state, captured live before the
+# ----                      holder dies).
+# ---- The watcher self-terminates (12s cap; early break once a
+# ---- flow-domain pid has been seen and none remains for 10 ticks).
+# ---- Read-only observation: it changes no flow authority.
+mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
+(
+  set +e
+  exec 9<>"/tmp/p4b-work/.gate-clock" 2>/dev/null || exit 1
+  declare -A GSEEN=() GNSM=() GMI=()
+  G_END=$(( EPOCHSECONDS + 12 ))
+  G_GONE=0
+  while :; do
+    GTS="$EPOCHREALTIME"
+    G_ALIVE=0
+    for GP in /proc/[0-9]*; do
+      IFS= read -r GLC < "$GP/comm" 2>/dev/null || true
+      case "$GLC" in
+        rootlesskit|exe|slirp4netns|buildkitd|newuidmap|newgidmap) ;;
+        *) continue ;;
+      esac
+      GPID="${GP#/proc/}"
+      GCTX=""
+      IFS= read -r GCTX < "$GP/attr/current" 2>/dev/null || true
+      case "$GCTX" in
+        docker_helper_rootlesskit_t:*|docker_helper_slirp4netns_t:*) ;;
+        *) continue ;;
+      esac
+      G_ALIVE=$(( G_ALIVE + 1 ))
+      G1=""; G2=""; G3=""; G4=""; GREST=""
+      IFS=" " read -r G1 G2 G3 G4 GREST < "$GP/stat" 2>/dev/null || true
+      set -- $GREST
+      GST="${18}"
+      GNSM_NOW="$(readlink "$GP/ns/mnt" 2>/dev/null || true)"
+      GNSU="$(readlink "$GP/ns/user" 2>/dev/null || true)"
+      if [ -z "${GSEEN[$GPID]:-}" ]; then
+        GSEEN[$GPID]=1
+        GNSM[$GPID]="$GNSM_NOW"
+        GMI[$GPID]=""
+        printf '%s GATE-HOLDER-FIRST pid=%s comm=%s state=%s ppid=%s ctx=%s ns/mnt=%s ns/user=%s starttime=%s\n' \
+          "$GTS" "$GPID" "$GLC" "$G3" "$G4" "$GCTX" "${GNSM_NOW:-(none)}" "${GNSU:-(none)}" "${GST:-(none)}"
+      fi
+      if [ "${GNSM[$GPID]:-}" != "$GNSM_NOW" ]; then
+        printf '%s GATE-NSMNT pid=%s ns/mnt=%s (was %s)\n' \
+          "$GTS" "$GPID" "${GNSM_NOW:-(none)}" "${GNSM[$GPID]:-none}"
+        GNSM[$GPID]="$GNSM_NOW"
+      fi
+      printf '%s GATE-TICK pid=%s comm=%s ns/mnt=%s ns/user=%s starttime=%s\n' \
+        "$GTS" "$GPID" "$GLC" "${GNSM_NOW:-(none)}" "${GNSU:-(none)}" "${GST:-(none)}"
+      case "$GCTX" in
+        docker_helper_rootlesskit_t:*)
+          GMINFO=""
+          IFS= read -r -d '' GMINFO < "$GP/mountinfo" 2>/dev/null || true
+          if [ -n "$GMINFO" ] && [ "$GMINFO" != "${GMI[$GPID]:-}" ]; then
+            GMI[$GPID]="$GMINFO"
+            printf '%s GATE-MOUNTINFO pid=%s lines=%s\n' "$GTS" "$GPID" \
+              "$(printf '%s\n' "$GMINFO" | grep -ac . || true)"
+            printf '%s\n' "$GMINFO" | sed 's/^/    GATE-MOUNTINFO-LINE /'
+          fi
+          ;;
+      esac
+    done
+    if [ "$G_ALIVE" -gt 0 ]; then
+      G_GONE=0
+    elif [ "${#GSEEN[@]}" -gt 0 ]; then
+      G_GONE=$(( G_GONE + 1 ))
+      if [ "$G_GONE" -ge 10 ]; then
+        printf '%s GATE-WATCHER-END reason=flow-domain-vacant\n' "$EPOCHREALTIME"
+        break
+      fi
+    fi
+    read -t 0.002 -u 9 _ 2>/dev/null || :
+    if [ "$EPOCHSECONDS" -ge "$G_END" ]; then
+      printf '%s GATE-WATCHER-END reason=time-cap\n' "$EPOCHREALTIME"
+      break
+    fi
+  done
+) > "$EVIDENCE_DIR/51-confinement-gate.txt" 2>&1 &
+GATE_WATCHER_PID=$!
+log "D: 4C-49 confinement-gate watcher armed (pid $GATE_WATCHER_PID)"
+
+# ---- 4C-49 confinement gate: the host-side mount table BEFORE the
+# ---- window (the init process and the harness's own namespace; both
+# ---- host-side references for the untouched-host-table proof — item G;
+# ---- the AFTER copy is taken at harvest).
+{
+  echo "=== the host-side mount table BEFORE the window (the 4C-49 confinement gate's untouched-host-table reference) ==="
+  echo "--- /proc/1/mountinfo"
+  cat /proc/1/mountinfo 2>/dev/null || true
+  echo "--- /proc/self/mountinfo (the harness's own namespace)"
+  cat /proc/self/mountinfo 2>/dev/null || true
+} > "$EVIDENCE_DIR/55-host-mountinfo-before.txt" 2>&1
 
 START_RC=0
 START_OUT="$(printf 'START %s\n' "$OP_ID" | timeout 120 socat - UNIX-CONNECT:"$MANAGER_SOCK")" || START_RC=$?
@@ -2633,7 +2769,7 @@ POSTTUN_NSTARTUP=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIMED=0
 POSTTUN_OLD_BOUNDARY_PRESENT=0
 POSTTUN_BND_SYMBOLIC=""
 {
-  echo "=== 4C-38..4C-48 post-TUN lifetime/readiness causal verdict (the 4C-48 run carries exactly the rootlesskit_t -> tmpfs_t:lnk_file create grant) ==="
+  echo "=== 4C-38..4C-49 post-TUN lifetime/readiness causal verdict (the 4C-49 confinement-gate run: the loaded policy is the 4C-48 grant set ONLY — NO cgroup mounton grant; the gate verdict decides whether the semantic delta may follow) ==="
   echo "POST-TUN-T0: ${POSTTUN_T0_EPOCH:-(not derived)}"
   echo "  derivation: trace-ts=$POSTTUN_T0_TRACE_TS attach-executor=${POSTTUN_ATTACH_WHO:-(none)} read-epoch=$POSTTUN_READ_EPOCH read-uptime=$POSTTUN_READ_UPTIME ring-last-ts=${POSTTUN_RING_LAST_TS:-(none)} clock-drift=${POSTTUN_CLOCK_DRIFT:-?}s"
   echo "--- the attach pair (the T0 anchor; the attach executor's own TUNSETIFF):"
@@ -2731,7 +2867,9 @@ POSTTUN_BND_SYMBOLIC=""
   #   3. the production-enter set = the armed startup-stage syscalls
   #      (mount/mkdir/mkdirat/umount2/umount/rename/getdents64/openat/
   #      openat2/newfstatat/statx/unlink/unlinkat/rmdir/symlink/
-  #      symlinkat/readlink/execve/socket/open) of flow-domain comms,
+  #      symlinkat/readlink/execve/socket/open/setns/ioctl) of flow-domain
+  #      comms (4C-49 adds setns and ioctl — both armed startup-stage
+  #      production operations of the next stages),
   #      minus the cleanup shapes, before the zone;
   #   4. the ANCHOR = the LAST pre-zone candidate with NO later
   #      different-name non-cleanup production enter (the terminal
@@ -2823,7 +2961,7 @@ POSTTUN_BND_SYMBOLIC=""
           qcl[k, qtop[k]] = 1
           next
         }
-        if (nm ~ /^(mount|mkdir|mkdirat|umount2|umount|rename|getdents64|openat|openat2|newfstatat|statx|unlink|unlinkat|rmdir|symlink|symlinkat|readlink|execve|socket|open)$/) {
+        if (nm ~ /^(mount|mkdir|mkdirat|umount2|umount|rename|getdents64|openat|openat2|newfstatat|statx|unlink|unlinkat|rmdir|symlink|symlinkat|readlink|execve|socket|open|setns|ioctl)$/) {
           ne++
           ent[ne] = ts "\t" who "\t" nm "\t" $0
         }
@@ -3421,6 +3559,201 @@ POSTTUN_BND_SYMBOLIC=""
     | head -24 || true
   echo "(end of the shape-classified mount operations)"
 
+  # ============================================================
+  # 4C-49: the CONFINEMENT GATE for the cgroup_t:dir mounton boundary —
+  # the PRE-GRANT live proof that the mount authority the next grant
+  # would widen is exercised INSIDE the holder's own distinct mount
+  # namespace on a recursive-private propagation state, never in the
+  # manager/host mount table. The gate is EVIDENCE-ONLY: a BLOCKED gate
+  # stops the phase before the semantic delta; no compensating SELinux
+  # grants are permitted (the phase contract).
+  # Items A..G:
+  #   A. the holder (the mount-dancing trace pid) was observed live with
+  #      a mount-namespace identity;
+  #   B. that mount namespace differs from the manager-side ones (the
+  #      harness subshell, the init process, the manager daemon, and the
+  #      rootlesskit parent — the parent's ns/mnt is the holder's
+  #      inherited-at-fork reference);
+  #   C. the propagation mount mount("none", "/", MS_REC|MS_PRIVATE)
+  #      returned 0x0 and belongs to the SAME trace pid that performs
+  #      the cgroup move-mount (one holder flow);
+  #   D. the cgroup move-mount is attempted AFTER the propagation
+  #      success (trace-clock order);
+  #   E. the move's source /tmp/rksys* was bound FROM /sys/fs/cgroup by
+  #      the same holder flow earlier (the MS_BIND|MS_REC pair -> 0x0,
+  #      trace-clock order);
+  #   F. the move's destination is exactly /sys/fs/cgroup;
+  #   G. the host-side mount table is untouched across the window (the
+  #      before/after mountinfo diff carries no flow mount and no
+  #      /sys/fs/cgroup change).
+  # The mountinfo captures of the gate watcher are BEST-EFFORT supporting
+  # evidence (the dance window is ~4ms; a tick may miss it) — gate PASS
+  # never rests on them; the syscall pairs and the namespace identities
+  # are the primary proof.
+  # ============================================================
+  echo "--- the 4C-49 confinement-gate evidence (pre-grant; the gate items A..G):"
+  POSTTUN_GATE_MGR_MNT="$(sed -n 's/^[0-9.]* MGR-IDENTITY pid=[0-9]* ctx=[^ ]* ns\/mnt=\([^ ]*\) .*/\1/p' "$EVIDENCE_DIR/50-posttun-timeline.txt" 2>/dev/null | head -1 || true)"
+  POSTTUN_GATE_MGRD_MNT="$(sed -n 's/^[0-9.]* MGR-IDENTITY-DAEMON pid=[0-9]* .* ns\/mnt=\([^ ]*\) .*/\1/p' "$EVIDENCE_DIR/50-posttun-timeline.txt" 2>/dev/null | head -1 || true)"
+  POSTTUN_GATE_MGRINIT_MNT="$(sed -n 's/^[0-9.]* MGR-IDENTITY-INIT pid=1 .* ns\/mnt=\([^ ]*\)$/\1/p' "$EVIDENCE_DIR/50-posttun-timeline.txt" 2>/dev/null | head -1 || true)"
+  POSTTUN_GATE_PARENT_MNT="$(sed -n 's/^.* pid=[0-9]* comm=rootlesskit .* ns\/mnt=\([^ ]*\) .*/\1/p' "$EVIDENCE_DIR/50-posttun-timeline.txt" 2>/dev/null | head -1 || true)"
+  echo "manager-side mount-ns identities (the gate item B references):"
+  echo "  harness  ns/mnt=${POSTTUN_GATE_MGR_MNT:-(none)}"
+  echo "  init     ns/mnt=${POSTTUN_GATE_MGRINIT_MNT:-(none)}"
+  echo "  daemon   ns/mnt=${POSTTUN_GATE_MGRD_MNT:-(none)}"
+  echo "  rk-parent ns/mnt=${POSTTUN_GATE_PARENT_MNT:-(none)}"
+  # The three mount pairs (the same pair-extraction shape as the
+  # milestone extractors: the enter line's SHAPE keys the pair, the
+  # paired own exit closes it).
+  POSTTUN_GATE_PROP_PAIR="$(awk -v t0="$POSTTUN_T0_TRACE_TS" '
+    /sys_mount\(dev_name:/ && t0 != "" {
+      ts = $4; sub(/:$/, "", ts)
+      if (ts + 0 > t0 + 0 && $0 ~ /dev_name: [^,]*"none"/ && $0 ~ /dir_name: [^,]*"\/",/ && $0 ~ /flags: 0x44000/) {
+        pend = 1; pwho = $1; pline = $0; next
+      }
+      next
+    }
+    pend && /sys_mount -> / && $1 == pwho {
+      print pline; print $0; exit
+    }
+  ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true)"
+  POSTTUN_GATE_CGROUPBIND_PAIR="$(awk -v t0="$POSTTUN_T0_TRACE_TS" '
+    /sys_mount\(dev_name:/ && t0 != "" {
+      ts = $4; sub(/:$/, "", ts)
+      if (ts + 0 > t0 + 0 && $0 ~ /dev_name: [^,]*"\/sys\/fs\/cgroup"/ && $0 ~ /dir_name: [^,]*"\/tmp\/rksys[0-9]+"/ && $0 ~ /flags: 0x5000/) {
+        pend = 1; pwho = $1; pline = $0; next
+      }
+      next
+    }
+    pend && /sys_mount -> / && $1 == pwho {
+      print pline; print $0; exit
+    }
+  ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true)"
+  POSTTUN_GATE_CGROUPMOVE_PAIR="$(awk -v t0="$POSTTUN_T0_TRACE_TS" '
+    /sys_mount\(dev_name:/ && t0 != "" {
+      ts = $4; sub(/:$/, "", ts)
+      if (ts + 0 > t0 + 0 && $0 ~ /dev_name: [^,]*"\/tmp\/rksys[0-9]+"/ && $0 ~ /dir_name: [^,]*"\/sys\/fs\/cgroup"/ && $0 ~ /flags: 0x2000/) {
+        pend = 1; pwho = $1; pline = $0; next
+      }
+      next
+    }
+    pend && /sys_mount -> / && $1 == pwho {
+      print pline; print $0; exit
+    }
+  ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true)"
+  POSTTUN_GATE_PROP_TS="$(printf '%s\n' "$POSTTUN_GATE_PROP_PAIR" | head -1 | awk '{ ts = $4; sub(/:$/, "", ts); print ts }' 2>/dev/null || true)"
+  POSTTUN_GATE_PROP_RET="$(printf '%s\n' "$POSTTUN_GATE_PROP_PAIR" | tail -1 | awk '{print $NF}' 2>/dev/null || true)"
+  POSTTUN_GATE_BIND_TS="$(printf '%s\n' "$POSTTUN_GATE_CGROUPBIND_PAIR" | head -1 | awk '{ ts = $4; sub(/:$/, "", ts); print ts }' 2>/dev/null || true)"
+  POSTTUN_GATE_BIND_RET="$(printf '%s\n' "$POSTTUN_GATE_CGROUPBIND_PAIR" | tail -1 | awk '{print $NF}' 2>/dev/null || true)"
+  POSTTUN_GATE_MOVE_TS="$(printf '%s\n' "$POSTTUN_GATE_CGROUPMOVE_PAIR" | head -1 | awk '{ ts = $4; sub(/:$/, "", ts); print ts }' 2>/dev/null || true)"
+  POSTTUN_GATE_MOVE_RET="$(printf '%s\n' "$POSTTUN_GATE_CGROUPMOVE_PAIR" | tail -1 | awk '{print $NF}' 2>/dev/null || true)"
+  POSTTUN_GATE_MOVE_ENTER_TS="$(printf '%s\n' "$POSTTUN_GATE_CGROUPMOVE_PAIR" | head -1 | awk '{ ts = $4; sub(/:$/, "", ts); print ts }' 2>/dev/null || true)"
+  POSTTUN_GATE_MOVE_EXIT_TS="$(printf '%s\n' "$POSTTUN_GATE_CGROUPMOVE_PAIR" | tail -1 | awk '{ ts = $4; sub(/:$/, "", ts); print ts }' 2>/dev/null || true)"
+  echo "the holder flow's mount pairs (the trace facts; the MS_MOVE ret stays the BOUNDARY fact, not a gate item):"
+  printf '%s\n' "${POSTTUN_GATE_PROP_PAIR:-(the propagation pair was never recorded)}"
+  printf '%s\n' "${POSTTUN_GATE_CGROUPBIND_PAIR:-(the cgroup bind pair was never recorded)}"
+  printf '%s\n' "${POSTTUN_GATE_CGROUPMOVE_PAIR:-(the cgroup move-mount pair was never recorded)}"
+  # The same-trace-pid binding: the three pairs must carry ONE who (the
+  # mount-dancing holder).
+  POSTTUN_GATE_PROP_WHO="$(printf '%s\n' "$POSTTUN_GATE_PROP_PAIR" | head -1 | awk '{print $1}' 2>/dev/null || true)"
+  POSTTUN_GATE_BIND_WHO="$(printf '%s\n' "$POSTTUN_GATE_CGROUPBIND_PAIR" | head -1 | awk '{print $1}' 2>/dev/null || true)"
+  POSTTUN_GATE_MOVE_WHO="$(printf '%s\n' "$POSTTUN_GATE_CGROUPMOVE_PAIR" | head -1 | awk '{print $1}' 2>/dev/null || true)"
+  POSTTUN_GATE_DANCE_PID="$(printf '%s' "$POSTTUN_GATE_MOVE_WHO" | sed 's/^.*-//' 2>/dev/null || true)"
+  # The holder's recorded mount-ns identities: every distinct ns/mnt value
+  # the gate watcher recorded for the dance pid (the last tick's value is
+  # the dance-time namespace).
+  POSTTUN_GATE_HOLDER_MNTS="$(grep -a "GATE-TICK pid=$POSTTUN_GATE_DANCE_PID " "$EVIDENCE_DIR/51-confinement-gate.txt" 2>/dev/null | sed -n 's/.* ns\/mnt=\([^ ]*\) .*/\1/p' | sort -u || true)"
+  POSTTUN_GATE_HOLDER_MNT_LAST="$(printf '%s\n' "$POSTTUN_GATE_HOLDER_MNTS" | tail -1 || true)"
+  POSTTUN_GATE_HOLDER_FIRST_LINE="$(grep -a "GATE-HOLDER-FIRST pid=$POSTTUN_GATE_DANCE_PID " "$EVIDENCE_DIR/51-confinement-gate.txt" 2>/dev/null | head -1 || true)"
+  echo "the holder's watcher records (pid=$POSTTUN_GATE_DANCE_PID from the move-mount pair's trace who):"
+  printf '%s\n' "${POSTTUN_GATE_HOLDER_FIRST_LINE:-(the gate watcher never recorded the dance pid — identity missing)}"
+  echo "  the holder's distinct ns/mnt values: ${POSTTUN_GATE_HOLDER_MNTS:-(none)}"
+  echo "  the holder's last-observed ns/mnt:   ${POSTTUN_GATE_HOLDER_MNT_LAST:-(none)}"
+  # The ns/mnt transition records (the unshare's live trace, when caught):
+  POSTTUN_GATE_HOLDER_NSMNT_LINES="$(grep -a "GATE-NSMNT pid=$POSTTUN_GATE_DANCE_PID " "$EVIDENCE_DIR/51-confinement-gate.txt" 2>/dev/null || true)"
+  printf '%s\n' "${POSTTUN_GATE_HOLDER_NSMNT_LINES:-(no ns/mnt transition of the dance pid was caught by a watcher tick — the first tick may have seen the post-unshare namespace; the distinct-ns facts above are the proof)}"
+  # The watcher's own best-effort mountinfo captures for the holder:
+  POSTTUN_GATE_HOLDER_MOUNTINFO_COUNT="$(grep -ac "GATE-MOUNTINFO pid=$POSTTUN_GATE_DANCE_PID " "$EVIDENCE_DIR/51-confinement-gate.txt" 2>/dev/null || true)"
+  POSTTUN_GATE_HOLDER_RKSYS_SEEN="$(awk -v pid="$POSTTUN_GATE_DANCE_PID" '
+    /^[0-9.]+ GATE-MOUNTINFO pid=/ { on = ($0 ~ ("pid=" pid " ")) ? 1 : 0; next }
+    on && /GATE-MOUNTINFO-LINE/ { print }
+  ' "$EVIDENCE_DIR/51-confinement-gate.txt" 2>/dev/null | grep -a '/tmp/rksys' | tail -2 || true)"
+  echo "  the holder's distinct mountinfo captures: ${POSTTUN_GATE_HOLDER_MOUNTINFO_COUNT:-0} (best-effort)"
+  if [ -n "$POSTTUN_GATE_HOLDER_RKSYS_SEEN" ]; then
+    echo "  the rksys bind is LIVE in a captured holder mountinfo (the item E provenance, seen live):"
+    printf '%s\n' "$POSTTUN_GATE_HOLDER_RKSYS_SEEN" | sed 's/^/    /'
+  else
+    echo "  the rksys bind: not caught in a captured holder mountinfo (best-effort; the item E trace pair is the proof)"
+  fi
+  # The gate items, one computed verdict each:
+  POSTTUN_GATE_A=0; POSTTUN_GATE_B=0; POSTTUN_GATE_C=0; POSTTUN_GATE_D=0
+  POSTTUN_GATE_E=0; POSTTUN_GATE_F=0; POSTTUN_GATE_G=0
+  # A: the holder identity exists and carries a recorded ns/mnt.
+  if [ -n "$POSTTUN_GATE_DANCE_PID" ] && [ -n "$POSTTUN_GATE_HOLDER_FIRST_LINE" ] \
+    && printf '%s\n' "$POSTTUN_GATE_HOLDER_FIRST_LINE" | grep -aq 'docker_helper_rootlesskit_t:' \
+    && [ -n "$POSTTUN_GATE_HOLDER_MNT_LAST" ] && [ "$POSTTUN_GATE_HOLDER_MNT_LAST" != "(none)" ]; then
+    POSTTUN_GATE_A=1
+  fi
+  # B: the holder's dance-time ns/mnt differs from EVERY manager-side
+  # reference (harness, init, daemon, rk-parent).
+  if [ "$POSTTUN_GATE_A" = 1 ] \
+    && [ -n "$POSTTUN_GATE_MGR_MNT" ] && [ "$POSTTUN_GATE_HOLDER_MNT_LAST" != "$POSTTUN_GATE_MGR_MNT" ] \
+    && [ -n "$POSTTUN_GATE_MGRINIT_MNT" ] && [ "$POSTTUN_GATE_HOLDER_MNT_LAST" != "$POSTTUN_GATE_MGRINIT_MNT" ] \
+    && [ -n "$POSTTUN_GATE_MGRD_MNT" ] && [ "$POSTTUN_GATE_HOLDER_MNT_LAST" != "$POSTTUN_GATE_MGRD_MNT" ] \
+    && [ -n "$POSTTUN_GATE_PARENT_MNT" ] && [ "$POSTTUN_GATE_HOLDER_MNT_LAST" != "$POSTTUN_GATE_PARENT_MNT" ]; then
+    POSTTUN_GATE_B=1
+  fi
+  # C: the propagation pair exists, returned 0x0, and belongs to the SAME
+  # trace who as the cgroup move-mount.
+  if [ "$POSTTUN_GATE_PROP_RET" = "0x0" ] && [ -n "$POSTTUN_GATE_PROP_WHO" ] \
+    && [ "$POSTTUN_GATE_PROP_WHO" = "$POSTTUN_GATE_MOVE_WHO" ]; then
+    POSTTUN_GATE_C=1
+  fi
+  # D: the move attempt is AFTER the propagation success (trace clock).
+  if [ -n "$POSTTUN_GATE_PROP_TS" ] && [ -n "$POSTTUN_GATE_MOVE_TS" ] \
+    && awk -v a="$POSTTUN_GATE_MOVE_TS" -v b="$POSTTUN_GATE_PROP_TS" 'BEGIN { exit !(a + 0 > b + 0) }' 2>/dev/null; then
+    POSTTUN_GATE_D=1
+  fi
+  # E: the rksys bind pair exists (from /sys/fs/cgroup, MS_BIND|MS_REC),
+  # returned 0x0, belongs to the same trace who, and precedes the move.
+  if [ "$POSTTUN_GATE_BIND_RET" = "0x0" ] && [ -n "$POSTTUN_GATE_BIND_WHO" ] \
+    && [ "$POSTTUN_GATE_BIND_WHO" = "$POSTTUN_GATE_MOVE_WHO" ] \
+    && awk -v a="$POSTTUN_GATE_MOVE_TS" -v b="$POSTTUN_GATE_BIND_TS" 'BEGIN { exit !(a + 0 > b + 0) }' 2>/dev/null; then
+    POSTTUN_GATE_E=1
+  fi
+  # F: the move's destination is exactly /sys/fs/cgroup (the pair's own
+  # enter line, extracted verbatim above, carries dir_name "/sys/fs/cgroup").
+  if printf '%s\n' "$POSTTUN_GATE_CGROUPMOVE_PAIR" | head -1 | grep -aq 'dir_name: [^,]*"/sys/fs/cgroup"'; then
+    POSTTUN_GATE_F=1
+  fi
+  # G: the host-side mount table is untouched across the window.
+  {
+    echo "=== the host-side mount table AFTER the window (the 4C-49 confinement gate's untouched-host-table proof) ==="
+    echo "--- /proc/1/mountinfo"
+    cat /proc/1/mountinfo 2>/dev/null || true
+    echo "--- /proc/self/mountinfo (the harness's own namespace)"
+    cat /proc/self/mountinfo 2>/dev/null || true
+  } > "$EVIDENCE_DIR/55-host-mountinfo-after.txt" 2>&1
+  POSTTUN_GATE_HOST_DIFF="$(diff "$EVIDENCE_DIR/55-host-mountinfo-before.txt" "$EVIDENCE_DIR/55-host-mountinfo-after.txt" 2>/dev/null \
+    | grep -aE '^[<>].*(/tmp/rksys|/tmp/rootlesskit-b|/sys/fs/cgroup)' || true)"
+  if [ -n "$POSTTUN_GATE_MGR_MNT" ] && [ -s "$EVIDENCE_DIR/55-host-mountinfo-before.txt" ] \
+    && [ -s "$EVIDENCE_DIR/55-host-mountinfo-after.txt" ] && [ -z "$POSTTUN_GATE_HOST_DIFF" ]; then
+    POSTTUN_GATE_G=1
+    echo "  the host-table diff (before vs after; the flow-mount/cgroup shapes): CLEAN (no diff line)"
+  else
+    echo "  the host-table diff (before vs after; the flow-mount/cgroup shapes):"
+    printf '%s\n' "${POSTTUN_GATE_HOST_DIFF:-(the diff itself is unavailable)}"
+  fi
+  echo "GATE 4C-49-CONFINEMENT items: A=$POSTTUN_GATE_A B=$POSTTUN_GATE_B C=$POSTTUN_GATE_C D=$POSTTUN_GATE_D E=$POSTTUN_GATE_E F=$POSTTUN_GATE_F G=$POSTTUN_GATE_G"
+  if [ "$POSTTUN_GATE_A" = 1 ] && [ "$POSTTUN_GATE_B" = 1 ] && [ "$POSTTUN_GATE_C" = 1 ] \
+    && [ "$POSTTUN_GATE_D" = 1 ] && [ "$POSTTUN_GATE_E" = 1 ] && [ "$POSTTUN_GATE_F" = 1 ] \
+    && [ "$POSTTUN_GATE_G" = 1 ]; then
+    echo "GATE 4C-49-CONFINEMENT: PASS (all seven items proven live; the authority remains type-wide for cgroup_t and the confinement is the holder's own mount namespace + recursive-private propagation state — the scope statement, not a TE property)"
+    POSTTUN_GATE_VERDICT=PASS
+  else
+    echo "GATE 4C-49-CONFINEMENT: BLOCKED/CONFINEMENT-NOT-PROVEN (the failed items are recorded above; NO cgroup_t:dir mounton authority may be granted and no compensating SELinux grant is permitted)"
+    POSTTUN_GATE_VERDICT=BLOCKED
+  fi
+
   # The B milestone: the flow-domain mount whose source is /etc, whose
   # target is the copy-up temp dir, with MS_BIND|MS_REC (0x5000),
   # paired with ITS OWN exit — a 0x0 ret makes
@@ -3477,12 +3810,12 @@ POSTTUN_BND_SYMBOLIC=""
     printf '%s\n' "${POSTTUN_TMPFSMOUNT_PAIR:-(the C-shaped mount pair was never recorded)}"
     POSTTUN_TMPFSMOUNT_OK=0
   fi
-  echo "--- the mountinfo probe at harvest (any process whose mount table still carries the bind0 mount point; best-effort — the holder's namespace dies with it):"
+  echo "--- the mountinfo probe at harvest (any process whose mount table still carries the bind0 mount point or the rksys bind; best-effort — the holder's namespace dies with it):"
   for mp in /proc/[0-9]*/mountinfo; do
     [ -r "$mp" ] || continue
-    if grep -aq '/tmp/rootlesskit-b' "$mp" 2>/dev/null; then
+    if grep -aqE '/tmp/rootlesskit-b|/tmp/rksys' "$mp" 2>/dev/null; then
       echo "  (from $mp):"
-      grep -a '/tmp/rootlesskit-b' "$mp" 2>/dev/null | head -3 | sed 's/^/    /'
+      grep -aE '/tmp/rootlesskit-b|/tmp/rksys' "$mp" 2>/dev/null | head -3 | sed 's/^/    /'
     fi
   done 2>/dev/null | head -12 || true
   echo "(end of the mountinfo probe)"
@@ -3702,6 +4035,11 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
   marker "POSTTUN-FIRST-DEATH=pid=${POSTTUN_FIRST_DEATH_PID:-none} comm=${POSTTUN_FIRST_DEATH_COMM:-none} at=T0+${POSTTUN_T0_TO_DEATH:-?}s cause=${POSTTUN_DEATH_CAUSE%% *}"
   marker "POSTTUN-DENIALS=STARTUP-CAUSAL=$POSTTUN_NSTARTUP POST-FAILURE/CLEANUP=$POSTTUN_NPOST POLLING-ONLY=$POSTTUN_NPOLL UNTIMED=$POSTTUN_NUNTIMED HANDLED/NON-TERMINAL=${POSTTUN_NHANDLED:-0}"
   marker "POSTTUN-PRIMARY-BOUNDARY=${POSTTUN_BND_SYMBOLIC:-(undecoded — see 53-posttun-verdict.txt)}"
+  if [ "${POSTTUN_GATE_VERDICT:-}" = "PASS" ]; then
+    marker "4C-49-CONFINEMENT-GATE=PASS"
+  else
+    marker "4C-49-CONFINEMENT-GATE=BLOCKED/CONFINEMENT-NOT-PROVEN"
+  fi
   if [ "$POSTTUN_OLD_BOUNDARY_PRESENT" = 1 ]; then
     marker "4C-39-OLD-MOUNTON-BOUNDARY=STILL-PRESENT"
     marker "4C-39=INCOMPLETE/GRANT-DID-NOT-TAKE-EFFECT"
@@ -3832,6 +4170,7 @@ else
   marker "4C-46=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-47=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-48=INCOMPLETE/ORDER_NOT_ESTABLISHED"
+  marker "4C-49-CONFINEMENT-GATE=${POSTTUN_GATE_VERDICT:-(the gate did not run — see 53-posttun-verdict.txt)}"
   POSTTUN_NOT_ESTABLISHED=1
 fi
 
@@ -5516,6 +5855,16 @@ if [ "$I9_OK" = 1 ]; then
   # mounton boundary, the 4C-43 tmp mounton, the 4C-42 create, the
   # 4C-41 add_name, the 4C-40 write and the 4C-39 mounton boundaries
   # (the standing regression guards).
+  # The 4C-49 confinement gate is a PRE-GRANT condition: a BLOCKED gate
+  # stops the phase before the cgroup mounton semantic delta — no
+  # compensating SELinux grant is permitted, and the gate verdict stays
+  # the phase's own record.
+  if [ "${POSTTUN_GATE_VERDICT:-}" = "BLOCKED" ]; then
+    marker "4C-49=BLOCKED/CONFINEMENT-NOT-PROVEN"
+    marker "BLOCKER=the 4C-49 confinement gate did not pass (see 53-posttun-verdict.txt; no cgroup_t:dir mounton authority may be granted)"
+    finish INCOMPLETE
+    exit 0
+  fi
   if [ "${POSTTUN_OLD_LNKCREATE_PRESENT:-0}" = 1 ]; then
     marker "BLOCKER=the 4C-48 rebuild symlink create grant did not remove the old rootlesskit_t -> tmpfs_t:lnk_file create boundary (see 53-posttun-verdict.txt)"
     finish FAIL
