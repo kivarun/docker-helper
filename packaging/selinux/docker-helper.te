@@ -1701,6 +1701,72 @@ allow docker_helper_rootlesskit_t tmpfs_t:filesystem mount;
 # the module version stay untouched.
 allow docker_helper_rootlesskit_t tmpfs_t:dir { create mounton };
 
+# The rebuild symlink creation (P5-S2 Phase 4C-48): with the
+# tmpfs_t:dir { create mounton } pair granted (4C-46/47), the canonical
+# 4C-47 run 37153317223 saw the WHOLE copy-up mount stage chain pass —
+# A (propagation -> 0x0), the bind0 mkdirat (-> 0x0), B (bind mount ->
+# 0x0), C (tmpfs mount -> 0x0), the .ro mkdirat (-> 0x0) AND the
+# MS_MOVE move-mount (-> 0x0, the 4C-47 grant took effect directly) —
+# and reach the REBUILD stage: ReadDir(bind1) succeeded (getdents64 ->
+# 0xe68) and the first entry's reconstruction failed at the symlink
+# object's own creation check:
+#   sys_symlinkat(oldname: ".ro2286969802/.pwd.lock", newdfd: AT_FDCWD,
+#   newname: "/etc/.pwd.lock") -> 0xfffffffffffffff3
+# with the denial INSIDE the symlinkat(2) window, trace-ts 278.310136
+# (16µs before the failing exit at trace-ts 278.310152; T0 = the attach
+# at trace-ts 278.307104):
+#   requested=0x8 denied=0x8 audited=0x8 result=-13 (EACCES)
+#   scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+#   tcontext=system_u:object_r:tmpfs_t:s0 tclass=lnk_file
+#
+# THE PAIR IS LIVE-PROVEN — NOT ASSUMED: the new symlink object's SID is
+# inherited from the parent dir's own label tmpfs_t:s0 (the kernel's own
+# tcontext), and the CLASS is the symlink object's own class lnk_file —
+# the may_create() mediation of a new object with SECCLASS_LNK_FILE.
+# THE DECODE is lnk_file:create = 0x8 (bit 3 of COMMON_FILE_PERMS — the
+# kernel's static classmap; the same bit-3 position the dir:create and
+# file:create decodes are pinned at; the lnk_file fixture entry and its
+# neighbors write=0x4/getattr=0x10/setattr=0x20 are pinned in
+# TestSELinuxPermissionKernelClassmapDecode). The canonical 4C-47
+# mechanical verdict was a KNOWN HARNESS MISCLASSIFICATION (the benign
+# ENOENT housekeeping probe of the rootlesskit parent stole the causal
+# anchor); the corrected 4C-48 machinery (the terminal-failure contract:
+# a failure owns the primary boundary only when no forward production
+# progress follows it) restores this denial as the STARTUP-CAUSAL
+# owner — the anchor regression on the saved corpus is in the phase
+# record.
+#
+# THE PRECEDING PROBES ARE HANDLED/NON-TERMINAL, NOT PART OF THIS
+# GRANT: the holder's unlinkat("/etc/.pwd.lock", 0) and
+# unlinkat("/etc/.pwd.lock", AT_REMOVEDIR) ENOENT probes are the
+# RemoveAll-destination cleanup probes RootlessKit issues BEFORE the
+# symlink — ENOENT there is the EXPECTED outcome (the destination does
+# not exist on the fresh tmpfs); no unlink/remove_name authority is
+# granted for them, and the machinery classifies them
+# HANDLED/NON-TERMINAL (they were followed by the symlinkat — forward
+# production progress).
+#
+# SCOPE NOTE — GLOBAL TYPE, NOT OPERATION-SCOPED: tmpfs_t:s0 carries no
+# per-operation MCS category, so this allow is not operation-scoped
+# (the nsfs_t/tmpfs scope shape); the in-namespace capability layer and
+# the MCS-constrained subject stay the abuse gates, and the
+# cross-operation reachability gate stays OPEN.
+#
+# The audit slice was empty in that window too (the same
+# userspace-audit gap); a next symbolic AVC record, when captured, is
+# the confirming decode.
+#
+# Deliberately NOT granted: read/write/getattr/setattr/unlink/link/
+# rename/relabelfrom/relabelto or any other lnk_file permission (each a
+# distinct hook — the link() stage's own link permission is NOT this
+# create), any dir/file/filesystem-class permission (the 4C-45/46/47
+# owners), any OTHER type's lnk_file surface (the moved original
+# tree's entries keep their own labels etc_t and friends — the
+# rebuild's SOURCE reads go through the existing standing/flow surfaces
+# and their own boundaries when reached), process/capability surfaces,
+# other subjects; the .fc and the module version stay untouched.
+allow docker_helper_rootlesskit_t tmpfs_t:lnk_file create;
+
 # --- docker_helper_slirp4netns_t: the rootlesskit user-network helper domain (P5-S2) ---
 #
 # RootlessKit forks and execs the distro slirp4netns binary as its
