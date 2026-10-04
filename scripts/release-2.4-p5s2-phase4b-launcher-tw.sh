@@ -2088,33 +2088,31 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
   while :; do
     GTS="$EPOCHREALTIME"
     G_ALIVE=0
-    for GP in /proc/[0-9]*; do
-      IFS= read -r GLC < "$GP/comm" 2>/dev/null || true
-      case "$GLC" in
-        rootlesskit|exe|slirp4netns|buildkitd|newuidmap|newgidmap) ;;
-        *) continue ;;
-      esac
-      GPID="${GP#/proc/}"
-      GCTX=""
-      IFS= read -r GCTX < "$GP/attr/current" 2>/dev/null || true
-      # The context is the FULL kernel-issued string (user:role:type:
-      # level), so the patterns must match it as a substring — a bare
-      # docker_helper_rootlesskit_t:* pattern would demand the string
-      # START with the type (the canonical gate run's own lesson: the
-      # unstarred patterns matched nothing and the watcher recorded
-      # zero holders).
-      case "$GCTX" in
-        *docker_helper_rootlesskit_t:*|*docker_helper_slirp4netns_t:*) ;;
-        *) continue ;;
-      esac
+    # The cheap comm+context pass: ONE awk fork reads every comm file at
+    # C speed and joins the SELinux context read; the shell then probes
+    # only the matched flow-domain pids. The bash per-pid scan this
+    # replaces cost ~0.27ms per pid (the canonical 4C-49 run 37191972618
+    # measured a ~40ms tick over the full Tumbleweed proc table and the
+    # 37ms mount-dancing holder slipped between every tick).
+    G_MATCH="$(awk '
+      $0 ~ /^(rootlesskit|exe|slirp4netns|buildkitd|newuidmap|newgidmap)$/ {
+        pid = FILENAME; sub(/\/comm$/, "", pid)
+        ctx = ""; getline ctx < (pid "/attr/current")
+        if (ctx ~ /docker_helper_rootlesskit_t:/ || ctx ~ /docker_helper_slirp4netns_t:/) print pid " " $0 " " ctx
+        close(pid "/attr/current")
+      }' /proc/[0-9]*/comm 2>/dev/null || true)"
+    while IFS=" " read -r GPID GLC GCTX; do
+      [ -n "$GPID" ] || continue
       G_ALIVE=$(( G_ALIVE + 1 ))
+      GP="/proc/$GPID"
       G1=""; G2=""; G3=""; G4=""; GREST=""
       IFS=" " read -r G1 G2 G3 G4 GREST < "$GP/stat" 2>/dev/null || true
       set -- $GREST
       GST="${18}"
       GNSM_NOW="$(readlink "$GP/ns/mnt" 2>/dev/null || true)"
-      GNSU="$(readlink "$GP/ns/user" 2>/dev/null || true)"
+      GNSU=""
       if [ -z "${GSEEN[$GPID]:-}" ]; then
+        GNSU="$(readlink "$GP/ns/user" 2>/dev/null || true)"
         GSEEN[$GPID]=1
         GNSM[$GPID]="$GNSM_NOW"
         GMI[$GPID]=""
@@ -2126,8 +2124,8 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
           "$GTS" "$GPID" "${GNSM_NOW:-(none)}" "${GNSM[$GPID]:-none}"
         GNSM[$GPID]="$GNSM_NOW"
       fi
-      printf '%s GATE-TICK pid=%s comm=%s ns/mnt=%s ns/user=%s starttime=%s\n' \
-        "$GTS" "$GPID" "$GLC" "${GNSM_NOW:-(none)}" "${GNSU:-(none)}" "${GST:-(none)}"
+      printf '%s GATE-TICK pid=%s comm=%s ns/mnt=%s starttime=%s\n' \
+        "$GTS" "$GPID" "$GLC" "${GNSM_NOW:-(none)}" "${GST:-(none)}"
       case "$GCTX" in
         *docker_helper_rootlesskit_t:*)
           GMINFO=""
@@ -2140,7 +2138,7 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
           fi
           ;;
       esac
-    done
+    done <<< "$G_MATCH"
     if [ "$G_ALIVE" -gt 0 ]; then
       G_GONE=0
     elif [ "${#GSEEN[@]}" -gt 0 ]; then
@@ -2150,7 +2148,7 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
         break
       fi
     fi
-    read -t 0.002 -u 9 _ 2>/dev/null || :
+    read -t 0.0005 -u 9 _ 2>/dev/null || :
     if [ "$EPOCHSECONDS" -ge "$G_END" ]; then
       printf '%s GATE-WATCHER-END reason=time-cap\n' "$EPOCHREALTIME"
       break
