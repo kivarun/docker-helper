@@ -2776,12 +2776,22 @@ POSTTUN_BND_SYMBOLIC=""
       k = who "|" nm
       if ($0 ~ "sys_" nm " -> ") {
         # The paired window close (both success and failure).
+        wasclean = 0
         if (qtop[k] > 0) {
           pc++
           pwho[pc] = who; pname[pc] = nm; pets[pc] = qent[k, qtop[k]]; pxts[pc] = ts
+          wasclean = qcl[k, qtop[k]]
+          pclean[pc] = wasclean
           qtop[k]--
         }
-        if ($0 ~ / -> 0xf/) {
+        if ($0 ~ / -> 0xf/ && !wasclean) {
+          # A failing exit is a TERMINAL CANDIDATE only when its own
+          # syscall window is not a cleanup shape: the RemoveAll(bind0)
+          # stage (the tolerated mid-startup temp-dir removal AND the
+          # post-failure defer) is the failure-response stage — its own
+          # failures never own the lifetime (the 4C-48 canonical run
+          # new shape: the tolerated mid-startup RemoveAll followed by
+          # the rksys/sysfs production stages).
           nc++
           cand[nc] = ts "\t" who "\t" nm "\t" $0
         }
@@ -2790,18 +2800,27 @@ POSTTUN_BND_SYMBOLIC=""
       if ($0 ~ "sys_" nm "\\(") {
         qtop[k]++
         qent[k, qtop[k]] = ts
-        # The cleanup-zone entry (the first observable step of the
-        # defer RemoveAll(bind0) sequence): a residue-naming
-        # enumeration/remove enter, or the /tmp enumeration open (the
-        # RemoveAll parent open — the canonical 4C-46 run zone began
-        # there). The mkdirat/mkdir/mount stages name the residue path
-        # too but are PRODUCTION and excluded.
+        qcl[k, qtop[k]] = 0
+        # The cleanup-shape recognition (enter-level): the flow temp-dir
+        # removal stage (the RemoveAll(bind0) defer AND the rksys
+        # self-cleanup after a failed sys move-mount — the canonical
+        # 4C-48 run showed both) and the /tmp enumeration opens. These
+        # are the failure-response stage: NOT progress, and their own
+        # failures are not terminal candidates. The mkdirat/mkdir/mount
+        # stages name /tmp paths too but are PRODUCTION and excluded.
+        if (nm ~ /^(unlink|unlinkat|rmdir)$/ && $0 ~ /"\/tmp\//) {
+          if (zone == "" || ts + 0 < zone + 0) zone = ts
+          qcl[k, qtop[k]] = 1
+          next
+        }
         if (nm ~ /^(unlink|unlinkat|rmdir|openat|openat2|getdents64|newfstatat|statx|readlink)$/ && $0 ~ /\/tmp\/rootlesskit-b/) {
           if (zone == "" || ts + 0 < zone + 0) zone = ts
+          qcl[k, qtop[k]] = 1
           next
         }
         if (nm ~ /^(openat|openat2)$/ && $0 ~ /"\/tmp",/) {
           if (zone == "" || ts + 0 < zone + 0) zone = ts
+          qcl[k, qtop[k]] = 1
           next
         }
         if (nm ~ /^(mount|mkdir|mkdirat|umount2|umount|rename|getdents64|openat|openat2|newfstatat|statx|unlink|unlinkat|rmdir|symlink|symlinkat|readlink|execve|socket|open)$/) {
@@ -2812,11 +2831,11 @@ POSTTUN_BND_SYMBOLIC=""
       }
     }
     END {
-      # The pre-zone candidates, in order.
+      # The candidates, in order (the cleanup-shaped failures are
+      # already excluded at collection).
       m = 0
       for (i = 1; i <= nc; i++) {
-        split(cand[i], f, "\t")
-        if (zone == "" || f[1] + 0 < zone + 0) pre[++m] = i
+        pre[++m] = i
       }
       # The reverse scan: the LAST candidate with no later
       # different-name non-cleanup production enter (the terminal
@@ -2842,10 +2861,10 @@ POSTTUN_BND_SYMBOLIC=""
       print "ANCHOR_FALLBACK=" fb
       print "ZONE_TS=" (zone == "" ? "-" : zone)
       print "ANCHOR_LINE=" f[4]
-      # The handled candidates: every pre-zone candidate except the
-      # anchor, each with its first later production enter as the
-      # handling proof (failure + later production operation => the
-      # failure was handled/non-terminal).
+      # The handled candidates: every candidate except the anchor,
+      # each with its first later production enter as the handling
+      # proof (failure + later production operation => the failure was
+      # handled/non-terminal).
       h = 0
       for (j = 1; j <= m; j++) {
         i = pre[j]
@@ -2855,7 +2874,7 @@ POSTTUN_BND_SYMBOLIC=""
         proof = ""
         for (e = 1; e <= ne; e++) {
           split(ent[e], g, "\t")
-          if (g[1] + 0 > cts + 0 && (zone == "" || g[1] + 0 < zone + 0) && g[3] != cnm) {
+          if (g[1] + 0 > cts + 0 && g[3] != cnm) {
             proof = g[1] " " g[3]
             break
           }
@@ -2865,10 +2884,12 @@ POSTTUN_BND_SYMBOLIC=""
       }
       print "HANDLED_COUNT=" h
       # The denial classification (the 4C-43 vocabulary + HANDLED):
-      # POLLING-ONLY (recurring shape) > the cleanup zone
-      # (POST-FAILURE/CLEANUP) > a denial whose owning syscall window
-      # belongs to a HANDLED failure (HANDLED/NON-TERMINAL) > d<=0 vs
-      # the anchor (STARTUP-CAUSAL) > POST-FAILURE/CLEANUP > UNTIMED.
+      # POLLING-ONLY (recurring shape) > a denial whose owning syscall
+      # window is a cleanup shape (POST-FAILURE/CLEANUP — the
+      # RemoveAll(bind0) stage noise, wherever it sits in time) > a
+      # denial whose owning failure is HANDLED (HANDLED/NON-TERMINAL) >
+      # d<=0 vs the anchor (STARTUP-CAUSAL) > POST-FAILURE/CLEANUP >
+      # UNTIMED.
       ns = 0; np = 0; nq = 0; nu = 0; nh = 0
       for (i = 1; i <= nd; i++) {
         split(den[i], f, "\t")
@@ -2879,15 +2900,15 @@ POSTTUN_BND_SYMBOLIC=""
         if (match(raw, /denied=0x[0-9a-fA-F]+/)) sh = sh "|" substr(raw, RSTART, RLENGTH)
         shp[sh]++
         cls = ""
-        if (zone != "" && ts + 0 >= zone + 0) cls = "POST-FAILURE/CLEANUP"
-        else if (a != 0) {
-          owncand = ""; best = -1
+        if (a != 0) {
+          owncand = ""; best = -1; ownclean = 0
           for (p = 1; p <= pc; p++) {
             if (pwho[p] != dwho) continue
             if (pets[p] + 0 > ts + 0 || pxts[p] + 0 < ts + 0) continue
-            if (pets[p] + 0 > best) { best = pets[p] + 0; owncand = pxts[p] }
+            if (pets[p] + 0 > best) { best = pets[p] + 0; owncand = pxts[p]; ownclean = pclean[p] }
           }
-          if (owncand != "") {
+          if (ownclean) cls = "POST-FAILURE/CLEANUP"
+          else if (owncand != "") {
             for (j = 1; j <= m; j++) {
               ii = pre[j]
               if (ii == a) continue
@@ -3539,7 +3560,7 @@ POSTTUN_BND_SYMBOLIC=""
   POSTTUN_SYMLINK_PAIR="$(awk -v t0="$POSTTUN_T0_TRACE_TS" '
     /sys_symlinkat\(oldname:/ && t0 != "" {
       ts = $4; sub(/:$/, "", ts)
-      if (ts + 0 > t0 + 0 && $0 ~ /oldname: [^,]*"\/[^"]*\/\.ro[0-9]+\// && $0 ~ /newname: [^,]*"\/etc\//) {
+      if (ts + 0 > t0 + 0 && $0 ~ /oldname: [^,]*"[^"]*\.ro[0-9]+\// && $0 ~ /newname: [^,]*"\/etc\//) {
         pend = 1; pwho = $1; pline = $0; next
       }
       next
