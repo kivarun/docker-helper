@@ -2088,36 +2088,48 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
   while :; do
     GTS="$EPOCHREALTIME"
     G_ALIVE=0
-    # The cheap comm+context pass: ONE awk fork reads every comm file at
-    # C speed and joins the SELinux context read; the shell then probes
-    # only the matched flow-domain pids. The bash per-pid scan this
-    # replaces cost ~0.27ms per pid (the canonical 4C-49 run 37191972618
-    # measured a ~40ms tick over the full Tumbleweed proc table and the
-    # 37ms mount-dancing holder slipped between every tick).
+    # The identity pass: ONE awk fork per tick reads every comm file at C
+    # speed and, for each flow-domain match, reads the stat and the ns
+    # links INLINE at scan time. The reads must be inline: the canonical
+    # run 37193403480 proved a ~50ms consumer lag (the awk scan plus the
+    # serial bash per-pid reads) exceeded the holder's remaining
+    # lifetime, and a holder that lived 91ms was recorded with (none)
+    # identity. The ns links cannot be read() (the nsfs link body only
+    # answers readlink), so each matched pid costs one readlink
+    # co-process fork.
     G_MATCH="$(awk '
       $0 ~ /^(rootlesskit|exe|slirp4netns|buildkitd|newuidmap|newgidmap)$/ {
         pid = FILENAME; sub(/\/comm$/, "", pid); sub(/^\/proc\//, "", pid)
         ctx = ""; getline ctx < ("/proc/" pid "/attr/current")
-        if (ctx ~ /docker_helper_rootlesskit_t:/ || ctx ~ /docker_helper_slirp4netns_t:/) print pid " " $0 " " ctx
         close("/proc/" pid "/attr/current")
+        if (ctx !~ /docker_helper_rootlesskit_t:/ && ctx !~ /docker_helper_slirp4netns_t:/) next
+        st = ""; getline st < ("/proc/" pid "/stat")
+        close("/proc/" pid "/stat")
+        gst = "(none)"; gpp = "(none)"; gstm = "(none)"
+        if (st != "") {
+          n = split(st, f, " ")
+          if (n >= 3) gst = f[3]
+          if (n >= 4) gpp = f[4]
+          if (n >= 22) gstm = f[22]
+        }
+        nsm = "(none)"; nsu = "(none)"
+        cmd = "readlink /proc/" pid "/ns/mnt /proc/" pid "/ns/user 2>/dev/null"
+        if ((cmd | getline nsm) > 0) {
+          if ((cmd | getline nsu) <= 0) nsu = "(none)"
+        }
+        close(cmd)
+        print pid, $0, ctx, gst, gpp, nsm, nsu, gstm
       }' /proc/[0-9]*/comm 2>/dev/null || true)"
-    while IFS=" " read -r GPID GLC GCTX; do
+    while IFS=" " read -r GPID GLC GCTX GST GPPID GNSM_NOW GNSU GSTIME; do
       [ -n "$GPID" ] || continue
       G_ALIVE=$(( G_ALIVE + 1 ))
       GP="/proc/$GPID"
-      G1=""; G2=""; G3=""; G4=""; GREST=""
-      IFS=" " read -r G1 G2 G3 G4 GREST < "$GP/stat" 2>/dev/null || true
-      set -- $GREST
-      GST="${18:-}"
-      GNSM_NOW="$(readlink "$GP/ns/mnt" 2>/dev/null || true)"
-      GNSU=""
       if [ -z "${GSEEN[$GPID]:-}" ]; then
-        GNSU="$(readlink "$GP/ns/user" 2>/dev/null || true)"
         GSEEN[$GPID]=1
         GNSM[$GPID]="$GNSM_NOW"
         GMI[$GPID]=""
         printf '%s GATE-HOLDER-FIRST pid=%s comm=%s state=%s ppid=%s ctx=%s ns/mnt=%s ns/user=%s starttime=%s\n' \
-          "$GTS" "$GPID" "$GLC" "$G3" "$G4" "$GCTX" "${GNSM_NOW:-(none)}" "${GNSU:-(none)}" "${GST:-(none)}"
+          "$GTS" "$GPID" "$GLC" "${GST:-(none)}" "${GPPID:-(none)}" "$GCTX" "${GNSM_NOW:-(none)}" "${GNSU:-(none)}" "${GSTIME:-(none)}"
       fi
       if [ "${GNSM[$GPID]:-}" != "$GNSM_NOW" ]; then
         printf '%s GATE-NSMNT pid=%s ns/mnt=%s (was %s)\n' \
@@ -2125,7 +2137,7 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
         GNSM[$GPID]="$GNSM_NOW"
       fi
       printf '%s GATE-TICK pid=%s comm=%s ns/mnt=%s starttime=%s\n' \
-        "$GTS" "$GPID" "$GLC" "${GNSM_NOW:-(none)}" "${GST:-(none)}"
+        "$GTS" "$GPID" "$GLC" "${GNSM_NOW:-(none)}" "${GSTIME:-(none)}"
       case "$GCTX" in
         *docker_helper_rootlesskit_t:*)
           GMINFO=""
