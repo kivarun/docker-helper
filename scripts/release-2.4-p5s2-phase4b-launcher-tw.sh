@@ -1139,6 +1139,54 @@ PREFLIGHT_OK=1
     PREFLIGHT_OK=0
   fi
 
+  echo "=== flow cgroup preservation identity (the 4C-49 grant: the module's own rootlesskit -> cgroup_t:dir contribution must be the STANDING search rule + exactly one NEW bare dir-mounton rule — the rksys move-mount target /sys/fs/cgroup's OWN global label cgroup_t, a NEW evidenced pair whose confinement is proven by this run's own 4C-49 confinement-gate section (the holder's distinct mount namespace, the recursive-private propagation order, the exact-source/destination binding); cgroup_t:s0 is a GLOBAL label and mounton is path-insensitive TE authority — the grant is NOT operation-scoped and the cross-operation reachability gate stays OPEN; the standing surface: the module's OWN earlier cgroup2-root-walk pair { dir search } + { file read open } (recorded, prior contributions) plus the base policy's attribute-derived residual; every dir permission beyond the standing surface and the granted mounton is a STOP; the sysfs mount attempts stay UNGRANTED (the tolerated flow behavior)) ==="
+  echo "--- raw effective inventory (rootlesskit -> cgroup_t, every class; base-policy/attribute expansions recorded, not asserted):"
+  RK_CGROUP_RAW="$(sesearch --allow -s docker_helper_rootlesskit_t -t cgroup_t /sys/fs/selinux/policy 2>/dev/null || true)"
+  printf '%s\n' "${RK_CGROUP_RAW:-(none)}"
+  echo "--- CONCRETE module contribution (source must be docker_helper_rootlesskit_t AND class dir — cgroup_t may carry multiple owned rules across classes; the NEW mounton rule must be exactly one bare dir-mounton rule beside the standing bare search rule):"
+  RK_CGROUP_DIR_CONCRETE="$(printf '%s\n' "$RK_CGROUP_RAW" | awk '$2 == "docker_helper_rootlesskit_t" && $0 ~ /:dir/' || true)"
+  printf '%s\n' "${RK_CGROUP_DIR_CONCRETE:-(none)}"
+  RK_CGROUP_MOUNTON_RULES="$(printf '%s\n' "$RK_CGROUP_DIR_CONCRETE" | grep -a 'mounton' || true)"
+  echo "--- the NEW rule (the only concrete dir rule naming mounton — must be exactly one bare mounton rule):"
+  printf '%s\n' "${RK_CGROUP_MOUNTON_RULES:-(none)}"
+  echo "--- the base policy's standing cgroup_t:dir surface (the effective inventory's NON-concrete rules — source other than docker_helper_rootlesskit_t, the attribute-derived standing; recorded not asserted):"
+  RK_CGROUP_STANDING="$(printf '%s\n' "$RK_CGROUP_RAW" | grep -av '^allow docker_helper_rootlesskit_t ' | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:dir \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
+  printf '%s\n' "${RK_CGROUP_STANDING:-(none — the attribute-derived standing surface is empty)}"
+  RK_CGROUP_DIR_UNION="$(printf '%s\n' "$RK_CGROUP_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:dir \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
+  echo "effective dir perm union: ${RK_CGROUP_DIR_UNION:-(none)}"
+  echo "--- the forbidden-dir-perms negative (everything beyond the standing surface and the granted mounton must be absent from the whole effective dir surface; the standing set is this run's own inventory fact):"
+  RK_CGROUP_FORBIDDEN="$(printf '%s\n' "$RK_CGROUP_DIR_UNION" | tr ' ' '\n' | grep -avE "^(mounton|$(printf '%s' "$RK_CGROUP_STANDING" | tr ' ' '|'))$" || true)"
+  printf '%s\n' "${RK_CGROUP_FORBIDDEN:-(none — no extra dir permission)}"
+  echo "--- the non-dir class surfaces of cgroup_t (the standing file pair { read open } is the module's own prior contribution; the filesystem and any other class carry NO module rule — their surfaces are RECORDED, not asserted; the MOUNTON negative below is the class-confusion gate):"
+  RK_CGROUP_FILE_CONCRETE="$(printf '%s\n' "$RK_CGROUP_RAW" | awk '$2 == "docker_helper_rootlesskit_t" && $0 ~ /:file/' || true)"
+  printf '%s\n' "${RK_CGROUP_FILE_CONCRETE:-(none)}"
+  RK_CGROUP_FILE_UNION="$(printf '%s\n' "$RK_CGROUP_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:file \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
+  RK_CGROUP_FS_UNION="$(printf '%s\n' "$RK_CGROUP_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:filesystem \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
+  RK_CGROUP_OTHER_CLASSES="$(printf '%s\n' "$RK_CGROUP_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:\([^ ]*\) .*/\1/p' | grep -avE '^(dir|file|filesystem)$' | sort -u | tr '\n' ' ' || true)"
+  echo "effective file perm union: ${RK_CGROUP_FILE_UNION:-(none)}"
+  echo "effective filesystem perm union: ${RK_CGROUP_FS_UNION:-(none)}"
+  echo "other classes: ${RK_CGROUP_OTHER_CLASSES:-(none)}"
+  echo "--- the MOUNTON negative across every class (the cgroup_t authority's mounton shape belongs to the one dir rule — a file/filesystem mounton record is the class confusion the phase forbids):"
+  RK_CGROUP_MOUNTON_CLASSES="$(printf '%s\n' "$RK_CGROUP_RAW" | grep -a 'mounton' | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:\([^ ]*\) .*/\1/p' | sort -u | tr '\n' ' ' || true)"
+  echo "mounton-naming classes: ${RK_CGROUP_MOUNTON_CLASSES:-(none)}"
+  RK_CGROUP_OK=0
+  if [ "$(printf '%s\n' "$RK_CGROUP_DIR_CONCRETE" | grep -ac . || true)" = 2 ] \
+    && printf '%s\n' "$RK_CGROUP_DIR_CONCRETE" | grep -aqx 'allow docker_helper_rootlesskit_t cgroup_t:dir mounton;' \
+    && printf '%s\n' "$RK_CGROUP_DIR_CONCRETE" | grep -aqx 'allow docker_helper_rootlesskit_t cgroup_t:dir search;' \
+    && printf '%s\n' "$RK_CGROUP_DIR_UNION" | tr ' ' '\n' | grep -aqx 'mounton' \
+    && printf '%s\n' "$RK_CGROUP_DIR_UNION" | tr ' ' '\n' | grep -aqx 'search' \
+    && [ "$(printf '%s\n' "$RK_CGROUP_FILE_CONCRETE" | grep -ac . || true)" = 1 ] \
+    && printf '%s\n' "$RK_CGROUP_FILE_CONCRETE" | grep -aqx 'allow docker_helper_rootlesskit_t cgroup_t:file { read open };' \
+    && [ "$RK_CGROUP_MOUNTON_CLASSES" = "dir" ]; then
+    RK_CGROUP_OK=1
+  fi
+  if [ "$RK_CGROUP_OK" = 1 ]; then
+    echo "PASS: flow cgroup preservation identity (the NEW contribution exactly { mounton } beside the module's own standing { search } rule; the module's own file pair { read open } unchanged; mounton named by no other class; the attribute-derived standing residual recorded above; no module-borne permission beyond mounton)"
+  else
+    echo "FAIL: flow cgroup preservation identity (dir-rules=$(printf '%s\n' "$RK_CGROUP_DIR_CONCRETE" | grep -ac . || true) dir-union=${RK_CGROUP_DIR_UNION:-(none)} mounton-rules=$(printf '%s\n' "$RK_CGROUP_MOUNTON_RULES" | grep -ac . || true) file-rules=$(printf '%s\n' "${RK_CGROUP_FILE_CONCRETE:-(none)}" | grep -ac . || true) mounton-classes=${RK_CGROUP_MOUNTON_CLASSES:-(none)})"
+    PREFLIGHT_OK=0
+  fi
+
   echo "=== netlink-route send+lookup+receive+mutation identity (the 4C-22 composition: exactly { create setopt bind getattr write nlmsg_read read nlmsg_write }, no other socket permission, no capability surface) ==="
   echo "--- allow rules on netlink_route_socket (expected: the rootlesskit child's create+setopt+bind+getattr+write+nlmsg_read only; attribute-generic base-policy rules recorded, not asserted):"
   sesearch --allow -c netlink_route_socket /sys/fs/selinux/policy || true
@@ -2080,7 +2128,7 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
       printf '%s GATE-TICK pid=%s comm=%s ns/mnt=%s ns/user=%s starttime=%s\n' \
         "$GTS" "$GPID" "$GLC" "${GNSM_NOW:-(none)}" "${GNSU:-(none)}" "${GST:-(none)}"
       case "$GCTX" in
-        docker_helper_rootlesskit_t:*)
+        *docker_helper_rootlesskit_t:*)
           GMINFO=""
           IFS= read -r -d '' GMINFO < "$GP/mountinfo" 2>/dev/null || true
           if [ -n "$GMINFO" ] && [ "$GMINFO" != "${GMI[$GPID]:-}" ]; then
@@ -2775,7 +2823,7 @@ POSTTUN_NSTARTUP=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIMED=0
 POSTTUN_OLD_BOUNDARY_PRESENT=0
 POSTTUN_BND_SYMBOLIC=""
 {
-  echo "=== 4C-38..4C-49 post-TUN lifetime/readiness causal verdict (the 4C-49 confinement-gate run: the loaded policy is the 4C-48 grant set ONLY — NO cgroup mounton grant; the gate verdict decides whether the semantic delta may follow) ==="
+  echo "=== 4C-38..4C-49 post-TUN lifetime/readiness causal verdict (the 4C-49 run carries exactly the rootlesskit_t -> cgroup_t:dir mounton grant beside the standing search rule; the confinement gate's PASS is this run's own re-proven precondition) ==="
   echo "POST-TUN-T0: ${POSTTUN_T0_EPOCH:-(not derived)}"
   echo "  derivation: trace-ts=$POSTTUN_T0_TRACE_TS attach-executor=${POSTTUN_ATTACH_WHO:-(none)} read-epoch=$POSTTUN_READ_EPOCH read-uptime=$POSTTUN_READ_UPTIME ring-last-ts=${POSTTUN_RING_LAST_TS:-(none)} clock-drift=${POSTTUN_CLOCK_DRIFT:-?}s"
   echo "--- the attach pair (the T0 anchor; the attach executor's own TUNSETIFF):"
@@ -3512,6 +3560,31 @@ POSTTUN_BND_SYMBOLIC=""
     echo "OLD-LNKCREATE-BOUNDARY: GONE (no rootlesskit_t -> tmpfs_t:lnk_file create (0x8) decision in the window's trace span)"
   fi
 
+  # 4C-49: the SAME contract for the phase's own grant — the OLD primary
+  # boundary (docker_helper_rootlesskit_t -> cgroup_t:dir, denied mask
+  # 0x10000 = mounton, bit 16 of the kernel's static dir classmap; the
+  # canonical 4C-48 run's record inside the cgroup move-mount's own
+  # window) must be GONE anywhere in the window's trace span. The mask
+  # anchor is pinned to the literal 0x10000 followed by a non-hex/edge;
+  # the tclass=dir anchor separates this gate from the tmpfs
+  # lnk_file/filesystem shapes; the tcontext=cgroup_t:s0 anchor (the
+  # global type carries no MCS category) separates it from the
+  # dir-class mounton gates on the tmp_t/etc_t/tmpfs_t/root_t targets. A
+  # record here means the 4C-49 grant did not take effect on the loaded
+  # policy: STOP and report the actual behavior (no rule widening).
+  POSTTUN_OLD_CGROUPMOUNTON_PRESENT="$(grep -a 'selinux_audited:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
+    | grep -a 'scontext=system_u:system_r:docker_helper_rootlesskit_t' \
+    | grep -aE 'tcontext=system_u:object_r:cgroup_t:s0([ \t]|$)' \
+    | grep -a 'tclass=dir' \
+    | grep -aE 'denied=0x10000([^0-9a-fA-F]|$)' || true)"
+  if [ -n "$POSTTUN_OLD_CGROUPMOUNTON_PRESENT" ]; then
+    echo "OLD-CGROUPMOUNTON-BOUNDARY: STILL-PRESENT — the 4C-49 cgroup move-mount mounton grant did not take effect (STOP; no rule widening):"
+    printf '%s\n' "$POSTTUN_OLD_CGROUPMOUNTON_PRESENT"
+    POSTTUN_OLD_CGROUPMOUNTON_PRESENT=1
+  else
+    echo "OLD-CGROUPMOUNTON-BOUNDARY: GONE (no rootlesskit_t -> cgroup_t:dir mounton (0x10000) decision in the window's trace span)"
+  fi
+
   # The 4C-42 milestone: a flow-domain mkdirat AFTER T0 returning 0x0
   # means the copy-up temp dir was CREATED — the kernel-stated type of
   # the create hook (tmp_t) now carries the object. Recorded as the
@@ -3921,6 +3994,72 @@ POSTTUN_BND_SYMBOLIC=""
     POSTTUN_SYMLINK_OK=0
   fi
 
+  # The 4C-49 milestone: the cgroup preservation move-mount — the flow's
+  # own rksys bind (the /sys/fs/cgroup -> /tmp/rksys<digits>
+  # MS_BIND|MS_REC pair, extracted by the confinement gate above) and the
+  # MS_MOVE of that bind onto the exact /sys/fs/cgroup target, paired
+  # with ITS OWN exit. ROOTLESSKIT-CGROUP-MOVE-MOUNT=OK requires ALL of:
+  #   - the cgroup bind returned 0x0 (the source provenance is live);
+  #   - the MS_MOVE returned 0x0 (the move itself succeeded);
+  #   - NO cgroup_t:dir mounton denial inside the exact MS_MOVE window
+  #     (between the move's enter and its own exit);
+  #   - the production flow went further: a later non-cleanup production
+  #     enter of the same trace who (the next stage began).
+  # A missing denial alone is NOT a pass; a present denial inside the
+  # window means the grant did not take effect on the loaded policy.
+  echo "--- the 4C-49 cgroup move-mount objective (bind pair + MS_MOVE pair + the exact window's records):"
+  POSTTUN_CGROUPMOVE_WINDOW_DENIAL=""
+  if [ -n "$POSTTUN_GATE_MOVE_ENTER_TS" ] && [ -n "$POSTTUN_GATE_MOVE_EXIT_TS" ]; then
+    POSTTUN_CGROUPMOVE_WINDOW_DENIAL="$(awk -v a="$POSTTUN_GATE_MOVE_ENTER_TS" -v b="$POSTTUN_GATE_MOVE_EXIT_TS" '
+      { ts = $4; sub(/:$/, "", ts)
+        if (ts + 0 < a + 0 || ts + 0 > b + 0) next
+        print }
+    ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
+      | grep -a 'selinux_audited:' \
+      | grep -a 'scontext=system_u:system_r:docker_helper_rootlesskit_t' \
+      | grep -a 'tcontext=system_u:object_r:cgroup_t:s0' \
+      | grep -a 'tclass=dir' \
+      | grep -aE 'denied=0x10000([^0-9a-fA-F]|$)' || true)"
+  fi
+  POSTTUN_CGROUPMOVE_CONTINUATION=""
+  if [ -n "$POSTTUN_GATE_MOVE_WHO" ] && [ -n "$POSTTUN_GATE_MOVE_EXIT_TS" ]; then
+    POSTTUN_CGROUPMOVE_CONTINUATION="$(awk -v who="$POSTTUN_GATE_MOVE_WHO" -v te="$POSTTUN_GATE_MOVE_EXIT_TS" '
+      $1 != who { next }
+      { ts = $4; sub(/:$/, "", ts)
+        if (ts + 0 <= te + 0) next
+        if ($0 !~ /sys_[a-z0-9_]+\(/) next
+        nm = $0; sub(/.*sys_/, "", nm); sub(/\(.*/, "", nm)
+        if (nm ~ /^(unlink|unlinkat|rmdir)$/ && $0 ~ /"\/tmp\//) next
+        if (nm ~ /^(unlink|unlinkat|rmdir|openat|openat2|getdents64|newfstatat|statx|readlink)$/ && $0 ~ /\/tmp\/rootlesskit-b/) next
+        if (nm ~ /^(openat|openat2)$/ && $0 ~ /"\/tmp",/) next
+        if (nm ~ /^(mount|mkdir|mkdirat|umount2|umount|rename|getdents64|openat|openat2|newfstatat|statx|unlink|unlinkat|rmdir|symlink|symlinkat|readlink|execve|socket|open|setns|ioctl)$/) {
+          print; exit
+        }
+      }' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | head -1 || true)"
+  fi
+  POSTTUN_CGROUPMOVE_OK=0
+  if [ "$POSTTUN_GATE_BIND_RET" = "0x0" ] && [ "$POSTTUN_GATE_MOVE_RET" = "0x0" ] \
+    && [ -z "$POSTTUN_CGROUPMOVE_WINDOW_DENIAL" ] && [ -n "$POSTTUN_CGROUPMOVE_CONTINUATION" ]; then
+    POSTTUN_CGROUPMOVE_OK=1
+  fi
+  echo "  the cgroup bind pair:"
+  printf '%s\n' "${POSTTUN_GATE_CGROUPBIND_PAIR:-(the cgroup bind pair was never recorded)}"
+  echo "  the cgroup MS_MOVE pair:"
+  printf '%s\n' "${POSTTUN_GATE_CGROUPMOVE_PAIR:-(the cgroup MS_MOVE pair was never recorded)}"
+  if [ -n "$POSTTUN_CGROUPMOVE_WINDOW_DENIAL" ]; then
+    echo "  the exact MS_MOVE window carries a cgroup_t:dir mounton denial (the grant did not take effect):"
+    printf '%s\n' "$POSTTUN_CGROUPMOVE_WINDOW_DENIAL"
+  else
+    echo "  the exact MS_MOVE window: NO cgroup_t:dir mounton denial"
+  fi
+  if [ "$POSTTUN_CGROUPMOVE_OK" = 1 ]; then
+    echo "MILESTONE: ROOTLESSKIT-CGROUP-MOVE-MOUNT=OK — the cgroup bind and the MS_MOVE both returned success, the exact window is clean, and the flow continued:"
+    echo "  the first post-move production enter (the next stage began):"
+    printf '%s\n' "$POSTTUN_CGROUPMOVE_CONTINUATION"
+  else
+    echo "MILESTONE: ROOTLESSKIT-CGROUP-MOVE-MOUNT=NOT-REACHED (bind-ret=${POSTTUN_GATE_BIND_RET:-(none)} move-ret=${POSTTUN_GATE_MOVE_RET:-(none)} window-denial=$([ -n "$POSTTUN_CGROUPMOVE_WINDOW_DENIAL" ] && echo PRESENT || echo absent) continuation=$([ -n "$POSTTUN_CGROUPMOVE_CONTINUATION" ] && echo present || echo absent))"
+  fi
+
   # The gates.
   echo "GATES:"
   [ "$POSTTUN_T0_OK" = 1 ] && echo "  POST-TUN-T0 observed: PASS" || echo "  POST-TUN-T0 observed: FAIL"
@@ -4163,6 +4302,22 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
       marker "4C-48=PASS/POST-TUN-LIFETIME-STABLE"
     fi
   fi
+  if [ "$POSTTUN_OLD_CGROUPMOUNTON_PRESENT" = 1 ]; then
+    marker "4C-49-OLD-CGROUPMOUNTON-BOUNDARY=STILL-PRESENT"
+    marker "4C-49=INCOMPLETE/GRANT-DID-NOT-TAKE-EFFECT"
+  else
+    marker "4C-49-OLD-CGROUPMOUNTON-BOUNDARY=GONE"
+    [ "$POSTTUN_CGROUPMOVE_OK" = 1 ] && marker "ROOTLESSKIT-CGROUP-MOVE-MOUNT=OK"
+    if [ -n "$POSTTUN_FIRST_FAIL_PID" ]; then
+      marker "4C-49-OUTCOME=NEXT-STARTUP-BOUNDARY-CONFIRMED"
+      marker "4C-49=PASS/NEXT-BOUNDARY-CONFIRMED"
+    else
+      marker "4C-49-OUTCOME=POST-TUN-LIFETIME-STABLE"
+      marker "TARGET-LIFETIME-BLOCKER=GONE"
+      marker "POST-TUN-LIFETIME=STABLE"
+      marker "4C-49=PASS/POST-TUN-LIFETIME-STABLE"
+    fi
+  fi
   marker "4C-38=PROVEN/PRIMARY-BOUNDARY-ESTABLISHED"
 else
   marker "4C-38=INCOMPLETE/ORDER_NOT_ESTABLISHED"
@@ -4176,6 +4331,7 @@ else
   marker "4C-46=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-47=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-48=INCOMPLETE/ORDER_NOT_ESTABLISHED"
+  marker "4C-49=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-49-CONFINEMENT-GATE=${POSTTUN_GATE_VERDICT:-(the gate did not run — see 53-posttun-verdict.txt)}"
   POSTTUN_NOT_ESTABLISHED=1
 fi
@@ -5854,8 +6010,9 @@ if [ "$I9_OK" = 1 ]; then
   # phase INCOMPLETE (no guessing).
   # A still-present old boundary is a hard phase failure (the grant
   # demonstrably did not take effect); it outranks the cross-op
-  # INCOMPLETE. All ten standing gone-gates apply: the 4C-48 rebuild
-  # symlink-create boundary (the phase's own grant), the 4C-47
+  # INCOMPLETE. All eleven standing gone-gates apply: the 4C-49 cgroup
+  # move-mount mounton boundary (the phase's own grant), the 4C-48
+  # rebuild symlink-create boundary, the 4C-47
   # move-mount target mounton boundary, the 4C-46 .ro dir-create
   # boundary, the 4C-45 tmpfs filesystem-mount boundary, the 4C-44 etc
   # mounton boundary, the 4C-43 tmp mounton, the 4C-42 create, the
@@ -5869,6 +6026,11 @@ if [ "$I9_OK" = 1 ]; then
     marker "4C-49=BLOCKED/CONFINEMENT-NOT-PROVEN"
     marker "BLOCKER=the 4C-49 confinement gate did not pass (see 53-posttun-verdict.txt; no cgroup_t:dir mounton authority may be granted)"
     finish INCOMPLETE
+    exit 0
+  fi
+  if [ "${POSTTUN_OLD_CGROUPMOUNTON_PRESENT:-0}" = 1 ]; then
+    marker "BLOCKER=the 4C-49 cgroup move-mount mounton grant did not remove the old rootlesskit_t -> cgroup_t:dir mounton boundary (see 53-posttun-verdict.txt)"
+    finish FAIL
     exit 0
   fi
   if [ "${POSTTUN_OLD_LNKCREATE_PRESENT:-0}" = 1 ]; then
