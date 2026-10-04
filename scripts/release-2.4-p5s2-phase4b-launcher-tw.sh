@@ -2569,6 +2569,9 @@ fi
 # The flow-domain comm set is the lifetime subject (rootlesskit parent +
 # child, slirp4netns parent + child, the uid-map shims, the payload).
 POSTTUN_FLOW_COMM_GREP='(rootlesskit|exe|slirp4netns|buildkitd|newuidmap|newgidmap)-[0-9]+ '
+# The awk-side comm shape ($1 has no trailing space; the grep-side
+# pattern above cannot be reused there).
+POSTTUN_FLOW_COMM_AWK='^(rootlesskit|exe|slirp4netns|buildkitd|newuidmap|newgidmap)-[0-9]+$'
 POSTTUN_TRACE_EVENT_GREP='sched_process_fork:|sched_process_exit:|signal_generate:|signal_deliver:|selinux_audited:|sys_(openat|setns|ioctl|kill|tkill|tgkill|pidfd_send_signal|wait4|waitid|poll|ppoll|select|pselect6|read|write|close|exit|exit_group|mount|mkdir|mkdirat|execve)'
 
 # The ordered flow-domain extract (the lifetime subject's own records;
@@ -2675,35 +2678,234 @@ POSTTUN_BND_SYMBOLIC=""
   # a flow member).
   POSTTUN_WINDOW_TS="${POSTTUN_FIRST_FAIL_TS:-$POSTTUN_FIRST_DEATH_TS}"
 
-  # 4C-43: the classification anchor refines from the first failing
-  # PROCESS exit to the first failing SYSCALL exit of a flow-domain
-  # member after T0: the failed launch's RemoveAll cleanup-path denials
-  # sit AFTER the failing syscall (the blocker) but BEFORE the terminal
-  # exit, so the exit anchor mislabeled them STARTUP-CAUSAL (the 4C-42
-  # report's correction). The kill-family syscalls are excluded from
-  # the anchor search — the lifecycle surface is closed and every
-  # observed kill denial is cleanup, never a startup blocker. When no
-  # failing non-kill syscall-exit is recorded (e.g. the failing
-  # syscall's family was not armed), the anchor falls back to the first
-  # failing process exit (the pre-4C-43 behavior).
-  POSTTUN_FIRST_FAIL_SYSCALL_LINE="$(awk -v t0="$POSTTUN_T0_TRACE_TS" '
-    /sys_[a-z0-9_]+ -> 0xf/ && t0 != "" {
+  # 4C-48: the causal-anchor machinery, CORRECTED. The canonical 4C-47
+  # run (37153317223) exposed a misclassification: the anchor was the
+  # FIRST failing syscall exit after T0, which was the rootlesskit
+  # PARENT's benign state-file housekeeping probe (unlinkat -> ENOENT,
+  # 2.3ms BEFORE the holder's startup chain began, NO SELinux decision,
+  # the parent continued running) — it stole the anchor and pushed the
+  # REAL production boundary (the symlink reconstruction's lnk_file
+  # create denial, co-timed with the holder's own symlinkat -> EACCES)
+  # into POST-FAILURE/CLEANUP, and the verdict mislabeled the lifetime
+  # failure SOFTWARE-LIFECYCLE. The corrected causal contract: a failing
+  # syscall may own the PRIMARY-BOUNDARY only when the flow shows NO
+  # further forward production progress after it (failure + later
+  # production operation => the failure was handled/non-terminal).
+  # ENOENT is NOT special-cased: the criterion is the OBSERVED forward
+  # production progress, not the errno. The machinery:
+  #   1. candidates = every non-kill failing syscall exit of a
+  #      flow-domain comm after T0;
+  #   2. the cleanup zone begins at the first enter of the residue
+  #      cleanup shapes (the defer RemoveAll(bind0): unlink/unlinkat/
+  #      rmdir/openat/openat2/getdents64/newfstatat/statx naming
+  #      /tmp/rootlesskit-b*; the mkdirat/mkdir/mount stages are
+  #      production and excluded — they name the residue path as their
+  #      own target/source) — everything at/after it is
+  #      POST-FAILURE/CLEANUP territory, never forward progress;
+  #   3. the production-enter set = the armed startup-stage syscalls
+  #      (mount/mkdir/mkdirat/umount2/umount/rename/getdents64/openat/
+  #      openat2/newfstatat/statx/unlink/unlinkat/rmdir/symlink/
+  #      symlinkat/readlink/execve/socket/open) of flow-domain comms,
+  #      minus the cleanup shapes, before the zone;
+  #   4. the ANCHOR = the LAST pre-zone candidate with NO later
+  #      different-name non-cleanup production enter (the terminal
+  #      production failure — no forward progress follows it; a
+  #      same-name-retry shape is a documented limitation, none
+  #      observed); every OTHER pre-zone candidate is
+  #      HANDLED/NON-TERMINAL (its handling proof = the first later
+  #      production enter); when every candidate has later progress the
+  #      anchor falls back to the LAST candidate, flagged fallback (no
+  #      terminal production failure was isolated);
+  #   5. denial classes: POLLING-ONLY (recurring shape) > zone
+  #      (POST-FAILURE/CLEANUP) > a denial whose owning syscall window
+  #      belongs to a HANDLED failure (HANDLED/NON-TERMINAL) > d<=0 vs
+  #      the anchor (STARTUP-CAUSAL) > POST-FAILURE/CLEANUP > UNTIMED.
+  # The negative control (a terminal failing production syscall with no
+  # co-timed SELinux decision and no later progress) still yields
+  # SOFTWARE-LIFECYCLE — the correction must not bias the classifier
+  # toward SELinux. When no failing non-kill syscall-exit is recorded,
+  # the anchor falls back to the first failing process exit (the
+  # pre-4C-43 behavior).
+  # P4B-ANCHOR-MACHINERY-BEGIN (extracted verbatim by the corpus replays)
+  POSTTUN_ANCHOR_TMP="$EVIDENCE_DIR/.p4b-anchor-facts"
+  awk -v t0="$POSTTUN_T0_TRACE_TS" -v fl="$POSTTUN_FLOW_COMM_AWK" '
+    function namof(s) {
+      if (match(s, /sys_[a-z0-9_]+/)) return substr(s, RSTART+4, RLENGTH-4)
+      return ""
+    }
+    /^ *[a-zA-Z0-9_.-]+-[0-9]+ +\[[0-9]+\]/ {
+      if ($0 !~ /sys_[a-z0-9_]+/ && $0 !~ /selinux_audited:/) next
+      who = $1
+      if (who !~ fl) next
       ts = $4; sub(/:$/, "", ts)
-      if (ts + 0 > t0 + 0) print
-    }' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
-    | grep -aE "$POSTTUN_FLOW_COMM_GREP" \
-    | grep -avE 'sys_(kill|tkill|tgkill|pidfd_send_signal) ->' \
-    | head -1 || true)"
-  POSTTUN_FIRST_FAIL_SYSCALL_TS="$(printf '%s\n' "$POSTTUN_FIRST_FAIL_SYSCALL_LINE" | awk '{ ts = $4; sub(/:$/, "", ts); print ts }' 2>/dev/null || true)"
-  POSTTUN_FIRST_FAIL_SYSCALL_WHO="$(printf '%s\n' "$POSTTUN_FIRST_FAIL_SYSCALL_LINE" | awk '{print $1}' 2>/dev/null || true)"
-  if [ -n "$POSTTUN_FIRST_FAIL_SYSCALL_TS" ]; then
-    POSTTUN_CLASS_REF_TS="$POSTTUN_FIRST_FAIL_SYSCALL_TS"
-    POSTTUN_REF_ANCHOR="the first failing syscall exit ($POSTTUN_FIRST_FAIL_SYSCALL_WHO at trace-ts=$POSTTUN_FIRST_FAIL_SYSCALL_TS)"
+      if (t0 != "" && ts + 0 <= t0 + 0) next
+      if ($0 ~ /selinux_audited:/) {
+        nd++
+        den[nd] = ts "\t" who "\t" $0
+        next
+      }
+      if (!match($0, /sys_[a-z0-9_]+/)) next
+      nm = namof($0)
+      if (nm ~ /^(kill|tkill|tgkill|pidfd_send_signal)$/) next
+      k = who "|" nm
+      if ($0 ~ "sys_" nm " -> ") {
+        # The paired window close (both success and failure).
+        if (qtop[k] > 0) {
+          pc++
+          pwho[pc] = who; pname[pc] = nm; pets[pc] = qent[k, qtop[k]]; pxts[pc] = ts
+          qtop[k]--
+        }
+        if ($0 ~ / -> 0xf/) {
+          nc++
+          cand[nc] = ts "\t" who "\t" nm "\t" $0
+        }
+        next
+      }
+      if ($0 ~ "sys_" nm "\\(") {
+        qtop[k]++
+        qent[k, qtop[k]] = ts
+        # The cleanup-zone entry (the first observable step of the
+        # defer RemoveAll(bind0) sequence): a residue-naming
+        # enumeration/remove enter, or the /tmp enumeration open (the
+        # RemoveAll parent open — the canonical 4C-46 run zone began
+        # there). The mkdirat/mkdir/mount stages name the residue path
+        # too but are PRODUCTION and excluded.
+        if (nm ~ /^(unlink|unlinkat|rmdir|openat|openat2|getdents64|newfstatat|statx|readlink)$/ && $0 ~ /\/tmp\/rootlesskit-b/) {
+          if (zone == "" || ts + 0 < zone + 0) zone = ts
+          next
+        }
+        if (nm ~ /^(openat|openat2)$/ && $0 ~ /"\/tmp",/) {
+          if (zone == "" || ts + 0 < zone + 0) zone = ts
+          next
+        }
+        if (nm ~ /^(mount|mkdir|mkdirat|umount2|umount|rename|getdents64|openat|openat2|newfstatat|statx|unlink|unlinkat|rmdir|symlink|symlinkat|readlink|execve|socket|open)$/) {
+          ne++
+          ent[ne] = ts "\t" who "\t" nm "\t" $0
+        }
+        next
+      }
+    }
+    END {
+      # The pre-zone candidates, in order.
+      m = 0
+      for (i = 1; i <= nc; i++) {
+        split(cand[i], f, "\t")
+        if (zone == "" || f[1] + 0 < zone + 0) pre[++m] = i
+      }
+      # The reverse scan: the LAST candidate with no later
+      # different-name non-cleanup production enter (the terminal
+      # production failure — no forward progress follows it).
+      a = 0
+      for (j = m; j >= 1; j--) {
+        i = pre[j]
+        split(cand[i], f, "\t")
+        cts = f[1]; cnm = f[3]
+        later = 0
+        for (e = 1; e <= ne; e++) {
+          split(ent[e], g, "\t")
+          if (g[1] + 0 > cts + 0 && (zone == "" || g[1] + 0 < zone + 0) && g[3] != cnm) { later = 1; break }
+        }
+        if (!later) { a = i; break }
+      }
+      fb = 0
+      if (a == 0 && m > 0) { a = pre[m]; fb = 1 }
+      split(cand[a], f, "\t")
+      print "ANCHOR_TS=" f[1]
+      print "ANCHOR_WHO=" f[2]
+      print "ANCHOR_SYS=" f[3]
+      print "ANCHOR_FALLBACK=" fb
+      print "ZONE_TS=" (zone == "" ? "-" : zone)
+      print "ANCHOR_LINE=" f[4]
+      # The handled candidates: every pre-zone candidate except the
+      # anchor, each with its first later production enter as the
+      # handling proof (failure + later production operation => the
+      # failure was handled/non-terminal).
+      h = 0
+      for (j = 1; j <= m; j++) {
+        i = pre[j]
+        if (i == a) continue
+        split(cand[i], f, "\t")
+        cts = f[1]; cnm = f[3]
+        proof = ""
+        for (e = 1; e <= ne; e++) {
+          split(ent[e], g, "\t")
+          if (g[1] + 0 > cts + 0 && (zone == "" || g[1] + 0 < zone + 0) && g[3] != cnm) {
+            proof = g[1] " " g[3]
+            break
+          }
+        }
+        h++
+        print "HANDLED " h " trace-ts=" f[1] " who=" f[2] " sys=" cnm " by=" (proof == "" ? "(none — fallback)" : proof)
+      }
+      print "HANDLED_COUNT=" h
+      # The denial classification (the 4C-43 vocabulary + HANDLED):
+      # POLLING-ONLY (recurring shape) > the cleanup zone
+      # (POST-FAILURE/CLEANUP) > a denial whose owning syscall window
+      # belongs to a HANDLED failure (HANDLED/NON-TERMINAL) > d<=0 vs
+      # the anchor (STARTUP-CAUSAL) > POST-FAILURE/CLEANUP > UNTIMED.
+      ns = 0; np = 0; nq = 0; nu = 0; nh = 0
+      for (i = 1; i <= nd; i++) {
+        split(den[i], f, "\t")
+        ts = f[1]; dwho = f[2]; raw = f[3]
+        sh = ""
+        if (match(raw, /scontext=[^ \t]+/)) sh = substr(raw, RSTART, RLENGTH)
+        if (match(raw, /tcontext=[^ \t]+/)) sh = sh "|" substr(raw, RSTART, RLENGTH)
+        if (match(raw, /denied=0x[0-9a-fA-F]+/)) sh = sh "|" substr(raw, RSTART, RLENGTH)
+        shp[sh]++
+        cls = ""
+        if (zone != "" && ts + 0 >= zone + 0) cls = "POST-FAILURE/CLEANUP"
+        else if (a != 0) {
+          owncand = ""; best = -1
+          for (p = 1; p <= pc; p++) {
+            if (pwho[p] != dwho) continue
+            if (pets[p] + 0 > ts + 0 || pxts[p] + 0 < ts + 0) continue
+            if (pets[p] + 0 > best) { best = pets[p] + 0; owncand = pxts[p] }
+          }
+          if (owncand != "") {
+            for (j = 1; j <= m; j++) {
+              ii = pre[j]
+              if (ii == a) continue
+              split(cand[ii], g, "\t")
+              if (g[1] == owncand) { cls = "HANDLED/NON-TERMINAL"; break }
+            }
+          }
+        }
+        if (cls == "" && shp[sh] >= 2) cls = "POLLING-ONLY"
+        else if (cls == "" && a == 0) cls = "UNTIMED"
+        else if (cls == "") {
+          split(cand[a], g, "\t")
+          d = ts - g[1]
+          if (d <= 0) cls = "STARTUP-CAUSAL"
+          else cls = "POST-FAILURE/CLEANUP"
+        }
+        if (cls == "STARTUP-CAUSAL") ns++
+        else if (cls == "POST-FAILURE/CLEANUP") np++
+        else if (cls == "POLLING-ONLY") nq++
+        else if (cls == "UNTIMED") nu++
+        else if (cls == "HANDLED/NON-TERMINAL") nh++
+        printf "class=%s trace-ts=%s shape=%s\n  %s\n", cls, ts, sh, raw
+      }
+      print "COUNTS STARTUP-CAUSAL=" ns " POST-FAILURE/CLEANUP=" np " POLLING-ONLY=" nq " UNTIMED=" nu " HANDLED/NON-TERMINAL=" nh
+    }
+  ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null > "$POSTTUN_ANCHOR_TMP" || true
+  POSTTUN_ANCHOR_TS="$(grep -a '^ANCHOR_TS=' "$POSTTUN_ANCHOR_TMP" 2>/dev/null | cut -d= -f2 | head -1 || true)"
+  POSTTUN_ANCHOR_WHO="$(grep -a '^ANCHOR_WHO=' "$POSTTUN_ANCHOR_TMP" 2>/dev/null | cut -d= -f2 | head -1 || true)"
+  POSTTUN_ANCHOR_SYS="$(grep -a '^ANCHOR_SYS=' "$POSTTUN_ANCHOR_TMP" 2>/dev/null | cut -d= -f2 | head -1 || true)"
+  POSTTUN_ANCHOR_FALLBACK="$(grep -a '^ANCHOR_FALLBACK=' "$POSTTUN_ANCHOR_TMP" 2>/dev/null | cut -d= -f2 | head -1 || true)"
+  POSTTUN_ANCHOR_LINE="$(grep -a '^ANCHOR_LINE=' "$POSTTUN_ANCHOR_TMP" 2>/dev/null | cut -d= -f2- | head -1 || true)"
+  POSTTUN_ZONE_TS="$(grep -a '^ZONE_TS=' "$POSTTUN_ANCHOR_TMP" 2>/dev/null | sed 's/^ZONE_TS=//' | head -1 || true)"
+  if [ -n "$POSTTUN_ANCHOR_TS" ]; then
+    POSTTUN_CLASS_REF_TS="$POSTTUN_ANCHOR_TS"
+    POSTTUN_REF_ANCHOR="the terminal failing production syscall exit ($POSTTUN_ANCHOR_WHO sys_$POSTTUN_ANCHOR_SYS at trace-ts=$POSTTUN_ANCHOR_TS; the 4C-48 corrected contract: a failure owns the primary boundary only when no forward production progress follows it${POSTTUN_ANCHOR_FALLBACK:+; FALLBACK — the terminal production failure was not isolated, later progress follows every candidate})"
   else
     POSTTUN_CLASS_REF_TS="$POSTTUN_WINDOW_TS"
     POSTTUN_REF_ANCHOR="the first failing process exit (fallback; no failing non-kill syscall-exit recorded)"
   fi
   echo "classification anchor: $POSTTUN_REF_ANCHOR"
+  echo "cleanup zone: ${POSTTUN_ZONE_TS:--} (the defer RemoveAll(bind0) entry; everything at/after it is POST-FAILURE/CLEANUP, never forward progress)"
+  echo "--- the HANDLED/NON-TERMINAL failures (each followed by forward production progress; the probes and handled stages, never the owner):"
+  grep -a '^HANDLED ' "$POSTTUN_ANCHOR_TMP" 2>/dev/null || echo "(none — no pre-anchor failure showed later forward production progress)"
+  # P4B-ANCHOR-MACHINERY-END
   if [ -n "$POSTTUN_WINDOW_TS" ]; then
     echo "--- the failure's ±0.25s causal window (all comms, the lifetime-relevant events, ordered; anchored AT T0 — the attach's own pre-T0 steps live in the flow-domain extract):"
     awk -v t0="$POSTTUN_T0_TRACE_TS" -v td="$POSTTUN_WINDOW_TS" '
@@ -2876,51 +3078,22 @@ POSTTUN_BND_SYMBOLIC=""
   # The classification covers EVERY tclass after T0 (the startup story's
   # own dir/file/socket denials included); the pre-T0 records are the
   # launcher-chain window's scope.
-  echo "--- the trace-side SELinux decisions, temporally classified (the anchor: $POSTTUN_REF_ANCHOR):"
-  POSTTUN_TRACE_CLASSIFIED="$(grep -a 'selinux_audited:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
-    | awk -v t0="$POSTTUN_T0_TRACE_TS" -v td="$POSTTUN_CLASS_REF_TS" '
-      function shapeof(s,   a, b, m) {
-        # The recurrence key: scontext|tcontext|denied-mask. The record
-        # timestamp must NOT be part of the key, or no two records would
-        # ever repeat and the polling shape could never be detected.
-        a = ""; b = ""; m = ""
-        if (match(s, /scontext=[^ \t]+/)) a = substr(s, RSTART, RLENGTH)
-        if (match(s, /tcontext=[^ \t]+/)) b = substr(s, RSTART, RLENGTH)
-        if (match(s, /denied=0x[0-9a-fA-F]+/)) m = substr(s, RSTART, RLENGTH)
-        return a "|" b "|" m
-      }
-      {
-        ts = $4; sub(/:$/, "", ts)
-        if (t0 != "" && ts + 0 < t0 + 0) next
-        n[shapeof($0)]++
-        line[++c] = ts "\t" shapeof($0) "\t" $0
-      }
-      END {
-        for (i = 1; i <= c; i++) {
-          split(line[i], f, "\t")
-          ts = f[1]; sh = f[2]; raw = f[3]
-          cls = ""
-          if (n[sh] >= 2) cls = "POLLING-ONLY"
-          else if (td == "") cls = "UNTIMED"
-          else { d = ts - td; if (d <= 0) cls = "STARTUP-CAUSAL"; else cls = "POST-FAILURE/CLEANUP" }
-          printf "class=%s trace-ts=%s shape=%s\n  %s\n", cls, ts, sh, raw
-        }
-      }' 2>/dev/null || true)"
-  printf '%s\n' "${POSTTUN_TRACE_CLASSIFIED:-(none — no SELinux decision was recorded after T0)}"
+  echo "--- the trace-side SELinux decisions, temporally classified (the anchor: $POSTTUN_REF_ANCHOR; the corrected 4C-48 classes: STARTUP-CAUSAL / POST-FAILURE/CLEANUP / POLLING-ONLY / UNTIMED / HANDLED/NON-TERMINAL):"
+  sed -n '/^class=/,$p' "$POSTTUN_ANCHOR_TMP" 2>/dev/null | grep -av '^COUNTS ' || echo "(none — no SELinux decision was recorded after T0)"
 
-  if [ -n "$POSTTUN_TRACE_CLASSIFIED" ]; then
-    case "$(printf '%s\n' "$POSTTUN_TRACE_CLASSIFIED" | grep -ao 'class=[A-Z/-]*' | sort -u)" in
-      *UNTIMED*) POSTTUN_DENIALS_CLASSIFIED=0 ;;
-      *) POSTTUN_DENIALS_CLASSIFIED=1 ;;
-    esac
-  else
-    POSTTUN_DENIALS_CLASSIFIED=1
+  if [ -n "$POSTTUN_ANCHOR_TMP" ] && grep -aq '^COUNTS ' "$POSTTUN_ANCHOR_TMP" 2>/dev/null; then
+    POSTTUN_COUNTS_LINE="$(grep -a '^COUNTS ' "$POSTTUN_ANCHOR_TMP" | head -1)"
+    POSTTUN_NSTARTUP="$(printf '%s\n' "$POSTTUN_COUNTS_LINE" | sed -n 's/.*STARTUP-CAUSAL=\([0-9]*\).*/\1/p')"
+    POSTTUN_NPOST="$(printf '%s\n' "$POSTTUN_COUNTS_LINE" | sed -n 's/.*POST-FAILURE\/CLEANUP=\([0-9]*\).*/\1/p')"
+    POSTTUN_NPOLL="$(printf '%s\n' "$POSTTUN_COUNTS_LINE" | sed -n 's/.*POLLING-ONLY=\([0-9]*\).*/\1/p')"
+    POSTTUN_NUNTIMED="$(printf '%s\n' "$POSTTUN_COUNTS_LINE" | sed -n 's/.*UNTIMED=\([0-9]*\).*/\1/p')"
+    POSTTUN_NHANDLED="$(printf '%s\n' "$POSTTUN_COUNTS_LINE" | sed -n 's/.*HANDLED\/NON-TERMINAL=\([0-9]*\).*/\1/p')"
   fi
-  POSTTUN_NSTARTUP="$(printf '%s\n' "$POSTTUN_TRACE_CLASSIFIED" | grep -ac 'class=STARTUP-CAUSAL' || true)"
-  POSTTUN_NPOST="$(printf '%s\n' "$POSTTUN_TRACE_CLASSIFIED" | grep -ac 'class=POST-FAILURE/CLEANUP' || true)"
-  POSTTUN_NPOLL="$(printf '%s\n' "$POSTTUN_TRACE_CLASSIFIED" | grep -ac 'class=POLLING-ONLY' || true)"
-  POSTTUN_NUNTIMED="$(printf '%s\n' "$POSTTUN_TRACE_CLASSIFIED" | grep -ac 'class=UNTIMED' || true)"
-  echo "denial classes: STARTUP-CAUSAL=$POSTTUN_NSTARTUP POST-FAILURE/CLEANUP=$POSTTUN_NPOST POLLING-ONLY=$POSTTUN_NPOLL UNTIMED=$POSTTUN_NUNTIMED"
+  POSTTUN_DENIALS_CLASSIFIED=1
+  if grep -aq 'class=UNTIMED' "$POSTTUN_ANCHOR_TMP" 2>/dev/null; then
+    POSTTUN_DENIALS_CLASSIFIED=0
+  fi
+  echo "denial classes: STARTUP-CAUSAL=${POSTTUN_NSTARTUP:-0} POST-FAILURE/CLEANUP=${POSTTUN_NPOST:-0} POLLING-ONLY=${POSTTUN_NPOLL:-0} UNTIMED=${POSTTUN_NUNTIMED:-0} HANDLED/NON-TERMINAL=${POSTTUN_NHANDLED:-0}"
 
   # 4C-39: the OLD primary boundary must be GONE — no selinux_audited
   # record naming the exact triple (docker_helper_rootlesskit_t ->
@@ -3390,8 +3563,17 @@ POSTTUN_BND_SYMBOLIC=""
       fi
       POSTTUN_BOUNDARY="POLICY-DENIAL-CANDIDATE (${POSTTUN_BND_SYMBOLIC:+$POSTTUN_BND_SYMBOLIC; }a SELinux decision at trace-ts=$POSTTUN_FIRST_PRE_AT_TS, ${POSTTUN_PRE_AT_TO_FAIL}s relative to $POSTTUN_REF_DESC — the denial owns the next semantic phase; see 52-posttun-denials.txt)"
     else
-      POSTTUN_BOUNDARY="SOFTWARE-LIFECYCLE ($POSTTUN_REF_DESC at=T0+${POSTTUN_T0_TO_FAIL}s precedes every SELinux decision — no SELinux blocker owns the lifetime failure; the next phase's owner is the software/lifecycle finding)"
-      POSTTUN_BND_SYMBOLIC="SOFTWARE-LIFECYCLE (no SELinux decision precedes the first failing exit)"
+      # The 4C-48 contract: the SOFTWARE verdict must PROVE the
+      # terminality — the anchor's failure is followed by no forward
+      # production operation (only the error/exit path: the cleanup
+      # zone or the failing comm's own exit).
+      echo "--- the terminal-failure proof (the 4C-48 contract: absence of later forward production progress):"
+      printf '%s\n' "${POSTTUN_ANCHOR_LINE:-(the anchor's own record: absent)}"
+      echo "  the anchor's failing syscall: sys_$POSTTUN_ANCHOR_SYS by $POSTTUN_ANCHOR_WHO at trace-ts=$POSTTUN_ANCHOR_TS"
+      echo "  NO non-cleanup production enter follows it before ${POSTTUN_ZONE_TS:-(the window's end — no cleanup zone)} (the forward-production-enter scan found none; handled failures: ${POSTTUN_NHANDLED:-0})"
+      echo "  the transition into the error/exit path: the failing comm's subsequent records (the failure window above) end in the terminal exit"
+      POSTTUN_BOUNDARY="SOFTWARE-LIFECYCLE ($POSTTUN_REF_DESC at=T0+${POSTTUN_T0_TO_FAIL}s precedes every SELinux decision and no forward production progress follows the anchor's failure — no SELinux blocker owns the lifetime failure; the next phase's owner is the software/lifecycle finding)"
+      POSTTUN_BND_SYMBOLIC="SOFTWARE-LIFECYCLE (no SELinux decision precedes the terminal failing production syscall $POSTTUN_ANCHOR_WHO sys_$POSTTUN_ANCHOR_SYS at trace-ts=$POSTTUN_ANCHOR_TS)"
     fi
     echo "PRIMARY-BOUNDARY: $POSTTUN_BOUNDARY"
   else
@@ -3409,7 +3591,7 @@ POSTTUN_BND_SYMBOLIC=""
 cat "$EVIDENCE_DIR/53-posttun-verdict.txt" >&2
 if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
   marker "POSTTUN-FIRST-DEATH=pid=${POSTTUN_FIRST_DEATH_PID:-none} comm=${POSTTUN_FIRST_DEATH_COMM:-none} at=T0+${POSTTUN_T0_TO_DEATH:-?}s cause=${POSTTUN_DEATH_CAUSE%% *}"
-  marker "POSTTUN-DENIALS=STARTUP-CAUSAL=$POSTTUN_NSTARTUP POST-FAILURE/CLEANUP=$POSTTUN_NPOST POLLING-ONLY=$POSTTUN_NPOLL UNTIMED=$POSTTUN_NUNTIMED"
+  marker "POSTTUN-DENIALS=STARTUP-CAUSAL=$POSTTUN_NSTARTUP POST-FAILURE/CLEANUP=$POSTTUN_NPOST POLLING-ONLY=$POSTTUN_NPOLL UNTIMED=$POSTTUN_NUNTIMED HANDLED/NON-TERMINAL=${POSTTUN_NHANDLED:-0}"
   marker "POSTTUN-PRIMARY-BOUNDARY=${POSTTUN_BND_SYMBOLIC:-(undecoded — see 53-posttun-verdict.txt)}"
   if [ "$POSTTUN_OLD_BOUNDARY_PRESENT" = 1 ]; then
     marker "4C-39-OLD-MOUNTON-BOUNDARY=STILL-PRESENT"
