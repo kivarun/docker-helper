@@ -1084,6 +1084,32 @@ PREFLIGHT_OK=1
     PREFLIGHT_OK=0
   fi
 
+  echo "=== flow tmpfs rebuild-symlink identity (the 4C-48 grant: the module's own rootlesskit -> tmpfs_t:lnk_file contribution must be exactly the one bare lnk_file-create rule — the rebuild's first symlink object creation on the tmpfs (the canonical 4C-47 run's live-proven pair: the symlink object's own class lnk_file, the SID inherited from the parent dir's label tmpfs_t); NEW pair/class surface — never folded into the dir pair or the filesystem rule; the preceding unlinkat destination-probes are HANDLED/NON-TERMINAL and receive NO authority; the standing tmpfs_t:lnk_file surface is RECORDED, not asserted; every lnk_file permission beyond the standing surface and the granted create is a STOP) ==="
+  echo "--- CONCRETE module contribution (source must be docker_helper_rootlesskit_t AND class lnk_file — tmpfs_t now carries three owned rules across classes; must be exactly one bare lnk_file create rule):"
+  RK_LNK_CONCRETE="$(printf '%s\n' "$RK_TMPFSDIR_RAW" | awk '$2 == "docker_helper_rootlesskit_t" && $0 ~ /:lnk_file/' || true)"
+  printf '%s\n' "${RK_LNK_CONCRETE:-(none)}"
+  echo "--- the base policy's standing tmpfs_t:lnk_file surface (the effective inventory minus the granted create — the effective_before record; attribute-derived, recorded not asserted):"
+  RK_LNK_STANDING="$(printf '%s\n' "$RK_TMPFSDIR_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:[^ ]* \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | grep -av '^create$' | sort -u | tr '\n' ' ' || true)"
+  printf '%s\n' "${RK_LNK_STANDING:-(none — the standing surface is empty)}"
+  RK_LNK_UNION="$(printf '%s\n' "$RK_TMPFSDIR_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:lnk_file \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
+  echo "effective lnk_file perm union: ${RK_LNK_UNION:-(none)}"
+  echo "--- the forbidden-lnk-perms negative (everything beyond the base policy's standing surface and the granted create must be absent from the whole effective lnk_file surface; the standing set is this run's own inventory fact; the link/unlink/rename hooks must not ride):"
+  RK_LNK_FORBIDDEN="$(printf '%s\n' "$RK_LNK_UNION" | tr ' ' '\n' | grep -avE "^(create|$(printf '%s' "$RK_LNK_STANDING" | tr ' ' '|'))$" || true)"
+  printf '%s\n' "${RK_LNK_FORBIDDEN:-(none — no extra lnk_file permission)}"
+  RK_LNK_OK=0
+  if [ "$(printf '%s\n' "$RK_LNK_CONCRETE" | grep -ac . || true)" = 1 ] \
+    && printf '%s\n' "$RK_LNK_CONCRETE" | grep -aqx 'allow docker_helper_rootlesskit_t tmpfs_t:lnk_file create;' \
+    && printf '%s\n' "$RK_LNK_UNION" | tr ' ' '\n' | grep -aqx 'create' \
+    && [ -z "$RK_LNK_FORBIDDEN" ]; then
+    RK_LNK_OK=1
+  fi
+  if [ "$RK_LNK_OK" = 1 ]; then
+    echo "PASS: flow tmpfs rebuild-symlink identity (module contribution exactly { create }; effective lnk_file union = the base policy's standing surface + create — the standing residual recorded above; no module-borne permission beyond create)"
+  else
+    echo "FAIL: flow tmpfs rebuild-symlink identity (concrete-rules=$(printf '%s\n' "$RK_LNK_CONCRETE" | grep -ac . || true) union=${RK_LNK_UNION:-(none)})"
+    PREFLIGHT_OK=0
+  fi
+
   echo "=== flow tmpfs superblock identity (the 4C-45 grant: the module's own rootlesskit -> tmpfs_t contribution must be exactly the one bare filesystem-mount rule — the copy-up tmpfs mount over /etc creates a NEW tmpfs superblock whose OWN filesystem-class check gates its creation; the class is the evidence — filesystem, never a dir permission; tmpfs_t:s0 is a GLOBAL label, so this grant is NOT operation-scoped — the nsfs_t scope shape; the standing tmpfs_t:filesystem surface is RECORDED, not asserted; every filesystem permission beyond the standing surface and the granted mount is a STOP; the .ro/MS_MOVE/scan surfaces stay ungranted) ==="
   echo "--- raw effective inventory (rootlesskit -> tmpfs_t, every class; base-policy/attribute expansions recorded, not asserted):"
   RK_TMPFS_RAW="$(sesearch --allow -s docker_helper_rootlesskit_t -t tmpfs_t /sys/fs/selinux/policy 2>/dev/null || true)"
@@ -2607,7 +2633,7 @@ POSTTUN_NSTARTUP=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIMED=0
 POSTTUN_OLD_BOUNDARY_PRESENT=0
 POSTTUN_BND_SYMBOLIC=""
 {
-  echo "=== 4C-38..4C-47 post-TUN lifetime/readiness causal verdict (the 4C-47 run carries exactly the rootlesskit_t -> tmpfs_t:dir { create mounton } grant) ==="
+  echo "=== 4C-38..4C-48 post-TUN lifetime/readiness causal verdict (the 4C-48 run carries exactly the rootlesskit_t -> tmpfs_t:lnk_file create grant) ==="
   echo "POST-TUN-T0: ${POSTTUN_T0_EPOCH:-(not derived)}"
   echo "  derivation: trace-ts=$POSTTUN_T0_TRACE_TS attach-executor=${POSTTUN_ATTACH_WHO:-(none)} read-epoch=$POSTTUN_READ_EPOCH read-uptime=$POSTTUN_READ_UPTIME ring-last-ts=${POSTTUN_RING_LAST_TS:-(none)} clock-drift=${POSTTUN_CLOCK_DRIFT:-?}s"
   echo "--- the attach pair (the T0 anchor; the attach executor's own TUNSETIFF):"
@@ -3295,6 +3321,30 @@ POSTTUN_BND_SYMBOLIC=""
     echo "OLD-TMPDIRMOUNTON-BOUNDARY: GONE (no rootlesskit_t -> tmpfs_t:dir mounton (0x10000) decision in the window's trace span)"
   fi
 
+  # 4C-48: the SAME contract for the phase's own grant — the OLD primary
+  # boundary (docker_helper_rootlesskit_t -> tmpfs_t:lnk_file, denied
+  # mask 0x8 = create, bit 3 of COMMON_FILE_PERMS; the canonical 4C-47
+  # run's record inside the rebuild symlinkat window) must be GONE
+  # anywhere in the window's trace span. The mask anchor is pinned to
+  # the literal 0x8 followed by a non-hex/edge; the tclass=lnk_file
+  # anchor separates this gate from the dir-class create gates
+  # (tmpfs_t:dir create — the 4C-46 standing gate) and from the
+  # file-class ioctl 0x1/0x8-family masks. A record here means the
+  # 4C-48 grant did not take effect on the loaded policy: STOP and
+  # report the actual behavior (no rule widening).
+  POSTTUN_OLD_LNKCREATE_PRESENT="$(grep -a 'selinux_audited:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
+    | grep -a 'scontext=system_u:system_r:docker_helper_rootlesskit_t' \
+    | grep -aE 'tcontext=system_u:object_r:tmpfs_t:s0([ \t]|$)' \
+    | grep -a 'tclass=lnk_file' \
+    | grep -aE 'denied=0x8([^0-9a-fA-F]|$)' || true)"
+  if [ -n "$POSTTUN_OLD_LNKCREATE_PRESENT" ]; then
+    echo "OLD-LNKCREATE-BOUNDARY: STILL-PRESENT — the 4C-48 rebuild symlink create grant did not take effect (STOP; no rule widening):"
+    printf '%s\n' "$POSTTUN_OLD_LNKCREATE_PRESENT"
+    POSTTUN_OLD_LNKCREATE_PRESENT=1
+  else
+    echo "OLD-LNKCREATE-BOUNDARY: GONE (no rootlesskit_t -> tmpfs_t:lnk_file create (0x8) decision in the window's trace span)"
+  fi
+
   # The 4C-42 milestone: a flow-domain mkdirat AFTER T0 returning 0x0
   # means the copy-up temp dir was CREATED — the kernel-stated type of
   # the create hook (tmp_t) now carries the object. Recorded as the
@@ -3477,6 +3527,38 @@ POSTTUN_BND_SYMBOLIC=""
     POSTTUN_MOVEMOUNT_OK=0
   fi
 
+  # The 4C-48 milestone: the rebuild stage's first symlink creation —
+  # the flow-domain symlinkat whose oldname targets the .ro mount and
+  # whose newname recreates an original /etc entry, paired with ITS OWN
+  # exit — a 0x0 ret makes ROOTLESSKIT-COPYUP-SYMLINK-CREATE=OK. The
+  # SHAPE keys the gate (source .ro + destination /etc), not the
+  # symlink-call order; repeated symlinkat calls on the same granted
+  # surface are ONE stage (the 4C-48 contract: the first successful
+  # rebuild symlink proves the stage). Absence without a successful
+  # syscall is not a pass.
+  POSTTUN_SYMLINK_PAIR="$(awk -v t0="$POSTTUN_T0_TRACE_TS" '
+    /sys_symlinkat\(oldname:/ && t0 != "" {
+      ts = $4; sub(/:$/, "", ts)
+      if (ts + 0 > t0 + 0 && $0 ~ /oldname: [^,]*"\/[^"]*\/\.ro[0-9]+\// && $0 ~ /newname: [^,]*"\/etc\//) {
+        pend = 1; pwho = $1; pline = $0; next
+      }
+      next
+    }
+    pend && /sys_symlinkat -> / && $1 == pwho {
+      print pline; print $0; exit
+    }
+  ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true)"
+  POSTTUN_SYMLINK_RET="$(printf '%s\n' "$POSTTUN_SYMLINK_PAIR" | tail -1 | awk '{print $NF}' 2>/dev/null || true)"
+  if [ "$POSTTUN_SYMLINK_RET" = "0x0" ]; then
+    echo "MILESTONE: ROOTLESSKIT-COPYUP-SYMLINK-CREATE=OK — the rebuild symlink creation returned success:"
+    printf '%s\n' "$POSTTUN_SYMLINK_PAIR"
+    POSTTUN_SYMLINK_OK=1
+  else
+    echo "MILESTONE: ROOTLESSKIT-COPYUP-SYMLINK-CREATE=NOT-REACHED (ret=${POSTTUN_SYMLINK_RET:-(the rebuild-shaped symlinkat was never recorded)}):"
+    printf '%s\n' "${POSTTUN_SYMLINK_PAIR:-(the rebuild-shaped symlinkat pair was never recorded)}"
+    POSTTUN_SYMLINK_OK=0
+  fi
+
   # The gates.
   echo "GATES:"
   [ "$POSTTUN_T0_OK" = 1 ] && echo "  POST-TUN-T0 observed: PASS" || echo "  POST-TUN-T0 observed: FAIL"
@@ -3564,15 +3646,15 @@ POSTTUN_BND_SYMBOLIC=""
       POSTTUN_BOUNDARY="POLICY-DENIAL-CANDIDATE (${POSTTUN_BND_SYMBOLIC:+$POSTTUN_BND_SYMBOLIC; }a SELinux decision at trace-ts=$POSTTUN_FIRST_PRE_AT_TS, ${POSTTUN_PRE_AT_TO_FAIL}s relative to $POSTTUN_REF_DESC — the denial owns the next semantic phase; see 52-posttun-denials.txt)"
     else
       # The 4C-48 contract: the SOFTWARE verdict must PROVE the
-      # terminality — the anchor's failure is followed by no forward
+      # terminality — the anchor failure is followed by no forward
       # production operation (only the error/exit path: the cleanup
-      # zone or the failing comm's own exit).
+      # zone or the failing comm own exit).
       echo "--- the terminal-failure proof (the 4C-48 contract: absence of later forward production progress):"
-      printf '%s\n' "${POSTTUN_ANCHOR_LINE:-(the anchor's own record: absent)}"
-      echo "  the anchor's failing syscall: sys_$POSTTUN_ANCHOR_SYS by $POSTTUN_ANCHOR_WHO at trace-ts=$POSTTUN_ANCHOR_TS"
-      echo "  NO non-cleanup production enter follows it before ${POSTTUN_ZONE_TS:-(the window's end — no cleanup zone)} (the forward-production-enter scan found none; handled failures: ${POSTTUN_NHANDLED:-0})"
-      echo "  the transition into the error/exit path: the failing comm's subsequent records (the failure window above) end in the terminal exit"
-      POSTTUN_BOUNDARY="SOFTWARE-LIFECYCLE ($POSTTUN_REF_DESC at=T0+${POSTTUN_T0_TO_FAIL}s precedes every SELinux decision and no forward production progress follows the anchor's failure — no SELinux blocker owns the lifetime failure; the next phase's owner is the software/lifecycle finding)"
+      printf '%s\n' "${POSTTUN_ANCHOR_LINE:-(the anchor record: absent)}"
+      echo "  the terminal failing syscall: sys_$POSTTUN_ANCHOR_SYS by $POSTTUN_ANCHOR_WHO at trace-ts=$POSTTUN_ANCHOR_TS"
+      echo "  NO non-cleanup production enter follows it before ${POSTTUN_ZONE_TS:--} (the forward-production-enter scan found none; handled failures: ${POSTTUN_NHANDLED:-0})"
+      echo "  the transition into the error/exit path: the failing comm subsequent records (the failure window above) end in the terminal exit"
+      POSTTUN_BOUNDARY="SOFTWARE-LIFECYCLE ($POSTTUN_REF_DESC at=T0+${POSTTUN_T0_TO_FAIL}s precedes every SELinux decision and no forward production progress follows the anchor failure — no SELinux blocker owns the lifetime failure; the next phase owner is the software/lifecycle finding)"
       POSTTUN_BND_SYMBOLIC="SOFTWARE-LIFECYCLE (no SELinux decision precedes the terminal failing production syscall $POSTTUN_ANCHOR_WHO sys_$POSTTUN_ANCHOR_SYS at trace-ts=$POSTTUN_ANCHOR_TS)"
     fi
     echo "PRIMARY-BOUNDARY: $POSTTUN_BOUNDARY"
@@ -3694,6 +3776,22 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
       marker "4C-47=PASS/POST-TUN-LIFETIME-STABLE"
     fi
   fi
+  if [ "$POSTTUN_OLD_LNKCREATE_PRESENT" = 1 ]; then
+    marker "4C-48-OLD-LNKCREATE-BOUNDARY=STILL-PRESENT"
+    marker "4C-48=INCOMPLETE/GRANT-DID-NOT-TAKE-EFFECT"
+  else
+    marker "4C-48-OLD-LNKCREATE-BOUNDARY=GONE"
+    [ "$POSTTUN_SYMLINK_OK" = 1 ] && marker "ROOTLESSKIT-COPYUP-SYMLINK-CREATE=OK"
+    if [ -n "$POSTTUN_FIRST_FAIL_PID" ]; then
+      marker "4C-48-OUTCOME=NEXT-STARTUP-BOUNDARY-CONFIRMED"
+      marker "4C-48=PASS/NEXT-BOUNDARY-CONFIRMED"
+    else
+      marker "4C-48-OUTCOME=POST-TUN-LIFETIME-STABLE"
+      marker "TARGET-LIFETIME-BLOCKER=GONE"
+      marker "POST-TUN-LIFETIME=STABLE"
+      marker "4C-48=PASS/POST-TUN-LIFETIME-STABLE"
+    fi
+  fi
   marker "4C-38=PROVEN/PRIMARY-BOUNDARY-ESTABLISHED"
 else
   marker "4C-38=INCOMPLETE/ORDER_NOT_ESTABLISHED"
@@ -3706,6 +3804,7 @@ else
   marker "4C-45=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-46=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-47=INCOMPLETE/ORDER_NOT_ESTABLISHED"
+  marker "4C-48=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   POSTTUN_NOT_ESTABLISHED=1
 fi
 
@@ -5383,12 +5482,18 @@ if [ "$I9_OK" = 1 ]; then
   # phase INCOMPLETE (no guessing).
   # A still-present old boundary is a hard phase failure (the grant
   # demonstrably did not take effect); it outranks the cross-op
-  # INCOMPLETE. All nine standing gone-gates apply: the 4C-47 move-mount
-  # target mounton boundary (the phase's own grant), the 4C-46 .ro
-  # dir-create boundary, the 4C-45 tmpfs filesystem-mount boundary, the
-  # 4C-44 etc mounton boundary, the 4C-43 tmp mounton, the 4C-42
-  # create, the 4C-41 add_name, the 4C-40 write and the 4C-39 mounton
-  # boundaries (the standing regression guards).
+  # INCOMPLETE. All ten standing gone-gates apply: the 4C-48 rebuild
+  # symlink-create boundary (the phase's own grant), the 4C-47
+  # move-mount target mounton boundary, the 4C-46 .ro dir-create
+  # boundary, the 4C-45 tmpfs filesystem-mount boundary, the 4C-44 etc
+  # mounton boundary, the 4C-43 tmp mounton, the 4C-42 create, the
+  # 4C-41 add_name, the 4C-40 write and the 4C-39 mounton boundaries
+  # (the standing regression guards).
+  if [ "${POSTTUN_OLD_LNKCREATE_PRESENT:-0}" = 1 ]; then
+    marker "BLOCKER=the 4C-48 rebuild symlink create grant did not remove the old rootlesskit_t -> tmpfs_t:lnk_file create boundary (see 53-posttun-verdict.txt)"
+    finish FAIL
+    exit 0
+  fi
   if [ "${POSTTUN_OLD_TMPDIRMOUNTON_PRESENT:-0}" = 1 ]; then
     marker "BLOCKER=the 4C-47 move-mount mounton grant did not remove the old rootlesskit_t -> tmpfs_t:dir mounton boundary (see 53-posttun-verdict.txt)"
     finish FAIL
