@@ -2941,9 +2941,11 @@ POSTTUN_BND_SYMBOLIC=""
   POSTTUN_ANCHOR_FALLBACK="$(grep -a '^ANCHOR_FALLBACK=' "$POSTTUN_ANCHOR_TMP" 2>/dev/null | cut -d= -f2 | head -1 || true)"
   POSTTUN_ANCHOR_LINE="$(grep -a '^ANCHOR_LINE=' "$POSTTUN_ANCHOR_TMP" 2>/dev/null | cut -d= -f2- | head -1 || true)"
   POSTTUN_ZONE_TS="$(grep -a '^ZONE_TS=' "$POSTTUN_ANCHOR_TMP" 2>/dev/null | sed 's/^ZONE_TS=//' | head -1 || true)"
+  POSTTUN_ANCHOR_FB_NOTE=""
+  [ "$POSTTUN_ANCHOR_FALLBACK" = "1" ] && POSTTUN_ANCHOR_FB_NOTE="; FALLBACK — the terminal production failure was not isolated, later progress follows every candidate"
   if [ -n "$POSTTUN_ANCHOR_TS" ]; then
     POSTTUN_CLASS_REF_TS="$POSTTUN_ANCHOR_TS"
-    POSTTUN_REF_ANCHOR="the terminal failing production syscall exit ($POSTTUN_ANCHOR_WHO sys_$POSTTUN_ANCHOR_SYS at trace-ts=$POSTTUN_ANCHOR_TS; the 4C-48 corrected contract: a failure owns the primary boundary only when no forward production progress follows it${POSTTUN_ANCHOR_FALLBACK:+; FALLBACK — the terminal production failure was not isolated, later progress follows every candidate})"
+    POSTTUN_REF_ANCHOR="the terminal failing production syscall exit ($POSTTUN_ANCHOR_WHO sys_$POSTTUN_ANCHOR_SYS at trace-ts=$POSTTUN_ANCHOR_TS; the 4C-48 corrected contract: a failure owns the primary boundary only when no forward production progress follows it$POSTTUN_ANCHOR_FB_NOTE)"
   else
     POSTTUN_CLASS_REF_TS="$POSTTUN_WINDOW_TS"
     POSTTUN_REF_ANCHOR="the first failing process exit (fallback; no failing non-kill syscall-exit recorded)"
@@ -3626,16 +3628,20 @@ POSTTUN_BND_SYMBOLIC=""
   if [ "$POSTTUN_T0_OK" = 1 ] && [ "$POSTTUN_DEATH_PID_OK" = 1 ] && [ "$POSTTUN_DEATH_TS_OK" = 1 ] && [ -n "$POSTTUN_DEATH_CAUSE" ] && [ "$POSTTUN_DENIALS_CLASSIFIED" = 1 ]; then
     if [ -n "$POSTTUN_FIRST_FAIL_PID" ]; then
     POSTTUN_REF_DESC="$POSTTUN_REF_ANCHOR; the terminal exit pid=$POSTTUN_FIRST_FAIL_PID comm=$POSTTUN_FIRST_FAIL_COMM exit=$POSTTUN_FIRST_FAIL_EXIT_CODE at=T0+${POSTTUN_T0_TO_FAIL:-?}s"
-    POSTTUN_FIRST_PRE_AT_TS="$(grep -a 'selinux_audited:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
-      | awk -v t0="$POSTTUN_T0_TRACE_TS" -v td="$POSTTUN_CLASS_REF_TS" '
-        {
-          ts = $4; sub(/:$/, "", ts)
-          if (t0 != "" && ts + 0 < t0 + 0) next
-          if (td == "") next
-          d = ts - td
-          if (d < -0.02) { print ts; exit }
-          if (d <= 0) { print ts; exit }
-        }' 2>/dev/null | head -1 || true)"
+    # The boundary's owner denial = the FIRST denial CLASSIFIED
+    # STARTUP-CAUSAL by the corrected 4C-48 machinery (the ownership-
+    # aware classification — a chronologically-earlier d<=0 denial that
+    # the machinery classified HANDLED/NON-TERMINAL or cleanup-shaped
+    # POST is NOT the owner; the canonical 4C-48 evB run showed the
+    # difference: the RemoveAll(bind0) remove_name denial sits earlier
+    # in time but the classified owner is the cgroup move-mount's own
+    # mounton denial).
+    POSTTUN_FIRST_PRE_AT_TS="$(grep -a '^class=STARTUP-CAUSAL trace-ts=' "$POSTTUN_ANCHOR_TMP" 2>/dev/null \
+      | head -1 | sed -n 's/^class=STARTUP-CAUSAL trace-ts=\([0-9.]*\) shape=.*/\1/p' || true)"
+    POSTTUN_PRE_AT_RECORD=""
+    if [ -n "$POSTTUN_FIRST_PRE_AT_TS" ]; then
+      POSTTUN_PRE_AT_RECORD="$(grep -a "^class=STARTUP-CAUSAL trace-ts=$POSTTUN_FIRST_PRE_AT_TS " -A1 "$POSTTUN_ANCHOR_TMP" 2>/dev/null | sed -n '2p' | sed 's/^  //' || true)"
+    fi
     if [ -n "$POSTTUN_FIRST_PRE_AT_TS" ]; then
       POSTTUN_PRE_AT_TO_FAIL="$(awk -v a="$POSTTUN_FIRST_PRE_AT_TS" -v b="$POSTTUN_CLASS_REF_TS" 'BEGIN { printf "%.3f", a - b }' 2>/dev/null || true)"
       POSTTUN_PRE_AT_RECORD="$(grep -a 'selinux_audited:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | awk -v ts0="$POSTTUN_FIRST_PRE_AT_TS" '{ ts = $4; sub(/:$/, "", ts); if (ts + 0 == ts0 + 0) { print; exit } }' 2>/dev/null | head -1 || true)"
