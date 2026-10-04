@@ -2080,7 +2080,7 @@ log "D: 4C-38 post-TUN lifetime observer armed (pid $POSTTUN_OBSERVER_PID)"
 # ---- Read-only observation: it changes no flow authority.
 mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
 (
-  set +e
+  set +eu
   exec 9<>"/tmp/p4b-work/.gate-clock" 2>/dev/null || exit 1
   declare -A GSEEN=() GNSM=() GMI=()
   G_END=$(( EPOCHSECONDS + 12 ))
@@ -2096,10 +2096,10 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
     # 37ms mount-dancing holder slipped between every tick).
     G_MATCH="$(awk '
       $0 ~ /^(rootlesskit|exe|slirp4netns|buildkitd|newuidmap|newgidmap)$/ {
-        pid = FILENAME; sub(/\/comm$/, "", pid)
-        ctx = ""; getline ctx < (pid "/attr/current")
+        pid = FILENAME; sub(/\/comm$/, "", pid); sub(/^\/proc\//, "", pid)
+        ctx = ""; getline ctx < ("/proc/" pid "/attr/current")
         if (ctx ~ /docker_helper_rootlesskit_t:/ || ctx ~ /docker_helper_slirp4netns_t:/) print pid " " $0 " " ctx
-        close(pid "/attr/current")
+        close("/proc/" pid "/attr/current")
       }' /proc/[0-9]*/comm 2>/dev/null || true)"
     while IFS=" " read -r GPID GLC GCTX; do
       [ -n "$GPID" ] || continue
@@ -2108,7 +2108,7 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
       G1=""; G2=""; G3=""; G4=""; GREST=""
       IFS=" " read -r G1 G2 G3 G4 GREST < "$GP/stat" 2>/dev/null || true
       set -- $GREST
-      GST="${18}"
+      GST="${18:-}"
       GNSM_NOW="$(readlink "$GP/ns/mnt" 2>/dev/null || true)"
       GNSU=""
       if [ -z "${GSEEN[$GPID]:-}" ]; then
