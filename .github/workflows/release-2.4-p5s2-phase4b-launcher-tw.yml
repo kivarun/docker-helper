@@ -32,15 +32,18 @@ jobs:
 
       - name: Check out the tested proof commit for the composition
         env:
-          # 4C-47: the composition's module now widens the rootlesskit
-          # child's tmpfs_t:dir pair in place (+ mounton — the move-mount
-          # target-dir mediation, the 4C-46 boundary's semantic fix; the
-          # same pair, one rule; tmpfs_t:s0 is a global label, so the
-          # cross-operation gate stays mandatory); the proof ref advances
-          # from the 4C-46-era pin to the commit carrying that module
-          # (969d759 — identical Go sources, so the binary is the same
-          # program).
-          PHASE4B_PROOF_REF: '969d759f0ac2db804bb63d24c1707e97a6a42b80'
+          # 4C-48: the composition's module now carries the rootlesskit
+          # child's rebuild-symlink grant (the 4C-47 boundary's semantic
+          # fix — the symlink object's own lnk_file class and the SID
+          # inherited from the parent dir's label tmpfs_t, the
+          # live-proven pair; the canonical 4C-47 mechanical verdict was
+          # a known harness misclassification, corrected by the 4C-48
+          # terminal-failure anchor contract; tmpfs_t:s0 is a global
+          # label, so the cross-operation gate stays mandatory); the
+          # proof ref advances from the 4C-47-era pin to the commit
+          # carrying that module (76f2685 — identical Go sources, so the
+          # binary is the same program).
+          PHASE4B_PROOF_REF: '76f26854f912bffce217154fc356fb7015d6a351'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
