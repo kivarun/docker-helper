@@ -597,6 +597,353 @@ restorecon -R /usr/libexec/docker-helper 2>>"$EVIDENCE_DIR/01-composition-inputs
   /usr/bin/rootlesskit --version 2>&1 || true
 } > "$EVIDENCE_DIR/a2-payload.txt" 2>&1
 
+# ---- 4C-49: the confinement-gate watcher. The post-TUN observer's
+# ---- observed cadence is ~90ms (its per-pid fork volume dominates the
+# ---- 20ms sleep) — the canonical 4C-48 run PROVED it can miss the
+# ---- mount-dancing holder entirely (the holder exe-3676 lived 47.5ms
+# ---- and appears in zero timeline lines). The gate needs the holder's
+# ---- mount-namespace inode and its mountinfo DURING the mount dance,
+# ---- so this watcher scans /proc FORKLESS at a ~2-4ms cadence (builtin
+# ---- reads only; the fifo-clock read -t paces without a fork; the
+# ---- expensive ns/mnt and mountinfo probes run only for the few
+# ---- flow-domain pids) and records:
+# ----   GATE-HOLDER-FIRST  the first-seen identity of every flow-domain
+# ----                      pid (pid, comm, ppid, ctx, ns/mnt, ns/user,
+# ----                      starttime — the gate's holder identity facts);
+# ----   GATE-NSMNT         each DISTINCT ns/mnt value of a tracked pid
+# ----                      (the unshare transition — the new mount
+# ----                      namespace's creation is live-proven here);
+# ----   GATE-MOUNTINFO     each DISTINCT mountinfo content of a tracked
+# ----                      rootlesskit_t pid (best-effort: the dance's
+# ----                      own mount stack — bind0/tmpfs/rksys — and the
+# ----                      propagation state, captured live before the
+# ----                      holder dies).
+# ---- The watcher self-terminates (12s cap; early break once a
+# ---- flow-domain pid has been seen and none remains for 10 ticks).
+# ---- Read-only observation: it changes no flow authority.
+mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
+(
+  set +eu
+  exec 9<>"/tmp/p4b-work/.gate-clock" 2>/dev/null || exit 1
+  # The readiness line: the harness's own launch handshake waits for
+  # this watcher's first output before sending the START, so the flow's
+  # own mount dance (born within ~0.2s of the START, lifetime ~0.2s)
+  # is covered by live watcher ticks instead of racing the backgrounded
+  # subshell's own fork-and-first-tick latency.
+  printf '%s GATE-WATCHER-ARMED pid=%s\n' "$EPOCHREALTIME" "$$"
+  # The READY line comes AFTER the first loop pass has actually run
+  # (not after the fork): the launch handshake waits for THIS line, so
+  # the flow's own dance (born within ~0.2s of the START, lifetime
+  # ~0.2s) starts with the watcher's ticks already live. The canonical
+  # 4C-54 run 37365418204's shape: the ARMED line alone released the
+  # handshake while the first tick's own records still came ~0.15s
+  # later — the dance pid died inside that gap (gate items A/B = 0,
+  # the phase BLOCKED although the dance itself was clean).
+  declare -A GSEEN=() GNSM=() GMI=() GCOMM=() GSTIME=() GCTX=()
+  G_END=$(( EPOCHSECONDS + 12 ))
+  G_GONE=0
+  G_NSCHECK=0
+  G_LASTPID=0
+  G_FULLTICK=0
+  G_FIRSTTICK=1
+  GIDENTQ=""
+  # The per-pid discovery body, shared by both scan tiers. For an
+  # unseen pid: one builtin comm read, the flow-comm match (the alive
+  # count happens at the match, before the identity pass — the current
+  # semantics), then the identity pass and the GATE-HOLDER-FIRST
+  # record. A pid whose identity pass skips (a flow-comm pid with a
+  # non-flow ctx — e.g. the runner's own buildkitd) stays unseen and
+  # unrecorded; it still counts alive at its own discovery ticks.
+  #
+  # The canonical run 37326112431 reproduced the discovery stall: the
+  # identity pass was one awk + a forked readlink per discovered pid
+  # (~2 forks, ~30-60ms each under the launch-window fork storm), so a
+  # four-pid discovery burst stretched the tick to ~250ms and the whole
+  # mount dance (born ~.66, dead ~.83 on the watcher clock) finished
+  # inside one stall gap — the dance pid died before the watcher ever
+  # probed it alive (gate items A/B = 0, the phase BLOCKED although the
+  # dance itself was clean). The discovery is now fork-free (comm/ctx/
+  # stat are builtin reads; the ns identities are queued): the record
+  # is emitted the instant the pid matches, the queued ns probe drains
+  # the whole queue with ONE readlink fork per tick.
+  g_flow_pid() {
+    GPID="${1#/proc/}"
+    if [ -n "${GSEEN[$GPID]:-}" ]; then
+      return 0
+    fi
+    GLC=""
+    IFS= read -r GLC 2>/dev/null < "/proc/$GPID/comm" || return 0
+    case "$GLC" in
+      rootlesskit|exe|slirp4netns|buildkitd|newuidmap|newgidmap) ;;
+      *) return 0 ;;
+    esac
+    G_ALIVE=$(( G_ALIVE + 1 ))
+    GCTXV=""
+    IFS= read -r GCTXV 2>/dev/null < "/proc/$GPID/attr/current" || true
+    case "$GCTXV" in
+      *docker_helper_rootlesskit_t:*|*docker_helper_slirp4netns_t:*) ;;
+      *) return 0 ;;
+    esac
+    GST=""
+    IFS= read -r GST 2>/dev/null < "/proc/$GPID/stat" || true
+    GSTV="(none)"; GPP="(none)"; GSTART="(none)"
+    case "$GST" in
+      *") "*)
+        GBODY="${GST#*) }"
+        # After "pid (comm) " the stat fields shift: state=1, ppid=2,
+        # starttime=20 (kernel stat fields 3/4/22).
+        set -- $GBODY
+        GSTV="${1:-"(none)"}"; GPP="${2:-"(none)"}"; GSTART="${20:-"(none)"}"
+        ;;
+    esac
+    GSEEN[$GPID]=1
+    GCOMM[$GPID]="$GLC"
+    GSTIME[$GPID]="$GSTART"
+    GCTX[$GPID]="$GCTXV"
+    GNSM[$GPID]=""
+    GMI[$GPID]=""
+    # The 4C-53 correction: the ns-identity probe runs INLINE at the
+    # discovery instant (the canonical 4C-53 run 37346689804's defect:
+    # the dance pid was seen ALIVE by a full-scan tick and queued, but
+    # its whole lifetime is shorter than the queue's retry cadence —
+    # the next tick's dead-pid purge dropped it before the batched
+    # queued readlink ever returned for it, gate items A/B came out 0,
+    # and the phase finished INCOMPLETE although every gate-relevant
+    # mount pair returned 0x0). One readlink fork per discovered pid,
+    # issued the instant the comm read proved it alive; a dead-in-
+    # window pid falls back to the queued retry tier below.
+    GIDENTOUT="$(readlink "/proc/$GPID/ns/mnt" "/proc/$GPID/ns/user" 2>/dev/null || true)"
+    if [ "$(printf '%s\n' "$GIDENTOUT" | grep -ac . || true)" = 2 ]; then
+      GNSM[$GPID]="$(printf '%s\n' "$GIDENTOUT" | sed -n '1p')"
+      printf '%s GATE-HOLDER-IDENT pid=%s ns/mnt=%s ns/user=%s\n' \
+        "$GTS" "$GPID" "${GNSM[$GPID]}" "$(printf '%s\n' "$GIDENTOUT" | sed -n '2p')"
+    else
+      GIDENTQ="$GIDENTQ$GPID "
+    fi
+    printf '%s GATE-HOLDER-FIRST pid=%s comm=%s state=%s ppid=%s ctx=%s ns/mnt=%s ns/user=pending starttime=%s\n' \
+      "$GTS" "$GPID" "$GLC" "$GSTV" "$GPP" "$GCTXV" "${GNSM[$GPID]:-pending}" "${GSTART:-(none)}"
+    # The 4C-52 correction: the discovery moment IS a tick observation
+    # (the pid was alive and fully identified the instant this record
+    # was built). The canonical run 37307909383 showed a mount-dancing
+    # pid whose whole lifetime fell between two watcher ticks: the gate
+    # never recorded a GATE-TICK for it, so its recorded mount-ns
+    # identity (the gate items A/B input) came out empty. Emitting the
+    # GATE-TICK here keeps the recorded ns/mnt list honest for exactly
+    # such single-sighting pids; the tracked-pids pass continues to
+    # emit its own GATE-TICKs for the pids that survive the next tick.
+    printf '%s GATE-TICK pid=%s comm=%s ns/mnt=%s starttime=%s\n' \
+      "$GTS" "$GPID" "$GLC" "${GNSM[$GPID]:-(none)}" "${GSTART:-(none)}"
+  }
+  while :; do
+    GTS="$EPOCHREALTIME"
+    G_ALIVE=0
+    G_FULLTICK=$(( G_FULLTICK + 1 ))
+    G_DO_FULL=0
+    if [ "$G_FULLTICK" -ge 40 ]; then
+      G_FULLTICK=0
+      G_DO_FULL=1
+    fi
+    # The 4C-52 correction — the incremental discovery tier. The
+    # canonical 4C-52 pre-correction run 37294649118 showed the full
+    # /proc glob scan itself taking ~35-90ms per tick — the same
+    # magnitude as the mount-dancing pid's whole lifetime (~45ms) — and
+    # the dance pid's birth-to-death fell entirely between two glob
+    # expansions (the gate never recorded the dance pid: items A/B/C =
+    # 0, the phase BLOCKED/CONFINEMENT-NOT-PROVEN although the mount
+    # pairs themselves were clean). The corrected discovery: ONE
+    # fork-free ns_last_pid read per tick, then the comm reads ONLY for
+    # the pids born since the last tick — the flow children are forked
+    # fresh (their birth comm is the parent's own flow comm), so the
+    # incremental tier catches each dance pid AT THE FORK with the
+    # born-fresh namespace identity. The full-scan retry tier (every
+    # 40th tick) keeps the launcher re-exec discovery (the comm changes
+    # docker-helper -> rootlesskit in place on an already-scanned pid —
+    # the retry semantics the full scan existed for) and resets the
+    # vacancy counter for any long-lived flow-comm pid the identity
+    # pass skips. The tracked-pids pass below keeps every seen pid's
+    # tick record and mountinfo capture at the incremental cadence.
+    GLASTNEW=""
+    IFS= read -r GLASTNEW 2>/dev/null < /proc/sys/kernel/ns_last_pid || true
+    case "$GLASTNEW" in
+      ''|*[!0-9]*) GLASTNEW="" ;;
+    esac
+    if [ -n "$GLASTNEW" ] && [ "$GLASTNEW" -ge "$G_LASTPID" ]; then
+      if [ "$G_LASTPID" -gt 0 ]; then
+        # BACKWARD scan (the newest pids first): the launch-window fork
+        # storm stretches each tick's born-since scan, and the flow's
+        # own dance forks are ALWAYS at the range's newest tail — the
+        # canonical 4C-54 run 37358199605 reproduced the miss: the
+        # dance pid (born 229.70, dead 229.85 on the trace clock) fell
+        # inside the first tick's own full-range coverage, but the
+        # forward order reached it last, after its death (gate items
+        # A/B = 0, the phase BLOCKED although the dance itself was
+        # clean). The newest-first order gives the dance pid its
+        # discovery chance within its own lifetime; the inline
+        # ns-identity readlink at the discovery instant (the 4C-53
+        # correction) then binds it.
+        for (( GPID = GLASTNEW; GPID > G_LASTPID; GPID-- )); do
+          g_flow_pid "/proc/$GPID"
+        done
+      fi
+      G_LASTPID="$GLASTNEW"
+    else
+      G_LASTPID=0
+      G_DO_FULL=1
+    fi
+    if [ "$G_DO_FULL" = 1 ]; then
+      # BACKWARD full scan (the newest pids first): the re-exec
+      # discovery tier reads the same /proc set in newest-first order,
+      # so a long-lived flow-comm pid whose comm changed in place is
+      # found before the scan own duration matters. The FIRST tick is
+      # deliberately NOT a full tick (G_FULLTICK starts at 0): the
+      # flow-domain starts empty (the launch begins after the
+      # watcher-ready handshake), a full 4000-pid sweep here would
+      # delay the incremental tier past the dance pid whole lifetime
+      # (the canonical 4C-54 runs 37358199605/37360622771 shapes), and
+      # any pre-arm flow-comm leftover is still covered by the first
+      # regular full tick at tick 40.
+      for GPC in $(printf '%s\n' /proc/[0-9]* | sed 's|.*/||' | sort -rn | sed 's|^|/proc/|'); do
+        g_flow_pid "$GPC"
+      done
+    fi
+    # The queued ns-identity probe: ONE readlink fork per tick drains
+    # the whole discovery queue (mnt+user pairs per live pid). The
+    # alignment guard: dead pids are purged before the fork (a builtin
+    # comm test), and if the fork's line count still misses the operand
+    # count (a pid died inside the fork window), the queue is retried
+    # next tick and the purge eventually drops the dead ones.
+    if [ -n "${GIDENTQ:-}" ]; then
+      GQNEW=""
+      for GQ in $GIDENTQ; do
+        if [ -r "/proc/$GQ/comm" ]; then
+          GQNEW="$GQNEW$GQ "
+        fi
+      done
+      GIDENTQ="${GQNEW% }"
+      if [ -n "$GIDENTQ" ]; then
+        GQARGS=()
+        for GQ in $GIDENTQ; do
+          GQARGS+=("/proc/$GQ/ns/mnt" "/proc/$GQ/ns/user")
+        done
+        GQOUT="$(readlink "${GQARGS[@]}" 2>/dev/null || true)"
+        GQEXP=$(( ${#GQARGS[@]} ))
+        GQN="$(printf '%s\n' "$GQOUT" | grep -ac . || true)"
+        if [ "$GQN" -eq "$GQEXP" ]; then
+          # One output line per argument, in argument order (verified
+          # locally: GNU readlink prints the targets in operand order and
+          # skips failed operands entirely). The pairing into mnt+user
+          # comes from the ARGUMENT ORDER, not from pairing the lines.
+          GQI=0
+          while IFS= read -r GQLINE; do
+            GQI=$(( GQI + 1 ))
+            GQP="${GQARGS[$(( GQI - 1 ))]}"
+            GQP="${GQP#/proc/}"; GQP="${GQP%/ns/mnt}"; GQP="${GQP%/ns/user}"
+            if [ $(( GQI % 2 )) -eq 1 ]; then
+              GNSM[$GQP]="$GQLINE"
+            else
+              printf '%s GATE-HOLDER-IDENT pid=%s ns/mnt=%s ns/user=%s\n' \
+                "$GTS" "$GQP" "${GNSM[$GQP]:-(none)}" "$GQLINE"
+            fi
+          done <<< "$GQOUT"
+          GIDENTQ=""
+        fi
+      fi
+    fi
+    # The tracked-pids pass: the aliveness (the comm file's readability
+    # bounds the death between ticks), the tick record, and the
+    # mountinfo change capture for the rootlesskit_t pids.
+    for GPID in "${!GSEEN[@]}"; do
+      if [ -r "/proc/$GPID/comm" ]; then
+        G_ALIVE=$(( G_ALIVE + 1 ))
+        printf '%s GATE-TICK pid=%s comm=%s ns/mnt=%s starttime=%s\n' \
+          "$GTS" "$GPID" "${GCOMM[$GPID]}" "${GNSM[$GPID]}" "${GSTIME[$GPID]}"
+        case "${GCTX[$GPID]:-}" in
+          *docker_helper_rootlesskit_t:*)
+            GMINFO=""
+            IFS= read -r -d '' GMINFO < "/proc/$GPID/mountinfo" 2>/dev/null || true
+            if [ -n "$GMINFO" ] && [ "$GMINFO" != "${GMI[$GPID]:-}" ]; then
+              GMI[$GPID]="$GMINFO"
+              printf '%s GATE-MOUNTINFO pid=%s lines=%s\n' "$GTS" "$GPID" \
+                "$(printf '%s\n' "$GMINFO" | grep -ac . || true)"
+              printf '%s\n' "$GMINFO" | sed 's/^/    GATE-MOUNTINFO-LINE /'
+            fi
+            ;;
+        esac
+      fi
+    done
+    # The defensive ns/mnt re-check (~once per second of ticks): the
+    # flow namespaces are born fresh and never transitioned in any
+    # recorded run; the re-check keeps the GATE-NSMNT transition record
+    # live for the general case without paying its readlink fork every
+    # tick. Batched: one readlink fork covers every tracked pid.
+    G_NSCHECK=$(( G_NSCHECK + 1 ))
+    if [ "$G_NSCHECK" -ge 250 ] && [ "${#GSEEN[@]}" -gt 0 ]; then
+      G_NSCHECK=0
+      GNARGS=()
+      for GPID in "${!GSEEN[@]}"; do
+        GNARGS+=("/proc/$GPID/ns/mnt")
+      done
+      GNOUT="$(readlink "${GNARGS[@]}" 2>/dev/null || true)"
+      GNN="$(printf '%s\n' "$GNOUT" | grep -ac . || true)"
+      if [ "$GNN" -eq "${#GNARGS[@]}" ]; then
+        GNI=0
+        while IFS= read -r GNL; do
+          GNP="${GNARGS[$GNI]}"; GNP="${GNP#/proc/}"; GNP="${GNP%/ns/mnt}"
+          GNI=$(( GNI + 1 ))
+          if [ "${GNSM[$GNP]:-}" != "$GNL" ]; then
+            printf '%s GATE-NSMNT pid=%s ns/mnt=%s (was %s)\n' \
+              "$GTS" "$GNP" "$GNL" "${GNSM[$GNP]:-none}"
+            GNSM[$GNP]="$GNL"
+          fi
+        done <<< "$GNOUT"
+      fi
+    fi
+    if [ "$G_ALIVE" -gt 0 ]; then
+      G_GONE=0
+    elif [ "${#GSEEN[@]}" -gt 0 ]; then
+      G_GONE=$(( G_GONE + 1 ))
+      if [ "$G_GONE" -ge 150 ]; then
+        printf '%s GATE-WATCHER-END reason=flow-domain-vacant\n' "$EPOCHREALTIME"
+        break
+      fi
+    fi
+    if [ "$G_FIRSTTICK" = 1 ]; then
+      printf '%s GATE-WATCHER-READY\n' "$EPOCHREALTIME"
+      G_FIRSTTICK=0
+    fi
+    read -t 0.0005 -u 9 _ 2>/dev/null || :
+    if [ "$EPOCHSECONDS" -ge "$G_END" ]; then
+      printf '%s GATE-WATCHER-END reason=time-cap\n' "$EPOCHREALTIME"
+      break
+    fi
+  done
+) > "$EVIDENCE_DIR/51-confinement-gate.txt" 2>&1 &
+GATE_WATCHER_PID=$!
+log "D: 4C-49 confinement-gate watcher armed (pid $GATE_WATCHER_PID)"
+
+# The watcher-ready handshake: the backgrounded subshell fork plus its
+# first tick can lag the launch by seconds under the VM's own load (the
+# canonical 4C-54 run 37360622771's shape: the subshell's first
+# productive tick came ~1.9s after the START, while the flow's own
+# mount dance lived 0.16s — the dance pid's whole lifetime fell before
+# the watcher's first record, gate items A/B = 0, the phase BLOCKED
+# although the dance itself was clean). The START is sent only after
+# the watcher has PROVEN its own first tick (the gate file's first
+# record); the dance pid's lifetime is then covered by live ticks and
+# the inline ns-identity discovery. Bounded wait; a timeout records the
+# fact and proceeds (the launch is not gated on the handshake's
+# success, only on its own bounded attempt).
+GARM_WAIT=0
+until grep -aq 'GATE-WATCHER-READY' "$EVIDENCE_DIR/51-confinement-gate.txt" 2>/dev/null || [ "$GARM_WAIT" -ge 60 ]; do
+  sleep 0.05
+  GARM_WAIT=$(( GARM_WAIT + 1 ))
+done
+if grep -aq 'GATE-WATCHER-READY' "$EVIDENCE_DIR/51-confinement-gate.txt" 2>/dev/null; then
+  log "D: 4C-49 confinement-gate watcher READY proven after ${GARM_WAIT} polls (the launch window opens with the watcher's first tick done)"
+else
+  log "D: 4C-49 confinement-gate watcher READY NOT proven within the bounded handshake wait (${GARM_WAIT} polls); the launch proceeds (the gate's own evidence records the fact)"
+fi
+
 log 'A3: REAL unit bring-up (SELinuxContext binding)'
 systemctl daemon-reload
 systemctl start "$UNIT" 2>"$EVIDENCE_DIR/a3-unit-start.err" || true
@@ -2142,353 +2489,6 @@ SAMPLER_PID=$!
 ) > "$EVIDENCE_DIR/50-posttun-timeline.txt" 2>&1 &
 POSTTUN_OBSERVER_PID=$!
 log "D: 4C-38 post-TUN lifetime observer armed (pid $POSTTUN_OBSERVER_PID)"
-
-# ---- 4C-49: the confinement-gate watcher. The post-TUN observer's
-# ---- observed cadence is ~90ms (its per-pid fork volume dominates the
-# ---- 20ms sleep) — the canonical 4C-48 run PROVED it can miss the
-# ---- mount-dancing holder entirely (the holder exe-3676 lived 47.5ms
-# ---- and appears in zero timeline lines). The gate needs the holder's
-# ---- mount-namespace inode and its mountinfo DURING the mount dance,
-# ---- so this watcher scans /proc FORKLESS at a ~2-4ms cadence (builtin
-# ---- reads only; the fifo-clock read -t paces without a fork; the
-# ---- expensive ns/mnt and mountinfo probes run only for the few
-# ---- flow-domain pids) and records:
-# ----   GATE-HOLDER-FIRST  the first-seen identity of every flow-domain
-# ----                      pid (pid, comm, ppid, ctx, ns/mnt, ns/user,
-# ----                      starttime — the gate's holder identity facts);
-# ----   GATE-NSMNT         each DISTINCT ns/mnt value of a tracked pid
-# ----                      (the unshare transition — the new mount
-# ----                      namespace's creation is live-proven here);
-# ----   GATE-MOUNTINFO     each DISTINCT mountinfo content of a tracked
-# ----                      rootlesskit_t pid (best-effort: the dance's
-# ----                      own mount stack — bind0/tmpfs/rksys — and the
-# ----                      propagation state, captured live before the
-# ----                      holder dies).
-# ---- The watcher self-terminates (12s cap; early break once a
-# ---- flow-domain pid has been seen and none remains for 10 ticks).
-# ---- Read-only observation: it changes no flow authority.
-mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
-(
-  set +eu
-  exec 9<>"/tmp/p4b-work/.gate-clock" 2>/dev/null || exit 1
-  # The readiness line: the harness's own launch handshake waits for
-  # this watcher's first output before sending the START, so the flow's
-  # own mount dance (born within ~0.2s of the START, lifetime ~0.2s)
-  # is covered by live watcher ticks instead of racing the backgrounded
-  # subshell's own fork-and-first-tick latency.
-  printf '%s GATE-WATCHER-ARMED pid=%s\n' "$EPOCHREALTIME" "$$"
-  # The READY line comes AFTER the first loop pass has actually run
-  # (not after the fork): the launch handshake waits for THIS line, so
-  # the flow's own dance (born within ~0.2s of the START, lifetime
-  # ~0.2s) starts with the watcher's ticks already live. The canonical
-  # 4C-54 run 37365418204's shape: the ARMED line alone released the
-  # handshake while the first tick's own records still came ~0.15s
-  # later — the dance pid died inside that gap (gate items A/B = 0,
-  # the phase BLOCKED although the dance itself was clean).
-  declare -A GSEEN=() GNSM=() GMI=() GCOMM=() GSTIME=() GCTX=()
-  G_END=$(( EPOCHSECONDS + 12 ))
-  G_GONE=0
-  G_NSCHECK=0
-  G_LASTPID=0
-  G_FULLTICK=0
-  G_FIRSTTICK=1
-  GIDENTQ=""
-  # The per-pid discovery body, shared by both scan tiers. For an
-  # unseen pid: one builtin comm read, the flow-comm match (the alive
-  # count happens at the match, before the identity pass — the current
-  # semantics), then the identity pass and the GATE-HOLDER-FIRST
-  # record. A pid whose identity pass skips (a flow-comm pid with a
-  # non-flow ctx — e.g. the runner's own buildkitd) stays unseen and
-  # unrecorded; it still counts alive at its own discovery ticks.
-  #
-  # The canonical run 37326112431 reproduced the discovery stall: the
-  # identity pass was one awk + a forked readlink per discovered pid
-  # (~2 forks, ~30-60ms each under the launch-window fork storm), so a
-  # four-pid discovery burst stretched the tick to ~250ms and the whole
-  # mount dance (born ~.66, dead ~.83 on the watcher clock) finished
-  # inside one stall gap — the dance pid died before the watcher ever
-  # probed it alive (gate items A/B = 0, the phase BLOCKED although the
-  # dance itself was clean). The discovery is now fork-free (comm/ctx/
-  # stat are builtin reads; the ns identities are queued): the record
-  # is emitted the instant the pid matches, the queued ns probe drains
-  # the whole queue with ONE readlink fork per tick.
-  g_flow_pid() {
-    GPID="${1#/proc/}"
-    if [ -n "${GSEEN[$GPID]:-}" ]; then
-      return 0
-    fi
-    GLC=""
-    IFS= read -r GLC 2>/dev/null < "/proc/$GPID/comm" || return 0
-    case "$GLC" in
-      rootlesskit|exe|slirp4netns|buildkitd|newuidmap|newgidmap) ;;
-      *) return 0 ;;
-    esac
-    G_ALIVE=$(( G_ALIVE + 1 ))
-    GCTXV=""
-    IFS= read -r GCTXV 2>/dev/null < "/proc/$GPID/attr/current" || true
-    case "$GCTXV" in
-      *docker_helper_rootlesskit_t:*|*docker_helper_slirp4netns_t:*) ;;
-      *) return 0 ;;
-    esac
-    GST=""
-    IFS= read -r GST 2>/dev/null < "/proc/$GPID/stat" || true
-    GSTV="(none)"; GPP="(none)"; GSTART="(none)"
-    case "$GST" in
-      *") "*)
-        GBODY="${GST#*) }"
-        # After "pid (comm) " the stat fields shift: state=1, ppid=2,
-        # starttime=20 (kernel stat fields 3/4/22).
-        set -- $GBODY
-        GSTV="${1:-"(none)"}"; GPP="${2:-"(none)"}"; GSTART="${20:-"(none)"}"
-        ;;
-    esac
-    GSEEN[$GPID]=1
-    GCOMM[$GPID]="$GLC"
-    GSTIME[$GPID]="$GSTART"
-    GCTX[$GPID]="$GCTXV"
-    GNSM[$GPID]=""
-    GMI[$GPID]=""
-    # The 4C-53 correction: the ns-identity probe runs INLINE at the
-    # discovery instant (the canonical 4C-53 run 37346689804's defect:
-    # the dance pid was seen ALIVE by a full-scan tick and queued, but
-    # its whole lifetime is shorter than the queue's retry cadence —
-    # the next tick's dead-pid purge dropped it before the batched
-    # queued readlink ever returned for it, gate items A/B came out 0,
-    # and the phase finished INCOMPLETE although every gate-relevant
-    # mount pair returned 0x0). One readlink fork per discovered pid,
-    # issued the instant the comm read proved it alive; a dead-in-
-    # window pid falls back to the queued retry tier below.
-    GIDENTOUT="$(readlink "/proc/$GPID/ns/mnt" "/proc/$GPID/ns/user" 2>/dev/null || true)"
-    if [ "$(printf '%s\n' "$GIDENTOUT" | grep -ac . || true)" = 2 ]; then
-      GNSM[$GPID]="$(printf '%s\n' "$GIDENTOUT" | sed -n '1p')"
-      printf '%s GATE-HOLDER-IDENT pid=%s ns/mnt=%s ns/user=%s\n' \
-        "$GTS" "$GPID" "${GNSM[$GPID]}" "$(printf '%s\n' "$GIDENTOUT" | sed -n '2p')"
-    else
-      GIDENTQ="$GIDENTQ$GPID "
-    fi
-    printf '%s GATE-HOLDER-FIRST pid=%s comm=%s state=%s ppid=%s ctx=%s ns/mnt=%s ns/user=pending starttime=%s\n' \
-      "$GTS" "$GPID" "$GLC" "$GSTV" "$GPP" "$GCTXV" "${GNSM[$GPID]:-pending}" "${GSTART:-(none)}"
-    # The 4C-52 correction: the discovery moment IS a tick observation
-    # (the pid was alive and fully identified the instant this record
-    # was built). The canonical run 37307909383 showed a mount-dancing
-    # pid whose whole lifetime fell between two watcher ticks: the gate
-    # never recorded a GATE-TICK for it, so its recorded mount-ns
-    # identity (the gate items A/B input) came out empty. Emitting the
-    # GATE-TICK here keeps the recorded ns/mnt list honest for exactly
-    # such single-sighting pids; the tracked-pids pass continues to
-    # emit its own GATE-TICKs for the pids that survive the next tick.
-    printf '%s GATE-TICK pid=%s comm=%s ns/mnt=%s starttime=%s\n' \
-      "$GTS" "$GPID" "$GLC" "${GNSM[$GPID]:-(none)}" "${GSTART:-(none)}"
-  }
-  while :; do
-    GTS="$EPOCHREALTIME"
-    G_ALIVE=0
-    G_FULLTICK=$(( G_FULLTICK + 1 ))
-    G_DO_FULL=0
-    if [ "$G_FULLTICK" -ge 40 ]; then
-      G_FULLTICK=0
-      G_DO_FULL=1
-    fi
-    # The 4C-52 correction — the incremental discovery tier. The
-    # canonical 4C-52 pre-correction run 37294649118 showed the full
-    # /proc glob scan itself taking ~35-90ms per tick — the same
-    # magnitude as the mount-dancing pid's whole lifetime (~45ms) — and
-    # the dance pid's birth-to-death fell entirely between two glob
-    # expansions (the gate never recorded the dance pid: items A/B/C =
-    # 0, the phase BLOCKED/CONFINEMENT-NOT-PROVEN although the mount
-    # pairs themselves were clean). The corrected discovery: ONE
-    # fork-free ns_last_pid read per tick, then the comm reads ONLY for
-    # the pids born since the last tick — the flow children are forked
-    # fresh (their birth comm is the parent's own flow comm), so the
-    # incremental tier catches each dance pid AT THE FORK with the
-    # born-fresh namespace identity. The full-scan retry tier (every
-    # 40th tick) keeps the launcher re-exec discovery (the comm changes
-    # docker-helper -> rootlesskit in place on an already-scanned pid —
-    # the retry semantics the full scan existed for) and resets the
-    # vacancy counter for any long-lived flow-comm pid the identity
-    # pass skips. The tracked-pids pass below keeps every seen pid's
-    # tick record and mountinfo capture at the incremental cadence.
-    GLASTNEW=""
-    IFS= read -r GLASTNEW 2>/dev/null < /proc/sys/kernel/ns_last_pid || true
-    case "$GLASTNEW" in
-      ''|*[!0-9]*) GLASTNEW="" ;;
-    esac
-    if [ -n "$GLASTNEW" ] && [ "$GLASTNEW" -ge "$G_LASTPID" ]; then
-      if [ "$G_LASTPID" -gt 0 ]; then
-        # BACKWARD scan (the newest pids first): the launch-window fork
-        # storm stretches each tick's born-since scan, and the flow's
-        # own dance forks are ALWAYS at the range's newest tail — the
-        # canonical 4C-54 run 37358199605 reproduced the miss: the
-        # dance pid (born 229.70, dead 229.85 on the trace clock) fell
-        # inside the first tick's own full-range coverage, but the
-        # forward order reached it last, after its death (gate items
-        # A/B = 0, the phase BLOCKED although the dance itself was
-        # clean). The newest-first order gives the dance pid its
-        # discovery chance within its own lifetime; the inline
-        # ns-identity readlink at the discovery instant (the 4C-53
-        # correction) then binds it.
-        for (( GPID = GLASTNEW; GPID > G_LASTPID; GPID-- )); do
-          g_flow_pid "/proc/$GPID"
-        done
-      fi
-      G_LASTPID="$GLASTNEW"
-    else
-      G_LASTPID=0
-      G_DO_FULL=1
-    fi
-    if [ "$G_DO_FULL" = 1 ]; then
-      # BACKWARD full scan (the newest pids first): the re-exec
-      # discovery tier reads the same /proc set in newest-first order,
-      # so a long-lived flow-comm pid whose comm changed in place is
-      # found before the scan own duration matters. The FIRST tick is
-      # deliberately NOT a full tick (G_FULLTICK starts at 0): the
-      # flow-domain starts empty (the launch begins after the
-      # watcher-ready handshake), a full 4000-pid sweep here would
-      # delay the incremental tier past the dance pid whole lifetime
-      # (the canonical 4C-54 runs 37358199605/37360622771 shapes), and
-      # any pre-arm flow-comm leftover is still covered by the first
-      # regular full tick at tick 40.
-      for GPC in $(printf '%s\n' /proc/[0-9]* | sed 's|.*/||' | sort -rn | sed 's|^|/proc/|'); do
-        g_flow_pid "$GPC"
-      done
-    fi
-    # The queued ns-identity probe: ONE readlink fork per tick drains
-    # the whole discovery queue (mnt+user pairs per live pid). The
-    # alignment guard: dead pids are purged before the fork (a builtin
-    # comm test), and if the fork's line count still misses the operand
-    # count (a pid died inside the fork window), the queue is retried
-    # next tick and the purge eventually drops the dead ones.
-    if [ -n "${GIDENTQ:-}" ]; then
-      GQNEW=""
-      for GQ in $GIDENTQ; do
-        if [ -r "/proc/$GQ/comm" ]; then
-          GQNEW="$GQNEW$GQ "
-        fi
-      done
-      GIDENTQ="${GQNEW% }"
-      if [ -n "$GIDENTQ" ]; then
-        GQARGS=()
-        for GQ in $GIDENTQ; do
-          GQARGS+=("/proc/$GQ/ns/mnt" "/proc/$GQ/ns/user")
-        done
-        GQOUT="$(readlink "${GQARGS[@]}" 2>/dev/null || true)"
-        GQEXP=$(( ${#GQARGS[@]} ))
-        GQN="$(printf '%s\n' "$GQOUT" | grep -ac . || true)"
-        if [ "$GQN" -eq "$GQEXP" ]; then
-          # One output line per argument, in argument order (verified
-          # locally: GNU readlink prints the targets in operand order and
-          # skips failed operands entirely). The pairing into mnt+user
-          # comes from the ARGUMENT ORDER, not from pairing the lines.
-          GQI=0
-          while IFS= read -r GQLINE; do
-            GQI=$(( GQI + 1 ))
-            GQP="${GQARGS[$(( GQI - 1 ))]}"
-            GQP="${GQP#/proc/}"; GQP="${GQP%/ns/mnt}"; GQP="${GQP%/ns/user}"
-            if [ $(( GQI % 2 )) -eq 1 ]; then
-              GNSM[$GQP]="$GQLINE"
-            else
-              printf '%s GATE-HOLDER-IDENT pid=%s ns/mnt=%s ns/user=%s\n' \
-                "$GTS" "$GQP" "${GNSM[$GQP]:-(none)}" "$GQLINE"
-            fi
-          done <<< "$GQOUT"
-          GIDENTQ=""
-        fi
-      fi
-    fi
-    # The tracked-pids pass: the aliveness (the comm file's readability
-    # bounds the death between ticks), the tick record, and the
-    # mountinfo change capture for the rootlesskit_t pids.
-    for GPID in "${!GSEEN[@]}"; do
-      if [ -r "/proc/$GPID/comm" ]; then
-        G_ALIVE=$(( G_ALIVE + 1 ))
-        printf '%s GATE-TICK pid=%s comm=%s ns/mnt=%s starttime=%s\n' \
-          "$GTS" "$GPID" "${GCOMM[$GPID]}" "${GNSM[$GPID]}" "${GSTIME[$GPID]}"
-        case "${GCTX[$GPID]:-}" in
-          *docker_helper_rootlesskit_t:*)
-            GMINFO=""
-            IFS= read -r -d '' GMINFO < "/proc/$GPID/mountinfo" 2>/dev/null || true
-            if [ -n "$GMINFO" ] && [ "$GMINFO" != "${GMI[$GPID]:-}" ]; then
-              GMI[$GPID]="$GMINFO"
-              printf '%s GATE-MOUNTINFO pid=%s lines=%s\n' "$GTS" "$GPID" \
-                "$(printf '%s\n' "$GMINFO" | grep -ac . || true)"
-              printf '%s\n' "$GMINFO" | sed 's/^/    GATE-MOUNTINFO-LINE /'
-            fi
-            ;;
-        esac
-      fi
-    done
-    # The defensive ns/mnt re-check (~once per second of ticks): the
-    # flow namespaces are born fresh and never transitioned in any
-    # recorded run; the re-check keeps the GATE-NSMNT transition record
-    # live for the general case without paying its readlink fork every
-    # tick. Batched: one readlink fork covers every tracked pid.
-    G_NSCHECK=$(( G_NSCHECK + 1 ))
-    if [ "$G_NSCHECK" -ge 250 ] && [ "${#GSEEN[@]}" -gt 0 ]; then
-      G_NSCHECK=0
-      GNARGS=()
-      for GPID in "${!GSEEN[@]}"; do
-        GNARGS+=("/proc/$GPID/ns/mnt")
-      done
-      GNOUT="$(readlink "${GNARGS[@]}" 2>/dev/null || true)"
-      GNN="$(printf '%s\n' "$GNOUT" | grep -ac . || true)"
-      if [ "$GNN" -eq "${#GNARGS[@]}" ]; then
-        GNI=0
-        while IFS= read -r GNL; do
-          GNP="${GNARGS[$GNI]}"; GNP="${GNP#/proc/}"; GNP="${GNP%/ns/mnt}"
-          GNI=$(( GNI + 1 ))
-          if [ "${GNSM[$GNP]:-}" != "$GNL" ]; then
-            printf '%s GATE-NSMNT pid=%s ns/mnt=%s (was %s)\n' \
-              "$GTS" "$GNP" "$GNL" "${GNSM[$GNP]:-none}"
-            GNSM[$GNP]="$GNL"
-          fi
-        done <<< "$GNOUT"
-      fi
-    fi
-    if [ "$G_ALIVE" -gt 0 ]; then
-      G_GONE=0
-    elif [ "${#GSEEN[@]}" -gt 0 ]; then
-      G_GONE=$(( G_GONE + 1 ))
-      if [ "$G_GONE" -ge 150 ]; then
-        printf '%s GATE-WATCHER-END reason=flow-domain-vacant\n' "$EPOCHREALTIME"
-        break
-      fi
-    fi
-    if [ "$G_FIRSTTICK" = 1 ]; then
-      printf '%s GATE-WATCHER-READY\n' "$EPOCHREALTIME"
-      G_FIRSTTICK=0
-    fi
-    read -t 0.0005 -u 9 _ 2>/dev/null || :
-    if [ "$EPOCHSECONDS" -ge "$G_END" ]; then
-      printf '%s GATE-WATCHER-END reason=time-cap\n' "$EPOCHREALTIME"
-      break
-    fi
-  done
-) > "$EVIDENCE_DIR/51-confinement-gate.txt" 2>&1 &
-GATE_WATCHER_PID=$!
-log "D: 4C-49 confinement-gate watcher armed (pid $GATE_WATCHER_PID)"
-
-# The watcher-ready handshake: the backgrounded subshell fork plus its
-# first tick can lag the launch by seconds under the VM's own load (the
-# canonical 4C-54 run 37360622771's shape: the subshell's first
-# productive tick came ~1.9s after the START, while the flow's own
-# mount dance lived 0.16s — the dance pid's whole lifetime fell before
-# the watcher's first record, gate items A/B = 0, the phase BLOCKED
-# although the dance itself was clean). The START is sent only after
-# the watcher has PROVEN its own first tick (the gate file's first
-# record); the dance pid's lifetime is then covered by live ticks and
-# the inline ns-identity discovery. Bounded wait; a timeout records the
-# fact and proceeds (the launch is not gated on the handshake's
-# success, only on its own bounded attempt).
-GARM_WAIT=0
-until grep -aq 'GATE-WATCHER-READY' "$EVIDENCE_DIR/51-confinement-gate.txt" 2>/dev/null || [ "$GARM_WAIT" -ge 60 ]; do
-  sleep 0.05
-  GARM_WAIT=$(( GARM_WAIT + 1 ))
-done
-if grep -aq 'GATE-WATCHER-READY' "$EVIDENCE_DIR/51-confinement-gate.txt" 2>/dev/null; then
-  log "D: 4C-49 confinement-gate watcher READY proven after ${GARM_WAIT} polls (the launch window opens with the watcher's first tick done)"
-else
-  log "D: 4C-49 confinement-gate watcher READY NOT proven within the bounded handshake wait (${GARM_WAIT} polls); the launch proceeds (the gate's own evidence records the fact)"
-fi
 
 # ---- 4C-49 confinement gate: the host-side mount table BEFORE the
 # ---- window (the init process and the harness's own namespace; both
