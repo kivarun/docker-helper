@@ -1114,6 +1114,36 @@ PREFLIGHT_OK=1
     PREFLIGHT_OK=0
   fi
 
+  echo "=== flow tmpfs replacement-file identity (the 4C-54 grant: the module's own rootlesskit -> tmpfs_t:file contribution must be exactly the one bare file-create rule — the setupNet replacement stage's WriteFile(\"/etc/resolv.conf\") openat(O_WRONLY|O_CREAT|O_TRUNC) create hook, the canonical 4C-53 run 37350350345's terminal boundary (requested=0x8 denied=0x8 tclass=file INSIDE that openat window, raw mask decoded per COMMON_FILE_PERMS: 0x8 = create, NOT write — the loaded policy's perms-file VALUES are the policy's own numbering and are never the AVC decoder); the class is the evidence — file, never the 4C-48/50/53 lnk_file triple or the 4C-46/47 dir pair; the parent-dir-side mediation ran BEFORE the create check in the pre-grant window (the create denial was the window's first decision — the dir surface stays the 4C-46/47 owner's exact pair, recorded standing fact, not assumed into the module); the fd is NOT required for the create milestone's pass — the create hook may cross while the same openat's next hook (the may_open MAY_WRITE file:write 0x4, the open-completion file:open 0x80000, the O_TRUNC setattr, the parent-dir add_name) stops the syscall, and whichever hook denies owns the next phase; every file permission beyond the standing surface and the granted create is a STOP) ==="
+  echo "--- raw effective inventory (rootlesskit -> tmpfs_t, every class; base-policy/attribute expansions recorded, not asserted):"
+  printf '%s\n' "${RK_TMPFSDIR_RAW:-(none)}"
+  echo "--- CONCRETE module contribution (source must be docker_helper_rootlesskit_t AND class file — tmpfs_t now carries four owned rules across classes; must be exactly one bare file create rule):"
+  RK_FILE_CONCRETE="$(printf '%s\n' "$RK_TMPFSDIR_RAW" | awk '$2 == "docker_helper_rootlesskit_t" && $0 ~ /:file /' || true)"
+  printf '%s\n' "${RK_FILE_CONCRETE:-(none)}"
+  RK_FILE_NORM="$(printf '%s\n' "$RK_FILE_CONCRETE" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:file \(.*\);$/\1/p' | sed 's/[{}]//g; s/^ *//; s/ *$//' | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//' || true)"
+  echo "--- the base policy's standing tmpfs_t:file surface (the effective inventory's NON-concrete file-class rules — attribute-derived, recorded not asserted; do NOT assume, this run's own inventory is the fact):"
+  RK_FILE_STANDING="$(printf '%s\n' "$RK_TMPFSDIR_RAW" | grep -av '^allow docker_helper_rootlesskit_t ' | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:file \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
+  printf '%s\n' "${RK_FILE_STANDING:-(none — the standing surface is empty)}"
+  RK_FILE_UNION="$(printf '%s\n' "$RK_TMPFSDIR_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:file \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
+  echo "effective file perm union: ${RK_FILE_UNION:-(none)}"
+  echo "--- the forbidden-file-perms negative (everything beyond the base policy's standing surface and the granted create must be absent from the whole effective file surface; the standing set is this run's own inventory fact; the write/open/getattr/setattr hooks must not ride — the predicted next boundaries stay ungranted):"
+  RK_FILE_FORBIDDEN="$(printf '%s\n' "$RK_FILE_UNION" | tr ' ' '\n' | grep -avE "^(create|$(printf '%s' "$RK_FILE_STANDING" | tr ' ' '|'))$" || true)"
+  printf '%s\n' "${RK_FILE_FORBIDDEN:-(none — no extra file permission)}"
+  RK_FILE_OK=0
+  if [ "$(printf '%s\n' "$RK_FILE_CONCRETE" | grep -ac . || true)" = 1 ] \
+    && printf '%s\n' "$RK_FILE_CONCRETE" | grep -aq 'allow docker_helper_rootlesskit_t tmpfs_t:file ' \
+    && [ "$RK_FILE_NORM" = "create" ] \
+    && printf '%s\n' "$RK_FILE_UNION" | tr ' ' '\n' | grep -aqx 'create' \
+    && [ -z "$RK_FILE_FORBIDDEN" ]; then
+    RK_FILE_OK=1
+  fi
+  if [ "$RK_FILE_OK" = 1 ]; then
+    echo "PASS: flow tmpfs replacement-file identity (module contribution exactly { create }; effective file union = the base policy's standing surface + create — the standing residual recorded above; no module-borne permission beyond create)"
+  else
+    echo "FAIL: flow tmpfs replacement-file identity (concrete-rules=$(printf '%s\n' "$RK_FILE_CONCRETE" | grep -ac . || true) norm=${RK_FILE_NORM:-(none)} union=${RK_FILE_UNION:-(none)})"
+    PREFLIGHT_OK=0
+  fi
+
   echo "=== flow tmpfs superblock identity (the 4C-45 grant: the module's own rootlesskit -> tmpfs_t contribution must be exactly the one bare filesystem-mount rule — the copy-up tmpfs mount over /etc creates a NEW tmpfs superblock whose OWN filesystem-class check gates its creation; the class is the evidence — filesystem, never a dir permission; tmpfs_t:s0 is a GLOBAL label, so this grant is NOT operation-scoped — the nsfs_t scope shape; the standing tmpfs_t:filesystem surface is RECORDED, not asserted; every filesystem permission beyond the standing surface and the granted mount is a STOP; the .ro/MS_MOVE/scan surfaces stay ungranted) ==="
   echo "--- raw effective inventory (rootlesskit -> tmpfs_t, every class; base-policy/attribute expansions recorded, not asserted):"
   RK_TMPFS_RAW="$(sesearch --allow -s docker_helper_rootlesskit_t -t tmpfs_t /sys/fs/selinux/policy 2>/dev/null || true)"
@@ -3067,7 +3097,7 @@ POSTTUN_NSTARTUP=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIMED=0
 POSTTUN_OLD_BOUNDARY_PRESENT=0
 POSTTUN_BND_SYMBOLIC=""
 {
-  echo "=== 4C-38..4C-53 post-TUN lifetime/readiness causal verdict (the 4C-53 run carries exactly the rootlesskit_t -> net_conf_t:file { read open } pair — the 4C-51 read widened in place by the 4C-52 open hook — beside the tmpfs_t:lnk_file { create read unlink } triple (the 4C-48 create + 4C-50 read widened in place by the 4C-53 unlink removal hook) and the cgroup_t:dir mounton grant; the confinement gate's PASS is this run's own re-proven precondition) ==="
+  echo "=== 4C-38..4C-54 post-TUN lifetime/readiness causal verdict (the 4C-54 run carries exactly the rootlesskit_t -> net_conf_t:file { read open } pair — the 4C-51 read widened in place by the 4C-52 open hook — beside the tmpfs_t:lnk_file { create read unlink } triple (the 4C-48 create + 4C-50 read widened in place by the 4C-53 unlink removal hook), the tmpfs_t:file create grant (the 4C-54 replacement-file creation hook — the canonical 4C-53 run's own terminal boundary, raw 0x8 decoded per COMMON_FILE_PERMS) and the cgroup_t:dir mounton grant; the confinement gate's PASS is this run's own re-proven precondition) ==="
   echo "POST-TUN-T0: ${POSTTUN_T0_EPOCH:-(not derived)}"
   echo "  derivation: trace-ts=$POSTTUN_T0_TRACE_TS attach-executor=${POSTTUN_ATTACH_WHO:-(none)} read-epoch=$POSTTUN_READ_EPOCH read-uptime=$POSTTUN_READ_UPTIME ring-last-ts=${POSTTUN_RING_LAST_TS:-(none)} clock-drift=${POSTTUN_CLOCK_DRIFT:-?}s"
   echo "--- the attach pair (the T0 anchor; the attach executor's own TUNSETIFF):"
@@ -4071,6 +4101,36 @@ POSTTUN_BND_SYMBOLIC=""
     POSTTUN_OLD_LNKUNLINK_PRESENT=1
   else
     echo "OLD-LNKUNLINK-BOUNDARY: GONE (no rootlesskit_t -> tmpfs_t:lnk_file unlink (0x800) decision in the window's trace span)"
+  fi
+
+  # 4C-54: the SAME contract for the phase's own grant — the OLD primary
+  # boundary (docker_helper_rootlesskit_t -> tmpfs_t:file, denied mask
+  # 0x8 = the CREATE hook, bit 3 of the kernel's COMMON_FILE_PERMS
+  # layout — the canonical 4C-53 run 37350350345's record inside the
+  # WriteFile("/etc/resolv.conf") openat(O_CREAT) window; the decoder
+  # correction: the loaded policy's perms-file VALUES are the policy's
+  # own numbering and are never the AVC decode) must be GONE anywhere in
+  # the window's trace span. The mask anchor is pinned to the literal
+  # 0x8 followed by a non-hex/edge (0x80/0x800/0x8000/0x8000000 and the
+  # dir-class 0x8000000 remove_name mask never match); the tclass=file
+  # anchor separates this gate from the dir/lnk_file classes; the
+  # tcontext=tmpfs_t:s0 anchor separates it from every other type's
+  # file-class gates (the 4C-51 read/4C-52 open gates are on net_conf_t
+  # and the 0x2/0x40000 masks, not 0x8; the getattr 0x10 rows never
+  # match). A record here means the 4C-54 create grant did not take
+  # effect on the loaded policy: STOP and report the actual behavior (no
+  # rule widening).
+  POSTTUN_OLD_FILECREATE_PRESENT="$(grep -a 'selinux_audited:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
+    | grep -a 'scontext=system_u:system_r:docker_helper_rootlesskit_t' \
+    | grep -aE 'tcontext=system_u:object_r:tmpfs_t:s0([ \t]|$)' \
+    | grep -a 'tclass=file' \
+    | grep -aE 'denied=0x8([^0-9a-fA-F]|$)' || true)"
+  if [ -n "$POSTTUN_OLD_FILECREATE_PRESENT" ]; then
+    echo "OLD-FILECREATE-BOUNDARY: STILL-PRESENT — the 4C-54 replacement-file create grant did not take effect (STOP; no rule widening):"
+    printf '%s\n' "$POSTTUN_OLD_FILECREATE_PRESENT"
+    POSTTUN_OLD_FILECREATE_PRESENT=1
+  else
+    echo "OLD-FILECREATE-BOUNDARY: GONE (no rootlesskit_t -> tmpfs_t:file create (0x8) decision in the window's trace span)"
   fi
 
   # 4C-49: the SAME contract for the phase's own grant — the OLD primary
@@ -5086,6 +5146,137 @@ REBUILD-STAGE=NOT-REACHED}"
   ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true)"
   printf '%s\n' "${POSTTUN_HOSTSREMOVE_PAIR:-(none — no /etc/hosts-shaped unlinkat pair followed the resolv stage in this trace span)}"
 
+  # The 4C-54 objective: the replacement file's own creation. The target
+  # operation is the openat(AT_FDCWD, "/etc/resolv.conf",
+  # O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0644) window that FOLLOWS the
+  # resolv-removal stage (the 4C-53 milestone's own continuation shape —
+  # the RemoveAll+WriteFile dance's next pass). ROOTLESSKIT-ETC-RESOLV-
+  # FILE-CREATE=OK requires ALL of:
+  #   - NO tmpfs_t:file create (0x8) denial anywhere in the window (the
+  #     OLD-FILECREATE gone-gate above — the grant took effect);
+  #   - the create hook's own CAUSAL crossing, proven one of two ways
+  #     (THE FD IS NOT REQUIRED — the create hook may pass while the
+  #     same openat's next hook stops the syscall):
+  #       (a) the window's own openat exit returned an fd (ret not
+  #           0xffffffff-prefixed — the stronger shape), or
+  #       (b) a NEW SELinux decision INSIDE the window (enter ts <
+  #           decision ts <= exit ts): the may_open MAY_WRITE hook
+  #           (tclass=file write 0x4), the open-completion hook
+  #           (tclass=file open 0x80000), the O_TRUNC setattr
+  #           (tclass=file setattr 0x20), or the parent-dir add_name
+  #           (tclass=dir add_name 0x4000000) — whichever hook denies
+  #           owns the next phase; the request demonstrably got PAST
+  #           the create hook;
+  #   - the window itself was reached (the enter line exists).
+  # The create-vs-write-vs-open distinction is the phase's own duty:
+  # the openat(O_CREAT) window, the open completion, and the
+  # subsequent write() calls are separate hooks — never collapsed into
+  # "WriteFile needs permissions". The /etc/hosts equivalent
+  # openat(O_CREAT) on the SAME already-granted type/class/perm is the
+  # same permission at work, not a new phase; the machinery's
+  # terminal-boundary classification owns where the next NEW semantic
+  # boundary actually is.
+  echo "--- the 4C-54 replacement-file create objective (the exact openat(O_CREAT) window following the resolv-removal stage; the enter/exit are the paired own records, the in-window SELinux decisions are the create hook's crossing evidence):"
+  POSTTUN_FILECREATE_WINDOW_ENTER=""
+  POSTTUN_FILECREATE_WINDOW_ENTER_TS=""
+  POSTTUN_FILECREATE_WINDOW_EXIT_TS=""
+  POSTTUN_FILECREATE_WINDOW_RET=""
+  POSTTUN_FILECREATE_FD_OK=0
+  POSTTUN_FILECREATE_INWINDOW_DENIALS=""
+  if [ -n "${POSTTUN_RESOLV_STAGE_END_TS:-}" ]; then
+    POSTTUN_FILECREATE_WINDOW_PAIR="$(awk -v t0="$POSTTUN_T0_TRACE_TS" -v te="$POSTTUN_RESOLV_STAGE_END_TS" '
+      /^ *[a-zA-Z0-9_.-]+-[0-9]+ +\[[0-9]+\]/ {
+        ts = $4; sub(/:$/, "", ts)
+        if (t0 != "" && ts + 0 <= t0 + 0) next
+        if (te != "" && ts + 0 <= te + 0) next
+        if ($0 ~ /sys_openat\(/) {
+          if ($0 ~ /filename: [^,]*"\/etc\/resolv\.conf"/ && $0 ~ /O_CREAT/) {
+            pend = 1; pwho = $1; pline = $0; perts = ts
+          }
+          next
+        }
+        if (pend && /sys_openat -> / && $1 == pwho) {
+          print "    enter trace-ts=" perts " (the replacement-file create openat): " pline
+          print "    exit trace-ts=" ts " ret=" $NF
+          exit
+        }
+      }
+    ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true)"
+    printf '%s\n' "${POSTTUN_FILECREATE_WINDOW_PAIR:-(none — no /etc/resolv.conf openat(O_CREAT) window followed the resolv-removal stage in this trace span)}"
+    POSTTUN_FILECREATE_WINDOW_ENTER="$(printf '%s\n' "$POSTTUN_FILECREATE_WINDOW_PAIR" | grep -a '^    enter trace-ts=' | cut -d: -f2- | sed 's/^[^ ]* (the replacement-file create openat): //' | head -1 || true)"
+    POSTTUN_FILECREATE_WINDOW_ENTER_TS="$(printf '%s\n' "$POSTTUN_FILECREATE_WINDOW_PAIR" | grep -a '^    enter trace-ts=' | sed -n 's/^    enter trace-ts=\([0-9.]*\).*/\1/p' | head -1 || true)"
+    POSTTUN_FILECREATE_WINDOW_EXIT_TS="$(printf '%s\n' "$POSTTUN_FILECREATE_WINDOW_PAIR" | grep -a '^    exit trace-ts=' | sed -n 's/^    exit trace-ts=\([0-9.]*\).*/\1/p' | head -1 || true)"
+    POSTTUN_FILECREATE_WINDOW_RET="$(printf '%s\n' "$POSTTUN_FILECREATE_WINDOW_PAIR" | grep -a '^    exit trace-ts=' | sed -n 's/.* ret=\(.*\)$/\1/p' | head -1 || true)"
+  else
+    echo "(none — the resolv-removal stage itself was never recorded; the create window's position is unknown)"
+  fi
+  if [ -n "$POSTTUN_FILECREATE_WINDOW_ENTER" ]; then
+    echo "--- the create hook's crossing evidence (the SELinux decisions INSIDE the window; the decode is the kernel's own COMMON_FILE_PERMS/classmap numbering — the perms-file values are never the decoder):"
+    POSTTUN_FILECREATE_INWINDOW_DENIALS="$(awk -v who="$(printf '%s' "$POSTTUN_FILECREATE_WINDOW_ENTER" | awk '{print $1}')" -v we="$POSTTUN_FILECREATE_WINDOW_ENTER_TS" -v wx="$POSTTUN_FILECREATE_WINDOW_EXIT_TS" '
+      /selinux_audited:/ {
+        ts = $4; sub(/:$/, "", ts)
+        if (we != "" && ts + 0 > we + 0 && wx != "" && ts + 0 <= wx + 0 && $1 == who) print
+      }
+    ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true)"
+    if [ -n "$POSTTUN_FILECREATE_INWINDOW_DENIALS" ]; then
+      printf '%s\n' "$POSTTUN_FILECREATE_INWINDOW_DENIALS" | while IFS= read -r DLINE; do
+        printf '%s\n' "$DLINE"
+        printf '%s' "$DLINE" | grep -aE 'tclass=file' >/dev/null 2>&1 && \
+          printf '%s' "$DLINE" | grep -aE 'denied=0x4([^0-9a-fA-F]|$)' >/dev/null 2>&1 && \
+          echo "    decode: tclass=file write (0x4 — the may_open MAY_WRITE hook on the just-created inode)"
+        printf '%s' "$DLINE" | grep -aE 'tclass=file' >/dev/null 2>&1 && \
+          printf '%s' "$DLINE" | grep -aE 'denied=0x80000([^0-9a-fA-F]|$)' >/dev/null 2>&1 && \
+          echo "    decode: tclass=file open (0x80000 — the open-completion hook)"
+        printf '%s' "$DLINE" | grep -aE 'tclass=file' >/dev/null 2>&1 && \
+          printf '%s' "$DLINE" | grep -aE 'denied=0x20([^0-9a-fA-F]|$)' >/dev/null 2>&1 && \
+          echo "    decode: tclass=file setattr (0x20 — the O_TRUNC truncate hook)"
+        printf '%s' "$DLINE" | grep -aE 'tclass=dir' >/dev/null 2>&1 && \
+          printf '%s' "$DLINE" | grep -aE 'denied=0x4000000([^0-9a-fA-F]|$)' >/dev/null 2>&1 && \
+          echo "    decode: tclass=dir add_name (0x4000000 — the parent-dir's own name-insertion hook)"
+        printf '%s' "$DLINE" | grep -aE 'tclass=dir' >/dev/null 2>&1 && \
+          printf '%s' "$DLINE" | grep -aE 'denied=0x4([^0-9a-fA-F]|$)' >/dev/null 2>&1 && \
+          echo "    decode: tclass=dir write (0x4 — the parent-dir's own write check)"
+        printf '%s' "$DLINE" | grep -aE 'tclass=dir' >/dev/null 2>&1 && \
+          printf '%s' "$DLINE" | grep -aE 'denied=0x20000000([^0-9a-fA-F]|$)' >/dev/null 2>&1 && \
+          echo "    decode: tclass=dir search (0x20000000 — the parent-dir's own search check)"
+      done
+    else
+      echo "(none — no SELinux decision inside the window; the window's own exit ret is the only evidence)"
+    fi
+    POSTTUN_FILECREATE_FD_OK=0
+    if [ -n "$POSTTUN_FILECREATE_WINDOW_RET" ] && ! printf '%s' "$POSTTUN_FILECREATE_WINDOW_RET" | grep -aq '^0xffffffff'; then
+      POSTTUN_FILECREATE_FD_OK=1
+      echo "--- the fd was obtained (the window's own openat ret is non-negative — the stronger shape); the subsequent write stream (record-only, the open-completion vs write() distinction):"
+      POSTTUN_FILECREATE_WRITE_STREAM="$(awk -v who="$(printf '%s' "$POSTTUN_FILECREATE_WINDOW_ENTER" | awk '{print $1}')" -v wx="$POSTTUN_FILECREATE_WINDOW_EXIT_TS" '
+        $1 != who { next }
+        { ts = $4; sub(/:$/, "", ts)
+          if (wx != "" && ts + 0 <= wx + 0) next
+          if ($0 ~ /sys_write\(/) { print; exit }
+        }' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | head -1 || true)"
+      printf '%s\n' "${POSTTUN_FILECREATE_WRITE_STREAM:-(none — no write() enter of the same trace who followed the window in this trace span)}"
+    fi
+  fi
+  POSTTUN_FILECREATE_CROSSED=0
+  if [ "$POSTTUN_FILECREATE_FD_OK" = 1 ] || [ -n "$POSTTUN_FILECREATE_INWINDOW_DENIALS" ]; then
+    POSTTUN_FILECREATE_CROSSED=1
+  fi
+  POSTTUN_FILECREATE_OK=0
+  if [ -z "$POSTTUN_OLD_FILECREATE_PRESENT" ] \
+    && [ -n "$POSTTUN_FILECREATE_WINDOW_ENTER" ] \
+    && [ "$POSTTUN_FILECREATE_CROSSED" = 1 ]; then
+    POSTTUN_FILECREATE_OK=1
+  fi
+  if [ "$POSTTUN_FILECREATE_OK" = 1 ]; then
+    if [ "$POSTTUN_FILECREATE_FD_OK" = 1 ]; then
+      echo "MILESTONE: ROOTLESSKIT-ETC-RESOLV-FILE-CREATE=OK — the create hook crossed (the OLD create boundary is GONE) and the same openat window returned an fd (the stronger shape; the write stream is recorded above):"
+    else
+      echo "MILESTONE: ROOTLESSKIT-ETC-RESOLV-FILE-CREATE=OK — the create hook crossed (the OLD create boundary is GONE) and the request advanced to the NEXT hook's own denial inside the same window (the fd was not obtained — whichever hook denies owns the next phase):"
+    fi
+    printf '%s\n' "  the window: enter=$POSTTUN_FILECREATE_WINDOW_ENTER_TS exit=$POSTTUN_FILECREATE_WINDOW_EXIT_TS ret=$POSTTUN_FILECREATE_WINDOW_RET"
+  else
+    echo "MILESTONE: ROOTLESSKIT-ETC-RESOLV-FILE-CREATE=NOT-REACHED (window-enter=$([ -n "$POSTTUN_FILECREATE_WINDOW_ENTER" ] && echo "$POSTTUN_FILECREATE_WINDOW_ENTER_TS" || echo none) window-ret=${POSTTUN_FILECREATE_WINDOW_RET:-(unpaired)} fd=$([ "$POSTTUN_FILECREATE_FD_OK" = 1 ] && echo obtained || echo not-obtained) in-window-denial=$([ -n "$POSTTUN_FILECREATE_INWINDOW_DENIALS" ] && echo present || echo absent) oldcreate-denial=$([ -n "$POSTTUN_OLD_FILECREATE_PRESENT" ] && echo PRESENT || echo absent))"
+  fi
+
   # The gates.
   echo "GATES:"
   [ "$POSTTUN_T0_OK" = 1 ] && echo "  POST-TUN-T0 observed: PASS" || echo "  POST-TUN-T0 observed: FAIL"
@@ -5427,6 +5618,34 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
       POSTTUN_4C53_PHASE_OK=0
       marker "ROOTLESSKIT-ETC-RESOLV-SYMLINK-REMOVE=NOT-REACHED"
       marker "4C-53=INCOMPLETE/MILESTONE-NOT-REACHED"
+    fi
+  fi
+  # The 4C-54 phase block: the same shape as the 4C-53 block (the
+  # accepted PASS contract: the milestone OK is REQUIRED for the
+  # phase's PASS; the fd is NOT required for the milestone — the create
+  # hook's crossing is the proof, the next hook owns the next phase).
+  if [ "$POSTTUN_OLD_FILECREATE_PRESENT" = 1 ]; then
+    POSTTUN_4C54_PHASE_OK=0
+    marker "4C-54-OLD-FILECREATE-BOUNDARY=STILL-PRESENT"
+    marker "4C-54=INCOMPLETE/GRANT-DID-NOT-TAKE-EFFECT"
+  else
+    marker "4C-54-OLD-FILECREATE-BOUNDARY=GONE"
+    if [ "$POSTTUN_FILECREATE_OK" = 1 ]; then
+      POSTTUN_4C54_PHASE_OK=1
+      marker "ROOTLESSKIT-ETC-RESOLV-FILE-CREATE=OK"
+      if [ -n "$POSTTUN_FIRST_FAIL_PID" ]; then
+        marker "4C-54-OUTCOME=NEXT-STARTUP-BOUNDARY-CONFIRMED"
+        marker "4C-54=PASS/NEXT-BOUNDARY-CONFIRMED"
+      else
+        marker "4C-54-OUTCOME=POST-TUN-LIFETIME-STABLE"
+        marker "TARGET-LIFETIME-BLOCKER=GONE"
+        marker "POST-TUN-LIFETIME=STABLE"
+        marker "4C-54=PASS/POST-TUN-LIFETIME-STABLE"
+      fi
+    else
+      POSTTUN_4C54_PHASE_OK=0
+      marker "ROOTLESSKIT-ETC-RESOLV-FILE-CREATE=NOT-REACHED"
+      marker "4C-54=INCOMPLETE/MILESTONE-NOT-REACHED"
     fi
   fi
   marker "4C-38=PROVEN/PRIMARY-BOUNDARY-ESTABLISHED"
@@ -7125,7 +7344,8 @@ if [ "$I9_OK" = 1 ]; then
   # phase INCOMPLETE (no guessing).
   # A still-present old boundary is a hard phase failure (the grant
   # demonstrably did not take effect); it outranks the cross-op
-  # INCOMPLETE. All fifteen standing gone-gates apply: the 4C-53
+  # INCOMPLETE. All sixteen standing gone-gates apply: the 4C-54
+  # replacement-file create boundary (the phase's own grant), the 4C-53
   # rebuild-symlink unlink boundary (the phase's own widening), the
   # 4C-52 resolved-pair open boundary (the phase's own widening), the
   # 4C-51 resolved-file read boundary (the prior phase's own grant),
@@ -7149,6 +7369,11 @@ if [ "$I9_OK" = 1 ]; then
     marker "4C-49=BLOCKED/CONFINEMENT-NOT-PROVEN"
     marker "BLOCKER=the 4C-49 confinement gate did not pass (see 53-posttun-verdict.txt; no cgroup_t:dir mounton authority may be granted)"
     finish INCOMPLETE
+    exit 0
+  fi
+  if [ "${POSTTUN_OLD_LNKUNLINK_PRESENT:-0}" = 1 ]; then
+    marker "BLOCKER=the 4C-53 rebuild-symlink unlink widening did not remove the old rootlesskit_t -> tmpfs_t:lnk_file unlink boundary (see 53-posttun-verdict.txt)"
+    finish FAIL
     exit 0
   fi
   if [ "${POSTTUN_OLD_CONFOPEN_PRESENT:-0}" = 1 ]; then
@@ -7223,6 +7448,16 @@ if [ "$I9_OK" = 1 ]; then
   fi
   if [ "${POSTTUN_ESTABLISHED:-0}" = 1 ] && [ "${POSTTUN_4C53_PHASE_OK:-0}" != 1 ]; then
     marker "BLOCKER=the 4C-53 resolv-removal milestone did not reach OK (see 53-posttun-verdict.txt; the accepted PASS contract requires the milestone — the run 37346689804 defect: the final verdict ran PASS while the phase marker said INCOMPLETE)"
+    finish INCOMPLETE
+    exit 0
+  fi
+  if [ "${POSTTUN_OLD_FILECREATE_PRESENT:-0}" = 1 ]; then
+    marker "BLOCKER=the 4C-54 replacement-file create grant did not remove the old rootlesskit_t -> tmpfs_t:file create boundary (see 53-posttun-verdict.txt)"
+    finish FAIL
+    exit 0
+  fi
+  if [ "${POSTTUN_ESTABLISHED:-0}" = 1 ] && [ "${POSTTUN_4C54_PHASE_OK:-0}" != 1 ]; then
+    marker "BLOCKER=the 4C-54 file-create milestone did not reach OK (see 53-posttun-verdict.txt; the accepted PASS contract requires the milestone)"
     finish INCOMPLETE
     exit 0
   fi
