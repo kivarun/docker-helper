@@ -3459,45 +3459,63 @@ func TestSELinuxPolicyRootlesskitTmpfsDir(t *testing.T) {
 	}
 }
 
-// TestSELinuxPolicyRootlesskitTmpfsSymlinkCreate owns the exact surface
-// of the 4C-48 rebuild-symlink grant: docker_helper_rootlesskit_t ->
-// tmpfs_t:lnk_file { create }. The grant exists because the copy-up
-// flow's rebuild stage — after the WHOLE mount chain passed (A, B, C,
-// the .ro mkdirat and the MS_MOVE move-mount all -> 0x0 in the
-// canonical 4C-47 run 37153317223) and ReadDir(bind1) succeeded — failed at the FIRST entry's symlink
-// creation: requested=0x8 denied=0x8 result=-13 tcontext=tmpfs_t:s0
-// tclass=lnk_file INSIDE the symlinkat(".ro2286969802/.pwd.lock" ->
-// "/etc/.pwd.lock") window, 16µs before the failing exit. The pair is
-// live-proven — the symlink object's own class (lnk_file) and the SID
-// inherited from the parent dir's label tmpfs_t:s0; the decode is
-// lnk_file:create = 0x8 (bit 3 of COMMON_FILE_PERMS, pinned in the
-// kernel-classmap fixture). This is a NEW pair/class surface — never
-// folded into the tmpfs_t:dir { create mounton } pair or the
-// tmpfs_t:filesystem mount rule (separate classes, separate hooks,
-// separate provenance). The holder's preceding unlinkat
-// destination-probes are HANDLED/NON-TERMINAL (ENOENT, followed by the
-// symlinkat — forward production progress) and receive NO authority:
-// unlink/remove_name/link stay ungranted. SCOPE — a GLOBAL-TYPE grant
-// (tmpfs_t:s0): not operation-scoped (the nsfs_t scope shape); the
-// cross-operation gate stays mandatory. Deliberately NOT granted:
-// read/write/getattr/setattr/unlink/link/rename/relabelfrom/relabelto
-// on this pair, any dir/file/filesystem permission, any other type's
+// TestSELinuxPolicyRootlesskitTmpfsSymlink owns the whole evidenced
+// module surface of the rebuild-symlink pair: docker_helper_rootlesskit_t
+// -> tmpfs_t:lnk_file = exactly { create read }. ONE pair, ONE rule,
+// widened IN PLACE per phase — never two parallel owners for the same
+// pair/class. Provenance stays per-perm:
+//
+//   - create — the canonical 4C-47 run (37153317223) recorded
+//     requested=0x8 denied=0x8 result=-13 tcontext=tmpfs_t:s0
+//     tclass=lnk_file INSIDE the symlinkat(".ro2286969802/.pwd.lock" ->
+//     "/etc/.pwd.lock") window, 16µs before the failing exit; the
+//     symlink object's own creation check (may_create with
+//     SECCLASS_LNK_FILE, the SID inherited from the parent dir's label
+//     tmpfs_t:s0); added by 4C-48.
+//   - read — the canonical 4C-49 run (37191972618) recorded
+//     requested=0x2 denied=0x2 result=-13 tcontext=tmpfs_t:s0
+//     tclass=lnk_file INSIDE the openat("/etc/hosts", O_RDONLY|
+//     O_CLOEXEC) window — generateEtcHosts()'s os.ReadFile, the
+//     startup's first /etc read — 9µs before the failing exit; the link
+//     traversal's own read hook (followed-symlink mediation), the same
+//     pair/class shape the flow's earlier /etc/localtime openat hit as a
+//     HANDLED/NON-TERMINAL probe; added by 4C-50.
+//
+// The read is the LINK-TRAVERSAL hook, not the resolved target's own
+// file access: the original /etc file behind the rebuilt link (on the
+// .ro mount's own labels) mediates on its own type/class and stays
+// ungranted — the next boundary is not this rule. The class is the
+// evidence — an lnk_file pair, never the tmpfs_t:dir { create mounton }
+// pair (4C-46/47's separate owner), never the tmpfs_t:filesystem mount
+// rule (4C-45's separate owner), never a tmpfs_t:file surface. SCOPE —
+// a GLOBAL-TYPE grant (tmpfs_t:s0): not operation-scoped (the nsfs_t
+// scope shape); the cross-operation gate stays mandatory. Deliberately
+// NOT granted: write/getattr/setattr/unlink/link/rename/relabelfrom/
+// relabelto or any other lnk_file permission on this pair (each a
+// distinct hook — the link() stage's own link permission is NOT this
+// create, and the setupNet RemoveAll/WriteFile stages' own hooks stay
+// ungranted), any dir/file/filesystem permission, any other type's
 // lnk_file surface, any other class, any other subject.
-func TestSELinuxPolicyRootlesskitTmpfsSymlinkCreate(t *testing.T) {
+func TestSELinuxPolicyRootlesskitTmpfsSymlink(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
-	pinnedSymlinkCreate := "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file create;"
-	if !strings.Contains(policy, pinnedSymlinkCreate) {
-		t.Fatalf("the rootlesskit child domain's rebuild-symlink surface must be exact: %q", pinnedSymlinkCreate)
+	pinnedSymlinkPair := "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create read };"
+	pinnedTmpfsDirPair := "allow docker_helper_rootlesskit_t tmpfs_t:dir { create mounton };"
+	pinnedTmpfsFsMount := "allow docker_helper_rootlesskit_t tmpfs_t:filesystem mount;"
+	if !strings.Contains(policy, pinnedSymlinkPair) {
+		t.Fatalf("the rootlesskit child domain's rebuild-symlink surface must be exact: %q", pinnedSymlinkPair)
 	}
-	// symlinkCreateViolations returns one violation per line of module
+	// symlinkPairViolations returns one violation per line of module
 	// text that breaks the grant invariants: exactly one allow rule may
 	// name docker_helper_rootlesskit_t -> tmpfs_t:lnk_file, in the exact
-	// bare-create shape (no brace form, no split rules, no second
-	// lnk_file permission — read/write/getattr/setattr/unlink/link/
-	// rename/relabel* are distinct hooks); no other subject may receive
-	// tmpfs_t:lnk_file authority from this module; no tmpfs_t:file or
-	// tmpfs_t:dir create may ride (the class confusion).
-	symlinkCreateViolations := func(text string) []string {
+	// brace-pair shape { create read } (no bare single-perm shape, no
+	// split rules, no reordering — { read create } is a different
+	// written shape, no second/third lnk_file permission — write/getattr/
+	// setattr/unlink/link/rename/relabel* are distinct hooks); no other
+	// subject may receive tmpfs_t:lnk_file authority from this module;
+	// no tmpfs_t:file surface may ride (the class confusion); the
+	// tmpfs_t:dir and tmpfs_t:filesystem surfaces stay their own
+	// owners' exact rules.
+	symlinkPairViolations := func(text string) []string {
 		var violations []string
 		count := 0
 		for _, line := range strings.Split(text, "\n") {
@@ -3508,23 +3526,31 @@ func TestSELinuxPolicyRootlesskitTmpfsSymlinkCreate(t *testing.T) {
 			switch {
 			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file"):
 				count++
-				if trimmed != pinnedSymlinkCreate {
-					violations = append(violations, "the rebuild-symlink grant must be the exact bare-create lnk_file shape (no brace form, no split rules, no second permission — read/write/getattr/setattr/unlink/link/rename/relabel* are distinct hooks): "+trimmed)
+				if trimmed != pinnedSymlinkPair {
+					violations = append(violations, "the rebuild-symlink grant must be the exact brace-pair lnk_file shape { create read } (no bare shape, no split rules, no reorder, no second permission — write/getattr/setattr/unlink/link/rename/relabel* are distinct hooks): "+trimmed)
 				}
 			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, " tmpfs_t:lnk_file"):
-				violations = append(violations, "tmpfs_t lnk_file authority is unique to the rootlesskit child domain's pinned create rule: "+trimmed)
+				violations = append(violations, "tmpfs_t lnk_file authority is unique to the rootlesskit child domain's pinned pair rule: "+trimmed)
 			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t tmpfs_t:file "):
 				violations = append(violations, "the class confusion is forbidden — the file class surface of tmpfs_t is not this grant: "+trimmed)
+			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t tmpfs_t:dir"):
+				if trimmed != pinnedTmpfsDirPair {
+					violations = append(violations, "the tmpfs_t:dir surface belongs to the 4C-46/47 owner's exact pair; any other dir shape is forbidden here: "+trimmed)
+				}
+			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t tmpfs_t:filesystem"):
+				if trimmed != pinnedTmpfsFsMount {
+					violations = append(violations, "the tmpfs_t:filesystem surface belongs to the 4C-45 owner's exact bare-mount rule; any other filesystem shape is forbidden here: "+trimmed)
+				}
 			}
 		}
 		if count == 0 {
-			violations = append(violations, "the rebuild-symlink grant (rootlesskit_t -> tmpfs_t:lnk_file create) is missing")
+			violations = append(violations, "the rebuild-symlink grant (rootlesskit_t -> tmpfs_t:lnk_file { create read }) is missing")
 		} else if count > 1 {
 			violations = append(violations, fmt.Sprintf("exactly one tmpfs_t:lnk_file grant may exist for the rootlesskit child domain, found %d", count))
 		}
 		return violations
 	}
-	if violations := symlinkCreateViolations(policy); len(violations) > 0 {
+	if violations := symlinkPairViolations(policy); len(violations) > 0 {
 		t.Errorf("the committed policy violates the rebuild-symlink invariants: %v", violations)
 	}
 	// The replacement regressions: each replacement must APPLY and must
@@ -3534,27 +3560,33 @@ func TestSELinuxPolicyRootlesskitTmpfsSymlinkCreate(t *testing.T) {
 		rule string
 	}{
 		{"missing whole rule", ""},
-		{"missing create (write-only shape)", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file write;"},
-		{"write instead of create", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file write;"},
-		{"setattr instead of create", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file setattr;"},
-		{"link instead of create", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file link;"},
-		{"unlink instead of create", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file unlink;"},
-		{"create write brace set", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create write };"},
-		{"create setattr brace set", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create setattr };"},
-		{"create unlink brace set", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create unlink };"},
-		{"create link brace set", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create link };"},
-		{"duplicate identical rule", pinnedSymlinkCreate + "\n" + pinnedSymlinkCreate},
-		{"parallel create rule (brace form)", pinnedSymlinkCreate + "\nallow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create };"},
-		{"equivalent brace-single-perm shape", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create };"},
-		{"wrong class (tmpfs_t:file create)", "allow docker_helper_rootlesskit_t tmpfs_t:file create;"},
-		{"wrong class (tmpfs_t:dir create)", "allow docker_helper_rootlesskit_t tmpfs_t:dir create;"},
-		{"wrong target type (tmp_t)", "allow docker_helper_rootlesskit_t tmp_t:lnk_file create;"},
-		{"wrong target type (etc_t)", "allow docker_helper_rootlesskit_t etc_t:lnk_file create;"},
+		{"pre-4C-50 shape (bare create)", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file create;"},
+		{"pre-4C-50 shape (brace create)", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create };"},
+		{"missing create (read-only bare shape)", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file read;"},
+		{"missing create (read-only brace shape)", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { read };"},
+		{"write instead of read", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create write };"},
+		{"getattr instead of read", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create getattr };"},
+		{"unlink instead of read", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create unlink };"},
+		{"create read write brace set", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create read write };"},
+		{"create read getattr brace set", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create read getattr };"},
+		{"create read setattr brace set", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create read setattr };"},
+		{"create read unlink brace set", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create read unlink };"},
+		{"create read link brace set", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create read link };"},
+		{"duplicate identical rule", pinnedSymlinkPair + "\n" + pinnedSymlinkPair},
+		{"parallel pair rule (brace form)", pinnedSymlinkPair + "\nallow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create read };"},
+		{"split into two bare rules (create, read)", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file create;\nallow docker_helper_rootlesskit_t tmpfs_t:lnk_file read;"},
+		{"split into two bare rules (read, create)", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file read;\nallow docker_helper_rootlesskit_t tmpfs_t:lnk_file create;"},
+		{"split into bare create and parallel brace-read rule", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file create;\nallow docker_helper_rootlesskit_t tmpfs_t:lnk_file { read };"},
+		{"reordered brace content (read create)", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { read create };"},
+		{"wrong class (tmpfs_t:file read)", "allow docker_helper_rootlesskit_t tmpfs_t:file read;"},
+		{"wrong class (tmpfs_t:dir read)", "allow docker_helper_rootlesskit_t tmpfs_t:dir read;"},
+		{"wrong target type (tmp_t)", "allow docker_helper_rootlesskit_t tmp_t:lnk_file { create read };"},
+		{"wrong target type (etc_t)", "allow docker_helper_rootlesskit_t etc_t:lnk_file { create read };"},
 	} {
-		mutated := strings.Replace(policy, pinnedSymlinkCreate, regressed.rule, 1)
+		mutated := strings.Replace(policy, pinnedSymlinkPair, regressed.rule, 1)
 		applied := func() bool {
 			if regressed.rule == "" {
-				return !strings.Contains(mutated, pinnedSymlinkCreate)
+				return !strings.Contains(mutated, pinnedSymlinkPair)
 			}
 			return strings.Contains(mutated, regressed.rule)
 		}
@@ -3562,24 +3594,24 @@ func TestSELinuxPolicyRootlesskitTmpfsSymlinkCreate(t *testing.T) {
 			t.Errorf("the rebuild-symlink regression %q was not applied", regressed.name)
 			continue
 		}
-		if len(symlinkCreateViolations(mutated)) == 0 {
+		if len(symlinkPairViolations(mutated)) == 0 {
 			t.Errorf("the rebuild-symlink regression %q must fail the rebuild-symlink invariants", regressed.name)
 		}
 	}
-	// The widening sweep: { create <X> } for every other lnk_file
+	// The widening sweep: { create read <X> } for every other lnk_file
 	// permission must fail the invariants in every case.
 	for _, extra := range []string{
-		"read", "write", "getattr", "setattr", "lock", "relabelfrom",
-		"relabelto", "append", "map", "unlink", "link", "rename",
-		"execute", "quotaon", "mounton", "audit_access", "open", "execmod",
+		"write", "getattr", "setattr", "lock", "relabelfrom", "relabelto",
+		"append", "map", "unlink", "link", "rename", "execute", "quotaon",
+		"mounton", "audit_access", "open", "execmod",
 	} {
-		mutated := strings.Replace(policy, pinnedSymlinkCreate,
-			fmt.Sprintf("allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create %s };", extra), 1)
-		if !strings.Contains(mutated, fmt.Sprintf("allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create %s };", extra)) {
+		mutated := strings.Replace(policy, pinnedSymlinkPair,
+			fmt.Sprintf("allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create read %s };", extra), 1)
+		if !strings.Contains(mutated, fmt.Sprintf("allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create read %s };", extra)) {
 			t.Errorf("the rebuild-symlink widening +%s was not applied", extra)
 			continue
 		}
-		if len(symlinkCreateViolations(mutated)) == 0 {
+		if len(symlinkPairViolations(mutated)) == 0 {
 			t.Errorf("the rebuild-symlink widening +%s must fail the rebuild-symlink invariants", extra)
 		}
 	}
@@ -3589,12 +3621,13 @@ func TestSELinuxPolicyRootlesskitTmpfsSymlinkCreate(t *testing.T) {
 		name string
 		rule string
 	}{
-		{"tmpfs lnk_file create for the manager", "allow docker_helper_builder_t tmpfs_t:lnk_file create;"},
-		{"tmpfs lnk_file create for the launcher", "allow docker_helper_builder_launcher_t tmpfs_t:lnk_file create;"},
-		{"tmpfs lnk_file create for the network helper", "allow docker_helper_slirp4netns_t tmpfs_t:lnk_file create;"},
-		{"tmpfs lnk_file create for the daemon", "allow docker_helper_t tmpfs_t:lnk_file create;"},
+		{"tmpfs lnk_file pair for the manager", "allow docker_helper_builder_t tmpfs_t:lnk_file { create read };"},
+		{"tmpfs lnk_file pair for the launcher", "allow docker_helper_builder_launcher_t tmpfs_t:lnk_file { create read };"},
+		{"tmpfs lnk_file pair for the network helper", "allow docker_helper_slirp4netns_t tmpfs_t:lnk_file { create read };"},
+		{"tmpfs lnk_file pair for the daemon", "allow docker_helper_t tmpfs_t:lnk_file { create read };"},
+		{"tmpfs lnk_file bare create for the manager", "allow docker_helper_builder_t tmpfs_t:lnk_file create;"},
 	} {
-		if len(symlinkCreateViolations(policy+"\n"+mut.rule)) == 0 {
+		if len(symlinkPairViolations(policy+"\n"+mut.rule)) == 0 {
 			t.Errorf("mutation %q must trip the rebuild-symlink invariants", mut.name)
 		}
 	}
@@ -4348,7 +4381,11 @@ func TestSELinuxPermissionKernelClassmapDecode(t *testing.T) {
 	one("file", 0x4000, "execute")
 	// The 4C-48 lnk_file decodes: the common neighbors pinned for
 	// anti-shift (the symlink object's own creation check was the
-	// canonical 4C-47 run's boundary record).
+	// canonical 4C-47 run's boundary record). The 4C-50 read decode: the
+	// canonical 4C-49 run's openat("/etc/hosts") boundary carried
+	// denied=0x2 tclass=lnk_file — the link traversal's own read hook
+	// (bit 1 of the static classmap's common layout).
+	one("lnk_file", 0x2, "read")
 	one("lnk_file", 0x4, "write")
 	one("lnk_file", 0x8, "create")
 	one("lnk_file", 0x10, "getattr")
