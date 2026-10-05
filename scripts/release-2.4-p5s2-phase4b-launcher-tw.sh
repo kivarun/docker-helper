@@ -2289,10 +2289,14 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
         GQEXP=$(( ${#GQARGS[@]} ))
         GQN="$(printf '%s\n' "$GQOUT" | grep -ac . || true)"
         if [ "$GQN" -eq "$GQEXP" ]; then
+          # One output line per argument, in argument order (verified
+          # locally: GNU readlink prints the targets in operand order and
+          # skips failed operands entirely). The pairing into mnt+user
+          # comes from the ARGUMENT ORDER, not from pairing the lines.
           GQI=0
           while IFS= read -r GQLINE; do
             GQI=$(( GQI + 1 ))
-            GQP="${GQARGS[$(( (GQI - 1) / 2 ))]}"
+            GQP="${GQARGS[$(( GQI - 1 ))]}"
             GQP="${GQP#/proc/}"; GQP="${GQP%/ns/mnt}"; GQP="${GQP%/ns/user}"
             if [ $(( GQI % 2 )) -eq 1 ]; then
               GNSM[$GQP]="$GQLINE"
@@ -4241,9 +4245,14 @@ POSTTUN_BND_SYMBOLIC=""
   if [ -n "$POSTTUN_GATE_PROP_WHO" ] && [ -n "$POSTTUN_GATE_MOVE_WHO" ] \
     && [ "$POSTTUN_GATE_PROP_WHO" != "$POSTTUN_GATE_MOVE_WHO" ]; then
     POSTTUN_GATE_PROP_PID="$(printf '%s' "$POSTTUN_GATE_PROP_WHO" | sed 's/^.*-//' 2>/dev/null || true)"
-    POSTTUN_GATE_DANCE_FORK_EDGE="$(grep -aE "sched_process_fork: .* pid=$POSTTUN_GATE_PROP_PID child_comm=[^ ]+ child_pid=$POSTTUN_GATE_DANCE_PID( |\$)" "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | head -1 || true)"
+    POSTTUN_GATE_MOVE_PID="$(printf '%s' "$POSTTUN_GATE_MOVE_WHO" | sed 's/^.*-//' 2>/dev/null || true)"
+    # Either direction: run 37326112431 reproduced the parent->worker
+    # edge (exe-3841 forked exe-3872), run 37332939389 reproduced the
+    # reverse (the dance parent exe-3856 forked the propagation stage
+    # exe-3907). The chain linkage is what the item proves.
+    POSTTUN_GATE_DANCE_FORK_EDGE="$(grep -aE "sched_process_fork: .* pid=($POSTTUN_GATE_PROP_PID|$POSTTUN_GATE_MOVE_PID) child_comm=[^ ]+ child_pid=($POSTTUN_GATE_MOVE_PID|$POSTTUN_GATE_PROP_PID)( |\$)" "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | head -1 || true)"
     if [ -n "$POSTTUN_GATE_DANCE_FORK_EDGE" ]; then
-      echo "the dance chain's fork edge (the trace's own parent->worker linkage):"
+      echo "the dance chain's fork edge (the trace's own linkage between the propagation and move-mount stages):"
       printf '%s\n' "$POSTTUN_GATE_DANCE_FORK_EDGE"
     fi
   fi
