@@ -1701,9 +1701,10 @@ allow docker_helper_rootlesskit_t tmpfs_t:filesystem mount;
 # the module version stay untouched.
 allow docker_helper_rootlesskit_t tmpfs_t:dir { create mounton };
 
-# The rebuild symlink object's create AND its link-traversal read
-# (P5-S2 Phase 4C-48 create; Phase 4C-50 read — ONE pair, ONE rule,
-# widened IN PLACE; the provenance stays per-perm):
+# The rebuild symlink object's create, its link-traversal read, AND the
+# production removal's unlink (P5-S2 Phase 4C-48 create; Phase 4C-50
+# read; Phase 4C-53 unlink — ONE pair, ONE rule, widened IN PLACE per
+# phase; the provenance stays per-perm):
 #
 #   create <- the canonical 4C-47 run 37153317223's evidence. With the
 #   tmpfs_t:dir { create mounton } pair granted (4C-46/47), that run
@@ -1747,16 +1748,41 @@ allow docker_helper_rootlesskit_t tmpfs_t:dir { create mounton };
 #   production operation ("[rootlesskit:child ] error: open
 #   /etc/hosts: permission denied.") before exit_group(1).
 #
-# THE PAIR IS LIVE-PROVEN — NOT ASSUMED: the symlink object's SID is
+#   unlink <- Phase 4C-53, the canonical 4C-52 run's terminal boundary
+#   (the 4C-52 phase-end record NEXT-STARTUP-BOUNDARY:
+#   scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+#   tcontext=system_u:object_r:tmpfs_t:s0 tclass=lnk_file, denied
+#   { unlink } — the classmap decode unlink = 0x800, bit 11 of the
+#   kernel's static classmap's common layout). With the read/open pair
+#   granted, the 4C-52 run's generateEtcHosts() read COMPLETED
+#   (ROOTLESSKIT-ETC-HOSTS-READ=OK) and the flow advanced to the
+#   setupNet resolv-replacement stage: RemoveAll("/etc/resolv.conf")
+#   issues unlinkat("/etc/resolv.conf", 0) against the REBUILT
+#   /etc/resolv.conf symlink on the fresh tmpfs — the DESTINATION
+#   object's own symlink-removal hook, the SAME tmpfs_t:lnk_file pair
+#   the create and read hooks own; the denial sat INSIDE the RemoveAll
+#   stage's unlinkat window (the machinery's stage anchor — the
+#   canonical 4C-52 corpus run 37307909383's terminal boundary, the
+#   stage own retry windows openat("/etc") + dirfd-relative
+#   unlinkat/readlinkat recorded around the SAME semantic operation).
+#   The RemoveAll mini-sequence's own probes are ONE semantic
+#   operation's syscall surface, never one phase per errno; the
+#   grant-owning boundary is the unlinkat denial that blocks the
+#   production RemoveAll's completion.
+#
+# THE TRIPLE IS LIVE-PROVEN — NOT ASSUMED: the symlink object's SID is
 # inherited from the parent dir's own label tmpfs_t:s0 (the kernel's
 # own tcontext), and the CLASS is the symlink object's own class
 # lnk_file. THE DECODES are the kernel's static classmap's common
 # positions, pinned in TestSELinuxPermissionKernelClassmapDecode:
 # lnk_file:create = 0x8 (bit 3 — the same bit-3 position the dir:create
-# and file:create decodes are pinned at) and lnk_file:read = 0x2 (bit 1
-# — the traversal hook the 4C-49 boundary carried; the kernel's own
-# perms-file numbering would index read differently and stays the
-# recorded interface fact, never the decode). The canonical 4C-47
+# and file:create decodes are pinned at), lnk_file:read = 0x2 (bit 1
+# — the traversal hook the 4C-49 boundary carried) and lnk_file:unlink
+# = 0x800 (bit 11 — the removal hook the 4C-53 widening carries; the
+# map/link/rename neighbors 0x400/0x1000/0x2000 are pinned alongside
+# for anti-shift; the kernel's own perms-file numbering would index
+# read differently and stays the recorded interface fact, never the
+# decode). The canonical 4C-47
 # mechanical verdict was a KNOWN HARNESS MISCLASSIFICATION (the benign
 # ENOENT housekeeping probe of the rootlesskit parent stole the causal
 # anchor); the corrected 4C-48 machinery (the terminal-failure
@@ -1775,11 +1801,15 @@ allow docker_helper_rootlesskit_t tmpfs_t:dir { create mounton };
 # not exist on the fresh tmpfs); no unlink/remove_name authority is
 # granted for them, and the machinery classifies them
 # HANDLED/NON-TERMINAL (they were followed by the symlinkat — forward
-# production progress). The same holds for the setupNet stages AFTER
-# the read (the RemoveAll("/etc/resolv.conf") / RemoveAll("/etc/hosts")
-# unlinks and the WriteFile/bind-mount steps): they are PRODUCTION
-# operations of the flow — never assumed cleanup noise — and their own
-# hooks stay UNGRANTED; the live trace owns their classification.
+# production progress). THE RESOLV REMOVAL IS THE ONE EVIDENCED
+# unlink EXCEPTION — the RemoveAll("/etc/resolv.conf") unlinkat's own
+# destination hook (the paragraph above), NOT a cleanup probe: the
+# destination EXISTS on the fresh tmpfs (the rebuilt symlink) and the
+# denial blocked a PRODUCTION operation. The setupNet stages still
+# beyond it (the RemoveAll("/etc/hosts") unlinks and the
+# WriteFile/bind-mount steps) are PRODUCTION operations of the flow —
+# never assumed cleanup noise — and their own hooks stay UNGRANTED;
+# the live trace owns their classification.
 #
 # THE READ IS THE LINK-TRAVERSAL HOOK — NOT THE TARGET'S FILE ACCESS:
 # the kernel mediates a FOLLOWED symlink with lnk_file:read; the
@@ -1794,20 +1824,22 @@ allow docker_helper_rootlesskit_t tmpfs_t:dir { create mounton };
 # the MCS-constrained subject stay the abuse gates, and the
 # cross-operation reachability gate stays OPEN.
 #
-# The audit slice was empty in both windows too (the same
-# userspace-audit gap); a next symbolic AVC record, when captured, is
-# the confirming decode.
+# The audit slice was empty in the create/read windows (the same
+# userspace-audit gap); the unlink window's audit-slice state is the
+# 4C-52 run's own recorded evidence; a next symbolic AVC record, when
+# captured, is the confirming decode.
 #
-# Deliberately NOT granted: write/getattr/setattr/unlink/link/rename/
+# Deliberately NOT granted: write/getattr/setattr/link/rename/
 # relabelfrom/relabelto or any other lnk_file permission (each a
 # distinct hook — the link() stage's own link permission is NOT this
-# create), any dir/file/filesystem-class permission (the 4C-45/46/47
+# create, and the setupNet replacement stages' write hooks stay
+# ungranted), any dir/file/filesystem-class permission (the 4C-45/46/47
 # owners), any OTHER type's lnk_file surface (the moved original
 # tree's entries keep their own labels etc_t and friends — the
 # rebuild's SOURCE reads go through the existing standing/flow surfaces
 # and their own boundaries when reached), process/capability surfaces,
 # other subjects; the .fc and the module version stay untouched.
-allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create read };
+allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create read unlink };
 
 # The cgroup preservation move-mount (P5-S2 Phase 4C-49): with the whole
 # copy-up/rebuild chain granted (4C-39..4C-48), the canonical 4C-48 run
