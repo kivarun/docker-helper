@@ -1206,9 +1206,9 @@ PREFLIGHT_OK=1
   echo "--- the forbidden-file-perms negative (everything beyond the base policy's standing surface and the granted read must be absent from the whole effective file surface; the standing set is this run's own inventory fact; the open/getattr/write hooks must not ride):"
   RK_NCONF_FORBIDDEN="$(printf '%s\n' "$RK_NCONF_FILE_UNION" | tr ' ' '\n' | grep -avE "^(read|$(printf '%s' "$RK_NCONF_STANDING" | tr ' ' '|'))$" || true)"
   printf '%s\n' "${RK_NCONF_FORBIDDEN:-(none — no extra file permission)}"
-  echo "--- the CLASS-CONFUSION negatives (the net_conf_t:lnk_file and net_conf_t:dir surfaces must be ABSENT from the whole effective surface — the link traversal's own hook is the 4C-50 tmpfs_t pair's owner, a dir surface is the parent walk, and every non-file class is a STOP):"
-  RK_NCONF_NONFILE="$(printf '%s\n' "$RK_NCONF_RAW" | grep -av ':file[ ;]' || true)"
-  printf '%s\n' "${RK_NCONF_NONFILE:-(none — no non-file class surface)}"
+  echo "--- the CLASS-CONFUSION negatives (the net_conf_t:lnk_file and net_conf_t:dir surfaces must be ABSENT from the concrete-source surface — the link traversal's own hook is the 4C-50 tmpfs_t pair's owner, a dir surface is the parent walk, and every concrete non-file class rule is a STOP; the attribute-generic standing rules (source 'domain', the '[ ... ]:True' conditionals) are RECORDED above and never module-borne authority):"
+  RK_NCONF_NONFILE="$(printf '%s\n' "$RK_NCONF_RAW" | awk '$2 == "docker_helper_rootlesskit_t" && $0 !~ /:file[ ;]/' || true)"
+  printf '%s\n' "${RK_NCONF_NONFILE:-(none — no concrete non-file class surface)}"
   echo "--- the dontaudit surface toward net_conf_t (RECORDED SEPARATELY per the 4C-28 preflight contract; never merged into the allow verdict):"
   RK_NCONF_DONTAUDIT="$(sesearch --dontaudit -s docker_helper_rootlesskit_t -t net_conf_t /sys/fs/selinux/policy 2>/dev/null || true)"
   printf '%s\n' "${RK_NCONF_DONTAUDIT:-(none — no dontaudit rule hides rootlesskit -> net_conf_t denials)}"
@@ -1221,7 +1221,7 @@ PREFLIGHT_OK=1
     RK_NCONF_OK=1
   fi
   if [ "$RK_NCONF_OK" = 1 ]; then
-    echo "PASS: flow resolved-/etc read identity (module contribution exactly { read }; effective file union = the base policy's standing surface + read — the standing residual recorded above; no module-borne permission beyond read; no non-file class surface)"
+    echo "PASS: flow resolved-/etc read identity (module contribution exactly { read }; effective file union = the base policy's standing surface + read — the standing residual recorded above; no module-borne permission beyond read; no concrete non-file class surface)"
   else
     echo "FAIL: flow resolved-/etc read identity (concrete-rules=$(printf '%s\n' "$RK_NCONF_FILE_CONCRETE" | grep -ac . || true) union=${RK_NCONF_FILE_UNION:-(none)} forbidden=${RK_NCONF_FORBIDDEN:-(none)} non-file=${RK_NCONF_NONFILE:-(none)})"
     PREFLIGHT_OK=0
