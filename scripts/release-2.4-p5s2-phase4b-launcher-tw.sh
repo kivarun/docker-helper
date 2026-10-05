@@ -2171,12 +2171,18 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
 (
   set +eu
   exec 9<>"/tmp/p4b-work/.gate-clock" 2>/dev/null || exit 1
+  # The readiness line: the harness's own launch handshake waits for
+  # this watcher's first output before sending the START, so the flow's
+  # own mount dance (born within ~0.2s of the START, lifetime ~0.2s)
+  # is covered by live watcher ticks instead of racing the backgrounded
+  # subshell's own fork-and-first-tick latency.
+  printf '%s GATE-WATCHER-ARMED pid=%s\n' "$EPOCHREALTIME" "$$"
   declare -A GSEEN=() GNSM=() GMI=() GCOMM=() GSTIME=() GCTX=()
   G_END=$(( EPOCHSECONDS + 12 ))
   G_GONE=0
   G_NSCHECK=0
   G_LASTPID=0
-  G_FULLTICK=39
+  G_FULLTICK=0
   GIDENTQ=""
   # The per-pid discovery body, shared by both scan tiers. For an
   # unseen pid: one builtin comm read, the flow-comm match (the alive
@@ -2298,46 +2304,44 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
     case "$GLASTNEW" in
       ''|*[!0-9]*) GLASTNEW="" ;;
     esac
-    G_LASTPID_PREV="$G_LASTPID"
     if [ -n "$GLASTNEW" ] && [ "$GLASTNEW" -ge "$G_LASTPID" ]; then
-      # BACKWARD scan (the newest pids first): the launch-window fork
-      # storm stretches each tick's born-since scan, and the flow's
-      # own dance forks are ALWAYS at the range's newest tail — the
-      # canonical 4C-54 run 37358199605 reproduced the miss: the dance
-      # pid (born 229.70, dead 229.85 on the trace clock) fell inside
-      # the first tick's own full-range coverage, but the forward order
-      # reached it last, after its death, and the born-since tier
-      # SKIPPED the first tick entirely (the G_LASTPID>0 guard), so no
-      # tier ever read the dance pid while it lived (gate items A/B =
-      # 0, the phase BLOCKED although the dance itself was clean). The
-      # born-since scan now runs on EVERY tick (the first tick's range
-      # 1..GLASTNEW IS the full enumeration, backward), which gives the
-      # dance pid its discovery chance within its own lifetime; the
-      # inline ns-identity readlink at the discovery instant (the 4C-53
-      # correction) then binds it. The full-scan tier below stays for
-      # the re-exec discovery on later ticks (the same-pass first tick
-      # covers it).
-      for (( GPID = GLASTNEW; GPID > G_LASTPID; GPID-- )); do
-        g_flow_pid "/proc/$GPID"
-      done
+      if [ "$G_LASTPID" -gt 0 ]; then
+        # BACKWARD scan (the newest pids first): the launch-window fork
+        # storm stretches each tick's born-since scan, and the flow's
+        # own dance forks are ALWAYS at the range's newest tail — the
+        # canonical 4C-54 run 37358199605 reproduced the miss: the
+        # dance pid (born 229.70, dead 229.85 on the trace clock) fell
+        # inside the first tick's own full-range coverage, but the
+        # forward order reached it last, after its death (gate items
+        # A/B = 0, the phase BLOCKED although the dance itself was
+        # clean). The newest-first order gives the dance pid its
+        # discovery chance within its own lifetime; the inline
+        # ns-identity readlink at the discovery instant (the 4C-53
+        # correction) then binds it.
+        for (( GPID = GLASTNEW; GPID > G_LASTPID; GPID-- )); do
+          g_flow_pid "/proc/$GPID"
+        done
+      fi
       G_LASTPID="$GLASTNEW"
     else
       G_LASTPID=0
       G_DO_FULL=1
     fi
     if [ "$G_DO_FULL" = 1 ]; then
-      # The first tick's own born-since pass above already enumerated
-      # the whole range (1..GLASTNEW) in the backward newest-first
-      # order; the lexicographic full scan on that same tick would be
-      # the doubled sweep with no additional coverage (the born-since
-      # pass reads the same /proc set). Skip it for that tick only —
-      # the retry tier's re-exec discovery role starts from the NEXT
-      # full tick.
-      if [ "${G_LASTPID_PREV:-0}" != 0 ]; then
-        for GPC in /proc/[0-9]*; do
-          g_flow_pid "$GPC"
-        done
-      fi
+      # BACKWARD full scan (the newest pids first): the re-exec
+      # discovery tier reads the same /proc set in newest-first order,
+      # so a long-lived flow-comm pid whose comm changed in place is
+      # found before the scan own duration matters. The FIRST tick is
+      # deliberately NOT a full tick (G_FULLTICK starts at 0): the
+      # flow-domain starts empty (the launch begins after the
+      # watcher-ready handshake), a full 4000-pid sweep here would
+      # delay the incremental tier past the dance pid whole lifetime
+      # (the canonical 4C-54 runs 37358199605/37360622771 shapes), and
+      # any pre-arm flow-comm leftover is still covered by the first
+      # regular full tick at tick 40.
+      for GPC in $(printf '%s\n' /proc/[0-9]* | sed 's|.*/||' | sort -rn | sed 's|^|/proc/|'); do
+        g_flow_pid "$GPC"
+      done
     fi
     # The queued ns-identity probe: ONE readlink fork per tick drains
     # the whole discovery queue (mnt+user pairs per live pid). The
