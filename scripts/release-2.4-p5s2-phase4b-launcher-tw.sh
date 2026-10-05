@@ -2298,21 +2298,46 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
     case "$GLASTNEW" in
       ''|*[!0-9]*) GLASTNEW="" ;;
     esac
+    G_LASTPID_PREV="$G_LASTPID"
     if [ -n "$GLASTNEW" ] && [ "$GLASTNEW" -ge "$G_LASTPID" ]; then
-      if [ "$G_LASTPID" -gt 0 ]; then
-        for (( GPID = G_LASTPID + 1; GPID <= GLASTNEW; GPID++ )); do
-          g_flow_pid "/proc/$GPID"
-        done
-      fi
+      # BACKWARD scan (the newest pids first): the launch-window fork
+      # storm stretches each tick's born-since scan, and the flow's
+      # own dance forks are ALWAYS at the range's newest tail — the
+      # canonical 4C-54 run 37358199605 reproduced the miss: the dance
+      # pid (born 229.70, dead 229.85 on the trace clock) fell inside
+      # the first tick's own full-range coverage, but the forward order
+      # reached it last, after its death, and the born-since tier
+      # SKIPPED the first tick entirely (the G_LASTPID>0 guard), so no
+      # tier ever read the dance pid while it lived (gate items A/B =
+      # 0, the phase BLOCKED although the dance itself was clean). The
+      # born-since scan now runs on EVERY tick (the first tick's range
+      # 1..GLASTNEW IS the full enumeration, backward), which gives the
+      # dance pid its discovery chance within its own lifetime; the
+      # inline ns-identity readlink at the discovery instant (the 4C-53
+      # correction) then binds it. The full-scan tier below stays for
+      # the re-exec discovery on later ticks (the same-pass first tick
+      # covers it).
+      for (( GPID = GLASTNEW; GPID > G_LASTPID; GPID-- )); do
+        g_flow_pid "/proc/$GPID"
+      done
       G_LASTPID="$GLASTNEW"
     else
       G_LASTPID=0
       G_DO_FULL=1
     fi
     if [ "$G_DO_FULL" = 1 ]; then
-      for GPC in /proc/[0-9]*; do
-        g_flow_pid "$GPC"
-      done
+      # The first tick's own born-since pass above already enumerated
+      # the whole range (1..GLASTNEW) in the backward newest-first
+      # order; the lexicographic full scan on that same tick would be
+      # the doubled sweep with no additional coverage (the born-since
+      # pass reads the same /proc set). Skip it for that tick only —
+      # the retry tier's re-exec discovery role starts from the NEXT
+      # full tick.
+      if [ "${G_LASTPID_PREV:-0}" != 0 ]; then
+        for GPC in /proc/[0-9]*; do
+          g_flow_pid "$GPC"
+        done
+      fi
     fi
     # The queued ns-identity probe: ONE readlink fork per tick drains
     # the whole discovery queue (mnt+user pairs per live pid). The
@@ -4991,7 +5016,22 @@ REBUILD-STAGE=NOT-REACHED}"
             if (nm == "unlinkat" && firstabs[k] != "" && qets[k, qtop[k]] + 0 == firstabs[k] + 0) firstabsxts[k] = ts
             if (qabs0[k, qtop[k]]) {
               abstot[k]++
-              if ($NF == "0x0") absok[k]++
+              if ($NF == "0x0") {
+                absok[k]++
+                # The TWO-WHOS correction (the canonical 4C-54 run
+                # 37358199605 own shape): the replacement stage forked
+                # a SECOND worker for the real removal — the first
+                # absolute pair who (the ENOENT absence pass) had NO
+                # further production enters, while the ret=0x0 removal
+                # who did (its own openat(O_CREAT) was the 4C-54
+                # objective window). The stage-aware continuation must
+                # key on the who that performed the SUCCESSFUL removal,
+                # not the first absolute pair who; keep the last
+                # successful pair enter/exit.
+                okabs[k] = qets[k, qtop[k]]
+                okabsline[k] = qent[k, qtop[k]]
+                okabsxts[k] = ts
+              }
               else if ($NF == "0xfffffffffffffffe") absenoent[k]++
               else { absbad[k]++; absbadret[k, absbad[k]] = $NF }
             }
@@ -5003,6 +5043,7 @@ REBUILD-STAGE=NOT-REACHED}"
       if ($0 ~ "sys_" nm "\\(") {
         qtop[k]++
         qets[k, qtop[k]] = ts
+        qent[k, qtop[k]] = $0
         qdesc[k, qtop[k]] = ""
         qabs0[k, qtop[k]] = 0
         isresolv = 0
@@ -5032,6 +5073,15 @@ REBUILD-STAGE=NOT-REACHED}"
         print "  FIRST-ABS-UNLINKAT-ENTER=" faline
         print "  FIRST-ABS-UNLINKAT-EXIT-TS=" faxts
       } else print "  FIRST-ABS-UNLINKAT-ENTER-TS="
+      ok = ""
+      for (k in okabs) {
+        if (ok == "" || okabs[k] + 0 > ok + 0) { ok = okabs[k]; okline = okabsline[k]; okxts = okabsxts[k] }
+      }
+      if (ok != "") {
+        print "  OK-ABS-UNLINKAT-ENTER-TS=" ok
+        print "  OK-ABS-UNLINKAT-ENTER=" okline
+        print "  OK-ABS-UNLINKAT-EXIT-TS=" okxts
+      }
       mx = ""
       for (k in lastresolvxts) {
         if (mx == "" || lastresolvxts[k] + 0 > mx + 0) mx = lastresolvxts[k]
@@ -5083,13 +5133,29 @@ REBUILD-STAGE=NOT-REACHED}"
   fi
   echo "  the pair's ret: ${POSTTUN_RESOLV_UNLINK_RET:-(not paired — the enter never closed)}"
   # The stage-aware continuation: the first later production enter of
-  # the SAME trace who (the first absolute unlinkat's own pid — the
-  # stage's owner), after the stage's LAST resolv window (the stage's
-  # own retry chain is never the proof; the next stage — the resolv
-  # WriteFile or the /etc/hosts RemoveAll — is).
+  # the stage's owner (the trace who that performed the SUCCESSFUL
+  # removal when one exists — the two-whos shape: the dance's
+  # replacement stage forks a second worker for the real removal, and
+  # the first absolute pair's ENOENT absence pass may be a DIFFERENT,
+  # shorter-lived who with no further production enters; the canonical
+  # 4C-54 run 37358199605's own timeline: the first-abs who exe-3885
+  # had no continuation, the ret=0x0 removal's who exe-3946's own
+  # openat(O_CREAT) was the 4C-54 objective's window), after the
+  # stage's LAST resolv window (the stage's own retry chain is never
+  # the proof; the next stage — the resolv WriteFile or the
+  # /etc/hosts RemoveAll — is).
+  POSTTUN_RESOLVREMOVE_OK_who=""
+  if [ -n "$POSTTUN_RESOLV_STAGE_END_TS" ]; then
+    POSTTUN_RESOLVREMOVE_OK_who="$(printf '%s\n' "$POSTTUN_RESOLV_TIMELINE" | grep -a '^  OK-ABS-UNLINKAT-ENTER=' | cut -d= -f2- | head -1 || true)"
+  fi
   POSTTUN_RESOLVREMOVE_CONTINUATION=""
-  if [ -n "$POSTTUN_RESOLV_STAGE_END_TS" ] && [ -n "$POSTTUN_RESOLV_UNLINK_ENTER" ]; then
-    POSTTUN_RESOLVREMOVE_WHO="$(printf '%s' "$POSTTUN_RESOLV_UNLINK_ENTER" | awk '{print $1}' || true)"
+  if [ -n "$POSTTUN_RESOLV_STAGE_END_TS" ]; then
+    if [ -n "$POSTTUN_RESOLVREMOVE_OK_who" ]; then
+      POSTTUN_RESOLVREMOVE_WHO="$(printf '%s' "$POSTTUN_RESOLVREMOVE_OK_who" | awk '{print $1}' || true)"
+    elif [ -n "$POSTTUN_RESOLV_UNLINK_ENTER" ]; then
+      POSTTUN_RESOLVREMOVE_WHO="$(printf '%s' "$POSTTUN_RESOLV_UNLINK_ENTER" | awk '{print $1}' || true)"
+    fi
+    if [ -n "${POSTTUN_RESOLVREMOVE_WHO:-}" ]; then
     POSTTUN_RESOLVREMOVE_CONTINUATION="$(awk -v who="$POSTTUN_RESOLVREMOVE_WHO" -v te="$POSTTUN_RESOLV_STAGE_END_TS" '
       $1 != who { next }
       { ts = $4; sub(/:$/, "", ts)
@@ -5103,6 +5169,7 @@ REBUILD-STAGE=NOT-REACHED}"
           print; exit
         }
       }' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | head -1 || true)"
+    fi
   fi
   POSTTUN_RESOLVREMOVE_OK=0
   if [ "${POSTTUN_RESOLV_PAIRS:-0}" -ge 1 ] \
