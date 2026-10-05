@@ -2198,6 +2198,17 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
     GMI[$GPID]=""
     printf '%s GATE-HOLDER-FIRST pid=%s comm=%s state=%s ppid=%s ctx=%s ns/mnt=%s ns/user=%s starttime=%s\n' \
       "$GTS" "$GPID" "$GLC" "$GST" "$GPP" "$GCTXV" "${GNSM_NOW:-(none)}" "${GNSU:-(none)}" "${GSTART:-(none)}"
+    # The 4C-52 correction: the discovery moment IS a tick observation
+    # (the pid was alive and fully identified the instant this record
+    # was built). The canonical run 37307909383 showed a mount-dancing
+    # pid whose whole lifetime fell between two watcher ticks: the gate
+    # never recorded a GATE-TICK for it, so its recorded mount-ns
+    # identity (the gate items A/B input) came out empty. Emitting the
+    # GATE-TICK here keeps the recorded ns/mnt list honest for exactly
+    # such single-sighting pids; the tracked-pids pass continues to
+    # emit its own GATE-TICKs for the pids that survive the next tick.
+    printf '%s GATE-TICK pid=%s comm=%s ns/mnt=%s starttime=%s\n' \
+      "$GTS" "$GPID" "$GLC" "${GNSM_NOW:-(none)}" "${GSTART:-(none)}"
   }
   while :; do
     GTS="$EPOCHREALTIME"
@@ -3083,11 +3094,17 @@ POSTTUN_BND_SYMBOLIC=""
   #      minus the cleanup shapes, before the zone;
   #   4. the ANCHOR = the LAST pre-zone candidate with NO later
   #      different-name non-cleanup production enter (the terminal
-  #      production failure — no forward progress follows it; a
-  #      same-name-retry shape is a documented limitation, none
-  #      observed); every OTHER pre-zone candidate is
+  #      production failure — no forward progress follows it;
+  #      stage-aware standing, the canonical 4C-52 run 37307909383:
+  #      the handled proof must come after the owning stage-chain's
+  #      last failing window and from a different stage — the
+  #      RemoveAll-stage's own retry chain never proves progress — and
+  #      a pre-anchor denial with no spanning owning window but later
+  #      production progress is tolerated, the untraced fd-Stat
+  #      getattr); every OTHER pre-zone candidate is
   #      HANDLED/NON-TERMINAL (its handling proof = the first later
-  #      production enter); when every candidate has later progress the
+  #      production enter from a different stage after the chain's
+  #      last failure); when every candidate has later progress the
   #      anchor falls back to the LAST candidate, flagged fallback (no
   #      terminal production failure was isolated);
   #   5. denial classes: POLLING-ONLY (recurring shape) > zone
@@ -3107,6 +3124,23 @@ POSTTUN_BND_SYMBOLIC=""
       if (match(s, /sys_[a-z0-9_]+/)) return substr(s, RSTART+4, RLENGTH-4)
       return ""
     }
+    # The stage key is the basename of the first quoted path argument
+    # (pathname/filename/dir_name/oldname; empty when the syscall
+    # carries no quoted path). Name + stage basename together identify
+    # the producing call-site stage: the canonical 4C-52 run
+    # 37307909383 showed the RemoveAll("/etc/resolv.conf") stage own
+    # retry windows (openat("/etc"), fd-based unlinkat/readlinkat)
+    # acting as the handling proof while the flow died at the stage
+    # anchor — the 4C-48 corpus interleaved same-syscall stages (the
+    # sysfs mounts vs the cgroup MS_MOVE) must keep their cross-stage
+    # proofs, so the proof search is stage-aware, not name-only.
+    function baseof(s,   q, n, parts) {
+      if (!match(s, /"[^"]*"/)) return ""
+      q = substr(s, RSTART + 1, RLENGTH - 2)
+      if (q == "") return ""
+      n = split(q, parts, "/")
+      return parts[n]
+    }
     /^ *[a-zA-Z0-9_.-]+-[0-9]+ +\[[0-9]+\]/ {
       if ($0 !~ /sys_[a-z0-9_]+/ && $0 !~ /selinux_audited:/) next
       who = $1
@@ -3125,11 +3159,20 @@ POSTTUN_BND_SYMBOLIC=""
       if ($0 ~ "sys_" nm " -> ") {
         # The paired window close (both success and failure).
         wasclean = 0
+        wbase = ""
         if (qtop[k] > 0) {
           pc++
           pwho[pc] = who; pname[pc] = nm; pets[pc] = qent[k, qtop[k]]; pxts[pc] = ts
           wasclean = qcl[k, qtop[k]]
           pclean[pc] = wasclean
+          # The closing window own stage key is captured BEFORE the stack
+          # pop: after the decrement the candidate would read the
+          # enclosing window base (or empty at depth one), collapsing
+          # all same-syscall stages into one broken chain (reproduced on
+          # the canonical 4C-52 run 37307909383 corpus: every unlinkat
+          # candidate read an empty base and the stage cut landed on the
+          # anchor).
+          wbase = qbase[k, qtop[k]]
           qtop[k]--
         }
         if ($0 ~ / -> 0xf/ && !wasclean) {
@@ -3141,7 +3184,7 @@ POSTTUN_BND_SYMBOLIC=""
           # new shape: the tolerated mid-startup RemoveAll followed by
           # the rksys/sysfs production stages).
           nc++
-          cand[nc] = ts "\t" who "\t" nm "\t" $0
+          cand[nc] = ts "\t" who "\t" nm "\t" $0 "\t" wbase
         }
         next
       }
@@ -3149,6 +3192,12 @@ POSTTUN_BND_SYMBOLIC=""
         qtop[k]++
         qent[k, qtop[k]] = ts
         qcl[k, qtop[k]] = 0
+        # The window stage-key is taken from the ENTER record (the exit
+        # record carries no quoted path argument — the canonical
+        # 4C-52 run showed every candidate collected with an empty
+        # stage key when taken from the exit record, collapsing all
+        # same-syscall stages into one chain).
+        qbase[k, qtop[k]] = baseof($0)
         # The cleanup-shape recognition (enter-level): the flow temp-dir
         # removal stage (the RemoveAll(bind0) defer AND the rksys
         # self-cleanup after a failed sys move-mount — the canonical
@@ -3173,7 +3222,7 @@ POSTTUN_BND_SYMBOLIC=""
         }
         if (nm ~ /^(mount|mkdir|mkdirat|umount2|umount|rename|getdents64|openat|openat2|newfstatat|statx|unlink|unlinkat|rmdir|symlink|symlinkat|readlink|execve|socket|open|setns|ioctl)$/) {
           ne++
-          ent[ne] = ts "\t" who "\t" nm "\t" $0
+          ent[ne] = ts "\t" who "\t" nm "\t" baseof($0)
         }
         next
       }
@@ -3218,11 +3267,17 @@ POSTTUN_BND_SYMBOLIC=""
         i = pre[j]
         if (i == a) continue
         split(cand[i], f, "\t")
-        cts = f[1]; cnm = f[3]
+        cts = f[1]; cnm = f[3]; cbase = f[5]
+        cut = 0
+        for (j2 = 1; j2 <= m; j2++) {
+          i2 = pre[j2]
+          split(cand[i2], f2, "\t")
+          if (f[2] == f2[2] && cnm == f2[3] && cbase == f2[5] && f2[1] + 0 > cut) cut = f2[1] + 0
+        }
         proof = ""
         for (e = 1; e <= ne; e++) {
           split(ent[e], g, "\t")
-          if (g[1] + 0 > cts + 0 && g[3] != cnm) {
+          if (g[1] + 0 > cut + 0 && (g[3] != cnm || g[4] != cbase)) {
             proof = g[1] " " g[3]
             break
           }
@@ -3237,9 +3292,13 @@ POSTTUN_BND_SYMBOLIC=""
       # continuation proof when the denial sits before the terminal
       # anchor (the 4C-51 corrective contract — the tolerated mid-flow
       # temp-dir stage noise), POST-FAILURE/CLEANUP at/after the anchor
-      # > a denial whose owning failure is HANDLED (HANDLED/NON-TERMINAL)
-      # > d<=0 vs the anchor (STARTUP-CAUSAL) > POST-FAILURE/CLEANUP >
-      # UNTIMED.
+      # > a denial whose owning failure is HANDLED (HANDLED/NON-TERMINAL;
+      # the owning stage-chain own retry chain never serves as the
+      # proof: the proof is the first later production enter from a
+      # different stage after the chain last failure — the canonical
+      # 4C-52 contract §12), the same for the untraced-owner branch
+      # (no spanning window + later progress) > d<=0 vs the anchor
+      # (STARTUP-CAUSAL) > POST-FAILURE/CLEANUP > UNTIMED.
       ns = 0; np = 0; nq = 0; nu = 0; nh = 0
       for (i = 1; i <= nd; i++) {
         split(den[i], f, "\t")
@@ -3291,12 +3350,52 @@ POSTTUN_BND_SYMBOLIC=""
             split(cand[a], g, "\t")
             if (owncand == g[1] && ownwho == g[2]) cls = "STARTUP-CAUSAL"
             else {
+              ii = 0
               for (j = 1; j <= m; j++) {
-                ii = pre[j]
-                if (ii == a) continue
-                split(cand[ii], g, "\t")
-                if (g[1] == owncand) { cls = "HANDLED/NON-TERMINAL"; break }
+                if (pre[j] == a) continue
+                split(cand[pre[j]], f2, "\t")
+                if (f2[1] == owncand) { ii = pre[j]; break }
               }
+              if (ii != 0) {
+                split(cand[ii], f2, "\t")
+                cut = 0
+                for (j2 = 1; j2 <= m; j2++) {
+                  i2 = pre[j2]
+                  split(cand[i2], f3, "\t")
+                  if (f2[2] == f3[2] && f2[3] == f3[3] && f2[5] == f3[5] && f3[1] + 0 > cut) cut = f3[1] + 0
+                }
+                prf = ""
+                for (e2 = 1; e2 <= ne; e2++) {
+                  split(ent[e2], h2, "\t")
+                  if (h2[1] + 0 > cut + 0 && (h2[3] != f2[3] || h2[4] != f2[5])) { prf = h2[1] " " h2[3]; break }
+                }
+                if (prf != "") { cls = "HANDLED/NON-TERMINAL"; dproof = prf }
+                else {
+                  d = ts - g[1]
+                  if (d <= 0) cls = "STARTUP-CAUSAL"
+                  else cls = "POST-FAILURE/CLEANUP"
+                }
+              }
+            }
+          }
+          else if (owncand == "") {
+            # The untraced-owner branch (the canonical 4C-52 run
+            # 37307909383: the ReadFile fd-Stat getattr decision sat
+            # in the openat-to-read gap with NO owning syscall window —
+            # the runner kernel offers no fstat syscall tracepoint dir —
+            # and the flow demonstrably continued past it: the reads,
+            # the EOF, the stateDir hosts write and the network child
+            # all followed). Anchor-order outranks the owner gap: a
+            # pre-anchor unowned decision with later production
+            # progress is tolerated, not terminal.
+            split(cand[a], g2, "\t")
+            if (ts + 0 <= g2[1] + 0) {
+              prf = ""
+              for (sp = 1; sp <= ne; sp++) {
+                split(ent[sp], h2, "\t")
+                if (h2[1] + 0 > ts + 0) { prf = h2[1] " " h2[3]; break }
+              }
+              if (prf != "") { cls = "HANDLED/NON-TERMINAL"; dproof = prf }
             }
           }
         }
@@ -3314,7 +3413,7 @@ POSTTUN_BND_SYMBOLIC=""
         else if (cls == "UNTIMED") nu++
         else if (cls == "HANDLED/NON-TERMINAL") nh++
         printf "class=%s trace-ts=%s shape=%s\n  %s\n", cls, ts, sh, raw
-        if (dproof != "") printf "  HANDLED-PROOF by=%s (the first production enter after the owning cleanup-shaped window)\n", dproof
+        if (dproof != "") printf "  HANDLED-PROOF by=%s (the machinery continuation proof)\n", dproof
         dproof = ""
       }
       print "COUNTS STARTUP-CAUSAL=" ns " POST-FAILURE/CLEANUP=" np " POLLING-ONLY=" nq " UNTIMED=" nu " HANDLED/NON-TERMINAL=" nh
