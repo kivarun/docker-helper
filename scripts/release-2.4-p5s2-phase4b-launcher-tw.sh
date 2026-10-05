@@ -3184,10 +3184,12 @@ POSTTUN_BND_SYMBOLIC=""
       print "HANDLED_COUNT=" h
       # The denial classification (the 4C-43 vocabulary + HANDLED):
       # POLLING-ONLY (recurring shape) > a denial whose owning syscall
-      # window is a cleanup shape (POST-FAILURE/CLEANUP — the
-      # RemoveAll(bind0) stage noise, wherever it sits in time) > a
-      # denial whose owning failure is HANDLED (HANDLED/NON-TERMINAL) >
-      # d<=0 vs the anchor (STARTUP-CAUSAL) > POST-FAILURE/CLEANUP >
+      # window is a cleanup shape: HANDLED/NON-TERMINAL with the
+      # continuation proof when the denial sits before the terminal
+      # anchor (the 4C-51 corrective contract — the tolerated mid-flow
+      # temp-dir stage noise), POST-FAILURE/CLEANUP at/after the anchor
+      # > a denial whose owning failure is HANDLED (HANDLED/NON-TERMINAL)
+      # > d<=0 vs the anchor (STARTUP-CAUSAL) > POST-FAILURE/CLEANUP >
       # UNTIMED.
       ns = 0; np = 0; nq = 0; nu = 0; nh = 0
       for (i = 1; i <= nd; i++) {
@@ -3206,7 +3208,28 @@ POSTTUN_BND_SYMBOLIC=""
             if (pets[p] + 0 > ts + 0 || pxts[p] + 0 < ts + 0) continue
             if (pets[p] + 0 > best) { best = pets[p] + 0; owncand = pxts[p]; ownwho = pwho[p]; ownclean = pclean[p] }
           }
-          if (ownclean) cls = "POST-FAILURE/CLEANUP"
+          if (ownclean) {
+            # The 4C-51 corrective contract: POST-FAILURE/CLEANUP means
+            # the terminal anchor has already fired. A denial before the
+            # anchor whose owning window is the tolerated temp-dir stage
+            # (the residue RmdirAll walks, the /tmp enumeration opens)
+            # is never post-failure: the flow demonstrably continues
+            # past it. The continuation is proven from the machinery
+            # own forward-progress data — the first production enter
+            # after the owning window (the stage own retry chain is
+            # cleanup-shaped and structurally absent from the enter
+            # list).
+            split(cand[a], g, "\t")
+            if (ts + 0 <= g[1] + 0) {
+              prf = ""
+              for (sp = 1; sp <= ne; sp++) {
+                split(ent[sp], h2, "\t")
+                if (h2[1] + 0 > owncand + 0) { prf = h2[1] " " h2[3]; break }
+              }
+              if (prf != "") { cls = "HANDLED/NON-TERMINAL"; dproof = prf }
+              else cls = "POST-FAILURE/CLEANUP"
+            } else cls = "POST-FAILURE/CLEANUP"
+          }
           else if (owncand != "") {
             # The anchor own denial outranks the polling shape: a
             # denial whose owning window IS the terminal anchor own
@@ -3242,6 +3265,8 @@ POSTTUN_BND_SYMBOLIC=""
         else if (cls == "UNTIMED") nu++
         else if (cls == "HANDLED/NON-TERMINAL") nh++
         printf "class=%s trace-ts=%s shape=%s\n  %s\n", cls, ts, sh, raw
+        if (dproof != "") printf "  HANDLED-PROOF by=%s (the first production enter after the owning cleanup-shaped window)\n", dproof
+        dproof = ""
       }
       print "COUNTS STARTUP-CAUSAL=" ns " POST-FAILURE/CLEANUP=" np " POLLING-ONLY=" nq " UNTIMED=" nu " HANDLED/NON-TERMINAL=" nh
     }
@@ -3262,7 +3287,7 @@ POSTTUN_BND_SYMBOLIC=""
     POSTTUN_REF_ANCHOR="the first failing process exit (fallback; no failing non-kill syscall-exit recorded)"
   fi
   echo "classification anchor: $POSTTUN_REF_ANCHOR"
-  echo "cleanup zone: ${POSTTUN_ZONE_TS:--} (the defer RemoveAll(bind0) entry; everything at/after it is POST-FAILURE/CLEANUP, never forward progress)"
+  echo "cleanup zone: ${POSTTUN_ZONE_TS:--} (the earliest /tmp temp-dir stage entry; denials owned by that stage before the terminal anchor are the tolerated stage own noise — HANDLED/NON-TERMINAL with the continuation proof; only the post-anchor ones are POST-FAILURE/CLEANUP)"
   echo "--- the HANDLED/NON-TERMINAL failures (each followed by forward production progress; the probes and handled stages, never the owner):"
   grep -a '^HANDLED ' "$POSTTUN_ANCHOR_TMP" 2>/dev/null || echo "(none — no pre-anchor failure showed later forward production progress)"
   # P4B-ANCHOR-MACHINERY-END
