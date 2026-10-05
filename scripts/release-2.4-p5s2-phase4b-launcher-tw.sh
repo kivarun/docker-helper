@@ -2146,14 +2146,26 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
   G_NSCHECK=0
   G_LASTPID=0
   G_FULLTICK=39
+  GIDENTQ=""
   # The per-pid discovery body, shared by both scan tiers. For an
   # unseen pid: one builtin comm read, the flow-comm match (the alive
   # count happens at the match, before the identity pass — the current
-  # semantics), then the one-awk identity pass for the matched pid
-  # (attr/stat/ns-readlink reads inline) and the GATE-HOLDER-FIRST
+  # semantics), then the identity pass and the GATE-HOLDER-FIRST
   # record. A pid whose identity pass skips (a flow-comm pid with a
   # non-flow ctx — e.g. the runner's own buildkitd) stays unseen and
   # unrecorded; it still counts alive at its own discovery ticks.
+  #
+  # The canonical run 37326112431 reproduced the discovery stall: the
+  # identity pass was one awk + a forked readlink per discovered pid
+  # (~2 forks, ~30-60ms each under the launch-window fork storm), so a
+  # four-pid discovery burst stretched the tick to ~250ms and the whole
+  # mount dance (born ~.66, dead ~.83 on the watcher clock) finished
+  # inside one stall gap — the dance pid died before the watcher ever
+  # probed it alive (gate items A/B = 0, the phase BLOCKED although the
+  # dance itself was clean). The discovery is now fork-free (comm/ctx/
+  # stat are builtin reads; the ns identities are queued): the record
+  # is emitted the instant the pid matches, the queued ns probe drains
+  # the whole queue with ONE readlink fork per tick.
   g_flow_pid() {
     GPID="${1#/proc/}"
     if [ -n "${GSEEN[$GPID]:-}" ]; then
@@ -2166,38 +2178,33 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
       *) return 0 ;;
     esac
     G_ALIVE=$(( G_ALIVE + 1 ))
-    GIDENT="$(awk -v pid="$GPID" '
-      BEGIN {
-        ctx = ""; getline ctx < ("/proc/" pid "/attr/current")
-        close("/proc/" pid "/attr/current")
-        if (ctx !~ /docker_helper_rootlesskit_t:/ && ctx !~ /docker_helper_slirp4netns_t:/) { print "SKIP"; exit }
-        st = ""; getline st < ("/proc/" pid "/stat")
-        close("/proc/" pid "/stat")
-        gst = "(none)"; gpp = "(none)"; gstm = "(none)"
-        n = split(st, f, " ")
-        if (n >= 3) gst = f[3]
-        if (n >= 4) gpp = f[4]
-        if (n >= 22) gstm = f[22]
-        nsm = "(none)"; nsu = "(none)"
-        cmd = "readlink /proc/" pid "/ns/mnt /proc/" pid "/ns/user 2>/dev/null"
-        if ((cmd | getline nsm) > 0) {
-          if ((cmd | getline nsu) <= 0) nsu = "(none)"
-        }
-        close(cmd)
-        print gst "\t" gpp "\t" ctx "\t" nsm "\t" nsu "\t" gstm
-      }' </dev/null 2>/dev/null || true)"
-    if [ -z "$GIDENT" ] || [ "$GIDENT" = "SKIP" ]; then
-      return 0
-    fi
-    IFS=$'\t' read -r GST GPP GCTXV GNSM_NOW GNSU GSTART <<< "$GIDENT"
+    GCTXV=""
+    IFS= read -r GCTXV 2>/dev/null < "/proc/$GPID/attr/current" || true
+    case "$GCTXV" in
+      *docker_helper_rootlesskit_t:*|*docker_helper_slirp4netns_t:*) ;;
+      *) return 0 ;;
+    esac
+    GST=""
+    IFS= read -r GST 2>/dev/null < "/proc/$GPID/stat" || true
+    GSTV="(none)"; GPP="(none)"; GSTART="(none)"
+    case "$GST" in
+      *") "*)
+        GBODY="${GST#*) }"
+        # After "pid (comm) " the stat fields shift: state=1, ppid=2,
+        # starttime=20 (kernel stat fields 3/4/22).
+        set -- $GBODY
+        GSTV="${1:-"(none)"}"; GPP="${2:-"(none)"}"; GSTART="${20:-"(none)"}"
+        ;;
+    esac
     GSEEN[$GPID]=1
     GCOMM[$GPID]="$GLC"
     GSTIME[$GPID]="$GSTART"
     GCTX[$GPID]="$GCTXV"
-    GNSM[$GPID]="$GNSM_NOW"
+    GNSM[$GPID]=""
     GMI[$GPID]=""
-    printf '%s GATE-HOLDER-FIRST pid=%s comm=%s state=%s ppid=%s ctx=%s ns/mnt=%s ns/user=%s starttime=%s\n' \
-      "$GTS" "$GPID" "$GLC" "$GST" "$GPP" "$GCTXV" "${GNSM_NOW:-(none)}" "${GNSU:-(none)}" "${GSTART:-(none)}"
+    GIDENTQ="$GIDENTQ$GPID "
+    printf '%s GATE-HOLDER-FIRST pid=%s comm=%s state=%s ppid=%s ctx=%s ns/mnt=pending ns/user=pending starttime=%s\n' \
+      "$GTS" "$GPID" "$GLC" "$GSTV" "$GPP" "$GCTXV" "${GSTART:-(none)}"
     # The 4C-52 correction: the discovery moment IS a tick observation
     # (the pid was alive and fully identified the instant this record
     # was built). The canonical run 37307909383 showed a mount-dancing
@@ -2208,7 +2215,7 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
     # such single-sighting pids; the tracked-pids pass continues to
     # emit its own GATE-TICKs for the pids that survive the next tick.
     printf '%s GATE-TICK pid=%s comm=%s ns/mnt=%s starttime=%s\n' \
-      "$GTS" "$GPID" "$GLC" "${GNSM_NOW:-(none)}" "${GSTART:-(none)}"
+      "$GTS" "$GPID" "$GLC" "${GNSM[$GPID]:-(none)}" "${GSTART:-(none)}"
   }
   while :; do
     GTS="$EPOCHREALTIME"
@@ -2259,6 +2266,45 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
         g_flow_pid "$GPC"
       done
     fi
+    # The queued ns-identity probe: ONE readlink fork per tick drains
+    # the whole discovery queue (mnt+user pairs per live pid). The
+    # alignment guard: dead pids are purged before the fork (a builtin
+    # comm test), and if the fork's line count still misses the operand
+    # count (a pid died inside the fork window), the queue is retried
+    # next tick and the purge eventually drops the dead ones.
+    if [ -n "${GIDENTQ:-}" ]; then
+      GQNEW=""
+      for GQ in $GIDENTQ; do
+        if [ -r "/proc/$GQ/comm" ]; then
+          GQNEW="$GQNEW$GQ "
+        fi
+      done
+      GIDENTQ="${GQNEW% }"
+      if [ -n "$GIDENTQ" ]; then
+        GQARGS=()
+        for GQ in $GIDENTQ; do
+          GQARGS+=("/proc/$GQ/ns/mnt" "/proc/$GQ/ns/user")
+        done
+        GQOUT="$(readlink "${GQARGS[@]}" 2>/dev/null || true)"
+        GQEXP=$(( ${#GQARGS[@]} ))
+        GQN="$(printf '%s\n' "$GQOUT" | grep -ac . || true)"
+        if [ "$GQN" -eq "$GQEXP" ]; then
+          GQI=0
+          while IFS= read -r GQLINE; do
+            GQI=$(( GQI + 1 ))
+            GQP="${GQARGS[$(( (GQI - 1) / 2 ))]}"
+            GQP="${GQP#/proc/}"; GQP="${GQP%/ns/mnt}"; GQP="${GQP%/ns/user}"
+            if [ $(( GQI % 2 )) -eq 1 ]; then
+              GNSM[$GQP]="$GQLINE"
+            else
+              printf '%s GATE-HOLDER-IDENT pid=%s ns/mnt=%s ns/user=%s\n' \
+                "$GTS" "$GQP" "${GNSM[$GQP]:-(none)}" "$GQLINE"
+            fi
+          done <<< "$GQOUT"
+          GIDENTQ=""
+        fi
+      fi
+    fi
     # The tracked-pids pass: the aliveness (the comm file's readability
     # bounds the death between ticks), the tick record, and the
     # mountinfo change capture for the rootlesskit_t pids.
@@ -2285,19 +2331,28 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
     # flow namespaces are born fresh and never transitioned in any
     # recorded run; the re-check keeps the GATE-NSMNT transition record
     # live for the general case without paying its readlink fork every
-    # tick.
+    # tick. Batched: one readlink fork covers every tracked pid.
     G_NSCHECK=$(( G_NSCHECK + 1 ))
     if [ "$G_NSCHECK" -ge 250 ] && [ "${#GSEEN[@]}" -gt 0 ]; then
       G_NSCHECK=0
+      GNARGS=()
       for GPID in "${!GSEEN[@]}"; do
-        GNSM_NOW="$(readlink "/proc/$GPID/ns/mnt" 2>/dev/null || true)"
-        [ -n "$GNSM_NOW" ] || continue
-        if [ "${GNSM[$GPID]:-}" != "$GNSM_NOW" ]; then
-          printf '%s GATE-NSMNT pid=%s ns/mnt=%s (was %s)\n' \
-            "$GTS" "$GPID" "$GNSM_NOW" "${GNSM[$GPID]:-none}"
-          GNSM[$GPID]="$GNSM_NOW"
-        fi
+        GNARGS+=("/proc/$GPID/ns/mnt")
       done
+      GNOUT="$(readlink "${GNARGS[@]}" 2>/dev/null || true)"
+      GNN="$(printf '%s\n' "$GNOUT" | grep -ac . || true)"
+      if [ "$GNN" -eq "${#GNARGS[@]}" ]; then
+        GNI=0
+        while IFS= read -r GNL; do
+          GNP="${GNARGS[$GNI]}"; GNP="${GNP#/proc/}"; GNP="${GNP%/ns/mnt}"
+          GNI=$(( GNI + 1 ))
+          if [ "${GNSM[$GNP]:-}" != "$GNL" ]; then
+            printf '%s GATE-NSMNT pid=%s ns/mnt=%s (was %s)\n' \
+              "$GTS" "$GNP" "$GNL" "${GNSM[$GNP]:-none}"
+            GNSM[$GNP]="$GNL"
+          fi
+        done <<< "$GNOUT"
+      fi
     fi
     if [ "$G_ALIVE" -gt 0 ]; then
       G_GONE=0
@@ -4117,14 +4172,25 @@ POSTTUN_BND_SYMBOLIC=""
   POSTTUN_GATE_DANCE_PID="$(printf '%s' "$POSTTUN_GATE_MOVE_WHO" | sed 's/^.*-//' 2>/dev/null || true)"
   # The holder's recorded mount-ns identities: every distinct ns/mnt value
   # the gate watcher recorded for the dance pid (the last tick's value is
-  # the dance-time namespace).
+  # the dance-time namespace). The GATE-HOLDER-IDENT record (the queued
+  # probe's result) is the same evidence, taken at the identification
+  # moment; either source proves the recorded ns/mnt.
   POSTTUN_GATE_HOLDER_MNTS="$(grep -a "GATE-TICK pid=$POSTTUN_GATE_DANCE_PID " "$EVIDENCE_DIR/51-confinement-gate.txt" 2>/dev/null | sed -n 's/.* ns\/mnt=\([^ ]*\) .*/\1/p' | sort -u || true)"
   POSTTUN_GATE_HOLDER_MNT_LAST="$(printf '%s\n' "$POSTTUN_GATE_HOLDER_MNTS" | tail -1 || true)"
+  POSTTUN_GATE_HOLDER_IDENT_LINE="$(grep -a "GATE-HOLDER-IDENT pid=$POSTTUN_GATE_DANCE_PID " "$EVIDENCE_DIR/51-confinement-gate.txt" 2>/dev/null | head -1 || true)"
+  POSTTUN_GATE_HOLDER_IDENT_MNT="$(printf '%s\n' "$POSTTUN_GATE_HOLDER_IDENT_LINE" | sed -n 's/.* ns\/mnt=\([^ ]*\) ns\/user=.*/\1/p' || true)"
+  if [ -n "$POSTTUN_GATE_HOLDER_IDENT_MNT" ]; then
+    POSTTUN_GATE_HOLDER_MNT_EFF="$POSTTUN_GATE_HOLDER_IDENT_MNT"
+  else
+    POSTTUN_GATE_HOLDER_MNT_EFF="$POSTTUN_GATE_HOLDER_MNT_LAST"
+  fi
   POSTTUN_GATE_HOLDER_FIRST_LINE="$(grep -a "GATE-HOLDER-FIRST pid=$POSTTUN_GATE_DANCE_PID " "$EVIDENCE_DIR/51-confinement-gate.txt" 2>/dev/null | head -1 || true)"
   echo "the holder's watcher records (pid=$POSTTUN_GATE_DANCE_PID from the move-mount pair's trace who):"
   printf '%s\n' "${POSTTUN_GATE_HOLDER_FIRST_LINE:-(the gate watcher never recorded the dance pid — identity missing)}"
+  printf '%s\n' "${POSTTUN_GATE_HOLDER_IDENT_LINE:-(no GATE-HOLDER-IDENT record for the dance pid — the queued ns probe did not return for it)}"
   echo "  the holder's distinct ns/mnt values: ${POSTTUN_GATE_HOLDER_MNTS:-(none)}"
   echo "  the holder's last-observed ns/mnt:   ${POSTTUN_GATE_HOLDER_MNT_LAST:-(none)}"
+  echo "  the holder's effective ns/mnt:       ${POSTTUN_GATE_HOLDER_MNT_EFF:-(none)}"
   # The ns/mnt transition records (the unshare's live trace, when caught):
   POSTTUN_GATE_HOLDER_NSMNT_LINES="$(grep -a "GATE-NSMNT pid=$POSTTUN_GATE_DANCE_PID " "$EVIDENCE_DIR/51-confinement-gate.txt" 2>/dev/null || true)"
   printf '%s\n' "${POSTTUN_GATE_HOLDER_NSMNT_LINES:-(no ns/mnt transition of the dance pid was caught by a watcher tick — the first tick may have seen the post-unshare namespace; the distinct-ns facts above are the proof)}"
@@ -4144,25 +4210,45 @@ POSTTUN_BND_SYMBOLIC=""
   # The gate items, one computed verdict each:
   POSTTUN_GATE_A=0; POSTTUN_GATE_B=0; POSTTUN_GATE_C=0; POSTTUN_GATE_D=0
   POSTTUN_GATE_E=0; POSTTUN_GATE_F=0; POSTTUN_GATE_G=0
-  # A: the holder identity exists and carries a recorded ns/mnt.
+  # A: the holder identity exists and carries a recorded ns/mnt (from a
+  # GATE-TICK or a GATE-HOLDER-IDENT record; "(none)" and the pre-probe
+  # "pending" placeholder are both no-evidence values).
   if [ -n "$POSTTUN_GATE_DANCE_PID" ] && [ -n "$POSTTUN_GATE_HOLDER_FIRST_LINE" ] \
     && printf '%s\n' "$POSTTUN_GATE_HOLDER_FIRST_LINE" | grep -aq 'docker_helper_rootlesskit_t:' \
-    && [ -n "$POSTTUN_GATE_HOLDER_MNT_LAST" ] && [ "$POSTTUN_GATE_HOLDER_MNT_LAST" != "(none)" ]; then
+    && [ -n "$POSTTUN_GATE_HOLDER_MNT_EFF" ] && [ "$POSTTUN_GATE_HOLDER_MNT_EFF" != "(none)" ] \
+    && [ "$POSTTUN_GATE_HOLDER_MNT_EFF" != "pending" ]; then
     POSTTUN_GATE_A=1
   fi
   # B: the holder's dance-time ns/mnt differs from EVERY manager-side
   # reference (harness, init, daemon, rk-parent).
   if [ "$POSTTUN_GATE_A" = 1 ] \
-    && [ -n "$POSTTUN_GATE_MGR_MNT" ] && [ "$POSTTUN_GATE_HOLDER_MNT_LAST" != "$POSTTUN_GATE_MGR_MNT" ] \
-    && [ -n "$POSTTUN_GATE_MGRINIT_MNT" ] && [ "$POSTTUN_GATE_HOLDER_MNT_LAST" != "$POSTTUN_GATE_MGRINIT_MNT" ] \
-    && [ -n "$POSTTUN_GATE_MGRD_MNT" ] && [ "$POSTTUN_GATE_HOLDER_MNT_LAST" != "$POSTTUN_GATE_MGRD_MNT" ] \
-    && [ -n "$POSTTUN_GATE_PARENT_MNT" ] && [ "$POSTTUN_GATE_HOLDER_MNT_LAST" != "$POSTTUN_GATE_PARENT_MNT" ]; then
+    && [ -n "$POSTTUN_GATE_MGR_MNT" ] && [ "$POSTTUN_GATE_HOLDER_MNT_EFF" != "$POSTTUN_GATE_MGR_MNT" ] \
+    && [ -n "$POSTTUN_GATE_MGRINIT_MNT" ] && [ "$POSTTUN_GATE_HOLDER_MNT_EFF" != "$POSTTUN_GATE_MGRINIT_MNT" ] \
+    && [ -n "$POSTTUN_GATE_MGRD_MNT" ] && [ "$POSTTUN_GATE_HOLDER_MNT_EFF" != "$POSTTUN_GATE_MGRD_MNT" ] \
+    && [ -n "$POSTTUN_GATE_PARENT_MNT" ] && [ "$POSTTUN_GATE_HOLDER_MNT_EFF" != "$POSTTUN_GATE_PARENT_MNT" ]; then
     POSTTUN_GATE_B=1
   fi
-  # C: the propagation pair exists, returned 0x0, and belongs to the SAME
-  # trace who as the cgroup move-mount.
+  # C: the propagation pair exists, returned 0x0, and belongs to the same
+  # dance chain as the cgroup move-mount. The dance chain is proven by
+  # the same trace who, or by the trace's own fork edge (the reproduced
+  # run 37326112431 shape: the dance's mount sequence split across the
+  # dance parent and its forked worker child — propagation + /etc bind by
+  # exe-3841, tmpfs + .ro move + cgroup pair by its child exe-3872, the
+  # shared /tmp/rootlesskit-b staging name binding the two halves; all
+  # gate-relevant mount returns were 0x0, so pid equality was the wrong
+  # proxy for one confined dance chain).
+  POSTTUN_GATE_DANCE_FORK_EDGE=""
+  if [ -n "$POSTTUN_GATE_PROP_WHO" ] && [ -n "$POSTTUN_GATE_MOVE_WHO" ] \
+    && [ "$POSTTUN_GATE_PROP_WHO" != "$POSTTUN_GATE_MOVE_WHO" ]; then
+    POSTTUN_GATE_PROP_PID="$(printf '%s' "$POSTTUN_GATE_PROP_WHO" | sed 's/^.*-//' 2>/dev/null || true)"
+    POSTTUN_GATE_DANCE_FORK_EDGE="$(grep -aE "sched_process_fork: .* pid=$POSTTUN_GATE_PROP_PID child_comm=[^ ]+ child_pid=$POSTTUN_GATE_DANCE_PID( |\$)" "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | head -1 || true)"
+    if [ -n "$POSTTUN_GATE_DANCE_FORK_EDGE" ]; then
+      echo "the dance chain's fork edge (the trace's own parent->worker linkage):"
+      printf '%s\n' "$POSTTUN_GATE_DANCE_FORK_EDGE"
+    fi
+  fi
   if [ "$POSTTUN_GATE_PROP_RET" = "0x0" ] && [ -n "$POSTTUN_GATE_PROP_WHO" ] \
-    && [ "$POSTTUN_GATE_PROP_WHO" = "$POSTTUN_GATE_MOVE_WHO" ]; then
+    && { [ "$POSTTUN_GATE_PROP_WHO" = "$POSTTUN_GATE_MOVE_WHO" ] || [ -n "$POSTTUN_GATE_DANCE_FORK_EDGE" ]; }; then
     POSTTUN_GATE_C=1
   fi
   # D: the move attempt is AFTER the propagation success (trace clock).
