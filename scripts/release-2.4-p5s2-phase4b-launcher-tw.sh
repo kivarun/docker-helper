@@ -5215,33 +5215,25 @@ REBUILD-STAGE=NOT-REACHED}"
     POSTTUN_FILECREATE_INWINDOW_DENIALS="$(awk -v who="$(printf '%s' "$POSTTUN_FILECREATE_WINDOW_ENTER" | awk '{print $1}')" -v we="$POSTTUN_FILECREATE_WINDOW_ENTER_TS" -v wx="$POSTTUN_FILECREATE_WINDOW_EXIT_TS" '
       /selinux_audited:/ {
         ts = $4; sub(/:$/, "", ts)
-        if (we != "" && ts + 0 > we + 0 && wx != "" && ts + 0 <= wx + 0 && $1 == who) print
+        if (we != "" && ts + 0 > we + 0 && wx != "" && ts + 0 <= wx + 0 && $1 == who) {
+          print
+          if ($0 ~ /tclass=file/) {
+            if ($0 ~ /denied=0x4([^0-9a-fA-F]|$)/) print "    decode: tclass=file write (0x4 — the may_open MAY_WRITE hook on the just-created inode)"
+            if ($0 ~ /denied=0x80000([^0-9a-fA-F]|$)/) print "    decode: tclass=file open (0x80000 — the open-completion hook)"
+            if ($0 ~ /denied=0x20([^0-9a-fA-F]|$)/) print "    decode: tclass=file setattr (0x20 — the O_TRUNC truncate hook)"
+          }
+          if ($0 ~ /tclass=dir/) {
+            if ($0 ~ /denied=0x4000000([^0-9a-fA-F]|$)/) print "    decode: tclass=dir add_name (0x4000000 — the parent-dir own name-insertion hook)"
+            if ($0 ~ /denied=0x4([^0-9a-fA-F]|$)/) print "    decode: tclass=dir write (0x4 — the parent-dir own write check)"
+            if ($0 ~ /denied=0x20000000([^0-9a-fA-F]|$)/) print "    decode: tclass=dir search (0x20000000 — the parent-dir own search check)"
+          }
+        }
       }
     ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true)"
     if [ -n "$POSTTUN_FILECREATE_INWINDOW_DENIALS" ]; then
-      printf '%s\n' "$POSTTUN_FILECREATE_INWINDOW_DENIALS" | while IFS= read -r DLINE; do
-        printf '%s\n' "$DLINE"
-        printf '%s' "$DLINE" | grep -aE 'tclass=file' >/dev/null 2>&1 && \
-          printf '%s' "$DLINE" | grep -aE 'denied=0x4([^0-9a-fA-F]|$)' >/dev/null 2>&1 && \
-          echo "    decode: tclass=file write (0x4 — the may_open MAY_WRITE hook on the just-created inode)"
-        printf '%s' "$DLINE" | grep -aE 'tclass=file' >/dev/null 2>&1 && \
-          printf '%s' "$DLINE" | grep -aE 'denied=0x80000([^0-9a-fA-F]|$)' >/dev/null 2>&1 && \
-          echo "    decode: tclass=file open (0x80000 — the open-completion hook)"
-        printf '%s' "$DLINE" | grep -aE 'tclass=file' >/dev/null 2>&1 && \
-          printf '%s' "$DLINE" | grep -aE 'denied=0x20([^0-9a-fA-F]|$)' >/dev/null 2>&1 && \
-          echo "    decode: tclass=file setattr (0x20 — the O_TRUNC truncate hook)"
-        printf '%s' "$DLINE" | grep -aE 'tclass=dir' >/dev/null 2>&1 && \
-          printf '%s' "$DLINE" | grep -aE 'denied=0x4000000([^0-9a-fA-F]|$)' >/dev/null 2>&1 && \
-          echo "    decode: tclass=dir add_name (0x4000000 — the parent-dir's own name-insertion hook)"
-        printf '%s' "$DLINE" | grep -aE 'tclass=dir' >/dev/null 2>&1 && \
-          printf '%s' "$DLINE" | grep -aE 'denied=0x4([^0-9a-fA-F]|$)' >/dev/null 2>&1 && \
-          echo "    decode: tclass=dir write (0x4 — the parent-dir's own write check)"
-        printf '%s' "$DLINE" | grep -aE 'tclass=dir' >/dev/null 2>&1 && \
-          printf '%s' "$DLINE" | grep -aE 'denied=0x20000000([^0-9a-fA-F]|$)' >/dev/null 2>&1 && \
-          echo "    decode: tclass=dir search (0x20000000 — the parent-dir's own search check)"
-      done
+      printf '%s\n' "$POSTTUN_FILECREATE_INWINDOW_DENIALS"
     else
-      echo "(none — no SELinux decision inside the window; the window's own exit ret is the only evidence)"
+      echo "(none — no SELinux decision inside the window; the window own exit ret is the only evidence)"
     fi
     POSTTUN_FILECREATE_FD_OK=0
     if [ -n "$POSTTUN_FILECREATE_WINDOW_RET" ] && ! printf '%s' "$POSTTUN_FILECREATE_WINDOW_RET" | grep -aq '^0xffffffff'; then
