@@ -1191,6 +1191,42 @@ PREFLIGHT_OK=1
     PREFLIGHT_OK=0
   fi
 
+  echo "=== flow resolved-/etc read identity (the 4C-51 grant: the module's own rootlesskit -> net_conf_t contribution must be exactly the one bare file-read rule — the RESOLVED /etc/hosts target's own regular-file read after the 4C-50 link-traversal read passed: the SAME openat(\"/etc/hosts\", O_RDONLY|O_CLOEXEC) advanced past the traversal into the resolved object's own file-class mediation and the canonical 4C-50 run's boundary record denied it (requested=0x2 denied=0x2 result=-13 tcontext=system_u:object_r:net_conf_t:s0 tclass=file, trace-ts 279.786326; confirmed in three observations including the companion c2 window); the target type is LIVE-PROVEN — the kernel's own tcontext, not a pathname inference; the class is the evidence — file, never lnk_file/dir; the OPEN completion hook ({ open }) is NOT granted here — if it materializes live it owns the next phase; net_conf_t:s0 is a GLOBAL distro label, so the grant is NOT operation-scoped — the nsfs/tmpfs scope shape; the standing net_conf_t:file surface is RECORDED, not asserted (do NOT assume a standing surface: the pre-grant live fact is the 4C-50 boundary denial itself — the effective surface carried NO read; the effective_before = this run's own effective inventory minus the granted read); every file permission beyond the standing surface and the granted read is a STOP) ==="
+  echo "--- raw effective inventory (rootlesskit -> net_conf_t, every class; base-policy/attribute expansions recorded, not asserted):"
+  RK_NCONF_RAW="$(sesearch --allow -s docker_helper_rootlesskit_t -t net_conf_t /sys/fs/selinux/policy 2>/dev/null || true)"
+  printf '%s\n' "${RK_NCONF_RAW:-(none)}"
+  echo "--- CONCRETE module contribution (source must be docker_helper_rootlesskit_t; must be exactly one bare file read rule):"
+  RK_NCONF_FILE_CONCRETE="$(printf '%s\n' "$RK_NCONF_RAW" | awk '$2 == "docker_helper_rootlesskit_t" && $0 ~ /:file[ ;]/' || true)"
+  printf '%s\n' "${RK_NCONF_FILE_CONCRETE:-(none)}"
+  echo "--- the base policy's standing net_conf_t:file surface (the effective inventory minus the granted read — the effective_before record; attribute-derived, recorded not asserted):"
+  RK_NCONF_STANDING="$(printf '%s\n' "$RK_NCONF_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:[^ ]* \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | grep -av '^read$' | sort -u | tr '\n' ' ' || true)"
+  printf '%s\n' "${RK_NCONF_STANDING:-(none — the standing surface is empty)}"
+  RK_NCONF_FILE_UNION="$(printf '%s\n' "$RK_NCONF_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:file \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
+  echo "effective file perm union: ${RK_NCONF_FILE_UNION:-(none)}"
+  echo "--- the forbidden-file-perms negative (everything beyond the base policy's standing surface and the granted read must be absent from the whole effective file surface; the standing set is this run's own inventory fact; the open/getattr/write hooks must not ride):"
+  RK_NCONF_FORBIDDEN="$(printf '%s\n' "$RK_NCONF_FILE_UNION" | tr ' ' '\n' | grep -avE "^(read|$(printf '%s' "$RK_NCONF_STANDING" | tr ' ' '|'))$" || true)"
+  printf '%s\n' "${RK_NCONF_FORBIDDEN:-(none — no extra file permission)}"
+  echo "--- the CLASS-CONFUSION negatives (the net_conf_t:lnk_file and net_conf_t:dir surfaces must be ABSENT from the whole effective surface — the link traversal's own hook is the 4C-50 tmpfs_t pair's owner, a dir surface is the parent walk, and every non-file class is a STOP):"
+  RK_NCONF_NONFILE="$(printf '%s\n' "$RK_NCONF_RAW" | grep -av ':file[ ;]' || true)"
+  printf '%s\n' "${RK_NCONF_NONFILE:-(none — no non-file class surface)}"
+  echo "--- the dontaudit surface toward net_conf_t (RECORDED SEPARATELY per the 4C-28 preflight contract; never merged into the allow verdict):"
+  RK_NCONF_DONTAUDIT="$(sesearch --dontaudit -s docker_helper_rootlesskit_t -t net_conf_t /sys/fs/selinux/policy 2>/dev/null || true)"
+  printf '%s\n' "${RK_NCONF_DONTAUDIT:-(none — no dontaudit rule hides rootlesskit -> net_conf_t denials)}"
+  RK_NCONF_OK=0
+  if [ "$(printf '%s\n' "$RK_NCONF_FILE_CONCRETE" | grep -ac . || true)" = 1 ] \
+    && printf '%s\n' "$RK_NCONF_FILE_CONCRETE" | grep -aqx 'allow docker_helper_rootlesskit_t net_conf_t:file read;' \
+    && printf '%s\n' "$RK_NCONF_FILE_UNION" | tr ' ' '\n' | grep -aqx 'read' \
+    && [ -z "$RK_NCONF_FORBIDDEN" ] \
+    && [ -z "$RK_NCONF_NONFILE" ]; then
+    RK_NCONF_OK=1
+  fi
+  if [ "$RK_NCONF_OK" = 1 ]; then
+    echo "PASS: flow resolved-/etc read identity (module contribution exactly { read }; effective file union = the base policy's standing surface + read — the standing residual recorded above; no module-borne permission beyond read; no non-file class surface)"
+  else
+    echo "FAIL: flow resolved-/etc read identity (concrete-rules=$(printf '%s\n' "$RK_NCONF_FILE_CONCRETE" | grep -ac . || true) union=${RK_NCONF_FILE_UNION:-(none)} forbidden=${RK_NCONF_FORBIDDEN:-(none)} non-file=${RK_NCONF_NONFILE:-(none)})"
+    PREFLIGHT_OK=0
+  fi
+
   echo "=== netlink-route send+lookup+receive+mutation identity (the 4C-22 composition: exactly { create setopt bind getattr write nlmsg_read read nlmsg_write }, no other socket permission, no capability surface) ==="
   echo "--- allow rules on netlink_route_socket (expected: the rootlesskit child's create+setopt+bind+getattr+write+nlmsg_read only; attribute-generic base-policy rules recorded, not asserted):"
   sesearch --allow -c netlink_route_socket /sys/fs/selinux/policy || true
@@ -2894,7 +2930,7 @@ POSTTUN_NSTARTUP=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIMED=0
 POSTTUN_OLD_BOUNDARY_PRESENT=0
 POSTTUN_BND_SYMBOLIC=""
 {
-  echo "=== 4C-38..4C-50 post-TUN lifetime/readiness causal verdict (the 4C-50 run carries exactly the rootlesskit_t -> tmpfs_t:lnk_file { create read } pair beside the cgroup_t:dir mounton grant; the confinement gate's PASS is this run's own re-proven precondition) ==="
+  echo "=== 4C-38..4C-51 post-TUN lifetime/readiness causal verdict (the 4C-51 run carries exactly the rootlesskit_t -> net_conf_t:file read grant beside the tmpfs_t:lnk_file { create read } pair and the cgroup_t:dir mounton grant; the confinement gate's PASS is this run's own re-proven precondition) ==="
   echo "POST-TUN-T0: ${POSTTUN_T0_EPOCH:-(not derived)}"
   echo "  derivation: trace-ts=$POSTTUN_T0_TRACE_TS attach-executor=${POSTTUN_ATTACH_WHO:-(none)} read-epoch=$POSTTUN_READ_EPOCH read-uptime=$POSTTUN_READ_UPTIME ring-last-ts=${POSTTUN_RING_LAST_TS:-(none)} clock-drift=${POSTTUN_CLOCK_DRIFT:-?}s"
   echo "--- the attach pair (the T0 anchor; the attach executor's own TUNSETIFF):"
@@ -3670,6 +3706,36 @@ POSTTUN_BND_SYMBOLIC=""
     echo "OLD-LNKREAD-BOUNDARY: GONE (no rootlesskit_t -> tmpfs_t:lnk_file read (0x2) decision in the window's trace span)"
   fi
 
+  # 4C-51: the SAME contract for the phase's own grant — the OLD primary
+  # boundary (docker_helper_rootlesskit_t -> net_conf_t:file, denied mask
+  # 0x2 = read, bit 1 of the kernel's static COMMON_FILE_SOCK_PERMS
+  # layout; the canonical 4C-50 run 37264978329's record inside the
+  # openat("/etc/hosts") window — generateEtcHosts()'s os.ReadFile, the
+  # RESOLVED target's own file read after the 4C-50 link traversal
+  # passed; confirmed in three observations including the companion c2
+  # window) must be GONE anywhere in the window's trace span. The mask
+  # anchor is pinned to the literal 0x2 followed by a non-hex/edge (0x2
+  # never matches a 0x2X/0x2XX mask); the tclass=file anchor separates
+  # this gate from the lnk_file-class read gates (the 4C-50 tmpfs_t
+  # standing gate — different class) and from every dir/filesystem-class
+  # shape; the tcontext=net_conf_t:s0 anchor (the global type carries no
+  # MCS category) separates it from every other type's file-class read
+  # gates. A record here means the 4C-51 grant did not take effect on
+  # the loaded policy: STOP and report the actual behavior (no rule
+  # widening).
+  POSTTUN_OLD_CONFFILEREAD_PRESENT="$(grep -a 'selinux_audited:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
+    | grep -a 'scontext=system_u:system_r:docker_helper_rootlesskit_t' \
+    | grep -aE 'tcontext=system_u:object_r:net_conf_t:s0([ \t]|$)' \
+    | grep -a 'tclass=file' \
+    | grep -aE 'denied=0x2([^0-9a-fA-F]|$)' || true)"
+  if [ -n "$POSTTUN_OLD_CONFFILEREAD_PRESENT" ]; then
+    echo "OLD-CONFFILEREAD-BOUNDARY: STILL-PRESENT — the 4C-51 resolved-file read grant did not take effect (STOP; no rule widening):"
+    printf '%s\n' "$POSTTUN_OLD_CONFFILEREAD_PRESENT"
+    POSTTUN_OLD_CONFFILEREAD_PRESENT=1
+  else
+    echo "OLD-CONFFILEREAD-BOUNDARY: GONE (no rootlesskit_t -> net_conf_t:file read (0x2) decision in the window's trace span)"
+  fi
+
   # 4C-49: the SAME contract for the phase's own grant — the OLD primary
   # boundary (docker_helper_rootlesskit_t -> cgroup_t:dir, denied mask
   # 0x10000 = mounton, bit 16 of the kernel's static dir classmap; the
@@ -4253,7 +4319,7 @@ POSTTUN_BND_SYMBOLIC=""
       | grep -a 'scontext=system_u:system_r:docker_helper_rootlesskit_t' || true)"
   fi
   if [ -n "$POSTTUN_HOSTSOPEN_WINDOW_AVC" ]; then
-    echo "  the exact openat window's SELinux decisions (any record here is decision evidence: an AVC naming the resolved object's tcontext IS the target's proven label; a tmpfs_t:lnk_file denied=0x2 record is the 4C-50 boundary's own regression signal):"
+    echo "  the exact openat window's SELinux decisions (any record here is decision evidence: an AVC naming the resolved object's tcontext IS the target's proven label; a tmpfs_t:lnk_file denied=0x2 record is the 4C-50 boundary's own regression signal, and a net_conf_t:file denied=0x2 record is the 4C-51 boundary's own regression signal):"
     printf '%s\n' "$POSTTUN_HOSTSOPEN_WINDOW_AVC"
   else
     echo "  the exact openat window: no SELinux decision (a silent success is not decision-proven for the resolved object's label; the pre-grant shape carried exactly the lnk_file read decision here)"
@@ -4348,15 +4414,16 @@ POSTTUN_BND_SYMBOLIC=""
   if [ "$POSTTUN_HOSTS_FD_OK" = 1 ] && [ "$POSTTUN_HOSTS_READ_BYTES_OK" = 1 ] \
     && { [ "$POSTTUN_HOSTS_EOF_OK" = 1 ] || [ "$POSTTUN_HOSTS_CLOSE_OK" = 1 ]; } \
     && [ -z "$POSTTUN_OLD_LNKREAD_PRESENT" ] \
+    && [ -z "$POSTTUN_OLD_CONFFILEREAD_PRESENT" ] \
     && [ -n "$POSTTUN_HOSTSREAD_CONTINUATION" ]; then
     POSTTUN_HOSTSREAD_OK=1
   fi
   if [ "$POSTTUN_HOSTSREAD_OK" = 1 ]; then
-    echo "MILESTONE: ROOTLESSKIT-ETC-HOSTS-READ=OK — the openat returned an fd, the content was actually read (bytes>0), the stream ended (EOF read or close), no tmpfs_t:lnk_file read denial exists in the window, and the flow continued:"
+    echo "MILESTONE: ROOTLESSKIT-ETC-HOSTS-READ=OK — the openat returned an fd, the content was actually read (bytes>0), the stream ended (EOF read or close), no tmpfs_t:lnk_file read denial exists in the window, no net_conf_t:file read denial exists in the window (the 4C-51 resolved-file grant held), and the flow continued:"
     echo "  the first post-stage production enter (the next stage began):"
     printf '%s\n' "$POSTTUN_HOSTSREAD_CONTINUATION"
   else
-    echo "MILESTONE: ROOTLESSKIT-ETC-HOSTS-READ=NOT-REACHED (fd=$([ "$POSTTUN_HOSTS_FD_OK" = 1 ] && echo "$POSTTUN_HOSTS_FD" || echo none) bytes>0=$POSTTUN_HOSTS_READ_BYTES_OK eof=$POSTTUN_HOSTS_EOF_OK close=$POSTTUN_HOSTS_CLOSE_OK lnkread-denial=$([ -n "$POSTTUN_OLD_LNKREAD_PRESENT" ] && echo PRESENT || echo absent) continuation=$([ -n "$POSTTUN_HOSTSREAD_CONTINUATION" ] && echo present || echo absent))"
+    echo "MILESTONE: ROOTLESSKIT-ETC-HOSTS-READ=NOT-REACHED (fd=$([ "$POSTTUN_HOSTS_FD_OK" = 1 ] && echo "$POSTTUN_HOSTS_FD" || echo none) bytes>0=$POSTTUN_HOSTS_READ_BYTES_OK eof=$POSTTUN_HOSTS_EOF_OK close=$POSTTUN_HOSTS_CLOSE_OK lnkread-denial=$([ -n "$POSTTUN_OLD_LNKREAD_PRESENT" ] && echo PRESENT || echo absent) conffileread-denial=$([ -n "$POSTTUN_OLD_CONFFILEREAD_PRESENT" ] && echo PRESENT || echo absent) continuation=$([ -n "$POSTTUN_HOSTSREAD_CONTINUATION" ] && echo present || echo absent))"
   fi
 
   # The gates.
@@ -4633,6 +4700,22 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
       marker "4C-50=PASS/POST-TUN-LIFETIME-STABLE"
     fi
   fi
+  if [ "$POSTTUN_OLD_CONFFILEREAD_PRESENT" = 1 ]; then
+    marker "4C-51-OLD-CONFFILEREAD-BOUNDARY=STILL-PRESENT"
+    marker "4C-51=INCOMPLETE/GRANT-DID-NOT-TAKE-EFFECT"
+  else
+    marker "4C-51-OLD-CONFFILEREAD-BOUNDARY=GONE"
+    [ "$POSTTUN_HOSTSREAD_OK" = 1 ] && marker "ROOTLESSKIT-ETC-HOSTS-READ=OK"
+    if [ -n "$POSTTUN_FIRST_FAIL_PID" ]; then
+      marker "4C-51-OUTCOME=NEXT-STARTUP-BOUNDARY-CONFIRMED"
+      marker "4C-51=PASS/NEXT-BOUNDARY-CONFIRMED"
+    else
+      marker "4C-51-OUTCOME=POST-TUN-LIFETIME-STABLE"
+      marker "TARGET-LIFETIME-BLOCKER=GONE"
+      marker "POST-TUN-LIFETIME=STABLE"
+      marker "4C-51=PASS/POST-TUN-LIFETIME-STABLE"
+    fi
+  fi
   marker "4C-38=PROVEN/PRIMARY-BOUNDARY-ESTABLISHED"
 else
   marker "4C-38=INCOMPLETE/ORDER_NOT_ESTABLISHED"
@@ -4648,6 +4731,7 @@ else
   marker "4C-48=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-49=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-50=INCOMPLETE/ORDER_NOT_ESTABLISHED"
+  marker "4C-51=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-49-CONFINEMENT-GATE=${POSTTUN_GATE_VERDICT:-(the gate did not run — see 53-posttun-verdict.txt)}"
   POSTTUN_NOT_ESTABLISHED=1
 fi
@@ -6326,7 +6410,8 @@ if [ "$I9_OK" = 1 ]; then
   # phase INCOMPLETE (no guessing).
   # A still-present old boundary is a hard phase failure (the grant
   # demonstrably did not take effect); it outranks the cross-op
-  # INCOMPLETE. All twelve standing gone-gates apply: the 4C-50 read
+  # INCOMPLETE. All thirteen standing gone-gates apply: the 4C-51
+  # resolved-file read boundary (the phase's own grant), the 4C-50 read
   # widening boundary (the phase's own grant), the 4C-49 cgroup
   # move-mount mounton boundary, the 4C-48
   # rebuild symlink-create boundary, the 4C-47
@@ -6343,6 +6428,11 @@ if [ "$I9_OK" = 1 ]; then
     marker "4C-49=BLOCKED/CONFINEMENT-NOT-PROVEN"
     marker "BLOCKER=the 4C-49 confinement gate did not pass (see 53-posttun-verdict.txt; no cgroup_t:dir mounton authority may be granted)"
     finish INCOMPLETE
+    exit 0
+  fi
+  if [ "${POSTTUN_OLD_CONFFILEREAD_PRESENT:-0}" = 1 ]; then
+    marker "BLOCKER=the 4C-51 resolved-file read grant did not remove the old rootlesskit_t -> net_conf_t:file read boundary (see 53-posttun-verdict.txt)"
+    finish FAIL
     exit 0
   fi
   if [ "${POSTTUN_OLD_LNKREAD_PRESENT:-0}" = 1 ]; then
