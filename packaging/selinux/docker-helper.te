@@ -1880,6 +1880,88 @@ allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create read };
 # untouched; no require delta (cgroup_t is already required).
 allow docker_helper_rootlesskit_t cgroup_t:dir mounton;
 
+# The resolved /etc/hosts configuration-file read (P5-S2 Phase 4C-51): the
+# RESOLVED TARGET's own regular-file read after the 4C-50 link-traversal
+# read passed. The chain: the rebuilt /etc/hosts symlink (tmpfs_t:lnk_file)
+# traversal SUCCEEDED with the 4C-50 widening in place, and the SAME
+# openat("/etc/hosts", O_RDONLY|O_CLOEXEC) advanced into the RESOLVED
+# object's own file-class mediation, which denied the regular-file read:
+#
+#   denied { read } for pid=3793 comm="exe"
+#     scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+#     tcontext=system_u:object_r:net_conf_t:s0 tclass=file
+#
+# Live enforcing evidence, canonical 4C-50 run 37264978329, the machinery's
+# anchor-own record: the kernel decision INSIDE the openat window — the
+# decision at trace-ts 279.786326 (13µs before the failing exit at
+# 279.786339; T0 = the attach at trace-ts 279.762339, the attach executor's
+# own TUNSETIFF -> 0x0):
+#   requested=0x2 denied=0x2 audited=0x2 result=-13 (EACCES)
+#   tcontext=system_u:object_r:net_conf_t:s0 tclass=file
+# and the direct userspace failure at trace-ts 279.786346 ("[rootlesskit:
+# child ] error: open /etc/hosts: permission denied.") followed by
+# exit_group(1) at 279.786351 — the direct causal chain to the 4C-50 flow
+# death, one stage after the link traversal's own hook passed. The same
+# boundary was confirmed in three observations: the 4C-50 harness run
+# 37263373116's canonical window (c1, exe-3796, trace-ts 181.091658, the
+# machinery's STARTUP-CAUSAL owner record), this canonical run's own
+# window (c1), and the canonical run's companion diagnostic window
+# (dontaudit disabled, c2, exe-15530, trace-ts 379.143815).
+#
+# THE TARGET TYPE IS LIVE-PROVEN — NOT PATHNAME-INFERRED: net_conf_t is
+# the kernel's OWN tcontext for the RESOLVED object (the AVC/decision
+# record's tcontext, taken from the live decision — never from a pathname
+# guess). The resolved object is the ORIGINAL /etc/hosts entry behind the
+# rebuilt symlink (the rebuild symlinkat's own oldname ".ro<random>/hosts"
+# — the moved original /etc tree on the .ro mount), and the kernel resolves
+# it to the distro's /etc network-configuration file label net_conf_t
+# (Tumbleweed labels /etc/hosts and /etc/resolv.conf net_conf_t; the live
+# tcontext is the authority). The class is the evidence — the REGULAR-FILE
+# class of the resolved object: tclass=file, NEVER the lnk_file class (the
+# traversal's own hook, the 4C-50 pair's owner) and never a dir surface.
+#
+# THE DECODE is the kernel's static classmap's common layout: file:read =
+# 0x2 (bit 1 of the COMMON_FILE_SOCK_PERMS positions — the same bit-1
+# position the lnk_file read boundary carried; the perms files' own
+# numbering, file read=2, is the recorded interface fact, never the
+# decode). The audit slice was empty in all three windows (the measured
+# userspace-audit gap); the raw kernel decision plus the holder's own
+# stderr name the boundary, and a next symbolic AVC record, when captured,
+# is the confirming decode.
+#
+# THE OPEN COMPLETION HOOK IS NOT GRANTED HERE: the VFS open's completion
+# mediates a separate { open } permission on the same file object (the
+# two-hook open structure the 4C-11/4C-32 boundaries proved for
+# tun_tap_device_t and nsfs_t). If the open hook materializes live after
+# this grant, it owns the next phase — never folded into this read rule.
+# The READ's full completion (fd, bytes, EOF, close) is proven by the
+# live run's own ROOTLESSKIT-ETC-HOSTS-READ milestone, not assumed here.
+#
+# SCOPE — READ CAREFULLY: exactly ONE permission of the file class on
+# exactly this pair — the resolved-target read of generateEtcHosts()'s
+# os.ReadFile("/etc/hosts") (the same standing read authority the daemon
+# domain already carries: allow docker_helper_t net_conf_t:file
+# { read open getattr } — the child's grant is NOT a copy of that rule:
+# exactly the one evidenced permission, no open/getattr). Deliberately NOT
+# granted: open/getattr/write/append/lock/create/setattr/unlink/rename/
+# link/execute/map/relabelfrom/relabelto or any other file permission
+# (each a distinct hook — the setupNet stages' own hooks materialize
+# live), any net_conf_t:lnk_file or net_conf_t:dir surface (the class
+# confusion), any other type's file surface, process/capability surfaces,
+# other subjects; the .fc and the module version stay untouched; no
+# require delta (net_conf_t is already required).
+#
+# GLOBAL-TYPE SCOPE NOTE — RECORD IT AS SUCH: net_conf_t:s0 is a GLOBAL
+# distro label with no per-operation MCS category, so this allow is NOT
+# operation-scoped: the flow domain may read the regular-file contents of
+# the distro's /etc network-configuration objects wherever kernel/DAC
+# relationships already permit. Like every flow-domain grant this is a
+# domain-wide permission on the distro type, not an operation-scoped one;
+# the operation separation is owned by the categorized process/object MCS
+# boundary, and cross-operation targeting stays the OPEN/Critical
+# concurrency/security gate before the Release GO.
+allow docker_helper_rootlesskit_t net_conf_t:file read;
+
 # --- docker_helper_slirp4netns_t: the rootlesskit user-network helper domain (P5-S2) ---
 #
 # RootlessKit forks and execs the distro slirp4netns binary as its
