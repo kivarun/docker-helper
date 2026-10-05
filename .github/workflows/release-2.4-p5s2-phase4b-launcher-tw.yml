@@ -32,18 +32,18 @@ jobs:
 
       - name: Check out the tested proof commit for the composition
         env:
-          # 4C-52: the composition's module now carries the rootlesskit
-          # child's resolved /etc/hosts read-open pair — net_conf_t:file
-          # { read open } (the 4C-51 read widened IN PLACE by the 4C-52
-          # open hook): with the 4C-51 read in place, the canonical
-          # 4C-51 run 37286690263's same openat passed the read hook and
-          # the VFS open's own completion hook was denied
-          # (requested=0x40002 denied=0x40000, the machinery's anchor-own
-          # record, confirmed in the companion c2 window); the proof ref
-          # advances from the 4C-51-era pin to the commit carrying that
-          # module (ebeead4 — identical Go sources, so the binary is the
-          # same program).
-          PHASE4B_PROOF_REF: 'ebeead43d5d80e93cc5a83714a932254969141ef'
+          # 4C-53: the composition's module now carries the rootlesskit
+          # child's rebuild-symlink unlink hook — tmpfs_t:lnk_file
+          # { create read unlink } (the 4C-48 create + 4C-50 read pair
+          # widened IN PLACE by the 4C-53 unlink removal hook): the
+          # canonical 4C-52 run's phase-end record named the
+          # NEXT-STARTUP-BOUNDARY (tmpfs_t:lnk_file { unlink } inside the
+          # RemoveAll("/etc/resolv.conf") stage's own unlinkat window —
+          # the rebuilt /etc/resolv.conf destination symlink's removal
+          # hook); the proof ref advances from the 4C-52-era pin to the
+          # commit carrying that module (fa97b51 — identical Go sources,
+          # so the binary is the same program).
+          PHASE4B_PROOF_REF: 'fa97b5192efb441c48e3a1bc51616a5a43b62222'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"

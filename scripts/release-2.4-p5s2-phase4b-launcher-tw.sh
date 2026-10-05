@@ -1084,8 +1084,8 @@ PREFLIGHT_OK=1
     PREFLIGHT_OK=0
   fi
 
-  echo "=== flow tmpfs rebuild-symlink identity (the 4C-48 create + 4C-50 read pair: the module's own rootlesskit -> tmpfs_t:lnk_file contribution must be exactly the one brace-pair lnk_file rule { create read } — ONE pair, ONE rule, widened IN PLACE per phase, never split into two rules, never folded into the dir pair or the filesystem rule; provenance stays per-perm: create <- the canonical 4C-47 run's live-proven symlinkat window (the symlink object's own creation check), read <- the canonical 4C-49 run's live-proven openat(\"/etc/hosts\") window (the link traversal's own read hook — generateEtcHosts()'s os.ReadFile, the startup's FIRST /etc read); the class is the evidence — the symlink object's own class lnk_file; the RESOLVED target's own open/read stays UNGRANTED (a separate mediation on the target's own type/class — the next boundary is not this rule); the standing tmpfs_t:lnk_file surface is RECORDED, not asserted — the 4C-49 canonical run's inventory showed the child's lnk_file-class standing residual map-only (file_type); every lnk_file permission beyond the standing surface and the granted pair is a STOP) ==="
-  echo "--- CONCRETE module contribution (source must be docker_helper_rootlesskit_t AND class lnk_file — tmpfs_t now carries three owned rules across classes; must be exactly one brace-pair lnk_file { create read } rule):"
+  echo "=== flow tmpfs rebuild-symlink identity (the 4C-48 create + 4C-50 read + 4C-53 unlink triple: the module's own rootlesskit -> tmpfs_t:lnk_file contribution must be exactly the one brace-triple lnk_file rule { create read unlink } — ONE pair, ONE rule, widened IN PLACE per phase, never split into two rules, never folded into the dir pair or the filesystem rule; provenance stays per-perm: create <- the canonical 4C-47 run's live-proven symlinkat window (the symlink object's own creation check), read <- the canonical 4C-49 run's live-proven openat(\"/etc/hosts\") window (the link traversal's own read hook — generateEtcHosts()'s os.ReadFile, the startup's FIRST /etc read), unlink <- the canonical 4C-52 run's terminal boundary (the RemoveAll(\"/etc/resolv.conf\") stage's own unlinkat destination hook — the setupNet resolv-replacement step's production removal); the class is the evidence — the symlink object's own class lnk_file; the RESOLVED target's own open/read is the net_conf_t:file pair owner's separate grant (4C-51/4C-52), not this rule; the standing tmpfs_t:lnk_file surface is RECORDED, not asserted — the 4C-49 canonical run's inventory showed the child's lnk_file-class standing residual map-only (file_type); every lnk_file permission beyond the standing surface and the granted triple is a STOP) ==="
+  echo "--- CONCRETE module contribution (source must be docker_helper_rootlesskit_t AND class lnk_file — tmpfs_t now carries three owned rules across classes; must be exactly one brace-triple lnk_file { create read unlink } rule):"
   RK_LNK_CONCRETE="$(printf '%s\n' "$RK_TMPFSDIR_RAW" | awk '$2 == "docker_helper_rootlesskit_t" && $0 ~ /:lnk_file/' || true)"
   printf '%s\n' "${RK_LNK_CONCRETE:-(none)}"
   RK_LNK_NORM="$(printf '%s\n' "$RK_LNK_CONCRETE" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:[^ ]* {\(.*\)};$/\1/p' | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//' || true)"
@@ -1094,20 +1094,21 @@ PREFLIGHT_OK=1
   printf '%s\n' "${RK_LNK_STANDING:-(none — the standing surface is empty)}"
   RK_LNK_UNION="$(printf '%s\n' "$RK_TMPFSDIR_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:lnk_file \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
   echo "effective lnk_file perm union: ${RK_LNK_UNION:-(none)}"
-  echo "--- the forbidden-lnk-perms negative (everything beyond the base policy's standing surface and the granted pair must be absent from the whole effective lnk_file surface; the standing set is this run's own inventory fact; the write/getattr/unlink/link/rename hooks must not ride):"
-  RK_LNK_FORBIDDEN="$(printf '%s\n' "$RK_LNK_UNION" | tr ' ' '\n' | grep -avE "^(create|read|$(printf '%s' "$RK_LNK_STANDING" | tr ' ' '|'))$" || true)"
+  echo "--- the forbidden-lnk-perms negative (everything beyond the base policy's standing surface and the granted triple must be absent from the whole effective lnk_file surface; the standing set is this run's own inventory fact; the write/getattr/link/rename hooks must not ride):"
+  RK_LNK_FORBIDDEN="$(printf '%s\n' "$RK_LNK_UNION" | tr ' ' '\n' | grep -avE "^(create|read|unlink|$(printf '%s' "$RK_LNK_STANDING" | tr ' ' '|'))$" || true)"
   printf '%s\n' "${RK_LNK_FORBIDDEN:-(none — no extra lnk_file permission)}"
   RK_LNK_OK=0
   if [ "$(printf '%s\n' "$RK_LNK_CONCRETE" | grep -ac . || true)" = 1 ] \
     && printf '%s\n' "$RK_LNK_CONCRETE" | grep -aq 'allow docker_helper_rootlesskit_t tmpfs_t:lnk_file' \
-    && [ "$RK_LNK_NORM" = "create read" ] \
+    && [ "$RK_LNK_NORM" = "create read unlink" ] \
     && printf '%s\n' "$RK_LNK_UNION" | tr ' ' '\n' | grep -aqx 'create' \
     && printf '%s\n' "$RK_LNK_UNION" | tr ' ' '\n' | grep -aqx 'read' \
+    && printf '%s\n' "$RK_LNK_UNION" | tr ' ' '\n' | grep -aqx 'unlink' \
     && [ -z "$RK_LNK_FORBIDDEN" ]; then
     RK_LNK_OK=1
   fi
   if [ "$RK_LNK_OK" = 1 ]; then
-    echo "PASS: flow tmpfs rebuild-symlink identity (module contribution exactly { create read }; effective lnk_file union = the base policy's standing surface + the pair — the standing residual recorded above; no module-borne permission beyond the pair)"
+    echo "PASS: flow tmpfs rebuild-symlink identity (module contribution exactly { create read unlink }; effective lnk_file union = the base policy's standing surface + the triple — the standing residual recorded above; no module-borne permission beyond the triple)"
   else
     echo "FAIL: flow tmpfs rebuild-symlink identity (concrete-rules=$(printf '%s\n' "$RK_LNK_CONCRETE" | grep -ac . || true) norm=${RK_LNK_NORM:-(none)} union=${RK_LNK_UNION:-(none)})"
     PREFLIGHT_OK=0
@@ -3049,7 +3050,7 @@ POSTTUN_NSTARTUP=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIMED=0
 POSTTUN_OLD_BOUNDARY_PRESENT=0
 POSTTUN_BND_SYMBOLIC=""
 {
-  echo "=== 4C-38..4C-52 post-TUN lifetime/readiness causal verdict (the 4C-52 run carries exactly the rootlesskit_t -> net_conf_t:file { read open } pair — the 4C-51 read widened in place by the 4C-52 open hook — beside the tmpfs_t:lnk_file { create read } pair and the cgroup_t:dir mounton grant; the confinement gate's PASS is this run's own re-proven precondition) ==="
+  echo "=== 4C-38..4C-53 post-TUN lifetime/readiness causal verdict (the 4C-53 run carries exactly the rootlesskit_t -> net_conf_t:file { read open } pair — the 4C-51 read widened in place by the 4C-52 open hook — beside the tmpfs_t:lnk_file { create read unlink } triple (the 4C-48 create + 4C-50 read widened in place by the 4C-53 unlink removal hook) and the cgroup_t:dir mounton grant; the confinement gate's PASS is this run's own re-proven precondition) ==="
   echo "POST-TUN-T0: ${POSTTUN_T0_EPOCH:-(not derived)}"
   echo "  derivation: trace-ts=$POSTTUN_T0_TRACE_TS attach-executor=${POSTTUN_ATTACH_WHO:-(none)} read-epoch=$POSTTUN_READ_EPOCH read-uptime=$POSTTUN_READ_UPTIME ring-last-ts=${POSTTUN_RING_LAST_TS:-(none)} clock-drift=${POSTTUN_CLOCK_DRIFT:-?}s"
   echo "--- the attach pair (the T0 anchor; the attach executor's own TUNSETIFF):"
@@ -3498,6 +3499,35 @@ POSTTUN_BND_SYMBOLIC=""
   echo "--- the HANDLED/NON-TERMINAL failures (each followed by forward production progress; the probes and handled stages, never the owner):"
   grep -a '^HANDLED ' "$POSTTUN_ANCHOR_TMP" 2>/dev/null || echo "(none — no pre-anchor failure showed later forward production progress)"
   # P4B-ANCHOR-MACHINERY-END
+  # The NO-PREANCHOR-POST gate (the standing machinery invariant, the
+  # 4C-53 phase contract) — computed FROM the machinery's own output,
+  # never re-deriving it: NO decision classified POST-FAILURE/CLEANUP
+  # may carry a trace-ts BEFORE the terminal anchor. The corrected
+  # machinery's own permanent contract:
+  #   timestamp < terminal anchor + subsequent production progress
+  #   => never POST-FAILURE
+  # (pre-anchor denials are STARTUP-CAUSAL — the anchor's own boundary —
+  # or HANDLED/NON-TERMINAL with the continuation proof). A violation
+  # means the classification machinery itself is broken: the phase
+  # HOLDs (the staircase must not continue on an unreliable ladder;
+  # the gate is mandatory, checked below in the verdict).
+  POSTTUN_PREANCHOR_POST_REPORT="$(awk -v a="$POSTTUN_ANCHOR_TS" '
+    /^class=POST-FAILURE\/CLEANUP trace-ts=/ {
+      ts = substr($2, 10)
+      if (a == "" || ts + 0 < a + 0) { n++; print "  VIOLATION " $0 }
+    }
+    END { print "PREANCHOR-POST-COUNT=" n + 0 }
+  ' "$POSTTUN_ANCHOR_TMP" 2>/dev/null || true)"
+  POSTTUN_PREANCHOR_POST_N="$(grep -a '^PREANCHOR-POST-COUNT=' <<<"$POSTTUN_PREANCHOR_POST_REPORT" | cut -d= -f2 | head -1 || true)"
+  POSTTUN_PREANCHOR_POST_ROWS="$(grep -a '^  VIOLATION ' <<<"$POSTTUN_PREANCHOR_POST_REPORT" | sed 's/^  VIOLATION //' || true)"
+  POSTTUN_NO_PREANCHOR_POST_OK=0
+  if [ "${POSTTUN_PREANCHOR_POST_N:-1}" = "0" ]; then
+    POSTTUN_NO_PREANCHOR_POST_OK=1
+    echo "NO-PREANCHOR-POST: PASS (no decision classified POST-FAILURE/CLEANUP precedes the terminal anchor trace-ts=${POSTTUN_ANCHOR_TS:-(none)})"
+  else
+    echo "NO-PREANCHOR-POST: FAIL (${POSTTUN_PREANCHOR_POST_N:-?} pre-anchor decision(s) classified POST-FAILURE/CLEANUP — the machinery standing invariant is violated; the phase HOLDs):"
+    printf '%s\n' "$POSTTUN_PREANCHOR_POST_ROWS"
+  fi
   if [ -n "$POSTTUN_WINDOW_TS" ]; then
     echo "--- the failure's ±0.25s causal window (all comms, the lifetime-relevant events, ordered; anchored AT T0 — the attach's own pre-T0 steps live in the flow-domain extract):"
     awk -v t0="$POSTTUN_T0_TRACE_TS" -v td="$POSTTUN_WINDOW_TS" '
@@ -3995,6 +4025,35 @@ POSTTUN_BND_SYMBOLIC=""
     POSTTUN_OLD_CONFOPEN_PRESENT=1
   else
     echo "OLD-CONFOPEN-BOUNDARY: GONE (no rootlesskit_t -> net_conf_t:file open (0x40000) decision in the window's trace span)"
+  fi
+
+  # 4C-53: the SAME contract for the phase's own widening — the OLD
+  # primary boundary (docker_helper_rootlesskit_t -> tmpfs_t:lnk_file,
+  # denied mask 0x800 = unlink, bit 11 of the kernel's static classmap's
+  # common layout — the classmap fixture's pinned decode; the canonical
+  # 4C-52 run's phase-end NEXT-STARTUP-BOUNDARY record INSIDE the
+  # RemoveAll("/etc/resolv.conf") stage's own unlinkat window — the
+  # rebuilt /etc/resolv.conf symlink's DESTINATION removal hook) must be
+  # GONE anywhere in the window's trace span. The mask anchor is pinned
+  # to the literal 0x800 followed by a non-hex/edge (0x8 and 0x80
+  # never match; 0x800X masks are different perms); the tclass=lnk_file
+  # anchor separates this gate from the dir/file classes; the
+  # tcontext=tmpfs_t:s0 anchor separates it from every other type's
+  # lnk_file gates (the 4C-50 read gate on the same pair is the 0x2
+  # mask, not 0x800). A record here means the 4C-53 widening did not
+  # take effect on the loaded policy: STOP and report the actual
+  # behavior (no rule widening).
+  POSTTUN_OLD_LNKUNLINK_PRESENT="$(grep -a 'selinux_audited:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
+    | grep -a 'scontext=system_u:system_r:docker_helper_rootlesskit_t' \
+    | grep -aE 'tcontext=system_u:object_r:tmpfs_t:s0([ \t]|$)' \
+    | grep -a 'tclass=lnk_file' \
+    | grep -aE 'denied=0x800([^0-9a-fA-F]|$)' || true)"
+  if [ -n "$POSTTUN_OLD_LNKUNLINK_PRESENT" ]; then
+    echo "OLD-LNKUNLINK-BOUNDARY: STILL-PRESENT — the 4C-53 rebuild-symlink unlink widening did not take effect (STOP; no rule widening):"
+    printf '%s\n' "$POSTTUN_OLD_LNKUNLINK_PRESENT"
+    POSTTUN_OLD_LNKUNLINK_PRESENT=1
+  else
+    echo "OLD-LNKUNLINK-BOUNDARY: GONE (no rootlesskit_t -> tmpfs_t:lnk_file unlink (0x800) decision in the window's trace span)"
   fi
 
   # 4C-49: the SAME contract for the phase's own grant — the OLD primary
@@ -4734,6 +4793,241 @@ POSTTUN_BND_SYMBOLIC=""
     echo "MILESTONE: ROOTLESSKIT-ETC-HOSTS-READ=NOT-REACHED (fd=$([ "$POSTTUN_HOSTS_FD_OK" = 1 ] && echo "$POSTTUN_HOSTS_FD" || echo none) bytes>0=$POSTTUN_HOSTS_READ_BYTES_OK eof=$POSTTUN_HOSTS_EOF_OK close=$POSTTUN_HOSTS_CLOSE_OK lnkread-denial=$([ -n "$POSTTUN_OLD_LNKREAD_PRESENT" ] && echo PRESENT || echo absent) conffileread-denial=$([ -n "$POSTTUN_OLD_CONFFILEREAD_PRESENT" ] && echo PRESENT || echo absent) confopen-denial=$([ -n "$POSTTUN_OLD_CONFOPEN_PRESENT" ] && echo PRESENT || echo absent) continuation=$([ -n "$POSTTUN_HOSTSREAD_CONTINUATION" ] && echo present || echo absent))"
   fi
 
+  # The 4C-53 standing-chain tally: the REBUILD stage's own completeness
+  # (the canonical 4C-52 run's standing fact — the rebuilt /etc tree's
+  # every rebuild-shaped symlinkat returned success). Every flow-domain
+  # rebuild-shaped symlinkat pair (oldname on the .ro mount, newname an
+  # /etc entry) after T0 is tallied with its own ret; the stage is
+  # COMPLETE when every recorded rebuild-shaped symlinkat returned 0x0
+  # and at least one was recorded. The count is this run's own live
+  # fact (recorded, never hardcoded). This re-proves the standing
+  # rebuild-stage completion beside the standing TUNSETIFF/copy-up/
+  # cgroup/hosts-read milestones; it grants nothing.
+  echo "--- the 4C-53 standing-chain tally (the rebuild stage's own symlinkat results; every rebuild-shaped pair in trace order):"
+  POSTTUN_REBUILD_TALLY="$(awk -v t0="$POSTTUN_T0_TRACE_TS" '
+    /sys_symlinkat\(oldname:/ && t0 != "" {
+      ts = $4; sub(/:$/, "", ts)
+      if (ts + 0 > t0 + 0 && $0 ~ /oldname: [^,]*"[^"]*\.ro[0-9]+\// && $0 ~ /newname: [^,]*"\/etc\//) {
+        pend = 1; pwho = $1; pline = $0
+      }
+      next
+    }
+    pend && /sys_symlinkat -> / && $1 == pwho {
+      total++
+      if ($NF == "0x0") ok++; else { bad++; print "  rebuild-symlinkat FAILED trace-ts=" $4 " ret=" $NF ": " pline }
+      pend = 0
+      next
+    }
+    END {
+      print "REBUILD-SYMLINKAT-TOTAL=" total + 0
+      print "REBUILD-SYMLINKAT-OK=" ok + 0
+      if (total > 0 && ok == total) print "REBUILD-STAGE=COMPLETE"
+      else if (total > 0) print "REBUILD-STAGE=INCOMPLETE"
+      else print "REBUILD-STAGE=NOT-REACHED"
+    }
+  ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true)"
+  printf '%s\n' "${POSTTUN_REBUILD_TALLY:-REBUILD-SYMLINKAT-TOTAL=0
+REBUILD-SYMLINKAT-OK=0
+REBUILD-STAGE=NOT-REACHED}"
+  POSTTUN_REBUILD_TOTAL="$(grep -a '^REBUILD-SYMLINKAT-TOTAL=' <<<"${POSTTUN_REBUILD_TALLY:-}" | cut -d= -f2 | head -1 || true)"
+  POSTTUN_REBUILD_OK_N="$(grep -a '^REBUILD-SYMLINKAT-OK=' <<<"${POSTTUN_REBUILD_TALLY:-}" | cut -d= -f2 | head -1 || true)"
+  POSTTUN_REBUILD_COMPLETE="$(grep -a '^REBUILD-STAGE=' <<<"${POSTTUN_REBUILD_TALLY:-}" | cut -d= -f2 | head -1 || true)"
+  POSTTUN_REBUILD_COMPLETE_OK=0
+  [ "$POSTTUN_REBUILD_COMPLETE" = "COMPLETE" ] && POSTTUN_REBUILD_COMPLETE_OK=1
+
+  # The 4C-53 objective: the production RemoveAll("/etc/resolv.conf") —
+  # the setupNet resolv-replacement stage's FIRST step after the granted
+  # /etc/hosts read (the 4C-52 canonical run's terminal boundary was
+  # EXACTLY this stage's unlinkat destination hook). The rebuilt
+  # /etc/resolv.conf destination symlink (tmpfs_t:lnk_file) must be
+  # REMOVED by the flow's own unlinkat, and the stage's whole
+  # mini-sequence is recorded EXACTLY — the 4C-52 trace showed several
+  # syscall probes around ONE semantic operation, and the timeline is
+  # recorded verbatim, never one phase per errno:
+  #   unlinkat("/etc/resolv.conf", 0)         (the destination symlink's
+  #                                            own removal hook — the
+  #                                            4C-53 widening's owner)
+  #   unlinkat("/etc/resolv.conf", AT_REMOVEDIR)  (Go's os.Remove's
+  #                                            directory retry shape)
+  #   dirfd-relative unlinkat("resolv.conf")  (the RemoveAll parent-walk
+  #                                            retry probes)
+  #   openat("/etc", O_DIRECTORY|O_NOFOLLOW)  (the parent-walk's own
+  #                                            dirfd open)
+  #   readlinkat                              (the symlink-shaped entry
+  #                                            probe)
+  #   final result                            (the stage's own completion)
+  #   next production enter                   (the replacement stage
+  #                                            began)
+  # ROOTLESSKIT-ETC-RESOLV-SYMLINK-REMOVE=OK requires ALL of:
+  #   - the AT_FDCWD unlinkat("/etc/resolv.conf", 0) pair returned 0x0
+  #     (the rebuilt destination symlink was actually removed — the
+  #     4C-53 unlink widening's own live proof);
+  #   - NO tmpfs_t:lnk_file unlink (0x800) denial anywhere in the window
+  #     (the OLD-LNKUNLINK gone-gate above — the grant took effect);
+  #   - the production flow went further: a later production enter of
+  #     the same trace who from a DIFFERENT stage after the stage's
+  #     last resolv window (the stage-aware contract — the RemoveAll
+  #     stage's own retry chain never proves progress; the resolv
+  #     WriteFile / the /etc/hosts RemoveAll are the next stages).
+  # A missing denial alone is NOT a pass; an unlinkat that fails at a
+  # DEEPER hook keeps this milestone NOT-REACHED with the reached stage
+  # recorded (the phase's semantic delta is then proven by the
+  # gone-gates and the phase STOPs there — no compensating grant). The
+  # /etc/hosts equivalents are deliberately NOT part of this objective
+  # (the resolv-vs-hosts distinction): a hosts-shaped failure on the
+  # SAME already-granted surface is the same permission at work, not a
+  # new phase — the machinery's terminal-boundary classification owns
+  # where the next semantic boundary actually is.
+  echo "--- the 4C-53 /etc/resolv.conf RemoveAll objective (the exact mini-sequence timeline; the enter lines name their shape keys, the exit lines are the paired own rets):"
+  POSTTUN_RESOLV_TIMELINE="$(awk -v t0="$POSTTUN_T0_TRACE_TS" -v fl="$POSTTUN_FLOW_COMM_AWK" '
+    function baseof(s,   q, n, parts) {
+      if (!match(s, /"[^"]*"/)) return ""
+      q = substr(s, RSTART + 1, RLENGTH - 2)
+      n = split(q, parts, "/")
+      return parts[n]
+    }
+    /^ *[a-zA-Z0-9_.-]+-[0-9]+ +\[[0-9]+\]/ && $0 ~ /sys_/ {
+      who = $1
+      if (who !~ fl) next
+      ts = $4; sub(/:$/, "", ts)
+      if (t0 == "" || ts + 0 <= t0 + 0) next
+      if (!match($0, /sys_[a-z0-9_]+/)) next
+      nm = substr($0, RSTART + 4, RLENGTH - 4)
+      if (nm !~ /^(unlink|unlinkat|rmdir|openat|openat2|readlink|readlinkat)$/) next
+      k = who "|" nm
+      if ($0 ~ "sys_" nm " -> ") {
+        if (qtop[k] > 0) {
+          if (qresolv[k, qtop[k]]) {
+            print "    exit trace-ts=" ts " ret=" $NF " (closes " qdesc[k, qtop[k]] ")"
+            lastresolvxts[k] = ts
+            if (nm == "unlinkat" && firstabs[k] != "" && qets[k, qtop[k]] + 0 == firstabs[k] + 0) firstabsxts[k] = ts
+          }
+          qtop[k]--
+        }
+        next
+      }
+      if ($0 ~ "sys_" nm "\\(") {
+        qtop[k]++
+        qets[k, qtop[k]] = ts
+        qdesc[k, qtop[k]] = ""
+        isresolv = 0
+        if ($0 ~ /pathname: [^,]*"\/etc\/resolv\.conf"/) { isresolv = 1; qdesc[k, qtop[k]] = "pathname=/etc/resolv.conf" }
+        else if ($0 ~ /"resolv\.conf"/) { isresolv = 1; qdesc[k, qtop[k]] = "basename=resolv.conf (dirfd-relative)" }
+        else if (nm ~ /^(openat|openat2)$/ && $0 ~ /filename: [^,]*"\/etc",/) { isresolv = 1; qdesc[k, qtop[k]] = "the parent-dir /etc openat" }
+        qresolv[k, qtop[k]] = isresolv
+        if (isresolv) {
+          print "    enter trace-ts=" ts " (" qdesc[k, qtop[k]] "): " $0
+          if (nm == "unlinkat" && firstabs[k] == "" && $0 ~ /pathname: [^,]*"\/etc\/resolv\.conf"/) {
+            firstabs[k] = ts; firstabsline[k] = $0
+          }
+        }
+        next
+      }
+    }
+    END {
+      fa = ""
+      for (k in firstabs) {
+        if (fa == "" || firstabs[k] + 0 < fa + 0) { fa = firstabs[k]; faline = firstabsline[k]; faxts = firstabsxts[k] }
+      }
+      if (fa != "") {
+        print "  FIRST-ABS-UNLINKAT-ENTER-TS=" fa
+        print "  FIRST-ABS-UNLINKAT-ENTER=" faline
+        print "  FIRST-ABS-UNLINKAT-EXIT-TS=" faxts
+      } else print "  FIRST-ABS-UNLINKAT-ENTER-TS="
+      mx = ""
+      for (k in lastresolvxts) {
+        if (mx == "" || lastresolvxts[k] + 0 > mx + 0) mx = lastresolvxts[k]
+      }
+      print "  RESOLV-STAGE-END-TS=" mx
+    }
+  ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | head -60 || true)"
+  printf '%s\n' "${POSTTUN_RESOLV_TIMELINE:-(no resolv-removal-shaped records in the trace span — the flow did not reach the resolv-replacement stage)}"
+  POSTTUN_RESOLV_UNLINK_ENTER_TS="$(printf '%s\n' "$POSTTUN_RESOLV_TIMELINE" | grep -a '^  FIRST-ABS-UNLINKAT-ENTER-TS=' | cut -d= -f2 | head -1 || true)"
+  POSTTUN_RESOLV_UNLINK_ENTER="$(printf '%s\n' "$POSTTUN_RESOLV_TIMELINE" | grep -a '^  FIRST-ABS-UNLINKAT-ENTER=' | cut -d= -f2- | head -1 || true)"
+  POSTTUN_RESOLV_UNLINK_EXIT_TS="$(printf '%s\n' "$POSTTUN_RESOLV_TIMELINE" | grep -a '^  FIRST-ABS-UNLINKAT-EXIT-TS=' | cut -d= -f2 | head -1 || true)"
+  POSTTUN_RESOLV_STAGE_END_TS="$(printf '%s\n' "$POSTTUN_RESOLV_TIMELINE" | grep -a '^  RESOLV-STAGE-END-TS=' | cut -d= -f2 | head -1 || true)"
+  echo "--- the first absolute unlinkat(\"/etc/resolv.conf\", 0) pair (the destination symlink's own removal hook — the 4C-53 widening's live proof):"
+  if [ -n "$POSTTUN_RESOLV_UNLINK_ENTER" ]; then
+    printf '%s\n' "$POSTTUN_RESOLV_UNLINK_ENTER"
+    awk -v who="$(printf '%s' "$POSTTUN_RESOLV_UNLINK_ENTER" | awk '{print $1}')" -v ts0="$POSTTUN_RESOLV_UNLINK_ENTER_TS" '
+      $1 != who { next }
+      { ts = $4; sub(/:$/, "", ts)
+        if (ts + 0 <= ts0 + 0) next
+        if ($0 ~ /sys_unlinkat -> /) { print; exit }
+      }' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true
+  else
+    echo "(the absolute unlinkat(\"/etc/resolv.conf\") enter was never recorded)"
+  fi
+  POSTTUN_RESOLV_UNLINK_RET=""
+  if [ -n "$POSTTUN_RESOLV_UNLINK_ENTER" ] && [ -n "$POSTTUN_RESOLV_UNLINK_EXIT_TS" ]; then
+    POSTTUN_RESOLV_UNLINK_RET="$(awk -v who="$(printf '%s' "$POSTTUN_RESOLV_UNLINK_ENTER" | awk '{print $1}')" -v ts0="$POSTTUN_RESOLV_UNLINK_EXIT_TS" '
+      $1 != who { next }
+      { ts = $4; sub(/:$/, "", ts)
+        if (ts + 0 == ts0 + 0 && $0 ~ /sys_unlinkat -> /) { print $NF; exit }
+      }' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | head -1 || true)"
+  fi
+  echo "  the pair's ret: ${POSTTUN_RESOLV_UNLINK_RET:-(not paired — the enter never closed)}"
+  # The stage-aware continuation: the first later production enter of
+  # the SAME trace who (the first absolute unlinkat's own pid — the
+  # stage's owner), after the stage's LAST resolv window (the stage's
+  # own retry chain is never the proof; the next stage — the resolv
+  # WriteFile or the /etc/hosts RemoveAll — is).
+  POSTTUN_RESOLVREMOVE_CONTINUATION=""
+  if [ -n "$POSTTUN_RESOLV_STAGE_END_TS" ] && [ -n "$POSTTUN_RESOLV_UNLINK_ENTER" ]; then
+    POSTTUN_RESOLVREMOVE_WHO="$(printf '%s' "$POSTTUN_RESOLV_UNLINK_ENTER" | awk '{print $1}' || true)"
+    POSTTUN_RESOLVREMOVE_CONTINUATION="$(awk -v who="$POSTTUN_RESOLVREMOVE_WHO" -v te="$POSTTUN_RESOLV_STAGE_END_TS" '
+      $1 != who { next }
+      { ts = $4; sub(/:$/, "", ts)
+        if (ts + 0 <= te + 0) next
+        if ($0 !~ /sys_[a-z0-9_]+\(/) next
+        nm = $0; sub(/.*sys_/, "", nm); sub(/\(.*/, "", nm)
+        if (nm ~ /^(unlink|unlinkat|rmdir)$/ && $0 ~ /"\/tmp\//) next
+        if (nm ~ /^(unlink|unlinkat|rmdir|openat|openat2|getdents64|newfstatat|statx|readlink)$/ && $0 ~ /\/tmp\/rootlesskit-b/) next
+        if (nm ~ /^(openat|openat2)$/ && $0 ~ /"\/tmp",/) next
+        if (nm ~ /^(mount|mkdir|mkdirat|umount2|umount|rename|getdents64|openat|openat2|newfstatat|statx|unlink|unlinkat|rmdir|symlink|symlinkat|readlink|execve|socket|open|setns|ioctl)$/) {
+          print; exit
+        }
+      }' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | head -1 || true)"
+  fi
+  POSTTUN_RESOLVREMOVE_OK=0
+  if [ "$POSTTUN_RESOLV_UNLINK_RET" = "0x0" ] \
+    && [ -z "$POSTTUN_OLD_LNKUNLINK_PRESENT" ] \
+    && [ -n "$POSTTUN_RESOLVREMOVE_CONTINUATION" ]; then
+    POSTTUN_RESOLVREMOVE_OK=1
+  fi
+  if [ "$POSTTUN_RESOLVREMOVE_OK" = 1 ]; then
+    echo "MILESTONE: ROOTLESSKIT-ETC-RESOLV-SYMLINK-REMOVE=OK — the RemoveAll(\"/etc/resolv.conf\") unlinkat returned success, no tmpfs_t:lnk_file unlink denial exists in the window, and the flow continued:"
+    echo "  the first post-stage production enter (the next stage began):"
+    printf '%s\n' "$POSTTUN_RESOLVREMOVE_CONTINUATION"
+  else
+    echo "MILESTONE: ROOTLESSKIT-ETC-RESOLV-SYMLINK-REMOVE=NOT-REACHED (unlink-ret=${POSTTUN_RESOLV_UNLINK_RET:-(the pair was never recorded)} lnkunlink-denial=$([ -n "$POSTTUN_OLD_LNKUNLINK_PRESENT" ] && echo PRESENT || echo absent) continuation=$([ -n "$POSTTUN_RESOLVREMOVE_CONTINUATION" ] && echo present || echo absent))"
+  fi
+
+  # The resolv-vs-hosts distinction (the 4C-53 phase contract): the
+  # timeline above is keyed to /etc/resolv.conf ONLY. The NEXT
+  # production step (the replacement chain: the resolv WriteFile, then
+  # the RemoveAll("/etc/hosts") / WriteFile, then the bind mounts) is
+  # recorded here for the run's own execution map — RECORD-ONLY, no
+  # gate, no assumed class/type: if the hosts stage fails on the SAME
+  # already-granted surface (its destination symlink is also a
+  # tmpfs_t:lnk_file), that is the same permission at work, not a new
+  # phase; the machinery's terminal-boundary classification owns where
+  # the next NEW semantic boundary actually is.
+  echo "--- the next production step after the resolv removal (record-only; the first /etc/hosts-named unlinkat pair after the resolv stage, then the flow's first later production enter):"
+  POSTTUN_HOSTSREMOVE_PAIR="$(awk -v t0="$POSTTUN_T0_TRACE_TS" -v te="${POSTTUN_RESOLV_STAGE_END_TS:-}" '
+    /sys_unlinkat\(/ && t0 != "" {
+      ts = $4; sub(/:$/, "", ts)
+      if (ts + 0 > t0 + 0 && te != "" && ts + 0 > te + 0 && $0 ~ /pathname: [^,]*"\/etc\/hosts"/) {
+        pend = 1; pwho = $1; pline = $0; next
+      }
+      next
+    }
+    pend && /sys_unlinkat -> / && $1 == pwho {
+      print pline; print $0; exit
+    }
+  ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true)"
+  printf '%s\n' "${POSTTUN_HOSTSREMOVE_PAIR:-(none — no /etc/hosts-shaped unlinkat pair followed the resolv stage in this trace span)}"
+
   # The gates.
   echo "GATES:"
   [ "$POSTTUN_T0_OK" = 1 ] && echo "  POST-TUN-T0 observed: PASS" || echo "  POST-TUN-T0 observed: FAIL"
@@ -4746,6 +5040,7 @@ POSTTUN_BND_SYMBOLIC=""
     echo "  first-death cause classified: FAIL (no death observed in the window's trace span)"
   fi
   [ "$POSTTUN_DENIALS_CLASSIFIED" = 1 ] && echo "  all observed SELinux decisions temporally classified: PASS" || echo "  all observed SELinux decisions temporally classified: FAIL (UNTIMED records remain)"
+  [ "$POSTTUN_NO_PREANCHOR_POST_OK" = 1 ] && echo "  NO-PREANCHOR-POST (no POST-FAILURE/CLEANUP decision precedes the terminal anchor): PASS" || echo "  NO-PREANCHOR-POST (no POST-FAILURE/CLEANUP decision precedes the terminal anchor): FAIL (${POSTTUN_PREANCHOR_POST_N:-?} violation(s) — see the machinery section)"
   if [ -n "$POSTTUN_FIRST_FAIL_PID" ]; then
     echo "  first failing exit identified: PASS (pid=$POSTTUN_FIRST_FAIL_PID comm=$POSTTUN_FIRST_FAIL_COMM exit=$POSTTUN_FIRST_FAIL_EXIT_CODE at=T0+${POSTTUN_T0_TO_FAIL:-?}s)"
   elif [ "$POSTTUN_T0_OK" = 1 ] && [ "$POSTTUN_DENIALS_CLASSIFIED" = 1 ]; then
@@ -4853,6 +5148,12 @@ cat "$EVIDENCE_DIR/53-posttun-verdict.txt" >&2
 if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
   marker "POSTTUN-FIRST-DEATH=pid=${POSTTUN_FIRST_DEATH_PID:-none} comm=${POSTTUN_FIRST_DEATH_COMM:-none} at=T0+${POSTTUN_T0_TO_DEATH:-?}s cause=${POSTTUN_DEATH_CAUSE%% *}"
   marker "POSTTUN-DENIALS=STARTUP-CAUSAL=$POSTTUN_NSTARTUP POST-FAILURE/CLEANUP=$POSTTUN_NPOST POLLING-ONLY=$POSTTUN_NPOLL UNTIMED=$POSTTUN_NUNTIMED HANDLED/NON-TERMINAL=${POSTTUN_NHANDLED:-0}"
+  if [ "$POSTTUN_NO_PREANCHOR_POST_OK" = 1 ]; then
+    marker "NO-PREANCHOR-POST=PASS"
+  else
+    marker "NO-PREANCHOR-POST=FAIL"
+    marker "4C-53=HOLD/PREANCHOR-POST-VIOLATION"
+  fi
   marker "POSTTUN-PRIMARY-BOUNDARY=${POSTTUN_BND_SYMBOLIC:-(undecoded — see 53-posttun-verdict.txt)}"
   if [ "${POSTTUN_GATE_VERDICT:-}" = "PASS" ]; then
     marker "4C-49-CONFINEMENT-GATE=PASS"
@@ -5040,6 +5341,23 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
       marker "4C-52=PASS/POST-TUN-LIFETIME-STABLE"
     fi
   fi
+  if [ "$POSTTUN_OLD_LNKUNLINK_PRESENT" = 1 ]; then
+    marker "4C-53-OLD-LNKUNLINK-BOUNDARY=STILL-PRESENT"
+    marker "4C-53=INCOMPLETE/GRANT-DID-NOT-TAKE-EFFECT"
+  else
+    marker "4C-53-OLD-LNKUNLINK-BOUNDARY=GONE"
+    [ "$POSTTUN_REBUILD_COMPLETE_OK" = 1 ] && marker "ROOTLESSKIT-REBUILD-STAGE=COMPLETE"
+    [ "$POSTTUN_RESOLVREMOVE_OK" = 1 ] && marker "ROOTLESSKIT-ETC-RESOLV-SYMLINK-REMOVE=OK"
+    if [ -n "$POSTTUN_FIRST_FAIL_PID" ]; then
+      marker "4C-53-OUTCOME=NEXT-STARTUP-BOUNDARY-CONFIRMED"
+      marker "4C-53=PASS/NEXT-BOUNDARY-CONFIRMED"
+    else
+      marker "4C-53-OUTCOME=POST-TUN-LIFETIME-STABLE"
+      marker "TARGET-LIFETIME-BLOCKER=GONE"
+      marker "POST-TUN-LIFETIME=STABLE"
+      marker "4C-53=PASS/POST-TUN-LIFETIME-STABLE"
+    fi
+  fi
   marker "4C-38=PROVEN/PRIMARY-BOUNDARY-ESTABLISHED"
 else
   marker "4C-38=INCOMPLETE/ORDER_NOT_ESTABLISHED"
@@ -5057,6 +5375,7 @@ else
   marker "4C-50=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-51=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-52=INCOMPLETE/ORDER_NOT_ESTABLISHED"
+  marker "4C-53=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-49-CONFINEMENT-GATE=${POSTTUN_GATE_VERDICT:-(the gate did not run — see 53-posttun-verdict.txt)}"
   POSTTUN_NOT_ESTABLISHED=1
 fi
@@ -6735,17 +7054,26 @@ if [ "$I9_OK" = 1 ]; then
   # phase INCOMPLETE (no guessing).
   # A still-present old boundary is a hard phase failure (the grant
   # demonstrably did not take effect); it outranks the cross-op
-  # INCOMPLETE. All fourteen standing gone-gates apply: the 4C-52
-  # resolved-pair open boundary (the phase's own widening), the 4C-51
-  # resolved-file read boundary (the prior phase's own grant), the
-  # 4C-50 read widening boundary (the phase's own grant), the 4C-49
+  # INCOMPLETE. All fifteen standing gone-gates apply: the 4C-53
+  # rebuild-symlink unlink boundary (the phase's own widening), the
+  # 4C-52 resolved-pair open boundary (the phase's own widening), the
+  # 4C-51 resolved-file read boundary (the prior phase's own grant),
+  # the 4C-50 read widening boundary (the phase's own grant), the 4C-49
   # cgroup move-mount mounton boundary, the 4C-48 rebuild
   # symlink-create boundary, the 4C-47 move-mount target mounton
   # boundary, the 4C-46 .ro dir-create boundary, the 4C-45 tmpfs
   # filesystem-mount boundary, the 4C-44 etc mounton boundary, the
   # 4C-43 tmp mounton, the 4C-42 create, the 4C-41 add_name, the 4C-40
   # write and the 4C-39 mounton boundaries (the standing regression
-  # guards).
+  # guards). The machinery's own standing invariant gate
+  # (NO-PREANCHOR-POST) outranks them all: a pre-anchor POST
+  # classification means the ladder itself is unreliable — the phase
+  # HOLDs and the staircase does not continue.
+  if [ "${POSTTUN_ESTABLISHED:-0}" = 1 ] && [ "${POSTTUN_NO_PREANCHOR_POST_OK:-0}" != 1 ]; then
+    marker "BLOCKER=NO-PREANCHOR-POST failed: a POST-FAILURE/CLEANUP classification precedes the terminal anchor — the machinery standing invariant is violated (see 53-posttun-verdict.txt; the phase HOLDs, the staircase does not continue)"
+    finish INCOMPLETE
+    exit 0
+  fi
   if [ "${POSTTUN_GATE_VERDICT:-}" = "BLOCKED" ]; then
     marker "4C-49=BLOCKED/CONFINEMENT-NOT-PROVEN"
     marker "BLOCKER=the 4C-49 confinement gate did not pass (see 53-posttun-verdict.txt; no cgroup_t:dir mounton authority may be granted)"
