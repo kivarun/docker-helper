@@ -1701,40 +1701,71 @@ allow docker_helper_rootlesskit_t tmpfs_t:filesystem mount;
 # the module version stay untouched.
 allow docker_helper_rootlesskit_t tmpfs_t:dir { create mounton };
 
-# The rebuild symlink creation (P5-S2 Phase 4C-48): with the
-# tmpfs_t:dir { create mounton } pair granted (4C-46/47), the canonical
-# 4C-47 run 37153317223 saw the WHOLE copy-up mount stage chain pass —
-# A (propagation -> 0x0), the bind0 mkdirat (-> 0x0), B (bind mount ->
-# 0x0), C (tmpfs mount -> 0x0), the .ro mkdirat (-> 0x0) AND the
-# MS_MOVE move-mount (-> 0x0, the 4C-47 grant took effect directly) —
-# and reach the REBUILD stage: ReadDir(bind1) succeeded (getdents64 ->
-# 0xe68) and the first entry's reconstruction failed at the symlink
-# object's own creation check:
-#   sys_symlinkat(oldname: ".ro2286969802/.pwd.lock", newdfd: AT_FDCWD,
-#   newname: "/etc/.pwd.lock") -> 0xfffffffffffffff3
-# with the denial INSIDE the symlinkat(2) window, trace-ts 278.310136
-# (16µs before the failing exit at trace-ts 278.310152; T0 = the attach
-# at trace-ts 278.307104):
-#   requested=0x8 denied=0x8 audited=0x8 result=-13 (EACCES)
-#   scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
-#   tcontext=system_u:object_r:tmpfs_t:s0 tclass=lnk_file
+# The rebuild symlink object's create AND its link-traversal read
+# (P5-S2 Phase 4C-48 create; Phase 4C-50 read — ONE pair, ONE rule,
+# widened IN PLACE; the provenance stays per-perm):
 #
-# THE PAIR IS LIVE-PROVEN — NOT ASSUMED: the new symlink object's SID is
-# inherited from the parent dir's own label tmpfs_t:s0 (the kernel's own
-# tcontext), and the CLASS is the symlink object's own class lnk_file —
-# the may_create() mediation of a new object with SECCLASS_LNK_FILE.
-# THE DECODE is lnk_file:create = 0x8 (bit 3 of COMMON_FILE_PERMS — the
-# kernel's static classmap; the same bit-3 position the dir:create and
-# file:create decodes are pinned at; the lnk_file fixture entry and its
-# neighbors write=0x4/getattr=0x10/setattr=0x20 are pinned in
-# TestSELinuxPermissionKernelClassmapDecode). The canonical 4C-47
+#   create <- the canonical 4C-47 run 37153317223's evidence. With the
+#   tmpfs_t:dir { create mounton } pair granted (4C-46/47), that run
+#   saw the WHOLE copy-up mount stage chain pass — A (propagation ->
+#   0x0), the bind0 mkdirat (-> 0x0), B (bind mount -> 0x0), C (tmpfs
+#   mount -> 0x0), the .ro mkdirat (-> 0x0) AND the MS_MOVE move-mount
+#   (-> 0x0, the 4C-47 grant took effect directly) — and reach the
+#   REBUILD stage: ReadDir(bind1) succeeded (getdents64 -> 0xe68) and
+#   the first entry's reconstruction failed at the symlink object's
+#   own creation check:
+#     sys_symlinkat(oldname: ".ro2286969802/.pwd.lock", newdfd:
+#     AT_FDCWD, newname: "/etc/.pwd.lock") -> 0xfffffffffffffff3
+#   with the denial INSIDE the symlinkat(2) window, trace-ts 278.310136
+#   (16µs before the failing exit at trace-ts 278.310152; T0 = the
+#   attach at trace-ts 278.307104):
+#     requested=0x8 denied=0x8 audited=0x8 result=-13 (EACCES)
+#     scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+#     tcontext=system_u:object_r:tmpfs_t:s0 tclass=lnk_file
+#
+#   read <- the canonical 4C-49 run's evidence (run 37191972618, the
+#   anchor-own-denial machinery's record; reproduced across the 4C-49
+#   gate and canonical runs). With the create granted, that run's
+#   REBUILD stage completed ENTIRELY (the rebuilt /etc/hosts symlink,
+#   oldname ".ro1194745973/hosts", at trace-ts 181.345115 -> 0x0, is
+#   one of the stage's entries) and the flow advanced through the
+#   cgroup-preservation move-mount to the startup's FIRST /etc read —
+#   generateEtcHosts()'s os.ReadFile("/etc/hosts") — which failed at
+#   the LINK TRAVERSAL's own read hook:
+#     sys_openat(dfd: AT_FDCWD, filename: "/etc/hosts", flags:
+#     O_RDONLY|O_CLOEXEC) -> 0xfffffffffffffff3
+#   with the denial INSIDE the openat window, trace-ts 181.348602 (9µs
+#   before the failing exit at trace-ts 181.348611; T0 = the attach at
+#   trace-ts 181.341903):
+#     requested=0x2 denied=0x2 audited=0x2 result=-13 (EACCES)
+#     scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+#     tcontext=system_u:object_r:tmpfs_t:s0 tclass=lnk_file
+#   the same pair/class/perm shape the flow's earlier /etc/localtime
+#   openat hit at trace-ts 181.348187 (the log library's tz probe —
+#   HANDLED/NON-TERMINAL there, the flow continued to the zoneinfo
+#   openat and the warning), and the failure's own stderr named the
+#   production operation ("[rootlesskit:child ] error: open
+#   /etc/hosts: permission denied.") before exit_group(1).
+#
+# THE PAIR IS LIVE-PROVEN — NOT ASSUMED: the symlink object's SID is
+# inherited from the parent dir's own label tmpfs_t:s0 (the kernel's
+# own tcontext), and the CLASS is the symlink object's own class
+# lnk_file. THE DECODES are the kernel's static classmap's common
+# positions, pinned in TestSELinuxPermissionKernelClassmapDecode:
+# lnk_file:create = 0x8 (bit 3 — the same bit-3 position the dir:create
+# and file:create decodes are pinned at) and lnk_file:read = 0x2 (bit 1
+# — the traversal hook the 4C-49 boundary carried; the kernel's own
+# perms-file numbering would index read differently and stays the
+# recorded interface fact, never the decode). The canonical 4C-47
 # mechanical verdict was a KNOWN HARNESS MISCLASSIFICATION (the benign
 # ENOENT housekeeping probe of the rootlesskit parent stole the causal
-# anchor); the corrected 4C-48 machinery (the terminal-failure contract:
-# a failure owns the primary boundary only when no forward production
-# progress follows it) restores this denial as the STARTUP-CAUSAL
-# owner — the anchor regression on the saved corpus is in the phase
-# record.
+# anchor); the corrected 4C-48 machinery (the terminal-failure
+# contract: a failure owns the primary boundary only when no forward
+# production progress follows it) restores the STARTUP-CAUSAL owner —
+# the anchor regression on the saved corpus is in the phase record,
+# and the 4C-49 run's /etc/hosts boundary is the machinery's own
+# anchor-own-denial proof (the recurring lnk shape must not steal the
+# anchor own denial into POLLING-ONLY).
 #
 # THE PRECEDING PROBES ARE HANDLED/NON-TERMINAL, NOT PART OF THIS
 # GRANT: the holder's unlinkat("/etc/.pwd.lock", 0) and
@@ -1744,7 +1775,18 @@ allow docker_helper_rootlesskit_t tmpfs_t:dir { create mounton };
 # not exist on the fresh tmpfs); no unlink/remove_name authority is
 # granted for them, and the machinery classifies them
 # HANDLED/NON-TERMINAL (they were followed by the symlinkat — forward
-# production progress).
+# production progress). The same holds for the setupNet stages AFTER
+# the read (the RemoveAll("/etc/resolv.conf") / RemoveAll("/etc/hosts")
+# unlinks and the WriteFile/bind-mount steps): they are PRODUCTION
+# operations of the flow — never assumed cleanup noise — and their own
+# hooks stay UNGRANTED; the live trace owns their classification.
+#
+# THE READ IS THE LINK-TRAVERSAL HOOK — NOT THE TARGET'S FILE ACCESS:
+# the kernel mediates a FOLLOWED symlink with lnk_file:read; the
+# RESOLVED target's own open/read (the original /etc file behind the
+# rebuilt link, on the .ro mount's own labels) is a separate mediation
+# on the target's own type/class and stays UNGRANTED — the next
+# boundary, whatever the live trace proves it to be, is not this rule.
 #
 # SCOPE NOTE — GLOBAL TYPE, NOT OPERATION-SCOPED: tmpfs_t:s0 carries no
 # per-operation MCS category, so this allow is not operation-scoped
@@ -1752,12 +1794,12 @@ allow docker_helper_rootlesskit_t tmpfs_t:dir { create mounton };
 # the MCS-constrained subject stay the abuse gates, and the
 # cross-operation reachability gate stays OPEN.
 #
-# The audit slice was empty in that window too (the same
+# The audit slice was empty in both windows too (the same
 # userspace-audit gap); a next symbolic AVC record, when captured, is
 # the confirming decode.
 #
-# Deliberately NOT granted: read/write/getattr/setattr/unlink/link/
-# rename/relabelfrom/relabelto or any other lnk_file permission (each a
+# Deliberately NOT granted: write/getattr/setattr/unlink/link/rename/
+# relabelfrom/relabelto or any other lnk_file permission (each a
 # distinct hook — the link() stage's own link permission is NOT this
 # create), any dir/file/filesystem-class permission (the 4C-45/46/47
 # owners), any OTHER type's lnk_file surface (the moved original
@@ -1765,7 +1807,7 @@ allow docker_helper_rootlesskit_t tmpfs_t:dir { create mounton };
 # rebuild's SOURCE reads go through the existing standing/flow surfaces
 # and their own boundaries when reached), process/capability surfaces,
 # other subjects; the .fc and the module version stay untouched.
-allow docker_helper_rootlesskit_t tmpfs_t:lnk_file create;
+allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create read };
 
 # The cgroup preservation move-mount (P5-S2 Phase 4C-49): with the whole
 # copy-up/rebuild chain granted (4C-39..4C-48), the canonical 4C-48 run
