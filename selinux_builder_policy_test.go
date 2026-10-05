@@ -3218,12 +3218,17 @@ func TestSELinuxPolicyRootlesskitTmpfsFilesystemMount(t *testing.T) {
 				}
 			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t tmpfs_t:") &&
 				!strings.Contains(trimmed, " tmpfs_t:dir ") &&
-				!strings.Contains(trimmed, " tmpfs_t:lnk_file "):
+				!strings.Contains(trimmed, " tmpfs_t:lnk_file ") &&
+				!strings.Contains(trimmed, " tmpfs_t:file "):
 				// The dir-class surface of tmpfs_t has its own owner
 				// (the 4C-46 .ro create grant — TestSELinuxPolicy-
-				// RootlesskitTmpfsDir); this filesystem pair's
-				// invariant is only that no OTHER-class surface rides
-				// here.
+				// RootlesskitTmpfsDir); the file-class surface has
+				// its own owner too (the 4C-54 replacement-file
+				// create — TestSELinuxPolicyRootlesskitTmpfsFile-
+				// Create); this filesystem pair's invariant is only
+				// that no OTHER-class surface rides here. The
+				// trailing space keeps "tmpfs_t:file" from matching
+				// "tmpfs_t:filesystem" (this case's own class).
 				violations = append(violations, "the flow child's tmpfs_t authority beyond the evidenced filesystem-mount and dir-create pairs is forbidden: "+trimmed)
 			}
 		}
@@ -3510,6 +3515,7 @@ func TestSELinuxPolicyRootlesskitTmpfsSymlink(t *testing.T) {
 	pinnedSymlinkTriple := "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create read unlink };"
 	pinnedTmpfsDirPair := "allow docker_helper_rootlesskit_t tmpfs_t:dir { create mounton };"
 	pinnedTmpfsFsMount := "allow docker_helper_rootlesskit_t tmpfs_t:filesystem mount;"
+	pinnedTmpfsFileCreate := "allow docker_helper_rootlesskit_t tmpfs_t:file create;"
 	if !strings.Contains(policy, pinnedSymlinkTriple) {
 		t.Fatalf("the rootlesskit child domain's rebuild-symlink surface must be exact: %q", pinnedSymlinkTriple)
 	}
@@ -3543,7 +3549,17 @@ func TestSELinuxPolicyRootlesskitTmpfsSymlink(t *testing.T) {
 			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, " tmpfs_t:lnk_file"):
 				violations = append(violations, "tmpfs_t lnk_file authority is unique to the rootlesskit child domain's pinned triple rule: "+trimmed)
 			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t tmpfs_t:file "):
-				violations = append(violations, "the class confusion is forbidden — the file class surface of tmpfs_t is not this grant: "+trimmed)
+				// The 4C-54: the tmpfs_t:file surface has its OWN
+				// owner now (the replacement resolv.conf regular-file
+				// create rule) — the class confusion is no longer
+				// "any file-class rule"; the file surface must be
+				// exactly the file-create owner's pinned bare rule,
+				// and any other file shape is forbidden here. The
+				// trailing space in the prefix keeps "tmpfs_t:file"
+				// from matching "tmpfs_t:filesystem".
+				if trimmed != pinnedTmpfsFileCreate {
+					violations = append(violations, "the tmpfs_t:file surface belongs to the 4C-54 owner's exact bare create rule; any other file shape is forbidden here: "+trimmed)
+				}
 			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t tmpfs_t:dir"):
 				if trimmed != pinnedTmpfsDirPair {
 					violations = append(violations, "the tmpfs_t:dir surface belongs to the 4C-46/47 owner's exact pair; any other dir shape is forbidden here: "+trimmed)
@@ -3651,6 +3667,204 @@ func TestSELinuxPolicyRootlesskitTmpfsSymlink(t *testing.T) {
 	} {
 		if len(symlinkTripleViolations(policy+"\n"+mut.rule)) == 0 {
 			t.Errorf("mutation %q must trip the rebuild-symlink invariants", mut.name)
+		}
+	}
+}
+
+// TestSELinuxPolicyRootlesskitTmpfsFileCreate owns the whole evidenced
+// module surface of the replacement /etc/resolv.conf regular-file
+// creation: docker_helper_rootlesskit_t -> tmpfs_t:file = exactly
+// { create }. A NEW pair/class surface — never merged into the
+// tmpfs_t:lnk_file { create read unlink } triple (the 4C-48/50/53
+// owner), the tmpfs_t:dir { create mounton } pair (the 4C-46/47 owner),
+// or the tmpfs_t:filesystem mount (the 4C-45 owner).
+//
+// Live enforcing evidence, canonical 4C-53 run 37350350345: with the
+// lnk_file unlink removal hook granted, the resolv-replacement stage's
+// RemoveAll completed (the rebuilt destination symlink actually
+// removed: the AT_FDCWD unlinkat("/etc/resolv.conf", 0) pair ret 0x0 at
+// trace-ts 234.517271..234.517283; the fresh run's first pass was
+// legitimately -ENOENT — RemoveAll's own contract makes "the path does
+// not exist" a completed removal) and the flow's very next production
+// step — the replacement file's own creation — failed at the file's own
+// create hook:
+//
+//	sys_openat(dfd: AT_FDCWD, filename: "/etc/resolv.conf",
+//	flags: O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, mode: 0644)
+//	enter trace-ts 234.517284, exit 234.517318
+//
+// with the denial INSIDE the openat(2) window (trace-ts 234.517307,
+// 11µs before the failing openat exit; T0 = the attach at trace-ts
+// 234.476447, the failing exit at T0+0.041s, no later production
+// progress): requested=0x8 denied=0x8 audited=0x8 result=-13 (EACCES)
+// scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+// tcontext=system_u:object_r:tmpfs_t:s0 tclass=file.
+//
+// THE DECODER CORRECTION this owner pins: the kernel's AVC bitmap for
+// the file class follows COMMON_FILE_PERMS — ioctl=0x1 read=0x2
+// write=0x4 create=0x8 getattr=0x10 — the same kernel-classmap order
+// every live-proven association of this staircase uses. Raw 0x8 on
+// tclass=file is the CREATE hook, not write (the 4C-53 deliverable's
+// raw {write} decode was produced from the loaded policy's perms-file
+// VALUES — the policy's own numbering, with the distro's swapon entry
+// diverging from the kernel's file common — and is corrected; the
+// classmap fixture below and TestSELinuxPermissionKernelClassmapDecode
+// pin the authoritative decode).
+//
+// The created inode inherits the parent dir's own type (tmpfs_t); the
+// parent-dir-side mediation (search/write on tmpfs_t:dir) ran BEFORE
+// the create check and passed in the pre-grant window (the create
+// denial was the window's FIRST decision — recorded standing fact, not
+// assumed into the module). Deliberately NOT granted: write/open/
+// getattr/setattr/append/map/unlink/link/rename/execute/lock or any
+// other file permission — the same openat's own MAY_WRITE (file:write
+// 0x4) and open-completion (file:open 0x80000) checks are the predicted
+// next hooks, each its own staircase phase; the fd is NOT required for
+// the create milestone's pass (the create hook may cross while the next
+// hook of the same openat stops the syscall).
+func TestSELinuxPolicyRootlesskitTmpfsFileCreate(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	pinnedTmpfsFileCreate := "allow docker_helper_rootlesskit_t tmpfs_t:file create;"
+	pinnedSymlinkTriple := "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create read unlink };"
+	pinnedTmpfsDirPair := "allow docker_helper_rootlesskit_t tmpfs_t:dir { create mounton };"
+	pinnedTmpfsFsMount := "allow docker_helper_rootlesskit_t tmpfs_t:filesystem mount;"
+	pinnedNetconfPair := "allow docker_helper_rootlesskit_t net_conf_t:file { read open };"
+	if !strings.Contains(policy, pinnedTmpfsFileCreate) {
+		t.Fatalf("the rootlesskit child domain's replacement-file create surface must be exact: %q", pinnedTmpfsFileCreate)
+	}
+	// fileCreateViolations returns one violation per line of module text
+	// that breaks the grant invariants: exactly one allow rule may name
+	// docker_helper_rootlesskit_t -> tmpfs_t:file, in the exact bare
+	// single-perm shape `create` (no brace variant — { create } is a
+	// different written shape even when the loaded form coalesces; no
+	// other permission — write/open/getattr/setattr are the predicted
+	// next hooks, each its own phase; no split rules; no duplicate). No
+	// other subject may receive tmpfs_t:file authority from this
+	// module; the lnk_file/dir/filesystem surfaces stay their own
+	// owners' exact rules; the net_conf_t:file pair stays the 4C-51/52
+	// owner's exact rule.
+	fileCreateViolations := func(text string) []string {
+		var violations []string
+		count := 0
+		for _, line := range strings.Split(text, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			switch {
+			// "file " (with the trailing space) — "tmpfs_t:file" is a
+			// prefix of "tmpfs_t:filesystem"; the class token's own
+			// boundary discriminates them.
+			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t tmpfs_t:file "):
+				count++
+				if trimmed != pinnedTmpfsFileCreate {
+					violations = append(violations, "the replacement-file create grant must be the exact bare file shape `create` (no brace variant, no split rules, no duplicate, no second permission — write/open/getattr/setattr are the predicted next hooks, each its own phase): "+trimmed)
+				}
+			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, " tmpfs_t:file "):
+				violations = append(violations, "tmpfs_t file authority is unique to the rootlesskit child domain's pinned create rule: "+trimmed)
+			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file"):
+				if trimmed != pinnedSymlinkTriple {
+					violations = append(violations, "the tmpfs_t:lnk_file surface belongs to the 4C-48/50/53 owner's exact triple; any other lnk_file shape is forbidden here: "+trimmed)
+				}
+			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t tmpfs_t:dir"):
+				if trimmed != pinnedTmpfsDirPair {
+					violations = append(violations, "the tmpfs_t:dir surface belongs to the 4C-46/47 owner's exact pair; any other dir shape is forbidden here: "+trimmed)
+				}
+			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t tmpfs_t:filesystem"):
+				if trimmed != pinnedTmpfsFsMount {
+					violations = append(violations, "the tmpfs_t:filesystem surface belongs to the 4C-45 owner's exact bare-mount rule; any other filesystem shape is forbidden here: "+trimmed)
+				}
+			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t net_conf_t:file"):
+				if trimmed != pinnedNetconfPair {
+					violations = append(violations, "the net_conf_t:file surface belongs to the 4C-51/52 owner's exact pair; any other net_conf file shape is forbidden here: "+trimmed)
+				}
+			}
+		}
+		if count == 0 {
+			violations = append(violations, "the replacement-file create grant (rootlesskit_t -> tmpfs_t:file create) is missing")
+		} else if count > 1 {
+			violations = append(violations, fmt.Sprintf("exactly one tmpfs_t:file grant may exist for the rootlesskit child domain, found %d", count))
+		}
+		return violations
+	}
+	if violations := fileCreateViolations(policy); len(violations) > 0 {
+		t.Errorf("the committed policy violates the replacement-file create invariants: %v", violations)
+	}
+	// The replacement regressions: each replacement must APPLY and must
+	// actually trip the invariants.
+	for _, regressed := range []struct {
+		name string
+		rule string
+	}{
+		{"missing whole rule", ""},
+		{"write instead of create", "allow docker_helper_rootlesskit_t tmpfs_t:file write;"},
+		{"open instead of create", "allow docker_helper_rootlesskit_t tmpfs_t:file open;"},
+		{"getattr instead of create", "allow docker_helper_rootlesskit_t tmpfs_t:file getattr;"},
+		{"create write brace set", "allow docker_helper_rootlesskit_t tmpfs_t:file { create write };"},
+		{"create open brace set", "allow docker_helper_rootlesskit_t tmpfs_t:file { create open };"},
+		{"create getattr brace set", "allow docker_helper_rootlesskit_t tmpfs_t:file { create getattr };"},
+		{"create setattr brace set", "allow docker_helper_rootlesskit_t tmpfs_t:file { create setattr };"},
+		{"missing create (write open brace set)", "allow docker_helper_rootlesskit_t tmpfs_t:file { write open };"},
+		{"duplicate identical rule", pinnedTmpfsFileCreate + "\n" + pinnedTmpfsFileCreate},
+		{"parallel brace rule", pinnedTmpfsFileCreate + "\nallow docker_helper_rootlesskit_t tmpfs_t:file { create };"},
+		{"equivalent brace-single-perm shape", "allow docker_helper_rootlesskit_t tmpfs_t:file { create };"},
+		{"split into bare create and parallel brace-create rule", "allow docker_helper_rootlesskit_t tmpfs_t:file create;\nallow docker_helper_rootlesskit_t tmpfs_t:file { create };"},
+		{"wrong class (tmpfs_t:lnk_file create)", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file create;"},
+		{"wrong class (tmpfs_t:dir create)", "allow docker_helper_rootlesskit_t tmpfs_t:dir create;"},
+		{"wrong target type (tmp_t)", "allow docker_helper_rootlesskit_t tmp_t:file create;"},
+		{"wrong target type (net_conf_t)", "allow docker_helper_rootlesskit_t net_conf_t:file create;"},
+	} {
+		mutated := strings.Replace(policy, pinnedTmpfsFileCreate, regressed.rule, 1)
+		applied := func() bool {
+			if regressed.rule == "" {
+				return !strings.Contains(mutated, pinnedTmpfsFileCreate)
+			}
+			return strings.Contains(mutated, regressed.rule)
+		}
+		if !applied() {
+			t.Errorf("the replacement-file create regression %q was not applied", regressed.name)
+			continue
+		}
+		if len(fileCreateViolations(mutated)) == 0 {
+			t.Errorf("the replacement-file create regression %q must fail the replacement-file create invariants", regressed.name)
+		}
+	}
+	// The widening sweep: { create <X> } for every other file-class
+	// permission must fail the invariants in every case (the
+	// second-permission sweep; the single-perm replacements are covered
+	// by the regressions above).
+	for _, extra := range []string{
+		"ioctl", "read", "write", "getattr", "setattr", "lock",
+		"relabelfrom", "relabelto", "append", "map", "unlink", "link",
+		"rename", "execute", "quotaon", "mounton", "audit_access",
+		"open", "execmod", "watch", "watch_mount", "watch_sb",
+		"watch_with_perm", "watch_reads", "watch_mountns",
+		"execute_no_trans", "entrypoint",
+	} {
+		mutated := strings.Replace(policy, pinnedTmpfsFileCreate,
+			fmt.Sprintf("allow docker_helper_rootlesskit_t tmpfs_t:file { create %s };", extra), 1)
+		if !strings.Contains(mutated, fmt.Sprintf("allow docker_helper_rootlesskit_t tmpfs_t:file { create %s };", extra)) {
+			t.Errorf("the replacement-file widening +%s was not applied", extra)
+			continue
+		}
+		if len(fileCreateViolations(mutated)) == 0 {
+			t.Errorf("the replacement-file widening +%s must fail the replacement-file create invariants", extra)
+		}
+	}
+	// The subject regressions: no other domain may gain tmpfs_t file
+	// authority, appended beside the real grant.
+	for _, mut := range []struct {
+		name string
+		rule string
+	}{
+		{"tmpfs file create for the manager", "allow docker_helper_builder_t tmpfs_t:file create;"},
+		{"tmpfs file create for the launcher", "allow docker_helper_builder_launcher_t tmpfs_t:file create;"},
+		{"tmpfs file create for the network helper", "allow docker_helper_slirp4netns_t tmpfs_t:file create;"},
+		{"tmpfs file create for the daemon", "allow docker_helper_t tmpfs_t:file create;"},
+		{"tmpfs file bare write for the manager", "allow docker_helper_builder_t tmpfs_t:file write;"},
+	} {
+		if len(fileCreateViolations(policy+"\n"+mut.rule)) == 0 {
+			t.Errorf("mutation %q must trip the replacement-file create invariants", mut.name)
 		}
 	}
 }
@@ -4584,6 +4798,22 @@ func TestSELinuxPermissionKernelClassmapDecode(t *testing.T) {
 	one("tun_socket", 0x100, "relabelto")
 	one("file", 0x10, "getattr")
 	one("file", 0x4000, "execute")
+	// The 4C-54 file-class decodes — the DECODER CORRECTION's own
+	// regression: the canonical 4C-53 run 37350350345's terminal
+	// boundary carried requested=0x8 denied=0x8 tcontext=tmpfs_t:s0
+	// tclass=file INSIDE the openat("/etc/resolv.conf",
+	// O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC) window — and the 4C-53
+	// deliverable decoded that mask as { write } from the loaded
+	// policy's perms-file VALUES (the policy's own numbering, the
+	// distro's swapon entry diverging from the kernel's file common).
+	// The kernel's own AVC numbering — COMMON_FILE_PERMS — puts create
+	// at bit 3 (0x8) and write at bit 2 (0x4); the granted permission is
+	// therefore exactly create. These pins catch exactly that
+	// value-as-bit error: a re-decode of 0x8 as write, or 0x4 as read,
+	// must fail here.
+	one("file", 0x2, "read")
+	one("file", 0x4, "write")
+	one("file", 0x8, "create")
 	// The 4C-48 lnk_file decodes: the common neighbors pinned for
 	// anti-shift (the symlink object's own creation check was the
 	// canonical 4C-47 run's boundary record). The 4C-50 read decode: the
