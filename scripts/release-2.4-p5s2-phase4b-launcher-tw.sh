@@ -2450,6 +2450,29 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
 GATE_WATCHER_PID=$!
 log "D: 4C-49 confinement-gate watcher armed (pid $GATE_WATCHER_PID)"
 
+# The watcher-ready handshake: the backgrounded subshell fork plus its
+# first tick can lag the launch by seconds under the VM's own load (the
+# canonical 4C-54 run 37360622771's shape: the subshell's first
+# productive tick came ~1.9s after the START, while the flow's own
+# mount dance lived 0.16s — the dance pid's whole lifetime fell before
+# the watcher's first record, gate items A/B = 0, the phase BLOCKED
+# although the dance itself was clean). The START is sent only after
+# the watcher has PROVEN its own first tick (the gate file's first
+# record); the dance pid's lifetime is then covered by live ticks and
+# the inline ns-identity discovery. Bounded wait; a timeout records the
+# fact and proceeds (the launch is not gated on the handshake's
+# success, only on its own bounded attempt).
+GARM_WAIT=0
+until [ -s "$EVIDENCE_DIR/51-confinement-gate.txt" ] || [ "$GARM_WAIT" -ge 60 ]; do
+  sleep 0.05
+  GARM_WAIT=$(( GARM_WAIT + 1 ))
+done
+if [ -s "$EVIDENCE_DIR/51-confinement-gate.txt" ]; then
+  log "D: 4C-49 confinement-gate watcher first tick proven after ${GARM_WAIT} polls (the launch window opens with the watcher live)"
+else
+  log "D: 4C-49 confinement-gate watcher first tick NOT proven within the bounded handshake wait (${GARM_WAIT} polls); the launch proceeds (the gate's own evidence records the fact)"
+fi
+
 # ---- 4C-49 confinement gate: the host-side mount table BEFORE the
 # ---- window (the init process and the harness's own namespace; both
 # ---- host-side references for the untouched-host-table proof — item G;
