@@ -1084,29 +1084,32 @@ PREFLIGHT_OK=1
     PREFLIGHT_OK=0
   fi
 
-  echo "=== flow tmpfs rebuild-symlink identity (the 4C-48 grant: the module's own rootlesskit -> tmpfs_t:lnk_file contribution must be exactly the one bare lnk_file-create rule — the rebuild's first symlink object creation on the tmpfs (the canonical 4C-47 run's live-proven pair: the symlink object's own class lnk_file, the SID inherited from the parent dir's label tmpfs_t); NEW pair/class surface — never folded into the dir pair or the filesystem rule; the preceding unlinkat destination-probes are HANDLED/NON-TERMINAL and receive NO authority; the standing tmpfs_t:lnk_file surface is RECORDED, not asserted; every lnk_file permission beyond the standing surface and the granted create is a STOP) ==="
-  echo "--- CONCRETE module contribution (source must be docker_helper_rootlesskit_t AND class lnk_file — tmpfs_t now carries three owned rules across classes; must be exactly one bare lnk_file create rule):"
+  echo "=== flow tmpfs rebuild-symlink identity (the 4C-48 create + 4C-50 read pair: the module's own rootlesskit -> tmpfs_t:lnk_file contribution must be exactly the one brace-pair lnk_file rule { create read } — ONE pair, ONE rule, widened IN PLACE per phase, never split into two rules, never folded into the dir pair or the filesystem rule; provenance stays per-perm: create <- the canonical 4C-47 run's live-proven symlinkat window (the symlink object's own creation check), read <- the canonical 4C-49 run's live-proven openat(\"/etc/hosts\") window (the link traversal's own read hook — generateEtcHosts()'s os.ReadFile, the startup's FIRST /etc read); the class is the evidence — the symlink object's own class lnk_file; the RESOLVED target's own open/read stays UNGRANTED (a separate mediation on the target's own type/class — the next boundary is not this rule); the standing tmpfs_t:lnk_file surface is RECORDED, not asserted — the 4C-49 canonical run's inventory showed the child's lnk_file-class standing residual map-only (file_type); every lnk_file permission beyond the standing surface and the granted pair is a STOP) ==="
+  echo "--- CONCRETE module contribution (source must be docker_helper_rootlesskit_t AND class lnk_file — tmpfs_t now carries three owned rules across classes; must be exactly one brace-pair lnk_file { create read } rule):"
   RK_LNK_CONCRETE="$(printf '%s\n' "$RK_TMPFSDIR_RAW" | awk '$2 == "docker_helper_rootlesskit_t" && $0 ~ /:lnk_file/' || true)"
   printf '%s\n' "${RK_LNK_CONCRETE:-(none)}"
-  echo "--- the base policy's standing tmpfs_t:lnk_file surface (the effective inventory minus the granted create — the effective_before record; attribute-derived, recorded not asserted):"
-  RK_LNK_STANDING="$(printf '%s\n' "$RK_TMPFSDIR_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:[^ ]* \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | grep -av '^create$' | sort -u | tr '\n' ' ' || true)"
+  RK_LNK_NORM="$(printf '%s\n' "$RK_LNK_CONCRETE" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:[^ ]* {\(.*\)};$/\1/p' | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//' || true)"
+  echo "--- the base policy's standing tmpfs_t:lnk_file surface for the child (the effective inventory's OTHER-source lnk_file-class rules — attribute-derived, recorded not asserted; the 4C-49 canonical run's own inventory showed the child's lnk_file-class standing residual map-only):"
+  RK_LNK_STANDING="$(printf '%s\n' "$RK_TMPFSDIR_RAW" | grep -av '^allow docker_helper_rootlesskit_t ' | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:lnk_file \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
   printf '%s\n' "${RK_LNK_STANDING:-(none — the standing surface is empty)}"
   RK_LNK_UNION="$(printf '%s\n' "$RK_TMPFSDIR_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:lnk_file \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
   echo "effective lnk_file perm union: ${RK_LNK_UNION:-(none)}"
-  echo "--- the forbidden-lnk-perms negative (everything beyond the base policy's standing surface and the granted create must be absent from the whole effective lnk_file surface; the standing set is this run's own inventory fact; the link/unlink/rename hooks must not ride):"
-  RK_LNK_FORBIDDEN="$(printf '%s\n' "$RK_LNK_UNION" | tr ' ' '\n' | grep -avE "^(create|$(printf '%s' "$RK_LNK_STANDING" | tr ' ' '|'))$" || true)"
+  echo "--- the forbidden-lnk-perms negative (everything beyond the base policy's standing surface and the granted pair must be absent from the whole effective lnk_file surface; the standing set is this run's own inventory fact; the write/getattr/unlink/link/rename hooks must not ride):"
+  RK_LNK_FORBIDDEN="$(printf '%s\n' "$RK_LNK_UNION" | tr ' ' '\n' | grep -avE "^(create|read|$(printf '%s' "$RK_LNK_STANDING" | tr ' ' '|'))$" || true)"
   printf '%s\n' "${RK_LNK_FORBIDDEN:-(none — no extra lnk_file permission)}"
   RK_LNK_OK=0
   if [ "$(printf '%s\n' "$RK_LNK_CONCRETE" | grep -ac . || true)" = 1 ] \
-    && printf '%s\n' "$RK_LNK_CONCRETE" | grep -aqx 'allow docker_helper_rootlesskit_t tmpfs_t:lnk_file create;' \
+    && printf '%s\n' "$RK_LNK_CONCRETE" | grep -aq 'allow docker_helper_rootlesskit_t tmpfs_t:lnk_file' \
+    && [ "$RK_LNK_NORM" = "create read" ] \
     && printf '%s\n' "$RK_LNK_UNION" | tr ' ' '\n' | grep -aqx 'create' \
+    && printf '%s\n' "$RK_LNK_UNION" | tr ' ' '\n' | grep -aqx 'read' \
     && [ -z "$RK_LNK_FORBIDDEN" ]; then
     RK_LNK_OK=1
   fi
   if [ "$RK_LNK_OK" = 1 ]; then
-    echo "PASS: flow tmpfs rebuild-symlink identity (module contribution exactly { create }; effective lnk_file union = the base policy's standing surface + create — the standing residual recorded above; no module-borne permission beyond create)"
+    echo "PASS: flow tmpfs rebuild-symlink identity (module contribution exactly { create read }; effective lnk_file union = the base policy's standing surface + the pair — the standing residual recorded above; no module-borne permission beyond the pair)"
   else
-    echo "FAIL: flow tmpfs rebuild-symlink identity (concrete-rules=$(printf '%s\n' "$RK_LNK_CONCRETE" | grep -ac . || true) union=${RK_LNK_UNION:-(none)})"
+    echo "FAIL: flow tmpfs rebuild-symlink identity (concrete-rules=$(printf '%s\n' "$RK_LNK_CONCRETE" | grep -ac . || true) norm=${RK_LNK_NORM:-(none)} union=${RK_LNK_UNION:-(none)})"
     PREFLIGHT_OK=0
   fi
 
@@ -1717,7 +1720,11 @@ if [ -d "$TRACING/events/capability/cap_capable" ]; then
   # os.MkdirTemp("/tmp", "rootlesskit-b*") is the next granted stage's
   # own operation — the trace records carry the pathname, which binds
   # the boundary to the MkdirTemp call (not to another /tmp access).
-  # No comm filters: the event field
+  # 4C-50 adds the READ-RET families (sys_exit_read, the readv pair) and
+  # the close exit: the /etc/hosts read milestone needs the read(2)s'
+  # OWN results (fd/bytes/EOF), not just the openat's fd; and the
+  # readlinkat pair for the symlink-resolution window. No comm filters:
+  # the event field
   # shapes vary by kernel and a wrong filter would silently drop the
   # evidence; the volume is bounded by the ring and post-filtered at the
   # harvest. Each enable is best-effort; the arm file records what the
@@ -1734,7 +1741,9 @@ if [ -d "$TRACING/events/capability/cap_capable" ]; then
             syscalls/sys_enter_ppoll syscalls/sys_exit_ppoll \
             syscalls/sys_enter_select syscalls/sys_exit_select \
             syscalls/sys_enter_pselect6 syscalls/sys_exit_pselect6 \
-            syscalls/sys_enter_read syscalls/sys_enter_write syscalls/sys_enter_close \
+            syscalls/sys_enter_read syscalls/sys_exit_read \
+            syscalls/sys_enter_readv syscalls/sys_exit_readv \
+            syscalls/sys_enter_write syscalls/sys_enter_close syscalls/sys_exit_close \
             syscalls/sys_enter_exit syscalls/sys_enter_exit_group \
             syscalls/sys_enter_mount syscalls/sys_exit_mount \
             syscalls/sys_enter_execve syscalls/sys_exit_execve \
@@ -1752,7 +1761,8 @@ if [ -d "$TRACING/events/capability/cap_capable" ]; then
             syscalls/sys_enter_rmdir syscalls/sys_exit_rmdir \
             syscalls/sys_enter_symlink syscalls/sys_exit_symlink \
             syscalls/sys_enter_symlinkat syscalls/sys_exit_symlinkat \
-            syscalls/sys_enter_readlink syscalls/sys_exit_readlink; do
+            syscalls/sys_enter_readlink syscalls/sys_exit_readlink \
+            syscalls/sys_enter_readlinkat syscalls/sys_exit_readlinkat; do
     [ -d "$TRACING/events/$ev" ] && echo 1 > "$TRACING/events/$ev/enable" 2>/dev/null || true
   done
   # 4C-29: the SELinux decision tracepoint (avc:selinux_audited) —
@@ -1783,8 +1793,10 @@ if [ -d "$TRACING/events/capability/cap_capable" ]; then
     for ev in sched/sched_process_fork sched/sched_process_exit signal/signal_generate signal/signal_deliver \
               syscalls/sys_enter_kill syscalls/sys_enter_tkill syscalls/sys_enter_tgkill syscalls/sys_enter_pidfd_send_signal \
               syscalls/sys_enter_wait4 syscalls/sys_enter_waitid syscalls/sys_enter_poll syscalls/sys_enter_ppoll \
-              syscalls/sys_enter_select syscalls/sys_enter_pselect6 syscalls/sys_enter_read syscalls/sys_enter_write \
-              syscalls/sys_enter_close syscalls/sys_enter_exit syscalls/sys_enter_exit_group \
+              syscalls/sys_enter_select syscalls/sys_enter_pselect6 syscalls/sys_exit_pselect6 \
+              syscalls/sys_enter_read syscalls/sys_exit_read syscalls/sys_enter_readv syscalls/sys_exit_readv \
+              syscalls/sys_enter_write syscalls/sys_enter_close syscalls/sys_exit_close \
+              syscalls/sys_enter_exit syscalls/sys_enter_exit_group \
               syscalls/sys_enter_mount syscalls/sys_exit_mount syscalls/sys_enter_execve syscalls/sys_exit_execve \
               syscalls/sys_enter_mkdir syscalls/sys_exit_mkdir syscalls/sys_enter_mkdirat syscalls/sys_exit_mkdirat \
               syscalls/sys_enter_umount2 syscalls/sys_exit_umount2 syscalls/sys_enter_umount syscalls/sys_exit_umount \
@@ -1798,7 +1810,8 @@ if [ -d "$TRACING/events/capability/cap_capable" ]; then
               syscalls/sys_enter_rmdir syscalls/sys_exit_rmdir \
               syscalls/sys_enter_symlink syscalls/sys_exit_symlink \
               syscalls/sys_enter_symlinkat syscalls/sys_exit_symlinkat \
-              syscalls/sys_enter_readlink syscalls/sys_exit_readlink; do
+              syscalls/sys_enter_readlink syscalls/sys_exit_readlink \
+              syscalls/sys_enter_readlinkat syscalls/sys_exit_readlinkat; do
       echo "$ev: $([ -d "$TRACING/events/$ev" ] && echo yes || echo no)"
     done
     echo "=== 4C-29 live class/permission mapping evidence (RECORDED, not hardcoded — decode validation uses co-captured AVC records) ==="
@@ -2229,7 +2242,9 @@ if [ "$TRACE_ENABLED" = 1 ]; then
             syscalls/sys_enter_ppoll syscalls/sys_exit_ppoll \
             syscalls/sys_enter_select syscalls/sys_exit_select \
             syscalls/sys_enter_pselect6 syscalls/sys_exit_pselect6 \
-            syscalls/sys_enter_read syscalls/sys_enter_write syscalls/sys_enter_close \
+            syscalls/sys_enter_read syscalls/sys_exit_read \
+            syscalls/sys_enter_readv syscalls/sys_exit_readv \
+            syscalls/sys_enter_write syscalls/sys_enter_close syscalls/sys_exit_close \
             syscalls/sys_enter_exit syscalls/sys_enter_exit_group \
             syscalls/sys_enter_mount syscalls/sys_exit_mount \
             syscalls/sys_enter_execve syscalls/sys_exit_execve \
@@ -2247,7 +2262,8 @@ if [ "$TRACE_ENABLED" = 1 ]; then
             syscalls/sys_enter_rmdir syscalls/sys_exit_rmdir \
             syscalls/sys_enter_symlink syscalls/sys_exit_symlink \
             syscalls/sys_enter_symlinkat syscalls/sys_exit_symlinkat \
-            syscalls/sys_enter_readlink syscalls/sys_exit_readlink; do
+            syscalls/sys_enter_readlink syscalls/sys_exit_readlink \
+            syscalls/sys_enter_readlinkat syscalls/sys_exit_readlinkat; do
     [ -d "$TRACING/events/$ev" ] && echo 0 > "$TRACING/events/$ev/enable" 2>/dev/null || true
   done
   grep -a -E 'slirp4netns|rootlesskit| ns/net|ns/user|/dev/net/tun|cap_capable|selinux_audited' "$EVIDENCE_DIR/30-trace-window.txt" \
@@ -2799,7 +2815,11 @@ POSTTUN_FLOW_COMM_GREP='(rootlesskit|exe|slirp4netns|buildkitd|newuidmap|newgidm
 # The awk-side comm shape ($1 has no trailing space; the grep-side
 # pattern above cannot be reused there).
 POSTTUN_FLOW_COMM_AWK='^(rootlesskit|exe|slirp4netns|buildkitd|newuidmap|newgidmap)-[0-9]+$'
-POSTTUN_TRACE_EVENT_GREP='sched_process_fork:|sched_process_exit:|signal_generate:|signal_deliver:|selinux_audited:|sys_(openat|setns|ioctl|kill|tkill|tgkill|pidfd_send_signal|wait4|waitid|poll|ppoll|select|pselect6|read|write|close|exit|exit_group|mount|mkdir|mkdirat|execve)'
+# 4C-50 adds the readv/readlink/readlinkat families to the flow-domain
+# extract: the /etc/hosts read stage's own records (the read results
+# ride the sys_exit_read exits; readlink/readlinkat are the
+# symlink-resolution window's own probes).
+POSTTUN_TRACE_EVENT_GREP='sched_process_fork:|sched_process_exit:|signal_generate:|signal_deliver:|selinux_audited:|sys_(openat|setns|ioctl|kill|tkill|tgkill|pidfd_send_signal|wait4|waitid|poll|ppoll|select|pselect6|read|readv|write|close|exit|exit_group|mount|mkdir|mkdirat|execve|readlink|readlinkat)'
 
 # The ordered flow-domain extract (the lifetime subject's own records;
 # chronology-preserving; capped).
@@ -2834,7 +2854,7 @@ POSTTUN_NSTARTUP=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIMED=0
 POSTTUN_OLD_BOUNDARY_PRESENT=0
 POSTTUN_BND_SYMBOLIC=""
 {
-  echo "=== 4C-38..4C-49 post-TUN lifetime/readiness causal verdict (the 4C-49 run carries exactly the rootlesskit_t -> cgroup_t:dir mounton grant beside the standing search rule; the confinement gate's PASS is this run's own re-proven precondition) ==="
+  echo "=== 4C-38..4C-50 post-TUN lifetime/readiness causal verdict (the 4C-50 run carries exactly the rootlesskit_t -> tmpfs_t:lnk_file { create read } pair beside the cgroup_t:dir mounton grant; the confinement gate's PASS is this run's own re-proven precondition) ==="
   echo "POST-TUN-T0: ${POSTTUN_T0_EPOCH:-(not derived)}"
   echo "  derivation: trace-ts=$POSTTUN_T0_TRACE_TS attach-executor=${POSTTUN_ATTACH_WHO:-(none)} read-epoch=$POSTTUN_READ_EPOCH read-uptime=$POSTTUN_READ_UPTIME ring-last-ts=${POSTTUN_RING_LAST_TS:-(none)} clock-drift=${POSTTUN_CLOCK_DRIFT:-?}s"
   echo "--- the attach pair (the T0 anchor; the attach executor's own TUNSETIFF):"
@@ -3583,6 +3603,33 @@ POSTTUN_BND_SYMBOLIC=""
     echo "OLD-LNKCREATE-BOUNDARY: GONE (no rootlesskit_t -> tmpfs_t:lnk_file create (0x8) decision in the window's trace span)"
   fi
 
+  # 4C-50: the SAME contract for the phase's own widening — the OLD
+  # primary boundary (docker_helper_rootlesskit_t -> tmpfs_t:lnk_file,
+  # denied mask 0x2 = read, bit 1 of the kernel's static classmap's
+  # common layout; the canonical 4C-49 run's record inside the
+  # openat("/etc/hosts") window — generateEtcHosts()'s own read, the
+  # link traversal's own hook) must be GONE anywhere in the window's
+  # trace span. The mask anchor is pinned to the literal 0x2 followed
+  # by a non-hex/edge (0x2 never matches a 0x2X/0x2XX mask); the
+  # tclass=lnk_file anchor separates this gate from the dir-class read
+  # gates (tmp_t:dir read — the standing /tmp-enumeration shape) and
+  # the tcontext=tmpfs_t:s0 anchor separates it from every other
+  # type's lnk_file read (etc_t's standing traversal read). A record
+  # here means the 4C-50 widening did not take effect on the loaded
+  # policy: STOP and report the actual behavior (no rule widening).
+  POSTTUN_OLD_LNKREAD_PRESENT="$(grep -a 'selinux_audited:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
+    | grep -a 'scontext=system_u:system_r:docker_helper_rootlesskit_t' \
+    | grep -aE 'tcontext=system_u:object_r:tmpfs_t:s0([ \t]|$)' \
+    | grep -a 'tclass=lnk_file' \
+    | grep -aE 'denied=0x2([^0-9a-fA-F]|$)' || true)"
+  if [ -n "$POSTTUN_OLD_LNKREAD_PRESENT" ]; then
+    echo "OLD-LNKREAD-BOUNDARY: STILL-PRESENT — the 4C-50 read widening did not take effect (STOP; no rule widening):"
+    printf '%s\n' "$POSTTUN_OLD_LNKREAD_PRESENT"
+    POSTTUN_OLD_LNKREAD_PRESENT=1
+  else
+    echo "OLD-LNKREAD-BOUNDARY: GONE (no rootlesskit_t -> tmpfs_t:lnk_file read (0x2) decision in the window's trace span)"
+  fi
+
   # 4C-49: the SAME contract for the phase's own grant — the OLD primary
   # boundary (docker_helper_rootlesskit_t -> cgroup_t:dir, denied mask
   # 0x10000 = mounton, bit 16 of the kernel's static dir classmap; the
@@ -4083,6 +4130,195 @@ POSTTUN_BND_SYMBOLIC=""
     echo "MILESTONE: ROOTLESSKIT-CGROUP-MOVE-MOUNT=NOT-REACHED (bind-ret=${POSTTUN_GATE_BIND_RET:-(none)} move-ret=${POSTTUN_GATE_MOVE_RET:-(none)} window-denial=$([ -n "$POSTTUN_CGROUPMOVE_WINDOW_DENIAL" ] && echo PRESENT || echo absent) continuation=$([ -n "$POSTTUN_CGROUPMOVE_CONTINUATION" ] && echo present || echo absent))"
   fi
 
+  # The 4C-50 milestone: the startup's first /etc read —
+  # generateEtcHosts()'s os.ReadFile("/etc/hosts") — the FULL read
+  # path, not just the link hook. The extractor pairs the flow-domain
+  # openat whose pathname is exactly "/etc/hosts" with O_RDONLY against
+  # ITS OWN exit (an fd on success — the trace's syscall rets are hex;
+  # any 0xf-prefixed ret is an error), then follows THAT fd through the
+  # read/readv windows: an enter queues its fd (decimal in the enter
+  # records), an exit pops the most recent pending enter (the flow's
+  # read stage is sequential, so the pairing is exact) and only the
+  # hosts fd's rets count. ROOTLESSKIT-ETC-HOSTS-READ=OK requires ALL
+  # of:
+  #   - the openat pair returned an fd (the 4C-50 link-traversal hook
+  #     passed — the widening's own live proof);
+  #   - at least one read on that fd returned > 0 bytes (the content
+  #     was actually read);
+  #   - the fd's read stream reached its end on the traced fd: a 0x0
+  #     (EOF) read or the close(2) of that fd;
+  #   - NO tmpfs_t:lnk_file read denial anywhere in the window (the
+  #     OLD-LNKREAD gone-gate above);
+  #   - the production flow went further: a later non-cleanup
+  #     production enter of the same trace who.
+  # A missing denial alone is NOT a pass. An openat that fails at a
+  # DEEPER hook (the resolved target's own class/type — the next
+  # boundary, whatever the live trace proves it to be) keeps this
+  # milestone NOT-REACHED with the reached stage recorded; the phase's
+  # own semantic delta is then proven by the gone-gate, and the phase
+  # STOPs there (the 4C-50 contract: no compensating grant).
+  echo "--- the 4C-50 /etc/hosts read objective (the openat pair, then the fd's own read stream, then the continuation):"
+  POSTTUN_HOSTSOPEN_PAIR="$(awk -v t0="$POSTTUN_T0_TRACE_TS" '
+    /sys_openat\(/ && t0 != "" {
+      ts = $4; sub(/:$/, "", ts)
+      if (ts + 0 > t0 + 0 && $0 ~ /filename: [^,]*"\/etc\/hosts"/ && $0 ~ /flags: [^,]*O_RDONLY/) {
+        pend = 1; pwho = $1; pline = $0; next
+      }
+      next
+    }
+    pend && $1 == pwho && /sys_openat -> / {
+      print pline; print $0; exit
+    }
+  ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true)"
+  POSTTUN_HOSTSOPEN_ENTER_TS="$(printf '%s\n' "$POSTTUN_HOSTSOPEN_PAIR" | head -1 | awk '{ ts = $4; sub(/:$/, "", ts); print ts }' 2>/dev/null || true)"
+  POSTTUN_HOSTSOPEN_WHO="$(printf '%s\n' "$POSTTUN_HOSTSOPEN_PAIR" | head -1 | awk '{print $1}' 2>/dev/null || true)"
+  POSTTUN_HOSTSOPEN_RET="$(printf '%s\n' "$POSTTUN_HOSTSOPEN_PAIR" | tail -1 | awk '{print $NF}' 2>/dev/null || true)"
+  POSTTUN_HOSTSOPEN_EXIT_TS="$(printf '%s\n' "$POSTTUN_HOSTSOPEN_PAIR" | tail -1 | awk '{ ts = $4; sub(/:$/, "", ts); print ts }' 2>/dev/null || true)"
+  echo "the /etc/hosts openat pair (the generateEtcHosts read):"
+  printf '%s\n' "${POSTTUN_HOSTSOPEN_PAIR:-(the O_RDONLY /etc/hosts openat pair was never recorded — the flow did not reach generateEtcHosts)}"
+  # The symlink-resolution evidence (the 4C-50 objective's own link):
+  # the rebuild stage's symlinkat that recreated /etc/hosts carries the
+  # symlink's target pathname (oldname ".ro<random>/hosts"); the
+  # resolved object is /etc/<oldname>. The resolved object's own
+  # SID/type is recorded from decision evidence ONLY: an AVC record
+  # inside the exact openat window names the resolved object's
+  # tcontext; a silent success is recorded as not-decision-proven and
+  # is never assumed from the pathname.
+  POSTTUN_HOSTS_SYMLINK_PAIR="$(awk -v t0="$POSTTUN_T0_TRACE_TS" '
+    /sys_symlinkat\(oldname:/ && t0 != "" {
+      ts = $4; sub(/:$/, "", ts)
+      if (ts + 0 > t0 + 0 && $0 ~ /newname: [^,]*"\/etc\/hosts"/) {
+        pend = 1; pwho = $1; pline = $0; next
+      }
+      next
+    }
+    pend && /sys_symlinkat -> / && $1 == pwho {
+      print pline; print $0; exit
+    }
+  ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true)"
+  POSTTUN_HOSTS_SYMLINK_TARGET="$(printf '%s\n' "$POSTTUN_HOSTS_SYMLINK_PAIR" | head -1 | sed -n 's/.*oldname: [^ ]* "\([^"]*\)".*/\1/p' || true)"
+  echo "--- the rebuilt /etc/hosts symlink's resolution evidence:"
+  printf '%s\n' "${POSTTUN_HOSTS_SYMLINK_PAIR:-(the /etc/hosts-shaped rebuild symlinkat pair was never recorded)}"
+  if [ -n "$POSTTUN_HOSTS_SYMLINK_TARGET" ]; then
+    echo "  destination: /etc/hosts; symlink target: $POSTTUN_HOSTS_SYMLINK_TARGET; resolved object: /etc/$POSTTUN_HOSTS_SYMLINK_TARGET"
+  fi
+  POSTTUN_HOSTSOPEN_WINDOW_AVC=""
+  if [ -n "$POSTTUN_HOSTSOPEN_ENTER_TS" ] && [ -n "$POSTTUN_HOSTSOPEN_EXIT_TS" ]; then
+    POSTTUN_HOSTSOPEN_WINDOW_AVC="$(awk -v a="$POSTTUN_HOSTSOPEN_ENTER_TS" -v b="$POSTTUN_HOSTSOPEN_EXIT_TS" '
+      { ts = $4; sub(/:$/, "", ts)
+        if (ts + 0 < a + 0 || ts + 0 > b + 0) next
+        print }
+    ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
+      | grep -a 'selinux_audited:' \
+      | grep -a 'scontext=system_u:system_r:docker_helper_rootlesskit_t' || true)"
+  fi
+  if [ -n "$POSTTUN_HOSTSOPEN_WINDOW_AVC" ]; then
+    echo "  the exact openat window's SELinux decisions (any record here is decision evidence: an AVC naming the resolved object's tcontext IS the target's proven label; a tmpfs_t:lnk_file denied=0x2 record is the 4C-50 boundary's own regression signal):"
+    printf '%s\n' "$POSTTUN_HOSTSOPEN_WINDOW_AVC"
+  else
+    echo "  the exact openat window: no SELinux decision (a silent success is not decision-proven for the resolved object's label; the pre-grant shape carried exactly the lnk_file read decision here)"
+  fi
+  # The fd's own read stream (the reads' rets, the EOF read, the close).
+  POSTTUN_HOSTS_FD=""
+  POSTTUN_HOSTS_FD_OK=0
+  case "$POSTTUN_HOSTSOPEN_RET" in
+    0xf*|"") POSTTUN_HOSTS_FD_OK=0 ;;
+    *) POSTTUN_HOSTS_FD="$(( POSTTUN_HOSTSOPEN_RET ))"; POSTTUN_HOSTS_FD_OK=1 ;;
+  esac
+  POSTTUN_HOSTS_READ_REPORT=""
+  POSTTUN_HOSTS_READ_BYTES_OK=0
+  POSTTUN_HOSTS_EOF_OK=0
+  POSTTUN_HOSTS_CLOSE_OK=0
+  POSTTUN_HOSTS_STAGE_END_TS=""
+  if [ "$POSTTUN_HOSTS_FD_OK" = 1 ]; then
+    echo "--- the fd=$POSTTUN_HOSTS_FD read stream (the enter queues the fd, the exit carries the ret; sequential stage):"
+    POSTTUN_HOSTS_READ_REPORT="$(awk -v who="$POSTTUN_HOSTSOPEN_WHO" -v fd="$POSTTUN_HOSTS_FD" -v ts0="$POSTTUN_HOSTSOPEN_EXIT_TS" '
+      $1 != who { next }
+      { ts = $4; sub(/:$/, "", ts)
+        if (ts0 != "" && ts + 0 <= ts0 + 0) next
+        if ($0 ~ /sys_read\(/ || $0 ~ /sys_readv\(/) {
+          if (match($0, /fd: [0-9]+/)) {
+            f = substr($0, RSTART + 4, RLENGTH - 4) + 0
+            if (f == fd + 0) { lasth = ts; lasthline = $0 }
+            else { lasto = ts }
+          }
+          next
+        }
+        if ($0 ~ /sys_read -> / || $0 ~ /sys_readv -> /) {
+          ret = $NF
+          own = ""
+          if (lasth != "" && (lasto == "" || lasto + 0 < lasth + 0)) { own = lasth; lasth = "" }
+          else if (lasto != "") { lasto = "" }
+          if (own != "") {
+            if (ret ~ /^0xf/) { print "  read-ERROR trace-ts=" own " ret=" ret }
+            else if (ret == "0x0") { print "  read-EOF   trace-ts=" own " ret=" ret; eofseen = 1 }
+            else { print "  read       trace-ts=" own " ret=" ret " (bytes>0)"; bytesseen = 1 }
+            last = ts
+          }
+          next
+        }
+        if ($0 ~ /sys_close\(/) {
+          if (match($0, /fd: [0-9]+/)) {
+            f = substr($0, RSTART + 4, RLENGTH - 4) + 0
+            if (f == fd + 0) { print "  close      trace-ts=" ts; closeseen = 1 }
+          }
+          next
+        }
+      }
+      END {
+        if (bytesseen) print "  READ-BYTES>0: yes"
+        else print "  READ-BYTES>0: no"
+        if (eofseen) print "  EOF-READ: yes"
+        else print "  EOF-READ: no"
+        if (closeseen) print "  CLOSE: yes"
+        else print "  CLOSE: no"
+        if (last != "") print "  STAGE-END-TS=" last
+      }
+    ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true)"
+    printf '%s\n' "$POSTTUN_HOSTS_READ_REPORT"
+    grep -aq 'READ-BYTES>0: yes' <<<"$POSTTUN_HOSTS_READ_REPORT" && POSTTUN_HOSTS_READ_BYTES_OK=1
+    grep -aq 'EOF-READ: yes' <<<"$POSTTUN_HOSTS_READ_REPORT" && POSTTUN_HOSTS_EOF_OK=1
+    grep -aq 'CLOSE: yes' <<<"$POSTTUN_HOSTS_READ_REPORT" && POSTTUN_HOSTS_CLOSE_OK=1
+    POSTTUN_HOSTS_STAGE_END_TS="$(grep -a '^  STAGE-END-TS=' <<<"$POSTTUN_HOSTS_READ_REPORT" | cut -d= -f2 | head -1 || true)"
+  else
+    echo "--- the fd's read stream: NOT REACHED (the openat did not return an fd: ret=${POSTTUN_HOSTSOPEN_RET:-(the pair was never recorded)} — the open failed at its own hook; the pair above is the boundary evidence)"
+  fi
+  # The continuation: the flow went further after the hosts read stage
+  # (the same trace who; the first later non-cleanup production enter —
+  # the standard machinery enter set; read/close are this stage's own
+  # ops and stay excluded here).
+  POSTTUN_HOSTSREAD_CONTINUATION=""
+  POSTTUN_HOSTSREAD_CONT_TS="${POSTTUN_HOSTS_STAGE_END_TS:-$POSTTUN_HOSTSOPEN_EXIT_TS}"
+  if [ -n "$POSTTUN_HOSTSOPEN_WHO" ] && [ -n "$POSTTUN_HOSTSREAD_CONT_TS" ]; then
+    POSTTUN_HOSTSREAD_CONTINUATION="$(awk -v who="$POSTTUN_HOSTSOPEN_WHO" -v te="$POSTTUN_HOSTSREAD_CONT_TS" '
+      $1 != who { next }
+      { ts = $4; sub(/:$/, "", ts)
+        if (ts + 0 <= te + 0) next
+        if ($0 !~ /sys_[a-z0-9_]+\(/) next
+        nm = $0; sub(/.*sys_/, "", nm); sub(/\(.*/, "", nm)
+        if (nm ~ /^(unlink|unlinkat|rmdir)$/ && $0 ~ /"\/tmp\//) next
+        if (nm ~ /^(unlink|unlinkat|rmdir|openat|openat2|getdents64|newfstatat|statx|readlink)$/ && $0 ~ /\/tmp\/rootlesskit-b/) next
+        if (nm ~ /^(openat|openat2)$/ && $0 ~ /"\/tmp",/) next
+        if (nm ~ /^(mount|mkdir|mkdirat|umount2|umount|rename|getdents64|openat|openat2|newfstatat|statx|unlink|unlinkat|rmdir|symlink|symlinkat|readlink|execve|socket|open|setns|ioctl)$/) {
+          print; exit
+        }
+      }' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | head -1 || true)"
+  fi
+  POSTTUN_HOSTSREAD_OK=0
+  if [ "$POSTTUN_HOSTS_FD_OK" = 1 ] && [ "$POSTTUN_HOSTS_READ_BYTES_OK" = 1 ] \
+    && { [ "$POSTTUN_HOSTS_EOF_OK" = 1 ] || [ "$POSTTUN_HOSTS_CLOSE_OK" = 1 ]; } \
+    && [ -z "$POSTTUN_OLD_LNKREAD_PRESENT" ] \
+    && [ -n "$POSTTUN_HOSTSREAD_CONTINUATION" ]; then
+    POSTTUN_HOSTSREAD_OK=1
+  fi
+  if [ "$POSTTUN_HOSTSREAD_OK" = 1 ]; then
+    echo "MILESTONE: ROOTLESSKIT-ETC-HOSTS-READ=OK — the openat returned an fd, the content was actually read (bytes>0), the stream ended (EOF read or close), no tmpfs_t:lnk_file read denial exists in the window, and the flow continued:"
+    echo "  the first post-stage production enter (the next stage began):"
+    printf '%s\n' "$POSTTUN_HOSTSREAD_CONTINUATION"
+  else
+    echo "MILESTONE: ROOTLESSKIT-ETC-HOSTS-READ=NOT-REACHED (fd=$([ "$POSTTUN_HOSTS_FD_OK" = 1 ] && echo "$POSTTUN_HOSTS_FD" || echo none) bytes>0=$POSTTUN_HOSTS_READ_BYTES_OK eof=$POSTTUN_HOSTS_EOF_OK close=$POSTTUN_HOSTS_CLOSE_OK lnkread-denial=$([ -n "$POSTTUN_OLD_LNKREAD_PRESENT" ] && echo PRESENT || echo absent) continuation=$([ -n "$POSTTUN_HOSTSREAD_CONTINUATION" ] && echo present || echo absent))"
+  fi
+
   # The gates.
   echo "GATES:"
   [ "$POSTTUN_T0_OK" = 1 ] && echo "  POST-TUN-T0 observed: PASS" || echo "  POST-TUN-T0 observed: FAIL"
@@ -4341,6 +4577,22 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
       marker "4C-49=PASS/POST-TUN-LIFETIME-STABLE"
     fi
   fi
+  if [ "$POSTTUN_OLD_LNKREAD_PRESENT" = 1 ]; then
+    marker "4C-50-OLD-LNKREAD-BOUNDARY=STILL-PRESENT"
+    marker "4C-50=INCOMPLETE/GRANT-DID-NOT-TAKE-EFFECT"
+  else
+    marker "4C-50-OLD-LNKREAD-BOUNDARY=GONE"
+    [ "$POSTTUN_HOSTSREAD_OK" = 1 ] && marker "ROOTLESSKIT-ETC-HOSTS-READ=OK"
+    if [ -n "$POSTTUN_FIRST_FAIL_PID" ]; then
+      marker "4C-50-OUTCOME=NEXT-STARTUP-BOUNDARY-CONFIRMED"
+      marker "4C-50=PASS/NEXT-BOUNDARY-CONFIRMED"
+    else
+      marker "4C-50-OUTCOME=POST-TUN-LIFETIME-STABLE"
+      marker "TARGET-LIFETIME-BLOCKER=GONE"
+      marker "POST-TUN-LIFETIME=STABLE"
+      marker "4C-50=PASS/POST-TUN-LIFETIME-STABLE"
+    fi
+  fi
   marker "4C-38=PROVEN/PRIMARY-BOUNDARY-ESTABLISHED"
 else
   marker "4C-38=INCOMPLETE/ORDER_NOT_ESTABLISHED"
@@ -4355,6 +4607,7 @@ else
   marker "4C-47=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-48=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-49=INCOMPLETE/ORDER_NOT_ESTABLISHED"
+  marker "4C-50=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-49-CONFINEMENT-GATE=${POSTTUN_GATE_VERDICT:-(the gate did not run — see 53-posttun-verdict.txt)}"
   POSTTUN_NOT_ESTABLISHED=1
 fi
@@ -6033,8 +6286,9 @@ if [ "$I9_OK" = 1 ]; then
   # phase INCOMPLETE (no guessing).
   # A still-present old boundary is a hard phase failure (the grant
   # demonstrably did not take effect); it outranks the cross-op
-  # INCOMPLETE. All eleven standing gone-gates apply: the 4C-49 cgroup
-  # move-mount mounton boundary (the phase's own grant), the 4C-48
+  # INCOMPLETE. All twelve standing gone-gates apply: the 4C-50 read
+  # widening boundary (the phase's own grant), the 4C-49 cgroup
+  # move-mount mounton boundary, the 4C-48
   # rebuild symlink-create boundary, the 4C-47
   # move-mount target mounton boundary, the 4C-46 .ro dir-create
   # boundary, the 4C-45 tmpfs filesystem-mount boundary, the 4C-44 etc
@@ -6049,6 +6303,11 @@ if [ "$I9_OK" = 1 ]; then
     marker "4C-49=BLOCKED/CONFINEMENT-NOT-PROVEN"
     marker "BLOCKER=the 4C-49 confinement gate did not pass (see 53-posttun-verdict.txt; no cgroup_t:dir mounton authority may be granted)"
     finish INCOMPLETE
+    exit 0
+  fi
+  if [ "${POSTTUN_OLD_LNKREAD_PRESENT:-0}" = 1 ]; then
+    marker "BLOCKER=the 4C-50 read widening did not remove the old rootlesskit_t -> tmpfs_t:lnk_file read boundary (see 53-posttun-verdict.txt)"
+    finish FAIL
     exit 0
   fi
   if [ "${POSTTUN_OLD_CGROUPMOUNTON_PRESENT:-0}" = 1 ]; then
