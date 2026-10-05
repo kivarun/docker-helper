@@ -3633,6 +3633,181 @@ func TestSELinuxPolicyRootlesskitTmpfsSymlink(t *testing.T) {
 	}
 }
 
+// TestSELinuxPolicyRootlesskitNetconfFile owns the whole evidenced module
+// surface of the resolved /etc/hosts configuration-file read:
+// docker_helper_rootlesskit_t -> net_conf_t:file = exactly { read }. The
+// RESOLVED TARGET's own regular-file read after the 4C-50 link-traversal
+// read passed: the rebuilt /etc/hosts symlink (tmpfs_t:lnk_file, the
+// 4C-48/4C-50 pair's owner) traversal succeeded and the SAME
+// openat("/etc/hosts", O_RDONLY|O_CLOEXEC) advanced into the resolved
+// object's own file-class mediation.
+//
+// Live enforcing evidence, canonical 4C-50 run 37264978329: the kernel
+// decision INSIDE the openat window (trace-ts 279.786326, 13µs before the
+// failing exit 279.786339; T0 = the attach at trace-ts 279.762339):
+// requested=0x2 denied=0x2 audited=0x2 result=-13 (EACCES)
+// scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+// tcontext=system_u:object_r:net_conf_t:s0 tclass=file, with the direct
+// userspace failure "[rootlesskit:child ] error: open /etc/hosts:
+// permission denied." and exit_group(1). Confirmed in three observations:
+// the 4C-50 harness run 37263373116's canonical window (c1, exe-3796,
+// trace-ts 181.091658, the machinery's STARTUP-CAUSAL owner record), the
+// canonical run's own window (c1), and the canonical run's companion
+// dontaudit-disabled window (c2, exe-15530, trace-ts 379.143815).
+//
+// The target type is LIVE-PROVEN — the kernel's own tcontext for the
+// RESOLVED object (the original /etc/hosts entry behind the rebuilt
+// symlink, the moved original /etc tree's label net_conf_t), never a
+// pathname inference. The class is the evidence — file, never
+// net_conf_t:lnk_file (the traversal's own hook, the tmpfs_t pair's
+// owner) and never net_conf_t:dir. The OPEN completion hook ({ open } —
+// the separate two-hook open structure the 4C-11/4C-32 boundaries
+// proved) is NOT granted here: if it materializes live it owns the next
+// phase. SCOPE — a GLOBAL-TYPE grant (net_conf_t:s0, the distro's
+// /etc-network-configuration file label): not operation-scoped (the
+// nsfs/tmpfs scope shape); the cross-operation gate stays OPEN/Critical.
+// Deliberately NOT granted: open/getattr/write/append/lock/create/
+// setattr/unlink/rename/link/execute/map/relabelfrom/relabelto or any
+// other file permission on this pair, any net_conf_t lnk_file/dir
+// surface, any other subject's bare-read shape (the daemon's own braced
+// rule { read open getattr } is the prior live-evidenced contribution
+// and stays intact), any other class, any other subject.
+func TestSELinuxPolicyRootlesskitNetconfFile(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	pinnedNetconfRead := "allow docker_helper_rootlesskit_t net_conf_t:file read;"
+	pinnedDaemonNetconf := "allow docker_helper_t net_conf_t:file { read open getattr };"
+	if !strings.Contains(policy, pinnedNetconfRead) {
+		t.Fatalf("the rootlesskit child domain's resolved-/etc-read surface must be exact: %q", pinnedNetconfRead)
+	}
+	// netconfFileViolations returns one violation per line of module text
+	// that breaks the grant invariants: exactly one allow rule may name
+	// docker_helper_rootlesskit_t -> net_conf_t:file, in the exact bare
+	// read shape (no brace form, no split rules, no second read-naming
+	// rule — open/getattr/write/append/setattr/create/unlink/rename/
+	// link/execute/map/relabel* are distinct hooks); no other subject
+	// may carry the bare net_conf_t:file read shape (the daemon's braced
+	// { read open getattr } rule is the prior live-evidenced contribution
+	// and must appear exactly once); no net_conf_t:lnk_file or
+	// net_conf_t:dir surface may exist for any subject (the class
+	// confusion).
+	netconfFileViolations := func(text string) []string {
+		var violations []string
+		readCount := 0
+		daemonCount := 0
+		for _, line := range strings.Split(text, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			switch {
+			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t net_conf_t:file"):
+				readCount++
+				if trimmed != pinnedNetconfRead {
+					violations = append(violations, "the resolved-/etc-read grant must be the exact bare file shape (no brace form, no split rules, no second permission — open/getattr/write/append/setattr/create/unlink/rename/link/execute/map/relabel* are distinct hooks): "+trimmed)
+				}
+			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, " net_conf_t:file"):
+				if strings.Contains(trimmed, " net_conf_t:file read;") {
+					violations = append(violations, "the bare net_conf_t:file read shape is unique to the rootlesskit child domain's pinned grant: "+trimmed)
+				} else if trimmed == pinnedDaemonNetconf {
+					daemonCount++
+				} else {
+					violations = append(violations, "the daemon's braced net_conf_t:file { read open getattr } rule is the module's only other net_conf_t:file surface: "+trimmed)
+				}
+			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, " net_conf_t:lnk_file"):
+				violations = append(violations, "the class confusion is forbidden — the lnk_file class surface of net_conf_t is not this grant: "+trimmed)
+			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, " net_conf_t:dir"):
+				violations = append(violations, "the class confusion is forbidden — the dir class surface of net_conf_t is not this grant: "+trimmed)
+			}
+		}
+		if readCount == 0 {
+			violations = append(violations, "the resolved-/etc-read grant (rootlesskit_t -> net_conf_t:file read) is missing")
+		} else if readCount > 1 {
+			violations = append(violations, fmt.Sprintf("exactly one net_conf_t:file read grant may exist for the rootlesskit child domain, found %d", readCount))
+		}
+		if daemonCount != 1 {
+			violations = append(violations, fmt.Sprintf("the module's own standing daemon net_conf_t read-open-getattr rule must appear exactly once, found %d", daemonCount))
+		}
+		return violations
+	}
+	if violations := netconfFileViolations(policy); len(violations) > 0 {
+		t.Errorf("the committed policy violates the resolved-/etc-read invariants: %v", violations)
+	}
+	// The replacement regressions: each replacement must APPLY and must
+	// actually trip the invariants.
+	for _, regressed := range []struct {
+		name string
+		rule string
+	}{
+		{"missing whole rule", ""},
+		{"missing read (getattr-only shape)", "allow docker_helper_rootlesskit_t net_conf_t:file getattr;"},
+		{"getattr instead of read", "allow docker_helper_rootlesskit_t net_conf_t:file getattr;"},
+		{"open instead of read", "allow docker_helper_rootlesskit_t net_conf_t:file open;"},
+		{"write instead of read", "allow docker_helper_rootlesskit_t net_conf_t:file write;"},
+		{"read getattr brace set", "allow docker_helper_rootlesskit_t net_conf_t:file { read getattr };"},
+		{"read open brace set", "allow docker_helper_rootlesskit_t net_conf_t:file { read open };"},
+		{"read write brace set", "allow docker_helper_rootlesskit_t net_conf_t:file { read write };"},
+		{"read setattr brace set", "allow docker_helper_rootlesskit_t net_conf_t:file { read setattr };"},
+		{"read execute brace set", "allow docker_helper_rootlesskit_t net_conf_t:file { read execute };"},
+		{"duplicate identical rule", pinnedNetconfRead + "\n" + pinnedNetconfRead},
+		{"parallel read rule (brace form)", pinnedNetconfRead + "\nallow docker_helper_rootlesskit_t net_conf_t:file { read };"},
+		{"equivalent brace-single-perm shape", "allow docker_helper_rootlesskit_t net_conf_t:file { read };"},
+		{"split into two bare rules (read, read)", pinnedNetconfRead + "\nallow docker_helper_rootlesskit_t net_conf_t:file read;"},
+		{"wrong class (net_conf_t:lnk_file read)", "allow docker_helper_rootlesskit_t net_conf_t:lnk_file read;"},
+		{"wrong class (net_conf_t:dir read)", "allow docker_helper_rootlesskit_t net_conf_t:dir read;"},
+		{"wrong target type (tmpfs_t)", "allow docker_helper_rootlesskit_t tmpfs_t:file read;"},
+		{"wrong target type (etc_t)", "allow docker_helper_rootlesskit_t etc_t:file read;"},
+	} {
+		mutated := strings.Replace(policy, pinnedNetconfRead, regressed.rule, 1)
+		applied := func() bool {
+			if regressed.rule == "" {
+				return !strings.Contains(mutated, pinnedNetconfRead)
+			}
+			return strings.Contains(mutated, regressed.rule)
+		}
+		if !applied() {
+			t.Errorf("the resolved-/etc-read regression %q was not applied", regressed.name)
+			continue
+		}
+		if len(netconfFileViolations(mutated)) == 0 {
+			t.Errorf("the resolved-/etc-read regression %q must fail the resolved-/etc-read invariants", regressed.name)
+		}
+	}
+	// The widening sweep: { read <X> } for every other file permission
+	// must fail the invariants in every case.
+	for _, extra := range []string{
+		"open", "getattr", "setattr", "lock", "append", "create", "unlink",
+		"link", "rename", "execute", "execute_no_trans", "map", "execmod",
+		"ioctl", "audit_access", "mounton", "quotaon", "swapon", "entrypoint",
+		"relabelfrom", "relabelto", "watch",
+	} {
+		mutated := strings.Replace(policy, pinnedNetconfRead,
+			fmt.Sprintf("allow docker_helper_rootlesskit_t net_conf_t:file { read %s };", extra), 1)
+		if !strings.Contains(mutated, fmt.Sprintf("allow docker_helper_rootlesskit_t net_conf_t:file { read %s };", extra)) {
+			t.Errorf("the resolved-/etc-read widening +%s was not applied", extra)
+			continue
+		}
+		if len(netconfFileViolations(mutated)) == 0 {
+			t.Errorf("the resolved-/etc-read widening +%s must fail the resolved-/etc-read invariants", extra)
+		}
+	}
+	// The subject regressions: no other domain may gain the bare
+	// net_conf_t:file read shape, appended beside the real grant.
+	for _, mut := range []struct {
+		name string
+		rule string
+	}{
+		{"bare read for the manager", "allow docker_helper_builder_t net_conf_t:file read;"},
+		{"bare read for the launcher", "allow docker_helper_builder_launcher_t net_conf_t:file read;"},
+		{"bare read for the network helper", "allow docker_helper_slirp4netns_t net_conf_t:file read;"},
+		{"bare read for the uid-map shim", "allow docker_helper_newuidmap_t net_conf_t:file read;"},
+		{"brace read for the daemon", "allow docker_helper_t net_conf_t:file { read };"},
+	} {
+		if len(netconfFileViolations(policy+"\n"+mut.rule)) == 0 {
+			t.Errorf("mutation %q must trip the resolved-/etc-read invariants", mut.name)
+		}
+	}
+}
+
 // TestSELinuxPolicyRootlesskitCgroupMounton pins the cgroup preservation
 // move-mount's own grant: the rootlesskit child domain's move of its rksys
 // bind onto /sys/fs/cgroup (the canonical 4C-48 run's denial: the MS_MOVE
