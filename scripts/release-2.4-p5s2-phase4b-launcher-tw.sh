@@ -618,8 +618,11 @@ restorecon -R /usr/libexec/docker-helper 2>>"$EVIDENCE_DIR/01-composition-inputs
 # ----                      own mount stack — bind0/tmpfs/rksys — and the
 # ----                      propagation state, captured live before the
 # ----                      holder dies).
-# ---- The watcher self-terminates (12s cap; early break once a
-# ---- flow-domain pid has been seen and none remains for 10 ticks).
+# ---- The watcher self-terminates (a generous wall cap — the flow's
+# ---- own build stage before the rootlesskit launch varies from ~0s to
+# ---- hundreds of seconds, see the G_END comment below; early break
+# ---- once a flow-domain pid has been seen and none remains for the
+# ---- vacancy threshold).
 # ---- Read-only observation: it changes no flow authority.
 mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
 (
@@ -640,7 +643,19 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
   # later — the dance pid died inside that gap (gate items A/B = 0,
   # the phase BLOCKED although the dance itself was clean).
   declare -A GSEEN=() GNSM=() GMI=() GCOMM=() GSTIME=() GCTX=()
-  G_END=$(( EPOCHSECONDS + 12 ))
+  # The generous wall cap, NOT the launch-adjacent 12s: the flow's own
+  # op runs its own BUILD stage before the rootlesskit launch, and the
+  # build's own duration varies from ~0s (the cached layers) to
+  # hundreds of seconds (the canonical 4C-54 runs 37358199605 through
+  # 37368641216 all showed the mount dance landing 190+s after the
+  # watcher arm — the 12s cap ended the watcher while the build was
+  # still running, and the dance pid's whole lifetime then fell after
+  # the watcher's own death: gate items A/B = 0, the phase BLOCKED
+  # although the dance itself was clean). The idle ticks are cheap
+  # (one ns_last_pid read + an empty born-since range); the
+  # flow-domain-vacant rule and the harness's own harvest still end the
+  # watcher earlier whenever the flow is done.
+  G_END=$(( EPOCHSECONDS + 600 ))
   G_GONE=0
   G_NSCHECK=0
   G_LASTPID=0
