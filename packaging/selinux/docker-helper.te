@@ -1880,7 +1880,8 @@ allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create read };
 # untouched; no require delta (cgroup_t is already required).
 allow docker_helper_rootlesskit_t cgroup_t:dir mounton;
 
-# The resolved /etc/hosts configuration-file read (P5-S2 Phase 4C-51): the
+# The resolved /etc/hosts configuration-file read-open pair (P5-S2 Phase
+# 4C-51 the read, widened IN PLACE by Phase 4C-52 with the open hook): the
 # RESOLVED TARGET's own regular-file read after the 4C-50 link-traversal
 # read passed. The chain: the rebuilt /etc/hosts symlink (tmpfs_t:lnk_file)
 # traversal SUCCEEDED with the 4C-50 widening in place, and the SAME
@@ -1908,6 +1909,29 @@ allow docker_helper_rootlesskit_t cgroup_t:dir mounton;
 # window (c1), and the canonical run's companion diagnostic window
 # (dontaudit disabled, c2, exe-15530, trace-ts 379.143815).
 #
+# 4C-52 — THE OPEN HOOK (the same operation's second hook, the two-hook
+# open structure the 4C-11/4C-32 boundaries proved for tun_tap_device_t
+# and nsfs_t): with the read grant above in place, the canonical 4C-51
+# run 37286690263's SAME openat("/etc/hosts", O_RDONLY|O_CLOEXEC)
+# PASSED the read hook and the VFS open's own completion hook denied:
+#
+#   requested=0x40002 denied=0x40000 audited=0x40000 result=-13 (EACCES)
+#   scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+#   tcontext=system_u:object_r:net_conf_t:s0 tclass=file
+#
+# at trace-ts 292.328103, -0.000s relative to the terminal failing
+# production syscall exit (exe-3822 sys_openat -> 0xfffffffffffffff3 at
+# trace-ts 292.328116; T0 = the attach at trace-ts 292.303852, the
+# attach executor's own TUNSETIFF -> 0x0 at 292.304011). The read bit
+# 0x2 sat INSIDE requested=0x40002 and NOT inside denied=0x40000 — the
+# read hook passed, the open completion hook is the boundary; the open
+# never returned an fd (the direct userspace failure
+# "[rootlesskit:child ] error: open /etc/hosts: permission denied." at
+# 292.328122 followed by exit_group(1) at 292.328126). Confirmed in the
+# companion c2 window (dontaudit disabled, exe-15107, trace-ts
+# 391.246530, the same shape). The resolved object's own label stays
+# LIVE-PROVEN by the kernel's own tcontext, not a pathname inference.
+#
 # THE TARGET TYPE IS LIVE-PROVEN — NOT PATHNAME-INFERRED: net_conf_t is
 # the kernel's OWN tcontext for the RESOLVED object (the AVC/decision
 # record's tcontext, taken from the live decision — never from a pathname
@@ -1929,21 +1953,25 @@ allow docker_helper_rootlesskit_t cgroup_t:dir mounton;
 # stderr name the boundary, and a next symbolic AVC record, when captured,
 # is the confirming decode.
 #
-# THE OPEN COMPLETION HOOK IS NOT GRANTED HERE: the VFS open's completion
-# mediates a separate { open } permission on the same file object (the
-# two-hook open structure the 4C-11/4C-32 boundaries proved for
-# tun_tap_device_t and nsfs_t). If the open hook materializes live after
-# this grant, it owns the next phase — never folded into this read rule.
-# The READ's full completion (fd, bytes, EOF, close) is proven by the
-# live run's own ROOTLESSKIT-ETC-HOSTS-READ milestone, not assumed here.
+# THE OPEN COMPLETION HOOK IS GRANTED HERE — IN PLACE (4C-52): the VFS
+# open's completion mediates a separate { open } permission on the same
+# file object; the open hook materialized live in the canonical 4C-51
+# run (the paragraph above) and owns this widening. The provenance stays
+# SEPARATE: read <- the 4C-50 evidence (the block above), open <- the
+# 4C-51 evidence (this block) — one pair rule, two recorded hooks, never
+# a standard read bundle (no getattr or any third hook). The pair's full
+# completion (fd, bytes, EOF, close, the flow's continuation) is proven
+# by the live run's own ROOTLESSKIT-ETC-HOSTS-READ milestone, not
+# assumed here.
 #
-# SCOPE — READ CAREFULLY: exactly ONE permission of the file class on
-# exactly this pair — the resolved-target read of generateEtcHosts()'s
-# os.ReadFile("/etc/hosts") (the same standing read authority the daemon
-# domain already carries: allow docker_helper_t net_conf_t:file
-# { read open getattr } — the child's grant is NOT a copy of that rule:
-# exactly the one evidenced permission, no open/getattr). Deliberately NOT
-# granted: open/getattr/write/append/lock/create/setattr/unlink/rename/
+# SCOPE — READ CAREFULLY: exactly TWO permissions of the file class on
+# exactly this pair — the resolved-target read (4C-50 evidence) and the
+# resolved-target open completion (4C-51 evidence) of generateEtcHosts()'s
+# os.ReadFile("/etc/hosts") (the same standing surface the daemon
+# domain carries wider: allow docker_helper_t net_conf_t:file
+# { read open getattr } — the child's pair is NOT a copy of that rule:
+# exactly the two evidenced permissions, no getattr). Deliberately NOT
+# granted: getattr/write/append/lock/create/setattr/unlink/rename/
 # link/execute/map/relabelfrom/relabelto or any other file permission
 # (each a distinct hook — the setupNet stages' own hooks materialize
 # live), any net_conf_t:lnk_file or net_conf_t:dir surface (the class
@@ -1953,14 +1981,14 @@ allow docker_helper_rootlesskit_t cgroup_t:dir mounton;
 #
 # GLOBAL-TYPE SCOPE NOTE — RECORD IT AS SUCH: net_conf_t:s0 is a GLOBAL
 # distro label with no per-operation MCS category, so this allow is NOT
-# operation-scoped: the flow domain may read the regular-file contents of
-# the distro's /etc network-configuration objects wherever kernel/DAC
+# operation-scoped: the flow domain may read and open the distro's /etc
+# network-configuration regular files wherever kernel/DAC
 # relationships already permit. Like every flow-domain grant this is a
 # domain-wide permission on the distro type, not an operation-scoped one;
 # the operation separation is owned by the categorized process/object MCS
 # boundary, and cross-operation targeting stays the OPEN/Critical
 # concurrency/security gate before the Release GO.
-allow docker_helper_rootlesskit_t net_conf_t:file read;
+allow docker_helper_rootlesskit_t net_conf_t:file { read open };
 
 # --- docker_helper_slirp4netns_t: the rootlesskit user-network helper domain (P5-S2) ---
 #
