@@ -2177,12 +2177,21 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
   # is covered by live watcher ticks instead of racing the backgrounded
   # subshell's own fork-and-first-tick latency.
   printf '%s GATE-WATCHER-ARMED pid=%s\n' "$EPOCHREALTIME" "$$"
+  # The READY line comes AFTER the first loop pass has actually run
+  # (not after the fork): the launch handshake waits for THIS line, so
+  # the flow's own dance (born within ~0.2s of the START, lifetime
+  # ~0.2s) starts with the watcher's ticks already live. The canonical
+  # 4C-54 run 37365418204's shape: the ARMED line alone released the
+  # handshake while the first tick's own records still came ~0.15s
+  # later — the dance pid died inside that gap (gate items A/B = 0,
+  # the phase BLOCKED although the dance itself was clean).
   declare -A GSEEN=() GNSM=() GMI=() GCOMM=() GSTIME=() GCTX=()
   G_END=$(( EPOCHSECONDS + 12 ))
   G_GONE=0
   G_NSCHECK=0
   G_LASTPID=0
   G_FULLTICK=0
+  G_FIRSTTICK=1
   GIDENTQ=""
   # The per-pid discovery body, shared by both scan tiers. For an
   # unseen pid: one builtin comm read, the flow-comm match (the alive
@@ -2444,6 +2453,10 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
         break
       fi
     fi
+    if [ "$G_FIRSTTICK" = 1 ]; then
+      printf '%s GATE-WATCHER-READY\n' "$EPOCHREALTIME"
+      G_FIRSTTICK=0
+    fi
     read -t 0.0005 -u 9 _ 2>/dev/null || :
     if [ "$EPOCHSECONDS" -ge "$G_END" ]; then
       printf '%s GATE-WATCHER-END reason=time-cap\n' "$EPOCHREALTIME"
@@ -2467,14 +2480,14 @@ log "D: 4C-49 confinement-gate watcher armed (pid $GATE_WATCHER_PID)"
 # fact and proceeds (the launch is not gated on the handshake's
 # success, only on its own bounded attempt).
 GARM_WAIT=0
-until [ -s "$EVIDENCE_DIR/51-confinement-gate.txt" ] || [ "$GARM_WAIT" -ge 60 ]; do
+until grep -aq 'GATE-WATCHER-READY' "$EVIDENCE_DIR/51-confinement-gate.txt" 2>/dev/null || [ "$GARM_WAIT" -ge 60 ]; do
   sleep 0.05
   GARM_WAIT=$(( GARM_WAIT + 1 ))
 done
-if [ -s "$EVIDENCE_DIR/51-confinement-gate.txt" ]; then
-  log "D: 4C-49 confinement-gate watcher first tick proven after ${GARM_WAIT} polls (the launch window opens with the watcher live)"
+if grep -aq 'GATE-WATCHER-READY' "$EVIDENCE_DIR/51-confinement-gate.txt" 2>/dev/null; then
+  log "D: 4C-49 confinement-gate watcher READY proven after ${GARM_WAIT} polls (the launch window opens with the watcher's first tick done)"
 else
-  log "D: 4C-49 confinement-gate watcher first tick NOT proven within the bounded handshake wait (${GARM_WAIT} polls); the launch proceeds (the gate's own evidence records the fact)"
+  log "D: 4C-49 confinement-gate watcher READY NOT proven within the bounded handshake wait (${GARM_WAIT} polls); the launch proceeds (the gate's own evidence records the fact)"
 fi
 
 # ---- 4C-49 confinement gate: the host-side mount table BEFORE the
