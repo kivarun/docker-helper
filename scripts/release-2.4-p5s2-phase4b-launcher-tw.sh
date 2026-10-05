@@ -1760,7 +1760,14 @@ if [ -d "$TRACING/events/capability/cap_capable" ]; then
   # 4C-50 adds the READ-RET families (sys_exit_read, the readv pair) and
   # the close exit: the /etc/hosts read milestone needs the read(2)s'
   # OWN results (fd/bytes/EOF), not just the openat's fd; and the
-  # readlinkat pair for the symlink-resolution window. No comm filters:
+  # readlinkat pair for the symlink-resolution window. 4C-52 adds the
+  # fstat pair: the os.ReadFile fd-Stat's own getattr hook — the
+  # canonical 4C-52 pre-correction run 37294649118 showed the getattr
+  # decision INSIDE the openat-to-read gap with NO owning window (the
+  # untraced fstat) falling to the anchor-relative STARTUP-CAUSAL class
+  # and displacing the terminal removal-stage boundary; the owning
+  # syscall must be traced so the machinery can attribute the decision.
+  # No comm filters:
   # the event field
   # shapes vary by kernel and a wrong filter would silently drop the
   # evidence; the volume is bounded by the ring and post-filtered at the
@@ -1793,6 +1800,7 @@ if [ -d "$TRACING/events/capability/cap_capable" ]; then
             syscalls/sys_enter_openat2 syscalls/sys_exit_openat2 \
             syscalls/sys_enter_newfstatat syscalls/sys_exit_newfstatat \
             syscalls/sys_enter_statx syscalls/sys_exit_statx \
+            syscalls/sys_enter_fstat syscalls/sys_exit_fstat \
             syscalls/sys_enter_unlink syscalls/sys_exit_unlink \
             syscalls/sys_enter_unlinkat syscalls/sys_exit_unlinkat \
             syscalls/sys_enter_rmdir syscalls/sys_exit_rmdir \
@@ -2136,83 +2144,122 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
   G_END=$(( EPOCHSECONDS + 12 ))
   G_GONE=0
   G_NSCHECK=0
+  G_LASTPID=0
+  G_FULLTICK=39
+  # The per-pid discovery body, shared by both scan tiers. For an
+  # unseen pid: one builtin comm read, the flow-comm match (the alive
+  # count happens at the match, before the identity pass — the current
+  # semantics), then the one-awk identity pass for the matched pid
+  # (attr/stat/ns-readlink reads inline) and the GATE-HOLDER-FIRST
+  # record. A pid whose identity pass skips (a flow-comm pid with a
+  # non-flow ctx — e.g. the runner's own buildkitd) stays unseen and
+  # unrecorded; it still counts alive at its own discovery ticks.
+  g_flow_pid() {
+    GPID="${1#/proc/}"
+    if [ -n "${GSEEN[$GPID]:-}" ]; then
+      return 0
+    fi
+    GLC=""
+    IFS= read -r GLC 2>/dev/null < "/proc/$GPID/comm" || return 0
+    case "$GLC" in
+      rootlesskit|exe|slirp4netns|buildkitd|newuidmap|newgidmap) ;;
+      *) return 0 ;;
+    esac
+    G_ALIVE=$(( G_ALIVE + 1 ))
+    GIDENT="$(awk -v pid="$GPID" '
+      BEGIN {
+        ctx = ""; getline ctx < ("/proc/" pid "/attr/current")
+        close("/proc/" pid "/attr/current")
+        if (ctx !~ /docker_helper_rootlesskit_t:/ && ctx !~ /docker_helper_slirp4netns_t:/) { print "SKIP"; exit }
+        st = ""; getline st < ("/proc/" pid "/stat")
+        close("/proc/" pid "/stat")
+        gst = "(none)"; gpp = "(none)"; gstm = "(none)"
+        n = split(st, f, " ")
+        if (n >= 3) gst = f[3]
+        if (n >= 4) gpp = f[4]
+        if (n >= 22) gstm = f[22]
+        nsm = "(none)"; nsu = "(none)"
+        cmd = "readlink /proc/" pid "/ns/mnt /proc/" pid "/ns/user 2>/dev/null"
+        if ((cmd | getline nsm) > 0) {
+          if ((cmd | getline nsu) <= 0) nsu = "(none)"
+        }
+        close(cmd)
+        print gst "\t" gpp "\t" ctx "\t" nsm "\t" nsu "\t" gstm
+      }' </dev/null 2>/dev/null || true)"
+    if [ -z "$GIDENT" ] || [ "$GIDENT" = "SKIP" ]; then
+      return 0
+    fi
+    IFS=$'\t' read -r GST GPP GCTXV GNSM_NOW GNSU GSTART <<< "$GIDENT"
+    GSEEN[$GPID]=1
+    GCOMM[$GPID]="$GLC"
+    GSTIME[$GPID]="$GSTART"
+    GCTX[$GPID]="$GCTXV"
+    GNSM[$GPID]="$GNSM_NOW"
+    GMI[$GPID]=""
+    printf '%s GATE-HOLDER-FIRST pid=%s comm=%s state=%s ppid=%s ctx=%s ns/mnt=%s ns/user=%s starttime=%s\n' \
+      "$GTS" "$GPID" "$GLC" "$GST" "$GPP" "$GCTXV" "${GNSM_NOW:-(none)}" "${GNSU:-(none)}" "${GSTART:-(none)}"
+  }
   while :; do
     GTS="$EPOCHREALTIME"
     G_ALIVE=0
-    # The discovery tick is FORK-FREE: the /proc glob plus one builtin
-    # comm read per pid. The comm reads repeat every tick (the same
-    # retry semantics the old awk pass had — the launcher pid's comm
-    # changes docker-helper -> rootlesskit at its re-exec and must stay
-    # discoverable). A newly matched flow-domain comm gets its full
-    # identity pass IMMEDIATELY (one awk fork for ONE pid: the
-    # attr/stat/ns-readlink reads inline). The canonical runs
-    # 37189443606 (one tick sighting, mid-dance) and 37263373116 (ZERO
-    # sightings of a ~68ms-lived holder) proved the old one-awk-pass-
-    # per-tick shape's ~36ms cadence loses the holder's identity by
-    # coin flip; the flow child's mount namespace is BORN FRESH at the
-    # rootlesskit parent's own clone (Cloneflags CLONE_NEWUSER|
-    # CLONE_NEWNS — the rootlesskit parent source's own child
-    # construction; the observed ns/user and ns/mnt values differ from
-    # the parent's in every run), so the FIRST-SEEN identity IS the
-    # dance-time identity, and a tick cadence of a few ms turns the
-    # sighting into a near-certainty instead of a coin flip.
-    for GPC in /proc/[0-9]*; do
-      GPID="${GPC#/proc/}"
-      if [ -z "${GSEEN[$GPID]:-}" ]; then
-        GLC=""
-        IFS= read -r GLC 2>/dev/null < "$GPC/comm" || continue
-        case "$GLC" in
-          rootlesskit|exe|slirp4netns|buildkitd|newuidmap|newgidmap) ;;
-          *) continue ;;
-        esac
-        G_ALIVE=$(( G_ALIVE + 1 ))
-        GIDENT="$(awk -v pid="$GPID" '
-          BEGIN {
-            ctx = ""; getline ctx < ("/proc/" pid "/attr/current")
-            close("/proc/" pid "/attr/current")
-            if (ctx !~ /docker_helper_rootlesskit_t:/ && ctx !~ /docker_helper_slirp4netns_t:/) { print "SKIP"; exit }
-            st = ""; getline st < ("/proc/" pid "/stat")
-            close("/proc/" pid "/stat")
-            gst = "(none)"; gpp = "(none)"; gstm = "(none)"
-            n = split(st, f, " ")
-            if (n >= 3) gst = f[3]
-            if (n >= 4) gpp = f[4]
-            if (n >= 22) gstm = f[22]
-            nsm = "(none)"; nsu = "(none)"
-            cmd = "readlink /proc/" pid "/ns/mnt /proc/" pid "/ns/user 2>/dev/null"
-            if ((cmd | getline nsm) > 0) {
-              if ((cmd | getline nsu) <= 0) nsu = "(none)"
-            }
-            close(cmd)
-            print gst "\t" gpp "\t" ctx "\t" nsm "\t" nsu "\t" gstm
-          }' </dev/null 2>/dev/null || true)"
-        if [ -z "$GIDENT" ] || [ "$GIDENT" = "SKIP" ]; then
-          continue
-        fi
-        IFS=$'\t' read -r GST GPP GCTXV GNSM_NOW GNSU GSTART <<< "$GIDENT"
-        GSEEN[$GPID]=1
-        GCOMM[$GPID]="$GLC"
-        GSTIME[$GPID]="$GSTART"
-        GCTX[$GPID]="$GCTXV"
-        GNSM[$GPID]="$GNSM_NOW"
-        GMI[$GPID]=""
-        printf '%s GATE-HOLDER-FIRST pid=%s comm=%s state=%s ppid=%s ctx=%s ns/mnt=%s ns/user=%s starttime=%s\n' \
-          "$GTS" "$GPID" "$GLC" "$GST" "$GPP" "$GCTXV" "${GNSM_NOW:-(none)}" "${GNSU:-(none)}" "${GSTART:-(none)}"
-      else
-        G_ALIVE=$(( G_ALIVE + 1 ))
+    G_FULLTICK=$(( G_FULLTICK + 1 ))
+    G_DO_FULL=0
+    if [ "$G_FULLTICK" -ge 40 ]; then
+      G_FULLTICK=0
+      G_DO_FULL=1
+    fi
+    # The 4C-52 correction — the incremental discovery tier. The
+    # canonical 4C-52 pre-correction run 37294649118 showed the full
+    # /proc glob scan itself taking ~35-90ms per tick — the same
+    # magnitude as the mount-dancing pid's whole lifetime (~45ms) — and
+    # the dance pid's birth-to-death fell entirely between two glob
+    # expansions (the gate never recorded the dance pid: items A/B/C =
+    # 0, the phase BLOCKED/CONFINEMENT-NOT-PROVEN although the mount
+    # pairs themselves were clean). The corrected discovery: ONE
+    # fork-free ns_last_pid read per tick, then the comm reads ONLY for
+    # the pids born since the last tick — the flow children are forked
+    # fresh (their birth comm is the parent's own flow comm), so the
+    # incremental tier catches each dance pid AT THE FORK with the
+    # born-fresh namespace identity. The full-scan retry tier (every
+    # 40th tick) keeps the launcher re-exec discovery (the comm changes
+    # docker-helper -> rootlesskit in place on an already-scanned pid —
+    # the retry semantics the full scan existed for) and resets the
+    # vacancy counter for any long-lived flow-comm pid the identity
+    # pass skips. The tracked-pids pass below keeps every seen pid's
+    # tick record and mountinfo capture at the incremental cadence.
+    GLASTNEW=""
+    IFS= read -r GLASTNEW 2>/dev/null < /proc/sys/kernel/ns_last_pid || true
+    case "$GLASTNEW" in
+      ''|*[!0-9]*) GLASTNEW="" ;;
+    esac
+    if [ -n "$GLASTNEW" ] && [ "$GLASTNEW" -ge "$G_LASTPID" ]; then
+      if [ "$G_LASTPID" -gt 0 ]; then
+        for (( GPID = G_LASTPID + 1; GPID <= GLASTNEW; GPID++ )); do
+          g_flow_pid "/proc/$GPID"
+        done
       fi
-      # The per-tick tracked record (the cached identity; the
-      # first-seen ns/mnt IS the dance-time value for the born-fresh
-      # flow namespaces) and the mountinfo change capture for the
-      # rootlesskit_t ones (fork-free reads; the dance's own mount
-      # stack — bind0/tmpfs/rksys — lands in the captured mountinfo).
-      if [ -n "${GSEEN[$GPID]:-}" ]; then
+      G_LASTPID="$GLASTNEW"
+    else
+      G_LASTPID=0
+      G_DO_FULL=1
+    fi
+    if [ "$G_DO_FULL" = 1 ]; then
+      for GPC in /proc/[0-9]*; do
+        g_flow_pid "$GPC"
+      done
+    fi
+    # The tracked-pids pass: the aliveness (the comm file's readability
+    # bounds the death between ticks), the tick record, and the
+    # mountinfo change capture for the rootlesskit_t pids.
+    for GPID in "${!GSEEN[@]}"; do
+      if [ -r "/proc/$GPID/comm" ]; then
+        G_ALIVE=$(( G_ALIVE + 1 ))
         printf '%s GATE-TICK pid=%s comm=%s ns/mnt=%s starttime=%s\n' \
           "$GTS" "$GPID" "${GCOMM[$GPID]}" "${GNSM[$GPID]}" "${GSTIME[$GPID]}"
         case "${GCTX[$GPID]:-}" in
           *docker_helper_rootlesskit_t:*)
             GMINFO=""
-            IFS= read -r -d '' GMINFO < "$GP/mountinfo" 2>/dev/null || true
+            IFS= read -r -d '' GMINFO < "/proc/$GPID/mountinfo" 2>/dev/null || true
             if [ -n "$GMINFO" ] && [ "$GMINFO" != "${GMI[$GPID]:-}" ]; then
               GMI[$GPID]="$GMINFO"
               printf '%s GATE-MOUNTINFO pid=%s lines=%s\n' "$GTS" "$GPID" \
@@ -2334,6 +2381,7 @@ if [ "$TRACE_ENABLED" = 1 ]; then
             syscalls/sys_enter_openat2 syscalls/sys_exit_openat2 \
             syscalls/sys_enter_newfstatat syscalls/sys_exit_newfstatat \
             syscalls/sys_enter_statx syscalls/sys_exit_statx \
+            syscalls/sys_enter_fstat syscalls/sys_exit_fstat \
             syscalls/sys_enter_unlink syscalls/sys_exit_unlink \
             syscalls/sys_enter_unlinkat syscalls/sys_exit_unlinkat \
             syscalls/sys_enter_rmdir syscalls/sys_exit_rmdir \
@@ -2341,7 +2389,7 @@ if [ "$TRACE_ENABLED" = 1 ]; then
             syscalls/sys_enter_symlinkat syscalls/sys_exit_symlinkat \
             syscalls/sys_enter_readlink syscalls/sys_exit_readlink \
             syscalls/sys_enter_readlinkat syscalls/sys_exit_readlinkat; do
-    [ -d "$TRACING/events/$ev" ] && echo 0 > "$TRACING/events/$ev/enable" 2>/dev/null || true
+    echo 0 > "$TRACING/events/$ev/enable" 2>/dev/null || true
   done
   grep -a -E 'slirp4netns|rootlesskit| ns/net|ns/user|/dev/net/tun|cap_capable|selinux_audited' "$EVIDENCE_DIR/30-trace-window.txt" \
     > "$EVIDENCE_DIR/30-trace-relevant.txt" 2>/dev/null || true
