@@ -3674,25 +3674,28 @@ func TestSELinuxPolicyRootlesskitTmpfsSymlink(t *testing.T) {
 // and stays intact), any other class, any other subject.
 func TestSELinuxPolicyRootlesskitNetconfFile(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
-	pinnedNetconfRead := "allow docker_helper_rootlesskit_t net_conf_t:file read;"
+	pinnedNetconfPair := "allow docker_helper_rootlesskit_t net_conf_t:file { read open };"
 	pinnedDaemonNetconf := "allow docker_helper_t net_conf_t:file { read open getattr };"
-	if !strings.Contains(policy, pinnedNetconfRead) {
-		t.Fatalf("the rootlesskit child domain's resolved-/etc-read surface must be exact: %q", pinnedNetconfRead)
+	if !strings.Contains(policy, pinnedNetconfPair) {
+		t.Fatalf("the rootlesskit child domain's resolved-/etc read-open pair must be exact: %q", pinnedNetconfPair)
 	}
-	// netconfFileViolations returns one violation per line of module text
-	// that breaks the grant invariants: exactly one allow rule may name
-	// docker_helper_rootlesskit_t -> net_conf_t:file, in the exact bare
-	// read shape (no brace form, no split rules, no second read-naming
-	// rule — open/getattr/write/append/setattr/create/unlink/rename/
-	// link/execute/map/relabel* are distinct hooks); no other subject
-	// may carry the bare net_conf_t:file read shape (the daemon's braced
-	// { read open getattr } rule is the prior live-evidenced contribution
-	// and must appear exactly once); no net_conf_t:lnk_file or
-	// net_conf_t:dir surface may exist for any subject (the class
+	// netconfPairViolations returns one violation per line of module text
+	// that breaks the pair invariants: exactly one allow rule may name
+	// docker_helper_rootlesskit_t -> net_conf_t:file, in the exact brace
+	// pair shape { read open } (the 4C-50 read evidence and the 4C-51
+	// open evidence are the pair's two recorded provenances; no bare
+	// single-perm form, no split read/open rules, no reordered brace
+	// form, no second rule — getattr/write/append/setattr/create/unlink/
+	// rename/link/execute/map/relabel* are distinct hooks, and the
+	// pre-4C-52 read-only shape is the old boundary that must not
+	// return); no other subject may name net_conf_t:file with anything
+	// but the daemon's braced { read open getattr } rule (the prior
+	// live-evidenced contribution, exactly once); no net_conf_t:lnk_file
+	// or net_conf_t:dir surface may exist for any subject (the class
 	// confusion).
-	netconfFileViolations := func(text string) []string {
+	netconfPairViolations := func(text string) []string {
 		var violations []string
-		readCount := 0
+		pairCount := 0
 		daemonCount := 0
 		for _, line := range strings.Split(text, "\n") {
 			trimmed := strings.TrimSpace(line)
@@ -3701,36 +3704,34 @@ func TestSELinuxPolicyRootlesskitNetconfFile(t *testing.T) {
 			}
 			switch {
 			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t net_conf_t:file"):
-				readCount++
-				if trimmed != pinnedNetconfRead {
-					violations = append(violations, "the resolved-/etc-read grant must be the exact bare file shape (no brace form, no split rules, no second permission — open/getattr/write/append/setattr/create/unlink/rename/link/execute/map/relabel* are distinct hooks): "+trimmed)
+				pairCount++
+				if trimmed != pinnedNetconfPair {
+					violations = append(violations, "the resolved-/etc read-open pair must be the exact brace pair shape (no bare single-perm form, no split read/open rules, no reordering, no second rule — getattr/write/append/setattr/create/unlink/rename/link/execute/map/relabel* are distinct hooks): "+trimmed)
 				}
 			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, " net_conf_t:file"):
-				if strings.Contains(trimmed, " net_conf_t:file read;") {
-					violations = append(violations, "the bare net_conf_t:file read shape is unique to the rootlesskit child domain's pinned grant: "+trimmed)
-				} else if trimmed == pinnedDaemonNetconf {
+				if trimmed == pinnedDaemonNetconf {
 					daemonCount++
 				} else {
 					violations = append(violations, "the daemon's braced net_conf_t:file { read open getattr } rule is the module's only other net_conf_t:file surface: "+trimmed)
 				}
 			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, " net_conf_t:lnk_file"):
-				violations = append(violations, "the class confusion is forbidden — the lnk_file class surface of net_conf_t is not this grant: "+trimmed)
+				violations = append(violations, "the class confusion is forbidden — the lnk_file class surface of net_conf_t is not this pair: "+trimmed)
 			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, " net_conf_t:dir"):
-				violations = append(violations, "the class confusion is forbidden — the dir class surface of net_conf_t is not this grant: "+trimmed)
+				violations = append(violations, "the class confusion is forbidden — the dir class surface of net_conf_t is not this pair: "+trimmed)
 			}
 		}
-		if readCount == 0 {
-			violations = append(violations, "the resolved-/etc-read grant (rootlesskit_t -> net_conf_t:file read) is missing")
-		} else if readCount > 1 {
-			violations = append(violations, fmt.Sprintf("exactly one net_conf_t:file read grant may exist for the rootlesskit child domain, found %d", readCount))
+		if pairCount == 0 {
+			violations = append(violations, "the resolved-/etc read-open pair (rootlesskit_t -> net_conf_t:file { read open }) is missing")
+		} else if pairCount > 1 {
+			violations = append(violations, fmt.Sprintf("exactly one net_conf_t:file read-open pair may exist for the rootlesskit child domain, found %d", pairCount))
 		}
 		if daemonCount != 1 {
 			violations = append(violations, fmt.Sprintf("the module's own standing daemon net_conf_t read-open-getattr rule must appear exactly once, found %d", daemonCount))
 		}
 		return violations
 	}
-	if violations := netconfFileViolations(policy); len(violations) > 0 {
-		t.Errorf("the committed policy violates the resolved-/etc-read invariants: %v", violations)
+	if violations := netconfPairViolations(policy); len(violations) > 0 {
+		t.Errorf("the committed policy violates the resolved-/etc pair invariants: %v", violations)
 	}
 	// The replacement regressions: each replacement must APPLY and must
 	// actually trip the invariants.
@@ -3739,71 +3740,75 @@ func TestSELinuxPolicyRootlesskitNetconfFile(t *testing.T) {
 		rule string
 	}{
 		{"missing whole rule", ""},
-		{"missing read (getattr-only shape)", "allow docker_helper_rootlesskit_t net_conf_t:file getattr;"},
-		{"getattr instead of read", "allow docker_helper_rootlesskit_t net_conf_t:file getattr;"},
-		{"open instead of read", "allow docker_helper_rootlesskit_t net_conf_t:file open;"},
-		{"write instead of read", "allow docker_helper_rootlesskit_t net_conf_t:file write;"},
-		{"read getattr brace set", "allow docker_helper_rootlesskit_t net_conf_t:file { read getattr };"},
-		{"read open brace set", "allow docker_helper_rootlesskit_t net_conf_t:file { read open };"},
-		{"read write brace set", "allow docker_helper_rootlesskit_t net_conf_t:file { read write };"},
-		{"read setattr brace set", "allow docker_helper_rootlesskit_t net_conf_t:file { read setattr };"},
-		{"read execute brace set", "allow docker_helper_rootlesskit_t net_conf_t:file { read execute };"},
-		{"duplicate identical rule", pinnedNetconfRead + "\n" + pinnedNetconfRead},
-		{"parallel read rule (brace form)", pinnedNetconfRead + "\nallow docker_helper_rootlesskit_t net_conf_t:file { read };"},
-		{"equivalent brace-single-perm shape", "allow docker_helper_rootlesskit_t net_conf_t:file { read };"},
-		{"split into two bare rules (read, read)", pinnedNetconfRead + "\nallow docker_helper_rootlesskit_t net_conf_t:file read;"},
-		{"wrong class (net_conf_t:lnk_file read)", "allow docker_helper_rootlesskit_t net_conf_t:lnk_file read;"},
-		{"wrong class (net_conf_t:dir read)", "allow docker_helper_rootlesskit_t net_conf_t:dir read;"},
-		{"wrong target type (tmpfs_t)", "allow docker_helper_rootlesskit_t tmpfs_t:file read;"},
-		{"wrong target type (etc_t)", "allow docker_helper_rootlesskit_t etc_t:file read;"},
+		{"pre-4C-52 read-only shape (missing open)", "allow docker_helper_rootlesskit_t net_conf_t:file read;"},
+		{"open-only shape (missing read)", "allow docker_helper_rootlesskit_t net_conf_t:file open;"},
+		{"getattr instead of open", "allow docker_helper_rootlesskit_t net_conf_t:file { read getattr };"},
+		{"write instead of open", "allow docker_helper_rootlesskit_t net_conf_t:file { read write };"},
+		{"execute instead of open", "allow docker_helper_rootlesskit_t net_conf_t:file { read execute };"},
+		{"read open getattr bundle", "allow docker_helper_rootlesskit_t net_conf_t:file { read open getattr };"},
+		{"read open write", "allow docker_helper_rootlesskit_t net_conf_t:file { read open write };"},
+		{"read open setattr", "allow docker_helper_rootlesskit_t net_conf_t:file { read open setattr };"},
+		{"read open execute", "allow docker_helper_rootlesskit_t net_conf_t:file { read open execute };"},
+		{"duplicate identical pair rule", pinnedNetconfPair + "\n" + pinnedNetconfPair},
+		{"parallel pair rule", pinnedNetconfPair + "\nallow docker_helper_rootlesskit_t net_conf_t:file { open read };"},
+		{"reordered brace form (open read)", "allow docker_helper_rootlesskit_t net_conf_t:file { open read };"},
+		{"split read/open bare rules", "allow docker_helper_rootlesskit_t net_conf_t:file read;\nallow docker_helper_rootlesskit_t net_conf_t:file open;"},
+		{"wrong class (net_conf_t:lnk_file open)", "allow docker_helper_rootlesskit_t net_conf_t:lnk_file open;"},
+		{"wrong class (net_conf_t:dir open)", "allow docker_helper_rootlesskit_t net_conf_t:dir open;"},
+		{"wrong target type (tmpfs_t)", "allow docker_helper_rootlesskit_t tmpfs_t:file { read open };"},
+		{"wrong target type (etc_t)", "allow docker_helper_rootlesskit_t etc_t:file { read open };"},
 	} {
-		mutated := strings.Replace(policy, pinnedNetconfRead, regressed.rule, 1)
+		mutated := strings.Replace(policy, pinnedNetconfPair, regressed.rule, 1)
 		applied := func() bool {
 			if regressed.rule == "" {
-				return !strings.Contains(mutated, pinnedNetconfRead)
+				return !strings.Contains(mutated, pinnedNetconfPair)
 			}
 			return strings.Contains(mutated, regressed.rule)
 		}
 		if !applied() {
-			t.Errorf("the resolved-/etc-read regression %q was not applied", regressed.name)
+			t.Errorf("the resolved-/etc pair regression %q was not applied", regressed.name)
 			continue
 		}
-		if len(netconfFileViolations(mutated)) == 0 {
-			t.Errorf("the resolved-/etc-read regression %q must fail the resolved-/etc-read invariants", regressed.name)
+		if len(netconfPairViolations(mutated)) == 0 {
+			t.Errorf("the resolved-/etc pair regression %q must fail the resolved-/etc pair invariants", regressed.name)
 		}
 	}
-	// The widening sweep: { read <X> } for every other file permission
-	// must fail the invariants in every case.
+	// The widening sweep: { read open <X> } for every other file
+	// permission must fail the invariants in every case.
 	for _, extra := range []string{
-		"open", "getattr", "setattr", "lock", "append", "create", "unlink",
-		"link", "rename", "execute", "execute_no_trans", "map", "execmod",
-		"ioctl", "audit_access", "mounton", "quotaon", "swapon", "entrypoint",
-		"relabelfrom", "relabelto", "watch",
+		"getattr", "setattr", "lock", "append", "create", "unlink", "link",
+		"rename", "execute", "execute_no_trans", "map", "execmod", "ioctl",
+		"audit_access", "mounton", "quotaon", "swapon", "entrypoint",
+		"relabelfrom", "relabelto", "watch", "watch_mount", "watch_mountns",
+		"watch_reads", "watch_sb", "watch_with_perm",
 	} {
-		mutated := strings.Replace(policy, pinnedNetconfRead,
-			fmt.Sprintf("allow docker_helper_rootlesskit_t net_conf_t:file { read %s };", extra), 1)
-		if !strings.Contains(mutated, fmt.Sprintf("allow docker_helper_rootlesskit_t net_conf_t:file { read %s };", extra)) {
-			t.Errorf("the resolved-/etc-read widening +%s was not applied", extra)
+		mutated := strings.Replace(policy, pinnedNetconfPair,
+			fmt.Sprintf("allow docker_helper_rootlesskit_t net_conf_t:file { read open %s };", extra), 1)
+		if !strings.Contains(mutated, fmt.Sprintf("allow docker_helper_rootlesskit_t net_conf_t:file { read open %s };", extra)) {
+			t.Errorf("the resolved-/etc pair widening +%s was not applied", extra)
 			continue
 		}
-		if len(netconfFileViolations(mutated)) == 0 {
-			t.Errorf("the resolved-/etc-read widening +%s must fail the resolved-/etc-read invariants", extra)
+		if len(netconfPairViolations(mutated)) == 0 {
+			t.Errorf("the resolved-/etc pair widening +%s must fail the resolved-/etc pair invariants", extra)
 		}
 	}
-	// The subject regressions: no other domain may gain the bare
-	// net_conf_t:file read shape, appended beside the real grant.
+	// The subject regressions: no other domain may gain the pair shape,
+	// appended beside the real pair rule.
 	for _, mut := range []struct {
 		name string
 		rule string
 	}{
-		{"bare read for the manager", "allow docker_helper_builder_t net_conf_t:file read;"},
-		{"bare read for the launcher", "allow docker_helper_builder_launcher_t net_conf_t:file read;"},
-		{"bare read for the network helper", "allow docker_helper_slirp4netns_t net_conf_t:file read;"},
-		{"bare read for the uid-map shim", "allow docker_helper_newuidmap_t net_conf_t:file read;"},
+		{"pair for the manager", "allow docker_helper_builder_t net_conf_t:file { read open };"},
+		{"pair for the launcher", "allow docker_helper_builder_launcher_t net_conf_t:file { read open };"},
+		{"pair for the network helper", "allow docker_helper_slirp4netns_t net_conf_t:file { read open };"},
+		{"pair for the uid-map shim", "allow docker_helper_newuidmap_t net_conf_t:file { read open };"},
+		{"bare open for the daemon", "allow docker_helper_t net_conf_t:file open;"},
+		{"bare read for the daemon", "allow docker_helper_t net_conf_t:file read;"},
 		{"brace read for the daemon", "allow docker_helper_t net_conf_t:file { read };"},
+		{"duplicate daemon rule", "allow docker_helper_t net_conf_t:file { read open getattr };"},
 	} {
-		if len(netconfFileViolations(policy+"\n"+mut.rule)) == 0 {
-			t.Errorf("mutation %q must trip the resolved-/etc-read invariants", mut.name)
+		if len(netconfPairViolations(policy+"\n"+mut.rule)) == 0 {
+			t.Errorf("mutation %q must trip the resolved-/etc pair invariants", mut.name)
 		}
 	}
 }
