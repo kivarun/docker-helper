@@ -2095,80 +2095,120 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
 (
   set +eu
   exec 9<>"/tmp/p4b-work/.gate-clock" 2>/dev/null || exit 1
-  declare -A GSEEN=() GNSM=() GMI=()
+  declare -A GSEEN=() GNSM=() GMI=() GCOMM=() GSTIME=() GCTX=()
   G_END=$(( EPOCHSECONDS + 12 ))
   G_GONE=0
+  G_NSCHECK=0
   while :; do
     GTS="$EPOCHREALTIME"
     G_ALIVE=0
-    # The identity pass: ONE awk fork per tick reads every comm file at C
-    # speed and, for each flow-domain match, reads the stat and the ns
-    # links INLINE at scan time. The reads must be inline: the canonical
-    # run 37193403480 proved a ~50ms consumer lag (the awk scan plus the
-    # serial bash per-pid reads) exceeded the holder's remaining
-    # lifetime, and a holder that lived 91ms was recorded with (none)
-    # identity. The ns links cannot be read() (the nsfs link body only
-    # answers readlink), so each matched pid costs one readlink
-    # co-process fork.
-    G_MATCH="$(awk '
-      $0 ~ /^(rootlesskit|exe|slirp4netns|buildkitd|newuidmap|newgidmap)$/ {
-        pid = FILENAME; sub(/\/comm$/, "", pid); sub(/^\/proc\//, "", pid)
-        ctx = ""; getline ctx < ("/proc/" pid "/attr/current")
-        close("/proc/" pid "/attr/current")
-        if (ctx !~ /docker_helper_rootlesskit_t:/ && ctx !~ /docker_helper_slirp4netns_t:/) next
-        st = ""; getline st < ("/proc/" pid "/stat")
-        close("/proc/" pid "/stat")
-        gst = "(none)"; gpp = "(none)"; gstm = "(none)"
-        if (st != "") {
-          n = split(st, f, " ")
-          if (n >= 3) gst = f[3]
-          if (n >= 4) gpp = f[4]
-          if (n >= 22) gstm = f[22]
-        }
-        nsm = "(none)"; nsu = "(none)"
-        cmd = "readlink /proc/" pid "/ns/mnt /proc/" pid "/ns/user 2>/dev/null"
-        if ((cmd | getline nsm) > 0) {
-          if ((cmd | getline nsu) <= 0) nsu = "(none)"
-        }
-        close(cmd)
-        print pid, $0, ctx, gst, gpp, nsm, nsu, gstm
-      }' /proc/[0-9]*/comm 2>/dev/null || true)"
-    while IFS=" " read -r GPID GLC GCTX GST GPPID GNSM_NOW GNSU GSTIME; do
-      [ -n "$GPID" ] || continue
-      G_ALIVE=$(( G_ALIVE + 1 ))
-      GP="/proc/$GPID"
+    # The discovery tick is FORK-FREE: the /proc glob plus one builtin
+    # comm read per pid. The comm reads repeat every tick (the same
+    # retry semantics the old awk pass had — the launcher pid's comm
+    # changes docker-helper -> rootlesskit at its re-exec and must stay
+    # discoverable). A newly matched flow-domain comm gets its full
+    # identity pass IMMEDIATELY (one awk fork for ONE pid: the
+    # attr/stat/ns-readlink reads inline). The canonical runs
+    # 37189443606 (one tick sighting, mid-dance) and 37263373116 (ZERO
+    # sightings of a ~68ms-lived holder) proved the old one-awk-pass-
+    # per-tick shape's ~36ms cadence loses the holder's identity by
+    # coin flip; the flow child's mount namespace is BORN FRESH at the
+    # rootlesskit parent's own clone (Cloneflags CLONE_NEWUSER|
+    # CLONE_NEWNS — the rootlesskit parent source's own child
+    # construction; the observed ns/user and ns/mnt values differ from
+    # the parent's in every run), so the FIRST-SEEN identity IS the
+    # dance-time identity, and a tick cadence of a few ms turns the
+    # sighting into a near-certainty instead of a coin flip.
+    for GPC in /proc/[0-9]*; do
+      GPID="${GPC#/proc/}"
       if [ -z "${GSEEN[$GPID]:-}" ]; then
+        GLC=""
+        IFS= read -r GLC 2>/dev/null < "$GPC/comm" || continue
+        case "$GLC" in
+          rootlesskit|exe|slirp4netns|buildkitd|newuidmap|newgidmap) ;;
+          *) continue ;;
+        esac
+        G_ALIVE=$(( G_ALIVE + 1 ))
+        GIDENT="$(awk -v pid="$GPID" '
+          BEGIN {
+            ctx = ""; getline ctx < ("/proc/" pid "/attr/current")
+            close("/proc/" pid "/attr/current")
+            if (ctx !~ /docker_helper_rootlesskit_t:/ && ctx !~ /docker_helper_slirp4netns_t:/) { print "SKIP"; exit }
+            st = ""; getline st < ("/proc/" pid "/stat")
+            close("/proc/" pid "/stat")
+            gst = "(none)"; gpp = "(none)"; gstm = "(none)"
+            n = split(st, f, " ")
+            if (n >= 3) gst = f[3]
+            if (n >= 4) gpp = f[4]
+            if (n >= 22) gstm = f[22]
+            nsm = "(none)"; nsu = "(none)"
+            cmd = "readlink /proc/" pid "/ns/mnt /proc/" pid "/ns/user 2>/dev/null"
+            if ((cmd | getline nsm) > 0) {
+              if ((cmd | getline nsu) <= 0) nsu = "(none)"
+            }
+            close(cmd)
+            print gst "\t" gpp "\t" ctx "\t" nsm "\t" nsu "\t" gstm
+          }' </dev/null 2>/dev/null || true)"
+        if [ -z "$GIDENT" ] || [ "$GIDENT" = "SKIP" ]; then
+          continue
+        fi
+        IFS=$'\t' read -r GST GPP GCTXV GNSM_NOW GNSU GSTART <<< "$GIDENT"
         GSEEN[$GPID]=1
+        GCOMM[$GPID]="$GLC"
+        GSTIME[$GPID]="$GSTART"
+        GCTX[$GPID]="$GCTXV"
         GNSM[$GPID]="$GNSM_NOW"
         GMI[$GPID]=""
         printf '%s GATE-HOLDER-FIRST pid=%s comm=%s state=%s ppid=%s ctx=%s ns/mnt=%s ns/user=%s starttime=%s\n' \
-          "$GTS" "$GPID" "$GLC" "${GST:-(none)}" "${GPPID:-(none)}" "$GCTX" "${GNSM_NOW:-(none)}" "${GNSU:-(none)}" "${GSTIME:-(none)}"
+          "$GTS" "$GPID" "$GLC" "$GST" "$GPP" "$GCTXV" "${GNSM_NOW:-(none)}" "${GNSU:-(none)}" "${GSTART:-(none)}"
+      else
+        G_ALIVE=$(( G_ALIVE + 1 ))
       fi
-      if [ "${GNSM[$GPID]:-}" != "$GNSM_NOW" ]; then
-        printf '%s GATE-NSMNT pid=%s ns/mnt=%s (was %s)\n' \
-          "$GTS" "$GPID" "${GNSM_NOW:-(none)}" "${GNSM[$GPID]:-none}"
-        GNSM[$GPID]="$GNSM_NOW"
+      # The per-tick tracked record (the cached identity; the
+      # first-seen ns/mnt IS the dance-time value for the born-fresh
+      # flow namespaces) and the mountinfo change capture for the
+      # rootlesskit_t ones (fork-free reads; the dance's own mount
+      # stack — bind0/tmpfs/rksys — lands in the captured mountinfo).
+      if [ -n "${GSEEN[$GPID]:-}" ]; then
+        printf '%s GATE-TICK pid=%s comm=%s ns/mnt=%s starttime=%s\n' \
+          "$GTS" "$GPID" "${GCOMM[$GPID]}" "${GNSM[$GPID]}" "${GSTIME[$GPID]}"
+        case "${GCTX[$GPID]:-}" in
+          *docker_helper_rootlesskit_t:*)
+            GMINFO=""
+            IFS= read -r -d '' GMINFO < "$GP/mountinfo" 2>/dev/null || true
+            if [ -n "$GMINFO" ] && [ "$GMINFO" != "${GMI[$GPID]:-}" ]; then
+              GMI[$GPID]="$GMINFO"
+              printf '%s GATE-MOUNTINFO pid=%s lines=%s\n' "$GTS" "$GPID" \
+                "$(printf '%s\n' "$GMINFO" | grep -ac . || true)"
+              printf '%s\n' "$GMINFO" | sed 's/^/    GATE-MOUNTINFO-LINE /'
+            fi
+            ;;
+        esac
       fi
-      printf '%s GATE-TICK pid=%s comm=%s ns/mnt=%s starttime=%s\n' \
-        "$GTS" "$GPID" "$GLC" "${GNSM_NOW:-(none)}" "${GSTIME:-(none)}"
-      case "$GCTX" in
-        *docker_helper_rootlesskit_t:*)
-          GMINFO=""
-          IFS= read -r -d '' GMINFO < "$GP/mountinfo" 2>/dev/null || true
-          if [ -n "$GMINFO" ] && [ "$GMINFO" != "${GMI[$GPID]:-}" ]; then
-            GMI[$GPID]="$GMINFO"
-            printf '%s GATE-MOUNTINFO pid=%s lines=%s\n' "$GTS" "$GPID" \
-              "$(printf '%s\n' "$GMINFO" | grep -ac . || true)"
-            printf '%s\n' "$GMINFO" | sed 's/^/    GATE-MOUNTINFO-LINE /'
-          fi
-          ;;
-      esac
-    done <<< "$G_MATCH"
+    done
+    # The defensive ns/mnt re-check (~once per second of ticks): the
+    # flow namespaces are born fresh and never transitioned in any
+    # recorded run; the re-check keeps the GATE-NSMNT transition record
+    # live for the general case without paying its readlink fork every
+    # tick.
+    G_NSCHECK=$(( G_NSCHECK + 1 ))
+    if [ "$G_NSCHECK" -ge 250 ] && [ "${#GSEEN[@]}" -gt 0 ]; then
+      G_NSCHECK=0
+      for GPID in "${!GSEEN[@]}"; do
+        GNSM_NOW="$(readlink "/proc/$GPID/ns/mnt" 2>/dev/null || true)"
+        [ -n "$GNSM_NOW" ] || continue
+        if [ "${GNSM[$GPID]:-}" != "$GNSM_NOW" ]; then
+          printf '%s GATE-NSMNT pid=%s ns/mnt=%s (was %s)\n' \
+            "$GTS" "$GPID" "$GNSM_NOW" "${GNSM[$GPID]:-none}"
+          GNSM[$GPID]="$GNSM_NOW"
+        fi
+      done
+    fi
     if [ "$G_ALIVE" -gt 0 ]; then
       G_GONE=0
     elif [ "${#GSEEN[@]}" -gt 0 ]; then
       G_GONE=$(( G_GONE + 1 ))
-      if [ "$G_GONE" -ge 10 ]; then
+      if [ "$G_GONE" -ge 150 ]; then
         printf '%s GATE-WATCHER-END reason=flow-domain-vacant\n' "$EPOCHREALTIME"
         break
       fi
