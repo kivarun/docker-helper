@@ -2203,9 +2203,26 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
     GCTX[$GPID]="$GCTXV"
     GNSM[$GPID]=""
     GMI[$GPID]=""
-    GIDENTQ="$GIDENTQ$GPID "
-    printf '%s GATE-HOLDER-FIRST pid=%s comm=%s state=%s ppid=%s ctx=%s ns/mnt=pending ns/user=pending starttime=%s\n' \
-      "$GTS" "$GPID" "$GLC" "$GSTV" "$GPP" "$GCTXV" "${GSTART:-(none)}"
+    # The 4C-53 correction: the ns-identity probe runs INLINE at the
+    # discovery instant (the canonical 4C-53 run 37346689804's defect:
+    # the dance pid was seen ALIVE by a full-scan tick and queued, but
+    # its whole lifetime is shorter than the queue's retry cadence —
+    # the next tick's dead-pid purge dropped it before the batched
+    # queued readlink ever returned for it, gate items A/B came out 0,
+    # and the phase finished INCOMPLETE although every gate-relevant
+    # mount pair returned 0x0). One readlink fork per discovered pid,
+    # issued the instant the comm read proved it alive; a dead-in-
+    # window pid falls back to the queued retry tier below.
+    GIDENTOUT="$(readlink "/proc/$GPID/ns/mnt" "/proc/$GPID/ns/user" 2>/dev/null || true)"
+    if [ "$(printf '%s\n' "$GIDENTOUT" | grep -ac . || true)" = 2 ]; then
+      GNSM[$GPID]="$(printf '%s\n' "$GIDENTOUT" | sed -n '1p')"
+      printf '%s GATE-HOLDER-IDENT pid=%s ns/mnt=%s ns/user=%s\n' \
+        "$GTS" "$GPID" "${GNSM[$GPID]}" "$(printf '%s\n' "$GIDENTOUT" | sed -n '2p')"
+    else
+      GIDENTQ="$GIDENTQ$GPID "
+    fi
+    printf '%s GATE-HOLDER-FIRST pid=%s comm=%s state=%s ppid=%s ctx=%s ns/mnt=%s ns/user=pending starttime=%s\n' \
+      "$GTS" "$GPID" "$GLC" "$GSTV" "$GPP" "$GCTXV" "${GNSM[$GPID]:-pending}" "${GSTART:-(none)}"
     # The 4C-52 correction: the discovery moment IS a tick observation
     # (the pid was alive and fully identified the instant this record
     # was built). The canonical run 37307909383 showed a mount-dancing
@@ -4859,9 +4876,20 @@ REBUILD-STAGE=NOT-REACHED}"
   #   next production enter                   (the replacement stage
   #                                            began)
   # ROOTLESSKIT-ETC-RESOLV-SYMLINK-REMOVE=OK requires ALL of:
-  #   - the AT_FDCWD unlinkat("/etc/resolv.conf", 0) pair returned 0x0
-  #     (the rebuilt destination symlink was actually removed — the
-  #     4C-53 unlink widening's own live proof);
+  #   - EVERY AT_FDCWD unlinkat("/etc/resolv.conf", 0) pair in the
+  #     window returned 0x0 or -ENOENT, and at least ONE pair returned
+  #     0x0. The multi-pass contract (the run 37346689804 defect: the
+  #     first-pair-0x0 requirement declared a healthy fresh run
+  #     NOT-REACHED): RemoveAll's own contract makes "the path does
+  #     not exist" a completed removal, so a fresh run's first pass
+  #     legitimately returns -ENOENT before the replacement file
+  #     exists; the widened removal hook is then exercised by a LATER
+  #     pass that actually removes the rebuilt destination symlink
+  #     (run 37346689804's own live proof: the 186.236067 pair, ret
+  #     0x0). Requiring every pass to succeed-or-be-absent keeps a
+  #     denial-shaped or deeper-hook ret a failure; requiring at least
+  #     one 0x0 keeps a never-exercised widening from passing by
+  #     absence alone;
   #   - NO tmpfs_t:lnk_file unlink (0x800) denial anywhere in the window
   #     (the OLD-LNKUNLINK gone-gate above — the grant took effect);
   #   - the production flow went further: a later production enter of
@@ -4901,6 +4929,12 @@ REBUILD-STAGE=NOT-REACHED}"
             print "    exit trace-ts=" ts " ret=" $NF " (closes " qdesc[k, qtop[k]] ")"
             lastresolvxts[k] = ts
             if (nm == "unlinkat" && firstabs[k] != "" && qets[k, qtop[k]] + 0 == firstabs[k] + 0) firstabsxts[k] = ts
+            if (qabs0[k, qtop[k]]) {
+              abstot[k]++
+              if ($NF == "0x0") absok[k]++
+              else if ($NF == "0xfffffffffffffffe") absenoent[k]++
+              else { absbad[k]++; absbadret[k, absbad[k]] = $NF }
+            }
           }
           qtop[k]--
         }
@@ -4910,8 +4944,12 @@ REBUILD-STAGE=NOT-REACHED}"
         qtop[k]++
         qets[k, qtop[k]] = ts
         qdesc[k, qtop[k]] = ""
+        qabs0[k, qtop[k]] = 0
         isresolv = 0
-        if ($0 ~ /pathname: [^,]*"\/etc\/resolv\.conf"/) { isresolv = 1; qdesc[k, qtop[k]] = "pathname=/etc/resolv.conf" }
+        if ($0 ~ /pathname: [^,]*"\/etc\/resolv\.conf"/) {
+          isresolv = 1; qdesc[k, qtop[k]] = "pathname=/etc/resolv.conf"
+          if (nm == "unlinkat" && $0 ~ /flags?: 0(x0)?\)/) qabs0[k, qtop[k]] = 1
+        }
         else if ($0 ~ /"resolv\.conf"/) { isresolv = 1; qdesc[k, qtop[k]] = "basename=resolv.conf (dirfd-relative)" }
         else if (nm ~ /^(openat|openat2)$/ && $0 ~ /filename: [^,]*"\/etc",/) { isresolv = 1; qdesc[k, qtop[k]] = "the parent-dir /etc openat" }
         qresolv[k, qtop[k]] = isresolv
@@ -4939,6 +4977,19 @@ REBUILD-STAGE=NOT-REACHED}"
         if (mx == "" || lastresolvxts[k] + 0 > mx + 0) mx = lastresolvxts[k]
       }
       print "  RESOLV-STAGE-END-TS=" mx
+      at = 0; aok = 0; aen = 0; abd = 0; badrets = ""
+      for (k in abstot) at += abstot[k]
+      for (k in absok) aok += absok[k]
+      for (k in absenoent) aen += absenoent[k]
+      for (k in absbad) {
+        abd += absbad[k]
+        for (i = 1; i <= absbad[k]; i++) badrets = badrets (badrets == "" ? "" : " ") absbadret[k, i]
+      }
+      print "  ABS-UNLINKAT-PAIRS=" at
+      print "  ABS-UNLINKAT-OK=" aok
+      print "  ABS-UNLINKAT-ENOENT=" aen
+      print "  ABS-UNLINKAT-BAD=" abd
+      if (abd > 0) print "  ABS-UNLINKAT-BAD-RETS=" badrets
     }
   ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | head -60 || true)"
   printf '%s\n' "${POSTTUN_RESOLV_TIMELINE:-(no resolv-removal-shaped records in the trace span — the flow did not reach the resolv-replacement stage)}"
@@ -4946,6 +4997,10 @@ REBUILD-STAGE=NOT-REACHED}"
   POSTTUN_RESOLV_UNLINK_ENTER="$(printf '%s\n' "$POSTTUN_RESOLV_TIMELINE" | grep -a '^  FIRST-ABS-UNLINKAT-ENTER=' | cut -d= -f2- | head -1 || true)"
   POSTTUN_RESOLV_UNLINK_EXIT_TS="$(printf '%s\n' "$POSTTUN_RESOLV_TIMELINE" | grep -a '^  FIRST-ABS-UNLINKAT-EXIT-TS=' | cut -d= -f2 | head -1 || true)"
   POSTTUN_RESOLV_STAGE_END_TS="$(printf '%s\n' "$POSTTUN_RESOLV_TIMELINE" | grep -a '^  RESOLV-STAGE-END-TS=' | cut -d= -f2 | head -1 || true)"
+  POSTTUN_RESOLV_PAIRS="$(printf '%s\n' "$POSTTUN_RESOLV_TIMELINE" | grep -a '^  ABS-UNLINKAT-PAIRS=' | cut -d= -f2 | head -1 || true)"
+  POSTTUN_RESOLV_OK_PAIRS="$(printf '%s\n' "$POSTTUN_RESOLV_TIMELINE" | grep -a '^  ABS-UNLINKAT-OK=' | cut -d= -f2 | head -1 || true)"
+  POSTTUN_RESOLV_ENOENT_PAIRS="$(printf '%s\n' "$POSTTUN_RESOLV_TIMELINE" | grep -a '^  ABS-UNLINKAT-ENOENT=' | cut -d= -f2 | head -1 || true)"
+  POSTTUN_RESOLV_BAD_PAIRS="$(printf '%s\n' "$POSTTUN_RESOLV_TIMELINE" | grep -a '^  ABS-UNLINKAT-BAD=' | cut -d= -f2 | head -1 || true)"
   echo "--- the first absolute unlinkat(\"/etc/resolv.conf\", 0) pair (the destination symlink's own removal hook — the 4C-53 widening's live proof):"
   if [ -n "$POSTTUN_RESOLV_UNLINK_ENTER" ]; then
     printf '%s\n' "$POSTTUN_RESOLV_UNLINK_ENTER"
@@ -4990,17 +5045,20 @@ REBUILD-STAGE=NOT-REACHED}"
       }' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | head -1 || true)"
   fi
   POSTTUN_RESOLVREMOVE_OK=0
-  if [ "$POSTTUN_RESOLV_UNLINK_RET" = "0x0" ] \
+  if [ "${POSTTUN_RESOLV_PAIRS:-0}" -ge 1 ] \
+    && [ "${POSTTUN_RESOLV_OK_PAIRS:-0}" -ge 1 ] \
+    && [ "${POSTTUN_RESOLV_BAD_PAIRS:-0}" -eq 0 ] \
     && [ -z "$POSTTUN_OLD_LNKUNLINK_PRESENT" ] \
     && [ -n "$POSTTUN_RESOLVREMOVE_CONTINUATION" ]; then
     POSTTUN_RESOLVREMOVE_OK=1
   fi
   if [ "$POSTTUN_RESOLVREMOVE_OK" = 1 ]; then
-    echo "MILESTONE: ROOTLESSKIT-ETC-RESOLV-SYMLINK-REMOVE=OK — the RemoveAll(\"/etc/resolv.conf\") unlinkat returned success, no tmpfs_t:lnk_file unlink denial exists in the window, and the flow continued:"
+    echo "MILESTONE: ROOTLESSKIT-ETC-RESOLV-SYMLINK-REMOVE=OK — every /etc/resolv.conf unlinkat pass returned success-or-absence (RemoveAll's own contract) and at least one pass actually removed the rebuilt destination symlink (the 4C-53 unlink widening's own live proof), no tmpfs_t:lnk_file unlink denial exists in the window, and the flow continued:"
+    echo "  the stage's absolute flag-0 unlinkat pairs: total=${POSTTUN_RESOLV_PAIRS} removed=${POSTTUN_RESOLV_OK_PAIRS} absent=${POSTTUN_RESOLV_ENOENT_PAIRS:-0} failed=${POSTTUN_RESOLV_BAD_PAIRS:-0}"
     echo "  the first post-stage production enter (the next stage began):"
     printf '%s\n' "$POSTTUN_RESOLVREMOVE_CONTINUATION"
   else
-    echo "MILESTONE: ROOTLESSKIT-ETC-RESOLV-SYMLINK-REMOVE=NOT-REACHED (unlink-ret=${POSTTUN_RESOLV_UNLINK_RET:-(the pair was never recorded)} lnkunlink-denial=$([ -n "$POSTTUN_OLD_LNKUNLINK_PRESENT" ] && echo PRESENT || echo absent) continuation=$([ -n "$POSTTUN_RESOLVREMOVE_CONTINUATION" ] && echo present || echo absent))"
+    echo "MILESTONE: ROOTLESSKIT-ETC-RESOLV-SYMLINK-REMOVE=NOT-REACHED (pairs=${POSTTUN_RESOLV_PAIRS:-0} removed=${POSTTUN_RESOLV_OK_PAIRS:-0} absent=${POSTTUN_RESOLV_ENOENT_PAIRS:-0} failed=${POSTTUN_RESOLV_BAD_PAIRS:-0} first-pair-ret=${POSTTUN_RESOLV_UNLINK_RET:-(the pair was never recorded)} lnkunlink-denial=$([ -n "$POSTTUN_OLD_LNKUNLINK_PRESENT" ] && echo PRESENT || echo absent) continuation=$([ -n "$POSTTUN_RESOLVREMOVE_CONTINUATION" ] && echo present || echo absent))"
   fi
 
   # The resolv-vs-hosts distinction (the 4C-53 phase contract): the
@@ -5342,20 +5400,33 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
     fi
   fi
   if [ "$POSTTUN_OLD_LNKUNLINK_PRESENT" = 1 ]; then
+    POSTTUN_4C53_PHASE_OK=0
     marker "4C-53-OLD-LNKUNLINK-BOUNDARY=STILL-PRESENT"
     marker "4C-53=INCOMPLETE/GRANT-DID-NOT-TAKE-EFFECT"
   else
     marker "4C-53-OLD-LNKUNLINK-BOUNDARY=GONE"
     [ "$POSTTUN_REBUILD_COMPLETE_OK" = 1 ] && marker "ROOTLESSKIT-REBUILD-STAGE=COMPLETE"
-    [ "$POSTTUN_RESOLVREMOVE_OK" = 1 ] && marker "ROOTLESSKIT-ETC-RESOLV-SYMLINK-REMOVE=OK"
-    if [ -n "$POSTTUN_FIRST_FAIL_PID" ]; then
-      marker "4C-53-OUTCOME=NEXT-STARTUP-BOUNDARY-CONFIRMED"
-      marker "4C-53=PASS/NEXT-BOUNDARY-CONFIRMED"
+    # The accepted PASS contract: the milestone OK is REQUIRED for the
+    # phase's PASS (the run 37346689804 defect: the verdict emitted
+    # PASS/NEXT-BOUNDARY-CONFIRMED while the milestone was NOT-REACHED
+    # — the gone-gate alone cannot prove the widening was exercised;
+    # a never-created resolv.conf would pass by absence alone).
+    if [ "$POSTTUN_RESOLVREMOVE_OK" = 1 ]; then
+      POSTTUN_4C53_PHASE_OK=1
+      marker "ROOTLESSKIT-ETC-RESOLV-SYMLINK-REMOVE=OK"
+      if [ -n "$POSTTUN_FIRST_FAIL_PID" ]; then
+        marker "4C-53-OUTCOME=NEXT-STARTUP-BOUNDARY-CONFIRMED"
+        marker "4C-53=PASS/NEXT-BOUNDARY-CONFIRMED"
+      else
+        marker "4C-53-OUTCOME=POST-TUN-LIFETIME-STABLE"
+        marker "TARGET-LIFETIME-BLOCKER=GONE"
+        marker "POST-TUN-LIFETIME=STABLE"
+        marker "4C-53=PASS/POST-TUN-LIFETIME-STABLE"
+      fi
     else
-      marker "4C-53-OUTCOME=POST-TUN-LIFETIME-STABLE"
-      marker "TARGET-LIFETIME-BLOCKER=GONE"
-      marker "POST-TUN-LIFETIME=STABLE"
-      marker "4C-53=PASS/POST-TUN-LIFETIME-STABLE"
+      POSTTUN_4C53_PHASE_OK=0
+      marker "ROOTLESSKIT-ETC-RESOLV-SYMLINK-REMOVE=NOT-REACHED"
+      marker "4C-53=INCOMPLETE/MILESTONE-NOT-REACHED"
     fi
   fi
   marker "4C-38=PROVEN/PRIMARY-BOUNDARY-ESTABLISHED"
@@ -7148,6 +7219,11 @@ if [ "$I9_OK" = 1 ]; then
   if [ "${POSTTUN_OLD_BOUNDARY_PRESENT:-0}" = 1 ]; then
     marker "BLOCKER=the 4C-39 mounton grant did not remove the old rootlesskit_t -> root_t:dir mounton boundary (see 53-posttun-verdict.txt)"
     finish FAIL
+    exit 0
+  fi
+  if [ "${POSTTUN_ESTABLISHED:-0}" = 1 ] && [ "${POSTTUN_4C53_PHASE_OK:-0}" != 1 ]; then
+    marker "BLOCKER=the 4C-53 resolv-removal milestone did not reach OK (see 53-posttun-verdict.txt; the accepted PASS contract requires the milestone — the run 37346689804 defect: the final verdict ran PASS while the phase marker said INCOMPLETE)"
+    finish INCOMPLETE
     exit 0
   fi
   if [ "${CROSS_NOT_PROVEN:-0}" = 1 ] || [ "${POSTTUN_NOT_ESTABLISHED:-0}" = 1 ]; then
