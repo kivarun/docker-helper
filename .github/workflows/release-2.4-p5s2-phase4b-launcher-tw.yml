@@ -32,17 +32,18 @@ jobs:
 
       - name: Check out the tested proof commit for the composition
         env:
-          # 4C-51: the composition's module now carries the rootlesskit
-          # child's resolved /etc/hosts read — net_conf_t:file read (the
-          # 4C-51 grant): with the 4C-50 link-traversal read in place, the
-          # canonical 4C-50 run 37264978329's same openat advanced past
-          # the traversal and the RESOLVED target's own file-class read
-          # was denied (the machinery's anchor-own record, confirmed in
-          # three observations including the companion c2 window); the
-          # proof ref advances from the 4C-50-era pin to the commit
-          # carrying that module (341d46c — identical Go sources, so the
-          # binary is the same program).
-          PHASE4B_PROOF_REF: '341d46c4fd7b0b70cc166f8ada94e41d73e09bbc'
+          # 4C-52: the composition's module now carries the rootlesskit
+          # child's resolved /etc/hosts read-open pair — net_conf_t:file
+          # { read open } (the 4C-51 read widened IN PLACE by the 4C-52
+          # open hook): with the 4C-51 read in place, the canonical
+          # 4C-51 run 37286690263's same openat passed the read hook and
+          # the VFS open's own completion hook was denied
+          # (requested=0x40002 denied=0x40000, the machinery's anchor-own
+          # record, confirmed in the companion c2 window); the proof ref
+          # advances from the 4C-51-era pin to the commit carrying that
+          # module (ebeead4 — identical Go sources, so the binary is the
+          # same program).
+          PHASE4B_PROOF_REF: 'ebeead43d5d80e93cc5a83714a932254969141ef'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
