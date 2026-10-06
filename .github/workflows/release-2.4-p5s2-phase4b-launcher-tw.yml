@@ -37,16 +37,20 @@ jobs:
           # tmpfs_t:file create (a NEW pair/class surface, NOT merged
           # into the lnk_file triple or the dir pair): the canonical
           # 4C-53 run 37350350345's own terminal boundary named the
-          # NEXT-STARTUP-BOUNDARY (raw 0x8 denied tclass=file inside the
+          # create hook (raw 0x8 denied tclass=file inside the
           # openat("/etc/resolv.conf", O_WRONLY|O_CREAT|O_TRUNC) window
-          # — the may_create() create hook of the replacement file's
-          # own creation; raw 0x8 decoded per COMMON_FILE_PERMS = the
-          # create hook, NOT write — the loaded policy's perms-file
-          # values are the policy's own numbering and are never the AVC
-          # decoder); the proof ref advances from the 4C-53-era pin to
-          # the commit carrying that module (91880bd — identical Go
-          # sources, so the binary is the same program).
-          PHASE4B_PROOF_REF: '91880bd0ae1ff771f748eaec5abe723841c406f6'
+          # — raw 0x8 decoded per COMMON_FILE_PERMS = create, NOT write
+          # — the loaded policy's perms-file values are the policy's own
+          # numbering and are never the AVC decoder); the canonical
+          # 4C-54 run 37370262779's SAME window then carried the
+          # combined write|open boundary (requested=0x40004 denied=0x40004
+          # tclass=file — ONE audited decision covering the
+          # open-completion hook's FILE__OPEN and its f_mode-derived
+          # FILE__WRITE, one boundary not two phases); the proof ref
+          # advances from the 4C-53-era pin to the commit carrying that
+          # module widened to exactly { create write open } (cf346f8 —
+          # identical Go sources, so the binary is the same program).
+          PHASE4B_PROOF_REF: 'cf346f87b02dd9b39647bb03a5735f3870f7072c'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
