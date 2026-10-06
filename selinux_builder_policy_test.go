@@ -4405,12 +4405,19 @@ func TestSELinuxPolicyRootlesskitIsolation(t *testing.T) {
 //     map).
 func buildkitdIdentityViolations(policy string) []string {
 	const canonicalExec = "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute read open };"
+	const canonicalTransition = "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;"
 	standingRootlesskitExecRules := map[string]string{
 		"docker_helper_rootlesskit_exec_t": "allow docker_helper_rootlesskit_t docker_helper_rootlesskit_exec_t:file { entrypoint read open execute execute_no_trans getattr map };",
 		"docker_helper_slirp4netns_exec_t": "allow docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:file { execute read open getattr };",
 	}
+	standingRootlesskitTransitionRules := map[string]string{
+		"docker_helper_slirp4netns_t": "allow docker_helper_rootlesskit_t docker_helper_slirp4netns_t:process { transition };",
+		"docker_helper_newuidmap_t":   "allow docker_helper_rootlesskit_t docker_helper_newuidmap_t:process { transition };",
+		"docker_helper_newgidmap_t":   "allow docker_helper_rootlesskit_t docker_helper_newgidmap_t:process { transition };",
+	}
 	var violations []string
 	canonicalCount := 0
+	transitionCount := 0
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "#") {
@@ -4419,9 +4426,15 @@ func buildkitdIdentityViolations(policy string) []string {
 		if trimmed == canonicalExec {
 			canonicalCount++
 		}
+		if trimmed == canonicalTransition {
+			transitionCount++
+		}
 	}
 	if canonicalCount != 1 {
 		violations = append(violations, fmt.Sprintf("the buildkitd source-exec grant must exist exactly once in the exact canonical form, found %d: %s", canonicalCount, canonicalExec))
+	}
+	if transitionCount != 1 {
+		violations = append(violations, fmt.Sprintf("the buildkitd process-transition grant must exist exactly once in the exact canonical form, found %d: %s", transitionCount, canonicalTransition))
 	}
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -4432,8 +4445,8 @@ func buildkitdIdentityViolations(policy string) []string {
 			if strings.Contains(trimmed, "docker_helper_buildkitd_exec_t") && trimmed != canonicalExec {
 				violations = append(violations, "the only allow rule naming the buildkitd exec type is the exact source-exec grant { execute read open }: "+trimmed)
 			}
-			if strings.Contains(trimmed, "docker_helper_buildkitd_t") {
-				violations = append(violations, "no allow rule may exist toward the buildkitd domain (it stays permission-less until its own transition phase): "+trimmed)
+			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition {
+				violations = append(violations, "the only allow rule toward the buildkitd domain is the exact process transition grant: "+trimmed)
 			}
 			fields := strings.Fields(trimmed)
 			if len(fields) >= 3 && fields[1] == "docker_helper_rootlesskit_t" && strings.Contains(fields[2], ":file") {
@@ -4443,6 +4456,20 @@ func buildkitdIdentityViolations(policy string) []string {
 				}
 				if standing, ok := standingRootlesskitExecRules[target]; ok && trimmed != standing {
 					violations = append(violations, "no second permission sweep toward the standing sibling exec identity (the existing owner's rule must stay unchanged): "+trimmed)
+				}
+			}
+			if len(fields) >= 3 && fields[1] == "docker_helper_rootlesskit_t" && strings.Contains(fields[2], ":process") {
+				target := strings.SplitN(fields[2], ":", 2)[0]
+				if target == "docker_helper_buildkitd_t" {
+					if trimmed != canonicalTransition {
+						violations = append(violations, "the buildkitd process-transition grant must be the exact bare { transition } form: "+trimmed)
+					}
+				} else if standing, ok := standingRootlesskitTransitionRules[target]; ok {
+					if trimmed != standing {
+						violations = append(violations, "no second permission sweep toward the standing helper transition (the existing owner's rule must stay unchanged): "+trimmed)
+					}
+				} else {
+					violations = append(violations, "the rootlesskit child's process-transition surface is the pointed set (the three launch helpers + the buildkitd edge); a transition toward another domain is an escalation shape: "+trimmed)
 				}
 			}
 		}
@@ -4475,6 +4502,14 @@ func buildkitdIdentityViolations(policy string) []string {
 //     by the 4C-59 executable-image read/open hooks; nothing else in the
 //     exec chain is granted — the transition bundle is deliberately NOT
 //     finished);
+//   - the 4C-60 grant: allow docker_helper_rootlesskit_t
+//     docker_helper_buildkitd_t:process transition; — exactly once, in
+//     the exact bare form (the pointed routing edge's own authority; no
+//     siginh/noatsecure/rlimitinh/dyntransition/setexec — the
+//     conventional transition bundle is NOT copied; no process2
+//     surface; the rootlesskit child's process-transition surface stays
+//     the pointed set: the three launch helpers' standing brace rules +
+//     this edge);
 //   - the exact .fc entry labels exactly the canonical buildkitd path —
 //     one rule, the `--` regular-file form, no directory regex, no
 //     sibling (buildctl/buildkit-runc keep their distro labels);
@@ -4594,6 +4629,29 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		t.Error("the missing-rule mutation must trip the buildkitd authority invariants")
 	}
 
+	// The 4C-60 process-transition grant: exactly the canonical bare
+	// rule, once (non-comment lines only — the provenance comment
+	// mentions the rule).
+	const canonicalTransition = "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;"
+	var withoutTransition []string
+	transitionCount := 0
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == canonicalTransition {
+			transitionCount++
+			continue
+		}
+		withoutTransition = append(withoutTransition, line)
+	}
+	if transitionCount != 1 {
+		t.Errorf("the buildkitd process-transition grant must exist exactly once, found %d", transitionCount)
+	}
+
+	// Missing-rule mutation: removing the canonical grant must trip.
+	if violations := buildkitdIdentityViolations(strings.Join(withoutTransition, "\n")); len(violations) == 0 {
+		t.Error("the missing-transition mutation must trip the buildkitd authority invariants")
+	}
+
 	// Mutation guards: every forbidden authority shape appended to the
 	// module must trip the authority invariants; transition mutations
 	// must trip the exactly-one edge invariant.
@@ -4629,7 +4687,20 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		{"self re-exec re-grant", "allow docker_helper_rootlesskit_t docker_helper_rootlesskit_exec_t:file execute;"},
 		{"slirp4netns exec re-grant", "allow docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:file execute;"},
 		// the transition bundle stays closed
-		{"flow process transition toward the domain", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { transition };"},
+		{"process transition toward the domain with the conventional bundle", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { transition siginh };"},
+		{"process transition + noatsecure", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { transition noatsecure };"},
+		{"process transition + rlimitinh", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { transition rlimitinh };"},
+		{"process transition + setexec", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { transition setexec };"},
+		{"fork instead of transition", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process fork;"},
+		{"dyntransition instead of transition", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process dyntransition;"},
+		{"process2 nnp_transition toward the domain", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process2 nnp_transition;"},
+		{"wrong-class transition shape", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:file transition;"},
+		{"wrong-source transition from the manager", "allow docker_helper_builder_t docker_helper_buildkitd_t:process transition;"},
+		{"wrong-source transition from the launcher", "allow docker_helper_builder_launcher_t docker_helper_buildkitd_t:process transition;"},
+		{"wrong-source transition from the daemon", "allow docker_helper_t docker_helper_buildkitd_t:process transition;"},
+		{"wrong-source transition from slirp4netns", "allow docker_helper_slirp4netns_t docker_helper_buildkitd_t:process transition;"},
+		{"wrong-target transition into the daemon", "allow docker_helper_rootlesskit_t docker_helper_t:process transition;"},
+		{"wrong-target transition into the container domain", "allow docker_helper_rootlesskit_t docker_helper_container_t:process transition;"},
 		{"target entrypoint rule", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint execute read open getattr map };"},
 		{"target capability grant", "allow docker_helper_buildkitd_t self:capability sys_admin;"},
 		{"target cap_userns grant", "allow docker_helper_buildkitd_t self:cap_userns sys_admin;"},
@@ -4729,6 +4800,22 @@ var kernelCommonFilePerms = []string{
 var kernelFileOnlyPerms = []string{"execute_no_trans", "entrypoint"}
 var kernelDirOnlyPerms = []string{"add_name", "remove_name", "reparent", "search", "rmdir"}
 
+// kernelProcessPerms mirrors the kernel's static process-class permission
+// order (linux/security/selinux/include/classmap.h: fork transition sigchld
+// sigkill sigstop signull signal ptrace getsched setsched getsession getpgid
+// setpgid getcap setcap share getattr setexec setfscreate noatsecure siginh
+// setrlimit rlimitinh dyntransition setcurrent execmem execstack execheap
+// setkeycreate setsockcreate getrlimit). The selinux_audited masks the
+// harness's traces record for tclass=process are numbered by THIS order.
+var kernelProcessPerms = []string{
+	"fork", "transition", "sigchld", "sigkill", "sigstop", "signull",
+	"signal", "ptrace", "getsched", "setsched", "getsession", "getpgid",
+	"setpgid", "getcap", "setcap", "share", "getattr", "setexec",
+	"setfscreate", "noatsecure", "siginh", "setrlimit", "rlimitinh",
+	"dyntransition", "setcurrent", "execmem", "execstack", "execheap",
+	"setkeycreate", "setsockcreate", "getrlimit",
+}
+
 // TestSELinuxPolicyKernelClassmapMaskPins pins the kernel-side AVC mask
 // decode the staircase's gone-gates and boundary records depend on. The
 // masks are derived from the kernel's static classmap order above and
@@ -4758,6 +4845,14 @@ func TestSELinuxPolicyKernelClassmapMaskPins(t *testing.T) {
 		}
 		return -1
 	}
+	processIndex := func(perm string) int {
+		for i, p := range kernelProcessPerms {
+			if p == perm {
+				return i
+			}
+		}
+		return -1
+	}
 	for _, pin := range []struct {
 		perm  string
 		want  uint
@@ -4781,6 +4876,17 @@ func TestSELinuxPolicyKernelClassmapMaskPins(t *testing.T) {
 		// the dir-class companions
 		{"add_name", 0x4000000, dirIndex("add_name")},
 		{"search", 0x20000000, dirIndex("search")},
+		// the process-class companions (the 4C-60 boundary pin: the
+		// transition stage's own denial is process:transition=0x2)
+		{"fork", 0x1, processIndex("fork")},
+		{"transition", 0x2, processIndex("transition")},
+		{"sigchld", 0x4, processIndex("sigchld")},
+		{"sigkill", 0x8, processIndex("sigkill")},
+		{"signull", 0x20, processIndex("signull")},
+		{"signal", 0x40, processIndex("signal")},
+		{"getattr", 0x10000, processIndex("getattr")},
+		{"setexec", 0x20000, processIndex("setexec")},
+		{"dyntransition", 0x800000, processIndex("dyntransition")},
 	} {
 		if pin.index < 0 {
 			t.Errorf("perm %q must exist in the kernel classmap mirror", pin.perm)
