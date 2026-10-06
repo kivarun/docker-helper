@@ -4324,34 +4324,69 @@ func TestSELinuxPolicyRootlesskitIsolation(t *testing.T) {
 }
 
 // buildkitdIdentityViolations scans the module's parsed rules against the
-// 4C-57 zero-authority identity invariants and returns one human-readable
-// violation per broken rule, empty when none:
-//   - no allow rule may name docker_helper_buildkitd_exec_t or
-//     docker_helper_buildkitd_t as its target (any source, any class, any
-//     permission set — the execution, transition, entrypoint, and runtime
-//     surfaces all stay ungranted);
+// 4C-57 identity + 4C-58 source-execute authority invariants and returns one
+// human-readable violation per broken rule, empty when none:
+//   - exactly ONE allow rule may name docker_helper_buildkitd_exec_t as a
+//     participant: the 4C-58 source-execute grant, in the exact canonical
+//     bare form (any other shape — a wider bundle, execute_no_trans, a
+//     brace equivalent, another source domain, another class, a parallel
+//     or duplicate line — violates);
+//   - the canonical execute rule must exist exactly once (missing or
+//     duplicated violates);
+//   - no allow rule may name docker_helper_buildkitd_t (the declared
+//     process domain stays permission-less — unreachable until its own
+//     live-evidence transition phase);
+//   - no rootlesskit_t -> bin_t:file grant (the forbidden generic
+//     compensating bundle; the narrowed private identity is never papered
+//     over with a generic grant);
+//   - no second permission sweep toward the sibling exec identities: an
+//     allow from the rootlesskit child toward its own or slirp4netns's
+//     exec type must be exactly the standing rule (a re-granted subset
+//     line duplicates an existing owner);
 //   - no range_transition may exist anywhere (the MCS category
 //     preservation is a live-transition-phase proof, never a pre-declared
-//     map);
-//   - the rootlesskit child domain holds no bin_t:file grant (the
-//     forbidden generic compensating bundle — the old generic identity
-//     must be allowed to disappear via the relabel).
+//     map).
 func buildkitdIdentityViolations(policy string) []string {
+	const canonicalExecute = "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file execute;"
+	standingRootlesskitExecRules := map[string]string{
+		"docker_helper_rootlesskit_exec_t": "allow docker_helper_rootlesskit_t docker_helper_rootlesskit_exec_t:file { entrypoint read open execute execute_no_trans getattr map };",
+		"docker_helper_slirp4netns_exec_t": "allow docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:file { execute read open getattr };",
+	}
 	var violations []string
+	canonicalCount := 0
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if trimmed == canonicalExecute {
+			canonicalCount++
+		}
+	}
+	if canonicalCount != 1 {
+		violations = append(violations, fmt.Sprintf("the 4C-58 source-execute grant must exist exactly once, found %d: %s", canonicalCount, canonicalExecute))
+	}
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "#") {
 			continue
 		}
 		if strings.HasPrefix(trimmed, "allow ") {
-			if strings.Contains(trimmed, "docker_helper_buildkitd_exec_t") {
-				violations = append(violations, "no allow rule may exist on the buildkitd exec type yet (zero-authority phase; execution stays denied): "+trimmed)
+			if strings.Contains(trimmed, "docker_helper_buildkitd_exec_t") && trimmed != canonicalExecute {
+				violations = append(violations, "the only allow rule naming the buildkitd exec type is the exact source-execute grant: "+trimmed)
 			}
 			if strings.Contains(trimmed, "docker_helper_buildkitd_t") {
-				violations = append(violations, "no allow rule may exist toward the buildkitd domain yet (zero-authority phase): "+trimmed)
+				violations = append(violations, "no allow rule may exist toward the buildkitd domain (it stays permission-less until its own transition phase): "+trimmed)
 			}
-			if strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t bin_t:file") {
-				violations = append(violations, "the rootlesskit flow domain must hold no bin_t:file grant (the generic buildkitd boundary stays closed; a narrowed private identity, never a generic bundle): "+trimmed)
+			fields := strings.Fields(trimmed)
+			if len(fields) >= 3 && fields[1] == "docker_helper_rootlesskit_t" && strings.Contains(fields[2], ":file") {
+				target := strings.SplitN(fields[2], ":", 2)[0]
+				if target == "bin_t" {
+					violations = append(violations, "the rootlesskit flow domain must hold no bin_t:file grant (the generic buildkitd boundary stays closed; a narrowed private identity, never a generic bundle): "+trimmed)
+				}
+				if standing, ok := standingRootlesskitExecRules[target]; ok && trimmed != standing {
+					violations = append(violations, "no second permission sweep toward the standing sibling exec identity (the existing owner's rule must stay unchanged): "+trimmed)
+				}
 			}
 		}
 		if strings.HasPrefix(trimmed, "range_transition") {
@@ -4362,18 +4397,25 @@ func buildkitdIdentityViolations(policy string) []string {
 }
 
 // TestSELinuxPolicyBuildkitdExecIdentity verifies the Phase 4C-57
-// identity-narrowing foundation: the bundled BuildKit daemon carries a
-// dedicated executable type and the dedicated process domain exists as
-// STRUCTURE ONLY. The invariant set:
+// identity-narrowing foundation plus the Phase 4C-58 source-execute
+// authority: the bundled BuildKit daemon carries a dedicated executable
+// type and the dedicated process domain exists, and the rootlesskit child
+// domain holds EXACTLY ONE permission on the private exec type. The
+// invariant set:
 //   - the exact type declarations, each exactly once (the exec type with
 //     file_type + exec_type, the domain, the system_r role membership);
 //   - exactly ONE pointed type_transition declaration naming the pair
 //     (rootlesskit_t + buildkitd_exec_t -> buildkitd_t, class process) —
 //     the routing map only: no transition permission, no entrypoint, no
-//     execute/execute_no_trans/read/open/getattr/map on the exec type
-//     from ANY domain, no permission toward the domain from ANY domain,
-//     no capability/cap_userns surface, no range_transition (the MCS
+//     execute_no_trans/read/open/getattr/map on the exec type from ANY
+//     domain, no permission toward the domain from ANY domain, no
+//     capability/cap_userns surface, no range_transition (the MCS
 //     category preservation is a live-transition-phase proof);
+//   - the 4C-58 grant: allow docker_helper_rootlesskit_t
+//     docker_helper_buildkitd_exec_t:file execute; — exactly once, in the
+//     exact bare form (the first real execution authority for the private
+//     buildkitd identity; nothing else in the exec chain is granted — the
+//     transition bundle is deliberately NOT finished);
 //   - the exact .fc entry labels exactly the canonical buildkitd path —
 //     one rule, the `--` regular-file form, no directory regex, no
 //     sibling (buildctl/buildkit-runc keep their distro labels);
@@ -4384,8 +4426,8 @@ func buildkitdIdentityViolations(policy string) []string {
 //   - the generic bin_t execution boundary stays absent for the
 //     rootlesskit child domain (any rootlesskit_t -> bin_t:file grant —
 //     the compensating generic bundle the phase forbids — violates;
-//     the old bin_t boundary must be allowed to disappear via the
-//     relabel, never papered over with a generic grant).
+//     the narrowed private identity is never papered over with a
+//     generic grant).
 func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
 	fc := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.fc")
@@ -4465,33 +4507,69 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		t.Error("the package payload destination must be exactly the canonical buildkitd path (nfpm.yaml)")
 	}
 
+	// The 4C-58 source-execute grant: exactly the canonical rule, once
+	// (non-comment lines only — the provenance comment mentions the rule).
+	const canonicalExecute = "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file execute;"
+	var withoutExecute []string
+	canonicalCount := 0
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == canonicalExecute {
+			canonicalCount++
+			continue
+		}
+		withoutExecute = append(withoutExecute, line)
+	}
+	if canonicalCount != 1 {
+		t.Errorf("the buildkitd source-execute grant must exist exactly once, found %d", canonicalCount)
+	}
+
 	// The committed policy violates nothing.
 	if violations := buildkitdIdentityViolations(policy); len(violations) > 0 {
-		t.Errorf("the committed policy violates the buildkitd zero-authority invariants: %v", violations)
+		t.Errorf("the committed policy violates the buildkitd authority invariants: %v", violations)
+	}
+
+	// Missing-rule mutation: removing the canonical grant must trip.
+	if violations := buildkitdIdentityViolations(strings.Join(withoutExecute, "\n")); len(violations) == 0 {
+		t.Error("the missing-rule mutation must trip the buildkitd authority invariants")
 	}
 
 	// Mutation guards: every forbidden authority shape appended to the
-	// module must trip the zero-authority invariants; transition
-	// mutations must trip the exactly-one edge invariant.
+	// module must trip the authority invariants; transition mutations
+	// must trip the exactly-one edge invariant.
 	for _, mut := range []struct {
 		name string
 		rule string
 	}{
-		{"flow execute on the exec type", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file execute;"},
+		{"missing execute (read instead)", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file read;"},
+		{"execute_no_trans instead of execute", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file execute_no_trans;"},
+		{"execute + execute_no_trans bundle", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute execute_no_trans };"},
+		{"execute + read", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute read };"},
+		{"execute + open", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute open };"},
+		{"execute + getattr", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute getattr };"},
+		{"execute + map", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute map };"},
+		{"brace equivalent of the canonical rule", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute };"},
 		{"flow full exec-source bundle", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute read open getattr map };"},
-		{"flow execute_no_trans on the exec type", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file execute_no_trans;"},
 		{"flow process transition toward the domain", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { transition };"},
 		{"target entrypoint rule", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint execute read open getattr map };"},
 		{"target capability grant", "allow docker_helper_buildkitd_t self:capability sys_admin;"},
 		{"target cap_userns grant", "allow docker_helper_buildkitd_t self:cap_userns sys_admin;"},
-		{"manager execute on the exec type", "allow docker_helper_builder_t docker_helper_buildkitd_exec_t:file execute;"},
 		{"daemon execute on the exec type", "allow docker_helper_t docker_helper_buildkitd_exec_t:file execute;"},
+		{"manager execute on the exec type", "allow docker_helper_builder_t docker_helper_buildkitd_exec_t:file execute;"},
+		{"launcher execute on the exec type", "allow docker_helper_builder_launcher_t docker_helper_buildkitd_exec_t:file execute;"},
+		{"slirp4netns execute on the exec type", "allow docker_helper_slirp4netns_t docker_helper_buildkitd_exec_t:file execute;"},
+		{"buildkitd domain execute on its own exec type", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file execute;"},
 		{"generic bin_t execute for the flow", "allow docker_helper_rootlesskit_t bin_t:file { execute };"},
+		{"generic bin_t execute_no_trans for the flow", "allow docker_helper_rootlesskit_t bin_t:file execute_no_trans;"},
 		{"generic bin_t full bundle for the flow", "allow docker_helper_rootlesskit_t bin_t:file { execute read open getattr map };"},
+		{"self re-exec execute re-grant", "allow docker_helper_rootlesskit_t docker_helper_rootlesskit_exec_t:file execute;"},
+		{"slirp4netns exec execute re-grant", "allow docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:file execute;"},
+		{"second permission sweep on the pair", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { read open };"},
+		{"duplicate of the canonical execute rule", canonicalExecute},
 		{"range_transition declaration", "range_transition docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:process s0:c1;"},
 	} {
 		if violations := buildkitdIdentityViolations(policy + "\n" + mut.rule); len(violations) == 0 {
-			t.Errorf("mutation %q must trip the buildkitd zero-authority invariants", mut.name)
+			t.Errorf("mutation %q must trip the buildkitd authority invariants", mut.name)
 		}
 	}
 	for _, mut := range []struct {
@@ -4552,6 +4630,93 @@ func TestSELinuxPolicyBuildkitdExecIdentitySiblingLabels(t *testing.T) {
 	} {
 		if !strings.Contains(fc, want) {
 			t.Errorf("the /usr/bin exec identity set must stay unchanged: %q", want)
+		}
+	}
+}
+
+// kernelCommonFilePerms mirrors the kernel's static file-family permission
+// order (linux/security/selinux/include/classmap.h): COMMON_FILE_SOCK_PERMS
+// (ioctl read write create getattr setattr lock relabelfrom relabelto
+// append map), then COMMON_FILE_PERMS (unlink link rename execute quotaon
+// mounton audit_access open execmod watch watch_mount watch_sb
+// watch_with_perm watch_reads watch_mountns). The selinux_audited masks the
+// harness's traces record are numbered by THIS kernel-side order; the loaded
+// policy's perms files carry their own numbering and are NEVER the AVC-mask
+// decoder (the recorded 4C-53/4C-58 distinction).
+var kernelCommonFilePerms = []string{
+	"ioctl", "read", "write", "create", "getattr", "setattr", "lock",
+	"relabelfrom", "relabelto", "append", "map",
+	"unlink", "link", "rename", "execute", "quotaon", "mounton",
+	"audit_access", "open", "execmod",
+	"watch", "watch_mount", "watch_sb", "watch_with_perm", "watch_reads",
+	"watch_mountns",
+}
+
+// kernelFileOnlyPerms and kernelDirOnlyPerms mirror the class-specific
+// tails: only file (and memfd_file) carry execute_no_trans/entrypoint; only
+// dir carries add_name/remove_name/reparent/search/rmdir.
+var kernelFileOnlyPerms = []string{"execute_no_trans", "entrypoint"}
+var kernelDirOnlyPerms = []string{"add_name", "remove_name", "reparent", "search", "rmdir"}
+
+// TestSELinuxPolicyKernelClassmapMaskPins pins the kernel-side AVC mask
+// decode the staircase's gone-gates and boundary records depend on. The
+// masks are derived from the kernel's static classmap order above and
+// cross-checked against the values the live canonical runs recorded:
+//   - the 4C-58 pins: file:rename=0x2000, file:execute=0x4000,
+//     file:quotaon=0x8000 (the 4C-57 canonical run's boundary record
+//     denied=0x4000 inside the canonical buildkitd execve window is
+//     exactly file:execute);
+//   - the live-proven members: read=0x2, write=0x4, create=0x8,
+//     getattr=0x10, unlink=0x800, mounton=0x10000, audit_access=0x20000,
+//     open=0x40000;
+//   - the dir-class companions: add_name=0x4000000, search=0x20000000.
+func TestSELinuxPolicyKernelClassmapMaskPins(t *testing.T) {
+	fileIndex := func(perm string) int {
+		for i, p := range append(append([]string{}, kernelCommonFilePerms...), kernelFileOnlyPerms...) {
+			if p == perm {
+				return i
+			}
+		}
+		return -1
+	}
+	dirIndex := func(perm string) int {
+		for i, p := range append(append([]string{}, kernelCommonFilePerms...), kernelDirOnlyPerms...) {
+			if p == perm {
+				return i
+			}
+		}
+		return -1
+	}
+	for _, pin := range []struct {
+		perm  string
+		want  uint
+		index int
+	}{
+		// the 4C-58 decode pins
+		{"rename", 0x2000, fileIndex("rename")},
+		{"execute", 0x4000, fileIndex("execute")},
+		{"quotaon", 0x8000, fileIndex("quotaon")},
+		// the live-proven members
+		{"read", 0x2, fileIndex("read")},
+		{"write", 0x4, fileIndex("write")},
+		{"create", 0x8, fileIndex("create")},
+		{"getattr", 0x10, fileIndex("getattr")},
+		{"unlink", 0x800, fileIndex("unlink")},
+		{"mounton", 0x10000, fileIndex("mounton")},
+		{"audit_access", 0x20000, fileIndex("audit_access")},
+		{"open", 0x40000, fileIndex("open")},
+		{"execute_no_trans", 0x4000000, fileIndex("execute_no_trans")},
+		{"entrypoint", 0x8000000, fileIndex("entrypoint")},
+		// the dir-class companions
+		{"add_name", 0x4000000, dirIndex("add_name")},
+		{"search", 0x20000000, dirIndex("search")},
+	} {
+		if pin.index < 0 {
+			t.Errorf("perm %q must exist in the kernel classmap mirror", pin.perm)
+			continue
+		}
+		if got := uint(1) << uint(pin.index); got != pin.want {
+			t.Errorf("kernel classmap pin: file-family %q must decode to %#x, mirror gives %#x (index %d)", pin.perm, pin.want, got, pin.index)
 		}
 	}
 }
