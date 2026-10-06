@@ -2089,19 +2089,21 @@ RK_BKD_LABEL_OK=1
   sesearch --allow -s "$LAUNCHER_DOMAIN" -t docker_helper_exec_t -c file /sys/fs/selinux/policy || true
   sesearch --allow -s "$LAUNCHER_DOMAIN" -t docker_helper_rootlesskit_exec_t -c file /sys/fs/selinux/policy || true
 
-  echo "=== the buildkitd exec identity (the 4C-57 zero-authority narrowing; the loaded-policy facts must match the transferred source exactly) ==="
-  echo "--- the transferred source's own non-comment buildkitd lines (must be the EXACT declarations plus the ONE structural transition — zero allow rules):"
+  echo "=== the buildkitd source-execute authority (the 4C-58 widening of the 4C-57 private identity; the loaded-policy facts must match the transferred source exactly) ==="
+  echo "--- the transferred source's own non-comment buildkitd lines (must be the EXACT declarations, the ONE structural transition, and the ONE execute grant — no other allow):"
   grep -an 'docker_helper_buildkitd' "$TRANSFERRED/docker-helper.te" | grep -av ':[0-9]*:#' || true
   echo "--- the transferred source's buildkitd .fc lines:"
   grep -an 'docker_helper_buildkitd' "$TRANSFERRED/docker-helper.fc" | grep -av ':[0-9]*#' || true
   BKD_SRC_ALLOW_COUNT="$(grep -aE '^allow .*docker_helper_buildkitd' "$TRANSFERRED/docker-helper.te" | grep -ac . || true)"
-  echo "  module-borne allow rules naming a buildkitd type: $BKD_SRC_ALLOW_COUNT (must be 0)"
+  BKD_SRC_ALLOW_LINE="$(grep -aE '^allow .*docker_helper_buildkitd' "$TRANSFERRED/docker-helper.te" | head -1 || true)"
+  echo "  module-borne allow rules naming a buildkitd type: $BKD_SRC_ALLOW_COUNT (must be 1)"
+  echo "  the rule: ${BKD_SRC_ALLOW_LINE:-(none)}"
   echo "--- sesearch --allow -t docker_helper_buildkitd_exec_t (raw; sesearch expands the file_type/exec_type attributes, so the base policy's attribute rules dominate this print — RECORDED here, never merged into the verdict; the CONCRETE per-subject queries below are the gate):"
   sesearch --allow -t docker_helper_buildkitd_exec_t /sys/fs/selinux/policy 2>/dev/null | grep -aE '^allow docker_helper_buildkitd' || true
-  echo "--- sesearch --allow per CONCRETE docker-helper subject on the exec type (a hit = a rule whose OWN subject AND target fields are the queried names — the attribute-form prints do not count):"
+  echo "--- sesearch --allow per CONCRETE docker-helper subject on the exec type (a hit = a rule whose OWN subject AND target fields are the queried names — the attribute-form prints do not count; the rootlesskit child must carry EXACTLY the one execute rule, every other subject must stay empty):"
   BKD_ZERO_ALLOW_OK=1
-  if [ "$BKD_SRC_ALLOW_COUNT" != "0" ]; then
-    echo "  STOP: the module source itself carries allow rules naming a buildkitd type"
+  if [ "$BKD_SRC_ALLOW_COUNT" != "1" ] || [ "$BKD_SRC_ALLOW_LINE" != "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file execute;" ]; then
+    echo "  STOP: the module source's buildkitd allow surface is not exactly the one execute rule"
     BKD_ZERO_ALLOW_OK=0
   fi
   for s in docker_helper_t docker_helper_builder_t docker_helper_builder_launcher_t \
@@ -2110,7 +2112,12 @@ RK_BKD_LABEL_OK=1
     line="$(sesearch --allow -s "$s" -t docker_helper_buildkitd_exec_t /sys/fs/selinux/policy 2>/dev/null \
       | awk -v s="$s" '$1 == "allow" && $2 == s && $3 ~ /^docker_helper_buildkitd/' || true)"
     printf '  %s -> buildkitd_exec_t: %s\n' "$s" "${line:-(empty)}"
-    if [ -n "$line" ]; then
+    if [ "$s" = "docker_helper_rootlesskit_t" ]; then
+      if [ "$line" != "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file execute;" ]; then
+        echo "  STOP: the rootlesskit child's concrete surface on the exec type is not exactly { execute }"
+        BKD_ZERO_ALLOW_OK=0
+      fi
+    elif [ -n "$line" ]; then
       echo "  STOP: $s holds a concrete allow rule on the buildkitd exec type"
       BKD_ZERO_ALLOW_OK=0
     fi
@@ -2144,6 +2151,9 @@ RK_BKD_LABEL_OK=1
   if [ -z "$BKD_BIN_ALLOW_CONCRETE" ]; then
     BKD_BIN_CLOSED_OK=1
   fi
+  echo "--- the generic execution gate (the 4C-58 §15 shape; the concrete bin_t closure above is the strict form — no bin_t rule of ANY class; the execution-focused inventory below is the marker evidence):"
+  BKD_BIN_EXEC_RAW="$(sesearch --allow -s docker_helper_rootlesskit_t -t bin_t -c file /sys/fs/selinux/policy 2>/dev/null | grep -aE '^allow ' || true)"
+  printf '  rootlesskit_t -> bin_t:file (concrete; execute/execute_no_trans must be ABSENT): %s\n' "${BKD_BIN_EXEC_RAW:-(empty — no concrete bin_t:file rule; the generic execution negative holds)}"
   # The label convergence (the 4C-57 packaging contract): the INSTALLED
   # payload's own type must be the new exec type; the siblings must NOT
   # carry it; the .fc lookup must name the exact canonical path.
@@ -2161,9 +2171,9 @@ RK_BKD_LABEL_OK=1
     BKD_LABEL_OK=1
   fi
   if [ "$BKD_TRANS_OK" = 1 ] && [ "$BKD_ZERO_ALLOW_OK" = 1 ] && [ "$BKD_BIN_CLOSED_OK" = 1 ]; then
-    echo "PASS: the buildkitd exec identity is structural-only (both types declared — the ONE type_transition naming the pair is the loaded-policy proof; ZERO concrete allow rules on the exec type and toward the domain from any module subject; exactly ONE pointed type_transition — the routing map; the generic bin_t bundle stays closed)"
+    echo "PASS: the buildkitd source-execute authority holds the 4C-58 shape (both types declared — the ONE type_transition naming the pair is the loaded-policy proof; the module's ONLY allow rule naming the exec type is the rootlesskit child's file execute grant; ZERO concrete allow rules toward the domain from any module subject; the generic bin_t bundle stays closed)"
   else
-    echo "FAIL: the buildkitd exec identity is not the shipped zero-authority shape (transition=$BKD_TRANS_OK zero-allow=$BKD_ZERO_ALLOW_OK bin-closed=$BKD_BIN_CLOSED_OK)"
+    echo "FAIL: the buildkitd exec authority is not the shipped 4C-58 shape (transition=$BKD_TRANS_OK source-surface=$BKD_ZERO_ALLOW_OK bin-closed=$BKD_BIN_CLOSED_OK)"
     PREFLIGHT_OK=0
   fi
   if [ "$BKD_LABEL_OK" = 1 ]; then
@@ -2173,6 +2183,36 @@ RK_BKD_LABEL_OK=1
     PREFLIGHT_OK=0
     RK_BKD_LABEL_OK=0
   fi
+  # The future buildkitd domain's standing-authority inventory (the 4C-58
+  # §8 contract — INVENTORY ONLY, never a gate): the domain is declared
+  # with the base policy's `domain` attribute, so base-policy
+  # attribute-derived rules may already grant it standing authority even
+  # with zero module-local allow rules. Before any future transition
+  # phase makes the domain reachable, the baseline must be on record:
+  # what the domain would hold the moment it becomes live. The raw
+  # prints are the record; the grouped summary is navigation. NOTHING
+  # here is granted, blocked, or compensated — the ordinary base
+  # `domain` grants do NOT block this phase.
+  echo "=== the future docker_helper_buildkitd_t standing-authority inventory (inventory-only; the recorded baseline for the future transition phase) ==="
+  BKD_DOM_SRC_RAW="$(sesearch --allow -s docker_helper_buildkitd_t /sys/fs/selinux/policy 2>/dev/null | grep -aE '^allow ' || true)"
+  BKD_DOM_TGT_RAW="$(sesearch --allow -t docker_helper_buildkitd_t /sys/fs/selinux/policy 2>/dev/null | grep -aE '^allow ' || true)"
+  echo "--- sesearch --allow -s docker_helper_buildkitd_t (the domain as SOURCE; the attribute expansions — the base policy's domain/capability attribute rules — dominate; the raw print is the record):"
+  printf '%s\n' "${BKD_DOM_SRC_RAW:-(empty)}"
+  echo "--- sesearch --allow -t docker_helper_buildkitd_t (rules TOWARD the domain; the attribute expansions dominate; the raw print is the record):"
+  printf '%s\n' "${BKD_DOM_TGT_RAW:-(empty)}"
+  echo "--- the grouped standing surface (class-family -> line count; attribute-derived standing, RECORDED not asserted):"
+  printf '%s\n' "$BKD_DOM_SRC_RAW" "$BKD_DOM_TGT_RAW" | grep -a '^allow ' | awk '{
+    n = split($3, a, ":"); tc = (n > 1) ? a[2] : $3
+    fam = "other"
+    if (tc == "capability" || tc == "capability2") fam = "capability"
+    else if (tc == "cap_userns" || tc == "cap2_userns") fam = "cap_userns"
+    else if (tc == "process" || tc == "process2") fam = "process"
+    else if (tc == "filesystem") fam = "filesystem"
+    else if (tc == "file" || tc == "dir" || tc == "lnk_file" || tc == "chr_file" || tc == "blk_file" || tc == "fifo_file" || tc == "sock_file") fam = "file/dir-family"
+    else if (tc ~ /socket$/ || tc == "node" || tc == "netif" || tc == "packet" || tc == "association" || tc ~ /^netlink_/) fam = "network/socket"
+    cnt[fam]++; total++
+  } END { if (total == 0) print "  (none)"; else for (f in cnt) printf "  %s: %d\n", f, cnt[f] }' || true
+  echo "=== the future-domain inventory ends (inventory-only; no verdict rides on it) ==="
 } > "$EVIDENCE_DIR/02-preflight.txt" 2>&1
 cat "$EVIDENCE_DIR/02-preflight.txt" >&2
 if [ "${RK_BKD_LABEL_OK:-1}" != 1 ]; then
@@ -3357,7 +3397,7 @@ POSTTUN_NSTARTUP=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIMED=0
 POSTTUN_OLD_BOUNDARY_PRESENT=0
 POSTTUN_BND_SYMBOLIC=""
 {
-  echo "=== 4C-38..4C-57 post-TUN lifetime/readiness causal verdict (the 4C-57 run carries exactly the rootlesskit_t -> net_conf_t:file { read open } pair — the 4C-51 read widened in place by the 4C-52 open hook — beside the tmpfs_t:lnk_file { create read unlink } triple (the 4C-48 create + 4C-50 read widened in place by the 4C-53 unlink removal hook), the tmpfs_t:file { create write open mounton } grant (the 4C-54 create hook widened in place by the 4C-55 combined write|open boundary and the 4C-56 bind-mount mounton boundary) and the cgroup_t:dir mounton grant; the 4C-57 identity narrowing adds NO permission — the payload's exec boundary moves from the generic bin_t label to the private docker_helper_buildkitd_exec_t identity (the exact .fc relabel) and the runtime keeps failing closed; the confinement gate's PASS is this run's own re-proven precondition) ==="
+  echo "=== 4C-38..4C-58 post-TUN lifetime/readiness causal verdict (the 4C-58 run carries exactly the rootlesskit_t -> net_conf_t:file { read open } pair — the 4C-51 read widened in place by the 4C-52 open hook — beside the tmpfs_t:lnk_file { create read unlink } triple (the 4C-48 create + 4C-50 read widened in place by the 4C-53 unlink removal hook), the tmpfs_t:file { create write open mounton } grant (the 4C-54 create hook widened in place by the 4C-55 combined write|open boundary and the 4C-56 bind-mount mounton boundary) and the cgroup_t:dir mounton grant; the 4C-57 identity narrowing moved the payload's exec boundary off the generic bin_t label onto the private docker_helper_buildkitd_exec_t identity (the exact .fc relabel), and the 4C-58 grant is the private identity's ONE source-side execute permission (file:execute=0x4000, the kernel classmap's own decode pin) — the exec chain must ADVANCE past the granted hook (the process transition, the entrypoint, the loader hooks stay ungranted; the structural type_transition stays routing-only; any live buildkitd_t record is counted, never auto-interpreted as a successful transition); the confinement gate's PASS is this run's own re-proven precondition) ==="
   echo "POST-TUN-T0: ${POSTTUN_T0_EPOCH:-(not derived)}"
   echo "  derivation: trace-ts=$POSTTUN_T0_TRACE_TS attach-executor=${POSTTUN_ATTACH_WHO:-(none)} read-epoch=$POSTTUN_READ_EPOCH read-uptime=$POSTTUN_READ_UPTIME ring-last-ts=${POSTTUN_RING_LAST_TS:-(none)} clock-drift=${POSTTUN_CLOCK_DRIFT:-?}s"
   echo "--- the attach pair (the T0 anchor; the attach executor's own TUNSETIFF):"
@@ -5891,25 +5931,25 @@ REBUILD-STAGE=NOT-REACHED}"
     echo "MILESTONE: ROOTLESSKIT-ETC-RESOLV-BIND-MOUNT=NOT-REACHED (pair=$([ -n "$POSTTUN_RESOLVBIND_PAIR" ] && echo present || echo absent) ret=${POSTTUN_RESOLVBIND_RET:-(unpaired)} source-provenance=$([ "${POSTTUN_RESOLVBIND_SRCOK:-0}" = 1 ] && echo proven || echo unproven) continuation=$([ -n "$POSTTUN_RESOLVBIND_CONTINUATION" ] && echo present || echo absent) filemounton-denial=$([ -n "$POSTTUN_OLD_FILEMOUNTON_PRESENT" ] && echo PRESENT || echo absent))"
   fi
 
-  # The 4C-57 objective: the buildkitd exec identity narrowing (NOT a
-  # startup-progress phase — the syscall stays AT the exec boundary; the
-  # phase's success is the identity move, never an execution grant). The
-  # operation is the sys_execve window whose filename is EXACTLY the
-  # canonical buildkitd constant (/usr/libexec/docker-helper/buildkit/
-  # buildkitd — the manager's fixed RootlessKit argv target, no PATH
-  # lookup). The OLD 4C-56-era boundary (the generic bin_t:file execute
-  # denial) must be GONE: the shipped .fc relabels the payload to the
-  # private docker_helper_buildkitd_exec_t identity, so the same exec's
-  # SELinux decision now names the PRIVATE type — recorded live (the
-  # permission/mask is never assumed; the recorded mask/class is the
-  # boundary). The exec itself must FAIL (ret negative — the startup
-  # fails closed at the private boundary; a success would be an execution
-  # authority the zero-authority phase must never carry). No decision may
-  # name the docker_helper_buildkitd_t PROCESS domain either: the
-  # structural transition cannot fire without the transition/entrypoint
-  # permissions, and the domain stays unreachable (a buildkitd_t record
-  # would be an authority leak, not a boundary).
-  echo "--- the 4C-57 buildkitd exec objective (the exact sys_execve window onto the canonical buildkitd path; the enter/exit are the paired own records):"
+  # The 4C-58 objective: the source-side execution of the private
+  # BuildKitd executable. The 4C-58 grant (rootlesskit_t ->
+  # buildkitd_exec_t:file execute) must move the canonical execve
+  # window's own decision OFF the granted hook: the OLD private-file
+  # execute boundary (denied=0x4000, tcontext=docker_helper_buildkitd_exec_t,
+  # tclass=file — the 4C-57 run's live record, decode-pinned by the
+  # kernel classmap: file:rename=0x2000, file:execute=0x4000,
+  # file:quotaon=0x8000) must be GONE from the window, and the exec must
+  # ADVANCE — its ret is 0x0, or the window carries a NEW decision (the
+  # next exec-chain hook: the process transition, the entrypoint, the
+  # loader hooks — whatever the kernel names live). execve -> 0 is NOT
+  # required: the PASS is the boundary movement, not startup success.
+  # Nothing is pre-granted: the transition bundle stays closed (the
+  # structural type_transition remains routing-only), and any live
+  # docker_helper_buildkitd_t record is RECORDED, never auto-interpreted
+  # as a successful transition; when a target process context
+  # materializes, its MCS category must equal the source's (the live
+  # category-preservation proof; no range_transition is declared).
+  echo "--- the 4C-58 buildkitd exec objective (the exact sys_execve window onto the canonical buildkitd path; the enter/exit are the paired own records; ALL SELinux decisions inside the window are the exec chain's own mediation):"
   POSTTUN_BKD_EXEC_PAIR=""
   POSTTUN_BKD_EXEC_RET=""
   POSTTUN_BKD_EXEC_ENTER_TS=""
@@ -5934,69 +5974,130 @@ REBUILD-STAGE=NOT-REACHED}"
     POSTTUN_BKD_EXEC_EXIT_TS="$(printf '%s\n' "$POSTTUN_BKD_EXEC_PAIR" | tail -1 | awk '{ ts = $4; sub(/:$/, "", ts); print ts }' 2>/dev/null || true)"
     POSTTUN_BKD_EXEC_WHO="$(printf '%s\n' "$POSTTUN_BKD_EXEC_PAIR" | head -1 | awk '{print $1}' 2>/dev/null || true)"
   fi
-  echo "--- the SELinux decision INSIDE the exec window (the exec's own mediation; the mask/class is recorded live, never assumed):"
-  POSTTUN_BKD_EXEC_DECISION=""
-  POSTTUN_BKD_EXEC_TCTX_TYPE=""
-  POSTTUN_BKD_EXEC_MASK=""
-  POSTTUN_BKD_EXEC_TCLASS=""
+  echo "--- the SELinux decisions INSIDE the exec window (the exec chain's own mediation — every record, in order; the granted execute hook must NOT reappear here):"
+  POSTTUN_BKD_DECISIONS=""
+  POSTTUN_BKD_OLD_PRESENT=""
+  POSTTUN_BKD_NEW_DECISION=""
   if [ -n "$POSTTUN_BKD_EXEC_ENTER_TS" ] && [ -n "$POSTTUN_BKD_EXEC_EXIT_TS" ]; then
-    POSTTUN_BKD_EXEC_DECISION="$(awk -v a="$POSTTUN_BKD_EXEC_ENTER_TS" -v b="$POSTTUN_BKD_EXEC_EXIT_TS" -v who="$POSTTUN_BKD_EXEC_WHO" '
+    POSTTUN_BKD_DECISIONS="$(awk -v a="$POSTTUN_BKD_EXEC_ENTER_TS" -v b="$POSTTUN_BKD_EXEC_EXIT_TS" -v who="$POSTTUN_BKD_EXEC_WHO" '
       { ts = $4; sub(/:$/, "", ts)
         if (ts + 0 < a + 0 || ts + 0 > b + 0) next
         if ($1 != who) next
         if ($0 !~ /selinux_audited:/) next
-        print; exit
+        print
       }' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true)"
-    printf '%s\n' "${POSTTUN_BKD_EXEC_DECISION:-(none — no SELinux decision was recorded inside the exec window)}"
-    POSTTUN_BKD_EXEC_TCTX_FULL="$(printf '%s\n' "$POSTTUN_BKD_EXEC_DECISION" | grep -aoE 'tcontext=[^ ]+' | head -1 | cut -d= -f2 || true)"
-    POSTTUN_BKD_EXEC_TCTX_TYPE="$(printf '%s\n' "$POSTTUN_BKD_EXEC_TCTX_FULL" | sed -e 's/^[^:]*:[^:]*://' -e 's/:.*$//' || true)"
-    POSTTUN_BKD_EXEC_MASK="$(printf '%s\n' "$POSTTUN_BKD_EXEC_DECISION" | grep -aoE 'denied=0x[0-9a-fA-F]+' | head -1 | cut -d= -f2 || true)"
-    POSTTUN_BKD_EXEC_TCLASS="$(printf '%s\n' "$POSTTUN_BKD_EXEC_DECISION" | grep -aoE 'tclass=[a-z_0-9]+' | head -1 | cut -d= -f2 || true)"
-    echo "--- the boundary's symbolic decode (the audit slice's own records for the same shape; the kernel's own name):"
-    POSTTUN_BKD_SHAPE_AVC="$(grep -a 'type=AVC' "$EVIDENCE_DIR/09-avc-window.txt" 2>/dev/null | grep -a "tcontext=${POSTTUN_BKD_EXEC_TCTX_FULL:-NONE}" | grep -a 'denied' | head -3 || true)"
-    printf '%s\n' "${POSTTUN_BKD_SHAPE_AVC:-(none — the audit slice carries no same-shape record; the boundary stays raw, no symbolic name is claimed from any other source)}"
-    POSTTUN_BKD_BIN_IN_WINDOW=""
-    if [ -n "$POSTTUN_BKD_EXEC_ENTER_TS" ]; then
-      POSTTUN_BKD_BIN_IN_WINDOW="$(awk -v a="$POSTTUN_BKD_EXEC_ENTER_TS" -v b="$POSTTUN_BKD_EXEC_EXIT_TS" '
-        { ts = $4; sub(/:$/, "", ts)
-          if (ts + 0 < a + 0 || ts + 0 > b + 0) next
-          print }' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
-        | grep -a 'selinux_audited:' \
-        | grep -a 'scontext=system_u:system_r:docker_helper_rootlesskit_t' \
-        | grep -aE 'tcontext=system_u:object_r:bin_t:s0([ \t]|$)' \
-        | grep -a 'tclass=file' || true)"
-    fi
+    printf '%s\n' "${POSTTUN_BKD_DECISIONS:-(none — no SELinux decision was recorded inside the exec window)}"
+    # The OLD private-file execute boundary (the 4C-57 record's exact
+    # shape): tcontext=docker_helper_buildkitd_exec_t, tclass=file,
+    # denied=0x4000 — the kernel classmap's file:execute pin (rename
+    # 0x2000 / execute 0x4000 / quotaon 0x8000; the literal is
+    # edge-anchored so 0x40000-family masks never match). The record
+    # must be GONE from the window: the 4C-58 grant took effect.
+    POSTTUN_BKD_OLD_PRESENT="$(printf '%s\n' "$POSTTUN_BKD_DECISIONS" \
+      | grep -a 'scontext=system_u:system_r:docker_helper_rootlesskit_t' \
+      | grep -aE 'tcontext=system_u:object_r:docker_helper_buildkitd_exec_t:s0([ \t]|$)' \
+      | grep -a 'tclass=file' \
+      | grep -aE 'denied=0x4000([^0-9a-fA-F]|$)' || true)"
+    printf '%s\n' "${POSTTUN_BKD_OLD_PRESENT:-(none — the OLD private-file execute (0x4000) boundary is gone from the exec window)}"
+    # The generic bin_t negative stays: no bin_t:file decision inside
+    # the window (the relabel is not papered over).
+    POSTTUN_BKD_BIN_IN_WINDOW="$(printf '%s\n' "$POSTTUN_BKD_DECISIONS" \
+      | grep -a 'scontext=system_u:system_r:docker_helper_rootlesskit_t' \
+      | grep -aE 'tcontext=system_u:object_r:bin_t:s0([ \t]|$)' \
+      | grep -a 'tclass=file' || true)"
     printf '%s\n' "${POSTTUN_BKD_BIN_IN_WINDOW:-(none — no bin_t:file decision inside the exec window; the OLD generic boundary is gone from the exec path)}"
+    # The exec's advance: every in-window decision whose shape is NOT
+    # the old private-file execute boundary — the next hooks of the
+    # exec chain (the process transition, the entrypoint, ...),
+    # recorded live and never assumed.
+    POSTTUN_BKD_NEW_DECISION="$(printf '%s\n' "$POSTTUN_BKD_DECISIONS" \
+      | awk '
+          /selinux_audited:/ {
+            if ($0 ~ /tcontext=system_u:object_r:docker_helper_buildkitd_exec_t:s0([ \t]|$)/ \
+              && $0 ~ /tclass=file/ \
+              && $0 ~ /denied=0x4000([^0-9a-fA-F]|$)/) next
+            print
+          }' || true)"
+    printf '%s\n' "${POSTTUN_BKD_NEW_DECISION:-(none — no NEW decision inside the exec window; the advance must then come from ret=0x0)}"
   fi
-  # The OLD generic boundary gone-gate: scoped to the exec window (the
-  # old boundary was THE buildkitd exec denial on bin_t; a bin_t record
-  # inside that window means the .fc relabel did not converge — the
-  # §13 packaging failure shape, never compensated with allow rules).
+  # The OLD generic boundary gone-gate: scoped to the exec window (a
+  # bin_t:file record inside that window means the .fc relabel did not
+  # converge — the §13 packaging failure shape, never compensated with
+  # allow rules).
   POSTTUN_OLD_BINT_PRESENT=0
   if [ -n "$POSTTUN_BKD_BIN_IN_WINDOW" ]; then
     POSTTUN_OLD_BINT_PRESENT=1
   fi
-  # The buildkitd PROCESS domain must never appear anywhere in the
-  # window's trace span (the structural transition cannot fire without
-  # the transition/entrypoint permissions; a buildkitd_t record would be
-  # an authority leak, not a boundary). RECORDED as the negative
-  # inventory; the phase gate reads it below.
+  # The OLD private-file execute boundary (the 4C-57 record): if the
+  # 0x4000 buildkitd_exec_t:file denial is STILL inside the window, the
+  # 4C-58 grant did not take effect — the phase FAILS (no new phase, no
+  # rule widening; see the phase block and the RESULT wiring).
+  POSTTUN_OLD_BKD_EXEC_PRESENT=0
+  if [ -n "$POSTTUN_BKD_OLD_PRESENT" ]; then
+    POSTTUN_OLD_BKD_EXEC_PRESENT=1
+  fi
+  # The future buildkitd domain records (the 4C-58 §12 contract):
+  # every trace record in the window's span naming
+  # docker_helper_buildkitd_t as scontext OR tcontext (the exec type's
+  # own records excluded), COUNTED and printed with their exact fields.
+  # A tcontext=buildkitd_t record is the kernel's own transition-target
+  # computation reaching an AVC — NOT a successful transition (the
+  # transition permission stays ungranted); an scontext=buildkitd_t
+  # record would be a live process context. Neither is interpreted
+  # automatically; the MCS check below applies to whatever appears.
   POSTTUN_BKD_DOMAIN_RECORDS="$(grep -a 'docker_helper_buildkitd_t' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -av 'docker_helper_buildkitd_exec_t' || true)"
-  printf '%s\n' "${POSTTUN_BKD_DOMAIN_RECORDS:-(none — no docker_helper_buildkitd_t record in the window trace span)}"
+  POSTTUN_BKD_DOMAIN_N="$(printf '%s\n' "${POSTTUN_BKD_DOMAIN_RECORDS:-}" | grep -ac . || true)"
+  [ -n "$POSTTUN_BKD_DOMAIN_RECORDS" ] || POSTTUN_BKD_DOMAIN_N=0
+  echo "--- the future docker_helper_buildkitd_t domain records (the §12 counter; a tcontext record is the transition-target computation reaching an AVC, NOT a successful transition; an scontext record would be a live process context):"
+  echo "BUILDKITD-DOMAIN-RECORDS=$POSTTUN_BKD_DOMAIN_N"
+  printf '%s\n' "${POSTTUN_BKD_DOMAIN_RECORDS:-(none — no docker_helper_buildkitd_t record in the window trace span; the future domain is still unreachable)}"
+  # The MCS category preservation (the 4C-58 §13 contract): whenever a
+  # buildkitd_t context materializes in the span (either side), its
+  # category set must equal the source flow's category set (the
+  # canonical first-op category c1). A mismatch BLOCKS the phase — and
+  # must never be compensated with broad grants or a pre-declared
+  # range_transition.
+  POSTTUN_BKD_MCS_OK=1
+  POSTTUN_BKD_MCS_NOTE="(no buildkitd_t context materialized — the category check has nothing to compare)"
+  BKD_SRC_CAT="$(printf '%s\n' "$POSTTUN_BKD_DECISIONS" | grep -aoE 'scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:[^ \t]*' | head -1 | sed 's/.*s0//' || true)"
+  if [ -n "$POSTTUN_BKD_DOMAIN_RECORDS" ]; then
+    BKD_DOM_CTX="$(printf '%s\n' "$POSTTUN_BKD_DOMAIN_RECORDS" | grep -aoE '[st]context=system_u:system_r:docker_helper_buildkitd_t:s0:[^ \t]*' | head -1 || true)"
+    BKD_DOM_CAT="$(printf '%s\n' "$BKD_DOM_CTX" | sed 's/.*s0//' || true)"
+    BKD_FLOW_CAT="$(printf '%s\n' "$BKD_SRC_CAT" | sed 's/^.*rootlesskit_t//' || true)"
+    if [ -n "$BKD_DOM_CAT" ] && [ -n "$BKD_FLOW_CAT" ] && [ "$BKD_DOM_CAT" != "$BKD_FLOW_CAT" ]; then
+      POSTTUN_BKD_MCS_OK=0
+      POSTTUN_BKD_MCS_NOTE="MISMATCH: the buildkitd_t context carries ${BKD_DOM_CAT:-(none)} while the source flow carries $BKD_FLOW_CAT"
+    elif [ -n "$BKD_DOM_CAT" ]; then
+      POSTTUN_BKD_MCS_NOTE="preserved: the buildkitd_t context's category ${BKD_DOM_CAT} equals the source flow's category ${BKD_FLOW_CAT}"
+    else
+      POSTTUN_BKD_MCS_NOTE="the buildkitd_t record carries no category component to compare (recorded as-is)"
+    fi
+    echo "  MCS: $POSTTUN_BKD_MCS_NOTE"
+  fi
+  # The milestone gate (the 4C-58 §10/§19 contract): the canonical
+  # execve window exists, the OLD private-file execute (0x4000) boundary
+  # is GONE from it, the generic bin_t negative holds, and the exec
+  # ADVANCED — ret 0x0, or a NEW in-window decision (the next exec-chain
+  # hook, whatever the kernel names live).
   POSTTUN_BKD_EXEC_OK=0
   if [ -n "$POSTTUN_BKD_EXEC_PAIR" ] \
-    && [ "$POSTTUN_BKD_EXEC_RET" != "0x0" ] \
-    && [ "$POSTTUN_BKD_EXEC_TCTX_TYPE" = "docker_helper_buildkitd_exec_t" ] \
-    && [ "$POSTTUN_BKD_EXEC_TCLASS" = "file" ] \
+    && [ "$POSTTUN_OLD_BKD_EXEC_PRESENT" = 0 ] \
     && [ -z "$POSTTUN_BKD_BIN_IN_WINDOW" ] \
-    && [ -z "$POSTTUN_BKD_DOMAIN_RECORDS" ]; then
+    && { [ "$POSTTUN_BKD_EXEC_RET" = "0x0" ] || [ -n "$POSTTUN_BKD_NEW_DECISION" ]; }; then
     POSTTUN_BKD_EXEC_OK=1
   fi
   if [ "$POSTTUN_BKD_EXEC_OK" = 1 ]; then
-    echo "MILESTONE: ROOTLESSKIT-BUILDKITD-EXEC-IDENTITY=NARROWED — the canonical buildkitd execve window's own SELinux decision names the PRIVATE exec identity (tcontext=$POSTTUN_BKD_EXEC_TCTX_FULL tclass=$POSTTUN_BKD_EXEC_TCLASS denied=${POSTTUN_BKD_EXEC_MASK:-(unmasked)}), the exec FAILED (ret=$POSTTUN_BKD_EXEC_RET — the startup fails closed at the private boundary), the OLD generic bin_t boundary is gone from the exec window, and no docker_helper_buildkitd_t record exists (the structural transition cannot fire):"
+    if [ -n "$POSTTUN_BKD_NEW_DECISION" ]; then
+      POSTTUN_BKD_ADVANCE="a new in-window decision is live (the next exec-chain hook)"
+    else
+      POSTTUN_BKD_ADVANCE="ret 0x0 — the exec syscall itself returned"
+    fi
+    echo "MILESTONE: ROOTLESSKIT-BUILDKITD-SOURCE-EXECUTE=OK — the granted file:execute hook (0x4000) no longer denies inside the canonical buildkitd execve window (the OLD private boundary is GONE) and the exec ADVANCED past the granted hook: $POSTTUN_BKD_ADVANCE"
     printf '%s\n' "  the exec: who=$POSTTUN_BKD_EXEC_WHO path=/usr/libexec/docker-helper/buildkit/buildkitd ret=$POSTTUN_BKD_EXEC_RET (enter trace-ts=$POSTTUN_BKD_EXEC_ENTER_TS exit=$POSTTUN_BKD_EXEC_EXIT_TS)"
+    printf '%s\n' "  the in-window decisions: $(printf '%s\n' "$POSTTUN_BKD_DECISIONS" | grep -ac . || true) record(s)"
+    printf '%s\n' "  the domain records: BUILDKITD-DOMAIN-RECORDS=$POSTTUN_BKD_DOMAIN_N; MCS: $POSTTUN_BKD_MCS_NOTE"
   else
-    echo "MILESTONE: ROOTLESSKIT-BUILDKITD-EXEC-IDENTITY=NOT-NARROWED (pair=$([ -n "$POSTTUN_BKD_EXEC_PAIR" ] && echo present || echo absent) ret=${POSTTUN_BKD_EXEC_RET:-(unpaired)} decision-tctx-type=${POSTTUN_BKD_EXEC_TCTX_TYPE:-(none)} tclass=${POSTTUN_BKD_EXEC_TCLASS:-(none)} bin-t-in-window=$([ -n "$POSTTUN_BKD_BIN_IN_WINDOW" ] && echo PRESENT || echo absent) buildkitd-domain-records=$([ -n "$POSTTUN_BKD_DOMAIN_RECORDS" ] && echo PRESENT || echo absent))"
+    echo "MILESTONE: ROOTLESSKIT-BUILDKITD-SOURCE-EXECUTE=NOT-REACHED (pair=$([ -n "$POSTTUN_BKD_EXEC_PAIR" ] && echo present || echo absent) ret=${POSTTUN_BKD_EXEC_RET:-(unpaired)} old-0x4000-present=$POSTTUN_OLD_BKD_EXEC_PRESENT bin-t-in-window=$([ -n "$POSTTUN_BKD_BIN_IN_WINDOW" ] && echo PRESENT || echo absent) new-in-window-decision=$([ -n "$POSTTUN_BKD_NEW_DECISION" ] && echo PRESENT || echo absent))"
   fi
 
   # The gates.
@@ -6435,30 +6536,73 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
       marker "4C-56=INCOMPLETE/MILESTONE-NOT-REACHED"
     fi
   fi
-  # The 4C-57 phase block: the IDENTITY-NARROWING proof (deliberately
-  # NOT a startup-progress phase — the syscall stays at the exec
-  # boundary; §11). The PASS contract: the OLD generic bin_t boundary is
-  # GONE from the canonical buildkitd exec window (the relabel moved the
-  # payload off the distro label), the exec window carries exactly the
-  # canonical buildkitd path, the window's own SELinux decision names the
-  # PRIVATE exec identity (docker_helper_buildkitd_exec_t, tclass=file —
-  # the mask recorded live, never assumed), the exec FAILED closed, and
-  # no buildkitd_t process record exists (the structural transition
-  # cannot fire — zero execution authority).
+  # The 4C-57 standing re-proof: the identity narrowing HOLDS under the
+  # 4C-58 grant — the installed payload's label is the private exec type
+  # (the preflight's convergence gate) and no generic bin_t:file
+  # decision appears inside the canonical exec window (the old generic
+  # boundary stays gone; the relabel is never papered over). The
+  # narrowed identity's own 0x4000 execute hook is now GRANTED (the
+  # 4C-58 authority), so the window's own decision no longer names it —
+  # the standing proof is the label + the bin_t absence, not the old
+  # denial's shape.
   if [ "$POSTTUN_OLD_BINT_PRESENT" = 1 ]; then
     POSTTUN_4C57_PHASE_OK=0
     marker "4C-57-OLD-BIN-T-BOUNDARY=STILL-PRESENT"
     marker "4C-57=BLOCKED/IDENTITY-NOT-CONVERGED"
-  else
+  elif [ "${RK_BKD_LABEL_OK:-1}" = 1 ]; then
+    POSTTUN_4C57_PHASE_OK=1
     marker "OLD-BUILDKITD-BIN-T-BOUNDARY=GONE"
-    if [ "$POSTTUN_BKD_EXEC_OK" = 1 ]; then
-      POSTTUN_4C57_PHASE_OK=1
-      marker "ROOTLESSKIT-BUILDKITD-EXEC-IDENTITY=NARROWED"
-      marker "4C-57=PASS/IDENTITY-NARROWED"
+    marker "ROOTLESSKIT-BUILDKITD-EXEC-IDENTITY=NARROWED"
+    marker "4C-57=PASS/IDENTITY-NARROWED"
+  else
+    POSTTUN_4C57_PHASE_OK=0
+    marker "OLD-BUILDKITD-BIN-T-BOUNDARY=GONE"
+    marker "4C-57=INCOMPLETE/IDENTITY-PROOF-INCOMPLETE"
+  fi
+  # The 4C-58 phase block: the source-side execution of the private
+  # BuildKitd executable (the FIRST real execution authority for the
+  # private identity). The PASS contract: the OLD private-file execute
+  # boundary (0x4000) is GONE from the canonical exec window, the exec
+  # ADVANCED (ret 0x0 or a new in-window decision — the next exec-chain
+  # hook, live-proven and never pre-granted), the generic bin_t
+  # execution stays ABSENT, the future domain's live records are
+  # counted (never auto-interpreted as a successful transition), and
+  # whenever a buildkitd_t context materializes its MCS category must
+  # equal the source flow's (no range_transition is declared in
+  # advance; a category loss BLOCKS the phase with no broad-grant
+  # compensation).
+  if [ "$POSTTUN_OLD_BKD_EXEC_PRESENT" = 1 ]; then
+    POSTTUN_4C58_PHASE_OK=0
+    marker "4C-58-OLD-EXEC-BOUNDARY=STILL-PRESENT"
+    marker "4C-58=FAIL/EXECUTE-GRANT-NOT-EFFECTIVE"
+  else
+    marker "OLD-BUILDKITD-EXEC-BOUNDARY=GONE"
+    marker "ROOTLESSKIT-GENERIC-BIN-EXECUTION=ABSENT"
+    marker "BUILDKITD-DOMAIN-RECORDS=$POSTTUN_BKD_DOMAIN_N"
+    if [ "$POSTTUN_BKD_MCS_OK" != 1 ]; then
+      POSTTUN_4C58_PHASE_OK=0
+      marker "4C-58=BLOCKED/MCS-CATEGORY-NOT-PRESERVED"
+    elif [ "$POSTTUN_BKD_EXEC_OK" = 1 ]; then
+      POSTTUN_4C58_PHASE_OK=1
+      marker "ROOTLESSKIT-BUILDKITD-SOURCE-EXECUTE=OK"
+      if [ "$POSTTUN_BKD_EXEC_RET" = "0x0" ] && [ -z "$POSTTUN_FIRST_FAIL_PID" ]; then
+        marker "POSTTUN-BKD-RESULTING-DOMAIN=$([ "$POSTTUN_BKD_DOMAIN_N" != 0 ] && echo proven || echo not-proven)"
+        marker "4C-58-OUTCOME=POST-TUN-LIFETIME-STABLE"
+        marker "TARGET-LIFETIME-BLOCKER=GONE"
+        marker "POST-TUN-LIFETIME=STABLE"
+        marker "4C-58=PASS/POST-TUN-LIFETIME-STABLE"
+      elif [ "$POSTTUN_BKD_EXEC_RET" = "0x0" ]; then
+        marker "POSTTUN-BKD-RESULTING-DOMAIN=$([ "$POSTTUN_BKD_DOMAIN_N" != 0 ] && echo proven || echo not-proven)"
+        marker "4C-58-OUTCOME=EXEC-RETURNED-LIFETIME-FAILED"
+        marker "4C-58=PASS/NEXT-BOUNDARY-CONFIRMED"
+      else
+        marker "4C-58-OUTCOME=NEXT-STARTUP-BOUNDARY-CONFIRMED"
+        marker "4C-58=PASS/NEXT-BOUNDARY-CONFIRMED"
+      fi
     else
-      POSTTUN_4C57_PHASE_OK=0
-      marker "ROOTLESSKIT-BUILDKITD-EXEC-IDENTITY=NOT-NARROWED"
-      marker "4C-57=INCOMPLETE/EXEC-WINDOW-NOT-CAPTURED"
+      POSTTUN_4C58_PHASE_OK=0
+      marker "ROOTLESSKIT-BUILDKITD-SOURCE-EXECUTE=NOT-REACHED"
+      marker "4C-58=INCOMPLETE/EXEC-WINDOW-NOT-CAPTURED"
     fi
   fi
   marker "4C-38=PROVEN/PRIMARY-BOUNDARY-ESTABLISHED"
@@ -8310,6 +8454,30 @@ if [ "$I9_OK" = 1 ]; then
   fi
   if [ "${POSTTUN_ESTABLISHED:-0}" = 1 ] && [ "${POSTTUN_4C57_PHASE_OK:-0}" != 1 ]; then
     marker "BLOCKER=the 4C-57 buildkitd exec identity did not narrow (see 53-posttun-verdict.txt; the accepted PASS contract requires the private-boundary capture — the canonical exec window's own decision naming docker_helper_buildkitd_exec_t and the failed-closed exec)"
+    finish INCOMPLETE
+    exit 0
+  fi
+  if [ "${POSTTUN_OLD_BKD_EXEC_PRESENT:-0}" = 1 ]; then
+    # The 4C-58 FAIL shape: the granted execute hook still denies inside
+    # the canonical exec window — the grant did not take effect on the
+    # loaded policy. A phase FAIL, not a new phase; no rule widening.
+    marker "4C-58=FAIL/EXECUTE-GRANT-NOT-EFFECTIVE"
+    marker "BLOCKER=the canonical buildkitd exec window still carries the private buildkitd_exec_t:file execute (0x4000) denial — the 4C-58 grant did not take effect on the loaded policy (see 53-posttun-verdict.txt)"
+    finish INCOMPLETE
+    exit 0
+  fi
+  if [ "${POSTTUN_BKD_MCS_OK:-1}" != 1 ]; then
+    # The §13 shape: a buildkitd_t context materialized with a category
+    # set different from the source flow's. The phase is BLOCKED; the
+    # loss must never be compensated with broad grants or a pre-declared
+    # range_transition.
+    marker "4C-58=BLOCKED/MCS-CATEGORY-NOT-PRESERVED"
+    marker "BLOCKER=the buildkitd_t context materialized with a category set different from the source flow's (see 53-posttun-verdict.txt; no broad-grant or range_transition compensation)"
+    finish INCOMPLETE
+    exit 0
+  fi
+  if [ "${POSTTUN_ESTABLISHED:-0}" = 1 ] && [ "${POSTTUN_4C58_PHASE_OK:-0}" != 1 ]; then
+    marker "BLOCKER=the 4C-58 source-execute milestone did not reach OK (see 53-posttun-verdict.txt; the accepted PASS contract requires the old private 0x4000 boundary GONE from the canonical exec window and the exec's own advance — ret 0x0 or a new in-window decision)"
     finish INCOMPLETE
     exit 0
   fi

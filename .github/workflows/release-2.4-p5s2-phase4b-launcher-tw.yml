@@ -47,16 +47,19 @@ jobs:
           # package payload destination) move that SAME production exec
           # boundary onto the private identity, and the ONE pointed
           # type_transition records the routing map
-          # (rootlesskit_t:s0:cX -> exec -> buildkitd_t:s0:cX). NO
-          # permission is granted: no execute/execute_no_trans on the exec
-          # type from any domain, no transition/entrypoint permission, no
-          # capability/cap_userns surface, no range_transition — the
-          # runtime keeps FAILING CLOSED, now at the private boundary; the
-          # narrowed boundary is captured live by this run and owns 4C-58
-          # (the proof ref advances from the 4C-56-era pin to the commit
-          # carrying that module; identical Go sources, so the binary is
-          # the same program).
-          PHASE4B_PROOF_REF: '8bd35fd41048b5d7ab60ecf4ebbb0ec3765b835a'
+          # (rootlesskit_t:s0:cX -> exec -> buildkitd_t:s0:cX). The 4C-58
+          # phase grants the private identity's ONE source-side execute
+          # permission (file:execute=0x4000, the kernel classmap's own
+          # decode pin) and NOTHING else: no execute_no_trans, no
+          # read/open/getattr/map, no process transition (the structural
+          # type_transition stays routing-only), no entrypoint, no
+          # capability/cap_userns, no range_transition — the transition
+          # bundle is deliberately NOT finished; the exec chain must
+          # advance past the granted hook and the next live boundary owns
+          # 4C-59 (the proof ref advances from the 4C-57-era pin to the
+          # commit carrying that module; identical Go sources, so the
+          # binary is the same program).
+          PHASE4B_PROOF_REF: '70b91746850a19927c807aa4f874361e7ff5837f'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
