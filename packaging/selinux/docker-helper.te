@@ -2270,15 +2270,18 @@ allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };
 #     LIVE in the transition phase, never assumed from SELinux semantics,
 #     and NO range_transition is declared in advance.
 #
-# THE 4C-58 DELTA — THE ONE SOURCE-SIDE EXECUTE PERMISSION:
-#   allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file execute;
-# (the rule lives below, immediately after the routing declaration; its
-# evidence comment carries the boundary record and the decode pin.)
+# THE 4C-58 + 4C-59 DELTAS — THE SOURCE-SIDE EXEC CHAIN GRANTS:
+#   4C-58: allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file execute;
+#   4C-59: the SAME rule widened IN PLACE to { execute read open } —
+#     exactly ONE allow rule still names the exec type; the widened form
+#     lives below, immediately after the routing declaration; its
+#     evidence comment carries the boundary records and the decode pins.
 #
 # STILL DELIBERATELY ABSENT (each is a separate live-evidence phase):
-#   - execute_no_trans, read, open, getattr, map on the exec type from
-#     the flow (the 4C-58 grant is the ONE execute hook, nothing else —
-#     no "finishing the domain-transition bundle" in advance);
+#   - execute_no_trans, getattr, map on the exec type from the flow
+#     (the 4C-59 grant is the exec chain's own execute+image-read hooks,
+#     nothing else — no "finishing the domain-transition bundle" in
+#     advance);
 #   - rootlesskit_t -> buildkitd_t:process transition (the structural
 #     type_transition below stays ROUTING-ONLY — the transition
 #     permission remains ungranted, so the next live blocker may be the
@@ -2292,11 +2295,12 @@ allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };
 #   - any generic bin_t execution bundle for the flow (the narrowed
 #     private identity must never be papered over with a generic grant;
 #     the old generic boundary stays gone via the relabel).
-# The runtime therefore still fails closed — the 4C-57 private-file
-# execute hook (0x4000) is now GRANTED, and the startup advances to the
-# next hook of the exec chain, wherever the kernel's own live boundary
-# moves (the process transition, the entrypoint, the loader hooks —
-# live evidence only; the harness captures the new terminal boundary).
+# The runtime therefore still fails closed — the 4C-58 execute hook and
+# the 4C-59 image-read hooks are now GRANTED, and the startup advances to
+# the next hook of the exec chain, wherever the kernel's own live
+# boundary moves (the process transition, the entrypoint, the loader
+# hooks — live evidence only; the harness captures the new terminal
+# boundary).
 #
 # buildctl and buildkit-runc stay SEPARATE future executable boundaries:
 # the .fc carries NO rule for them, no directory regex covers the
@@ -2312,7 +2316,8 @@ role system_r types docker_helper_buildkitd_t;
 # so no execution can reach docker_helper_buildkitd_t through this edge.
 type_transition docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:process docker_helper_buildkitd_t;
 
-# --- 4C-58: the source-side execute permission on the private identity ---
+# --- 4C-58 + 4C-59: the source-side execute + executable-image read/open
+# --- permissions on the private identity ---
 #
 # The 4C-57 canonical run's (37432307266) boundary record, live inside the
 # canonical execve window:
@@ -2326,19 +2331,35 @@ type_transition docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:proce
 #     tclass=file
 #   exe-36357 351.480940 sys_execve -> 0xfffffffffffffff3
 #
-# The mask decode pin (the kernel's static classmap numbering, NOT the
+# The 4C-58 canonical run's (37437472526) boundary record, the SAME execve
+# window one stage deeper:
+#
+#   exe-30590 276.722761 sys_execve(
+#     "/usr/libexec/docker-helper/buildkit/buildkitd", ...)
+#   exe-30590 276.722781 selinux_audited: requested=0x40002
+#     denied=0x40002 audited=0x40002 result=-13
+#     scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+#     tcontext=system_u:object_r:docker_helper_buildkitd_exec_t:s0
+#     tclass=file
+#   exe-30590 276.722805 sys_execve -> 0xfffffffffffffff3
+#
+# The mask decode pins (the kernel's static classmap numbering, NOT the
 # loaded policy's perms-file numbering — the latter stays a recorded
 # interface fact, never the AVC decoder): file:rename=0x2000,
-# file:execute=0x4000, file:quotaon=0x8000 — the same kernel-side layout
-# whose members are live-proven across the staircase: read=0x2, write=0x4,
-# create=0x8, getattr=0x10, unlink=0x800, mounton=0x10000,
-# audit_access=0x20000, open=0x40000. The 4C-57 boundary's denied=0x4000
-# is therefore exactly file:execute on the private identity, and this
-# rule grants EXACTLY that permission — nothing else.
+# file:execute=0x4000, file:quotaon=0x8000, file:open=0x40000,
+# file:read=0x2 — the same kernel-side layout whose members are
+# live-proven across the staircase (getattr=0x10, unlink=0x800,
+# mounton=0x10000, audit_access=0x20000). The 4C-58 boundary's
+# denied=0x40002 is therefore exactly file:{ read open } — the
+# executable-IMAGE read stage of the exec chain (the kernel, past the
+# granted execute hook, reads the ELF image through the bprm file) —
+# and the 4C-59 widening grants EXACTLY that pair, in ONE phase (both
+# permissions live-proven by the one decision; not split 59a/59b).
 #
-# THE GRANT IS EXACTLY { execute } — the source-side execute hook only:
-#   - no execute_no_trans, no read/open/getattr/map (the exec-side
-#     object hooks stay ungranted);
+# THE GRANT IS EXACTLY { execute read open } — the exec chain's own
+# hooks only:
+#   - no execute_no_trans, no getattr/map (the object-side exec hooks
+#     stay ungranted);
 #   - no process transition toward docker_helper_buildkitd_t (the
 #     structural type_transition above stays routing-only);
 #   - no entrypoint from the target side, no range_transition, no
@@ -2347,7 +2368,7 @@ type_transition docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:proce
 # Scope caveat: type-wide TE authority on the product's own executable
 # identity (exact-path, product-scoped — NOT operation-scoped): the
 # cross-operation gate stays OPEN/Critical.
-allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file execute;
+allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute read open };
 
 # --- docker_helper_slirp4netns_t: the rootlesskit user-network helper domain (P5-S2) ---
 #
