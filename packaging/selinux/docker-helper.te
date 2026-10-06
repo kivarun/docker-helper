@@ -2298,9 +2298,14 @@ allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };
 #     shared root plane was passed live and the category handoff c1 ->
 #     c1 was proven; the runtime died at the state-tree getattr hook):
 #     allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir getattr;
-#     (the state-tree search stays RECORDED/NON-OWNING — the process
-#     proceeded past it and died at the getattr hook; every remaining
-#     hook stays a separate live-evidence phase).
+#     (the state-tree search stayed RECORDED/NON-OWNING at the 4C-65
+#     grant — the process proceeded past it and died at the getattr
+#     hook);
+#   4C-66: the SAME rule widened IN PLACE by the 4C-65 canonical run's
+#     own terminal state-tree search boundary (ONE rule, never split;
+#     the 4C-65 getattr stays):
+#     allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search };
+#     (every remaining hook stays a separate live-evidence phase).
 #
 # STILL DELIBERATELY ABSENT (each is a separate live-evidence phase):
 #   - siginh, noatsecure, rlimitinh, dyntransition, setexec on the
@@ -2318,11 +2323,12 @@ allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };
 #     helper-domains' shape) is NOT copied — BuildKitd's remaining hooks
 #     are its own live-evidence phases, and a static binary needs no
 #     loader surface at all);
-#   - buildkitd_t -> builder_state_t:dir search/read/open/write/create/
-#     add_name/remove_name/setattr/rmdir/mounton/lock (the 4C-65 grant
-#     is the ONE getattr permission — the 4C-64 run's terminal-causal
-#     owner; the state-tree search records stay RECORDED/NON-OWNING —
-#     the process proceeded past them and died at the getattr hook;
+#   - buildkitd_t -> builder_state_t:dir read/open/write/create/
+#     add_name/remove_name/setattr/rmdir/mounton/lock (the 4C-65/66
+#     grants are exactly { getattr search } on the ONE rule — the 4C-65
+#     getattr is the 4C-64 run's terminal-causal owner, the 4C-66 search
+#     is the 4C-65 canonical run's own terminal 0x20000000 boundary;
+#     every remaining permission is its own live-evidence phase;
 #     nothing on builder_state_t's other classes, nothing on the
 #     sibling root/runtime types, and every other quarantined surface
 #     stays ungranted);
@@ -2696,15 +2702,20 @@ allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr
 # (418.702648), but the process proceeded past it and died at the
 # getattr hook — live-observed is NOT automatically grantable;
 #   grantable now = live + terminal-causal owner
-# — so THIS rule grants exactly the terminal-causal getattr. search
-# stays DELIBERATELY UNGRANTED and serves as the next boundary-canary
-# (its own live terminal proof — if the getattr grant moves the failure
-# onto it — would make it a separate 4C-66 candidate; a combined
-# { getattr search } rule is explicitly NOT written).
+# — so the 4C-65 rule granted exactly the terminal-causal getattr and
+# search stayed DELIBERATELY UNGRANTED as the next boundary-canary.
+# THE 4C-65 CANONICAL RUN (37505792611, attempt 3) RESOLVED THE CANARY:
+# the getattr grant took effect (zero state-tree getattr denials in the
+# whole span) and the SAME pair's search hook became the span's own
+# terminal buildkitd decision — the first load-bearing boundary after
+# the getattr grant — so the 4C-66 widening below is that live
+# terminal-causal search grant (never a repeat-count conversion, never
+# a combined-form shortcut: the 4C-65 rule itself was widened IN PLACE).
 #
-# THE GRANT IS EXACTLY { getattr } — metadata-only on the categorized
-# per-operation state directory:
-#   - no search/read/open/write/create/add_name/remove_name/setattr/
+# THE 4C-65 GRANT WAS EXACTLY { getattr } — metadata-only on the
+# categorized per-operation state directory (the 4C-66 widening adds
+# exactly search — see the 4C-66 block after the rule):
+#   - no read/open/write/create/add_name/remove_name/setattr/
 #     rmdir/mounton/lock (each its own live-evidence phase);
 #   - nothing on builder_state_t:file/lnk_file or any other class of the
 #     per-op tree, nothing on the sibling root/runtime types
@@ -2733,7 +2744,79 @@ allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr
 # effect (a c1 subject cannot reach a c2 per-op tree — the cross-
 # operation reachability proof (4C-37) stays mandatory and the
 # cross-operation gate stays OPEN/Critical until it holds).
-allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir getattr;
+
+# --- 4C-66: the categorized operation-state dir search — the 4C-65 rule
+# --- widened IN PLACE (ONE rule, never split) ---
+#
+# The 4C-65 canonical run's (37505792611, attempt 3) terminal record,
+# live at the END of the buildkitd process's own lifetime (the 4C-65
+# getattr grant took effect — zero state-tree getattr denials in the
+# whole span — and the SAME pair's search hook became the terminal):
+#
+#   buildkitd-47073 433.960248 selinux_audited: requested=0x20000000
+#     denied=0x20000000 audited=0x20000000 result=-13
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:docker_helper_builder_state_t:s0:c1
+#     tclass=dir
+#
+# The terminal canonical record sits INSIDE the fatal production
+# syscall — the EEXIST-verification lstat the 4C-64 run died at:
+#   sys_newfstatat(op_path, AT_SYMLINK_NOFOLLOW)
+#     enter 433.960243 -> decision 433.960248 -> exit 433.960259
+#     (the anchor; the 418.702711-equivalent of this run)
+# and the same pair's search denied DURING the preceding mkdirat walk
+# (433.960222 -> decision 433.960229 -> exit -13 EACCES; the 4C-64 run's
+# mkdirat returned -17 EEXIST — the new outcome is itself forward
+# evidence that the getattr grant moved the boundary deeper into the
+# same walk). Two more same-pair search records support the surface
+# (433.959552 — its producing syscall's own records were not captured;
+# 433.960229) and do not enlarge it.
+#
+# THE MASK DECODE PIN (the kernel's static classmap numbering, NOT the
+# loaded policy's perms-file numbering): 0x20000000 = search (bit 29,
+# dir-only) — the SAME bit the 4C-64 state-root widening pinned; the
+# granted getattr stays 0x10 (bit 4). The negative discrimination is
+# pinned by the owner test: 0x10={ getattr }, 0x20000000={ search },
+# 0x20000010={ getattr search }, 0x4={ write } (the dir write bit —
+# pinned so the 4C-65 deliverable's tmp_t:dir 0x4 prose misdecode as
+# getattr cannot re-enter the machinery) — none equals another.
+#
+# THE WIDENING IS IN PLACE — the 4C-65 rule becomes exactly
+# { getattr search }, the delta is exactly +search:
+#   - no read/open/write/create/add_name/remove_name/setattr/
+#     rmdir/mounton/lock (each its own live-evidence phase; the
+#     execution-map speculation about future state-tree operations
+#     grants NOTHING);
+#   - nothing on builder_state_t:file/lnk_file or any other class of
+#     the per-op tree, nothing on the sibling root/runtime types
+#     (builder_state_root_t, builder_runtime_root_t, builder_runtime_t),
+#     and nothing on any quarantined surface (tmp_t:dir write, the
+#     fifos, nsfs, cgroup, sysctl_fs, sysfs, passwd_file,
+#     buildkitd_exec_t:file open — repeat count never converts a
+#     non-terminal denial into authority);
+#   - no process/process2 permission, no capability/cap_userns, no
+#     range_transition;
+#   - the frozen planes stay frozen: the three exec planes (the source
+#     { execute read open }, the transition { transition }, the target
+#     { entrypoint read execute }), the shared state-root rule (exactly
+#     { getattr search }), and the standing RootlessKit state-tree
+#     rule { search getattr read open write add_name remove_name lock }
+#     (a different subject and a different owner).
+# MCS: the TE rule encodes NO categories — the rule is the bare pair;
+# the c1 -> c1 admissibility stays the existing constraints' job (both
+# domains are proven mcs_constrained_type members; the 4C-64/65 handoff
+# records are the live provenance of the own-category pair). The
+# op_<id> directory's own label is proven separately (the kernel-label
+# sampler's first/last/all read-backs and the live stat, all
+# builder_state_t:s0:c1) — never inferred from an AVC's tcontext.
+# SCOPE — READ CAREFULLY: the rule is type-wide TE authority
+# (buildkitd_t -> EVERY builder_state_t:dir getattr+search), NOT
+# path-scoped; the MCS category constraints are what keep it
+# operation-scoped in effect (a c1 subject cannot reach a c2 per-op
+# tree — the cross-operation reachability proof (4C-37) stays
+# mandatory and the cross-operation gate stays OPEN/Critical until it
+# holds).
+allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search };
 
 # --- 4C-62: the target-side image-load boundary — the 4C-61 rule widened
 # --- IN PLACE (ONE rule, never split) ---
