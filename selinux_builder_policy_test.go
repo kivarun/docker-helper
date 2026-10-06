@@ -4388,22 +4388,22 @@ func TestSELinuxPolicyRootlesskitIsolation(t *testing.T) {
 // authority planes, each owned separately (never coalesced into one "exec
 // bundle"):
 //
-//	A. the source executable surface: rootlesskit_t ->
-//	   buildkitd_exec_t:file — exactly the { execute read open } rule;
-//	B. the process transition surface: rootlesskit_t ->
-//	   buildkitd_t:process — exactly the bare { transition } rule;
-//   C. the target executable surface: buildkitd_t ->
-//      buildkitd_exec_t:file — exactly the { entrypoint read execute }
-//      rule (the 4C-61 entrypoint widened IN PLACE by the 4C-62
-//      combined image-load boundary, ONE rule on one pair, never split;
-//      the conventional entry bundle is NOT copied).
-//	- any other allow rule naming a buildkitd type (any source, any
-//	  target, any class, any permission set) violates;
-//	- the rootlesskit child holds no bin_t:file grant; its exec/transition
-//	  surfaces toward the standing sibling identities stay exactly the
-//	  existing owners' rules (a re-granted subset line duplicates an
-//	  existing owner);
-//	- no range_transition may exist anywhere.
+//		A. the source executable surface: rootlesskit_t ->
+//		   buildkitd_exec_t:file — exactly the { execute read open } rule;
+//		B. the process transition surface: rootlesskit_t ->
+//		   buildkitd_t:process — exactly the bare { transition } rule;
+//	  C. the target executable surface: buildkitd_t ->
+//	     buildkitd_exec_t:file — exactly the { entrypoint read execute }
+//	     rule (the 4C-61 entrypoint widened IN PLACE by the 4C-62
+//	     combined image-load boundary, ONE rule on one pair, never split;
+//	     the conventional entry bundle is NOT copied).
+//		- any other allow rule naming a buildkitd type (any source, any
+//		  target, any class, any permission set) violates;
+//		- the rootlesskit child holds no bin_t:file grant; its exec/transition
+//		  surfaces toward the standing sibling identities stay exactly the
+//		  existing owners' rules (a re-granted subset line duplicates an
+//		  existing owner);
+//		- no range_transition may exist anywhere.
 func buildkitdIdentityViolations(policy string) []string {
 	const canonicalExec = "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute read open };"
 	const canonicalTransition = "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;"
