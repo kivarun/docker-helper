@@ -2105,8 +2105,8 @@ RK_BKD_LABEL_OK=1
   if [ "$BKD_SRC_ALLOW_COUNT" != "3" ] \
     || [ "$(printf '%s\n' "$BKD_SRC_ALLOW_LINES" | grep -acF 'allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute read open };' || true)" != "1" ] \
     || [ "$(printf '%s\n' "$BKD_SRC_ALLOW_LINES" | grep -acF 'allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;' || true)" != "1" ] \
-    || [ "$(printf '%s\n' "$BKD_SRC_ALLOW_LINES" | grep -acF 'allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file entrypoint;' || true)" != "1" ]; then
-    echo "  STOP: the module source's buildkitd allow surface is not exactly the source-exec triple + the bare transition grant + the bare target-domain entrypoint grant"
+    || [ "$(printf '%s\n' "$BKD_SRC_ALLOW_LINES" | grep -acF 'allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute };' || true)" != "1" ]; then
+    echo "  STOP: the module source's buildkitd allow surface is not exactly the source-exec triple + the bare transition grant + the target-domain { entrypoint read execute } grant"
     BKD_ZERO_ALLOW_OK=0
   fi
   for s in docker_helper_t docker_helper_builder_t docker_helper_builder_launcher_t \
@@ -2250,7 +2250,7 @@ RK_BKD_LABEL_OK=1
   if [ "$BKD_TRANS_OK" = 1 ] && [ "$BKD_ZERO_ALLOW_OK" = 1 ] && [ "$BKD_BIN_CLOSED_OK" = 1 ]; then
     echo "PASS: the buildkitd authority holds the 4C-61 three-plane shape (both types declared — the ONE type_transition naming the pair is the loaded-policy proof; PLANE A: the module's rootlesskit child file surface is exactly { execute read open }, one rule; PLANE B: the rootlesskit child's domain surface is exactly the bare transition rule, one rule, the conventional bundle closed per-perm; PLANE C: the buildkitd domain's own exec-type surface is exactly the bare entrypoint rule, one rule, the conventional entry bundle closed per-perm; ZERO other concrete allow rules naming a buildkitd type from any module subject; the generic bin_t bundle stays closed)"
   else
-    echo "FAIL: the buildkitd exec authority is not the shipped 4C-61 shape (transition=$BKD_TRANS_OK source-surface=$BKD_ZERO_ALLOW_OK bin-closed=$BKD_BIN_CLOSED_OK)"
+    echo "FAIL: the buildkitd exec authority is not the shipped 4C-62 shape (transition=$BKD_TRANS_OK source-surface=$BKD_ZERO_ALLOW_OK bin-closed=$BKD_BIN_CLOSED_OK)"
     PREFLIGHT_OK=0
   fi
   if [ "$BKD_LABEL_OK" = 1 ]; then
