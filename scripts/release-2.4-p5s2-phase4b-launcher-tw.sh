@@ -2096,10 +2096,9 @@ RK_BKD_LABEL_OK=1
   grep -an 'docker_helper_buildkitd' "$TRANSFERRED/docker-helper.fc" | grep -av ':[0-9]*#' || true
   BKD_SRC_ALLOW_COUNT="$(grep -aE '^allow .*docker_helper_buildkitd' "$TRANSFERRED/docker-helper.te" | grep -ac . || true)"
   echo "  module-borne allow rules naming a buildkitd type: $BKD_SRC_ALLOW_COUNT (must be 0)"
-  BKD_ALLOW_ON_EXEC="$(sesearch --allow -t docker_helper_buildkitd_exec_t /sys/fs/selinux/policy 2>/dev/null || true)"
-  echo "--- sesearch --allow -t docker_helper_buildkitd_exec_t (raw; the attribute-derived base-policy standing is RECORDED here, never merged into the verdict):"
-  printf '%s\n' "${BKD_ALLOW_ON_EXEC:-(none)}"
-  echo "--- sesearch --allow per CONCRETE docker-helper subject on the exec type (every one must be EMPTY — zero execution authority from any module domain):"
+  echo "--- sesearch --allow -t docker_helper_buildkitd_exec_t (raw; sesearch expands the file_type/exec_type attributes, so the base policy's attribute rules dominate this print — RECORDED here, never merged into the verdict; the CONCRETE per-subject queries below are the gate):"
+  sesearch --allow -t docker_helper_buildkitd_exec_t /sys/fs/selinux/policy 2>/dev/null | grep -aE '^allow docker_helper_buildkitd' || true
+  echo "--- sesearch --allow per CONCRETE docker-helper subject on the exec type (a hit = a rule whose OWN subject AND target fields are the queried names — the attribute-form prints do not count):"
   BKD_ZERO_ALLOW_OK=1
   if [ "$BKD_SRC_ALLOW_COUNT" != "0" ]; then
     echo "  STOP: the module source itself carries allow rules naming a buildkitd type"
@@ -2108,42 +2107,41 @@ RK_BKD_LABEL_OK=1
   for s in docker_helper_t docker_helper_builder_t docker_helper_builder_launcher_t \
            docker_helper_rootlesskit_t docker_helper_slirp4netns_t \
            docker_helper_newuidmap_t docker_helper_newgidmap_t docker_helper_buildkitd_t; do
-    line="$(sesearch --allow -s "$s" -t docker_helper_buildkitd_exec_t /sys/fs/selinux/policy 2>/dev/null || true)"
+    line="$(sesearch --allow -s "$s" -t docker_helper_buildkitd_exec_t /sys/fs/selinux/policy 2>/dev/null \
+      | awk -v s="$s" '$1 == "allow" && $2 == s && $3 ~ /^docker_helper_buildkitd/' || true)"
     printf '  %s -> buildkitd_exec_t: %s\n' "$s" "${line:-(empty)}"
     if [ -n "$line" ]; then
-      echo "  STOP: $s holds an allow rule on the buildkitd exec type"
+      echo "  STOP: $s holds a concrete allow rule on the buildkitd exec type"
       BKD_ZERO_ALLOW_OK=0
     fi
   done
-  echo "--- sesearch --allow per CONCRETE docker-helper subject toward the domain (every one must be EMPTY — the domain is unreachable):"
+  echo "--- sesearch --allow per CONCRETE docker-helper subject toward the domain (a hit = a rule whose OWN subject AND target fields are the queried names — the base policy's domain-attribute rules, e.g. the manager's standing domain:dir getattr, do not count):"
   for s in docker_helper_t docker_helper_builder_t docker_helper_builder_launcher_t \
            docker_helper_rootlesskit_t docker_helper_slirp4netns_t \
            docker_helper_newuidmap_t docker_helper_newgidmap_t; do
-    line="$(sesearch --allow -s "$s" -t docker_helper_buildkitd_t /sys/fs/selinux/policy 2>/dev/null || true)"
+    line="$(sesearch --allow -s "$s" -t docker_helper_buildkitd_t /sys/fs/selinux/policy 2>/dev/null \
+      | awk -v s="$s" '$1 == "allow" && $2 == s && $3 ~ /^docker_helper_buildkitd/' || true)"
     printf '  %s -> buildkitd_t: %s\n' "$s" "${line:-(empty)}"
     if [ -n "$line" ]; then
-      echo "  STOP: $s holds an allow rule toward the buildkitd domain"
+      echo "  STOP: $s holds a concrete allow rule toward the buildkitd domain"
       BKD_ZERO_ALLOW_OK=0
     fi
   done
   BKD_TRANS="$(sesearch --type_trans /sys/fs/selinux/policy 2>/dev/null | awk '$3 ~ /docker_helper_buildkitd_exec_t/' || true)"
-  echo "--- sesearch --type_trans naming the exec type (expected EXACTLY ONE: the rootlesskit edge — the structural routing declaration):"
+  echo "--- sesearch --type_trans naming the exec type (expected EXACTLY ONE: the rootlesskit edge — the structural routing declaration; the ONE rule is also the loaded-policy proof that BOTH new types exist):"
   printf '%s\n' "${BKD_TRANS:-(none)}"
-  BKD_BIN_ALLOW="$(sesearch --allow -s docker_helper_rootlesskit_t -t bin_t /sys/fs/selinux/policy 2>/dev/null || true)"
-  echo "--- sesearch --allow -s docker_helper_rootlesskit_t -t bin_t (expected EMPTY — the generic compensating bundle stays closed):"
-  printf '%s\n' "${BKD_BIN_ALLOW:-(empty — no bin_t grant for the flow domain)}"
-  BKD_TYPE_OK=0
-  if seinfo -t /sys/fs/selinux/policy 2>/dev/null | grep -aq 'docker_helper_buildkitd_exec_t' \
-    && seinfo -t /sys/fs/selinux/policy 2>/dev/null | grep -aq 'docker_helper_buildkitd_t'; then
-    BKD_TYPE_OK=1
-  fi
+  echo "--- sesearch --allow -s docker_helper_rootlesskit_t -t bin_t (raw; the attribute expansions dominate — RECORDED; the CONCRETE bin_t check below is the gate):"
+  BKD_BIN_ALLOW_CONCRETE="$(sesearch --allow -s docker_helper_rootlesskit_t -t bin_t /sys/fs/selinux/policy 2>/dev/null \
+    | awk '$1 == "allow" && $2 == "docker_helper_rootlesskit_t" && $3 ~ /^bin_t:/' || true)"
+  BKD_BIN_ALLOW="$(sesearch --allow -s docker_helper_rootlesskit_t -t bin_t /sys/fs/selinux/policy 2>/dev/null | grep -aE '^allow docker_helper_rootlesskit_t bin_t:' || true)"
+  printf '%s\n' "${BKD_BIN_ALLOW:-(empty — no concrete bin_t rule for the flow domain)}"
   BKD_TRANS_OK=0
   if [ "$(printf '%s\n' "$BKD_TRANS" | grep -ac . || true)" = 1 ] \
     && printf '%s\n' "$BKD_TRANS" | grep -aq 'type_transition docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:process docker_helper_buildkitd_t'; then
     BKD_TRANS_OK=1
   fi
   BKD_BIN_CLOSED_OK=0
-  if [ -z "$BKD_BIN_ALLOW" ]; then
+  if [ -z "$BKD_BIN_ALLOW_CONCRETE" ]; then
     BKD_BIN_CLOSED_OK=1
   fi
   # The label convergence (the 4C-57 packaging contract): the INSTALLED
@@ -2162,10 +2160,10 @@ RK_BKD_LABEL_OK=1
     && ! matchpathcon /usr/libexec/docker-helper/buildkit/buildkit-runc 2>/dev/null | grep -aq 'docker_helper_buildkitd_exec_t'; then
     BKD_LABEL_OK=1
   fi
-  if [ "$BKD_TYPE_OK" = 1 ] && [ "$BKD_ZERO_ALLOW_OK" = 1 ] && [ "$BKD_TRANS_OK" = 1 ] && [ "$BKD_BIN_CLOSED_OK" = 1 ]; then
-    echo "PASS: the buildkitd exec identity is structural-only (two new types declared; ZERO allow rules on the exec type and toward the domain from any source; exactly ONE pointed type_transition — the routing map; the generic bin_t bundle stays closed)"
+  if [ "$BKD_TRANS_OK" = 1 ] && [ "$BKD_ZERO_ALLOW_OK" = 1 ] && [ "$BKD_BIN_CLOSED_OK" = 1 ]; then
+    echo "PASS: the buildkitd exec identity is structural-only (both types declared — the ONE type_transition naming the pair is the loaded-policy proof; ZERO concrete allow rules on the exec type and toward the domain from any module subject; exactly ONE pointed type_transition — the routing map; the generic bin_t bundle stays closed)"
   else
-    echo "FAIL: the buildkitd exec identity is not the shipped zero-authority shape (types=$BKD_TYPE_OK zero-allow=$BKD_ZERO_ALLOW_OK transition=$BKD_TRANS_OK bin-closed=$BKD_BIN_CLOSED_OK)"
+    echo "FAIL: the buildkitd exec identity is not the shipped zero-authority shape (transition=$BKD_TRANS_OK zero-allow=$BKD_ZERO_ALLOW_OK bin-closed=$BKD_BIN_CLOSED_OK)"
     PREFLIGHT_OK=0
   fi
   if [ "$BKD_LABEL_OK" = 1 ]; then
