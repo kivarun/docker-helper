@@ -2096,21 +2096,22 @@ RK_BKD_LABEL_OK=1
   grep -an 'docker_helper_buildkitd' "$TRANSFERRED/docker-helper.fc" | grep -av ':[0-9]*#' || true
   BKD_SRC_ALLOW_COUNT="$(grep -aE '^allow .*docker_helper_buildkitd' "$TRANSFERRED/docker-helper.te" | grep -ac . || true)"
   BKD_SRC_ALLOW_LINES="$(grep -aE '^allow .*docker_helper_buildkitd' "$TRANSFERRED/docker-helper.te" || true)"
-  echo "  module-borne allow rules naming a buildkitd type: $BKD_SRC_ALLOW_COUNT (must be 2)"
+  echo "  module-borne allow rules naming a buildkitd type: $BKD_SRC_ALLOW_COUNT (must be 3)"
   printf '%s\n' "$BKD_SRC_ALLOW_LINES" | sed 's/^/  the rule: /'
   echo "--- sesearch --allow -t docker_helper_buildkitd_exec_t (raw; sesearch expands the file_type/exec_type attributes, so the base policy's attribute rules dominate this print — RECORDED here, never merged into the verdict; the CONCRETE per-subject queries below are the gate):"
   sesearch --allow -t docker_helper_buildkitd_exec_t /sys/fs/selinux/policy 2>/dev/null | grep -aE '^allow docker_helper_buildkitd' || true
-  echo "--- sesearch --allow per CONCRETE docker-helper subject on the exec type (a hit = a rule whose OWN subject AND target fields are the queried names — the attribute-form prints do not count; the rootlesskit child must carry EXACTLY the one { execute read open } rule, every other subject must stay empty):"
+  echo "--- sesearch --allow per CONCRETE docker-helper subject on the exec type (a hit = a rule whose OWN subject AND target fields are the queried names — the attribute-form prints do not count; the rootlesskit child must carry EXACTLY the one { execute read open } rule, the buildkitd domain must carry EXACTLY the one bare entrypoint rule, every other subject must stay empty):"
   BKD_ZERO_ALLOW_OK=1
-  if [ "$BKD_SRC_ALLOW_COUNT" != "2" ] \
+  if [ "$BKD_SRC_ALLOW_COUNT" != "3" ] \
     || [ "$(printf '%s\n' "$BKD_SRC_ALLOW_LINES" | grep -acF 'allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute read open };' || true)" != "1" ] \
-    || [ "$(printf '%s\n' "$BKD_SRC_ALLOW_LINES" | grep -acF 'allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;' || true)" != "1" ]; then
-    echo "  STOP: the module source's buildkitd allow surface is not exactly the source-exec triple + the bare transition grant"
+    || [ "$(printf '%s\n' "$BKD_SRC_ALLOW_LINES" | grep -acF 'allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;' || true)" != "1" ] \
+    || [ "$(printf '%s\n' "$BKD_SRC_ALLOW_LINES" | grep -acF 'allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file entrypoint;' || true)" != "1" ]; then
+    echo "  STOP: the module source's buildkitd allow surface is not exactly the source-exec triple + the bare transition grant + the bare target-domain entrypoint grant"
     BKD_ZERO_ALLOW_OK=0
   fi
   for s in docker_helper_t docker_helper_builder_t docker_helper_builder_launcher_t \
            docker_helper_slirp4netns_t \
-           docker_helper_newuidmap_t docker_helper_newgidmap_t docker_helper_buildkitd_t; do
+           docker_helper_newuidmap_t docker_helper_newgidmap_t; do
     line="$(sesearch --allow -s "$s" -t docker_helper_buildkitd_exec_t /sys/fs/selinux/policy 2>/dev/null \
       | awk -v s="$s" '$1 == "allow" && $2 == s && $3 ~ /^docker_helper_buildkitd/' || true)"
     printf '  %s -> buildkitd_exec_t: %s\n' "$s" "${line:-(empty)}"
