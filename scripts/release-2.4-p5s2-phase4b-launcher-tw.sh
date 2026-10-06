@@ -2138,12 +2138,13 @@ RK_BKD_LABEL_OK=1
     echo "  STOP: the rootlesskit child's concrete surface on the exec type is not exactly { execute read open }"
     BKD_ZERO_ALLOW_OK=0
   fi
-  echo "--- sesearch --allow per-perm NEGATIVES on the pair (each must be empty — no forbidden extra source-exec permission):"
+  echo "--- sesearch --allow per-perm NEGATIVES on the pair (each must be empty — no forbidden extra source-exec permission; the filter is CONCRETE-rule-only: sesearch expands the source's domain attribute and the target's file_type attribute, so the base policy's attribute rules — e.g. allow domain file_type:file map; [ domain_can_mmap_files ]:True — print here but are the RECORDED standing surface, never the module's contribution):"
   for p in getattr map execute_no_trans entrypoint; do
-    extra="$(sesearch --allow -s docker_helper_rootlesskit_t -t docker_helper_buildkitd_exec_t -c file -p "$p" /sys/fs/selinux/policy 2>/dev/null | awk '$1 == "allow"' || true)"
-    printf '  %s: %s\n' "$p" "${extra:-(empty)}"
+    extra="$(sesearch --allow -s docker_helper_rootlesskit_t -t docker_helper_buildkitd_exec_t -c file -p "$p" /sys/fs/selinux/policy 2>/dev/null \
+      | awk '$1 == "allow" && $2 == "docker_helper_rootlesskit_t" && $3 ~ /^docker_helper_buildkitd/' || true)"
+    printf '  %s: %s\n' "$p" "${extra:-(empty — no concrete rule)}; the expanded attribute standing: $(sesearch --allow -s docker_helper_rootlesskit_t -t docker_helper_buildkitd_exec_t -c file -p "$p" /sys/fs/selinux/policy 2>/dev/null | grep -av "^allow docker_helper_rootlesskit_t" | grep -ac . || true) attribute-form line(s)"
     if [ -n "$extra" ]; then
-      echo "  STOP: the forbidden permission $p is present on the source-exec pair"
+      echo "  STOP: the forbidden permission $p is present on the source-exec pair (concrete)"
       BKD_ZERO_ALLOW_OK=0
     fi
   done
