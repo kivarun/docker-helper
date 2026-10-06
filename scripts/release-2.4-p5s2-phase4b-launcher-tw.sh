@@ -2278,19 +2278,21 @@ RK_BKD_LABEL_OK=1
       BKD_ZERO_ALLOW_OK=0
     fi
   done
-  echo "--- PLANE E standing-owner companion check (the OTHER subjects' builder_state_t:dir rules are their own owners; each subject's effective dir surface must stay EXACTLY its standing perm set — the 4C-65 grant must not have touched them; the comparison is the NORMALIZED sorted perm union, never the source spelling; the LOADED-policy rule count is the CIL-merged shape: semodule/CIL merges allow rules sharing the (source, target, class) triple into ONE printed rule carrying the union — run 37503445663's red observation — so the counts below are PRINTED-rule counts, not source-line counts; the init_t owner's subject is the BASE type init_t, not docker_helper_init_t):"
+  echo "--- PLANE E standing-owner companion check (the OTHER subjects' builder_state_t:dir rules are their own owners; each subject's CONCRETE dir surface must stay EXACTLY its standing perm set — the 4C-65 grant must not have touched them; the comparison is the NORMALIZED sorted perm union, never the source spelling; the LOADED-policy rule count is the CIL-merged shape: semodule/CIL merges allow rules sharing the (source, target, class) triple into ONE printed rule carrying the union — run 37503445663's red observation — so the counts below are PRINTED-rule counts, not source-line counts; the init_t owner's subject is the BASE type init_t, not docker_helper_init_t; ONLY the concrete-target lines count here (the written target names the builder_state type) — attribute-derived base-policy surfaces (run 37504704675's red observation: init_t's file_type-attribute dir authority printed beside the module rule and a naive '^allow ' count saw it) are STANDING FACTS printed beside the comparison and never merged into it):"
   for spec in \
     "init_t:create remove_name rmdir setattr write:1" \
     "docker_helper_builder_t:add_name create getattr open read relabelto remove_name rmdir search setattr write:1" \
     "docker_helper_rootlesskit_t:add_name getattr lock open read remove_name search write:1" ; do
     s="${spec%%:*}"; rest="${spec#*:}"; want="${rest%:*}"; wantn="${rest##*:}"
-    raw="$(sesearch --allow -s "$s" -t docker_helper_builder_state_t -c dir /sys/fs/selinux/policy 2>/dev/null | grep -aE '^allow ' || true)"
+    raw_full="$(sesearch --allow -s "$s" -t docker_helper_builder_state_t -c dir /sys/fs/selinux/policy 2>/dev/null | grep -aE '^allow ' || true)"
+    printf '  %s: the full effective surface (attribute-derived standing facts included, RECORDED never merged):\n%s\n' "$s" "${raw_full:-(empty)}"
+    raw="$(printf '%s\n' "${raw_full:-}" | awk '$1 == "allow" && $3 == "docker_helper_builder_state_t:dir"' || true)"
     n="$(printf '%s\n' "${raw:-}" | grep -ac . || true)"
     [ -n "$raw" ] || n=0
     got="$(printf '%s\n' "${raw:-}" | awk '{ for (i = 4; i <= NF; i++) { p = $i; gsub(/[{};]/, "", p); if (p != "") print p } }' | sort -u | tr '\n' ' ' | sed 's/ $//')"
-    printf '  %s: rules=%s effective-union={ %s }\n' "$s" "$n" "${got:-(empty)}"
+    printf '  %s: concrete rules=%s concrete-union={ %s }\n' "$s" "$n" "${got:-(empty)}"
     if [ "$n" != "$wantn" ] || [ "$got" != "$want" ]; then
-      echo "  STOP: the standing state-tree owner $s drifted (want rules=$wantn { $want })"
+      echo "  STOP: the standing state-tree owner $s drifted (want concrete rules=$wantn { $want })"
       BKD_ZERO_ALLOW_OK=0
     else
       echo "  $s: the standing owner unchanged"
