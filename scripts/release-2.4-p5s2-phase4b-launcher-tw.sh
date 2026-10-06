@@ -800,7 +800,7 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
       G_LASTPID=0
       G_DO_FULL=1
     fi
-    if [ "$G_DO_FULL" = 1 ]; then
+    if [ "$G_DO_FULL" = 1 ] && { [ "${#GSEEN[@]}" -eq 0 ] || [ "${G_LAST_ALIVE:-0}" -eq 0 ]; }; then
       # BACKWARD full scan (the newest pids first): the re-exec
       # discovery tier reads the same /proc set in newest-first order,
       # so a long-lived flow-comm pid whose comm changed in place is
@@ -812,6 +812,16 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
       # (the canonical 4C-54 runs 37358199605/37360622771 shapes), and
       # any pre-arm flow-comm leftover is still covered by the first
       # regular full tick at tick 40.
+      # The 4C-55 correction (reproduced run 37412271327): the full
+      # 4000-pid sweep under the launch fork storm IS a multi-hundred-
+      # millisecond stall — the 206ms tick gap of that run swallowed
+      # the dance pid whole lifetime (born 311.443, dead 311.605 on the
+      # trace clock; the covering scan arrived after the death). The
+      # full-scan tier now runs ONLY while the flow domain is empty:
+      # the pre-arm/pre-launch re-exec retry keeps its cadence, and
+      # during the flow own lifetime the born-since tier (plus the
+      # tail re-scan below) owns every new pid — the launch-window
+      # storm pids never wait behind a full sweep.
       for GPC in $(printf '%s\n' /proc/[0-9]* | sed 's|.*/||' | sort -rn | sed 's|^|/proc/|'); do
         g_flow_pid "$GPC"
       done
@@ -906,7 +916,12 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
     fi
     # The tracked-pids pass: the aliveness (the comm file's readability
     # bounds the death between ticks), the tick record, and the
-    # mountinfo change capture for the rootlesskit_t pids.
+    # mountinfo change capture for the rootlesskit_t pids (the capture
+    # is budgeted per tick — the launch storm changes every holder's
+    # mount table at once, and the unbounded dump load stretched the
+    # tick cadence past the dance pid lifetime, run 37412271327; the
+    # item-E proof is the trace pair, the captures stay best-effort).
+    GMI_CAPS=0
     for GPID in "${!GSEEN[@]}"; do
       if [ -r "/proc/$GPID/comm" ]; then
         G_ALIVE=$(( G_ALIVE + 1 ))
@@ -914,18 +929,22 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
           "$GTS" "$GPID" "${GCOMM[$GPID]}" "${GNSM[$GPID]}" "${GSTIME[$GPID]}"
         case "${GCTX[$GPID]:-}" in
           *docker_helper_rootlesskit_t:*)
-            GMINFO=""
-            IFS= read -r -d '' GMINFO < "/proc/$GPID/mountinfo" 2>/dev/null || true
-            if [ -n "$GMINFO" ] && [ "$GMINFO" != "${GMI[$GPID]:-}" ]; then
-              GMI[$GPID]="$GMINFO"
-              printf '%s GATE-MOUNTINFO pid=%s lines=%s\n' "$GTS" "$GPID" \
-                "$(printf '%s\n' "$GMINFO" | grep -ac . || true)"
-              printf '%s\n' "$GMINFO" | sed 's/^/    GATE-MOUNTINFO-LINE /'
+            if [ "$GMI_CAPS" -lt 4 ]; then
+              GMINFO=""
+              IFS= read -r -d '' GMINFO < "/proc/$GPID/mountinfo" 2>/dev/null || true
+              if [ -n "$GMINFO" ] && [ "$GMINFO" != "${GMI[$GPID]:-}" ]; then
+                GMI_CAPS=$(( GMI_CAPS + 1 ))
+                GMI[$GPID]="$GMINFO"
+                printf '%s GATE-MOUNTINFO pid=%s lines=%s\n' "$GTS" "$GPID" \
+                  "$(printf '%s\n' "$GMINFO" | grep -ac . || true)"
+                printf '%s\n' "$GMINFO" | sed 's/^/    GATE-MOUNTINFO-LINE /'
+              fi
             fi
             ;;
         esac
       fi
     done
+    G_LAST_ALIVE="$G_ALIVE"
     # The defensive ns/mnt re-check (~once per second of ticks): the
     # flow namespaces are born fresh and never transitioned in any
     # recorded run; the re-check keeps the GATE-NSMNT transition record
