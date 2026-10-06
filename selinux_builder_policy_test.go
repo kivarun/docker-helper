@@ -4398,11 +4398,11 @@ func TestSELinuxPolicyRootlesskitIsolation(t *testing.T) {
 //	     combined image-load boundary, ONE rule on one pair, never split;
 //	     the conventional entry bundle is NOT copied);
 //	  D. the shared state-root surface: buildkitd_t ->
-//	     builder_state_root_t:dir — exactly the bare { getattr } rule
-//	     (the 4C-62 run's terminal-causal owner; the state-root search
-//	     records stay RECORDED/NON-OWNING — live-observed is not
-//	     automatically grantable, and a combined { search getattr } rule
-//	     is never written).
+//	     builder_state_root_t:dir — exactly the ONE { getattr search }
+//	     rule (the 4C-63 getattr widened IN PLACE by the 4C-63 canonical
+//	     run's own terminal search boundary, ONE rule on one pair, never
+//	     split; the standing RootlessKit state-root search rule is a
+//	     different subject and a different owner and stays untouched).
 //			- any other allow rule naming a buildkitd type (any source, any
 //			  target, any class, any permission set) violates;
 //			- the rootlesskit child holds no bin_t:file grant; its exec/transition
@@ -4414,7 +4414,7 @@ func buildkitdIdentityViolations(policy string) []string {
 	const canonicalExec = "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute read open };"
 	const canonicalTransition = "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;"
 	const canonicalEntry = "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute };"
-	const canonicalStateRoot = "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir getattr;"
+	const canonicalStateRoot = "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search };"
 	standingRootlesskitExecRules := map[string]string{
 		"docker_helper_rootlesskit_exec_t": "allow docker_helper_rootlesskit_t docker_helper_rootlesskit_exec_t:file { entrypoint read open execute execute_no_trans getattr map };",
 		"docker_helper_slirp4netns_exec_t": "allow docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:file { execute read open getattr };",
@@ -4464,7 +4464,7 @@ func buildkitdIdentityViolations(policy string) []string {
 		}
 	}
 	if stateRootCount != 1 {
-		violations = append(violations, fmt.Sprintf("the buildkitd state-root getattr grant must exist exactly once in the exact canonical form, found %d: %s", stateRootCount, canonicalStateRoot))
+		violations = append(violations, fmt.Sprintf("the buildkitd state-root { getattr search } grant must exist exactly once in the exact canonical form, found %d: %s", stateRootCount, canonicalStateRoot))
 	}
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -4709,8 +4709,10 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		t.Error("the missing-entrypoint mutation must trip the buildkitd authority invariants")
 	}
 
-	// The 4C-63 state-root plane: exactly the bare getattr rule, once.
-	const canonicalStateRoot = "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir getattr;"
+	// The 4C-64 state-root plane: exactly the ONE { getattr search }
+	// rule, once (the 4C-63 getattr widened IN PLACE by the 4C-63
+	// canonical run's own terminal search boundary).
+	const canonicalStateRoot = "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search };"
 	var withoutStateRoot []string
 	stateRootCount := 0
 	for _, line := range strings.Split(policy, "\n") {
@@ -4722,7 +4724,7 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		withoutStateRoot = append(withoutStateRoot, line)
 	}
 	if stateRootCount != 1 {
-		t.Errorf("the buildkitd state-root getattr grant must exist exactly once, found %d", stateRootCount)
+		t.Errorf("the buildkitd state-root { getattr search } grant must exist exactly once, found %d", stateRootCount)
 	}
 	if violations := buildkitdIdentityViolations(strings.Join(withoutStateRoot, "\n")); len(violations) == 0 {
 		t.Error("the missing-state-root mutation must trip the buildkitd authority invariants")
@@ -4805,29 +4807,35 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		{"reordered brace form of the target rule", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { execute entrypoint read };"},
 		{"split target grant", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file entrypoint;\nallow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { read execute };"},
 		{"duplicate of the target-side rule", canonicalEntry},
-		// the 4C-63 state-root plane (the terminal-causal getattr only;
-		// the missing-rule case is covered by the withoutStateRoot removal above)
-		{"search instead of getattr", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir search;"},
-		{"getattr+search combined", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search };"},
+		// the 4C-64 state-root plane (the ONE { getattr search } rule; the
+		// missing-rule case is covered by the withoutStateRoot removal above)
+		{"the old 4C-63 bare getattr form (missing search)", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir getattr;"},
+		{"search-only (missing getattr)", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir search;"},
+		{"missing search (bare-getattr shape)", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr };"},
+		{"missing getattr (search-only shape)", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { search };"},
 		{"read instead", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir read;"},
 		{"open instead", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir open;"},
 		{"write instead", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir write;"},
-		{"getattr + read", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr read };"},
-		{"getattr + open", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr open };"},
-		{"getattr + write", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr write };"},
-		{"getattr + add_name", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr add_name };"},
-		{"getattr + remove_name", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr remove_name };"},
-		{"getattr + create", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr create };"},
-		{"getattr + setattr", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr setattr };"},
-		{"getattr + rmdir", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr rmdir };"},
-		{"getattr + mounton", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr mounton };"},
-		{"getattr + lock", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr lock };"},
+		{"third permission read", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search read };"},
+		{"third permission open", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search open };"},
+		{"third permission write", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search write };"},
+		{"third permission setattr", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search setattr };"},
+		{"third permission add_name", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search add_name };"},
+		{"third permission remove_name", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search remove_name };"},
+		{"third permission create", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search create };"},
+		{"third permission rmdir", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search rmdir };"},
+		{"third permission mounton", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search mounton };"},
+		{"third permission lock", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search lock };"},
 		{"state-root grant from the wrong source", "allow docker_helper_rootlesskit_t docker_helper_builder_state_root_t:dir getattr;"},
-		{"state-root grant toward the wrong target", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir getattr;"},
-		{"state-root grant on the wrong class", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:file getattr;"},
-		{"brace equivalent of the state-root rule", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr };"},
+		{"state-root grant from the wrong source (the pair form)", "allow docker_helper_rootlesskit_t docker_helper_builder_state_root_t:dir { getattr search };"},
+		{"state-root grant toward the wrong target (builder_state_t)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search };"},
+		{"state-root grant toward the wrong target (builder_runtime_root_t)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir { getattr search };"},
+		{"state-root grant toward the wrong target (builder_runtime_t)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search };"},
+		{"state-root grant on the wrong class", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:file { getattr search };"},
 		{"reordered brace form of the state-root rule", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { search getattr };"},
-		{"split state-root grant", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir search;\nallow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir getattr;"},
+		{"parallel bare getattr rule beside the canonical pair", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir getattr;"},
+		{"parallel bare search rule beside the canonical pair", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir search;"},
+		{"split state-root grant", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir getattr;\nallow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir search;"},
 		{"duplicate of the state-root rule", canonicalStateRoot},
 		// parallel / split / duplicate / order shapes
 		{"split grant (execute; then read open)", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file execute;\nallow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { read open };"},
@@ -5113,6 +5121,19 @@ func TestSELinuxPolicyKernelClassmapMaskPins(t *testing.T) {
 	}
 	if got := dirDecode(0x20000000); samePerms(got, []string{"getattr"}) {
 		t.Errorf("kernel classmap decode: dir mask 0x20000000 must not decode to { getattr }, got %v", got)
+	}
+	// The 4C-64 combined dir-class decode: decode(dir, 0x20000010) ==
+	// exactly { getattr search } — the ONE widened rule's two bits must
+	// decode together, and neither single-bit shape may equal the pair
+	// (0x20000010 != { search }, 0x20000010 != { getattr }).
+	if got := dirDecode(0x20000010); !samePerms(got, []string{"getattr", "search"}) {
+		t.Errorf("kernel classmap decode: dir mask 0x20000010 must decode to exactly { getattr search }, got %v", got)
+	}
+	if got := dirDecode(0x20000010); samePerms(got, []string{"search"}) {
+		t.Errorf("kernel classmap decode: dir mask 0x20000010 must not decode to { search } alone, got %v", got)
+	}
+	if got := dirDecode(0x20000010); samePerms(got, []string{"getattr"}) {
+		t.Errorf("kernel classmap decode: dir mask 0x20000010 must not decode to { getattr } alone, got %v", got)
 	}
 }
 
