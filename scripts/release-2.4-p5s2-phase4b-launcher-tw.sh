@@ -4961,6 +4961,16 @@ POSTTUN_BND_SYMBOLIC=""
     echo "  the exact openat window: no SELinux decision (a silent success is not decision-proven for the resolved object's label; with the pair granted no hook decision is expected here — the resolved object's own label provenance is the 4C-50/4C-51 boundary records' tcontext)"
   fi
   # The fd's own read stream (the reads' rets, the EOF read, the close).
+  # The 4C-56 correction (reproduced run 37416993997): rootlesskit's
+  # worker THREADS share the process fd table — the opener thread
+  # (exe-30998) was preempted by SIGURG right after the openat and the
+  # read continuation executed in the sibling thread (exe-30975): the
+  # reads (0x200 + 0xa2 bytes, the 0x0 EOF read) and the close are the
+  # SAME process fd's stream. The stream is therefore NOT scoped to the
+  # opener thread: any exe-* task's read on the hosts fd between the
+  # openat and the fd's own close belongs to the stream (the fd table
+  # is the process's); the first close of that fd number bounds the
+  # window.
   POSTTUN_HOSTS_FD=""
   POSTTUN_HOSTS_FD_OK=0
   case "$POSTTUN_HOSTSOPEN_RET" in
@@ -4974,14 +4984,13 @@ POSTTUN_BND_SYMBOLIC=""
   POSTTUN_HOSTS_STAGE_END_TS=""
   if [ "$POSTTUN_HOSTS_FD_OK" = 1 ]; then
     echo "--- the fd=$POSTTUN_HOSTS_FD read stream (the enter queues the fd, the exit carries the ret; sequential stage):"
-    POSTTUN_HOSTS_READ_REPORT="$(awk -v who="$POSTTUN_HOSTSOPEN_WHO" -v fd="$POSTTUN_HOSTS_FD" -v ts0="$POSTTUN_HOSTSOPEN_EXIT_TS" '
-      $1 != who { next }
+    POSTTUN_HOSTS_READ_REPORT="$(awk -v fd="$POSTTUN_HOSTS_FD" -v ts0="$POSTTUN_HOSTSOPEN_EXIT_TS" '
       { ts = $4; sub(/:$/, "", ts)
         if (ts0 != "" && ts + 0 <= ts0 + 0) next
         if ($0 ~ /sys_read\(/ || $0 ~ /sys_readv\(/) {
           if (match($0, /fd: [0-9]+/)) {
             f = substr($0, RSTART + 4, RLENGTH - 4) + 0
-            if (f == fd + 0) { lasth = ts; lasthline = $0 }
+            if (f == fd + 0) { lasth = ts }
             else { lasto = ts }
           }
           next
@@ -5002,7 +5011,7 @@ POSTTUN_BND_SYMBOLIC=""
         if ($0 ~ /sys_close\(/) {
           if (match($0, /fd: [0-9]+/)) {
             f = substr($0, RSTART + 4, RLENGTH - 4) + 0
-            if (f == fd + 0) { print "  close      trace-ts=" ts; closeseen = 1 }
+            if (f == fd + 0) { print "  close      trace-ts=" ts; closeseen = 1; exit }
           }
           next
         }
@@ -5547,9 +5556,8 @@ REBUILD-STAGE=NOT-REACHED}"
     if [ -n "$POSTTUN_RESOLVRECREATE_FD" ]; then
       POSTTUN_RESOLVRECREATE_FD="$((POSTTUN_RESOLVRECREATE_FD))"
     fi
-    echo "--- the 4C-55 recreate stream (the fd=$POSTTUN_RESOLVRECREATE_FD write/close timeline after the window own exit; the write(2) is NOT required by the contract — the SELinux file:write permission was already checked at the open-completion hook via the file f_mode):"
-    POSTTUN_RESOLVRECREATE_STREAM="$(awk -v who="$(printf '%s' "$POSTTUN_FILECREATE_WINDOW_ENTER" | awk '{print $1}')" -v wx="$POSTTUN_FILECREATE_WINDOW_EXIT_TS" -v fd="$POSTTUN_RESOLVRECREATE_FD" '
-      $1 != who { next }
+    echo "--- the 4C-55 recreate stream (the fd=$POSTTUN_RESOLVRECREATE_FD write/close timeline after the window own exit; the write(2) is NOT required by the contract — the SELinux file:write permission was already checked at the open-completion hook via the file f_mode; the 4C-56 correction: the stream is NOT scoped to the opener thread — rootlesskit's worker threads share the process fd table (reproduced run 37416993997: the hosts read continuation executed in the sibling thread), the fd's own first close exit bounds the stream):"
+    POSTTUN_RESOLVRECREATE_STREAM="$(awk -v wx="$POSTTUN_FILECREATE_WINDOW_EXIT_TS" -v fd="$POSTTUN_RESOLVRECREATE_FD" '
       { ts = $4; sub(/:$/, "", ts)
         if (wx != "" && ts + 0 <= wx + 0) next
         if (scanned++ > 2000) exit
