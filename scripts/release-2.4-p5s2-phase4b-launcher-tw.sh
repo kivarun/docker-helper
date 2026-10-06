@@ -6416,7 +6416,7 @@ REBUILD-STAGE=NOT-REACHED}"
   # fifo records are NOT progress evidence.
   POSTTUN_BKD_STROOT_TERMINAL_OK=0
   if [ -n "$POSTTUN_BKD_SPAN_TERMINAL" ] \
-    && ! printf '%s\n' "$POSTTUN_BKD_SPAN_TERMINAL" | grep -aqE 'tcontext=system_u:object_r:docker_helper_builder_state_root_t:s0([ \t]|$).*denied=0x10([^0-9a-fA-F]|$)'; then
+    && ! { printf '%s\n' "$POSTTUN_BKD_SPAN_TERMINAL" | grep -aqE 'tcontext=system_u:object_r:docker_helper_builder_state_root_t:s0([ \t]|$)' && printf '%s\n' "$POSTTUN_BKD_SPAN_TERMINAL" | grep -aqE 'denied=0x10([^0-9a-fA-F]|$)'; }; then
     POSTTUN_BKD_STROOT_TERMINAL_OK=1
   fi
   POSTTUN_BKD_EXEC_OK=0
@@ -6440,7 +6440,7 @@ REBUILD-STAGE=NOT-REACHED}"
     | grep -aE 'denied=0x20000000([^0-9a-fA-F]|$)' || true)"
   if [ -z "$POSTTUN_BKD_STROOT_SEARCH_PRESENT" ]; then
     echo "BUILDKITD-STATE-ROOT-SEARCH=ABSENT"
-  elif printf '%s\n' "$POSTTUN_BKD_SPAN_TERMINAL" | grep -aqE 'tcontext=system_u:object_r:docker_helper_builder_state_root_t:s0([ \t]|$).*denied=0x20000000([^0-9a-fA-F]|$)'; then
+  elif { printf '%s\n' "$POSTTUN_BKD_SPAN_TERMINAL" | grep -aqE 'tcontext=system_u:object_r:docker_helper_builder_state_root_t:s0([ \t]|$)' && printf '%s\n' "$POSTTUN_BKD_SPAN_TERMINAL" | grep -aqE 'denied=0x20000000([^0-9a-fA-F]|$)'; }; then
     echo "BUILDKITD-STATE-ROOT-SEARCH=TERMINAL-NOW (the span's own last buildkitd decision is the search shape)"
   else
     echo "BUILDKITD-STATE-ROOT-SEARCH=OBSERVED-NONOWNING"
