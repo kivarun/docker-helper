@@ -2283,8 +2283,13 @@ allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };
 #   4C-62: the SAME target-side rule widened IN PLACE by the combined
 #     { read execute } boundary (ONE terminal decision, never split):
 #     allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute };
+#   4C-63: the shared state-root dir getattr permission — a NEW pair
+#     (the runtime moved past the executable the moment the exec
+#     succeeded):
+#     allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir getattr;
 #     (every remaining hook stays a separate live-evidence phase; the
-#     conventional entry bundle is NOT copied).
+#     4C-62 run's state-root `search` records stay RECORDED/NON-OWNING
+#     — live-observed != automatically grantable).
 #
 # STILL DELIBERATELY ABSENT (each is a separate live-evidence phase):
 #   - siginh, noatsecure, rlimitinh, dyntransition, setexec on the
@@ -2302,6 +2307,15 @@ allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };
 #     helper-domains' shape) is NOT copied — BuildKitd's remaining hooks
 #     are its own live-evidence phases, and a static binary needs no
 #     loader surface at all);
+#   - buildkitd_t -> builder_state_root_t:dir search/read/open/write/
+#     create/add_name/remove_name/setattr/rmdir/mounton/lock (the
+#     4C-63 grant is the ONE getattr permission — the 4C-62 run's
+#     terminal-causal owner; the state-root search records stay
+#     RECORDED/NON-OWNING — the exec proceeded past them; a search
+#     grant waits for its own terminal live proof; the sibling state/
+#     runtime types (builder_state_t, builder_runtime_root_t,
+#     builder_runtime_t) and every other quarantined surface stay
+#     ungranted);
 #   - the 4C-61 run's inherited-fd fifo_file write denials (the fd
 #     revalidation under the new domain toward the builder_t and
 #     rootlesskit_t fifos) stay UNGRANTED — the exec progressed past
@@ -2495,6 +2509,58 @@ allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;
 # until the cross-operation isolation proof (4C-37) holds for the now
 # reachable domain.
 allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute };
+
+# --- 4C-63: the shared state-root dir getattr — the terminal-causal owner ---
+#
+# The 4C-62 canonical run's (37465900895-2) terminal records, live at the
+# END of the buildkitd process's own lifetime (the exec SUCCEEDED —
+# BUILDKITD-EXECVE=SUCCEEDED, ret=0x0 at 410.530149 — and BuildKitd's
+# startup then failed on the shared state-root surface; the process died
+# exit=1 at 410.574003, T0+0.118s; the terminal anchor = 410.572469):
+#
+#   buildkitd-42737 410.572429 selinux_audited: requested=0x10
+#     denied=0x10 audited=0x10 result=-13
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:docker_helper_builder_state_root_t:s0
+#     tclass=dir
+#   buildkitd-42737 410.572456 (the same exact shape)
+#
+# The mask decode pin (the kernel's static classmap numbering, NOT the
+# loaded policy's perms-file numbering): dir:getattr=0x10 (bit 4, the
+# common layout); the dir-only tail's search=0x20000000 (bit 29) was ALSO
+# live-observed earlier in the same cascade (343/410-window records) but
+# is NOT the terminal owner — the exec proceeded past the search denials
+# and died at the getattr hook. The staircase rule:
+#   live-observed != automatically grantable
+#   grantable now = live + terminal-causal owner
+# — so THIS rule grants exactly the terminal-causal getattr, and search
+# stays RECORDED/NON-OWNING (its own live terminal proof would make it
+# a separate 4C-64 candidate; a combined { search getattr } rule is
+# explicitly NOT written).
+#
+# THE GRANT IS EXACTLY { getattr } — metadata-only on the shared state
+# root:
+#   - no search/read/open/write/create/add_name/remove_name/setattr/
+#     rmdir/mounton/lock (each its own live-evidence phase);
+#   - nothing on the sibling state/runtime types (builder_state_t,
+#     builder_runtime_root_t, builder_runtime_t) and nothing on tmp_t,
+#     cgroup_t, sysfs_t, passwd_file_t, nsfs_t, fifo_file, or any other
+#     4C-62 quarantined surface (the quarantine list lives in the owner
+#     test and the harness; repeat count never converts a non-terminal
+#     denial into authority);
+#   - no process/process2 permission, no capability/cap_userns, no
+#     range_transition;
+#   - the three exec planes stay frozen (the source { execute read open },
+#     the transition { transition }, the target { entrypoint read
+#     execute }).
+# SCOPE — READ CAREFULLY: docker_helper_builder_state_root_t:s0 is the
+# SHARED root plane (not a per-operation categorized child). PROVEN:
+# BuildKitd needs metadata getattr on the shared state root during
+# startup. NOT PROVEN: that this type-wide root-plane authority is
+# operation-scoped — the grant is type-wide TE authority, NOT
+# path-scoped, NOT operation-scoped; the cross-operation gate stays
+# OPEN/Critical until the cross-operation isolation proof (4C-37) holds.
+allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir getattr;
 
 # --- 4C-62: the target-side image-load boundary — the 4C-61 rule widened
 # --- IN PLACE (ONE rule, never split) ---
