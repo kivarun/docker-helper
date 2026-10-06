@@ -3515,7 +3515,7 @@ func TestSELinuxPolicyRootlesskitTmpfsSymlink(t *testing.T) {
 	pinnedSymlinkTriple := "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create read unlink };"
 	pinnedTmpfsDirPair := "allow docker_helper_rootlesskit_t tmpfs_t:dir { create mounton };"
 	pinnedTmpfsFsMount := "allow docker_helper_rootlesskit_t tmpfs_t:filesystem mount;"
-	pinnedTmpfsFileCreate := "allow docker_helper_rootlesskit_t tmpfs_t:file { create write open };"
+	pinnedTmpfsFileCreate := "allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };"
 	if !strings.Contains(policy, pinnedSymlinkTriple) {
 		t.Fatalf("the rootlesskit child domain's rebuild-symlink surface must be exact: %q", pinnedSymlinkTriple)
 	}
@@ -3559,7 +3559,7 @@ func TestSELinuxPolicyRootlesskitTmpfsSymlink(t *testing.T) {
 				// trailing space in the prefix keeps "tmpfs_t:file"
 				// from matching "tmpfs_t:filesystem".
 				if trimmed != pinnedTmpfsFileCreate {
-					violations = append(violations, "the tmpfs_t:file surface belongs to the 4C-54/55 owner's exact brace triple { create write open }; any other file shape is forbidden here: "+trimmed)
+					violations = append(violations, "the tmpfs_t:file surface belongs to the 4C-54/55/56 owner's exact brace quartet { create write open mounton }; any other file shape is forbidden here: "+trimmed)
 				}
 			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t tmpfs_t:dir"):
 				if trimmed != pinnedTmpfsDirPair {
@@ -3674,13 +3674,15 @@ func TestSELinuxPolicyRootlesskitTmpfsSymlink(t *testing.T) {
 
 // TestSELinuxPolicyRootlesskitTmpfsFile owns the whole evidenced module
 // surface of the replacement /etc/resolv.conf regular-file creation:
-// docker_helper_rootlesskit_t -> tmpfs_t:file = exactly the brace triple
-// { create write open } (4C-54 granted exactly { create }; 4C-55 widened
-// the SAME rule in place with the combined write|open boundary — one
-// owner, no second rule). A NEW pair/class surface — never merged into
-// the tmpfs_t:lnk_file { create read unlink } triple (the 4C-48/50/53
-// owner), the tmpfs_t:dir { create mounton } pair (the 4C-46/47 owner),
-// or the tmpfs_t:filesystem mount (the 4C-45 owner).
+// docker_helper_rootlesskit_t -> tmpfs_t:file = exactly the brace
+// quartet { create write open mounton } (4C-54 granted exactly
+// { create }; 4C-55 widened the SAME rule in place with the combined
+// write|open boundary; 4C-56 widened it again in place with the bind
+// mount's mounton boundary — one owner, no second rule). A NEW
+// pair/class surface — never merged into the tmpfs_t:lnk_file
+// { create read unlink } triple (the 4C-48/50/53 owner), the
+// tmpfs_t:dir { create mounton } pair (the 4C-46/47 owner), or the
+// tmpfs_t:filesystem mount (the 4C-45 owner).
 //
 // Live enforcing evidence, canonical 4C-53 run 37350350345: with the
 // lnk_file unlink removal hook granted, the resolv-replacement stage's
@@ -3739,9 +3741,49 @@ func TestSELinuxPolicyRootlesskitTmpfsSymlink(t *testing.T) {
 // write(2) syscall is NOT (the SELinux file:write permission was
 // already checked at the open-completion hook via the file's f_mode;
 // a zero-length payload legitimately has no write(2)).
+//
+// THE 4C-56 MOUNTON DELTA this owner pins: the canonical 4C-55 run
+// 37414244341's SAME replacement stage completed the whole recreate
+// chain (the resolv openat ret 0x3 = fd 3 at trace-ts
+// 173.273944..173.273963 with the zero-length write ret 0x0 and the
+// close ret 0x0; the hosts equivalents on the SAME surfaces: the
+// unlinkat ret 0x0 on the standing lnk_file unlink, the openat ret 0x3
+// with NO denial) and then failed at the flow's next production step —
+// the generated-file bind mount:
+//
+//	sys_mount(dev_name: ... "/var/lib/docker-helper-builder/ops/
+//	op_2290e535.../resolv.conf", dir_name: ... "/etc/resolv.conf",
+//	flags: 0x1000 (MS_BIND), data: 0)
+//	enter trace-ts 173.274006, exit 173.274025
+//
+// with the denial INSIDE the mount(2) window (trace-ts 173.274015,
+// 10µs before the failing mount exit; T0 = the attach at trace-ts
+// 173.241903, the failing exit at T0+0.032s, no later production
+// progress): requested=0x10000 denied=0x10000 audited=0x10000
+// result=-13 (EACCES)
+// scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+// tcontext=system_u:object_r:tmpfs_t:s0 tclass=file. The hook:
+// security_mount → selinux_mount → path_has_perm() on the MOUNTPOINT
+// — FILE__MOUNTON = bit 16 = 0x10000 of COMMON_FILE_PERMS (quotaon bit
+// 15 = 0x8000, audit_access bit 17 = 0x20000, open bit 18 = 0x40000);
+// the denial's tcontext is the just-recreated replacement file's own
+// LIVE type (tmpfs_t — the created inode inherited the parent dir's
+// type; not a pathname-derived assumption). The source-side lookup ran
+// before and passed (no source-side denial exists in the window; no
+// source-side permission is granted here). SCOPE CAVEAT: type-wide TE
+// authority — NOT path-scoped, NOT operation-scoped (tmpfs_t:s0
+// carries no per-operation MCS category); the acceptance re-proves per
+// canonical run: the holder's mount namespace is its own and distinct
+// from every manager-side reference, the recursive-private propagation
+// pair precedes the moves, and the host-side mount table stays CLEAN.
+// PROVEN: the observed mount operation is confined to the production
+// holder's private mount namespace. NOT PROVEN: tmpfs_t:file mounton
+// is cross-operation safe as type-wide TE authority (the
+// cross-operation gate stays OPEN/Critical; the Release GO stays
+// CLOSED).
 func TestSELinuxPolicyRootlesskitTmpfsFile(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
-	pinnedTmpfsFileSurface := "allow docker_helper_rootlesskit_t tmpfs_t:file { create write open };"
+	pinnedTmpfsFileSurface := "allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };"
 	pinnedSymlinkTriple := "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create read unlink };"
 	pinnedTmpfsDirPair := "allow docker_helper_rootlesskit_t tmpfs_t:dir { create mounton };"
 	pinnedTmpfsFsMount := "allow docker_helper_rootlesskit_t tmpfs_t:filesystem mount;"
@@ -3752,19 +3794,18 @@ func TestSELinuxPolicyRootlesskitTmpfsFile(t *testing.T) {
 	// fileSurfaceViolations returns one violation per line of module
 	// text that breaks the grant invariants: exactly one allow rule may
 	// name docker_helper_rootlesskit_t -> tmpfs_t:file, in the exact
-	// brace-triple shape { create write open } (no bare single-perm
-	// shape — the pre-4C-55 create-only shape is the old boundary that
-	// must not return and { create } is a different written shape even
-	// when the loaded form coalesces; no missing member — { create
-	// write }/{ create open }/{ write open } are incomplete hook sets,
-	// and the 4C-54 phase's own forbidden shape { create write } stays
-	// forbidden as the missing-open form; no fourth permission —
-	// read/getattr/setattr/append/map/unlink/link/rename/execute/lock
-	// are distinct hooks and this is deliberately NOT the file-RW
-	// bundle; no split rules — three bare rules or a bare-plus-brace
-	// pair reconstruct the same surface as separate grants; no
-	// duplicate; no reorder — { open write create } is a different
-	// written shape). No other subject may receive tmpfs_t:file
+	// brace-quartet shape { create write open mounton } (no bare
+	// single-perm shape — mounton-only is the pre-4C-56 boundary; no
+	// pre-4C-56 triple shape — { create write open } is the old
+	// boundary that must not return; no missing member — any
+	// three-of-four set is an incomplete hook set, and the 4C-54
+	// phase's own forbidden shape { create write } stays forbidden as
+	// the missing-open form; no fifth permission — read/getattr/
+	// setattr/append/map/unlink/link/rename/execute/lock are distinct
+	// hooks and this is deliberately NOT the file-RW bundle; no split
+	// rules — bare or brace pairs reconstruct the same surface as
+	// separate grants; no duplicate; no reorder — a different written
+	// shape). No other subject may receive tmpfs_t:file
 	// authority from this module; the lnk_file/dir/filesystem surfaces
 	// stay their own owners' exact rules; the net_conf_t:file pair
 	// stays the 4C-51/52 owner's exact rule.
@@ -3783,7 +3824,7 @@ func TestSELinuxPolicyRootlesskitTmpfsFile(t *testing.T) {
 			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t tmpfs_t:file "):
 				count++
 				if trimmed != pinnedTmpfsFileSurface {
-					violations = append(violations, "the replacement-file grant must be the exact brace triple { create write open } (no bare shape — the pre-4C-55 create-only boundary must not return, no split rules, no duplicate, no reorder, no missing member — { create write }/{ create open }/{ write open } are incomplete hook sets, no fourth permission — read/getattr/setattr/append/map/unlink/link/rename/execute/lock are distinct hooks and this is deliberately NOT the file-RW bundle): "+trimmed)
+					violations = append(violations, "the replacement-file grant must be the exact brace quartet { create write open mounton } (no bare shape — the pre-4C-56 mounton-only boundary, no pre-4C-56 triple — { create write open } is the old boundary that must not return, no split rules, no duplicate, no reorder, no missing member — any three-of-four set is an incomplete hook set, no fifth permission — read/getattr/setattr/append/map/unlink/link/rename/execute/lock are distinct hooks and this is deliberately NOT the file-RW bundle): "+trimmed)
 				}
 			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, " tmpfs_t:file "):
 				violations = append(violations, "tmpfs_t file authority is unique to the rootlesskit child domain's pinned replacement-file surface rule: "+trimmed)
@@ -3806,7 +3847,7 @@ func TestSELinuxPolicyRootlesskitTmpfsFile(t *testing.T) {
 			}
 		}
 		if count == 0 {
-			violations = append(violations, "the replacement-file surface grant (rootlesskit_t -> tmpfs_t:file { create write open }) is missing")
+			violations = append(violations, "the replacement-file surface grant (rootlesskit_t -> tmpfs_t:file { create write open mounton }) is missing")
 		} else if count > 1 {
 			violations = append(violations, fmt.Sprintf("exactly one tmpfs_t:file grant may exist for the rootlesskit child domain, found %d", count))
 		}
@@ -3822,28 +3863,29 @@ func TestSELinuxPolicyRootlesskitTmpfsFile(t *testing.T) {
 		rule string
 	}{
 		{"missing whole rule", ""},
-		{"the pre-4C-55 bare create shape (the old boundary must not return)", "allow docker_helper_rootlesskit_t tmpfs_t:file create;"},
+		{"the pre-4C-55 bare create shape", "allow docker_helper_rootlesskit_t tmpfs_t:file create;"},
 		{"the pre-4C-55 brace-create shape", "allow docker_helper_rootlesskit_t tmpfs_t:file { create };"},
-		{"missing open (create write pair)", "allow docker_helper_rootlesskit_t tmpfs_t:file { create write };"},
-		{"missing write (create open pair)", "allow docker_helper_rootlesskit_t tmpfs_t:file { create open };"},
-		{"missing create (write open pair — the 4C-54 forbidden shape)", "allow docker_helper_rootlesskit_t tmpfs_t:file { write open };"},
-		{"write-only", "allow docker_helper_rootlesskit_t tmpfs_t:file write;"},
-		{"open-only", "allow docker_helper_rootlesskit_t tmpfs_t:file open;"},
-		{"read instead of write", "allow docker_helper_rootlesskit_t tmpfs_t:file { create read open };"},
-		{"getattr instead of open", "allow docker_helper_rootlesskit_t tmpfs_t:file { create write getattr };"},
-		{"fourth perm read", "allow docker_helper_rootlesskit_t tmpfs_t:file { create write open read };"},
-		{"fourth perm getattr", "allow docker_helper_rootlesskit_t tmpfs_t:file { create write open getattr };"},
-		{"fourth perm setattr", "allow docker_helper_rootlesskit_t tmpfs_t:file { create write open setattr };"},
-		{"fourth perm append", "allow docker_helper_rootlesskit_t tmpfs_t:file { create write open append };"},
+		{"the pre-4C-56 triple shape (the old boundary must not return)", "allow docker_helper_rootlesskit_t tmpfs_t:file { create write open };"},
+		{"missing mounton (create write open)", "allow docker_helper_rootlesskit_t tmpfs_t:file { create write open };"},
+		{"missing create (write open mounton)", "allow docker_helper_rootlesskit_t tmpfs_t:file { write open mounton };"},
+		{"missing write (create open mounton)", "allow docker_helper_rootlesskit_t tmpfs_t:file { create open mounton };"},
+		{"missing open (create write mounton)", "allow docker_helper_rootlesskit_t tmpfs_t:file { create write mounton };"},
+		{"mounton-only", "allow docker_helper_rootlesskit_t tmpfs_t:file mounton;"},
+		{"mounton replaced by getattr", "allow docker_helper_rootlesskit_t tmpfs_t:file { create write open getattr };"},
+		{"mounton replaced by setattr", "allow docker_helper_rootlesskit_t tmpfs_t:file { create write open setattr };"},
+		{"mounton replaced by relabelto", "allow docker_helper_rootlesskit_t tmpfs_t:file { create write open relabelto };"},
+		{"fifth perm getattr", "allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton getattr };"},
+		{"fifth perm setattr", "allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton setattr };"},
+		{"fifth perm unlink", "allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton unlink };"},
 		{"duplicate identical rule", pinnedTmpfsFileSurface + "\n" + pinnedTmpfsFileSurface},
-		{"parallel brace rule", pinnedTmpfsFileSurface + "\nallow docker_helper_rootlesskit_t tmpfs_t:file { create write open };"},
-		{"reordered brace triple", "allow docker_helper_rootlesskit_t tmpfs_t:file { open write create };"},
-		{"split into three bare rules", "allow docker_helper_rootlesskit_t tmpfs_t:file create;\nallow docker_helper_rootlesskit_t tmpfs_t:file write;\nallow docker_helper_rootlesskit_t tmpfs_t:file open;"},
-		{"split into bare create and parallel brace pair", "allow docker_helper_rootlesskit_t tmpfs_t:file create;\nallow docker_helper_rootlesskit_t tmpfs_t:file { write open };"},
-		{"wrong class (tmpfs_t:lnk_file triple)", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file { create write open };"},
-		{"wrong class (tmpfs_t:dir triple)", "allow docker_helper_rootlesskit_t tmpfs_t:dir { create write open };"},
-		{"wrong target type (tmp_t)", "allow docker_helper_rootlesskit_t tmp_t:file { create write open };"},
-		{"wrong target type (net_conf_t)", "allow docker_helper_rootlesskit_t net_conf_t:file { create write open };"},
+		{"parallel brace rule", pinnedTmpfsFileSurface + "\nallow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };"},
+		{"reordered brace quartet", "allow docker_helper_rootlesskit_t tmpfs_t:file { mounton open write create };"},
+		{"split into bare mounton and parallel brace triple", "allow docker_helper_rootlesskit_t tmpfs_t:file mounton;\nallow docker_helper_rootlesskit_t tmpfs_t:file { create write open };"},
+		{"split into two brace pairs", "allow docker_helper_rootlesskit_t tmpfs_t:file { create write };\nallow docker_helper_rootlesskit_t tmpfs_t:file { open mounton };"},
+		{"wrong class (tmpfs_t:dir mounton)", "allow docker_helper_rootlesskit_t tmpfs_t:dir mounton;"},
+		{"wrong class (tmpfs_t:lnk_file mounton)", "allow docker_helper_rootlesskit_t tmpfs_t:lnk_file mounton;"},
+		{"wrong target type (tmp_t)", "allow docker_helper_rootlesskit_t tmp_t:file { create write open mounton };"},
+		{"wrong target type (net_conf_t)", "allow docker_helper_rootlesskit_t net_conf_t:file { create write open mounton };"},
 	} {
 		mutated := strings.Replace(policy, pinnedTmpfsFileSurface, regressed.rule, 1)
 		applied := func() bool {
@@ -3860,21 +3902,21 @@ func TestSELinuxPolicyRootlesskitTmpfsFile(t *testing.T) {
 			t.Errorf("the replacement-file surface regression %q must fail the replacement-file surface invariants", regressed.name)
 		}
 	}
-	// The widening sweep: { create write open <X> } for every other
-	// file-class permission must fail the invariants in every case (the
-	// fourth-permission sweep; the single/pair replacements are covered
-	// by the regressions above).
+	// The widening sweep: { create write open mounton <X> } for every
+	// other file-class permission must fail the invariants in every
+	// case (the fifth-permission sweep; the single/pair/triple
+	// replacements are covered by the regressions above).
 	for _, extra := range []string{
 		"ioctl", "read", "getattr", "setattr", "lock",
 		"relabelfrom", "relabelto", "append", "map", "unlink", "link",
-		"rename", "execute", "quotaon", "mounton", "audit_access",
+		"rename", "execute", "quotaon", "audit_access",
 		"execmod", "watch", "watch_mount", "watch_sb",
 		"watch_with_perm", "watch_reads", "watch_mountns",
 		"execute_no_trans", "entrypoint",
 	} {
 		mutated := strings.Replace(policy, pinnedTmpfsFileSurface,
-			fmt.Sprintf("allow docker_helper_rootlesskit_t tmpfs_t:file { create write open %s };", extra), 1)
-		if !strings.Contains(mutated, fmt.Sprintf("allow docker_helper_rootlesskit_t tmpfs_t:file { create write open %s };", extra)) {
+			fmt.Sprintf("allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton %s };", extra), 1)
+		if !strings.Contains(mutated, fmt.Sprintf("allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton %s };", extra)) {
 			t.Errorf("the replacement-file widening +%s was not applied", extra)
 			continue
 		}
@@ -3888,10 +3930,11 @@ func TestSELinuxPolicyRootlesskitTmpfsFile(t *testing.T) {
 		name string
 		rule string
 	}{
-		{"tmpfs file triple for the manager", "allow docker_helper_builder_t tmpfs_t:file { create write open };"},
-		{"tmpfs file triple for the launcher", "allow docker_helper_builder_launcher_t tmpfs_t:file { create write open };"},
-		{"tmpfs file triple for the network helper", "allow docker_helper_slirp4netns_t tmpfs_t:file { create write open };"},
-		{"tmpfs file triple for the daemon", "allow docker_helper_t tmpfs_t:file { create write open };"},
+		{"tmpfs file quartet for the manager", "allow docker_helper_builder_t tmpfs_t:file { create write open mounton };"},
+		{"tmpfs file quartet for the launcher", "allow docker_helper_builder_launcher_t tmpfs_t:file { create write open mounton };"},
+		{"tmpfs file quartet for the network helper", "allow docker_helper_slirp4netns_t tmpfs_t:file { create write open mounton };"},
+		{"tmpfs file quartet for the daemon", "allow docker_helper_t tmpfs_t:file { create write open mounton };"},
+		{"tmpfs file bare mounton for the manager", "allow docker_helper_builder_t tmpfs_t:file mounton;"},
 		{"tmpfs file bare write for the manager", "allow docker_helper_builder_t tmpfs_t:file write;"},
 		{"tmpfs file bare create for the manager (the old boundary)", "allow docker_helper_builder_t tmpfs_t:file create;"},
 	} {
@@ -4855,6 +4898,18 @@ func TestSELinuxPermissionKernelClassmapDecode(t *testing.T) {
 	// matched by the union mask and never exercised) and that wrong
 	// value must not come back: open is 0x40000.
 	one("file", 0x40000, "open")
+	// The 4C-56 mounton decode and its neighbors: the canonical 4C-55
+	// run 37414244341's terminal boundary carried requested=0x10000
+	// denied=0x10000 tcontext=tmpfs_t:s0 tclass=file INSIDE the
+	// sys_mount(<op-state>/resolv.conf, "/etc/resolv.conf", MS_BIND)
+	// window — the mountpoint's own FILE__MOUNTON hook (bit 16). The
+	// quotaon/audit_access neighbors are pinned alongside so no
+	// listing-order or perms-file shift can move the decode (the
+	// perms-file values are the recorded interface fact, never the AVC
+	// decode).
+	one("file", 0x8000, "quotaon")
+	one("file", 0x10000, "mounton")
+	one("file", 0x20000, "audit_access")
 	// The 4C-48 lnk_file decodes: the common neighbors pinned for
 	// anti-shift (the symlink object's own creation check was the
 	// canonical 4C-47 run's boundary record). The 4C-50 read decode: the
@@ -4932,6 +4987,14 @@ func TestSELinuxPermissionKernelClassmapDecode(t *testing.T) {
 	}
 	if equalPermSet(decode("file", 0x40008), []string{"write", "open"}) {
 		t.Error("file mask 0x40008 is { create open }, not { write open } — the create/write bit discrimination must hold")
+	}
+	// The 4C-56 exact decode regression: file mask 0x10000 is the
+	// bind-mount mountpoint's own mounton hook — exactly { mounton }.
+	if got := decode("file", 0x10000); !equalPermSet(got, []string{"mounton"}) {
+		t.Errorf("file mask 0x10000 must decode to exactly { mounton } (the kernel's own static classmap), got %v", got)
+	}
+	if got := decode("file", 0x10000); equalPermSet(got, []string{"quotaon"}) || equalPermSet(got, []string{"audit_access"}) {
+		t.Error("file mask 0x10000 is mounton, not quotaon/audit_access — the perms-file misread must not come back")
 	}
 }
 
