@@ -6146,6 +6146,8 @@ REBUILD-STAGE=NOT-REACHED}"
   fi
   echo "--- the SELinux decisions INSIDE the exec window (the exec chain's own mediation — every record, in order; the granted execute hook must NOT reappear here):"
   POSTTUN_BKD_DECISIONS=""
+  POSTTUN_BKD_SPAN_DECISIONS=""
+  POSTTUN_BKD_SPAN_TERMINAL=""
   POSTTUN_BKD_OLD_PRESENT=""
   POSTTUN_BKD_NEW_DECISION=""
   if [ -n "$POSTTUN_BKD_EXEC_ENTER_TS" ] && [ -n "$POSTTUN_BKD_EXEC_EXIT_TS" ]; then
@@ -6157,6 +6159,19 @@ REBUILD-STAGE=NOT-REACHED}"
         print
       }' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true)"
     printf '%s\n' "${POSTTUN_BKD_DECISIONS:-(none — no SELinux decision was recorded inside the exec window)}"
+    # The SPAN decisions: ALL of the exec who's selinux_audited records
+    # across the whole window trace (the exec window AND the post-exec
+    # runtime cascade). The state-root getattr/search surfaces and every
+    # quarantined runtime surface live HERE — after the exec window —
+    # so every state-root gate and count must read the span, never the
+    # exec window alone (the exec window only ever re-proves the exec
+    # chain's own hooks).
+    POSTTUN_BKD_SPAN_DECISIONS="$(awk -v who="$POSTTUN_BKD_EXEC_WHO" '
+      { if ($1 != who) next
+        if ($0 !~ /selinux_audited:/) next
+        print
+      }' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true)"
+    printf '%s\n' "  the span decisions: $(printf '%s\n' "$POSTTUN_BKD_SPAN_DECISIONS" | grep -ac . || true) record(s) across the whole window trace (the exec window + the post-exec runtime cascade)"
     # The 4C-59 STANDING shape (the granted image-read hooks must keep
     # holding): no buildkitd_exec_t:file record with the edge-anchored
     # 0x40002 mask.
@@ -6204,12 +6219,12 @@ REBUILD-STAGE=NOT-REACHED}"
     # the dir-only search bit 29 = 0x20000000 is the SEPARATE non-owning
     # surface). The record must be GONE from the window's span: the
     # 4C-63 grant took effect.
-    POSTTUN_BKD_OLD_STROOT_PRESENT="$(printf '%s\n' "$POSTTUN_BKD_DECISIONS" \
+    POSTTUN_BKD_OLD_STROOT_PRESENT="$(printf '%s\n' "$POSTTUN_BKD_SPAN_DECISIONS" \
       | grep -a 'scontext=system_u:system_r:docker_helper_buildkitd_t' \
       | grep -aE 'tcontext=system_u:object_r:docker_helper_builder_state_root_t:s0([ \t]|$)' \
       | grep -a 'tclass=dir' \
       | grep -aE 'denied=0x10([^0-9a-fA-F]|$)' || true)"
-    printf '%s\n' "${POSTTUN_BKD_OLD_STROOT_PRESENT:-(none — the OLD state-root getattr (0x10) terminal boundary is gone from the exec span)}"
+    printf '%s\n' "${POSTTUN_BKD_OLD_STROOT_PRESENT:-(none — the OLD state-root getattr (0x10) terminal boundary is gone from the whole span)}"
     # The 4C-61 STANDING boundary (the 4C-60 record's entrypoint shape):
     # the granted entrypoint hook (0x8000000) must stay gone — its
     # reappearance inside the window is a standing break, not a new
@@ -6391,17 +6406,23 @@ REBUILD-STAGE=NOT-REACHED}"
   # The milestone gate (the 4C-63 §14 contract): the canonical execve
   # window exists, the OLD state-root getattr (0x10) terminal boundary
   # is GONE from the whole span (the exec window AND the post-exec
-  # runtime cascade — the §12 quarantined surfaces still deny and are
-  # recorded, but the getattr hook must no longer block), the generic
-  # bin_t negative holds, and BuildKitd made FORWARD PRODUCTION PROGRESS
-  # beyond the previous failure point — ret 0x0, or the span carries a
-  # NEW decision (the runtime surfaces past the state-root getattr
-  # hook). The absence of an AVC alone is NOT sufficient.
+  # runtime cascade), the generic bin_t negative holds, and BuildKitd
+  # made FORWARD PRODUCTION PROGRESS beyond the previous failure point:
+  # the span's own terminal buildkitd decision EXISTS and is NOT the old
+  # 0x10 getattr shape (the flow moved past the getattr hook to a later
+  # failure — the search, the runtime surfaces, or beyond). The absence
+  # of an AVC alone is NOT sufficient, and the exec window's quarantined
+  # fifo records are NOT progress evidence.
+  POSTTUN_BKD_STROOT_TERMINAL_OK=0
+  if [ -n "$POSTTUN_BKD_SPAN_TERMINAL" ] \
+    && ! printf '%s\n' "$POSTTUN_BKD_SPAN_TERMINAL" | grep -aqE 'tcontext=system_u:object_r:docker_helper_builder_state_root_t:s0([ \t]|$).*denied=0x10([^0-9a-fA-F]|$)'; then
+    POSTTUN_BKD_STROOT_TERMINAL_OK=1
+  fi
   POSTTUN_BKD_EXEC_OK=0
   if [ -n "$POSTTUN_BKD_EXEC_PAIR" ] \
     && [ "$POSTTUN_OLD_BKD_STROOT_PRESENT" = 0 ] \
     && [ -z "$POSTTUN_BKD_BIN_IN_WINDOW" ] \
-    && { [ "$POSTTUN_BKD_EXEC_RET" = "0x0" ] || [ -n "$POSTTUN_BKD_NEW_DECISION" ]; }; then
+    && [ "$POSTTUN_BKD_STROOT_TERMINAL_OK" = 1 ]; then
     POSTTUN_BKD_EXEC_OK=1
   fi
   # The §12 search-status machine state: the state-root search surface's
@@ -6411,25 +6432,27 @@ REBUILD-STAGE=NOT-REACHED}"
   #   OBSERVED-NONOWNING — search records exist but the exec progressed
   #                      past them (the 4C-62 standing shape);
   #   ABSENT           — no search record in the span at all.
-  POSTTUN_BKD_STROOT_SEARCH_PRESENT="$(printf '%s\n' "$POSTTUN_BKD_DECISIONS" \
+  POSTTUN_BKD_STROOT_SEARCH_PRESENT="$(printf '%s\n' "$POSTTUN_BKD_SPAN_DECISIONS" \
     | grep -a 'scontext=system_u:system_r:docker_helper_buildkitd_t' \
     | grep -aE 'tcontext=system_u:object_r:docker_helper_builder_state_root_t:s0([ \t]|$)' \
     | grep -a 'tclass=dir' \
     | grep -aE 'denied=0x20000000([^0-9a-fA-F]|$)' || true)"
+  POSTTUN_BKD_SPAN_TERMINAL="$(printf '%s\n' "$POSTTUN_BKD_SPAN_DECISIONS" | grep -a . | tail -1 || true)"
   if [ -z "$POSTTUN_BKD_STROOT_SEARCH_PRESENT" ]; then
     echo "BUILDKITD-STATE-ROOT-SEARCH=ABSENT"
-  elif [ -n "$POSTTUN_BKD_NEW_DECISION" ] && printf '%s\n' "$POSTTUN_BKD_NEW_DECISION" | grep -aq 'tcontext=system_u:object_r:docker_helper_builder_state_root_t.*denied=0x20000000'; then
-    echo "BUILDKITD-STATE-ROOT-SEARCH=TERMINAL-NOW"
+  elif printf '%s\n' "$POSTTUN_BKD_SPAN_TERMINAL" | grep -aqE 'tcontext=system_u:object_r:docker_helper_builder_state_root_t:s0([ \t]|$).*denied=0x20000000([^0-9a-fA-F]|$)'; then
+    echo "BUILDKITD-STATE-ROOT-SEARCH=TERMINAL-NOW (the span's own last buildkitd decision is the search shape)"
   else
     echo "BUILDKITD-STATE-ROOT-SEARCH=OBSERVED-NONOWNING"
   fi
   printf '%s\n' "${POSTTUN_BKD_STROOT_SEARCH_PRESENT:-(none — no state-root search record in the span)}"
+  printf '%s\n' "  the span's own terminal buildkitd decision: ${POSTTUN_BKD_SPAN_TERMINAL:-(none)}"
   # The §17 state-tree transition detection: any record whose tcontext
   # is the categorized per-operation state type
   # (docker_helper_builder_state_t:s0:cX) — the shared-root-plane ->
   # per-op-plane transition moment. The exact fields + the category
   # match are printed; NO state-tree bundle is prepared in advance.
-  POSTTUN_BKD_STATE_TREE_RECORDS="$(printf '%s\n' "$POSTTUN_BKD_DECISIONS" \
+  POSTTUN_BKD_STATE_TREE_RECORDS="$(printf '%s\n' "$POSTTUN_BKD_SPAN_DECISIONS" \
     | grep -aE 'tcontext=system_u:object_r:docker_helper_builder_state_t:s0:c[0-9]+' || true)"
   if [ -n "$POSTTUN_BKD_STATE_TREE_RECORDS" ]; then
     echo "  the per-op state-tree records (the §17 transition candidates):"
@@ -6452,13 +6475,13 @@ REBUILD-STAGE=NOT-REACHED}"
   for spec in "tmp_t:dir" "docker_helper_builder_t:fifo_file" "docker_helper_rootlesskit_t:fifo_file" "sysfs_t:dir" "passwd_file_t:dir" "nsfs_t:file" "cgroup_t:dir" "sysctl_fs_t:dir"; do
     t="$(printf '%s' "$spec" | cut -d: -f1)"
     c="$(printf '%s' "$spec" | cut -d: -f2)"
-    n="$(printf '%s\n' "$POSTTUN_BKD_DECISIONS" \
+    n="$(printf '%s\n' "$POSTTUN_BKD_SPAN_DECISIONS" \
       | grep -aE "tcontext=system_u:(object_r:)?${t}:s0" \
       | grep -acE "tclass=${c}([ \t]|$)" || true)"
     printf '  %s: %s\n' "$spec" "$n"
   done
-  echo "  buildkitd_exec_t:file open (the 0x40000 target-side hook): $(printf '%s\n' "$POSTTUN_BKD_DECISIONS" | grep -aE 'tcontext=system_u:object_r:docker_helper_buildkitd_exec_t:s0([ \t]|$)' | grep -acE 'denied=0x40000([^0-9a-fA-F]|$)' || true)"
-  echo "  builder_state_root_t:dir search: $(printf '%s\n' "$POSTTUN_BKD_DECISIONS" | grep -aE 'tcontext=system_u:object_r:docker_helper_builder_state_root_t:s0([ \t]|$)' | grep -acE 'denied=0x20000000([^0-9a-fA-F]|$)' || true)"
+  echo "  buildkitd_exec_t:file open (the 0x40000 target-side hook): $(printf '%s\n' "$POSTTUN_BKD_SPAN_DECISIONS" | grep -aE 'tcontext=system_u:object_r:docker_helper_buildkitd_exec_t:s0([ \t]|$)' | grep -acE 'denied=0x40000([^0-9a-fA-F]|$)' || true)"
+  echo "  builder_state_root_t:dir search: $(printf '%s\n' "$POSTTUN_BKD_SPAN_DECISIONS" | grep -aE 'tcontext=system_u:object_r:docker_helper_builder_state_root_t:s0([ \t]|$)' | grep -acE 'denied=0x20000000([^0-9a-fA-F]|$)' || true)"
   # The §7 pathname inventory: the exact pathname(s) that produced the
   # state-root getattr decisions — attributed from the ORDERED SYSCALL
   # TRACE (the syscall record immediately preceding each decision,
@@ -6467,7 +6490,7 @@ REBUILD-STAGE=NOT-REACHED}"
   # per-op child of the same type) are DISTINGUISHED by their own path
   # strings when the trace prints them.
   echo "  the state-root getattr pathname inventory (the closest preceding traced syscall record per decision):"
-  stroot_getattr_recs="$(printf '%s\n' "$POSTTUN_BKD_DECISIONS" \
+  stroot_getattr_recs="$(printf '%s\n' "$POSTTUN_BKD_SPAN_DECISIONS" \
     | grep -aE 'tcontext=system_u:object_r:docker_helper_builder_state_root_t:s0' \
     | grep -aE 'denied=0x10([^0-9a-fA-F]|$)' || true)"
   if [ -n "$stroot_getattr_recs" ]; then
