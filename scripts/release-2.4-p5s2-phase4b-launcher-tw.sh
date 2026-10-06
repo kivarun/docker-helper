@@ -1562,10 +1562,10 @@ PREFLIGHT_OK=1
     PREFLIGHT_OK=0
   fi
 
-  echo "=== flow tmpfs replacement-file identity (the 4C-55 grant: the module's own rootlesskit -> tmpfs_t:file contribution must be exactly the one brace-triple rule { create write open } — the 4C-54 create grant widened IN PLACE by the combined write|open boundary, never a second rule; the canonical 4C-54 run 37370262779's terminal record requested=0x40004 denied=0x40004 tclass=file INSIDE the same openat(O_CREAT) window decoded per COMMON_FILE_PERMS as exactly { write open } — ONE audited decision covering BOTH the open-completion hook's FILE__OPEN and its f_mode-derived FILE__WRITE (write=bit 2, open=bit 18), one evidenced boundary, not two phases; the loaded policy's perms-file VALUES are the policy's own numbering and are never the AVC decoder; the kernel's own do_open() strips O_TRUNC and zeroes acc_mode for freshly created files, so once the triple is granted the same openat returns fd >= 0 — the fd IS the recreate milestone's requirement while the write(2) syscall is NOT (the file:write permission was already checked at the open-completion hook via the file f_mode); the class is the evidence — file, never the 4C-48/50/53 lnk_file triple or the 4C-46/47 dir pair; every file permission beyond the standing surface and the granted create write open is a STOP) ==="
+  echo "=== flow tmpfs replacement-file identity (the 4C-56 grant: the module's own rootlesskit -> tmpfs_t:file contribution must be exactly the one brace-quartet rule { create write open mounton } — the 4C-54 create grant widened in place by the combined write|open boundary (4C-55) and by the bind-mount mounton boundary (4C-56), never a second rule; the canonical 4C-55 run 37414244341's terminal record requested=0x10000 denied=0x10000 tclass=file tcontext=tmpfs_t:s0 INSIDE the sys_mount(<op-state>/resolv.conf, /etc/resolv.conf, MS_BIND) window — the mountpoint's own FILE__MOUNTON hook (bit 16 of COMMON_FILE_PERMS: quotaon=0x8000, mounton=0x10000, audit_access=0x20000, open=0x40000); the denial's tcontext is the just-recreated replacement file's own LIVE type; the source-side lookup ran before and passed — no source-side permission is granted here; the scope caveat: type-wide TE authority, NOT path-scoped, NOT operation-scoped — the acceptance re-proves the holder mount namespace distinctness, the recursive-private propagation pair and the clean host-side mount table per canonical run; PROVEN: the observed mount operation is confined to the production holder's private mount namespace; NOT PROVEN: cross-operation safety of the type-wide grant — the cross-op gate stays OPEN/Critical; the class is the evidence — file, never the 4C-48/50/53 lnk_file triple or the 4C-46/47 dir pair; every file permission beyond the standing surface and the granted quartet is a STOP) ==="
   echo "--- raw effective inventory (rootlesskit -> tmpfs_t, every class; base-policy/attribute expansions recorded, not asserted):"
   printf '%s\n' "${RK_TMPFSDIR_RAW:-(none)}"
-  echo "--- CONCRETE module contribution (source must be docker_helper_rootlesskit_t AND class file — tmpfs_t now carries four owned rules across classes; must be exactly one brace-triple file rule { create write open }):"
+  echo "--- CONCRETE module contribution (source must be docker_helper_rootlesskit_t AND class file — tmpfs_t now carries four owned rules across classes; must be exactly one brace-quartet file rule { create write open mounton }):"
   RK_FILE_CONCRETE="$(printf '%s\n' "$RK_TMPFSDIR_RAW" | awk '$2 == "docker_helper_rootlesskit_t" && $0 ~ /:file /' || true)"
   printf '%s\n' "${RK_FILE_CONCRETE:-(none)}"
   RK_FILE_NORM="$(printf '%s\n' "$RK_FILE_CONCRETE" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:file \(.*\);$/\1/p' | sed 's/[{}]//g; s/^ *//; s/ *$//' | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//' || true)"
@@ -1574,21 +1574,22 @@ PREFLIGHT_OK=1
   printf '%s\n' "${RK_FILE_STANDING:-(none — the standing surface is empty)}"
   RK_FILE_UNION="$(printf '%s\n' "$RK_TMPFSDIR_RAW" | sed -n 's/^[[:space:]]*allow [^ ]* [^:]*:file \(.*\);$/\1/p' | sed 's/[{}]//g; s/;.*//' | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)"
   echo "effective file perm union: ${RK_FILE_UNION:-(none)}"
-  echo "--- the forbidden-file-perms negative (everything beyond the base policy's standing surface and the granted create write open must be absent from the whole effective file surface; the standing set is this run's own inventory fact; this is deliberately NOT the file-RW bundle — read/getattr/setattr/append/map/unlink/link/rename/execute/lock and every other hook must not ride — the predicted next boundaries stay ungranted):"
-  RK_FILE_FORBIDDEN="$(printf '%s\n' "$RK_FILE_UNION" | tr ' ' '\n' | grep -avE "^(create|open|write|$(printf '%s' "$RK_FILE_STANDING" | tr ' ' '|'))$" || true)"
+  echo "--- the forbidden-file-perms negative (everything beyond the base policy's standing surface and the granted create write open mounton must be absent from the whole effective file surface; the standing set is this run's own inventory fact; this is deliberately NOT the file-RW bundle — read/getattr/setattr/append/map/unlink/link/rename/execute/lock and every other hook must not ride — the predicted next boundaries stay ungranted):"
+  RK_FILE_FORBIDDEN="$(printf '%s\n' "$RK_FILE_UNION" | tr ' ' '\n' | grep -avE "^(create|mounton|open|write|$(printf '%s' "$RK_FILE_STANDING" | tr ' ' '|'))$" || true)"
   printf '%s\n' "${RK_FILE_FORBIDDEN:-(none — no extra file permission)}"
   RK_FILE_OK=0
   if [ "$(printf '%s\n' "$RK_FILE_CONCRETE" | grep -ac . || true)" = 1 ] \
     && printf '%s\n' "$RK_FILE_CONCRETE" | grep -aq 'allow docker_helper_rootlesskit_t tmpfs_t:file ' \
-    && [ "$RK_FILE_NORM" = "create open write" ] \
+    && [ "$RK_FILE_NORM" = "create mounton open write" ] \
     && printf '%s\n' "$RK_FILE_UNION" | tr ' ' '\n' | grep -aqx 'create' \
+    && printf '%s\n' "$RK_FILE_UNION" | tr ' ' '\n' | grep -aqx 'mounton' \
     && printf '%s\n' "$RK_FILE_UNION" | tr ' ' '\n' | grep -aqx 'open' \
     && printf '%s\n' "$RK_FILE_UNION" | tr ' ' '\n' | grep -aqx 'write' \
     && [ -z "$RK_FILE_FORBIDDEN" ]; then
     RK_FILE_OK=1
   fi
   if [ "$RK_FILE_OK" = 1 ]; then
-    echo "PASS: flow tmpfs replacement-file identity (module contribution exactly { create write open }; effective file union = the base policy's standing surface + create + write + open — the standing residual recorded above; no module-borne permission beyond the triple)"
+    echo "PASS: flow tmpfs replacement-file identity (module contribution exactly { create write open mounton }; effective file union = the base policy's standing surface + create + write + open + mounton — the standing residual recorded above; no module-borne permission beyond the quartet)"
   else
     echo "FAIL: flow tmpfs replacement-file identity (concrete-rules=$(printf '%s\n' "$RK_FILE_CONCRETE" | grep -ac . || true) norm=${RK_FILE_NORM:-(none)} union=${RK_FILE_UNION:-(none)})"
     PREFLIGHT_OK=0
@@ -3265,7 +3266,7 @@ POSTTUN_NSTARTUP=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIMED=0
 POSTTUN_OLD_BOUNDARY_PRESENT=0
 POSTTUN_BND_SYMBOLIC=""
 {
-  echo "=== 4C-38..4C-55 post-TUN lifetime/readiness causal verdict (the 4C-55 run carries exactly the rootlesskit_t -> net_conf_t:file { read open } pair — the 4C-51 read widened in place by the 4C-52 open hook — beside the tmpfs_t:lnk_file { create read unlink } triple (the 4C-48 create + 4C-50 read widened in place by the 4C-53 unlink removal hook), the tmpfs_t:file { create write open } grant (the 4C-54 create hook widened in place by the 4C-55 combined write|open boundary — the canonical 4C-54 run's own terminal record, raw 0x40004 decoded per COMMON_FILE_PERMS) and the cgroup_t:dir mounton grant; the confinement gate's PASS is this run's own re-proven precondition) ==="
+  echo "=== 4C-38..4C-56 post-TUN lifetime/readiness causal verdict (the 4C-56 run carries exactly the rootlesskit_t -> net_conf_t:file { read open } pair — the 4C-51 read widened in place by the 4C-52 open hook — beside the tmpfs_t:lnk_file { create read unlink } triple (the 4C-48 create + 4C-50 read widened in place by the 4C-53 unlink removal hook), the tmpfs_t:file { create write open mounton } grant (the 4C-54 create hook widened in place by the 4C-55 combined write|open boundary and the 4C-56 bind-mount mounton boundary — the canonical 4C-55 run's own terminal record, raw 0x10000 decoded per COMMON_FILE_PERMS) and the cgroup_t:dir mounton grant; the confinement gate's PASS is this run's own re-proven precondition) ==="
   echo "POST-TUN-T0: ${POSTTUN_T0_EPOCH:-(not derived)}"
   echo "  derivation: trace-ts=$POSTTUN_T0_TRACE_TS attach-executor=${POSTTUN_ATTACH_WHO:-(none)} read-epoch=$POSTTUN_READ_EPOCH read-uptime=$POSTTUN_READ_UPTIME ring-last-ts=${POSTTUN_RING_LAST_TS:-(none)} clock-drift=${POSTTUN_CLOCK_DRIFT:-?}s"
   echo "--- the attach pair (the T0 anchor; the attach executor's own TUNSETIFF):"
@@ -4331,6 +4332,37 @@ POSTTUN_BND_SYMBOLIC=""
     POSTTUN_OLD_FILEWRITEOPEN_PRESENT=1
   else
     echo "OLD-FILEWRITEOPEN-BOUNDARY: GONE (no rootlesskit_t -> tmpfs_t:file write|open (0x40004) decision in the window's trace span)"
+  fi
+
+  # 4C-56: the SAME contract for the phase's own widening — the OLD
+  # primary boundary (docker_helper_rootlesskit_t -> tmpfs_t:file,
+  # denied mask 0x10000 = mounton, bit 16 of the kernel's
+  # COMMON_FILE_PERMS layout — the canonical 4C-55 run 37414244341's
+  # record INSIDE the sys_mount(<op-state>/resolv.conf,
+  # /etc/resolv.conf, MS_BIND) window, the bind-mount mountpoint's own
+  # FILE__MOUNTON check; the denial's tcontext was the just-recreated
+  # replacement file's own type) must be GONE anywhere in the window's
+  # trace span. The mask anchor is pinned to the literal 0x10000
+  # followed by a non-hex/edge (0x100000/0x1000000 and the dir-class
+  # 0x1000000 masks never match); the tclass=file anchor separates this
+  # gate from the dir/lnk_file classes (the sysfs_t:dir mounton rows
+  # are the tolerated stage noise on ANOTHER type and another class);
+  # the tcontext=tmpfs_t:s0 anchor separates it from every other type's
+  # file-class gates. A record here means the 4C-56 widening did not
+  # take effect on the loaded policy (or the hosts bind re-hit the same
+  # surface — a phase regression, not a new phase): STOP and report the
+  # actual behavior (no rule widening).
+  POSTTUN_OLD_FILEMOUNTON_PRESENT="$(grep -a 'selinux_audited:' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null \
+    | grep -a 'scontext=system_u:system_r:docker_helper_rootlesskit_t' \
+    | grep -aE 'tcontext=system_u:object_r:tmpfs_t:s0([ \t]|$)' \
+    | grep -a 'tclass=file' \
+    | grep -aE 'denied=0x10000([^0-9a-fA-F]|$)' || true)"
+  if [ -n "$POSTTUN_OLD_FILEMOUNTON_PRESENT" ]; then
+    echo "OLD-FILEMOUNTON-BOUNDARY: STILL-PRESENT — the 4C-56 replacement-file mounton widening did not take effect (STOP; no rule widening):"
+    printf '%s\n' "$POSTTUN_OLD_FILEMOUNTON_PRESENT"
+    POSTTUN_OLD_FILEMOUNTON_PRESENT=1
+  else
+    echo "OLD-FILEMOUNTON-BOUNDARY: GONE (no rootlesskit_t -> tmpfs_t:file mounton (0x10000) decision in the window's trace span)"
   fi
 
   # 4C-49: the SAME contract for the phase's own grant — the OLD primary
@@ -5637,6 +5669,129 @@ REBUILD-STAGE=NOT-REACHED}"
     echo "MILESTONE: ROOTLESSKIT-ETC-RESOLV-FILE-RECREATE=NOT-REACHED (fd=$([ "$POSTTUN_FILECREATE_FD_OK" = 1 ] && echo obtained || echo not-obtained) writes=${POSTTUN_RESOLVRECREATE_WRITES:-0} write-fails=${POSTTUN_RESOLVRECREATE_WRITE_FAILS:-0} closes=${POSTTUN_RESOLVRECREATE_CLOSES:-0} close-fails=${POSTTUN_RESOLVRECREATE_CLOSE_FAILS:-0} continuation=$([ -n "$POSTTUN_RESOLVRECREATE_CONTINUATION" ] && echo present || echo absent) filewriteopen-denial=$([ -n "$POSTTUN_OLD_FILEWRITEOPEN_PRESENT" ] && echo PRESENT || echo absent))"
   fi
 
+  # The 4C-56 objective: the generated-file bind mounts. The target
+  # operation is the sys_mount(<operation-state>/resolv.conf,
+  # "/etc/resolv.conf", "", MS_BIND, NULL) window that FOLLOWS the
+  # resolv/hosts recreation chain. ROOTLESSKIT-ETC-RESOLV-BIND-MOUNT=OK
+  # requires ALL of:
+  #   - NO tmpfs_t:file mounton (0x10000) denial anywhere in the window
+  #     (the OLD-FILEMOUNTON gone-gate above — the grant took effect);
+  #   - the exact resolv MS_BIND pair returned 0x0 (the bind actually
+  #     happened — absence of an AVC alone is NOT a pass);
+  #   - the source provenance established: the traced source path
+  #     extracted from the mount enter line, its /ops/op_<id>/ prefix
+  #     matching the run's own operation id (the operation-local
+  #     generated resolv.conf; the SOURCE TYPE is NOT claimed — no
+  #     kernel mediation record names it in this window, no
+  #     source-side permission is granted);
+  #   - the production continues (the hosts bind is the expected next
+  #     step; the same-who production enter is the alternative).
+  # The mountpoint identity facts (the target type/mode/mount state)
+  # are recorded best-effort; the primary proof is the mount ret plus
+  # the continuation. The hosts bind on the SAME already-granted
+  # surface is the same permission at work, not a new phase; if the
+  # hosts bind re-hits the tmpfs_t:file mounton denial the gone-gate
+  # fires (a phase regression, not a new phase).
+  echo "--- the 4C-56 resolv bind objective (the exact sys_mount MS_BIND window onto /etc/resolv.conf following the recreation chain; the enter/exit are the paired own records):"
+  POSTTUN_RESOLVBIND_PAIR=""
+  POSTTUN_RESOLVBIND_RET=""
+  POSTTUN_RESOLVBIND_SOURCE=""
+  POSTTUN_RESOLVBIND_SRCOP=""
+  POSTTUN_RESOLVBIND_EXIT_TS=""
+  if [ -n "${POSTTUN_T0_TRACE_TS:-}" ]; then
+    POSTTUN_RESOLVBIND_PAIR="$(awk -v t0="$POSTTUN_T0_TRACE_TS" '
+      /sys_mount\(dev_name:/ && t0 != "" {
+        ts = $4; sub(/:$/, "", ts)
+        if (ts + 0 > t0 + 0 && $0 ~ /dir_name: [^,]*"\/etc\/resolv\.conf"/ && $0 ~ /flags: 0x1000([^0-9a-fA-F]|$)/) {
+          pend = 1; pwho = $1; pline = $0; next
+        }
+        next
+      }
+      pend && /sys_mount -> / && $1 == pwho {
+        print pline; print $0; exit
+      }
+    ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true)"
+    printf '%s\n' "${POSTTUN_RESOLVBIND_PAIR:-(none — no /etc/resolv.conf MS_BIND mount pair in this trace span)}"
+    POSTTUN_RESOLVBIND_RET="$(printf '%s\n' "$POSTTUN_RESOLVBIND_PAIR" | tail -1 | awk '{print $NF}' 2>/dev/null || true)"
+    POSTTUN_RESOLVBIND_EXIT_TS="$(printf '%s\n' "$POSTTUN_RESOLVBIND_PAIR" | tail -1 | awk '{ ts = $4; sub(/:$/, "", ts); print ts }' 2>/dev/null || true)"
+    POSTTUN_RESOLVBIND_SOURCE="$(printf '%s\n' "$POSTTUN_RESOLVBIND_PAIR" | head -1 | sed -n 's/.*dev_name: [^ ]* "\([^"]*\)".*/\1/p' 2>/dev/null || true)"
+    POSTTUN_RESOLVBIND_SRCOP="$(printf '%s' "$POSTTUN_RESOLVBIND_SOURCE" | sed -n 's|.*/var/lib/docker-helper-builder/ops/\(op_[0-9a-f]*\).*|\1|p' 2>/dev/null || true)"
+  fi
+  echo "--- the source provenance (the traced source path — the tracer truncates long strings; the op-id prefix match is the operation-local relation; the source TYPE is not claimed: no kernel mediation record names it in this window):"
+  if [ -n "$POSTTUN_RESOLVBIND_SOURCE" ]; then
+    echo "  source path (as traced): $POSTTUN_RESOLVBIND_SOURCE"
+    echo "  the operation id (the run's own): ${OP_ID:-(unknown)}"
+    if [ -n "$POSTTUN_RESOLVBIND_SRCOP" ] && case "${OP_ID:-}" in "$POSTTUN_RESOLVBIND_SRCOP"*) true ;; *) false ;; esac; then
+      echo "  PASS: the traced source's ops/<id> token is the run's own operation id prefix (the source is the operation-local generated resolv.conf)"
+      POSTTUN_RESOLVBIND_SRCOK=1
+    else
+      echo "  FAIL: the traced source's ops token (${POSTTUN_RESOLVBIND_SRCOP:-(none)}) does not match the run's own operation id"
+      POSTTUN_RESOLVBIND_SRCOK=0
+    fi
+  else
+    echo "  (the mount enter was never recorded — no source provenance)"
+    POSTTUN_RESOLVBIND_SRCOK=0
+  fi
+  POSTTUN_RESOLVBIND_CONTINUATION=""
+  if [ -n "$POSTTUN_RESOLVBIND_EXIT_TS" ]; then
+    POSTTUN_RESOLVBIND_CONTINUATION="$(awk -v who="$(printf '%s\n' "$POSTTUN_RESOLVBIND_PAIR" | head -1 | awk '{print $1}')" -v te="$POSTTUN_RESOLVBIND_EXIT_TS" '
+      $1 != who { next }
+      { ts = $4; sub(/:$/, "", ts)
+        if (ts + 0 <= te + 0) next
+        if ($0 !~ /sys_[a-z0-9_]+\(/) next
+        nm = $0; sub(/.*sys_/, "", nm); sub(/\(.*/, "", nm)
+        if (nm ~ /^(unlink|unlinkat|rmdir)$/ && $0 ~ /"\/tmp\//) next
+        if (nm ~ /^(unlink|unlinkat|rmdir|openat|openat2|getdents64|newfstatat|statx|readlink)$/ && $0 ~ /\/tmp\/rootlesskit-b/) next
+        if (nm ~ /^(openat|openat2)$/ && $0 ~ /"\/tmp",/) next
+        if (nm ~ /^(mount|mkdir|mkdirat|umount2|umount|rename|getdents64|openat|openat2|newfstatat|statx|unlink|unlinkat|rmdir|symlink|symlinkat|readlink|execve|socket|open|setns|ioctl|move_mount|open_tree|fsopen|fsmount)$/) {
+          print; exit
+        }
+      }' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | head -1 || true)"
+  fi
+  echo "--- the hosts bind (the SAME already-granted surface at work — the expected next step; record + milestone-if-reached):"
+  POSTTUN_HOSTSBIND_PAIR=""
+  POSTTUN_HOSTSBIND_RET=""
+  POSTTUN_HOSTSBIND_SOURCE=""
+  if [ -n "$POSTTUN_RESOLVBIND_EXIT_TS" ]; then
+    POSTTUN_HOSTSBIND_PAIR="$(awk -v te="$POSTTUN_RESOLVBIND_EXIT_TS" '
+      /sys_mount\(dev_name:/ {
+        ts = $4; sub(/:$/, "", ts)
+        if (te != "" && ts + 0 > te + 0 && $0 ~ /dir_name: [^,]*"\/etc\/hosts"/ && $0 ~ /flags: 0x1000([^0-9a-fA-F]|$)/) {
+          pend = 1; pwho = $1; pline = $0; next
+        }
+        next
+      }
+      pend && /sys_mount -> / && $1 == pwho {
+        print pline; print $0; exit
+      }
+    ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true)"
+    printf '%s\n' "${POSTTUN_HOSTSBIND_PAIR:-(none — no /etc/hosts MS_BIND mount pair followed the resolv bind in this trace span)}"
+    POSTTUN_HOSTSBIND_RET="$(printf '%s\n' "$POSTTUN_HOSTSBIND_PAIR" | tail -1 | awk '{print $NF}' 2>/dev/null || true)"
+    POSTTUN_HOSTSBIND_SOURCE="$(printf '%s\n' "$POSTTUN_HOSTSBIND_PAIR" | head -1 | sed -n 's/.*dev_name: [^ ]* "\([^"]*\)".*/\1/p' 2>/dev/null || true)"
+  fi
+  POSTTUN_HOSTSBIND_OK=0
+  if [ -n "$POSTTUN_HOSTSBIND_PAIR" ] && [ "$POSTTUN_HOSTSBIND_RET" = "0x0" ]; then
+    POSTTUN_HOSTSBIND_OK=1
+    echo "  MILESTONE: ROOTLESSKIT-ETC-HOSTS-BIND-MOUNT=OK — the hosts bind mount succeeded on the SAME already-granted surface (the source: ${POSTTUN_HOSTSBIND_SOURCE:-(untraced)})"
+  fi
+  POSTTUN_RESOLVBIND_OK=0
+  if [ -z "$POSTTUN_OLD_FILEMOUNTON_PRESENT" ] \
+    && [ "$POSTTUN_RESOLVBIND_RET" = "0x0" ] \
+    && [ "${POSTTUN_RESOLVBIND_SRCOK:-0}" = 1 ] \
+    && { [ -n "$POSTTUN_RESOLVBIND_CONTINUATION" ] || [ "$POSTTUN_HOSTSBIND_OK" = 1 ]; }; then
+    POSTTUN_RESOLVBIND_OK=1
+  fi
+  if [ "$POSTTUN_RESOLVBIND_OK" = 1 ]; then
+    echo "MILESTONE: ROOTLESSKIT-ETC-RESOLV-BIND-MOUNT=OK — the OLD tmpfs_t:file mounton boundary is GONE, the exact resolv MS_BIND mount returned 0x0, the source provenance is the operation-local generated resolv.conf (the op-id prefix match), and the production continued:"
+    printf '%s\n' "  the mount: source=$POSTTUN_RESOLVBIND_SOURCE target=/etc/resolv.conf flags=MS_BIND ret=$POSTTUN_RESOLVBIND_RET"
+    if [ "$POSTTUN_HOSTSBIND_OK" != 1 ] && [ -n "$POSTTUN_RESOLVBIND_CONTINUATION" ]; then
+      echo "  the first post-bind production enter (the next stage began):"
+      printf '%s\n' "$POSTTUN_RESOLVBIND_CONTINUATION"
+    fi
+  else
+    echo "MILESTONE: ROOTLESSKIT-ETC-RESOLV-BIND-MOUNT=NOT-REACHED (pair=$([ -n "$POSTTUN_RESOLVBIND_PAIR" ] && echo present || echo absent) ret=${POSTTUN_RESOLVBIND_RET:-(unpaired)} source-provenance=$([ "${POSTTUN_RESOLVBIND_SRCOK:-0}" = 1 ] && echo proven || echo unproven) continuation=$([ -n "$POSTTUN_RESOLVBIND_CONTINUATION" ] && echo present || echo absent) filemounton-denial=$([ -n "$POSTTUN_OLD_FILEMOUNTON_PRESENT" ] && echo PRESENT || echo absent))"
+  fi
+
   # The gates.
   echo "GATES:"
   [ "$POSTTUN_T0_OK" = 1 ] && echo "  POST-TUN-T0 observed: PASS" || echo "  POST-TUN-T0 observed: FAIL"
@@ -6039,6 +6194,38 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
       POSTTUN_4C55_PHASE_OK=0
       marker "ROOTLESSKIT-ETC-RESOLV-FILE-RECREATE=NOT-REACHED"
       marker "4C-55=INCOMPLETE/MILESTONE-NOT-REACHED"
+    fi
+  fi
+  # The 4C-56 phase block: the same shape as the 4C-55 block. The
+  # BIND-MOUNT milestone REQUIRES the mount pair's own 0x0 (absence of
+  # an AVC alone is not a pass) plus the source provenance (the
+  # operation-local generated resolv.conf, the op-id prefix match) plus
+  # the production continuation; the hosts bind on the SAME surface is
+  # the same permission at work — when re-hit by the same mounton
+  # denial the gone-gate fires (a phase regression, not a new phase).
+  if [ "$POSTTUN_OLD_FILEMOUNTON_PRESENT" = 1 ]; then
+    POSTTUN_4C56_PHASE_OK=0
+    marker "4C-56-OLD-FILEMOUNTON-BOUNDARY=STILL-PRESENT"
+    marker "4C-56=INCOMPLETE/GRANT-DID-NOT-TAKE-EFFECT"
+  else
+    marker "4C-56-OLD-FILEMOUNTON-BOUNDARY=GONE"
+    if [ "$POSTTUN_RESOLVBIND_OK" = 1 ]; then
+      POSTTUN_4C56_PHASE_OK=1
+      marker "ROOTLESSKIT-ETC-RESOLV-BIND-MOUNT=OK"
+      [ "$POSTTUN_HOSTSBIND_OK" = 1 ] && marker "ROOTLESSKIT-ETC-HOSTS-BIND-MOUNT=OK"
+      if [ -n "$POSTTUN_FIRST_FAIL_PID" ]; then
+        marker "4C-56-OUTCOME=NEXT-STARTUP-BOUNDARY-CONFIRMED"
+        marker "4C-56=PASS/NEXT-BOUNDARY-CONFIRMED"
+      else
+        marker "4C-56-OUTCOME=POST-TUN-LIFETIME-STABLE"
+        marker "TARGET-LIFETIME-BLOCKER=GONE"
+        marker "POST-TUN-LIFETIME=STABLE"
+        marker "4C-56=PASS/POST-TUN-LIFETIME-STABLE"
+      fi
+    else
+      POSTTUN_4C56_PHASE_OK=0
+      marker "ROOTLESSKIT-ETC-RESOLV-BIND-MOUNT=NOT-REACHED"
+      marker "4C-56=INCOMPLETE/MILESTONE-NOT-REACHED"
     fi
   fi
   marker "4C-38=PROVEN/PRIMARY-BOUNDARY-ESTABLISHED"
@@ -7737,7 +7924,9 @@ if [ "$I9_OK" = 1 ]; then
   # phase INCOMPLETE (no guessing).
   # A still-present old boundary is a hard phase failure (the grant
   # demonstrably did not take effect); it outranks the cross-op
-  # INCOMPLETE. All seventeen standing gone-gates apply: the 4C-55
+  # INCOMPLETE. All eighteen standing gone-gates apply: the 4C-56
+  # replacement-file mounton boundary (the phase's own widening), the
+  # 4C-55
   # replacement-file write/open boundary (the phase's own widening), the
   # 4C-54 replacement-file create boundary (the prior phase's own
   # grant), the 4C-53 rebuild-symlink unlink boundary (the 4C-53
@@ -7856,6 +8045,11 @@ if [ "$I9_OK" = 1 ]; then
     finish FAIL
     exit 0
   fi
+  if [ "${POSTTUN_OLD_FILEMOUNTON_PRESENT:-0}" = 1 ]; then
+    marker "BLOCKER=the 4C-56 replacement-file mounton widening did not remove the old rootlesskit_t -> tmpfs_t:file mounton boundary (see 53-posttun-verdict.txt)"
+    finish FAIL
+    exit 0
+  fi
   if [ "${POSTTUN_ESTABLISHED:-0}" = 1 ] && [ "${POSTTUN_4C54_PHASE_OK:-0}" != 1 ]; then
     marker "BLOCKER=the 4C-54 file-create milestone did not reach OK (see 53-posttun-verdict.txt; the accepted PASS contract requires the milestone)"
     finish INCOMPLETE
@@ -7863,6 +8057,11 @@ if [ "$I9_OK" = 1 ]; then
   fi
   if [ "${POSTTUN_ESTABLISHED:-0}" = 1 ] && [ "${POSTTUN_4C55_PHASE_OK:-0}" != 1 ]; then
     marker "BLOCKER=the 4C-55 file-recreate milestone did not reach OK (see 53-posttun-verdict.txt; the accepted PASS contract requires the milestone — the fd is REQUIRED: the kernel own do_open() strips O_TRUNC for freshly created files, so once create+write+open are granted the openat has no further hook to deny)"
+    finish INCOMPLETE
+    exit 0
+  fi
+  if [ "${POSTTUN_ESTABLISHED:-0}" = 1 ] && [ "${POSTTUN_4C56_PHASE_OK:-0}" != 1 ]; then
+    marker "BLOCKER=the 4C-56 resolv bind-mount milestone did not reach OK (see 53-posttun-verdict.txt; the accepted PASS contract requires the milestone — the mount pair's own 0x0, the source provenance and the production continuation)"
     finish INCOMPLETE
     exit 0
   fi

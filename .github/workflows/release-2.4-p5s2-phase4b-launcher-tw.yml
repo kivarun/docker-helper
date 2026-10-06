@@ -46,11 +46,19 @@ jobs:
           # combined write|open boundary (requested=0x40004 denied=0x40004
           # tclass=file — ONE audited decision covering the
           # open-completion hook's FILE__OPEN and its f_mode-derived
-          # FILE__WRITE, one boundary not two phases); the proof ref
-          # advances from the 4C-53-era pin to the commit carrying that
-          # module widened to exactly { create write open } (cf346f8 —
-          # identical Go sources, so the binary is the same program).
-          PHASE4B_PROOF_REF: 'cf346f87b02dd9b39647bb03a5735f3870f7072c'
+          # FILE__WRITE, one boundary not two phases); the canonical
+          # 4C-55 run 37414244341's SAME stage then completed the whole
+          # recreate chain (fd 3, the zero-length write ret 0x0, the
+          # close ret 0x0; the hosts equivalents on the SAME surfaces)
+          # and failed at the generated-file bind mount's mountpoint
+          # hook (requested=0x10000 denied=0x10000 tclass=file
+          # tcontext=tmpfs_t:s0 inside sys_mount(<op-state>/resolv.conf,
+          # /etc/resolv.conf, MS_BIND) — FILE__MOUNTON bit 16); the
+          # proof ref advances from the 4C-54-era pin to the commit
+          # carrying that module widened to exactly
+          # { create write open mounton } (0374e21 — identical Go
+          # sources, so the binary is the same program).
+          PHASE4B_PROOF_REF: '0374e21434d1396abd4d316e847b97d460730a50'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
