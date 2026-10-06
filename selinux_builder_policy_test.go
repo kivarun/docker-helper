@@ -4382,30 +4382,31 @@ func TestSELinuxPolicyRootlesskitIsolation(t *testing.T) {
 }
 
 // buildkitdIdentityViolations scans the module's parsed rules against the
-// 4C-57 identity + 4C-58/4C-59 source-exec authority invariants and returns
-// one human-readable violation per broken rule, empty when none:
-//   - exactly ONE allow rule may name docker_helper_buildkitd_exec_t as a
-//     participant: the source-exec grant, in the exact canonical brace form
-//     { execute read open } (any other shape — a narrower pair, the bare
-//     4C-58 form, execute_no_trans, a getattr/map/entrypoint addition, a
-//     reordered brace form, another source domain, another class, a
-//     parallel, split, or duplicate line — violates);
-//   - no allow rule may name docker_helper_buildkitd_t (the declared
-//     process domain stays permission-less — unreachable until its own
-//     live-evidence transition phase);
-//   - no rootlesskit_t -> bin_t:file grant (the forbidden generic
-//     compensating bundle; the narrowed private identity is never papered
-//     over with a generic grant);
-//   - no second permission sweep toward the sibling exec identities: an
-//     allow from the rootlesskit child toward its own or slirp4netns's
-//     exec type must be exactly the standing rule (a re-granted subset
-//     line duplicates an existing owner);
-//   - no range_transition may exist anywhere (the MCS category
-//     preservation is a live-transition-phase proof, never a pre-declared
-//     map).
+// 4C-57 identity + 4C-58/4C-59 source-exec + 4C-60 process-transition +
+// 4C-61 target-entrypoint authority invariants and returns one
+// human-readable violation per broken rule, empty when none. THREE distinct
+// authority planes, each owned separately (never coalesced into one "exec
+// bundle"):
+//
+//	A. the source executable surface: rootlesskit_t ->
+//	   buildkitd_exec_t:file — exactly the { execute read open } rule;
+//	B. the process transition surface: rootlesskit_t ->
+//	   buildkitd_t:process — exactly the bare { transition } rule;
+//	C. the target executable surface: buildkitd_t ->
+//	   buildkitd_exec_t:file — exactly the bare { entrypoint } rule
+//	   (the FIRST module-local runtime authority of the buildkitd
+//	   domain; the conventional entry bundle is NOT copied).
+//	- any other allow rule naming a buildkitd type (any source, any
+//	  target, any class, any permission set) violates;
+//	- the rootlesskit child holds no bin_t:file grant; its exec/transition
+//	  surfaces toward the standing sibling identities stay exactly the
+//	  existing owners' rules (a re-granted subset line duplicates an
+//	  existing owner);
+//	- no range_transition may exist anywhere.
 func buildkitdIdentityViolations(policy string) []string {
 	const canonicalExec = "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute read open };"
 	const canonicalTransition = "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;"
+	const canonicalEntry = "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file entrypoint;"
 	standingRootlesskitExecRules := map[string]string{
 		"docker_helper_rootlesskit_exec_t": "allow docker_helper_rootlesskit_t docker_helper_rootlesskit_exec_t:file { entrypoint read open execute execute_no_trans getattr map };",
 		"docker_helper_slirp4netns_exec_t": "allow docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:file { execute read open getattr };",
@@ -4418,6 +4419,7 @@ func buildkitdIdentityViolations(policy string) []string {
 	var violations []string
 	canonicalCount := 0
 	transitionCount := 0
+	entryCount := 0
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "#") {
@@ -4429,6 +4431,9 @@ func buildkitdIdentityViolations(policy string) []string {
 		if trimmed == canonicalTransition {
 			transitionCount++
 		}
+		if trimmed == canonicalEntry {
+			entryCount++
+		}
 	}
 	if canonicalCount != 1 {
 		violations = append(violations, fmt.Sprintf("the buildkitd source-exec grant must exist exactly once in the exact canonical form, found %d: %s", canonicalCount, canonicalExec))
@@ -4436,17 +4441,20 @@ func buildkitdIdentityViolations(policy string) []string {
 	if transitionCount != 1 {
 		violations = append(violations, fmt.Sprintf("the buildkitd process-transition grant must exist exactly once in the exact canonical form, found %d: %s", transitionCount, canonicalTransition))
 	}
+	if entryCount != 1 {
+		violations = append(violations, fmt.Sprintf("the buildkitd target-entrypoint grant must exist exactly once in the exact canonical form, found %d: %s", entryCount, canonicalEntry))
+	}
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "#") {
 			continue
 		}
 		if strings.HasPrefix(trimmed, "allow ") {
-			if strings.Contains(trimmed, "docker_helper_buildkitd_exec_t") && trimmed != canonicalExec {
-				violations = append(violations, "the only allow rule naming the buildkitd exec type is the exact source-exec grant { execute read open }: "+trimmed)
+			if strings.Contains(trimmed, "docker_helper_buildkitd_exec_t") && trimmed != canonicalExec && trimmed != canonicalEntry {
+				violations = append(violations, "the only allow rules naming the buildkitd exec type are the exact source-exec grant { execute read open } and the exact target-entrypoint grant: "+trimmed)
 			}
-			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition {
-				violations = append(violations, "the only allow rule toward the buildkitd domain is the exact process transition grant: "+trimmed)
+			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry {
+				violations = append(violations, "the only allow rules toward the buildkitd domain are the exact process transition grant and the exact target-entrypoint grant: "+trimmed)
 			}
 			fields := strings.Fields(trimmed)
 			if len(fields) >= 3 && fields[1] == "docker_helper_rootlesskit_t" && strings.Contains(fields[2], ":file") {
@@ -4652,6 +4660,28 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		t.Error("the missing-transition mutation must trip the buildkitd authority invariants")
 	}
 
+	// The 4C-61 target-entrypoint grant: exactly the canonical bare
+	// rule, once (non-comment lines only).
+	const canonicalEntry = "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file entrypoint;"
+	var withoutEntry []string
+	entryCount := 0
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == canonicalEntry {
+			entryCount++
+			continue
+		}
+		withoutEntry = append(withoutEntry, line)
+	}
+	if entryCount != 1 {
+		t.Errorf("the buildkitd target-entrypoint grant must exist exactly once, found %d", entryCount)
+	}
+
+	// Missing-rule mutation: removing the canonical grant must trip.
+	if violations := buildkitdIdentityViolations(strings.Join(withoutEntry, "\n")); len(violations) == 0 {
+		t.Error("the missing-entrypoint mutation must trip the buildkitd authority invariants")
+	}
+
 	// Mutation guards: every forbidden authority shape appended to the
 	// module must trip the authority invariants; transition mutations
 	// must trip the exactly-one edge invariant.
@@ -4704,6 +4734,25 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		{"target entrypoint rule", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint execute read open getattr map };"},
 		{"target capability grant", "allow docker_helper_buildkitd_t self:capability sys_admin;"},
 		{"target cap_userns grant", "allow docker_helper_buildkitd_t self:cap_userns sys_admin;"},
+		// the 4C-61 target-entrypoint plane (the conventional entry bundle is NOT copied)
+		{"entrypoint + execute", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint execute };"},
+		{"entrypoint + read", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read };"},
+		{"entrypoint + open", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint open };"},
+		{"entrypoint + getattr", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint getattr };"},
+		{"entrypoint + map", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint map };"},
+		{"execute instead of entrypoint", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file execute;"},
+		{"execute_no_trans instead of entrypoint", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file execute_no_trans;"},
+		{"read instead of entrypoint", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file read;"},
+		{"open instead of entrypoint", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file open;"},
+		{"the slirp-style entry bundle copied whole", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read open execute getattr map };"},
+		{"entrypoint from the wrong source (the flow)", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file entrypoint;"},
+		{"entrypoint from the manager", "allow docker_helper_builder_t docker_helper_buildkitd_exec_t:file entrypoint;"},
+		{"entrypoint toward the wrong target", "allow docker_helper_buildkitd_t bin_t:file entrypoint;"},
+		{"entrypoint toward the slirp4netns exec type", "allow docker_helper_buildkitd_t docker_helper_slirp4netns_exec_t:file entrypoint;"},
+		{"entrypoint on the wrong class", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:process entrypoint;"},
+		{"brace equivalent of the entrypoint rule", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint };"},
+		{"split entrypoint grant", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { execute read open };\nallow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file entrypoint;"},
+		{"duplicate of the target-entrypoint rule", canonicalEntry},
 		// parallel / split / duplicate / order shapes
 		{"split grant (execute; then read open)", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file execute;\nallow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { read open };"},
 		{"reordered brace equivalent", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { open read execute };"},
@@ -4934,6 +4983,18 @@ func TestSELinuxPolicyKernelClassmapMaskPins(t *testing.T) {
 	}
 	if got := decode(0x40002); samePerms(got, []string{"write", "open"}) || samePerms(got, []string{"create", "open"}) {
 		t.Errorf("kernel classmap decode: 0x40002 must not decode to a write/create-open set, got %v", got)
+	}
+	// The 4C-61 target-boundary decode: decode(file, 0x8000000) ==
+	// exactly { entrypoint } — and the anti-shift discrimination: the
+	// one-shift-down neighbor 0x80000 is execmod, NOT entrypoint.
+	if got := decode(0x8000000); !samePerms(got, []string{"entrypoint"}) {
+		t.Errorf("kernel classmap decode: file mask 0x8000000 must decode to exactly { entrypoint }, got %v", got)
+	}
+	if got := decode(0x4000000); !samePerms(got, []string{"execute_no_trans"}) {
+		t.Errorf("kernel classmap decode: file mask 0x4000000 must decode to exactly { execute_no_trans }, got %v", got)
+	}
+	if got := decode(0x80000); !samePerms(got, []string{"execmod"}) {
+		t.Errorf("kernel classmap decode: file mask 0x80000 must decode to exactly { execmod } (the anti-shift neighbor), got %v", got)
 	}
 }
 
