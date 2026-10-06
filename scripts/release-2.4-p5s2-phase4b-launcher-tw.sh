@@ -2106,8 +2106,8 @@ RK_BKD_LABEL_OK=1
     || [ "$(printf '%s\n' "$BKD_SRC_ALLOW_LINES" | grep -acF 'allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute read open };' || true)" != "1" ] \
     || [ "$(printf '%s\n' "$BKD_SRC_ALLOW_LINES" | grep -acF 'allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;' || true)" != "1" ] \
     || [ "$(printf '%s\n' "$BKD_SRC_ALLOW_LINES" | grep -acF 'allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute };' || true)" != "1" ] \
-    || [ "$(printf '%s\n' "$BKD_SRC_ALLOW_LINES" | grep -acF 'allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir getattr;' || true)" != "1" ]; then
-    echo "  STOP: the module source's buildkitd allow surface is not exactly the source-exec triple + the bare transition grant + the target-domain { entrypoint read execute } grant + the state-root bare getattr grant"
+    || [ "$(printf '%s\n' "$BKD_SRC_ALLOW_LINES" | grep -acF 'allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search };' || true)" != "1" ]; then
+    echo "  STOP: the module source's buildkitd allow surface is not exactly the source-exec triple + the bare transition grant + the target-domain { entrypoint read execute } grant + the state-root { getattr search } grant"
     BKD_ZERO_ALLOW_OK=0
   fi
   for s in docker_helper_t docker_helper_builder_t docker_helper_builder_launcher_t \
@@ -2212,34 +2212,42 @@ RK_BKD_LABEL_OK=1
   done
   echo "SOURCE-BUILDKITD-EXEC-SURFACE=UNCHANGED (plane A stays exactly { execute read open })"
   echo "BUILDKITD-PROCESS-TRANSITION-SURFACE=UNCHANGED (plane B stays exactly { transition } — no new RootlessKit authority in this phase)"
-  echo "--- PLANE D (the 4C-63 shared state-root surface): sesearch --allow -s docker_helper_buildkitd_t -t docker_helper_builder_state_root_t (the domain's own state-root authority; must be EXACTLY the one bare getattr rule — the 4C-62 run's terminal-causal owner; the state-root search stays RECORDED/NON-OWNING and a combined { search getattr } rule is never written):"
+  echo "--- PLANE D (the 4C-64 shared state-root surface): sesearch --allow -s docker_helper_buildkitd_t -t docker_helper_builder_state_root_t (the domain's own state-root authority; must be EXACTLY the ONE { getattr search } rule — the 4C-63 getattr widened IN PLACE by the 4C-63 canonical run's terminal search boundary; never split, never duplicated; the standing RootlessKit state-root search rule is a DIFFERENT subject and a DIFFERENT owner and stays untouched):"
   BKD_STATE_ROOT_LINE="$(sesearch --allow -s docker_helper_buildkitd_t -t docker_helper_builder_state_root_t /sys/fs/selinux/policy 2>/dev/null \
     | awk '$1 == "allow" && $2 == "docker_helper_buildkitd_t" && $3 ~ /^docker_helper_builder_state_root/' || true)"
   printf '  module contribution (the concrete rule): %s\n' "${BKD_STATE_ROOT_LINE:-(empty)}"
-  if [ "$BKD_STATE_ROOT_LINE" = "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir getattr;" ]; then
-    echo "  module contribution = exactly { getattr }"
+  if [ "$BKD_STATE_ROOT_LINE" = "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search };" ]; then
+    echo "  module contribution = exactly { getattr search }"
+  elif [ "$(printf '%s\n' "$BKD_STATE_ROOT_LINE" | grep -acF 'allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search };' || true)" = "1" ]; then
+    echo "  module contribution = exactly { getattr search } (the source spelling)"
   else
-    echo "  STOP: the target domain's concrete surface on the shared state root is not exactly the bare { getattr } grant"
+    echo "  STOP: the target domain's concrete surface on the shared state root is not exactly the one { getattr search } rule"
     BKD_ZERO_ALLOW_OK=0
   fi
   echo "--- PLANE D effective-vs-module distinction (the two facts printed separately):"
   BKD_STATE_ROOT_EFFECTIVE="$(sesearch --allow -s docker_helper_buildkitd_t -t docker_helper_builder_state_root_t /sys/fs/selinux/policy 2>/dev/null || true)"
   printf '  effective loaded-policy surface (the live inventory, attribute-derived base-policy rules included as standing facts):\n%s\n' "${BKD_STATE_ROOT_EFFECTIVE:-(empty)}"
   echo "  (base-policy attribute-derived permissions on this pair are STANDING FACTS of the base policy, never the module's grant)"
-  echo "--- PLANE D per-perm NEGATIVES (each must be empty on the concrete pair — no second state-root permission rides; the module search must stay ABSENT):"
-  BKD_STATE_ROOT_MODULE_SEARCH_ABSENT=1
-  for p in search read open write create add_name remove_name setattr rmdir mounton lock; do
+  echo "--- PLANE D per-perm NEGATIVES (each must be empty on the concrete pair — no third state-root permission rides; getattr and search are the granted pair):"
+  for p in read open write create add_name remove_name setattr rmdir mounton lock; do
     extra="$(sesearch --allow -s docker_helper_buildkitd_t -t docker_helper_builder_state_root_t -c dir -p "$p" /sys/fs/selinux/policy 2>/dev/null \
       | awk '$1 == "allow" && $2 == "docker_helper_buildkitd_t" && $3 ~ /^docker_helper_builder_state_root/' || true)"
     printf '  %s: %s\n' "$p" "${extra:-(empty — no concrete rule)}"
     if [ -n "$extra" ]; then
       echo "  STOP: the forbidden state-root permission $p is present on the pair"
       BKD_ZERO_ALLOW_OK=0
-      [ "$p" = "search" ] && BKD_STATE_ROOT_MODULE_SEARCH_ABSENT=0
     fi
   done
-  echo "BUILDKITD-STATE-ROOT-MODULE-SEARCH=$([ "$BKD_STATE_ROOT_MODULE_SEARCH_ABSENT" = 1 ] && echo ABSENT || echo PRESENT)"
-  echo "  (the attribute-derived effective search surface, if any, is RECORDED above as a standing base-policy fact — never attributed to the module)"
+  echo "--- PLANE D standing-companion check (the RootlessKit state-root search rule is a DIFFERENT subject and a DIFFERENT owner; it must stay EXACTLY the one { search } rule on the loaded policy — the 4C-64 widening must not have touched it):"
+  RK_STATE_ROOT_LINE="$(sesearch --allow -s docker_helper_rootlesskit_t -t docker_helper_builder_state_root_t /sys/fs/selinux/policy 2>/dev/null \
+    | awk '$1 == "allow" && $2 == "docker_helper_rootlesskit_t" && $3 ~ /^docker_helper_builder_state_root/' || true)"
+  printf '  module contribution (the concrete rule): %s\n' "${RK_STATE_ROOT_LINE:-(empty)}"
+  if [ "$RK_STATE_ROOT_LINE" = "allow docker_helper_rootlesskit_t docker_helper_builder_state_root_t:dir { search };" ]; then
+    echo "  module contribution = exactly { search } (the standing RootlessKit owner unchanged)"
+  else
+    echo "  STOP: the flow domain's concrete surface on the shared state root is not exactly the standing { search } rule"
+    BKD_ZERO_ALLOW_OK=0
+  fi
   BKD_TRANS="$(sesearch --type_trans /sys/fs/selinux/policy 2>/dev/null | awk '$3 ~ /docker_helper_buildkitd_exec_t/' || true)"
   echo "--- sesearch --type_trans naming the exec type (expected EXACTLY ONE: the rootlesskit edge — the structural routing declaration; the ONE rule is also the loaded-policy proof that BOTH new types exist):"
   printf '%s\n' "${BKD_TRANS:-(none)}"
@@ -2277,7 +2285,7 @@ RK_BKD_LABEL_OK=1
     BKD_LABEL_OK=1
   fi
   if [ "$BKD_TRANS_OK" = 1 ] && [ "$BKD_ZERO_ALLOW_OK" = 1 ] && [ "$BKD_BIN_CLOSED_OK" = 1 ]; then
-    echo "PASS: the buildkitd authority holds the 4C-61 three-plane shape (both types declared — the ONE type_transition naming the pair is the loaded-policy proof; PLANE A: the module's rootlesskit child file surface is exactly { execute read open }, one rule; PLANE B: the rootlesskit child's domain surface is exactly the bare transition rule, one rule, the conventional bundle closed per-perm; PLANE C: the buildkitd domain's own exec-type surface is exactly the bare entrypoint rule, one rule, the conventional entry bundle closed per-perm; ZERO other concrete allow rules naming a buildkitd type from any module subject; the generic bin_t bundle stays closed)"
+    echo "PASS: the buildkitd authority holds the four-plane shape (both types declared — the ONE type_transition naming the pair is the loaded-policy proof; PLANE A: the module's rootlesskit child file surface is exactly { execute read open }, one rule; PLANE B: the rootlesskit child's domain surface is exactly the bare transition rule, one rule, the conventional bundle closed per-perm; PLANE C: the buildkitd domain's own exec-type surface is exactly the one { entrypoint read execute } rule, one rule, the conventional entry bundle closed per-perm; PLANE D: the buildkitd domain's state-root surface is exactly the ONE { getattr search } rule, one rule, the third-permission sweep closed per-perm; ZERO other concrete allow rules naming a buildkitd type from any module subject; the generic bin_t bundle stays closed)"
   else
     echo "FAIL: the buildkitd exec authority is not the shipped 4C-62 shape (transition=$BKD_TRANS_OK source-surface=$BKD_ZERO_ALLOW_OK bin-closed=$BKD_BIN_CLOSED_OK)"
     PREFLIGHT_OK=0
@@ -3555,7 +3563,7 @@ POSTTUN_NSTARTUP=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIMED=0
 POSTTUN_OLD_BOUNDARY_PRESENT=0
 POSTTUN_BND_SYMBOLIC=""
 {
-  echo "=== 4C-38..4C-63 post-TUN lifetime/readiness causal verdict (the 4C-62 run carries exactly the rootlesskit_t -> net_conf_t:file { read open } pair — the 4C-51 read widened in place by the 4C-52 open hook — beside the tmpfs_t:lnk_file { create read unlink } triple (the 4C-48 create + 4C-50 read widened in place by the 4C-53 unlink removal hook), the tmpfs_t:file { create write open mounton } grant (the 4C-54 create hook widened in place by the 4C-55 combined write|open boundary and the 4C-56 bind-mount mounton boundary) and the cgroup_t:dir mounton grant; the 4C-57 identity narrowing moved the payload's exec boundary off the generic bin_t label onto the private docker_helper_buildkitd_exec_t identity (the exact .fc relabel), the 4C-58/4C-59 grants widened the source-exec surface to { execute read open } (execute=0x4000, the image-read 0x40002={ read open }), the 4C-60 grant was the pointed process transition (transition=0x2) which SUCCEEDED live (buildkitd_t:s0:c1, the category preserved), the 4C-61 grant is the target-domain's own entrypoint (file:entrypoint=0x8000000, the kernel classmap) — the FIRST module-local runtime authority of docker_helper_buildkitd_t — and the 4C-62 grant widened that rule IN PLACE by the combined target-side image-load boundary (0x4002={ read execute }, the kernel classmap) which SUCCEEDED live (BUILDKITD-EXECVE=SUCCEEDED — the image replacement completed and the runtime ran under buildkitd_t:s0:c1), and the 4C-63 grant is the shared state-root dir getattr (dir:getattr=0x10, the kernel classmap; the dir-only search=0x20000000 stays RECORDED/NON-OWNING — live-observed != automatically grantable, grantable = live + terminal-causal owner; a combined { search getattr } rule is never written) — the terminal-causal owner of the 4C-62 run's death; the quarantined non-terminal surfaces (tmp_t write, the fifos, cgroup/sysfs/nsfs/passwd_file/sysctl_fs search, the target-side open) stay UNGRANTED no matter how often they repeat; the exec chain / runtime must ADVANCE past the previous failure point (forward production progress: ret 0x0 or new span decisions — the absence of an AVC alone is not sufficient; each live type/class/permission its own boundary; no prediction is authority); the inherited-fd fifo_file records stay HANDLED/NON-TERMINAL; the confinement gate's PASS is this run's own re-proven precondition) ==="
+  echo "=== 4C-38..4C-64 post-TUN lifetime/readiness causal verdict (the 4C-62 run carries exactly the rootlesskit_t -> net_conf_t:file { read open } pair — the 4C-51 read widened in place by the 4C-52 open hook — beside the tmpfs_t:lnk_file { create read unlink } triple (the 4C-48 create + 4C-50 read widened in place by the 4C-53 unlink removal hook), the tmpfs_t:file { create write open mounton } grant (the 4C-54 create hook widened in place by the 4C-55 combined write|open boundary and the 4C-56 bind-mount mounton boundary) and the cgroup_t:dir mounton grant; the 4C-57 identity narrowing moved the payload's exec boundary off the generic bin_t label onto the private docker_helper_buildkitd_exec_t identity (the exact .fc relabel), the 4C-58/4C-59 grants widened the source-exec surface to { execute read open } (execute=0x4000, the image-read 0x40002={ read open }), the 4C-60 grant was the pointed process transition (transition=0x2) which SUCCEEDED live (buildkitd_t:s0:c1, the category preserved), the 4C-61 grant is the target-domain's own entrypoint (file:entrypoint=0x8000000, the kernel classmap) — the FIRST module-local runtime authority of docker_helper_buildkitd_t — the 4C-62 grant widened that rule IN PLACE by the combined target-side image-load boundary (0x4002={ read execute }, the kernel classmap) which SUCCEEDED live (BUILDKITD-EXECVE=SUCCEEDED — the image replacement completed and the runtime ran under buildkitd_t:s0:c1), the 4C-63 grant is the shared state-root dir getattr (dir:getattr=0x10, the kernel classmap) — the terminal-causal owner of the 4C-62 run's death — and the 4C-64 grant widens that SAME rule IN PLACE by the 4C-63 run's own terminal dir:search boundary (search=0x20000000, the kernel classmap; ONE rule carrying exactly { getattr search }, never split; the five same-surface search records' repeat count was diagnostic, the terminal causality was the reason; the categorized per-op builder_state_t:s0:cX object was NOT reached in the 4C-63 run because traversal stopped on the shared root plane first — the AVC's tcontext identifies the denied PATH-WALK COMPONENT, never the final op_<id> inode of the traced syscall pathname); the quarantined non-terminal surfaces (tmp_t write, the fifos, cgroup/sysfs/nsfs/passwd_file/sysctl_fs search, the target-side open) stay UNGRANTED no matter how often they repeat; the exec chain / runtime must ADVANCE past the previous failure point (forward production progress: ret 0x0 or new span decisions — the absence of an AVC alone is not sufficient; each live type/class/permission its own boundary; no prediction is authority); the inherited-fd fifo_file records stay HANDLED/NON-TERMINAL; the confinement gate's PASS is this run's own re-proven precondition) ==="
   echo "POST-TUN-T0: ${POSTTUN_T0_EPOCH:-(not derived)}"
   echo "  derivation: trace-ts=$POSTTUN_T0_TRACE_TS attach-executor=${POSTTUN_ATTACH_WHO:-(none)} read-epoch=$POSTTUN_READ_EPOCH read-uptime=$POSTTUN_READ_UPTIME ring-last-ts=${POSTTUN_RING_LAST_TS:-(none)} clock-drift=${POSTTUN_CLOCK_DRIFT:-?}s"
   echo "--- the attach pair (the T0 anchor; the attach executor's own TUNSETIFF):"
@@ -6150,6 +6158,18 @@ REBUILD-STAGE=NOT-REACHED}"
   POSTTUN_BKD_SPAN_TERMINAL=""
   POSTTUN_BKD_OLD_PRESENT=""
   POSTTUN_BKD_NEW_DECISION=""
+  # The set -u hardening: the OLD-boundary and bin-window extraction
+  # variables are assigned inside the exec-pair branch only, but the
+  # gone-gate flags below read them unconditionally — an absent exec
+  # pair must produce the INCOMPLETE verdict, not an unbound-variable
+  # crash (the run 37463078411 defect class).
+  POSTTUN_BKD_OLD58_PRESENT=""
+  POSTTUN_BKD_OLD_TRANS_PRESENT=""
+  POSTTUN_BKD_OLD_ENTRY61_PRESENT=""
+  POSTTUN_BKD_OLD_IMGLOAD_PRESENT=""
+  POSTTUN_BKD_OLD_STROOT_PRESENT=""
+  POSTTUN_BKD_OLD_STROOT_SEARCH=""
+  POSTTUN_BKD_BIN_IN_WINDOW=""
   if [ -n "$POSTTUN_BKD_EXEC_ENTER_TS" ] && [ -n "$POSTTUN_BKD_EXEC_EXIT_TS" ]; then
     POSTTUN_BKD_DECISIONS="$(awk -v a="$POSTTUN_BKD_EXEC_ENTER_TS" -v b="$POSTTUN_BKD_EXEC_EXIT_TS" -v who="$POSTTUN_BKD_EXEC_WHO" '
       { ts = $4; sub(/:$/, "", ts)
@@ -6217,15 +6237,27 @@ REBUILD-STAGE=NOT-REACHED}"
     # The OLD state-root getattr boundary (the 4C-62 run's TERMINAL
     # record): scontext=buildkitd_t, tcontext=builder_state_root_t,
     # tclass=dir, denied=0x10 (dir:getattr, the kernel classmap bit 4;
-    # the dir-only search bit 29 = 0x20000000 is the SEPARATE non-owning
-    # surface). The record must be GONE from the window's span: the
-    # 4C-63 grant took effect.
+    # the dir-only search bit 29 = 0x20000000 is the SEPARATE member of
+    # the same widened rule). The record must be GONE from the whole
+    # span: the 4C-63 grant took effect and the 4C-64 widening kept it.
     POSTTUN_BKD_OLD_STROOT_PRESENT="$(printf '%s\n' "$POSTTUN_BKD_SPAN_DECISIONS" \
       | grep -a 'scontext=system_u:system_r:docker_helper_buildkitd_t' \
       | grep -aE 'tcontext=system_u:object_r:docker_helper_builder_state_root_t:s0([ \t]|$)' \
       | grep -a 'tclass=dir' \
       | grep -aE 'denied=0x10([^0-9a-fA-F]|$)' || true)"
     printf '%s\n' "${POSTTUN_BKD_OLD_STROOT_PRESENT:-(none — the OLD state-root getattr (0x10) terminal boundary is gone from the whole span)}"
+    # The OLD state-root search boundary (the 4C-63 canonical run's
+    # TERMINAL record): scontext=buildkitd_t, tcontext=builder_state_root_t,
+    # tclass=dir, denied=0x20000000 (dir:search, the kernel classmap bit
+    # 29; the getattr bit 4 = 0x10 is the SEPARATE granted surface). The
+    # record must be GONE from the whole span: the 4C-64 grant took
+    # effect.
+    POSTTUN_BKD_OLD_STROOT_SEARCH="$(printf '%s\n' "$POSTTUN_BKD_SPAN_DECISIONS" \
+      | grep -a 'scontext=system_u:system_r:docker_helper_buildkitd_t' \
+      | grep -aE 'tcontext=system_u:object_r:docker_helper_builder_state_root_t:s0([ \t]|$)' \
+      | grep -a 'tclass=dir' \
+      | grep -aE 'denied=0x20000000([^0-9a-fA-F]|$)' || true)"
+    printf '%s\n' "${POSTTUN_BKD_OLD_STROOT_SEARCH:-(none — the OLD state-root search (0x20000000) terminal boundary is gone from the whole span)}"
     # The 4C-61 STANDING boundary (the 4C-60 record's entrypoint shape):
     # the granted entrypoint hook (0x8000000) must stay gone — its
     # reappearance inside the window is a standing break, not a new
@@ -6243,18 +6275,18 @@ REBUILD-STAGE=NOT-REACHED}"
       | grep -aE 'tcontext=system_u:object_r:bin_t:s0([ \t]|$)' \
       | grep -a 'tclass=file' || true)"
     printf '%s\n' "${POSTTUN_BKD_BIN_IN_WINDOW:-(none — no bin_t:file decision inside the exec window; the OLD generic boundary is gone from the exec path)}"
-    # The exec's advance: every in-window decision whose shape is NONE
-    # of the six granted-stage boundaries (the 4C-58 execute 0x4000,
-    # the 4C-59 image-read 0x40002, the 4C-60 transition 0x2, the 4C-61
-    # entrypoint 0x8000000, the 4C-62 image-load 0x4002, the 4C-63
-    # state-root getattr 0x10) — the next hooks of the exec chain and
-    # the runtime surfaces, recorded live and never assumed. The
-    # inherited-fd fifo_file records and every other quarantined
-    # non-terminal surface print as the domain's own records and stay
-    # HANDLED/NON-TERMINAL in their classification role (never
-    # promoted, never granted).
-    POSTTUN_BKD_NEW_DECISION="$(printf '%s\n' "$POSTTUN_BKD_DECISIONS" \
-      | awk '
+  # The exec's advance: every in-window decision whose shape is NONE
+  # of the seven granted-stage boundaries (the 4C-58 execute 0x4000,
+  # the 4C-59 image-read 0x40002, the 4C-60 transition 0x2, the 4C-61
+  # entrypoint 0x8000000, the 4C-62 image-load 0x4002, the 4C-63
+  # state-root getattr 0x10, the 4C-64 state-root search 0x20000000) —
+  # the next hooks of the exec chain and the runtime surfaces, recorded
+  # live and never assumed. The inherited-fd fifo_file records and
+  # every other quarantined non-terminal surface print as the domain's
+  # own records and stay HANDLED/NON-TERMINAL in their classification
+  # role (never promoted, never granted).
+  POSTTUN_BKD_NEW_DECISION="$(printf '%s\n' "$POSTTUN_BKD_DECISIONS" \
+    | awk '
           /selinux_audited:/ {
             if ($0 ~ /tcontext=system_u:object_r:docker_helper_buildkitd_exec_t:s0([ \t]|$)/ \
               && $0 ~ /tclass=file/ \
@@ -6264,7 +6296,7 @@ REBUILD-STAGE=NOT-REACHED}"
               && $0 ~ /denied=0x2([^0-9a-fA-F]|$)/) next
             if ($0 ~ /tcontext=system_u:object_r:docker_helper_builder_state_root_t:s0([ \t]|$)/ \
               && $0 ~ /tclass=dir/ \
-              && $0 ~ /denied=0x10([^0-9a-fA-F]|$)/) next
+              && ($0 ~ /denied=0x10([^0-9a-fA-F]|$)/ || $0 ~ /denied=0x20000000([^0-9a-fA-F]|$)/)) next
             print
           }' || true)"
     printf '%s\n' "${POSTTUN_BKD_NEW_DECISION:-(none — no NEW decision inside the exec window; the advance must then come from ret=0x0)}"
@@ -6313,6 +6345,14 @@ REBUILD-STAGE=NOT-REACHED}"
   POSTTUN_OLD_BKD_STROOT_PRESENT=0
   if [ -n "$POSTTUN_BKD_OLD_STROOT_PRESENT" ]; then
     POSTTUN_OLD_BKD_STROOT_PRESENT=1
+  fi
+  # The OLD state-root search boundary (the 4C-63 run's terminal
+  # record): if the 0x20000000 dir denial is STILL inside the window's
+  # span, the 4C-64 grant did not take effect — the phase FAILS (no new
+  # phase, no rule widening).
+  POSTTUN_OLD_BKD_STROOT_SEARCH_PRESENT=0
+  if [ -n "$POSTTUN_BKD_OLD_STROOT_SEARCH" ]; then
+    POSTTUN_OLD_BKD_STROOT_SEARCH_PRESENT=1
   fi
   # The future buildkitd domain records (the 4C-60 §11 contract): every
   # trace record in the window's span naming docker_helper_buildkitd_t
@@ -6426,47 +6466,88 @@ REBUILD-STAGE=NOT-REACHED}"
     && [ "$POSTTUN_BKD_STROOT_TERMINAL_OK" = 1 ]; then
     POSTTUN_BKD_EXEC_OK=1
   fi
-  # The §12 search-status machine state: the state-root search surface's
-  # own status, NEVER a companion of getattr. Three outcomes:
-  #   TERMINAL-NOW     — a 0x20000000 record is the terminal decision
-  #                      (the 4C-64 candidate = search);
-  #   OBSERVED-NONOWNING — search records exist but the exec progressed
-  #                      past them (the 4C-62 standing shape);
-  #   ABSENT           — no search record in the span at all.
-  POSTTUN_BKD_STROOT_SEARCH_PRESENT="$(printf '%s\n' "$POSTTUN_BKD_SPAN_DECISIONS" \
-    | grep -a 'scontext=system_u:system_r:docker_helper_buildkitd_t' \
-    | grep -aE 'tcontext=system_u:object_r:docker_helper_builder_state_root_t:s0([ \t]|$)' \
-    | grep -a 'tclass=dir' \
-    | grep -aE 'denied=0x20000000([^0-9a-fA-F]|$)' || true)"
-  if [ -z "$POSTTUN_BKD_STROOT_SEARCH_PRESENT" ]; then
-    echo "BUILDKITD-STATE-ROOT-SEARCH=ABSENT"
-  elif { printf '%s\n' "$POSTTUN_BKD_SPAN_TERMINAL" | grep -aqE 'tcontext=system_u:object_r:docker_helper_builder_state_root_t:s0([ \t]|$)' && printf '%s\n' "$POSTTUN_BKD_SPAN_TERMINAL" | grep -aqE 'denied=0x20000000([^0-9a-fA-F]|$)'; }; then
-    echo "BUILDKITD-STATE-ROOT-SEARCH=TERMINAL-NOW (the span's own last buildkitd decision is the search shape)"
-  else
-    echo "BUILDKITD-STATE-ROOT-SEARCH=OBSERVED-NONOWNING"
+  # The 4C-64 progress gate (the §14 contract): the span's own terminal
+  # buildkitd decision EXISTS and is NOT the old 0x20000000 search shape
+  # (the flow moved past the search hook to a later failure — the
+  # categorized state tree, the runtime surfaces, or beyond). The
+  # absence of an AVC alone is NOT sufficient, and the exec window's
+  # quarantined fifo records are NOT progress evidence.
+  POSTTUN_BKD_STROOT_SEARCH_TERMINAL_OK=0
+  if [ -n "$POSTTUN_BKD_SPAN_TERMINAL" ] \
+    && ! { printf '%s\n' "$POSTTUN_BKD_SPAN_TERMINAL" | grep -aqE 'tcontext=system_u:object_r:docker_helper_builder_state_root_t:s0([ \t]|$)' && printf '%s\n' "$POSTTUN_BKD_SPAN_TERMINAL" | grep -aqE 'denied=0x20000000([^0-9a-fA-F]|$)'; }; then
+    POSTTUN_BKD_STROOT_SEARCH_TERMINAL_OK=1
   fi
-  printf '%s\n' "${POSTTUN_BKD_STROOT_SEARCH_PRESENT:-(none — no state-root search record in the span)}"
+  POSTTUN_BKD_EXEC64_OK=0
+  if [ -n "$POSTTUN_BKD_EXEC_PAIR" ] \
+    && [ "$POSTTUN_OLD_BKD_STROOT_PRESENT" = 0 ] \
+    && [ "$POSTTUN_OLD_BKD_STROOT_SEARCH_PRESENT" = 0 ] \
+    && [ -z "$POSTTUN_BKD_BIN_IN_WINDOW" ] \
+    && [ "$POSTTUN_BKD_STROOT_SEARCH_TERMINAL_OK" = 1 ]; then
+    POSTTUN_BKD_EXEC64_OK=1
+  fi
+  # The §14 search-boundary status (the 4C-64 acceptance instrument):
+  # the OLD state-root search (0x20000000) records must be GONE from the
+  # whole span. The span extraction above already captured them
+  # (POSTTUN_BKD_OLD_STROOT_SEARCH); the printed verdict names the
+  # boundary's own status. The 4C-63-era TERMINAL-NOW/OBSERVED-NONOWNING
+  # machine states named the PRE-grant candidate; under the granted rule
+  # ANY surviving search record is the grant-not-effective FAIL shape.
+  if [ -z "$POSTTUN_BKD_OLD_STROOT_SEARCH" ]; then
+    echo "BUILDKITD-STATE-ROOT-SEARCH-BOUNDARY=GONE (no state-root search denial in the whole span — the 4C-64 grant took effect)"
+  else
+    echo "BUILDKITD-STATE-ROOT-SEARCH-BOUNDARY=STILL-PRESENT (the span still carries the search denial(s) — the 4C-64 grant did NOT take effect)"
+  fi
+  printf '%s\n' "${POSTTUN_BKD_OLD_STROOT_SEARCH:-(none — no state-root search record in the span)}"
   printf '%s\n' "  the span's own terminal buildkitd decision: ${POSTTUN_BKD_SPAN_TERMINAL:-(none)}"
   # The §17 state-tree transition detection: any record whose tcontext
   # is the categorized per-operation state type
   # (docker_helper_builder_state_t:s0:cX) — the shared-root-plane ->
   # per-op-plane transition moment. The exact fields + the category
   # match are printed; NO state-tree bundle is prepared in advance.
+  # The §8 category handoff milestone rides on the same records: the
+  # FIRST live mediation against the categorized per-op state tree,
+  # with the subject buildkitd_t:s0:c1 and the target
+  # builder_state_t:s0:c1 (the own operation category on BOTH sides),
+  # proves the shared uncategorized root plane ended and the
+  # categorized operation tree began. NOT-REACHED stays a plain
+  # observation — no speculative conclusion, no pre-grant.
   POSTTUN_BKD_STATE_TREE_RECORDS="$(printf '%s\n' "$POSTTUN_BKD_SPAN_DECISIONS" \
     | grep -aE 'tcontext=system_u:object_r:docker_helper_builder_state_t:s0:c[0-9]+' || true)"
+  POSTTUN_BKD_STATE_TREE_HANDOFF="NOT-REACHED"
+  POSTTUN_BKD_STATE_TREE_CROSSCAT=0
   if [ -n "$POSTTUN_BKD_STATE_TREE_RECORDS" ]; then
     echo "  the per-op state-tree records (the §17 transition candidates):"
     printf '%s\n' "$POSTTUN_BKD_STATE_TREE_RECORDS" | sed 's/^/    /'
-    BKD_ST_CAT_MATCH="$(printf '%s\n' "$POSTTUN_BKD_STATE_TREE_RECORDS" | grep -acE 'scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c[0-9]+ tcontext=system_u:object_r:docker_helper_builder_state_t:s0:c[0-9]+' || true)"
-    BKD_ST_CAT_TOTAL="$(printf '%s\n' "$POSTTUN_BKD_STATE_TREE_RECORDS" | grep -ac . || true)"
-    if [ "$BKD_ST_CAT_TOTAL" != "$BKD_ST_CAT_MATCH" ]; then
-      echo "  STOP: a state-tree record's category pair does not match (the scontext and tcontext categories must be the operation's own)"
-      POSTTUN_BKD_MCS_OK=0
+    # The §8 own-category pair check: the subject's category and the
+    # target's category must be the SAME number (c1 -> c1). The plain
+    # any-cN/any-cM regex can NOT prove the own-category pair — the
+    # categories are extracted and compared numerically per record.
+    BKD_ST_CAT_PAIRS="$(printf '%s\n' "$POSTTUN_BKD_STATE_TREE_RECORDS" | awk '
+      {
+        if (!match($0, /scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c[0-9]+/)) { print "  the unclassified state-tree record (no buildkitd_t subject): " $0 > "/dev/stderr"; next }
+        s = substr($0, RSTART, RLENGTH); sub(/.*s0:c/, "", s)
+        if (!match($0, /tcontext=system_u:object_r:docker_helper_builder_state_t:s0:c[0-9]+/)) { print "  the unclassified state-tree record (no categorized target): " $0 > "/dev/stderr"; next }
+        t = substr($0, RSTART, RLENGTH); sub(/.*s0:c/, "", t)
+        if (s == t) ok++
+        else { bad++; print "  the §17 cross-category record: buildkitd_t:s0:c" s " -> builder_state_t:s0:c" t " (" $0 ")" > "/dev/stderr" }
+      }
+      END { printf "%d %d", ok + 0, bad + 0 }' || true)"
+    BKD_ST_CAT_OK="${BKD_ST_CAT_PAIRS%% *}"
+    BKD_ST_CAT_BAD="${BKD_ST_CAT_PAIRS##* }"
+    if [ "${BKD_ST_CAT_BAD:-0}" != 0 ]; then
+      echo "  the §17 cross-operation warning: a buildkitd_t:s0:c<X> -> builder_state_t:s0:c<Y> reach with X != Y was recorded exactly above — record it, do NOT grant anything (the attempt is potentially useful evidence for the eventual cross-operation phase 4C-37; 4C-64 itself stays a startup phase)"
+      POSTTUN_BKD_STATE_TREE_CROSSCAT=1
+    fi
+    if [ "${BKD_ST_CAT_OK:-0}" != 0 ]; then
+      echo "  the state-tree own-category pair: $BKD_ST_CAT_OK record(s) carry the operation's own category on BOTH sides (c<N> -> c<N>)"
+      echo "BUILDKITD-STATE-TREE-CATEGORY-HANDOFF=OK (the first live mediation against the categorized per-op state tree — the shared uncategorized root plane ended and the categorized operation tree began; $BKD_ST_CAT_OK record(s); whatever permission appeared there stays a NEW phase, never pre-granted)"
+      POSTTUN_BKD_STATE_TREE_HANDOFF="OK"
     else
-      echo "  the state-tree category match: ALL $BKD_ST_CAT_TOTAL record(s) carry the operation's own category on both sides"
+      echo "BUILDKITD-STATE-TREE-CATEGORY-HANDOFF=NOT-REACHED (no own-category state-tree record in the span; no speculative conclusion)"
     fi
   else
     echo "  the per-op state-tree records: (none — the categorized state type was not reached this run)"
+    echo "BUILDKITD-STATE-TREE-CATEGORY-HANDOFF=NOT-REACHED (no state-tree record in the span; no speculative conclusion)"
   fi
   # The §11 quarantine counts: every 4C-62 non-terminal surface stays
   # UNGRANTED; the repeats never convert a non-terminal denial into
@@ -6483,12 +6564,16 @@ REBUILD-STAGE=NOT-REACHED}"
   echo "  buildkitd_exec_t:file open (the 0x40000 target-side hook): $(printf '%s\n' "$POSTTUN_BKD_SPAN_DECISIONS" | grep -aE 'tcontext=system_u:object_r:docker_helper_buildkitd_exec_t:s0([ \t]|$)' | grep -acE 'denied=0x40000([^0-9a-fA-F]|$)' || true)"
   echo "  builder_state_root_t:dir search: $(printf '%s\n' "$POSTTUN_BKD_SPAN_DECISIONS" | grep -aE 'tcontext=system_u:object_r:docker_helper_builder_state_root_t:s0([ \t]|$)' | grep -acE 'denied=0x20000000([^0-9a-fA-F]|$)' || true)"
   # The §7 pathname inventory: the exact pathname(s) that produced the
-  # state-root getattr decisions — attributed from the ORDERED SYSCALL
-  # TRACE (the syscall record immediately preceding each decision,
-  # printed verbatim), never inferred from the type label alone. The
-  # shared root plane's candidates (the state root itself and any
-  # per-op child of the same type) are DISTINGUISHED by their own path
-  # strings when the trace prints them.
+  # state-root getattr AND search decisions — attributed from the
+  # ORDERED SYSCALL TRACE (the syscall record immediately preceding
+  # each decision, printed verbatim), never inferred from the type
+  # label alone. The §7 shared-root vs categorized-child invariant:
+  # the AVC's tcontext identifies the denied PATH-WALK COMPONENT, NOT
+  # the final inode of the traced syscall pathname; the traced
+  # pathname pointing into ops/op_<id>... never proves the op_<id>
+  # directory carries the ROOT type — the inode's own label must come
+  # from live object context (xattr/stat/matchpathcon/provisioning
+  # evidence) or a kernel decision ON that object.
   echo "  the state-root getattr pathname inventory (the closest preceding traced syscall record per decision):"
   stroot_getattr_recs="$(printf '%s\n' "$POSTTUN_BKD_SPAN_DECISIONS" \
     | grep -aE 'tcontext=system_u:object_r:docker_helper_builder_state_root_t:s0' \
@@ -6506,6 +6591,84 @@ REBUILD-STAGE=NOT-REACHED}"
     done
   else
     echo "  (no state-root getattr records in the span)"
+  fi
+  echo "  the state-root search pathname inventory (the closest preceding traced syscall record per decision; the surviving-record diagnostics):"
+  stroot_search_recs="$(printf '%s\n' "$POSTTUN_BKD_SPAN_DECISIONS" \
+    | grep -aE 'tcontext=system_u:object_r:docker_helper_builder_state_root_t:s0' \
+    | grep -aE 'denied=0x20000000([^0-9a-fA-F]|$)' || true)"
+  if [ -n "$stroot_search_recs" ]; then
+    printf '%s\n' "$stroot_search_recs" | while IFS= read -r rec; do
+      ts="$(printf '%s' "$rec" | awk '{t=$4; sub(/:$/, "", t); print t}')"
+      sysrec="$(awk -v ts="$ts" '
+        { t = $4; sub(/:$/, "", t)
+          if (t + 0 >= ts + 0) exit
+          if ($0 ~ /sys_[a-z0-9_]+\(/) last = $0
+        }
+        END { if (last != "") print last }' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true)"
+      printf '  search-ts=%s <- the preceding syscall record: %s\n' "$ts" "${sysrec:-(none captured in the window trace)}"
+    done
+  else
+    echo "  (no state-root search records in the span — the granted traversal produces no AVC of its own)"
+  fi
+  # The §15 root-plane path proof: the exact syscall path walks behind
+  # the state-root plane, classified by the TRACED PATHNAME's own
+  # shape. The standing caveat is printed with the record: the syscall
+  # target path is NOT automatically the inode that generated the
+  # SELinux decision (the tracer truncates long strings; a pathname
+  # argument names the walk's FINAL component attempt, while the AVC's
+  # tcontext names the COMPONENT the decision mediated — when the exact
+  # component identity cannot be proven from the trace, that is said,
+  # never guessed). The production model's three planes:
+  #   /var/lib/docker-helper-builder            (the state ROOT)
+  #   /var/lib/docker-helper-builder/ops        (the shared ops container)
+  #   /var/lib/docker-helper-builder/ops/op_<id>  (the per-op CHILD)
+  echo "  the §15 root-plane path proof (the state-root tree's syscall walks in the window trace, classified by traced pathname):"
+  root_walks="$(grep -aE 'sys_[a-z0-9_]+\(' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -aF '/var/lib/docker-helper-builder' || true)"
+  if [ -n "$root_walks" ]; then
+    printf '%s\n' "$root_walks" | awk '{
+      path = ""
+      if (match($0, /"\/var\/lib\/docker-helper-builder[^"]*"/)) {
+        path = substr($0, RSTART, RLENGTH); gsub(/"/, "", path)
+      }
+      cls = "(unparsed — no quoted state-root pathname on the record)"
+      if (path ~ /\/ops\/op_/) cls = "per-op child (ops/op_<id>...)"
+      else if (path ~ /\/ops/) cls = "shared ops container (ops)"
+      else if (path ~ /\/var\/lib\/docker-helper-builder/) cls = "state root"
+      who = $1; ts = $4; sub(/:$/, "", ts)
+      key = cls
+      if (!(key in seen)) { seen[key] = 1; order[++n] = key }
+      cnt[key]++
+      if (cnt[key] <= 3) examples[key] = examples[key] "\n    " who " @" ts " " cls ": " path
+    }
+    END {
+      for (i = 1; i <= n; i++) {
+        k = order[i]
+        printf "  %s: %d traced walk(s)%s\n", k, cnt[k], examples[k]
+      }
+    }' || true
+    echo "  the caveat: the traced pathname names the syscall's target-path attempt (the tracer truncates long strings); the AVC's tcontext identifies the denied PATH-WALK COMPONENT — the two coincide only when the walk's denied component IS the final named inode, which this trace alone cannot prove; exact component identity needs the object's own live label evidence (the §9 probe) or a kernel decision naming that object"
+  else
+    echo "  (no traced syscall walk touched the state-root tree in the window trace)"
+  fi
+  # The §9 labeling invariant: the canonical per-op state directory's
+  # ACTUAL label — from the sampler's last kernel-issued read-back
+  # (last.state-op; the provisioning relabel's verdict value) and the
+  # post-run live stat (the tree is usually already converged away by
+  # the failed START's cleanup). A per-op directory PROVEN to carry the
+  # SHARED ROOT type after the launch stage is the labeling regression:
+  # BLOCKED — never treated with root-plane policy widening.
+  POSTTUN_BKD_OPDIR_LABEL="$(cat "$EVIDENCE_DIR/last.state-op" 2>/dev/null || true)"
+  POSTTUN_BKD_OPDIR_LIVE="$(stat -c '%C' "$ST_OP_DIR" 2>/dev/null || true)"
+  echo "  the §9 per-op state-dir actual label: sampler-last-seen=${POSTTUN_BKD_OPDIR_LABEL:-(not observed)} live-stat=${POSTTUN_BKD_OPDIR_LIVE:-(gone/not probed)}"
+  POSTTUN_BKD_PEROP_LABEL_OK=1
+  if [ "$POSTTUN_BKD_OPDIR_LABEL" = "system_u:object_r:docker_helper_builder_state_root_t:s0" ] \
+    || [ "$POSTTUN_BKD_OPDIR_LIVE" = "system_u:object_r:docker_helper_builder_state_root_t:s0" ]; then
+    POSTTUN_BKD_PEROP_LABEL_OK=0
+    echo "  STOP: the per-op state directory's own label is the SHARED ROOT type (docker_helper_builder_state_root_t:s0) — the §9 labeling invariant failure (the §10 provisioning/labeling regression; BLOCKED/PER-OP-STATE-LABEL-NOT-CONVERGED — never policy-fixed)"
+  elif [ -n "$POSTTUN_BKD_OPDIR_LABEL" ] || [ -n "$POSTTUN_BKD_OPDIR_LIVE" ]; then
+    echo "  the per-op state-dir labeling invariant: the observed label(s) carry the categorized per-op type (the Phase 3 provisioning relabel converged)"
+  else
+    echo "  the per-op state-dir label was neither observed nor probed this run (the tree converged away before any label read) — recorded as NOT-PROBED, no speculative conclusion"
   fi
   # The §12 subject verification: every NEW in-window decision's
   # SUBJECT — scontext=buildkitd_t is the correct target-side
@@ -6558,6 +6721,23 @@ REBUILD-STAGE=NOT-REACHED}"
     printf '%s\n' "  the domain records: BUILDKITD-DOMAIN-RECORDS=$POSTTUN_BKD_DOMAIN_N; MCS: $POSTTUN_BKD_MCS_NOTE; transition-succeeded=$([ "$POSTTUN_BKD_TRANSITION_SUCCEEDED" = 1 ] && echo YES || echo NO); execve-succeeded=$([ "$POSTTUN_BKD_EXECVE_SUCCEEDED" = 1 ] && echo YES || echo NO)"
   else
     echo "MILESTONE: BUILDKITD-STATE-ROOT-GETATTR=NOT-REACHED (pair=$([ -n "$POSTTUN_BKD_EXEC_PAIR" ] && echo present || echo absent) ret=${POSTTUN_BKD_EXEC_RET:-(unpaired)} old-0x10-present=$POSTTUN_OLD_BKD_STROOT_PRESENT bin-t-in-window=$([ -n "$POSTTUN_BKD_BIN_IN_WINDOW" ] && echo PRESENT || echo absent) new-in-window-decision=$([ -n "$POSTTUN_BKD_NEW_DECISION" ] && echo PRESENT || echo absent))"
+  fi
+  # The 4C-64 milestone echo (the §14 contract): the OLD state-root
+  # search (0x20000000) terminal boundary GONE from the whole span AND
+  # forward production progress beyond the previous terminal point (the
+  # span's own terminal buildkitd decision exists and is NOT the search
+  # shape). The absence of an AVC alone is insufficient. The §8 handoff
+  # status repeats here as the phase's own second instrument.
+  if [ "$POSTTUN_BKD_EXEC64_OK" = 1 ]; then
+    if [ -n "$POSTTUN_BKD_NEW_DECISION" ]; then
+      POSTTUN_BKD_ADVANCE64="a new in-window decision is live (the next hook)"
+    else
+      POSTTUN_BKD_ADVANCE64="ret 0x0 — the exec syscall itself returned"
+    fi
+    echo "MILESTONE: BUILDKITD-STATE-ROOT-SEARCH=OK — the granted shared state-root search hook (0x20000000) no longer denies inside the canonical buildkitd span (the OLD terminal boundary is GONE) and BuildKitd made FORWARD PRODUCTION PROGRESS past the previous failure point: $POSTTUN_BKD_ADVANCE64"
+    echo "  the §8 category handoff: BUILDKITD-STATE-TREE-CATEGORY-HANDOFF=${POSTTUN_BKD_STATE_TREE_HANDOFF:-NOT-REACHED} (the first live mediation against docker_helper_builder_state_t:s0:c<own> is the shared-root-plane -> categorized-operation-tree boundary; a NOT-REACHED result is a plain observation, never a speculative conclusion; whatever permission the state tree demands stays a NEW phase)"
+  else
+    echo "MILESTONE: BUILDKITD-STATE-ROOT-SEARCH=NOT-REACHED (pair=$([ -n "$POSTTUN_BKD_EXEC_PAIR" ] && echo present || echo absent) ret=${POSTTUN_BKD_EXEC_RET:-(unpaired)} old-0x10-present=$POSTTUN_OLD_BKD_STROOT_PRESENT old-0x20000000-present=$POSTTUN_OLD_BKD_STROOT_SEARCH_PRESENT bin-t-in-window=$([ -n "$POSTTUN_BKD_BIN_IN_WINDOW" ] && echo PRESENT || echo absent) new-in-window-decision=$([ -n "$POSTTUN_BKD_NEW_DECISION" ] && echo PRESENT || echo absent))"
   fi
 
   # The gates.
@@ -7128,48 +7308,94 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
     POSTTUN_4C62_PHASE_OK=0
     marker "4C-62=INCOMPLETE/IMAGELOAD-PROOF-INCOMPLETE"
   fi
-  # The 4C-63 phase block: the shared state-root dir getattr (the
-  # 4C-62 run's terminal-causal owner; the state-root search stays
-  # RECORDED/NON-OWNING and a combined { search getattr } rule is never
-  # written). The PASS contract: the OLD state-root getattr boundary
-  # (0x10) is GONE from the whole span, BuildKitd made FORWARD
-  # PRODUCTION PROGRESS past the previous failure point (ret 0x0 or new
-  # span decisions — the absence of an AVC alone is NOT sufficient),
-  # the generic bin_t execution stays ABSENT, the quarantined surfaces
-  # stay UNGRANTED, every record's subject is verified, and the search
-  # surface's own status is emitted as its own machine state
-  # (TERMINAL-NOW / OBSERVED-NONOWNING / ABSENT — never a companion of
-  # getattr).
+  # The 4C-63 standing re-proof: the state-root getattr boundary HOLDS
+  # under the 4C-64 grant — the OLD state-root getattr (0x10) records
+  # must NOT reappear anywhere in the canonical span (the 4C-63
+  # boundary stays gone), the span's own terminal buildkitd decision
+  # exists and is NOT the old 0x10 shape (the 4C-63 progress gate), and
+  # the EXECVE/category proofs stand.
   if [ "$POSTTUN_OLD_BKD_STROOT_PRESENT" = 1 ]; then
     POSTTUN_4C63_PHASE_OK=0
-    marker "4C-63-OLD-STATE-ROOT-GETATTR-BOUNDARY=STILL-PRESENT"
-    marker "4C-63=FAIL/STATE-ROOT-GETATTR-GRANT-NOT-EFFECTIVE"
-  else
+    marker "4C-63-OLD-STATE-ROOT-GETATTR-BOUNDARY=REGRESSED"
+    marker "4C-63=INCOMPLETE/STATE-ROOT-GETATTR-BOUNDARY-REGRESSED"
+  elif [ "$POSTTUN_BKD_EXEC_OK" = 1 ] && [ "$POSTTUN_BKD_MCS_OK" = 1 ]; then
+    POSTTUN_4C63_PHASE_OK=1
     marker "OLD-BUILDKITD-STATE-ROOT-GETATTR-BOUNDARY=GONE"
+    marker "BUILDKITD-STATE-ROOT-GETATTR=OK"
+    if [ "$POSTTUN_BKD_EXECVE_SUCCEEDED" = 1 ] && [ -z "$POSTTUN_FIRST_FAIL_PID" ]; then
+      marker "POSTTUN-BKD-RESULTING-DOMAIN=$([ "$POSTTUN_BKD_DOMAIN_N" != 0 ] && echo proven || echo not-proven)"
+      marker "4C-63-OUTCOME=POST-TUN-LIFETIME-STABLE"
+      marker "TARGET-LIFETIME-BLOCKER=GONE"
+      marker "POST-TUN-LIFETIME=STABLE"
+      marker "4C-63=PASS/POST-TUN-LIFETIME-STABLE"
+    elif [ "$POSTTUN_BKD_EXECVE_SUCCEEDED" = 1 ]; then
+      marker "POSTTUN-BKD-RESULTING-DOMAIN=$([ "$POSTTUN_BKD_DOMAIN_N" != 0 ] && echo proven || echo not-proven)"
+      marker "4C-63-OUTCOME=EXEC-RETURNED-LIFETIME-FAILED"
+      marker "4C-63=PASS/NEXT-BOUNDARY-CONFIRMED"
+    else
+      marker "4C-63-OUTCOME=NEXT-STARTUP-BOUNDARY-CONFIRMED"
+      marker "4C-63=PASS/NEXT-BOUNDARY-CONFIRMED"
+    fi
+  elif [ -z "$POSTTUN_BKD_EXEC_PAIR" ]; then
+    POSTTUN_4C63_PHASE_OK=0
+    marker "4C-63=INCOMPLETE/EXEC-WINDOW-NOT-CAPTURED"
+  else
+    POSTTUN_4C63_PHASE_OK=0
+    marker "OLD-BUILDKITD-STATE-ROOT-GETATTR-BOUNDARY=GONE"
+    marker "4C-63=INCOMPLETE/STATE-ROOT-GETATTR-PROOF-INCOMPLETE"
+  fi
+  # The 4C-64 phase block: the shared state-root dir search (the 4C-63
+  # getattr widened IN PLACE by the 4C-63 canonical run's own terminal
+  # search boundary; ONE rule carrying exactly { getattr search }, never
+  # split; the standing RootlessKit state-root search rule is a
+  # different subject and a different owner and stays untouched). The
+  # PASS contract: the OLD state-root search boundary (0x20000000) is
+  # GONE from the whole span, BuildKitd made FORWARD PRODUCTION
+  # PROGRESS past the previous failure point (the span's own terminal
+  # buildkitd decision exists and is NOT the search shape — the absence
+  # of an AVC alone is NOT sufficient), the OLD getattr boundary STAYS
+  # gone (the 4C-63 standing re-proof above), the generic bin_t
+  # execution stays ABSENT, the quarantined surfaces stay UNGRANTED,
+  # every record's subject is verified, and the §8 category handoff and
+  # the §9 per-op labeling invariants are evaluated from live evidence
+  # — never assumed.
+  if [ "$POSTTUN_OLD_BKD_STROOT_SEARCH_PRESENT" = 1 ]; then
+    POSTTUN_4C64_PHASE_OK=0
+    marker "4C-64-OLD-STATE-ROOT-SEARCH-BOUNDARY=STILL-PRESENT"
+    marker "4C-64=FAIL/STATE-ROOT-SEARCH-GRANT-NOT-EFFECTIVE"
+  else
+    marker "OLD-BUILDKITD-STATE-ROOT-SEARCH-BOUNDARY=GONE"
     if [ "$POSTTUN_BKD_MCS_OK" != 1 ]; then
-      POSTTUN_4C63_PHASE_OK=0
-      marker "4C-63=BLOCKED/MCS-CATEGORY-NOT-PRESERVED"
-    elif [ "$POSTTUN_BKD_EXEC_OK" = 1 ]; then
-      POSTTUN_4C63_PHASE_OK=1
-      marker "BUILDKITD-STATE-ROOT-GETATTR=OK"
+      POSTTUN_4C64_PHASE_OK=0
+      marker "4C-64=BLOCKED/MCS-CATEGORY-NOT-PRESERVED"
+    elif [ "${POSTTUN_BKD_PEROP_LABEL_OK:-1}" != 1 ]; then
+      POSTTUN_4C64_PHASE_OK=0
+      marker "4C-64=BLOCKED/PER-OP-STATE-LABEL-NOT-CONVERGED"
+    elif [ "$POSTTUN_BKD_EXEC64_OK" = 1 ]; then
+      POSTTUN_4C64_PHASE_OK=1
+      marker "BUILDKITD-STATE-ROOT-SEARCH=OK"
+      marker "BUILDKITD-STATE-TREE-CATEGORY-HANDOFF=${POSTTUN_BKD_STATE_TREE_HANDOFF:-NOT-REACHED}"
       if [ "$POSTTUN_BKD_EXECVE_SUCCEEDED" = 1 ] && [ -z "$POSTTUN_FIRST_FAIL_PID" ]; then
         marker "POSTTUN-BKD-RESULTING-DOMAIN=$([ "$POSTTUN_BKD_DOMAIN_N" != 0 ] && echo proven || echo not-proven)"
-        marker "4C-63-OUTCOME=POST-TUN-LIFETIME-STABLE"
+        marker "4C-64-OUTCOME=POST-TUN-LIFETIME-STABLE"
         marker "TARGET-LIFETIME-BLOCKER=GONE"
         marker "POST-TUN-LIFETIME=STABLE"
-        marker "4C-63=PASS/POST-TUN-LIFETIME-STABLE"
+        marker "4C-64=PASS/POST-TUN-LIFETIME-STABLE"
       elif [ "$POSTTUN_BKD_EXECVE_SUCCEEDED" = 1 ]; then
         marker "POSTTUN-BKD-RESULTING-DOMAIN=$([ "$POSTTUN_BKD_DOMAIN_N" != 0 ] && echo proven || echo not-proven)"
-        marker "4C-63-OUTCOME=EXEC-RETURNED-LIFETIME-FAILED"
-        marker "4C-63=PASS/NEXT-BOUNDARY-CONFIRMED"
+        marker "4C-64-OUTCOME=EXEC-RETURNED-LIFETIME-FAILED"
+        marker "4C-64=PASS/NEXT-BOUNDARY-CONFIRMED"
       else
-        marker "4C-63-OUTCOME=NEXT-STARTUP-BOUNDARY-CONFIRMED"
-        marker "4C-63=PASS/NEXT-BOUNDARY-CONFIRMED"
+        marker "4C-64-OUTCOME=NEXT-STARTUP-BOUNDARY-CONFIRMED"
+        marker "4C-64=PASS/NEXT-BOUNDARY-CONFIRMED"
       fi
+    elif [ -z "$POSTTUN_BKD_EXEC_PAIR" ]; then
+      POSTTUN_4C64_PHASE_OK=0
+      marker "4C-64=INCOMPLETE/EXEC-WINDOW-NOT-CAPTURED"
     else
-      POSTTUN_4C63_PHASE_OK=0
-      marker "BUILDKITD-STATE-ROOT-GETATTR=NOT-REACHED"
-      marker "4C-63=INCOMPLETE/EXEC-WINDOW-NOT-CAPTURED"
+      POSTTUN_4C64_PHASE_OK=0
+      marker "OLD-BUILDKITD-STATE-ROOT-SEARCH-BOUNDARY=GONE"
+      marker "4C-64=INCOMPLETE/STATE-ROOT-SEARCH-PROOF-INCOMPLETE"
     fi
   fi
   marker "4C-38=PROVEN/PRIMARY-BOUNDARY-ESTABLISHED"
@@ -9061,12 +9287,21 @@ if [ "$I9_OK" = 1 ]; then
     exit 0
   fi
   if [ "${POSTTUN_OLD_BKD_STROOT_PRESENT:-0}" = 1 ]; then
-    # The 4C-63 FAIL shape: the granted shared state-root getattr still
-    # denies inside the canonical exec span — the grant did not take
-    # effect on the loaded policy. A phase FAIL, not a new phase; no
-    # rule widening.
-    marker "4C-63=FAIL/STATE-ROOT-GETATTR-GRANT-NOT-EFFECTIVE"
-    marker "BLOCKER=the canonical buildkitd span still carries the shared state-root buildkitd_t -> builder_state_root_t:dir getattr (0x10) denial — the 4C-63 grant did not take effect on the loaded policy (see 53-posttun-verdict.txt)"
+    # The 4C-63 STANDING shape broken: the granted shared state-root
+    # getattr denies again inside the canonical span — the standing
+    # re-proof failed; no rule widening.
+    marker "4C-63-OLD-STATE-ROOT-GETATTR-BOUNDARY=REGRESSED"
+    marker "BLOCKER=the canonical buildkitd span carries the shared state-root buildkitd_t -> builder_state_root_t:dir getattr (0x10) denial again — the 4C-63 standing broke (see 53-posttun-verdict.txt)"
+    finish INCOMPLETE
+    exit 0
+  fi
+  if [ "${POSTTUN_OLD_BKD_STROOT_SEARCH_PRESENT:-0}" = 1 ]; then
+    # The 4C-64 FAIL shape: the granted shared state-root search still
+    # denies inside the canonical span — the grant did not take effect
+    # on the loaded policy. A phase FAIL, not a new phase; no rule
+    # widening.
+    marker "4C-64=FAIL/STATE-ROOT-SEARCH-GRANT-NOT-EFFECTIVE"
+    marker "BLOCKER=the canonical buildkitd span still carries the shared state-root buildkitd_t -> builder_state_root_t:dir search (0x20000000) denial — the 4C-64 grant did not take effect on the loaded policy (see 53-posttun-verdict.txt)"
     finish INCOMPLETE
     exit 0
   fi
@@ -9075,8 +9310,18 @@ if [ "$I9_OK" = 1 ]; then
     # set different from the source flow's. The phase is BLOCKED; the
     # loss must never be compensated with broad grants or a pre-declared
     # range_transition.
-    marker "4C-63=BLOCKED/MCS-CATEGORY-NOT-PRESERVED"
+    marker "4C-64=BLOCKED/MCS-CATEGORY-NOT-PRESERVED"
     marker "BLOCKER=the buildkitd_t context materialized with a category set different from the source flow's (see 53-posttun-verdict.txt; no broad-grant or range_transition compensation)"
+    finish INCOMPLETE
+    exit 0
+  fi
+  if [ "${POSTTUN_BKD_PEROP_LABEL_OK:-1}" != 1 ]; then
+    # The 4C-64 §10 shape: the canonical per-op state directory's own
+    # label is the SHARED ROOT type after the launch stage — the
+    # provisioning/labeling regression. BLOCKED; never treated with
+    # root-plane policy widening.
+    marker "4C-64=BLOCKED/PER-OP-STATE-LABEL-NOT-CONVERGED"
+    marker "BLOCKER=the canonical per-op state directory's own label is the shared root type (docker_helper_builder_state_root_t:s0) after the launch stage — the provisioning/labeling regression; BLOCKED, never policy-fixed (see 53-posttun-verdict.txt / 06-labels.txt)"
     finish INCOMPLETE
     exit 0
   fi
@@ -9106,7 +9351,12 @@ if [ "$I9_OK" = 1 ]; then
     exit 0
   fi
   if [ "${POSTTUN_ESTABLISHED:-0}" = 1 ] && [ "${POSTTUN_4C63_PHASE_OK:-0}" != 1 ]; then
-    marker "BLOCKER=the 4C-63 state-root-getattr milestone did not reach OK (see 53-posttun-verdict.txt; the accepted PASS contract requires the old state-root getattr 0x10 terminal boundary GONE from the canonical span and the forward production progress — ret 0x0 or new span decisions; the absence of an AVC alone is not sufficient)"
+    marker "BLOCKER=the 4C-63 state-root-getattr standing re-proof did not hold (see 53-posttun-verdict.txt; the accepted contract requires the granted state-root getattr hook to keep holding — no 0x10 record in the canonical span — and the forward production progress to stand)"
+    finish INCOMPLETE
+    exit 0
+  fi
+  if [ "${POSTTUN_ESTABLISHED:-0}" = 1 ] && [ "${POSTTUN_4C64_PHASE_OK:-0}" != 1 ]; then
+    marker "BLOCKER=the 4C-64 state-root-search milestone did not reach OK (see 53-posttun-verdict.txt; the accepted PASS contract requires the old state-root search 0x20000000 terminal boundary GONE from the canonical span and the forward production progress — the span's own terminal buildkitd decision existing and NOT being the search shape; the absence of an AVC alone is not sufficient)"
     finish INCOMPLETE
     exit 0
   fi
