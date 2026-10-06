@@ -32,33 +32,31 @@ jobs:
 
       - name: Check out the tested proof commit for the composition
         env:
-          # 4C-54: the composition's module now carries the replacement
-          # /etc/resolv.conf regular-file's own creation hook —
-          # tmpfs_t:file create (a NEW pair/class surface, NOT merged
-          # into the lnk_file triple or the dir pair): the canonical
-          # 4C-53 run 37350350345's own terminal boundary named the
-          # create hook (raw 0x8 denied tclass=file inside the
-          # openat("/etc/resolv.conf", O_WRONLY|O_CREAT|O_TRUNC) window
-          # — raw 0x8 decoded per COMMON_FILE_PERMS = create, NOT write
-          # — the loaded policy's perms-file values are the policy's own
-          # numbering and are never the AVC decoder); the canonical
-          # 4C-54 run 37370262779's SAME window then carried the
-          # combined write|open boundary (requested=0x40004 denied=0x40004
-          # tclass=file — ONE audited decision covering the
-          # open-completion hook's FILE__OPEN and its f_mode-derived
-          # FILE__WRITE, one boundary not two phases); the canonical
-          # 4C-55 run 37414244341's SAME stage then completed the whole
-          # recreate chain (fd 3, the zero-length write ret 0x0, the
-          # close ret 0x0; the hosts equivalents on the SAME surfaces)
-          # and failed at the generated-file bind mount's mountpoint
-          # hook (requested=0x10000 denied=0x10000 tclass=file
-          # tcontext=tmpfs_t:s0 inside sys_mount(<op-state>/resolv.conf,
-          # /etc/resolv.conf, MS_BIND) — FILE__MOUNTON bit 16); the
-          # proof ref advances from the 4C-54-era pin to the commit
-          # carrying that module widened to exactly
-          # { create write open mounton } (0374e21 — identical Go
-          # sources, so the binary is the same program).
-          PHASE4B_PROOF_REF: '0374e21434d1396abd4d316e847b97d460730a50'
+          # 4C-57: the composition's module now carries the dedicated
+          # BuildKitd executable identity + process domain as STRUCTURE
+          # ONLY — the ZERO-AUTHORITY corrective/architecture phase. The
+          # 4C-56 canonical run 37414244341's phase-end
+          # NEXT-STARTUP-BOUNDARY was the payload exec's entry boundary at
+          # the GENERIC distro label (rootlesskit_t:s0:c1 -> bin_t:s0:file
+          # denied execute inside
+          # execve(/usr/libexec/docker-helper/buildkit/buildkitd)); the
+          # new types (docker_helper_buildkitd_exec_t, file_type +
+          # exec_type; docker_helper_buildkitd_t, domain) with the EXACT
+          # .fc entry on the canonical path (the manager constant
+          # builderManagerBuildkitd = the RootlessKit argv target = the
+          # package payload destination) move that SAME production exec
+          # boundary onto the private identity, and the ONE pointed
+          # type_transition records the routing map
+          # (rootlesskit_t:s0:cX -> exec -> buildkitd_t:s0:cX). NO
+          # permission is granted: no execute/execute_no_trans on the exec
+          # type from any domain, no transition/entrypoint permission, no
+          # capability/cap_userns surface, no range_transition — the
+          # runtime keeps FAILING CLOSED, now at the private boundary; the
+          # narrowed boundary is captured live by this run and owns 4C-58
+          # (the proof ref advances from the 4C-56-era pin to the commit
+          # carrying that module; identical Go sources, so the binary is
+          # the same program).
+          PHASE4B_PROOF_REF: '8bd35fd41048b5d7ab60ecf4ebbb0ec3765b835a'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
