@@ -6476,7 +6476,7 @@ REBUILD-STAGE=NOT-REACHED}"
     t="$(printf '%s' "$spec" | cut -d: -f1)"
     c="$(printf '%s' "$spec" | cut -d: -f2)"
     n="$(printf '%s\n' "$POSTTUN_BKD_SPAN_DECISIONS" \
-      | grep -aE "tcontext=system_u:(object_r:)?${t}:s0" \
+      | grep -aE "tcontext=system_u:(system_r:|object_r:)?${t}:s0" \
       | grep -acE "tclass=${c}([ \t]|$)" || true)"
     printf '  %s: %s\n' "$spec" "$n"
   done
