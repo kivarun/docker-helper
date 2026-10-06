@@ -47,19 +47,22 @@ jobs:
           # package payload destination) move that SAME production exec
           # boundary onto the private identity, and the ONE pointed
           # type_transition records the routing map
-          # (rootlesskit_t:s0:cX -> exec -> buildkitd_t:s0:cX). The 4C-58
-          # phase grants the private identity's ONE source-side execute
-          # permission (file:execute=0x4000, the kernel classmap's own
-          # decode pin) and NOTHING else: no execute_no_trans, no
-          # read/open/getattr/map, no process transition (the structural
-          # type_transition stays routing-only), no entrypoint, no
-          # capability/cap_userns, no range_transition — the transition
-          # bundle is deliberately NOT finished; the exec chain must
-          # advance past the granted hook and the next live boundary owns
-          # 4C-59 (the proof ref advances from the 4C-57-era pin to the
-          # commit carrying that module; identical Go sources, so the
-          # binary is the same program).
-          PHASE4B_PROOF_REF: '70b91746850a19927c807aa4f874361e7ff5837f'
+          # (rootlesskit_t:s0:cX -> exec -> buildkitd_t:s0:cX). The 4C-59
+          # phase: first the structural foundation (the buildkitd domain
+          # joins mcs_constrained_type BEFORE reachability — restrictive
+          # structure, not new authority, no range_transition), then the
+          # source-exec grant widened IN PLACE to { execute read open }
+          # (the executable-image read stage, 0x40002 = { read open }
+          # per the kernel classmap) and NOTHING else: no
+          # execute_no_trans/getattr/map, no process transition (the
+          # structural type_transition stays routing-only), no
+          # entrypoint, no capability/cap_userns — the transition bundle
+          # is deliberately NOT finished; the exec chain must advance
+          # past the granted stage and the next live boundary owns 4C-60
+          # (the proof ref advances from the 4C-58-era pin to the commit
+          # carrying that module; identical Go sources, so the binary is
+          # the same program).
+          PHASE4B_PROOF_REF: '8bef268d14e00e2438bbe868554e266173db140d'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
