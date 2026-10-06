@@ -3412,26 +3412,32 @@ allow docker_helper_rootlesskit_t self:tun_socket create;
 
 # --- MCS operation isolation: constrained-domain membership (G32 r3 §6.A) ---
 #
-# The four flow-side domains join the mcs_constrained_type attribute: the
+# The five flow-side domains join the mcs_constrained_type attribute: the
 # three-domain G26 minimal set (rootlesskit child + the two uid/gid map
 # helpers; the G26 Parts C/D pairing proved the cross-operation uid-map
 # and process-control closures) plus slirp4netns — a G26 exclusion whose
 # premise (the domain is unreachable under enforcing policy) was removed by
-# G28, which runs slirp4netns live in the full flow; including it closes
-# the subject-side MCS exemption class. Every flow surface of these
-# domains is same-category by construction.
+# G28, which runs slirp4netns live in the full flow — plus buildkitd_t
+# (the 4C-59 structural foundation correction, BEFORE the domain ever
+# becomes reachable: a future process context :s0:cX without
+# mcs_constrained_type membership is not proven MCS isolation — the
+# operation category label and the participation in the MCS constraints
+# are two different things; restrictive/security structure, no new
+# authority, no range_transition). Every flow surface of these domains
+# is same-category by construction.
 #
 # Deliberately NOT members: docker_helper_t and docker_helper_builder_t
 # (the trusted control planes — their cross-category reachability is the
 # measured escape mechanics the launch chain and the lifecycle depend on),
-# docker_helper_builder_launcher_t (the authority-free launch child must
-# reach ANY operation's category), and docker_helper_container_t (the
+# and docker_helper_builder_launcher_t (the authority-free launch child
+# must reach ANY operation's category). docker_helper_container_t is the
 # separate managed-container boundary, already a member by its own
-# design).
+# design (its own accepted boundary, not this block's).
 typeattribute docker_helper_rootlesskit_t mcs_constrained_type;
 typeattribute docker_helper_newuidmap_t mcs_constrained_type;
 typeattribute docker_helper_newgidmap_t mcs_constrained_type;
 typeattribute docker_helper_slirp4netns_t mcs_constrained_type;
+typeattribute docker_helper_buildkitd_t mcs_constrained_type;
 
 # The flow's minimal traversal toward the root types (G32 r3 §4.1): the
 # rootlesskit child walks through the roots and the shared ops containers

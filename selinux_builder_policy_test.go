@@ -879,46 +879,51 @@ func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
 	}
 }
 
-// TestSELinuxPolicyMCSMembership verifies the G32 r3 §6.A constrained
-// membership: the managed-container domain (its own accepted boundary) and
-// exactly the four flow-side domains are members of mcs_constrained_type
-// (the G26 minimal set plus the G28-revised slirp4netns), and the trusted
-// control planes / launch child stay OUT — their cross-category
-// reachability is the measured escape mechanics the launch chain and the
-// lifecycle depend on.
-func TestSELinuxPolicyMCSMembership(t *testing.T) {
-	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
-	want := []string{
-		"docker_helper_container_t",
-		"docker_helper_rootlesskit_t",
-		"docker_helper_newuidmap_t",
-		"docker_helper_newgidmap_t",
-		"docker_helper_slirp4netns_t",
-	}
+// mcsMembershipViolations scans the policy against the mcs_constrained_type
+// membership contract (the exact canonical single-attribute form, each
+// wanted domain a member exactly once, the trusted control planes and the
+// launch child out) and returns one human-readable violation per broken
+// shape, empty when none.
+func mcsMembershipViolations(policy string, want []string) []string {
+	var violations []string
 	var members []string
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, "typeattribute ") {
+		if !strings.HasPrefix(trimmed, "typeattribute ") || !strings.Contains(trimmed, "mcs_constrained_type") {
 			continue
 		}
 		if !strings.HasSuffix(trimmed, " mcs_constrained_type;") {
+			violations = append(violations, "membership in mcs_constrained_type must use the exact canonical single-attribute form: "+trimmed)
 			continue
 		}
 		members = append(members, strings.Fields(strings.TrimSuffix(trimmed, " mcs_constrained_type;"))[1])
 	}
-	if len(members) != len(want) {
-		t.Errorf("exactly %d domains may be mcs_constrained_type members, found %d: %v", len(want), len(members), members)
+	seen := map[string]int{}
+	for _, member := range members {
+		seen[member]++
+	}
+	for domain, n := range seen {
+		if n > 1 {
+			violations = append(violations, fmt.Sprintf("the mcs_constrained_type membership must not be duplicated: %s appears %d times", domain, n))
+		}
 	}
 	for _, domain := range want {
-		found := false
-		for _, member := range members {
-			if member == domain {
-				found = true
-				break
-			}
+		if seen[domain] != 1 {
+			violations = append(violations, fmt.Sprintf("the flow-side domain must be a mcs_constrained_type member (exactly once): %s", domain))
 		}
-		if !found {
-			t.Errorf("the flow-side domain must be a mcs_constrained_type member: %s", domain)
+	}
+	for _, member := range members {
+		if seen[member] == 1 {
+			found := false
+			for _, domain := range want {
+				if domain == member {
+					found = true
+					break
+				}
+			}
+			if !found {
+				violations = append(violations, fmt.Sprintf("no domain outside the accepted membership set may join mcs_constrained_type: %s", member))
+			}
 		}
 	}
 	for _, excluded := range []string{
@@ -928,8 +933,61 @@ func TestSELinuxPolicyMCSMembership(t *testing.T) {
 	} {
 		for _, member := range members {
 			if member == excluded {
-				t.Errorf("the trusted control plane / launch child must NOT be mcs_constrained: %s", excluded)
+				violations = append(violations, "the trusted control plane / launch child must NOT be mcs_constrained: "+excluded)
 			}
+		}
+	}
+	return violations
+}
+
+// TestSELinuxPolicyMCSMembership verifies the G32 r3 §6.A constrained
+// membership: the managed-container domain (its own accepted boundary) and
+// exactly the five flow-side domains are members of mcs_constrained_type
+// (the G26 minimal set, the G28-revised slirp4netns, and the 4C-59
+// structural foundation correction's buildkitd_t — the domain joins
+// BEFORE it ever becomes reachable), and the trusted control planes /
+// launch child stay OUT — their cross-category reachability is the
+// measured escape mechanics the launch chain and the lifecycle depend on.
+// The owner catches: a missing member, the removal of any standing member,
+// the addition of a trusted control plane, the addition of an arbitrary
+// unrelated docker-helper domain, and a duplicate or malformed membership
+// line (membership must be declared in the exact canonical single-attribute
+// form).
+func TestSELinuxPolicyMCSMembership(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	want := []string{
+		"docker_helper_container_t",
+		"docker_helper_rootlesskit_t",
+		"docker_helper_newuidmap_t",
+		"docker_helper_newgidmap_t",
+		"docker_helper_slirp4netns_t",
+		"docker_helper_buildkitd_t",
+	}
+	if violations := mcsMembershipViolations(policy, want); len(violations) > 0 {
+		t.Errorf("the committed policy violates the MCS membership invariants: %v", violations)
+	}
+	// Removal mutation: the policy without one standing member must trip.
+	removed := strings.Replace(policy, "typeattribute docker_helper_slirp4netns_t mcs_constrained_type;\n", "", 1)
+	if removed == policy {
+		t.Fatal("the standing slirp4netns membership line was not found for the removal mutation")
+	}
+	if violations := mcsMembershipViolations(removed, want); len(violations) == 0 {
+		t.Error("the removal mutation must trip the MCS membership invariants")
+	}
+	// Mutation guards: every forbidden membership shape must trip.
+	for _, mut := range []struct {
+		name string
+		rule string
+	}{
+		{"trusted control plane joined", "typeattribute docker_helper_builder_t mcs_constrained_type;"},
+		{"daemon joined", "typeattribute docker_helper_t mcs_constrained_type;"},
+		{"launch child joined", "typeattribute docker_helper_builder_launcher_t mcs_constrained_type;"},
+		{"arbitrary unrelated docker-helper domain joined", "typeattribute docker_helper_nsenter_t mcs_constrained_type;"},
+		{"duplicate membership line", "typeattribute docker_helper_buildkitd_t mcs_constrained_type;"},
+		{"malformed multi-attribute membership", "typeattribute docker_helper_rootlesskit_t mcs_constrained_type, container_net_domain;"},
+	} {
+		if violations := mcsMembershipViolations(policy+"\n"+mut.rule, want); len(violations) == 0 {
+			t.Errorf("mutation %q must trip the MCS membership invariants", mut.name)
 		}
 	}
 }
