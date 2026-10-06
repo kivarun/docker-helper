@@ -6171,6 +6171,7 @@ REBUILD-STAGE=NOT-REACHED}"
         if ($0 !~ /selinux_audited:/) next
         print
       }' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true)"
+    POSTTUN_BKD_SPAN_TERMINAL="$(printf '%s\n' "$POSTTUN_BKD_SPAN_DECISIONS" | grep -a . | tail -1 || true)"
     printf '%s\n' "  the span decisions: $(printf '%s\n' "$POSTTUN_BKD_SPAN_DECISIONS" | grep -ac . || true) record(s) across the whole window trace (the exec window + the post-exec runtime cascade)"
     # The 4C-59 STANDING shape (the granted image-read hooks must keep
     # holding): no buildkitd_exec_t:file record with the edge-anchored
@@ -6437,7 +6438,6 @@ REBUILD-STAGE=NOT-REACHED}"
     | grep -aE 'tcontext=system_u:object_r:docker_helper_builder_state_root_t:s0([ \t]|$)' \
     | grep -a 'tclass=dir' \
     | grep -aE 'denied=0x20000000([^0-9a-fA-F]|$)' || true)"
-  POSTTUN_BKD_SPAN_TERMINAL="$(printf '%s\n' "$POSTTUN_BKD_SPAN_DECISIONS" | grep -a . | tail -1 || true)"
   if [ -z "$POSTTUN_BKD_STROOT_SEARCH_PRESENT" ]; then
     echo "BUILDKITD-STATE-ROOT-SEARCH=ABSENT"
   elif printf '%s\n' "$POSTTUN_BKD_SPAN_TERMINAL" | grep -aqE 'tcontext=system_u:object_r:docker_helper_builder_state_root_t:s0([ \t]|$).*denied=0x20000000([^0-9a-fA-F]|$)'; then
