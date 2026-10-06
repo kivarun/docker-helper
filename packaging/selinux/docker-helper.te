@@ -2280,6 +2280,9 @@ allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };
 #   4C-61: the target-domain entrypoint permission — the FIRST
 #     module-local runtime authority of docker_helper_buildkitd_t itself:
 #     allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file entrypoint;
+#   4C-62: the SAME target-side rule widened IN PLACE by the combined
+#     { read execute } boundary (ONE terminal decision, never split):
+#     allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute };
 #     (every remaining hook stays a separate live-evidence phase; the
 #     conventional entry bundle is NOT copied).
 #
@@ -2290,13 +2293,21 @@ allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };
 #     domains);
 #   - process2:nnp_transition;
 #   - execute_no_trans, getattr, map on the exec type from the flow;
-#   - buildkitd_t -> buildkitd_exec_t:file execute/execute_no_trans/read/
-#     open/getattr/map (the 4C-61 grant is the ONE entrypoint permission
-#     — the target-side identity check; the conventional entry bundle
-#     (entrypoint read open execute getattr map, the helper-domains'
-#     shape) is NOT copied — BuildKitd's remaining hooks are its own
-#     live-evidence phases; a static binary needs no loader surface at
-#     all);
+#   - buildkitd_t -> buildkitd_exec_t:file open/getattr/map/execute_no_trans/
+#     execmod/write/setattr/append (the 4C-62 grant is the ONE combined
+#     { entrypoint read execute } boundary — the 4C-61 entrypoint widened
+#     IN PLACE by the 4C-61 run's own terminal 0x4002 decision; open/
+#     getattr/map stay separate live-evidence phases; the conventional
+#     entry bundle (entrypoint read open execute getattr map, the
+#     helper-domains' shape) is NOT copied — BuildKitd's remaining hooks
+#     are its own live-evidence phases, and a static binary needs no
+#     loader surface at all);
+#   - the 4C-61 run's inherited-fd fifo_file write denials (the fd
+#     revalidation under the new domain toward the builder_t and
+#     rootlesskit_t fifos) stay UNGRANTED — the exec progressed past
+#     them to the 0x4002 terminal hook, so they are standing
+#     HANDLED/NON-TERMINAL evidence, never promoted to a terminal
+#     boundary, and a required-fd future failure owns its own phase;
 #   - any buildkitd_t capability, cap_userns, process/process2, or
 #     filesystem/state/runtime/network surface;
 #   - any OTHER source domain's execution or transition toward the exec
@@ -2309,12 +2320,14 @@ allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };
 #     transition) and the PROCESS edge is FROZEN (the 4C-60 grant stays
 #     exactly { transition }).
 # The runtime therefore still fails closed — the 4C-58 execute hook, the
-# 4C-59 image-read hooks, the 4C-60 process transition, and the 4C-61
-# target-side entrypoint are now GRANTED, and the startup advances to
-# the next hook of the exec chain (the target-side image mediation, the
-# loader/interpreter/library hooks if the binary is dynamically linked,
-# the process inheritance checks — live evidence only; the harness
-# captures the new terminal boundary).
+# 4C-59 image-read hooks, the 4C-60 process transition, the 4C-61
+# target-side entrypoint, and the 4C-62 target-side { read execute }
+# image-load boundary are now GRANTED, and the startup advances to
+# the next hook of the exec chain (the target-side image mediation
+# continues — open/getattr/map if the kernel names them; the
+# loader/interpreter/library hooks if the binary is dynamically linked;
+# the process inheritance checks; the runtime/state objects — live
+# evidence only; the harness captures the new terminal boundary).
 #
 # buildctl and buildkit-runc stay SEPARATE future executable boundaries:
 # the .fc carries NO rule for them, no directory regex covers the
@@ -2481,7 +2494,56 @@ allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;
 # pair's own identity hook; the cross-operation gate stays OPEN/Critical
 # until the cross-operation isolation proof (4C-37) holds for the now
 # reachable domain.
-allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file entrypoint;
+allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute };
+
+# --- 4C-62: the target-side image-load boundary — the 4C-61 rule widened
+# --- IN PLACE (ONE rule, never split) ---
+#
+# The 4C-61 canonical run's (37457507735) terminal record, live inside the
+# canonical execve window — the exec advanced past the 4C-61 entrypoint
+# hook (the fd-inheritance revalidation records — the fifo_file write
+# denials toward the builder_t and rootlesskit_t fifos — were audited and
+# did NOT block the exec; the kernel proceeded to the image-load stage)
+# and died at the target-side image mediation:
+#
+#   buildkitd-42136 403.248790 selinux_audited: requested=0x4002
+#     denied=0x4002 audited=0x4002 result=-13
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:docker_helper_buildkitd_exec_t:s0
+#     tclass=file
+#   buildkitd-42136 403.248847 sys_execve -> 0xfffffffffffffff3
+#
+# The mask decode pin (the kernel's static classmap numbering, NOT the
+# loaded policy's perms-file numbering): 0x4002 = read (0x2, bit 1) +
+# execute (0x4000, bit 14) — exactly { read execute }, the combined
+# terminal decision. The negative discrimination is pinned by the owner
+# test: 0x40002={ read open }, 0x4000={ execute }, 0x2={ read } — none
+# equals { read execute }. The same kernel-side layout whose members are
+# live-proven across the staircase (read=0x2 from the 4C-50/51 windows,
+# execute=0x4000 from the 4C-58 window, open=0x40000 from the 4C-52
+# window, execute_no_trans=0x4000000/entrypoint=0x8000000 from the 4C-60/
+# 61 windows).
+#
+# THE GRANT WIDENS THE 4C-61 RULE IN PLACE — one rule on one pair, never
+# split:
+#   - no open/getattr/map/execute_no_trans/execmod/write/setattr/append
+#     (the conventional entry bundle is NOT copied; BuildKitd's
+#     remaining hooks are its own live-evidence phases);
+#   - the inherited-fd fifo_file write denials stay UNGRANTED (standing
+#     HANDLED/NON-TERMINAL evidence — the exec progressed past them;
+#     a future required-fd failure owns its own phase);
+#   - no process/process2 permission, no capability/cap_userns, no
+#     filesystem/state/runtime/network surface, no range_transition;
+#   - the SOURCE side stays frozen at { execute read open }; the
+#     PROCESS edge stays frozen at { transition }.
+# MCS: both domains are proven mcs_constrained_type members; the live
+# process context is buildkitd_t:s0:c1 (the category preserved through
+# the actual transition) — the target-side category preservation must
+# keep holding for every downstream record; no range_transition.
+# Scope caveat: the rule is the pointed (domain, entry-type) pair's own
+# type-wide TE authority, NOT path-scoped, NOT operation-scoped; the
+# cross-operation gate stays OPEN/Critical until the cross-operation
+# isolation proof (4C-37) holds for the reachable domain.
 
 # --- docker_helper_slirp4netns_t: the rootlesskit user-network helper domain (P5-S2) ---
 #
