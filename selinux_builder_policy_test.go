@@ -4382,15 +4382,14 @@ func TestSELinuxPolicyRootlesskitIsolation(t *testing.T) {
 }
 
 // buildkitdIdentityViolations scans the module's parsed rules against the
-// 4C-57 identity + 4C-58 source-execute authority invariants and returns one
-// human-readable violation per broken rule, empty when none:
+// 4C-57 identity + 4C-58/4C-59 source-exec authority invariants and returns
+// one human-readable violation per broken rule, empty when none:
 //   - exactly ONE allow rule may name docker_helper_buildkitd_exec_t as a
-//     participant: the 4C-58 source-execute grant, in the exact canonical
-//     bare form (any other shape — a wider bundle, execute_no_trans, a
-//     brace equivalent, another source domain, another class, a parallel
-//     or duplicate line — violates);
-//   - the canonical execute rule must exist exactly once (missing or
-//     duplicated violates);
+//     participant: the source-exec grant, in the exact canonical brace form
+//     { execute read open } (any other shape — a narrower pair, the bare
+//     4C-58 form, execute_no_trans, a getattr/map/entrypoint addition, a
+//     reordered brace form, another source domain, another class, a
+//     parallel, split, or duplicate line — violates);
 //   - no allow rule may name docker_helper_buildkitd_t (the declared
 //     process domain stays permission-less — unreachable until its own
 //     live-evidence transition phase);
@@ -4405,7 +4404,7 @@ func TestSELinuxPolicyRootlesskitIsolation(t *testing.T) {
 //     preservation is a live-transition-phase proof, never a pre-declared
 //     map).
 func buildkitdIdentityViolations(policy string) []string {
-	const canonicalExecute = "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file execute;"
+	const canonicalExec = "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute read open };"
 	standingRootlesskitExecRules := map[string]string{
 		"docker_helper_rootlesskit_exec_t": "allow docker_helper_rootlesskit_t docker_helper_rootlesskit_exec_t:file { entrypoint read open execute execute_no_trans getattr map };",
 		"docker_helper_slirp4netns_exec_t": "allow docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:file { execute read open getattr };",
@@ -4417,12 +4416,12 @@ func buildkitdIdentityViolations(policy string) []string {
 		if strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		if trimmed == canonicalExecute {
+		if trimmed == canonicalExec {
 			canonicalCount++
 		}
 	}
 	if canonicalCount != 1 {
-		violations = append(violations, fmt.Sprintf("the 4C-58 source-execute grant must exist exactly once, found %d: %s", canonicalCount, canonicalExecute))
+		violations = append(violations, fmt.Sprintf("the buildkitd source-exec grant must exist exactly once in the exact canonical form, found %d: %s", canonicalCount, canonicalExec))
 	}
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -4430,8 +4429,8 @@ func buildkitdIdentityViolations(policy string) []string {
 			continue
 		}
 		if strings.HasPrefix(trimmed, "allow ") {
-			if strings.Contains(trimmed, "docker_helper_buildkitd_exec_t") && trimmed != canonicalExecute {
-				violations = append(violations, "the only allow rule naming the buildkitd exec type is the exact source-execute grant: "+trimmed)
+			if strings.Contains(trimmed, "docker_helper_buildkitd_exec_t") && trimmed != canonicalExec {
+				violations = append(violations, "the only allow rule naming the buildkitd exec type is the exact source-exec grant { execute read open }: "+trimmed)
 			}
 			if strings.Contains(trimmed, "docker_helper_buildkitd_t") {
 				violations = append(violations, "no allow rule may exist toward the buildkitd domain (it stays permission-less until its own transition phase): "+trimmed)
@@ -4469,11 +4468,13 @@ func buildkitdIdentityViolations(policy string) []string {
 //     domain, no permission toward the domain from ANY domain, no
 //     capability/cap_userns surface, no range_transition (the MCS
 //     category preservation is a live-transition-phase proof);
-//   - the 4C-58 grant: allow docker_helper_rootlesskit_t
-//     docker_helper_buildkitd_exec_t:file execute; — exactly once, in the
-//     exact bare form (the first real execution authority for the private
-//     buildkitd identity; nothing else in the exec chain is granted — the
-//     transition bundle is deliberately NOT finished);
+//   - the 4C-59 grant: allow docker_helper_rootlesskit_t
+//     docker_helper_buildkitd_exec_t:file { execute read open }; — exactly
+//     once, in the exact brace form (the source-exec authority for the
+//     private buildkitd identity: the 4C-58 execute hook widened in place
+//     by the 4C-59 executable-image read/open hooks; nothing else in the
+//     exec chain is granted — the transition bundle is deliberately NOT
+//     finished);
 //   - the exact .fc entry labels exactly the canonical buildkitd path —
 //     one rule, the `--` regular-file form, no directory regex, no
 //     sibling (buildctl/buildkit-runc keep their distro labels);
@@ -4565,21 +4566,22 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		t.Error("the package payload destination must be exactly the canonical buildkitd path (nfpm.yaml)")
 	}
 
-	// The 4C-58 source-execute grant: exactly the canonical rule, once
-	// (non-comment lines only — the provenance comment mentions the rule).
-	const canonicalExecute = "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file execute;"
-	var withoutExecute []string
+	// The 4C-59 source-exec grant: exactly the canonical brace triple,
+	// once (non-comment lines only — the provenance comment mentions the
+	// rule).
+	const canonicalExec = "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute read open };"
+	var withoutExec []string
 	canonicalCount := 0
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
-		if trimmed == canonicalExecute {
+		if trimmed == canonicalExec {
 			canonicalCount++
 			continue
 		}
-		withoutExecute = append(withoutExecute, line)
+		withoutExec = append(withoutExec, line)
 	}
 	if canonicalCount != 1 {
-		t.Errorf("the buildkitd source-execute grant must exist exactly once, found %d", canonicalCount)
+		t.Errorf("the buildkitd source-exec grant must exist exactly once, found %d", canonicalCount)
 	}
 
 	// The committed policy violates nothing.
@@ -4588,7 +4590,7 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 	}
 
 	// Missing-rule mutation: removing the canonical grant must trip.
-	if violations := buildkitdIdentityViolations(strings.Join(withoutExecute, "\n")); len(violations) == 0 {
+	if violations := buildkitdIdentityViolations(strings.Join(withoutExec, "\n")); len(violations) == 0 {
 		t.Error("the missing-rule mutation must trip the buildkitd authority invariants")
 	}
 
@@ -4599,31 +4601,42 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		name string
 		rule string
 	}{
-		{"missing execute (read instead)", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file read;"},
-		{"execute_no_trans instead of execute", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file execute_no_trans;"},
-		{"execute + execute_no_trans bundle", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute execute_no_trans };"},
-		{"execute + read", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute read };"},
-		{"execute + open", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute open };"},
-		{"execute + getattr", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute getattr };"},
-		{"execute + map", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute map };"},
-		{"brace equivalent of the canonical rule", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute };"},
-		{"flow full exec-source bundle", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute read open getattr map };"},
-		{"flow process transition toward the domain", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { transition };"},
-		{"target entrypoint rule", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint execute read open getattr map };"},
-		{"target capability grant", "allow docker_helper_buildkitd_t self:capability sys_admin;"},
-		{"target cap_userns grant", "allow docker_helper_buildkitd_t self:cap_userns sys_admin;"},
+		// the older, narrower shapes (missing read/open)
+		{"the bare 4C-58 form (missing read+open)", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file execute;"},
+		{"execute + read (missing open)", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute read };"},
+		{"execute + open (missing read)", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute open };"},
+		// missing members of the triple
+		{"missing execute (read+open only)", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { read open };"},
+		// forbidden additions
+		{"execute_no_trans instead", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file execute_no_trans;"},
+		{"execute_no_trans additionally", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute read open execute_no_trans };"},
+		{"getattr addition", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute read open getattr };"},
+		{"map addition", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute read open map };"},
+		{"entrypoint addition", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute read open entrypoint };"},
+		{"fourth permission sweep (full exec bundle)", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute read open getattr map };"},
+		// the generic bin_t bundle
+		{"generic bin_t execute for the flow", "allow docker_helper_rootlesskit_t bin_t:file { execute };"},
+		{"generic bin_t read+open for the flow", "allow docker_helper_rootlesskit_t bin_t:file { read open };"},
+		{"generic bin_t execute_no_trans for the flow", "allow docker_helper_rootlesskit_t bin_t:file execute_no_trans;"},
+		{"generic bin_t full bundle for the flow", "allow docker_helper_rootlesskit_t bin_t:file { execute read open getattr map };"},
+		// wrong sources on the exec type
 		{"daemon execute on the exec type", "allow docker_helper_t docker_helper_buildkitd_exec_t:file execute;"},
 		{"manager execute on the exec type", "allow docker_helper_builder_t docker_helper_buildkitd_exec_t:file execute;"},
 		{"launcher execute on the exec type", "allow docker_helper_builder_launcher_t docker_helper_buildkitd_exec_t:file execute;"},
 		{"slirp4netns execute on the exec type", "allow docker_helper_slirp4netns_t docker_helper_buildkitd_exec_t:file execute;"},
 		{"buildkitd domain execute on its own exec type", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file execute;"},
-		{"generic bin_t execute for the flow", "allow docker_helper_rootlesskit_t bin_t:file { execute };"},
-		{"generic bin_t execute_no_trans for the flow", "allow docker_helper_rootlesskit_t bin_t:file execute_no_trans;"},
-		{"generic bin_t full bundle for the flow", "allow docker_helper_rootlesskit_t bin_t:file { execute read open getattr map };"},
-		{"self re-exec execute re-grant", "allow docker_helper_rootlesskit_t docker_helper_rootlesskit_exec_t:file execute;"},
-		{"slirp4netns exec execute re-grant", "allow docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:file execute;"},
-		{"second permission sweep on the pair", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { read open };"},
-		{"duplicate of the canonical execute rule", canonicalExecute},
+		// wrong targets from the flow domain
+		{"self re-exec re-grant", "allow docker_helper_rootlesskit_t docker_helper_rootlesskit_exec_t:file execute;"},
+		{"slirp4netns exec re-grant", "allow docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:file execute;"},
+		// the transition bundle stays closed
+		{"flow process transition toward the domain", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { transition };"},
+		{"target entrypoint rule", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint execute read open getattr map };"},
+		{"target capability grant", "allow docker_helper_buildkitd_t self:capability sys_admin;"},
+		{"target cap_userns grant", "allow docker_helper_buildkitd_t self:cap_userns sys_admin;"},
+		// parallel / split / duplicate / order shapes
+		{"split grant (execute; then read open)", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file execute;\nallow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { read open };"},
+		{"reordered brace equivalent", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { open read execute };"},
+		{"duplicate of the canonical rule", canonicalExec},
 		{"range_transition declaration", "range_transition docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:process s0:c1;"},
 	} {
 		if violations := buildkitdIdentityViolations(policy + "\n" + mut.rule); len(violations) == 0 {
@@ -4776,6 +4789,45 @@ func TestSELinuxPolicyKernelClassmapMaskPins(t *testing.T) {
 		if got := uint(1) << uint(pin.index); got != pin.want {
 			t.Errorf("kernel classmap pin: file-family %q must decode to %#x, mirror gives %#x (index %d)", pin.perm, pin.want, got, pin.index)
 		}
+	}
+	// The combined-mask decode regression (the 4C-59 boundary): the
+	// kernel's masks are BIT ORs of the per-perm values, and the decode
+	// must recover EXACTLY the granted/denied permission set.
+	decode := func(mask uint) []string {
+		var out []string
+		for i, perm := range append(append([]string{}, kernelCommonFilePerms...), kernelFileOnlyPerms...) {
+			if mask&(uint(1)<<uint(i)) != 0 {
+				out = append(out, perm)
+			}
+		}
+		return out
+	}
+	samePerms := func(a, b []string) bool {
+		if len(a) != len(b) {
+			return false
+		}
+		for i := range a {
+			if a[i] != b[i] {
+				return false
+			}
+		}
+		return true
+	}
+	// decode(file, 0x40002) == exactly { read open } (open=0x40000 |
+	// read=0x2) — the 4C-58 canonical run's live boundary record.
+	if got := decode(0x40002); !samePerms(got, []string{"read", "open"}) {
+		t.Errorf("kernel classmap decode: file mask 0x40002 must decode to exactly { read open }, got %v", got)
+	}
+	// Negative discrimination: the neighboring combined masks decode to
+	// DIFFERENT permission sets — never { read open }.
+	if got := decode(0x40004); !samePerms(got, []string{"write", "open"}) {
+		t.Errorf("kernel classmap decode: file mask 0x40004 must decode to { write open }, got %v", got)
+	}
+	if got := decode(0x40008); !samePerms(got, []string{"create", "open"}) {
+		t.Errorf("kernel classmap decode: file mask 0x40008 must decode to { create open }, got %v", got)
+	}
+	if got := decode(0x40002); samePerms(got, []string{"write", "open"}) || samePerms(got, []string{"create", "open"}) {
+		t.Errorf("kernel classmap decode: 0x40002 must not decode to a write/create-open set, got %v", got)
 	}
 }
 
