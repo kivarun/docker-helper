@@ -717,24 +717,19 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
     GCTX[$GPID]="$GCTXV"
     GNSM[$GPID]=""
     GMI[$GPID]=""
-    # The 4C-53 correction: the ns-identity probe runs INLINE at the
-    # discovery instant (the canonical 4C-53 run 37346689804's defect:
-    # the dance pid was seen ALIVE by a full-scan tick and queued, but
-    # its whole lifetime is shorter than the queue's retry cadence —
-    # the next tick's dead-pid purge dropped it before the batched
-    # queued readlink ever returned for it, gate items A/B came out 0,
-    # and the phase finished INCOMPLETE although every gate-relevant
-    # mount pair returned 0x0). One readlink fork per discovered pid,
-    # issued the instant the comm read proved it alive; a dead-in-
-    # window pid falls back to the queued retry tier below.
-    GIDENTOUT="$(readlink "/proc/$GPID/ns/mnt" "/proc/$GPID/ns/user" 2>/dev/null || true)"
-    if [ "$(printf '%s\n' "$GIDENTOUT" | grep -ac . || true)" = 2 ]; then
-      GNSM[$GPID]="$(printf '%s\n' "$GIDENTOUT" | sed -n '1p')"
-      printf '%s GATE-HOLDER-IDENT pid=%s ns/mnt=%s ns/user=%s\n' \
-        "$GTS" "$GPID" "${GNSM[$GPID]}" "$(printf '%s\n' "$GIDENTOUT" | sed -n '2p')"
-    else
-      GIDENTQ="$GIDENTQ$GPID "
-    fi
+    # The 4C-53 contract (the identification must happen within a
+    # short-lived dance pid's own lifetime) met WITHOUT a per-discovery
+    # fork: the discovery reads are builtin file reads (comm, ctx,
+    # stat), the ns-identity readlink is QUEUED here and drained by the
+    # ONE batched readlink fork later in the SAME tick (the 4C-55
+    # correction, reproduced run 37411005148: the per-discovery inline
+    # readlink forks stretched a five-discovery tick to ~278ms under
+    # the launch fork storm — longer than the dance pid own ~170ms
+    # lifetime — so the only born-since scan whose window covered the
+    # dance pid ran AFTER its death and the gate never recorded it,
+    # items A/B = 0). A dead-in-window pid falls out at the drain own
+    # purge; the drain alignment fallback keeps the batch honest.
+    GIDENTQ="$GIDENTQ$GPID "
     printf '%s GATE-HOLDER-FIRST pid=%s comm=%s state=%s ppid=%s ctx=%s ns/mnt=%s ns/user=pending starttime=%s\n' \
       "$GTS" "$GPID" "$GLC" "$GSTV" "$GPP" "$GCTXV" "${GNSM[$GPID]:-pending}" "${GSTART:-(none)}"
     # The 4C-52 correction: the discovery moment IS a tick observation
@@ -821,6 +816,26 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
         g_flow_pid "$GPC"
       done
     fi
+    # The 4C-55 tail re-scan: a pid born WHILE this tick worked (the
+    # discovery/ident/mountinfo load) must not wait a whole next tick
+    # for its own born-since coverage — re-read ns_last_pid and scan
+    # the delta right before the identity drain, so the same tick that
+    # covered the storm also covers its own stragglers (the reproduced
+    # run 37411005148 shape: the dance pid was born ~0.01s after the
+    # scan read ns_last_pid and died ~0.10s before the next scan
+    # arrived). The G_LASTPID=0 reset case skips the tail scan (the
+    # tick head's own full scan already covered the whole range).
+    GTAILNEW=""
+    IFS= read -r GTAILNEW 2>/dev/null < /proc/sys/kernel/ns_last_pid || true
+    case "$GTAILNEW" in
+      ''|*[!0-9]*) GTAILNEW="" ;;
+    esac
+    if [ -n "$GTAILNEW" ] && [ "$GTAILNEW" -ge "$G_LASTPID" ] && [ "$G_LASTPID" -gt 0 ]; then
+      for (( GTAILPID = GTAILNEW; GTAILPID > G_LASTPID; GTAILPID-- )); do
+        g_flow_pid "/proc/$GTAILPID"
+      done
+      G_LASTPID="$GTAILNEW"
+    fi
     # The queued ns-identity probe: ONE readlink fork per tick drains
     # the whole discovery queue (mnt+user pairs per live pid). The
     # alignment guard: dead pids are purged before the fork (a builtin
@@ -860,6 +875,31 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
                 "$GTS" "$GQP" "${GNSM[$GQP]:-(none)}" "$GQLINE"
             fi
           done <<< "$GQOUT"
+          GIDENTQ=""
+        else
+          # The 4C-55 alignment fallback: a queued pid that died inside
+          # the fork window makes readlink skip its operands and the
+          # whole batch unpairable by order (the 4C-53-era defect run
+          # 37346689804 shape: the batch retried next tick and the
+          # short-lived dance pid was purged dead before the retry).
+          # Fall back to the per-pid inline readlink for every
+          # STILL-alive queued pid right now — a live dance pid keeps
+          # its same-tick identification, a dead one drops with no
+          # ident (the correct outcome for a dead pid).
+          GQFALLBACK=""
+          for GQ in $GIDENTQ; do
+            if [ -r "/proc/$GQ/comm" ]; then
+              GQFALLBACK="$GQFALLBACK$GQ "
+            fi
+          done
+          for GQ in $GQFALLBACK; do
+            GQOUT="$(readlink "/proc/$GQ/ns/mnt" "/proc/$GQ/ns/user" 2>/dev/null || true)"
+            if [ "$(printf '%s\n' "$GQOUT" | grep -ac . || true)" = 2 ]; then
+              GNSM[$GQ]="$(printf '%s\n' "$GQOUT" | sed -n '1p')"
+              printf '%s GATE-HOLDER-IDENT pid=%s ns/mnt=%s ns/user=%s\n' \
+                "$GTS" "$GQ" "${GNSM[$GQ]}" "$(printf '%s\n' "$GQOUT" | sed -n '2p')"
+            fi
+          done
           GIDENTQ=""
         fi
       fi
