@@ -856,12 +856,21 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
       done
       G_LASTPID="$GTAILNEW"
     fi
-    # The queued ns-identity probe: ONE readlink fork per tick drains
-    # the whole discovery queue (mnt+user pairs per live pid). The
-    # alignment guard: dead pids are purged before the fork (a builtin
-    # comm test), and if the fork's line count still misses the operand
-    # count (a pid died inside the fork window), the queue is retried
-    # next tick and the purge eventually drops the dead ones.
+    # The queued ns-identity probe: the 4C-55 correction's final shape
+    # (reproduced run 37416056235: even the ONE batched readlink fork
+    # per tick cost ~170ms under the launch fork storm — the dance pid
+    # died 150ms after its discovery tick started, the covering scan
+    # arrived after the death, items A/B = 0 again). The identification
+    # is now ASYNC: the tick purges dead pids (builtin comm tests) and
+    # spawns ONE background subshell per discovery tick that does the
+    # per-pid readlinks OUTSIDE the tick own critical path; the tick
+    # loop never waits for any fork. The IDENT records land in the same
+    # gate file through the shared open-file description (each write
+    # appends at the shared offset, serialized by the file position
+    # lock — no tearing). A pid that dies before its own async readlink
+    # completes gets no ident (the residual race; the discovery tick
+    # itself is fork-free, so the identification now starts within
+    # milliseconds of the discovery).
     if [ -n "${GIDENTQ:-}" ]; then
       GQNEW=""
       for GQ in $GIDENTQ; do
@@ -869,71 +878,23 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
           GQNEW="$GQNEW$GQ "
         fi
       done
-      GIDENTQ="${GQNEW% }"
-      if [ -n "$GIDENTQ" ]; then
-        GQARGS=()
-        for GQ in $GIDENTQ; do
-          GQARGS+=("/proc/$GQ/ns/mnt" "/proc/$GQ/ns/user")
-        done
-        GQOUT="$(readlink "${GQARGS[@]}" 2>/dev/null || true)"
-        GQEXP=$(( ${#GQARGS[@]} ))
-        # The forkless line count (the 4C-55 correction: every command
-        # substitution with a pipe is two extra forks under the launch
-        # fork storm, and the fork storm is exactly when the tick
-        # cadence must hold).
-        GQN=0
-        if [ -n "$GQOUT" ]; then
-          while IFS= read -r _; do GQN=$(( GQN + 1 )); done <<< "$GQOUT"
-        fi
-        if [ "$GQN" -eq "$GQEXP" ]; then
-          # One output line per argument, in argument order (verified
-          # locally: GNU readlink prints the targets in operand order and
-          # skips failed operands entirely). The pairing into mnt+user
-          # comes from the ARGUMENT ORDER, not from pairing the lines.
-          GQI=0
-          while IFS= read -r GQLINE; do
-            GQI=$(( GQI + 1 ))
-            GQP="${GQARGS[$(( GQI - 1 ))]}"
-            GQP="${GQP#/proc/}"; GQP="${GQP%/ns/mnt}"; GQP="${GQP%/ns/user}"
-            if [ $(( GQI % 2 )) -eq 1 ]; then
-              GNSM[$GQP]="$GQLINE"
-            else
-              printf '%s GATE-HOLDER-IDENT pid=%s ns/mnt=%s ns/user=%s\n' \
-                "$GTS" "$GQP" "${GNSM[$GQP]:-(none)}" "$GQLINE"
-            fi
-          done <<< "$GQOUT"
-          GIDENTQ=""
-        else
-          # The 4C-55 alignment fallback: a queued pid that died inside
-          # the fork window makes readlink skip its operands and the
-          # whole batch unpairable by order (the 4C-53-era defect run
-          # 37346689804 shape: the batch retried next tick and the
-          # short-lived dance pid was purged dead before the retry).
-          # Fall back to the per-pid inline readlink for every
-          # STILL-alive queued pid right now — a live dance pid keeps
-          # its same-tick identification, a dead one drops with no
-          # ident (the correct outcome for a dead pid).
-          GQFALLBACK=""
-          for GQ in $GIDENTQ; do
-            if [ -r "/proc/$GQ/comm" ]; then
-              GQFALLBACK="$GQFALLBACK$GQ "
-            fi
-          done
-          for GQ in $GQFALLBACK; do
+      GQNEW="${GQNEW% }"
+      if [ -n "$GQNEW" ]; then
+        (
+          for GQ in $GQNEW; do
             GQOUT="$(readlink "/proc/$GQ/ns/mnt" "/proc/$GQ/ns/user" 2>/dev/null || true)"
             GQC=0
             if [ -n "$GQOUT" ]; then
               while IFS= read -r _; do GQC=$(( GQC + 1 )); done <<< "$GQOUT"
             fi
             if [ "$GQC" = 2 ]; then
-              GNSM[$GQ]="${GQOUT%%$'\n'*}"
               printf '%s GATE-HOLDER-IDENT pid=%s ns/mnt=%s ns/user=%s\n' \
-                "$GTS" "$GQ" "${GNSM[$GQ]}" "${GQOUT#*$'\n'}"
+                "$EPOCHREALTIME" "$GQ" "${GQOUT%%$'\n'*}" "${GQOUT#*$'\n'}"
             fi
           done
-          GIDENTQ=""
-        fi
+        ) &
       fi
+      GIDENTQ=""
     fi
     # The tracked-pids pass: the aliveness (the comm file's readability
     # bounds the death between ticks), the tick record, and the
