@@ -2242,8 +2242,13 @@ RK_BKD_LABEL_OK=1
   RK_STATE_ROOT_LINE="$(sesearch --allow -s docker_helper_rootlesskit_t -t docker_helper_builder_state_root_t /sys/fs/selinux/policy 2>/dev/null \
     | awk '$1 == "allow" && $2 == "docker_helper_rootlesskit_t" && $3 ~ /^docker_helper_builder_state_root/' || true)"
   printf '  module contribution (the concrete rule): %s\n' "${RK_STATE_ROOT_LINE:-(empty)}"
-  if [ "$RK_STATE_ROOT_LINE" = "allow docker_helper_rootlesskit_t docker_helper_builder_state_root_t:dir { search };" ]; then
-    echo "  module contribution = exactly { search } (the standing RootlessKit owner unchanged)"
+  # sesearch NORMALIZES a one-permission brace rule to the bare form
+  # (the same normalization the transition rule's bare print showed), so
+  # both the sesearch-normalized bare spelling and the source's brace
+  # spelling are the ONE standing rule.
+  if [ "$RK_STATE_ROOT_LINE" = "allow docker_helper_rootlesskit_t docker_helper_builder_state_root_t:dir search;" ] \
+    || [ "$(printf '%s\n' "$RK_STATE_ROOT_LINE" | grep -acF 'allow docker_helper_rootlesskit_t docker_helper_builder_state_root_t:dir { search };' || true)" = "1" ]; then
+    echo "  module contribution = exactly { search } (the standing RootlessKit owner unchanged; sesearch's bare normalization of the one-permission rule)"
   else
     echo "  STOP: the flow domain's concrete surface on the shared state root is not exactly the standing { search } rule"
     BKD_ZERO_ALLOW_OK=0
