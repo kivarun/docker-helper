@@ -6239,6 +6239,13 @@ REBUILD-STAGE=NOT-REACHED}"
   if [ -n "$POSTTUN_BKD_OLD_ENTRY61_PRESENT" ]; then
     POSTTUN_OLD_BKD_ENTRY61_PRESENT=1
   fi
+  # The OLD target-side image-load boundary (the 4C-61 record): if the
+  # 0x4002 denial is STILL inside the window, the 4C-62 grant did not
+  # take effect — the phase FAILS (no new phase, no rule widening).
+  POSTTUN_OLD_BKD_ENTRY_PRESENT=0
+  if [ -n "$POSTTUN_BKD_OLD_ENTRY_PRESENT" ]; then
+    POSTTUN_OLD_BKD_ENTRY_PRESENT=1
+  fi
   # The future buildkitd domain records (the 4C-60 §11 contract): every
   # trace record in the window's span naming docker_helper_buildkitd_t
   # as scontext OR tcontext (the exec type's own records excluded),
