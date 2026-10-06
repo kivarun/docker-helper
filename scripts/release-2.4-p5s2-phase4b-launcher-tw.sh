@@ -2166,9 +2166,8 @@ RK_BKD_LABEL_OK=1
   BKD_FLOW_TRANS_LINE="$(sesearch --allow -s docker_helper_rootlesskit_t -t docker_helper_buildkitd_t /sys/fs/selinux/policy 2>/dev/null \
     | awk '$1 == "allow" && $2 == "docker_helper_rootlesskit_t" && $3 ~ /^docker_helper_buildkitd/' || true)"
   printf '  docker_helper_rootlesskit_t -> buildkitd_t: %s\n' "${BKD_FLOW_TRANS_LINE:-(empty)}"
-  BKD_TRANS_PERMS_OK=0
   if [ "$BKD_FLOW_TRANS_LINE" = "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;" ]; then
-    BKD_TRANS_PERMS_OK=1
+    true
   else
     echo "  STOP: the rootlesskit child's concrete surface toward the buildkitd domain is not exactly the bare { transition } grant"
     BKD_ZERO_ALLOW_OK=0
@@ -2220,9 +2219,9 @@ RK_BKD_LABEL_OK=1
     BKD_LABEL_OK=1
   fi
   if [ "$BKD_TRANS_OK" = 1 ] && [ "$BKD_ZERO_ALLOW_OK" = 1 ] && [ "$BKD_BIN_CLOSED_OK" = 1 ]; then
-    echo "PASS: the buildkitd source-exec authority holds the 4C-59 shape (both types declared — the ONE type_transition naming the pair is the loaded-policy proof; the module's ONLY allow rule naming the exec type is the rootlesskit child's file { execute read open } grant; ZERO concrete allow rules toward the domain from any module subject; the generic bin_t bundle stays closed)"
+    echo "PASS: the buildkitd source-exec + transition authority holds the 4C-60 shape (both types declared — the ONE type_transition naming the pair is the loaded-policy proof; the module's allow surface naming buildkitd types is EXACTLY the rootlesskit child's file { execute read open } grant plus the bare process transition grant — each exactly once; ZERO other concrete allow rules on the exec type or toward the domain from any module subject; the conventional transition bundle stays closed per-perm; the generic bin_t bundle stays closed)"
   else
-    echo "FAIL: the buildkitd exec authority is not the shipped 4C-59 shape (transition=$BKD_TRANS_OK source-surface=$BKD_ZERO_ALLOW_OK bin-closed=$BKD_BIN_CLOSED_OK)"
+    echo "FAIL: the buildkitd exec authority is not the shipped 4C-60 shape (transition=$BKD_TRANS_OK source-surface=$BKD_ZERO_ALLOW_OK bin-closed=$BKD_BIN_CLOSED_OK)"
     PREFLIGHT_OK=0
   fi
   if [ "$BKD_LABEL_OK" = 1 ]; then
