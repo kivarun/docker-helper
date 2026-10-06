@@ -6181,7 +6181,17 @@ REBUILD-STAGE=NOT-REACHED}"
   # canonical exec must carry the source operation's category (c1) —
   # the MCS check below applies to whatever appears, and a category
   # loss BLOCKS the phase (never compensated with a range_transition).
-  POSTTUN_BKD_DOMAIN_RECORDS="$(grep -a 'docker_helper_buildkitd_t' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -av 'docker_helper_buildkitd_exec_t' || true)"
+  # The token 'docker_helper_buildkitd_t:s0' matches ONLY the DOMAIN
+  # contexts: the exec type's own context token
+  # 'docker_helper_buildkitd_exec_t:s0' does NOT contain it ('_exec_t'
+  # sits between), so no line-level exclusion is needed — a record
+  # carrying BOTH (scontext=buildkitd_t + tcontext=buildkitd_exec_t, the
+  # target-side entrypoint shape) is captured. The previous
+  # line-level 'grep -av buildkitd_exec_t' exclusion dropped exactly
+  # that record (run 37449845332: the counter read 0 while the
+  # transition had succeeded live and the entrypoint denial stood in
+  # the span).
+  POSTTUN_BKD_DOMAIN_RECORDS="$(grep -aE 'docker_helper_buildkitd_t:s0([^0-9a-zA-Z_]|$)' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true)"
   POSTTUN_BKD_DOMAIN_N="$(printf '%s\n' "${POSTTUN_BKD_DOMAIN_RECORDS:-}" | grep -ac . || true)"
   [ -n "$POSTTUN_BKD_DOMAIN_RECORDS" ] || POSTTUN_BKD_DOMAIN_N=0
   echo "--- the future docker_helper_buildkitd_t domain records (the §13 counter; a tcontext record is the transition-target computation reaching an AVC, NOT a successful transition; an scontext record would be a live process context):"
@@ -6197,7 +6207,7 @@ REBUILD-STAGE=NOT-REACHED}"
   POSTTUN_BKD_TRANSITION_ATTEMPTED=0
   POSTTUN_BKD_TRANSITION_SUCCEEDED=0
   POSTTUN_BKD_TARGET_CAT_OK=1
-  BKD_SRC_CAT="$(printf '%s\n' "$POSTTUN_BKD_DECISIONS" | grep -aoE 'scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:[^ \t]*' | head -1 | sed 's/.*s0//' || true)"
+  BKD_SRC_CAT="$(grep -aoE 'scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:[^ \t]*' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | head -1 | sed 's/.*s0//' || true)"
   if [ -n "$POSTTUN_BKD_DOMAIN_RECORDS" ]; then
     BKD_DOM_CTX="$(printf '%s\n' "$POSTTUN_BKD_DOMAIN_RECORDS" | grep -aoE '[st]context=system_u:system_r:docker_helper_buildkitd_t:s0:[^ \t]*' | head -1 || true)"
     BKD_DOM_CAT="$(printf '%s\n' "$BKD_DOM_CTX" | sed 's/.*s0//' || true)"
