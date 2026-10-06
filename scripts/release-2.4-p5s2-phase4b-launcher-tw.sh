@@ -800,7 +800,17 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
       G_LASTPID=0
       G_DO_FULL=1
     fi
-    if [ "$G_DO_FULL" = 1 ] && { [ "${#GSEEN[@]}" -eq 0 ] || [ "${G_LAST_ALIVE:-0}" -eq 0 ]; }; then
+    # The 4C-55 correction (reproduced run 37413346997): the first
+    # discovery tick itself ran the full sweep — GSEEN was still empty
+    # BEFORE the scan filled it and G_LAST_ALIVE (the previous tick's
+    # aliveness) was 0, so the OR-shaped skip condition let the ~256ms
+    # sweep through and the dance pid (a 43ms lifetime) died inside it.
+    # The full-scan tier now runs ONLY in the truly virgin state (no
+    # tracked pids ever, none alive last tick); once any flow pid has
+    # been seen, the born-since and tail tiers own discovery and the
+    # vacancy countdown does not need the sweep (the flow's own parent
+    # is always tracked, so G_ALIVE stays > 0 while the flow lives).
+    if [ "$G_DO_FULL" = 1 ] && [ "${#GSEEN[@]}" -eq 0 ] && [ "${G_LAST_ALIVE:-0}" -eq 0 ]; then
       # BACKWARD full scan (the newest pids first): the re-exec
       # discovery tier reads the same /proc set in newest-first order,
       # so a long-lived flow-comm pid whose comm changed in place is
@@ -867,7 +877,14 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
         done
         GQOUT="$(readlink "${GQARGS[@]}" 2>/dev/null || true)"
         GQEXP=$(( ${#GQARGS[@]} ))
-        GQN="$(printf '%s\n' "$GQOUT" | grep -ac . || true)"
+        # The forkless line count (the 4C-55 correction: every command
+        # substitution with a pipe is two extra forks under the launch
+        # fork storm, and the fork storm is exactly when the tick
+        # cadence must hold).
+        GQN=0
+        if [ -n "$GQOUT" ]; then
+          while IFS= read -r _; do GQN=$(( GQN + 1 )); done <<< "$GQOUT"
+        fi
         if [ "$GQN" -eq "$GQEXP" ]; then
           # One output line per argument, in argument order (verified
           # locally: GNU readlink prints the targets in operand order and
@@ -904,10 +921,14 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
           done
           for GQ in $GQFALLBACK; do
             GQOUT="$(readlink "/proc/$GQ/ns/mnt" "/proc/$GQ/ns/user" 2>/dev/null || true)"
-            if [ "$(printf '%s\n' "$GQOUT" | grep -ac . || true)" = 2 ]; then
-              GNSM[$GQ]="$(printf '%s\n' "$GQOUT" | sed -n '1p')"
+            GQC=0
+            if [ -n "$GQOUT" ]; then
+              while IFS= read -r _; do GQC=$(( GQC + 1 )); done <<< "$GQOUT"
+            fi
+            if [ "$GQC" = 2 ]; then
+              GNSM[$GQ]="${GQOUT%%$'\n'*}"
               printf '%s GATE-HOLDER-IDENT pid=%s ns/mnt=%s ns/user=%s\n' \
-                "$GTS" "$GQ" "${GNSM[$GQ]}" "$(printf '%s\n' "$GQOUT" | sed -n '2p')"
+                "$GTS" "$GQ" "${GNSM[$GQ]}" "${GQOUT#*$'\n'}"
             fi
           done
           GIDENTQ=""
@@ -935,9 +956,12 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
               if [ -n "$GMINFO" ] && [ "$GMINFO" != "${GMI[$GPID]:-}" ]; then
                 GMI_CAPS=$(( GMI_CAPS + 1 ))
                 GMI[$GPID]="$GMINFO"
-                printf '%s GATE-MOUNTINFO pid=%s lines=%s\n' "$GTS" "$GPID" \
-                  "$(printf '%s\n' "$GMINFO" | grep -ac . || true)"
-                printf '%s\n' "$GMINFO" | sed 's/^/    GATE-MOUNTINFO-LINE /'
+                GMI_LINES=0
+                while IFS= read -r _; do GMI_LINES=$(( GMI_LINES + 1 )); done <<< "$GMINFO"
+                printf '%s GATE-MOUNTINFO pid=%s lines=%s\n' "$GTS" "$GPID" "$GMI_LINES"
+                while IFS= read -r GMIL; do
+                  printf '    GATE-MOUNTINFO-LINE %s\n' "$GMIL"
+                done <<< "$GMINFO"
               fi
             fi
             ;;
@@ -958,7 +982,10 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
         GNARGS+=("/proc/$GPID/ns/mnt")
       done
       GNOUT="$(readlink "${GNARGS[@]}" 2>/dev/null || true)"
-      GNN="$(printf '%s\n' "$GNOUT" | grep -ac . || true)"
+      GNN=0
+      if [ -n "$GNOUT" ]; then
+        while IFS= read -r _; do GNN=$(( GNN + 1 )); done <<< "$GNOUT"
+      fi
       if [ "$GNN" -eq "${#GNARGS[@]}" ]; then
         GNI=0
         while IFS= read -r GNL; do
