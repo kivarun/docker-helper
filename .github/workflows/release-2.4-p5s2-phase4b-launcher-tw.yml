@@ -47,22 +47,22 @@ jobs:
           # package payload destination) move that SAME production exec
           # boundary onto the private identity, and the ONE pointed
           # type_transition records the routing map
-          # (rootlesskit_t:s0:cX -> exec -> buildkitd_t:s0:cX). The 4C-59
-          # phase: first the structural foundation (the buildkitd domain
-          # joins mcs_constrained_type BEFORE reachability — restrictive
-          # structure, not new authority, no range_transition), then the
-          # source-exec grant widened IN PLACE to { execute read open }
-          # (the executable-image read stage, 0x40002 = { read open }
-          # per the kernel classmap) and NOTHING else: no
-          # execute_no_trans/getattr/map, no process transition (the
-          # structural type_transition stays routing-only), no
-          # entrypoint, no capability/cap_userns — the transition bundle
-          # is deliberately NOT finished; the exec chain must advance
-          # past the granted stage and the next live boundary owns 4C-60
-          # (the proof ref advances from the 4C-58-era pin to the commit
-          # carrying that module; identical Go sources, so the binary is
-          # the same program).
-          PHASE4B_PROOF_REF: '8bef268d14e00e2438bbe868554e266173db140d'
+          # (rootlesskit_t:s0:cX -> exec -> buildkitd_t:s0:cX). The 4C-60
+          # phase grants the pointed process transition — the routing
+          # declaration's own authority (process:transition=0x2, the
+          # kernel classmap) — and NOTHING else: no
+          # siginh/noatsecure/rlimitinh/dyntransition/setexec (the
+          # conventional transition bundle is NOT copied), no process2
+          # surface, no entrypoint, no execute_no_trans, no
+          # capability/cap_userns, no range_transition — every next hook
+          # is a separate live-evidence phase; an scontext=buildkitd_t
+          # record is the STRONG acceptance shape (the transition
+          # succeeded live), every buildkitd_t context must carry the
+          # source operation's category, and the next live boundary owns
+          # 4C-61 (the proof ref advances from the 4C-59-era pin to the
+          # commit carrying that module; identical Go sources, so the
+          # binary is the same program).
+          PHASE4B_PROOF_REF: 'd10b67b453099042a6e6bc8f30be43c05d93391a'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
