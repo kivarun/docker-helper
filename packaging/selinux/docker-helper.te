@@ -2270,24 +2270,28 @@ allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };
 #     LIVE in the transition phase, never assumed from SELinux semantics,
 #     and NO range_transition is declared in advance.
 #
-# THE 4C-58 + 4C-59 DELTAS — THE SOURCE-SIDE EXEC CHAIN GRANTS:
+# THE 4C-58 + 4C-59 + 4C-60 DELTAS — THE SOURCE-SIDE EXEC CHAIN GRANTS:
 #   4C-58: allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file execute;
 #   4C-59: the SAME rule widened IN PLACE to { execute read open } —
-#     exactly ONE allow rule still names the exec type; the widened form
-#     lives below, immediately after the routing declaration; its
-#     evidence comment carries the boundary records and the decode pins.
+#     exactly ONE allow rule names the exec type; the widened form lives
+#     below, immediately after the routing declaration;
+#   4C-60: the pointed process transition permission — the ONE allow rule
+#     toward the buildkitd domain:
+#     allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;
+#     (the routing declaration's own authority; every other hook stays
+#     a separate live-evidence phase).
 #
 # STILL DELIBERATELY ABSENT (each is a separate live-evidence phase):
-#   - execute_no_trans, getattr, map on the exec type from the flow
-#     (the 4C-59 grant is the exec chain's own execute+image-read hooks,
-#     nothing else — no "finishing the domain-transition bundle" in
-#     advance);
-#   - rootlesskit_t -> buildkitd_t:process transition (the structural
-#     type_transition below stays ROUTING-ONLY — the transition
-#     permission remains ungranted, so the next live blocker may be the
-#     process transition itself; that phase owns its own evidence);
+#   - siginh, noatsecure, rlimitinh, dyntransition, setexec on the
+#     transition pair (the 4C-60 grant is the ONE transition permission,
+#     nothing else — no conventional transition bundle copied from other
+#     domains);
+#   - process2:nnp_transition;
+#   - execute_no_trans, getattr, map on the exec type from the flow;
 #   - buildkitd_t -> buildkitd_exec_t:file entrypoint/execute/read/open/
-#     getattr/map (no entry rule exists yet);
+#     getattr/map (no entry rule exists yet; the entrypoint is a
+#     separate live boundary, never combined with the transition merely
+#     because conventional bundles need both);
 #   - any buildkitd_t capability, cap_userns, or
 #     filesystem/state/runtime/network surface;
 #   - any OTHER source domain's execution or transition toward the exec
@@ -2295,12 +2299,11 @@ allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };
 #   - any generic bin_t execution bundle for the flow (the narrowed
 #     private identity must never be papered over with a generic grant;
 #     the old generic boundary stays gone via the relabel).
-# The runtime therefore still fails closed — the 4C-58 execute hook and
-# the 4C-59 image-read hooks are now GRANTED, and the startup advances to
-# the next hook of the exec chain, wherever the kernel's own live
-# boundary moves (the process transition, the entrypoint, the loader
-# hooks — live evidence only; the harness captures the new terminal
-# boundary).
+# The runtime therefore still fails closed — the 4C-58 execute hook, the
+# 4C-59 image-read hooks, and the 4C-60 process transition are now
+# GRANTED, and the startup advances to the next hook of the exec chain
+# (the target-side entrypoint/execute/image mediation, the loader hooks —
+# live evidence only; the harness captures the new terminal boundary).
 #
 # buildctl and buildkit-runc stay SEPARATE future executable boundaries:
 # the .fc carries NO rule for them, no directory regex covers the
@@ -2311,9 +2314,11 @@ type docker_helper_buildkitd_exec_t, file_type, exec_type;
 type docker_helper_buildkitd_t, domain;
 role system_r types docker_helper_buildkitd_t;
 
-# The pointed transition DECLARATION only — the routing map above. This
-# is NOT authority: the transition/entrypoint permissions stay ungranted,
-# so no execution can reach docker_helper_buildkitd_t through this edge.
+# The pointed transition DECLARATION — the routing map above. Its
+# authority is the 4C-60 transition grant below; the entrypoint and
+# every other target-side hook stay ungranted, and the conventional
+# transition bundle (siginh/noatsecure/rlimitinh/dyntransition/setexec)
+# is NOT copied here.
 type_transition docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:process docker_helper_buildkitd_t;
 
 # --- 4C-58 + 4C-59: the source-side execute + executable-image read/open
@@ -2369,6 +2374,54 @@ type_transition docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:proce
 # identity (exact-path, product-scoped — NOT operation-scoped): the
 # cross-operation gate stays OPEN/Critical.
 allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute read open };
+
+# --- 4C-60: the pointed process transition — the routing declaration's
+# --- own authority ---
+#
+# The 4C-59 canonical run's (37445011513) boundary record, live inside the
+# canonical execve window — the FIRST docker_helper_buildkitd_t record and
+# the transition stage's own denial:
+#
+#   exe-39534 368.653435 sys_execve(
+#     "/usr/libexec/docker-helper/buildkit/buildkitd", ...)
+#   exe-39534 368.653481 selinux_audited: requested=0x2 denied=0x2
+#     audited=0x2 result=-13
+#     scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+#     tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tclass=process
+#   exe-39534 368.653506 sys_execve -> 0xfffffffffffffff3
+#
+# The mask decode pin (the kernel's static classmap numbering, NOT the
+# loaded policy's perms-file numbering): process:fork=0x1,
+# process:transition=0x2, process:sigchld=0x4, process:sigkill=0x8 —
+# the kernel-side layout whose members are live-proven across the
+# staircase (the teardown records' process:sigkill=0x8, the
+# builder-signal HANDLED records' process:fork=0x1). The 4C-59
+# boundary's denied=0x2 is therefore exactly process:transition on the
+# pointed pair, and this rule grants EXACTLY that permission — nothing
+# else.
+#
+# THE GRANT IS EXACTLY { transition } — the pointed routing edge's own
+# permission only:
+#   - no siginh/noatsecure/rlimitinh/dyntransition/setexec (the
+#     conventional transition bundle is NOT copied from other domains;
+#     every next hook is a separate live boundary);
+#   - no process2:nnp_transition, no execute_no_trans, no entrypoint,
+#     no range_transition, no capability/cap_userns;
+#   - the source executable surface stays exactly { execute read open }
+#     (no new source-side exec permission).
+# MCS preconditions are ALREADY PROVEN (4C-59): both domains are
+# mcs_constrained_type members, and the kernel's own 4C-59 record
+# computed the target context WITH the source's category (c1 == c1).
+# If the transition now succeeds, the target-side category preservation
+# must be proven LIVE again (every buildkitd_t process context involved
+# in the canonical exec must carry the operation's category); a category
+# loss BLOCKS the phase and is never compensated with a range_transition.
+# Scope caveat: the transition is a pointed domain boundary (the exact
+# source domain, the exact entry type, the exact destination domain);
+# the cross-operation gate stays OPEN/Critical until the cross-operation
+# isolation proof (4C-37) holds for the reachable domain.
+allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;
 
 # --- docker_helper_slirp4netns_t: the rootlesskit user-network helper domain (P5-S2) ---
 #
