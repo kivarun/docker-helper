@@ -2022,11 +2022,12 @@ allow docker_helper_rootlesskit_t cgroup_t:dir mounton;
 # concurrency/security gate before the Release GO.
 allow docker_helper_rootlesskit_t net_conf_t:file { read open };
 
-# --- the replacement /etc/resolv.conf regular-file creation (P5-S2 Phase
-# --- 4C-54): with the lnk_file unlink removal hook granted (4C-53), the
-# canonical 4C-53 run 37350350345 saw the resolv-replacement stage's own
-# RemoveAll complete — the rebuilt destination symlink actually removed
-# (the AT_FDCWD unlinkat("/etc/resolv.conf", 0) pair ret 0x0 at trace-ts
+# --- the replacement /etc/resolv.conf regular-file surface (P5-S2 Phase
+# --- 4C-54, widened in place by Phase 4C-55): with the lnk_file unlink
+# removal hook granted (4C-53), the canonical 4C-53 run 37350350345 saw
+# the resolv-replacement stage's own RemoveAll complete — the rebuilt
+# destination symlink actually removed (the AT_FDCWD
+# unlinkat("/etc/resolv.conf", 0) pair ret 0x0 at trace-ts
 # 234.517271..234.517283; the fresh run's FIRST pass was legitimately
 # -ENOENT: RemoveAll's own contract makes "the path does not exist" a
 # completed removal, so the multi-pass shape is the pass that actually
@@ -2048,20 +2049,20 @@ allow docker_helper_rootlesskit_t net_conf_t:file { read open };
 # THE DECODER CORRECTION (the 4C-53 deliverable's raw-mask decode,
 # corrected per the kernel's own AVC numbering): the kernel's AVC bitmap
 # for the file class follows COMMON_FILE_PERMS — ioctl=0x1 read=0x2
-# write=0x4 create=0x8 getattr=0x10 setattr=0x20 ... — the same
-# kernel-classmap order every live-proven association of this staircase
-# uses (the lnk_file create=0x8 read=0x2 unlink=0x800 link=0x1000
-# rename=0x2000 map=0x400; the net_conf_t:file open=0x40000 read=0x2;
-# the dir mounton=0x10000 search=0x20000000 add_name=0x4000000). The
-# loaded policy's selinuxfs perms-file VALUES are the policy's own
-# numbering (the distro policy's file class carries a swapon entry the
-# kernel's file common does not) and are NEVER the AVC bitmap decoder.
-# Raw 0x8 on tclass=file is therefore the file's own CREATE hook — the
-# 4C-53 deliverable's raw {write} decode is corrected here; the granted
-# permission is exactly create, not write.
+# write=0x4 create=0x8 getattr=0x10 setattr=0x20 ... open=0x40000
+# (bit 18) ... — the same kernel-classmap order every live-proven
+# association of this staircase uses (the lnk_file create=0x8 read=0x2
+# unlink=0x800 link=0x1000 rename=0x2000 map=0x400; the net_conf_t:file
+# open=0x40000 read=0x2; the dir mounton=0x10000 search=0x20000000
+# add_name=0x4000000). The loaded policy's selinuxfs perms-file VALUES
+# are the policy's own numbering (the distro policy's file class carries
+# a swapon entry the kernel's file common does not) and are NEVER the
+# AVC bitmap decoder. Raw 0x8 on tclass=file is therefore the file's own
+# CREATE hook — the 4C-53 deliverable's raw {write} decode is corrected
+# here; the granted permission is exactly create, not write.
 #
-# THE HOOK: security_inode_create — the vfs may_create() path of the
-# O_CREAT openat on the MISSING replacement file inside the child
+# THE 4C-54 HOOK: security_inode_create — the vfs may_create() path of
+# the O_CREAT openat on the MISSING replacement file inside the child
 # namespace's tmpfs-backed /etc (the created inode inherits the parent
 # dir's own type tmpfs_t). The parent-dir-side mediation (the
 # tmpfs_t:dir search/write checks) ran BEFORE the create check and
@@ -2070,16 +2071,57 @@ allow docker_helper_rootlesskit_t net_conf_t:file { read open };
 # into the module: the dir surface stays the 4C-46/47 owner's exact
 # pair).
 #
-# THE PASS SHAPE IS CAUTIOUS BY CONTRACT: the create hook's crossing is
-# proven by the OLD-FILECREATE gone-gate plus the causal progression —
-# EITHER the same openat window returned an fd (the stronger milestone:
-# ROOTLESSKIT-ETC-RESOLV-FILE-CREATE with the fd), OR the same window
-# failed at the NEXT hook with a NEW denial (the may_open MAY_WRITE
-# file:write 0x4, the open-completion file:open 0x80000, the O_TRUNC
-# setattr, or the parent-dir add_name — whichever comes owns the next
-# phase). The fd is NOT required: the create hook may pass while the
-# next hook of the SAME openat stops the syscall — that is the next
-# phase's live boundary, not this grant's failure.
+# THE 4C-54 CANONICAL RUN (37370262779): the create grant crossed the
+# create hook — the same openat(O_CREAT) window (enter trace-ts
+# 186.870735, exit 186.870759, ret 0xfffffffffffffff3; one who,
+# exe-24175, owned the whole resolv chain this run: the ENOENT absence
+# pass at 186.852794, the ret-0x0 removal at 186.870726..186.870734)
+# then reached the NEXT hooks of the SAME openat, and the kernel
+# audited ONE combined decision, trace-ts 186.870752 (7µs before the
+# failing openat exit; no fd was returned; the exit=1 at T0+0.020s was
+# the flow's terminal failure — the ladder's STARTUP-CAUSAL row):
+#   requested=0x40004 denied=0x40004 audited=0x40004 result=-13 (EACCES)
+#   scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+#   tcontext=system_u:object_r:tmpfs_t:s0 tclass=file
+#
+# ONE BOUNDARY, NOT TWO PHASES (the 4C-55 composition rule): write
+# (0x4, bit 2) and open (0x40000, bit 18) were requested AND denied in
+# the SAME audited decision inside ONE terminal openat, and neither had
+# ever been granted — the decoded set is ONE evidenced boundary,
+# { write open }, widened as one grant. No mechanical one-bit-per-phase
+# split; no bit beyond the denied mask (read/getattr/setattr/... stay
+# ungranted).
+#
+# THE 4C-55 HOOK ATTRIBUTION (corrected from the 4C-54 comment's
+# prediction): the combined write|open decision comes from the
+# open-completion hook — security_file_open → selinux_file_open requests
+# FILE__OPEN (the open permission) together with the f_mode-derived
+# access av (FMODE_WRITE → FILE__WRITE) in ONE check
+# (open_file_to_av()). The may_open() inode-permission check does NOT
+# produce this mask on the fresh-file path: the kernel's own do_open()
+# strips O_TRUNC and zeroes acc_mode for FMODE_CREATED files ("Don't
+# check for write permission, don't truncate"), so may_open()'s
+# inode_permission runs with MAY_OPEN only and — selinux_inode_permission
+# deriving no av from MAY_OPEN alone — performs no audit. After
+# create+write+open are granted, the same openat therefore has NO
+# further SELinux hook to deny on the fresh-file path: it returns
+# fd >= 0. The O_TRUNC setattr hook (0x20) is NOT on this path (a fresh
+# FMODE_CREATED file is never truncated; an existing-file re-open would
+# be the shape where it could appear — recorded, not granted).
+#
+# THE 4C-55 MILESTONE (ROOTLESSKIT-ETC-RESOLV-FILE-RECREATE): the
+# replacement regular file successfully created/opened (the openat
+# returns an fd), the WriteFile completed (every observed write(fd) ret
+# non-negative and every observed close(fd) ret 0x0 — a zero-length
+# payload legitimately has no write(2) syscall and is never required:
+# the SELinux file:write permission was already checked at the
+# open-completion hook via the file's f_mode, so the permission's proof
+# is the OLD combined 0x40004 boundary's GONE plus the fd, not a
+# write(2); the observed replacement payload is non-empty — the
+# stateDir resolv.conf carries "nameserver 10.0.2.3" — so the write(2)
+# is expected to appear and is recorded when it does), and the flow
+# advanced to the next production stage (the /etc/hosts
+# RemoveAll/WriteFile chain, then the stateDir bind mounts).
 #
 # SCOPE NOTE — GLOBAL TYPE, NOT OPERATION-SCOPED: tmpfs_t:s0 carries no
 # per-operation MCS category, so this allow is not operation-scoped (the
@@ -2087,26 +2129,28 @@ allow docker_helper_rootlesskit_t net_conf_t:file { read open };
 # MCS-constrained subject stay the abuse gates, and the
 # cross-operation reachability gate stays OPEN.
 #
-# The audit slice was empty for this shape (the same userspace-audit
-# gap as the lnk_file create/read windows); a next symbolic AVC record,
-# when captured, is the confirming decode.
+# The audit slice was empty for the 4C-54 shape (the same
+# userspace-audit gap as the lnk_file create/read windows); the 4C-55
+# combined mask is recorded from the same window's own selinux_audited
+# record above — the raw mask is the boundary (a next symbolic AVC
+# record, when captured, is the confirming decode).
 #
-# Deliberately NOT granted: write/open/getattr/setattr/append/map/
-# unlink/link/rename/execute/lock/relabelfrom/relabelto/audit_access/
-# execmod or any other file permission (each a distinct hook — the same
-# openat's own MAY_WRITE and open-completion checks are the predicted
-# next boundaries, the O_TRUNC setattr the one after; tmpfs_t:file
-# { create write } is exactly the forbidden shape), any new tmpfs_t:dir
-# permission (the 4C-46/47 owner's pair stays exact), any new
-# tmpfs_t:lnk_file permission (the 4C-48/50/53 owner's triple stays
-# exact), any net_conf_t surface (the 4C-51/52 owner's pair stays
-# exact), any other type's file surface, filesystem/mount surfaces, the
-# process/capability surfaces, other subjects; the .fc and the module
-# version stay untouched; no require delta (tmpfs_t is already
-# required). The /etc/hosts equivalent openat(O_CREAT) on the SAME
-# already-granted type/class/perm is the same permission at work, not a
-# new phase.
-allow docker_helper_rootlesskit_t tmpfs_t:file create;
+# Deliberately NOT granted: read/getattr/setattr/append/map/unlink/
+# link/rename/execute/lock/ioctl/relabelfrom/relabelto/audit_access/
+# execmod or any other file permission (each a distinct hook — this is
+# deliberately NOT the typical file-RW bundle; read stays ungranted
+# even though write/open/create are the triple: the file is written
+# blind, never read back, and a read hook is its own phase if a live
+# boundary ever demands it), any new tmpfs_t:dir permission (the
+# 4C-46/47 owner's pair stays exact), any new tmpfs_t:lnk_file
+# permission (the 4C-48/50/53 owner's triple stays exact), any
+# net_conf_t surface (the 4C-51/52 owner's pair stays exact), any other
+# type's file surface, filesystem/mount surfaces, the process/
+# capability surfaces, other subjects; the .fc and the module version
+# stay untouched; no require delta (tmpfs_t is already required). The
+# /etc/hosts equivalent openat(O_CREAT) on the SAME already-granted
+# type/class/perm is the same permission at work, not a new phase.
+allow docker_helper_rootlesskit_t tmpfs_t:file { create write open };
 
 # --- docker_helper_slirp4netns_t: the rootlesskit user-network helper domain (P5-S2) ---
 #
