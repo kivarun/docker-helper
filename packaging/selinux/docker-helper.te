@@ -2023,7 +2023,8 @@ allow docker_helper_rootlesskit_t cgroup_t:dir mounton;
 allow docker_helper_rootlesskit_t net_conf_t:file { read open };
 
 # --- the replacement /etc/resolv.conf regular-file surface (P5-S2 Phase
-# --- 4C-54, widened in place by Phase 4C-55): with the lnk_file unlink
+# --- 4C-54, widened in place by Phases 4C-55 and 4C-56): with the
+# lnk_file unlink
 # removal hook granted (4C-53), the canonical 4C-53 run 37350350345 saw
 # the resolv-replacement stage's own RemoveAll complete — the rebuilt
 # destination symlink actually removed (the AT_FDCWD
@@ -2129,28 +2130,85 @@ allow docker_helper_rootlesskit_t net_conf_t:file { read open };
 # MCS-constrained subject stay the abuse gates, and the
 # cross-operation reachability gate stays OPEN.
 #
+# THE 4C-56 BOUNDARY (the canonical 4C-55 run 37414244341): with
+# create+write+open granted, the SAME stage completed the whole
+# replacement chain — the resolv recreate (openat(O_CREAT) ret 0x3 =
+# fd 3 at trace-ts 173.273944..173.273963, the zero-length write ret
+# 0x0, the close ret 0x0; the /etc/hosts equivalents: the unlinkat ret
+# 0x0 on the standing lnk_file unlink, then the SAME granted triple's
+# openat ret 0x3 with no denial — the same permission at work) — and
+# the flow's NEXT production step, the generated-file bind mount,
+# failed at the file's own mountpoint hook:
+#   sys_mount(dev_name: ... "/var/lib/docker-helper-builder/ops/
+#   op_2290e535.../resolv.conf", dir_name: ... "/etc/resolv.conf",
+#   flags: 0x1000 (MS_BIND), data: 0)
+#   enter trace-ts 173.274006, exit 173.274025
+# with the denial INSIDE the mount(2) window, trace-ts 173.274015
+# (10µs before the failing mount exit; T0 = the attach at trace-ts
+# 173.241903, the failing exit at T0+0.032s; no later production
+# progress — the flow's terminal failure):
+#   requested=0x10000 denied=0x10000 audited=0x10000 result=-13 (EACCES)
+#   scontext=system_u:system_r:docker_helper_rootlesskit_t:s0:c1
+#   tcontext=system_u:object_r:tmpfs_t:s0 tclass=file
+#
+# THE HOOK: security_mount → selinux_mount → path_has_perm() on the
+# MOUNTPOINT — the bind's target /etc/resolv.conf is the just-recreated
+# replacement regular file (its own type tmpfs_t is the record above —
+# the LIVE tcontext of the created inode, not a pathname-derived
+# assumption); FILE__MOUNTON = bit 16 = 0x10000 of COMMON_FILE_PERMS
+# (quotaon bit 15 = 0x8000, audit_access bit 17 = 0x20000, open bit 18
+# = 0x40000). The source-side lookup ran before and passed (no
+# source-side denial exists in the window — the stateDir source's own
+# mediation is not this grant and no source-side permission is granted
+# here). The same-surface equivalence: the hosts bind
+# (mount(<operation-state>/hosts, "/etc/hosts", MS_BIND)) is the SAME
+# type/class/perm at work — not a new phase; the second bind's own
+# milestone is recorded when reached.
+#
+# SCOPE CAVEAT (the 4C-56 acceptance contract): this is type-wide TE
+# authority — rootlesskit_t -> tmpfs_t:file mounton is NOT path-scoped
+# and NOT operation-scoped (tmpfs_t:s0 carries no per-operation MCS
+# category). The acceptance therefore re-proves, per canonical run:
+# the holder's mount namespace is its own and distinct from every
+# manager-side reference (the 4C-49 confinement gate), the
+# recursive-private propagation pair precedes the moves (MS_REC|
+# MS_PRIVATE → 0x0), and the host-side mount table stays CLEAN across
+# the window. PROVEN: the observed mount operation is confined to the
+# production holder's private mount namespace. NOT PROVEN: tmpfs_t:file
+# mounton is cross-operation safe as type-wide TE authority — the
+# cross-operation reachability gate stays OPEN/Critical and the Release
+# GO stays CLOSED.
+#
+# THE 4C-56 MILESTONE (ROOTLESSKIT-ETC-RESOLV-BIND-MOUNT): the OLD
+# mounton boundary GONE, the exact resolv MS_BIND pair returned 0x0,
+# the source provenance established (the operation-state generated
+# resolv.conf path recorded from the mount enter line), the target is
+# /etc/resolv.conf, and the production continued.
+#
 # The audit slice was empty for the 4C-54 shape (the same
 # userspace-audit gap as the lnk_file create/read windows); the 4C-55
-# combined mask is recorded from the same window's own selinux_audited
-# record above — the raw mask is the boundary (a next symbolic AVC
-# record, when captured, is the confirming decode).
+# combined mask and the 4C-56 mounton mask are recorded from their own
+# windows' selinux_audited records above — the raw masks are the
+# boundaries (a next symbolic AVC record, when captured, is the
+# confirming decode).
 #
 # Deliberately NOT granted: read/getattr/setattr/append/map/unlink/
-# link/rename/execute/lock/ioctl/relabelfrom/relabelto/audit_access/
-# execmod or any other file permission (each a distinct hook — this is
-# deliberately NOT the typical file-RW bundle; read stays ungranted
-# even though write/open/create are the triple: the file is written
-# blind, never read back, and a read hook is its own phase if a live
-# boundary ever demands it), any new tmpfs_t:dir permission (the
-# 4C-46/47 owner's pair stays exact), any new tmpfs_t:lnk_file
+# link/rename/execute/lock/ioctl/quotaon/audit_access/relabelfrom/
+# relabelto/execmod or any other file permission (each a distinct hook
+# — this is deliberately NOT the typical file-RW bundle; read stays
+# ungranted even though write/open/create are in the triple: the file
+# is written blind, never read back, and a read hook is its own phase
+# if a live boundary ever demands it), any new tmpfs_t:dir permission
+# (the 4C-46/47 owner's pair stays exact), any new tmpfs_t:lnk_file
 # permission (the 4C-48/50/53 owner's triple stays exact), any
 # net_conf_t surface (the 4C-51/52 owner's pair stays exact), any other
-# type's file surface, filesystem/mount surfaces, the process/
-# capability surfaces, other subjects; the .fc and the module version
-# stay untouched; no require delta (tmpfs_t is already required). The
-# /etc/hosts equivalent openat(O_CREAT) on the SAME already-granted
-# type/class/perm is the same permission at work, not a new phase.
-allow docker_helper_rootlesskit_t tmpfs_t:file { create write open };
+# type's file surface, filesystem/mount surfaces (the 4C-45 owner's
+# bare mount stays exact), the process/capability surfaces, other
+# subjects; the .fc and the module version stay untouched; no require
+# delta (tmpfs_t is already required). The /etc/hosts equivalents on
+# the SAME already-granted type/class/perm are the same permission at
+# work, not a new phase.
+allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };
 
 # --- docker_helper_slirp4netns_t: the rootlesskit user-network helper domain (P5-S2) ---
 #
