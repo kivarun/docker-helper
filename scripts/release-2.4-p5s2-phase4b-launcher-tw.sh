@@ -2107,18 +2107,43 @@ RK_BKD_LABEL_OK=1
     BKD_ZERO_ALLOW_OK=0
   fi
   for s in docker_helper_t docker_helper_builder_t docker_helper_builder_launcher_t \
-           docker_helper_rootlesskit_t docker_helper_slirp4netns_t \
+           docker_helper_slirp4netns_t \
            docker_helper_newuidmap_t docker_helper_newgidmap_t docker_helper_buildkitd_t; do
     line="$(sesearch --allow -s "$s" -t docker_helper_buildkitd_exec_t /sys/fs/selinux/policy 2>/dev/null \
       | awk -v s="$s" '$1 == "allow" && $2 == s && $3 ~ /^docker_helper_buildkitd/' || true)"
     printf '  %s -> buildkitd_exec_t: %s\n' "$s" "${line:-(empty)}"
-    if [ "$s" = "docker_helper_rootlesskit_t" ]; then
-      if [ "$line" != "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute read open };" ]; then
-        echo "  STOP: the rootlesskit child's concrete surface on the exec type is not exactly { execute read open }"
-        BKD_ZERO_ALLOW_OK=0
-      fi
-    elif [ -n "$line" ]; then
+    if [ -n "$line" ]; then
       echo "  STOP: $s holds a concrete allow rule on the buildkitd exec type"
+      BKD_ZERO_ALLOW_OK=0
+    fi
+  done
+  echo "--- sesearch --allow -s docker_helper_rootlesskit_t -t docker_helper_buildkitd_exec_t (the CONCRETE surface; sesearch NORMALIZES the perm set to alphabetical order, so the gate compares the NORMALIZED set against the sorted expectation — never the source's spelling):"
+  BKD_FLOW_EXEC_LINE="$(sesearch --allow -s docker_helper_rootlesskit_t -t docker_helper_buildkitd_exec_t /sys/fs/selinux/policy 2>/dev/null \
+    | awk '$1 == "allow" && $2 == "docker_helper_rootlesskit_t" && $3 ~ /^docker_helper_buildkitd/' || true)"
+  printf '  docker_helper_rootlesskit_t -> buildkitd_exec_t: %s\n' "${BKD_FLOW_EXEC_LINE:-(empty)}"
+  BKD_FLOW_PERMS_SORTED="$(printf '%s\n' "$BKD_FLOW_EXEC_LINE" | awk '{
+    line = $0
+    sub(/^allow [^ ]+ [^:]*:file[ \t]*/, "", line)
+    sub(/;[ \t]*$/, "", line)
+    sub(/^[ \t]*\{[ \t]*/, "", line)
+    sub(/[ \t]*\}[ \t]*$/, "", line)
+    n = split(line, a, /[ \t]+/)
+    for (i = 1; i < n; i++) for (j = i + 1; j <= n; j++) if (a[j] < a[i]) { t = a[i]; a[i] = a[j]; a[j] = t }
+    out = ""
+    for (i = 1; i <= n; i++) out = out a[i] (i < n ? " " : "")
+    print out
+  }' || true)"
+  echo "  the concrete perm set (normalized): ${BKD_FLOW_PERMS_SORTED:-(none)} (must be: execute open read)"
+  if [ "$BKD_FLOW_PERMS_SORTED" != "execute open read" ]; then
+    echo "  STOP: the rootlesskit child's concrete surface on the exec type is not exactly { execute read open }"
+    BKD_ZERO_ALLOW_OK=0
+  fi
+  echo "--- sesearch --allow per-perm NEGATIVES on the pair (each must be empty — no forbidden extra source-exec permission):"
+  for p in getattr map execute_no_trans entrypoint; do
+    extra="$(sesearch --allow -s docker_helper_rootlesskit_t -t docker_helper_buildkitd_exec_t -c file -p "$p" /sys/fs/selinux/policy 2>/dev/null | awk '$1 == "allow"' || true)"
+    printf '  %s: %s\n' "$p" "${extra:-(empty)}"
+    if [ -n "$extra" ]; then
+      echo "  STOP: the forbidden permission $p is present on the source-exec pair"
       BKD_ZERO_ALLOW_OK=0
     fi
   done
