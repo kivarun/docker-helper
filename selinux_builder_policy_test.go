@@ -4323,6 +4323,239 @@ func TestSELinuxPolicyRootlesskitIsolation(t *testing.T) {
 	}
 }
 
+// buildkitdIdentityViolations scans the module's parsed rules against the
+// 4C-57 zero-authority identity invariants and returns one human-readable
+// violation per broken rule, empty when none:
+//   - no allow rule may name docker_helper_buildkitd_exec_t or
+//     docker_helper_buildkitd_t as its target (any source, any class, any
+//     permission set — the execution, transition, entrypoint, and runtime
+//     surfaces all stay ungranted);
+//   - no range_transition may exist anywhere (the MCS category
+//     preservation is a live-transition-phase proof, never a pre-declared
+//     map);
+//   - the rootlesskit child domain holds no bin_t:file grant (the
+//     forbidden generic compensating bundle — the old generic identity
+//     must be allowed to disappear via the relabel).
+func buildkitdIdentityViolations(policy string) []string {
+	var violations []string
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "allow ") {
+			if strings.Contains(trimmed, "docker_helper_buildkitd_exec_t") {
+				violations = append(violations, "no allow rule may exist on the buildkitd exec type yet (zero-authority phase; execution stays denied): "+trimmed)
+			}
+			if strings.Contains(trimmed, "docker_helper_buildkitd_t") {
+				violations = append(violations, "no allow rule may exist toward the buildkitd domain yet (zero-authority phase): "+trimmed)
+			}
+			if strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t bin_t:file") {
+				violations = append(violations, "the rootlesskit flow domain must hold no bin_t:file grant (the generic buildkitd boundary stays closed; a narrowed private identity, never a generic bundle): "+trimmed)
+			}
+		}
+		if strings.HasPrefix(trimmed, "range_transition") {
+			violations = append(violations, "no range_transition may be declared (category preservation is a live proof, not a pre-declared map): "+trimmed)
+		}
+	}
+	return violations
+}
+
+// TestSELinuxPolicyBuildkitdExecIdentity verifies the Phase 4C-57
+// identity-narrowing foundation: the bundled BuildKit daemon carries a
+// dedicated executable type and the dedicated process domain exists as
+// STRUCTURE ONLY. The invariant set:
+//   - the exact type declarations, each exactly once (the exec type with
+//     file_type + exec_type, the domain, the system_r role membership);
+//   - exactly ONE pointed type_transition declaration naming the pair
+//     (rootlesskit_t + buildkitd_exec_t -> buildkitd_t, class process) —
+//     the routing map only: no transition permission, no entrypoint, no
+//     execute/execute_no_trans/read/open/getattr/map on the exec type
+//     from ANY domain, no permission toward the domain from ANY domain,
+//     no capability/cap_userns surface, no range_transition (the MCS
+//     category preservation is a live-transition-phase proof);
+//   - the exact .fc entry labels exactly the canonical buildkitd path —
+//     one rule, the `--` regular-file form, no directory regex, no
+//     sibling (buildctl/buildkit-runc keep their distro labels);
+//   - the canonical path identity: the manager constant, the
+//     RootlessKit argv target, the packaged payload destination, and the
+//     .fc pattern are all exactly /usr/libexec/docker-helper/buildkit/
+//     buildkitd;
+//   - the generic bin_t execution boundary stays absent for the
+//     rootlesskit child domain (any rootlesskit_t -> bin_t:file grant —
+//     the compensating generic bundle the phase forbids — violates;
+//     the old bin_t boundary must be allowed to disappear via the
+//     relabel, never papered over with a generic grant).
+func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	fc := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.fc")
+
+	// The exact structural declarations, each exactly once.
+	declarations := []string{
+		"type docker_helper_buildkitd_exec_t, file_type, exec_type;",
+		"type docker_helper_buildkitd_t, domain;",
+		"role system_r types docker_helper_buildkitd_t;",
+		"type_transition docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:process docker_helper_buildkitd_t;",
+	}
+	for _, decl := range declarations {
+		if got := strings.Count(policy, decl); got != 1 {
+			t.Errorf("the buildkitd identity structure must declare %q exactly once, found %d", decl, got)
+		}
+	}
+
+	// The pointed transition is the ONLY transition into the domain (the
+	// exact rootlesskit edge; duplicates and parallel sources violate).
+	_, transitions := parseSELinuxRules(policy)
+	buildkitdTransitions := 0
+	for _, tr := range transitions {
+		if tr.dest != "docker_helper_buildkitd_t" {
+			continue
+		}
+		buildkitdTransitions++
+		if tr.source != "docker_helper_rootlesskit_t" || tr.entry != "docker_helper_buildkitd_exec_t" || tr.class != "process" {
+			t.Errorf("the only transition into the buildkitd domain is the rootlesskit child's exec of its entry type, got: type_transition %s %s:%s %s", tr.source, tr.entry, tr.class, tr.dest)
+		}
+	}
+	if buildkitdTransitions != 1 {
+		t.Errorf("exactly one (structural) transition may name the buildkitd domain, found %d", buildkitdTransitions)
+	}
+
+	// The exact .fc entry: one rule, the canonical path, the `--` form;
+	// no rule other than the exact buildkitd path may carry the type (no
+	// directory regex, no sibling).
+	fcLines := 0
+	for _, line := range strings.Split(fc, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || !strings.Contains(trimmed, "docker_helper_buildkitd_exec_t") {
+			continue
+		}
+		fcLines++
+		if trimmed != "/usr/libexec/docker-helper/buildkit/buildkitd  --  system_u:object_r:docker_helper_buildkitd_exec_t:s0" {
+			t.Errorf("the buildkitd fc rule must be the exact canonical path in the `--` form: %s", trimmed)
+		}
+	}
+	if fcLines != 1 {
+		t.Errorf("exactly one buildkitd fc rule must exist, found %d", fcLines)
+	}
+
+	// The canonical path identity (the phase's four-congruent-owners
+	// proof): the manager constant, the RootlessKit argv target, the
+	// packaged payload destination, and the .fc pattern are the SAME
+	// path.
+	if builderManagerBuildkitd != "/usr/libexec/docker-helper/buildkit/buildkitd" {
+		t.Errorf("the canonical buildkitd constant drifted: %q", builderManagerBuildkitd)
+	}
+	argv := builderRootlessKitArgv("op_0123456789abcdef0123456789abcdef",
+		opRuntimeDir("op_0123456789abcdef0123456789abcdef"),
+		opStateDir("op_0123456789abcdef0123456789abcdef"))
+	argvHits := 0
+	for _, a := range argv {
+		if a == builderManagerBuildkitd {
+			argvHits++
+		}
+	}
+	if argvHits != 1 {
+		t.Errorf("the canonical RootlessKit argv must carry the canonical buildkitd target exactly once, found %d", argvHits)
+	}
+	nfpm, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(nfpm), "dst: /usr/libexec/docker-helper/buildkit/buildkitd") != 1 {
+		t.Error("the package payload destination must be exactly the canonical buildkitd path (nfpm.yaml)")
+	}
+
+	// The committed policy violates nothing.
+	if violations := buildkitdIdentityViolations(policy); len(violations) > 0 {
+		t.Errorf("the committed policy violates the buildkitd zero-authority invariants: %v", violations)
+	}
+
+	// Mutation guards: every forbidden authority shape appended to the
+	// module must trip the zero-authority invariants; transition
+	// mutations must trip the exactly-one edge invariant.
+	for _, mut := range []struct {
+		name string
+		rule string
+	}{
+		{"flow execute on the exec type", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file execute;"},
+		{"flow full exec-source bundle", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute read open getattr map };"},
+		{"flow execute_no_trans on the exec type", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file execute_no_trans;"},
+		{"flow process transition toward the domain", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { transition };"},
+		{"target entrypoint rule", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint execute read open getattr map };"},
+		{"target capability grant", "allow docker_helper_buildkitd_t self:capability sys_admin;"},
+		{"target cap_userns grant", "allow docker_helper_buildkitd_t self:cap_userns sys_admin;"},
+		{"manager execute on the exec type", "allow docker_helper_builder_t docker_helper_buildkitd_exec_t:file execute;"},
+		{"daemon execute on the exec type", "allow docker_helper_t docker_helper_buildkitd_exec_t:file execute;"},
+		{"generic bin_t execute for the flow", "allow docker_helper_rootlesskit_t bin_t:file { execute };"},
+		{"generic bin_t full bundle for the flow", "allow docker_helper_rootlesskit_t bin_t:file { execute read open getattr map };"},
+		{"range_transition declaration", "range_transition docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:process s0:c1;"},
+	} {
+		if violations := buildkitdIdentityViolations(policy + "\n" + mut.rule); len(violations) == 0 {
+			t.Errorf("mutation %q must trip the buildkitd zero-authority invariants", mut.name)
+		}
+	}
+	for _, mut := range []struct {
+		name string
+		rule string
+	}{
+		{"duplicate transition declaration", "type_transition docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:process docker_helper_buildkitd_t;"},
+		{"parallel transition from the manager", "type_transition docker_helper_builder_t docker_helper_buildkitd_exec_t:process docker_helper_buildkitd_t;"},
+		{"parallel transition from the launcher", "type_transition docker_helper_builder_launcher_t docker_helper_buildkitd_exec_t:process docker_helper_buildkitd_t;"},
+	} {
+		_, mutTransitions := parseSELinuxRules(policy + "\n" + mut.rule)
+		count := 0
+		for _, tr := range mutTransitions {
+			if tr.dest == "docker_helper_buildkitd_t" {
+				count++
+			}
+		}
+		if count != 2 {
+			t.Errorf("mutation %q must produce a second transition into the buildkitd domain (the exactly-one edge invariant), got %d", mut.name, count)
+		}
+	}
+}
+
+// TestSELinuxPolicyBuildkitdExecIdentitySiblingLabels verifies the negative
+// sibling-label invariants of the 4C-57 .fc entry: the shipped rules must
+// NOT label the payload siblings or the directory itself — buildctl,
+// buildkit-runc, and an arbitrary sibling file under the buildkit tree keep
+// their distro labels (each is a separate future executable boundary), and
+// the /usr/bin rules stay unaffected.
+func TestSELinuxPolicyBuildkitdExecIdentitySiblingLabels(t *testing.T) {
+	fc := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.fc")
+	for _, line := range strings.Split(fc, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || trimmed == "" {
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		if len(fields) == 0 {
+			continue
+		}
+		pattern := fields[0]
+		for _, forbidden := range []string{
+			"/usr/libexec/docker-helper/buildkit(/.*)?",
+			"/usr/libexec/docker-helper/buildkit/buildctl",
+			"/usr/libexec/docker-helper/buildkit/buildkit-runc",
+			"/usr/libexec/docker-helper(/.*)?",
+		} {
+			if pattern == forbidden {
+				t.Errorf("no shipped fc rule may cover the buildkit siblings or the payload tree (separate future boundaries): %s", trimmed)
+			}
+		}
+	}
+	// The /usr/bin rules stay unaffected: the exact-label set is unchanged.
+	for _, want := range []string{
+		"/usr/bin/docker-helper              --  system_u:object_r:docker_helper_exec_t:s0",
+		"/usr/bin/rootlesskit                --  system_u:object_r:docker_helper_rootlesskit_exec_t:s0",
+		"/usr/bin/nsenter                    --  system_u:object_r:docker_helper_nsenter_exec_t:s0",
+	} {
+		if !strings.Contains(fc, want) {
+			t.Errorf("the /usr/bin exec identity set must stay unchanged: %q", want)
+		}
+	}
+}
+
 // TestSELinuxFCBuilderTrees verifies the .fc labels the builder-owned trees
 // with the G32 r3 split geometry: the tree roots AND the shared ops
 // containers carry the dedicated root types, ONLY the children of ops/ carry
@@ -4500,6 +4733,18 @@ func TestSELinuxFCFirstMatchShape(t *testing.T) {
 		{"/run/docker-helper/builds/op_ac4cbdc1ae4d4d3fa39943de5fcf2e6f/context", "docker_helper_runtime_t"},
 		{"/run/docker-helper/builds", "docker_helper_runtime_t"},
 		{"/run/docker-helper/manager.sock", "docker_helper_runtime_t"},
+		// 4C-57: the exact buildkitd exec identity and the negative
+		// siblings — ONLY the canonical daemon binary carries the type;
+		// the payload siblings and the directory itself keep their distro
+		// labels (no shipped rule matches them), and the /usr/bin exec
+		// identities stay unaffected.
+		{"/usr/libexec/docker-helper/buildkit/buildkitd", "docker_helper_buildkitd_exec_t"},
+		{"/usr/libexec/docker-helper/buildkit/buildctl", ""},
+		{"/usr/libexec/docker-helper/buildkit/buildkit-runc", ""},
+		{"/usr/libexec/docker-helper/buildkit/sibling-arbitrary", ""},
+		{"/usr/libexec/docker-helper/buildkit", ""},
+		{"/usr/bin/docker-helper", "docker_helper_exec_t"},
+		{"/usr/bin/rootlesskit", "docker_helper_rootlesskit_exec_t"},
 	} {
 		if got := lookup(t, tc.path); got != tc.want {
 			t.Errorf("fc first-match for %q: got %q, want %q", tc.path, got, tc.want)
@@ -4625,6 +4870,7 @@ func TestDeploymentLifecycleIsOnlyBuilderRelabelOwner(t *testing.T) {
 			"restorecon /usr/bin/rootlesskit",
 			"restorecon /usr/bin/slirp4netns",
 			"restorecon /usr/bin/newuidmap",
+			"restorecon /usr/libexec/docker-helper/buildkit/buildkitd",
 		},
 		"packaging/install-system.sh": {
 			"\"$RESTORECON\" -R /run/docker-helper-builder",
@@ -4632,6 +4878,7 @@ func TestDeploymentLifecycleIsOnlyBuilderRelabelOwner(t *testing.T) {
 			"\"$RESTORECON\" /usr/bin/rootlesskit",
 			"\"$RESTORECON\" /usr/bin/slirp4netns",
 			"\"$RESTORECON\" /usr/bin/newuidmap",
+			"\"$RESTORECON\" /usr/libexec/docker-helper/buildkit/buildkitd",
 		},
 	}
 	for path, wants := range owners {
