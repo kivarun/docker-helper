@@ -700,6 +700,12 @@ apply_selinux_restorecon() {
 	# rootlesskit child domain. Label-only: restorecon never alters owner,
 	# mode, or xattrs.
 	"$RESTORECON" /usr/bin/newgidmap 2>/dev/null || true
+	# buildkitd: the bundled BuildKit daemon payload; the dedicated exec
+	# type (the exact canonical path only — the .fc never covers the
+	# payload siblings) is the narrowed executable identity the flow's
+	# eventual transition is bound to. Label-only, exact path: buildctl and
+	# buildkit-runc keep their distro labels.
+	"$RESTORECON" /usr/libexec/docker-helper/buildkit/buildkitd 2>/dev/null || true
 	"$RESTORECON" -R /run/docker-helper-builder 2>/dev/null || true
 	"$RESTORECON" -R /var/lib/docker-helper-builder 2>/dev/null || true
 	"$RESTORECON" -R /etc/docker-helper 2>/dev/null || true

@@ -2210,6 +2210,99 @@ allow docker_helper_rootlesskit_t net_conf_t:file { read open };
 # work, not a new phase.
 allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };
 
+# --- docker_helper_buildkitd_exec_t / docker_helper_buildkitd_t: the
+# --- dedicated BuildKitd executable identity + process domain (P5-S2
+# --- Phase 4C-57, the identity-narrowing phase — ZERO policy-authority
+# --- delta) ---
+#
+# The 4C-56 canonical run's (37414244341) phase-end NEXT-STARTUP-BOUNDARY
+# was the payload exec's entry boundary, live-proven at the GENERIC distro
+# label:
+#
+#   docker_helper_rootlesskit_t:s0:c1
+#     -> bin_t:s0:file
+#     denied { execute }
+#   inside execve("/usr/libexec/docker-helper/buildkit/buildkitd", ...)
+#
+# The generic bin_t identity is NOT a security identity — it is the
+# ABSENCE of a private file label: bin_t is the distro's default /usr
+# executable label shared with every distro binary, and the previous
+# staircase phases deliberately closed execution toward it (the 4C-2
+# getsubids denial stayed closed; TestSELinuxPolicyRootlesskitIsolation
+# statically forbids any rootlesskit_t -> bin_t:file grant). The startup
+# MUST keep failing closed — but at a PRIVATE, product-owned identity
+# instead of the generic one.
+#
+# THE TARGET PATH IS FIXED BY CODE — NOT OPERATOR-CHOSEN:
+#   - the canonical manager constant builderManagerBuildkitd
+#     (builder_manager.go) = /usr/libexec/docker-helper/buildkit/buildkitd;
+#   - the single canonical RootlessKit argv grammar
+#     (builderRootlessKitArgv, builder_launcher.go) passes exactly this
+#     constant as rootlesskit's payload target — no PATH lookup, no
+#     operator selection;
+#   - the package payload destination (RPM/DEB/tarball) = exactly this
+#     path (the cross-format payload-identity tests pin the member paths);
+#   - the .fc entry below = exactly this path.
+# One canonical path, four congruent owners; nothing else may carry the
+# type.
+#
+# THE 4C-57 DELTA IS STRUCTURE ONLY:
+#   - type docker_helper_buildkitd_exec_t (file_type, exec_type): the
+#     exact executable identity of the bundled BuildKit daemon;
+#   - type docker_helper_buildkitd_t (domain) + role system_r
+#     membership: the dedicated process domain the eventual transition
+#     lands in. BuildKitd must NOT live in docker_helper_rootlesskit_t:
+#     the rootlesskit domain already owns the namespace/network/helper
+#     authorities (user_namespace create, cap_userns
+#     sys_admin/sys_ptrace/sys_chroot/net_admin, the tun/TUNSETIFF+
+#     TUNSETPERSIST surface, the netlink-route mutation class, the
+#     /tmp,/etc copy-up and mount surfaces) — authorities buildkitd must
+#     not inherit automatically; a separate domain makes the payload's
+#     own authority a separate, evidence-driven staircase.
+#   - ONE pointed type_transition DECLARATION (routing map, no
+#     permission): docker_helper_rootlesskit_t +
+#     docker_helper_buildkitd_exec_t:process -> docker_helper_buildkitd_t.
+#     It records the eventual live shape
+#       docker_helper_rootlesskit_t:s0:cX -> exec buildkitd_exec_t
+#         -> docker_helper_buildkitd_t:s0:cX
+#     before any permission exists. The eventual transition MUST preserve
+#     the operation category (cX -> cX); category preservation is proven
+#     LIVE in the transition phase, never assumed from SELinux semantics,
+#     and NO range_transition is declared in advance.
+#
+# DELIBERATELY ABSENT (the zero-authority contract; each is a separate
+# live-evidence phase after the narrowed boundary is captured):
+#   - rootlesskit_t -> buildkitd_exec_t:file execute/execute_no_trans
+#     (and read/open/getattr/map — every exec-side hook stays ungranted);
+#   - rootlesskit_t -> buildkitd_t:process transition;
+#   - buildkitd_t -> buildkitd_exec_t:file entrypoint/execute/read/open/
+#     getattr/map (no entry rule exists yet);
+#   - any buildkitd_t capability, cap_userns, or
+#     filesystem/state/runtime/network surface;
+#   - any OTHER source domain's execution or transition toward the exec
+#     type or the domain (the manager/launcher/daemon stay out);
+#   - any generic bin_t execution bundle for the flow (the old generic
+#     identity must be allowed to disappear — the relabel below REMOVES
+#     the payload inode from bin_t; no compensating bin_t grant).
+# The runtime therefore keeps failing closed at this exec boundary — now
+# at the private docker_helper_buildkitd_exec_t identity instead of the
+# generic bin_t one; the narrowed boundary is captured live by the
+# harness and owns the next phase.
+#
+# buildctl and buildkit-runc stay SEPARATE future executable boundaries:
+# the .fc carries NO rule for them, no directory regex covers the
+# payload tree, and they keep their distro labels. A future phase that
+# needs one of them adds its own exact executable identity with its own
+# live evidence.
+type docker_helper_buildkitd_exec_t, file_type, exec_type;
+type docker_helper_buildkitd_t, domain;
+role system_r types docker_helper_buildkitd_t;
+
+# The pointed transition DECLARATION only — the routing map above. This
+# is NOT authority: the transition/entrypoint permissions stay ungranted,
+# so no execution can reach docker_helper_buildkitd_t through this edge.
+type_transition docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:process docker_helper_buildkitd_t;
+
 # --- docker_helper_slirp4netns_t: the rootlesskit user-network helper domain (P5-S2) ---
 #
 # RootlessKit forks and execs the distro slirp4netns binary as its

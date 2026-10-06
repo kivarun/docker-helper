@@ -76,6 +76,14 @@ if command -v restorecon >/dev/null 2>&1; then
   # child can exec it). Label-only: restorecon never alters owner, mode,
   # or xattrs.
   restorecon /usr/bin/newgidmap 2>/dev/null || true
+  # buildkitd is the bundled BuildKit daemon payload (the launch chain's
+  # exec target); apply the shipped docker_helper_buildkitd_exec_t file
+  # context so the payload carries its private executable identity — the
+  # exact canonical path only (the .fc never covers the payload siblings:
+  # buildctl and buildkit-runc keep their distro labels as separate future
+  # boundaries). Label-only: restorecon never alters owner, mode, or
+  # xattrs.
+  restorecon /usr/libexec/docker-helper/buildkit/buildkitd 2>/dev/null || true
   restorecon -R /etc/docker-helper 2>/dev/null || true
   restorecon -R /var/lib/docker-helper 2>/dev/null || true
   # Relabel only the helper-owned /run/docker-helper dir itself to

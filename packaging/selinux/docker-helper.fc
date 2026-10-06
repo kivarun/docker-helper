@@ -37,6 +37,14 @@
 # stays in that domain (execute_no_trans — no separate nsenter domain);
 # see the comment in docker-helper.te.
 /usr/bin/nsenter                    --  system_u:object_r:docker_helper_nsenter_exec_t:s0
+# P5-S2 Phase 4C-57: the bundled BuildKit daemon's own executable identity
+# — the EXACT packaged path only. The canonical manager constant
+# (builderManagerBuildkitd), the RootlessKit argv target, the package
+# payload destination and this rule are all exactly
+# /usr/libexec/docker-helper/buildkit/buildkitd. Never the directory,
+# never the siblings: buildctl and buildkit-runc keep their distro labels
+# and stay separate future executable boundaries.
+/usr/libexec/docker-helper/buildkit/buildkitd  --  system_u:object_r:docker_helper_buildkitd_exec_t:s0
 /etc/docker-helper(/.*)?                system_u:object_r:docker_helper_config_t:s0
 /var/lib/docker-helper(/.*)?            system_u:object_r:docker_helper_state_t:s0
 /run/docker-helper(/.*)?                system_u:object_r:docker_helper_runtime_t:s0
