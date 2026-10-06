@@ -4392,10 +4392,11 @@ func TestSELinuxPolicyRootlesskitIsolation(t *testing.T) {
 //	   buildkitd_exec_t:file — exactly the { execute read open } rule;
 //	B. the process transition surface: rootlesskit_t ->
 //	   buildkitd_t:process — exactly the bare { transition } rule;
-//	C. the target executable surface: buildkitd_t ->
-//	   buildkitd_exec_t:file — exactly the bare { entrypoint } rule
-//	   (the FIRST module-local runtime authority of the buildkitd
-//	   domain; the conventional entry bundle is NOT copied).
+//   C. the target executable surface: buildkitd_t ->
+//      buildkitd_exec_t:file — exactly the { entrypoint read execute }
+//      rule (the 4C-61 entrypoint widened IN PLACE by the 4C-62
+//      combined image-load boundary, ONE rule on one pair, never split;
+//      the conventional entry bundle is NOT copied).
 //	- any other allow rule naming a buildkitd type (any source, any
 //	  target, any class, any permission set) violates;
 //	- the rootlesskit child holds no bin_t:file grant; its exec/transition
@@ -4406,7 +4407,7 @@ func TestSELinuxPolicyRootlesskitIsolation(t *testing.T) {
 func buildkitdIdentityViolations(policy string) []string {
 	const canonicalExec = "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute read open };"
 	const canonicalTransition = "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;"
-	const canonicalEntry = "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file entrypoint;"
+	const canonicalEntry = "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute };"
 	standingRootlesskitExecRules := map[string]string{
 		"docker_helper_rootlesskit_exec_t": "allow docker_helper_rootlesskit_t docker_helper_rootlesskit_exec_t:file { entrypoint read open execute execute_no_trans getattr map };",
 		"docker_helper_slirp4netns_exec_t": "allow docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:file { execute read open getattr };",
@@ -4451,7 +4452,7 @@ func buildkitdIdentityViolations(policy string) []string {
 		}
 		if strings.HasPrefix(trimmed, "allow ") {
 			if strings.Contains(trimmed, "docker_helper_buildkitd_exec_t") && trimmed != canonicalExec && trimmed != canonicalEntry {
-				violations = append(violations, "the only allow rules naming the buildkitd exec type are the exact source-exec grant { execute read open } and the exact target-entrypoint grant: "+trimmed)
+				violations = append(violations, "the only allow rules naming the buildkitd exec type are the exact source-exec grant { execute read open } and the exact target-side { entrypoint read execute } grant: "+trimmed)
 			}
 			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry {
 				violations = append(violations, "the only allow rules toward the buildkitd domain are the exact process transition grant and the exact target-entrypoint grant: "+trimmed)
@@ -4662,7 +4663,7 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 
 	// The 4C-61 target-entrypoint grant: exactly the canonical bare
 	// rule, once (non-comment lines only).
-	const canonicalEntry = "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file entrypoint;"
+	const canonicalEntry = "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute };"
 	var withoutEntry []string
 	entryCount := 0
 	for _, line := range strings.Split(policy, "\n") {
@@ -4734,25 +4735,31 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		{"target entrypoint rule", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint execute read open getattr map };"},
 		{"target capability grant", "allow docker_helper_buildkitd_t self:capability sys_admin;"},
 		{"target cap_userns grant", "allow docker_helper_buildkitd_t self:cap_userns sys_admin;"},
-		// the 4C-61 target-entrypoint plane (the conventional entry bundle is NOT copied)
-		{"entrypoint + execute", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint execute };"},
-		{"entrypoint + read", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read };"},
-		{"entrypoint + open", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint open };"},
-		{"entrypoint + getattr", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint getattr };"},
-		{"entrypoint + map", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint map };"},
-		{"execute instead of entrypoint", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file execute;"},
-		{"execute_no_trans instead of entrypoint", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file execute_no_trans;"},
-		{"read instead of entrypoint", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file read;"},
-		{"open instead of entrypoint", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file open;"},
+		// the 4C-62 target-plane mutations (the conventional entry bundle is NOT copied)
+		{"the old 4C-61 bare entrypoint form", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file entrypoint;"},
+		{"entrypoint + read only", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read };"},
+		{"entrypoint + execute only", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint execute };"},
+		{"missing entrypoint", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { read execute };"},
+		{"missing read", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint execute };"},
+		{"missing execute", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read };"},
+		{"open instead of read", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint open execute };"},
+		{"getattr instead of execute", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read getattr };"},
+		{"map instead of execute", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read map };"},
+		{"fourth permission open", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute open };"},
+		{"fourth permission getattr", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr };"},
+		{"fourth permission map", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute map };"},
+		{"fourth permission execute_no_trans", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute execute_no_trans };"},
+		{"fourth permission execmod", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute execmod };"},
 		{"the slirp-style entry bundle copied whole", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read open execute getattr map };"},
-		{"entrypoint from the wrong source (the flow)", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file entrypoint;"},
-		{"entrypoint from the manager", "allow docker_helper_builder_t docker_helper_buildkitd_exec_t:file entrypoint;"},
-		{"entrypoint toward the wrong target", "allow docker_helper_buildkitd_t bin_t:file entrypoint;"},
-		{"entrypoint toward the slirp4netns exec type", "allow docker_helper_buildkitd_t docker_helper_slirp4netns_exec_t:file entrypoint;"},
-		{"entrypoint on the wrong class", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:process entrypoint;"},
-		{"brace equivalent of the entrypoint rule", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint };"},
-		{"split entrypoint grant", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { execute read open };\nallow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file entrypoint;"},
-		{"duplicate of the target-entrypoint rule", canonicalEntry},
+		{"target grant from the wrong source (the flow)", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { entrypoint read execute };"},
+		{"target grant from the manager", "allow docker_helper_builder_t docker_helper_buildkitd_exec_t:file { entrypoint read execute };"},
+		{"target grant toward the wrong target", "allow docker_helper_buildkitd_t bin_t:file { entrypoint read execute };"},
+		{"target grant toward the slirp4netns exec type", "allow docker_helper_buildkitd_t docker_helper_slirp4netns_exec_t:file { entrypoint read execute };"},
+		{"target grant on the wrong class", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:process { entrypoint read execute };"},
+		{"brace equivalent of the target rule", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint };"},
+		{"reordered brace form of the target rule", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { execute entrypoint read };"},
+		{"split target grant", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file entrypoint;\nallow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { read execute };"},
+		{"duplicate of the target-side rule", canonicalEntry},
 		// parallel / split / duplicate / order shapes
 		{"split grant (execute; then read open)", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file execute;\nallow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { read open };"},
 		{"reordered brace equivalent", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { open read execute };"},
@@ -4995,6 +5002,23 @@ func TestSELinuxPolicyKernelClassmapMaskPins(t *testing.T) {
 	}
 	if got := decode(0x80000); !samePerms(got, []string{"execmod"}) {
 		t.Errorf("kernel classmap decode: file mask 0x80000 must decode to exactly { execmod } (the anti-shift neighbor), got %v", got)
+	}
+	// The 4C-62 combined image-load decode: decode(file, 0x4002) ==
+	// exactly { read execute } — one terminal decision, never split.
+	// Negative discrimination: none of the neighboring/earlier masks
+	// decodes to { read execute }: 0x40002={ read open }, 0x4000={
+	// execute }, 0x2={ read }.
+	if got := decode(0x4002); !samePerms(got, []string{"read", "execute"}) {
+		t.Errorf("kernel classmap decode: file mask 0x4002 must decode to exactly { read execute }, got %v", got)
+	}
+	if got := decode(0x40002); samePerms(got, []string{"read", "execute"}) {
+		t.Errorf("kernel classmap decode: 0x40002 must not decode to { read execute } (it is { read open }), got %v", got)
+	}
+	if got := decode(0x4000); samePerms(got, []string{"read", "execute"}) {
+		t.Errorf("kernel classmap decode: 0x4000 must not decode to { read execute } (it is { execute }), got %v", got)
+	}
+	if got := decode(0x2); samePerms(got, []string{"read", "execute"}) {
+		t.Errorf("kernel classmap decode: 0x2 must not decode to { read execute } (it is { read }), got %v", got)
 	}
 }
 
