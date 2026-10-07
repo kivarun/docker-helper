@@ -59,10 +59,10 @@ jobs:
           # record is the STRONG acceptance shape (the transition
           # succeeded live), every buildkitd_t context must carry the
           # source operation's category, and the next live boundary owns
-          # 4C-61 (the proof ref advances from the 4C-59-era pin to the
+          # 4C-72 (the proof ref advances from the 4C-71-era pin to the
           # commit carrying that module; identical Go sources, so the
           # binary is the same program).
-          PHASE4B_PROOF_REF: '97ab24e6df4745d69894ce998a21107bad4f1c38'
+          PHASE4B_PROOF_REF: '812379886ca99f107b11d0ce1ad78b1916673ac1'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
