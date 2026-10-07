@@ -2319,7 +2319,14 @@ allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };
 #     allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name };
 #     (the boundary owns the DENIED bit only — requested=0x24000000 =
 #     { search add_name }, search was already granted, denied=0x4000000 =
-#     add_name; every remaining hook stays a separate live-evidence phase).
+#     add_name; every remaining hook stays a separate live-evidence phase);
+#   4C-69: the categorized state-tree FILE plane — a NEW pair+class rule,
+#     NOT a widening of the dir rule (the 4C-68 canonical run's own
+#     terminal boundary):
+#     allow docker_helper_buildkitd_t docker_helper_builder_state_t:file create;
+#     (the authority is the PAIR (tclass=file, 0x8) — the same bit number
+#     on the dir class is dir:create and is NOT this authority; the class-
+#     aware decode regression pins the tuple).
 #
 # STILL DELIBERATELY ABSENT (each is a separate live-evidence phase):
 #   - siginh, noatsecure, rlimitinh, dyntransition, setexec on the
@@ -2347,9 +2354,17 @@ allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };
 #     0x4000000 boundary — the DENIED bit of the requested
 #     0x24000000 { search add_name } decision, never the whole requested
 #     mask; every remaining permission is its own live-evidence phase;
-#     nothing on builder_state_t's other classes, nothing on the sibling
-#     root/runtime types, and every other quarantined surface stays
-#     ungranted);
+#     nothing on the sibling root/runtime types, and every other
+#     quarantined surface stays ungranted);
+#   - buildkitd_t -> builder_state_t:file open/read/write/getattr/setattr/
+#     lock/unlink/append/map/execute/execute_no_trans/execmod (the 4C-69
+#     grant is EXACTLY { create } on the file class — the inode-creation
+#     hook alone; after a successful creation the kernel may separately
+#     require open/read/write/getattr/setattr and each next live terminal
+#     decision is its own phase — file:create is NOT a file-IO bundle and
+#     no conventional writable-file bundle is prepared in advance; the
+#     standing RootlessKit state-tree file rule is a different subject
+#     and a different owner and is NOT a template for BuildKitd);
 #   - buildkitd_t -> builder_state_root_t:dir read/open/write/create/
 #     add_name/remove_name/setattr/rmdir/mounton/lock (the 4C-63/64
 #     grants are exactly { getattr search } on the ONE rule — the
@@ -2377,13 +2392,14 @@ allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };
 #     exactly { transition }).
 # The runtime therefore still fails closed — the 4C-58 execute hook, the
 # 4C-59 image-read hooks, the 4C-60 process transition, the 4C-61
-# target-side entrypoint, and the 4C-62 target-side { read execute }
-# image-load boundary are now GRANTED, and the startup advances to
-# the next hook of the exec chain (the target-side image mediation
-# continues — open/getattr/map if the kernel names them; the
-# loader/interpreter/library hooks if the binary is dynamically linked;
-# the process inheritance checks; the runtime/state objects — live
-# evidence only; the harness captures the new terminal boundary).
+# target-side entrypoint, the 4C-62 target-side { read execute }
+# image-load boundary, the 4C-63/64 shared state-root { getattr search }
+# pair, the 4C-65/66/67/68 categorized state-tree dir quadruple, and the
+# 4C-69 categorized state-tree file create grant are now GRANTED, and
+# the startup advances to the next hook (the state-tree entry-creation
+# layer's own follow-up hooks — open/read/write/getattr/setattr on the
+# created file, or the next surface the kernel names; live evidence
+# only; the harness captures the new terminal boundary).
 #
 # buildctl and buildkit-runc stay SEPARATE future executable boundaries:
 # the .fc carries NO rule for them, no directory regex covers the
@@ -3003,6 +3019,92 @@ allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr
 # (4C-37) stays mandatory and the cross-operation gate stays
 # OPEN/Critical until it holds).
 allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name };
+
+# --- 4C-69: the categorized operation-state file create — the NEW
+# --- file-class plane (a NEW pair+class rule, NEVER a widening of the
+# --- dir rule above) ---
+#
+# The 4C-68 canonical run's terminal record, live at the END of the
+# buildkitd process's own lifetime (all four state-tree dir hooks took
+# effect — zero getattr, search, write AND add_name denials on the dir
+# pair in the whole span; the OLD-BUILDKITD-STATE-TREE-ADD-NAME-BOUNDARY
+# was GONE and the parent-dir walk passed silently — and the entry-
+# creation's own file hook became the terminal):
+#
+#   selinux_audited: requested=0x8
+#     denied=0x8 audited=0x8 result=-13
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:docker_helper_builder_state_t:s0:c1
+#     tclass=file
+#   trace-ts=460.524213, inside the failing
+#     openat(..., O_RDONLY|O_CREAT|O_CLOEXEC, 0600)
+#   whose exit trace-ts=460.524230 is the anchor.
+#
+# THE CLASS MATTERS (the phase's own critical reading):
+#   requested = denied = 0x8 = create — the kernel classmap's common
+#   file/sock prefix bit 3. The SAME bit number exists on the dir class
+#   as dir:create; the authority is the PAIR (tclass=file, 0x8), never
+#   the bare mask:
+#     grant candidate = decode(tclass, denied) = exactly { create }
+#     ON tclass=file — NOT decode(mask) without the class.
+#   The owner test pins the class-aware decode regression: the decoder's
+#   output preserves the (tclass, permission-set) TUPLE, and the two
+#   tuples (file, { create }) and (dir, { create }) are distinct
+#   authorities (the dir:create shape on the pair stays forbidden — the
+#   dir rule's exactly-{ getattr search write add_name } shape is
+#   unchanged and no dir permission rides this grant).
+#
+# requested == denied, so no subtraction of standing bits is needed
+# (the requested-vs-denied rule degrades to the exact delta); the
+# standing invariant holds unchanged: candidate = decode(tclass, denied).
+#
+# THE NEW PLANE IS NOT A WIDENING AND NOT A BUNDLE:
+#   - the dir rule stays byte-for-semantics exactly
+#     { getattr search write add_name } (PLANE E unchanged — the delta
+#     is a SEPARATE rule on a SEPARATE class, never a permission added
+#     to the dir rule);
+#   - file:create is NOT a file-IO bundle: it grants the inode-creation
+#     hook and NOT open/read/write/getattr/setattr/lock/unlink/append/
+#     map/execute — after a successful inode creation the kernel may
+#     separately require open/read/write/getattr/setattr (each next live
+#     terminal decision its own phase; no conventional writable-file
+#     bundle is prepared in advance — the standing RootlessKit state-tree
+#     file rule { create open read write getattr setattr lock } is a
+#     DIFFERENT subject and a DIFFERENT owner and is NOT a template for
+#     BuildKitd, and the companion init_t/builder_t file rules are their
+#     own owners too);
+#   - the quarantined buildkitd_exec_t:file open hook is a DIFFERENT
+#     pair — a same-permission coincidence (open vs create, or two
+#     file-class surfaces) never merges two planes;
+#   - nothing on builder_state_t's other classes (lnk_file, sock_file,
+#     fifo_file), nothing beyond the standing dir quadruple on dir,
+#     nothing on the sibling root/runtime types (builder_state_root_t,
+#     builder_runtime_root_t, builder_runtime_t), and nothing on any
+#     quarantined surface (tmp_t:dir write, the fifos, nsfs, cgroup,
+#     sysctl_fs, sysfs, passwd_file — repeat count never converts a
+#     non-terminal denial into authority);
+#   - no process/process2 permission, no capability/cap_userns, no
+#     range_transition;
+#   - the frozen planes stay frozen: the three exec planes (the source
+#     { execute read open }, the transition { transition }, the target
+#     { entrypoint read execute }), the shared state-root rule (exactly
+#     { getattr search }), and the categorized state-tree dir rule
+#     (exactly { getattr search write add_name }).
+# MCS: the TE rule encodes NO categories — the rule is the bare pair;
+# the c1 -> c1 admissibility stays the existing constraints' job (both
+# domains are proven mcs_constrained_type members). The COMPUTED
+# creation target is builder_state_t:s0:c1 (the 4C-68 record's own
+# tcontext — the prospective object's category, proven live as the
+# computed creation SID; the CREATED inode's own label must still be
+# proven independently by the created-object inventory (stat/first/
+# last read-backs) once creation occurs — never inferred from the
+# pre-create AVC's tcontext). SCOPE — READ CAREFULLY: the rule is
+# type-wide TE authority (buildkitd_t -> EVERY builder_state_t:file
+# create), NOT path-scoped; the MCS category constraints are what keep
+# it operation-scoped in effect (a c1 subject cannot reach a c2 per-op
+# tree — the cross-operation reachability proof (4C-37) stays mandatory
+# and the cross-operation gate stays OPEN/Critical until it holds).
+allow docker_helper_buildkitd_t docker_helper_builder_state_t:file create;
 
 # --- 4C-62: the target-side image-load boundary — the 4C-61 rule widened
 # --- IN PLACE (ONE rule, never split) ---
