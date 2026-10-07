@@ -86,7 +86,36 @@ jobs:
           # owns 4C-74 (the proof ref advances from the 4C-72-era pin to
           # the commit carrying that module; identical Go sources, so
           # the binary is the same program).
-          PHASE4B_PROOF_REF: 'b8f4e8871aadfc8be44d7d2f2d59aaa6b5dea265'
+          #
+          # 4C-74: the 4C-73 canonical run 37660355610 proved the
+          # categorized runtime-tree dir getattr grant live (the OLD
+          # boundary GONE; both per-op runtime-tree newfstatat lookups
+          # passed CLEAN — ret 0x0 twice, zero in-window decisions — and
+          # the runtime-tree category handoff c1 -> c1 held) and its own
+          # terminal record is the genuine PRE-CLEANUP owner:
+          # buildkitd_t:s0:c1 -> builder_runtime_t:s0:c1:dir
+          # requested=denied=0x20000000 (the path-walk search hook)
+          # inside the failing stale-socket-removal
+          # sys_unlinkat(AT_FDCWD, /run/docker-helper-builder/ops/
+          # op_feaa..., flag: 0) whose exit 547.066700 is the anchor —
+          # the runtime's own pre-bind cleanup, NOT the post-failure
+          # state-tree teardown whose ZONE2 boundary began only later at
+          # 547.066726. The 4C-74 grant WIDENS THAT SAME RULE IN PLACE
+          # (ONE rule, never split): allow
+          # docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir
+          # { getattr search } — the delta exactly +search
+          # (decode(tclass=dir, 0x20000000) = exactly { search }, the
+          # standing kernel-side dir-class pin the 4C-64/66/72 search
+          # grants live-proved; requested==denied so no subtraction of
+          # standing bits is needed; dir:search is NOT an unlink bundle —
+          # write/remove_name and the socket object's own sock_file:
+          # unlink stay their own live-evidence phases, no sock_file
+          # access, no socket/connect), the module-borne buildkitd-named
+          # allow total STAYS EXACTLY EIGHT, and the next live boundary
+          # owns 4C-75 (the proof ref advances from the 4C-73-era pin to
+          # the commit carrying that module; identical Go sources, so
+          # the binary is the same program).
+          PHASE4B_PROOF_REF: '1c391c6c0fc385e2f070f154aa1e48f64ca734c5'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
