@@ -2258,8 +2258,16 @@ RK_BKD_LABEL_OK=1
   BKD_STATE_TREE_LINE="$(sesearch --allow -s docker_helper_buildkitd_t -t docker_helper_builder_state_t -c dir /sys/fs/selinux/policy 2>/dev/null \
     | awk '$1 == "allow" && $2 == "docker_helper_buildkitd_t" && $3 ~ /^docker_helper_builder_state/' || true)"
   printf '  module contribution (the concrete rule): %s\n' "${BKD_STATE_TREE_LINE:-(empty)}"
-  if [ "$BKD_STATE_TREE_LINE" = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name };" ]; then
-    echo "  module contribution = exactly { getattr search write add_name }"
+  # The sesearch NORMALIZATION correction (run 37570595309's red
+  # observation): sesearch prints the perm set in ITS OWN alphabetical
+  # order — { add_name getattr search write } — NOT the module source's
+  # spelling order { getattr search write add_name }; the 4C-65/66/67
+  # phases' exact-string compares only matched because getattr/search/
+  # write are already alphabetical. The loaded-policy gate compares the
+  # sesearch-normalized spelling; the module SOURCE spelling is gated
+  # separately by the source-level exact-string check above.
+  if [ "$BKD_STATE_TREE_LINE" = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { add_name getattr search write };" ]; then
+    echo "  module contribution = exactly { add_name getattr search write } (sesearch's alphabetical normalization of the ONE quadruple rule — the module source's own spelling is { getattr search write add_name }; the loaded-policy gate compares sesearch's printed spelling)"
   else
     echo "  STOP: the target domain's concrete surface on the categorized state tree is not exactly the ONE { getattr search write add_name } grant"
     BKD_ZERO_ALLOW_OK=0
