@@ -2407,7 +2407,24 @@ allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };
 #     cross-operation reachability proof (4C-37) stays mandatory and the
 #     cross-operation gate stays OPEN/Critical; every remaining
 #     builder_runtime_t dir permission and every other class of the
-#     runtime tree stays its own live-evidence phase).
+#     runtime tree stays its own live-evidence phase);
+#   4C-74: the SAME runtime-tree rule widened IN PLACE by the 4C-73
+#     canonical run 37660355610's own terminal search boundary (ONE
+#     rule, never split; the 4C-73 getattr stays):
+#     allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search };
+#     (the terminal record requested=denied=0x20000000 result=-13
+#     scontext=buildkitd_t:s0:c1 tcontext=builder_runtime_t:s0:c1
+#     tclass=dir trace-ts=547.065089, inside the terminal failing
+#     sys_unlinkat(AT_FDCWD, "/run/docker-helper-builder/ops/op_feaa...",
+#     flag: 0) whose exit 547.066700 is the anchor — the STALE
+#     RUNTIME-SOCKET REMOVAL stage on the flow's own pre-bind path, NOT
+#     the post-failure state-tree teardown whose ZONE2 boundary began
+#     only later at 547.066726; the per-op runtime-tree newfstatat
+#     lookups had passed CLEAN (-> 0x0 twice) under the granted getattr
+#     before it; dir:search is NOT an unlink bundle — write/remove_name/
+#     sock_file:unlink stay their own live-evidence phases; every
+#     remaining runtime-tree permission and every other class stays its
+#     own live-evidence phase).
 #
 # STILL DELIBERATELY ABSENT (each is a separate live-evidence phase):
 #   - siginh, noatsecure, rlimitinh, dyntransition, setexec on the
@@ -2468,15 +2485,17 @@ allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };
 #     is a DIFFERENT subject and a DIFFERENT owner and the daemon
 #     transport rules are trusted control-plane authority — neither is
 #     a template for BuildKitd);
-#   - buildkitd_t -> builder_runtime_t:dir search/read/open/write/
+#   - buildkitd_t -> builder_runtime_t:dir read/open/write/
 #     add_name/remove_name/create/rmdir/setattr/lock/mounton and
-#     builder_runtime_t:file/sock_file anything (the 4C-73 grant is the
-#     ONE bare getattr rule on the NEW pair — PLANE H, the FIRST
-#     builder_runtime_t authority; dir:getattr is a METADATA hook, not
-#     a traversal/entry/creation bundle: search/read/open and every
-#     mutation stay their own live-evidence phases; no sock_file access,
-#     no socket/connect authority; the runtime tree's remaining surfaces
-#     are reached only when the kernel names its own live hook);
+#     builder_runtime_t:file/sock_file anything (the 4C-73/74 grants
+#     are exactly { getattr search } on the ONE rule — the 4C-73
+#     metadata hook widened IN PLACE by the 4C-73 canonical run's own
+#     terminal search boundary (the stale-socket unlinkat's path-walk
+#     component); dir:search is NOT an unlink bundle: write/remove_name
+#     and the socket object's own sock_file:unlink stay their own
+#     live-evidence phases; no socket/connect authority; the runtime
+#     tree's remaining surfaces are reached only when the kernel names
+#     its own live hook);
 #   - the 4C-61 run's inherited-fd fifo_file write denials (the fd
 #     revalidation under the new domain toward the builder_t and
 #     rootlesskit_t fifos) stay UNGRANTED — the exec progressed past
@@ -2500,12 +2519,13 @@ allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };
 # image-load boundary, the 4C-63/64 shared state-root { getattr search }
 # pair, the 4C-65/66/67/68 categorized state-tree dir quadruple, the
 # 4C-69/70/71 categorized state-tree file { create read open lock }
-# grants, the 4C-72 shared runtime-root dir search grant, and the 4C-73
-# categorized runtime-tree dir getattr grant are now
+# grants, the 4C-72 shared runtime-root dir search grant, and the
+# 4C-73/74 categorized runtime-tree dir { getattr search } grant are now
 # GRANTED, and the startup advances to the next hook
-# (the post-getattr follow-up hooks — the runtime-tree search/sock_file/
-# file surface when the kernel names it, or the next surface; live
-# evidence only; the harness captures the new terminal boundary).
+# (the post-search follow-up hooks — the stale-socket unlinkat's
+# entry-mutation hooks or the socket object's own hook when the kernel
+# names them, or the next surface; live evidence
+# only; the harness captures the new terminal boundary).
 #
 # buildctl and buildkit-runc stay SEPARATE future executable boundaries:
 # the .fc carries NO rule for them, no directory regex covers the
@@ -3327,7 +3347,109 @@ allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search;
 # transport) are DIFFERENT subjects and DIFFERENT owners — their
 # builder_runtime_t/builder_runtime_root_t rules stay byte-unchanged,
 # never merged and never templates.
-allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir getattr;
+
+# --- 4C-74: the categorized operation-runtime dir search — the 4C-73
+# --- rule widened IN PLACE (ONE rule, never split) ---
+#
+# The 4C-73 canonical run's (37660355610) terminal record, live at the
+# END of the buildkitd process's own lifetime (the 4C-73 getattr took
+# effect — zero builder_runtime_t:dir getattr denials in the whole span
+# and BOTH per-op runtime-tree newfstatat lookups passed CLEAN
+# (ret 0x0, zero in-window decisions) — and the runtime's NEXT
+# production stage became the terminal):
+#
+#   buildkitd-58290 547.065035 sys_openat -> 0x5 (the state-file entry
+#     creation returned fd 5)
+#   buildkitd-58290 547.065052 sys_newfstatat(AT_FDCWD,
+#     "/run/docker-helper-builder/ops/op_feaa...", statbuf, flag: 0)
+#     -> 547.065074 sys_newfstatat -> 0x0  (the 4C-73-granted lookup,
+#     CLEAN)
+#   buildkitd-58290 547.065076 sys_newfstatat(AT_FDCWD, same op_ path,
+#     flag: 0) -> 547.065079 sys_newfstatat -> 0x0  (CLEAN)
+#   buildkitd-58290 547.065081 sys_unlinkat(AT_FDCWD,
+#     "/run/docker-helper-builder/ops/op_feaa...", flag: 0) — the STALE
+#     RUNTIME-SOCKET REMOVAL stage (the runtime's own pre-bind cleanup
+#     of a stale socket path in its per-op runtime tree — NOT the
+#     post-failure state-tree teardown, which began only later at
+#     547.066726)
+#   buildkitd-58290 547.065089 selinux_audited: requested=0x20000000
+#     denied=0x20000000 audited=0x20000000 result=-13
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:docker_helper_builder_runtime_t:s0:c1
+#     tclass=dir
+#   buildkitd-58290 547.066700 sys_unlinkat -> 0xfffffffffffffff3 (the
+#     anchor; -EACCES)
+#   buildkitd-58290 547.066714 sys_close(fd: 5)
+#   buildkitd-58290 547.066726 sys_unlinkat(AT_FDCWD,
+#     "/var/lib/docker-helper-builder/ops/op_feaa...", flag: 0) — the
+#     state-tree cleanup-zone boundary itself (ZONE2 begins here; the
+#     unlinkat decision is genuine PRE-CLEANUP ownership).
+#
+# THE STALE-SOCKET STAGE IS NOT THE CLEANUP (the phase's own critical
+# reading): the unlinkat runs against the flow's own PER-OP RUNTIME
+# tree (/run/.../ops/op_<id>) BEFORE any production failure response —
+# the runtime's stale-socket removal stage on its own pre-bind path —
+# while the state-tree teardown walk (/var/lib/.../ops/op_<id>,
+# ZONE2 at 547.066726) is the failure response to the anchor. The
+# denial inside the stale-socket unlinkat window is STARTUP-CAUSAL and
+# owns the next phase; the teardown walk's own denials stay
+# POST-FAILURE/CLEANUP and can never be the owner (the correction-3
+# causal contract stands unchanged).
+#
+# THE WIDENING IS IN PLACE — the 4C-73 rule becomes exactly
+# { getattr search }, the delta is exactly +search:
+#   - requested == denied, so no subtraction of standing bits is needed
+#     (the requested-vs-denied rule degrades to the exact delta; a
+#     decision with denied=0 produces no AVC and no grant — the forward
+#     syscall/result evidence decides progress);
+#   - decode(tclass=dir, 0x20000000) = exactly { search } — the
+#     standing kernel-side dir-class pin the 4C-64/66 search grants
+#     live-proved; NO permission inference from the loaded policy's
+#     perms-file numbering (the class-aware decode regression pins the
+#     tuple (dir, { search }));
+#   - dir:search is NOT an unlink bundle: it grants the path-walk
+#     traversal component inside the stale-socket unlinkat's lookup and
+#     NOT dir:write/dir:remove_name (the entry-mutation hooks), NOT
+#     sock_file:unlink (the socket object's own hook), NOT
+#     dir:getattr-beyond-the-standing-grant — the kernel emits each
+#     hook as its OWN decision and the execution-map expectations
+#     (write/remove_name/sock_file unlink possibly following) grant
+#     NOTHING; if the next hook is a builder_runtime_t:dir write or a
+#     builder_runtime_t:sock_file unlink it gets its own phase and its
+#     own rule on its own class;
+#   - no read/open/add_name/remove_name/create/rmdir/setattr/lock/
+#     mounton rides this widening;
+#   - NOTHING on builder_runtime_t:file or builder_runtime_t:sock_file,
+#     no socket/connect — the daemon's sock_file transport authority is
+#     a DIFFERENT subject and a DIFFERENT owner and must never leak
+#     into this plane;
+#   - nothing on the sibling root/state types (builder_runtime_root_t,
+#     builder_state_root_t, builder_state_t) — PLANE G stays the bare
+#     search singleton on the ROOT pair and is NOT widened (the
+#     root-plane getattr has no live evidence);
+#   - no process/process2 permission, no capability/cap_userns, no
+#     range_transition;
+#   - the frozen planes stay frozen: the three exec planes (the source
+#     { execute read open }, the transition { transition }, the target
+#     { entrypoint read execute }), the shared state-root rule (exactly
+#     { getattr search }), the categorized state-tree dir rule (exactly
+#     { getattr search write add_name }), the categorized state-tree
+#     file rule (exactly { create read open lock }), and the shared
+#     runtime-root rule (exactly { search }).
+# MCS: the TE rule encodes NO categories — the rule is the bare pair;
+# the c1 -> c1 admissibility stays the existing constraints' job (both
+# domains are proven mcs_constrained_type members). The op_<id> runtime
+# directory's own label is proven separately (the kernel-label sampler's
+# first/last/all read-backs and the live stat, all
+# builder_runtime_t:s0:c1 — the 4C-72 §9 instrument carries forward) —
+# never inferred from an AVC's tcontext.
+# SCOPE — READ CAREFULLY: the rule is type-wide TE authority
+# (buildkitd_t -> EVERY builder_runtime_t:dir getattr+search), NOT
+# path-scoped; the MCS category constraints are what keep it
+# operation-scoped in effect (a c1 subject cannot reach a c2 per-op
+# tree — the cross-operation reachability proof (4C-37) stays mandatory
+# and the cross-operation gate stays OPEN/Critical until it holds).
+allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search };
 
 # --- 4C-71: the categorized operation-state file lock — the 4C-70 file
 # --- rule widened IN PLACE (ONE rule, never split) ---
@@ -3398,8 +3520,8 @@ allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir getattr;
 # The 4C-69/70/71 file rule is widened IN PLACE, never split; the 4C-72
 # shared runtime-root search is a NEW pair/plane rule (PLANE G); the
 # 4C-73 categorized runtime-tree getattr is a NEW pair/plane rule
-# (PLANE H) — the module-borne buildkitd-named allow total stays
-# EXACTLY EIGHT.
+# (PLANE H) widened IN PLACE by the 4C-74 search — the module-borne
+# buildkitd-named allow total stays EXACTLY EIGHT.
 
 # --- 4C-72: the shared runtime-root dir search — a NEW pair/plane rule
 # --- (PLANE G), never a widening of the state-tree rules ---
@@ -3564,8 +3686,8 @@ allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir getattr;
 # The 4C-69/70/71 file rule is widened IN PLACE, never split; the 4C-72
 # shared runtime-root search is a NEW pair/plane rule (PLANE G); the
 # 4C-73 categorized runtime-tree getattr is a NEW pair/plane rule
-# (PLANE H) — the module-borne buildkitd-named allow total stays
-# EXACTLY EIGHT.
+# (PLANE H) widened IN PLACE by the 4C-74 search — the module-borne
+# buildkitd-named allow total stays EXACTLY EIGHT.
 
 # --- 4C-62: the target-side image-load boundary — the 4C-61 rule widened
 # --- IN PLACE (ONE rule, never split) ---
