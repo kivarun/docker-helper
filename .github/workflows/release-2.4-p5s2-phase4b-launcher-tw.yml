@@ -62,7 +62,7 @@ jobs:
           # 4C-61 (the proof ref advances from the 4C-59-era pin to the
           # commit carrying that module; identical Go sources, so the
           # binary is the same program).
-          PHASE4B_PROOF_REF: '296025c840560eb5c690d743ec3b92cc09cc1812'
+          PHASE4B_PROOF_REF: '4ad5eff378108ff91d4add950fb361834ecf4ea6'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
