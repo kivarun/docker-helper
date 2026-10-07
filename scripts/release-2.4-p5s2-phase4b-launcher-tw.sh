@@ -8748,33 +8748,6 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
   # 4C-70 progress gate), and the EXECVE/category/created-label proofs
   # stand. The file lock boundary the 4C-70 run found is the 4C-71
   # phase's own old boundary below — never a 4C-70 shape.
- — the ONE rule
-  # now carries exactly { create read open }; the combined 0x40002
-  # decision is ONE terminal decision, never split, never 4C-70a/4C-70b;
-  # the same mask on the 4C-59 buildkitd_exec_t pair is a DIFFERENT
-  # plane and the quarantined buildkitd_exec_t:file open stays
-  # UNGRANTED). The PASS contract: the OLD state-tree file { read open }
-  # boundary (0x40002 ON tclass=file, with the single-bit companions
-  # 0x40000/0x2 — the same authority denying through a single-hook
-  # syscall) is GONE from the whole span, BuildKitd made FORWARD
-  # PRODUCTION PROGRESS past the previous openat failure layer (the
-  # span's own terminal buildkitd decision exists and is NOT the
-  # state-tree file read/open shape — the absence of an AVC alone is
-  # NOT sufficient; a denied=0 decision produces no AVC, so the forward
-  # syscall/result evidence decides; no predetermined errno/result is
-  # required and the openat is NOT presupposed to return an fd — a
-  # later hook inside the same syscall may become the new terminal
-  # boundary, and the actual post-open file USE the trace records
-  # decides the next boundary, never the permission names), the OLD
-  # dir-plane/state-root/file-create boundaries STAY gone (the standing
-  # re-proofs above), the generic bin_t execution stays ABSENT, the MCS
-  # category guard and the §9 per-op labeling invariants hold, the
-  # created state-tree file's own label (when a creation occurred and
-  # the sampler caught it) is the exact per-op context (the §13
-  # fail-closed gate), and the next state-tree permission or
-  # object-class hook is NOT implied (the next terminal decision's own
-  # live set owns the next phase — one audited terminal decision, one
-  # evidenced boundary; no 4C-71 grant is prepared inside this phase).
   if [ "$POSTTUN_OLD_BKD_STATETREE_FILEREADOPEN_PRESENT" = 1 ]; then
     POSTTUN_4C70_PHASE_OK=0
     marker "4C-70-OLD-STATE-FILE-READ-OPEN-BOUNDARY=REGRESSED"
