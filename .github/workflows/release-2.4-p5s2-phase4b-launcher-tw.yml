@@ -62,7 +62,31 @@ jobs:
           # 4C-72 (the proof ref advances from the 4C-71-era pin to the
           # commit carrying that module; identical Go sources, so the
           # binary is the same program).
-          PHASE4B_PROOF_REF: '812379886ca99f107b11d0ce1ad78b1916673ac1'
+          #
+          # 4C-73: the 4C-72 canonical run 37644134366 proved the shared
+          # runtime-root dir search grant live (the OLD boundary GONE;
+          # BUILDKITD-RUNTIME-TREE-CATEGORY-HANDOFF=OK — the first live
+          # mediation against the categorized per-op runtime tree, the
+          # own-category c1 -> c1 pair) and its own terminal record is
+          # the genuine PRE-CLEANUP owner: buildkitd_t:s0:c1 ->
+          # builder_runtime_t:s0:c1:dir requested=denied=0x10 (the
+          # metadata hook) inside the failing sys_newfstatat(AT_FDCWD,
+          # /run/docker-helper-builder/ops/op_9ee65..., flag: 0) whose
+          # exit 515.987119 is the anchor, the first later enter
+          # 515.987147 being the state-tree cleanup-zone boundary
+          # itself. The 4C-73 grant is the NEW pair/plane H rule allow
+          # docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir
+          # getattr (the BARE singleton; decode(tclass=dir, 0x10) =
+          # exactly { getattr }; dir:getattr is a METADATA hook — the
+          # traversal/entry/mutation surfaces and the file/sock_file
+          # classes stay their own live-evidence phases, no
+          # socket/connect), the FIRST builder_runtime_t authority of
+          # the buildkitd domain; the module-borne buildkitd-named allow
+          # total moves 7 -> EXACTLY EIGHT, and the next live boundary
+          # owns 4C-74 (the proof ref advances from the 4C-72-era pin to
+          # the commit carrying that module; identical Go sources, so
+          # the binary is the same program).
+          PHASE4B_PROOF_REF: 'b8f4e8871aadfc8be44d7d2f2d59aaa6b5dea265'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
