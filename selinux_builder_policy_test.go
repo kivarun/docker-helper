@@ -4446,6 +4446,7 @@ func buildkitdIdentityViolations(policy string) []string {
 	const canonicalStateRoot = "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search };"
 	const canonicalStateTree = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name };"
 	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock };"
+	const canonicalRuntimeRoot = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search;"
 	// The categorized state-tree dir surface's standing owners (the
 	// exact module lines): the daemon does NOT own one; every other
 	// subject's existing rule is its own owner and must stay unchanged —
@@ -4480,6 +4481,22 @@ func buildkitdIdentityViolations(policy string) []string {
 		"docker_helper_newgidmap_t":   "allow docker_helper_rootlesskit_t docker_helper_newgidmap_t:process { transition };",
 	}
 	standingRootlesskitStateRoot := "allow docker_helper_rootlesskit_t docker_helper_builder_state_root_t:dir { search };"
+	// The shared runtime-root dir surface's standing owners (the exact
+	// module lines, the 4C-72 pair): the rootlesskit flow traversal, the
+	// daemon transport, the init provisioning/mount rules, the manager's
+	// relabel + own-runtime management, and the buildkitd's own ONE bare
+	// search rule (PLANE G) — every other subject's existing rule is its
+	// own owner and must stay unchanged; any NEW or reshaped rule on the
+	// pair trips.
+	standingRuntimeRootDirRules := map[string]bool{
+		"allow init_t docker_helper_builder_runtime_root_t:dir { create rmdir write remove_name setattr };":                                            true,
+		"allow init_t docker_helper_builder_runtime_root_t:dir { mounton };":                                                                           true,
+		"allow docker_helper_builder_t docker_helper_builder_runtime_root_t:dir { relabelfrom };":                                                      true,
+		"allow docker_helper_builder_t docker_helper_builder_runtime_root_t:dir { getattr search read open write add_name remove_name create rmdir };": true,
+		"allow docker_helper_rootlesskit_t docker_helper_builder_runtime_root_t:dir { search };":                                                       true,
+		"allow docker_helper_t docker_helper_builder_runtime_root_t:dir { search };":                                                                   true,
+		canonicalRuntimeRoot: true,
+	}
 	var violations []string
 	canonicalCount := 0
 	transitionCount := 0
@@ -4547,10 +4564,24 @@ func buildkitdIdentityViolations(policy string) []string {
 	if stateFileCount != 1 {
 		violations = append(violations, fmt.Sprintf("the buildkitd categorized state-tree file { create read open lock } grant must exist exactly once in the exact canonical form, found %d: %s", stateFileCount, canonicalStateFile))
 	}
+	runtimeRootCount := 0
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if trimmed == canonicalRuntimeRoot {
+			runtimeRootCount++
+		}
+	}
+	if runtimeRootCount != 1 {
+		violations = append(violations, fmt.Sprintf("the buildkitd shared runtime-root dir { search } grant must exist exactly once in the exact bare canonical form, found %d: %s", runtimeRootCount, canonicalRuntimeRoot))
+	}
 	// The exact module-borne allow-rule total naming a buildkitd type:
-	// the six planes only (A source-exec, B transition, C target-side,
+	// the seven planes only (A source-exec, B transition, C target-side,
 	// D shared state-root, E categorized state-tree dir, F categorized
-	// state-tree file { create read open lock }) — never "at least".
+	// state-tree file { create read open lock }, G shared runtime-root
+	// dir { search }) — never "at least".
 	buildkitdNamedAllow := 0
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -4561,8 +4592,34 @@ func buildkitdIdentityViolations(policy string) []string {
 			buildkitdNamedAllow++
 		}
 	}
-	if buildkitdNamedAllow != 6 {
-		violations = append(violations, fmt.Sprintf("the module must carry exactly the six buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name }, the categorized state-tree file { create read open lock }), found %d", buildkitdNamedAllow))
+	if buildkitdNamedAllow != 7 {
+		violations = append(violations, fmt.Sprintf("the module must carry exactly the seven buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name }, the categorized state-tree file { create read open lock }, the shared runtime-root dir bare search), found %d", buildkitdNamedAllow))
+	}
+	// The shared runtime-root dir surface has exactly the standing
+	// owners above; a NEW or reshaped rule on the pair (any source,
+	// including attribute/broad forms) trips here.
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || !strings.HasPrefix(trimmed, "allow ") {
+			continue
+		}
+		if strings.Contains(trimmed, " docker_helper_builder_runtime_root_t:dir ") && !standingRuntimeRootDirRules[trimmed] {
+			violations = append(violations, "the shared runtime-root dir surface has exactly the standing owners (init_t provisioning/mount, the manager relabel + own-runtime management, the flow search, the daemon transport search, the buildkitd ONE bare search rule) — every other shape on the pair violates: "+trimmed)
+		}
+	}
+	// The categorized per-op runtime surfaces stay UNGRANTED from the
+	// buildkitd domain: no dir/file/sock_file authority on
+	// builder_runtime_t, no socket/connect — the runtime tree is reached
+	// only when the kernel names its own live hook.
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || !strings.HasPrefix(trimmed, "allow ") {
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		if len(fields) >= 3 && fields[1] == "docker_helper_buildkitd_t" && strings.Contains(fields[2], "docker_helper_builder_runtime_t:") {
+			violations = append(violations, "the buildkitd domain holds NO authority on the categorized per-op runtime surfaces (the runtime tree is reached only on the kernel's own live hook): "+trimmed)
+		}
 	}
 	// The categorized state-tree dir surface has exactly the standing
 	// owners above; a NEW or reshaped rule on the pair (any source,
@@ -4600,7 +4657,7 @@ func buildkitdIdentityViolations(policy string) []string {
 			if strings.Contains(trimmed, "docker_helper_buildkitd_exec_t") && trimmed != canonicalExec && trimmed != canonicalEntry {
 				violations = append(violations, "the only allow rules naming the buildkitd exec type are the exact source-exec grant { execute read open } and the exact target-side { entrypoint read execute } grant: "+trimmed)
 			}
-			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile {
+			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot {
 				violations = append(violations, "the only allow rules toward the buildkitd domain are the exact process transition grant, the exact target-entrypoint grant, and the exact state surfaces: "+trimmed)
 			}
 			fields := strings.Fields(trimmed)
@@ -4904,6 +4961,28 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		t.Error("the missing-state-file mutation must trip the buildkitd authority invariants")
 	}
 
+	// The 4C-72 shared runtime-root dir plane: exactly the ONE bare
+	// search rule, once — a NEW pair/plane (PLANE G), never a widening of
+	// the state-tree rules and never a copy of the RootlessKit/daemon
+	// search owners.
+	const canonicalRuntimeRoot = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search;"
+	var withoutRuntimeRoot []string
+	runtimeRootCount := 0
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == canonicalRuntimeRoot {
+			runtimeRootCount++
+			continue
+		}
+		withoutRuntimeRoot = append(withoutRuntimeRoot, line)
+	}
+	if runtimeRootCount != 1 {
+		t.Errorf("the buildkitd shared runtime-root dir { search } grant must exist exactly once, found %d", runtimeRootCount)
+	}
+	if violations := buildkitdIdentityViolations(strings.Join(withoutRuntimeRoot, "\n")); len(violations) == 0 {
+		t.Error("the missing-runtime-root mutation must trip the buildkitd authority invariants")
+	}
+
 	// Mutation guards: every forbidden authority shape appended to the
 	// module must trip the authority invariants; transition mutations
 	// must trip the exactly-one edge invariant.
@@ -5170,6 +5249,46 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		{"parallel bare create rule beside the canonical triple", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file create;"},
 		{"parallel bare read rule beside the canonical triple", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file read;"},
 		{"duplicate of the state-file rule", canonicalStateFile},
+		// the 4C-72 shared runtime-root dir plane (exactly the ONE bare
+		// search rule; the missing-rule case is covered by the
+		// withoutRuntimeRoot removal above; the appended buildkitd-source
+		// shapes trip the seven-rule count, the reshaped cross-subject
+		// shapes trip the standing-owner map)
+		{"the brace search form of the runtime-root rule", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir { search };"},
+		{"runtime-root getattr instead", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir getattr;"},
+		{"runtime-root read instead", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir read;"},
+		{"runtime-root open instead", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir open;"},
+		{"runtime-root write instead", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir write;"},
+		{"runtime-root add_name instead", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir add_name;"},
+		{"runtime-root remove_name instead", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir remove_name;"},
+		{"runtime-root create instead", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir create;"},
+		{"runtime-root rmdir instead", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir rmdir;"},
+		{"runtime-root setattr instead", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir setattr;"},
+		{"runtime-root lock instead", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir lock;"},
+		{"runtime-root mounton instead", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir mounton;"},
+		{"runtime-root pair { search getattr }", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir { search getattr };"},
+		{"runtime-root pair { search read }", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir { search read };"},
+		{"runtime-root pair { search open }", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir { search open };"},
+		{"runtime-root pair { search write }", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir { search write };"},
+		{"runtime-root pair { search add_name }", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir { search add_name };"},
+		{"runtime-root pair { search create }", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir { search create };"},
+		{"runtime-root reshaped grant from the flow", "allow docker_helper_rootlesskit_t docker_helper_builder_runtime_root_t:dir { search getattr };"},
+		{"runtime-root reshaped grant from the manager", "allow docker_helper_builder_t docker_helper_builder_runtime_root_t:dir getattr;"},
+		{"runtime-root reshaped grant from the daemon", "allow docker_helper_t docker_helper_builder_runtime_root_t:dir getattr;"},
+		{"runtime-root grant toward the wrong target (builder_runtime_t)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir search;"},
+		{"runtime-root grant toward the wrong target (builder_state_root_t)", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir search;"},
+		{"runtime-root grant toward the wrong target (builder_state_t)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir search;"},
+		{"runtime-root grant on the wrong class (file)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:file search;"},
+		{"runtime-root grant on the wrong class (sock_file)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:sock_file search;"},
+		{"categorized runtime-tree authority (dir search)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir search;"},
+		{"categorized runtime-tree authority (dir getattr)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir getattr;"},
+		{"categorized runtime-tree authority (file read)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:file read;"},
+		{"categorized runtime-tree authority (sock_file getattr)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:sock_file getattr;"},
+		{"categorized runtime-tree sock_file transport shape", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:sock_file { getattr open read write };"},
+		{"parallel bare getattr rule beside the canonical bare search", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir getattr;"},
+		{"split runtime-root grant (search rule + getattr rule)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search;\nallow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir getattr;"},
+		{"split runtime-root grant (the daemon search copied for the buildkitd)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir { search };\nallow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir getattr;"},
+		{"duplicate of the runtime-root rule", canonicalRuntimeRoot},
 		{"broad attribute target on the file plane", "allow docker_helper_buildkitd_t file_type:file create;"},
 		{"broad attribute source on the file plane", "allow domain docker_helper_builder_state_t:file create;"},
 		{"broad attribute target", "allow docker_helper_buildkitd_t file_type:dir getattr;"},
@@ -5337,7 +5456,14 @@ var kernelProcessPerms = []string{
 //     relabelfrom } each decode to their own sets and never to {
 //     lock }; the delta pin: the canonical { create read open lock }
 //     quadruple minus the already-granted { create read open } equals
-//     exactly the denied decode.
+//     exactly the denied decode;
+//   - the 4C-72 grant relies on the STANDING dir-class search pin
+//     decode(dir, 0x20000000) == exactly the tuple (dir, { search }) —
+//     the 4C-71 correction-3 fresh canonical run 37627672074's own
+//     terminal record requested=denied=0x20000000 tclass=dir; a NEW
+//     pair/plane (never a widening of the state-tree rules), so there
+//     is no delta to subtract and the class-aware tuple IS the new
+//     authority's whole identity.
 func TestSELinuxPolicyKernelClassmapMaskPins(t *testing.T) {
 	fileIndex := func(perm string) int {
 		for i, p := range append(append([]string{}, kernelCommonFilePerms...), kernelFileOnlyPerms...) {
