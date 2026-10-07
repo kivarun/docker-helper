@@ -4051,7 +4051,25 @@ POSTTUN_BND_SYMBOLIC=""
           wbase = qbase[k, qtop[k]]
           qtop[k]--
         }
-        if ($0 ~ / -> 0xf/ && !wasclean) {
+        # The 4C-74 correction 1: the failing-exit test is the ERRNO
+        # RANGE, never a 0xf prefix. The old prefix match
+        # (/ -> 0xf/) also caught SUCCESSFUL short-write returns in the
+        # 0xf0-0xff band (the canonical 4C-74 run 37673582201 own
+        # buildkitd-50339 stderr report sys_write -> 0xf5 — 245 bytes
+        # WRITTEN, a success) and made the error-reporting write a
+        # terminal candidate and then the ANCHOR — the anchor landed
+        # AFTER the state-tree teardown walk, the two teardown denials
+        # (correctly POST-FAILURE/CLEANUP) preceded it, and the
+        # NO-PREANCHOR-POST invariant broke (2 pre-anchor POST
+        # violations) on a corpus whose real terminal failure (the
+        # untraced bind runtime-tree dir write denial) sat EARLIER.
+        # A negative errno renders as 0xfffffffffffff001..ffffffff
+        # (13 or more leading f digits, max errno 4095); a successful
+        # return (a write/read byte count, an fd, a pid) never reaches
+        # that range. The 13-f-digit prefix is the precise predicate;
+        # the six prior canonical corpora own anchors are all genuine
+        # errno exits and replay byte-identical under it.
+        if ($0 ~ / -> 0xfffffffffffff/ && !wasclean) {
           # A failing exit is a TERMINAL CANDIDATE only when its own
           # syscall window is not a cleanup shape: the RemoveAll(bind0)
           # stage (the tolerated mid-startup temp-dir removal AND the
@@ -4177,9 +4195,54 @@ POSTTUN_BND_SYMBOLIC=""
       for (i = 1; i <= nc; i++) {
         pre[++m] = i
       }
+      # The 4C-74 correction 1: the untraced-owner decision inventory —
+      # every decision with NO spanning traced syscall window (the
+      # owning syscall enter/exit records were not captured — the
+      # tracer armed list does not cover it). Such a decision is the
+      # only traced evidence that its process EXECUTED a syscall at
+      # that moment: production-activity evidence by its own process.
+      # The cleanup stages are excluded structurally: every cleanup
+      # walk syscall (the /tmp temp-dir stage and the per-op state-tree
+      # teardown walk: openat/openat2/unlink/unlinkat/rmdir/getdents64/
+      # newfstatat/statx/readlink) is an ARMED syscall, so a cleanup
+      # decision always carries a traced owning window and never lands
+      # in this inventory.
+      nuo = 0
+      for (i = 1; i <= nd; i++) {
+        split(den[i], f, "\t")
+        dts = f[1]; dwh = f[2]
+        ownw = ""
+        for (p = 1; p <= pc; p++) {
+          if (pwho[p] != dwh) continue
+          if (pets[p] + 0 > dts + 0 || pxts[p] + 0 < dts + 0) continue
+          ownw = pxts[p]
+          break
+        }
+        if (ownw == "") {
+          nuo++
+          uts[nuo] = dts; uwhov[nuo] = dwh; uline[nuo] = f[3]
+        }
+      }
       # The reverse scan: the LAST candidate with no later
       # different-name non-cleanup production enter (the terminal
-      # production failure — no forward progress follows it).
+      # production failure — no forward progress follows it). The
+      # 4C-74 correction 1 extends the progress evidence: a later
+      # SAME-PROCESS untraced-owner decision is production activity —
+      # the process demonstrably executed another (untraced) syscall
+      # after the candidate failure, so the failure was not terminal.
+      # The same-process restriction is the 4C-71 correction-3 causal
+      # contract: another process activity says nothing about this
+      # process own failure. The 4C-74 correction 1 also REMOVES the
+      # old /tmp-zone gate from the enter check: the cleanup-stage
+      # enters are ALREADY structurally absent from the enter list
+      # (the qcl-marked enters are skipped at collection), so the gate
+      # only suppressed GENUINE post-zone production enters — the
+      # canonical 4C-74 corpus showed the effect (the buildkitd execve
+      # and socket enters after the early launch-era /tmp zone could
+      # not clear a mid-flow benign ENOENT probe and the scan anchored
+      # on it once the false 0xf-prefix candidates were gone). The six
+      # prior canonical corpora carry no enter-list enter after their
+      # anchors at all, so they replay byte-identical.
       a = 0
       for (j = m; j >= 1; j--) {
         i = pre[j]
@@ -4188,29 +4251,71 @@ POSTTUN_BND_SYMBOLIC=""
         later = 0
         for (e = 1; e <= ne; e++) {
           split(ent[e], g, "\t")
-          if (g[1] + 0 > cts + 0 && (zone == "" || g[1] + 0 < zone + 0) && g[3] != cnm) { later = 1; break }
+          if (g[1] + 0 > cts + 0 && g[3] != cnm) { later = 1; break }
+        }
+        if (!later) {
+          for (u = 1; u <= nuo; u++) {
+            if (uwhov[u] == f[2] && uts[u] + 0 > cts + 0) { later = 1; break }
+          }
         }
         if (!later) { a = i; break }
       }
       fb = 0
       if (a == 0 && m > 0) { a = pre[m]; fb = 1 }
+      # The 4C-74 correction 1 second tier: when NO traced failing exit
+      # is terminal (every candidate had later production progress —
+      # the fallback fired above), the terminal production failure may
+      # be an UNTRACED syscall whose only traced evidence is its own
+      # SELinux decision. The anchor moves to the LAST same-process
+      # untraced-owner decision after the fallback candidate failure
+      # (the same-process restriction as above), provided no later
+      # production enter follows it either. The owning syscall name is
+      # NEVER invented: the anchor text carries the UNTRACED-OWNER fact.
+      untr = 0; lastu = 0
+      if (fb == 1) {
+        split(cand[a], f, "\t")
+        refa = f[1] + 0
+        for (u = 1; u <= nuo; u++) {
+          if (uwhov[u] == f[2] && uts[u] + 0 > refa) { lastu = u }
+        }
+        if (lastu > 0) {
+          l2 = 0
+          for (e = 1; e <= ne; e++) {
+            split(ent[e], g, "\t")
+            if (g[1] + 0 > uts[lastu] + 0) { l2 = 1; break }
+          }
+          if (l2 == 0) untr = 1
+        }
+      }
       split(cand[a], f, "\t")
-      print "ANCHOR_TS=" f[1]
-      print "ANCHOR_WHO=" f[2]
-      print "ANCHOR_SYS=" f[3]
+      ats = f[1]; awhov = f[2]; asys = f[3]; aline = f[4]
+      if (untr == 1) {
+        ats = uts[lastu]; awhov = uwhov[lastu]; asys = "UNTRACED-OWNER"; aline = uline[lastu]
+      }
+      print "ANCHOR_TS=" ats
+      print "ANCHOR_WHO=" awhov
+      print "ANCHOR_SYS=" asys
       print "ANCHOR_FALLBACK=" fb
+      print "ANCHOR_UNTRACED=" untr
       print "ZONE_TS=" (zone == "" ? "-" : zone)
       print "ZONE2_TS=" (szone == "" ? "-" : szone)
       print "ZONE2_REC=" szrec
-      print "ANCHOR_LINE=" f[4]
+      print "ANCHOR_LINE=" aline
       # The handled candidates: every candidate except the anchor,
       # each with its first later production enter as the handling
       # proof (failure + later production operation => the failure was
-      # handled/non-terminal).
+      # handled/non-terminal). The 4C-74 correction 1: the proof may
+      # also be a later same-process untraced-owner decision (the same
+      # production-activity evidence the anchor scan and the denial
+      # classification use).
       h = 0
       for (j = 1; j <= m; j++) {
         i = pre[j]
-        if (i == a) continue
+        # The 4C-74 correction 1: with the UNTRACED-OWNER anchor the
+        # fallback candidate (index a) is a regular handled candidate
+        # and stays in this enumeration; the skip is for the traced
+        # exit-anchor only.
+        if (i == a && untr == 0) continue
         split(cand[i], f, "\t")
         cts = f[1]; cnm = f[3]; cbase = f[5]
         cut = 0
@@ -4225,6 +4330,11 @@ POSTTUN_BND_SYMBOLIC=""
           if (g[1] + 0 > cut + 0 && (g[3] != cnm || g[4] != cbase)) {
             proof = g[1] " " g[3]
             break
+          }
+        }
+        if (proof == "") {
+          for (u = 1; u <= nuo; u++) {
+            if (uwhov[u] == f[2] && uts[u] + 0 > cut + 0) { proof = uts[u] " untraced-owner-decision"; break }
           }
         }
         h++
@@ -4269,15 +4379,23 @@ POSTTUN_BND_SYMBOLIC=""
             # is never post-failure: the flow demonstrably continues
             # past it. The continuation is proven from the machinery
             # own forward-progress data — the first production enter
-            # after the owning window (the stage own retry chain is
-            # cleanup-shaped and structurally absent from the enter
-            # list).
-            split(cand[a], g, "\t")
-            if (ts + 0 <= g[1] + 0) {
+            # after the owning window, or (the 4C-74 correction 1) the
+            # first later same-process untraced-owner decision when no
+            # enter follows (an untraced syscall executing IS production
+            # activity; the cleanup walk own decisions carry traced
+            # cleanup windows and never serve) (the stage own retry
+            # chain is cleanup-shaped and structurally absent from the
+            # enter list).
+            if (ts + 0 <= ats + 0) {
               prf = ""
               for (sp = 1; sp <= ne; sp++) {
                 split(ent[sp], h2, "\t")
                 if (h2[1] + 0 > owncand + 0) { prf = h2[1] " " h2[3]; break }
+              }
+              if (prf == "") {
+                for (u = 1; u <= nuo; u++) {
+                  if (uwhov[u] == dwho && uts[u] + 0 > owncand + 0) { prf = uts[u] " untraced-owner-decision"; break }
+                }
               }
               if (prf != "") { cls = "HANDLED/NON-TERMINAL"; dproof = prf }
               else cls = "POST-FAILURE/CLEANUP"
@@ -4291,13 +4409,22 @@ POSTTUN_BND_SYMBOLIC=""
             # 4C-49 run /etc/hosts openat: the recurring tmpfs_t
             # lnk_file mask shape stole the anchor own denial into
             # POLLING-ONLY and hid the boundary behind a
-            # SOFTWARE-LIFECYCLE verdict).
-            split(cand[a], g, "\t")
-            if (owncand == g[1] && ownwho == g[2]) cls = "STARTUP-CAUSAL"
+            # SOFTWARE-LIFECYCLE verdict). The 4C-74 correction 1: the
+            # anchor may be an untraced-owner DECISION (the UNTRACED-
+            # OWNER anchor) — no traced window exit can equal its ts,
+            # so the anchor-own equality simply never fires for it and
+            # the anchor own decision classifies through the
+            # untraced-owner branch below.
+            if (owncand == ats && ownwho == awhov) cls = "STARTUP-CAUSAL"
             else {
               ii = 0
               for (j = 1; j <= m; j++) {
-                if (pre[j] == a) continue
+                # The 4C-74 correction 1: with the UNTRACED-OWNER anchor
+                # the fallback candidate (index a) is a REGULAR
+                # candidate — its own window exit can own a denial
+                # chain and must stay in the lookup; the skip below is
+                # for the traced exit-anchor only.
+                if (pre[j] == a && untr == 0) continue
                 split(cand[pre[j]], f2, "\t")
                 if (f2[1] == owncand) { ii = pre[j]; break }
               }
@@ -4314,9 +4441,14 @@ POSTTUN_BND_SYMBOLIC=""
                   split(ent[e2], h2, "\t")
                   if (h2[1] + 0 > cut + 0 && (h2[3] != f2[3] || h2[4] != f2[5])) { prf = h2[1] " " h2[3]; break }
                 }
+                if (prf == "") {
+                  for (u = 1; u <= nuo; u++) {
+                    if (uwhov[u] == dwho && uts[u] + 0 > cut + 0) { prf = uts[u] " untraced-owner-decision"; break }
+                  }
+                }
                 if (prf != "") { cls = "HANDLED/NON-TERMINAL"; dproof = prf }
                 else {
-                  d = ts - g[1]
+                  d = ts - ats
                   if (d <= 0) cls = "STARTUP-CAUSAL"
                   else cls = "POST-FAILURE/CLEANUP"
                 }
@@ -4332,13 +4464,21 @@ POSTTUN_BND_SYMBOLIC=""
             # the EOF, the stateDir hosts write and the network child
             # all followed). Anchor-order outranks the owner gap: a
             # pre-anchor unowned decision with later production
-            # progress is tolerated, not terminal.
-            split(cand[a], g2, "\t")
-            if (ts + 0 <= g2[1] + 0) {
+            # progress is tolerated, not terminal. The 4C-74
+            # correction 1: the progress evidence may be a later
+            # same-process untraced-owner decision (the UNTRACED-OWNER
+            # anchor own decision classifies here at d=0 —
+            # STARTUP-CAUSAL, the terminal owner itself).
+            if (ts + 0 <= ats + 0) {
               prf = ""
               for (sp = 1; sp <= ne; sp++) {
                 split(ent[sp], h2, "\t")
                 if (h2[1] + 0 > ts + 0) { prf = h2[1] " " h2[3]; break }
+              }
+              if (prf == "") {
+                for (u = 1; u <= nuo; u++) {
+                  if (uwhov[u] == dwho && uts[u] + 0 > ts + 0) { prf = uts[u] " untraced-owner-decision"; break }
+                }
               }
               if (prf != "") { cls = "HANDLED/NON-TERMINAL"; dproof = prf }
             }
@@ -4347,8 +4487,7 @@ POSTTUN_BND_SYMBOLIC=""
         if (cls == "" && shp[sh] >= 2) cls = "POLLING-ONLY"
         else if (cls == "" && a == 0) cls = "UNTIMED"
         else if (cls == "") {
-          split(cand[a], g, "\t")
-          d = ts - g[1]
+          d = ts - ats
           if (d <= 0) cls = "STARTUP-CAUSAL"
           else cls = "POST-FAILURE/CLEANUP"
         }
@@ -4368,6 +4507,7 @@ POSTTUN_BND_SYMBOLIC=""
   POSTTUN_ANCHOR_WHO="$(grep -a '^ANCHOR_WHO=' "$POSTTUN_ANCHOR_TMP" 2>/dev/null | cut -d= -f2 | head -1 || true)"
   POSTTUN_ANCHOR_SYS="$(grep -a '^ANCHOR_SYS=' "$POSTTUN_ANCHOR_TMP" 2>/dev/null | cut -d= -f2 | head -1 || true)"
   POSTTUN_ANCHOR_FALLBACK="$(grep -a '^ANCHOR_FALLBACK=' "$POSTTUN_ANCHOR_TMP" 2>/dev/null | cut -d= -f2 | head -1 || true)"
+  POSTTUN_ANCHOR_UNTRACED="$(grep -a '^ANCHOR_UNTRACED=' "$POSTTUN_ANCHOR_TMP" 2>/dev/null | cut -d= -f2 | head -1 || true)"
   POSTTUN_ANCHOR_LINE="$(grep -a '^ANCHOR_LINE=' "$POSTTUN_ANCHOR_TMP" 2>/dev/null | cut -d= -f2- | head -1 || true)"
   POSTTUN_ZONE_TS="$(grep -a '^ZONE_TS=' "$POSTTUN_ANCHOR_TMP" 2>/dev/null | sed 's/^ZONE_TS=//' | head -1 || true)"
   POSTTUN_ZONE2_TS="$(grep -a '^ZONE2_TS=' "$POSTTUN_ANCHOR_TMP" 2>/dev/null | sed 's/^ZONE2_TS=//' | head -1 || true)"
@@ -4376,7 +4516,16 @@ POSTTUN_BND_SYMBOLIC=""
   [ "$POSTTUN_ANCHOR_FALLBACK" = "1" ] && POSTTUN_ANCHOR_FB_NOTE="; FALLBACK — the terminal production failure was not isolated, later progress follows every candidate"
   if [ -n "$POSTTUN_ANCHOR_TS" ]; then
     POSTTUN_CLASS_REF_TS="$POSTTUN_ANCHOR_TS"
-    POSTTUN_REF_ANCHOR="the terminal failing production syscall exit ($POSTTUN_ANCHOR_WHO sys_$POSTTUN_ANCHOR_SYS at trace-ts=$POSTTUN_ANCHOR_TS; the 4C-48 corrected contract: a failure owns the primary boundary only when no forward production progress follows it$POSTTUN_ANCHOR_FB_NOTE)"
+    if [ "$POSTTUN_ANCHOR_UNTRACED" = "1" ]; then
+      # The 4C-74 correction 1 UNTRACED-OWNER anchor: the terminal
+      # production failure owning syscall was not traced (its
+      # enter/exit records absent — the tracer armed list does not
+      # cover it); the anchor is the failure own traced SELinux
+      # decision. The owning syscall name is never invented.
+      POSTTUN_REF_ANCHOR="the terminal failing production syscall (UNTRACED-OWNER — the owning syscall's enter/exit records were not captured; the traced evidence is the failure's own SELinux decision) ($POSTTUN_ANCHOR_WHO at trace-ts=$POSTTUN_ANCHOR_TS; the 4C-48 corrected contract: a failure owns the primary boundary only when no forward production progress follows it$POSTTUN_ANCHOR_FB_NOTE)"
+    else
+      POSTTUN_REF_ANCHOR="the terminal failing production syscall exit ($POSTTUN_ANCHOR_WHO sys_$POSTTUN_ANCHOR_SYS at trace-ts=$POSTTUN_ANCHOR_TS; the 4C-48 corrected contract: a failure owns the primary boundary only when no forward production progress follows it$POSTTUN_ANCHOR_FB_NOTE)"
+    fi
   else
     POSTTUN_CLASS_REF_TS="$POSTTUN_WINDOW_TS"
     POSTTUN_REF_ANCHOR="the first failing process exit (fallback; no failing non-kill syscall-exit recorded)"
@@ -8693,7 +8842,11 @@ EOF
       # zone or the failing comm own exit).
       echo "--- the terminal-failure proof (the 4C-48 contract: absence of later forward production progress):"
       printf '%s\n' "${POSTTUN_ANCHOR_LINE:-(the anchor record: absent)}"
-      echo "  the terminal failing syscall: sys_$POSTTUN_ANCHOR_SYS by $POSTTUN_ANCHOR_WHO at trace-ts=$POSTTUN_ANCHOR_TS"
+      if [ "$POSTTUN_ANCHOR_UNTRACED" = "1" ]; then
+        echo "  the terminal failing syscall: UNTRACED-OWNER (the owning syscall enter/exit records were not captured; the anchor is the failure own traced SELinux decision) by $POSTTUN_ANCHOR_WHO at trace-ts=$POSTTUN_ANCHOR_TS"
+      else
+        echo "  the terminal failing syscall: sys_$POSTTUN_ANCHOR_SYS by $POSTTUN_ANCHOR_WHO at trace-ts=$POSTTUN_ANCHOR_TS"
+      fi
       echo "  NO non-cleanup production enter follows it before ${POSTTUN_ZONE_TS:--} (the forward-production-enter scan found none; handled failures: ${POSTTUN_NHANDLED:-0})"
       echo "  the transition into the error/exit path: the failing comm subsequent records (the failure window above) end in the terminal exit"
       POSTTUN_BOUNDARY="SOFTWARE-LIFECYCLE ($POSTTUN_REF_DESC at=T0+${POSTTUN_T0_TO_FAIL}s precedes every SELinux decision and no forward production progress follows the anchor failure — no SELinux blocker owns the lifetime failure; the next phase owner is the software/lifecycle finding)"
