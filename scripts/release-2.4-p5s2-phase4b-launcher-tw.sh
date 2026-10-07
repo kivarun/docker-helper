@@ -7206,9 +7206,9 @@ REBUILD-STAGE=NOT-REACHED}"
   POSTTUN_BKD_STATE_FILE_LABEL="NOT-REACHED"
   POSTTUN_BKD_STATE_FILE_LABEL_BAD=0
   POSTTUN_BKD_STATE_FILE_LABEL_N=0
-  BKD_OWN_CAT="$(printf '%s\n' "${POSTTUN_BKD_OPDIR_LABEL:-}" | sed -n 's/.*docker_helper_builder_state_t:s0:c\([0-9]*\).*/\1/p' | head -1 || true)"
+  BKD_OWN_CAT="$(printf '%s\n' "${POSTTUN_BKD_OPDIR_LABEL:-}" | sed -n 's/.*docker_helper_builder_state_t:s0:\(c[0-9]*\).*/\1/p' | head -1 || true)"
   if [ -z "$BKD_OWN_CAT" ]; then
-    BKD_OWN_CAT="$(printf '%s\n' "${POSTTUN_BKD_STATE_TREE_RECORDS:-}" | grep -aoE 'tcontext=system_u:object_r:docker_helper_builder_state_t:s0:c[0-9]+' | head -1 | sed 's/.*s0:c//' || true)"
+    BKD_OWN_CAT="$(printf '%s\n' "${POSTTUN_BKD_STATE_TREE_RECORDS:-}" | grep -aoE 'tcontext=system_u:object_r:docker_helper_builder_state_t:s0:c[0-9]+' | head -1 | sed 's/.*s0://' || true)"
   fi
   echo "  the §13 created-state-file inventory (the sampler's independent label proof; the own category: ${BKD_OWN_CAT:-(not derivable)}):"
   if [ -s "$EVIDENCE_DIR/sfile-keys" ]; then
