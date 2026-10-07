@@ -2335,7 +2335,20 @@ allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };
 #     { read open }, ONE combined decision, never 4C-70a/4C-70b; the same
 #     mask number 0x40002 appeared before as the 4C-59 source-exec
 #     image-read grant on the buildkitd_exec_t pair — a same-mask
-#     coincidence NEVER merges two planes).
+#     coincidence NEVER merges two planes);
+#   4C-71: the SAME file rule widened IN PLACE by the 4C-70 canonical
+#     run's own terminal { lock } boundary (ONE rule, never split; the
+#     create/read/open grants stay):
+#     allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock };
+#     (the terminal record requested=denied=0x40 tclass=file result=-13
+#     at 360.541014 sat between the successful entry-creation openat
+#     (its exit returned fd 5 at 360.540992) and the same process's
+#     close(fd: 5) — the lock authority is proven by the KERNEL
+#     DECISION, never inferred from the path name buildkitd.lock; the
+#     trace-side fd identity (the openat's returned 0x5, the next
+#     records' fd: 5) is recorded, and the lock syscall's own enter
+#     record was not captured that run — the tracer gap is recorded
+#     as-is, the exact syscall form (flock vs fcntl) stays unclaimed).
 #
 # STILL DELIBERATELY ABSENT (each is a separate live-evidence phase):
 #   - siginh, noatsecure, rlimitinh, dyntransition, setexec on the
@@ -2365,15 +2378,16 @@ allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };
 #     mask; every remaining permission is its own live-evidence phase;
 #     nothing on the sibling root/runtime types, and every other
 #     quarantined surface stays ungranted);
-#   - buildkitd_t -> builder_state_t:file write/getattr/setattr/lock/
-#     unlink/append/map/execute/execute_no_trans/execmod (the 4C-69/70
-#     grants are EXACTLY { create read open } on the ONE file rule — the
-#     4C-69 create is the inode-creation hook, the 4C-70 read+open is the
-#     4C-69 canonical run's own terminal COMBINED 0x40002 decision (one
-#     terminal decision, never split into 4C-70a/4C-70b); after a
-#     successful open the kernel may separately require
-#     write/getattr/setattr/lock and each next live terminal decision is
-#     its own phase — the { create read open } grant is NOT a
+#   - buildkitd_t -> builder_state_t:file write/getattr/setattr/unlink/
+#     append/map/execute/execute_no_trans/execmod (the 4C-69/70/71
+#     grants are EXACTLY { create read open lock } on the ONE file rule —
+#     the 4C-69 create is the inode-creation hook, the 4C-70 read+open
+#     is the 4C-69 canonical run's terminal COMBINED 0x40002 decision
+#     (one terminal decision, never split), the 4C-71 lock is the 4C-70
+#     canonical run's own terminal 0x40 decision (the fd-use hook on the
+#     just-opened file — NOT a writable-file member); after the lock the
+#     kernel may separately require write/getattr/setattr and each next
+#     live terminal decision is its own phase — the grant is NOT a
 #     writable-file bundle and no conventional bundle is prepared in
 #     advance; the standing RootlessKit state-tree file rule is a
 #     different subject and a different owner and is NOT a template for
@@ -2408,10 +2422,10 @@ allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };
 # target-side entrypoint, the 4C-62 target-side { read execute }
 # image-load boundary, the 4C-63/64 shared state-root { getattr search }
 # pair, the 4C-65/66/67/68 categorized state-tree dir quadruple, and the
-# 4C-69/70 categorized state-tree file { create read open } grants are
-# now GRANTED, and the startup advances to the next hook (the state-tree
-# entry layer's own follow-up hooks — write/getattr/setattr/lock on the
-# opened state file, or the next surface the kernel names; live evidence
+# 4C-69/70/71 categorized state-tree file { create read open lock }
+# grants are now GRANTED, and the startup advances to the next hook
+# (the post-lock follow-up hooks — write/getattr/setattr on the locked
+# state file, or the next surface the kernel names; live evidence
 # only; the harness captures the new terminal boundary).
 #
 # buildctl and buildkit-runc stay SEPARATE future executable boundaries:
@@ -3117,7 +3131,76 @@ allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr sear
 # it operation-scoped in effect (a c1 subject cannot reach a c2 per-op
 # tree — the cross-operation reachability proof (4C-37) stays mandatory
 # and the cross-operation gate stays OPEN/Critical until it holds).
-allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open };
+allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock };
+
+# --- 4C-71: the categorized operation-state file lock — the 4C-70 file
+# --- rule widened IN PLACE (ONE rule, never split) ---
+#
+# The 4C-70 canonical run's (37606244308) terminal record, the FIRST
+# post-open record of the buildkitd process — the entry-creation openat
+# passed WHOLE (zero in-window SELinux decisions: the 4C-69 create AND
+# the 4C-70 read/open hooks both passed silently inside ONE syscall) and
+# returned a real fd, and the very next production record was this lock
+# denial:
+#
+#   buildkitd-43067 360.540932 sys_openat(AT_FDCWD,
+#     "/var/lib/docker-helper-builder/ops/op_192a9690...", O_RDONLY|
+#     O_CREAT|O_CLOEXEC, mode 0600) — no in-window decisions
+#   buildkitd-43067 360.540992 sys_openat -> 0x5   (fd 5)
+#   buildkitd-43067 360.541014 selinux_audited: requested=0x40
+#     denied=0x40 audited=0x40 result=-13
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:docker_helper_builder_state_t:s0:c1
+#     tclass=file
+#   buildkitd-43067 360.541029 sys_close(fd: 5) -> 0x0
+#   buildkitd-43067 360.542124 sys_exit_group(1); dead at T0+0.078s.
+#
+# THE AUTHORITY IS THE KERNEL DECISION, never the path name: the file
+# is named buildkitd.lock by the state-tree layout, but the lock
+# authority is granted because decode(tclass=file, denied=0x40) =
+# exactly { lock } (the COMMON_FILE_SOCK_PERMS bit 6; setattr=0x20 and
+# relabelfrom=0x80 are the anti-collision neighbors), NOT because of
+# the name. The trace-side fd identity is recorded: the lock decision
+# sat between the openat whose exit returned 0x5 and the close(fd: 5)
+# of the same process — fd 5 was the just-opened state-tree file and
+# nothing else; the lock syscall's own ENTER record was not captured
+# that run (the tracer gap under buffer pressure) and the exact
+# syscall form (flock vs fcntl F_SETLK) stays UNCLAIMED — the fresh
+# run's captured enter record (when the tracer catches it) owns the
+# syscall-form fact, never a reconstruction.
+#
+# NOT A WRITABLE-FILE BUNDLE: no write/getattr/setattr/unlink/append/
+# map/execute rides this widening. The standing RootlessKit
+# state-tree file rule { create open read write getattr setattr lock }
+# carries lock TOO — but that rule is a DIFFERENT subject and a
+# DIFFERENT owner and is NOT a template: the BuildKitd rule widens by
+# EXACTLY the live terminal bit +{ lock } and nothing else. The
+# post-lock follow-up hooks (write/getattr/setattr) stay their own
+# live-evidence phases, and the ACTUAL production records after a
+# successful lock decide the next boundary — never the permission
+# names, never a conventional bundle.
+# MCS: the TE rule encodes NO categories — the rule is the bare pair;
+# the c1 -> c1 admissibility stays the existing constraints' job (both
+# domains are proven mcs_constrained_type members). The created state
+# file's own label (builder_state_t:s0:c1, the sampler's independent
+# first/last/all read-backs — the buildkitd.lock proof) must keep
+# converging in every fresh run; a divergent label is the fail-closed
+# BLOCKED shape, never policy-fixed. SCOPE — READ CAREFULLY: the rule
+# is type-wide TE authority (buildkitd_t -> EVERY builder_state_t:file
+# create/read/open/lock), NOT path-scoped; the MCS category constraints
+# are what keep it operation-scoped in effect (a c1 subject cannot
+# reach a c2 per-op tree — the cross-operation reachability proof
+# (4C-37) stays mandatory and the cross-operation gate stays
+# OPEN/Critical until it holds).
+# The frozen planes stay frozen: the three exec planes (the source
+# { execute read open }, the transition { transition }, the target
+# { entrypoint read execute }), the shared state-root rule (exactly
+# { getattr search }), and the categorized state-tree dir rule (exactly
+# { getattr search write add_name } — no remove_name/create/setattr/
+# rmdir/rename; the dir-mutation -> file-object transition stays
+# explicit).
+# The module-borne buildkitd-named allow total stays EXACTLY SIX — the
+# 4C-69/70 rule is widened IN PLACE, never a seventh rule.
 
 # --- 4C-70: the categorized operation-state file { read open } — the
 # --- 4C-69 file rule widened IN PLACE (ONE rule, never split; never
