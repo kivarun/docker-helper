@@ -763,6 +763,29 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
     # items A/B = 0). A dead-in-window pid falls out at the drain own
     # purge; the drain alignment fallback keeps the batch honest.
     GIDENTQ="$GIDENTQ$GPID "
+    # The 4C-71 correction (reproduced run 37612732286): the R-state
+    # dance pid's ASYNC ident lost the fork-storm race — the dance pid
+    # (born in the storm peak, CPU-bound inside its own mount dance,
+    # state=R at discovery) died before the queued background readlink
+    # subshell drained its entry, so no GATE-HOLDER-IDENT record was
+    # ever written for it, the holder's effective ns/mnt stayed empty,
+    # and the gate items A/B came out 0 — the phase BLOCKED although
+    # the dance itself was clean (the documented residual race's exact
+    # shape: "a pid that dies before its own async readlink completes
+    # gets no ident"). For an R-state discovery the ns readlink runs
+    # INLINE (ONE fork in the discovery path — the exact pid the gate
+    # items A/B need, bound at the discovery instant while it is still
+    # alive); the S-state discoveries keep the async queue and the bulk
+    # path stays fork-free (the 4C-55 correction's shape preserved).
+    # The discovery-emitted GATE-TICK below then carries the real
+    # ns/mnt token, and the holder's effective-ns extraction (which
+    # reads the IDENT record first and the TICK lines otherwise) binds
+    # without needing the async record at all. The pid stays queued:
+    # the async drain still completes the ns/user pair when it wins.
+    if [ "$GSTV" = "R" ]; then
+      GRNSM="$(readlink "/proc/$GPID/ns/mnt" 2>/dev/null || true)"
+      [ -n "$GRNSM" ] && GNSM[$GPID]="$GRNSM"
+    fi
     printf '%s GATE-HOLDER-FIRST pid=%s comm=%s state=%s ppid=%s ctx=%s ns/mnt=%s ns/user=pending starttime=%s\n' \
       "$GTS" "$GPID" "$GLC" "$GSTV" "$GPP" "$GCTXV" "${GNSM[$GPID]:-pending}" "${GSTART:-(none)}"
     # The 4C-52 correction: the discovery moment IS a tick observation
