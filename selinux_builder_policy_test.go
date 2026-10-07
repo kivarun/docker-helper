@@ -4414,14 +4414,20 @@ func TestSELinuxPolicyRootlesskitIsolation(t *testing.T) {
 //	     other subjects' standing builder_state_t:dir rules are their own
 //	     owners and never count as this owner's contribution);
 //	  F. the categorized operation-state FILE surface: buildkitd_t ->
-//	     builder_state_t:file — exactly the bare { create } rule (the 4C-69
-//	     grant is the 4C-68 canonical run's own terminal boundary — the
-//	     class-aware pair (tclass=file, 0x8), the same bit number on the dir
-//	     class being dir:create and a DIFFERENT authority; a NEW pair+class
-//	     plane, NEVER a widening of the dir rule; file:create is NOT a
-//	     file-IO bundle — open/read/write/getattr/setattr/lock/unlink/append/
-//	     map/execute stay their own live-evidence phases; the companion
-//	     init_t/builder_t/rootlesskit_t builder_state_t:file rules are their
+//	     builder_state_t:file — exactly the ONE { create read open } rule
+//	     (the 4C-69 create is the 4C-68 canonical run's own terminal
+//	     boundary — the class-aware pair (tclass=file, 0x8), the same bit
+//	     number on the dir class being dir:create and a DIFFERENT
+//	     authority, a NEW pair+class plane, NEVER a widening of the dir
+//	     rule; the 4C-70 read+open is the 4C-69 canonical run's own
+//	     terminal COMBINED 0x40002 decision widened IN PLACE — ONE rule,
+//	     never split, never 4C-70a/4C-70b; the grant is NOT a writable-file
+//	     bundle — write/getattr/setattr/lock/unlink/append/map/execute stay
+//	     their own live-evidence phases, and the same-mask 4C-59
+//	     rootlesskit_t -> buildkitd_exec_t:file { read open } plane is a
+//	     DIFFERENT authority the anti-merge mutations pin; the companion
+//	     init_t/builder_t/rootlesskit_t builder_state_t:file rules are
+//	     their
 //	     own owners and never count as this owner's contribution).
 //			- any other allow rule naming a buildkitd type (any source, any
 //			  target, any class, any permission set) violates;
@@ -4436,7 +4442,7 @@ func buildkitdIdentityViolations(policy string) []string {
 	const canonicalEntry = "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute };"
 	const canonicalStateRoot = "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search };"
 	const canonicalStateTree = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name };"
-	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file create;"
+	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open };"
 	// The categorized state-tree dir surface's standing owners (the
 	// exact module lines): the daemon does NOT own one; every other
 	// subject's existing rule is its own owner and must stay unchanged —
@@ -4449,8 +4455,8 @@ func buildkitdIdentityViolations(policy string) []string {
 		canonicalStateTree: true,
 	}
 	// The categorized state-tree file surface's standing owners (the
-	// exact module lines): the daemon's own ONE create rule (the 4C-69
-	// grant) plus the three other subjects' standing rules — every other
+	// exact module lines): the daemon's own ONE { create read open } rule
+	// (the 4C-69/70 grants) plus the three other subjects' standing rules — every other
 	// subject's existing rule is its own owner and must stay unchanged
 	// (the RootlessKit seven-perm shape is NOT a template for BuildKitd;
 	// any NEW or reshaped rule on the pair trips).
@@ -4535,12 +4541,12 @@ func buildkitdIdentityViolations(policy string) []string {
 		}
 	}
 	if stateFileCount != 1 {
-		violations = append(violations, fmt.Sprintf("the buildkitd categorized state-tree file create grant must exist exactly once in the exact canonical form, found %d: %s", stateFileCount, canonicalStateFile))
+		violations = append(violations, fmt.Sprintf("the buildkitd categorized state-tree file { create read open } grant must exist exactly once in the exact canonical form, found %d: %s", stateFileCount, canonicalStateFile))
 	}
 	// The exact module-borne allow-rule total naming a buildkitd type:
 	// the six planes only (A source-exec, B transition, C target-side,
 	// D shared state-root, E categorized state-tree dir, F categorized
-	// state-tree file create) — never "at least".
+	// state-tree file { create read open }) — never "at least".
 	buildkitdNamedAllow := 0
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -4552,7 +4558,7 @@ func buildkitdIdentityViolations(policy string) []string {
 		}
 	}
 	if buildkitdNamedAllow != 6 {
-		violations = append(violations, fmt.Sprintf("the module must carry exactly the six buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name }, the categorized state-tree file create), found %d", buildkitdNamedAllow))
+		violations = append(violations, fmt.Sprintf("the module must carry exactly the six buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name }, the categorized state-tree file { create read open }), found %d", buildkitdNamedAllow))
 	}
 	// The categorized state-tree dir surface has exactly the standing
 	// owners above; a NEW or reshaped rule on the pair (any source,
@@ -4578,7 +4584,7 @@ func buildkitdIdentityViolations(policy string) []string {
 			continue
 		}
 		if strings.Contains(trimmed, " docker_helper_builder_state_t:file ") && !standingStateTreeFileRules[trimmed] {
-			violations = append(violations, "the categorized state-tree file surface has exactly the standing owners (init_t, the manager, the flow, the buildkitd create rule) — every other shape on the pair violates: "+trimmed)
+			violations = append(violations, "the categorized state-tree file surface has exactly the standing owners (init_t, the manager, the flow, the buildkitd { create read open } rule) — every other shape on the pair violates: "+trimmed)
 		}
 	}
 	for _, line := range strings.Split(policy, "\n") {
@@ -4871,12 +4877,12 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		t.Error("the missing-state-tree mutation must trip the buildkitd authority invariants")
 	}
 
-	// The 4C-69 categorized state-tree FILE plane: exactly the bare
-	// create rule, once (the 4C-68 canonical run's own terminal boundary
-	// — the class-aware pair (tclass=file, 0x8); a NEW pair+class plane,
-	// NEVER a widening of the dir rule, which stays byte-for-semantics
-	// the { getattr search write add_name } quadruple).
-	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file create;"
+	// The 4C-70 categorized state-tree FILE plane: exactly the ONE
+	// { create read open } rule, once — the 4C-69 bare create rule
+	// WIDENED IN PLACE by the 4C-69 canonical run's own terminal combined
+	// 0x40002 decision (ONE rule, never split, never 4C-70a/4C-70b; the
+	// old bare form is now a mutation shape below).
+	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open };"
 	var withoutStateFile []string
 	stateFileCount := 0
 	for _, line := range strings.Split(policy, "\n") {
@@ -4888,7 +4894,7 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		withoutStateFile = append(withoutStateFile, line)
 	}
 	if stateFileCount != 1 {
-		t.Errorf("the buildkitd categorized state-tree file create grant must exist exactly once, found %d", stateFileCount)
+		t.Errorf("the buildkitd categorized state-tree file { create read open } grant must exist exactly once, found %d", stateFileCount)
 	}
 	if violations := buildkitdIdentityViolations(strings.Join(withoutStateFile, "\n")); len(violations) == 0 {
 		t.Error("the missing-state-file mutation must trip the buildkitd authority invariants")
@@ -5052,11 +5058,20 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		{"parallel bare write rule beside the canonical quadruple", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir write;"},
 		{"parallel bare add_name rule beside the canonical quadruple", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir add_name;"},
 		{"duplicate of the state-tree rule", canonicalStateTree},
-		// the 4C-69 categorized state-tree FILE plane (exactly the bare
-		// create rule; the missing-rule case is covered by the
-		// withoutStateFile removal above; the dir rule above stays
-		// byte-for-semantics the quadruple — a permission added to the
-		// dir rule is a dir-plane mutation, never the file plane)
+		// the 4C-70 categorized state-tree FILE plane (exactly the ONE
+		// { create read open } rule, widened IN PLACE from the 4C-69 bare
+		// create; the missing-rule case is covered by the withoutStateFile
+		// removal above; the dir rule above stays byte-for-semantics the
+		// quadruple — a permission added to the dir rule is a dir-plane
+		// mutation, never the file plane)
+		// the old 4C-69 bare create form (missing read+open)
+		{"the old 4C-69 bare create form (missing read+open)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file create;"},
+		// missing members of the triple
+		{"the state-file { create read } (missing open)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read };"},
+		{"the state-file { create open } (missing read)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create open };"},
+		{"the state-file { read open } (missing create)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { read open };"},
+		{"the state-file read/open-only without create", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { read open };"},
+		// single-perm instead-of shapes
 		{"the state-file read instead", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file read;"},
 		{"the state-file write instead", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file write;"},
 		{"the state-file open instead", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file open;"},
@@ -5067,35 +5082,69 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		{"the state-file append instead", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file append;"},
 		{"the state-file map instead", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file map;"},
 		{"the state-file execute instead", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file execute;"},
-		// file:create is NOT a file-IO bundle: every create+X partial is
-		// a forbidden bundle shape, and the RootlessKit seven-perm shape
-		// copied whole is the explicit anti-template case
-		{"the state-file pair { create open }", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create open };"},
-		{"the state-file pair { create write }", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create write };"},
-		{"the state-file pair { create getattr }", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create getattr };"},
-		{"the state-file pair { create setattr }", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create setattr };"},
-		{"the state-file pair { create read }", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read };"},
+		// the fourth-permission sweep on the triple: the combined
+		// { create read open } grant is NOT a writable-file bundle — every
+		// post-open follow-up hook (write/getattr/setattr/lock) is its own
+		// live-evidence phase and no forbidden member rides the widening
+		{"the triple + write", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open write };"},
+		{"the triple + getattr", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open getattr };"},
+		{"the triple + setattr", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open setattr };"},
+		{"the triple + lock", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock };"},
+		{"the triple + unlink", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open unlink };"},
+		{"the triple + append", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open append };"},
+		{"the triple + map", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open map };"},
+		{"the triple + execute", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open execute };"},
+		// the conventional bundles copied whole stay forbidden
 		{"the state-file triple { create open write }", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create open write };"},
 		{"the writable-file bundle { create open write getattr setattr }", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create open write getattr setattr };"},
-		{"the RootlessKit shape copied whole", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create open read write getattr setattr lock };"},
-		// the class boundary: the authority is the pair (tclass=file, 0x8)
-		// — the same bit number on the OTHER classes is a DIFFERENT
-		// authority and stays forbidden (dir:create would widen the dir
+		{"the RootlessKit seven-perm shape copied whole", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create open read write getattr setattr lock };"},
+		{"the manager's writable-file shape copied whole", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read write open getattr setattr unlink };"},
+		// the class boundary: the authority is the pair (tclass=file) —
+		// the same permission names on the OTHER classes are DIFFERENT
+		// authorities and stay forbidden (dir:create would widen the dir
 		// rule's class plane; lnk_file/sock_file are other classes of the
-		// per-op tree)
+		// per-op tree); the widened { read open } shape is pinned on the
+		// wrong classes too
 		{"the wrong class (dir:create)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir create;"},
 		{"the wrong class (lnk_file:create)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file create;"},
 		{"the wrong class (sock_file:create)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:sock_file create;"},
+		{"the wrong class (dir:{ read open })", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { read open };"},
+		{"the wrong class (lnk_file:{ read open })", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file { read open };"},
+		{"the wrong class (sock_file:{ read open })", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:sock_file { read open };"},
+		// wrong source/target on the create shape and on the widened shape
 		{"state-file grant from the wrong source (the flow)", "allow docker_helper_rootlesskit_t docker_helper_builder_state_t:file create;"},
 		{"state-file grant from the wrong source (the manager)", "allow docker_helper_builder_t docker_helper_builder_state_t:file create;"},
 		{"state-file grant from the wrong source (the daemon)", "allow docker_helper_t docker_helper_builder_state_t:file create;"},
 		{"state-file grant from the wrong source (the launcher)", "allow docker_helper_builder_launcher_t docker_helper_builder_state_t:file create;"},
+		{"state-file triple from the wrong source (the flow)", "allow docker_helper_rootlesskit_t docker_helper_builder_state_t:file { create read open };"},
+		{"state-file triple from the wrong source (the manager)", "allow docker_helper_builder_t docker_helper_builder_state_t:file { create read open };"},
+		{"state-file triple from the wrong source (the daemon)", "allow docker_helper_t docker_helper_builder_state_t:file { create read open };"},
+		{"state-file triple from the wrong source (the launcher)", "allow docker_helper_builder_launcher_t docker_helper_builder_state_t:file { create read open };"},
 		{"state-file grant toward the wrong target (builder_state_root_t)", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:file create;"},
 		{"state-file grant toward the wrong target (builder_t)", "allow docker_helper_buildkitd_t docker_helper_builder_t:file create;"},
 		{"state-file grant toward the wrong target (builder_runtime_t)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:file create;"},
 		{"state-file grant toward the wrong target (builder_runtime_root_t)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:file create;"},
-		{"brace equivalent of the state-file rule", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create };"},
-		{"second create rule beside the canonical one (a split second rule)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file create;\nallow docker_helper_buildkitd_t docker_helper_builder_state_t:file create;"},
+		{"state-file triple toward the wrong target (builder_state_root_t)", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:file { create read open };"},
+		{"state-file triple toward the wrong target (builder_t)", "allow docker_helper_buildkitd_t docker_helper_builder_t:file { create read open };"},
+		{"state-file triple toward the wrong target (builder_runtime_t)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:file { create read open };"},
+		{"state-file triple toward the wrong target (builder_runtime_root_t)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:file { create read open };"},
+		// THE ANTI-MERGE BOUNDARY (the 4C-59 same-mask plane): the mask
+		// 0x40002 also names the 4C-59 source-exec image-read grant
+		// rootlesskit_t -> buildkitd_exec_t:file { read open } — same
+		// mask, same tclass, a DIFFERENT subject/target/security
+		// plane/semantic object; the exec pair must never carry the
+		// state-file shape, the state-file plane must never widen the
+		// quarantined exec pair, and buildkitd_t -> buildkitd_exec_t:file
+		// open stays UNGRANTED
+		{"anti-merge: the exec pair carrying the state-file shape", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { create read open };"},
+		{"anti-merge: the quarantined exec open widened on the entry triple", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute open };"},
+		// order/brace/split/parallel/duplicate shapes
+		{"order equivalent of the state-file rule", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { open read create };"},
+		{"old brace equivalent of the create-only rule", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create };"},
+		{"split state-file grant (create rule + read open rule)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file create;\nallow docker_helper_buildkitd_t docker_helper_builder_state_t:file { read open };"},
+		{"split state-file grant (create open rule + read rule)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create open };\nallow docker_helper_buildkitd_t docker_helper_builder_state_t:file read;"},
+		{"parallel bare create rule beside the canonical triple", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file create;"},
+		{"parallel bare read rule beside the canonical triple", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file read;"},
 		{"duplicate of the state-file rule", canonicalStateFile},
 		{"broad attribute target on the file plane", "allow docker_helper_buildkitd_t file_type:file create;"},
 		{"broad attribute source on the file plane", "allow domain docker_helper_builder_state_t:file create;"},
@@ -5243,7 +5292,17 @@ var kernelProcessPerms = []string{
 //     the (tclass, permission-set) TUPLE and the two tuples are
 //     DISTINCT authorities — (class=file,0x8) != (class=dir,0x8) (the
 //     4C-68 canonical run's terminal record is the FILE tuple; a
-//     decoder that drops the class loses the security boundary).
+//     decoder that drops the class loses the security boundary);
+//   - the 4C-70 combined file-class decode: decode(file, 0x40002) ==
+//     exactly { read open } (the 4C-69 canonical run's terminal record
+//     requested=denied=0x40002 — ONE kernel decision carrying both
+//     bits, never split into 4C-70a/4C-70b); the anti-collision
+//     neighbors 0x40004={ write open }, 0x40008={ create open },
+//     0x40000={ open }, 0x2={ read } each decode to a DIFFERENT set
+//     and never to { read open }; the dir tuple for the same mask stays
+//     DISTINCT (the class-aware tuple), and the widening's delta pin —
+//     the canonical { create read open } triple minus the
+//     already-granted { create } — equals exactly the denied decode.
 func TestSELinuxPolicyKernelClassmapMaskPins(t *testing.T) {
 	fileIndex := func(perm string) int {
 		for i, p := range append(append([]string{}, kernelCommonFilePerms...), kernelFileOnlyPerms...) {
@@ -5615,6 +5674,60 @@ func TestSELinuxPolicyKernelClassmapMaskPins(t *testing.T) {
 	// dir:create for a file-class denial is the wrong-class error).
 	if got := classDecode("file", 0x8); got == "(dir, create)" {
 		t.Error("kernel classmap decode: the 4C-69 grant candidate must be the file tuple (file, { create }), never the dir tuple (dir, { create }) (the wrong-class error)")
+	}
+	// The 4C-70 combined file-class decode: decode(file, 0x40002) ==
+	// exactly { read open } — the 4C-69 canonical run's (37594876477)
+	// terminal record requested=denied=0x40002 (read=0x2 the common-
+	// prefix bit 1, open=0x40000 the COMMON_FILE_PERMS bit 18), ONE
+	// kernel decision carrying both bits, never split into
+	// 4C-70a/4C-70b. The class-aware tuple form stays mandatory (the
+	// 4C-69 regression above).
+	if got := classDecode("file", 0x40002); got != "(file, read open)" {
+		t.Errorf("kernel classmap decode: file mask 0x40002 must decode to the tuple (file, { read open }), got %s", got)
+	}
+	// Negative discrimination: none of the neighboring/earlier masks
+	// decodes to { read open }: 0x40004={ write open }, 0x40008={
+	// create open }, 0x40000={ open }, 0x2={ read }.
+	for _, neg := range []struct {
+		mask uint
+		want string
+	}{{0x40004, "(file, write open)"}, {0x40008, "(file, create open)"}, {0x40000, "(file, open)"}, {0x2, "(file, read)"}} {
+		if got := classDecode("file", neg.mask); got != neg.want {
+			t.Errorf("kernel classmap decode: file mask %#x must decode to the tuple %s, got %s", neg.mask, neg.want, got)
+		}
+		if got := classDecode("file", neg.mask); got == "(file, read open)" {
+			t.Errorf("kernel classmap decode: file mask %#x must not decode to { read open } (the anti-collision neighbor), got %s", neg.mask, got)
+		}
+	}
+	// THE ANTI-MERGE BOUNDARY (the 4C-70 security regression): the SAME
+	// mask 0x40002 named the 4C-59 source-exec image-read plane
+	// (rootlesskit_t -> buildkitd_exec_t:file { read open }) — same
+	// mask, same tclass, a DIFFERENT subject/target/security
+	// plane/semantic object. The decoder is mask-shaped and stays
+	// plane-blind BY DESIGN — the (scontext,tcontext) identity that
+	// separates the planes is the owner test's authority (pinned by the
+	// anti-merge mutations); the decoder's own duty is the exact bit
+	// decode and the class-aware tuple, and the dir tuple for the same
+	// mask must stay DISTINCT from the file tuple.
+	if classDecode("file", 0x40002) == classDecode("dir", 0x40002) {
+		t.Error("kernel classmap decode: the file/dir tuples for 0x40002 must stay distinct authorities (the tclass-loss error)")
+	}
+	// The 4C-70 delta pin: requested == denied == 0x40002 (the first
+	// combined terminal record needing no standing-bit subtraction),
+	// and the canonical { create read open } triple minus the
+	// ALREADY-GRANTED create bit equals exactly the denied decode
+	// { read open } — the widening's delta is exactly +{ read open },
+	// never the whole requested mask of any earlier boundary and never
+	// a re-grant of the standing create.
+	standing70 := map[string]bool{"create": true}
+	var delta70 []string
+	for _, p := range []string{"create", "read", "open"} {
+		if !standing70[p] {
+			delta70 = append(delta70, p)
+		}
+	}
+	if !samePerms(delta70, decode(0x40002)) {
+		t.Errorf("kernel classmap decode: the canonical { create read open } triple minus the standing { create } must equal the denied decode exactly { read open }, got %v", delta70)
 	}
 }
 
