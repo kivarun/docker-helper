@@ -2382,7 +2382,32 @@ allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };
 #     inode's own runtime label must still be proven independently per
 #     run (the provisioning gate), never inferred from the syscall
 #     pathname; every remaining runtime-root permission and every
-#     builder_runtime_t surface stays its own live-evidence phase).
+#     builder_runtime_t surface stays its own live-evidence phase);
+#   4C-73: the categorized operation-runtime dir getattr — a NEW
+#     pair/plane rule (PLANE H), the FIRST builder_runtime_t authority
+#     of the buildkitd domain (the 4C-72 canonical run 37644134366's
+#     own terminal record — the root-plane search was passed live, the
+#     category handoff c1 -> c1 was proven, and the runtime died at the
+#     runtime-tree getattr hook):
+#     allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir getattr;
+#     (the terminal record requested=denied=0x10 result=-13
+#     scontext=buildkitd_t:s0:c1 tcontext=builder_runtime_t:s0:c1
+#     tclass=dir trace-ts=515.987102, inside the terminal failing
+#     sys_newfstatat(AT_FDCWD, "/run/docker-helper-builder/ops/op_9ee65...",
+#     flag: 0) whose exit 515.987119 is the anchor; the first later enter
+#     515.987147 is the state-tree cleanup-zone boundary itself — the
+#     abandonment chain mechanically shown and the owner confirmed by
+#     the 4C-72 run's own causal machinery; decode(tclass=dir, 0x10) =
+#     exactly { getattr }, the standing dir-class pin the 4C-63/65
+#     getattr grants live-proved; dir:read=0x2 pinned against the 4C-72
+#     deliverable's teardown-walk 0x2 prose misdecode as write;
+#     builder_runtime_t:s0:c1 is the CATEGORIZED per-op plane — the rule
+#     is type-wide TE authority toward every builder_runtime_t:dir, the
+#     MCS category constraints keep it operation-scoped in effect, the
+#     cross-operation reachability proof (4C-37) stays mandatory and the
+#     cross-operation gate stays OPEN/Critical; every remaining
+#     builder_runtime_t dir permission and every other class of the
+#     runtime tree stays its own live-evidence phase).
 #
 # STILL DELIBERATELY ABSENT (each is a separate live-evidence phase):
 #   - siginh, noatsecure, rlimitinh, dyntransition, setexec on the
@@ -2443,11 +2468,15 @@ allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };
 #     is a DIFFERENT subject and a DIFFERENT owner and the daemon
 #     transport rules are trusted control-plane authority — neither is
 #     a template for BuildKitd);
-#   - buildkitd_t -> builder_runtime_t:dir/file/sock_file anything (the
-#     categorized per-op runtime surface stays UNGRANTED — no search,
-#     no getattr, no sock_file access, no socket/connect authority; the
-#     runtime tree is reached only when the kernel names its own live
-#     hook);
+#   - buildkitd_t -> builder_runtime_t:dir search/read/open/write/
+#     add_name/remove_name/create/rmdir/setattr/lock/mounton and
+#     builder_runtime_t:file/sock_file anything (the 4C-73 grant is the
+#     ONE bare getattr rule on the NEW pair — PLANE H, the FIRST
+#     builder_runtime_t authority; dir:getattr is a METADATA hook, not
+#     a traversal/entry/creation bundle: search/read/open and every
+#     mutation stay their own live-evidence phases; no sock_file access,
+#     no socket/connect authority; the runtime tree's remaining surfaces
+#     are reached only when the kernel names its own live hook);
 #   - the 4C-61 run's inherited-fd fifo_file write denials (the fd
 #     revalidation under the new domain toward the builder_t and
 #     rootlesskit_t fifos) stay UNGRANTED — the exec progressed past
@@ -2471,11 +2500,12 @@ allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };
 # image-load boundary, the 4C-63/64 shared state-root { getattr search }
 # pair, the 4C-65/66/67/68 categorized state-tree dir quadruple, the
 # 4C-69/70/71 categorized state-tree file { create read open lock }
-# grants, and the 4C-72 shared runtime-root dir search grant are now
+# grants, the 4C-72 shared runtime-root dir search grant, and the 4C-73
+# categorized runtime-tree dir getattr grant are now
 # GRANTED, and the startup advances to the next hook
-# (the post-search follow-up hooks — the runtime-tree/sock_file surface
-# when the kernel names it, or the next surface; live evidence
-# only; the harness captures the new terminal boundary).
+# (the post-getattr follow-up hooks — the runtime-tree search/sock_file/
+# file surface when the kernel names it, or the next surface; live
+# evidence only; the harness captures the new terminal boundary).
 #
 # buildctl and buildkit-runc stay SEPARATE future executable boundaries:
 # the .fc carries NO rule for them, no directory regex covers the
@@ -3200,6 +3230,105 @@ allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read
 #
 allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search;
 
+# --- 4C-73: the categorized operation-runtime dir getattr — a NEW
+# --- pair/plane (PLANE H), the FIRST builder_runtime_t authority of the
+# --- buildkitd domain; the bare singleton, never a widening of any
+# --- existing rule ---
+#
+# The 4C-72 canonical run's (37644134366) terminal record, live at the
+# END of the buildkitd process's own lifetime (the 4C-72 root-plane
+# search took effect — zero builder_runtime_root_t:dir search denials in
+# the whole span — and the walk passed the shared runtime root and
+# reached the categorized per-op runtime tree, the category handoff
+# c1 -> c1 proven live; the runtime-tree GETATTR hook became the
+# terminal):
+#
+#   buildkitd-57615 515.987019 sys_openat(AT_FDCWD,
+#     "/var/lib/docker-helper-builder/ops/op_9ee65...",
+#     O_RDONLY|O_CREAT|O_CLOEXEC, mode 0600) -> fd 5 (the state-file
+#     entry creation passed WHOLE, zero in-window decisions)
+#   buildkitd-57615 515.987081 sys_newfstatat(AT_FDCWD,
+#     "/run/docker-helper-builder/ops/op_9ee65...", statbuf, flag: 0)
+#   buildkitd-57615 515.987102 selinux_audited: requested=0x10
+#     denied=0x10 audited=0x10 result=-13
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:docker_helper_builder_runtime_t:s0:c1
+#     tclass=dir
+#   buildkitd-57615 515.987119 sys_newfstatat -> 0xfffffffffffffff3
+#     (the anchor; -EACCES)
+#   buildkitd-57615 515.987130 sys_close(fd: 5) (the first subsequent
+#     record of the same process)
+#   buildkitd-57615 515.987147 sys_unlinkat(AT_FDCWD,
+#     "/var/lib/docker-helper-builder/ops/op_9ee65...", flag: 0) — the
+#     state-tree cleanup-zone boundary itself (ZONE2 begins here; the
+#     terminal anchor is genuine PRE-CLEANUP ownership).
+#
+# The span's own terminal buildkitd decision AFTER the anchor is the
+# failure-response teardown walk's own builder_state_t:dir read (0x2,
+# trace-ts=515.987205) — POST-FAILURE/CLEANUP, never the next phase's
+# owner; the 4C-72 deliverable's prose called that record "write" — the
+# correction: dir:read=0x2 (the kernel classmap's common-prefix bit 1;
+# the dir-class write bit is 0x4). The correction is pinned in the
+# decoder regressions so the misdecode cannot re-enter the machinery.
+#
+# THE GRANT IS THE BARE SINGLETON — exactly { getattr } on the NEW pair,
+# the METADATA hook only:
+#   - decode(tclass=dir, 0x10) = exactly { getattr } — the standing
+#     kernel-side dir-class pin the 4C-63/65 getattr grants live-proved;
+#     NO permission inference from the loaded policy's perms-file
+#     numbering (the class-aware decode regression pins the tuple
+#     (dir, { getattr }));
+#   - requested == denied, so no subtraction of standing bits is needed
+#     (the requested-vs-denied rule degrades to the exact delta; a
+#     decision with denied=0 produces no AVC and no grant — the forward
+#     syscall/result evidence decides progress);
+#   - dir:getattr is NOT a traversal/entry/creation bundle: it grants
+#     the metadata hook on the directory object itself and NOT search/
+#     read/open/write/add_name/remove_name/create/rmdir/setattr/lock/
+#     mounton — the runtime tree's remaining dir permissions stay their
+#     own live-evidence phases (the next terminal decision's own live
+#     set owns the next phase — possibly builder_runtime_t:dir search,
+#     a builder_runtime_t sock_file/file hook, or something unrelated;
+#     no speculation is authority);
+#   - NOTHING on builder_runtime_t:file or builder_runtime_t:sock_file,
+#     no socket/connect — the daemon's sock_file transport authority is
+#     a DIFFERENT subject and a DIFFERENT owner and must never leak
+#     into this plane;
+#   - nothing on the sibling root/state types (builder_runtime_root_t,
+#     builder_state_root_t, builder_state_t) — PLANE G stays the bare
+#     search singleton and is NOT widened to { search getattr } (the
+#     root-plane getattr has no live evidence);
+#   - no process/process2 permission, no capability/cap_userns, no
+#     range_transition;
+#   - the frozen planes stay frozen: the three exec planes (the source
+#     { execute read open }, the transition { transition }, the target
+#     { entrypoint read execute }), the shared state-root rule (exactly
+#     { getattr search }), the categorized state-tree dir rule (exactly
+#     { getattr search write add_name }), the categorized state-tree
+#     file rule (exactly { create read open lock }), and the shared
+#     runtime-root rule (exactly { search }).
+# MCS: the TE rule encodes NO categories — the rule is the bare pair;
+# the c1 -> c1 admissibility stays the existing constraints' job (both
+# domains are proven mcs_constrained_type members). The op_<id> runtime
+# directory's own label is proven separately (the kernel-label sampler's
+# first/last/all read-backs and the live stat, all
+# builder_runtime_t:s0:c1 — the 4C-72 §9 instrument carries forward) —
+# never inferred from an AVC's tcontext.
+# SCOPE — READ CAREFULLY: this is the FIRST BuildKitd authority on
+# docker_helper_builder_runtime_t. The rule is type-wide TE authority
+# (buildkitd_t -> EVERY builder_runtime_t:dir getattr), NOT path-scoped;
+# the MCS category constraints are what keep it operation-scoped in
+# effect (a c1 subject cannot reach a c2 per-op tree — the
+# cross-operation reachability proof (4C-37) stays mandatory and the
+# cross-operation gate stays OPEN/Critical until it holds). The
+# category-scoped effect is NOT the 4C-37 isolation proof.
+# The companion runtime owners (init_t provisioning, the manager's own
+# runtime management + relabel, the flow traversal, the daemon
+# transport) are DIFFERENT subjects and DIFFERENT owners — their
+# builder_runtime_t/builder_runtime_root_t rules stay byte-unchanged,
+# never merged and never templates.
+allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir getattr;
+
 # --- 4C-71: the categorized operation-state file lock — the 4C-70 file
 # --- rule widened IN PLACE (ONE rule, never split) ---
 #
@@ -3267,8 +3396,10 @@ allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search;
 # rmdir/rename; the dir-mutation -> file-object transition stays
 # explicit).
 # The 4C-69/70/71 file rule is widened IN PLACE, never split; the 4C-72
-# shared runtime-root search is a NEW pair/plane rule (PLANE G) — the
-# module-borne buildkitd-named allow total stays EXACTLY SEVEN.
+# shared runtime-root search is a NEW pair/plane rule (PLANE G); the
+# 4C-73 categorized runtime-tree getattr is a NEW pair/plane rule
+# (PLANE H) — the module-borne buildkitd-named allow total stays
+# EXACTLY EIGHT.
 
 # --- 4C-72: the shared runtime-root dir search — a NEW pair/plane rule
 # --- (PLANE G), never a widening of the state-tree rules ---
@@ -3431,8 +3562,10 @@ allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search;
 # rmdir/rename; the dir-mutation -> file-object transition stays
 # explicit).
 # The 4C-69/70/71 file rule is widened IN PLACE, never split; the 4C-72
-# shared runtime-root search is a NEW pair/plane rule (PLANE G) — the
-# module-borne buildkitd-named allow total stays EXACTLY SEVEN.
+# shared runtime-root search is a NEW pair/plane rule (PLANE G); the
+# 4C-73 categorized runtime-tree getattr is a NEW pair/plane rule
+# (PLANE H) — the module-borne buildkitd-named allow total stays
+# EXACTLY EIGHT.
 
 # --- 4C-62: the target-side image-load boundary — the 4C-61 rule widened
 # --- IN PLACE (ONE rule, never split) ---
