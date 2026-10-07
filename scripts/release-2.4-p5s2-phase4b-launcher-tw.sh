@@ -2113,13 +2113,13 @@ RK_BKD_LABEL_OK=1
   sesearch --allow -s "$LAUNCHER_DOMAIN" -t docker_helper_rootlesskit_exec_t -c file /sys/fs/selinux/policy || true
 
   echo "=== the buildkitd source-exec authority (the 4C-61 composition: the source-exec { execute read open } grant + the pointed process transition + the target-domain entrypoint; the loaded-policy facts must match the transferred source exactly) ==="
-  echo "--- the transferred source's own non-comment buildkitd lines (must be the EXACT declarations, the ONE structural transition, the ONE { execute read open } grant, the ONE bare transition grant, the ONE { entrypoint read execute } grant, the ONE state-root { getattr search } grant, the ONE categorized state-tree dir { getattr search write add_name } grant, and the ONE categorized state-tree file { create read open lock } grant — no other allow):"
+  echo "--- the transferred source's own non-comment buildkitd lines (must be the EXACT declarations, the ONE structural transition, the ONE { execute read open } grant, the ONE bare transition grant, the ONE { entrypoint read execute } grant, the ONE state-root { getattr search } grant, the ONE categorized state-tree dir { getattr search write add_name } grant, the ONE categorized state-tree file { create read open lock } grant, and the ONE shared runtime-root bare dir search grant — no other allow):"
   grep -an 'docker_helper_buildkitd' "$TRANSFERRED/docker-helper.te" | grep -av ':[0-9]*:#' || true
   echo "--- the transferred source's buildkitd .fc lines:"
   grep -an 'docker_helper_buildkitd' "$TRANSFERRED/docker-helper.fc" | grep -av ':[0-9]*#' || true
   BKD_SRC_ALLOW_COUNT="$(grep -aE '^allow .*docker_helper_buildkitd' "$TRANSFERRED/docker-helper.te" | grep -ac . || true)"
   BKD_SRC_ALLOW_LINES="$(grep -aE '^allow .*docker_helper_buildkitd' "$TRANSFERRED/docker-helper.te" || true)"
-  echo "  module-borne allow rules naming a buildkitd type: $BKD_SRC_ALLOW_COUNT (must be 6)"
+  echo "  module-borne allow rules naming a buildkitd type: $BKD_SRC_ALLOW_COUNT (must be 7)"
   printf '%s\n' "$BKD_SRC_ALLOW_LINES" | sed 's/^/  the rule: /'
   echo "--- sesearch --allow -t docker_helper_buildkitd_exec_t (raw; sesearch expands the file_type/exec_type attributes, so the base policy's attribute rules dominate this print — RECORDED here, never merged into the verdict; the CONCRETE per-subject queries below are the gate):"
   sesearch --allow -t docker_helper_buildkitd_exec_t /sys/fs/selinux/policy 2>/dev/null | grep -aE '^allow docker_helper_buildkitd' || true
@@ -2131,8 +2131,9 @@ RK_BKD_LABEL_OK=1
     || [ "$(printf '%s\n' "$BKD_SRC_ALLOW_LINES" | grep -acF 'allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute };' || true)" != "1" ] \
     || [ "$(printf '%s\n' "$BKD_SRC_ALLOW_LINES" | grep -acF 'allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search };' || true)" != "1" ] \
     || [ "$(printf '%s\n' "$BKD_SRC_ALLOW_LINES" | grep -acF 'allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name };' || true)" != "1" ] \
-     || [ "$(printf '%s\n' "$BKD_SRC_ALLOW_LINES" | grep -acF 'allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock };' || true)" != "1" ]; then
-    echo "  STOP: the module source's buildkitd allow surface is not exactly the source-exec triple + the bare transition grant + the target-domain { entrypoint read execute } grant + the state-root { getattr search } grant + the categorized state-tree dir { getattr search write add_name } grant + the categorized state-tree file { create read open lock } grant"
+     || [ "$(printf '%s\n' "$BKD_SRC_ALLOW_LINES" | grep -acF 'allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock };' || true)" != "1" ] \
+    || [ "$(printf '%s\n' "$BKD_SRC_ALLOW_LINES" | grep -acF 'allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search;' || true)" != "1" ]; then
+    echo "  STOP: the module source's buildkitd allow surface is not exactly the source-exec triple + the bare transition grant + the target-domain { entrypoint read execute } grant + the state-root { getattr search } grant + the categorized state-tree dir { getattr search write add_name } grant + the categorized state-tree file { create read open lock } grant + the shared runtime-root bare dir search grant"
     BKD_ZERO_ALLOW_OK=0
   fi
   for s in docker_helper_t docker_helper_builder_t docker_helper_builder_launcher_t \
@@ -2334,8 +2335,9 @@ RK_BKD_LABEL_OK=1
   BKD_RUNTIME_ROOT_LINE="$(sesearch --allow -s docker_helper_buildkitd_t -t docker_helper_builder_runtime_root_t -c dir /sys/fs/selinux/policy 2>/dev/null \
     | awk '$1 == "allow" && $2 == "docker_helper_buildkitd_t" && $3 ~ /^docker_helper_builder_runtime_root/' || true)"
   printf '  module contribution (the concrete rule): %s\n' "${BKD_RUNTIME_ROOT_LINE:-(empty)}"
-  if [ "$BKD_RUNTIME_ROOT_LINE" = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir { search };" ]; then
-    echo "  module contribution = exactly { search } (the bare singleton — sesearch prints the single permission inside braces; the module source's own spelling is the bare search;)"
+  BKD_RUNTIME_ROOT_NORM="$(printf '%s\n' "${BKD_RUNTIME_ROOT_LINE:-}" | sed 's/[{}]//g; s/  */ /g; s/^ //; s/ $//' || true)"
+  if [ "$BKD_RUNTIME_ROOT_NORM" = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search;" ]; then
+    echo "  module contribution = exactly { search } (the bare singleton — the normalized comparison, never the source's spelling; the live sesearch prints the single permission in its own form)"
   else
     echo "  STOP: the target domain's concrete surface on the shared runtime-root DIR class is not exactly the ONE bare { search } grant"
     BKD_ZERO_ALLOW_OK=0
@@ -2354,6 +2356,16 @@ RK_BKD_LABEL_OK=1
       BKD_ZERO_ALLOW_OK=0
     fi
   done
+  echo "--- PLANE G runtime-root non-dir QUARANTINE (each must be empty — the §13 contract: the root plane grants ONLY dir search to BuildKitd; the root's file/sock_file surfaces stay UNGRANTED from the buildkitd domain — the daemon's sock_file transport is a DIFFERENT subject and stays its own owner):"
+  for q in file sock_file; do
+    extra="$(sesearch --allow -s docker_helper_buildkitd_t -t docker_helper_builder_runtime_root_t -c "$q" /sys/fs/selinux/policy 2>/dev/null \
+      | awk '$1 == "allow" && $2 == "docker_helper_buildkitd_t" && $3 ~ /^docker_helper_builder_runtime_root/' || true)"
+    printf '  runtime_root_t:%s: %s\n' "$q" "${extra:-(empty — no concrete rule)}"
+    if [ -n "$extra" ]; then
+      echo "  STOP: the forbidden runtime-root surface $q is present on the pair"
+      BKD_ZERO_ALLOW_OK=0
+    fi
+  done
   echo "--- PLANE G runtime-tree/sock_file QUARANTINE (each must be empty — the categorized per-op runtime surface and the socket transport stay UNGRANTED from the buildkitd domain):"
   for q in dir file sock_file; do
     extra="$(sesearch --allow -s docker_helper_buildkitd_t -t docker_helper_builder_runtime_t -c "$q" /sys/fs/selinux/policy 2>/dev/null \
@@ -2367,7 +2379,7 @@ RK_BKD_LABEL_OK=1
   echo "--- PLANE G standing-owner companion check (the OTHER subjects' builder_runtime_root_t:dir rules are their own owners; each subject's CONCRETE dir surface must stay EXACTLY its standing perm set — the 4C-72 grant must not have touched them; the comparison is the NORMALIZED sorted perm union, never the source spelling; the LOADED-policy rule count is the CIL-merged shape: semodule/CIL merges allow rules sharing the (source, target, class) triple into ONE printed rule carrying the union — the same printed-vs-source distinction the dir/state planes' companion checks record — so the counts below are PRINTED-rule counts, not source-line counts; ONLY the concrete-target lines count here; the rootlesskit flow traversal and the daemon transport are DIFFERENT subjects and DIFFERENT owners, neither a template for BuildKitd):"
   for spec in \
     "init_t:create mounton remove_name rmdir setattr write:1" \
-    "docker_helper_builder_t:add_name create getattr open read relabelfrom remove_name rmdir search setattr write:1" \
+    "docker_helper_builder_t:add_name create getattr open read relabelfrom remove_name rmdir search write:1" \
     "docker_helper_rootlesskit_t:search:1" \
     "docker_helper_t:search:1" ; do
     s="${spec%%:*}"; rest="${spec#*:}"; want="${rest%:*}"; wantn="${rest##*:}"
