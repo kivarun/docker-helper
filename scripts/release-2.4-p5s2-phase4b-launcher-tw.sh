@@ -2125,7 +2125,7 @@ RK_BKD_LABEL_OK=1
   sesearch --allow -t docker_helper_buildkitd_exec_t /sys/fs/selinux/policy 2>/dev/null | grep -aE '^allow docker_helper_buildkitd' || true
   echo "--- sesearch --allow per CONCRETE docker-helper subject on the exec type (a hit = a rule whose OWN subject AND target fields are the queried names — the attribute-form prints do not count; the rootlesskit child must carry EXACTLY the one { execute read open } rule, the buildkitd domain must carry EXACTLY the one { entrypoint read execute } rule, every other subject must stay empty):"
   BKD_ZERO_ALLOW_OK=1
-  if [ "$BKD_SRC_ALLOW_COUNT" != "6" ] \
+  if [ "$BKD_SRC_ALLOW_COUNT" != "7" ] \
     || [ "$(printf '%s\n' "$BKD_SRC_ALLOW_LINES" | grep -acF 'allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute read open };' || true)" != "1" ] \
     || [ "$(printf '%s\n' "$BKD_SRC_ALLOW_LINES" | grep -acF 'allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;' || true)" != "1" ] \
     || [ "$(printf '%s\n' "$BKD_SRC_ALLOW_LINES" | grep -acF 'allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute };' || true)" != "1" ] \
