@@ -4403,7 +4403,7 @@ func TestSELinuxPolicyRootlesskitIsolation(t *testing.T) {
 //	     run's own terminal search boundary, ONE rule on one pair, never
 //	     split; the standing RootlessKit state-root search rule is a
 //	     different subject and a different owner and stays untouched);
-//	  E. the categorized operation-state surface: buildkitd_t ->
+//	  E. the categorized operation-state dir surface: buildkitd_t ->
 //	     builder_state_t:dir — exactly the { getattr search write add_name }
 //	     rule (the 4C-65 getattr is the 4C-64 run's terminal-causal owner, the
 //	     4C-66 search is the 4C-65 canonical run's own terminal boundary, the
@@ -4412,7 +4412,17 @@ func TestSELinuxPolicyRootlesskitIsolation(t *testing.T) {
 //	     the DENIED bit of the requested 0x24000000 { search add_name }
 //	     decision, never the whole requested mask; ONE rule, never split; the
 //	     other subjects' standing builder_state_t:dir rules are their own
-//	     owners and never count as this owner's contribution).
+//	     owners and never count as this owner's contribution);
+//	  F. the categorized operation-state FILE surface: buildkitd_t ->
+//	     builder_state_t:file — exactly the bare { create } rule (the 4C-69
+//	     grant is the 4C-68 canonical run's own terminal boundary — the
+//	     class-aware pair (tclass=file, 0x8), the same bit number on the dir
+//	     class being dir:create and a DIFFERENT authority; a NEW pair+class
+//	     plane, NEVER a widening of the dir rule; file:create is NOT a
+//	     file-IO bundle — open/read/write/getattr/setattr/lock/unlink/append/
+//	     map/execute stay their own live-evidence phases; the companion
+//	     init_t/builder_t/rootlesskit_t builder_state_t:file rules are their
+//	     own owners and never count as this owner's contribution).
 //			- any other allow rule naming a buildkitd type (any source, any
 //			  target, any class, any permission set) violates;
 //			- the rootlesskit child holds no bin_t:file grant; its exec/transition
@@ -4426,6 +4436,7 @@ func buildkitdIdentityViolations(policy string) []string {
 	const canonicalEntry = "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute };"
 	const canonicalStateRoot = "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search };"
 	const canonicalStateTree = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name };"
+	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file create;"
 	// The categorized state-tree dir surface's standing owners (the
 	// exact module lines): the daemon does NOT own one; every other
 	// subject's existing rule is its own owner and must stay unchanged —
@@ -4436,6 +4447,18 @@ func buildkitdIdentityViolations(policy string) []string {
 		"allow docker_helper_builder_t docker_helper_builder_state_t:dir { getattr search read open write add_name remove_name create rmdir setattr };": true,
 		"allow docker_helper_rootlesskit_t docker_helper_builder_state_t:dir { search getattr read open write add_name remove_name lock };":             true,
 		canonicalStateTree: true,
+	}
+	// The categorized state-tree file surface's standing owners (the
+	// exact module lines): the daemon's own ONE create rule (the 4C-69
+	// grant) plus the three other subjects' standing rules — every other
+	// subject's existing rule is its own owner and must stay unchanged
+	// (the RootlessKit seven-perm shape is NOT a template for BuildKitd;
+	// any NEW or reshaped rule on the pair trips).
+	standingStateTreeFileRules := map[string]bool{
+		"allow init_t docker_helper_builder_state_t:file { unlink };":                                                           true,
+		"allow docker_helper_builder_t docker_helper_builder_state_t:file { create read write open getattr setattr unlink };":   true,
+		"allow docker_helper_rootlesskit_t docker_helper_builder_state_t:file { create open read write getattr setattr lock };": true,
+		canonicalStateFile: true,
 	}
 	standingRootlesskitExecRules := map[string]string{
 		"docker_helper_rootlesskit_exec_t": "allow docker_helper_rootlesskit_t docker_helper_rootlesskit_exec_t:file { entrypoint read open execute execute_no_trans getattr map };",
@@ -4501,9 +4524,23 @@ func buildkitdIdentityViolations(policy string) []string {
 	if stateTreeCount != 1 {
 		violations = append(violations, fmt.Sprintf("the buildkitd categorized state-tree { getattr search write add_name } grant must exist exactly once in the exact canonical form, found %d: %s", stateTreeCount, canonicalStateTree))
 	}
+	stateFileCount := 0
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if trimmed == canonicalStateFile {
+			stateFileCount++
+		}
+	}
+	if stateFileCount != 1 {
+		violations = append(violations, fmt.Sprintf("the buildkitd categorized state-tree file create grant must exist exactly once in the exact canonical form, found %d: %s", stateFileCount, canonicalStateFile))
+	}
 	// The exact module-borne allow-rule total naming a buildkitd type:
-	// the five planes only (A source-exec, B transition, C target-side,
-	// D shared state-root, E categorized state-tree) — never "at least".
+	// the six planes only (A source-exec, B transition, C target-side,
+	// D shared state-root, E categorized state-tree dir, F categorized
+	// state-tree file create) — never "at least".
 	buildkitdNamedAllow := 0
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -4514,8 +4551,8 @@ func buildkitdIdentityViolations(policy string) []string {
 			buildkitdNamedAllow++
 		}
 	}
-	if buildkitdNamedAllow != 5 {
-		violations = append(violations, fmt.Sprintf("the module must carry exactly the five buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute }, the shared state-root { getattr search }, the categorized state-tree { getattr search write add_name }), found %d", buildkitdNamedAllow))
+	if buildkitdNamedAllow != 6 {
+		violations = append(violations, fmt.Sprintf("the module must carry exactly the six buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name }, the categorized state-tree file create), found %d", buildkitdNamedAllow))
 	}
 	// The categorized state-tree dir surface has exactly the standing
 	// owners above; a NEW or reshaped rule on the pair (any source,
@@ -4529,6 +4566,21 @@ func buildkitdIdentityViolations(policy string) []string {
 			violations = append(violations, "the categorized state-tree dir surface has exactly the standing owners (init_t, the manager, the flow, the buildkitd quadruple rule) — every other shape on the pair violates: "+trimmed)
 		}
 	}
+	// The categorized state-tree file surface has exactly the standing
+	// owners above (the daemon's ONE create rule + the three other
+	// subjects' standing rules); a NEW or reshaped rule on the pair (any
+	// source, including attribute/broad forms) trips here. The dir-class
+	// check above never judges a file-class rule and vice versa — the
+	// class is part of each rule's identity.
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || !strings.HasPrefix(trimmed, "allow ") {
+			continue
+		}
+		if strings.Contains(trimmed, " docker_helper_builder_state_t:file ") && !standingStateTreeFileRules[trimmed] {
+			violations = append(violations, "the categorized state-tree file surface has exactly the standing owners (init_t, the manager, the flow, the buildkitd create rule) — every other shape on the pair violates: "+trimmed)
+		}
+	}
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "#") {
@@ -4538,7 +4590,7 @@ func buildkitdIdentityViolations(policy string) []string {
 			if strings.Contains(trimmed, "docker_helper_buildkitd_exec_t") && trimmed != canonicalExec && trimmed != canonicalEntry {
 				violations = append(violations, "the only allow rules naming the buildkitd exec type are the exact source-exec grant { execute read open } and the exact target-side { entrypoint read execute } grant: "+trimmed)
 			}
-			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree {
+			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile {
 				violations = append(violations, "the only allow rules toward the buildkitd domain are the exact process transition grant, the exact target-entrypoint grant, and the exact state surfaces: "+trimmed)
 			}
 			fields := strings.Fields(trimmed)
@@ -4819,6 +4871,29 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		t.Error("the missing-state-tree mutation must trip the buildkitd authority invariants")
 	}
 
+	// The 4C-69 categorized state-tree FILE plane: exactly the bare
+	// create rule, once (the 4C-68 canonical run's own terminal boundary
+	// — the class-aware pair (tclass=file, 0x8); a NEW pair+class plane,
+	// NEVER a widening of the dir rule, which stays byte-for-semantics
+	// the { getattr search write add_name } quadruple).
+	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file create;"
+	var withoutStateFile []string
+	stateFileCount := 0
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == canonicalStateFile {
+			stateFileCount++
+			continue
+		}
+		withoutStateFile = append(withoutStateFile, line)
+	}
+	if stateFileCount != 1 {
+		t.Errorf("the buildkitd categorized state-tree file create grant must exist exactly once, found %d", stateFileCount)
+	}
+	if violations := buildkitdIdentityViolations(strings.Join(withoutStateFile, "\n")); len(violations) == 0 {
+		t.Error("the missing-state-file mutation must trip the buildkitd authority invariants")
+	}
+
 	// Mutation guards: every forbidden authority shape appended to the
 	// module must trip the authority invariants; transition mutations
 	// must trip the exactly-one edge invariant.
@@ -4977,6 +5052,53 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		{"parallel bare write rule beside the canonical quadruple", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir write;"},
 		{"parallel bare add_name rule beside the canonical quadruple", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir add_name;"},
 		{"duplicate of the state-tree rule", canonicalStateTree},
+		// the 4C-69 categorized state-tree FILE plane (exactly the bare
+		// create rule; the missing-rule case is covered by the
+		// withoutStateFile removal above; the dir rule above stays
+		// byte-for-semantics the quadruple — a permission added to the
+		// dir rule is a dir-plane mutation, never the file plane)
+		{"the state-file read instead", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file read;"},
+		{"the state-file write instead", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file write;"},
+		{"the state-file open instead", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file open;"},
+		{"the state-file getattr instead", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file getattr;"},
+		{"the state-file setattr instead", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file setattr;"},
+		{"the state-file lock instead", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file lock;"},
+		{"the state-file unlink instead", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file unlink;"},
+		{"the state-file append instead", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file append;"},
+		{"the state-file map instead", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file map;"},
+		{"the state-file execute instead", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file execute;"},
+		// file:create is NOT a file-IO bundle: every create+X partial is
+		// a forbidden bundle shape, and the RootlessKit seven-perm shape
+		// copied whole is the explicit anti-template case
+		{"the state-file pair { create open }", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create open };"},
+		{"the state-file pair { create write }", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create write };"},
+		{"the state-file pair { create getattr }", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create getattr };"},
+		{"the state-file pair { create setattr }", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create setattr };"},
+		{"the state-file pair { create read }", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read };"},
+		{"the state-file triple { create open write }", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create open write };"},
+		{"the writable-file bundle { create open write getattr setattr }", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create open write getattr setattr };"},
+		{"the RootlessKit shape copied whole", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create open read write getattr setattr lock };"},
+		// the class boundary: the authority is the pair (tclass=file, 0x8)
+		// — the same bit number on the OTHER classes is a DIFFERENT
+		// authority and stays forbidden (dir:create would widen the dir
+		// rule's class plane; lnk_file/sock_file are other classes of the
+		// per-op tree)
+		{"the wrong class (dir:create)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir create;"},
+		{"the wrong class (lnk_file:create)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file create;"},
+		{"the wrong class (sock_file:create)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:sock_file create;"},
+		{"state-file grant from the wrong source (the flow)", "allow docker_helper_rootlesskit_t docker_helper_builder_state_t:file create;"},
+		{"state-file grant from the wrong source (the manager)", "allow docker_helper_builder_t docker_helper_builder_state_t:file create;"},
+		{"state-file grant from the wrong source (the daemon)", "allow docker_helper_t docker_helper_builder_state_t:file create;"},
+		{"state-file grant from the wrong source (the launcher)", "allow docker_helper_builder_launcher_t docker_helper_builder_state_t:file create;"},
+		{"state-file grant toward the wrong target (builder_state_root_t)", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:file create;"},
+		{"state-file grant toward the wrong target (builder_t)", "allow docker_helper_buildkitd_t docker_helper_builder_t:file create;"},
+		{"state-file grant toward the wrong target (builder_runtime_t)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:file create;"},
+		{"state-file grant toward the wrong target (builder_runtime_root_t)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:file create;"},
+		{"brace equivalent of the state-file rule", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create };"},
+		{"second create rule beside the canonical one (a split second rule)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file create;\nallow docker_helper_buildkitd_t docker_helper_builder_state_t:file create;"},
+		{"duplicate of the state-file rule", canonicalStateFile},
+		{"broad attribute target on the file plane", "allow docker_helper_buildkitd_t file_type:file create;"},
+		{"broad attribute source on the file plane", "allow domain docker_helper_builder_state_t:file create;"},
 		{"broad attribute target", "allow docker_helper_buildkitd_t file_type:dir getattr;"},
 		{"broad attribute source", "allow domain docker_helper_builder_state_t:dir getattr;"},
 		{"multi-target brace form", "allow docker_helper_buildkitd_t { docker_helper_builder_state_t docker_helper_builder_state_root_t }:dir getattr;"},
@@ -5113,7 +5235,15 @@ var kernelProcessPerms = []string{
 //     remove_name } (the neighbor bit — the next dir-entry boundary
 //     must never collide with add_name), decode(dir, 0x24000000) ==
 //     exactly { add_name search } (the 4C-67 canonical run's terminal
-//     requested mask).
+//     requested mask);
+//   - the 4C-69 file-class hard pins + the CLASS-AWARE DECODE
+//     REGRESSION: file:write=0x4, file:create=0x8, file:getattr=0x10,
+//     file:open=0x40000; decode(file, 0x8) and decode(dir, 0x8) each
+//     recover exactly { create }, but the decoder's output preserves
+//     the (tclass, permission-set) TUPLE and the two tuples are
+//     DISTINCT authorities — (class=file,0x8) != (class=dir,0x8) (the
+//     4C-68 canonical run's terminal record is the FILE tuple; a
+//     decoder that drops the class loses the security boundary).
 func TestSELinuxPolicyKernelClassmapMaskPins(t *testing.T) {
 	fileIndex := func(perm string) int {
 		for i, p := range append(append([]string{}, kernelCommonFilePerms...), kernelFileOnlyPerms...) {
@@ -5420,6 +5550,71 @@ func TestSELinuxPolicyKernelClassmapMaskPins(t *testing.T) {
 	}
 	if !samePerms(delta68, deniedDecode68) {
 		t.Errorf("kernel classmap decode: requested(0x24000000) minus the standing { getattr search write } must equal the denied decode exactly { add_name }, got %v (denied decode %v)", delta68, deniedDecode68)
+	}
+	// The 4C-69 file-class hard pins + THE CLASS-AWARE DECODE
+	// REGRESSION. The 4C-68 canonical run's terminal record carried
+	// tclass=file requested=denied=0x8: the same bit NUMBER exists on
+	// every file-family class (the common file/sock prefix bit 3), so a
+	// decoder that drops the class and returns the permission set alone
+	// LOSES the security boundary — the authority is the TUPLE
+	// (tclass, permission-set), never the permission set alone. The
+	// pins: file:write=0x4, file:create=0x8, file:getattr=0x10,
+	// file:open=0x40000 (the kernel classmap's file-class numbering).
+	// The class-aware decode: decode(file, mask) vs decode(dir, mask)
+	// each recover exactly { create } for 0x8 — but the TUPLES differ,
+	// and equating them is the tclass-loss error this regression pins.
+	classDecode := func(class string, mask uint) string {
+		var perms []string
+		switch class {
+		case "file":
+			perms = decode(mask)
+		case "dir":
+			perms = dirDecode(mask)
+		default:
+			perms = nil
+		}
+		// The tuple's canonical form: (class, kernel-bit-order set).
+		return "(" + class + ", " + strings.Join(perms, " ") + ")"
+	}
+	// The file-class hard pins decode to exactly their single members.
+	if got := classDecode("file", 0x4); got != "(file, write)" {
+		t.Errorf("kernel classmap decode: file mask 0x4 must decode to the tuple (file, { write }), got %s", got)
+	}
+	if got := classDecode("file", 0x8); got != "(file, create)" {
+		t.Errorf("kernel classmap decode: file mask 0x8 must decode to the tuple (file, { create }), got %s", got)
+	}
+	if got := classDecode("file", 0x10); got != "(file, getattr)" {
+		t.Errorf("kernel classmap decode: file mask 0x10 must decode to the tuple (file, { getattr }), got %s", got)
+	}
+	if got := classDecode("file", 0x40000); got != "(file, open)" {
+		t.Errorf("kernel classmap decode: file mask 0x40000 must decode to the tuple (file, { open }), got %s", got)
+	}
+	// The dir-class same-bit companion: decode(dir, 0x8) also recovers
+	// exactly { create } (the shared prefix bit), but as the DIR tuple.
+	if got := classDecode("dir", 0x8); got != "(dir, create)" {
+		t.Errorf("kernel classmap decode: dir mask 0x8 must decode to the tuple (dir, { create }), got %s", got)
+	}
+	// THE CLASS BOUNDARY (the 4C-69 security regression): the two
+	// tuples are DISTINCT authorities even though their permission
+	// sets are identical — (class=file,0x8) != (class=dir,0x8). A
+	// decoder output that preserved only the permission set would make
+	// these two compare equal (the tclass-loss error).
+	if classDecode("file", 0x8) == classDecode("dir", 0x8) {
+		t.Error("kernel classmap decode: the tuples (file, 0x8) and (dir, 0x8) must stay DISTINCT authorities (the tclass-loss error) — the decoder output must preserve the (tclass, permission-set) tuple, never the permission set alone")
+	}
+	// The same tuple discipline on the other pinned bits: same set,
+	// different class, never equal.
+	for _, pair := range []struct{ mask uint }{{0x4}, {0x10}, {0x40000}} {
+		if classDecode("file", pair.mask) == classDecode("dir", pair.mask) {
+			t.Errorf("kernel classmap decode: the file/dir tuples for mask %#x must stay distinct authorities (the tclass-loss error)", pair.mask)
+		}
+	}
+	// The 4C-69 grant-candidate pin: the 4C-68 canonical run's terminal
+	// decision is the FILE tuple — decode(tclass=file, denied=0x8) ==
+	// exactly { create } ON file — and never the dir tuple (granting
+	// dir:create for a file-class denial is the wrong-class error).
+	if got := classDecode("file", 0x8); got == "(dir, create)" {
+		t.Error("kernel classmap decode: the 4C-69 grant candidate must be the file tuple (file, { create }), never the dir tuple (dir, { create }) (the wrong-class error)")
 	}
 }
 
