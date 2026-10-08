@@ -447,6 +447,149 @@ acc_ok "acceptance session $WSA_ID with mixed policy tree"
 AUDIT_START_EPOCH="$(date +%s)"
 
 # ==============================================================================
+# DIAGNOSTIC S2M (test-harness only; runs BEFORE S1/S2 so the pre-state is
+# pristine): libfuse mtab-update execution path on the shipped policy.
+# Hypothesis under test: with /etc/mtab present and writable (the check not
+# returning EROFS) AND /run/mount/utab present, the bindfs/libfuse 3.18.x
+# mount path takes the setuid(geteuid()) + execle("/bin/mount", ...) branch,
+# which the shipped docker_helper policy does not authorize -> the observed
+# "/bin/mount: Permission denied" with docker_helper_t self:capability setuid
+# and mount_exec_t:file execute AVCs.
+# This block only: (1) captures the guest pre-state; (2) creates
+# /run/mount/utab with the policy-default label ONLY when absent (tracked for
+# exact restore); (3) runs EXACTLY ONE fresh RO canary through the production
+# CLI under the UNCHANGED candidate policy; (4) dumps synchronized evidence;
+# (5) restores exactly what it created. No SELinux allow is added and no
+# executable is substituted. A reproduced canary failure is reported through
+# acc_fail (RED); a clean canary only reports the preconditions.
+# ==============================================================================
+say "S2M: mtab/utab pre-state + one fresh RO canary (harness-only diagnostic)"
+CANARY_UTAB_CREATED=0
+CANARY_MOUNT_DIR_CREATED=0
+CANARY_SID=""
+CANARY_OP_ID=""
+CANARY_ST=""
+CANARY_EC=0
+echo "  --- S2M pre-state: packages and linkage ---"
+rpm -q bindfs fuse3 fuse3-libs util-linux 2>&1 | sed 's/^/  rpm-q: /' || true
+ldd /usr/bin/bindfs 2>&1 | sed 's/^/  ldd: /' || true
+echo "  --- S2M pre-state: mtab/utab/mount files ---"
+ls -lZ /etc/mtab /run/mount /run/mount/utab /bin/mount 2>&1 | sed 's/^/  ls-lZ: /' || true
+stat -c '%F %a %U:%G %n' /etc/mtab /run/mount/utab 2>&1 | sed 's/^/  stat: /' || true
+echo "  readlink -f /etc/mtab:  $(readlink -f /etc/mtab 2>&1)"
+echo "  readlink -f /bin/mount: $(readlink -f /bin/mount 2>&1)"
+test -w /etc/mtab
+CANARY_MTAB_W=$?
+echo "  mtab_writable=$CANARY_MTAB_W"
+echo "  matchpathcon /run/mount/utab: $(matchpathcon /run/mount/utab 2>&1 || true)"
+if [ -e /run/mount/utab ]; then
+  echo "  utab: PRE-EXISTING before S2 (the canary leaves it untouched)"
+else
+  CANARY_UTAB_CREATED=1
+  if [ ! -d /run/mount ]; then
+    mkdir -p /run/mount && restorecon /run/mount 2>/dev/null || true
+    CANARY_MOUNT_DIR_CREATED=1
+  fi
+  : > /run/mount/utab
+  chmod 644 /run/mount/utab
+  restorecon /run/mount/utab 2>/dev/null || true
+  echo "  utab: ABSENT before S2 - created EMPTY for the canary ($(stat -c '%A %U:%G %C' /run/mount/utab 2>&1))"
+fi
+CANARY_SID="$(create_session /tmp/uat-wls-cred-main "$TREE/work")" \
+  || { echo "error: canary session creation failed" >&2; exit 1; }
+CANARY_TOKEN="$(cat "/tmp/uat-wls-tok-$CANARY_SID")"
+mkdir -p "$TREE/work/canary-ro"
+printf 'canary-ro-marker\n' > "$TREE/work/canary-ro/marker.txt"
+echo "  --- S2M canary: exactly one fresh RO run (fresh session $CANARY_SID) ---"
+DOCKER_HELPER_SESSION_TOKEN="$CANARY_TOKEN" \
+  dh run --mount canary-ro:/mnt/canary:ro alpine:3.24 -- \
+  sh -ec 'cat /mnt/canary/marker.txt' >/tmp/uat-wls-s2m-run.log 2>&1 &
+CANARY_BG_PID=$!
+CANARY_PROJ_EVIDENCE="$(wait_bindfs_projection "$CANARY_BG_PID" || true)"
+wait "$CANARY_BG_PID"
+CANARY_EC=$?
+echo "  canary run exit code: $CANARY_EC"
+echo "  canary projection during run: ${CANARY_PROJ_EVIDENCE:-<none observed>}"
+CANARY_OP_ID="$(journalctl --utc -u docker-helper.service --no-pager 2>/dev/null \
+  | grep '"event":"run.start"' \
+  | grep "\"session_id\":\"$CANARY_SID\"" \
+  | tail -1 | grep -oP '"operation_id":"\K[^"]+' || true)"
+echo "  canary operation id: ${CANARY_OP_ID:-<none: no admitted run.start for the canary session>}"
+if [ -n "$CANARY_OP_ID" ]; then
+  CANARY_ST="$(curl --silent --max-time 2 --unix-socket "$SOCK" \
+    "http://localhost/operations/$CANARY_OP_ID" 2>/dev/null | json_field status || true)"
+  echo "  canary terminal status: ${CANARY_ST:-<unreadable>}"
+fi
+echo "  --- S2M canary run output (full, redacted) ---"
+redact </tmp/uat-wls-s2m-run.log 2>/dev/null | sed 's/^/  run: /' || true
+echo "  --- S2M effective policy under test (setuid / mount_exec_t) ---"
+sesearch -A -s docker_helper_t -t docker_helper_t -c capability 2>&1 | sed 's/^/  sesearch: /' || true
+sesearch -A -s docker_helper_t -t mount_exec_t -c file 2>&1 | sed 's/^/  sesearch: /' || true
+semodule -E docker_helper 2>/dev/null | grep -E "setuid|mount_exec" | sed 's/^/  cil: /' \
+  || echo "  cil: no setuid/mount_exec rule in the exported docker_helper CIL"
+echo "  --- S2M post-run projection/worker/retained-state inventory ---"
+grep 'fuse.bindfs' /proc/mounts 2>/dev/null | sed 's/^/  mounts: /' || echo "  mounts: no fuse.bindfs mounts"
+ps -eZ 2>/dev/null | grep -E 'bindfs' | sed 's/^/  ps: /' || echo "  ps: no bindfs workers"
+ls -la /run/docker-helper/workload-mac 2>&1 | tail -10 | sed 's/^/  wlmac-runtime: /' || true
+ls -la /var/lib/docker-helper/workload-mac 2>&1 | tail -10 | sed 's/^/  wlmac-durable: /' || true
+residue_state | sed 's/^/  residue: /' || true
+echo "  --- S2M journal + AVC window (audit-window start epoch $AUDIT_START_EPOCH) ---"
+S2M_AUDIT_START_ISO="$(date -u -d "@${AUDIT_START_EPOCH}" '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || true)"
+journalctl --utc -u docker-helper.service --no-pager 2>/dev/null \
+  | awk -v start="${S2M_AUDIT_START_ISO:-}" '
+      /"time":"/ {
+        if (match($0, /"time":"[^"]*"/)) {
+          t = substr($0, RSTART + 8, RLENGTH - 9)
+          if (start == "" || t >= start) print
+        }
+      }' 2>/dev/null \
+  | grep -iE 'bindfs|mount|avc|denied|error|fail|operation' \
+  | tail -120 | redact | sed 's/^/  journal: /' || true
+S2M_AVC_DATE="$(date -d "@$AUDIT_START_EPOCH" '+%m/%d/%Y %H:%M:%S' 2>/dev/null || true)"
+S2M_AVC_WINDOW="$(ausearch -m AVC -ts "$S2M_AVC_DATE" 2>/dev/null || true)"
+if [ -z "$S2M_AVC_WINDOW" ] && [ -f /var/log/audit/audit.log ]; then
+  S2M_AVC_WINDOW="$(awk -v start="$AUDIT_START_EPOCH" '
+    match($0, /audit\(([0-9]+)\./, m) { if (m[1] + 0 >= start + 0) print }
+  ' /var/log/audit/audit.log 2>/dev/null || true)"
+fi
+if [ -n "$S2M_AVC_WINDOW" ]; then
+  printf '%s\n' "$S2M_AVC_WINDOW" | redact | sed 's/^/  avc: /' || true
+else
+  echo "  avc: no AVC records in the canary window"
+fi
+echo "  --- S2M post-state: mtab/utab after the canary ---"
+ls -lZ /etc/mtab /run/mount/utab 2>&1 | sed 's/^/  ls-lZ: /' || true
+stat -c '%F %a %U:%G %n' /etc/mtab /run/mount/utab 2>&1 | sed 's/^/  stat: /' || true
+echo "  --- S2M restore: remove exactly what the canary created ---"
+CANARY_FAIL_REASON=""
+[ "$CANARY_EC" -ne 0 ] && CANARY_FAIL_REASON="run exit $CANARY_EC"
+if [ -n "$CANARY_ST" ] && [ "$CANARY_ST" != "succeeded" ]; then
+  CANARY_FAIL_REASON="$CANARY_FAIL_REASON terminal-status=$CANARY_ST"
+fi
+if grep -q 'Permission denied' /tmp/uat-wls-s2m-run.log 2>/dev/null; then
+  CANARY_FAIL_REASON="$CANARY_FAIL_REASON 'Permission denied' present in run output"
+fi
+if [ "$CANARY_UTAB_CREATED" = 1 ]; then
+  rm -f /run/mount/utab
+  if [ "$CANARY_MOUNT_DIR_CREATED" = 1 ]; then
+    rmdir /run/mount 2>/dev/null || true
+  fi
+  echo "  restore: canary-created /run/mount/utab removed (pre-existing state restored)"
+else
+  echo "  restore: utab was pre-existing - left untouched"
+fi
+rm -rf "$TREE/work/canary-ro"
+CANARY_DELETE_RC=0
+dh session delete --token-file /tmp/uat-wls-cred-main "$CANARY_SID" >/dev/null 2>&1 || CANARY_DELETE_RC=$?
+echo "  restore: canary session $CANARY_SID delete rc=$CANARY_DELETE_RC"
+residue_state | sed 's/^/  residue-after-restore: /' || true
+if [ -n "$CANARY_FAIL_REASON" ]; then
+  acc_fail "S2M mtab-path canary RED: $CANARY_FAIL_REASON (full evidence above; hypothesis chain reproduced)"
+else
+  info "S2M: canary clean - no failure reproduced under the created mtab/utab preconditions (facts above)"
+fi
+
+# ==============================================================================
 # scenario S1: RW exposure is really writable
 # ==============================================================================
 say "S1: RW exposure really writable"
