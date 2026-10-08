@@ -476,7 +476,19 @@ allow docker_helper_t self:capability fowner;
 #   avc: denied { dac_override } scontext=docker_helper_t comm=bindfs
 #     tclass=capability (user-owned backing files read through projections)
 allow docker_helper_t mount_var_run_t:dir { search };
-allow docker_helper_t mount_var_run_t:file { getattr read open };
+allow docker_helper_t mount_var_run_t:file { getattr read open write };
+
+# The write permission is the evidenced utab bookkeeping write of the
+# libfuse mtab-update child (run 37784360967, S2M mtab-path canary):
+#   avc:  denied  { write }  comm="mount" name="utab"
+#     scontext=system_u:system_r:docker_helper_t:s0
+#     tcontext=unconfined_u:object_r:mount_var_run_t:s0 tclass=file permissive=0
+# The grant covers exactly the existing-file bookkeeping record write.
+# Deliberately NOT granted (no evidence, and /run/mount must stay outside the
+# daemon's mutation surface): file create/unlink/rename/setattr/append/lock,
+# any directory write (the dir stays the bare search singleton), any new
+# capability, and any domain transition. Any further enforcing denial is a NEW
+# boundary and must be evidence-driven on its own.
 
 # The libfuse (3.18.x) mtab/utab bookkeeping of the bindfs projection worker:
 # with /etc/mtab present (any form: the lstat succeeds and the access check

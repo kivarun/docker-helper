@@ -2346,7 +2346,7 @@ func TestSELinuxPolicyBindfsProjectionMount(t *testing.T) {
 		"allow docker_helper_t self:capability setuid;",
 		"allow docker_helper_t mount_exec_t:file { execute execute_no_trans read open };",
 		"allow docker_helper_t mount_var_run_t:dir { search };",
-		"allow docker_helper_t mount_var_run_t:file { getattr read open };",
+		"allow docker_helper_t mount_var_run_t:file { getattr read open write };",
 		"class capability { dac_read_search dac_override sys_admin fowner setuid };",
 	} {
 		if !strings.Contains(content, rule) {
@@ -2358,13 +2358,17 @@ func TestSELinuxPolicyBindfsProjectionMount(t *testing.T) {
 		t.Error("bindfs must stay in the daemon domain (execute_no_trans), not transition to its own domain")
 	}
 	// The libfuse mtab/utab bookkeeping grants are exact and evidence-bounded
-	// (runs 37764641564 and 37778527524): the setuid capability is for the
-	// forked mtab-bookkeeping child of the bindfs worker, and
+	// (runs 37764641564, 37778527524 and 37784360967): the setuid capability
+	// is for the forked mtab-bookkeeping child of the bindfs worker,
 	// mount_exec_t:file carries exactly the same-domain execution set
-	// (execute/execute_no_trans plus the kernel's ELF read/open). Nothing broader is
-	// granted: no distro mount domain, no new type transitions, no further
-	// mount_exec_t:file permissions, no bin_t same-domain execution, and no
-	// unproven capabilities such as setgid.
+	// (execute/execute_no_trans plus the kernel's ELF read/open), and
+	// mount_var_run_t:file carries exactly the read set plus the evidenced
+	// utab bookkeeping write of that child. Nothing broader is granted: no
+	// distro mount domain, no new type transitions, no further mount_exec_t
+	// or mount_var_run_t:file permissions (in particular no create/unlink/
+	// rename/setattr/append/lock on the utab file), no directory write
+	// (mount_var_run_t:dir stays the bare search singleton), no bin_t
+	// same-domain execution, and no unproven capabilities such as setgid.
 	if strings.Contains(content, "mount_t") {
 		t.Error("the helper must not reference the distro mount domain (no transition into a more privileged domain for the setuid /bin/mount)")
 	}
@@ -2374,6 +2378,9 @@ func TestSELinuxPolicyBindfsProjectionMount(t *testing.T) {
 	lines := strings.Split(string(data), "\n")
 	capPerms := map[string]bool{}
 	mountExecRules := 0
+	mountVarRunFileRules := 0
+	mountVarRunDirExact := false
+	mountVarRunOtherClass := false
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "allow docker_helper_t self:capability") {
@@ -2395,12 +2402,45 @@ func TestSELinuxPolicyBindfsProjectionMount(t *testing.T) {
 				t.Errorf("mount_exec_t:file must be granted exactly for the evidenced execution set, got: %s", line)
 			}
 		}
+		if strings.HasPrefix(line, "allow docker_helper_t mount_var_run_t:") {
+			cls := strings.Fields(strings.TrimPrefix(line, "allow docker_helper_t mount_var_run_t:"))[0]
+			switch cls {
+			case "file":
+				mountVarRunFileRules++
+				if line != "allow docker_helper_t mount_var_run_t:file { getattr read open write };" {
+					t.Errorf("mount_var_run_t:file must be granted exactly for the evidenced utab read+bookkeeping-write set, got: %s", line)
+				}
+			case "dir":
+				if line == "allow docker_helper_t mount_var_run_t:dir { search };" {
+					mountVarRunDirExact = true
+				} else {
+					t.Errorf("mount_var_run_t:dir must stay the bare search singleton (no directory write), got: %s", line)
+				}
+			default:
+				mountVarRunOtherClass = true
+				t.Errorf("mount_var_run_t must not be granted on any class beyond dir/file, got: %s", line)
+			}
+		}
 		if strings.HasPrefix(line, "allow docker_helper_t bin_t:file") && strings.Contains(line, "execute_no_trans") {
 			t.Errorf("same-domain execution of generic bin_t binaries must stay forbidden, got: %s", line)
 		}
 	}
 	if mountExecRules != 1 {
 		t.Errorf("there must be exactly one mount_exec_t:file allow rule, got %d", mountExecRules)
+	}
+	if mountVarRunFileRules != 1 {
+		t.Errorf("there must be exactly one mount_var_run_t:file allow rule, got %d", mountVarRunFileRules)
+	}
+	if !mountVarRunDirExact {
+		t.Error("the bare mount_var_run_t:dir { search } singleton must stay present")
+	}
+	if mountVarRunOtherClass {
+		t.Error("mount_var_run_t must not be granted on any class beyond dir/file")
+	}
+	// The container workload domain must have no utab access at all: the utab
+	// bookkeeping belongs to the daemon domain only.
+	if strings.Contains(content, "docker_helper_container_t mount_var_run_t") {
+		t.Error("docker_helper_container_t must have no mount_var_run_t access (the utab bookkeeping is daemon-domain only)")
 	}
 	wantCaps := map[string]bool{"dac_read_search": true, "dac_override": true, "sys_admin": true, "fowner": true, "setuid": true}
 	for p := range wantCaps {
