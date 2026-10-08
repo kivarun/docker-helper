@@ -37,7 +37,9 @@
 # hard failure. The utab fixture is created only when absent (policy-default
 # label, one inert foreign record) and removed on restore; a pre-existing
 # utab is byte-compared against a real file copy (Bash command substitution
-# strips trailing newlines, so byte-exactness is decided on files with cmp).
+# strips trailing newlines, so byte-exactness is decided on files — with the
+# cmp-free files_identical primitive, because cmp is absent from the minimal
+# guest image).
 #
 # Required output fields (printed verbatim): UTABDIAG_DONTAUDIT_LOADED=,
 # UTABDIAG_PROBE_AVC_SUPPRESSED=, UTABDIAG_PROBE_AVC_VISIBLE_DB=,
@@ -81,8 +83,11 @@ WS="/home/opc/uat-utab-diag"
 IMAGE="alpine:3.24"
 UTAB=/run/mount/utab
 # wait_service_health (the shared readiness owner) contract: callers set the
-# systemd unit and the API socket.
+# systemd unit and the API socket. The usage lives inside the sourced lib,
+# which shellcheck cannot resolve here.
+# shellcheck disable=SC2034
 SERVICE="docker-helper.service"
+# shellcheck disable=SC2034
 SOCK="/run/docker-helper/docker-helper.sock"
 UTAB_DIAG_CREATED=0
 UTAB_DIAG_DIR_CREATED=0
@@ -106,15 +111,26 @@ utab_snapshot_copy() {
   return 0
 }
 
+# files_identical compares two files byte-for-byte WITHOUT depending on cmp
+# (absent from the minimal openSUSE Tumbleweed cloud image — the same reason
+# scripts/uat-install-tarball.sh owns this primitive: sha256sum is guaranteed
+# (coreutils) and is already the UAT's canonical integrity primitive). The
+# byte-exactness is still decided on the REAL FILE COPIES, never on captured
+# strings (Bash command substitution strips trailing newlines).
+files_identical() {
+  local a="$1" b="$2"
+  [ "$(sha256sum "$a" | awk '{print $1}')" = "$(sha256sum "$b" | awk '{print $1}')" ]
+}
+
 # utab_unchanged TARGET COPY — true when the current utab state is byte-exact
-# the snapshotted one (cmp on the real files; presence compared via the
-# state marker).
+# the snapshotted one (files_identical on the real files; presence compared
+# via the state marker).
 utab_unchanged() {
   local target="$1" copy="$2" was
   was="$(cat "$copy.state" 2>/dev/null || true)"
   if [ "$was" = "present" ]; then
     [ -e "$target" ] || return 1
-    cmp -s "$copy" "$target"
+    files_identical "$copy" "$target"
   else
     [ ! -e "$target" ]
   fi

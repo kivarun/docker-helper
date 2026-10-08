@@ -519,7 +519,7 @@ AUDIT_START_EPOCH="$(date +%s)"
 #   (5) no utab AVC in the canary window (the dontaudit suppression) and no
 #       residue: canary session deleted, containers/pins/wlmac unchanged;
 #   (6) exact restore of the VM's pre-state: the utab pre-state is captured
-#       as a REAL FILE COPY and compared with cmp — a Bash command
+#       as a REAL FILE COPY and compared byte-for-byte — a Bash command
 #       substitution strips trailing newlines, so byte-exactness is decided
 #       on the file, never on a captured string.
 # This block only: (1) captures the guest pre-state; (2) creates
@@ -545,9 +545,17 @@ UTAB_PRE_CONTENT=""
 UTAB_POST_CONTENT=""
 UTAB_WATCH_LOG=/tmp/uat-wls-utab-watch.log
 # Byte-exact restore verification: the pre-state is captured as a REAL FILE
-# COPY and compared with cmp — Bash command substitution strips trailing
-# newlines, so a captured string can never decide byte-exactness.
+# COPY and compared byte-for-byte on the files — with the cmp-free
+# files_identical primitive (sha256sum; cmp is absent from the minimal
+# openSUSE Tumbleweed cloud image, the same reason
+# scripts/uat-install-tarball.sh owns this primitive). Bash command
+# substitution strips trailing newlines, so a captured string can never
+# decide byte-exactness.
 UTAB_PRE_COPY=/tmp/uat-wls-utab-pre-copy
+files_identical() {
+  local a="$1" b="$2"
+  [ "$(sha256sum "$a" | awk '{print $1}')" = "$(sha256sum "$b" | awk '{print $1}')" ]
+}
 # Inert foreign utab record in the canonical libmount utab writer field order
 # (ID UNIQID SRC TARGET ROOT BINDSRC ATTRS OPTS; the unset fields omitted), so
 # the seeded line round-trips libmount's parse+rewrite byte-exactly.
@@ -765,8 +773,9 @@ CANARY_DELETE_RC=0
 dh session delete --token-file /tmp/uat-wls-cred-main "$CANARY_SID" >/dev/null 2>&1 || CANARY_DELETE_RC=$?
 echo "  restore: canary session $CANARY_SID delete rc=$CANARY_DELETE_RC"
 # Restore verification: the VM's utab state must equal the pre-state,
-# byte-exact, decided on the real files with cmp (command substitution strips
-# trailing newlines; a captured string can never prove byte-exactness).
+# byte-exact, decided on the real files with files_identical (command
+# substitution strips trailing newlines; a captured string can never prove
+# byte-exactness).
 if [ "$CANARY_UTAB_CREATED" = 1 ]; then
   if [ -e /run/mount/utab ]; then
     CANARY_FAIL_REASON="$CANARY_FAIL_REASON utab-restore-left-the-canary-file-behind"
@@ -774,8 +783,8 @@ if [ "$CANARY_UTAB_CREATED" = 1 ]; then
     echo "  restore: /run/mount/utab absent again (the pre-existing state)"
   fi
 else
-  if cmp -s "$UTAB_PRE_COPY" /run/mount/utab; then
-    echo "  restore: utab byte-identical to the pre-state (cmp)"
+  if files_identical "$UTAB_PRE_COPY" /run/mount/utab; then
+    echo "  restore: utab byte-identical to the pre-state (files_identical)"
   else
     CANARY_FAIL_REASON="$CANARY_FAIL_REASON utab-restore-differs-from-the-pre-state"
   fi
