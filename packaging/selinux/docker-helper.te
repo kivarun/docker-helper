@@ -3449,7 +3449,129 @@ allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search;
 # operation-scoped in effect (a c1 subject cannot reach a c2 per-op
 # tree — the cross-operation reachability proof (4C-37) stays mandatory
 # and the cross-operation gate stays OPEN/Critical until it holds).
-allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search };
+
+# --- 4C-75: the categorized operation-runtime dir write — the 4C-74
+# --- rule widened IN PLACE (ONE rule, never split) ---
+#
+# The 4C-74 correction-1 canonical run's (37683155675) terminal record,
+# live at the END of the buildkitd process's own lifetime (the 4C-74
+# pair took effect — zero builder_runtime_t:dir search denials in the
+# whole span, BOTH per-op runtime-tree newfstatat lookups passed CLEAN
+# (ret 0x0 twice) and the stale-socket removal unlinkat PASSED WHOLE
+# (-ENOENT, zero in-window decisions) — and the runtime's NEXT
+# production stage became the terminal):
+#
+#   buildkitd-60350 543.896298 sys_openat -> 0x5 (the state-file entry
+#     creation returned fd 5)
+#   buildkitd-60350 543.896314 sys_newfstatat(AT_FDCWD,
+#     "/run/docker-helper-builder/ops/op_9e70a2...", statbuf, flag: 0)
+#     -> 543.896386 sys_newfstatat -> 0x0  (the 4C-74-granted lookup,
+#     CLEAN)
+#   buildkitd-60350 543.896389 sys_newfstatat(AT_FDCWD, same op_ path,
+#     flag: 0) -> 543.896392 sys_newfstatat -> 0x0  (CLEAN)
+#   buildkitd-60350 543.896394 sys_unlinkat(AT_FDCWD, same op_ path,
+#     flag: 0) -> 543.896398 -> 0xfffffffffffffffe (-ENOENT; the stale
+#     socket was absent — the stale-socket removal stage PASSED WHOLE,
+#     zero in-window decisions)
+#   buildkitd-60350 543.896407 sys_socket(family: 1, type: 0x80801,
+#     protocol: 0)  (family 1 = AF_UNIX; the exit record was not armed
+#     that run — only the enter was)
+#   buildkitd-60350 543.896435 sys_openat(AT_FDCWD,
+#     "/proc/sys/net/core/somaxconn", O_RDONLY|O_CLOEXEC)
+#   buildkitd-60350 543.896448 selinux_audited: requested=0x20000000
+#     denied=0x20000000 audited=0x20000000 result=-13
+#     tcontext=system_u:object_r:sysctl_net_t:s0 tclass=dir — the
+#     somaxconn read's own dir-walk hook (sysctl_net_t), classified
+#     HANDLED/NON-TERMINAL by the corrected causal machinery with the
+#     continuation proof by=543.896475 untraced-owner-decision (the
+#     bind attempt demonstrably followed it — the flow continued)
+#   buildkitd-60350 543.896461 sys_openat -> 0xfffffffffffffff3
+#     (-EACCES; the read is abandoned and the default backlog used —
+#     the flow continues)
+#   buildkitd-60350 543.896475 selinux_audited: requested=0x20000004
+#     denied=0x4 audited=0x4 result=-13
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:docker_helper_builder_runtime_t:s0:c1
+#     tclass=dir — the AF_UNIX bind(2) attempt's dir WRITE hook, the
+#     TERMINAL production failure. UNTRACED-OWNER: the sys_bind
+#     enter/exit records were not traced (the tracer armed list did
+#     not cover bind(2)); the 4C-75 phase arms
+#     sys_enter_bind/sys_exit_bind so the owning window is captured —
+#     instrumentation only, no policy authority.
+#   buildkitd-60350 543.896493 sys_close(fd: 8) -> 0x0 (the socket fd)
+#   buildkitd-60350 543.896515 sys_close(fd: 5) -> 0x0
+#   buildkitd-60350 543.896531 sys_unlinkat(AT_FDCWD,
+#     "/var/lib/docker-helper-builder/ops/op_9e70a2...", flag: 0) —
+#     the state-tree cleanup-zone boundary itself (ZONE2 begins here;
+#     the teardown walk's own denials — the dir remove_name 0x8000000
+#     record at 543.896539, the re-probe openat's dir read 0x2 at
+#     543.896566 — are POST-FAILURE/CLEANUP), then the error-report
+#     write (sys_write -> 0xf5, "buildkitd: failed to create unix
+#     socket on /run/docker-helper-b...") and exit_group(1) at
+#     T0+0.112s.
+#
+# No genuine later production follows the write denial — the anchor
+# (the corrected machinery's UNTRACED-OWNER second tier) is genuine
+# PRE-CLEANUP ownership.
+#
+# THE DELTA IS EXACTLY +write:
+#   - requested = 0x20000004 = { search write }; denied = 0x4 =
+#     { write }; the standing { getattr search } grant is NOT the
+#     boundary — candidate = decode(tclass=dir, denied=0x4) = exactly
+#     { write }, NEVER the whole requested mask (the requested-vs-
+#     denied subtraction: the standing search bit is not re-granted);
+#   - decode(tclass=dir, 0x4) = exactly { write } — the kernel-side
+#     dir-class pin (the dir-class write bit is 0x4; read is 0x2, the
+#     4C-72 prose correction's own pin); NO permission inference from
+#     the loaded policy's perms-file numbering (the class-aware decode
+#     regression pins the tuple (dir, { write }));
+#   - dir:write is NOT an unlink/creation bundle: it grants the write
+#     hook on the directory object itself and NOT add_name/remove_name/
+#     create (the entry hooks), NOT sock_file:create/write/open (the
+#     socket object's own hooks) — the conventional AF_UNIX pathname-
+#     creation bundle is NOT reconstructed; the kernel emits each hook
+#     as its OWN decision and the next boundary's own live decision
+#     set owns the next phase (dir:add_name, sock_file:create/
+#     sock_file:write, or something else — no speculation is
+#     authority, and dir-class and sock_file-class decisions are never
+#     combined into one phase);
+#   - no read/open rides this widening; NOTHING on
+#     builder_runtime_t:file or builder_runtime_t:sock_file, no
+#     socket/connect — the daemon's sock_file transport authority is
+#     a DIFFERENT subject and a DIFFERENT owner and must never leak
+#     into this plane;
+#   - nothing on the sibling root/state types (builder_runtime_root_t,
+#     builder_state_root_t, builder_state_t) — PLANE G stays the bare
+#     search singleton on the ROOT pair and is NOT widened;
+#   - no process/process2 permission, no capability/cap_userns, no
+#     range_transition;
+#   - the frozen planes stay frozen: the three exec planes (the source
+#     { execute read open }, the transition { transition }, the target
+#     { entrypoint read execute }), the shared state-root rule (exactly
+#     { getattr search }), the categorized state-tree dir rule (exactly
+#     { getattr search write add_name }), the categorized state-tree
+#     file rule (exactly { create read open lock }), and the shared
+#     runtime-root rule (exactly { search }).
+# MCS: the TE rule encodes NO categories — the rule is the bare pair;
+# the c1 -> c1 admissibility stays the existing constraints' job (both
+# domains are proven mcs_constrained_type members). The op_<id> runtime
+# directory's own label is proven separately (the kernel-label sampler's
+# first/last/all read-backs and the live stat, all
+# builder_runtime_t:s0:c1 — the 4C-72 §9 instrument carries forward) —
+# never inferred from an AVC's tcontext.
+# SCOPE — READ CAREFULLY: the rule is type-wide TE authority
+# (buildkitd_t -> EVERY builder_runtime_t:dir getattr+search+write), NOT
+# path-scoped; the MCS category constraints are what keep it
+# operation-scoped in effect (a c1 subject cannot reach a c2 per-op
+# tree — the cross-operation reachability proof (4C-37) stays mandatory
+# and the cross-operation gate stays OPEN/Critical until it holds).
+# The category-scoped effect is NOT the 4C-37 isolation proof.
+# The companion runtime owners (init_t provisioning, the manager's own
+# runtime management + relabel, the flow traversal, the daemon
+# transport) are DIFFERENT subjects and DIFFERENT owners — their
+# builder_runtime_t/builder_runtime_root_t rules stay byte-unchanged,
+# never merged and never templates.
+allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write };
 
 # --- 4C-71: the categorized operation-state file lock — the 4C-70 file
 # --- rule widened IN PLACE (ONE rule, never split) ---
