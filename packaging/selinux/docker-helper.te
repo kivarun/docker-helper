@@ -478,6 +478,32 @@ allow docker_helper_t self:capability fowner;
 allow docker_helper_t mount_var_run_t:dir { search };
 allow docker_helper_t mount_var_run_t:file { getattr read open };
 
+# The denied { write } on this type (GitHub UAT run 37784360967) is libmount's
+# WRITABILITY PROBE, not a real bookkeeping write: before any record update
+# libmount's try_write() checks potential writability with
+# eaccess("/run/mount/utab", R_OK|W_OK), and an access(2) check and a real
+# open(O_WRONLY) produce the identical single-perm AVC when open is already
+# granted. The probe denial is recurring benign noise on hosts where
+# /run/mount/utab exists: the current bindfs projection mount
+# (bindfs -f -o allow_other -o context=<ctx>) carries no userspace mount
+# options, so libmount's utab_new_entry() declares the utab entry unnecessary
+# and the bookkeeping writes nothing either way — proven by the Step-7
+# experiment (branch diag/ro-selinux-utab-write, run 37832314572: with
+# mount_var_run_t:file write granted the utab record still never appeared,
+# no further AVC followed, and the grant had no functional user).
+#
+# dontaudit suppresses exactly that probe's audit record and grants NOTHING:
+# the write permission check itself stays denied (the probe still returns
+# unwritable and libmount still skips the update — the runtime behavior is
+# unchanged). Trade-off that must stay visible: EVERY real write attempt by
+# this domain against mount_var_run_t objects also stops appearing in the AVC
+# stream while remaining forbidden — denial visibility for this type is
+# deliberately traded for the removal of the recurring probe noise. Nothing
+# else is granted: no create/unlink/rename/setattr/append/lock on the file,
+# no directory write (the dir stays the bare search singleton), no new
+# capability, no domain transition.
+dontaudit docker_helper_t mount_var_run_t:file write;
+
 # The libfuse (3.18.x) mtab/utab bookkeeping of the bindfs projection worker:
 # with /etc/mtab present (any form: the lstat succeeds and the access check
 # does not return EROFS) and /run/mount/utab present, fuse_mnt_add_mount()
