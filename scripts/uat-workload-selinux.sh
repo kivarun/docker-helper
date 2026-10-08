@@ -230,6 +230,49 @@ wait_bindfs_projection() {
   return 1
 }
 
+# utab_watch BG_PID — pure-observer utab bookkeeping watcher. Runs while the
+# canary run process is alive, ticking every 50ms, and records:
+#   - every observation tick while a fuse.bindfs workload projection is live
+#     (mountpoint observed from /proc/mounts), together with the FULL current
+#     /run/mount/utab content;
+#   - every /run/mount/utab content change even without a live projection;
+#   - one settled capture after the run process exited (the projection
+#     teardown completes around run completion).
+# Output records:
+#   obs tick=N projection_mounts=N mountpoint=<mp|none>   (+ full utab content)
+#   settled mountpoint=<mp|none>                          (+ full utab content)
+# The watcher NEVER mutates utab and grants no runtime-tree authority.
+utab_watch() {
+  local bgpid="$1" last="" tick=0 mp proj content
+  while kill -0 "$bgpid" 2>/dev/null; do
+    tick=$((tick + 1))
+    mp="$(grep 'fuse.bindfs' /proc/mounts 2>/dev/null \
+      | grep '/run/docker-helper/workload-mac/' | awk '{print $2}' | head -1 || true)"
+    proj="$(grep 'fuse.bindfs' /proc/mounts 2>/dev/null | grep -c '/run/docker-helper/workload-mac/' || true)"
+    content="$(cat /run/mount/utab 2>/dev/null || true)"
+    if [ -n "$mp" ] || [ "$content" != "$last" ]; then
+      printf 'obs tick=%s projection_mounts=%s mountpoint=%s\n' "$tick" "$proj" "${mp:-none}"
+      if [ -n "$content" ]; then
+        printf '%s\n' "$content" | sed 's/^/  utab| /'
+      else
+        echo "  utab| <empty>"
+      fi
+      last="$content"
+    fi
+    sleep 0.05
+  done
+  sleep 1
+  mp="$(grep 'fuse.bindfs' /proc/mounts 2>/dev/null \
+    | grep '/run/docker-helper/workload-mac/' | awk '{print $2}' | head -1 || true)"
+  content="$(cat /run/mount/utab 2>/dev/null || true)"
+  printf 'settled mountpoint=%s\n' "${mp:-none}"
+  if [ -n "$content" ]; then
+    printf '%s\n' "$content" | sed 's/^/  utab| /'
+  else
+    echo "  utab| <empty>"
+  fi
+}
+
 cleanup() {
   systemctl stop docker-helper.service >/dev/null 2>&1 || true
   systemctl disable docker-helper.service >/dev/null 2>&1 || true
@@ -448,28 +491,52 @@ AUDIT_START_EPOCH="$(date +%s)"
 
 # ==============================================================================
 # DIAGNOSTIC S2M (test-harness only; runs BEFORE S1/S2 so the pre-state is
-# pristine): libfuse mtab-update execution path on the shipped policy.
+# pristine): libfuse mtab/utab bookkeeping on the shipped policy.
 # Hypothesis under test: with /etc/mtab present and writable (the check not
 # returning EROFS) AND /run/mount/utab present, the bindfs/libfuse 3.18.x
-# mount path takes the setuid(geteuid()) + execle("/bin/mount", ...) branch,
-# which the shipped docker_helper policy does not authorize -> the observed
-# "/bin/mount: Permission denied" with docker_helper_t self:capability setuid
-# and mount_exec_t:file execute AVCs.
+# mount path takes the setuid(geteuid()) + execle("/bin/mount", ...) branch.
+# The evidence chain so far: the setuid/execute denials were granted
+# (runs 37764641564/37778527524), then run 37784360967 showed the remaining
+# enforcing denial of that child — the write on the utab bookkeeping file
+# (mount_var_run_t:file { write }) — which the candidate policy now grants.
+# This block must prove not only the ABSENCE of the AVC but the actual utab
+# bookkeeping:
+#   (1) the utab pre-state (existence, label, mode, full content);
+#   (2) while the live RO projection is mounted, a utab record whose TARGET is
+#       the projection mountpoint (the mount's own bookkeeping record);
+#   (3) the utab state after the run completed normally;
+#   (4) every pre-existing (foreign) utab line survives byte-exact — no
+#       corruption by the bookkeeping rewrite;
+#   (5) exact restore of the VM's pre-state (utab removed if this canary
+#       created it, the canary's own record removed if utab was pre-existing,
+#       canary session deleted, residue unchanged).
 # This block only: (1) captures the guest pre-state; (2) creates
-# /run/mount/utab with the policy-default label ONLY when absent (tracked for
-# exact restore); (3) runs EXACTLY ONE fresh RO canary through the production
-# CLI under the UNCHANGED candidate policy; (4) dumps synchronized evidence;
-# (5) restores exactly what it created. No SELinux allow is added and no
-# executable is substituted. A reproduced canary failure is reported through
-# acc_fail (RED); a clean canary only reports the preconditions.
+# /run/mount/utab with the policy-default label ONLY when absent, seeding one
+# syntactically valid foreign utab record (canonical libmount field order, an
+# inert marker never acted upon by libmount) so the foreign-integrity proof is
+# real rather than vacuous; (3) runs EXACTLY ONE fresh RO canary through the
+# production CLI under the UNCHANGED candidate policy while a pure-observer
+# watcher records the projection liveness and the full utab content timeline;
+# (4) dumps synchronized evidence; (5) restores exactly what it created. No
+# executable is substituted. A reproduced canary failure, a missing
+# bookkeeping record, or corrupted foreign entries are reported through
+# acc_fail (RED).
 # ==============================================================================
-say "S2M: mtab/utab pre-state + one fresh RO canary (harness-only diagnostic)"
+say "S2M: mtab/utab pre-state + one fresh RO canary with the utab bookkeeping proof (harness-only diagnostic)"
 CANARY_UTAB_CREATED=0
 CANARY_MOUNT_DIR_CREATED=0
 CANARY_SID=""
 CANARY_OP_ID=""
 CANARY_ST=""
 CANARY_EC=0
+UTAB_PRE_EXISTED=0
+UTAB_PRE_CONTENT=""
+UTAB_POST_CONTENT=""
+UTAB_WATCH_LOG=/tmp/uat-wls-utab-watch.log
+# Inert foreign utab record in the canonical libmount utab writer field order
+# (ID UNIQID SRC TARGET ROOT BINDSRC ATTRS OPTS; the unset fields omitted), so
+# the seeded line round-trips libmount's parse+rewrite byte-exactly.
+S2M_FOREIGN_UTAB_LINE='ID=4242 UNIQID=20990101 SRC=/uat-s2m-foreign-src TARGET=/uat-s2m-foreign-target OPTS=foreign-opt'
 echo "  --- S2M pre-state: packages and linkage ---"
 rpm -q bindfs fuse3 fuse3-libs util-linux 2>&1 | sed 's/^/  rpm-q: /' || true
 ldd /usr/bin/bindfs 2>&1 | sed 's/^/  ldd: /' || true
@@ -486,30 +553,46 @@ ls -lZ /bin/umount 2>&1 | sed 's/^/  ls-lZ: /' || true
 echo "  matchpathcon /run/mount/utab: $(matchpathcon /run/mount/utab 2>&1 || true)"
 if [ -e /run/mount/utab ]; then
   echo "  utab: PRE-EXISTING before S2 (the canary leaves it untouched)"
+  UTAB_PRE_EXISTED=1
+  UTAB_PRE_CONTENT="$(cat /run/mount/utab 2>/dev/null || true)"
+  UTAB_PRE_LINES="$(printf '%s\n' "$UTAB_PRE_CONTENT" | grep -c . 2>/dev/null || true)"
+  [ -n "$UTAB_PRE_LINES" ] || UTAB_PRE_LINES=0
+  echo "  utab pre-state content ($UTAB_PRE_LINES non-empty lines):"
+  if [ -n "$UTAB_PRE_CONTENT" ]; then
+    printf '%s\n' "$UTAB_PRE_CONTENT" | sed 's/^/  utab| /'
+  else
+    echo "  utab| <empty>"
+  fi
 else
   CANARY_UTAB_CREATED=1
   if [ ! -d /run/mount ]; then
     mkdir -p /run/mount && restorecon /run/mount 2>/dev/null || true
     CANARY_MOUNT_DIR_CREATED=1
   fi
-  : > /run/mount/utab
+  printf '%s\n' "$S2M_FOREIGN_UTAB_LINE" > /run/mount/utab
   chmod 644 /run/mount/utab
   restorecon /run/mount/utab 2>/dev/null || true
-  echo "  utab: ABSENT before S2 - created EMPTY for the canary ($(stat -c '%A %U:%G %C' /run/mount/utab 2>&1))"
+  echo "  utab: ABSENT before S2 - created for the canary with one inert foreign record ($(stat -c '%A %U:%G %C' /run/mount/utab 2>&1))"
+  echo "  utab| $S2M_FOREIGN_UTAB_LINE"
+  UTAB_PRE_CONTENT="$S2M_FOREIGN_UTAB_LINE"
 fi
 CANARY_SID="$(create_session /tmp/uat-wls-cred-main "$TREE/work")" \
   || { echo "error: canary session creation failed" >&2; exit 1; }
 CANARY_TOKEN="$(cat "/tmp/uat-wls-tok-$CANARY_SID")"
 mkdir -p "$TREE/work/canary-ro"
 printf 'canary-ro-marker\n' > "$TREE/work/canary-ro/marker.txt"
+: > "$UTAB_WATCH_LOG"
 echo "  --- S2M canary: exactly one fresh RO run (fresh session $CANARY_SID) ---"
 DOCKER_HELPER_SESSION_TOKEN="$CANARY_TOKEN" \
   dh run --mount canary-ro:/mnt/canary:ro alpine:3.24 -- \
   sh -ec 'cat /mnt/canary/marker.txt' >/tmp/uat-wls-s2m-run.log 2>&1 &
 CANARY_BG_PID=$!
+utab_watch "$CANARY_BG_PID" >>"$UTAB_WATCH_LOG" 2>&1 &
+UTAB_WATCH_PID=$!
 CANARY_PROJ_EVIDENCE="$(wait_bindfs_projection "$CANARY_BG_PID" || true)"
 wait "$CANARY_BG_PID"
 CANARY_EC=$?
+wait "$UTAB_WATCH_PID"
 echo "  canary run exit code: $CANARY_EC"
 echo "  canary projection during run: ${CANARY_PROJ_EVIDENCE:-<none observed>}"
 CANARY_OP_ID="$(journalctl --utc -u docker-helper.service --no-pager 2>/dev/null \
@@ -524,6 +607,15 @@ if [ -n "$CANARY_OP_ID" ]; then
 fi
 echo "  --- S2M canary run output (full, redacted) ---"
 redact </tmp/uat-wls-s2m-run.log 2>/dev/null | sed 's/^/  run: /' || true
+echo "  --- S2M utab watch: full timeline (projection liveness + every utab content change) ---"
+sed 's/^/  watch: /' "$UTAB_WATCH_LOG" 2>/dev/null || true
+UTAB_POST_CONTENT="$(cat /run/mount/utab 2>/dev/null || true)"
+echo "  --- S2M utab post-state content ---"
+if [ -n "$UTAB_POST_CONTENT" ]; then
+  printf '%s\n' "$UTAB_POST_CONTENT" | sed 's/^/  utab| /'
+else
+  echo "  utab| <empty>"
+fi
 echo "  --- S2M effective policy under test (setuid / mount_exec_t) ---"
 sesearch -A -s docker_helper_t -t docker_helper_t -c capability 2>&1 | sed 's/^/  sesearch: /' || true
 sesearch -A -s docker_helper_t -t mount_exec_t -c file 2>&1 | sed 's/^/  sesearch: /' || true
@@ -562,6 +654,40 @@ fi
 echo "  --- S2M post-state: mtab/utab after the canary ---"
 ls -lZ /etc/mtab /run/mount/utab 2>&1 | sed 's/^/  ls-lZ: /' || true
 stat -c '%F %a %U:%G %n' /etc/mtab /run/mount/utab 2>&1 | sed 's/^/  stat: /' || true
+echo "  --- S2M utab bookkeeping verdict ---"
+CANARY_MP="$(awk '/^obs tick=/ { mp=$0; sub(/^.*mountpoint=/, "", mp); if (mp != "none") { print mp; exit } }' "$UTAB_WATCH_LOG" 2>/dev/null || true)"
+echo "  canary projection mountpoint: ${CANARY_MP:-<none observed>}"
+UTAB_DURING_HITS="$(awk -v want="TARGET=$CANARY_MP" '
+  /^obs tick=/ { live = ($0 ~ /mountpoint=none$/ ? 0 : 1); next }
+  /^settled mountpoint=/ { live = ($0 ~ /mountpoint=none$/ ? 0 : 1); next }
+  live && want != "TARGET=" && index($0, want) { hits++ }
+  END { printf "%d", hits + 0 }
+' "$UTAB_WATCH_LOG" 2>/dev/null || echo 0)"
+echo "  utab bookkeeping records for the canary mount observed during the live projection: $UTAB_DURING_HITS"
+UTAB_STALE_COUNT=0
+if [ -n "$CANARY_MP" ]; then
+  UTAB_STALE_COUNT="$(printf '%s\n' "$UTAB_POST_CONTENT" | grep -Fc "TARGET=$CANARY_MP" 2>/dev/null || true)"
+  [ -n "$UTAB_STALE_COUNT" ] || UTAB_STALE_COUNT=0
+fi
+echo "  utab canary-entry records after normal completion: $UTAB_STALE_COUNT (0 = removed/never written; >0 = the record persists after the helper-owned unmount)"
+UTAB_FOREIGN_LOST=0
+if [ "$UTAB_PRE_EXISTED" -eq 1 ]; then
+  while IFS= read -r _l; do
+    [ -n "$_l" ] || continue
+    printf '%s\n' "$UTAB_POST_CONTENT" | grep -Fxq "$_l" || UTAB_FOREIGN_LOST=$((UTAB_FOREIGN_LOST + 1))
+  done <<< "$UTAB_PRE_CONTENT"
+else
+  if [ -n "$UTAB_POST_CONTENT" ]; then
+    printf '%s\n' "$UTAB_POST_CONTENT" | grep -Fxq "$S2M_FOREIGN_UTAB_LINE" || UTAB_FOREIGN_LOST=1
+  else
+    UTAB_FOREIGN_LOST=1
+  fi
+fi
+if [ "$UTAB_FOREIGN_LOST" -eq 0 ]; then
+  echo "  ok:      utab foreign entries intact after the canary (no corruption)"
+else
+  echo "  FAIL:    utab foreign entries lost or changed by the bookkeeping rewrite: $UTAB_FOREIGN_LOST line(s)" >&2
+fi
 echo "  --- S2M restore: remove exactly what the canary created ---"
 CANARY_FAIL_REASON=""
 [ "$CANARY_EC" -ne 0 ] && CANARY_FAIL_REASON="run exit $CANARY_EC"
@@ -571,6 +697,17 @@ fi
 if grep -q 'Permission denied' /tmp/uat-wls-s2m-run.log 2>/dev/null; then
   CANARY_FAIL_REASON="$CANARY_FAIL_REASON 'Permission denied' present in run output"
 fi
+# The utab bookkeeping write itself must be PROVEN, not merely un-denied:
+# while the projection was live, utab must have carried the mount's own
+# record (the mount_var_run_t:file write the candidate policy now grants).
+if [ -n "$CANARY_MP" ] && [ "$UTAB_DURING_HITS" -gt 0 ]; then
+  echo "  ok:      utab bookkeeping record for the canary mount written during the live projection ($UTAB_DURING_HITS observation tick(s))"
+else
+  CANARY_FAIL_REASON="$CANARY_FAIL_REASON utab-bookkeeping-record-not-observed-during-the-live-projection"
+fi
+if [ "$UTAB_FOREIGN_LOST" -ne 0 ]; then
+  CANARY_FAIL_REASON="$CANARY_FAIL_REASON utab-foreign-entry-corruption($UTAB_FOREIGN_LOST)"
+fi
 if [ "$CANARY_UTAB_CREATED" = 1 ]; then
   rm -f /run/mount/utab
   if [ "$CANARY_MOUNT_DIR_CREATED" = 1 ]; then
@@ -578,20 +715,42 @@ if [ "$CANARY_UTAB_CREATED" = 1 ]; then
   fi
   echo "  restore: canary-created /run/mount/utab removed (pre-existing state restored)"
 else
-  echo "  restore: utab was pre-existing - left untouched"
+  if [ -n "$CANARY_MP" ] && [ "$UTAB_STALE_COUNT" -gt 0 ]; then
+    sed -i "\#TARGET=$CANARY_MP#d" /run/mount/utab 2>/dev/null || true
+    echo "  restore: the canary's own utab record(s) removed from the pre-existing file ($UTAB_STALE_COUNT line(s))"
+  else
+    echo "  restore: utab was pre-existing - left untouched"
+  fi
 fi
 rm -rf "$TREE/work/canary-ro"
 CANARY_DELETE_RC=0
 dh session delete --token-file /tmp/uat-wls-cred-main "$CANARY_SID" >/dev/null 2>&1 || CANARY_DELETE_RC=$?
 echo "  restore: canary session $CANARY_SID delete rc=$CANARY_DELETE_RC"
+# Restore verification: the VM's utab state must equal the pre-state.
+UTAB_AFTER_RESTORE="$(cat /run/mount/utab 2>/dev/null || true)"
+if [ "$CANARY_UTAB_CREATED" = 1 ]; then
+  if [ -e /run/mount/utab ]; then
+    CANARY_FAIL_REASON="$CANARY_FAIL_REASON utab-restore-left-the-canary-file-behind"
+  else
+    echo "  restore: /run/mount/utab absent again (the pre-existing state)"
+  fi
+else
+  if [ "$UTAB_AFTER_RESTORE" = "$UTAB_PRE_CONTENT" ]; then
+    echo "  restore: utab content byte-identical to the pre-state"
+  else
+    CANARY_FAIL_REASON="$CANARY_FAIL_REASON utab-restore-differs-from-the-pre-state"
+  fi
+fi
 residue_state | sed 's/^/  residue-after-restore: /' || true
 if [ -n "$CANARY_FAIL_REASON" ]; then
   acc_fail "S2M mtab-path canary RED: $CANARY_FAIL_REASON (full evidence above; hypothesis chain reproduced)"
 else
   # The canary is a mandatory acceptance scenario, not an informational
   # note: with the mtab/utab preconditions satisfied, the fresh RO run must
-  # succeed through the bindfs projection on the shipped policy.
-  acc_ok "S2M mtab-path canary green: fresh RO exposure readable through the bindfs projection with /run/mount/utab present"
+  # succeed through the bindfs projection on the shipped policy AND the utab
+  # bookkeeping must be proven working (the mount's own record written while
+  # the projection was live, foreign entries intact, exact restore).
+  acc_ok "S2M mtab-path canary green: fresh RO exposure readable through the bindfs projection with /run/mount/utab present, and the utab bookkeeping record proven written during the live projection with foreign entries intact"
 fi
 
 # ==============================================================================
