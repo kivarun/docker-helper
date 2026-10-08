@@ -135,7 +135,12 @@ scenario() { say "scenario $1"; }
 dh() { /usr/bin/docker-helper "$@"; }
 SOCK="/run/docker-helper/docker-helper.sock"
 
-json_field() { grep -oP "\"$1\": \"\K[^\"]+" | head -1; }
+# json_field NAME — extract a JSON string field. The pattern is
+# space-tolerant after the colon: the CLI's indented --json output emits
+# "field": "value" while the raw HTTP API (writeJSONRaw, compact Go JSON)
+# emits "field":"value"; both must parse (the S2M canary terminal status is
+# read over raw HTTP).
+json_field() { grep -oP "\"$1\":\s*\"\K[^\"]+" | head -1; }
 
 wait_health() {
   local _i=0
