@@ -2344,7 +2344,7 @@ func TestSELinuxPolicyBindfsProjectionMount(t *testing.T) {
 		"allow docker_helper_t self:capability { dac_read_search dac_override sys_admin };",
 		"allow docker_helper_t self:capability fowner;",
 		"allow docker_helper_t self:capability setuid;",
-		"allow docker_helper_t mount_exec_t:file { execute execute_no_trans };",
+		"allow docker_helper_t mount_exec_t:file { execute execute_no_trans read open };",
 		"allow docker_helper_t mount_var_run_t:dir { search };",
 		"allow docker_helper_t mount_var_run_t:file { getattr read open };",
 		"class capability { dac_read_search dac_override sys_admin fowner setuid };",
@@ -2358,9 +2358,10 @@ func TestSELinuxPolicyBindfsProjectionMount(t *testing.T) {
 		t.Error("bindfs must stay in the daemon domain (execute_no_trans), not transition to its own domain")
 	}
 	// The libfuse mtab/utab bookkeeping grants are exact and evidence-bounded
-	// (run 37764641564): the setuid capability is for the forked
-	// mtab-bookkeeping child of the bindfs worker, and mount_exec_t:file
-	// carries exactly the same-domain execution pair. Nothing broader is
+	// (runs 37764641564 and 37778527524): the setuid capability is for the
+	// forked mtab-bookkeeping child of the bindfs worker, and
+	// mount_exec_t:file carries exactly the same-domain execution set
+	// (execute/execute_no_trans plus the kernel's ELF read/open). Nothing broader is
 	// granted: no distro mount domain, no new type transitions, no further
 	// mount_exec_t:file permissions, no bin_t same-domain execution, and no
 	// unproven capabilities such as setgid.
@@ -2390,8 +2391,8 @@ func TestSELinuxPolicyBindfsProjectionMount(t *testing.T) {
 		}
 		if strings.HasPrefix(line, "allow docker_helper_t mount_exec_t:file") {
 			mountExecRules++
-			if line != "allow docker_helper_t mount_exec_t:file { execute execute_no_trans };" {
-				t.Errorf("mount_exec_t:file must be granted exactly for the evidenced execution pair, got: %s", line)
+			if line != "allow docker_helper_t mount_exec_t:file { execute execute_no_trans read open };" {
+				t.Errorf("mount_exec_t:file must be granted exactly for the evidenced execution set, got: %s", line)
 			}
 		}
 		if strings.HasPrefix(line, "allow docker_helper_t bin_t:file") && strings.Contains(line, "execute_no_trans") {

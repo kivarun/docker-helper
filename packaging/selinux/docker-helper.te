@@ -492,15 +492,20 @@ allow docker_helper_t mount_var_run_t:file { getattr read open };
 #   avc:  denied  { execute }  comm="bindfs" name="mount"
 #     scontext=system_u:system_r:docker_helper_t:s0
 #     tcontext=system_u:object_r:mount_exec_t:s0 tclass=file permissive=0
+#   avc:  denied  { read open }  comm="bindfs" path="/usr/bin/mount"
+#     scontext=system_u:system_r:docker_helper_t:s0
+#     tcontext=system_u:object_r:mount_exec_t:s0 tclass=file permissive=0
+#     (the kernel's ELF load of the executable itself, after execute was
+#     granted — run 37778527524)
 # The bookkeeping execution stays in the daemon domain on purpose
 # (execute_no_trans — the same same-domain worker model as bindfs itself):
 # /bin/mount is a setuid-root executable, so there is deliberately NO domain
 # transition into the distro mount domain or any other more privileged
-# domain, no other permission on mount_exec_t:file, and no further
-# capability grant. Any further enforcing denial is a NEW boundary and must
-# be evidence-driven on its own.
+# domain, no permission on mount_exec_t:file beyond the evidenced execution
+# set, and no further capability grant. Any further enforcing denial is a
+# NEW boundary and must be evidence-driven on its own.
 allow docker_helper_t self:capability setuid;
-allow docker_helper_t mount_exec_t:file { execute execute_no_trans };
+allow docker_helper_t mount_exec_t:file { execute execute_no_trans read open };
 
 # Mount-pin: unmount filesystem (proven in enforcing UAT)
 allow docker_helper_t fs_t:filesystem { unmount };
