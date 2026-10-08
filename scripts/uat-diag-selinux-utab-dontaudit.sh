@@ -80,6 +80,10 @@ PRINCIPAL="opc"
 WS="/home/opc/uat-utab-diag"
 IMAGE="alpine:3.24"
 UTAB=/run/mount/utab
+# wait_service_health (the shared readiness owner) contract: callers set the
+# systemd unit and the API socket.
+SERVICE="docker-helper.service"
+SOCK="/run/docker-helper/docker-helper.sock"
 UTAB_DIAG_CREATED=0
 UTAB_DIAG_DIR_CREATED=0
 UTAB_DIAG_FOREIGN_LINE='ID=4242 UNIQID=20990101 SRC=/uat-utab-diag-foreign-src TARGET=/uat-utab-diag-foreign-target OPTS=foreign-opt'
@@ -156,11 +160,11 @@ utab_diag_canary() {
 # rebuild normally only when the dontaudit is missing, then verify the shipped
 # boundary is back.
 restore_policy() {
-  if ! sesearch -D -s docker_helper_t -t mount_var_run_t 2>/dev/null | grep -q mount_var_run_t; then
+  if ! sesearch --dontaudit -s docker_helper_t -t mount_var_run_t 2>/dev/null | grep -q mount_var_run_t; then
     info "restore: dontaudit missing — rebuilding (semodule -B)"
     semodule -B >/dev/null 2>&1 || true
   fi
-  if sesearch -D -s docker_helper_t -t mount_var_run_t 2>/dev/null | grep -q mount_var_run_t \
+  if sesearch --dontaudit -s docker_helper_t -t mount_var_run_t 2>/dev/null | grep -q mount_var_run_t \
       && sesearch -A -s docker_helper_t -t mount_var_run_t -c file 2>/dev/null | grep -q "getattr" \
       && ! sesearch -A -s docker_helper_t -t mount_var_run_t 2>/dev/null | grep -qE '\bwrite\b'; then
     info "restore verified: dontaudit present, allow read set unchanged, no write allow"
@@ -173,6 +177,9 @@ trap restore_policy EXIT
 
 say "utab dontaudit boundary diagnostic (disposable-VM policy toggle, isolated windows)"
 info "RPM: $UAT_RPM (sha256 verified)"
+# The audit-window epoch must exist before mac_preflight prints it (the pin
+# regression's canonical call order); the per-phase windows re-record it.
+mac_audit_start
 mac_preflight
 
 # ---------------------------------------------------------------------------
@@ -227,10 +234,10 @@ fi
 # Phase A: shipped policy (dontaudit loaded) — probe AVC suppressed
 # ---------------------------------------------------------------------------
 say "Phase A: shipped policy (dontaudit loaded)"
-A_DONTAUDIT="$(sesearch -D -s docker_helper_t -t mount_var_run_t 2>/dev/null | grep -c 'mount_var_run_t' || true)"
+A_DONTAUDIT="$(sesearch --dontaudit -s docker_helper_t -t mount_var_run_t 2>/dev/null | grep -c 'mount_var_run_t' || true)"
 [ -n "$A_DONTAUDIT" ] || A_DONTAUDIT=0
 if [ "$A_DONTAUDIT" -ge 1 ]; then
-  diag_ok "dontaudit rule loaded ($(sesearch -D -s docker_helper_t -t mount_var_run_t 2>/dev/null | head -1))"
+  diag_ok "dontaudit rule loaded ($(sesearch --dontaudit -s docker_helper_t -t mount_var_run_t 2>/dev/null | head -1))"
 else
   diag_fail "the shipped dontaudit rule is NOT loaded"
 fi
@@ -258,7 +265,7 @@ utab_unchanged "$UTAB" /tmp/uat-utab-diag-preA \
 # ---------------------------------------------------------------------------
 say "Phase B: semodule -DB (dontaudit rules disabled)"
 DB_OUT="$(semodule -DB 2>&1)" || diag_fail "semodule -DB failed: $DB_OUT"
-B_DONTAUDIT="$(sesearch -D -s docker_helper_t -t mount_var_run_t 2>/dev/null | grep -c 'mount_var_run_t' || true)"
+B_DONTAUDIT="$(sesearch --dontaudit -s docker_helper_t -t mount_var_run_t 2>/dev/null | grep -c 'mount_var_run_t' || true)"
 [ -n "$B_DONTAUDIT" ] || B_DONTAUDIT=0
 if [ "$B_DONTAUDIT" -eq 0 ]; then
   diag_ok "dontaudit rules disabled by the -DB rebuild"
@@ -288,10 +295,10 @@ utab_unchanged "$UTAB" /tmp/uat-utab-diag-preB \
 # ---------------------------------------------------------------------------
 say "Phase C: semodule -B (normal rebuild, dontaudit restored)"
 B_REBUILD_OUT="$(semodule -B 2>&1)" || diag_fail "semodule -B failed: $B_REBUILD_OUT"
-C_DONTAUDIT="$(sesearch -D -s docker_helper_t -t mount_var_run_t 2>/dev/null | grep -c 'mount_var_run_t' || true)"
+C_DONTAUDIT="$(sesearch --dontaudit -s docker_helper_t -t mount_var_run_t 2>/dev/null | grep -c 'mount_var_run_t' || true)"
 [ -n "$C_DONTAUDIT" ] || C_DONTAUDIT=0
 if [ "$C_DONTAUDIT" -ge 1 ]; then
-  diag_ok "dontaudit rule restored ($(sesearch -D -s docker_helper_t -t mount_var_run_t 2>/dev/null | head -1))"
+  diag_ok "dontaudit rule restored ($(sesearch --dontaudit -s docker_helper_t -t mount_var_run_t 2>/dev/null | head -1))"
   echo "UTABDIAG_DONTAUDIT_RESTORED=yes"
 else
   diag_fail "the dontaudit rule was NOT restored by semodule -B"

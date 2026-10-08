@@ -641,7 +641,7 @@ echo "  --- S2M effective policy under test (setuid / mount_exec_t / mount_var_r
 sesearch -A -s docker_helper_t -t docker_helper_t -c capability 2>&1 | sed 's/^/  sesearch: /' || true
 sesearch -A -s docker_helper_t -t mount_exec_t -c file 2>&1 | sed 's/^/  sesearch: /' || true
 sesearch -A -s docker_helper_t -t mount_var_run_t 2>&1 | sed 's/^/  sesearch: /' || true
-echo "  sesearch (dontaudit): $(sesearch -D -s docker_helper_t -t mount_var_run_t 2>&1 || true)"
+echo "  sesearch (dontaudit): $(sesearch --dontaudit -s docker_helper_t -t mount_var_run_t 2>&1 || true)"
 # semodule -c -E writes the extracted CIL as a REAL FILE (docker_helper.cil)
 # in the working directory and only prints a status line on stdout ("Extracting
 # at highest existing priority ..."). The exported-CIL check therefore runs in
