@@ -478,9 +478,11 @@ ls -lZ /etc/mtab /run/mount /run/mount/utab /bin/mount 2>&1 | sed 's/^/  ls-lZ: 
 stat -c '%F %a %U:%G %n' /etc/mtab /run/mount/utab 2>&1 | sed 's/^/  stat: /' || true
 echo "  readlink -f /etc/mtab:  $(readlink -f /etc/mtab 2>&1)"
 echo "  readlink -f /bin/mount: $(readlink -f /bin/mount 2>&1)"
+echo "  readlink -f /bin/umount: $(readlink -f /bin/umount 2>&1)"
 test -w /etc/mtab
 CANARY_MTAB_W=$?
 echo "  mtab_writable=$CANARY_MTAB_W"
+ls -lZ /bin/umount 2>&1 | sed 's/^/  ls-lZ: /' || true
 echo "  matchpathcon /run/mount/utab: $(matchpathcon /run/mount/utab 2>&1 || true)"
 if [ -e /run/mount/utab ]; then
   echo "  utab: PRE-EXISTING before S2 (the canary leaves it untouched)"
@@ -586,7 +588,10 @@ residue_state | sed 's/^/  residue-after-restore: /' || true
 if [ -n "$CANARY_FAIL_REASON" ]; then
   acc_fail "S2M mtab-path canary RED: $CANARY_FAIL_REASON (full evidence above; hypothesis chain reproduced)"
 else
-  info "S2M: canary clean - no failure reproduced under the created mtab/utab preconditions (facts above)"
+  # The canary is a mandatory acceptance scenario, not an informational
+  # note: with the mtab/utab preconditions satisfied, the fresh RO run must
+  # succeed through the bindfs projection on the shipped policy.
+  acc_ok "S2M mtab-path canary green: fresh RO exposure readable through the bindfs projection with /run/mount/utab present"
 fi
 
 # ==============================================================================
