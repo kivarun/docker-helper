@@ -601,7 +601,11 @@ CANARY_OP_ID="$(journalctl --utc -u docker-helper.service --no-pager 2>/dev/null
   | tail -1 | grep -oP '"operation_id":"\K[^"]+' || true)"
 echo "  canary operation id: ${CANARY_OP_ID:-<none: no admitted run.start for the canary session>}"
 if [ -n "$CANARY_OP_ID" ]; then
+  # GET /operations/{id} is session-bearer-authorized: the canary's OWN
+  # session bearer must be presented, or the call fails with
+  # auth.failure/session.parse_failed and the status reads <unreadable>.
   CANARY_ST="$(curl --silent --max-time 2 --unix-socket "$SOCK" \
+    -H "Authorization: Bearer $CANARY_TOKEN" \
     "http://localhost/operations/$CANARY_OP_ID" 2>/dev/null | json_field status || true)"
   echo "  canary terminal status: ${CANARY_ST:-<unreadable>}"
 fi
@@ -616,11 +620,31 @@ if [ -n "$UTAB_POST_CONTENT" ]; then
 else
   echo "  utab| <empty>"
 fi
-echo "  --- S2M effective policy under test (setuid / mount_exec_t) ---"
+echo "  --- S2M effective policy under test (setuid / mount_exec_t / mount_var_run_t) ---"
 sesearch -A -s docker_helper_t -t docker_helper_t -c capability 2>&1 | sed 's/^/  sesearch: /' || true
 sesearch -A -s docker_helper_t -t mount_exec_t -c file 2>&1 | sed 's/^/  sesearch: /' || true
-semodule -E docker_helper 2>/dev/null | grep -E "setuid|mount_exec" | sed 's/^/  cil: /' \
-  || echo "  cil: no setuid/mount_exec rule in the exported docker_helper CIL"
+sesearch -A -s docker_helper_t -t mount_var_run_t 2>&1 | sed 's/^/  sesearch: /' || true
+# semodule -c -E writes the extracted CIL as a REAL FILE (docker_helper.cil)
+# in the working directory and only prints a status line on stdout ("Extracting
+# at highest existing priority ..."). The exported-CIL check therefore runs in
+# a controlled directory and reads that real file; grepping stdout reads only
+# the status line and reports a false "no rule in the exported CIL".
+CIL_EXPORT_DIR="$(mktemp -d /tmp/uat-wls-cil.XXXXXX)"
+( cd "$CIL_EXPORT_DIR" && semodule -c -E docker_helper ) >"$CIL_EXPORT_DIR/export.stdout" 2>"$CIL_EXPORT_DIR/export.stderr" || true
+echo "  cil: export stdout: $(tr '\n' ' ' <"$CIL_EXPORT_DIR/export.stdout" 2>/dev/null) stderr: $(tr '\n' ' ' <"$CIL_EXPORT_DIR/export.stderr" 2>/dev/null)"
+if [ -f "$CIL_EXPORT_DIR/docker_helper.cil" ]; then
+  echo "  cil: exported real CIL file: $CIL_EXPORT_DIR/docker_helper.cil ($(wc -c <"$CIL_EXPORT_DIR/docker_helper.cil") bytes)"
+  CIL_HITS="$(grep -E "setuid|mount_exec|mount_var_run" "$CIL_EXPORT_DIR/docker_helper.cil" 2>/dev/null || true)"
+  if [ -n "$CIL_HITS" ]; then
+    printf '%s\n' "$CIL_HITS" | sed 's/^/  cil: /'
+  else
+    echo "  cil: no setuid/mount_exec/mount_var_run rule in the exported CIL file"
+  fi
+else
+  echo "  cil: exported CIL file missing in $CIL_EXPORT_DIR:"
+  ls -la "$CIL_EXPORT_DIR" 2>&1 | sed 's/^/  cil:   /' || true
+fi
+rm -rf "$CIL_EXPORT_DIR"
 echo "  --- S2M post-run projection/worker/retained-state inventory ---"
 grep 'fuse.bindfs' /proc/mounts 2>/dev/null | sed 's/^/  mounts: /' || echo "  mounts: no fuse.bindfs mounts"
 ps -eZ 2>/dev/null | grep -E 'bindfs' | sed 's/^/  ps: /' || echo "  ps: no bindfs workers"
