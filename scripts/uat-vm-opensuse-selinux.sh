@@ -337,6 +337,27 @@ record_stage "RuntimeDirectory socket regression" "$RUNDIR_RESULT"
 
 
 # ---------------------------------------------------------------------------
+# 8e2. utab dontaudit boundary diagnostic — the shipped policy suppresses the
+#      libmount utab writability probe with dontaudit (no write authority).
+#      Disposable-VM policy toggling only (dontaudit loaded -> semodule -DB
+#      -> semodule -B), each phase with its own bounded audit window, the
+#      policy restored and verified before returning. This stage runs BEFORE
+#      the workload acceptance, whose audit window starts afterwards — the
+#      diagnostic's own AVCs can never enter the final S13 accounting.
+# ---------------------------------------------------------------------------
+log "== 8e2. utab dontaudit boundary diagnostic (disposable-VM policy toggle) =="
+UTABDIAG_RESULT=FAIL
+if run_guest_capture "utab dontaudit boundary diagnostic inside the guest" \
+  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_RPM=/opt/uat-import/docker-helper.rpm UAT_RPM_SHA256=$UAT_RPM_SHA256 scripts/uat-diag-selinux-utab-dontaudit.sh"; then
+  UTABDIAG_RESULT=PASS
+  log "utab dontaudit boundary diagnostic passed inside the guest"
+else
+  log "utab dontaudit boundary diagnostic FAILED inside the guest (recorded)"
+fi
+record_stage "utab dontaudit diagnostic" "$UTABDIAG_RESULT"
+
+
+# ---------------------------------------------------------------------------
 # 8f. Release-2 SELinux workload-MAC acceptance matrix (the full
 #     docs/release-2.2-mac-enforcement.md SELinux matrix) inside the enforcing
 #     guest, against the exact candidate RPM, with the host-compiled live
@@ -437,7 +458,7 @@ echo "============================="
 # is not acceptable for Release-2 — the historical docker socket blocker that
 # once justified treating BLOCKED as success is closed, so it must not remain
 # encoded as acceptance semantics.
-if selinux_stage_accept "$BB_RESULT" "$SELREG_RESULT" "$MP_RESULT" "$LIFECYCLE_RESULT" "$SELCHECK_RESULT" "$RUNDIR_RESULT" "$WLMAC_RESULT" "$MIG211_RESULT"; then
+if selinux_stage_accept "$BB_RESULT" "$SELREG_RESULT" "$MP_RESULT" "$LIFECYCLE_RESULT" "$SELCHECK_RESULT" "$RUNDIR_RESULT" "$UTABDIAG_RESULT" "$WLMAC_RESULT" "$MIG211_RESULT"; then
   echo "RESULT: openSUSE/SELinux UAT stages PASSED inside Tumbleweed VM"
   echo "=============================================================="
   log "DONE"
