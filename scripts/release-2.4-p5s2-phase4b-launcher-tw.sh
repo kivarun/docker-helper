@@ -772,20 +772,31 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
     # and the gate items A/B came out 0 — the phase BLOCKED although
     # the dance itself was clean (the documented residual race's exact
     # shape: "a pid that dies before its own async readlink completes
-    # gets no ident"). For an R-state discovery the ns readlink runs
-    # INLINE (ONE fork in the discovery path — the exact pid the gate
-    # items A/B need, bound at the discovery instant while it is still
-    # alive); the S-state discoveries keep the async queue and the bulk
-    # path stays fork-free (the 4C-55 correction's shape preserved).
+    # gets no ident"). The 4C-75 correction 1: the residual race RECURRED
+    # in the 4C-75 canonical run 37726348034 with an S-STATE dance pid —
+    # the fork-storm cohort tick discovered the mount-dancing holder
+    # exe-61166 in state S (the state field only reflects the instant of
+    # the stat read; the dance alternates R and S), the discovery kept
+    # the async queue only, and the queued drain — reached ~150-250ms
+    # later behind seven earlier queue entries' readlink forks under the
+    # same storm — ran after the holder's death: no GATE-HOLDER-IDENT,
+    # items A/B = 0 again, the same BLOCKED-although-clean shape. The state
+    # discrimination is therefore DROPPED: for EVERY first discovery of
+    # a flow-domain pid (any state) the ns/mnt readlink runs INLINE (ONE
+    # fork in the discovery path — the exact pid the gate items A/B
+    # need, bound at the discovery instant while it is still alive);
+    # the async queue and the bulk path stay unchanged (the 4C-55
+    # correction's shape preserved: the tick's own discovery reads are
+    # builtin file reads, the ONE inline fork happens only at a NEW
+    # flow-domain pid's discovery instant, and the launch-window fork
+    # storm's cohort stretch is covered by the tail re-scan below).
     # The discovery-emitted GATE-TICK below then carries the real
     # ns/mnt token, and the holder's effective-ns extraction (which
     # reads the IDENT record first and the TICK lines otherwise) binds
     # without needing the async record at all. The pid stays queued:
     # the async drain still completes the ns/user pair when it wins.
-    if [ "$GSTV" = "R" ]; then
-      GRNSM="$(readlink "/proc/$GPID/ns/mnt" 2>/dev/null || true)"
-      [ -n "$GRNSM" ] && GNSM[$GPID]="$GRNSM"
-    fi
+    GRNSM="$(readlink "/proc/$GPID/ns/mnt" 2>/dev/null || true)"
+    [ -n "$GRNSM" ] && GNSM[$GPID]="$GRNSM"
     printf '%s GATE-HOLDER-FIRST pid=%s comm=%s state=%s ppid=%s ctx=%s ns/mnt=%s ns/user=pending starttime=%s\n' \
       "$GTS" "$GPID" "$GLC" "$GSTV" "$GPP" "$GCTXV" "${GNSM[$GPID]:-pending}" "${GSTART:-(none)}"
     # The 4C-52 correction: the discovery moment IS a tick observation
@@ -8639,7 +8650,15 @@ EOF
       if ($1 != who) next
       if ($0 ~ /sys_bind\(/ && $0 !~ / -> /) {
         inwin = 1; w++; wins[w] = t2 "\t" $0; wdec[w] = ""; wexit[w] = ""; wret[w] = ""; wfd[w] = ""
-        if (match($0, /fd: 0x[0-9a-fA-F]+/)) { fv = substr($0, RSTART + 4, RLENGTH - 4); sub(/^0x0*/, "", fv); if (fv == "") fv = "0"; wfd[w] = fv }
+        # The 4C-75 correction 1: the trace prints the fd argument in BOTH
+        # spellings — plain decimal below 10 (the buildkitd-61270 own
+        # record "fd: 8") and 0x-prefixed hex at 10 and above (the
+        # rootlesskit record "fd: 0xb") — the extractor must accept both
+        # or the fd field reads as not exposed for exactly the
+        # single-digit records. The DISPLAY stays the raw exposed token
+        # (the §10 contract: the fields as the trace exposes them; §11
+        # does the normalization).
+        if (match($0, /fd: (0x[0-9a-fA-F]+|[0-9]+)/)) { wfd[w] = substr($0, RSTART + 4, RLENGTH - 4) }
         next
       }
       if (!inwin) next
@@ -8669,18 +8688,48 @@ EOF
   # socket(AF_UNIX) -> fd N -> bind(fd N) chain proven from the trace,
   # never guessed. NOT-PROVEN is the honest outcome when the trace does
   # not expose the chain (no exit record, no fd field, no bind at all).
+  # The 4C-75 correction 1: the two spellings are the SAME fd value —
+  # the sys_socket exit retval is always 0x-prefixed hex ("0x8"), the
+  # sys_bind enter fd field is plain decimal below 10 ("fd: 8") and
+  # 0x-prefixed hex at 10 and above ("fd: 0xb") — both sides are
+  # normalized to one NUMERIC fd value before the compare (plain digits
+  # parse decimal, 0x-prefixed parse hex; for every single-digit value
+  # the two bases coincide, which is exactly the corpus own pair
+  # buildkitd-61270: sys_socket -> 0x8 then sys_bind(fd: 8, ...) in the
+  # same process). A socket exit whose retval is not a small non-negative
+  # number (the errno band 0xffffffff… = a FAILED socket, which returned
+  # no fd) is recorded but never an fd candidate; a bind record whose fd
+  # field matches neither spelling stays "(the fd field was not
+  # exposed)" and is never guessed. The marker is OK (the 4C-75
+  # correction 1 contract expected corrected marker).
   POSTTUN_BKD_BIND_FD_IDENTITY="$(awk '
+    function fdval(s,   v, i, c) {
+      if (s == "") return -1
+      if (s ~ /^0[xX][0-9a-fA-F]+$/) {
+        v = 0
+        for (i = 3; i <= length(s); i++) {
+          c = index("0123456789abcdef", tolower(substr(s, i, 1)))
+          if (c == 0) return -1
+          v = v * 16 + (c - 1)
+        }
+        return v
+      }
+      if (s ~ /^[0-9]+$/) return s + 0
+      return -1
+    }
     { t2 = $4; sub(/:$/, "", t2)
       if ($1 != who) next
       if ($0 ~ /sys_socket -> /) {
-        ret = $NF; fv = ret; sub(/^0x0*/, "", fv); if (fv == "") fv = "0"
-        ns++; sret[ns] = fv; sline[ns] = t2 "\t" $0; sts[ns] = t2 + 0
+        ret = $NF; v = fdval(ret)
+        ns++; sline[ns] = t2 "\t" $0; sts[ns] = t2 + 0
+        sret[ns] = (v >= 0 && v < 2147483648) ? v : ""
         next
       }
       if ($0 ~ /sys_bind\(/ && $0 !~ / -> /) {
         fv = ""
-        if (match($0, /fd: 0x[0-9a-fA-F]+/)) { fv = substr($0, RSTART + 4, RLENGTH - 4); sub(/^0x0*/, "", fv); if (fv == "") fv = "0" }
-        nb++; bline[nb] = t2 "\t" $0; bfd[nb] = fv; bts[nb] = t2 + 0
+        if (match($0, /fd: (0x[0-9a-fA-F]+|[0-9]+)/)) { fv = substr($0, RSTART + 4, RLENGTH - 4) }
+        nv = fdval(fv)
+        nb++; bline[nb] = t2 "\t" $0; bfd[nb] = (nv >= 0) ? nv : ""; bts[nb] = t2 + 0
       }
     }
     END {
@@ -8688,13 +8737,15 @@ EOF
       pm = 0
       for (b = 1; b <= nb && b <= 6; b++) {
         found = 0
-        for (s = ns; s >= 1; s--) {
-          if (sts[s] < bts[b] && sret[s] == bfd[b]) { found = s; break }
+        if (bfd[b] != "") {
+          for (s = ns; s >= 1; s--) {
+            if (sts[s] < bts[b] && sret[s] != "" && sret[s] == bfd[b]) { found = s; break }
+          }
         }
         if (found > 0) {
           pm++
           if (pm == 1) {
-            print "BIND-FD-IDENTITY=PROVEN (the bind fd " bfd[b] " is the fd returned by a preceding same-process sys_socket exit — the socket(AF_UNIX) -> fd N -> bind(fd N) chain)"
+            print "BIND-FD-IDENTITY=OK (the bind fd " bfd[b] " is the fd returned by a preceding same-process sys_socket exit — the socket(AF_UNIX) -> fd N -> bind(fd N) chain; the two spellings (the exit retval 0x… and the enter fd field) are normalized to the same fd value)"
             print "  the socket exit: " sline[found]
             print "  the bind enter:  " bline[b]
           }
