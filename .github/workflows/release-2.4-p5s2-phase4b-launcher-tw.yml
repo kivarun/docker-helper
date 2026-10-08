@@ -115,7 +115,41 @@ jobs:
           # owns 4C-75 (the proof ref advances from the 4C-73-era pin to
           # the commit carrying that module; identical Go sources, so
           # the binary is the same program).
-          PHASE4B_PROOF_REF: '1c391c6c0fc385e2f070f154aa1e48f64ca734c5'
+          # 4C-75: the 4C-74 correction-1 canonical run 37683155675 proved
+          # the categorized runtime-tree dir search grant live (the OLD
+          # boundary GONE; both per-op runtime-tree newfstatat lookups
+          # passed CLEAN, the stale-socket removal unlinkat PASSED WHOLE
+          # (-ENOENT, zero in-window decisions), the runtime-tree category
+          # handoff c1 -> c1 held, NO-PREANCHOR-POST=PASS under the
+          # corrected causal machinery) and its own terminal record is
+          # the genuine PRE-CLEANUP owner: buildkitd_t:s0:c1 ->
+          # builder_runtime_t:s0:c1:dir requested=0x20000004 denied=0x4
+          # (the AF_UNIX bind attempt's dir WRITE hook, trace-ts=
+          # 543.896475, the UNTRACED-OWNER second-tier anchor — the
+          # sys_bind enter/exit records were not traced; the
+          # sysctl_net_t:dir search denial at 543.896448 before it stayed
+          # HANDLED/NON-TERMINAL with the continuation proof
+          # by=543.896475 untraced-owner-decision; only close(fd: 8)/
+          # close(fd: 5), the ZONE2 state-tree teardown and the
+          # error-report write+exit_group(1) followed). The 4C-75 grant
+          # WIDENS THAT SAME RULE IN PLACE (ONE rule, never split):
+          # allow docker_helper_buildkitd_t
+          # docker_helper_builder_runtime_t:dir { getattr search write }
+          # — the delta exactly +write (candidate = decode(denied) =
+          # exactly { write }, NEVER the whole requested mask; dir:write
+          # is NOT an unlink/creation bundle — add_name/remove_name/
+          # create and the socket object's own sock_file hooks stay
+          # their own live-evidence phases, never combined; no sock_file
+          # access, no socket/connect), the module-borne buildkitd-named
+          # allow total STAYS EXACTLY EIGHT, the 4C-75 harness arms
+          # sys_enter_bind/sys_exit_bind (+ sys_exit_socket) so the
+          # bind(2) owning window and the socket->fd->bind identity
+          # chain are captured — instrumentation only, no policy
+          # authority — and the next live boundary owns 4C-76 (the proof
+          # ref advances from the 4C-74-era pin to the commit carrying
+          # that module; identical Go sources, so the binary is the same
+          # program).
+          PHASE4B_PROOF_REF: 'be5ec61e9b5192b114d066e275e6c954420d94ed'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
