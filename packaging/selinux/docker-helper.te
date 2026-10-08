@@ -98,6 +98,7 @@ module docker_helper 1.0;
 		type fusefs_t;
 		type fuse_device_t;
 		type mount_var_run_t;
+		type mount_exec_t;
 
 		role system_r;
 
@@ -112,7 +113,7 @@ module docker_helper 1.0;
 		class tcp_socket { create setopt bind node_bind listen accept getattr read write connect getopt name_connect };
 		class unix_stream_socket { connectto getattr ioctl read write };
 		class udp_socket { create setopt connect getattr read write };
-		class capability { dac_read_search dac_override sys_admin fowner };
+		class capability { dac_read_search dac_override sys_admin fowner setuid };
 		class process { transition siginh noatsecure rlimitinh sigkill };
 		class process2 { nnp_transition };
 	}
@@ -476,6 +477,30 @@ allow docker_helper_t self:capability fowner;
 #     tclass=capability (user-owned backing files read through projections)
 allow docker_helper_t mount_var_run_t:dir { search };
 allow docker_helper_t mount_var_run_t:file { getattr read open };
+
+# The libfuse (3.18.x) mtab/utab bookkeeping of the bindfs projection worker:
+# with /etc/mtab present (any form: the lstat succeeds and the access check
+# does not return EROFS) and /run/mount/utab present, fuse_mnt_add_mount()
+# forks a child that calls setuid(geteuid()) and execs the distro /bin/mount
+# for the fake utab/mtab record update ("mount --no-canonicalize -i -f").
+# Proven necessary by the enforcing scope=selinux UAT (run 37764641564, S2M
+# mtab-path canary; libfuse 3.18.3, bindfs 1.18.4, utab absent => clean,
+# utab present => worker exits 4 before the projection mounts):
+#   avc:  denied  { setuid }  comm="bindfs" capability=7
+#     scontext=system_u:system_r:docker_helper_t:s0
+#     tcontext=system_u:system_r:docker_helper_t:s0 tclass=capability permissive=0
+#   avc:  denied  { execute }  comm="bindfs" name="mount"
+#     scontext=system_u:system_r:docker_helper_t:s0
+#     tcontext=system_u:object_r:mount_exec_t:s0 tclass=file permissive=0
+# The bookkeeping execution stays in the daemon domain on purpose
+# (execute_no_trans — the same same-domain worker model as bindfs itself):
+# /bin/mount is a setuid-root executable, so there is deliberately NO domain
+# transition into the distro mount domain or any other more privileged
+# domain, no other permission on mount_exec_t:file, and no further
+# capability grant. Any further enforcing denial is a NEW boundary and must
+# be evidence-driven on its own.
+allow docker_helper_t self:capability setuid;
+allow docker_helper_t mount_exec_t:file { execute execute_no_trans };
 
 # Mount-pin: unmount filesystem (proven in enforcing UAT)
 allow docker_helper_t fs_t:filesystem { unmount };

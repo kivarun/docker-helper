@@ -2343,9 +2343,11 @@ func TestSELinuxPolicyBindfsProjectionMount(t *testing.T) {
 		"allow docker_helper_t docker_helper_runtime_t:dir { mounton };",
 		"allow docker_helper_t self:capability { dac_read_search dac_override sys_admin };",
 		"allow docker_helper_t self:capability fowner;",
+		"allow docker_helper_t self:capability setuid;",
+		"allow docker_helper_t mount_exec_t:file { execute execute_no_trans };",
 		"allow docker_helper_t mount_var_run_t:dir { search };",
 		"allow docker_helper_t mount_var_run_t:file { getattr read open };",
-		"class capability { dac_read_search dac_override sys_admin fowner };",
+		"class capability { dac_read_search dac_override sys_admin fowner setuid };",
 	} {
 		if !strings.Contains(content, rule) {
 			t.Errorf("SELinux policy must grant: %s", rule)
@@ -2354,6 +2356,61 @@ func TestSELinuxPolicyBindfsProjectionMount(t *testing.T) {
 	if strings.Contains(content, "domain_auto_trans docker_helper_t docker_helper_bindfs_exec_t") ||
 		strings.Contains(content, "type_transition docker_helper_t docker_helper_bindfs_exec_t") {
 		t.Error("bindfs must stay in the daemon domain (execute_no_trans), not transition to its own domain")
+	}
+	// The libfuse mtab/utab bookkeeping grants are exact and evidence-bounded
+	// (run 37764641564): the setuid capability is for the forked
+	// mtab-bookkeeping child of the bindfs worker, and mount_exec_t:file
+	// carries exactly the same-domain execution pair. Nothing broader is
+	// granted: no distro mount domain, no new type transitions, no further
+	// mount_exec_t:file permissions, no bin_t same-domain execution, and no
+	// unproven capabilities such as setgid.
+	if strings.Contains(content, "mount_t") {
+		t.Error("the helper must not reference the distro mount domain (no transition into a more privileged domain for the setuid /bin/mount)")
+	}
+	if strings.Contains(content, "type_transition docker_helper_t mount_exec_t") {
+		t.Error("the mtab bookkeeping must not add a type_transition on mount_exec_t")
+	}
+	lines := strings.Split(string(data), "\n")
+	capPerms := map[string]bool{}
+	mountExecRules := 0
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "allow docker_helper_t self:capability") {
+			rest := strings.TrimSpace(strings.TrimPrefix(line, "allow docker_helper_t self:capability"))
+			rest = strings.TrimSuffix(rest, ";")
+			if strings.HasPrefix(rest, "{") {
+				rest = strings.TrimSpace(strings.Trim(rest, "{}"))
+				for _, p := range strings.Fields(rest) {
+					capPerms[p] = true
+				}
+				continue
+			}
+			capPerms[rest] = true
+			continue
+		}
+		if strings.HasPrefix(line, "allow docker_helper_t mount_exec_t:file") {
+			mountExecRules++
+			if line != "allow docker_helper_t mount_exec_t:file { execute execute_no_trans };" {
+				t.Errorf("mount_exec_t:file must be granted exactly for the evidenced execution pair, got: %s", line)
+			}
+		}
+		if strings.HasPrefix(line, "allow docker_helper_t bin_t:file") && strings.Contains(line, "execute_no_trans") {
+			t.Errorf("same-domain execution of generic bin_t binaries must stay forbidden, got: %s", line)
+		}
+	}
+	if mountExecRules != 1 {
+		t.Errorf("there must be exactly one mount_exec_t:file allow rule, got %d", mountExecRules)
+	}
+	wantCaps := map[string]bool{"dac_read_search": true, "dac_override": true, "sys_admin": true, "fowner": true, "setuid": true}
+	for p := range wantCaps {
+		if !capPerms[p] {
+			t.Errorf("docker_helper_t capability grants must include %s", p)
+		}
+	}
+	for p := range capPerms {
+		if !wantCaps[p] {
+			t.Errorf("unexpected docker_helper_t capability grant (unproven): %s", p)
+		}
 	}
 }
 
