@@ -20,7 +20,8 @@ import (
 
 // newCapacityTestApp creates a test app with a supervisor and one
 // admin Session whose workspace exists, wired for long-lived fake Docker
-// processes. The terminateForShutdown cleanup bounds every fake process.
+// processes. The terminateForShutdown cleanup bounds every fake process and
+// waits for every operation to reach its terminal state before returning.
 func newCapacityTestApp(t *testing.T) (*App, *CreatedSession) {
 	t.Helper()
 	app := newTestAppWithAdminTokenAndStaging(t)
@@ -33,12 +34,71 @@ func newCapacityTestApp(t *testing.T) (*App, *CreatedSession) {
 		// sleep responds to SIGTERM, matching the real termination paths.
 		return exec.CommandContext(ctx, "sleep", "300")
 	}
+	// The fake Docker environment has no correlated containers: without this
+	// seam the terminal cleanup's container-absence proof builds its docker
+	// inspect through the same ExecCommandContext seam, receives sleep, and
+	// only resolves when the 10s proof timeout kills it — the completion
+	// watcher then writes its finish audit long after this test ended.
+	app.InspectOperationContainers = func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
+		return nil, nil
+	}
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		// The full documented shutdown budget (graceful + force reserve) is
+		// required: with a budget at or below the force-cleanup reserve the
+		// graceful phase is skipped and terminateForShutdown returns while a
+		// completion watcher is still pending. That watcher wakes from
+		// cmd.Wait and writes the <kind>.finish audit record into whatever
+		// the package-global audit writer holds at that moment — by then the
+		// next test's fresh buffer — racing with its assertions. The graceful
+		// phase waits for close(op.done), and writeFinishAudit precedes that
+		// close, so a completed wait proves the finish audit was written.
+		ctx, cancel := context.WithTimeout(context.Background(),
+			defaultTerminationTimeout+defaultForceCleanupTimeout)
 		defer cancel()
 		app.OperationSupervisor.terminateForShutdown(ctx, nil)
 	})
 	return app, result
+}
+
+// TestCapacityTestCleanupReachesTerminalOperations proves the
+// newCapacityTestApp cleanup contract: after terminateForShutdown returns,
+// every registered operation has reached its terminal state, so no completion
+// watcher outlives the test to write its finish audit into the next test's
+// audit buffer. CI raced twice on exactly that leak under -race.
+func TestCapacityTestCleanupReachesTerminalOperations(t *testing.T) {
+	var pending []*operation
+	t.Cleanup(func() {
+		// Registered before newCapacityTestApp's cleanup, so it runs after
+		// the full terminateForShutdown chain.
+		for _, op := range pending {
+			select {
+			case <-op.done:
+			default:
+				t.Errorf("operation %s outlived the capacity test cleanup: completion watcher still pending", op.ID)
+			}
+		}
+	})
+	app, result := newCapacityTestApp(t)
+
+	w := runCapacityRequest(t, app, result.Token)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("operation: expected %d, got %d (%s)", http.StatusCreated, w.Code, w.Body.String())
+	}
+	app.OperationSupervisor.mu.RLock()
+	for _, op := range app.OperationSupervisor.ops {
+		pending = append(pending, op)
+	}
+	app.OperationSupervisor.mu.RUnlock()
+	if len(pending) == 0 {
+		t.Fatal("no operation was registered")
+	}
+	for _, op := range pending {
+		select {
+		case <-op.done:
+			t.Errorf("operation %s already reached a terminal state before cleanup", op.ID)
+		default:
+		}
+	}
 }
 
 // runCapacityRequest posts one run request through the real handler.
