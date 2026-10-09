@@ -103,20 +103,25 @@ run_guest_capture() {
 # Combined result accounting for the SELinux job stages (collect-all).
 SELINUX_STAGES=""
 record_stage() { # name result
-  SELINUX_STAGES="${SELINUX_STAGES}$(printf '%-28s %s\n' "$1" "$2")"
+  # printf -v retains the trailing newline; command substitution would strip
+  # it and concatenate independently recorded stage rows in the summary.
+  local stage_line
+  printf -v stage_line '%-28s %s\n' "$1" "$2"
+  SELINUX_STAGES+="${stage_line}"
 }
 
 # selinux_stage_accept BB_RESULT SELREG_RESULT MP_RESULT LIFECYCLE_RESULT
 #                      SELCHECK_RESULT RUNDIR_RESULT UTABDIAG_RESULT
-#                      WLMAC_RESULT MIG211_RESULT:
-# overall acceptance of the normal SELinux UAT (fail-closed). Every gating
-# stage must be PASS: a BLOCKED stage means the required scenario was NOT
-# exercised, which is not acceptable for Release-2. Returns 0 only when all
-# nine are PASS.
+#                      WLMAC_RESULT MIG211_RESULT MIG22_RESULT
+# Fail closed: all TEN mandatory stages must be supplied and must be exactly
+# PASS. FAIL, BLOCKED, empty/unknown values and wrong arity are all rejected.
 selinux_stage_accept() {
-  [ "$1" = "PASS" ] && [ "$2" = "PASS" ] && [ "$3" = "PASS" ] && [ "$4" = "PASS" ] \
-    && [ "$5" = "PASS" ] && [ "$6" = "PASS" ] && [ "$7" = "PASS" ] && [ "$8" = "PASS" ] \
-    && [ "$9" = "PASS" ]
+  [ "$#" -eq 10 ] || return 1
+  local stage_result
+  for stage_result in "$@"; do
+    [ "$stage_result" = "PASS" ] || return 1
+  done
+  return 0
 }
 
 # ---------------------------------------------------------------------------
