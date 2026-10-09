@@ -130,7 +130,7 @@ stage_rows_have_newlines() {
       source "$SRC_DIR/scripts/uat-vm-opensuse-selinux-lib.sh" \
       && record_stage "first stage" PASS \
       && record_stage "second stage" FAIL \
-      && printf -v expected_rows '%-28s %s\\n%-28s %s\\n' "first stage" PASS "second stage" FAIL \
+      && printf -v expected_rows '%-28s %s\n%-28s %s\n' "first stage" PASS "second stage" FAIL \
       && [ "$SELINUX_STAGES" = "$expected_rows" ] )
 }
 if stage_rows_have_newlines; then
