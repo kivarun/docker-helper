@@ -451,14 +451,14 @@ echo "UAT version:      $VERSION"
 echo "Docker SELinux:   ${DOCKER_HEALTHY:-0}=naturally healthy two-stage setup (container-selinux before Docker)"
 echo "total:            ${TOTAL}s"
 echo "---- SELinux job stages ----"
-printf '%s\n' "$SELINUX_STAGES"
+printf '%s' "$SELINUX_STAGES"
 echo "============================="
 # Fail-closed acceptance: every gating stage must be PASS. A BLOCKED stage
 # (exit 2) means the required scenario was NOT successfully exercised, which
 # is not acceptable for Release-2 — the historical docker socket blocker that
 # once justified treating BLOCKED as success is closed, so it must not remain
 # encoded as acceptance semantics.
-if selinux_stage_accept "$BB_RESULT" "$SELREG_RESULT" "$MP_RESULT" "$LIFECYCLE_RESULT" "$SELCHECK_RESULT" "$RUNDIR_RESULT" "$UTABDIAG_RESULT" "$WLMAC_RESULT" "$MIG211_RESULT"; then
+if selinux_stage_accept "$BB_RESULT" "$SELREG_RESULT" "$MP_RESULT" "$LIFECYCLE_RESULT" "$SELCHECK_RESULT" "$RUNDIR_RESULT" "$UTABDIAG_RESULT" "$WLMAC_RESULT" "$MIG211_RESULT" "$MIG22_RESULT"; then
   echo "RESULT: openSUSE/SELinux UAT stages PASSED inside Tumbleweed VM"
   echo "=============================================================="
   log "DONE"
