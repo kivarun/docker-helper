@@ -18,19 +18,18 @@ var adminTokenCommand = &Command{
 var adminTokenRotateCommand = &Command{
 	Name:       "rotate",
 	Summary:    "Rotate the admin token",
-	Usage:      "docker-helper admin-token rotate [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json]",
+	Usage:      "docker-helper admin-token rotate [--endpoint ENDPOINT] [--token-file PATH] [--json]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
 
 	Presentation: humanJSONPresentation(),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:      *system,
 					Endpoint:    endpoint.value,
 					EndpointSet: endpoint.set,
 					TokenFile:   *tokenFile,
@@ -41,7 +40,6 @@ var adminTokenRotateCommand = &Command{
 			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
-					System:    *system,
 					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})

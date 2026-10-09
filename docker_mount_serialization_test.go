@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -115,16 +116,20 @@ func dockerMountValues(t *testing.T, args []string) []string {
 // WRITABLE at a different target).
 func TestRunHostileTargetKeepsIntendedBindMountThroughDockerGrammar(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeUser
 	app.OperationSupervisor = newOperationSupervisor()
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
+	var mu sync.Mutex
 	var dockerArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		dockerArgs = append([]string(nil), args...)
+		if len(args) > 2 && args[0] == "--config" && args[2] == "run" {
+			mu.Lock()
+			dockerArgs = append([]string(nil), args...)
+			mu.Unlock()
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -160,17 +165,21 @@ func TestRunHostileTargetKeepsIntendedBindMountThroughDockerGrammar(t *testing.T
 			if !strings.Contains(w.Body.String(), "invalid_mount") {
 				t.Fatalf("%s: expected invalid_mount, got %s", tc.name, w.Body.String())
 			}
+			mu.Lock()
 			if dockerArgs != nil {
 				t.Fatalf("%s: Docker was invoked for an unrepresentable mount", tc.name)
 			}
+			mu.Unlock()
 			continue
 		}
 
 		if w.Code != http.StatusCreated {
 			t.Fatalf("%s: expected 201, got %d (body=%s)", tc.name, w.Code, w.Body.String())
 		}
+		mu.Lock()
 		specs := dockerMountValues(t, dockerArgs)
 		dockerArgs = nil
+		mu.Unlock()
 		if len(specs) != 1 {
 			t.Fatalf("%s: expected exactly one --mount value, got %q", tc.name, specs)
 		}
@@ -289,7 +298,6 @@ func TestDockerBindMountSpecContract(t *testing.T) {
 // Docker process.
 func TestRunSerializerFailureBeforeAdmissionLeavesNoOperation(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeUser
 	app.OperationSupervisor = newOperationSupervisor()
 	auditBuf, _ := setupTestLogging(t)
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))

@@ -67,12 +67,12 @@ expect_reject "absolute mount source" \
 
 # --- absolute outside as session workspace -----------------------------------
 expect_reject "session workspace absolute outside allowed root" \
-  dh session create --system --token-file "$cred" "$OUTSIDE/ws" --json
+  dh session create --token-file "$cred" "$OUTSIDE/ws" --json
 
 # --- symlink inside -> outside ------------------------------------------------
 ln -s "$OUTSIDE" "$ws/escape"
 expect_reject "session workspace via symlink to outside" \
-  dh session create --system --token-file "$cred" "$ws/escape" --json
+  dh session create --token-file "$cred" "$ws/escape" --json
 expect_reject "mount source via symlink to outside" \
   env DOCKER_HELPER_SESSION_TOKEN="$stok" \
   dh run --mount escape:/mnt/x "$IMAGE" -- sh -ec 'true'
@@ -111,7 +111,7 @@ fi
 
 # --- best-effort cleanup --------------------------------------------------------
 rm -f "$ws/escape" "$ws/link"
-dh principal delete --system "$USER" >/dev/null 2>&1 || true
+dh principal delete "$USER" >/dev/null 2>&1 || true
 userdel -r "$USER" >/dev/null 2>&1 || true
 rm -f "$cred"
 rm -rf "$OUTSIDE"

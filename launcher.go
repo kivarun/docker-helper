@@ -343,8 +343,7 @@ func readPrincipalAllowedRoots(q txQuerier, principalID int64) ([]AllowedRootEnt
 // reload), and read-only introspection goes through
 // resolvePrincipalEffectiveRootsSnapshot.
 func (a *App) resolveEffectivePrincipalRootEntries(principalID int64) ([]AllowedRootEntry, error) {
-	cfg := a.getConfig()
-	globalRoots, err := resolveAllowedRootEntries(cfg.AllowedRoots)
+	globalRoots, err := resolveAllowedRootEntries(a.getConfig().AllowedRoots)
 	if err != nil {
 		return nil, err
 	}
@@ -352,12 +351,7 @@ func (a *App) resolveEffectivePrincipalRootEntries(principalID int64) ([]Allowed
 	if err != nil {
 		return nil, err
 	}
-	userMode := cfg.Mode == ModeUser
-	var daemonOwnerPrincipalID int64
-	if userMode && a.userModeDefault != nil {
-		daemonOwnerPrincipalID = a.userModeDefault.principalID
-	}
-	return effectivePrincipalAllowedRoots(globalRoots, stored, principalID, daemonOwnerPrincipalID, userMode), nil
+	return effectivePrincipalAllowedRoots(globalRoots, stored, principalID), nil
 }
 
 // resolveEffectivePrincipalRoots projects the canonical effective Principal

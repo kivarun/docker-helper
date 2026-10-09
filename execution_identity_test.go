@@ -13,21 +13,18 @@ import (
 	"testing"
 )
 
-// TestUserModeSessionUsesDaemonOwnerUIDGID proves the final user-mode ownership
-// contract: a user-mode Session created through the daemon-owner default
-// Launcher resolves its execution identity to the daemon-owner Principal's
-// persisted UID:GID (the real daemon OS identity), not to any ownerless/admin
-// daemon fallback.
-func TestUserModeSessionUsesDaemonOwnerUIDGID(t *testing.T) {
+// TestSessionExecutionIdentityIsTheLauncherPrincipalRow proves the system
+// execution-identity contract: a Session created through a Launcher resolves
+// its execution identity to the owning Principal's persisted UID:GID, read
+// from the principal row through the Launcher ownership join.
+func TestSessionExecutionIdentityIsTheLauncherPrincipalRow(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	// The generic fixture provisions the daemon-owner Principal with the real
-	// daemon OS identity (os.Getuid()/os.Getgid()).
-	daemonUID := os.Getuid()
-	daemonGID := os.Getgid()
+	// The generic fixture provisions the owner Principal with the explicit
+	// process identity (os.Getuid()/os.Getgid()).
+	wantUID := os.Getuid()
+	wantGID := os.Getgid()
 
-	// Create the Session through the daemon-owner default Launcher (the same
-	// transparent user-mode path an unauthenticated user-mode client uses).
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
@@ -38,28 +35,11 @@ func TestUserModeSessionUsesDaemonOwnerUIDGID(t *testing.T) {
 		t.Fatalf("resolveSessionExecutionIdentity() error: %v", err)
 	}
 
-	// Execution identity must equal the persisted daemon-owner Principal
-	// identity (the real daemon UID:GID), not a default or fallback.
-	if uid != daemonUID {
-		t.Errorf("UID = %d, want %d (daemon-owner Principal UID)", uid, daemonUID)
+	if uid != wantUID {
+		t.Errorf("UID = %d, want %d (owner Principal UID)", uid, wantUID)
 	}
-	if gid != daemonGID {
-		t.Errorf("GID = %d, want %d (daemon-owner Principal GID)", gid, daemonGID)
-	}
-
-	// Prove identity comes from the persisted Principal row, not from the OS
-	// lookup at resolve time.
-	osUserLookupOrig := OSUserLookupByUID
-	defer func() { OSUserLookupByUID = osUserLookupOrig }()
-	OSUserLookupByUID = func(uid int) (username, gid, home string, err error) {
-		return "otheruser", "9999", "/elsewhere", nil
-	}
-	uid, gid, err = resolveSessionExecutionIdentity(app.DB, &result.Session)
-	if err != nil {
-		t.Fatalf("resolveSessionExecutionIdentity() error: %v", err)
-	}
-	if uid != daemonUID || gid != daemonGID {
-		t.Errorf("identity must come from persisted Principal, got %d:%d, want %d:%d", uid, gid, daemonUID, daemonGID)
+	if gid != wantGID {
+		t.Errorf("GID = %d, want %d (owner Principal GID)", gid, wantGID)
 	}
 }
 

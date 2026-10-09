@@ -156,14 +156,14 @@ dh config allowed-root add /opt >/dev/null 2>&1 || true
 if ! dh config allowed-root list 2>/dev/null | awk 'NF && $1 ~ /^\// {print $1}' | grep -qx '/opt'; then
   reg_fail "cannot add /opt to global allowed roots (authorization prerequisite)"
 fi
-dh reload --system >/dev/null 2>&1 || reg_fail "config reload failed after adding /opt root"
+dh reload >/dev/null 2>&1 || reg_fail "config reload failed after adding /opt root"
 
 C3_P="c3race"
 C3_CRED="/tmp/c3race.tok"
 WS="/opt/uat-c3-ws-$RANDOM"
 VICTIM="/opt/uat-c3-victim-$RANDOM"
 reg_setup_principal "$C3_P" >/dev/null || { reg_fail "principal setup failed"; reg_result; }
-dh principal allowed-root add --system "$C3_P" /opt >/dev/null 2>&1 || { reg_fail "principal allowed-root add failed"; reg_result; }
+dh principal allowed-root add "$C3_P" /opt >/dev/null 2>&1 || { reg_fail "principal allowed-root add failed"; reg_result; }
 reg_principal_credential "$C3_P" "$C3_CRED" || { reg_fail "credential create failed"; reg_result; }
 
 # Victim: a Principal-owned tree OUTSIDE the issued workspace. Its PARENT
@@ -246,7 +246,7 @@ for round in $(seq 1 "$RACE_ROUNDS"); do
   # the accepted two-outcome contract instead of failing on any nonzero rc.
   CREATE_OUT="/tmp/uat-c3-create.$round.$$"
   CREATE_RC=0
-  dh session create --system --token-file "$C3_CRED" --json "$WS" >"$CREATE_OUT" 2>&1 || CREATE_RC=$?
+  dh session create --token-file "$C3_CRED" --json "$WS" >"$CREATE_OUT" 2>&1 || CREATE_RC=$?
   OUTCOME="$(c3_read_create_outcome "$CREATE_OUT" "$CREATE_RC")"
   SID=""
   STOK=""
@@ -261,7 +261,7 @@ for round in $(seq 1 "$RACE_ROUNDS"); do
       # Safe-refusal proof: no Session/token was issued for this credential
       # and the service stays healthy — the list answers successfully and
       # shows no issued session for this Principal.
-      LIST_OUT="$(dh session list --system --token-file "$C3_CRED" 2>&1)"
+      LIST_OUT="$(dh session list --token-file "$C3_CRED" 2>&1)"
       if [ $? -eq 0 ] && ! printf '%s\n' "$LIST_OUT" | grep -q 'dhs_'; then
         reg_ok "round $round: no Session was issued by the safe refusal (credential-owned session list empty, service healthy)"
       else
@@ -304,7 +304,7 @@ for round in $(seq 1 "$RACE_ROUNDS"); do
   # it only after the final round, so release failures surface here too.
   if [ -n "$SID" ]; then
     chown -R root:root "$WS" >/dev/null 2>&1 || true
-    if dh session delete --system "$SID" >/dev/null 2>&1; then
+    if dh session delete "$SID" >/dev/null 2>&1; then
       reg_ok "round $round: session deleted (coverage released)"
     else
       reg_fail "round $round: session delete failed"
@@ -324,7 +324,7 @@ fi
 reg_expect_no_se_rule_for "$WS" "no stale fcontext rule remains for the raced workspace after release"
 
 # --- service remains healthy ----------------------------------------------------
-if dh session list --system >/dev/null 2>&1; then
+if dh session list >/dev/null 2>&1; then
   reg_ok "service remains healthy after the race (session list answered)"
 else
   reg_fail "service unhealthy after the race (session list failed)"
@@ -365,7 +365,7 @@ if [ -n "$POST_SID" ]; then
     reg_fail "container RW run failed after the race: $(printf '%s' "$RW_OUT" | redact | head -4)"
   fi
   chown -R root:root "$WS" >/dev/null 2>&1 || true
-  if dh session delete --system "$POST_SID" >/dev/null 2>&1; then
+  if dh session delete "$POST_SID" >/dev/null 2>&1; then
     reg_ok "post-race session deleted"
   else
     reg_fail "post-race session delete failed"

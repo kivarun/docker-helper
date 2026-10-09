@@ -113,7 +113,7 @@ func TestRunDuplicateMountsEachCountAgainstLimit(t *testing.T) {
 	}
 }
 
-// TestRunUserModeSameMountCeiling proves user mode obeys the same fixed
+// TestRunSameMountCeiling proves the daemon obeys the same fixed
 // caller-mount ceiling without gaining system-mode mechanics.
 func TestRunUserModeSameMountCeiling(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
@@ -125,10 +125,10 @@ func TestRunUserModeSameMountCeiling(t *testing.T) {
 
 	w := runWithNMOUNTS(t, app, result.Token, maxRunMounts+1)
 	if w.Code != http.StatusBadRequest {
-		t.Fatalf("user mode over-limit mounts: expected %d, got %d (%s)", http.StatusBadRequest, w.Code, w.Body.String())
+		t.Fatalf("over-limit mounts: expected %d, got %d (%s)", http.StatusBadRequest, w.Code, w.Body.String())
 	}
 	if code := decodeRejectedResponse(t, w); code != "too_many_mounts" {
-		t.Fatalf("user mode over-limit mounts code: expected too_many_mounts, got %q", code)
+		t.Fatalf("over-limit mounts code: expected too_many_mounts, got %q", code)
 	}
 }
 

@@ -221,7 +221,7 @@ CREATE_OUT="/tmp/uat-h2-create.$$"
 REVOKE_OUT="/tmp/uat-h2-revoke.$$"
 create_start="$(date +%s)"
 (
-  dh session create --system --token-file "$CREDFILE" "$WS_A" >"$CREATE_OUT" 2>&1
+  dh session create --token-file "$CREDFILE" "$WS_A" >"$CREATE_OUT" 2>&1
 ) &
 CREATE_PID=$!
 # The create parks inside the shimmed MAC command: this proves the request
@@ -260,7 +260,7 @@ if [ "$marker_seen" = 1 ]; then
   # plane while the create is parked. The revoke must complete while the
   # parked create still holds the lifecycle coordination: credential
   # revocation does not queue behind that boundary.
-  if dh credential revoke --system "$REG_CRED_ID" >"$REVOKE_OUT" 2>&1; then
+  if dh credential revoke "$REG_CRED_ID" >"$REVOKE_OUT" 2>&1; then
     reg_ok "the authorizing credential was revoked through the production control plane while the create stayed parked"
   else
     reg_fail "credential revoke failed while the create was parked"
@@ -378,7 +378,7 @@ elif [ "$FINAL_COUNT" != "$BASELINE_COUNT" ]; then
   reg_fail "the session inventory changed across the refused create (baseline ${BASELINE_COUNT}, final ${FINAL_COUNT}): the parked create issued a Session for the revoked credential"
 else
   reg_ok "the session inventory is unchanged across the refused create (baseline ${BASELINE_COUNT}, final ${FINAL_COUNT}: the losing ordering issued nothing)"
-  FINAL_LIST_JSON="$(dh session list --system --json 2>/dev/null)"
+  FINAL_LIST_JSON="$(dh session list --json 2>/dev/null)"
   final_list_rc=$?
   if [ "$final_list_rc" -eq 0 ] && [ -n "$FINAL_LIST_JSON" ]; then
     # The CLI --json projection is indented JSON ("key": "value"); the
@@ -458,9 +458,9 @@ fi
 
 # --- cleanup -----------------------------------------------------------------------
 if [ -n "${RECOVERY_SESSION_ID:-}" ]; then
-  dh session delete --system "$RECOVERY_SESSION_ID" >/dev/null 2>&1 || true
+  dh session delete "$RECOVERY_SESSION_ID" >/dev/null 2>&1 || true
 fi
-dh principal delete --system "$USER_A" >/dev/null 2>&1 || true
+dh principal delete "$USER_A" >/dev/null 2>&1 || true
 rm -rf "$WS_A" "${WS_REC:-}" "$CREDFILE" "$RECOVERY_CRED" "$CREATE_OUT" "$REVOKE_OUT" 2>/dev/null || true
 
 reg_result

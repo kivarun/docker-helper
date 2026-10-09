@@ -17,14 +17,25 @@ func TestInitExplicitAllowedRoot(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
 
+	// Init is system-only: the runInit root gate is bypassed with the UID
+	// seam, and the runtime/state directory seams point at the isolated
+	// fixture directories.
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 0 }
+	t.Cleanup(func() { EffectiveUID = origUID })
+	origRuntime := getRuntimeDirFunc
+	getRuntimeDirFunc = func() (string, error) { return filepath.Join(dir, "runtime"), nil }
+	t.Cleanup(func() { getRuntimeDirFunc = origRuntime })
+	origState := getStateDirFunc
+	getStateDirFunc = func() string { return filepath.Join(dir, "state") }
+	t.Cleanup(func() { getStateDirFunc = origState })
+
 	allowedRoot := filepath.Join(testAllowedRootDir(t), "workspaces")
 	if err := os.MkdirAll(allowedRoot, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	// Standalone user init (no system daemon, Docker accessible).
-	restore := mockStandaloneUserInit()
-	defer restore()
+	mockDetectLSM(t, LSMAppArmor, nil)
 
 	var stdout, stderr bytes.Buffer
 	if err := runInit(allowedRoot, &stdout, &stderr); err != nil {
@@ -52,6 +63,12 @@ func TestInitNonInteractiveNoFlag(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
 
+	// The test proves root's non-interactive input contract; the canonical
+	// non-root refusal precedes argument validation and has its own test.
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 0 }
+	t.Cleanup(func() { EffectiveUID = origUID })
+
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"init"}, &stdout, &stderr)
 	if code != 2 {
@@ -68,6 +85,13 @@ func TestInitInvalidAllowedRootNonExistent(t *testing.T) {
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
+
+	// The test proves root's --allowed-root validation contract; the
+	// canonical non-root refusal precedes argument validation and has its
+	// own test.
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 0 }
+	t.Cleanup(func() { EffectiveUID = origUID })
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"init", "--allowed-root", filepath.Join(dir, "no-such-dir")}, &stdout, &stderr)
@@ -90,6 +114,13 @@ func TestInitInvalidAllowedRootNotDirectory(t *testing.T) {
 	if err := os.WriteFile(file, []byte("x"), 0644); err != nil {
 		t.Fatal(err)
 	}
+
+	// The test proves root's --allowed-root validation contract; the
+	// canonical non-root refusal precedes argument validation and has its
+	// own test.
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 0 }
+	t.Cleanup(func() { EffectiveUID = origUID })
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"init", "--allowed-root", file}, &stdout, &stderr)
@@ -307,6 +338,14 @@ func TestResolveAllowedRootForInitNoFlagNonTerminal(t *testing.T) {
 }
 
 func TestResolveAllowedRootForInitNoFlagTerminal(t *testing.T) {
+	// Init is root-only and its interactive default is /home, which resolves
+	// through the root admin wide-namespace override. Production refuses
+	// non-root init before this resolver is reached; the test simulates the
+	// root caller.
+	original := EffectiveUID
+	EffectiveUID = func() int { return 0 }
+	defer func() { EffectiveUID = original }()
+
 	input := strings.NewReader("\n")
 	var buf bytes.Buffer
 	resolved, err := resolveAllowedRootForInit("", input, &buf, true)
@@ -314,7 +353,7 @@ func TestResolveAllowedRootForInitNoFlagTerminal(t *testing.T) {
 		t.Fatalf("resolveAllowedRootForInit = error: %v", err)
 	}
 
-	// The default should be the user's home directory (non-root) or /home (root).
+	// The interactive default is /home (init is root-only).
 	expected := getInitDefaultRoot()
 	if resolved != expected {
 		t.Errorf("resolveAllowedRootForInit = %q, want %q (init default)", resolved, expected)
@@ -339,25 +378,10 @@ func TestResolveAllowedRootForInitTerminalCustomInput(t *testing.T) {
 }
 
 func TestGetInitDefaultRoot(t *testing.T) {
-	original := EffectiveUID
-	defer func() { EffectiveUID = original }()
-
-	t.Run("root gets /home", func(t *testing.T) {
-		EffectiveUID = func() int { return 0 }
-		got := getInitDefaultRoot()
-		if got != "/home" {
-			t.Errorf("getInitDefaultRoot() = %q, want /home (root)", got)
-		}
-	})
-
-	t.Run("non-root gets home dir", func(t *testing.T) {
-		EffectiveUID = func() int { return 1000 }
-		got := getInitDefaultRoot()
-		home, _ := os.UserHomeDir()
-		if got != home {
-			t.Errorf("getInitDefaultRoot() = %q, want %q (home dir)", got, home)
-		}
-	})
+	// Init is root-only; the canonical interactive default is /home.
+	if got := getInitDefaultRoot(); got != "/home" {
+		t.Errorf("getInitDefaultRoot() = %q, want /home", got)
+	}
 }
 
 func syntheticResolveRoot(path string) (string, error) {

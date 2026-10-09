@@ -149,7 +149,7 @@ func TestCoordinatorMultiBoundarySession(t *testing.T) {
 	}
 
 	if _, err := mac.CreateSessionBinding("sess-multi", []string{ws, ext1, ext2}, func([]sessionMACCoverage) error {
-		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-multi", ws)
+		return insertTestSessionTx(app.DB, testOwnerLauncherID(app), "sess-multi", ws)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestCoordinatorDriverDeduplicatesSameBoundary(t *testing.T) {
 	driver.helperOwnedBoundaries[parent] = true
 
 	if _, err := mac.CreateSessionBinding("sess-shared", []string{parent, child}, func([]sessionMACCoverage) error {
-		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-shared", parent)
+		return insertTestSessionTx(app.DB, testOwnerLauncherID(app), "sess-shared", parent)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
@@ -319,7 +319,7 @@ func TestCoordinatorLeaseProtectsAllBoundRoots(t *testing.T) {
 	}
 
 	if _, err := mac.CreateSessionBinding("sess-lease", []string{ws, ext}, func([]sessionMACCoverage) error {
-		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-lease", ws)
+		return insertTestSessionTx(app.DB, testOwnerLauncherID(app), "sess-lease", ws)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
@@ -364,7 +364,7 @@ func TestCoordinatorLeaseAcquireRejectsUnknownSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := mac.CreateSessionBinding("sess-live", []string{ws}, func([]sessionMACCoverage) error {
-		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-live", ws)
+		return insertTestSessionTx(app.DB, testOwnerLauncherID(app), "sess-live", ws)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
@@ -390,7 +390,7 @@ func TestCoordinatorSharedBoundaryRelease(t *testing.T) {
 
 	for _, sess := range []string{"sess-a", "sess-b"} {
 		if _, err := mac.CreateSessionBinding(sess, []string{shared}, func([]sessionMACCoverage) error {
-			return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, sess, shared)
+			return insertTestSessionTx(app.DB, testOwnerLauncherID(app), sess, shared)
 		}); err != nil {
 			t.Fatalf("CreateSessionBinding(%s): %v", sess, err)
 		}
@@ -422,12 +422,12 @@ func TestCoordinatorParentChildOverlapRelease(t *testing.T) {
 	}
 
 	if _, err := mac.CreateSessionBinding("sess-parent", []string{parent}, func([]sessionMACCoverage) error {
-		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-parent", parent)
+		return insertTestSessionTx(app.DB, testOwnerLauncherID(app), "sess-parent", parent)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding(parent): %v", err)
 	}
 	if _, err := mac.CreateSessionBinding("sess-child", []string{child}, func([]sessionMACCoverage) error {
-		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-child", child)
+		return insertTestSessionTx(app.DB, testOwnerLauncherID(app), "sess-child", child)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding(child): %v", err)
 	}
@@ -466,7 +466,7 @@ func TestCoordinatorPendingWorkloadExternalRoot(t *testing.T) {
 	// The create callback commits the session row and the two-tree issued
 	// snapshot together, exactly like the real create transaction.
 	if _, err := mac.CreateSessionBinding("sess-pending", []string{ws, ext}, func([]sessionMACCoverage) error {
-		if err := insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-pending", ws); err != nil {
+		if err := insertTestSessionTx(app.DB, testOwnerLauncherID(app), "sess-pending", ws); err != nil {
 			return err
 		}
 		insertTestSessionSnapshotEntries(t, app.DB, "sess-pending", normalizeAllowedRootEntries([]AllowedRootEntry{
@@ -530,7 +530,7 @@ func TestCoordinatorStartupMultiRootReconstruction(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	launcherID := app.userModeDefault.launcherID
+	launcherID := testOwnerLauncherID(app)
 	if _, err := app.DB.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id) VALUES (?, ?, ?, ?, ?, ?)`,
 		"sess-restart", "hash-restart", ws, time.Now().Unix(), time.Now().Add(time.Hour).Unix(), launcherID); err != nil {
 		t.Fatal(err)
@@ -585,7 +585,7 @@ func TestCoordinatorStartupCorruptSnapshotFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	launcherID := app.userModeDefault.launcherID
+	launcherID := testOwnerLauncherID(app)
 	if _, err := app.DB.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id) VALUES (?, ?, ?, ?, ?, ?)`,
 		"sess-corrupt", "hash-corrupt", ws, time.Now().Unix(), time.Now().Add(time.Hour).Unix(), launcherID); err != nil {
 		t.Fatal(err)
@@ -627,7 +627,7 @@ func TestCoordinatorStartupConcurrentDeleteRunRace(t *testing.T) {
 	for i := 0; i < iterations; i++ {
 		sess := fmt.Sprintf("sess-race-%d", i)
 		if _, err := mac.CreateSessionBinding(sess, []string{ws, ext}, func([]sessionMACCoverage) error {
-			return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, sess, ws)
+			return insertTestSessionTx(app.DB, testOwnerLauncherID(app), sess, ws)
 		}); err != nil {
 			t.Fatalf("CreateSessionBinding(%s): %v", sess, err)
 		}
@@ -730,7 +730,7 @@ func TestCoordinatorPreparesEveryConcreteIssuedTreeBeforeDedup(t *testing.T) {
 	driver.helperOwnedBoundaries[parent] = true
 
 	if _, err := mac.CreateSessionBinding("sess-siblings", []string{siblingA, siblingB}, func([]sessionMACCoverage) error {
-		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-siblings", siblingA)
+		return insertTestSessionTx(app.DB, testOwnerLauncherID(app), "sess-siblings", siblingA)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
@@ -778,7 +778,7 @@ func TestCoordinatorStartupReconcilePreparesEveryConcreteIssuedTree(t *testing.T
 	driver.coverageMap[siblingB] = parent
 	driver.helperOwnedBoundaries[parent] = true
 
-	if err := insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-reconcile-siblings", siblingA); err != nil {
+	if err := insertTestSessionTx(app.DB, testOwnerLauncherID(app), "sess-reconcile-siblings", siblingA); err != nil {
 		t.Fatal(err)
 	}
 	insertTestSessionSnapshotEntries(t, app.DB, "sess-reconcile-siblings", normalizeAllowedRootEntries([]AllowedRootEntry{

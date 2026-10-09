@@ -77,7 +77,7 @@ assert_no_doubled_separator() {
 # cleanup_principal USER: best-effort teardown shared by every subcase.
 cleanup_principal() {
   local user="$1"
-  dh principal delete --system "$user" >/dev/null 2>&1 || true
+  dh principal delete "$user" >/dev/null 2>&1 || true
   userdel -r "$user" >/dev/null 2>&1 || true
 }
 
@@ -95,7 +95,7 @@ subcase_a() {
   mkdir -p "$ws_in" "$ws_out"
   chown -R "$user:$user" "$home"
 
-  alpha_out="$(dh launcher create --system --principal "$user" alpha \
+  alpha_out="$(dh launcher create --principal "$user" alpha \
       --allowed-root "$sub" --no-credential --json 2>&1)"
   alpha_id="$(printf '%s' "$alpha_out" | json_field id || true)"
   if [ -n "$alpha_id" ]; then
@@ -106,7 +106,7 @@ subcase_a() {
   fi
 
   # Name-shaped selector through the public CLI.
-  if sid1="$(dh session create --system --token-file "$cred" "$ws_in" \
+  if sid1="$(dh session create --token-file "$cred" "$ws_in" \
         --launcher alpha --json 2>/dev/null)"; then
     if [ "$(printf '%s' "$sid1" | session_field launcher_id)" = "$alpha_id" ] \
         && [ "$(printf '%s' "$sid1" | session_field launcher)" = "alpha" ]; then
@@ -119,7 +119,7 @@ subcase_a() {
   fi
 
   # ID-shaped selector through the public CLI.
-  if sid2="$(dh session create --system --token-file "$cred" "$ws_in" \
+  if sid2="$(dh session create --token-file "$cred" "$ws_in" \
         --launcher "$alpha_id" --json 2>/dev/null)"; then
     if [ "$(printf '%s' "$sid2" | session_field launcher_id)" = "$alpha_id" ]; then
       reg_ok "A: --launcher <dhl_ ID> owns the Session"
@@ -133,7 +133,7 @@ subcase_a() {
   # Effective workspace policy: outside the restricted root is rejected even
   # though it stays inside the Principal's own allowed roots.
   local out_err out_rc
-  out_err="$(dh session create --system --token-file "$cred" "$ws_out" \
+  out_err="$(dh session create --token-file "$cred" "$ws_out" \
       --launcher alpha --json 2>&1)"; out_rc=$?
   if [ "$out_rc" -ne 0 ] && printf '%s' "$out_err" | grep -q 'workspace must be inside an allowed root'; then
     reg_ok "A: workspace outside the restricted Launcher root is rejected"
@@ -143,7 +143,7 @@ subcase_a() {
 
   # Cleanup.
   for s in $(printf '%s' "$sid1" | session_field id) $(printf '%s' "$sid2" | session_field id); do
-    [ -n "$s" ] && dh session delete --system "$s" >/dev/null 2>&1 || true
+    [ -n "$s" ] && dh session delete "$s" >/dev/null 2>&1 || true
   done
   cleanup_principal "$user"
   rm -f "$cred"
@@ -158,12 +158,12 @@ subcase_b() {
   home="$(reg_setup_principal "$user")" || { reg_fail "B: setup principal failed"; return; }
   mkdir -p "$home/ws"; chown -R "$user:$user" "$home"
 
-  beta_out="$(dh launcher create --system --principal "$user" beta --no-credential --json 2>&1)"
+  beta_out="$(dh launcher create --principal "$user" beta --no-credential --json 2>&1)"
   beta_id="$(printf '%s' "$beta_out" | json_field id || true)"
   [ -n "$beta_id" ] || { reg_fail "B: launcher create failed: $(printf '%s' "$beta_out" | head -2 | tr '\n' ' ')"; return; }
 
   # Read path: ONLY the global ID, no --principal.
-  if show_out="$(dh launcher show --system --json "$beta_id" 2>/dev/null)"; then
+  if show_out="$(dh launcher show --json "$beta_id" 2>/dev/null)"; then
     if printf '%s' "$show_out" | grep -q "\"principal\": \"$user\"" \
         && [ "$(printf '%s' "$show_out" | json_field name)" = "beta" ]; then
       reg_ok "B: launcher show by global dhl_ ID without --principal resolves the Launcher"
@@ -175,8 +175,8 @@ subcase_b() {
   fi
 
   # Mutation path: disable + re-enable by global ID only.
-  if dh launcher set --system --enabled false "$beta_id" >/dev/null 2>&1; then
-    show2="$(dh launcher show --system --json "$beta_id" 2>/dev/null || true)"
+  if dh launcher set --enabled false "$beta_id" >/dev/null 2>&1; then
+    show2="$(dh launcher show --json "$beta_id" 2>/dev/null || true)"
     if printf '%s' "$show2" | grep -q '"enabled": false'; then
       reg_ok "B: launcher set --enabled false by global dhl_ ID"
     else
@@ -185,8 +185,8 @@ subcase_b() {
   else
     reg_fail "B: launcher set --enabled false by global dhl_ ID failed"
   fi
-  if dh launcher set --system --enabled true "$beta_id" >/dev/null 2>&1; then
-    show2="$(dh launcher show --system --json "$beta_id" 2>/dev/null || true)"
+  if dh launcher set --enabled true "$beta_id" >/dev/null 2>&1; then
+    show2="$(dh launcher show --json "$beta_id" 2>/dev/null || true)"
     if printf '%s' "$show2" | grep -q '"enabled": true'; then
       reg_ok "B: launcher set --enabled true by global dhl_ ID"
     else
@@ -198,7 +198,7 @@ subcase_b() {
 
   # Name-shaped selector without --principal stays rejected for admin.
   local name_err name_rc
-  name_err="$(dh launcher show --system beta 2>&1)"; name_rc=$?
+  name_err="$(dh launcher show beta 2>&1)"; name_rc=$?
   if [ "$name_rc" -ne 0 ] && printf '%s' "$name_err" | grep -q -- '--principal is required for admin authentication'; then
     reg_ok "B: name-shaped selector without --principal is rejected"
   else
@@ -208,7 +208,7 @@ subcase_b() {
   # Foreign/unknown ID stays non-disclosing.
   unknown_id="dhl_$(printf 'ab%.0s' $(seq 1 16))"
   local unk_err unk_rc
-  unk_err="$(dh launcher show --system "$unknown_id" 2>&1)"; unk_rc=$?
+  unk_err="$(dh launcher show "$unknown_id" 2>&1)"; unk_rc=$?
   if [ "$unk_rc" -ne 0 ] && printf '%s' "$unk_err" | grep -q 'launcher not found'; then
     reg_ok "B: unknown global dhl_ ID is the non-disclosing launcher-not-found"
   else
@@ -231,24 +231,24 @@ subcase_c() {
   chown -R "$user:$user" "$home"
   chown -R "$foreign_user:$foreign_user" "$fhome"
 
-  gamma_out="$(dh launcher create --system --principal "$user" gamma --no-credential --json 2>&1)"
+  gamma_out="$(dh launcher create --principal "$user" gamma --no-credential --json 2>&1)"
   gamma_id="$(printf '%s' "$gamma_out" | json_field id || true)"
   [ -n "$gamma_id" ] || { reg_fail "C: launcher create failed: $(printf '%s' "$gamma_out" | head -2 | tr '\n' ' ')"; return; }
 
-  lc_out="$(dh launcher credential create --system --principal "$user" --json "$gamma_id" 2>/dev/null)"
+  lc_out="$(dh launcher credential create --principal "$user" --json "$gamma_id" 2>/dev/null)"
   lc_token="$(printf '%s' "$lc_out" | json_field token || true)"
   [ -n "$lc_token" ] || { reg_fail "C: launcher credential create failed"; return; }
   cred="/tmp/uat-reg10/c.token"
   printf '%s\n' "$lc_token" > "$cred"; chmod 600 "$cred"
 
-  f_out="$(dh launcher create --system --principal "$foreign_user" fgamma --no-credential --json 2>&1)"
+  f_out="$(dh launcher create --principal "$foreign_user" fgamma --no-credential --json 2>&1)"
   f_id="$(printf '%s' "$f_out" | json_field id || true)"
   [ -n "$f_id" ] || { reg_fail "C: foreign launcher create failed"; return; }
 
   # Own explicit ID through the Session path (the RC5 defect: this used to be
   # resolved through the launcher control plane, which this authority cannot
   # use).
-  if sid="$(dh session create --system --token-file "$cred" "$home/ws" \
+  if sid="$(dh session create --token-file "$cred" "$home/ws" \
         --launcher "$gamma_id" --json 2>/dev/null)"; then
     if [ "$(printf '%s' "$sid" | session_field launcher_id)" = "$gamma_id" ] \
         && [ "$(printf '%s' "$sid" | session_field launcher)" = "gamma" ]; then
@@ -261,7 +261,7 @@ subcase_c() {
   fi
 
   # No-selector self behavior is unchanged.
-  if self_sid="$(dh session create --system --token-file "$cred" "$home/ws" --json 2>/dev/null)"; then
+  if self_sid="$(dh session create --token-file "$cred" "$home/ws" --json 2>/dev/null)"; then
     if [ "$(printf '%s' "$self_sid" | session_field launcher_id)" = "$gamma_id" ]; then
       reg_ok "C: no-selector Session still resolves self"
     else
@@ -275,7 +275,7 @@ subcase_c() {
   # If the CLI ever fell back to the launcher control plane the failure would
   # instead be the 401 'Authentication required for launcher management.'
   local f_err f_rc
-  f_err="$(dh session create --system --token-file "$cred" "$home/ws" \
+  f_err="$(dh session create --token-file "$cred" "$home/ws" \
       --launcher "$f_id" --json 2>&1)"; f_rc=$?
   if [ "$f_rc" -ne 0 ] \
       && printf '%s' "$f_err" | grep -q 'launcher not found' \
@@ -289,7 +289,7 @@ subcase_c() {
   # Name-shaped selector under a Launcher credential: rejected locally with
   # the actionable dhl_ ID hint (no control-plane resolution exists).
   local n_err n_rc
-  n_err="$(dh session create --system --token-file "$cred" "$home/ws" \
+  n_err="$(dh session create --token-file "$cred" "$home/ws" \
       --launcher gamma --json 2>&1)"; n_rc=$?
   if [ "$n_rc" -ne 0 ] \
       && printf '%s' "$n_err" | grep -q "Launcher authentication requires the Launcher's dhl_ ID" \
@@ -301,7 +301,7 @@ subcase_c() {
 
   # Cleanup.
   for s in $(printf '%s' "$sid" | session_field id) $(printf '%s' "$self_sid" | session_field id); do
-    [ -n "$s" ] && dh session delete --system "$s" >/dev/null 2>&1 || true
+    [ -n "$s" ] && dh session delete "$s" >/dev/null 2>&1 || true
   done
   cleanup_principal "$user"
   cleanup_principal "$foreign_user"
@@ -321,7 +321,7 @@ subcase_d() {
   # Positional grammar: `launcher create` without the NAME operand is a
   # CLI syntax error (exit 2) before any daemon request and before the
   # credential prompt.
-  conflict_err="$(dh launcher create --system --principal "$user" 2>&1 </dev/null)"; conflict_rc=$?
+  conflict_err="$(dh launcher create --principal "$user" 2>&1 </dev/null)"; conflict_rc=$?
   if [ "$conflict_rc" -eq 2 ] \
       && printf '%s' "$conflict_err" | grep -q 'missing required argument'; then
     reg_ok "D: create without the NAME operand is a CLI syntax error before the prompt"
@@ -332,7 +332,7 @@ subcase_d() {
   # `launcher create default` is an ordinary explicit create of the
   # auto-provisioned name: the daemon's canonical conflict path decides it.
   # Non-interactive credential resolution precedes any mutating request.
-  conflict_err="$(dh launcher create --system --principal "$user" default 2>&1 </dev/null)"; conflict_rc=$?
+  conflict_err="$(dh launcher create --principal "$user" default 2>&1 </dev/null)"; conflict_rc=$?
   if [ "$conflict_rc" -ne 0 ] && printf '%s' "$conflict_err" | grep -q 'issue-credential'; then
     reg_ok "D: default create resolves the credential choice before any mutating request"
   else
@@ -341,7 +341,7 @@ subcase_d() {
 
   # With --no-credential the daemon conflict applies, naming Launcher and
   # Principal.
-  conflict_err="$(dh launcher create --system --principal "$user" default --no-credential 2>&1)"; conflict_rc=$?
+  conflict_err="$(dh launcher create --principal "$user" default --no-credential 2>&1)"; conflict_rc=$?
   if [ "$conflict_rc" -ne 0 ] && printf '%s' "$conflict_err" | grep -q 'launcher "default" already exists for principal'; then
     reg_ok "D: default create with --no-credential reports the daemon conflict"
   else
@@ -349,7 +349,7 @@ subcase_d() {
   fi
 
   # No second Launcher was created.
-  list_out="$(dh launcher list --system --principal "$user" --json 2>/dev/null || true)"
+  list_out="$(dh launcher list --principal "$user" --json 2>/dev/null || true)"
   if [ "$(printf '%s' "$list_out" | grep -c '"name": "default"')" = "1" ]; then
     reg_ok "D: no second Launcher was created"
   else
@@ -358,7 +358,7 @@ subcase_d() {
 
   # Explicit duplicate name keeps the stable daemon conflict code, naming the
   # Launcher and its Principal.
-  dup_err="$(dh launcher create --system --principal "$user" default --no-credential 2>&1)"; dup_rc=$?
+  dup_err="$(dh launcher create --principal "$user" default --no-credential 2>&1)"; dup_rc=$?
   if [ "$dup_rc" -ne 0 ] \
       && printf '%s' "$dup_err" | grep -q 'launcher_exists' \
       && printf '%s' "$dup_err" | grep -q 'already exists for principal' \
@@ -370,7 +370,7 @@ subcase_d() {
   fi
 
   # A fresh explicit name still creates normally.
-  delta_out="$(dh launcher create --system --principal "$user" delta --no-credential --json 2>&1)"
+  delta_out="$(dh launcher create --principal "$user" delta --no-credential --json 2>&1)"
   if printf '%s' "$delta_out" | json_field name | grep -q '^delta$'; then
     reg_ok "D: explicit fresh name still creates a Launcher"
   else
@@ -427,7 +427,7 @@ subcase_e() {
       echo "empty -F function in compspec: ${specs[0]}" >&2
       exit 6
     fi
-    COMP_WORDS=(/usr/bin/docker-helper session create --system --token-file "$2" "$3")
+    COMP_WORDS=(/usr/bin/docker-helper session create --token-file "$2" "$3")
     COMP_CWORD=$(( ${#COMP_WORDS[@]} - 1 ))
     "$func" || exit 4
     printf "%s\n" "${COMPREPLY[@]}"

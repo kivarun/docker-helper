@@ -62,7 +62,7 @@ sidB="$REG_SESSION_ID"
 reg_info "sessions: A=$sidA B=$sidB"
 
 # --- A cannot inspect/list B resources beyond documented visibility ----------
-LIST_A="$(dh session list --system --token-file "$CRED_A" 2>&1)"
+LIST_A="$(dh session list --token-file "$CRED_A" 2>&1)"
 if printf '%s' "$LIST_A" | grep -q "$sidA"; then
   reg_ok "A lists its own session"
 else
@@ -78,7 +78,7 @@ fi
 # The default Launchers created with each Principal are enough to prove global
 # vs narrowed visibility. Add a Launcher credential for A only to prove that a
 # valid Launcher bearer is rejected by both control-plane list families.
-LC_OUT="$(dh launcher credential create --system --principal "$USER_A" --json 2>/dev/null)"
+LC_OUT="$(dh launcher credential create --principal "$USER_A" --json 2>/dev/null)"
 LC_RC=$?
 LC_TOKEN="$(printf '%s' "$LC_OUT" | json_field token || true)"
 if [ "$LC_RC" -eq 0 ] && [ -n "$LC_TOKEN" ]; then
@@ -107,13 +107,13 @@ only_principal_rows() {
 }
 
 # Launcher list: admin sees both Principals without a filter and may narrow.
-L_ADMIN="$(dh launcher list --system 2>&1)"; L_ADMIN_RC=$?
+L_ADMIN="$(dh launcher list 2>&1)"; L_ADMIN_RC=$?
 if [ "$L_ADMIN_RC" -eq 0 ] && has_principal_row "$L_ADMIN" "$USER_A" && has_principal_row "$L_ADMIN" "$USER_B"; then
   reg_ok "scope-first launcher list: admin without filter sees A and B"
 else
   reg_fail "scope-first launcher list: admin global visibility failed"
 fi
-L_ADMIN_A="$(dh launcher list --system --principal "$USER_A" 2>&1)"; L_ADMIN_A_RC=$?
+L_ADMIN_A="$(dh launcher list --principal "$USER_A" 2>&1)"; L_ADMIN_A_RC=$?
 if [ "$L_ADMIN_A_RC" -eq 0 ] && only_principal_rows "$L_ADMIN_A" "$USER_A"; then
   reg_ok "scope-first launcher list: admin Principal filter only narrows"
 else
@@ -122,8 +122,8 @@ fi
 
 # Principal A derives its own scope from the bearer; no explicit Principal is
 # required. Its own explicit filter is equivalent and cannot expand scope.
-L_A="$(dh launcher list --system --token-file "$CRED_A" 2>&1)"; L_A_RC=$?
-L_A_OWN="$(dh launcher list --system --token-file "$CRED_A" --principal "$USER_A" 2>&1)"; L_A_OWN_RC=$?
+L_A="$(dh launcher list --token-file "$CRED_A" 2>&1)"; L_A_RC=$?
+L_A_OWN="$(dh launcher list --token-file "$CRED_A" --principal "$USER_A" 2>&1)"; L_A_OWN_RC=$?
 if [ "$L_A_RC" -eq 0 ] && only_principal_rows "$L_A" "$USER_A" \
     && [ "$L_A_OWN_RC" -eq 0 ] && only_principal_rows "$L_A_OWN" "$USER_A"; then
   reg_ok "scope-first launcher list: Principal bearer sees only own scope with or without own filter"
@@ -132,8 +132,8 @@ else
 fi
 
 # Foreign and nonexistent filters are deliberately indistinguishable.
-L_FOREIGN="$(dh launcher list --system --token-file "$CRED_A" --principal "$USER_B" 2>&1)"; L_FOREIGN_RC=$?
-L_MISSING="$(dh launcher list --system --token-file "$CRED_A" --principal uatreg4missing 2>&1)"; L_MISSING_RC=$?
+L_FOREIGN="$(dh launcher list --token-file "$CRED_A" --principal "$USER_B" 2>&1)"; L_FOREIGN_RC=$?
+L_MISSING="$(dh launcher list --token-file "$CRED_A" --principal uatreg4missing 2>&1)"; L_MISSING_RC=$?
 if [ "$L_FOREIGN_RC" -ne 0 ] && [ "$L_MISSING_RC" -ne 0 ] \
     && printf '%s' "$L_FOREIGN" | grep -q 'status 404, code principal_not_found' \
     && [ "$L_FOREIGN" = "$L_MISSING" ]; then
@@ -143,7 +143,7 @@ else
 fi
 
 if [ -n "$LC_TOKEN" ]; then
-  L_LAUNCHER="$(dh launcher list --system --token-file "$LAUNCHER_CRED_A" 2>&1)"; L_LAUNCHER_RC=$?
+  L_LAUNCHER="$(dh launcher list --token-file "$LAUNCHER_CRED_A" 2>&1)"; L_LAUNCHER_RC=$?
   if [ "$L_LAUNCHER_RC" -ne 0 ] && printf '%s' "$L_LAUNCHER" | grep -q 'status 401, code unauthorized'; then
     reg_ok "scope-first launcher list: Launcher credential rejected as control-plane authority"
   else
@@ -152,7 +152,7 @@ if [ -n "$LC_TOKEN" ]; then
 fi
 
 # Principal credential list: same authorization rule, same narrowing behavior.
-C_ADMIN="$(dh principal credential list --system 2>&1)"; C_ADMIN_RC=$?
+C_ADMIN="$(dh principal credential list 2>&1)"; C_ADMIN_RC=$?
 if [ "$C_ADMIN_RC" -eq 0 ] && printf '%s' "$C_ADMIN" | grep -q "$credA" \
     && printf '%s' "$C_ADMIN" | grep -q "$credB" \
     && has_principal_row "$C_ADMIN" "$USER_A" && has_principal_row "$C_ADMIN" "$USER_B"; then
@@ -160,7 +160,7 @@ if [ "$C_ADMIN_RC" -eq 0 ] && printf '%s' "$C_ADMIN" | grep -q "$credA" \
 else
   reg_fail "scope-first credential list: admin global visibility failed"
 fi
-C_ADMIN_A="$(dh principal credential list --system "$USER_A" 2>&1)"; C_ADMIN_A_RC=$?
+C_ADMIN_A="$(dh principal credential list "$USER_A" 2>&1)"; C_ADMIN_A_RC=$?
 if [ "$C_ADMIN_A_RC" -eq 0 ] && only_principal_rows "$C_ADMIN_A" "$USER_A" \
     && printf '%s' "$C_ADMIN_A" | grep -q "$credA" \
     && ! printf '%s' "$C_ADMIN_A" | grep -q "$credB"; then
@@ -169,8 +169,8 @@ else
   reg_fail "scope-first credential list: admin filter did not narrow to A"
 fi
 
-C_A="$(dh principal credential list --system --token-file "$CRED_A" 2>&1)"; C_A_RC=$?
-C_A_OWN="$(dh principal credential list --system --token-file "$CRED_A" "$USER_A" 2>&1)"; C_A_OWN_RC=$?
+C_A="$(dh principal credential list --token-file "$CRED_A" 2>&1)"; C_A_RC=$?
+C_A_OWN="$(dh principal credential list --token-file "$CRED_A" "$USER_A" 2>&1)"; C_A_OWN_RC=$?
 if [ "$C_A_RC" -eq 0 ] && only_principal_rows "$C_A" "$USER_A" \
     && printf '%s' "$C_A" | grep -q "$credA" && ! printf '%s' "$C_A" | grep -q "$credB" \
     && [ "$C_A_OWN_RC" -eq 0 ] && only_principal_rows "$C_A_OWN" "$USER_A"; then
@@ -181,7 +181,7 @@ fi
 
 # Release 2 compatibility alias: `credential list` must behave exactly like
 # the canonical command, in particular without a mandatory Principal positional.
-C_ALIAS="$(dh credential list --system --token-file "$CRED_A" 2>&1)"; C_ALIAS_RC=$?
+C_ALIAS="$(dh credential list --token-file "$CRED_A" 2>&1)"; C_ALIAS_RC=$?
 if [ "$C_ALIAS_RC" -eq 0 ] && only_principal_rows "$C_ALIAS" "$USER_A" \
     && printf '%s' "$C_ALIAS" | grep -q "$credA" && ! printf '%s' "$C_ALIAS" | grep -q "$credB"; then
   reg_ok "scope-first credential list: Release 2 alias works without a Principal argument and preserves own scope"
@@ -189,8 +189,8 @@ else
   reg_fail "scope-first credential list: Release 2 alias failed (mandatory Principal restored or own scope broken)"
 fi
 
-C_FOREIGN="$(dh principal credential list --system --token-file "$CRED_A" "$USER_B" 2>&1)"; C_FOREIGN_RC=$?
-C_MISSING="$(dh principal credential list --system --token-file "$CRED_A" uatreg4missing 2>&1)"; C_MISSING_RC=$?
+C_FOREIGN="$(dh principal credential list --token-file "$CRED_A" "$USER_B" 2>&1)"; C_FOREIGN_RC=$?
+C_MISSING="$(dh principal credential list --token-file "$CRED_A" uatreg4missing 2>&1)"; C_MISSING_RC=$?
 if [ "$C_FOREIGN_RC" -ne 0 ] && [ "$C_MISSING_RC" -ne 0 ] \
     && printf '%s' "$C_FOREIGN" | grep -q 'status 404, code principal_not_found' \
     && [ "$C_FOREIGN" = "$C_MISSING" ]; then
@@ -200,7 +200,7 @@ else
 fi
 
 if [ -n "$LC_TOKEN" ]; then
-  C_LAUNCHER="$(dh principal credential list --system --token-file "$LAUNCHER_CRED_A" 2>&1)"; C_LAUNCHER_RC=$?
+  C_LAUNCHER="$(dh principal credential list --token-file "$LAUNCHER_CRED_A" 2>&1)"; C_LAUNCHER_RC=$?
   if [ "$C_LAUNCHER_RC" -ne 0 ] && printf '%s' "$C_LAUNCHER" | grep -q 'status 401, code unauthorized'; then
     reg_ok "scope-first credential list: Launcher credential rejected as control-plane authority"
   else
@@ -231,7 +231,7 @@ else
 fi
 
 # --- A cannot delete B's Session (anti-enumeration: 404 not found) -----------
-DEL_ERR="$(dh session delete --system --token-file "$CRED_A" "$sidB" 2>&1)"
+DEL_ERR="$(dh session delete --token-file "$CRED_A" "$sidB" 2>&1)"
 if printf '%s' "$DEL_ERR" | grep -q 'session_not_found\|not found'; then
   reg_ok "A deleting B's session is indistinguishable from not-found (anti-enumeration)"
 else
@@ -239,48 +239,48 @@ else
 fi
 
 # --- A cannot modify B's Principal --------------------------------------------
-if dh principal set --system --token-file "$CRED_A" "$USER_B" enabled false >/dev/null 2>&1; then
+if dh principal set --token-file "$CRED_A" "$USER_B" enabled false >/dev/null 2>&1; then
   reg_fail "A modified B's principal (admin-only operation allowed)"
 else
   reg_ok "A cannot modify B's principal"
 fi
 
 # --- A cannot manage B's credentials ------------------------------------------
-if dh credential revoke --system --token-file "$CRED_A" "$credB" >/dev/null 2>&1; then
+if dh credential revoke --token-file "$CRED_A" "$credB" >/dev/null 2>&1; then
   reg_fail "A revoked B's credential (admin-only operation allowed)"
 else
   reg_ok "A cannot manage B's credentials"
 fi
 
 # --- A cannot use B's authorization scope -------------------------------------
-if dh session create --system --token-file "$CRED_A" "$wsB" --json >/dev/null 2>&1; then
+if dh session create --token-file "$CRED_A" "$wsB" --json >/dev/null 2>&1; then
   reg_fail "A created a session using B's authorization scope"
 else
   reg_ok "A cannot create a session inside B's authorization scope"
 fi
 
 # --- admin (global scope) can perform the corresponding operations -----------
-ADMIN_ALL="$(dh session list --system 2>&1)"
+ADMIN_ALL="$(dh session list 2>&1)"
 if printf '%s' "$ADMIN_ALL" | grep -q "$sidB"; then
   reg_ok "admin lists B's session"
 else
   reg_fail "admin cannot list B's session"
 fi
 
-if dh session delete --system "$sidB" >/dev/null 2>&1; then
+if dh session delete "$sidB" >/dev/null 2>&1; then
   reg_ok "admin deletes B's session"
 else
   reg_fail "admin cannot delete B's session"
 fi
 
-if dh principal set --system "$USER_B" enabled false >/dev/null 2>&1; then
+if dh principal set "$USER_B" enabled false >/dev/null 2>&1; then
   reg_ok "admin modifies B's principal"
-  dh principal set --system "$USER_B" enabled true >/dev/null 2>&1 || true
+  dh principal set "$USER_B" enabled true >/dev/null 2>&1 || true
 else
   reg_fail "admin cannot modify B's principal"
 fi
 
-if dh credential revoke --system "$credB" >/dev/null 2>&1; then
+if dh credential revoke "$credB" >/dev/null 2>&1; then
   reg_ok "admin revokes B's credential"
 else
   reg_fail "admin cannot manage B's credentials"
@@ -288,7 +288,7 @@ fi
 
 # --- best-effort cleanup -------------------------------------------------------
 for u in "$USER_A" "$USER_B"; do
-  dh principal delete --system "$u" >/dev/null 2>&1 || true
+  dh principal delete "$u" >/dev/null 2>&1 || true
   userdel -r "$u" >/dev/null 2>&1 || true
 done
 rm -f "$CRED_A" "$CRED_B" "$LAUNCHER_CRED_A"

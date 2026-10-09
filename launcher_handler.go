@@ -302,8 +302,6 @@ func launcherAllowedRootAuditResult(err error) string {
 	switch {
 	case isErrLauncherNotFound(err):
 		return "launcher_not_found"
-	case isErrUserModeOwnerReserved(err):
-		return "user_mode_owner_reserved"
 	case isErrInvalidAllowedRoot(err):
 		return "invalid_allowed_root"
 	case errors.Is(err, ErrAllowedRootNotFound):
@@ -324,8 +322,6 @@ func launcherScopeReplaceAuditResult(err error) string {
 	switch {
 	case isErrLauncherNotFound(err):
 		return "launcher_not_found"
-	case isErrUserModeOwnerReserved(err):
-		return "user_mode_owner_reserved"
 	case isErrInvalidScope(err):
 		return "invalid_scope"
 	case isErrInvalidAllowedRoots(err):
@@ -672,9 +668,6 @@ func (a *App) handlePatchLauncher(w http.ResponseWriter, r *http.Request) {
 	updated, revoked, err := a.updateLauncherWithLifecycle(l.ID, req.Name, req.Enabled)
 	if err != nil {
 		result := "error"
-		if isErrUserModeOwnerReserved(err) {
-			result = "user_mode_owner_reserved"
-		}
 		writeLauncherControlAudit(ctx, auditRecord{
 			Event:      "launcher.update",
 			LauncherID: l.ID,
@@ -689,9 +682,6 @@ func (a *App) handlePatchLauncher(w http.ResponseWriter, r *http.Request) {
 				fmt.Sprintf("launcher %q already exists for principal %q", *req.Name, l.PrincipalName))
 		case isErrInvalidLauncherName(err):
 			writeError(ctx, w, http.StatusBadRequest, "invalid_launcher_name", "invalid launcher name")
-		case isErrUserModeOwnerReserved(err):
-			writeError(ctx, w, http.StatusConflict, "user_mode_owner_reserved",
-				"this launcher is managed by transparent user mode and cannot be mutated in this way")
 		default:
 			opLog(ctx).Error("launcher update failed",
 				slog.String("operation", "launcher_update"),
@@ -833,8 +823,7 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 	// observes either the pre-replacement or post-replacement scope, never a
 	// mix, and a narrowing that linearizes first prevents the Session.
 	// replaceLauncherScopeWithLifecycle owns that boundary and the current
-	// policy snapshot inside it, and refuses any narrowing or rooting of the
-	// reserved user-mode daemon-owner default Launcher before any change.
+	// policy snapshot inside it.
 	updated, err := a.replaceLauncherScopeWithLifecycle(l.ID, scopeMode, requestedEntries)
 	duration := time.Since(started).Round(time.Millisecond).String()
 	if err != nil {
@@ -849,9 +838,6 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 		switch {
 		case isErrLauncherNotFound(err):
 			writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")
-		case isErrUserModeOwnerReserved(err):
-			writeError(ctx, w, http.StatusConflict, "user_mode_owner_reserved",
-				"this launcher is managed by transparent user mode and cannot be mutated in this way")
 		case isErrInvalidScope(err):
 			writeError(ctx, w, http.StatusBadRequest, "invalid_scope", "invalid scope")
 		case isErrInvalidAllowedRoots(err):
@@ -917,10 +903,10 @@ func launcherAllowedRootResponseOf(launcherID string, entry AllowedRootEntry, ch
 // handleAddLauncherAllowedRoot adds one allowed root to a Launcher through the
 // daemon-owned narrow mutation: the target Launcher is resolved under the
 // request authority (requireScopedLauncher), then
-// addLauncherAllowedRootWithLifecycle owns the lifecycle serialization, the
-// current Principal ceiling, and the reservation guard. Adding the first root
+// addLauncherAllowedRootWithLifecycle owns the lifecycle serialization and the
+// current Principal ceiling. Adding the first root
 // to an inherit-scope Launcher is the inherit -> restricted narrowing (never an
-// authority broadening); the reserved daemon-owner default Launcher is refused.
+// authority broadening).
 // The success audit reports the committed post-mutation Launcher projection
 // returned by the lifecycle owner — for the first add that is the committed
 // restricted scope, never the pre-mutation inherit snapshot.
@@ -983,8 +969,8 @@ func (a *App) handleAddLauncherAllowedRoot(w http.ResponseWriter, r *http.Reques
 
 	// The narrow add shares the lifecycle serialization with Session creation
 	// and the other ownership mutations (see handleReplaceLauncherAllowedRoots):
-	// addLauncherAllowedRootWithLifecycle owns that boundary, the current
-	// policy snapshot inside it, and the reserved-launcher refusal.
+	// addLauncherAllowedRootWithLifecycle owns that boundary and the current
+	// policy snapshot inside it.
 	committed, changed, entry, err := a.addLauncherAllowedRootWithLifecycle(l.ID, req.Path, requestedAccess)
 	duration := time.Since(started).Round(time.Millisecond).String()
 	if err != nil {
@@ -1002,9 +988,6 @@ func (a *App) handleAddLauncherAllowedRoot(w http.ResponseWriter, r *http.Reques
 		switch {
 		case isErrLauncherNotFound(err):
 			writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")
-		case isErrUserModeOwnerReserved(err):
-			writeError(ctx, w, http.StatusConflict, "user_mode_owner_reserved",
-				"this launcher is managed by transparent user mode and cannot be mutated in this way")
 		case isErrInvalidAllowedRoot(err):
 			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root", "invalid allowed root")
 		case errors.Is(err, ErrInvalidAllowedRootAccess):
@@ -1093,9 +1076,6 @@ func (a *App) handleRemoveLauncherAllowedRoot(w http.ResponseWriter, r *http.Req
 		switch {
 		case isErrLauncherNotFound(err):
 			writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")
-		case isErrUserModeOwnerReserved(err):
-			writeError(ctx, w, http.StatusConflict, "user_mode_owner_reserved",
-				"this launcher is managed by transparent user mode and cannot be mutated in this way")
 		case isErrInvalidAllowedRoot(err):
 			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root", "invalid allowed root")
 		default:
@@ -1125,8 +1105,7 @@ func (a *App) handleRemoveLauncherAllowedRoot(w http.ResponseWriter, r *http.Req
 // the root list, so the daemon owns the mutation and its concurrency
 // semantics. Unlike the idempotent remove, a missing stored root is refused
 // (404 allowed_root_not_found) so a mistyped path can never be silently
-// reported as satisfied, and the reserved user-mode daemon-owner default
-// Launcher is refused like every other mutation. The mutation shares the
+// reported as satisfied. The mutation shares the
 // lifecycle serialization with Session creation and the other root-policy
 // mutations; no ceiling re-check is performed here, because the effective
 // policy is composed by the canonical 2.2 effective-root owner at every
@@ -1213,9 +1192,6 @@ func (a *App) handleSetLauncherAllowedRootAccess(w http.ResponseWriter, r *http.
 		switch {
 		case isErrLauncherNotFound(err):
 			writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")
-		case isErrUserModeOwnerReserved(err):
-			writeError(ctx, w, http.StatusConflict, "user_mode_owner_reserved",
-				"this launcher is managed by transparent user mode and cannot be mutated in this way")
 		case isErrInvalidAllowedRoot(err):
 			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root", "invalid allowed root")
 		case errors.Is(err, ErrInvalidAllowedRootAccess):
@@ -1270,9 +1246,6 @@ func (a *App) handleDeleteLauncher(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		result := "error"
-		if isErrUserModeOwnerReserved(err) {
-			result = "user_mode_owner_reserved"
-		}
 		writeLauncherControlAudit(ctx, auditRecord{
 			Event:      "launcher.delete",
 			LauncherID: l.ID,
@@ -1284,9 +1257,6 @@ func (a *App) handleDeleteLauncher(w http.ResponseWriter, r *http.Request) {
 			writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")
 		case isErrLauncherRuntimeActive(err):
 			writeError(ctx, w, http.StatusConflict, "launcher_runtime_active", "launcher has active runtime")
-		case isErrUserModeOwnerReserved(err):
-			writeError(ctx, w, http.StatusConflict, "user_mode_owner_reserved",
-				"this launcher is managed by transparent user mode and cannot be mutated in this way")
 		default:
 			opLog(ctx).Error("launcher delete failed",
 				slog.String("operation", "launcher_delete"),

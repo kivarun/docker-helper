@@ -300,13 +300,13 @@ cleanup() {
     wait "$SERVER_PID" 2>/dev/null || true
   fi
   if [ -n "$ADMIN_CREATED_ID" ]; then
-    docker-helper session delete --system "$ADMIN_CREATED_ID" >/dev/null 2>&1 || true
+    docker-helper session delete "$ADMIN_CREATED_ID" >/dev/null 2>&1 || true
   fi
   if [ -n "$SESSION_PRINC_ID" ]; then
-    docker-helper session delete --system "$SESSION_PRINC_ID" >/dev/null 2>&1 || true
+    docker-helper session delete "$SESSION_PRINC_ID" >/dev/null 2>&1 || true
   fi
   if [ -n "$PRINCIPAL" ]; then
-    docker-helper principal delete --system "$PRINCIPAL" >/dev/null 2>&1 || true
+    docker-helper principal delete "$PRINCIPAL" >/dev/null 2>&1 || true
   fi
   rm -f "$CRED_FILE"
   systemctl stop docker-helper.service >/dev/null 2>&1 || true
@@ -455,12 +455,12 @@ printf 'ro-content\n' > "$WS/ro/readme.txt"
 chown -R "$PRINCIPAL:$PRINCIPAL" "$WS/rw"
 chmod 0755 "$WS" "$WS/rw" "$WS/ro" "$WS/buildctx"
 
-docker-helper principal create --system --no-credential "$PRINCIPAL" >/dev/null \
+docker-helper principal create --no-credential "$PRINCIPAL" >/dev/null \
   || fail_uat "principal create failed"
-docker-helper principal allowed-root add --system "$PRINCIPAL" "$ALLOWED_ROOT" \
+docker-helper principal allowed-root add "$PRINCIPAL" "$ALLOWED_ROOT" \
   || fail_uat "principal allowed-root add failed"
 
-CRED_OUT="$(docker-helper credential create --system --name uat-default "$PRINCIPAL")" \
+CRED_OUT="$(docker-helper credential create --name uat-default "$PRINCIPAL")" \
   || fail_uat "credential create failed"
 CRED_TOKEN="$(printf '%s\n' "$CRED_OUT" | sed -n 's/^  Token: //p')"
 [ -n "$CRED_TOKEN" ] || fail_uat "could not parse credential token"
@@ -474,7 +474,7 @@ chmod 600 "$CRED_FILE"
 # contract positively via the canonical Admin-scoped launcher show path:
 # 'default' already exists, belongs to the just-created Principal, and is
 # usable by the scenario below (enabled, inherit scope).
-LAUNCHER_JSON="$(docker-helper launcher show --system --principal "$PRINCIPAL" --json)" \
+LAUNCHER_JSON="$(docker-helper launcher show --principal "$PRINCIPAL" --json)" \
   || fail_uat "principal '$PRINCIPAL' has no default Launcher after principal create (eager provisioning broken)"
 printf '%s\n' "$LAUNCHER_JSON" | grep -q "\"principal\": \"$PRINCIPAL\"" \
   || fail_uat "default launcher does not belong to principal '$PRINCIPAL': $LAUNCHER_JSON"
@@ -501,7 +501,7 @@ info "default launcher for $PRINCIPAL proved present via launcher show (eager pr
 
 # Negative: an admin create with NO selector must fail closed with
 # 400 missing_launcher_selector — never create a selector-less session.
-NO_SEL_OUT="$(docker-helper session create --system "$WS" 2>&1)"; NO_SEL_RC=$?
+NO_SEL_OUT="$(docker-helper session create "$WS" 2>&1)"; NO_SEL_RC=$?
 [ "$NO_SEL_RC" -ne 0 ] \
   || fail_uat "admin selector-less session create unexpectedly succeeded"
 printf '%s\n' "$NO_SEL_OUT" | grep -q 'missing_launcher_selector' \
@@ -532,7 +532,7 @@ info "admin-created session (control-plane proof): $ADMIN_CREATED_ID -> launcher
 
 # Principal session (credential token -> principal scope). Container identity
 # = the principal's OS uid/gid. Proves the credential -> session -> run path.
-SESSION_PRINC_JSON="$(docker-helper session create --system --token-file "$CRED_FILE" "$WS" --json)" \
+SESSION_PRINC_JSON="$(docker-helper session create --token-file "$CRED_FILE" "$WS" --json)" \
   || fail_uat "principal session create failed"
 SESSION_PRINC_ID="$(printf '%s\n' "$SESSION_PRINC_JSON" | grep -oP '"id": "\K[^"]+' | head -1)"
 SESSION_PRINC_TOKEN="$(printf '%s\n' "$SESSION_PRINC_JSON" | grep -oP '"token": "\K[^"]+' | head -1)"
@@ -549,7 +549,7 @@ say "phase 3b: self introspection smoke (principal, launcher, session, admin)"
 
 # Principal credential self: the daemon classifies the bearer and answers
 # with the matching self resource; the CLI performs no local classification.
-PRINC_SELF_JSON="$(docker-helper self --system --token-file "$CRED_FILE" --json)" \
+PRINC_SELF_JSON="$(docker-helper self --token-file "$CRED_FILE" --json)" \
   || fail_uat "principal credential self failed"
 printf '%s\n' "$PRINC_SELF_JSON" | grep -q '"type": "principal"' \
   || fail_uat "principal self returned the wrong class: $PRINC_SELF_JSON"
@@ -562,7 +562,7 @@ printf '%s\n' "$PRINC_SELF_JSON" | grep -q "\"username\": \"$PRINCIPAL\"" \
 # --token-file exactly like `session show`.
 SESSION_SELF_FILE="$(mktemp /tmp/uat-self-session-token.XXXXXX)"
 printf '%s\n' "$SESSION_PRINC_TOKEN" > "$SESSION_SELF_FILE"; chmod 600 "$SESSION_SELF_FILE"
-SESSION_SELF_JSON="$(docker-helper self --system --token-file "$SESSION_SELF_FILE" --json)" \
+SESSION_SELF_JSON="$(docker-helper self --token-file "$SESSION_SELF_FILE" --json)" \
   || fail_uat "session bearer self failed"
 rm -f "$SESSION_SELF_FILE"
 printf '%s\n' "$SESSION_SELF_JSON" | grep -q '"type": "session"' \
@@ -620,7 +620,7 @@ printf '%s\n' "$ADMIN_CREATED_RUN" | grep -q 'ADMIN-CREATED-IDENTITY-OK' \
   || fail_uat "admin-created session identity check failed (expected uid=$PUID gid=$PGID): $ADMIN_CREATED_RUN"
 
 # The focused admin-created Session proof is complete; delete it.
-docker-helper session delete --system "$ADMIN_CREATED_ID" >/dev/null 2>&1 \
+docker-helper session delete "$ADMIN_CREATED_ID" >/dev/null 2>&1 \
   || fail_uat "admin-created session delete failed"
 unset ADMIN_CREATED_TOKEN
 
@@ -681,13 +681,13 @@ fi
 info "existing session keeps its issued snapshot (writable behavior unchanged)"
 
 # New session after the mutation: the RO region is part of the issued snapshot.
-NEW_SESS_JSON="$(docker-helper session create --system --token-file "$CRED_FILE" "$WS" --json)" \
+NEW_SESS_JSON="$(docker-helper session create --token-file "$CRED_FILE" "$WS" --json)" \
   || fail_uat "post-policy session create failed"
 NEW_SESS_ID="$(printf '%s\n' "$NEW_SESS_JSON" | grep -oP '"id": "\K[^"]+' | head -1)"
 NEW_SESS_TOKEN="$(printf '%s\n' "$NEW_SESS_JSON" | grep -oP '"token": "\K[^"]+' | head -1)"
 [ -n "$NEW_SESS_ID" ] && [ -n "$NEW_SESS_TOKEN" ] \
   || fail_uat "post-policy session returned no id/token"
-docker-helper session show --system "$NEW_SESS_ID" \
+docker-helper session show "$NEW_SESS_ID" \
   | grep -Eq "^$(printf '%s' "$WS/ro" | sed 's/[.[\*^$]/\\&/g')[[:space:]]+read_only$" \
   || fail_uat "issued snapshot does not show the policy RO region (session show)"
 
@@ -719,7 +719,7 @@ printf '%s\n' "$RO_REJECT_OUT" | grep -q 'read_only_root' \
 info "read_only_root refused before workload creation (no container/pin/MAC residue)"
 
 # Cleanup the smoke session.
-docker-helper session delete --system "$NEW_SESS_ID" >/dev/null 2>&1 \
+docker-helper session delete "$NEW_SESS_ID" >/dev/null 2>&1 \
   || fail_uat "smoke session delete failed"
 unset NEW_SESS_TOKEN
 
@@ -845,7 +845,7 @@ H6_PID_BEFORE="$(systemctl show -p MainPID --value docker-helper.service)"
 mac_h6_precheck "$ADMIN_TOKEN_FILE" "/etc/docker-helper/config.json"
 
 say "phase 7c: rotate the admin token through the shipped confined service"
-H6_ROTATE_OUT="$(docker-helper admin-token rotate --system 2>&1)"
+H6_ROTATE_OUT="$(docker-helper admin-token rotate 2>&1)"
 H6_ROTATE_RC=$?
 
 if [ "$H6_ROTATE_RC" -ne 0 ]; then
@@ -893,14 +893,14 @@ H6_FILE_TOKEN="$(cat "$ADMIN_TOKEN_FILE")"
 H6_NEW_FILE="$(mktemp /tmp/uat-h6-new.XXXXXX)"
 chmod 600 "$H6_NEW_FILE"
 printf '%s' "$NEW_ADMIN_TOKEN" > "$H6_NEW_FILE"
-if ! docker-helper session list --system --token-file "$H6_NEW_FILE" >/dev/null 2>&1; then
+if ! docker-helper session list --token-file "$H6_NEW_FILE" >/dev/null 2>&1; then
   rm -f "$H6_NEW_FILE"
   fail_uat "new admin token rejected after rotation"
 fi
 H6_OLD_FILE="$(mktemp /tmp/uat-h6-old.XXXXXX)"
 chmod 600 "$H6_OLD_FILE"
 printf '%s' "$OLD_ADMIN_TOKEN" > "$H6_OLD_FILE"
-H6_OLD_OUT="$(docker-helper session list --system --token-file "$H6_OLD_FILE" 2>&1)"
+H6_OLD_OUT="$(docker-helper session list --token-file "$H6_OLD_FILE" 2>&1)"
 rm -f "$H6_OLD_FILE" "$H6_NEW_FILE"
 printf '%s\n' "$H6_OLD_OUT" | grep -q 'unauthorized' \
   || fail_uat "old admin token failure was not an authorization result: $(printf '%s\n' "$H6_OLD_OUT" | redact_tokens | head -3)"
@@ -944,7 +944,7 @@ fi
 #    transport for the same admin token.
 ADMIN_TOKEN_FILE="/etc/docker-helper/admin.token"
 HTTP_ADMIN_LIST="$(docker-helper session list --endpoint "$HTTP_EP" --token-file "$ADMIN_TOKEN_FILE" 2>&1)"
-UNIX_ADMIN_LIST="$(docker-helper session list --system --token-file "$ADMIN_TOKEN_FILE" 2>&1)"
+UNIX_ADMIN_LIST="$(docker-helper session list --token-file "$ADMIN_TOKEN_FILE" 2>&1)"
 if [ "$HTTP_ADMIN_LIST" = "$UNIX_ADMIN_LIST" ]; then
   info "admin session list identical over HTTP and Unix transports"
 else
@@ -975,7 +975,7 @@ printf '%s\n' "$HTTP_RUN_OUT" | grep -q 'HTTP-RUN-OK' \
 #    result, not a transport/token-source difference.)
 DENIED_WS="$ALLOWED_ROOT/../denied-ws-$RANDOM"
 mkdir -p "$DENIED_WS"
-UNIX_DENIED_OUT="$(docker-helper session create --system --token-file "$CRED_FILE" "$DENIED_WS" 2>&1)"
+UNIX_DENIED_OUT="$(docker-helper session create --token-file "$CRED_FILE" "$DENIED_WS" 2>&1)"
 UNIX_DENIED_RC=$?
 HTTP_DENIED_OUT="$(docker-helper session create --endpoint "$HTTP_EP" --token-file "$CRED_FILE" "$DENIED_WS" 2>&1)"
 HTTP_DENIED_RC=$?
@@ -986,7 +986,7 @@ else
   fail_uat "authorization result differs between transports (unix rc=$UNIX_DENIED_RC http rc=$HTTP_DENIED_RC) unix='$UNIX_DENIED_OUT' http='$HTTP_DENIED_OUT'"
 fi
 rm -rf "$DENIED_WS"
-docker-helper session delete --system "$HTTP_SESS_ID" >/dev/null 2>&1 || true
+docker-helper session delete "$HTTP_SESS_ID" >/dev/null 2>&1 || true
 info "loopback HTTP acceptance ok"
 
 # ==============================================================================

@@ -66,19 +66,33 @@ func setupReloadTestEnv(t *testing.T) (configPath, tokenPath, socketPath, lockPa
 	oldConfigHome := os.Getenv("XDG_CONFIG_HOME")
 	os.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	os.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	// System-only client contract: the default CLI endpoint resolves to the
+	// system socket, so the seam points at the isolated runtime directory and
+	// the operator credential is installed at the canonical client store.
+	origSocketPath := systemSocketPath
+	systemSocketPath = socketPath
+	t.Cleanup(func() { systemSocketPath = origSocketPath })
+	origRuntime := getRuntimeDirFunc
+	getRuntimeDirFunc = func() (string, error) { return runtimeDir, nil }
+	t.Cleanup(func() { getRuntimeDirFunc = origRuntime })
+	origState := getStateDirFunc
+	getStateDirFunc = func() string { return stateHome }
+	t.Cleanup(func() { getStateDirFunc = origState })
+	if err := os.MkdirAll(filepath.Join(configHome, "docker-helper"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configHome, "docker-helper", "credential.token"), []byte("test-admin-token\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	os.Setenv("XDG_STATE_HOME", stateHome)
 	os.Setenv("XDG_CONFIG_HOME", configHome)
-
-	// Prevent tests from reaching a real system daemon.
-	origSocket := systemSocketExists
-	systemSocketExists = func() bool { return false }
 
 	cleanup = func() {
 		os.Setenv("DOCKER_HELPER_CONFIG", oldConfig)
 		os.Setenv("XDG_RUNTIME_DIR", oldRuntime)
 		os.Setenv("XDG_STATE_HOME", oldState)
 		os.Setenv("XDG_CONFIG_HOME", oldConfigHome)
-		systemSocketExists = origSocket
 	}
 
 	return configPath, tokenPath, socketPath, lockPath, cleanup
@@ -255,17 +269,6 @@ func TestConfigUnsetHelpReloadMention(t *testing.T) {
 	}
 	if !strings.Contains(output, `Set trusted_ca_injection to "disabled" first`) {
 		t.Fatalf("expected config unset help to require disabling auto first, got: %s", output)
-	}
-}
-
-func TestSystemdExecReload(t *testing.T) {
-	data, err := os.ReadFile("packaging/systemd/user/docker-helper.service")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-	if !strings.Contains(content, "ExecReload=%h/.local/bin/docker-helper reload") {
-		t.Fatalf("systemd unit missing ExecReload, got:\n%s", content)
 	}
 }
 
@@ -2196,22 +2199,18 @@ func TestReloadCATypedErrorDiagnostic(t *testing.T) {
 	// with "permission denied" (not containing "trusted_ca").
 	caPath := filepath.Join(t.TempDir(), "ca.pem")
 	generateTestCAPEM(t, caPath)
-	// Make the runtime dir unreadable so symlink creation fails with "permission denied".
-	dir := t.TempDir()
-	runtimeDir := filepath.Join(dir, "xdg_runtime")
-	runtimeSubDir := filepath.Join(runtimeDir, "docker-helper")
-	if err := os.MkdirAll(runtimeSubDir, 0700); err != nil {
+	// Pre-create the trusted-CA base unreadable so snapshot-directory
+	// creation under it fails with "permission denied"; the daemon socket
+	// path (<runtime>/docker-helper/...) stays reachable.
+	runtimeDir, _ := getRuntimeDirFunc()
+	caBase := filepath.Join(runtimeDir, "trusted-ca")
+	if err := os.MkdirAll(caBase, 0700); err != nil {
 		t.Fatal(err)
 	}
-	// Remove read permission from runtime dir to trigger "permission denied"
-	if err := os.Chmod(runtimeSubDir, 0000); err != nil {
+	if err := os.Chmod(caBase, 0000); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.Chmod(runtimeSubDir, 0700) })
-
-	oldRuntime := os.Getenv("XDG_RUNTIME_DIR")
-	os.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	t.Cleanup(func() { os.Setenv("XDG_RUNTIME_DIR", oldRuntime) })
+	t.Cleanup(func() { os.Chmod(caBase, 0700) })
 
 	newCfg := map[string]any{
 		"allowed_root":         testAllowedRootDir(t),
@@ -2453,7 +2452,6 @@ func TestReloadNoGlobalRootMACVerification(t *testing.T) {
 			AllowedRoots: []AllowedRootEntry{allowedRootEntry("/home")},
 			SessionTTL:   12 * time.Hour,
 			LogLevel:     slog.LevelInfo,
-			Mode:         ModeSystem,
 		},
 		DB:             db,
 		AdminTokenHash: adminHash,
@@ -2467,7 +2465,6 @@ func TestReloadNoGlobalRootMACVerification(t *testing.T) {
 				AllowedRoots: []AllowedRootEntry{allowedRootEntry("/opt")},
 				SessionTTL:   12 * time.Hour,
 				LogLevel:     slog.LevelInfo,
-				Mode:         ModeSystem,
 			}, nil
 		},
 	}

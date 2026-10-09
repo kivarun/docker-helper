@@ -330,12 +330,7 @@ func (a *App) resolveLauncherSelfSnapshot(launcherID string) (*launcherSelfSnaps
 	if err != nil {
 		return nil, err
 	}
-	userMode := a.getConfig().Mode == ModeUser
-	var daemonID int64
-	if userMode && a.userModeDefault != nil {
-		daemonID = a.userModeDefault.principalID
-	}
-	effective, err := effectiveLauncherAllowedRoots(globalEntries, snap, daemonID, userMode)
+	effective, err := effectiveLauncherAllowedRoots(globalEntries, snap)
 	if err != nil {
 		return nil, err
 	}

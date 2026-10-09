@@ -43,13 +43,27 @@ func setupSnapshotRacePrincipal(t *testing.T, app *App) (workspace string, input
 }
 
 // createSessionThroughMux issues a real POST /sessions through the route mux
-// and returns the recorded response.
+// and returns the recorded response. The authority is the caller's token: a
+// Principal credential resolves the Launcher from its own principal, so no
+// selector is needed.
 func createSessionThroughMux(app *App, token, workspace string) *httptest.ResponseRecorder {
 	mux := http.NewServeMux()
 	registerRoutes(mux, app)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte(fmt.Sprintf(`{"workspace":%q}`, workspace))))
 	req.Header.Set("Authorization", "Bearer "+token)
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+// createAdminSessionThroughMux issues a real POST /sessions through the
+// route mux with an Admin authority selecting the test owner Principal.
+func createAdminSessionThroughMux(app *App, workspace string) *httptest.ResponseRecorder {
+	mux := http.NewServeMux()
+	registerRoutes(mux, app)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte(fmt.Sprintf(`{"principal":%q,"workspace":%q}`, testOwnerUsername, workspace))))
+	req.Header.Set("Authorization", "Bearer "+testAdminToken)
 	mux.ServeHTTP(rec, req)
 	return rec
 }
@@ -73,9 +87,8 @@ func TestRaceSessionCreateCommitsSnapshotWhollyBeforeNarrowing(t *testing.T) {
 	createBoundaryPoint := newParkedQueryPoint("FROM launchers l JOIN principals p")
 	mutationPoint := newParkedQueryPoint("SELECT id FROM principals WHERE username")
 	app := &App{
-		Config:          app1.Config,
-		DB:              openParkedQueryDB(t, app1.Config.DatabasePath, doorPoint, createBoundaryPoint, mutationPoint),
-		userModeDefault: app1.userModeDefault,
+		Config: app1.Config,
+		DB:     openParkedQueryDB(t, app1.Config.DatabasePath, doorPoint, createBoundaryPoint, mutationPoint),
 	}
 
 	runSinglePinnedP(t, func() {
@@ -145,9 +158,8 @@ func TestRaceSessionCreateCommitsSnapshotWhollyAfterNarrowing(t *testing.T) {
 	mutationPoint := newParkedQueryPoint("SELECT id FROM principals WHERE username")
 	doorPoint := newParkedQueryPoint("SELECT username, enabled FROM principals WHERE id")
 	app := &App{
-		Config:          app1.Config,
-		DB:              openParkedQueryDB(t, app1.Config.DatabasePath, mutationPoint, doorPoint),
-		userModeDefault: app1.userModeDefault,
+		Config: app1.Config,
+		DB:     openParkedQueryDB(t, app1.Config.DatabasePath, mutationPoint, doorPoint),
 	}
 
 	runSinglePinnedP(t, func() {

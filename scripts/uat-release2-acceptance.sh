@@ -331,12 +331,12 @@ set_up_principal() {
   # The candidate CLI requires --issue-credential/--no-credential on
   # non-interactive stdin; the v2.0.0 upgrade baseline (scenarios F/G) predates
   # the flags. Try the candidate form first, then the baseline form.
-  dh principal create --system --no-credential "$user" >/dev/null 2>&1 \
-    || dh principal create --system "$user" >/dev/null 2>&1 || true
-  dh principal set --system "$user" enabled true >/dev/null 2>&1 || true
-  dh principal allowed-root add --system "$user" "$ALLOWED_ROOT" >/dev/null 2>&1 || true
+  dh principal create --no-credential "$user" >/dev/null 2>&1 \
+    || dh principal create "$user" >/dev/null 2>&1 || true
+  dh principal set "$user" enabled true >/dev/null 2>&1 || true
+  dh principal allowed-root add "$user" "$ALLOWED_ROOT" >/dev/null 2>&1 || true
   rm -f "$credfile"
-  out="$(dh credential create --system --name r2ac "$user" 2>/dev/null)" || return 1
+  out="$(dh credential create --name r2ac "$user" 2>/dev/null)" || return 1
   GLOBAL_CRED_ID="$(printf '%s\n' "$out" | sed -n 's/^  ID:    //p' | tr -d '[:space:]')"
   GLOBAL_CRED_TOKEN="$(printf '%s\n' "$out" | sed -n 's/^  Token: //p' | tr -d '[:space:]')"
   [ -n "$GLOBAL_CRED_ID" ] && [ -n "$GLOBAL_CRED_TOKEN" ] || return 1
@@ -374,8 +374,8 @@ set_up_principal() {
   # upgrade baselines (scenarios F/G/M) predate it and reject the positional
   # form locally (exit 2, no daemon request) — the baseline --workspace flag
   # form is the fallback, mirroring the create-flags fallback above.
-  json="$(dh session create --system --token-file "$credfile" "$home/ws" --json 2>/dev/null)" \
-    || json="$(dh session create --system --token-file "$credfile" --workspace "$home/ws" --json 2>/dev/null)" \
+  json="$(dh session create --token-file "$credfile" "$home/ws" --json 2>/dev/null)" \
+    || json="$(dh session create --token-file "$credfile" --workspace "$home/ws" --json 2>/dev/null)" \
     || return 1
   GLOBAL_SESSION_ID="$(printf '%s' "$json" | json_field id)"
   GLOBAL_SESSION_TOKEN="$(printf '%s' "$json" | json_field token)"
@@ -399,13 +399,13 @@ set_up_principal "$A_USER" "$A_CRED_A" || acc_fail "principal setup failed"
 A_PRINC="$GLOBAL_USER"; A_TOK_A="$GLOBAL_SESSION_TOKEN"
 
 # credential B for the SAME principal.
-B_OUT="$(dh credential create --system --name r2ac-b "$A_PRINC" 2>/dev/null)" \
+B_OUT="$(dh credential create --name r2ac-b "$A_PRINC" 2>/dev/null)" \
   || { acc_fail "credential B create failed"; :; }
 B_TOKEN="$(printf '%s\n' "$B_OUT" | sed -n 's/^  Token: //p' | tr -d '[:space:]')"
 printf '%s\n' "$B_TOKEN" > "$A_CRED_B"; chmod 600 "$A_CRED_B"
 
 # B authenticates as the same principal and creates a valid session.
-B_SESS_JSON="$(dh session create --system --token-file "$A_CRED_B" "$A_WORKSPACE/ws" --json 2>/dev/null)"
+B_SESS_JSON="$(dh session create --token-file "$A_CRED_B" "$A_WORKSPACE/ws" --json 2>/dev/null)"
 B_SESS_ID="$(printf '%s' "$B_SESS_JSON" | json_field id)"
 if [ -n "$B_SESS_ID" ]; then
   acc_ok "credential B authenticates as principal $A_PRINC and created session $B_SESS_ID"
@@ -422,18 +422,18 @@ else
 fi
 
 # Revoke credential A.
-dh credential revoke --system "$GLOBAL_CRED_ID" >/dev/null 2>&1 \
+dh credential revoke "$GLOBAL_CRED_ID" >/dev/null 2>&1 \
   && acc_ok "credential A revoked" || acc_fail "credential A revoke failed"
 
 # A can no longer create a new session.
-if dh session create --system --token-file "$A_CRED_A" "$A_WORKSPACE/ws" --json >/dev/null 2>&1; then
+if dh session create --token-file "$A_CRED_A" "$A_WORKSPACE/ws" --json >/dev/null 2>&1; then
   acc_fail "revoked credential A still created a session"
 else
   acc_ok "revoked credential A can no longer create a session"
 fi
 
 # B continues to work.
-if dh session create --system --token-file "$A_CRED_B" "$A_WORKSPACE/ws" --json >/dev/null 2>&1; then
+if dh session create --token-file "$A_CRED_B" "$A_WORKSPACE/ws" --json >/dev/null 2>&1; then
   acc_ok "credential B still creates sessions after A revoked"
 else
   acc_fail "credential B stopped working after A revoked"
@@ -442,7 +442,7 @@ fi
 # No credential secret appears in list/show/audit/log output. The list must
 # succeed first — a failed list yields no output and would vacuously "leak
 # nothing".
-LIST_OUT="$(dh credential list --system "$A_PRINC" 2>&1)"; LIST_EC=$?
+LIST_OUT="$(dh credential list "$A_PRINC" 2>&1)"; LIST_EC=$?
 if [ "$LIST_EC" -ne 0 ]; then
   acc_fail "credential list failed (rc=$LIST_EC); leak check cannot proceed: $(printf '%s\n' "$LIST_OUT" | redact | tail -3)"
 elif printf '%s\n' "$LIST_OUT" | grep -q 'dhc_'; then
@@ -751,7 +751,7 @@ if [ "$REG_UP" = 1 ]; then
   C_SESS_DIR="/run/docker-helper/sessions/$C_SESSION_A"
   if [ -f "$C_SESS_DIR/docker/config.json" ]; then
     acc_ok "session-scoped Docker auth material written under the session runtime dir"
-    if dh session delete --system "$C_SESSION_A" >/dev/null 2>&1; then
+    if dh session delete "$C_SESSION_A" >/dev/null 2>&1; then
       if [ -e "$C_SESS_DIR" ]; then
         acc_fail "session runtime dir (docker auth material) survived session deletion"
       else
@@ -762,7 +762,7 @@ if [ "$REG_UP" = 1 ]; then
     fi
   else
     acc_fail "session-scoped Docker auth material not present under $C_SESS_DIR/docker/config.json"
-    dh session delete --system "$C_SESSION_A" >/dev/null 2>&1 || true
+    dh session delete "$C_SESSION_A" >/dev/null 2>&1 || true
   fi
 
   # Restore the Docker daemon configuration (UAT-harness-owned setup).
@@ -863,7 +863,7 @@ if [ -n "$D_CID" ]; then
     acc_fail "stale mount pins after restart: $LEAK"
   fi
   # A fresh operation succeeds afterwards.
-  FRESH_JSON="$(dh session create --system --token-file "$D_CRED" "$(getent passwd "$D_USER" | cut -d: -f6)/ws" --json 2>/dev/null)" \
+  FRESH_JSON="$(dh session create --token-file "$D_CRED" "$(getent passwd "$D_USER" | cut -d: -f6)/ws" --json 2>/dev/null)" \
     && FRESH_TOKEN="$(printf '%s' "$FRESH_JSON" | json_field token)"
   if [ -n "${FRESH_TOKEN:-}" ] && \
       DOCKER_HELPER_SESSION_TOKEN="$FRESH_TOKEN" \
@@ -910,204 +910,79 @@ done
 wait_health "$SOCK" || acc_fail "daemon not healthy after restart for later scenarios"
 
 # ==============================================================================
-# scenario E: user-mode + system-mode coexistence
+# scenario E: non-root daemon bootstrap refused (system-only deployment)
+#
+# Release 2.3 removed the user-mode daemon: the only daemon deployment is the
+# root-owned system service. A real non-root OS account's init/serve must
+# refuse with the canonical root requirement and leave no per-user daemon
+# state or socket (RED on the 2.2 baseline, where a real user-mode daemon
+# bootstraps and serves on its own XDG socket).
 # ==============================================================================
-scenario "E: user-mode + system-mode coexistence"
+scenario "E: non-root daemon bootstrap refused (system-only deployment)"
 
 E_USER="uatcoex"
 
-E_SYSTEM_SESS=""
-
-# 1. package is installed; stop/disable the system daemon so the user-mode
-#    daemon is started FIRST (the required ordering).
-systemctl stop docker-helper.service >/dev/null 2>&1 || true
-systemctl disable docker-helper.service >/dev/null 2>&1 || true
-
-# 2. create a real non-root UAT user.
 if getent passwd "$E_USER" >/dev/null 2>&1; then
   userdel -r "$E_USER" >/dev/null 2>&1 || true
 fi
-useradd -m -s /bin/bash "$E_USER" 2>/dev/null || { acc_blocked "could not create coexistence user"; :; }
-E_UID="$(id -u "$E_USER")"
+useradd -m -s /bin/bash "$E_USER" 2>/dev/null || { acc_blocked "could not create the non-root probe user"; :; }
 E_HOME="$(getent passwd "$E_USER" | cut -d: -f6)"
-usermod -aG docker "$E_USER" 2>/dev/null || true
+E_UID="$(id -u "$E_USER")"
 mkdir -p "$E_HOME/ws"; chown -R "$E_USER:$E_USER" "$E_HOME/ws"
 
-# XDG runtime dir for the user-mode daemon (no logind session on the runner).
+# XDG runtime dir for the refusal probe (no logind session on the runner).
 E_XDG_RUNTIME="/run/user/$E_UID"
 mkdir -p "$E_XDG_RUNTIME"
 chown "$E_USER:$E_USER" "$E_XDG_RUNTIME"
 chmod 0700 "$E_XDG_RUNTIME"
 
-# A clean, user-scoped environment for every user-mode docker-helper process.
-# `env -i` prevents the CI runner's inherited XDG_CONFIG_HOME/XDG_STATE_HOME
-# (etc.) from leaking into the user-mode daemon: os.UserConfigDir() on Linux
-# prefers $XDG_CONFIG_HOME over $HOME, so a leaked runner value would make the
-# user-mode init write into the runner's config tree instead of the UAT user's.
+# A clean, user-scoped environment for every probe process; `env -i` keeps
+# the runner's inherited XDG variables out of the client's own resolution.
 E_ENV="env -i HOME=$E_HOME XDG_RUNTIME_DIR=$E_XDG_RUNTIME PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-# 3. BEFORE starting the system daemon, initialize + start the user's user-mode
-#    daemon.
-{
-  echo "=== coexistence pre-init diagnostics ==="
-  echo "system socket exists: $(test -S /run/docker-helper/docker-helper.sock && echo yes || echo no)"
-  echo "user groups: $(id -nG "$E_USER")"
-  if sudo -u "$E_USER" $E_ENV sh -c 'test -S /run/docker.sock && echo "docker.sock visible" || echo "docker.sock NOT visible"'; then
-    :
-  fi
-} > /tmp/r2ac-coex-diag.log 2>&1 || true
-if sudo -u "$E_USER" $E_ENV docker-helper init --allowed-root "$E_HOME" >/tmp/r2ac-coex-init.log 2>&1; then
-  acc_ok "user-mode init succeeded for $E_USER"
+E_INIT_OUT="$(sudo -u "$E_USER" $E_ENV docker-helper init --allowed-root "$E_HOME/ws" 2>&1)"
+E_INIT_RC=$?
+if [ "$E_INIT_RC" -ne 0 ] && printf '%s\n' "$E_INIT_OUT" | grep -q "must be run as root"; then
+  acc_ok "non-root init refused (must be run as root; the system service is the only daemon deployment)"
 else
-  acc_fail "user-mode init failed for $E_USER (see /tmp/r2ac-coex-init.log)"
-  sed 's/^/    init-log: /' /tmp/r2ac-coex-init.log 2>/dev/null | redact | tail -15 >&2
-  sed 's/^/    diag: /' /tmp/r2ac-coex-diag.log 2>/dev/null | redact | tail -10 >&2
+  acc_fail "non-root init must refuse with the root requirement (rc=$E_INIT_RC): $(printf '%s\n' "$E_INIT_OUT" | redact | tail -3)"
 fi
 
-E_USER_SOCK="$E_XDG_RUNTIME/docker-helper/docker-helper.sock"
-sudo -u "$E_USER" $E_ENV docker-helper serve >/tmp/r2ac-user-serve.log 2>&1 &
-E_USER_SERVE_PID=$!
-E_USER_READY=0
-for _ in $(seq 1 100); do
-  if [ -S "$E_USER_SOCK" ] && curl --silent --fail --max-time 1 --unix-socket "$E_USER_SOCK" http://localhost/health >/dev/null 2>&1; then
-    E_USER_READY=1; break
+for state_path in \
+  "$E_HOME/.config/docker-helper/config.json" \
+  "$E_HOME/.config/docker-helper/admin.token" \
+  "$E_HOME/.local/state/docker-helper" \
+  "$E_HOME/.local/share/docker-helper"; do
+  if [ ! -e "$state_path" ]; then
+    acc_ok "non-root init left no daemon state at $state_path"
+  else
+    acc_fail "non-root init created per-user daemon state at $state_path"
   fi
-  sleep 0.2
 done
-[ "$E_USER_READY" = 1 ] && acc_ok "user-mode daemon healthy on its own socket" || acc_fail "user-mode daemon did not become ready"
 
-# 4. prove user-mode socket/config/state/database work (a user session + run).
-E_USER_SESS=""
-if [ "$E_USER_READY" = 1 ]; then
-  E_USER_SESS_JSON="$(sudo -u "$E_USER" $E_ENV docker-helper session create "$E_HOME/ws" --json 2>/tmp/r2ac-coex-usr-sess.err)" \
-    && E_USER_SESS="$(printf '%s' "$E_USER_SESS_JSON" | json_field id)" \
-    && E_USER_TOK="$(printf '%s' "$E_USER_SESS_JSON" | json_field token)"
-  if [ -n "$E_USER_SESS" ]; then
-    acc_ok "user-mode session created via the user socket ($E_USER_SESS)"
-    if [ -f "$E_HOME/.config/docker-helper/docker-helper.db" ] \
-        || [ -f "$E_HOME/.local/state/docker-helper/docker-helper.db" ]; then
-      acc_ok "user-mode database exists under the user's own state path"
-    else
-      acc_fail "user-mode database not found under user state path"
-    fi
-    if sudo -u "$E_USER" env -i DOCKER_HELPER_SESSION_TOKEN="$E_USER_TOK" HOME="$E_HOME" XDG_RUNTIME_DIR="$E_XDG_RUNTIME" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-        docker-helper run alpine:3.24 -- sh -ec 'echo USER-MODE-OK' | grep -q 'USER-MODE-OK'; then
-      acc_ok "user-mode docker-helper operation works"
-    else
-      acc_fail "user-mode docker-helper operation failed"
-    fi
-  else
-    acc_fail "user-mode session create failed: $(cat /tmp/r2ac-coex-usr-sess.err | redact)"
-  fi
-fi
-
-# 5. start system mode. The system daemon was already initialized by the
-#    suite setup (config + admin.token + database persist across scenarios);
-#    init is not idempotent and must not be re-run. The ordering that matters
-#    is that the user-mode daemon started BEFORE the system daemon.
-if [ -f /etc/docker-helper/config.json ] && [ -f /etc/docker-helper/admin.token ]; then
-  acc_ok "system mode already initialized (setup); starting system daemon"
+E_SERVE_OUT="$(sudo -u "$E_USER" timeout 20 $E_ENV docker-helper serve 2>&1)"
+E_SERVE_RC=$?
+if [ "$E_SERVE_RC" -eq 124 ]; then
+  acc_fail "non-root serve did not refuse: a daemon started and served until the bounded timeout"
+elif [ "$E_SERVE_RC" -ne 0 ] && printf '%s\n' "$E_SERVE_OUT" | grep -q "must be run as root"; then
+  acc_ok "non-root serve refused (must be run as root, rc=$E_SERVE_RC)"
 else
-  acc_fail "system mode not initialized when coexistence started"
-fi
-systemctl enable --now docker-helper.service >/dev/null 2>&1 || true
-for _ in $(seq 1 30); do
-  systemctl is-active --quiet docker-helper.service && break
-  sleep 1
-done
-if wait_health "$SOCK"; then
-  acc_ok "system daemon healthy while user-mode daemon runs"
-else
-  acc_fail "system daemon not healthy while user-mode daemon runs"
+  acc_fail "non-root serve must refuse with the root requirement (rc=$E_SERVE_RC): $(printf '%s\n' "$E_SERVE_OUT" | redact | tail -3)"
 fi
 
-# 6. prove BOTH daemons remain healthy simultaneously.
-if curl --silent --fail --max-time 1 --unix-socket "$E_USER_SOCK" http://localhost/health >/dev/null 2>&1 \
-    && curl --silent --fail --max-time 1 --unix-socket "$SOCK" http://localhost/health >/dev/null 2>&1 \
-    && curl --silent --fail --max-time 1 "$HTTP_ENDPOINT/health" >/dev/null 2>&1; then
-  acc_ok "user socket + system socket + system HTTP all healthy simultaneously"
+if [ ! -S "$E_XDG_RUNTIME/docker-helper/docker-helper.sock" ]; then
+  acc_ok "non-root serve created no socket under the user's XDG runtime directory"
 else
-  acc_fail "not both daemons healthy simultaneously"
+  acc_fail "non-root serve left a socket at $E_XDG_RUNTIME/docker-helper/docker-helper.sock"
 fi
 
-# 7. prove paths/sockets/state are distinct.
-if [ "$E_USER_SOCK" = "$SOCK" ]; then
-  acc_fail "user and system sockets are not distinct"
-else
-  acc_ok "user socket ($E_USER_SOCK) distinct from system socket ($SOCK)"
-fi
-SYS_DB="/var/lib/docker-helper/docker-helper.db"
-if [ -f "$SYS_DB" ] && [ "$SYS_DB" != "$E_HOME/.local/state/docker-helper/docker-helper.db" ]; then
-  acc_ok "system database at $SYS_DB is distinct from user-mode state"
-else
-  acc_fail "system/user databases not distinct or system DB missing"
-fi
-
-# 8. default endpoint for that user selects the existing user socket.
-if [ "$E_USER_READY" = 1 ]; then
-  DEFAULT_SESS_JSON="$(sudo -u "$E_USER" $E_ENV docker-helper session create "$E_HOME/ws" --json 2>/dev/null)" \
-    && DEFAULT_SESS="$(printf '%s' "$DEFAULT_SESS_JSON" | json_field id)"
-  if [ -n "${DEFAULT_SESS:-}" ]; then
-    # The default-endpoint session must live in the USER daemon, not the
-    # system daemon. The system session list must succeed first — a failed
-    # list would vacuously "not contain" the session.
-    SYS_LIST="$(dh session list --system --token-file /etc/docker-helper/admin.token 2>&1)"; SYS_LIST_EC=$?
-    if [ "$SYS_LIST_EC" -ne 0 ]; then
-      acc_fail "system session list failed (rc=$SYS_LIST_EC); default-endpoint leak check cannot proceed"
-    elif printf '%s\n' "$SYS_LIST" | grep -q "$DEFAULT_SESS"; then
-      acc_fail "default endpoint session leaked into the system daemon"
-    else
-      acc_ok "user's default endpoint selected the existing user socket (not the system daemon)"
-    fi
-  else
-    acc_fail "user's default-endpoint session create failed"
-  fi
-else
-  acc_fail "cannot verify default endpoint selection without a user daemon"
-fi
-
-# 9. explicit --system selects the system daemon (operator creates a principal
-#    + credential for the user; the user installs it, then --system works).
-E_OPERATOR_CRED="$CRED_DIR/coex-sys.tok"
-if set_up_principal "$E_USER" "$E_OPERATOR_CRED" >/dev/null 2>&1; then
-  E_SYSTEM_SESS="$GLOBAL_SESSION_ID"
-  if [ -n "$E_SYSTEM_SESS" ]; then
-    # A system-mode session for the coexistence user must be visible to the
-    # SYSTEM daemon (proves --system/credential path selected the system daemon).
-    SYS_LIST2="$(dh session list --system --token-file /etc/docker-helper/admin.token 2>/dev/null)"
-    if printf '%s\n' "$SYS_LIST2" | grep -q "$E_SYSTEM_SESS"; then
-      acc_ok "explicit system-mode session is owned by the system daemon"
-    else
-      acc_fail "explicit system-mode session not found in the system daemon"
-    fi
-    # A system-mode session token must NOT be consumed by the user daemon.
-    if sudo -u "$E_USER" env -i DOCKER_HELPER_SESSION_TOKEN="$GLOBAL_SESSION_TOKEN" HOME="$E_HOME" XDG_RUNTIME_DIR="$E_XDG_RUNTIME" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-        docker-helper run alpine:3.24 -- sh -ec 'true' >/dev/null 2>&1; then
-      acc_fail "system-mode session token was consumed by the user-mode daemon"
-    else
-      acc_ok "system-mode session token rejected by the user-mode daemon"
-    fi
-  fi
-else
-  acc_fail "could not provision a system credential for the coexistence user"
-fi
-
-# 10. a user-mode session token must NOT be consumed by the system daemon.
-if [ -n "${E_USER_TOK:-}" ]; then
-  if DOCKER_HELPER_SESSION_TOKEN="$E_USER_TOK" \
-      dh run alpine:3.24 -- sh -ec 'true' >/dev/null 2>&1; then
-    acc_fail "user-mode session token was consumed by the system daemon"
-  else
-    acc_ok "user-mode session token rejected by the system daemon"
-  fi
-fi
-
-# Tear down the user-mode daemon for the lifecycle phase.
-kill "$E_USER_SERVE_PID" 2>/dev/null || true
-wait "$E_USER_SERVE_PID" 2>/dev/null || true
 userdel -r "$E_USER" >/dev/null 2>&1 || true
 rm -rf "$E_XDG_RUNTIME"
-systemctl stop docker-helper.service >/dev/null 2>&1 || true
+
+# The system service stays the only daemon: keep it healthy for the
+# following scenarios (it was never stopped in this scenario).
+wait_health "$SOCK" || acc_fail "system service not healthy after the non-root refusal scenario"
+
 
 # ==============================================================================
 # scenario G: v2.0.0 -> candidate upgrade ownership migration (depth proofs)
@@ -1192,7 +1067,7 @@ if [ -n "$G_BASELINE_DEB" ]; then
   G_HOME="$(getent passwd "$G_USER" | cut -d: -f6)"
   mkdir -p "$G_HOME/ws-admin"; chown -R "$G_USER:$G_USER" "$G_HOME/ws-admin"
   if [ -n "${G_ADMIN_TOKEN:-}" ]; then
-    G_ADMIN_SESS_JSON="$(dh session create --system --token-file /etc/docker-helper/admin.token --workspace "$G_HOME/ws-admin" --json 2>/dev/null || true)"
+    G_ADMIN_SESS_JSON="$(dh session create --token-file /etc/docker-helper/admin.token --workspace "$G_HOME/ws-admin" --json 2>/dev/null || true)"
     G_ADMIN_SESS_ID="$(printf '%s' "$G_ADMIN_SESS_JSON" | json_field id || true)"
     G_ADMIN_SESS_TOKEN="$(printf '%s' "$G_ADMIN_SESS_JSON" | json_field token || true)"
     if [ -n "$G_ADMIN_SESS_ID" ] && [ -n "$G_ADMIN_SESS_TOKEN" ]; then
@@ -1278,7 +1153,7 @@ if [ -n "$G_BASELINE_DEB" ]; then
 
   # G2: attributable session re-owned by the 'default' Launcher.
   if [ -n "${G_SESSION_ID:-}" ]; then
-    G_LIST="$(dh session list --system --token-file /etc/docker-helper/admin.token --json 2>/dev/null)"
+    G_LIST="$(dh session list --token-file /etc/docker-helper/admin.token --json 2>/dev/null)"
     if printf '%s\n' "$G_LIST" | grep -q "$G_SESSION_ID" \
         && printf '%s\n' "$G_LIST" | grep -q '"launcher": "default"' \
         && printf '%s\n' "$G_LIST" | grep -q "\"principal\": \"$G_USER\""; then
@@ -1289,7 +1164,7 @@ if [ -n "$G_BASELINE_DEB" ]; then
   fi
 
   # G3: pre-upgrade credential still creates sessions.
-  G_NEW_JSON="$(dh session create --system --token-file "$G_CRED" "$G_HOME/ws" --json 2>/dev/null || true)"
+  G_NEW_JSON="$(dh session create --token-file "$G_CRED" "$G_HOME/ws" --json 2>/dev/null || true)"
   G_NEW_ID="$(printf '%s' "$G_NEW_JSON" | json_field id || true)"
   if [ -n "$G_NEW_ID" ]; then
     acc_ok "pre-upgrade credential still creates sessions ($G_NEW_ID)"
@@ -1298,7 +1173,7 @@ if [ -n "$G_BASELINE_DEB" ]; then
   fi
 
   # G4: exactly one 'default' inherit Launcher for the principal.
-  G_LAUNCHERS="$(dh launcher list --system --principal "$G_USER" --json 2>/dev/null)"
+  G_LAUNCHERS="$(dh launcher list --principal "$G_USER" --json 2>/dev/null)"
   G_LCOUNT="$(printf '%s\n' "$G_LAUNCHERS" | grep -c '"id": "dhl_' || true)"
   if [ "$G_LCOUNT" = 1 ] \
       && printf '%s\n' "$G_LAUNCHERS" | grep -q '"name": "default"' \
@@ -1311,7 +1186,7 @@ if [ -n "$G_BASELINE_DEB" ]; then
 
   # G5: non-attributable admin session invalidated, never left ownerless.
   if [ -n "${G_ADMIN_SESS_ID:-}" ]; then
-    G_LIST2="$(dh session list --system --token-file /etc/docker-helper/admin.token --json 2>/dev/null)"
+    G_LIST2="$(dh session list --token-file /etc/docker-helper/admin.token --json 2>/dev/null)"
     if printf '%s\n' "$G_LIST2" | grep -q "$G_ADMIN_SESS_ID"; then
       acc_fail "non-attributable admin session survived migration (must be invalidated)"
     else
@@ -1347,7 +1222,7 @@ if [ -n "$G_BASELINE_DEB" ]; then
     sleep 1
   done
   if wait_health "$SOCK"; then
-    G_LIST3="$(dh session list --system --token-file /etc/docker-helper/admin.token --json 2>/dev/null)"
+    G_LIST3="$(dh session list --token-file /etc/docker-helper/admin.token --json 2>/dev/null)"
     if printf '%s\n' "$G_LIST3" | grep -q "$G_SESSION_ID" \
         && printf '%s\n' "$G_LIST3" | grep -q '"launcher": "default"'; then
       acc_ok "migrated ownership stable across restart (idempotent migration)"
@@ -1376,18 +1251,18 @@ sys.exit(0 if ("principal_id" not in cols and "launcher_id" in cols) else 1)
   fi
 
   # G8: migrated default Launcher is fully functional.
-  G_ISSUE_OUT="$(dh launcher credential create --system --principal "$G_USER" --json "$G_DEFAULT_ID" 2>/dev/null || true)"
+  G_ISSUE_OUT="$(dh launcher credential create --principal "$G_USER" --json "$G_DEFAULT_ID" 2>/dev/null || true)"
   G_LC_TOKEN="$(printf '%s' "$G_ISSUE_OUT" | json_field token || true)"
   G_LC_ID="$(printf '%s' "$G_ISSUE_OUT" | json_field id || true)"
   if [ -n "$G_LC_TOKEN" ] && [ -n "$G_LC_ID" ]; then
     printf '%s\n' "$G_LC_TOKEN" > "$CRED_DIR/upg-lc.tok"; chmod 600 "$CRED_DIR/upg-lc.tok"
-    G_LC_JSON="$(dh session create --system --token-file "$CRED_DIR/upg-lc.tok" "$G_HOME/ws" --json 2>/dev/null || true)"
+    G_LC_JSON="$(dh session create --token-file "$CRED_DIR/upg-lc.tok" "$G_HOME/ws" --json 2>/dev/null || true)"
     if printf '%s' "$G_LC_JSON" | grep -q '"launcher": "default"'; then
       acc_ok "migrated default Launcher issues a working credential"
     else
       acc_fail "launcher credential on migrated default Launcher cannot create sessions"
     fi
-    G_ROT_OUT="$(dh launcher credential rotate --system --principal "$G_USER" --json "$G_DEFAULT_ID" 2>/dev/null || true)"
+    G_ROT_OUT="$(dh launcher credential rotate --principal "$G_USER" --json "$G_DEFAULT_ID" 2>/dev/null || true)"
     G_ROT_TOKEN="$(printf '%s' "$G_ROT_OUT" | json_field token || true)"
     G_ROT_ID="$(printf '%s' "$G_ROT_OUT" | json_field id || true)"
     if [ "$G_ROT_ID" = "$G_LC_ID" ] && [ -n "$G_ROT_TOKEN" ] && [ "$G_ROT_TOKEN" != "$G_LC_TOKEN" ]; then
@@ -1396,12 +1271,12 @@ sys.exit(0 if ("principal_id" not in cols and "launcher_id" in cols) else 1)
     else
       acc_fail "rotation on migrated Launcher misbehaved (id=$G_ROT_ID)"
     fi
-    if dh session create --system --token-file "$CRED_DIR/upg-lc.tok" "$G_HOME/ws" --json >/dev/null 2>&1; then
+    if dh session create --token-file "$CRED_DIR/upg-lc.tok" "$G_HOME/ws" --json >/dev/null 2>&1; then
       acc_fail "old launcher bearer still accepted after rotation"
     else
       acc_ok "old launcher bearer rejected after rotation"
     fi
-    G_LC_JSON2="$(dh session create --system --token-file "$CRED_DIR/upg-lc2.tok" "$G_HOME/ws" --json 2>/dev/null || true)"
+    G_LC_JSON2="$(dh session create --token-file "$CRED_DIR/upg-lc2.tok" "$G_HOME/ws" --json 2>/dev/null || true)"
     if printf '%s' "$G_LC_JSON2" | grep -q '"launcher": "default"'; then
       acc_ok "rotated launcher credential creates sessions"
     else
@@ -1498,18 +1373,18 @@ if [ -n "$M_BASELINE_DEB" ]; then
     acc_fail "M1 global allowed-root seeding failed"
   fi
 
-  dh principal create --system --no-credential "$M_USER" >/dev/null 2>&1 || true
-  dh principal set --system "$M_USER" enabled true >/dev/null 2>&1 || true
-  dh principal allowed-root add --system "$M_USER" "$ALLOWED_ROOT" >/dev/null 2>&1 || true
-  dh principal allowed-root add --system "$M_USER" "$M_POLICY" >/dev/null 2>&1 || true
-  if dh principal allowed-root list --system "$M_USER" 2>/dev/null | grep -qx "$M_POLICY" \
-      && dh principal allowed-root list --system "$M_USER" 2>/dev/null | grep -qx "$ALLOWED_ROOT"; then
+  dh principal create --no-credential "$M_USER" >/dev/null 2>&1 || true
+  dh principal set "$M_USER" enabled true >/dev/null 2>&1 || true
+  dh principal allowed-root add "$M_USER" "$ALLOWED_ROOT" >/dev/null 2>&1 || true
+  dh principal allowed-root add "$M_USER" "$M_POLICY" >/dev/null 2>&1 || true
+  if dh principal allowed-root list "$M_USER" 2>/dev/null | grep -qx "$M_POLICY" \
+      && dh principal allowed-root list "$M_USER" 2>/dev/null | grep -qx "$ALLOWED_ROOT"; then
     acc_ok "M1 two path-only Principal roots seeded"
   else
     acc_fail "M1 Principal allowed-root seeding failed"
   fi
 
-  M_P_CRED_OUT="$(dh credential create --system --name mig "$M_USER" 2>/dev/null || true)"
+  M_P_CRED_OUT="$(dh credential create --name mig "$M_USER" 2>/dev/null || true)"
   M_P_TOKEN="$(printf '%s\n' "$M_P_CRED_OUT" | sed -n 's/^  Token: //p' | tr -d '[:space:]')"
   M_P_CRED_ID="$(printf '%s\n' "$M_P_CRED_OUT" | sed -n 's/^  ID:    //p' | tr -d '[:space:]')"
   if [ -n "$M_P_TOKEN" ] && [ -n "$M_P_CRED_ID" ]; then
@@ -1522,16 +1397,16 @@ if [ -n "$M_BASELINE_DEB" ]; then
   # seeding runs through the v2.1.1 baseline CLI, whose launcher create and
   # launcher credential create are JSON-always and reject an explicit --json
   # flag, so the document is parsed without requesting it.
-  M_L_OUT="$(dh launcher create --system --principal "$M_USER" --name mlaunch \
+  M_L_OUT="$(dh launcher create --principal "$M_USER" --name mlaunch \
     --allowed-root "$M_POLICY/sub" --no-credential 2>/dev/null || true)"
   M_L_ID="$(printf '%s\n' "$M_L_OUT" | json_field id)"
   if [ -n "$M_L_ID" ] \
-      && dh launcher allowed-root list --system --principal "$M_USER" "$M_L_ID" 2>/dev/null | grep -qx "$M_POLICY/sub"; then
+      && dh launcher allowed-root list --principal "$M_USER" "$M_L_ID" 2>/dev/null | grep -qx "$M_POLICY/sub"; then
     acc_ok "M1 restricted path-only Launcher root seeded ($M_L_ID)"
   else
     acc_fail "M1 restricted Launcher root seeding failed"
   fi
-  M_LC_OUT="$(dh launcher credential create --system --principal "$M_USER" "$M_L_ID" 2>/dev/null || true)"
+  M_LC_OUT="$(dh launcher credential create --principal "$M_USER" "$M_L_ID" 2>/dev/null || true)"
   M_LC_TOKEN="$(printf '%s\n' "$M_LC_OUT" | json_field token)"
   if [ -n "$M_LC_TOKEN" ]; then
     printf '%s\n' "$M_LC_TOKEN" > "$M_LCRED"; chmod 600 "$M_LCRED"
@@ -1541,12 +1416,12 @@ if [ -n "$M_BASELINE_DEB" ]; then
   fi
 
   # Two live Sessions: launcher-owned and principal-owned.
-  M_S1_JSON="$(dh session create --system --token-file "$M_LCRED" --workspace "$M_POLICY/sub/ws" --json 2>/dev/null || true)"
+  M_S1_JSON="$(dh session create --token-file "$M_LCRED" --workspace "$M_POLICY/sub/ws" --json 2>/dev/null || true)"
   M_S1_ID="$(printf '%s' "$M_S1_JSON" | json_field id)"
   M_S1_TOKEN="$(printf '%s' "$M_S1_JSON" | json_field token)"
   M_PCREDFILE="$CRED_DIR/mig-pc.tok"
   printf '%s\n' "$M_P_TOKEN" > "$M_PCREDFILE"; chmod 600 "$M_PCREDFILE"
-  M_S2_JSON="$(dh session create --system --token-file "$M_PCREDFILE" --workspace "$M_HOME/ws" --json 2>/dev/null || true)"
+  M_S2_JSON="$(dh session create --token-file "$M_PCREDFILE" --workspace "$M_HOME/ws" --json 2>/dev/null || true)"
   M_S2_ID="$(printf '%s' "$M_S2_JSON" | json_field id)"
   if [ -n "$M_S1_ID" ] && [ -n "$M_S2_ID" ]; then
     acc_ok "M1 live Sessions seeded (launcher=$M_S1_ID principal=$M_S2_ID)"
@@ -1684,7 +1559,7 @@ sys.exit(0 if isinstance(roots, list) and len(roots) == 2 and all(isinstance(r, 
   fi
 
   # --- M3/M4: Principal and Launcher roots migrated read_write -----------------
-  M_PLIST_JSON="$(dh principal allowed-root list --system --json "$M_USER" 2>/dev/null || true)"
+  M_PLIST_JSON="$(dh principal allowed-root list --json "$M_USER" 2>/dev/null || true)"
   M_RW_P_ROOT="$(printf '%s' "$M_PLIST_JSON" | allowed_root_json_access "$ALLOWED_ROOT")"
   M_RW_P_POLICY="$(printf '%s' "$M_PLIST_JSON" | allowed_root_json_access "$M_POLICY")"
   if [ "$M_RW_P_ROOT" = read_write ] && [ "$M_RW_P_POLICY" = read_write ]; then
@@ -1692,7 +1567,7 @@ sys.exit(0 if isinstance(roots, list) and len(roots) == 2 and all(isinstance(r, 
   else
     acc_fail "M3 Principal root migration wrong (rich projection: $M_PLIST_JSON)"
   fi
-  M_LLIST_JSON="$(dh launcher allowed-root list --system --principal "$M_USER" --json "$M_L_ID" 2>/dev/null || true)"
+  M_LLIST_JSON="$(dh launcher allowed-root list --principal "$M_USER" --json "$M_L_ID" 2>/dev/null || true)"
   M_RW_L_SUB="$(printf '%s' "$M_LLIST_JSON" | allowed_root_json_access "$M_POLICY/sub")"
   if [ "$M_RW_L_SUB" = read_write ]; then
     acc_ok "M4 Launcher root migrated as read_write (--json rich projection)"
@@ -1701,8 +1576,8 @@ sys.exit(0 if isinstance(roots, list) and len(roots) == 2 and all(isinstance(r, 
   fi
 
   # --- M5: compatibility workspace/read_write snapshots ------------------------
-  M_S1_SHOW="$(dh session show --system "$M_S1_ID" 2>/dev/null || true)"
-  M_S2_SHOW="$(dh session show --system "$M_S2_ID" 2>/dev/null || true)"
+  M_S1_SHOW="$(dh session show "$M_S1_ID" 2>/dev/null || true)"
+  M_S2_SHOW="$(dh session show "$M_S2_ID" 2>/dev/null || true)"
   if printf '%s\n' "$M_S1_SHOW" | grep -Eq "^$(printf '%s' "$M_POLICY/sub/ws" | sed 's/[.[\*^$]/\\&/g')[[:space:]]+read_write$" \
       && printf '%s\n' "$M_S2_SHOW" | grep -Eq "^$(printf '%s' "$M_HOME/ws" | sed 's/[.[\*^$]/\\&/g')[[:space:]]+read_write$"; then
     acc_ok "M5 pre-existing Sessions carry the compatibility workspace/read_write snapshot"
@@ -1719,14 +1594,14 @@ sys.exit(0 if isinstance(roots, list) and len(roots) == 2 and all(isinstance(r, 
   else
     acc_fail "M6 principal credential identity check failed (http=$M_AUTH_HTTP)"
   fi
-  M_LAUNCHERS="$(dh launcher list --system --principal "$M_USER" --json 2>/dev/null || true)"
+  M_LAUNCHERS="$(dh launcher list --principal "$M_USER" --json 2>/dev/null || true)"
   if printf '%s\n' "$M_LAUNCHERS" | grep -q "\"id\": \"$M_L_ID\"" \
       && printf '%s\n' "$M_LAUNCHERS" | grep -q '"name": "mlaunch"'; then
     acc_ok "M6 launcher identity preserved (same ID and name)"
   else
     acc_fail "M6 launcher identity changed after migration"
   fi
-  M_SESSIONS="$(dh session list --system --token-file /etc/docker-helper/admin.token --json 2>/dev/null || true)"
+  M_SESSIONS="$(dh session list --token-file /etc/docker-helper/admin.token --json 2>/dev/null || true)"
   if printf '%s\n' "$M_SESSIONS" | grep -q "$M_S1_ID" \
       && printf '%s\n' "$M_SESSIONS" | grep -q "$M_S2_ID"; then
     acc_ok "M6 both pre-existing Session IDs preserved in the authoritative list"
@@ -1753,7 +1628,7 @@ sys.exit(0 if isinstance(roots, list) and len(roots) == 2 and all(isinstance(r, 
   # projection of the migrated policy (config and Principal roots). The
   # post-restart check compares this projection, never formatted output.
   M8_CONFIG_PROJ_BEFORE="$(dh config allowed-root list --json 2>/dev/null | allowed_root_json_projection)"
-  M8_PRINCIPAL_PROJ_BEFORE="$(dh principal allowed-root list --system --json "$M_USER" 2>/dev/null | allowed_root_json_projection)"
+  M8_PRINCIPAL_PROJ_BEFORE="$(dh principal allowed-root list --json "$M_USER" 2>/dev/null | allowed_root_json_projection)"
 
   # --- M8: restart idempotency --------------------------------------------------
   systemctl restart docker-helper.service >/dev/null 2>&1 || true
@@ -1762,14 +1637,14 @@ sys.exit(0 if isinstance(roots, list) and len(roots) == 2 and all(isinstance(r, 
     sleep 1
   done
   if wait_health "$SOCK"; then
-    M_S1_SHOW2="$(dh session show --system "$M_S1_ID" 2>/dev/null || true)"
+    M_S1_SHOW2="$(dh session show "$M_S1_ID" 2>/dev/null || true)"
     if printf '%s\n' "$M_S1_SHOW2" | grep -Eq "^$(printf '%s' "$M_POLICY/sub/ws" | sed 's/[.[\*^$]/\\&/g')[[:space:]]+read_write$"; then
       acc_ok "M8 snapshot stable across restart (idempotent migration)"
     else
       acc_fail "M8 snapshot changed after restart"
     fi
     M8_CONFIG_JSON="$(dh config allowed-root list --json 2>/dev/null || true)"
-    M8_PRINCIPAL_JSON="$(dh principal allowed-root list --system --json "$M_USER" 2>/dev/null || true)"
+    M8_PRINCIPAL_JSON="$(dh principal allowed-root list --json "$M_USER" 2>/dev/null || true)"
     M8_CONFIG_RW="$(printf '%s' "$M8_CONFIG_JSON" | allowed_root_json_access "$M_POLICY")"
     M8_PRINCIPAL_RW="$(printf '%s' "$M8_PRINCIPAL_JSON" | allowed_root_json_access "$M_POLICY")"
     if [ "$(printf '%s' "$M8_CONFIG_JSON" | allowed_root_json_projection)" = "$M8_CONFIG_PROJ_BEFORE" ] \
@@ -1844,9 +1719,9 @@ mkdir -p "$H_SUB/ws"; chown -R "$H_USER:$H_USER" "$H_SUB"
 H_ADMIN_TOKEN="$(cat /etc/docker-helper/admin.token 2>/dev/null || true)"
 
 # H1: two launchers with separate namespaces.
-H_ALPHA_OUT="$(dh launcher create --system --principal "$H_USER" alpha --no-credential --json 2>/dev/null || true)"
+H_ALPHA_OUT="$(dh launcher create --principal "$H_USER" alpha --no-credential --json 2>/dev/null || true)"
 H_ALPHA_ID="$(printf '%s' "$H_ALPHA_OUT" | json_field id || true)"
-H_BETA_OUT="$(dh launcher create --system --principal "$H_USER" beta --allowed-root "$H_SUB" --no-credential --json 2>/dev/null || true)"
+H_BETA_OUT="$(dh launcher create --principal "$H_USER" beta --allowed-root "$H_SUB" --no-credential --json 2>/dev/null || true)"
 H_BETA_ID="$(printf '%s' "$H_BETA_OUT" | json_field id || true)"
 if [ -n "$H_ALPHA_ID" ] && [ -n "$H_BETA_ID" ] && [ "$H_ALPHA_ID" != "$H_BETA_ID" ]; then
   acc_ok "two distinct launchers created (alpha=$H_ALPHA_ID, beta=$H_BETA_ID)"
@@ -1860,11 +1735,11 @@ fi
 # Principals resolves independently (the migration scenario's principal still
 # exists), and a name that exists only under another Principal is the same
 # non-disclosing 404 as a missing selector.
-H_SEL_DEF_JSON="$(dh launcher show --system --principal "$H_USER" --json 2>/dev/null || true)"
+H_SEL_DEF_JSON="$(dh launcher show --principal "$H_USER" --json 2>/dev/null || true)"
 H_SEL_DEF_ID="$(printf '%s' "$H_SEL_DEF_JSON" | json_field id || true)"
-H_SEL_DEF_NAME_ID="$(dh launcher show --system --principal "$H_USER" --json default 2>/dev/null | json_field id || true)"
-H_SEL_ALPHA_NAME_ID="$(dh launcher show --system --principal "$H_USER" --json alpha 2>/dev/null | json_field id || true)"
-H_SEL_UPG_DEF_ID="$(dh launcher show --system --principal "$M_USER" --json 2>/dev/null | json_field id || true)"
+H_SEL_DEF_NAME_ID="$(dh launcher show --principal "$H_USER" --json default 2>/dev/null | json_field id || true)"
+H_SEL_ALPHA_NAME_ID="$(dh launcher show --principal "$H_USER" --json alpha 2>/dev/null | json_field id || true)"
+H_SEL_UPG_DEF_ID="$(dh launcher show --principal "$M_USER" --json 2>/dev/null | json_field id || true)"
 H_SEL_FOREIGN_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
   --unix-socket "$SOCK" -H "Authorization: Bearer $H_ADMIN_TOKEN" \
   "http://localhost/principals/$M_USER/launchers/alpha" 2>/dev/null || true)"
@@ -1883,19 +1758,19 @@ else
   acc_fail "launcher selector resolution broken (default=$H_SEL_DEF_ID by-name=$H_SEL_DEF_NAME_ID alpha-by-name=$H_SEL_ALPHA_NAME_ID/$H_ALPHA_ID upgrade-default=$H_SEL_UPG_DEF_ID foreign=$H_SEL_FOREIGN_HTTP malformed=$H_SEL_MALFORMED_HTTP)"
 fi
 
-H_ALPHA_TOK="$(dh launcher credential create --system --principal "$H_USER" --json "$H_ALPHA_ID" 2>/dev/null | json_field token || true)"
-H_BETA_TOK="$(dh launcher credential create --system --principal "$H_USER" --json "$H_BETA_ID" 2>/dev/null | json_field token || true)"
+H_ALPHA_TOK="$(dh launcher credential create --principal "$H_USER" --json "$H_ALPHA_ID" 2>/dev/null | json_field token || true)"
+H_BETA_TOK="$(dh launcher credential create --principal "$H_USER" --json "$H_BETA_ID" 2>/dev/null | json_field token || true)"
 [ -n "$H_ALPHA_TOK" ] && [ -n "$H_BETA_TOK" ] \
   && acc_ok "credentials issued for both launchers" \
   || acc_fail "launcher credential issuance failed"
 printf '%s\n' "$H_ALPHA_TOK" > "$CRED_DIR/lnc-alpha.tok"; chmod 600 "$CRED_DIR/lnc-alpha.tok"
 printf '%s\n' "$H_BETA_TOK" > "$CRED_DIR/lnc-beta.tok"; chmod 600 "$CRED_DIR/lnc-beta.tok"
 
-H_ALPHA_SESS_JSON="$(dh session create --system --token-file "$CRED_DIR/lnc-alpha.tok" "$H_WS" --json 2>/dev/null || true)"
+H_ALPHA_SESS_JSON="$(dh session create --token-file "$CRED_DIR/lnc-alpha.tok" "$H_WS" --json 2>/dev/null || true)"
 H_ALPHA_SESS="$(printf '%s' "$H_ALPHA_SESS_JSON" | json_field id || true)"
 # The beta workspace must be a proper subdirectory of the Launcher allowed
 # root; the root itself ($H_SUB) is rejected with 400 invalid_workspace.
-H_BETA_SESS_JSON="$(dh session create --system --token-file "$CRED_DIR/lnc-beta.tok" "$H_SUB/ws" --json 2>/dev/null || true)"
+H_BETA_SESS_JSON="$(dh session create --token-file "$CRED_DIR/lnc-beta.tok" "$H_SUB/ws" --json 2>/dev/null || true)"
 H_BETA_SESS="$(printf '%s' "$H_BETA_SESS_JSON" | json_field id || true)"
 if [ -n "$H_ALPHA_SESS" ] && [ -n "$H_BETA_SESS" ]; then
   acc_ok "each launcher created its own session (alpha=$H_ALPHA_SESS, beta=$H_BETA_SESS)"
@@ -1905,8 +1780,8 @@ fi
 
 if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
   # H1 (namespace separation) and H2 (non-disclosure) need both sessions.
-  ALPHA_LIST="$(dh session list --system --token-file "$CRED_DIR/lnc-alpha.tok" --json 2>/dev/null)"
-  BETA_LIST="$(dh session list --system --token-file "$CRED_DIR/lnc-beta.tok" --json 2>/dev/null)"
+  ALPHA_LIST="$(dh session list --token-file "$CRED_DIR/lnc-alpha.tok" --json 2>/dev/null)"
+  BETA_LIST="$(dh session list --token-file "$CRED_DIR/lnc-beta.tok" --json 2>/dev/null)"
   if printf '%s\n' "$ALPHA_LIST" | grep -q "$H_ALPHA_SESS" \
       && ! printf '%s\n' "$ALPHA_LIST" | grep -q "$H_BETA_SESS" \
       && printf '%s\n' "$BETA_LIST" | grep -q "$H_BETA_SESS" \
@@ -1928,15 +1803,15 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
   fi
 
   # H3: rotation continuity.
-  H_ROT_OUT="$(dh launcher credential rotate --system --principal "$H_USER" --json "$H_ALPHA_ID" 2>/dev/null || true)"
+  H_ROT_OUT="$(dh launcher credential rotate --principal "$H_USER" --json "$H_ALPHA_ID" 2>/dev/null || true)"
   H_ALPHA_TOK2="$(printf '%s' "$H_ROT_OUT" | json_field token || true)"
   if [ -n "$H_ALPHA_TOK2" ] && [ "$H_ALPHA_TOK2" != "$H_ALPHA_TOK" ]; then
     printf '%s\n' "$H_ALPHA_TOK2" > "$CRED_DIR/lnc-alpha2.tok"; chmod 600 "$CRED_DIR/lnc-alpha2.tok"
     H_OLD_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
       --unix-socket "$SOCK" -H "Authorization: Bearer $H_ALPHA_TOK" http://localhost/auth 2>/dev/null || true)"
-    H_NEW_JSON="$(dh session create --system --token-file "$CRED_DIR/lnc-alpha2.tok" "$H_WS" --json 2>/dev/null || true)"
+    H_NEW_JSON="$(dh session create --token-file "$CRED_DIR/lnc-alpha2.tok" "$H_WS" --json 2>/dev/null || true)"
     H_NEW_SESS="$(printf '%s' "$H_NEW_JSON" | json_field id || true)"
-    H_SHOW="$(dh launcher show --system --principal "$H_USER" --json "$H_ALPHA_ID" 2>/dev/null || true)"
+    H_SHOW="$(dh launcher show --principal "$H_USER" --json "$H_ALPHA_ID" 2>/dev/null || true)"
     if [ "$H_OLD_HTTP" = 401 ] \
         && [ -n "$H_NEW_SESS" ] \
         && printf '%s\n' "$H_SHOW" | grep -q "\"id\": \"$H_ALPHA_ID\"" \
@@ -1992,9 +1867,9 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
   # state is restored afterwards (later H checks reuse this Principal).
   H5_REMOVED=false
   H5_NARROWED=false
-  if dh principal allowed-root add --system "$H_USER" "$H_SUB" >/dev/null 2>&1; then
-    if dh principal allowed-root remove --system "$H_USER" "$ALLOWED_ROOT" >/dev/null 2>&1 \
-        && dh principal allowed-root remove --system "$H_USER" "$H_HOME" >/dev/null 2>&1; then
+  if dh principal allowed-root add "$H_USER" "$H_SUB" >/dev/null 2>&1; then
+    if dh principal allowed-root remove "$H_USER" "$ALLOWED_ROOT" >/dev/null 2>&1 \
+        && dh principal allowed-root remove "$H_USER" "$H_HOME" >/dev/null 2>&1; then
       H5_REMOVED=true
       H5_NARROWED=true
     else
@@ -2014,8 +1889,8 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
     else
       acc_fail "cascade precondition failed: Launcher unusable inside the narrow ceiling (http=$H_POS_HTTP)"
     fi
-    if dh principal allowed-root remove --system "$H_USER" "$H_SUB" >/dev/null 2>&1; then
-      H5_SHOW="$(dh launcher show --system --principal "$H_USER" --json "$H_BETA_ID" 2>/dev/null || true)"
+    if dh principal allowed-root remove "$H_USER" "$H_SUB" >/dev/null 2>&1; then
+      H5_SHOW="$(dh launcher show --principal "$H_USER" --json "$H_BETA_ID" 2>/dev/null || true)"
       if printf '%s\n' "$H5_SHOW" | grep -q '"scope": "restricted"' \
           && printf '%s\n' "$H5_SHOW" | grep -q '"allowed_roots": \[\]'; then
         acc_ok "parent-root removal cascaded the Launcher descendant out of stored state (restricted, zero roots)"
@@ -2037,8 +1912,8 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
     fi
   fi
   if [ "$H5_REMOVED" = true ]; then
-    if dh principal allowed-root add --system "$H_USER" "$ALLOWED_ROOT" >/dev/null 2>&1 \
-        && dh principal allowed-root add --system "$H_USER" "$H_HOME" >/dev/null 2>&1; then
+    if dh principal allowed-root add "$H_USER" "$ALLOWED_ROOT" >/dev/null 2>&1 \
+        && dh principal allowed-root add "$H_USER" "$H_HOME" >/dev/null 2>&1; then
       acc_ok "principal root state restored after the cascade check"
     else
       acc_fail "could not restore the principal root after the cascade check"
@@ -2055,12 +1930,12 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
   H5R_ID=""
   H5R_READY=false
   if dh config allowed-root add "$H5_GLOBAL_ROOT" >/dev/null 2>&1 \
-      && dh principal allowed-root add --system "$H_USER" "$H5_GLOBAL_ROOT" >/dev/null 2>&1; then
-    H5R_OUT="$(dh launcher create --system --principal "$H_USER" h5-runtime-cascade \
+      && dh principal allowed-root add "$H_USER" "$H5_GLOBAL_ROOT" >/dev/null 2>&1; then
+    H5R_OUT="$(dh launcher create --principal "$H_USER" h5-runtime-cascade \
       --allowed-root "$H5_GLOBAL_CHILD" --no-credential --json 2>/dev/null || true)"
     H5R_ID="$(printf '%s' "$H5R_OUT" | json_field id || true)"
-    H5R_PROOTS_BEFORE="$(dh principal allowed-root list --system --json "$H_USER" 2>/dev/null || true)"
-    H5R_SHOW_BEFORE="$(dh launcher show --system --principal "$H_USER" --json "$H5R_ID" 2>/dev/null || true)"
+    H5R_PROOTS_BEFORE="$(dh principal allowed-root list --json "$H_USER" 2>/dev/null || true)"
+    H5R_SHOW_BEFORE="$(dh launcher show --principal "$H_USER" --json "$H5R_ID" 2>/dev/null || true)"
     if [ -n "$H5R_ID" ] \
         && grep -q "\"path\": \"$H5_GLOBAL_ROOT\"" <<<"$H5R_PROOTS_BEFORE" \
         && grep -q "\"path\": \"$H5_GLOBAL_CHILD\"" <<<"$H5R_SHOW_BEFORE"; then
@@ -2075,8 +1950,8 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
 
   if [ "$H5R_READY" = true ]; then
     if dh config allowed-root remove "$H5_GLOBAL_ROOT" >/dev/null 2>&1; then
-      H5R_PROOTS="$(dh principal allowed-root list --system --json "$H_USER" 2>/dev/null || true)"
-      H5R_SHOW="$(dh launcher show --system --principal "$H_USER" --json "$H5R_ID" 2>/dev/null || true)"
+      H5R_PROOTS="$(dh principal allowed-root list --json "$H_USER" 2>/dev/null || true)"
+      H5R_SHOW="$(dh launcher show --principal "$H_USER" --json "$H5R_ID" 2>/dev/null || true)"
       if ! grep -q "\"path\": \"$H5_GLOBAL_ROOT\"" <<<"$H5R_PROOTS" \
           && grep -q '"scope": "restricted"' <<<"$H5R_SHOW" \
           && grep -q '"allowed_roots": \[\]' <<<"$H5R_SHOW"; then
@@ -2088,19 +1963,19 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
       acc_fail "live global-ceiling removal/reload failed"
     fi
   fi
-  [ -z "$H5R_ID" ] || dh launcher delete --system --principal "$H_USER" "$H5R_ID" >/dev/null 2>&1 || true
+  [ -z "$H5R_ID" ] || dh launcher delete --principal "$H_USER" "$H5R_ID" >/dev/null 2>&1 || true
 
   # H5S: the same global transition must converge through the actual daemon
   # startup path when config.json is narrowed while the daemon is stopped.
   H5S_ID=""
   H5S_READY=false
   if dh config allowed-root add "$H5_GLOBAL_ROOT" >/dev/null 2>&1 \
-      && dh principal allowed-root add --system "$H_USER" "$H5_GLOBAL_ROOT" >/dev/null 2>&1; then
-    H5S_OUT="$(dh launcher create --system --principal "$H_USER" h5-startup-cascade \
+      && dh principal allowed-root add "$H_USER" "$H5_GLOBAL_ROOT" >/dev/null 2>&1; then
+    H5S_OUT="$(dh launcher create --principal "$H_USER" h5-startup-cascade \
       --allowed-root "$H5_GLOBAL_CHILD" --no-credential --json 2>/dev/null || true)"
     H5S_ID="$(printf '%s' "$H5S_OUT" | json_field id || true)"
-    H5S_PROOTS_BEFORE="$(dh principal allowed-root list --system --json "$H_USER" 2>/dev/null || true)"
-    H5S_SHOW_BEFORE="$(dh launcher show --system --principal "$H_USER" --json "$H5S_ID" 2>/dev/null || true)"
+    H5S_PROOTS_BEFORE="$(dh principal allowed-root list --json "$H_USER" 2>/dev/null || true)"
+    H5S_SHOW_BEFORE="$(dh launcher show --principal "$H_USER" --json "$H5S_ID" 2>/dev/null || true)"
     if [ -n "$H5S_ID" ] \
         && grep -q "\"path\": \"$H5_GLOBAL_ROOT\"" <<<"$H5S_PROOTS_BEFORE" \
         && grep -q "\"path\": \"$H5_GLOBAL_CHILD\"" <<<"$H5S_SHOW_BEFORE"; then
@@ -2118,8 +1993,8 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
     H5S_SINCE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     if offline_remove_config_allowed_root "$H5_GLOBAL_ROOT" >/dev/null 2>&1; then
       if systemctl start docker-helper.service >/dev/null 2>&1 && wait_health "$SOCK"; then
-        H5S_PROOTS="$(dh principal allowed-root list --system --json "$H_USER" 2>/dev/null || true)"
-        H5S_SHOW="$(dh launcher show --system --principal "$H_USER" --json "$H5S_ID" 2>/dev/null || true)"
+        H5S_PROOTS="$(dh principal allowed-root list --json "$H_USER" 2>/dev/null || true)"
+        H5S_SHOW="$(dh launcher show --principal "$H_USER" --json "$H5S_ID" 2>/dev/null || true)"
         H5S_JOURNAL="$(journalctl --utc -u docker-helper.service --since "$H5S_SINCE" --no-pager 2>/dev/null || true)"
         if ! grep -q "\"path\": \"$H5_GLOBAL_ROOT\"" <<<"$H5S_PROOTS" \
             && grep -q '"scope": "restricted"' <<<"$H5S_SHOW" \
@@ -2143,17 +2018,17 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
   # Return the global config to the pre-fixture state even if one of the
   # preceding proof steps failed after installing the temporary root.
   dh config allowed-root remove "$H5_GLOBAL_ROOT" >/dev/null 2>&1 || true
-  [ -z "$H5S_ID" ] || dh launcher delete --system --principal "$H_USER" "$H5S_ID" >/dev/null 2>&1 || true
+  [ -z "$H5S_ID" ] || dh launcher delete --principal "$H_USER" "$H5S_ID" >/dev/null 2>&1 || true
   rm -rf "$H5_GLOBAL_ROOT"
 
   # H6: disable propagation + persistence of individual disablement.
-  H_BETA_DIS_OUT="$(dh launcher set --system --principal "$H_USER" --enabled false --json "$H_BETA_ID" 2>/dev/null || true)"
+  H_BETA_DIS_OUT="$(dh launcher set --principal "$H_USER" --enabled false --json "$H_BETA_ID" 2>/dev/null || true)"
   if printf '%s\n' "$H_BETA_DIS_OUT" | grep -q '"enabled": false'; then
     acc_ok "launcher disabled"
   else
     acc_fail "launcher disable failed"
   fi
-  H_DIS_LIST="$(dh session list --system --token-file /etc/docker-helper/admin.token --json 2>/dev/null)"
+  H_DIS_LIST="$(dh session list --token-file /etc/docker-helper/admin.token --json 2>/dev/null)"
   H_DIS_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
     --unix-socket "$SOCK" -H "Authorization: Bearer $H_BETA_TOK" http://localhost/auth 2>/dev/null || true)"
   if ! printf '%s\n' "$H_DIS_LIST" | grep -q "$H_BETA_SESS" && [ "$H_DIS_HTTP" = 401 ]; then
@@ -2161,21 +2036,21 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
   else
     acc_fail "disable propagation failed (session present or bearer alive)"
   fi
-  dh principal set --system "$H_USER" enabled false >/dev/null 2>&1 || true
-  dh principal set --system "$H_USER" enabled true >/dev/null 2>&1 || true
-  H_BETA_SHOW="$(dh launcher show --system --principal "$H_USER" --json "$H_BETA_ID" 2>/dev/null || true)"
-  H_ALPHA_SHOW="$(dh launcher show --system --principal "$H_USER" --json "$H_ALPHA_ID" 2>/dev/null || true)"
+  dh principal set "$H_USER" enabled false >/dev/null 2>&1 || true
+  dh principal set "$H_USER" enabled true >/dev/null 2>&1 || true
+  H_BETA_SHOW="$(dh launcher show --principal "$H_USER" --json "$H_BETA_ID" 2>/dev/null || true)"
+  H_ALPHA_SHOW="$(dh launcher show --principal "$H_USER" --json "$H_ALPHA_ID" 2>/dev/null || true)"
   if printf '%s\n' "$H_BETA_SHOW" | grep -q '"enabled": false' \
       && printf '%s\n' "$H_ALPHA_SHOW" | grep -q '"enabled": true'; then
     acc_ok "individually disabled launcher stays disabled through a principal enable cycle"
   else
     acc_fail "individual launcher disablement not preserved (beta=$(printf '%s' "$H_BETA_SHOW" | grep -o '"enabled": [a-z]*' | head -1))"
   fi
-  dh launcher set --system --principal "$H_USER" --enabled true "$H_BETA_ID" >/dev/null 2>&1 || true
+  dh launcher set --principal "$H_USER" --enabled true "$H_BETA_ID" >/dev/null 2>&1 || true
 
   # H7: checked delete with active runtime.
   H_BEFORE_CID="$(ls /run/docker-helper/*.cid 2>/dev/null | wc -l)"
-  H_RT_SESS_JSON="$(dh session create --system --token-file "$CRED_DIR/lnc-alpha2.tok" "$H_WS" --json 2>/dev/null || true)"
+  H_RT_SESS_JSON="$(dh session create --token-file "$CRED_DIR/lnc-alpha2.tok" "$H_WS" --json 2>/dev/null || true)"
   H_RT_SESS="$(printf '%s' "$H_RT_SESS_JSON" | json_field id || true)"
   H_RT_TOKEN="$(printf '%s' "$H_RT_SESS_JSON" | json_field token || true)"
   H_RT_CID=""
@@ -2199,8 +2074,8 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
     H_DEL_ACT_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
       --unix-socket "$SOCK" -H "Authorization: Bearer $H_ADMIN_TOKEN" \
       -X DELETE "http://localhost/principals/$H_USER/launchers/$H_ALPHA_ID" 2>/dev/null || true)"
-    H_ALPHA_SHOW2="$(dh launcher show --system --principal "$H_USER" --json "$H_ALPHA_ID" 2>/dev/null || true)"
-    H_ADMIN_LIST="$(dh session list --system --token-file /etc/docker-helper/admin.token --json 2>/dev/null || true)"
+    H_ALPHA_SHOW2="$(dh launcher show --principal "$H_USER" --json "$H_ALPHA_ID" 2>/dev/null || true)"
+    H_ADMIN_LIST="$(dh session list --token-file /etc/docker-helper/admin.token --json 2>/dev/null || true)"
     if [ "$H_DEL_ACT_HTTP" = 409 ] \
         && printf '%s\n' "$H_ALPHA_SHOW2" | grep -q '"enabled": true' \
         && [ -n "$H_ADMIN_LIST" ] \
@@ -2221,7 +2096,7 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
     if wait_no_container "$H_RT_CID"; then
       H_DELETED=false
       for _ in $(seq 1 25); do
-        if dh launcher delete --system --principal "$H_USER" "$H_ALPHA_ID" >/dev/null 2>&1; then
+        if dh launcher delete --principal "$H_USER" "$H_ALPHA_ID" >/dev/null 2>&1; then
           H_DELETED=true
           break
         fi
@@ -2230,7 +2105,7 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
       if [ "$H_DELETED" = true ]; then
         acc_ok "launcher delete succeeds after its sessions are cleaned up"
       else
-        H_DEL_RETRY_OUT="$(dh launcher delete --system --principal "$H_USER" "$H_ALPHA_ID" 2>&1 || true)"
+        H_DEL_RETRY_OUT="$(dh launcher delete --principal "$H_USER" "$H_ALPHA_ID" 2>&1 || true)"
         acc_fail "launcher delete failed after cleanup (cli: ${H_DEL_RETRY_OUT:-<no output>})"
         # Evidence for diagnosis: the delete/run audit trail and any
         # operational error line. Audit lines carry no bearer material.
@@ -2443,7 +2318,7 @@ fi
 # CLI surfacing: the CLI has no local grammar and must surface the daemon's
 # refusal (the LF spelling is argv-representable; NUL is not, which is why
 # the wire case above is the authoritative one).
-M5_CLI_OUT="$(dh principal create --system --no-credential $'uatr2m5\nlf' 2>&1)" && M5_CLI_RC=0 || M5_CLI_RC=$?
+M5_CLI_OUT="$(dh principal create --no-credential $'uatr2m5\nlf' 2>&1)" && M5_CLI_RC=0 || M5_CLI_RC=$?
 if [ "$M5_CLI_RC" != "0" ] && printf '%s\n' "$M5_CLI_OUT" | grep -q 'invalid_username'; then
   acc_ok "CLI surfaces the daemon invalid_username refusal without a local grammar"
 else
@@ -2452,25 +2327,25 @@ fi
 
 # F: ordinary Principal lifecycle still works afterward (show, default
 #    Launcher, allowed-root, credential create/revoke).
-dh principal show --system "$M5_USER" --json >/tmp/r2ac-m5-show.json 2>&1 \
+dh principal show "$M5_USER" --json >/tmp/r2ac-m5-show.json 2>&1 \
   && grep -q '"username": "uatr2m5"' /tmp/r2ac-m5-show.json \
   && acc_ok "principal show works after all refusals" \
   || acc_fail "principal show failed after the M5 refusals: $(head -2 /tmp/r2ac-m5-show.json)"
-dh launcher list --system --principal "$M5_USER" --json >/tmp/r2ac-m5-launchers.json 2>&1 \
+dh launcher list --principal "$M5_USER" --json >/tmp/r2ac-m5-launchers.json 2>&1 \
   && grep -qE '"name": *"default"' /tmp/r2ac-m5-launchers.json \
   && acc_ok "canonical Principal has its default Launcher (no alias Launcher exists)" \
   || acc_fail "launcher list for $M5_USER: $(head -2 /tmp/r2ac-m5-launchers.json)"
-dh principal allowed-root add --system "$M5_USER" "$ALLOWED_ROOT" >/dev/null 2>&1 \
+dh principal allowed-root add "$M5_USER" "$ALLOWED_ROOT" >/dev/null 2>&1 \
   && acc_ok "allowed-root add works for the canonical Principal" \
   || acc_fail "allowed-root add failed for $M5_USER"
-M5_CRED_OUT="$(dh credential create --system --name m5 "$M5_USER" 2>/dev/null)"
+M5_CRED_OUT="$(dh credential create --name m5 "$M5_USER" 2>/dev/null)"
 M5_CRED_ID="$(printf '%s\n' "$M5_CRED_OUT" | sed -n 's/^  ID:    //p' | tr -d '[:space:]')"
 if [ -n "$M5_CRED_ID" ]; then
   acc_ok "ordinary Principal credential create works after the refusals"
 else
   acc_fail "credential create for $M5_USER failed"
 fi
-[ -n "$M5_CRED_ID" ] && dh credential revoke --system "$M5_CRED_ID" >/dev/null 2>&1 \
+[ -n "$M5_CRED_ID" ] && dh credential revoke "$M5_CRED_ID" >/dev/null 2>&1 \
   && acc_ok "ordinary Principal credential revoke works after the refusals" \
   || acc_fail "credential revoke for $M5_USER failed"
 
@@ -2670,17 +2545,17 @@ else
     acc_fail "system config lost during upgrade"
   fi
   # Principal/credential/session state persists
-  if dh principal show --system --token-file /etc/docker-helper/admin.token "$F_USER" >/dev/null 2>&1; then
+  if dh principal show --token-file /etc/docker-helper/admin.token "$F_USER" >/dev/null 2>&1; then
     acc_ok "principal persisted across upgrade"
   else
     acc_fail "principal did not persist across upgrade"
   fi
-  if dh credential list --system --token-file /etc/docker-helper/admin.token "$F_USER" 2>/dev/null | grep -q "$F_PRINC_ID"; then
+  if dh credential list --token-file /etc/docker-helper/admin.token "$F_USER" 2>/dev/null | grep -q "$F_PRINC_ID"; then
     acc_ok "credential persisted across upgrade"
   else
     acc_fail "credential did not persist across upgrade"
   fi
-  if dh session list --system --token-file /etc/docker-helper/admin.token 2>/dev/null | grep -q "$F_SESSION_ID"; then
+  if dh session list --token-file /etc/docker-helper/admin.token 2>/dev/null | grep -q "$F_SESSION_ID"; then
     acc_ok "session persisted across upgrade"
   else
     acc_fail "session did not persist across upgrade"

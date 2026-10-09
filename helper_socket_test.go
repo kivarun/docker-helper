@@ -18,7 +18,6 @@ import (
 func newSystemModeRunTestApp(t *testing.T) *App {
 	t.Helper()
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
 	mockDetectLSM(t, LSMAppArmor, nil)
 	installTestWorkloadMACForTest(t, app, LSMAppArmor)
@@ -129,9 +128,8 @@ func TestHelperSocketOmittedByDefault(t *testing.T) {
 	}
 }
 
-func TestHelperSocketUserModeFailClosed(t *testing.T) {
+func TestHelperSocketConflictingLocatorFailsClosed(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeUser
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createSystemSession(t, app)
@@ -146,7 +144,7 @@ func TestHelperSocketUserModeFailClosed(t *testing.T) {
 	}
 
 	w, _ := postRunRequest(app, result.Token,
-		`{"image":"alpine:3.24","helper_socket":true,"command":["true"]}`)
+		`{"image":"alpine:3.24","helper_socket":true,"environment":{"DOCKER_HELPER_SOCKET_PATH":"/elsewhere/helper.sock"},"command":["true"]}`)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
 	}
@@ -159,10 +157,10 @@ func TestHelperSocketUserModeFailClosed(t *testing.T) {
 		t.Errorf("expected invalid_helper_socket code, got %v", resp)
 	}
 	if dockerCalled {
-		t.Error("user-mode helper_socket must fail closed before any docker call")
+		t.Error("helper_socket with a conflicting locator must fail closed before any docker call")
 	}
 	if resp["operation_id"] != nil {
-		t.Error("user-mode helper_socket rejection must not create an operation")
+		t.Error("helper_socket rejection must not create an operation")
 	}
 }
 

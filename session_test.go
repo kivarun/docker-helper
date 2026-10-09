@@ -13,14 +13,14 @@ import (
 	"time"
 )
 
-// provisionDefaultLauncherForDB provisions an enabled daemon-owner Principal
+// provisionDefaultLauncherForDB provisions an enabled test-owner Principal
 // and its 'default' Launcher against an arbitrary (non-newTestApp) test
 // database, and returns the Launcher's ID. It mirrors newTestApp's owner
 // provisioning so bare-DB fixtures can reference a valid launcher_id.
 func provisionDefaultLauncherForDB(t *testing.T, db *sql.DB) string {
 	t.Helper()
 	allowedRoot := testAllowedRootDir(t)
-	home := filepath.Join(allowedRoot, "daemon-home")
+	home := filepath.Join(allowedRoot, "owner-home")
 	if err := os.MkdirAll(home, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -345,7 +345,7 @@ func TestCleanupExpiredSessions(t *testing.T) {
 		"dhs_expired", "hash1", app.Config.AllowedRoots[0].Path,
 		time.Now().Add(-2*time.Hour).Unix(),
 		time.Now().Add(-1*time.Hour).Unix(),
-		app.userModeDefault.launcherID,
+		testOwnerLauncherID(app),
 	)
 	if err != nil {
 		t.Fatalf("cannot insert expired session: %v", err)
@@ -358,7 +358,7 @@ func TestCleanupExpiredSessions(t *testing.T) {
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		"dhs_expires_now", "hash2", app.Config.AllowedRoots[0].Path,
 		now-3600, now,
-		app.userModeDefault.launcherID,
+		testOwnerLauncherID(app),
 	)
 	if err != nil {
 		t.Fatalf("cannot insert boundary session: %v", err)
@@ -370,7 +370,7 @@ func TestCleanupExpiredSessions(t *testing.T) {
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		"dhs_active", "hash3", app.Config.AllowedRoots[0].Path,
 		now, now+3600,
-		app.userModeDefault.launcherID,
+		testOwnerLauncherID(app),
 	)
 	if err != nil {
 		t.Fatalf("cannot insert active session: %v", err)
@@ -425,8 +425,8 @@ func TestCleanupExpiredSessionsEmpty(t *testing.T) {
 
 func TestSessionCleanupCLI(t *testing.T) {
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "docker-helper.db")
-	stateDir := filepath.Join(dir, "state", "docker-helper")
+	dbPath := filepath.Join(dir, "state", "docker-helper.db")
+	stateDir := filepath.Join(dir, "state")
 	if err := os.MkdirAll(stateDir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -440,14 +440,21 @@ func TestSessionCleanupCLI(t *testing.T) {
 	}
 	db.Close()
 
-	if err := os.Symlink(dbPath, filepath.Join(stateDir, "docker-helper.db")); err != nil {
-		t.Fatal(err)
-	}
+	db.Close()
 
 	configPath := filepath.Join(dir, "config.json")
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
+
+	// The offline cleanup owns the system runtime/state directories; the
+	// test points both seams at the isolated fixture directories.
+	origRuntime := getRuntimeDirFunc
+	getRuntimeDirFunc = func() (string, error) { return filepath.Join(dir, "runtime"), nil }
+	t.Cleanup(func() { getRuntimeDirFunc = origRuntime })
+	origState := getStateDirFunc
+	getStateDirFunc = func() string { return filepath.Join(dir, "state") }
+	t.Cleanup(func() { getStateDirFunc = origState })
 
 	allowedRoot := testAllowedRootDir(t)
 	configData := []byte(`{"allowed_roots": ["` + allowedRoot + `"],"session_ttl":"12h"}` + "\n")
@@ -486,8 +493,8 @@ func TestSessionCleanupCLI(t *testing.T) {
 
 func TestSessionCleanupCLINoneExpired(t *testing.T) {
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "docker-helper.db")
-	stateDir := filepath.Join(dir, "state", "docker-helper")
+	dbPath := filepath.Join(dir, "state", "docker-helper.db")
+	stateDir := filepath.Join(dir, "state")
 	if err := os.MkdirAll(stateDir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -501,14 +508,21 @@ func TestSessionCleanupCLINoneExpired(t *testing.T) {
 	}
 	db.Close()
 
-	if err := os.Symlink(dbPath, filepath.Join(stateDir, "docker-helper.db")); err != nil {
-		t.Fatal(err)
-	}
+	db.Close()
 
 	configPath := filepath.Join(dir, "config.json")
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
+
+	// The offline cleanup owns the system runtime/state directories; the
+	// test points both seams at the isolated fixture directories.
+	origRuntime := getRuntimeDirFunc
+	getRuntimeDirFunc = func() (string, error) { return filepath.Join(dir, "runtime"), nil }
+	t.Cleanup(func() { getRuntimeDirFunc = origRuntime })
+	origState := getStateDirFunc
+	getStateDirFunc = func() string { return filepath.Join(dir, "state") }
+	t.Cleanup(func() { getStateDirFunc = origState })
 
 	allowedRoot := testAllowedRootDir(t)
 	configData := []byte(`{"allowed_roots": ["` + allowedRoot + `"],"session_ttl":"12h"}` + "\n")
@@ -545,8 +559,8 @@ func TestSessionCleanupCLIDatabaseError(t *testing.T) {
 
 func TestSessionCleanupWithRuntimeDirs(t *testing.T) {
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "docker-helper.db")
-	stateDir := filepath.Join(dir, "state", "docker-helper")
+	dbPath := filepath.Join(dir, "state", "docker-helper.db")
+	stateDir := filepath.Join(dir, "state")
 	if err := os.MkdirAll(stateDir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -558,13 +572,7 @@ func TestSessionCleanupWithRuntimeDirs(t *testing.T) {
 	if err := initializeDatabase(db); err != nil {
 		t.Fatalf("initializeDatabase() error: %v", err)
 	}
-	db.Close()
-
-	if err := os.Symlink(dbPath, filepath.Join(stateDir, "docker-helper.db")); err != nil {
-		t.Fatal(err)
-	}
-
-	runtimeDir := filepath.Join(dir, "runtime", "docker-helper")
+	runtimeDir := filepath.Join(dir, "runtime")
 	sessionsDir := filepath.Join(runtimeDir, "sessions")
 	if err := os.MkdirAll(sessionsDir, 0700); err != nil {
 		t.Fatal(err)
@@ -574,6 +582,15 @@ func TestSessionCleanupWithRuntimeDirs(t *testing.T) {
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
+
+	// The offline cleanup owns the system runtime/state directories; the
+	// test points both seams at the isolated fixture directories.
+	origRuntime := getRuntimeDirFunc
+	getRuntimeDirFunc = func() (string, error) { return filepath.Join(dir, "runtime"), nil }
+	t.Cleanup(func() { getRuntimeDirFunc = origRuntime })
+	origState := getStateDirFunc
+	getStateDirFunc = func() string { return filepath.Join(dir, "state") }
+	t.Cleanup(func() { getStateDirFunc = origState })
 
 	allowedRoot := testAllowedRootDir(t)
 	configData := []byte(`{"allowed_roots": ["` + allowedRoot + `"],"session_ttl":"12h"}` + "\n")
@@ -659,8 +676,8 @@ func TestSessionCleanupWithRuntimeDirs(t *testing.T) {
 
 func TestSessionCleanupRuntimeError(t *testing.T) {
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "docker-helper.db")
-	stateDir := filepath.Join(dir, "state", "docker-helper")
+	dbPath := filepath.Join(dir, "state", "docker-helper.db")
+	stateDir := filepath.Join(dir, "state")
 	if err := os.MkdirAll(stateDir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -674,12 +691,10 @@ func TestSessionCleanupRuntimeError(t *testing.T) {
 	}
 	db.Close()
 
-	if err := os.Symlink(dbPath, filepath.Join(stateDir, "docker-helper.db")); err != nil {
-		t.Fatal(err)
-	}
+	db.Close()
 
 	// Make sessionsDir a file, not a directory, to cause cleanupStaleSessionRuntimeDirs to fail.
-	runtimeDir := filepath.Join(dir, "runtime", "docker-helper")
+	runtimeDir := filepath.Join(dir, "runtime")
 	sessionsDir := filepath.Join(runtimeDir, "sessions")
 	if err := os.MkdirAll(filepath.Dir(sessionsDir), 0700); err != nil {
 		t.Fatal(err)
@@ -692,6 +707,15 @@ func TestSessionCleanupRuntimeError(t *testing.T) {
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
+
+	// The offline cleanup owns the system runtime/state directories; the
+	// test points both seams at the isolated fixture directories.
+	origRuntime := getRuntimeDirFunc
+	getRuntimeDirFunc = func() (string, error) { return filepath.Join(dir, "runtime"), nil }
+	t.Cleanup(func() { getRuntimeDirFunc = origRuntime })
+	origState := getStateDirFunc
+	getStateDirFunc = func() string { return filepath.Join(dir, "state") }
+	t.Cleanup(func() { getStateDirFunc = origState })
 
 	allowedRoot := testAllowedRootDir(t)
 	configData := []byte(`{"allowed_roots": ["` + allowedRoot + `"],"session_ttl":"12h"}` + "\n")

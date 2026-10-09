@@ -56,29 +56,24 @@ read grants no authority over peers.
 Skill and adapter authors must treat the installed credential as a
 secret: never print it, never copy it into logs or archives.
 
-## Workspace-parent write invariant for user mode
+## Mount contract
 
-In user mode, the security of the workspace-root bind mount relies on the
-workspace-parent write invariant: the sandboxed agent must not have
-host-side write access to the parent directory of the session workspace.
-This ensures the workspace directory entry cannot be replaced between
-validation and Docker mount.
+The system service is the only daemon deployment; there is no user-mode
+workspace-only special case. Mount containment is decided on the canonical
+resolved source, never on the caller spelling:
 
-If the agent has write access to the workspace parent directory, the TOCTOU
-gap is exploitable. In that scenario, use system mode with `CAP_SYS_ADMIN`
-for inode-pinned mounts.
+- a workspace-relative source (including `.` for the workspace root) is
+  scoped to the Session workspace;
+- an absolute host source is authorized only through the issued Session
+  filesystem snapshot (the workspace, or an issued filesystem root);
+  any other absolute path is refused.
 
-## Mount policy by deployment mode
-
-- **User mode**: the daemon accepts a mount source only when its canonical
-  resolved source equals the canonical Session workspace; subdirectory,
-  file, and disjoint sources are rejected as `invalid_mount`. The
-  workspace-relative `.` spelling is the recommended portable form.
-- **System mode** permits workspace-relative sources and absolute host
-  sources authorized through the issued Session filesystem snapshot, and
-  uses inode-pinned mounts via `open_tree` + `move_mount`. Pinning
-  requires Linux kernel support and `CAP_SYS_ADMIN`; it fails closed when
-  unavailable.
+All run mounts use inode pinning (`open_tree` + `move_mount`); pinning
+requires Linux kernel support and `CAP_SYS_ADMIN` and fails closed when
+unavailable. Read-only semantics are enforced by the issued snapshot
+together with mandatory workload MAC: a writable exposure that resolves
+to or covers a read-only region is refused `read_only_root`, and a
+read-only request is valid for a source in either access mode.
 
 ## Issued Session filesystem policy (Release 2.2)
 
@@ -88,11 +83,8 @@ affect only new Sessions. The snapshot is the single data-plane
 filesystem authority for every mount and build context of that Session.
 The workspace is mandatory; when the creation request supplies
 issuance-time filesystem roots, additional absolute host roots inside the
-Launcher's effective ceiling may narrow the scope (system mode), while
-user mode accepts only an explicit root whose canonical path equals the
-canonical workspace (an explicit workspace `read_only` narrowing); a
-widening request is refused `invalid_filesystem_policy` before the
-Session exists.
+Launcher's effective ceiling may narrow the scope; a widening request is
+refused `invalid_filesystem_policy` before the Session exists.
 
 Agent-facing consequences:
 
@@ -115,7 +107,8 @@ Agent-facing consequences:
   responded. This is a request, authentication, or policy rejection, not
   daemon unavailability.
 - `invalid_mount` is a request or policy failure — inspect the mount
-  specification and deployment-mode restrictions, then correct the request.
+  specification and the mount/path/snapshot policy (Mount contract), then
+  correct the request.
 - `read_only_root` is a filesystem-policy refusal of a writable exposure
   by the issued Session snapshot — request the source read-only or report
   the policy limitation; do not retry the same writable request.
@@ -165,8 +158,7 @@ between them. The consumer chooses the interface appropriate for its
 environment.
 
 For the initial local integration, both interfaces talk to the Docker Helper
-Unix socket. In system mode, loopback HTTP on `127.0.0.1:52375` is also
-available.
+Unix socket. Loopback HTTP on `127.0.0.1:52375` is also available.
 
 ## Skills
 

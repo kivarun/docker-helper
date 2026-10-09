@@ -117,17 +117,14 @@ func relabelAdminTokenFile(adminTokenPath string) error {
 	return nil
 }
 
-// applyAdminTokenDeploymentRelabel is invoked by system init immediately
+// applyAdminTokenDeploymentRelabel is invoked by init immediately
 // after the initial admin token is written, so the token carries the
 // dedicated token replacement type before the first daemon start. Under
-// system mode with enforcing SELinux an inability to relabel the token is
+// enforcing SELinux an inability to relabel the token is
 // fatal: init must not complete with deployment state the confined daemon
-// cannot use (no misleading partial initialization). AppArmor system mode
-// and user mode have no SELinux dependency and no relabel behavior.
-func applyAdminTokenDeploymentRelabel(mode DeploymentMode, adminTokenPath string) error {
-	if mode != ModeSystem {
-		return nil
-	}
+// cannot use (no misleading partial initialization). AppArmor has no SELinux
+// dependency and no relabel behavior.
+func applyAdminTokenDeploymentRelabel(adminTokenPath string) error {
 	backend, err := detectLSM()
 	if err != nil {
 		return fmt.Errorf("cannot determine MAC backend for the admin token relabel: %w", err)
@@ -138,21 +135,18 @@ func applyAdminTokenDeploymentRelabel(mode DeploymentMode, adminTokenPath string
 	return relabelAdminTokenFile(adminTokenPath)
 }
 
-// applyDeploymentSELinuxRelabel is invoked by system init immediately after
+// applyDeploymentSELinuxRelabel is invoked by init immediately after
 // the helper-owned config/state directories are created and before the config
 // / admin token are written, so the created files inherit the correct labels
 // and the first daemon start succeeds.
 //
-// Under system mode with enforcing SELinux an inability to perform the relabel
+// Under enforcing SELinux an inability to perform the relabel
 // is fatal: init must not complete with badly labeled deployment state. This
 // covers both the helper-owned config/state trees and the exact Docker CLI
 // executable docker-helper will exec (whose type must already be defined by the
-// distro/container-selinux fcontext rules). For AppArmor system mode and user
-// mode there is no SELinux dependency and no relabel behavior.
-func applyDeploymentSELinuxRelabel(mode DeploymentMode) error {
-	if mode != ModeSystem {
-		return nil
-	}
+// distro/container-selinux fcontext rules). For AppArmor there is no SELinux
+// dependency and no relabel behavior.
+func applyDeploymentSELinuxRelabel() error {
 	backend, err := detectLSM()
 	if err != nil {
 		return fmt.Errorf("cannot determine MAC backend for deployment relabel: %w", err)

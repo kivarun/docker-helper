@@ -173,17 +173,9 @@ func logRunCleanupOutcome(ctx context.Context, path, operationID string, outcome
 
 // cleanupAfterRunProcess is the post-start terminal cleanup owner. The
 // container-absence proof runs first: no workload MAC state, pin, or lease
-// may be released while a correlated container may still run. User mode has
-// no workload MAC state and keeps the existing behavior exactly.
+// may be released while a correlated container may still run.
 func (a *App) cleanupAfterRunProcess(op *operation) {
 	ctx := withSessionID(context.Background(), op.SessionID)
-
-	if op.workloadMAC == nil {
-		// User mode: application policy plus Docker/VFS, no workload MAC
-		// state, no pins, no lease. Existing behavior, unchanged.
-		cleanupCidfile(op)
-		return
-	}
 
 	outcome := newRunCleanupSequence(
 		cleanupStage{

@@ -477,7 +477,6 @@ func TestRunWorkloadAmbiguousProofRetainsState(t *testing.T) {
 // the session-use lease must remain until startup reconciliation.
 func TestRunWorkloadSELinuxPartialProjectionRetainsDependencies(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
 	coord := installTestWorkloadMACForTest(t, app, LSMSELinux)
 	backend := coord.backend.(*workloadSELinuxBackend)

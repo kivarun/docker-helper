@@ -19,9 +19,8 @@ type effectiveRootsResponse struct {
 // handlePrincipalEffectiveRoots answers GET
 // /principals/{username}/effective-allowed-roots: the effective Principal
 // filesystem authority, computed daemon-side by the canonical
-// effective-Principal-root policy owner (effectivePrincipalAllowedRoots): in
-// user mode the daemon-owner Principal with zero stored roots collapses onto
-// the global allowed roots, every other Principal intersects with them. The
+// effective-Principal-root policy owner (effectivePrincipalAllowedRoots): the
+// stored Principal roots intersect with the global allowed roots. The
 // whole projection — target Principal identity and effective roots — is
 // resolved under the lifecycle serialization boundary
 // (resolvePrincipalEffectiveRootsSnapshot) through the stable Principal-control

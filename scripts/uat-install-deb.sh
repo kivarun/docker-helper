@@ -77,6 +77,12 @@ install_verify_artifacts() {
     || fail_uat "systemd unit is not owned by the docker-helper package"
   dpkg -S /etc/apparmor.d/docker-helper-system >/dev/null 2>&1 \
     || fail_uat "AppArmor profile is not owned by the docker-helper package"
+  # Release 2.3: the system service is the ONLY daemon deployment. The
+  # package payload must not ship the user systemd unit.
+  dpkg -S /usr/lib/systemd/user/docker-helper.service >/dev/null 2>&1 \
+    && fail_uat "the package payload still ships the user systemd unit (system-mode-only payload broken)"
+  [ ! -e /usr/lib/systemd/user/docker-helper.service ] \
+    || fail_uat "the user systemd unit exists on disk after install"
 }
 
 # install_verify_version fails unless the installed binary reports the exact

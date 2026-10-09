@@ -51,7 +51,7 @@ chown -R "$USER:$USER" "$ws"
 # orchestrator workload. Created through the canonical launcher-credential
 # owner; the token is kept in a 0600 file and never echoed.
 rm -f /tmp/uat-reg17-cred.token
-launcher_cred_json="$(dh launcher credential create --system --principal "$USER" --json 2>/dev/null)" \
+launcher_cred_json="$(dh launcher credential create --principal "$USER" --json 2>/dev/null)" \
   || { reg_fail "launcher credential create failed"; reg_result; }
 CRED_TOKEN="$(printf '%s\n' "$launcher_cred_json" | json_field token)"
 CRED_ID="$(printf '%s\n' "$launcher_cred_json" | json_field id)"
@@ -159,7 +159,7 @@ else
 fi
 
 # No child session remains (launcher-scoped list through the host credential).
-LIST_JSON="$(dh session list --system --token-file /tmp/uat-reg17-cred.token --json 2>/dev/null || true)"
+LIST_JSON="$(dh session list --token-file /tmp/uat-reg17-cred.token --json 2>/dev/null || true)"
 if [ -n "$CHILD_ID" ] && printf '%s' "$LIST_JSON" | grep -qF "$CHILD_ID"; then
   reg_fail "child Session still present after in-workload cleanup"
 else
@@ -180,7 +180,7 @@ CID_LIST="$(docker ps -q --filter "label=com.dockerhelper.session.id=$SESSION_ID
 if [ -n "$CID_LIST" ]; then
   docker rm -f $CID_LIST >/dev/null 2>&1 || true
 fi
-dh session delete --system --token-file /tmp/uat-reg17-cred.token "$SESSION_ID" >/dev/null 2>&1 || true
+dh session delete --token-file /tmp/uat-reg17-cred.token "$SESSION_ID" >/dev/null 2>&1 || true
 rm -f /tmp/uat-reg17-cred.token /tmp/uat-reg17.* 2>/dev/null || true
 rm -f "$ws"/reg17-* 2>/dev/null || true
 

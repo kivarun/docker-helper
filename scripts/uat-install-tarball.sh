@@ -158,12 +158,24 @@ install_verify_artifacts() {
   [ -n "$BUNDLE_DIR" ] && [ -d "$BUNDLE_DIR" ] \
     || fail_uat "bundle directory not recorded for artifact verification"
 
+  # Release 2.3: the system service is the ONLY daemon deployment. The
+  # retained tarball must be system-mode-only: no user installer, no user
+  # uninstaller, no user systemd unit anywhere in the bundle.
+  [ ! -e "$BUNDLE_DIR/install.sh" ] \
+    || fail_uat "the tarball bundle still ships the user-mode installer install.sh"
+  [ ! -e "$BUNDLE_DIR/uninstall.sh" ] \
+    || fail_uat "the tarball bundle still ships the user-mode uninstaller uninstall.sh"
+  [ ! -e "$BUNDLE_DIR/systemd/user" ] \
+    || fail_uat "the tarball bundle still ships the user systemd unit directory"
+
   files_identical /usr/bin/docker-helper "$BUNDLE_DIR/docker-helper" \
     || fail_uat "installed /usr/bin/docker-helper does not match the bundle binary"
   assert_no_package_owner /usr/bin/docker-helper "installed binary"
   files_identical /etc/systemd/system/docker-helper.service "$BUNDLE_DIR/systemd/system/docker-helper.service" \
     || fail_uat "installed systemd unit does not match the bundle unit"
   assert_no_package_owner /etc/systemd/system/docker-helper.service "installed unit"
+  [ ! -e /usr/lib/systemd/user/docker-helper.service ] \
+    || fail_uat "the user systemd unit exists on disk after the tarball install"
 
   if [ "$MAC" = "apparmor" ]; then
     files_identical /etc/apparmor.d/docker-helper-system "$BUNDLE_DIR/apparmor/docker-helper-system" \

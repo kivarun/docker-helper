@@ -12,7 +12,7 @@ import (
 var selfCommand = &Command{
 	Name:    "self",
 	Summary: "Introspect the authenticated credential's own identity",
-	Usage:   "docker-helper self [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json]",
+	Usage:   "docker-helper self [--endpoint ENDPOINT] [--token-file PATH] [--json]",
 	Help: `Introspect the authenticated credential's own identity on the daemon.
 
 docker-helper self answers one question: who am I to this daemon? The
@@ -62,7 +62,7 @@ credential does not already have and never mutates state.
 	Presentation: humanJSONPresentation(),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output raw JSON response")
 		return Invocation{
 			Validate: func() error {
@@ -73,10 +73,9 @@ credential does not already have and never mutates state.
 				// Session-env bearer path follows agent validation (no
 				// operator token-file requirement).
 				if *tokenFile == "" && os.Getenv("DOCKER_HELPER_SESSION_TOKEN") != "" {
-					return validateAgentEndpointOptions(agentClientOptions{System: *system, Endpoint: endpoint.value, EndpointSet: endpoint.set})
+					return validateAgentEndpointOptions(agentClientOptions{Endpoint: endpoint.value, EndpointSet: endpoint.set})
 				}
 				return validateOperatorEndpointOptions(operatorClientOptions{
-					System:      *system,
 					Endpoint:    endpoint.value,
 					EndpointSet: endpoint.set,
 					TokenFile:   *tokenFile,
@@ -88,13 +87,13 @@ credential does not already have and never mutates state.
 				// `session show`). Without it, the agent environment's
 				// DOCKER_HELPER_SESSION_TOKEN is the session bearer's own
 				// credential — the agent-context self introspection path —
-				// resolved through the agent client owner (default user-mode
-				// socket, --system system socket, or the explicit endpoint).
+				// resolved through the agent client owner (default system
+				// socket or the explicit endpoint).
 				// With neither, the operator resolution (system/default
 				// endpoint token files) answers.
 				var client *apiClient
 				if *tokenFile == "" && os.Getenv("DOCKER_HELPER_SESSION_TOKEN") != "" {
-					opts := agentClientOptions{System: *system, Endpoint: endpoint.value}
+					opts := agentClientOptions{Endpoint: endpoint.value}
 					if err := validateAgentEndpointOptions(opts); err != nil {
 						fmt.Fprintf(stderr, "error: %v\n", err)
 						return 1
@@ -107,7 +106,6 @@ credential does not already have and never mutates state.
 					client = agentClient
 				} else {
 					operatorClient, cerr := resolveOperatorClient(operatorClientOptions{
-						System:    *system,
 						Endpoint:  endpoint.value,
 						TokenFile: *tokenFile,
 					})

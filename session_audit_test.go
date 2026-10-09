@@ -243,7 +243,7 @@ func TestSessionCreateAuditSuccess(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
 	workspace := testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)
-	reqBody := map[string]string{"workspace": workspace}
+	reqBody := map[string]string{"principal": testOwnerUsername, "workspace": workspace}
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
@@ -319,7 +319,7 @@ func TestSessionCreateAuditInvalidWorkspace(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAdminToken(t)
 
-	reqBody := map[string]string{"workspace": "/tmp/outside-workspace"}
+	reqBody := map[string]string{"principal": testOwnerUsername, "workspace": "/tmp/outside-workspace"}
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
@@ -359,7 +359,7 @@ func TestSessionCreateAuditDatabaseError(t *testing.T) {
 	app.DB = newFailExecDB(t, dbPath, errMockCreateDB)
 	defer app.DB.Close()
 
-	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)}
+	reqBody := map[string]string{"principal": testOwnerUsername, "workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)}
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
@@ -405,7 +405,7 @@ func TestSessionCreateAuditSystemError(t *testing.T) {
 	}
 	app.Config.AllowedRoots[0].Path = brokenLink
 
-	reqBody := map[string]string{"workspace": validWorkspace}
+	reqBody := map[string]string{"principal": testOwnerUsername, "workspace": validWorkspace}
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))

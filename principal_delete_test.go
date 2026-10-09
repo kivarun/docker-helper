@@ -76,14 +76,13 @@ func TestPrincipalDeleteRemovesAllData(t *testing.T) {
 		t.Error("session should be deleted")
 	}
 
-	rows, err := app.DB.Query(`SELECT COUNT(*) FROM principal_allowed_roots`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
 	var count int
-	if rows.Next() {
-		rows.Scan(&count)
+	if err := app.DB.QueryRow(
+		`SELECT COUNT(*) FROM principal_allowed_roots
+		 WHERE principal_id NOT IN (SELECT id FROM principals WHERE username = ?)`,
+		testOwnerUsername,
+	).Scan(&count); err != nil {
+		t.Fatal(err)
 	}
 	if count != 0 {
 		t.Errorf("allowed roots should be deleted (FK cascade), got %d", count)

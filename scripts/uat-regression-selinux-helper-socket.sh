@@ -46,17 +46,17 @@ AVC_TS="$(date '+%m/%d/%Y %H:%M:%S')"
 WS="/opt/uat-reg6-$RANDOM/ws"
 mkdir -p "$WS"
 dh config allowed-root add /opt >/dev/null 2>&1 || true
-dh config reload --system >/dev/null 2>&1 || true
+dh config reload >/dev/null 2>&1 || true
 
 # --- session owner (principal + default Launcher + credential) ----------------
 SEL_P="selsock"; SEL_CRED="/tmp/selsock.tok"
 reg_setup_principal "$SEL_P" >/dev/null || { reg_fail "principal setup failed"; reg_result; }
-dh principal allowed-root add --system "$SEL_P" /opt >/dev/null 2>&1 \
+dh principal allowed-root add "$SEL_P" /opt >/dev/null 2>&1 \
   || { reg_fail "principal allowed-root add failed"; reg_result; }
 reg_principal_credential "$SEL_P" "$SEL_CRED" || { reg_fail "credential create failed"; reg_result; }
 
 # Launcher credential for the explicit in-workload bearer (value kept out of argv).
-LC_JSON="$(dh launcher credential create --system --principal "$SEL_P" --json 2>/dev/null)" \
+LC_JSON="$(dh launcher credential create --principal "$SEL_P" --json 2>/dev/null)" \
   || { reg_fail "launcher credential create failed"; reg_result; }
 LC_TOKEN="$(printf '%s\n' "$LC_JSON" | json_field token)"
 [ -n "$LC_TOKEN" ] || { reg_fail "launcher credential token missing"; reg_result; }
@@ -138,7 +138,7 @@ else
 fi
 
 # --- cleanup --------------------------------------------------------------------
-dh session delete --system "$SID" >/dev/null 2>&1 || reg_fail "session delete failed"
+dh session delete "$SID" >/dev/null 2>&1 || reg_fail "session delete failed"
 rm -f "$SEL_CRED"
 rm -rf "$(dirname "$WS")"
 

@@ -414,9 +414,7 @@ func TestNonRootSystemUsesCredential(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(credDir, "credential.token"), []byte(validToken+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	client, err := resolveOperatorClient(operatorClientOptions{
-		System: true,
-	})
+	client, err := resolveOperatorClient(operatorClientOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -436,9 +434,7 @@ func TestRootSystemUsesAdminToken(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	// Create admin token in a temp system config dir.
 	// We can't write to /etc, so we verify the error mentions admin.token.
-	_, err := resolveOperatorClient(operatorClientOptions{
-		System: true,
-	})
+	_, err := resolveOperatorClient(operatorClientOptions{})
 	if err == nil {
 		t.Fatal("expected error when admin token doesn't exist")
 	}
@@ -466,7 +462,6 @@ func TestExplicitTokenFileHasPriority(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := resolveOperatorClient(operatorClientOptions{
-		System:    true,
 		TokenFile: tokenFile,
 	})
 	if err != nil {
@@ -482,10 +477,8 @@ func TestExplicitTokenFileHasPriority(t *testing.T) {
 }
 func TestDefaultEndpointSystemSocketUsesCredentialToken(t *testing.T) {
 	origUID := EffectiveUID
-	origSocket := systemSocketExists
-	defer func() { EffectiveUID = origUID; systemSocketExists = origSocket }()
+	defer func() { EffectiveUID = origUID }()
 	EffectiveUID = func() int { return 1000 }
-	systemSocketExists = func() bool { return true }
 
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
@@ -510,76 +503,10 @@ func TestDefaultEndpointSystemSocketUsesCredentialToken(t *testing.T) {
 		t.Errorf("token = %q, want %q", gotToken, validToken)
 	}
 }
-func TestDefaultEndpointUserSocketUsesAdminToken(t *testing.T) {
-	origUID := EffectiveUID
-	origSocket := systemSocketExists
-	defer func() { EffectiveUID = origUID; systemSocketExists = origSocket }()
-	EffectiveUID = func() int { return 1000 }
-	systemSocketExists = func() bool { return false }
-
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	t.Setenv("XDG_RUNTIME_DIR", dir)
-	dhDir := filepath.Join(dir, "docker-helper")
-	if err := os.MkdirAll(dhDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	adminToken := "admin-token-usermode"
-	if err := os.WriteFile(filepath.Join(dhDir, "admin.token"), []byte(adminToken+"\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	client, err := resolveOperatorClient(operatorClientOptions{})
-	if err != nil {
-		t.Fatalf("resolveOperatorClient: %v", err)
-	}
-	gotToken, err := client.tokenSource()
-	if err != nil {
-		t.Fatalf("tokenSource: %v", err)
-	}
-	if gotToken != adminToken {
-		t.Errorf("token = %q, want %q", gotToken, adminToken)
-	}
-}
-func TestDefaultEndpointUserSocketIgnoresCredentialToken(t *testing.T) {
-	origUID := EffectiveUID
-	origSocket := systemSocketExists
-	defer func() { EffectiveUID = origUID; systemSocketExists = origSocket }()
-	EffectiveUID = func() int { return 1000 }
-	systemSocketExists = func() bool { return false }
-
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	t.Setenv("XDG_RUNTIME_DIR", dir)
-	dhDir := filepath.Join(dir, "docker-helper")
-	if err := os.MkdirAll(dhDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	// Both tokens exist — user socket must use admin.token, not credential.token.
-	if err := os.WriteFile(filepath.Join(dhDir, "credential.token"), []byte("dhc_"+strings.Repeat("c", 64)+"\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	adminToken := "admin-token-wins"
-	if err := os.WriteFile(filepath.Join(dhDir, "admin.token"), []byte(adminToken+"\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	client, err := resolveOperatorClient(operatorClientOptions{})
-	if err != nil {
-		t.Fatalf("resolveOperatorClient: %v", err)
-	}
-	gotToken, err := client.tokenSource()
-	if err != nil {
-		t.Fatalf("tokenSource: %v", err)
-	}
-	if gotToken != adminToken {
-		t.Errorf("token = %q, want admin.token %q (credential.token must not be used for user socket)", gotToken, adminToken)
-	}
-}
 func TestDefaultEndpointNoTokensFails(t *testing.T) {
 	origUID := EffectiveUID
-	origSocket := systemSocketExists
-	defer func() { EffectiveUID = origUID; systemSocketExists = origSocket }()
+	defer func() { EffectiveUID = origUID }()
 	EffectiveUID = func() int { return 1000 }
-	systemSocketExists = func() bool { return false }
 
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
@@ -591,10 +518,8 @@ func TestDefaultEndpointNoTokensFails(t *testing.T) {
 }
 func TestDefaultEndpointNonRootFallsBackToSystem(t *testing.T) {
 	origUID := EffectiveUID
-	origSocket := systemSocketExists
-	defer func() { EffectiveUID = origUID; systemSocketExists = origSocket }()
+	defer func() { EffectiveUID = origUID }()
 	EffectiveUID = func() int { return 1000 }
-	systemSocketExists = func() bool { return true }
 
 	dir := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", dir)
@@ -830,304 +755,5 @@ func TestEnsureCredentialDirFixesMode(t *testing.T) {
 	}
 	if perm := info.Mode().Perm(); perm != 0700 {
 		t.Errorf("directory mode = %o, want 0700", perm)
-	}
-}
-
-func TestCheckCredentialStateAbsent(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	token := "dhc_" + strings.Repeat("a", 64)
-	state, err := checkCredentialState(token)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if state != credentialAbsent {
-		t.Errorf("state = %v, want credentialAbsent", state)
-	}
-}
-
-func TestCheckCredentialStateMatch(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	token := "dhc_" + strings.Repeat("a", 64)
-	credDir := filepath.Join(dir, "docker-helper")
-	if err := os.MkdirAll(credDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(credDir, "credential.token"), []byte(token+"\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	state, err := checkCredentialState(token)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if state != credentialMatch {
-		t.Errorf("state = %v, want credentialMatch", state)
-	}
-}
-
-func TestCheckCredentialStateConflict(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	existingToken := "dhc_" + strings.Repeat("a", 64)
-	newToken := "dhc_" + strings.Repeat("b", 64)
-	credDir := filepath.Join(dir, "docker-helper")
-	if err := os.MkdirAll(credDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(credDir, "credential.token"), []byte(existingToken+"\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	state, err := checkCredentialState(newToken)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if state != credentialConflict {
-		t.Errorf("state = %v, want credentialConflict", state)
-	}
-}
-
-func TestCheckCredentialStateReadErrorFailsClosed(t *testing.T) {
-	// A credential file that exists but cannot be read must NOT be treated
-	// as absent. The caller must fail closed.
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	token := "dhc_" + strings.Repeat("a", 64)
-	credDir := filepath.Join(dir, "docker-helper")
-	if err := os.MkdirAll(credDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	credFile := filepath.Join(credDir, "credential.token")
-	if err := os.WriteFile(credFile, []byte("some-content\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	// Make the file unreadable.
-	if err := os.Chmod(credFile, 0000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.Chmod(credFile, 0600) })
-
-	state, err := checkCredentialState(token)
-	if err == nil {
-		t.Fatalf("expected error for unreadable credential file, got state %v", state)
-	}
-	if state != 0 {
-		t.Errorf("state = %v, want 0 on error", state)
-	}
-}
-
-func TestInitUserWithSystemDaemonFirstUse(t *testing.T) {
-	// Regression: first-use with system daemon must actually install the credential.
-	origUID := EffectiveUID
-	defer func() { EffectiveUID = origUID }()
-	EffectiveUID = func() int { return 1000 }
-
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-
-	validToken := "dhc_" + strings.Repeat("a", 64)
-
-	var stdout, stderr bytes.Buffer
-	err := installCredentialForInit(validToken, &stdout, &stderr)
-	if err != nil {
-		t.Fatalf("installCredentialForInit: %v", err)
-	}
-
-	// Credential file must exist.
-	credPath := filepath.Join(dir, "docker-helper", "credential.token")
-	data, err := os.ReadFile(credPath)
-	if err != nil {
-		t.Fatalf("credential file not created: %v", err)
-	}
-	if string(data) != validToken+"\n" {
-		t.Errorf("credential = %q, want %q", string(data), validToken+"\n")
-	}
-
-	// File mode must be 0600.
-	info, err := os.Stat(credPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if perm := info.Mode().Perm(); perm != 0600 {
-		t.Errorf("file mode = %o, want 0600", perm)
-	}
-
-	// Directory mode must be 0700.
-	dirInfo, err := os.Stat(filepath.Join(dir, "docker-helper"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if perm := dirInfo.Mode().Perm(); perm != 0700 {
-		t.Errorf("directory mode = %o, want 0700", perm)
-	}
-
-	// Output must indicate success, NOT "Credential already installed."
-	out := stdout.String()
-	if strings.Contains(out, "Credential already installed") {
-		t.Error("first-use must NOT say 'Credential already installed'")
-	}
-	if !strings.Contains(out, "Credential installed successfully") {
-		t.Errorf("expected success message, got: %s", out)
-	}
-}
-
-func TestInitUserWithSystemDaemonSameTokenIdempotent(t *testing.T) {
-	origUID := EffectiveUID
-	defer func() { EffectiveUID = origUID }()
-	EffectiveUID = func() int { return 1000 }
-
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-
-	token := "dhc_" + strings.Repeat("a", 64)
-
-	// Pre-install the credential.
-	credDir := filepath.Join(dir, "docker-helper")
-	if err := os.MkdirAll(credDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	credPath := filepath.Join(credDir, "credential.token")
-	if err := os.WriteFile(credPath, []byte(token+"\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	err := installCredentialForInit(token, &stdout, &stderr)
-	if err != nil {
-		t.Fatalf("installCredentialForInit: %v", err)
-	}
-
-	out := stdout.String()
-	if !strings.Contains(out, "Credential already installed") {
-		t.Errorf("expected idempotent message, got: %s", out)
-	}
-
-	// File mode preserved.
-	info, err := os.Stat(credPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if perm := info.Mode().Perm(); perm != 0600 {
-		t.Errorf("file mode = %o, want 0600", perm)
-	}
-}
-
-func TestInitUserWithSystemDaemonDifferentTokenConflict(t *testing.T) {
-	origUID := EffectiveUID
-	defer func() { EffectiveUID = origUID }()
-	EffectiveUID = func() int { return 1000 }
-
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-
-	existingToken := "dhc_" + strings.Repeat("a", 64)
-	newToken := "dhc_" + strings.Repeat("b", 64)
-
-	// Pre-install the existing credential.
-	credDir := filepath.Join(dir, "docker-helper")
-	if err := os.MkdirAll(credDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(credDir, "credential.token"), []byte(existingToken+"\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	err := installCredentialForInit(newToken, &stdout, &stderr)
-	if err == nil {
-		t.Fatal("expected error for different token conflict")
-	}
-
-	// Must reference credential install --force.
-	if !strings.Contains(err.Error(), "credential install --force") {
-		t.Errorf("error should reference 'credential install --force', got: %v", err)
-	}
-
-	// Existing credential must NOT have been overwritten.
-	data, err := os.ReadFile(filepath.Join(credDir, "credential.token"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(data) != existingToken+"\n" {
-		t.Errorf("credential was overwritten: %q", string(data))
-	}
-}
-
-func TestInitCLIFirstUseWithSystemDaemon(t *testing.T) {
-	// End-to-end CLI regression: docker-helper init as non-root with system daemon.
-	origSocket := systemSocketExists
-	defer func() { systemSocketExists = origSocket }()
-	systemSocketExists = func() bool { return true }
-
-	origUID := EffectiveUID
-	defer func() { EffectiveUID = origUID }()
-	EffectiveUID = func() int { return 1000 }
-
-	configDir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", configDir)
-
-	// --allowed-root is required by the CLI parser even though
-	// initUserWithSystemDaemon does not use it.
-	allowedRoot := testAllowedRootDir(t)
-
-	validToken := "dhc_" + strings.Repeat("c", 64)
-
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	go func() {
-		fmt.Fprintln(w, validToken)
-		w.Close()
-	}()
-
-	oldStdin := os.Stdin
-	os.Stdin = r
-	defer func() { os.Stdin = oldStdin }()
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"init", "--allowed-root", allowedRoot}, &stdout, &stderr)
-
-	r.Close()
-
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d (stderr: %s)", code, stderr.String())
-	}
-
-	// Credential file must exist.
-	credPath := filepath.Join(configDir, "docker-helper", "credential.token")
-	data, err := os.ReadFile(credPath)
-	if err != nil {
-		t.Fatalf("credential file not created: %v", err)
-	}
-	if string(data) != validToken+"\n" {
-		t.Errorf("credential = %q, want %q", string(data), validToken+"\n")
-	}
-
-	// File mode must be 0600.
-	info, err := os.Stat(credPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if perm := info.Mode().Perm(); perm != 0600 {
-		t.Errorf("file mode = %o, want 0600", perm)
-	}
-
-	// Directory mode must be 0700.
-	dirInfo, err := os.Stat(filepath.Join(configDir, "docker-helper"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if perm := dirInfo.Mode().Perm(); perm != 0700 {
-		t.Errorf("directory mode = %o, want 0700", perm)
-	}
-
-	// Output must indicate success.
-	out := stdout.String()
-	if strings.Contains(out, "Credential already installed") {
-		t.Error("first-use must NOT say 'Credential already installed'")
-	}
-	if !strings.Contains(out, "Credential installed successfully") {
-		t.Errorf("expected success message, got: %s", out)
 	}
 }

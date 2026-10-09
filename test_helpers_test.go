@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -309,7 +310,6 @@ func newTestApp(t *testing.T) *App {
 		OperationRetentionTTL: 10 * time.Minute,
 		OperationMaxCompleted: 200,
 		OperationLogMaxBytes:  4 * 1024 * 1024,
-		Mode:                  ModeUser,
 	}
 
 	app := &App{
@@ -323,32 +323,57 @@ func newTestApp(t *testing.T) *App {
 		},
 	}
 
-	// Provision a user-mode daemon-owner Principal + 'default' Launcher so that
-	// session creation through the shared model works without a manual owner.
-	// The daemon-owner Principal has no allowed-root rows (collapsed global).
-	// The owner identity mirrors the real daemon process identity so that
-	// session execution UID:GID resolves to the daemon's own identity (the
-	// same invariant the production user-mode Owner chain guarantees).
-	home := filepath.Join(allowedRoot, "daemon-home")
+	// Provision the test owner Principal + 'default' Launcher so that session
+	// creation through the shared model works without a manual owner. The
+	// system-only ownership model has no daemon-owner special case: the owner
+	// Principal carries a stored allowed root covering the test allowed root,
+	// so its effective ceiling is the ordinary stored-root composition.
+	home := filepath.Join(allowedRoot, "owner-home")
 	if err := os.MkdirAll(home, 0700); err != nil {
-		t.Fatalf("cannot create daemon-owner home: %v", err)
+		t.Fatalf("cannot create owner home: %v", err)
 	}
-	owner := provisionTestOwner(t, db, allowedRoot, home, os.Getuid(), os.Getgid())
-	app.userModeDefault = owner
+	provisionTestOwner(t, db, allowedRoot, home, os.Getuid(), os.Getgid())
+
+	// The system-only run path pins every mount source through the
+	// inode-pinning primitive, which requires CAP_SYS_ADMIN. The default
+	// fixture stubs that primitive; mount-pinning tests install their own
+	// seam or exercise the real syscall path explicitly.
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+		return &pinnedMount{PinnedPath: sourcePath, cleanup: func() error { return nil }}, nil
+	}
+
+	// The mandatory workload MAC is part of the system-only run path, so the
+	// default fixture installs a real test-seamed coordinator: production
+	// renderers, drivers, and lifecycle owners run unchanged; only the LSM
+	// kernel mechanics are replaced. Tests needing a specific backend install
+	// their own coordinator after this one.
+	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 
 	return app
 }
 
+// testOwner is the test fixture identity of the provisioned owner Principal:
+// the DB row identity the session authority chain resolves through.
+type testOwner struct {
+	principalID int64
+	launcherID  string
+	username    string
+}
+
+// testOwnerUsername is the fixed username of the provisioned test owner
+// Principal.
+const testOwnerUsername = "dhtestowner"
+
 // provisionTestOwner provisions an enabled Principal (with the given explicit
-// uid/gid identity) and its 'default' inherit-scope Launcher via the production
-// ownership helpers. The Principal is created with no allowed-root rows
-// (collapsed global policy). home must be a valid, non-forbidden absolute
-// directory. Execution identity is owned explicitly by the caller so identity
-// tests control the exact uid/gid rather than relying on an implicit owner.
-func provisionTestOwner(t *testing.T, db *sql.DB, allowedRoot, home string, uid, gid int) *userModeDefaultLauncher {
+// uid/gid identity), a stored allowed root covering the test allowed root,
+// and its 'default' inherit-scope Launcher, mirroring the production
+// principal-row insert and default-Launcher provisioning. home must be a
+// valid, non-forbidden absolute directory under allowedRoot. Execution
+// identity is owned explicitly by the caller so identity tests control the
+// exact uid/gid rather than relying on an implicit owner.
+func provisionTestOwner(t *testing.T, db *sql.DB, allowedRoot, home string, uid, gid int) *testOwner {
 	t.Helper()
-	const username = "dhtestowner"
-	pid, err := insertDaemonOwnerPrincipal(db, username, uid, gid, home)
+	pid, err := insertTestPrincipalWithRoots(db, testOwnerUsername, uid, gid, home, []AllowedRootEntry{allowedRootEntry(allowedRoot)})
 	if err != nil {
 		t.Fatalf("cannot provision test owner principal: %v", err)
 	}
@@ -356,7 +381,104 @@ func provisionTestOwner(t *testing.T, db *sql.DB, allowedRoot, home string, uid,
 	if err != nil {
 		t.Fatalf("cannot provision test owner default launcher: %v", err)
 	}
-	return &userModeDefaultLauncher{principalID: pid, launcherID: launcherID, username: username}
+	return &testOwner{principalID: pid, launcherID: launcherID, username: testOwnerUsername}
+}
+
+// insertTestPrincipalWithRoots inserts an enabled Principal row with the
+// explicit uid/gid identity (no OS-account lookup) and the given stored
+// allowed roots, in one transaction. This mirrors the principal INSERT of the
+// production creation path for a principal whose OS account is not resolved
+// from the host.
+func insertTestPrincipalWithRoots(db *sql.DB, username string, uid, gid int, home string, roots []AllowedRootEntry) (int64, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(
+		`INSERT INTO principals (username, uid, gid, home, enabled)
+		 VALUES (?, ?, ?, ?, 1)`,
+		username, uid, gid, home,
+	)
+	if err != nil {
+		return 0, err
+	}
+	pid, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	for _, root := range roots {
+		if _, err := tx.Exec(
+			`INSERT INTO principal_allowed_roots (principal_id, root_path, access)
+			 VALUES (?, ?, ?)`,
+			pid, root.Path, string(root.Access),
+		); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return pid, nil
+}
+
+// decodeAPIError decodes the stable error envelope of a rejected request.
+func decodeAPIError(t *testing.T, body []byte) response {
+	t.Helper()
+	var resp response
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("decode error response: %v (body=%s)", err, body)
+	}
+	if resp.OK {
+		t.Fatalf("expected ok=false, got body=%s", body)
+	}
+	return resp
+}
+
+// narrowCfg copies the app's current configuration with the global allowed
+// roots narrowed to narrowRoot. The real reload setConfig merges only
+// configurable fields, so the copy keeps the rest of the runtime state.
+func narrowCfg(t *testing.T, app *App, narrowRoot string) *Config {
+	t.Helper()
+	cfg := app.getConfig()
+	cfg.AllowedRoots = []AllowedRootEntry{allowedRootEntry(narrowRoot)}
+	return &cfg
+}
+
+// testOwnerLauncherID resolves the provisioned test owner's default Launcher
+// ID through the production ownership query. It panics on failure: a missing
+// owner fixture is always a test bug, never a testable outcome.
+func testOwnerLauncherID(app *App) string {
+	launcherID, err := findDefaultLauncher(app.DB, testOwnerPrincipalID(app))
+	if err != nil {
+		panic("test owner default launcher missing: " + err.Error())
+	}
+	return launcherID
+}
+
+// testOwnerPrincipalID resolves the provisioned test owner's Principal DB ID
+// through the production ownership query.
+func testOwnerPrincipalID(app *App) int64 {
+	id, err := findPrincipalIDByUsername(app.DB, testOwnerUsername)
+	if err != nil {
+		panic("test owner principal missing: " + err.Error())
+	}
+	return int64(id)
+}
+
+// mustTestOwner resolves the provisioned test owner's DB identity through the
+// production ownership queries.
+func mustTestOwner(t *testing.T, app *App) *testOwner {
+	t.Helper()
+	pid, err := findPrincipalIDByUsername(app.DB, testOwnerUsername)
+	if err != nil {
+		t.Fatalf("cannot resolve test owner principal: %v", err)
+	}
+	launcherID, err := findDefaultLauncher(app.DB, int64(pid))
+	if err != nil {
+		t.Fatalf("cannot resolve test owner default launcher: %v", err)
+	}
+	return &testOwner{principalID: int64(pid), launcherID: launcherID, username: testOwnerUsername}
 }
 
 // mustAddDefaultLauncher resolves a named Principal's 'default' inherit
@@ -400,7 +522,7 @@ func removePrincipalAllowedRootForTest(t *testing.T, app *App, username, rootPat
 	t.Helper()
 	cfg := app.getConfig()
 	changed, canonicalPath, _, err = removePrincipalAllowedRootCascaded(
-		app.DB, username, rootPath, cfg.AllowedRoots, cfg.Mode == ModeUser, app.userModeDaemonOwnerPrincipalID(),
+		app.DB, username, rootPath, cfg.AllowedRoots,
 	)
 	return changed, canonicalPath, err
 }
@@ -435,12 +557,12 @@ func testWorkspaceDir(t *testing.T, allowedRoot string) string {
 }
 
 // createDefaultAdminSessionForTest creates a Session fixture through the
-// canonical production owner: a valid Admin authority with omitted selectors,
-// so policy resolution stays with resolveCreatePolicy (the daemon-owner
-// 'default' Launcher under the collapsed global roots). It never computes
-// effective roots or manufactures a sessionCreatePolicy.
+// canonical production owner: a valid Admin authority selecting the test
+// owner Principal, so policy resolution stays with resolveCreatePolicy (the
+// owner's 'default' Launcher under its stored-root composition). It never
+// computes effective roots or manufactures a sessionCreatePolicy.
 func createDefaultAdminSessionForTest(app *App, workspace string) (*CreatedSession, error) {
-	return app.createSessionAuthorized(&operatorAuthority{class: operatorAuthorityAdmin}, createSelector{}, workspace, nil)
+	return app.createSessionAuthorized(&operatorAuthority{class: operatorAuthorityAdmin}, createSelector{principal: testOwnerUsername}, workspace, nil)
 }
 
 // admitForTest registers an operation through the production admission path
@@ -456,16 +578,27 @@ func admitForTest(s *operationSupervisor, op *operation) admissionDecision {
 	return s.admitReserved(op, res)
 }
 
-// mockStandaloneUserInit mocks systemSocketExists and checkDockerAccess so
-// that runInit takes the "standalone user init" path (no system daemon,
-// Docker accessible). Returns a restore function that should be deferred.
-func mockStandaloneUserInit() func() {
-	origSocket := systemSocketExists
-	origDockerAccess := checkDockerAccess
-	systemSocketExists = func() bool { return false }
-	checkDockerAccess = func() error { return nil }
-	return func() {
-		systemSocketExists = origSocket
-		checkDockerAccess = origDockerAccess
+// stubSystemRuntimeDirsForTest points the system runtime/state directory
+// seams at isolated fixture directories. loadAndPrepareRuntimeConfig
+// creates the runtime directory; without the stub it writes the root-owned
+// system paths (/run/docker-helper), which an unprivileged test process
+// cannot create.
+func stubSystemRuntimeDirsForTest(t *testing.T) (runtimeDir, stateDir string) {
+	t.Helper()
+	dir := t.TempDir()
+	runtimeDir = filepath.Join(dir, "runtime")
+	stateDir = filepath.Join(dir, "state")
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatal(err)
 	}
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	origRuntime := getRuntimeDirFunc
+	getRuntimeDirFunc = func() (string, error) { return runtimeDir, nil }
+	t.Cleanup(func() { getRuntimeDirFunc = origRuntime })
+	origState := getStateDirFunc
+	getStateDirFunc = func() string { return stateDir }
+	t.Cleanup(func() { getStateDirFunc = origState })
+	return runtimeDir, stateDir
 }

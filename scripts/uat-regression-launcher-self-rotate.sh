@@ -68,8 +68,8 @@ LNAME="pipeline"
 
 trap cleanup EXIT
 cleanup() {
-  dh principal delete --system "$USER" >/dev/null 2>&1 || true
-  dh principal delete --system "$USER2" >/dev/null 2>&1 || true
+  dh principal delete "$USER" >/dev/null 2>&1 || true
+  dh principal delete "$USER2" >/dev/null 2>&1 || true
   userdel -r "$USER" >/dev/null 2>&1 || true
   userdel -r "$USER2" >/dev/null 2>&1 || true
   rm -rf "$TMPDIR_REG29"
@@ -87,7 +87,7 @@ home2="$(reg_setup_principal "$USER2")" || { reg_fail "fixture: principal $USER2
 # stdout and stderr are captured separately: the canonical --json document
 # goes to stdout, the credential-install hint goes to stderr, and the JSON
 # parses must only ever see the document.
-LC_CREATE="$(dh launcher create --system --principal "$USER" "$LNAME" --issue-credential --json 2>"$TMPDIR_REG29/create.err")"
+LC_CREATE="$(dh launcher create --principal "$USER" "$LNAME" --issue-credential --json 2>"$TMPDIR_REG29/create.err")"
 LC_RC=$?
 TOKA="$(printf '%s' "$LC_CREATE" | json_field token || true)"
 # Structural extraction of the Launcher ID and credential ID from the create
@@ -109,12 +109,12 @@ else
 fi
 
 # Pre-rotation admin-side policy snapshot (scope/enabled/roots provenance).
-SHOW_BEFORE="$(dh launcher show --system --principal "$USER" "$LNAME" --json 2>&1)" \
+SHOW_BEFORE="$(dh launcher show --principal "$USER" "$LNAME" --json 2>&1)" \
   || { reg_fail "fixture: launcher show failed: $(printf '%s\n' "$SHOW_BEFORE" | redact | head -2)"; reg_result; }
 
 # Pre-existing Session created with the ORIGINAL bearer A: it must survive
 # every later rotation untouched.
-S1_JSON="$(dh session create --system --token-file "$TMPDIR_REG29/credA" "$ws" --json 2>&1)"
+S1_JSON="$(dh session create --token-file "$TMPDIR_REG29/credA" "$ws" --json 2>&1)"
 S1_ID="$(printf '%s' "$S1_JSON" | json_field id || true)"
 S1_TOKEN="$(printf '%s' "$S1_JSON" | json_field token || true)"
 if [ -n "$S1_ID" ] && [ -n "$S1_TOKEN" ]; then
@@ -126,7 +126,7 @@ else
 fi
 
 # Original bearer self identity: the projection every rotation must preserve.
-SELF_A="$(dh self --system --token-file "$TMPDIR_REG29/credA" --json 2>&1)" \
+SELF_A="$(dh self --token-file "$TMPDIR_REG29/credA" --json 2>&1)" \
   || { reg_fail "fixture: launcher bearer self failed: $(printf '%s\n' "$SELF_A" | redact | head -2)"; reg_result; }
 if printf '%s' "$SELF_A" | grep -q "\"id\": \"$LID\"" \
     && printf '%s' "$SELF_A" | grep -q "\"name\": \"$LNAME\"" \
@@ -144,7 +144,7 @@ fi
 # and after every refusal.
 expected_identity() { # bearerfile
   local self
-  self="$(dh self --system --token-file "$1" --json 2>/dev/null)" || return 1
+  self="$(dh self --token-file "$1" --json 2>/dev/null)" || return 1
   printf '%s' "$self" | grep -q "\"id\": \"$LID\"" \
     && printf '%s' "$self" | grep -q "\"name\": \"$LNAME\"" \
     && printf '%s' "$self" | grep -q "\"principal\": \"$USER\""
@@ -154,7 +154,7 @@ expected_identity() { # bearerfile
 # refused unauthorized (the old bearer is dead; 401 at authentication).
 bearer_unauthorized() { # bearerfile
   local out rc
-  out="$(dh session create --system --token-file "$1" "$ws" --json 2>&1)"
+  out="$(dh session create --token-file "$1" "$ws" --json 2>&1)"
   rc=$?
   [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -q 'unauthorized'
 }
@@ -172,7 +172,7 @@ bearer_unauthorized() { # bearerfile
 assert_rotated() { # label newfile errfile curfile [LAUNCHER...]
   local label="$1" newfile="$2" errfile="$3" curfile="$4" out rc tok cred
   shift 4
-  out="$(dh launcher credential rotate --system --token-file "$curfile" --json "$@" 2>"$errfile")"
+  out="$(dh launcher credential rotate --token-file "$curfile" --json "$@" 2>"$errfile")"
   rc=$?
   tok="$(printf '%s' "$out" | json_field token || true)"
   cred="$(printf '%s' "$out" | json_field id || true)"
@@ -267,7 +267,7 @@ if [ ! -s "$CUR" ]; then
 fi
 
 # --- P: preservation across the sequence -------------------------------------------
-SHOW_AFTER="$(dh launcher show --system --principal "$USER" "$LNAME" --json 2>&1)" \
+SHOW_AFTER="$(dh launcher show --principal "$USER" "$LNAME" --json 2>&1)" \
   || reg_fail "P: launcher show after rotation failed: $(printf '%s\n' "$SHOW_AFTER" | redact | head -2)"
 if [ -n "$SHOW_AFTER" ] && [ "$(printf '%s' "$SHOW_AFTER" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), sort_keys=True))' 2>/dev/null)" \
     = "$(printf '%s' "$SHOW_BEFORE" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), sort_keys=True))' 2>/dev/null)" ]; then
@@ -278,25 +278,25 @@ fi
 
 # The pre-existing Session stays owned and listed under the final bearer, and
 # the final bearer drives its full create/list/show/delete lifecycle.
-P_JSON="$(dh session create --system --token-file "$CUR" "$ws" --json 2>&1)"
+P_JSON="$(dh session create --token-file "$CUR" "$ws" --json 2>&1)"
 P_ID="$(printf '%s' "$P_JSON" | json_field id || true)"
 if [ -n "$P_ID" ]; then
   reg_ok "P: final bearer created its own Session $P_ID normally"
 else
   reg_fail "P: final bearer cannot create a Session: $(printf '%s\n' "$P_JSON" | redact | tail -2)"
 fi
-LIST_JSON="$(dh session list --system --token-file "$CUR" --json 2>&1)"
+LIST_JSON="$(dh session list --token-file "$CUR" --json 2>&1)"
 if printf '%s' "$LIST_JSON" | grep -qF "$S1_ID" && printf '%s' "$LIST_JSON" | grep -qF "$P_ID"; then
   reg_ok "P: launcher-scoped list under the final bearer still carries the pre-rotation Session and the new Session"
 else
   reg_fail "P: launcher-scoped list under the final bearer lost $S1_ID or $P_ID: $(printf '%s' "$LIST_JSON" | redact | head -c 200)"
 fi
-if dh session show --system --token-file "$CUR" "$P_ID" >/dev/null 2>&1; then
+if dh session show --token-file "$CUR" "$P_ID" >/dev/null 2>&1; then
   reg_ok "P: final bearer showed its own Session with the issued snapshot"
 else
   reg_fail "P: final bearer could not show its own Session $P_ID"
 fi
-if dh session delete --system --token-file "$CUR" "$P_ID" >/dev/null 2>&1; then
+if dh session delete --token-file "$CUR" "$P_ID" >/dev/null 2>&1; then
   reg_ok "P: final bearer deleted its own Session normally"
 else
   reg_fail "P: final bearer could not delete its own Session $P_ID"
@@ -309,7 +309,7 @@ FOREIGN_NAME="uatreg29-foreign"
 refusal_case() { # label args...
   local label="$1"; shift
   local out rc
-  out="$(dh launcher credential rotate --system --token-file "$CUR" "$@" 2>&1)"
+  out="$(dh launcher credential rotate --token-file "$CUR" "$@" 2>&1)"
   rc=$?
   if [ "$rc" -eq 0 ]; then
     reg_fail "$label: expected refusal but rotation succeeded"
@@ -340,10 +340,10 @@ if expected_identity "$CUR"; then
 else
   reg_fail "N: refusals invalidated or rebound the current bearer"
 fi
-N_JSON="$(dh session create --system --token-file "$CUR" "$ws" --json 2>&1)"
+N_JSON="$(dh session create --token-file "$CUR" "$ws" --json 2>&1)"
 N_ID="$(printf '%s' "$N_JSON" | json_field id || true)"
 if [ -n "$N_ID" ]; then
-  dh session delete --system --token-file "$CUR" "$N_ID" >/dev/null 2>&1 || true
+  dh session delete --token-file "$CUR" "$N_ID" >/dev/null 2>&1 || true
   reg_ok "N: current bearer still operates its Sessions after all refusals"
 else
   reg_fail "N: current bearer cannot operate after the refusals: $(printf '%s\n' "$N_JSON" | redact | tail -2)"
@@ -366,12 +366,12 @@ forbidden_case() { # label cmd...
   reg_ok "$label: refused unauthorized"
 }
 
-forbidden_case "C launcher show" launcher show --system --principal "$USER" "$LNAME" || true
-forbidden_case "C launcher set" launcher set --system --principal "$USER" --enabled true "$LNAME" || true
-forbidden_case "C launcher allowed-root add" launcher allowed-root add --system --principal "$USER" "$LNAME" "$ws" || true
-forbidden_case "C launcher credential show" launcher credential show --system --principal "$USER" "$LNAME" || true
-forbidden_case "C launcher credential delete" launcher credential delete --system --principal "$USER" "$LNAME" || true
-forbidden_case "C principal credential list" principal credential list --system "$USER" || true
+forbidden_case "C launcher show" launcher show --principal "$USER" "$LNAME" || true
+forbidden_case "C launcher set" launcher set --principal "$USER" --enabled true "$LNAME" || true
+forbidden_case "C launcher allowed-root add" launcher allowed-root add --principal "$USER" "$LNAME" "$ws" || true
+forbidden_case "C launcher credential show" launcher credential show --principal "$USER" "$LNAME" || true
+forbidden_case "C launcher credential delete" launcher credential delete --principal "$USER" "$LNAME" || true
+forbidden_case "C principal credential list" principal credential list "$USER" || true
 
 # --- J: no bearer in the daemon journal (operational or audit stream) ---------------
 JOURNAL_SINCE="$(date +%s)"
@@ -388,7 +388,7 @@ else
 fi
 
 # --- cleanup: the final bearer deletes the pre-rotation Session ---------------------
-if dh session delete --system --token-file "$CUR" "$S1_ID" >/dev/null 2>&1; then
+if dh session delete --token-file "$CUR" "$S1_ID" >/dev/null 2>&1; then
   reg_ok "cleanup: final bearer deleted the pre-rotation Session $S1_ID through the launcher authority"
 else
   reg_fail "cleanup: final bearer could not delete the pre-rotation Session $S1_ID"

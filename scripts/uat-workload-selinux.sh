@@ -135,7 +135,12 @@ scenario() { say "scenario $1"; }
 dh() { /usr/bin/docker-helper "$@"; }
 SOCK="/run/docker-helper/docker-helper.sock"
 
-json_field() { grep -oP "\"$1\": \"\K[^\"]+" | head -1; }
+# json_field NAME — extract a JSON string field. The pattern is
+# space-tolerant after the colon: the CLI's indented --json output emits
+# "field": "value" while the raw HTTP API (writeJSONRaw, compact Go JSON)
+# emits "field":"value"; both must parse (the S2M canary terminal status is
+# read over raw HTTP).
+json_field() { grep -oP "\"$1\":\s*\"\K[^\"]+" | head -1; }
 
 wait_health() {
   local _i=0
@@ -180,7 +185,7 @@ workload_residue_clean() {
 
 create_session() {
   local cred="$1" ws="$2" out id
-  out="$(dh session create --system --token-file "$cred" "$ws" --json 2>&1 || true)"
+  out="$(dh session create --token-file "$cred" "$ws" --json 2>&1 || true)"
   id="$(printf '%s' "$out" | json_field id)"
   [ -n "$id" ] || { echo "session create failed for $ws: $(printf '%s' "$out" | redact | tail -2)" >&2; return 1; }
   printf '%s' "$out" | json_field token > "/tmp/uat-wls-tok-$id"; chmod 600 "/tmp/uat-wls-tok-$id"
@@ -228,6 +233,49 @@ wait_bindfs_projection() {
     sleep 0.25
   done
   return 1
+}
+
+# utab_watch BG_PID — pure-observer utab bookkeeping watcher. Runs while the
+# canary run process is alive, ticking every 50ms, and records:
+#   - every observation tick while a fuse.bindfs workload projection is live
+#     (mountpoint observed from /proc/mounts), together with the FULL current
+#     /run/mount/utab content;
+#   - every /run/mount/utab content change even without a live projection;
+#   - one settled capture after the run process exited (the projection
+#     teardown completes around run completion).
+# Output records:
+#   obs tick=N projection_mounts=N mountpoint=<mp|none>   (+ full utab content)
+#   settled mountpoint=<mp|none>                          (+ full utab content)
+# The watcher NEVER mutates utab and grants no runtime-tree authority.
+utab_watch() {
+  local bgpid="$1" last="" tick=0 mp proj content
+  while kill -0 "$bgpid" 2>/dev/null; do
+    tick=$((tick + 1))
+    mp="$(grep 'fuse.bindfs' /proc/mounts 2>/dev/null \
+      | grep '/run/docker-helper/workload-mac/' | awk '{print $2}' | head -1 || true)"
+    proj="$(grep 'fuse.bindfs' /proc/mounts 2>/dev/null | grep -c '/run/docker-helper/workload-mac/' || true)"
+    content="$(cat /run/mount/utab 2>/dev/null || true)"
+    if [ -n "$mp" ] || [ "$content" != "$last" ]; then
+      printf 'obs tick=%s projection_mounts=%s mountpoint=%s\n' "$tick" "$proj" "${mp:-none}"
+      if [ -n "$content" ]; then
+        printf '%s\n' "$content" | sed 's/^/  utab| /'
+      else
+        echo "  utab| <empty>"
+      fi
+      last="$content"
+    fi
+    sleep 0.05
+  done
+  sleep 1
+  mp="$(grep 'fuse.bindfs' /proc/mounts 2>/dev/null \
+    | grep '/run/docker-helper/workload-mac/' | awk '{print $2}' | head -1 || true)"
+  content="$(cat /run/mount/utab 2>/dev/null || true)"
+  printf 'settled mountpoint=%s\n' "${mp:-none}"
+  if [ -n "$content" ]; then
+    printf '%s\n' "$content" | sed 's/^/  utab| /'
+  else
+    echo "  utab| <empty>"
+  fi
 }
 
 cleanup() {
@@ -424,17 +472,17 @@ if [ -z "$TREE_CTX_BEFORE" ]; then
   exit 2
 fi
 
-dh principal create --system --no-credential "$PRINCIPAL" 2>/tmp/uat-wls-setup.err || {
+dh principal create --no-credential "$PRINCIPAL" 2>/tmp/uat-wls-setup.err || {
   echo "error: principal create failed: $(redact </tmp/uat-wls-setup.err | tail -3)" >&2; exit 1; }
-dh principal set --system "$PRINCIPAL" enabled true 2>>/tmp/uat-wls-setup.err || true
-dh principal allowed-root add --system "$PRINCIPAL" "$TREE" 2>>/tmp/uat-wls-setup.err || {
+dh principal set "$PRINCIPAL" enabled true 2>>/tmp/uat-wls-setup.err || true
+dh principal allowed-root add "$PRINCIPAL" "$TREE" 2>>/tmp/uat-wls-setup.err || {
   echo "error: principal TREE root add failed: $(redact </tmp/uat-wls-setup.err | tail -3)" >&2; exit 1; }
-dh principal allowed-root add --system --access read_only "$PRINCIPAL" "$TREE/work/pipeline-inputs" 2>>/tmp/uat-wls-setup.err || {
+dh principal allowed-root add --access read_only "$PRINCIPAL" "$TREE/work/pipeline-inputs" 2>>/tmp/uat-wls-setup.err || {
   echo "error: principal pipeline-inputs root add failed: $(redact </tmp/uat-wls-setup.err | tail -3)" >&2; exit 1; }
-MAIN_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" main --no-credential --json 2>>/tmp/uat-wls-setup.err || true)"
+MAIN_L_JSON="$(dh launcher create --principal "$PRINCIPAL" main --no-credential --json 2>>/tmp/uat-wls-setup.err || true)"
 MAIN_L_ID="$(printf '%s' "$MAIN_L_JSON" | json_field id)"
 [ -n "$MAIN_L_ID" ] || { echo "error: launcher create failed: $MAIN_L_JSON ($(redact </tmp/uat-wls-setup.err | tail -10))" >&2; exit 1; }
-MAIN_LC_OUT="$(dh launcher credential create --system --principal "$PRINCIPAL" --json "$MAIN_L_ID" 2>/dev/null || true)"
+MAIN_LC_OUT="$(dh launcher credential create --principal "$PRINCIPAL" --json "$MAIN_L_ID" 2>/dev/null || true)"
 MAIN_LC_TOKEN="$(printf '%s' "$MAIN_LC_OUT" | json_field token)"
 [ -n "$MAIN_LC_TOKEN" ] || { echo "error: launcher credential create failed" >&2; exit 1; }
 printf '%s\n' "$MAIN_LC_TOKEN" > /tmp/uat-wls-cred-main; chmod 600 /tmp/uat-wls-cred-main
@@ -445,6 +493,326 @@ acc_ok "acceptance session $WSA_ID with mixed policy tree"
 
 # The audit window starts now.
 AUDIT_START_EPOCH="$(date +%s)"
+
+# ==============================================================================
+# DIAGNOSTIC S2M (test-harness only; runs BEFORE S1/S2 so the pre-state is
+# pristine): libfuse mtab/utab bookkeeping on the shipped policy.
+# The shipped policy deliberately does NOT grant mount_var_run_t:file write.
+# The Step-7 experiment (branch diag/ro-selinux-utab-write, run 37832314572)
+# proved the denied { write } (comm="mount", name=utab, run 37784360967) is
+# libmount's WRITABILITY PROBE (try_write(): eaccess(R_OK|W_OK)) and that the
+# record write never happens either way: the bindfs projection mount carries
+# no userspace mount options, so utab_new_entry() declares the entry
+# unnecessary. The shipped policy therefore SUPPRESSES the probe with
+#   dontaudit docker_helper_t mount_var_run_t:file write;
+# (no authority change; the check stays denied). This block's mandatory
+# acceptance:
+#   (1) the utab pre-state (existence, label, mode, full content);
+#   (2) the live RO projection works with /run/mount/utab present: the canary
+#       run exits 0, reads the marker through the bindfs projection, and the
+#       terminal status (via the canary session's own bearer) is succeeded;
+#   (3) the utab state after the run completed normally (the canary's own
+#       record count after the unmount is OBSERVATIONAL evidence, not an
+#       error: the bookkeeping writes no entry for this mount);
+#   (4) every pre-existing (foreign) utab line survives byte-exact — no
+#       corruption by any bookkeeping rewrite;
+#   (5) no utab AVC in the canary window (the dontaudit suppression) and no
+#       residue: canary session deleted, containers/pins/wlmac unchanged;
+#   (6) exact restore of the VM's pre-state: the utab pre-state is captured
+#       as a REAL FILE COPY and compared byte-for-byte — a Bash command
+#       substitution strips trailing newlines, so byte-exactness is decided
+#       on the file, never on a captured string.
+# This block only: (1) captures the guest pre-state; (2) creates
+# /run/mount/utab with the policy-default label ONLY when absent, seeding one
+# syntactically valid foreign utab record (canonical libmount field order, an
+# inert marker never acted upon by libmount) so the foreign-integrity proof is
+# real rather than vacuous; (3) runs EXACTLY ONE fresh RO canary through the
+# production CLI while a pure-observer watcher records the projection
+# liveness and the full utab content timeline; (4) dumps synchronized
+# evidence; (5) restores exactly what it created. No executable is
+# substituted. A reproduced canary failure, corrupted foreign entries, an
+# utab AVC, or a failed restore are reported through acc_fail (RED).
+# ==============================================================================
+say "S2M: mtab/utab pre-state + one fresh RO canary with the utab observation (harness-only diagnostic)"
+CANARY_UTAB_CREATED=0
+CANARY_MOUNT_DIR_CREATED=0
+CANARY_SID=""
+CANARY_OP_ID=""
+CANARY_ST=""
+CANARY_EC=0
+UTAB_PRE_EXISTED=0
+UTAB_PRE_CONTENT=""
+UTAB_POST_CONTENT=""
+UTAB_WATCH_LOG=/tmp/uat-wls-utab-watch.log
+# Byte-exact restore verification: the pre-state is captured as a REAL FILE
+# COPY and compared byte-for-byte on the files — with the cmp-free
+# files_identical primitive (sha256sum; cmp is absent from the minimal
+# openSUSE Tumbleweed cloud image, the same reason
+# scripts/uat-install-tarball.sh owns this primitive). Bash command
+# substitution strips trailing newlines, so a captured string can never
+# decide byte-exactness.
+UTAB_PRE_COPY=/tmp/uat-wls-utab-pre-copy
+files_identical() {
+  local a="$1" b="$2"
+  [ "$(sha256sum "$a" | awk '{print $1}')" = "$(sha256sum "$b" | awk '{print $1}')" ]
+}
+# Inert foreign utab record in the canonical libmount utab writer field order
+# (ID UNIQID SRC TARGET ROOT BINDSRC ATTRS OPTS; the unset fields omitted), so
+# the seeded line round-trips libmount's parse+rewrite byte-exactly.
+S2M_FOREIGN_UTAB_LINE='ID=4242 UNIQID=20990101 SRC=/uat-s2m-foreign-src TARGET=/uat-s2m-foreign-target OPTS=foreign-opt'
+echo "  --- S2M pre-state: packages and linkage ---"
+rpm -q bindfs fuse3 fuse3-libs util-linux 2>&1 | sed 's/^/  rpm-q: /' || true
+ldd /usr/bin/bindfs 2>&1 | sed 's/^/  ldd: /' || true
+echo "  --- S2M pre-state: mtab/utab/mount files ---"
+ls -lZ /etc/mtab /run/mount /run/mount/utab /bin/mount 2>&1 | sed 's/^/  ls-lZ: /' || true
+stat -c '%F %a %U:%G %n' /etc/mtab /run/mount/utab 2>&1 | sed 's/^/  stat: /' || true
+echo "  readlink -f /etc/mtab:  $(readlink -f /etc/mtab 2>&1)"
+echo "  readlink -f /bin/mount: $(readlink -f /bin/mount 2>&1)"
+echo "  readlink -f /bin/umount: $(readlink -f /bin/umount 2>&1)"
+test -w /etc/mtab
+CANARY_MTAB_W=$?
+echo "  mtab_writable=$CANARY_MTAB_W"
+ls -lZ /bin/umount 2>&1 | sed 's/^/  ls-lZ: /' || true
+echo "  matchpathcon /run/mount/utab: $(matchpathcon /run/mount/utab 2>&1 || true)"
+if [ -e /run/mount/utab ]; then
+  echo "  utab: PRE-EXISTING before S2 (the canary leaves it untouched)"
+  UTAB_PRE_EXISTED=1
+  cp -p /run/mount/utab "$UTAB_PRE_COPY"
+  UTAB_PRE_CONTENT="$(cat /run/mount/utab 2>/dev/null || true)"
+  UTAB_PRE_LINES="$(printf '%s\n' "$UTAB_PRE_CONTENT" | grep -c . 2>/dev/null || true)"
+  [ -n "$UTAB_PRE_LINES" ] || UTAB_PRE_LINES=0
+  echo "  utab pre-state content ($UTAB_PRE_LINES non-empty lines; byte-exact copy at $UTAB_PRE_COPY):"
+  if [ -n "$UTAB_PRE_CONTENT" ]; then
+    printf '%s\n' "$UTAB_PRE_CONTENT" | sed 's/^/  utab| /'
+  else
+    echo "  utab| <empty>"
+  fi
+else
+  CANARY_UTAB_CREATED=1
+  if [ ! -d /run/mount ]; then
+    mkdir -p /run/mount && restorecon /run/mount 2>/dev/null || true
+    CANARY_MOUNT_DIR_CREATED=1
+  fi
+  printf '%s\n' "$S2M_FOREIGN_UTAB_LINE" > /run/mount/utab
+  chmod 644 /run/mount/utab
+  restorecon /run/mount/utab 2>/dev/null || true
+  echo "  utab: ABSENT before S2 - created for the canary with one inert foreign record ($(stat -c '%A %U:%G %C' /run/mount/utab 2>&1))"
+  echo "  utab| $S2M_FOREIGN_UTAB_LINE"
+  UTAB_PRE_CONTENT="$S2M_FOREIGN_UTAB_LINE"
+fi
+CANARY_SID="$(create_session /tmp/uat-wls-cred-main "$TREE/work")" \
+  || { echo "error: canary session creation failed" >&2; exit 1; }
+CANARY_TOKEN="$(cat "/tmp/uat-wls-tok-$CANARY_SID")"
+mkdir -p "$TREE/work/canary-ro"
+printf 'canary-ro-marker\n' > "$TREE/work/canary-ro/marker.txt"
+S2M_RESIDUE_BASE="$(residue_state || true)"
+: > "$UTAB_WATCH_LOG"
+echo "  --- S2M canary: exactly one fresh RO run (fresh session $CANARY_SID) ---"
+DOCKER_HELPER_SESSION_TOKEN="$CANARY_TOKEN" \
+  dh run --mount canary-ro:/mnt/canary:ro alpine:3.24 -- \
+  sh -ec 'cat /mnt/canary/marker.txt' >/tmp/uat-wls-s2m-run.log 2>&1 &
+CANARY_BG_PID=$!
+utab_watch "$CANARY_BG_PID" >>"$UTAB_WATCH_LOG" 2>&1 &
+UTAB_WATCH_PID=$!
+CANARY_PROJ_EVIDENCE="$(wait_bindfs_projection "$CANARY_BG_PID" || true)"
+wait "$CANARY_BG_PID"
+CANARY_EC=$?
+wait "$UTAB_WATCH_PID"
+echo "  canary run exit code: $CANARY_EC"
+echo "  canary projection during run: ${CANARY_PROJ_EVIDENCE:-<none observed>}"
+CANARY_OP_ID="$(journalctl --utc -u docker-helper.service --no-pager 2>/dev/null \
+  | grep '"event":"run.start"' \
+  | grep "\"session_id\":\"$CANARY_SID\"" \
+  | tail -1 | grep -oP '"operation_id":"\K[^"]+' || true)"
+echo "  canary operation id: ${CANARY_OP_ID:-<none: no admitted run.start for the canary session>}"
+if [ -n "$CANARY_OP_ID" ]; then
+  # GET /operations/{id} is session-bearer-authorized: the canary's OWN
+  # session bearer must be presented, or the call fails with
+  # auth.failure/session.parse_failed and the status reads <unreadable>.
+  CANARY_ST="$(curl --silent --max-time 2 --unix-socket "$SOCK" \
+    -H "Authorization: Bearer $CANARY_TOKEN" \
+    "http://localhost/operations/$CANARY_OP_ID" 2>/dev/null | json_field status || true)"
+  echo "  canary terminal status: ${CANARY_ST:-<unreadable>}"
+fi
+echo "  --- S2M canary run output (full, redacted) ---"
+redact </tmp/uat-wls-s2m-run.log 2>/dev/null | sed 's/^/  run: /' || true
+echo "  --- S2M utab watch: full timeline (projection liveness + every utab content change) ---"
+sed 's/^/  watch: /' "$UTAB_WATCH_LOG" 2>/dev/null || true
+UTAB_POST_CONTENT="$(cat /run/mount/utab 2>/dev/null || true)"
+echo "  --- S2M utab post-state content ---"
+if [ -n "$UTAB_POST_CONTENT" ]; then
+  printf '%s\n' "$UTAB_POST_CONTENT" | sed 's/^/  utab| /'
+else
+  echo "  utab| <empty>"
+fi
+echo "  --- S2M effective policy under test (setuid / mount_exec_t / mount_var_run_t) ---"
+sesearch -A -s docker_helper_t -t docker_helper_t -c capability 2>&1 | sed 's/^/  sesearch: /' || true
+sesearch -A -s docker_helper_t -t mount_exec_t -c file 2>&1 | sed 's/^/  sesearch: /' || true
+sesearch -A -s docker_helper_t -t mount_var_run_t 2>&1 | sed 's/^/  sesearch: /' || true
+echo "  sesearch (dontaudit): $(sesearch --dontaudit -s docker_helper_t -t mount_var_run_t 2>&1 || true)"
+# semodule -c -E writes the extracted CIL as a REAL FILE (docker_helper.cil)
+# in the working directory and only prints a status line on stdout ("Extracting
+# at highest existing priority ..."). The exported-CIL check therefore runs in
+# a controlled directory and reads that real file; grepping stdout reads only
+# the status line and reports a false "no rule in the exported CIL".
+CIL_EXPORT_DIR="$(mktemp -d /tmp/uat-wls-cil.XXXXXX)"
+( cd "$CIL_EXPORT_DIR" && semodule -c -E docker_helper ) >"$CIL_EXPORT_DIR/export.stdout" 2>"$CIL_EXPORT_DIR/export.stderr" || true
+echo "  cil: export stdout: $(tr '\n' ' ' <"$CIL_EXPORT_DIR/export.stdout" 2>/dev/null) stderr: $(tr '\n' ' ' <"$CIL_EXPORT_DIR/export.stderr" 2>/dev/null)"
+if [ -f "$CIL_EXPORT_DIR/docker_helper.cil" ]; then
+  echo "  cil: exported real CIL file: $CIL_EXPORT_DIR/docker_helper.cil ($(wc -c <"$CIL_EXPORT_DIR/docker_helper.cil") bytes)"
+  CIL_HITS="$(grep -E "setuid|mount_exec|mount_var_run" "$CIL_EXPORT_DIR/docker_helper.cil" 2>/dev/null || true)"
+  if [ -n "$CIL_HITS" ]; then
+    printf '%s\n' "$CIL_HITS" | sed 's/^/  cil: /'
+  else
+    echo "  cil: no setuid/mount_exec/mount_var_run rule in the exported CIL file"
+  fi
+else
+  echo "  cil: exported CIL file missing in $CIL_EXPORT_DIR:"
+  ls -la "$CIL_EXPORT_DIR" 2>&1 | sed 's/^/  cil:   /' || true
+fi
+rm -rf "$CIL_EXPORT_DIR"
+echo "  --- S2M post-run projection/worker/retained-state inventory ---"
+grep 'fuse.bindfs' /proc/mounts 2>/dev/null | sed 's/^/  mounts: /' || echo "  mounts: no fuse.bindfs mounts"
+ps -eZ 2>/dev/null | grep -E 'bindfs' | sed 's/^/  ps: /' || echo "  ps: no bindfs workers"
+ls -la /run/docker-helper/workload-mac 2>&1 | tail -10 | sed 's/^/  wlmac-runtime: /' || true
+ls -la /var/lib/docker-helper/workload-mac 2>&1 | tail -10 | sed 's/^/  wlmac-durable: /' || true
+residue_state | sed 's/^/  residue: /' || true
+echo "  --- S2M journal + AVC window (audit-window start epoch $AUDIT_START_EPOCH) ---"
+S2M_AUDIT_START_ISO="$(date -u -d "@${AUDIT_START_EPOCH}" '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || true)"
+journalctl --utc -u docker-helper.service --no-pager 2>/dev/null \
+  | awk -v start="${S2M_AUDIT_START_ISO:-}" '
+      /"time":"/ {
+        if (match($0, /"time":"[^"]*"/)) {
+          t = substr($0, RSTART + 8, RLENGTH - 9)
+          if (start == "" || t >= start) print
+        }
+      }' 2>/dev/null \
+  | grep -iE 'bindfs|mount|avc|denied|error|fail|operation' \
+  | tail -120 | redact | sed 's/^/  journal: /' || true
+S2M_AVC_DATE="$(date -d "@$AUDIT_START_EPOCH" '+%m/%d/%Y %H:%M:%S' 2>/dev/null || true)"
+S2M_AVC_WINDOW="$(ausearch -m AVC -ts "$S2M_AVC_DATE" 2>/dev/null || true)"
+if [ -z "$S2M_AVC_WINDOW" ] && [ -f /var/log/audit/audit.log ]; then
+  S2M_AVC_WINDOW="$(awk -v start="$AUDIT_START_EPOCH" '
+    match($0, /audit\(([0-9]+)\./, m) { if (m[1] + 0 >= start + 0) print }
+  ' /var/log/audit/audit.log 2>/dev/null || true)"
+fi
+if [ -n "$S2M_AVC_WINDOW" ]; then
+  printf '%s\n' "$S2M_AVC_WINDOW" | redact | sed 's/^/  avc: /' || true
+else
+  echo "  avc: no AVC records in the canary window"
+fi
+echo "  --- S2M post-state: mtab/utab after the canary ---"
+ls -lZ /etc/mtab /run/mount/utab 2>&1 | sed 's/^/  ls-lZ: /' || true
+stat -c '%F %a %U:%G %n' /etc/mtab /run/mount/utab 2>&1 | sed 's/^/  stat: /' || true
+echo "  --- S2M utab bookkeeping verdict ---"
+CANARY_MP="$(awk '/^obs tick=/ { mp=$0; sub(/^.*mountpoint=/, "", mp); if (mp != "none") { print mp; exit } }' "$UTAB_WATCH_LOG" 2>/dev/null || true)"
+echo "  canary projection mountpoint: ${CANARY_MP:-<none observed>}"
+UTAB_DURING_HITS="$(awk -v want="TARGET=$CANARY_MP" '
+  /^obs tick=/ { live = ($0 ~ /mountpoint=none$/ ? 0 : 1); next }
+  /^settled mountpoint=/ { live = ($0 ~ /mountpoint=none$/ ? 0 : 1); next }
+  live && want != "TARGET=" && index($0, want) { hits++ }
+  END { printf "%d", hits + 0 }
+' "$UTAB_WATCH_LOG" 2>/dev/null || echo 0)"
+echo "  utab bookkeeping records for the canary mount observed during the live projection: $UTAB_DURING_HITS"
+UTAB_STALE_COUNT=0
+if [ -n "$CANARY_MP" ]; then
+  UTAB_STALE_COUNT="$(printf '%s\n' "$UTAB_POST_CONTENT" | grep -Fc "TARGET=$CANARY_MP" 2>/dev/null || true)"
+  [ -n "$UTAB_STALE_COUNT" ] || UTAB_STALE_COUNT=0
+fi
+echo "  utab canary-entry records after normal completion: $UTAB_STALE_COUNT (0 = removed/never written; >0 = the record persists after the helper-owned unmount)"
+UTAB_FOREIGN_LOST=0
+if [ "$UTAB_PRE_EXISTED" -eq 1 ]; then
+  while IFS= read -r _l; do
+    [ -n "$_l" ] || continue
+    printf '%s\n' "$UTAB_POST_CONTENT" | grep -Fxq "$_l" || UTAB_FOREIGN_LOST=$((UTAB_FOREIGN_LOST + 1))
+  done <<< "$UTAB_PRE_CONTENT"
+else
+  if [ -n "$UTAB_POST_CONTENT" ]; then
+    printf '%s\n' "$UTAB_POST_CONTENT" | grep -Fxq "$S2M_FOREIGN_UTAB_LINE" || UTAB_FOREIGN_LOST=1
+  else
+    UTAB_FOREIGN_LOST=1
+  fi
+fi
+if [ "$UTAB_FOREIGN_LOST" -eq 0 ]; then
+  echo "  ok:      utab foreign entries intact after the canary (no corruption)"
+else
+  echo "  FAIL:    utab foreign entries lost or changed by the bookkeeping rewrite: $UTAB_FOREIGN_LOST line(s)" >&2
+fi
+echo "  --- S2M restore: remove exactly what the canary created ---"
+CANARY_FAIL_REASON=""
+[ "$CANARY_EC" -ne 0 ] && CANARY_FAIL_REASON="run exit $CANARY_EC"
+if [ -n "$CANARY_ST" ] && [ "$CANARY_ST" != "succeeded" ]; then
+  CANARY_FAIL_REASON="$CANARY_FAIL_REASON terminal-status=$CANARY_ST"
+fi
+if grep -q 'Permission denied' /tmp/uat-wls-s2m-run.log 2>/dev/null; then
+  CANARY_FAIL_REASON="$CANARY_FAIL_REASON 'Permission denied' present in run output"
+fi
+# The absence of the canary's own utab record is NOT an error: the shipped
+# policy deliberately does not grant mount_var_run_t:file write and the
+# Step-7 experiment proved the bookkeeping writes no entry for this mount
+# either way. The during/stale counts stay observational evidence only.
+if [ "$UTAB_FOREIGN_LOST" -ne 0 ]; then
+  CANARY_FAIL_REASON="$CANARY_FAIL_REASON utab-foreign-entry-corruption($UTAB_FOREIGN_LOST)"
+fi
+if [ "$CANARY_UTAB_CREATED" = 1 ]; then
+  rm -f /run/mount/utab
+  if [ "$CANARY_MOUNT_DIR_CREATED" = 1 ]; then
+    rmdir /run/mount 2>/dev/null || true
+  fi
+  echo "  restore: canary-created /run/mount/utab removed (pre-existing state restored)"
+else
+  if [ -n "$CANARY_MP" ] && [ "$UTAB_STALE_COUNT" -gt 0 ]; then
+    sed -i "\#TARGET=$CANARY_MP#d" /run/mount/utab 2>/dev/null || true
+    echo "  restore: the canary's own utab record(s) removed from the pre-existing file ($UTAB_STALE_COUNT line(s))"
+  else
+    echo "  restore: utab was pre-existing - left untouched"
+  fi
+fi
+rm -rf "$TREE/work/canary-ro"
+CANARY_DELETE_RC=0
+dh session delete --token-file /tmp/uat-wls-cred-main "$CANARY_SID" >/dev/null 2>&1 || CANARY_DELETE_RC=$?
+echo "  restore: canary session $CANARY_SID delete rc=$CANARY_DELETE_RC"
+# Restore verification: the VM's utab state must equal the pre-state,
+# byte-exact, decided on the real files with files_identical (command
+# substitution strips trailing newlines; a captured string can never prove
+# byte-exactness).
+if [ "$CANARY_UTAB_CREATED" = 1 ]; then
+  if [ -e /run/mount/utab ]; then
+    CANARY_FAIL_REASON="$CANARY_FAIL_REASON utab-restore-left-the-canary-file-behind"
+  else
+    echo "  restore: /run/mount/utab absent again (the pre-existing state)"
+  fi
+else
+  if files_identical "$UTAB_PRE_COPY" /run/mount/utab; then
+    echo "  restore: utab byte-identical to the pre-state (files_identical)"
+  else
+    CANARY_FAIL_REASON="$CANARY_FAIL_REASON utab-restore-differs-from-the-pre-state"
+  fi
+fi
+rm -f "$UTAB_PRE_COPY"
+# No residue: the helper-owned containers/pins/workload-MAC state must be
+# exactly what it was before the canary. An unavailable inventory is never
+# "clean" (fail-closed).
+if [ -z "$S2M_RESIDUE_BASE" ]; then
+  CANARY_FAIL_REASON="$CANARY_FAIL_REASON s2m-residue-inventory-unavailable"
+elif residue_unchanged "$S2M_RESIDUE_BASE"; then
+  echo "  restore: residue unchanged ($S2M_RESIDUE_BASE)"
+else
+  CANARY_FAIL_REASON="$CANARY_FAIL_REASON s2m-residue-drift"
+fi
+residue_state | sed 's/^/  residue-after-restore: /' || true
+if [ -n "$CANARY_FAIL_REASON" ]; then
+  acc_fail "S2M mtab-path canary RED: $CANARY_FAIL_REASON (full evidence above; hypothesis chain reproduced)"
+else
+  # The canary is a mandatory acceptance scenario, not an informational
+  # note: with the mtab/utab preconditions satisfied, the fresh RO run must
+  # succeed through the bindfs projection on the shipped policy (whose
+  # dontaudit suppresses the writability probe), the foreign utab entries
+  # must survive untouched, and the exact restore must hold. The absence of
+  # the canary's own utab record is the proven no-entry behavior, never an
+  # error.
+  acc_ok "S2M mtab-path canary green: fresh RO exposure readable through the bindfs projection with /run/mount/utab present, no utab AVC (probe suppressed by dontaudit), foreign entries intact, exact restore"
+fi
 
 # ==============================================================================
 # scenario S1: RW exposure is really writable
@@ -537,22 +905,22 @@ printf 'seed\n' > "$SE_CACHE/seed.txt"
 chown -R "$PRINCIPAL:$PRINCIPAL" "$SE_OPT"
 chmod -R u+rwX,go+rX "$SE_OPT"
 if dh config allowed-root add --access read_write "$SE_OPT" >/dev/null 2>&1 \
-    && dh principal allowed-root add --system --access read_write "$PRINCIPAL" "$ALLOWED_ROOT" >/dev/null 2>&1 \
-    && dh principal allowed-root add --system --access read_write "$PRINCIPAL" "$SE_OPT" >/dev/null 2>&1; then
+    && dh principal allowed-root add --access read_write "$PRINCIPAL" "$ALLOWED_ROOT" >/dev/null 2>&1 \
+    && dh principal allowed-root add --access read_write "$PRINCIPAL" "$SE_OPT" >/dev/null 2>&1; then
   acc_ok "SE setup: second effective root $SE_OPT (global RW + Principal RW)"
 else
   acc_fail "SE setup: second effective root setup failed"
 fi
-SE_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" se-multiroot --no-credential --json 2>/dev/null || true)"
+SE_L_JSON="$(dh launcher create --principal "$PRINCIPAL" se-multiroot --no-credential --json 2>/dev/null || true)"
 SE_L_ID="$(printf '%s' "$SE_L_JSON" | json_field id)"
 if [ -n "$SE_L_ID" ] \
-    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$SE_L_ID" "$ALLOWED_ROOT" >/dev/null 2>&1 \
-    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$SE_L_ID" "$SE_OPT" >/dev/null 2>&1; then
+    && dh launcher allowed-root add --principal "$PRINCIPAL" "$SE_L_ID" "$ALLOWED_ROOT" >/dev/null 2>&1 \
+    && dh launcher allowed-root add --principal "$PRINCIPAL" "$SE_L_ID" "$SE_OPT" >/dev/null 2>&1; then
   acc_ok "SE setup: multiroot launcher carries both effective roots"
 else
   acc_fail "SE setup: multiroot launcher setup failed: $SE_L_JSON"
 fi
-SE_LC_OUT="$(dh launcher credential create --system --principal "$PRINCIPAL" --json "$SE_L_ID" 2>/dev/null || true)"
+SE_LC_OUT="$(dh launcher credential create --principal "$PRINCIPAL" --json "$SE_L_ID" 2>/dev/null || true)"
 SE_LC_TOKEN="$(printf '%s' "$SE_LC_OUT" | json_field token)"
 if [ -n "$SE_LC_TOKEN" ]; then
   printf '%s\n' "$SE_LC_TOKEN" > /tmp/uat-wls-cred-multiroot; chmod 600 /tmp/uat-wls-cred-multiroot
@@ -564,7 +932,7 @@ rm -rf "$ALLOWED_ROOT/se-runs"
 mkdir -p "$SE_WS"
 chown -R "$PRINCIPAL:$PRINCIPAL" "$ALLOWED_ROOT/se-runs"
 chmod -R u+rwX,go+rX "$ALLOWED_ROOT/se-runs"
-SE_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+SE_OUT="$(dh session create --token-file /tmp/uat-wls-cred-multiroot \
   "$SE_WS" --json \
   --filesystem-root "$SE_HELPER=read_only" \
   --filesystem-root "$SE_CACHE=read_write" 2>&1 || true)"
@@ -612,14 +980,14 @@ else
 fi
 
 # SE introspection: session show and self carry the issued external roots.
-SE_SHOW="$(dh session show --system --token-file /tmp/uat-wls-cred-multiroot "$SE_ID" --json 2>/dev/null || true)"
+SE_SHOW="$(dh session show --token-file /tmp/uat-wls-cred-multiroot "$SE_ID" --json 2>/dev/null || true)"
 if printf '%s' "$SE_SHOW" | grep -q '"'"$SE_CACHE"'"' \
     && printf '%s' "$SE_SHOW" | grep -q '"'"$SE_HELPER"'"'; then
   acc_ok "SE session show carries the issued external roots (RW cache + RO helper)"
 else
   acc_fail "SE session show does not expose the issued external roots: $(printf '%s' "$SE_SHOW" | redact | head -2)"
 fi
-SE_SELF="$(dh self --system --token-file "/tmp/uat-wls-tok-$SE_ID" --json 2>/dev/null || true)"
+SE_SELF="$(dh self --token-file "/tmp/uat-wls-tok-$SE_ID" --json 2>/dev/null || true)"
 if printf '%s' "$SE_SELF" | grep -q '"'"$SE_CACHE"'"' \
     && printf '%s' "$SE_SELF" | grep -q 'read_write'; then
   acc_ok "SE self carries the issued external RW root"
@@ -721,13 +1089,13 @@ se_expect_context_type "$SE_CACHE" docker_helper_workspace_t \
 
 # SE share: a second Session issuing the same external tree must prevent
 # early release of the coverage when the first Session is deleted.
-SE2_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+SE2_OUT="$(dh session create --token-file /tmp/uat-wls-cred-multiroot \
   "$SE_WS" --json \
   --filesystem-root "$SE_CACHE=read_write" 2>&1 || true)"
 SE2_ID="$(printf '%s' "$SE2_OUT" | json_field id)"
 if [ -n "$SE2_ID" ]; then
   printf '%s\n' "$(printf '%s' "$SE2_OUT" | json_field token)" > "/tmp/uat-wls-tok-$SE2_ID"; chmod 600 "/tmp/uat-wls-tok-$SE2_ID"
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE_ID" >/dev/null 2>&1
+  dh session delete --token-file /tmp/uat-wls-cred-multiroot "$SE_ID" >/dev/null 2>&1
   se_expect_rule_present "$SE_CACHE(/.*)?" \
     "SE shared external tree survives the first Session deletion (second Session keeps it)" \
     "SE external fcontext coverage was released while a second Session still issues the tree"
@@ -739,7 +1107,7 @@ if [ -n "$SE2_ID" ]; then
   else
     acc_fail "SE second Session lost write access to the shared tree (ec=$SE2_W)"
   fi
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE2_ID" >/dev/null 2>&1
+  dh session delete --token-file /tmp/uat-wls-cred-multiroot "$SE2_ID" >/dev/null 2>&1
   se_expect_rule_absent "$SE_CACHE(/.*)?" \
     "SE external fcontext coverage relinquished after the last Session deletion" \
     "SE external fcontext coverage must be relinquished after the last Session released it"
@@ -752,7 +1120,7 @@ else
 fi
 
 # SE overlap: issued ancestor/descendant trees survive either deletion order.
-SE3_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+SE3_OUT="$(dh session create --token-file /tmp/uat-wls-cred-multiroot \
   "$SE_WS" --json \
   --filesystem-root "$SE_OPT=read_write" \
   --filesystem-root "$SE_CACHE=read_write" 2>&1 || true)"
@@ -767,7 +1135,7 @@ if [ -n "$SE3_ID" ]; then
   se_expect_rule_absent "$SE_CACHE(/.*)?" \
     "SE the collapsed descendant carries no independent rule" \
     "SE nested issued roots did not collapse"
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE3_ID" >/dev/null 2>&1
+  dh session delete --token-file /tmp/uat-wls-cred-multiroot "$SE3_ID" >/dev/null 2>&1
   se_expect_rule_absent "$SE_OPT(/.*)?" \
     "SE ancestor boundary removed after the only session deletion" \
     "SE ancestor boundary must be removed after the only session released it"
@@ -778,11 +1146,11 @@ fi
 
 # SE reverse overlap: issue the child first, then the parent; deleting the
 # child must keep the parent usable, deleting the parent cleans up.
-SE4_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+SE4_OUT="$(dh session create --token-file /tmp/uat-wls-cred-multiroot \
   "$SE_WS" --json \
   --filesystem-root "$SE_CACHE=read_write" 2>&1 || true)"
 SE4_ID="$(printf '%s' "$SE4_OUT" | json_field id)"
-SE5_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+SE5_OUT="$(dh session create --token-file /tmp/uat-wls-cred-multiroot \
   "$SE_WS" --json \
   --filesystem-root "$SE_OPT=read_write" 2>&1 || true)"
 SE5_ID="$(printf '%s' "$SE5_OUT" | json_field id)"
@@ -797,12 +1165,12 @@ if [ -n "$SE4_ID" ] && [ -n "$SE5_ID" ]; then
     "SE reverse-order issuance prepares both disjoint boundaries" \
     "SE reverse-order issuance boundaries missing"
   # Delete the child session first: the parent boundary stays.
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE4_ID" >/dev/null 2>&1
+  dh session delete --token-file /tmp/uat-wls-cred-multiroot "$SE4_ID" >/dev/null 2>&1
   se_expect_rule_present "$SE_OPT(/.*)?" \
     "SE child deletion first keeps the parent boundary" \
     "SE child deletion removed the parent boundary needed by the parent session"
   # Delete the parent session: everything is released and restored.
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE5_ID" >/dev/null 2>&1
+  dh session delete --token-file /tmp/uat-wls-cred-multiroot "$SE5_ID" >/dev/null 2>&1
   se_expect_rule_absent "$SE_OPT(/.*)?" \
     "SE final deletion relinquishes every external boundary" \
     "SE final deletion leaves fcontext residue"
@@ -821,7 +1189,7 @@ fi
 SE_FILE="$SE_OPT/worker.env"
 printf 'se-file-src\n' > "$SE_FILE"
 chown "$PRINCIPAL:$PRINCIPAL" "$SE_FILE" 2>/dev/null || true
-SE6_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+SE6_OUT="$(dh session create --token-file /tmp/uat-wls-cred-multiroot \
   "$SE_WS" --json \
   --filesystem-root "$SE_FILE=read_write" 2>&1 || true)"
 SE6_ID="$(printf '%s' "$SE6_OUT" | json_field id)"
@@ -837,12 +1205,12 @@ if [ -n "$SE6_ID" ]; then
   fi
   # Unrelated boundary mutation (a second session prepares and releases an
   # unrelated tree) must not disturb the issued file root's usability.
-  SE6B_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+  SE6B_OUT="$(dh session create --token-file /tmp/uat-wls-cred-multiroot \
     "$SE_WS" --json \
     --filesystem-root "$SE_CACHE=read_write" 2>&1 || true)"
   SE6B_ID="$(printf '%s' "$SE6B_OUT" | json_field id)"
   if [ -n "$SE6B_ID" ]; then
-    dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE6B_ID" >/dev/null 2>&1
+    dh session delete --token-file /tmp/uat-wls-cred-multiroot "$SE6B_ID" >/dev/null 2>&1
   fi
   SE6_W2="$(DOCKER_HELPER_SESSION_TOKEN="$(cat "/tmp/uat-wls-tok-$SE6_ID")" \
     dh run --mount "$SE_FILE:/etc/worker.env" alpine:3.24 -- \
@@ -852,7 +1220,7 @@ if [ -n "$SE6_ID" ]; then
   else
     acc_fail "SE regular-file root lost write access after an unrelated boundary mutation (ec=$SE6_W2)"
   fi
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE6_ID" >/dev/null 2>&1
+  dh session delete --token-file /tmp/uat-wls-cred-multiroot "$SE6_ID" >/dev/null 2>&1
   se_expect_rule_absent "$SE_FILE" \
     "SE regular-file boundary relinquished after deletion" \
     "SE regular-file boundary must be relinquished after deletion"
@@ -871,7 +1239,7 @@ chown -R "$PRINCIPAL:$PRINCIPAL" "$SE_SIB" 2>/dev/null || true
 semanage fcontext -a -t docker_helper_workspace_t "$SE_SIB(/.*)?" >/dev/null 2>&1
 restorecon -R "$SE_SIB" >/dev/null 2>&1
 
-SE8_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+SE8_OUT="$(dh session create --token-file /tmp/uat-wls-cred-multiroot \
   "$SE_WS" --json \
   --filesystem-root "$SE_SIB/a=read_write" \
   --filesystem-root "$SE_SIB/b=read_write" 2>&1 || true)"
@@ -896,7 +1264,7 @@ if [ -n "$SE8_ID" ]; then
   se_only_rule_for "$SE_SIB" "$SE_SIB(/.*)?" \
     "SE sibling coverage uses the operator rule without claiming helper state" \
     "SE sibling coverage created or claimed extra state"
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE8_ID" >/dev/null 2>&1
+  dh session delete --token-file /tmp/uat-wls-cred-multiroot "$SE8_ID" >/dev/null 2>&1
   se_expect_rule_present "$SE_SIB(/.*)?" \
     "SE operator-owned sibling coverage rule survives the session deletion" \
     "SE helper deleted the operator-owned sibling rule"
@@ -927,7 +1295,7 @@ SE_MIX="$SE_OPT/mix"
 rm -rf "$SE_MIX"
 mkdir -p "$SE_MIX"
 chown -R "$PRINCIPAL:$PRINCIPAL" "$SE_MIX" 2>/dev/null || true
-SE9A_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+SE9A_OUT="$(dh session create --token-file /tmp/uat-wls-cred-multiroot \
   "$SE_WS" --json \
   --filesystem-root "$SE_MIX=read_write" 2>&1 || true)"
 SE9A_ID="$(printf '%s' "$SE9A_OUT" | json_field id)"
@@ -954,7 +1322,7 @@ if [ -n "$SE9A_ID" ]; then
     "SE9A helper recursive rule still inventoried after the operator kind change"
   se_expect_rule_present "$SE_MIX" \
     "SE9A operator exact-file rule still inventoried after the operator kind change"
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE9A_ID" >/dev/null 2>&1
+  dh session delete --token-file /tmp/uat-wls-cred-multiroot "$SE9A_ID" >/dev/null 2>&1
   se_expect_rule_absent "$SE_MIX(/.*)?" \
     "SE9A helper-owned recursive-directory rule removed after the session deletion" \
     "SE9A helper-owned recursive-directory rule survived the session deletion"
@@ -969,7 +1337,7 @@ SE_MIXF="$SE_OPT/mixfile"
 rm -rf "$SE_MIXF"
 printf 'mixfile-content\n' > "$SE_MIXF"
 chown "$PRINCIPAL:$PRINCIPAL" "$SE_MIXF" 2>/dev/null || true
-SE9B_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+SE9B_OUT="$(dh session create --token-file /tmp/uat-wls-cred-multiroot \
   "$SE_WS" --json \
   --filesystem-root "$SE_MIXF=read_write" 2>&1 || true)"
 SE9B_ID="$(printf '%s' "$SE9B_OUT" | json_field id)"
@@ -993,7 +1361,7 @@ if [ -n "$SE9B_ID" ]; then
     "SE9B helper exact-file rule still inventoried after the operator kind change"
   se_expect_rule_present "$SE_MIXF(/.*)?" \
     "SE9B operator recursive rule still inventoried after the operator kind change"
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE9B_ID" >/dev/null 2>&1
+  dh session delete --token-file /tmp/uat-wls-cred-multiroot "$SE9B_ID" >/dev/null 2>&1
   se_expect_rule_absent "$SE_MIXF" \
     "SE9B helper-owned exact-file rule removed after the session deletion" \
     "SE9B helper-owned exact-file rule survived the session deletion"
@@ -1014,7 +1382,7 @@ rm -f "/tmp/uat-wls-tok-$SE8_ID" "/tmp/uat-wls-tok-$SE9A_ID" "/tmp/uat-wls-tok-$
 
 # SE restart: a live session's external coverage survives restart and the
 # reconciled binding keeps the write path working.
-SE7_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+SE7_OUT="$(dh session create --token-file /tmp/uat-wls-cred-multiroot \
   "$SE_WS" --json \
   --filesystem-root "$SE_CACHE=read_write" 2>&1 || true)"
 SE7_ID="$(printf '%s' "$SE7_OUT" | json_field id)"
@@ -1037,7 +1405,7 @@ if [ -n "$SE7_ID" ]; then
   else
     acc_fail "SE restart lost the external coverage or write access: $(redact </tmp/uat-wls-se7.log | tail -2)"
   fi
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE7_ID" >/dev/null 2>&1
+  dh session delete --token-file /tmp/uat-wls-cred-multiroot "$SE7_ID" >/dev/null 2>&1
   rm -f "$SE_CACHE/restart.txt"
   se_expect_rule_absent "$SE_CACHE(/.*)?" \
     "SE no external fcontext residue after the final cleanup" \

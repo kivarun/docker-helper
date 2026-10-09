@@ -10,8 +10,8 @@ import (
 
 // This file is the single pure/domain owner of effective allowed-root
 // semantics: most-specific match within one policy scope, composition of
-// policy scopes with access-mode meet, the effective Principal ceiling
-// (including the user-mode daemon-owner collapse), Launcher
+// policy scopes with access-mode meet, the effective Principal ceiling,
+// Launcher
 // inherit/restricted semantics, deterministic canonical ordering and
 // normalization, the issuance-time Session filesystem narrowing, and the
 // pure derivation of the Session filesystem snapshot with its source-access
@@ -247,43 +247,25 @@ func narrowSessionFilesystemPolicy(ceiling []AllowedRootEntry, workspace string,
 // effectivePrincipalAllowedRoots is the canonical Principal-level effective
 // policy, consumed by Session creation, Launcher restricted-scope create and
 // replacement validation, and Principal effective-roots introspection:
-//
-//   - in user mode, the daemon-owner Principal (identified by
-//     daemonOwnerPrincipalID, the startup-resolved App.userModeDefault
-//     identity) with zero stored root entries collapses onto the global
-//     allowed-root policy including its access modes: the transparent
-//     ownership chain defers wholly to the global ceiling and creates no
-//     second mode rule. This is the ONLY Principal for which empty roots
-//     mean the global ceiling.
-//   - every other Principal (and a daemon-owner Principal with unexpected
-//     stored roots, a state the user-mode startup contract refuses) gets the
-//     plain composition: empty or disjoint stored roots mean an empty
-//     ceiling, fail-closed.
+// empty or disjoint stored roots mean an empty ceiling, fail-closed.
 //
 // Structurally impossible global policy (unknown access, duplicate exact
-// paths, relative or uncleaned entries) is corrupt state on every branch:
-// the collapse validates its input through the same boundary as the
-// composition and yields empty authority instead of guessing. The function
-// keeps its error-free signature because every caller already handles the
-// empty fail-closed ceiling as no-Session-authority.
+// paths, relative or uncleaned entries) is corrupt state: the composition
+// validates its input through the same boundary and yields empty authority
+// instead of guessing. The function keeps its error-free signature because
+// every caller already handles the empty fail-closed ceiling as
+// no-Session-authority.
 //
-// It is a pure policy function: callers resolve the global entries, the
-// stored Principal entries, and the daemon-owner identity, and pass them in.
-func effectivePrincipalAllowedRoots(globalEntries, storedPrincipalEntries []AllowedRootEntry, principalID, daemonOwnerPrincipalID int64, userMode bool) []AllowedRootEntry {
-	if userMode && principalID == daemonOwnerPrincipalID && len(storedPrincipalEntries) == 0 {
-		if err := validateCanonicalAllowedRootEntries(globalEntries); err != nil {
-			return nil
-		}
-		return normalizeAllowedRootEntries(globalEntries)
-	}
+// It is a pure policy function: callers resolve the global entries and the
+// stored Principal entries and pass them in.
+func effectivePrincipalAllowedRoots(globalEntries, storedPrincipalEntries []AllowedRootEntry, principalID int64) []AllowedRootEntry {
 	return composeAllowedRootScopes(globalEntries, storedPrincipalEntries)
 }
 
 // effectiveLauncherAllowedRoots is the canonical three-level effective policy
 // for Session filesystem authority. It consumes the global allowed-root
-// entries (the config owner), the Launcher's ownership snapshot with its
-// Principal's and its own stored entries, and the user-mode daemon-owner
-// identity. The Principal-level ceiling is
+// entries (the config owner) and the Launcher's ownership snapshot with its
+// Principal's and its own stored entries. The Principal-level ceiling is
 // effectivePrincipalAllowedRoots.
 //
 //   - an inherit-scope Launcher adds no narrowing: the effective policy equals
@@ -297,8 +279,8 @@ func effectivePrincipalAllowedRoots(globalEntries, storedPrincipalEntries []Allo
 //   - any other stored scope value is corrupt state: it is never treated as
 //     inherit, and the Launcher fails closed as unavailable (the existing
 //     typed Session-create contract).
-func effectiveLauncherAllowedRoots(globalEntries []AllowedRootEntry, snap *sessionOwnershipSnapshot, daemonOwnerPrincipalID int64, userMode bool) ([]AllowedRootEntry, error) {
-	principalCeiling := effectivePrincipalAllowedRoots(globalEntries, snap.principalRoots, snap.principalID, daemonOwnerPrincipalID, userMode)
+func effectiveLauncherAllowedRoots(globalEntries []AllowedRootEntry, snap *sessionOwnershipSnapshot) ([]AllowedRootEntry, error) {
+	principalCeiling := effectivePrincipalAllowedRoots(globalEntries, snap.principalRoots, snap.principalID)
 	switch snap.launcherScope {
 	case LauncherScopeInherit:
 		return principalCeiling, nil

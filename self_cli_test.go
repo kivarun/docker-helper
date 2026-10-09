@@ -343,13 +343,6 @@ func TestSelfEndpointValidationFollowsCredentialSource(t *testing.T) {
 			wantErr: "cannot read token file",
 		},
 		{
-			name:    "mutual exclusion applies on every credential source",
-			env:     false,
-			args:    []string{"--system", "--endpoint", "/tmp/nonexistent.sock"},
-			wantRC:  2,
-			wantErr: "--system and --endpoint are mutually exclusive",
-		},
-		{
 			name:    "explicitly empty endpoint follows agent validation",
 			env:     true,
 			args:    []string{"--endpoint", ""},

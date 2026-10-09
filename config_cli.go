@@ -90,10 +90,10 @@ func isRuntimeDependent(name string) bool {
 }
 
 // isPureComputed returns true for fields that can be requested without
-// reading config.json (config_path, config_dir, admin_token_path, mode).
+// reading config.json (config_path, config_dir, admin_token_path).
 func isPureComputed(name string) bool {
 	switch name {
-	case "config_path", "config_dir", "admin_token_path", "mode":
+	case "config_path", "config_dir", "admin_token_path":
 		return true
 	default:
 		return false
@@ -141,7 +141,6 @@ Fields:
   operation_log_max_bytes
   trusted_ca_path
   trusted_ca_injection
-  mode
   http_address`,
 
 	Presentation: humanJSONPresentation(),
@@ -272,9 +271,8 @@ sessions. Every new session workspace must be under at least one allowed
 root. Principal allowed roots further narrow the ceiling per principal.
 
 Changing allowed_roots never prepares MAC state.
-In system mode, MAC coverage for a concrete workspace is handled by the
-session lifecycle at session creation. In user mode, no MAC preparation
-is required.
+MAC coverage for a concrete workspace is handled by the session lifecycle
+at session creation.
 
 Removing a global root, or otherwise narrowing the set of admitted global
 paths, is a parent-ceiling transition: when the daemon applies the new ceiling
@@ -715,14 +713,14 @@ func safeWriteConfig(configPath string, data []byte) error {
 }
 
 func getRuntimeDirSafe() string {
-	if resolveDeploymentMode() == ModeSystem {
-		return "/run/docker-helper"
+	dir, err := getRuntimeDirFunc()
+	if err != nil {
+		// The system runtime directory is a fixed constant; this is
+		// unreachable today, but the offline commands must still get a
+		// usable value if the seam ever reports an error.
+		return systemRuntimeDir
 	}
-	dir := os.Getenv("XDG_RUNTIME_DIR")
-	if dir == "" {
-		return ""
-	}
-	return filepath.Join(dir, "docker-helper")
+	return dir
 }
 
 func configShowAll(stdout, stderr io.Writer, jsonOut bool) int {
@@ -789,7 +787,6 @@ func configShowAll(stdout, stderr io.Writer, jsonOut bool) int {
 		"operation_log_max_bytes": ec.OperationLogMaxBytes,
 		"trusted_ca_path":         fc.TrustedCAPath,
 		"trusted_ca_injection":    ec.TrustedCAInjection,
-		"mode":                    resolveDeploymentMode(),
 		"http_address":            ec.HTTPAddress,
 	}
 
@@ -830,7 +827,6 @@ func configShowAll(stdout, stderr io.Writer, jsonOut bool) int {
 		{"operation_log_max_bytes", ec.OperationLogMaxBytes},
 		{"trusted_ca_path", fc.TrustedCAPath},
 		{"trusted_ca_injection", ec.TrustedCAInjection},
-		{"mode", resolveDeploymentMode()},
 		{"http_address", ec.HTTPAddress},
 	} {
 		fmt.Fprintf(stdout, "%s: %v\n", f.name, f.value)
@@ -840,15 +836,12 @@ func configShowAll(stdout, stderr io.Writer, jsonOut bool) int {
 }
 
 // resolveHTTPAddress returns the effective HTTP address.
-// If the configured value is empty, returns the default for system mode or empty for user mode.
+// If the configured value is empty, returns the default.
 func resolveHTTPAddress(configured string) string {
 	if configured != "" {
 		return configured
 	}
-	if resolveDeploymentMode() == ModeSystem {
-		return DefaultHTTPAddress
-	}
-	return ""
+	return DefaultHTTPAddress
 }
 
 func configShowField(field string, stdout, stderr io.Writer, jsonOut bool) int {
@@ -905,8 +898,6 @@ func configShowField(field string, stdout, stderr io.Writer, jsonOut bool) int {
 			return printField(configDir)
 		case "admin_token_path":
 			return printField(filepath.Join(configDir, "admin.token"))
-		case "mode":
-			return printField(resolveDeploymentMode())
 		}
 		return 0
 	}
@@ -1147,10 +1138,6 @@ func configSet(field, value string, stdout, stderr io.Writer, jsonOut bool) int 
 			return 2
 		}
 	case "http_address":
-		if resolveDeploymentMode() != ModeSystem {
-			fmt.Fprintln(stderr, "error: http_address is only used in system mode")
-			return 2
-		}
 		if err := validateHTTPAddress(value); err != nil {
 			fmt.Fprintf(stderr, "error: %v\n", err)
 			return 2
@@ -1512,7 +1499,7 @@ func executeConfigTransaction(stdout, stderr io.Writer, writeFn configWriter, js
 		}
 		printOperationalNote("daemon not running; change will apply on next start")
 		newCAInj, newCAPath := effectiveTrustedCAFromRaw(raw)
-		if trustedCAPreflightWarningRequired(resolveDeploymentMode(), oldCAInj, oldCAPath, newCAInj, newCAPath) {
+		if trustedCAPreflightWarningRequired(oldCAInj, oldCAPath, newCAInj, newCAPath) {
 			fmt.Fprintln(stderr, trustedCAPreflightWarning)
 		}
 		return 0

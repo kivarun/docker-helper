@@ -115,24 +115,18 @@ authenticated with the Session bearer) resolve the Unix socket in this
 order:
 
 1. `DOCKER_HELPER_SOCKET_PATH`, if set — the authoritative override;
-2. the user-mode socket
-   `$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock`, when
-   `XDG_RUNTIME_DIR` is set and that socket exists;
-3. the system socket `/run/docker-helper/docker-helper.sock` — the
+2. the system socket `/run/docker-helper/docker-helper.sock` — the
    system/sandbox default.
 
 The CLI resolves this order automatically. An HTTP client resolves the
-same order itself. Never declare Docker Helper unavailable only because
-the system-mode socket is absent while the daemon runs in user mode: check
-the user-mode socket first. A transport/connectivity failure on every
+same order itself. A transport/connectivity failure on every
 resolved socket is the only unavailability evidence.
 
 Operator/control-plane commands (`session create/list/show/delete`,
 `principal`, `launcher`, `credential`, `reload`, `admin-token rotate`,
 completion introspection) authenticate with Principal/Launcher credentials
-through explicit endpoint selection: `--endpoint` / `--system` when given,
-otherwise the documented operator default (an existing user socket first,
-otherwise the system socket). `DOCKER_HELPER_SOCKET_PATH` does **not**
+through explicit endpoint selection: `--endpoint` when given, otherwise
+the system socket default. `DOCKER_HELPER_SOCKET_PATH` does **not**
 select their endpoint. `session cleanup` is not an API-backed command at
 all: it is offline local-state maintenance with no endpoint selection.
 
@@ -237,9 +231,9 @@ curl --silent --show-error \
 The Session's filesystem scope is issued at creation time and is immutable
 afterwards: parent allowed-root policy changes never affect an
 already-issued Session. The workspace is mandatory. What else can be
-issued depends on the deployment mode:
+issued additionally:
 
-- **System mode**: a repeatable `--filesystem-root PATH=ACCESS` flag (CLI)
+- a repeatable `--filesystem-root PATH=ACCESS` flag (CLI)
   or a `filesystem_roots` array of `{path, access}` objects (HTTP) may add
   absolute host filesystem roots — directories or regular files that must
   already exist — inside
@@ -254,12 +248,6 @@ issued depends on the deployment mode:
   read this as "a Session cannot have a writable child under its own
   read-only parent". Issued roots may be
   used as absolute mount sources (see Path model).
-- **User mode**: no disjoint filesystem root can be issued — an explicit
-  root is accepted only when its canonical path equals the canonical
-  workspace. Such an explicit workspace root may narrow the workspace to
-  `read_only` (for example
-  `--filesystem-root /host/path/to/workspace=read_only`); any additional,
-  disjoint, or child root is refused before the Session exists.
 
 Every request may only narrow the target Launcher's ceiling; a widening
 request is refused `invalid_filesystem_policy` before the Session exists.
@@ -296,15 +284,16 @@ Both interfaces share the same path semantics. Define once, apply everywhere.
   authority, and the enforcement implementation's
   intermediate-path/ancestor containment invariants apply on top (a
   writable exposure additionally requires no `read_only` region below the
-  source inside the snapshot, and the enforced system-mode pathname may
+  source inside the snapshot, and the enforced pinned pathname may
   not contain a symlinked intermediate component). A spelling that only
   reaches a compliant final target by violating that containment is not a
   bypass.
-- **User-mode mount rule** — the daemon-enforced invariant is that the
-  canonical resolved source equals the canonical Session workspace.
-  `.` is the recommended portable spelling and is valid in both modes;
-  in user mode no subdirectory, file, or disjoint source is accepted
-  (rejected as `invalid_mount`).
+- **Workspace-relative sources are scoped by grammar** — `.` is the
+  recommended spelling for the workspace root; a relative source that
+  escapes the workspace lexically is rejected. Canonicalization owns the
+  rule: the canonical resolved source must stay inside the canonical
+  Session workspace (a relative source) or inside the issued snapshot
+  (an absolute source).
 - **Mount targets** are absolute paths inside the launched container.
 - **`--workdir`** / **`workdir`** is an absolute path inside the launched
   container.
@@ -457,10 +446,10 @@ docker-helper run --env-from LLM_KEY=ORCHESTRATOR_LLM_KEY IMAGE -- command arg..
   transport is introduced in Release 2.2; the argv class closes with the
   future migration away from the legacy Docker CLI.
 
-**Helper socket (system mode only).** `--helper-socket` makes the Docker
+**Helper socket.** `--helper-socket` makes the Docker
 Helper socket reachable inside the container at
 `/run/docker-helper/docker-helper.sock` (read-only projection, chosen
-server-side; rejected in user mode). While the projection is active, the
+server-side). While the projection is active, the
 daemon also supplies the workload with the server-owned transport locator
 `DOCKER_HELPER_SOCKET_PATH=/run/docker-helper/docker-helper.sock` when the
 caller omitted it; an exactly matching caller value is accepted and a
@@ -474,9 +463,9 @@ operations, passed separately with `--env-from`.
 **Mount examples** (rules in Path model):
 
 ```bash
---mount .:/workspace                # portable, both modes
---mount relative/source:/path       # system mode: workspace-relative file or subdirectory
---mount /opt/agent/cache:/cache     # system mode: issued absolute filesystem root
+--mount .:/workspace                # workspace root
+--mount relative/source:/path       # workspace-relative subdirectory
+--mount /opt/agent/cache:/cache     # issued absolute filesystem root
 --mount .:/workspace:ro             # read-only
 ```
 
@@ -511,14 +500,13 @@ printf '%s\n' "$REGISTRY_PASSWORD" | \
 # HTTP API interface
 
 The HTTP API is a fully supported direct client interface — same
-capabilities as the CLI, different syntax only. Set the socket path
-without displaying any secret (Socket discovery order):
+capabilities as the CLI, different syntax only. Resolve the socket with
+the same two-stage discovery defined in Socket discovery above, without
+displaying any secret:
 
 ```bash
 if [ -n "$DOCKER_HELPER_SOCKET_PATH" ]; then
   SOCKET="$DOCKER_HELPER_SOCKET_PATH"
-elif [ -n "$XDG_RUNTIME_DIR" ] && [ -S "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" ]; then
-  SOCKET="$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock"
 else
   SOCKET=/run/docker-helper/docker-helper.sock
 fi
@@ -585,8 +573,8 @@ Run request fields: `image`, `entrypoint`, `command`, `workdir`,
 Build request fields: `context`, `dockerfile`, `image`, `build_args`.
 
 `"helper_socket": true` is the HTTP equivalent of the CLI
-`--helper-socket` (Run, CLI interface): system mode only, server-owned
-read-only projection, user mode rejects the flag.
+`--helper-socket` (Run, CLI interface): the server-owned
+read-only projection.
 
 ## Mount examples (rules in Path model)
 
@@ -596,9 +584,9 @@ read-only projection, user mode rejects the flag.
 {"source": "/opt/agent/cache", "target": "/cache",         "read_only": false}
 ```
 
-First is portable (both modes); second is a workspace-relative
-subdirectory (system mode); third is an issued absolute filesystem root
-(system mode) — the same capability as the CLI `--mount
+First is the workspace root; second is a workspace-relative
+subdirectory; third is an issued absolute filesystem root — the same
+capability as the CLI `--mount
 /opt/agent/cache:/cache` example.
 
 ## Async operation lifecycle
@@ -658,8 +646,8 @@ Do not describe Docker Helper as unavailable after an HTTP response.
   not evidence that the daemon is down.
 - **`invalid_mount`** specifically means the mount specification or mount
   policy was rejected. After this error, inspect the source, target, and
-  deployment-mode restrictions described in the Path model section, then
-  correct the request.
+  the mount/path/snapshot policy described in the Path model and Session
+  filesystem policy sections, then correct the request.
 - **`read_only_root`** specifically means the issued session filesystem
   policy refuses a writable exposure of the source. This is a policy
   refusal, not a structural error and not daemon unavailability: request

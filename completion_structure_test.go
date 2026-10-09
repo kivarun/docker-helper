@@ -81,7 +81,7 @@ func TestCompletionBashScriptSingleDefinitions(t *testing.T) {
 func TestCompletionRootsPrincipalDeclaredFlags(t *testing.T) {
 	fs := flag.NewFlagSet("", flag.ContinueOnError)
 	completionRootsPrincipalCommand.NewInvocation(fs)
-	for _, name := range []string{"principal", "authority-only", "system", "endpoint", "token-file"} {
+	for _, name := range []string{"principal", "authority-only", "endpoint", "token-file"} {
 		if fs.Lookup(name) == nil {
 			t.Errorf("declared FlagSet of completion roots principal is missing --%s", name)
 		}

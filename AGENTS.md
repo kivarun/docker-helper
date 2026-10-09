@@ -23,11 +23,12 @@ governance, not as a substitute for `docs/architecture.md`.
   App state and synchronized policy), `operation.go` (async build/run
   lifecycle), `mac_lifecycle.go` (AppArmor/SELinux confinement lifecycle).
   Canonical current design reference: `docs/architecture.md`.
-- **Mode model:** the same binary runs non-root (user mode) or root (system
-  mode), decided at runtime by effective UID. Tests simulate both modes
-  without root by reassigning package-global seams — `EffectiveUID`
-  (`config.go`), `getConfigPathFunc`, `getRuntimeDirFunc`, `systemSocketExists`
-  (`operator_client.go`), `trustedCARestorecon` (`ca.go`). These are
+- **Deployment model:** the daemon lifecycle is root/system-service only;
+  non-root is a client identity, not a daemon mode. Tests simulate
+  root/non-root and operator-path state without root by reassigning
+  package-global seams — `EffectiveUID`, `getConfigPathFunc`,
+  `getRuntimeDirFunc` (`config.go`), `credentialPathFunc`
+  (`credential_install.go`), `trustedCARestorecon` (`ca.go`). These are
   package-global state: never use `t.Parallel()` in tests that swap them.
 - **Docker-dependent tests skip** when `docker`/the daemon is unavailable
   (for example `container_lifecycle_integration_test.go`); the rest of the

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
@@ -2343,9 +2345,11 @@ func TestSELinuxPolicyBindfsProjectionMount(t *testing.T) {
 		"allow docker_helper_t docker_helper_runtime_t:dir { mounton };",
 		"allow docker_helper_t self:capability { dac_read_search dac_override sys_admin };",
 		"allow docker_helper_t self:capability fowner;",
+		"allow docker_helper_t self:capability setuid;",
+		"allow docker_helper_t mount_exec_t:file { execute execute_no_trans read open };",
 		"allow docker_helper_t mount_var_run_t:dir { search };",
 		"allow docker_helper_t mount_var_run_t:file { getattr read open };",
-		"class capability { dac_read_search dac_override sys_admin fowner };",
+		"class capability { dac_read_search dac_override sys_admin fowner setuid };",
 	} {
 		if !strings.Contains(content, rule) {
 			t.Errorf("SELinux policy must grant: %s", rule)
@@ -2354,6 +2358,144 @@ func TestSELinuxPolicyBindfsProjectionMount(t *testing.T) {
 	if strings.Contains(content, "domain_auto_trans docker_helper_t docker_helper_bindfs_exec_t") ||
 		strings.Contains(content, "type_transition docker_helper_t docker_helper_bindfs_exec_t") {
 		t.Error("bindfs must stay in the daemon domain (execute_no_trans), not transition to its own domain")
+	}
+	// The libfuse mtab/utab bookkeeping grants are exact and evidence-bounded
+	// (runs 37764641564, 37778527524 and 37784360967): the setuid capability
+	// is for the forked mtab-bookkeeping child of the bindfs worker,
+	// mount_exec_t:file carries exactly the same-domain execution set
+	// (execute/execute_no_trans plus the kernel's ELF read/open), and
+	// mount_var_run_t:file carries exactly the read set. The utab
+	// writability probe of that child is SUPPRESSED, not granted (Step-7
+	// experiment, run 37832314572: with file write granted the utab record
+	// still never appears — the mount has no userspace options, so libmount
+	// never writes an entry): the dontaudit removes the recurring probe AVC
+	// while the write check stays denied. Nothing broader is granted: no
+	// distro mount domain, no new type transitions, no further mount_exec_t
+	// or mount_var_run_t permissions (in particular no write/create/unlink/
+	// rename allow on the utab file), no directory write (mount_var_run_t:dir
+	// stays the bare search singleton), no bin_t same-domain execution, and
+	// no unproven capabilities such as setgid.
+	if strings.Contains(content, "mount_t") {
+		t.Error("the helper must not reference the distro mount domain (no transition into a more privileged domain for the setuid /bin/mount)")
+	}
+	if strings.Contains(content, "type_transition docker_helper_t mount_exec_t") {
+		t.Error("the mtab bookkeeping must not add a type_transition on mount_exec_t")
+	}
+	lines := strings.Split(string(data), "\n")
+	capPerms := map[string]bool{}
+	mountExecRules := 0
+	mountVarRunAllowRules := 0
+	mountVarRunDontauditRules := 0
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "allow docker_helper_t self:capability") {
+			rest := strings.TrimSpace(strings.TrimPrefix(line, "allow docker_helper_t self:capability"))
+			rest = strings.TrimSuffix(rest, ";")
+			if strings.HasPrefix(rest, "{") {
+				rest = strings.TrimSpace(strings.Trim(rest, "{}"))
+				for _, p := range strings.Fields(rest) {
+					capPerms[p] = true
+				}
+				continue
+			}
+			capPerms[rest] = true
+			continue
+		}
+		if strings.HasPrefix(line, "allow docker_helper_t mount_exec_t:file") {
+			mountExecRules++
+			if line != "allow docker_helper_t mount_exec_t:file { execute execute_no_trans read open };" {
+				t.Errorf("mount_exec_t:file must be granted exactly for the evidenced execution set, got: %s", line)
+			}
+		}
+		// The mount_var_run_t boundary: exactly the two canonical allow rules
+		// (the bare dir search singleton and the utab read set) plus the one
+		// dontaudit probe suppression — any other allow (write, directory
+		// write, create, unlink, rename, any other class) or any other
+		// dontaudit is a boundary break, not a variation.
+		if strings.HasPrefix(line, "allow docker_helper_t mount_var_run_t:") {
+			mountVarRunAllowRules++
+			if line != "allow docker_helper_t mount_var_run_t:dir { search };" &&
+				line != "allow docker_helper_t mount_var_run_t:file { getattr read open };" {
+				t.Errorf("mount_var_run_t allow rules must stay exactly the bare dir search singleton and the utab read set (no write, directory write, create, unlink or rename), got: %s", line)
+			}
+		}
+		if strings.HasPrefix(line, "dontaudit docker_helper_t mount_var_run_t:") {
+			mountVarRunDontauditRules++
+			if line != "dontaudit docker_helper_t mount_var_run_t:file write;" {
+				t.Errorf("the utab writability probe must be suppressed by exactly the one dontaudit rule, got: %s", line)
+			}
+		}
+		if strings.HasPrefix(line, "allow docker_helper_t bin_t:file") && strings.Contains(line, "execute_no_trans") {
+			t.Errorf("same-domain execution of generic bin_t binaries must stay forbidden, got: %s", line)
+		}
+	}
+	if mountExecRules != 1 {
+		t.Errorf("there must be exactly one mount_exec_t:file allow rule, got %d", mountExecRules)
+	}
+	if mountVarRunAllowRules != 2 {
+		t.Errorf("there must be exactly two mount_var_run_t allow rules (dir search singleton + file read set), got %d", mountVarRunAllowRules)
+	}
+	if mountVarRunDontauditRules != 1 {
+		t.Errorf("there must be exactly one mount_var_run_t dontaudit rule (the writability probe suppression), got %d", mountVarRunDontauditRules)
+	}
+	if strings.Contains(content, "docker_helper_container_t mount_var_run_t") {
+		t.Error("docker_helper_container_t must have no mount_var_run_t access (the utab bookkeeping is daemon-domain only)")
+	}
+	wantCaps := map[string]bool{"dac_read_search": true, "dac_override": true, "sys_admin": true, "fowner": true, "setuid": true}
+	for p := range wantCaps {
+		if !capPerms[p] {
+			t.Errorf("docker_helper_t capability grants must include %s", p)
+		}
+	}
+	for p := range capPerms {
+		if !wantCaps[p] {
+			t.Errorf("unexpected docker_helper_t capability grant (unproven): %s", p)
+		}
+	}
+}
+
+// TestSELinuxPolicyCompiledUtabBoundaryParity compiles the shipped module with
+// checkmodule and proves the COMPILED policy carries exactly the source-pinned
+// utab boundary — both directions of the parity:
+//   - every pinned rule is present in the compiled CIL (the compiled module is
+//     what the kernel enforces, so a source pin without a compiled counterpart
+//     proves nothing);
+//   - the compiled CIL contains NO other allow rule toward mount_var_run_t and
+//     no other dontaudit rule toward it (an effective permission that the
+//     source sweep would miss cannot hide in the compiled output).
+//
+// Skipped when checkmodule is unavailable (the plain go test run stays
+// independent of the SELinux toolchain; the packaging-integration mode requires
+// it).
+func TestSELinuxPolicyCompiledUtabBoundaryParity(t *testing.T) {
+	requirePackagingTool(t, "checkmodule")
+
+	outDir := t.TempDir()
+	cil := filepath.Join(outDir, "docker_helper.cil")
+	cmd := exec.Command("checkmodule", "-M", "-m", "-C", "-o", cil, "packaging/selinux/docker-helper.te")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("checkmodule -C failed: %v\n%s", err, out)
+	}
+	compiled, err := os.ReadFile(cil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(compiled)
+	for _, want := range []string{
+		"(allow docker_helper_t mount_var_run_t (dir (search)))",
+		"(allow docker_helper_t mount_var_run_t (file (getattr open read)))",
+		"(dontaudit docker_helper_t mount_var_run_t (file (write)))",
+		"(allow docker_helper_t mount_exec_t (file (execute execute_no_trans open read)))",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("compiled policy must contain: %s", want)
+		}
+	}
+	if n := strings.Count(text, "(allow docker_helper_t mount_var_run_t "); n != 2 {
+		t.Errorf("compiled policy must carry exactly two allow rules toward mount_var_run_t, got %d", n)
+	}
+	if n := strings.Count(text, "(dontaudit docker_helper_t mount_var_run_t "); n != 1 {
+		t.Errorf("compiled policy must carry exactly one dontaudit rule toward mount_var_run_t, got %d", n)
 	}
 }
 

@@ -59,7 +59,6 @@ func legacyRunEnforcementApp(t *testing.T, dir, dbPath string, db *sql.DB, allow
 		OperationRetentionTTL: 10 * time.Minute,
 		OperationMaxCompleted: 200,
 		OperationLogMaxBytes:  4 * 1024 * 1024,
-		Mode:                  ModeSystem,
 	}
 	app := &App{
 		Config:              cfg,
@@ -292,7 +291,7 @@ func TestRunLegacyMigratedSessionKeepsWritableBehavior(t *testing.T) {
 	launcherID := testMACLauncherID(t, db)
 	// The legacy Session's MAC binding is provisioned the way the real
 	// Session creation lifecycle does: the binding wraps the Session row
-	// insert. (The daemon-owner Launcher's workspace MAC coverage is
+	// insert. (The test-owner Launcher's workspace MAC coverage is
 	// driver-recorded state; the run request below only needs the
 	// session-use lease from the binding table.)
 	mac := newSessionMACCoordinator(db, newTestSessionMACDriver(LSMBackend("test")))

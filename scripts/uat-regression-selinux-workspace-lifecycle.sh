@@ -45,7 +45,7 @@ dh config allowed-root add /opt >/dev/null 2>&1 || true
 if ! dh config allowed-root list 2>/dev/null | awk 'NF && $1 ~ /^\// {print $1}' | grep -qx '/opt'; then
   reg_fail "cannot add /opt to global allowed roots (authorization prerequisite)"
 fi
-dh reload --system >/dev/null 2>&1 || reg_fail "config reload failed after adding /opt root"
+dh reload >/dev/null 2>&1 || reg_fail "config reload failed after adding /opt root"
 reg_ok "/opt is an authorized global root (authorization ceiling)"
 
 # --- unrelated /opt path (must stay untouched) -----------------------------------
@@ -73,7 +73,7 @@ reg_setup_principal "$SEL_P" >/dev/null || { reg_fail "principal setup failed"; 
 # The session workspace is under /opt (the non-home allowed root this group
 # deliberately exercises), so /opt must be in the principal's own allowed roots
 # for the inherit-scope Session authorization to permit it.
-dh principal allowed-root add --system "$SEL_P" /opt >/dev/null 2>&1 || { reg_fail "principal allowed-root add failed"; reg_result; }
+dh principal allowed-root add "$SEL_P" /opt >/dev/null 2>&1 || { reg_fail "principal allowed-root add failed"; reg_result; }
 reg_principal_credential "$SEL_P" "$SEL_CRED" || { reg_fail "credential create failed"; reg_result; }
 
 # --- session creation ---------------------------------------------------------------
@@ -133,7 +133,7 @@ fi
 # Restore root ownership before teardown so the delete-time restorecon relabel does
 # not need the (un-granted) SELinux fowner capability on the principal-owned tree.
 chown -R root:root "$WS" >/dev/null 2>&1 || true
-if dh session delete --system "$SID" >/dev/null 2>&1; then
+if dh session delete "$SID" >/dev/null 2>&1; then
   reg_ok "session deleted"
 else
   reg_fail "session delete failed"
@@ -169,11 +169,11 @@ mkdir -p "$WS_CTRL"
 reg_info "control-character workspace spelling: $WS_CTRL"
 CTRL_INV_BEFORE="$(semanage fcontext -l -C -n 2>/dev/null)"
 CTRL_INV_RC=$?
-CTRL_LIST_BEFORE="$(dh session list --system --token-file "$SEL_CRED" 2>/dev/null)"
+CTRL_LIST_BEFORE="$(dh session list --token-file "$SEL_CRED" 2>/dev/null)"
 if [ "$CTRL_INV_RC" -ne 0 ]; then
   reg_fail "fcontext inventory unavailable before the control-character refusal; absence is never assumed"
 fi
-CTRL_OUT="$(dh session create --system --token-file "$SEL_CRED" "$WS_CTRL" --json 2>&1)"
+CTRL_OUT="$(dh session create --token-file "$SEL_CRED" "$WS_CTRL" --json 2>&1)"
 CTRL_RC=$?
 if [ "$CTRL_RC" -eq 0 ]; then
   reg_fail "session create with a control-character workspace was accepted (must be refused by the host-path text grammar)"
@@ -190,7 +190,7 @@ elif [ "$CTRL_INV_AFTER" = "$CTRL_INV_BEFORE" ]; then
 else
   reg_fail "fcontext inventory changed by the refused control-character create"
 fi
-CTRL_LIST_AFTER="$(dh session list --system --token-file "$SEL_CRED" 2>/dev/null)"
+CTRL_LIST_AFTER="$(dh session list --token-file "$SEL_CRED" 2>/dev/null)"
 if [ "$CTRL_LIST_AFTER" = "$CTRL_LIST_BEFORE" ]; then
   reg_ok "no Session residue for the refused control-character path"
 else
@@ -253,7 +253,7 @@ fi
 
 # Consumer-count release: removing the second consumer while the first still
 # holds the boundary keeps the helper-owned rule.
-if dh session delete --system "$LONG_SESSION_B_ID" >/dev/null 2>&1; then
+if dh session delete "$LONG_SESSION_B_ID" >/dev/null 2>&1; then
   reg_ok "second session deleted"
 else
   reg_fail "second session delete failed"
@@ -263,7 +263,7 @@ reg_expect_se_rule present "$WS_LONG(/.*)?" \
 
 # Final cleanup: removing the last consumer releases the proven rule and
 # relabels the tree back.
-if dh session delete --system "$LONG_SESSION_A_ID" >/dev/null 2>&1; then
+if dh session delete "$LONG_SESSION_A_ID" >/dev/null 2>&1; then
   reg_ok "first session deleted"
 else
   reg_fail "first session delete failed"

@@ -195,7 +195,7 @@ workload_residue_clean() {
 # (bearer stored in /tmp/uat-wla-<id>), prints the session ID.
 create_session() {
   local cred="$1" ws="$2" out id
-  out="$(dh session create --system --token-file "$cred" "$ws" --json 2>/dev/null || true)"
+  out="$(dh session create --token-file "$cred" "$ws" --json 2>/dev/null || true)"
   id="$(printf '%s' "$out" | json_field id)"
   [ -n "$id" ] || return 1
   printf '%s' "$out" | json_field token > "/tmp/uat-wla-tok-$id"; chmod 600 "/tmp/uat-wla-tok-$id"
@@ -298,14 +298,14 @@ printf 'ro-input\n' > "$TREE/pipeline-inputs/input.txt"
 chown -R "$PRINCIPAL:$PRINCIPAL" "$TREE"
 chmod -R u+rwX,go+rX "$TREE"
 
-dh principal create --system --no-credential "$PRINCIPAL" >/dev/null 2>&1 || true
-dh principal set --system "$PRINCIPAL" enabled true >/dev/null 2>&1 || true
-dh principal allowed-root add --system "$PRINCIPAL" "$TREE" >/dev/null 2>&1 || true
-dh principal allowed-root add --system --access read_only "$PRINCIPAL" "$TREE/pipeline-inputs" >/dev/null 2>&1 || true
-MAIN_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" main --no-credential --json 2>/dev/null || true)"
+dh principal create --no-credential "$PRINCIPAL" >/dev/null 2>&1 || true
+dh principal set "$PRINCIPAL" enabled true >/dev/null 2>&1 || true
+dh principal allowed-root add "$PRINCIPAL" "$TREE" >/dev/null 2>&1 || true
+dh principal allowed-root add --access read_only "$PRINCIPAL" "$TREE/pipeline-inputs" >/dev/null 2>&1 || true
+MAIN_L_JSON="$(dh launcher create --principal "$PRINCIPAL" main --no-credential --json 2>/dev/null || true)"
 MAIN_L_ID="$(printf '%s' "$MAIN_L_JSON" | json_field id)"
 [ -n "$MAIN_L_ID" ] || { echo "error: launcher create failed: $MAIN_L_JSON" >&2; exit 1; }
-MAIN_LC_OUT="$(dh launcher credential create --system --principal "$PRINCIPAL" --json "$MAIN_L_ID" 2>/dev/null || true)"
+MAIN_LC_OUT="$(dh launcher credential create --principal "$PRINCIPAL" --json "$MAIN_L_ID" 2>/dev/null || true)"
 MAIN_LC_TOKEN="$(printf '%s' "$MAIN_LC_OUT" | json_field token)"
 [ -n "$MAIN_LC_TOKEN" ] || { echo "error: launcher credential create failed" >&2; exit 1; }
 printf '%s\n' "$MAIN_LC_TOKEN" > /tmp/uat-wla-cred-main; chmod 600 /tmp/uat-wla-cred-main
@@ -425,22 +425,22 @@ printf 'seed\n' > "$WE_CACHE/seed.txt"
 chown -R "$PRINCIPAL:$PRINCIPAL" "$WE_OPT"
 chmod -R u+rwX,go+rX "$WE_OPT"
 if dh config allowed-root add --access read_write "$WE_OPT" >/dev/null 2>&1 \
-    && dh principal allowed-root add --system --access read_write "$PRINCIPAL" "$ALLOWED_ROOT" >/dev/null 2>&1 \
-    && dh principal allowed-root add --system --access read_write "$PRINCIPAL" "$WE_OPT" >/dev/null 2>&1; then
+    && dh principal allowed-root add --access read_write "$PRINCIPAL" "$ALLOWED_ROOT" >/dev/null 2>&1 \
+    && dh principal allowed-root add --access read_write "$PRINCIPAL" "$WE_OPT" >/dev/null 2>&1; then
   acc_ok "WE setup: second effective root $WE_OPT (global RW + Principal RW)"
 else
   acc_fail "WE setup: second effective root setup failed"
 fi
-WE_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" we-multiroot --no-credential --json 2>/dev/null || true)"
+WE_L_JSON="$(dh launcher create --principal "$PRINCIPAL" we-multiroot --no-credential --json 2>/dev/null || true)"
 WE_L_ID="$(printf '%s' "$WE_L_JSON" | json_field id)"
 if [ -n "$WE_L_ID" ] \
-    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$WE_L_ID" "$ALLOWED_ROOT" >/dev/null 2>&1 \
-    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$WE_L_ID" "$WE_OPT" >/dev/null 2>&1; then
+    && dh launcher allowed-root add --principal "$PRINCIPAL" "$WE_L_ID" "$ALLOWED_ROOT" >/dev/null 2>&1 \
+    && dh launcher allowed-root add --principal "$PRINCIPAL" "$WE_L_ID" "$WE_OPT" >/dev/null 2>&1; then
   acc_ok "WE setup: multiroot launcher carries both effective roots"
 else
   acc_fail "WE setup: multiroot launcher setup failed: $WE_L_JSON"
 fi
-WE_LC_OUT="$(dh launcher credential create --system --principal "$PRINCIPAL" --json "$WE_L_ID" 2>/dev/null || true)"
+WE_LC_OUT="$(dh launcher credential create --principal "$PRINCIPAL" --json "$WE_L_ID" 2>/dev/null || true)"
 WE_LC_TOKEN="$(printf '%s' "$WE_LC_OUT" | json_field token)"
 if [ -n "$WE_LC_TOKEN" ]; then
   printf '%s\n' "$WE_LC_TOKEN" > /tmp/uat-wla-cred-multiroot; chmod 600 /tmp/uat-wla-cred-multiroot
@@ -452,7 +452,7 @@ rm -rf "$ALLOWED_ROOT/we-runs"
 mkdir -p "$WE_WS"
 chown -R "$PRINCIPAL:$PRINCIPAL" "$ALLOWED_ROOT/we-runs"
 chmod -R u+rwX,go+rX "$ALLOWED_ROOT/we-runs"
-WE_OUT="$(dh session create --system --token-file /tmp/uat-wla-cred-multiroot \
+WE_OUT="$(dh session create --token-file /tmp/uat-wla-cred-multiroot \
   "$WE_WS" --json \
   --filesystem-root "$WE_HELPER=read_only" \
   --filesystem-root "$WE_CACHE=read_write" 2>&1 || true)"

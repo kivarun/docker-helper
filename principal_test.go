@@ -1423,9 +1423,13 @@ func TestPrincipalCascadeDelete(t *testing.T) {
 		t.Fatalf("DELETE FROM principals error: %v", err)
 	}
 
-	// Verify allowed roots were cascade-deleted
+	// Verify the deleted Principal's allowed roots were cascade-deleted.
 	var count int
-	err = app.DB.QueryRow("SELECT COUNT(*) FROM principal_allowed_roots").Scan(&count)
+	err = app.DB.QueryRow(
+		`SELECT COUNT(*) FROM principal_allowed_roots
+		 WHERE principal_id NOT IN (SELECT id FROM principals WHERE username = ?)`,
+		testOwnerUsername,
+	).Scan(&count)
 	if err != nil {
 		t.Fatalf("cannot query allowed roots: %v", err)
 	}
@@ -1593,7 +1597,7 @@ func TestListPrincipalSummaries(t *testing.T) {
 		t.Fatalf("expected 3 principals, got %d", len(summaries))
 	}
 
-	// Verify sorted by username (bootstrap daemon-owner sorts after the
+	// Verify sorted by username (the provisioned test-owner sorts after the
 	// user-created alice and bob).
 	if summaries[0].Username != "alice" {
 		t.Errorf("first principal = %q, want %q", summaries[0].Username, "alice")
@@ -1619,7 +1623,7 @@ func TestListPrincipalSummaries(t *testing.T) {
 		Username: "dhtestowner",
 		UID:      os.Getuid(),
 		GID:      os.Getgid(),
-		Home:     filepath.Join(app.Config.AllowedRoots[0].Path, "daemon-home"),
+		Home:     filepath.Join(app.Config.AllowedRoots[0].Path, "owner-home"),
 		Enabled:  true,
 	}
 	if summaries[2] != wantOwner {
@@ -1688,7 +1692,7 @@ func TestPrincipalHTTPList(t *testing.T) {
 		Username: "dhtestowner",
 		UID:      os.Getuid(),
 		GID:      os.Getgid(),
-		Home:     filepath.Join(app.Config.AllowedRoots[0].Path, "daemon-home"),
+		Home:     filepath.Join(app.Config.AllowedRoots[0].Path, "owner-home"),
 		Enabled:  true,
 	}
 	if resp.Principals[1] != wantOwner {
@@ -1708,8 +1712,8 @@ func TestPrincipalHTTPListEmpty(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// In user mode the daemon-owner is bootstrapped, so a list with no
-	// additional principals created must contain exactly the daemon-owner.
+	// The test owner is provisioned, so a list with no
+	// additional principals created must contain exactly the test owner.
 	var resp listPrincipalsResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("cannot decode response: %v", err)
@@ -1724,7 +1728,7 @@ func TestPrincipalHTTPListEmpty(t *testing.T) {
 		Username: "dhtestowner",
 		UID:      os.Getuid(),
 		GID:      os.Getgid(),
-		Home:     filepath.Join(app.Config.AllowedRoots[0].Path, "daemon-home"),
+		Home:     filepath.Join(app.Config.AllowedRoots[0].Path, "owner-home"),
 		Enabled:  true,
 	}
 	if resp.Principals[0] != wantOwner {

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 #
 # uat-regressions-runner-ubuntu.sh — collect-all runner for the Release-2
-# targeted UAT regression groups on the Ubuntu / DEB / AppArmor profile
-# (groups 3-29).
+# targeted UAT regression groups on the Ubuntu / DEB / AppArmor profile.
+# Since Release 2.3 the group set carries the system-only deployment
+# contract (groups 11, 12, 18) in place of the retired user-mode daemon
+# groups.
 #
 # The runner installs a docker-helper .deb and starts the system service, then
 # runs every regression group, capturing rc and recording PASS / FAIL / BLOCKED
@@ -145,15 +147,14 @@ REGRESSIONS=(
   "8:Secret containment:uat-regression-secret-containment.sh"
   "9:Daemon stale-runtime recovery:uat-regression-daemon-stale-runtime.sh"
   "10:Selector and completion acceptance:uat-regression-selector-completion-acceptance.sh"
-  "11:User-mode owner reservation:uat-regression-user-mode-owner-reservation.sh"
-  "12:User-mode effective Principal roots:uat-regression-user-mode-effective-roots.sh"
+  "11:System-only daemon deployment:uat-regression-system-only-daemon.sh"
+  "12:System-only endpoint resolution:uat-regression-system-endpoint-resolution.sh"
   "13:Session-list narrowing acceptance:uat-regression-session-list-narrowing.sh"
   "14:CLI introspection and completion acceptance:uat-regression-cli-introspection-completion.sh"
   "15:env-from secret forwarding:uat-regression-env-from.sh"
   "16:helper_socket runtime projection:uat-regression-helper-socket.sh"
   "17:env-from + helper-socket dogfood:uat-regression-dogfood-env-socket.sh"
-  "18:User-mode helper_socket fail-closed:uat-regression-user-mode-helper-socket.sh"
-  "19:User-mode self introspection:uat-regression-user-mode-self.sh"
+  "18:System-only no user-state adoption:uat-regression-system-no-user-adoption.sh"
   "20:CLI grammar and stored-roots completion acceptance:uat-regression-cli-grammar-stored-roots-completion.sh"
   "21:Allowed-root recovery universe:uat-regression-allowed-root-recovery.sh"
   "22:M13 Docker bind-mount serialization:uat-regression-bind-serialization.sh"
@@ -179,9 +180,9 @@ for entry in "${REGRESSIONS[@]}"; do
   # Re-ensure the service so a prior group's cleanup cannot BLOCK later groups
   # (a previous regression failure is never a valid BLOCKED reason). reset-failed
   # clears a systemd start-limit-hit unit state: the earlier groups' deliberate
-  # kill/restart cycles (group 9) and system-daemon stops (user-mode groups) can
-  # otherwise exhaust StartLimitBurst within its 60s window and leave the unit
-  # permanently refused for the rest of the collect-all run.
+  # kill/restart cycles (group 9) can otherwise exhaust StartLimitBurst within
+  # its 60s window and leave the unit permanently refused for the rest of the
+  # collect-all run.
   if ! systemctl is-active --quiet docker-helper.service 2>/dev/null; then
     systemctl reset-failed docker-helper.service >/dev/null 2>&1 || true
     systemctl enable --now docker-helper.service >/dev/null 2>&1 || true

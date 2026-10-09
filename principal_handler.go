@@ -328,9 +328,6 @@ func (a *App) handleSetPrincipal(w http.ResponseWriter, r *http.Request) {
 
 	if changeErr != nil {
 		result := "error"
-		if isErrUserModeOwnerReserved(changeErr) {
-			result = "user_mode_owner_reserved"
-		}
 		writeRequestContextAudit(ctx, auditRecord{
 			Event:         "principal.enabled_change",
 			PrincipalName: username,
@@ -341,9 +338,6 @@ func (a *App) handleSetPrincipal(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case isErrPrincipalNotFound(changeErr):
 			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
-		case isErrUserModeOwnerReserved(changeErr):
-			writeError(ctx, w, http.StatusConflict, "user_mode_owner_reserved",
-				"this principal is managed by transparent user mode and cannot be mutated in this way")
 		default:
 			opLog(ctx).Error("principal set failed",
 				slog.String("operation", "principal_set"),
@@ -464,8 +458,7 @@ func (a *App) handleAddPrincipalAllowedRoot(w http.ResponseWriter, r *http.Reque
 	// create either linearizes before the mutation (and observed the old
 	// policy) or after it (and observes the narrowed/widened one).
 	// addPrincipalAllowedRootWithLifecycle owns that boundary and the current
-	// policy snapshot inside it, and refuses the reserved user-mode
-	// daemon-owner Principal before any change.
+	// policy snapshot inside it.
 	changed, entry, err := a.addPrincipalAllowedRootWithLifecycle(username, req.Path, requestedAccess)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
@@ -485,9 +478,6 @@ func (a *App) handleAddPrincipalAllowedRoot(w http.ResponseWriter, r *http.Reque
 		switch {
 		case isErrPrincipalNotFound(err):
 			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
-		case isErrUserModeOwnerReserved(err):
-			writeError(ctx, w, http.StatusConflict, "user_mode_owner_reserved",
-				"this principal is managed by transparent user mode and cannot be mutated in this way")
 		case isErrInvalidAllowedRoot(err):
 			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root", "invalid allowed root")
 		case errors.Is(err, ErrInvalidAllowedRootAccess):
@@ -577,8 +567,7 @@ func (a *App) handleRemovePrincipalAllowedRoot(w http.ResponseWriter, r *http.Re
 
 	// Same lifecycle serialization boundary as Session creation and the
 	// Principal allowed-root add (see handleAddPrincipalAllowedRoot);
-	// removePrincipalAllowedRootWithLifecycle owns it and refuses the reserved
-	// user-mode daemon-owner Principal before any change. The committed
+	// removePrincipalAllowedRootWithLifecycle owns it. The committed
 	// transition carries the canonical cascade: when the stored root changed
 	// state, the restricted-Launcher descendants outside the resulting
 	// effective Principal ceiling were deleted in the same transaction.
@@ -596,9 +585,6 @@ func (a *App) handleRemovePrincipalAllowedRoot(w http.ResponseWriter, r *http.Re
 		switch {
 		case isErrPrincipalNotFound(err):
 			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
-		case isErrUserModeOwnerReserved(err):
-			writeError(ctx, w, http.StatusConflict, "user_mode_owner_reserved",
-				"this principal is managed by transparent user mode and cannot be mutated in this way")
 		case isErrInvalidAllowedRoot(err):
 			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root", "invalid allowed root")
 		default:
@@ -641,8 +627,7 @@ func (a *App) handleRemovePrincipalAllowedRoot(w http.ResponseWriter, r *http.Re
 // read-modify-write over the root list, so the daemon owns the mutation and
 // its concurrency semantics. Unlike the idempotent remove, a missing stored
 // root is refused (404 allowed_root_not_found) so a mistyped path can never
-// be silently reported as satisfied, and the reserved user-mode daemon-owner
-// Principal is refused like every other mutation. The mutation shares the
+// be silently reported as satisfied. The mutation shares the
 // lifecycle serialization with Session creation and the other root-policy
 // mutations; no ceiling re-check is performed here, because the effective
 // policy is composed by the canonical 2.2 effective-root owner at every
@@ -738,9 +723,6 @@ func (a *App) handleSetPrincipalAllowedRootAccess(w http.ResponseWriter, r *http
 		switch {
 		case isErrPrincipalNotFound(err):
 			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
-		case isErrUserModeOwnerReserved(err):
-			writeError(ctx, w, http.StatusConflict, "user_mode_owner_reserved",
-				"this principal is managed by transparent user mode and cannot be mutated in this way")
 		case isErrInvalidAllowedRoot(err):
 			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root", "invalid allowed root")
 		case errors.Is(err, ErrInvalidAllowedRootAccess):
@@ -791,8 +773,6 @@ func principalAllowedRootAuditResult(err error) string {
 	switch {
 	case isErrPrincipalNotFound(err):
 		return "principal_not_found"
-	case isErrUserModeOwnerReserved(err):
-		return "user_mode_owner_reserved"
 	case isErrInvalidAllowedRoot(err):
 		return "invalid_allowed_root"
 	case errors.Is(err, ErrAllowedRootNotFound):
@@ -870,15 +850,6 @@ func (a *App) handleDeletePrincipal(w http.ResponseWriter, r *http.Request) {
 				Duration:      duration,
 			})
 			writeError(ctx, w, http.StatusConflict, "launcher_runtime_active", "principal has active launcher runtime")
-		case isErrUserModeOwnerReserved(err):
-			writeRequestContextAudit(ctx, auditRecord{
-				Event:         "principal.delete",
-				PrincipalName: username,
-				Result:        "user_mode_owner_reserved",
-				Duration:      duration,
-			})
-			writeError(ctx, w, http.StatusConflict, "user_mode_owner_reserved",
-				"this principal is managed by transparent user mode and cannot be mutated in this way")
 		default:
 			writeRequestContextAudit(ctx, auditRecord{
 				Event:         "principal.delete",

@@ -20,13 +20,11 @@ const (
 
 // systemSocketPath is the canonical Unix socket path of the system daemon.
 // Both operator and agent CLI endpoint selection resolve the same path; it is a
-// variable so tests can bind a real listener at a controlled path (the same
-// test-injection pattern as systemSocketExists).
+// variable so tests can bind a real listener at a controlled path.
 var systemSocketPath = filepath.Join(systemRuntimeDir, "docker-helper.sock")
 
 // operatorClientOptions specifies how to connect to the daemon.
 type operatorClientOptions struct {
-	System    bool   // --system: force system daemon
 	Endpoint  string // --endpoint: explicit endpoint URL
 	TokenFile string // --token-file: explicit token file path
 	// EndpointSet records that --endpoint was explicitly supplied. It is
@@ -53,15 +51,12 @@ func (opts operatorClientOptions) clientTimeout() *time.Duration {
 }
 
 // validateEndpointSelection validates the endpoint-selection grammar shared
-// by every command family: --system and --endpoint are mutually exclusive,
-// and an explicit endpoint must carry the canonical syntax validateEndpoint
-// owns. It is pure and locally knowable, so CLI invocations run it during
+// by every command family: an explicit endpoint must carry the canonical
+// syntax validateEndpoint owns and an explicit empty value is a usage
+// error. It is pure and locally knowable, so CLI invocations run it during
 // Invocation.Validate (exit 2); family-specific requirements compose around
-// it rather than re-owning the mutual-exclusion or syntax rules.
-func validateEndpointSelection(system bool, endpoint string, endpointSet bool) error {
-	if system && endpoint != "" {
-		return fmt.Errorf("--system and --endpoint are mutually exclusive")
-	}
+// it rather than re-owning the syntax rules.
+func validateEndpointSelection(endpoint string, endpointSet bool) error {
 	if endpointSet && endpoint == "" {
 		return fmt.Errorf("--endpoint value must not be empty")
 	}
@@ -86,7 +81,7 @@ func isUnixEndpoint(endpoint string) bool {
 // (exit 2); resolveOperatorClient retains the same validation for direct and
 // internal callers.
 func validateOperatorEndpointOptions(opts operatorClientOptions) error {
-	if err := validateEndpointSelection(opts.System, opts.Endpoint, opts.EndpointSet); err != nil {
+	if err := validateEndpointSelection(opts.Endpoint, opts.EndpointSet); err != nil {
 		return err
 	}
 	if opts.Endpoint != "" && !isUnixEndpoint(opts.Endpoint) && opts.TokenFile == "" {
@@ -110,11 +105,7 @@ func resolveOperatorClient(opts operatorClientOptions) (*apiClient, error) {
 		return resolveExplicitEndpoint(opts)
 	}
 
-	if opts.System {
-		return resolveSystemEndpoint(opts)
-	}
-
-	return resolveDefaultEndpoint(opts)
+	return resolveSystemEndpoint(opts)
 }
 
 // resolveExplicitEndpoint is the execution/resolution stage for an already
@@ -147,7 +138,11 @@ func resolveExplicitEndpoint(opts operatorClientOptions) (*apiClient, error) {
 		// Auto-resolve token for unix sockets.
 		tokenPath := opts.TokenFile
 		if tokenPath == "" {
-			tokenPath = resolveSystemModeTokenPath()
+			resolved, err := resolveOperatorTokenPath()
+			if err != nil {
+				return nil, err
+			}
+			tokenPath = resolved
 		}
 		token, err := readTokenFile(tokenPath)
 		if err != nil {
@@ -174,53 +169,11 @@ func resolveSystemEndpoint(opts operatorClientOptions) (*apiClient, error) {
 	socketPath := systemSocketPath
 	tokenPath := opts.TokenFile
 	if tokenPath == "" {
-		tokenPath = resolveSystemModeTokenPath()
-	}
-
-	token, err := readTokenFile(tokenPath)
-	if err != nil {
-		return nil, err
-	}
-	tokenSource := func() (string, error) { return token, nil }
-
-	return newUnixAPIClient(socketPath, tokenSource, opts.clientTimeout()), nil
-}
-
-func resolveDefaultEndpoint(opts operatorClientOptions) (*apiClient, error) {
-	// Documented operator default: the user-mode daemon socket when it
-	// exists, otherwise the system socket. A non-root operator without a
-	// resolvable user runtime directory (no XDG_RUNTIME_DIR) has no user
-	// socket to consider, so the default resolves to the system socket;
-	// only when that fallback is also unavailable does the runtime
-	// directory resolution error surface.
-	userSocketPath := ""
-	if runtimeDir, err := getRuntimeDir(); err == nil {
-		userSocketPath = filepath.Join(runtimeDir, "docker-helper.sock")
-	} else if !systemSocketExists() {
-		return nil, err
-	}
-
-	// Determine which socket to use.
-	// If user socket exists, use it. Otherwise fall back to system socket.
-	var socketPath string
-	switch {
-	case userSocketPath == "":
-		socketPath = systemSocketPath
-	case userSocketExists(userSocketPath):
-		socketPath = userSocketPath
-	case systemSocketExists():
-		socketPath = systemSocketPath
-	default:
-		socketPath = userSocketPath
-	}
-
-	tokenPath := opts.TokenFile
-	if tokenPath == "" {
-		if socketPath == systemSocketPath {
-			tokenPath = resolveSystemModeTokenPath()
-		} else {
-			tokenPath = filepath.Join(getConfigDir(), "admin.token")
+		resolved, err := resolveOperatorTokenPath()
+		if err != nil {
+			return nil, err
 		}
+		tokenPath = resolved
 	}
 
 	token, err := readTokenFile(tokenPath)
@@ -232,32 +185,15 @@ func resolveDefaultEndpoint(opts operatorClientOptions) (*apiClient, error) {
 	return newUnixAPIClient(socketPath, tokenSource, opts.clientTimeout()), nil
 }
 
-// systemSocketExists reports whether the system daemon socket is present.
-// Can be replaced in tests.
-var systemSocketExists = func() bool {
-	_, err := os.Stat(systemSocketPath)
-	return err == nil
-}
-
-// userSocketExists reports whether a user-mode daemon socket exists at path.
-func userSocketExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
-// resolveSystemModeTokenPath returns the token file path for system daemon
-// authentication: non-root users use credential.token, root uses admin.token.
-func resolveSystemModeTokenPath() string {
+// resolveOperatorTokenPath returns the token file used to authenticate with
+// the system daemon: root resolves the system admin token, non-root resolves
+// the installed user credential. Credential-path resolution failure is
+// returned to the caller; resolution never falls back to any admin token.
+func resolveOperatorTokenPath() (string, error) {
 	if EffectiveUID() == 0 {
-		return filepath.Join(systemConfigDir, "admin.token")
+		return filepath.Join(systemConfigDir, "admin.token"), nil
 	}
-	// credentialPath can fail only if HOME is unreadable; fall back to
-	// admin.token in the user config directory rather than returning an error.
-	credPath, err := credentialPath()
-	if err == nil {
-		return credPath
-	}
-	return filepath.Join(getConfigDir(), "admin.token")
+	return credentialPathFunc()
 }
 
 // validateEndpoint validates an explicit endpoint URL. This is shared transport
@@ -356,10 +292,9 @@ func newHTTPAPIClient(address string, tokenSource func() (string, error), timeou
 	}
 }
 
-// registerOperatorFlags adds --system, --endpoint, and --token-file flags to the
-// given FlagSet and returns pointers to the flag values.
-func registerOperatorFlags(fs *flag.FlagSet) (system *bool, endpoint *explicitStringFlag, tokenFile *string) {
-	system = fs.Bool("system", false, "Connect to system daemon")
+// registerOperatorFlags adds --endpoint and --token-file flags to the given
+// FlagSet and returns pointers to the flag values.
+func registerOperatorFlags(fs *flag.FlagSet) (endpoint *explicitStringFlag, tokenFile *string) {
 	// The endpoint flag is presence-aware: the CLI grammar must distinguish
 	// an omitted --endpoint (default resolution) from an explicitly
 	// supplied empty value (a usage error), so the shared endpoint

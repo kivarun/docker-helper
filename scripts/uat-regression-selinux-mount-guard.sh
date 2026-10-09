@@ -45,7 +45,7 @@ fi
 
 # --- ensure /opt is an authorized global root (authorization, not MAC) ----------
 dh config allowed-root add /opt >/dev/null 2>&1 || true
-dh reload --system >/dev/null 2>&1 || true
+dh reload >/dev/null 2>&1 || true
 
 # --- workspace with a same-filesystem bind mount beneath it ----------------------
 WS="/opt/uat-guard-ws-$RANDOM"
@@ -84,9 +84,9 @@ reg_setup_principal "$SEL_P" >/dev/null || { reg_fail "principal setup failed"; 
 # deliberately exercises), so /opt must be in the principal's own allowed roots
 # for the inherit-scope Session authorization to permit it. Without it the
 # create is rejected as invalid_workspace instead of reaching the guard.
-dh principal allowed-root add --system "$SEL_P" /opt >/dev/null 2>&1 || { reg_fail "principal allowed-root add failed"; reg_result; }
+dh principal allowed-root add "$SEL_P" /opt >/dev/null 2>&1 || { reg_fail "principal allowed-root add failed"; reg_result; }
 reg_principal_credential "$SEL_P" "$SEL_CRED" || { reg_fail "credential create failed"; reg_result; }
-SESS_JSON="$(dh session create --system --token-file "$SEL_CRED" "$WS" --json 2>&1)"
+SESS_JSON="$(dh session create --token-file "$SEL_CRED" "$WS" --json 2>&1)"
 SESS_EC=$?
 if [ "$SESS_EC" -eq 0 ]; then
   reg_fail "session create unexpectedly SUCCEEDED despite a mount beneath the workspace"

@@ -223,7 +223,7 @@ func TestErrorContractMountErrorNoPathLeak(t *testing.T) {
 func TestErrorContractInvalidWorkspace(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 
-	reqBody, _ := json.Marshal(map[string]string{"workspace": "/nonexistent-path-xyz"})
+	reqBody, _ := json.Marshal(map[string]string{"principal": testOwnerUsername, "workspace": "/nonexistent-path-xyz"})
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(reqBody))
 	withAdminToken(req)
 	w := httptest.NewRecorder()
@@ -265,7 +265,7 @@ func TestErrorContractWorkspaceMessageDistinct(t *testing.T) {
 
 	create := func(workspace string) string {
 		t.Helper()
-		reqBody, _ := json.Marshal(map[string]string{"workspace": workspace})
+		reqBody, _ := json.Marshal(map[string]string{"principal": testOwnerUsername, "workspace": workspace})
 		req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(reqBody))
 		withAdminToken(req)
 		w := httptest.NewRecorder()
@@ -313,7 +313,7 @@ func TestErrorContractSessionCreateInternalError(t *testing.T) {
 	app.DB = newFailExecDB(t, dbPath, sql.ErrTxDone)
 	defer app.DB.Close()
 
-	reqBody, _ := json.Marshal(map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)})
+	reqBody, _ := json.Marshal(map[string]string{"principal": testOwnerUsername, "workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)})
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(reqBody))
 	withAdminToken(req)
 	w := httptest.NewRecorder()
@@ -1076,7 +1076,8 @@ func decodePostedBody(t *testing.T, body []byte) response {
 }
 
 // postSessionCreate posts a session-create body to the real production
-// handler and returns the HTTP status and decoded public body.
+// handler with an Admin authority and returns the HTTP status and decoded
+// public body. Callers that need a Launcher selector include it in the body.
 func postSessionCreate(t *testing.T, app *App, body string) postedRequestResult {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte(body)))
@@ -1165,7 +1166,7 @@ func TestErrorContractWorkspacePathDoesNotExist(t *testing.T) {
 	root := app.Config.AllowedRoots[0].Path
 	ws := testWorkspaceDir(t, root)
 
-	resp := postSessionCreate(t, app, `{"workspace":"`+filepath.ToSlash(filepath.Join(ws, "does-not-exist"))+`"}`)
+	resp := postSessionCreate(t, app, `{"principal":"`+testOwnerUsername+`","workspace":"`+filepath.ToSlash(filepath.Join(ws, "does-not-exist"))+`"}`)
 	requireRefused(t, resp, http.StatusBadRequest, "invalid_workspace")
 	if !strings.Contains(resp.Message, "does not exist") {
 		t.Errorf("expected the missing-path cause, got %q", resp.Message)
@@ -1178,7 +1179,7 @@ func TestErrorContractWorkspacePathDoesNotExist(t *testing.T) {
 
 	// Control: a valid workspace still creates through the same handler —
 	// the real success contract, not merely the absence of two refusals.
-	valid := postSessionCreate(t, app, `{"workspace":"`+filepath.ToSlash(ws)+`"}`)
+	valid := postSessionCreate(t, app, `{"principal":"`+testOwnerUsername+`","workspace":"`+filepath.ToSlash(ws)+`"}`)
 	requireSessionCreated(t, valid, ws)
 }
 
@@ -1224,7 +1225,7 @@ func TestErrorContractWorkspaceSymlinkEscapeStillRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp := postSessionCreate(t, app, `{"workspace":"`+filepath.ToSlash(escape)+`"}`)
+	resp := postSessionCreate(t, app, `{"principal":"`+testOwnerUsername+`","workspace":"`+filepath.ToSlash(escape)+`"}`)
 	requireRefused(t, resp, http.StatusBadRequest, "invalid_workspace")
 	if resp.Message != "workspace must be inside an allowed root" {
 		t.Errorf("expected the stable containment refusal, got %q", resp.Message)
@@ -1300,7 +1301,7 @@ func TestErrorContractWorkspaceDeniedResolutionIsPolicyRefusal(t *testing.T) {
 			}
 			t.Cleanup(func() { evalSymlinksFn, osStatFn = origEval, origStat })
 
-			resp := postSessionCreate(t, app, `{"workspace":"`+tc.spellTarget()+`"}`)
+			resp := postSessionCreate(t, app, `{"principal":"`+testOwnerUsername+`","workspace":"`+tc.spellTarget()+`"}`)
 			requireRefused(t, resp, http.StatusBadRequest, "invalid_workspace")
 			if resp.Message != tc.wantMessage {
 				t.Errorf("expected message %q, got %q", tc.wantMessage, resp.Message)
@@ -1328,7 +1329,7 @@ func TestErrorContractFilesystemRootMissing(t *testing.T) {
 	missingRoot := filepath.ToSlash(filepath.Join(ws, "no-such-root"))
 
 	resp := postSessionCreate(t, app,
-		`{"workspace":"`+filepath.ToSlash(ws)+`","filesystem_roots":[{"path":"`+missingRoot+`","access":"read_write"}]}`)
+		`{"principal":"`+testOwnerUsername+`","workspace":"`+filepath.ToSlash(ws)+`","filesystem_roots":[{"path":"`+missingRoot+`","access":"read_write"}]}`)
 	requireRefused(t, resp, http.StatusBadRequest, "invalid_filesystem_policy")
 	if resp.Message != "requested filesystem root does not exist or cannot be resolved" {
 		t.Errorf("expected the bounded resolution message, got %q", resp.Message)
@@ -1342,11 +1343,11 @@ func TestErrorContractFilesystemRootMissing(t *testing.T) {
 	}{
 		{
 			name: "root outside the ceiling",
-			body: `{"workspace":"` + filepath.ToSlash(ws) + `","filesystem_roots":[{"path":"/etc","access":"read_write"}]}`,
+			body: `{"principal":"` + testOwnerUsername + `","workspace":"` + filepath.ToSlash(ws) + `","filesystem_roots":[{"path":"/etc","access":"read_write"}]}`,
 		},
 		{
 			name: "invalid access mode",
-			body: `{"workspace":"` + filepath.ToSlash(ws) + `","filesystem_roots":[{"path":"` + filepath.ToSlash(ws) + `","access":"sometimes"}]}`,
+			body: `{"principal":"` + testOwnerUsername + `","workspace":"` + filepath.ToSlash(ws) + `","filesystem_roots":[{"path":"` + filepath.ToSlash(ws) + `","access":"sometimes"}]}`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1362,7 +1363,7 @@ func TestErrorContractFilesystemRootMissing(t *testing.T) {
 	// handler — the real success contract, not merely the absence of the
 	// refusal code.
 	resp = postSessionCreate(t, app,
-		`{"workspace":"`+filepath.ToSlash(ws)+`","filesystem_roots":[{"path":"`+filepath.ToSlash(ws)+`","access":"read_write"}]}`)
+		`{"principal":"`+testOwnerUsername+`","workspace":"`+filepath.ToSlash(ws)+`","filesystem_roots":[{"path":"`+filepath.ToSlash(ws)+`","access":"read_write"}]}`)
 	requireSessionCreated(t, resp, filepath.ToSlash(ws))
 }
 
@@ -1383,7 +1384,7 @@ func TestErrorContractFilesystemRootDeniedResolutionStaysPolicyRefusal(t *testin
 		t.Fatal(err)
 	}
 	body := func(spelling string) string {
-		return `{"workspace":"` + filepath.ToSlash(ws) + `","filesystem_roots":[{"path":"` + spelling + `","access":"read_write"}]}`
+		return `{"principal":"` + testOwnerUsername + `","workspace":"` + filepath.ToSlash(ws) + `","filesystem_roots":[{"path":"` + spelling + `","access":"read_write"}]}`
 	}
 
 	for _, tc := range []struct {

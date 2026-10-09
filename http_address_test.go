@@ -23,7 +23,7 @@ func TestHTTPAddressDefaultSystem(t *testing.T) {
 }
 
 func TestHTTPAddressCustomSystem(t *testing.T) {
-	// Validate custom http_address by loading config in user mode.
+	// Validate custom http_address by loading the config.
 	// Config decoding and validation are mode-independent;
 	// only TCP listener creation depends on mode.
 	orig := EffectiveUID
@@ -40,7 +40,8 @@ func TestHTTPAddressCustomSystem(t *testing.T) {
 	writeConfig(t, configPath, data)
 
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", dir)
+	runtimeDir, _ := stubSystemRuntimeDirsForTest(t)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 
 	cfg, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
@@ -51,7 +52,10 @@ func TestHTTPAddressCustomSystem(t *testing.T) {
 	}
 }
 
-func TestHTTPAddressUserModeEmpty(t *testing.T) {
+// TestHTTPAddressDefaultEmpty proves the effective http_address falls back
+// to the documented loopback default when the config omits the field (the
+// value is only consumed for TCP listener creation).
+func TestHTTPAddressDefaultEmpty(t *testing.T) {
 	orig := EffectiveUID
 	defer func() { EffectiveUID = orig }()
 	EffectiveUID = func() int { return 1000 }
@@ -65,13 +69,14 @@ func TestHTTPAddressUserModeEmpty(t *testing.T) {
 	writeConfig(t, configPath, data)
 
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", dir)
+	runtimeDir, _ := stubSystemRuntimeDirsForTest(t)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 
 	cfg, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatalf("loadAndPrepareRuntimeConfig: %v", err)
 	}
-	// In user mode, HTTPAddress is still set to the default value
+	// HTTPAddress is still set to the default value
 	// (it's just not used for TCP listener creation).
 	if cfg.HTTPAddress != DefaultHTTPAddress {
 		t.Errorf("HTTPAddress = %q, want %q", cfg.HTTPAddress, DefaultHTTPAddress)
@@ -205,32 +210,6 @@ func TestConfigSetHTTPAddressSystem(t *testing.T) {
 	json.Unmarshal(raw, &cfg)
 	if cfg["http_address"] != "127.0.0.1:54321" {
 		t.Errorf("http_address = %v, want 127.0.0.1:54321", cfg["http_address"])
-	}
-}
-
-func TestConfigSetHTTPAddressUserModeRejected(t *testing.T) {
-	orig := EffectiveUID
-	defer func() { EffectiveUID = orig }()
-	EffectiveUID = func() int { return 1000 }
-
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.json")
-	data := map[string]any{
-		"allowed_root": testAllowedRootDir(t),
-		"session_ttl":  "1h",
-	}
-	writeConfig(t, configPath, data)
-
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", dir)
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "http_address", "127.0.0.1:54321"}, &stdout, &stderr)
-	if code == 0 {
-		t.Fatal("expected error for user mode config set http_address")
-	}
-	if !strings.Contains(stderr.String(), "system mode") {
-		t.Errorf("expected 'system mode' in error: %s", stderr.String())
 	}
 }
 
@@ -391,32 +370,6 @@ func TestConfigShowHTTPAddressCustom(t *testing.T) {
 	}
 }
 
-func TestConfigShowHTTPAddressUserModeEmpty(t *testing.T) {
-	orig := EffectiveUID
-	defer func() { EffectiveUID = orig }()
-	EffectiveUID = func() int { return 1000 }
-
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.json")
-	data := map[string]any{
-		"allowed_root": testAllowedRootDir(t),
-		"session_ttl":  "1h",
-	}
-	writeConfig(t, configPath, data)
-
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", dir)
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "show", "http_address"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("config show exited %d: %s", code, stderr.String())
-	}
-	if strings.TrimSpace(stdout.String()) != "" {
-		t.Errorf("http_address = %q, want empty", stdout.String())
-	}
-}
-
 // --- Listener tests ---
 
 func TestPrepareListenersSystemCustomAddress(t *testing.T) {
@@ -428,7 +381,7 @@ func TestPrepareListenersSystemCustomAddress(t *testing.T) {
 	socketPath := filepath.Join(dir, "test.sock")
 	defer os.Remove(socketPath)
 
-	unixListener, tcpListener, _, err := prepareListeners(ModeSystem, socketPath, "127.0.0.1:0")
+	unixListener, tcpListener, _, err := prepareListeners(socketPath, "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("prepareListeners: %v", err)
 	}
@@ -445,25 +398,6 @@ func TestPrepareListenersSystemCustomAddress(t *testing.T) {
 	tcpAddr := tcpListener.Addr().String()
 	if !strings.HasPrefix(tcpAddr, "127.0.0.1:") {
 		t.Errorf("TCP address = %q, should start with 127.0.0.1:", tcpAddr)
-	}
-}
-
-func TestPrepareListenersUserModeNoTCP(t *testing.T) {
-	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "test.sock")
-	defer os.Remove(socketPath)
-
-	unixListener, tcpListener, _, err := prepareListeners(ModeUser, socketPath, DefaultHTTPAddress)
-	if err != nil {
-		t.Fatalf("prepareListeners: %v", err)
-	}
-	defer cleanupListeners(unixListener, tcpListener, socketPath)
-
-	if unixListener == nil {
-		t.Fatal("unixListener should not be nil")
-	}
-	if tcpListener != nil {
-		t.Fatal("tcpListener should be nil in user mode")
 	}
 }
 
@@ -484,17 +418,6 @@ func TestResolveHTTPAddressDefaultSystem(t *testing.T) {
 	got := resolveHTTPAddress("")
 	if got != DefaultHTTPAddress {
 		t.Errorf("resolveHTTPAddress = %q, want %q", got, DefaultHTTPAddress)
-	}
-}
-
-func TestResolveHTTPAddressDefaultUser(t *testing.T) {
-	orig := EffectiveUID
-	defer func() { EffectiveUID = orig }()
-	EffectiveUID = func() int { return 1000 }
-
-	got := resolveHTTPAddress("")
-	if got != "" {
-		t.Errorf("resolveHTTPAddress = %q, want empty", got)
 	}
 }
 
