@@ -56,12 +56,19 @@ func TestOperationLogsResponseBoundedForAdversarialBytes(t *testing.T) {
 
 	t.Cleanup(func() {
 		_ = os.WriteFile(releaseFile, nil, 0644)
-		// The budget must exceed the 3s force-cleanup reserve so the
-		// graceful phase actually waits for op.done: with a 3s budget the
-		// force phase begins immediately and the cleanup returns while the
-		// driver goroutine is still inside builderStopCleanup, racing the
-		// fake-manager seam restore (observed as a -race DATA RACE).
-		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		// Full shutdown budget (graceful + force reserve): with a budget at
+		// or below the force-cleanup reserve the graceful phase is skipped
+		// and terminateForShutdown returns while the operation is still
+		// running. A pending build completion watcher would then outlive
+		// this test and write its build.finish audit into the next test's
+		// audit buffer, and the driver goroutine could still be inside
+		// builderStopCleanup, racing the fake-manager seam restore (both
+		// observed as -race DATA RACEs). The graceful phase waits for
+		// close(op.done), and the terminal transition precedes that close,
+		// so a completed wait proves every watcher and driver goroutine
+		// has finished.
+		ctx, cancel := context.WithTimeout(context.Background(),
+			defaultTerminationTimeout+defaultForceCleanupTimeout)
 		defer cancel()
 		app.OperationSupervisor.terminateForShutdown(ctx, nil)
 	})

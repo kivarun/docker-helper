@@ -19,7 +19,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -54,7 +56,25 @@ type projectionWorker interface {
 	alive() bool
 	// waitExit waits for the owned worker to exit within a bounded budget.
 	// Only meaningful for a worker this process started.
+	//
+	// The result is three-valued and idempotent: nil reports a proven clean
+	// exit, a plain non-nil error reports a PROVEN exit with that failure
+	// record (any number of waiters may observe the same result again), and
+	// *workerExitUnprovenError reports that the exit fact itself could not
+	// be established within the budget. A proven nonzero exit is never
+	// conflated with an unproven exit.
 	waitExit(timeout time.Duration) error
+}
+
+// workerExitUnprovenError reports that the owned projection worker's exit
+// fact could not be established within the wait budget: the process was
+// still alive or its exit was not proven before the deadline. It is
+// deliberately distinct from a proven nonzero exit, which is the worker's
+// own failure record; only the unproven case keeps owned state reserved.
+type workerExitUnprovenError struct{ timeout time.Duration }
+
+func (e *workerExitUnprovenError) Error() string {
+	return "bindfs worker did not exit after unmount"
 }
 
 // workloadMountOps abstracts the mount mechanics the SELinux backend needs.
@@ -204,9 +224,37 @@ func getxattrSELinux(path string) (string, error) {
 // A stale worker observed after a daemon crash is never signaled: stale
 // cleanup correlates by owned mount paths, never by a recorded PID.
 type bindfsWorker struct {
-	cmd  *exec.Cmd
-	done chan error
-	once sync.Once
+	cmd    *exec.Cmd
+	stderr *bytes.Buffer
+	// exitRecorded is closed exactly once after the one real cmd.Wait()
+	// returns; exitErr is recorded before the close and stays readable any
+	// number of times. The channel is an edge signal, never a one-shot
+	// result queue.
+	exitRecorded chan struct{}
+	exitOnce     sync.Once
+	// exitErr is nil for a proven clean exit and non-nil for a proven failed
+	// exit (the wrapped wait error including captured stderr).
+	exitErr error
+}
+
+// newBindfsWorker builds the worker handle around one started command; the
+// caller owns the started process and spawns recordExit exactly once.
+func newBindfsWorker(cmd *exec.Cmd, stderr *bytes.Buffer) *bindfsWorker {
+	return &bindfsWorker{cmd: cmd, stderr: stderr, exitRecorded: make(chan struct{})}
+}
+
+// recordExit performs the one real cmd.Wait() and records its result before
+// closing exitRecorded, so every later waitExit observer reads the same
+// proven exit fact (nil or the wrapped failure with stderr).
+func (w *bindfsWorker) recordExit() {
+	waitErr := w.cmd.Wait()
+	if waitErr != nil {
+		waitErr = fmt.Errorf("bindfs worker exited with error: %w (stderr: %s)", waitErr, strings.TrimSpace(w.stderr.String()))
+	}
+	w.exitOnce.Do(func() {
+		w.exitErr = waitErr
+		close(w.exitRecorded)
+	})
 }
 
 // startBindfsWorker starts one foreground FUSE passthrough worker with the
@@ -217,19 +265,13 @@ func startBindfsWorker(lookPath func(string) (string, error), backing, mountpoin
 		return nil, fmt.Errorf("%s is required for SELinux read-only projections: %w", bindfsBinary, err)
 	}
 	cmd := exec.Command(bindfs, "-f", "-o", "allow_other", "-o", "context="+context, backing, mountpoint)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	stderr := &bytes.Buffer{}
+	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("cannot start %s projection worker: %w (stderr: %s)", bindfsBinary, err, strings.TrimSpace(stderr.String()))
 	}
-	w := &bindfsWorker{cmd: cmd, done: make(chan error, 1)}
-	go func() {
-		waitErr := cmd.Wait()
-		if waitErr != nil {
-			waitErr = fmt.Errorf("bindfs worker exited with error: %w (stderr: %s)", waitErr, strings.TrimSpace(stderr.String()))
-		}
-		w.once.Do(func() { w.done <- waitErr })
-	}()
+	w := newBindfsWorker(cmd, stderr)
+	go w.recordExit()
 	return w, nil
 }
 
@@ -242,10 +284,14 @@ func (w *bindfsWorker) alive() bool {
 
 func (w *bindfsWorker) waitExit(timeout time.Duration) error {
 	select {
-	case waitErr := <-w.done:
-		return waitErr
+	case <-w.exitRecorded:
+		// Proven exit: the recorded result is returned to every observer,
+		// nil for a clean exit and the wrapped failure (with stderr) for a
+		// nonzero one.
+		return w.exitErr
 	case <-time.After(timeout):
-		return fmt.Errorf("bindfs worker did not exit after unmount")
+		// The exit fact itself is not established: fail closed.
+		return &workerExitUnprovenError{timeout: timeout}
 	}
 }
 
@@ -524,7 +570,18 @@ func (b *workloadSELinuxBackend) cleanupOwnedProjectionEntry(entry *projectionEn
 	}
 	if entry.worker != nil {
 		if err := entry.worker.waitExit(workloadWorkerExitTimeout); err != nil {
-			return err
+			var unproven *workerExitUnprovenError
+			if errors.As(err, &unproven) {
+				// The exit fact is not established within the budget: a
+				// live worker may still back the lower tree. Fail closed.
+				return err
+			}
+			// The worker is proven exited and reaped; its nonzero status is
+			// the worker's own failure record and does not keep the owned
+			// paths reserved after the positive mount-absence proof. The
+			// readiness/prepare error chain already carries this error.
+			opLog(context.Background()).Warn("projection worker exited nonzero; owned projection state released after the mount-absence proof",
+				slog.String("error", err.Error()))
 		}
 	}
 	if entry.lowerItem != "" {

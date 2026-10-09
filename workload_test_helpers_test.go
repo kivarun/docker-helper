@@ -154,8 +154,9 @@ type testProjectionWorker struct {
 	// still fails — the live-worker-handle rollback reproduction.
 	dieAfterFirstAlive bool
 	aliveCalled        bool
-	// waitExitErr makes the exit wait fail (the worker cannot be proven
-	// exited), which the backend must report as a retained rollback.
+	// waitExitErr makes the exit wait return whatever the test sets; a
+	// *workerExitUnprovenError means the worker cannot be proven exited,
+	// which the backend must report as a retained rollback.
 	waitExitErr error
 }
 
@@ -215,9 +216,9 @@ type testSELinuxWorkloadSeam struct {
 	// dieAfterFirstAlive makes every created worker's second liveness
 	// probe report it gone (live-handle rollback reproduction).
 	dieAfterFirstAlive bool
-	// waitExitErr makes every worker's exit wait fail (the worker cannot
-	// be proven exited), which the backend must report as a retained
-	// rollback.
+	// waitExitErr makes every worker's exit wait return the set value; a
+	// *workerExitUnprovenError means the worker cannot be proven exited,
+	// which the backend must report as a retained rollback.
 	waitExitErr error
 }
 
