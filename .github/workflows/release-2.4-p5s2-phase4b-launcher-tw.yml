@@ -227,7 +227,48 @@ jobs:
           # artificial 4C-78 (the proof ref advances from the 4C-76-era
           # pin to the commit carrying that module; identical Go
           # sources, so the binary is the same program).
-          PHASE4B_PROOF_REF: '481201c82ee030319b68680da8bc12feb59bd909'
+          #
+          # 4C-78: the 4C-77 canonical run 38043216013 (BOTH attempts)
+          # proved the categorized runtime-tree sock_file create grant
+          # live (the OLD boundary GONE; the AF_UNIX bind(2) itself
+          # SUCCEEDED — sys_socket -> fd 8, sys_bind(fd: 8) -> 0x0 with
+          # ZERO in-window SELinux denials) and its own terminal causal
+          # record is the genuine PRE-CLEANUP owner:
+          # buildkitd_t:s0:c1 -> builder_runtime_t:s0:c1:dir
+          # requested=0x28000000 denied=0x8000000 (the post-bind
+          # sys_unlinkat's dir remove_name hook, trace-ts=579.033948,
+          # the attempt-2 twin 472.072205 the same shape; the owning
+          # unlinkat enter 579.033942 and its exit 579.033967 (result
+          # -13 EACCES) the span's terminal anchor with its own TRACED
+          # owning window; the same-process state-tree sibling record
+          # 579.034006 classifies POST-FAILURE/CLEANUP per the
+          # correction-3 causal contract and is NOT this boundary). THE
+          # DELTA: requested=0x28000000={ search remove_name }, the
+          # standing search bit is NOT the delta and is NOT re-granted —
+          # candidate = decode(tclass=dir, denied=0x8000000) = exactly
+          # { remove_name }, NEVER the whole requested mask; THE CLASS
+          # MATTERS — the same bit 0x8000000 on the file class is
+          # file:entrypoint (the 4C-61 grant, a same-mask coincidence
+          # never merges two planes) and on the sock_file class it is
+          # not a pinned member, NEITHER is this authority. The 4C-78
+          # grant WIDENS THE PLANE H DIR RULE IN PLACE (ONE rule, never
+          # split): allow docker_helper_buildkitd_t
+          # docker_helper_builder_runtime_t:dir { getattr search write
+          # add_name remove_name } — the delta exactly +remove_name;
+          # dir:remove_name is NOT an unlink bundle — NOT unlink (the
+          # sock_file object's own removal hook, its own live-evidence
+          # phase), NOT rmdir, NOT create/add_name, NOT setattr/mounton,
+          # NOT rename — the conventional AF_UNIX pathname-removal
+          # bundle NOT reconstructed; the PLANE I sock_file surface
+          # stays EXACTLY the ONE bare { create } rule; the module-borne
+          # buildkitd-named allow total STAYS EXACTLY NINE (any TENTH
+          # rule trips), and the §19 alternate applies: if the lifetime
+          # finally held, the startup staircase STOPS and the
+          # cross-operation isolation proof (4C-37) resumes — no
+          # artificial 4C-79 (the proof ref advances from the 4C-77-era
+          # pin to the commit carrying that module; identical Go
+          # sources, so the binary is the same program).
+          PHASE4B_PROOF_REF: '0b4d088383fbfb6719e735ee7a29d18a5d8916e6'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
