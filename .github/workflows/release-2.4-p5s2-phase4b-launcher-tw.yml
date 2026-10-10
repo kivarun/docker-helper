@@ -250,7 +250,9 @@ jobs:
           # MATTERS — the same bit 0x8000000 on the file class is
           # file:entrypoint (the 4C-61 grant, a same-mask coincidence
           # never merges two planes) and on the sock_file class it is
-          # not a pinned member, NEITHER is this authority. The 4C-78
+          # NOT this authority (the 4C-79 decoder correction pins
+          # sock_file's layout to the shared common-file-perms list;
+          # sock_file 0x8000000 stays an unresolved decode). The 4C-78
           # grant WIDENS THE PLANE H DIR RULE IN PLACE (ONE rule, never
           # split): allow docker_helper_buildkitd_t
           # docker_helper_builder_runtime_t:dir { getattr search write
@@ -268,7 +270,57 @@ jobs:
           # artificial 4C-79 (the proof ref advances from the 4C-77-era
           # pin to the commit carrying that module; identical Go
           # sources, so the binary is the same program).
-          PHASE4B_PROOF_REF: '0b4d088383fbfb6719e735ee7a29d18a5d8916e6'
+          #
+          # 4C-79: the 4C-78 canonical run 38072642982 (BOTH attempts)
+          # proved the categorized runtime-tree dir remove_name grant
+          # live (the OLD boundary GONE; the post-bind dir remove_name
+          # hook passed silently) and its own terminal causal record is
+          # the genuine PRE-CLEANUP owner:
+          # buildkitd_t:s0:c1 -> builder_runtime_t:s0:c1:sock_file
+          # requested=0x800 denied=0x800 result=-13 (the post-bind
+          # sys_unlinkat's SOCKET-OBJECT unlink hook, trace-ts=575.319385,
+          # the attempt-2 twin buildkitd-59481 446.358003 the same
+          # shape; the owning unlinkat enter 575.319378 and its exit
+          # 575.319400 (result -13 EACCES) the span's terminal anchor
+          # with its own TRACED owning window; the bind itself
+          # SUCCEEDED under the 4C-77 sock_file create grant and the
+          # granted dir remove_name hook passed inside the same
+          # unlinkat BEFORE this denial; the sibling sock_file setattr
+          # (0x20) record at 575.319363 classified HANDLED/NON-TERMINAL
+          # and is NOT this boundary). THE DECODER CORRECTION: the
+          # 481201c-era short-prefix pin (sock_file unlink=0x40) is
+          # WRONG — the live kernel emitted unlink at 0x800, bit 11 of
+          # the COMMON-FILE-PERMS layout the file and dir classes
+          # share; decode(sock_file, 0x800) = exactly { unlink };
+          # decode(sock_file, 0x40) = { lock } NEVER unlink;
+          # decode(sock_file, 0x8) = { create } the 4C-77 grant
+          # unchanged; decode(file, 0x800) = { unlink } and
+          # decode(dir, 0x800) = { unlink } — the SAME common list,
+          # bit 11 on all three classes, three classes three decisions
+          # NEVER one plane; decode(dir, 0x8000000) = { remove_name }
+          # (the 4C-78 grant) and decode(file, 0x8000000) =
+          # { entrypoint } (the 4C-61 grant) — the same-mask
+          # coincidence never merges two planes. The 4C-79 grant
+          # WIDENS THE PLANE I SOCK_FILE RULE IN PLACE (ONE rule,
+          # never split): allow docker_helper_buildkitd_t
+          # docker_helper_builder_runtime_t:sock_file { create unlink }
+          # — the delta exactly +unlink; sock_file:unlink is NOT an
+          # unlink bundle — NOT setattr (the HANDLED/NON-TERMINAL
+          # sibling stays its own live-evidence phase), NOT
+          # rename/link/append/lock/map, NOT rmdir, NOT
+          # create/add_name/remove_name (the dir rule stays
+          # byte-for-semantics the ONE quintuple never split), NOT
+          # mounton — the conventional AF_UNIX pathname-removal bundle
+          # NOT reconstructed; the PLANE H dir surface stays EXACTLY
+          # the ONE quintuple rule; the module-borne buildkitd-named
+          # allow total STAYS EXACTLY NINE (any TENTH rule trips), and
+          # the §19 alternate applies: if the lifetime finally held,
+          # the startup staircase STOPS and the cross-operation
+          # isolation proof (4C-37) resumes — no artificial 4C-80 (the
+          # proof ref advances from the 4C-78-era pin to the commit
+          # carrying that module; identical Go sources, so the binary
+          # is the same program).
+          PHASE4B_PROOF_REF: '09f6b75fe8baf03bb90d16495c83d54aa764fa4b'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
