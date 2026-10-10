@@ -3755,8 +3755,9 @@ allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search;
 #     0x8000000 on the file class is file:entrypoint (the 4C-61
 #     target-side grant — a DIFFERENT subject/target/semantic object, a
 #     same-mask coincidence never merges two planes) and on the
-#     sock_file class it is NOT a pinned member (the sock_file common-
-#     prefix decode pins 0x1..0x100 only — a mask outside the prefix is
+#     sock_file class it is NOT this authority (the 4C-79 decoder
+#     correction pins sock_file's layout to the shared common-file-
+#     perms list — sock_file 0x8000000 is outside that list and stays
 #     an unresolved decode, never a guessed member); NO permission
 #     inference from the loaded policy's perms-file numbering;
 #   - dir:remove_name is NOT an unlink bundle: it grants the
@@ -3888,7 +3889,115 @@ allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr se
 # borne buildkitd-named allow total moves 8 -> EXACTLY NINE (the 4C-69
 # NEW-plane precedent: a new pair+class is a new plane, never a ninth
 # widening of an existing rule — any TENTH rule trips).
-allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:sock_file create;
+#
+# --- 4C-79: the categorized operation-runtime sock_file unlink — the
+# --- 4C-77 rule widened IN PLACE (ONE rule, never split) ---
+#
+# The 4C-78 canonical run's (38072642982, BOTH attempts) own terminal
+# causal record, live at the END of the buildkitd process's own
+# lifetime (the 4C-78 dir remove_name took effect — the post-bind
+# sys_unlinkat's dir remove_name hook passed silently and the SAME
+# syscall's NEXT hook became the causal terminal):
+#
+#   buildkitd-64076 575.319385 selinux_audited: requested=0x800
+#     denied=0x800 audited=0x800 result=-13
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:docker_helper_builder_runtime_t:s0:c1
+#     tclass=sock_file — the socket object's OWN unlink hook INSIDE the
+#     failing post-bind sys_unlinkat (the attempt-2 twin:
+#     buildkitd-59481 446.358003, the same shape, requested=denied=
+#     0x800 tclass=sock_file); the owning sys_unlinkat enter 575.319378
+#     and its exit 575.319400 (result -13 EACCES) are the span's
+#     terminal anchor with its own TRACED owning window (the
+#     UNTRACED-OWNER tier stays closed), the genuine PRE-CLEANUP owner
+#     — the bind itself SUCCEEDED (sys_socket -> fd 8,
+#     sys_bind(fd: 8) -> 0x0) and the granted dir remove_name hook
+#     passed inside the same unlinkat BEFORE this denial; only the
+#     failure response followed.
+#
+# THE DECODER CORRECTION (the 481201c-era short-prefix assumption was
+# wrong for the sock_file class): the LIVE kernel emitted sock_file
+# unlink at 0x800 — bit 11, the COMMON-FILE-PERMS layout the file and
+# dir classes share — NOT the short-prefix 0x40 the 4C-77-era decoder
+# pin assumed. The sock_file classmap is the kernel's common file
+# perms list (ioctl read write create getattr setattr lock relabelfrom
+# relabelto append map unlink link rename execute quotaon mounton
+# audit_access open execmod watch watch_mount watch_sb watch_with_perm
+# watch_reads watch_mountns, bits 0..25) with NOTHING class-specific:
+#   - decode(sock_file, 0x800) = exactly { unlink } — the LIVE-backed
+#     pin (bit 11); the same record's sibling sock_file setattr=0x20
+#     (bit 5, both layouts agree) corroborates the layout;
+#   - decode(sock_file, 0x40) = { lock } — NEVER unlink (the 4C-71
+#     state-tree FILE lock was bit 6 on the file class and stays its
+#     own authority);
+#   - decode(sock_file, 0x8) = { create } — the 4C-77 grant, unchanged;
+#   - decode(file, 0x800) = { unlink } and decode(dir, 0x800) =
+#     { unlink } too (the SAME common list, bit 11 on all three
+#     classes) — three classes, three decisions, NEVER one plane;
+#   - decode(dir, 0x8000000) = { remove_name } (the 4C-78 grant, bit
+#     27 of the dir-only extension) and decode(file, 0x8000000) =
+#     { entrypoint } (the 4C-61 grant) — the same mask coincidence
+#     never merges two planes.
+# THE DELTA IS EXACTLY +unlink:
+#   - requested = 0x800 = { unlink }; denied = 0x800 = { unlink };
+#     requested==denied so no subtraction of standing bits is needed —
+#     candidate = decode(tclass=sock_file, denied=0x800) = exactly
+#     { unlink }, the standing invariant candidate=decode(tclass,denied)
+#     preserved; NO permission inference from the loaded policy's
+#     perms-file numbering (the class-aware decode regression pins the
+#     tuple);
+#   - sock_file:unlink is NOT an unlink bundle: it grants the
+#     socket-file object's OWN removal hook and NOT setattr (the
+#     sibling 0x20 record classified HANDLED/NON-TERMINAL — its owning
+#     syscall was untraced and the unlinkat enter followed; it stays
+#     its own live-evidence phase and becomes a candidate only if a
+#     fresh live proof names it the genuine terminal owner), NOT
+#     rename/link/append/lock/map, NOT rmdir (the directory-removal
+#     hook), NOT create/add_name/remove_name (the dir rule stays
+#     byte-for-semantics { getattr search write add_name remove_name },
+#     the ONE quintuple never split), NOT mounton — the conventional
+#     AF_UNIX pathname-removal bundle is NOT reconstructed; the kernel
+#     emits each hook as its OWN decision and the next boundary's own
+#     live decision set owns the next phase (dir-class and sock_file-
+#     class decisions are never combined into one phase);
+#   - no write/open/getattr/read rides this widening; NOTHING on
+#     builder_runtime_t:file — the daemon's sock_file transport
+#     authority (docker_helper_t { getattr open read write }) is a
+#     DIFFERENT subject and a DIFFERENT owner and must never leak into
+#     this plane; no socket/connect process surface;
+#   - nothing on the sibling root/state types — PLANE G stays the bare
+#     search singleton on the ROOT pair, the state-tree dir rule stays
+#     exactly { getattr search write add_name }, the state-tree file
+#     rule stays exactly { create read open lock }, and none is
+#     widened;
+#   - no process/process2 permission, no capability/cap_userns, no
+#     range_transition;
+#   - the frozen planes stay frozen: the three exec planes (the source
+#     { execute read open }, the transition { transition }, the target
+#     { entrypoint read execute }), the shared state-root rule (exactly
+#     { getattr search }), the categorized state-tree dir rule (exactly
+#     { getattr search write add_name }), the categorized state-tree
+#     file rule (exactly { create read open lock }), and the shared
+#     runtime-root rule (exactly { search }).
+# MCS: the TE rule encodes NO categories — the rule is the bare pair;
+# the c1 -> c1 admissibility stays the existing constraints' job (both
+# domains are proven mcs_constrained_type members). The op_<id> runtime
+# directory's own label is proven separately (the kernel-label sampler's
+# first/last/all read-backs and the live stat, all
+# builder_runtime_t:s0:c1 — the 4C-72 §9 instrument carries forward) —
+# never inferred from an AVC's tcontext.
+# SCOPE — READ CAREFULLY: the rule is type-wide TE authority
+# (buildkitd_t -> EVERY builder_runtime_t:sock_file create+unlink), NOT
+# path-scoped; the MCS category constraints are what keep it
+# operation-scoped in effect (a c1 subject cannot reach a c2 per-op
+# tree — the cross-operation reachability proof (4C-37) stays mandatory
+# and the cross-operation gate stays OPEN/Critical until it holds).
+# The category-scoped effect is NOT the 4C-37 isolation proof. The
+# companion runtime owners (init_t provisioning, the manager's own
+# runtime management + relabel, the daemon transport) are DIFFERENT
+# subjects and DIFFERENT owners — their builder_runtime_t rules stay
+# byte-unchanged, never merged and never templates.
+allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:sock_file { create unlink };
 
 # --- 4C-71: the categorized operation-state file lock — the 4C-70 file
 # --- rule widened IN PLACE (ONE rule, never split) ---
