@@ -6422,7 +6422,15 @@ REBUILD-STAGE=NOT-REACHED}"
       /^ *[a-zA-Z0-9_.-]+-[0-9]+ +\[[0-9]+\]/ {
         ts = $4; sub(/:$/, "", ts)
         if (t0 != "" && ts + 0 <= t0 + 0) next
-        if (te != "" && ts + 0 <= te + 0) next
+        # The 4C-79 correction-1 (the attempt-2 evidence of run
+        # 38080262145): the tracer collapses adjacent events to the
+        # SAME timestamp — the successful /etc/resolv.conf unlinkat
+        # exit and the FOLLOWING create openat enter both printed
+        # ts=326.807336 — so the stage-end guard must be STRICTLY
+        # before (ts < te), never ts <= te: a record AT the stage-end
+        # ts can be the very next stage enter. The guard is
+        # order-based, never duration-based.
+        if (te != "" && ts + 0 < te + 0) next
         if ($0 ~ /sys_openat\(/) {
           if ($0 ~ /filename: [^,]*"\/etc\/resolv\.conf"/ && $0 ~ /O_CREAT/) {
             pend = 1; pwho = $1; pline = $0; perts = ts
