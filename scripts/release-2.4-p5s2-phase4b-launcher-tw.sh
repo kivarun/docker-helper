@@ -750,6 +750,10 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
     GCTX[$GPID]="$GCTXV"
     GNSM[$GPID]=""
     GMI[$GPID]=""
+    # The 4C-77 correction 2 flag: this tick discovered a NEW flow pid —
+    # the tracked pass below must NOT stretch the born-since cadence
+    # this tick (see the correction note at the mountinfo capture).
+    G_DISCOVERED=1
     # The 4C-53 contract (the identification must happen within a
     # short-lived dance pid's own lifetime) met WITHOUT a per-discovery
     # fork: the discovery reads are builtin file reads (comm, ctx,
@@ -816,6 +820,7 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
     G_ALIVE=0
     G_FULLTICK=$(( G_FULLTICK + 1 ))
     G_DO_FULL=0
+    G_DISCOVERED=0
     if [ "$G_FULLTICK" -ge 40 ]; then
       G_FULLTICK=0
       G_DO_FULL=1
@@ -978,7 +983,26 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
           "$GTS" "$GPID" "${GCOMM[$GPID]}" "${GNSM[$GPID]}" "${GSTIME[$GPID]}"
         case "${GCTX[$GPID]:-}" in
           *docker_helper_rootlesskit_t:*)
-            if [ "$GMI_CAPS" -lt 4 ]; then
+            # The 4C-77 correction 2 (reproduced runs 38041462971
+            # attempts 1-2, both BLOCKED although the dance itself was
+            # clean — the trace's mount pairs all returned 0x0 and the
+            # host-table diff was CLEAN): the FIRST discovery tick
+            # stretched ~283ms (six inline ns readlinks at the discovery
+            # instants PLUS the four 36-line mountinfo captures of the
+            # just-discovered cohort in the tracked pass), and the
+            # dance child — forked mid-tick by the freshly discovered
+            # parent, its whole ~70ms lifetime the mount dance — died
+            # INSIDE that gap: the next born-since scan arrived after
+            # the death, no GATE-HOLDER-FIRST was ever recorded for the
+            # dance pid, and the gate items A/B came out 0. The
+            # mountinfo captures are best-effort BY THEIR OWN CONTRACT
+            # (the item-E proof is the trace pair, never the captures);
+            # the born-since cadence is gate-critical. A tick that
+            # discovered a new flow pid therefore DEFERS its captures to
+            # the next non-discovery tick (the flow's mount tables keep
+            # changing through the window, so the captures still happen
+            # there).
+            if [ "$G_DISCOVERED" = 0 ] && [ "$GMI_CAPS" -lt 4 ]; then
               GMINFO=""
               IFS= read -r -d '' GMINFO < "/proc/$GPID/mountinfo" 2>/dev/null || true
               if [ -n "$GMINFO" ] && [ "$GMINFO" != "${GMI[$GPID]:-}" ]; then
