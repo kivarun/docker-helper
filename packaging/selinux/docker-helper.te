@@ -3710,7 +3710,104 @@ allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search;
 # the daemon transport) are DIFFERENT subjects and DIFFERENT owners —
 # their builder_runtime_t/builder_runtime_root_t rules stay
 # byte-unchanged, never merged and never templates.
-allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write add_name };
+#
+# --- 4C-78: the categorized operation-runtime dir remove_name — the
+# --- 4C-76 rule widened IN PLACE (ONE rule, never split) ---
+#
+# The 4C-77 canonical run's (38043216013, BOTH attempts) own terminal
+# CAUSAL record, live at the END of the buildkitd process's own
+# lifetime (the 4C-77 sock_file create took effect — the AF_UNIX
+# bind(2) SUCCEEDED: sys_socket -> fd 8, sys_bind(fd: 8) -> 0x0 with
+# ZERO in-window SELinux denials, the create hook carried silently —
+# and the flow's NEXT production stage became the causal terminal):
+#
+#   buildkitd-64456 579.033948 selinux_audited: requested=0x28000000
+#     denied=0x8000000 audited=0x8000000 result=-13
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:docker_helper_builder_runtime_t:s0:c1
+#     tclass=dir — the post-bind sys_unlinkat's dir remove_name hook
+#     (the attempt-2 twin: buildkitd-62581 472.072205, the same shape,
+#     requested=0x28000000 denied=0x8000000 tclass=dir); the owning
+#     sys_unlinkat enter 579.033942 and its exit 579.033967 (result -13
+#     EACCES) are the span's terminal anchor with its own TRACED owning
+#     window (the UNTRACED-OWNER tier stays closed), the genuine
+#     PRE-CLEANUP owner — the same-process state-tree sibling record
+#     (579.034006, tcontext=builder_state_t:s0:c1 tclass=dir
+#     denied=0x8000000, inside the failing teardown sys_unlinkat whose
+#     exit 579.034020 is -13) classifies POST-FAILURE/CLEANUP (the
+#     correction-3 causal contract: the failure-response teardown walk
+#     joins NO terminal candidate) and is NOT this boundary; only the
+#     failure response followed the terminal.
+#
+# THE DELTA IS EXACTLY +remove_name:
+#   - requested = 0x28000000 = { search remove_name }; denied =
+#     0x8000000 = { remove_name }; the standing search bit is NOT the
+#     delta and is NOT re-granted — candidate = decode(tclass=dir,
+#     denied=0x8000000) = exactly { remove_name }, NEVER the whole
+#     requested mask (the requested-vs-denied subtraction: 0x28000000
+#     minus the standing 0x20000000 search = exactly the remove_name
+#     bit — the widening granted exactly the denied bit, never the
+#     whole mask);
+#   - decode(tclass=dir, 0x8000000) = exactly { remove_name } — the
+#     kernel-side dir-class pin (add_name=0x4000000 adjacent to
+#     remove_name=0x8000000 — the decode regression pins the tuple
+#     (dir, { remove_name })); THE CLASS MATTERS: the same bit number
+#     0x8000000 on the file class is file:entrypoint (the 4C-61
+#     target-side grant — a DIFFERENT subject/target/semantic object, a
+#     same-mask coincidence never merges two planes) and on the
+#     sock_file class it is NOT a pinned member (the sock_file common-
+#     prefix decode pins 0x1..0x100 only — a mask outside the prefix is
+#     an unresolved decode, never a guessed member); NO permission
+#     inference from the loaded policy's perms-file numbering;
+#   - dir:remove_name is NOT an unlink bundle: it grants the
+#     existing-entry name-removal hook on the directory object itself
+#     and NOT unlink (the sock_file object's own removal hook — its own
+#     live-evidence phase), NOT rmdir (the directory-removal hook), NOT
+#     create/add_name (the creation hooks), NOT setattr/mounton, NOT
+#     rename — the conventional AF_UNIX pathname-removal bundle is NOT
+#     reconstructed; the kernel emits each hook as its OWN decision and
+#     the next boundary's own live decision set owns the next phase
+#     (dir-class and sock_file-class decisions are never combined into
+#     one phase);
+#   - no read/open rides this widening; NOTHING on
+#     builder_runtime_t:file; the PLANE I sock_file surface stays
+#     EXACTLY the ONE bare { create } rule — no sock_file
+#     write/open/getattr/setattr/unlink/rename/append/lock/map rides,
+#     no socket/connect;
+#   - nothing on the sibling root/state types (builder_runtime_root_t,
+#     builder_state_root_t, builder_state_t) — PLANE G stays the bare
+#     search singleton on the ROOT pair, the state-tree dir rule stays
+#     exactly { getattr search write add_name }, and neither is
+#     widened;
+#   - no process/process2 permission, no capability/cap_userns, no
+#     range_transition;
+#   - the frozen planes stay frozen: the three exec planes (the source
+#     { execute read open }, the transition { transition }, the target
+#     { entrypoint read execute }), the shared state-root rule (exactly
+#     { getattr search }), the categorized state-tree dir rule (exactly
+#     { getattr search write add_name }), the categorized state-tree
+#     file rule (exactly { create read open lock }), and the shared
+#     runtime-root rule (exactly { search }).
+# MCS: the TE rule encodes NO categories — the rule is the bare pair;
+# the c1 -> c1 admissibility stays the existing constraints' job (both
+# domains are proven mcs_constrained_type members). The op_<id> runtime
+# directory's own label is proven separately (the kernel-label sampler's
+# first/last/all read-backs and the live stat, all
+# builder_runtime_t:s0:c1 — the 4C-72 §9 instrument carries forward) —
+# never inferred from an AVC's tcontext.
+# SCOPE — READ CAREFULLY: the rule is type-wide TE authority
+# (buildkitd_t -> EVERY builder_runtime_t:dir
+# getattr+search+write+add_name+remove_name), NOT path-scoped; the MCS
+# category constraints are what keep it operation-scoped in effect (a
+# c1 subject cannot reach a c2 per-op tree — the cross-operation
+# reachability proof (4C-37) stays mandatory and the cross-operation
+# gate stays OPEN/Critical until it holds). The category-scoped effect
+# is NOT the 4C-37 isolation proof. The companion runtime owners
+# (init_t provisioning, the manager's own runtime management + relabel,
+# the flow traversal, the daemon transport) are DIFFERENT subjects and
+# DIFFERENT owners — their builder_runtime_t/builder_runtime_root_t
+# rules stay byte-unchanged, never merged and never templates.
+allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write add_name remove_name };
 
 # --- 4C-77: the categorized operation-runtime sock_file create — the NEW
 # --- pair+class plane (PLANE I), NEVER a widening of the dir rule ---
