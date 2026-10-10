@@ -3712,6 +3712,87 @@ allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search;
 # byte-unchanged, never merged and never templates.
 allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write add_name };
 
+# --- 4C-77: the categorized operation-runtime sock_file create — the NEW
+# --- pair+class plane (PLANE I), NEVER a widening of the dir rule ---
+#
+# The 4C-76 canonical run's (38027012897) terminal record, live at the
+# END of the buildkitd process's own lifetime (the 4C-76 add_name took
+# effect — zero builder_runtime_t:dir add_name denials in the whole span
+# — and the runtime's NEXT production stage became the terminal):
+#
+#   buildkitd-61000 552.895275 selinux_audited: requested=0x8
+#     denied=0x8 audited=0x8 result=-13
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:docker_helper_builder_runtime_t:s0:c1
+#     tclass=sock_file — the AF_UNIX socket object's OWN inode-creation
+#     hook (sock_file:create) INSIDE the traced sys_bind window, AFTER
+#     the granted dir path-walk (search), dir write and dir add_name
+#     hooks had all passed silently in the same bind; the sys_bind exit
+#     at 552.895292 (result -13 EACCES) is the span's terminal anchor
+#     with its own TRACED owning window (the UNTRACED-OWNER tier stays
+#     closed), the genuine PRE-CLEANUP owner: only the failure response
+#     (the ZONE2 state-tree teardown, the error-report write,
+#     exit_group) followed.
+#
+# THE CLASS MATTERS (the 4C-69 anti-merge contract, verbatim here): the
+# authority is the PAIR (tclass=sock_file, 0x8) — the same bit number on
+# the dir class is dir:create and is NOT this authority (the 4C-77 task
+# correction explicitly withdrew the dir-quintuple misread), the same
+# bit on the file class is file:create and is NOT this authority either;
+# grant candidate = decode(tclass, denied) = exactly { create } on
+# sock_file, NEVER decode(mask) without the class, the class-aware
+# decode regression pins the tuple (dir 0x8 = { create }, file 0x8 =
+# { create }, sock_file 0x8 = { create } — three classes, three
+# decisions, never one plane).
+#
+# THE WIDENING IS A NEW PLANE — this is the FIRST builder_runtime_t
+# sock_file authority of the buildkitd domain, a NEW pair+class rule
+# that NEVER widens, splits, renames or copies any existing rule:
+#   - NOT dir:create (the dir rule stays byte-for-semantics
+#     { getattr search write add_name } — the entry hooks are granted,
+#     the inode-make hook for SUBDIRECTORIES stays ungranted);
+#   - NOT a writable-socket bundle: NO write/open/getattr/setattr/
+#     unlink/rename/append/lock/map rides this grant — the socket
+#     object's post-create USE (the connect/connectto path, the
+#     daemon's own sock_file transport read/write) stays its own
+#     live-evidence phase; no conventional AF_UNIX bundle is prepared
+#     in advance;
+#   - NOT the daemon transport: the daemon's own
+#     docker_helper_t -> builder_runtime_t:sock_file
+#     { getattr open read write } rule is a DIFFERENT subject and a
+#     DIFFERENT owner (the CLI/HTTP transport), never a template and
+#     never merged — a same-permission coincidence never merges two
+#     planes;
+#   - NOT the manager/init provisioning surfaces (the builder_t
+#     { create getattr setattr unlink } and the init_t { unlink } rules
+#     stay byte-unchanged — their own owners);
+#   - no read/open rides; NOTHING on builder_runtime_t:file; no
+#     socket/connect process-class surface; nothing on the sibling
+#     root/state types — PLANE G stays the bare search singleton and
+#     PLANE H stays the dir quadruple;
+#   - no process/process2 permission, no capability/cap_userns, no
+#     range_transition.
+# requested==denied so no subtraction of standing bits is needed; the
+# standing invariant candidate=decode(tclass,denied) is preserved.
+# MCS: the TE rule encodes NO categories — the rule is the bare pair;
+# the c1 -> c1 admissibility stays the existing constraints' job (both
+# domains are proven mcs_constrained_type members). The op_<id> runtime
+# directory's own label is proven separately (the kernel-label sampler's
+# first/last/all read-backs and the live stat, all
+# builder_runtime_t:s0:c1 — the 4C-72 §9 instrument carries forward) —
+# never inferred from an AVC's tcontext.
+# SCOPE — READ CAREFULLY: the rule is type-wide TE authority
+# (buildkitd_t -> EVERY builder_runtime_t:sock_file create), NOT
+# path-scoped; the MCS category constraints are what keep it
+# operation-scoped in effect (a c1 subject cannot reach a c2 per-op
+# tree — the cross-operation reachability proof (4C-37) stays mandatory
+# and the cross-operation gate stays OPEN/Critical until it holds). The
+# category-scoped effect is NOT the 4C-37 isolation proof. The module-
+# borne buildkitd-named allow total moves 8 -> EXACTLY NINE (the 4C-69
+# NEW-plane precedent: a new pair+class is a new plane, never a ninth
+# widening of an existing rule — any TENTH rule trips).
+allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:sock_file create;
+
 # --- 4C-71: the categorized operation-state file lock — the 4C-70 file
 # --- rule widened IN PLACE (ONE rule, never split) ---
 #

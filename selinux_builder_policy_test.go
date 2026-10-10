@@ -4448,6 +4448,12 @@ func buildkitdIdentityViolations(policy string) []string {
 	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock };"
 	const canonicalRuntimeRoot = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search;"
 	const canonicalRuntimeTree = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write add_name };"
+	// The categorized runtime-tree sock_file plane (PLANE I, the 4C-77
+	// NEW pair+class rule): exactly the ONE bare { create } rule — the
+	// AF_UNIX socket object's own inode-creation hook, the FIRST
+	// builder_runtime_t sock_file authority of the buildkitd domain,
+	// never a widening of the dir rule, never the daemon transport.
+	const canonicalRuntimeSockFile = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:sock_file create;"
 	// The categorized state-tree dir surface's standing owners (the
 	// exact module lines): the daemon does NOT own one; every other
 	// subject's existing rule is its own owner and must stay unchanged —
@@ -4516,6 +4522,19 @@ func buildkitdIdentityViolations(policy string) []string {
 		"allow docker_helper_builder_t docker_helper_builder_runtime_t:dir { relabelto };":                                                                true,
 		"allow docker_helper_t docker_helper_builder_runtime_t:dir { search };":                                                                           true,
 		canonicalRuntimeTree: true,
+	}
+	// The categorized runtime-tree sock_file surface's standing owners
+	// (the exact module lines, the 4C-77 plane): init_t provisioning
+	// unlink, the manager's own socket management, the daemon's CLI/HTTP
+	// transport read/write, and the buildkitd's own ONE bare { create }
+	// rule (PLANE I) — every other subject's existing rule is its own
+	// owner and must stay unchanged; any NEW or reshaped rule on the
+	// pair (any source, including attribute/broad forms) trips.
+	standingRuntimeSockFileRules := map[string]bool{
+		"allow init_t docker_helper_builder_runtime_t:sock_file { unlink };":                                         true,
+		"allow docker_helper_builder_t docker_helper_builder_runtime_t:sock_file { create getattr setattr unlink };": true,
+		"allow docker_helper_t docker_helper_builder_runtime_t:sock_file { getattr open read write };":               true,
+		canonicalRuntimeSockFile: true,
 	}
 	var violations []string
 	canonicalCount := 0
@@ -4610,12 +4629,26 @@ func buildkitdIdentityViolations(policy string) []string {
 	if runtimeTreeCount != 1 {
 		violations = append(violations, fmt.Sprintf("the buildkitd categorized runtime-tree dir { getattr search write add_name } grant must exist exactly once in the exact bare canonical form, found %d: %s", runtimeTreeCount, canonicalRuntimeTree))
 	}
+	runtimeSockFileCount := 0
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if trimmed == canonicalRuntimeSockFile {
+			runtimeSockFileCount++
+		}
+	}
+	if runtimeSockFileCount != 1 {
+		violations = append(violations, fmt.Sprintf("the buildkitd categorized runtime-tree sock_file bare create grant must exist exactly once in the exact bare canonical form, found %d: %s", runtimeSockFileCount, canonicalRuntimeSockFile))
+	}
 	// The exact module-borne allow-rule total naming a buildkitd type:
-	// the eight planes only (A source-exec, B transition, C target-side,
+	// the nine planes only (A source-exec, B transition, C target-side,
 	// D shared state-root, E categorized state-tree dir, F categorized
 	// state-tree file { create read open lock }, G shared runtime-root
 	// dir { search }, H categorized runtime-tree dir
-	// { getattr search write add_name }) — never "at least".
+	// { getattr search write add_name }, I categorized runtime-tree
+	// sock_file { create }) — never "at least".
 	buildkitdNamedAllow := 0
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -4626,8 +4659,8 @@ func buildkitdIdentityViolations(policy string) []string {
 			buildkitdNamedAllow++
 		}
 	}
-	if buildkitdNamedAllow != 8 {
-		violations = append(violations, fmt.Sprintf("the module must carry exactly the eight buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name }, the categorized state-tree file { create read open lock }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name }), found %d", buildkitdNamedAllow))
+	if buildkitdNamedAllow != 9 {
+		violations = append(violations, fmt.Sprintf("the module must carry exactly the nine buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name }, the categorized state-tree file { create read open lock }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name }, the categorized runtime-tree sock_file bare create), found %d", buildkitdNamedAllow))
 	}
 	// The shared runtime-root dir surface has exactly the standing
 	// owners above; a NEW or reshaped rule on the pair (any source,
@@ -4658,6 +4691,19 @@ func buildkitdIdentityViolations(policy string) []string {
 			violations = append(violations, "the categorized runtime-tree dir surface has exactly the standing owners (init_t, the manager x2, the daemon transport, the buildkitd ONE { getattr search write add_name } rule) — every other shape on the pair violates: "+trimmed)
 		}
 	}
+	// The categorized runtime-tree sock_file surface has exactly the
+	// standing owners above (init_t, the manager, the daemon transport,
+	// the buildkitd ONE bare { create } rule); a NEW or reshaped rule on
+	// the pair (any source, including attribute/broad forms) trips here.
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || !strings.HasPrefix(trimmed, "allow ") {
+			continue
+		}
+		if strings.Contains(trimmed, " docker_helper_builder_runtime_t:sock_file ") && !standingRuntimeSockFileRules[trimmed] {
+			violations = append(violations, "the categorized runtime-tree sock_file surface has exactly the standing owners (init_t unlink, the manager socket management, the daemon transport, the buildkitd ONE bare { create } rule) — every other shape on the pair violates: "+trimmed)
+		}
+	}
 	// The categorized per-op runtime-tree file and sock_file surfaces
 	// stay UNGRANTED from the buildkitd domain: no file IO, no socket
 	// transport — the daemon's sock_file transport is a DIFFERENT
@@ -4668,8 +4714,11 @@ func buildkitdIdentityViolations(policy string) []string {
 			continue
 		}
 		fields := strings.Fields(trimmed)
-		if len(fields) >= 3 && fields[1] == "docker_helper_buildkitd_t" && (strings.Contains(fields[2], "docker_helper_builder_runtime_t:file") || strings.Contains(fields[2], "docker_helper_builder_runtime_t:sock_file")) {
-			violations = append(violations, "the buildkitd domain holds NO authority on the categorized runtime-tree file/sock_file surfaces (the runtime tree is reached only on the kernel's own live hook; the daemon transport is a different subject and a different owner): "+trimmed)
+		if len(fields) >= 3 && fields[1] == "docker_helper_buildkitd_t" && strings.Contains(fields[2], "docker_helper_builder_runtime_t:file") {
+			violations = append(violations, "the buildkitd domain holds NO authority on the categorized runtime-tree file surface (the runtime tree is reached only on the kernel's own live hook): "+trimmed)
+		}
+		if len(fields) >= 3 && fields[1] == "docker_helper_buildkitd_t" && strings.Contains(fields[2], "docker_helper_builder_runtime_t:sock_file") && trimmed != canonicalRuntimeSockFile {
+			violations = append(violations, "the buildkitd domain's ONLY runtime-tree sock_file authority is the exact bare { create } rule (the 4C-77 AF_UNIX socket inode-creation hook; write/open/getattr/setattr/unlink/rename/append/lock/map stay closed and the daemon transport is a different subject and a different owner): "+trimmed)
 		}
 	}
 	// The categorized state-tree dir surface has exactly the standing
@@ -4708,7 +4757,7 @@ func buildkitdIdentityViolations(policy string) []string {
 			if strings.Contains(trimmed, "docker_helper_buildkitd_exec_t") && trimmed != canonicalExec && trimmed != canonicalEntry {
 				violations = append(violations, "the only allow rules naming the buildkitd exec type are the exact source-exec grant { execute read open } and the exact target-side { entrypoint read execute } grant: "+trimmed)
 			}
-			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot && trimmed != canonicalRuntimeTree {
+			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot && trimmed != canonicalRuntimeTree && trimmed != canonicalRuntimeSockFile {
 				violations = append(violations, "the only allow rules toward the buildkitd domain are the exact process transition grant, the exact target-entrypoint grant, and the exact state/runtime surfaces: "+trimmed)
 			}
 			fields := strings.Fields(trimmed)
@@ -5067,6 +5116,30 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 	}
 	if violations := buildkitdIdentityViolations(strings.Join(withoutRuntimeTree, "\n")); len(violations) == 0 {
 		t.Error("the missing-runtime-tree mutation must trip the buildkitd authority invariants")
+	}
+
+	// The 4C-77 categorized runtime-tree sock_file plane (PLANE I):
+	// exactly the ONE bare { create } rule, once — a NEW pair+class
+	// (the AF_UNIX socket object's own inode-creation hook, the 4C-76
+	// canonical run 38027012897's own terminal record inside the traced
+	// sys_bind window), never a widening of the dir rule, never the
+	// daemon transport, never a conventional AF_UNIX bundle.
+	const canonicalRuntimeSockFile = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:sock_file create;"
+	var withoutRuntimeSockFile []string
+	runtimeSockFileCount := 0
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == canonicalRuntimeSockFile {
+			runtimeSockFileCount++
+			continue
+		}
+		withoutRuntimeSockFile = append(withoutRuntimeSockFile, line)
+	}
+	if runtimeSockFileCount != 1 {
+		t.Errorf("the buildkitd categorized runtime-tree sock_file bare create grant must exist exactly once, found %d", runtimeSockFileCount)
+	}
+	if violations := buildkitdIdentityViolations(strings.Join(withoutRuntimeSockFile, "\n")); len(violations) == 0 {
+		t.Error("the missing-runtime-tree-sock_file mutation must trip the buildkitd authority invariants")
 	}
 
 	// Mutation guards: every forbidden authority shape appended to the
@@ -5444,6 +5517,30 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		{"split runtime-tree grant (the getattr brace + the bare write)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr };\nallow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir write;"},
 		{"split runtime-tree grant (the old canonical pair + the bare write)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search };\nallow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir write;"},
 		{"duplicate of the runtime-tree rule", canonicalRuntimeTree},
+		// the 4C-77 categorized runtime-tree SOCK_FILE plane (PLANE I):
+		// exactly the ONE bare { create } rule; every other sock_file
+		// permission, every other source, every other shape on the pair
+		// trips; the dir rule is byte-for-semantics unchanged and never
+		// absorbs the sock_file class
+		{"runtime-tree sock_file write instead", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:sock_file write;"},
+		{"runtime-tree sock_file open instead", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:sock_file open;"},
+		{"runtime-tree sock_file getattr instead", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:sock_file getattr;"},
+		{"runtime-tree sock_file setattr instead", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:sock_file setattr;"},
+		{"runtime-tree sock_file unlink instead", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:sock_file unlink;"},
+		{"runtime-tree sock_file rename instead", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:sock_file rename;"},
+		{"runtime-tree sock_file append instead", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:sock_file append;"},
+		{"runtime-tree sock_file lock instead", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:sock_file lock;"},
+		{"runtime-tree sock_file map instead", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:sock_file map;"},
+		{"runtime-tree sock_file the conventional AF_UNIX pair { create write }", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:sock_file { create write };"},
+		{"runtime-tree sock_file grant from the wrong source (the daemon transport)", "allow docker_helper_t docker_helper_builder_runtime_t:sock_file create;"},
+		{"runtime-tree sock_file grant from the wrong source (the manager)", "allow docker_helper_builder_t docker_helper_builder_runtime_t:sock_file create;"},
+		{"runtime-tree sock_file grant from the wrong source (the flow)", "allow docker_helper_rootlesskit_t docker_helper_builder_runtime_t:sock_file create;"},
+		{"runtime-tree sock_file grant on the wrong class (dir)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir create;"},
+		{"runtime-tree sock_file grant on the wrong class (file)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:file create;"},
+		{"runtime-tree sock_file grant toward the wrong target (state_tree)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:sock_file create;"},
+		{"runtime-tree sock_file grant toward the wrong target (runtime_root)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:sock_file create;"},
+		{"duplicate of the runtime-tree sock_file rule", canonicalRuntimeSockFile},
+		{"split runtime-tree sock_file grant (bare create + getattr rule)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:sock_file create;\nallow docker_helper_buildkitd_t docker_helper_builder_runtime_t:sock_file getattr;"},
 		{"broad attribute target on the file plane", "allow docker_helper_buildkitd_t file_type:file create;"},
 		{"broad attribute source on the file plane", "allow domain docker_helper_builder_state_t:file create;"},
 		{"broad attribute target", "allow docker_helper_buildkitd_t file_type:dir getattr;"},
@@ -5941,6 +6038,32 @@ func TestSELinuxPolicyKernelClassmapMaskPins(t *testing.T) {
 	// The class-aware decode: decode(file, mask) vs decode(dir, mask)
 	// each recover exactly { create } for 0x8 — but the TUPLES differ,
 	// and equating them is the tclass-loss error this regression pins.
+	// sockFileDecode implements the kernel's own sock_file classmap: the
+	// COMMON_FILE_SOCK prefix (ioctl, read, write, create, getattr,
+	// setattr, unlink, link, rename) shared by the file-family classes,
+	// followed by the sock_file-specific members. Only the common-prefix
+	// bits are pinned here; a mask outside the prefix is an unresolved
+	// decode, never a guessed member.
+	sockFileDecode := func(mask uint) []string {
+		var perms []string
+		for bit, name := range map[uint]string{
+			0x1:   "ioctl",
+			0x2:   "read",
+			0x4:   "write",
+			0x8:   "create",
+			0x10:  "getattr",
+			0x20:  "setattr",
+			0x40:  "unlink",
+			0x80:  "link",
+			0x100: "rename",
+		} {
+			if mask&bit != 0 {
+				perms = append(perms, name)
+			}
+		}
+		sort.Strings(perms)
+		return perms
+	}
 	classDecode := func(class string, mask uint) string {
 		var perms []string
 		switch class {
@@ -5948,6 +6071,8 @@ func TestSELinuxPolicyKernelClassmapMaskPins(t *testing.T) {
 			perms = decode(mask)
 		case "dir":
 			perms = dirDecode(mask)
+		case "sock_file":
+			perms = sockFileDecode(mask)
 		default:
 			perms = nil
 		}
@@ -6238,6 +6363,22 @@ func TestSELinuxPolicyKernelClassmapMaskPins(t *testing.T) {
 	}
 	if got := dirDecode(0x24000014 &^ 0x20000014); !samePerms(got, []string{"add_name"}) {
 		t.Errorf("kernel classmap decode: the 4C-76 delta (the quadruple minus the standing triple) must be exactly { add_name }, got %v", got)
+	}
+	// The 4C-77 grant-candidate pin: the 4C-76 canonical run 38027012897's
+	// own terminal record carried requested=0x8 denied=0x8 on
+	// tclass=sock_file (the AF_UNIX socket object's own inode-creation
+	// hook inside the traced sys_bind window, trace-ts=552.895275, the
+	// bind exit anchor 552.895292) — requested==denied so no subtraction
+	// of standing bits is needed; the grant candidate is the tuple
+	// (sock_file, { create }) — THE CLASS MATTERS: the same bit 0x8 on
+	// the dir class is dir:create and on the file class file:create, and
+	// neither is this authority (the 4C-69 anti-merge contract verbatim;
+	// the dir-quintuple misread was withdrawn by the task correction).
+	if got := classDecode("sock_file", 0x8); got != "(sock_file, create)" {
+		t.Errorf("kernel classmap decode: the 4C-77 grant candidate must be the tuple (sock_file, { create }), got %s", got)
+	}
+	if got := classDecode("dir", 0x8); got == "(sock_file, create)" {
+		t.Error("kernel classmap decode: the class is part of the tuple — dir 0x8 must never be reported as the sock_file plane")
 	}
 }
 
