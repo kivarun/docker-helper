@@ -2124,7 +2124,7 @@ RK_BKD_LABEL_OK=1
   sesearch --allow -s "$LAUNCHER_DOMAIN" -t docker_helper_rootlesskit_exec_t -c file /sys/fs/selinux/policy || true
 
   echo "=== the buildkitd source-exec authority (the 4C-61 composition: the source-exec { execute read open } grant + the pointed process transition + the target-domain entrypoint; the loaded-policy facts must match the transferred source exactly) ==="
-  echo "--- the transferred source's own non-comment buildkitd lines (must be the EXACT declarations, the ONE structural transition, the ONE { execute read open } grant, the ONE bare transition grant, the ONE { entrypoint read execute } grant, the ONE state-root { getattr search } grant, the ONE categorized state-tree dir { getattr search write add_name } grant, the ONE categorized state-tree file { create read open lock } grant, the ONE shared runtime-root bare dir search grant, and the ONE categorized runtime-tree dir { getattr search write } grant — no other allow):"
+  echo "--- the transferred source's own non-comment buildkitd lines (must be the EXACT declarations, the ONE structural transition, the ONE { execute read open } grant, the ONE bare transition grant, the ONE { entrypoint read execute } grant, the ONE state-root { getattr search } grant, the ONE categorized state-tree dir { getattr search write add_name } grant, the ONE categorized state-tree file { create read open lock } grant, the ONE shared runtime-root bare dir search grant, and the ONE categorized runtime-tree dir { getattr search write add_name } grant — no other allow):"
   grep -an 'docker_helper_buildkitd' "$TRANSFERRED/docker-helper.te" | grep -av ':[0-9]*:#' || true
   echo "--- the transferred source's buildkitd .fc lines:"
   grep -an 'docker_helper_buildkitd' "$TRANSFERRED/docker-helper.fc" | grep -av ':[0-9]*#' || true
@@ -2144,8 +2144,8 @@ RK_BKD_LABEL_OK=1
     || [ "$(printf '%s\n' "$BKD_SRC_ALLOW_LINES" | grep -acF 'allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name };' || true)" != "1" ] \
      || [ "$(printf '%s\n' "$BKD_SRC_ALLOW_LINES" | grep -acF 'allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock };' || true)" != "1" ] \
     || [ "$(printf '%s\n' "$BKD_SRC_ALLOW_LINES" | grep -acF 'allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search;' || true)" != "1" ] \
-    || [ "$(printf '%s\n' "$BKD_SRC_ALLOW_LINES" | grep -acF 'allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write };' || true)" != "1" ]; then
-    echo "  STOP: the module source's buildkitd allow surface is not exactly the source-exec triple + the bare transition grant + the target-domain { entrypoint read execute } grant + the state-root { getattr search } grant + the categorized state-tree dir { getattr search write add_name } grant + the categorized state-tree file { create read open lock } grant + the shared runtime-root bare dir search grant + the categorized runtime-tree dir { getattr search write } grant"
+    || [ "$(printf '%s\n' "$BKD_SRC_ALLOW_LINES" | grep -acF 'allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write add_name };' || true)" != "1" ]; then
+    echo "  STOP: the module source's buildkitd allow surface is not exactly the source-exec triple + the bare transition grant + the target-domain { entrypoint read execute } grant + the state-root { getattr search } grant + the categorized state-tree dir { getattr search write add_name } grant + the categorized state-tree file { create read open lock } grant + the shared runtime-root bare dir search grant + the categorized runtime-tree dir { getattr search write add_name } grant"
     BKD_ZERO_ALLOW_OK=0
   fi
   for s in docker_helper_t docker_helper_builder_t docker_helper_builder_launcher_t \
@@ -2409,7 +2409,7 @@ RK_BKD_LABEL_OK=1
       echo "  $s: the standing owner unchanged"
     fi
   done
-  echo "--- PLANE H (the 4C-73/74/75 categorized operation-runtime dir surface): sesearch --allow -s docker_helper_buildkitd_t -t docker_helper_builder_runtime_t -c dir (the domain's own categorized per-op runtime authority; must be EXACTLY the ONE { getattr search write } triple rule — the 4C-73 bare getattr rule WIDENED IN PLACE by the 4C-74 search and AGAIN by the 4C-75 write, ONE rule never split — the getattr granted by the 4C-72 canonical run 37644134366's own terminal record (requested=denied=0x10 result=-13 tclass=dir trace-ts=515.987102, the genuine last PRE-CLEANUP production failure — the state-file entry creation passed whole and the runtime-tree newfstatat died at the getattr hook, the first later enter 515.987147 being the state-tree cleanup-zone boundary itself), the search granted by the 4C-73 canonical run 37660355610's own terminal record (requested=denied=0x20000000 result=-13 tclass=dir trace-ts=547.065089, inside the terminal failing stale-socket-removal sys_unlinkat(AT_FDCWD, /run/docker-helper-builder/ops/op_feaa..., flag: 0) whose exit 547.066700 is the anchor — the runtime's own pre-bind cleanup, NOT the post-failure state-tree teardown whose ZONE2 boundary began only later at 547.066726) and the write granted by the 4C-74 correction-1 canonical run 37683155675's own terminal record (requested=0x20000004 denied=0x4 result=-13 tclass=dir trace-ts=543.896475, the AF_UNIX bind attempt's dir WRITE hook — the UNTRACED-OWNER second-tier anchor, the socket created 543.896407, the sysctl_net_t:dir search denial 543.896448 HANDLED with the continuation proof by=543.896475 untraced-owner-decision, only close(fd: 8)/close(fd: 5), the ZONE2 state-tree teardown and the error-report write+exit_group(1) following); NEVER a widening of the state-tree rules or the PLANE G root-plane search which stay exactly their own planes; the triple is NOT an unlink/creation bundle — no read/open/add_name/remove_name/create/rmdir/setattr/lock/mounton rides, NO sock_file hook, NO socket/connect; the companion runtime owners (init_t provisioning, the manager's own runtime management + relabel, the daemon transport) are DIFFERENT subjects and DIFFERENT owners and never count here):"
+  echo "--- PLANE H (the 4C-73/74/75/76 categorized operation-runtime dir surface): sesearch --allow -s docker_helper_buildkitd_t -t docker_helper_builder_runtime_t -c dir (the domain's own categorized per-op runtime authority; must be EXACTLY the ONE { getattr search write add_name } quadruple rule — the 4C-73 bare getattr rule WIDENED IN PLACE by the 4C-74 search, AGAIN by the 4C-75 write and ONCE MORE by the 4C-76 add_name, ONE rule never split — the getattr granted by the 4C-72 canonical run 37644134366's own terminal record (requested=denied=0x10 result=-13 tclass=dir trace-ts=515.987102, the genuine last PRE-CLEANUP production failure — the state-file entry creation passed whole and the runtime-tree newfstatat died at the getattr hook, the first later enter 515.987147 being the state-tree cleanup-zone boundary itself), the search granted by the 4C-73 canonical run 37660355610's own terminal record (requested=denied=0x20000000 result=-13 tclass=dir trace-ts=547.065089, inside the terminal failing stale-socket-removal sys_unlinkat(AT_FDCWD, /run/docker-helper-builder/ops/op_feaa..., flag: 0) whose exit 547.066700 is the anchor — the runtime's own pre-bind cleanup, NOT the post-failure state-tree teardown whose ZONE2 boundary began only later at 547.066726) and the write granted by the 4C-74 correction-1 canonical run 37683155675's own terminal record (requested=0x20000004 denied=0x4 result=-13 tclass=dir trace-ts=543.896475, the AF_UNIX bind attempt's dir WRITE hook — the UNTRACED-OWNER second-tier anchor, the socket created 543.896407, the sysctl_net_t:dir search denial 543.896448 HANDLED with the continuation proof by=543.896475 untraced-owner-decision, only close(fd: 8)/close(fd: 5), the ZONE2 state-tree teardown and the error-report write+exit_group(1) following); NEVER a widening of the state-tree rules or the PLANE G root-plane search which stay exactly their own planes; the quadruple is NOT a creation/unlink bundle — no read/open/remove_name/create/rmdir/setattr/lock/mounton rides (add_name is the 4C-76 GRANTED member and appears in the rule above, never a forbidden rider), NO sock_file hook, NO socket/connect; the companion runtime owners (init_t provisioning, the manager's own runtime management + relabel, the daemon transport) are DIFFERENT subjects and DIFFERENT owners and never count here):"
   BKD_RUNTIME_TREE_LINE="$(sesearch --allow -s docker_helper_buildkitd_t -t docker_helper_builder_runtime_t -c dir /sys/fs/selinux/policy 2>/dev/null \
     | awk '$1 == "allow" && $2 == "docker_helper_buildkitd_t" && $3 ~ /^docker_helper_builder_runtime/' || true)"
   printf '  module contribution (the concrete rule): %s\n' "${BKD_RUNTIME_TREE_LINE:-(empty)}"
@@ -2417,18 +2417,18 @@ RK_BKD_LABEL_OK=1
   [ -n "$BKD_RUNTIME_TREE_LINE" ] || BKD_RUNTIME_TREE_N=0
   BKD_RUNTIME_TREE_PERMS="$(printf '%s\n' "${BKD_RUNTIME_TREE_LINE:-}" | awk '{ for (i = 4; i <= NF; i++) { p = $i; gsub(/[{};]/, "", p); if (p != "") print p } }' | sort -u | tr '\n' ' ' | sed 's/ $//' || true)"
   echo "  the printed rule count: $BKD_RUNTIME_TREE_N; the normalized sorted perm union: { ${BKD_RUNTIME_TREE_PERMS:-(none)} }"
-  if [ "$BKD_RUNTIME_TREE_N" = "1" ] && [ "$BKD_RUNTIME_TREE_PERMS" = "getattr search write" ]; then
-    echo "  module contribution = exactly the triple { getattr search write } (the normalized sorted perm union of the ONE printed rule — never the printer's spelling; the 4C-73 getattr widened IN PLACE by the 4C-74 search and the 4C-75 write, ONE rule never split; the SOURCE spelling is gated separately by the module-source scan's exact-line check)"
+  if [ "$BKD_RUNTIME_TREE_N" = "1" ] && [ "$BKD_RUNTIME_TREE_PERMS" = "add_name getattr search write" ]; then
+    echo "  module contribution = exactly the quadruple { getattr search write add_name } (the normalized sorted perm union of the ONE printed rule — never the printer's spelling; the 4C-73 getattr widened IN PLACE by the 4C-74 search, the 4C-75 write and the 4C-76 add_name, ONE rule never split; the SOURCE spelling is gated separately by the module-source scan's exact-line check)"
   else
-    echo "  STOP: the target domain's concrete surface on the categorized runtime-tree DIR class is not exactly the ONE { getattr search write } grant"
+    echo "  STOP: the target domain's concrete surface on the categorized runtime-tree DIR class is not exactly the ONE { getattr search write add_name } grant"
     BKD_ZERO_ALLOW_OK=0
   fi
   echo "--- PLANE H effective-vs-module distinction (the two facts printed separately):"
   BKD_RUNTIME_TREE_EFFECTIVE="$(sesearch --allow -s docker_helper_buildkitd_t -t docker_helper_builder_runtime_t -c dir /sys/fs/selinux/policy 2>/dev/null || true)"
   printf '  effective loaded-policy surface (the live inventory, attribute-derived base-policy rules included as standing facts):\n%s\n' "${BKD_RUNTIME_TREE_EFFECTIVE:-(empty)}"
   echo "  (base-policy attribute-derived permissions on this pair are STANDING FACTS of the base policy, never the module's grant)"
-  echo "--- PLANE H per-perm NEGATIVES (each must be empty on the concrete pair — the { getattr search write } triple is NOT an unlink/creation bundle: no forbidden dir-class permission rides; getattr/search/write are the 4C-73/74/75 GRANTED members and appear in the PLANE H line above, never here; the file/sock_file surfaces stay out of this plane entirely):"
-  for p in read open add_name remove_name create rmdir setattr lock mounton; do
+  echo "--- PLANE H per-perm NEGATIVES (each must be empty on the concrete pair — the { getattr search write add_name } quadruple is NOT a creation/unlink bundle: no forbidden dir-class permission rides; getattr/search/write/add_name are the 4C-73/74/75/76 GRANTED members and appear in the PLANE H line above, never here; the file/sock_file surfaces stay out of this plane entirely):"
+  for p in read open remove_name create rmdir setattr lock mounton; do
     extra="$(sesearch --allow -s docker_helper_buildkitd_t -t docker_helper_builder_runtime_t -c dir -p "$p" /sys/fs/selinux/policy 2>/dev/null \
       | awk '$1 == "allow" && $2 == "docker_helper_buildkitd_t" && $3 ~ /^docker_helper_builder_runtime/' || true)"
     printf '  %s: %s\n' "$p" "${extra:-(empty — no concrete rule)}"
@@ -2437,7 +2437,7 @@ RK_BKD_LABEL_OK=1
       BKD_ZERO_ALLOW_OK=0
     fi
   done
-  echo "--- PLANE H standing-owner companion check (the OTHER subjects' builder_runtime_t:dir rules are their own owners; each subject's CONCRETE dir surface must stay EXACTLY its standing perm set — the 4C-73 grant must not have touched them; the comparison is the NORMALIZED sorted perm union, never the source spelling; the LOADED-policy rule count is the CIL-merged shape: semodule/CIL merges allow rules sharing the (source, target, class) triple into ONE printed rule carrying the union — the same printed-vs-source distinction the dir/state planes' companion checks record — so the counts below are PRINTED-rule counts, not source-line counts; ONLY the concrete-target lines count here; the RootlessKit flow has NO builder_runtime_t:dir rule at all — its runtime authority is the runtime-root traversal only; the daemon transport search is a DIFFERENT subject and a DIFFERENT owner, never a template for BuildKitd):"
+  echo "--- PLANE H standing-owner companion check (the OTHER subjects' builder_runtime_t:dir rules are their own owners; each subject's CONCRETE dir surface must stay EXACTLY its standing perm set — the 4C-76 grant must not have touched them; the comparison is the NORMALIZED sorted perm union, never the source spelling; the LOADED-policy rule count is the CIL-merged shape: semodule/CIL merges allow rules sharing the (source, target, class) triple into ONE printed rule carrying the union — the same printed-vs-source distinction the dir/state planes' companion checks record — so the counts below are PRINTED-rule counts, not source-line counts; ONLY the concrete-target lines count here; the RootlessKit flow has NO builder_runtime_t:dir rule at all — its runtime authority is the runtime-root traversal only; the daemon transport search is a DIFFERENT subject and a DIFFERENT owner, never a template for BuildKitd):"
   for spec in \
     "init_t:create remove_name rmdir setattr write:1" \
     "docker_helper_builder_t:add_name create getattr open read relabelto remove_name rmdir search setattr write:1" \
@@ -3895,7 +3895,7 @@ POSTTUN_NSTARTUP=0; POSTTUN_NPOST=0; POSTTUN_NPOLL=0; POSTTUN_NUNTIMED=0
 POSTTUN_OLD_BOUNDARY_PRESENT=0
 POSTTUN_BND_SYMBOLIC=""
 {
-  echo "=== 4C-38..4C-75 post-TUN lifetime/readiness causal verdict (the 4C-62 run carries exactly the rootlesskit_t -> net_conf_t:file { read open } pair — the 4C-51 read widened in place by the 4C-52 open hook — beside the tmpfs_t:lnk_file { create read unlink } triple (the 4C-48 create + 4C-50 read widened in place by the 4C-53 unlink removal hook), the tmpfs_t:file { create write open mounton } grant (the 4C-54 create hook widened in place by the 4C-55 combined write|open boundary and the 4C-56 bind-mount mounton boundary) and the cgroup_t:dir mounton grant; the 4C-57 identity narrowing moved the payload's exec boundary off the generic bin_t label onto the private docker_helper_buildkitd_exec_t identity (the exact .fc relabel), the 4C-58/4C-59 grants widened the source-exec surface to { execute read open } (execute=0x4000, the image-read 0x40002={ read open }), the 4C-60 grant was the pointed process transition (transition=0x2) which SUCCEEDED live (buildkitd_t:s0:c1, the category preserved), the 4C-61 grant is the target-domain's own entrypoint (file:entrypoint=0x8000000, the kernel classmap) — the FIRST module-local runtime authority of docker_helper_buildkitd_t — the 4C-62 grant widened that rule IN PLACE by the combined target-side image-load boundary (0x4002={ read execute }, the kernel classmap) which SUCCEEDED live (BUILDKITD-EXECVE=SUCCEEDED — the image replacement completed and the runtime ran under buildkitd_t:s0:c1), the 4C-63 grant is the shared state-root dir getattr (dir:getattr=0x10, the kernel classmap) — the terminal-causal owner of the 4C-62 run's death — the 4C-64 grant widens that SAME rule IN PLACE by the 4C-63 run's own terminal dir:search boundary (search=0x20000000, the kernel classmap; ONE rule carrying exactly { getattr search }, never split), the 4C-65 grant is the categorized operation-state dir getattr (the FIRST builder_state_t authority; the NEW pair buildkitd_t -> builder_state_t:dir; dir:getattr=0x10 the terminal-causal owner of the 4C-64 run's death — the category handoff c1->c1 was live-proven, the op_<id> dir's own label proven separately by the sampler/live-stat as builder_state_t:s0:c1), and the 4C-66 grant widens THAT rule IN PLACE by the 4C-65 canonical run 37505792611's own terminal state-tree search boundary (search=0x20000000 the span's own last buildkitd decision — inside the fatal newfstatat(op_path, AT_SYMLINK_NOFOLLOW) whose exit 433.960259 is the anchor; the same pair's search also denied during the preceding mkdirat walk whose outcome shifted from the 4C-64 run's -17 EEXIST to -13 EACCES — the getattr grant moved the boundary deeper into the same walk; ONE rule carrying exactly { getattr search }, never split), and the 4C-67 grant widens THAT rule IN PLACE by the 4C-66 canonical run 37515172504's own terminal state-tree write boundary (the DENIED bit of the requested 0x20000004={ search write } decision — denied=0x4={ write }, the standing granted search is NOT the delta; grant candidate = decode(denied) = exactly { write }, NEVER decode(requested); the record sits inside the terminal failing sys_openat whose exit 459.610209 is the anchor, its enter and the op_path mkdirat/newfstatat records not captured in that run's window — recorded as-is, never reconstructed; ONE rule carrying exactly { getattr search write }, never split), and the 4C-68 grant widens THAT rule IN PLACE by the 4C-67 canonical run 37519761945's own terminal state-tree add_name boundary (the DENIED bit of the requested 0x24000000={ search add_name } decision — denied=0x4000000={ add_name }, the standing granted search is NOT the delta; grant candidate = decode(denied) = exactly { add_name }, NEVER decode(requested); the record sits inside the terminal failing sys_openat whose exit 345.120663 is the anchor, its enter and the op_path mkdirat/newfstatat records not captured in that run's window — recorded as-is, never reconstructed; ONE rule carrying exactly { getattr search write add_name }, never split), and the 4C-69 grant is the NEW categorized state-tree FILE plane — a NEW pair+class rule, NEVER a widening of the dir rule (the 4C-68 canonical run's own terminal record: requested=denied=0x8 result=-13 scontext=buildkitd_t:s0:c1 tcontext=builder_state_t:s0:c1 tclass=file, trace-ts=460.524213, inside the failing openat(..., O_RDONLY|O_CREAT|O_CLOEXEC, 0600) whose exit 460.524230 is the anchor; THE CLASS MATTERS — the authority is the PAIR (tclass=file, 0x8), the same bit number on the dir class is dir:create and is NOT this authority, grant candidate = decode(tclass, denied) = exactly { create } on file, NEVER decode(mask) without the class, the class-aware decode regression pins the tuple; requested==denied so no subtraction of standing bits is needed, the standing invariant candidate=decode(tclass,denied) preserved; file:create is NOT a file-IO bundle — open/read/write/getattr/setattr/lock/unlink/append/map/execute stay their own live-evidence phases and no conventional writable-file bundle is prepared in advance, the standing RootlessKit state-tree file rule a different subject and a different owner, the quarantined buildkitd_exec_t:file open a DIFFERENT pair — a same-permission coincidence never merges two planes; ONE rule carrying exactly { create }, never split; the dir rule byte-for-semantics unchanged), and the 4C-70 grant WIDENS THAT FILE RULE IN PLACE by the 4C-69 canonical run 37594876477's own terminal COMBINED boundary (requested=denied=0x40002 result=-13 scontext=buildkitd_t:s0:c1 tcontext=builder_state_t:s0:c1 tclass=file, trace-ts=374.504372, inside the anchor openat whose ENTER record was captured (AT_FDCWD, the per-op state path, O_RDONLY|O_CREAT|O_CLOEXEC, mode 0600) and whose exit 374.504398 is -13 EACCES — the SAME syscall already passed the previously granted file:create silently before the open/read hooks denied; decode(tclass=file,0x40002) = exactly { read open } — read=0x2 the common-prefix bit, open=0x40000 the COMMON_FILE_PERMS bit 18 — ONE kernel decision carrying both bits, never split into 4C-70a/4C-70b; the already-granted create bit is NOT part of the delta and NOT re-granted, the delta is exactly +{ read open }, ONE rule carrying exactly { create read open }; THE ANTI-MERGE BOUNDARY: the same mask 0x40002 appeared before as the 4C-59 source-exec image-read grant rootlesskit_t -> buildkitd_exec_t:file { read open } — same mask, same tclass, a DIFFERENT subject/target/security plane/semantic object, a same-mask coincidence never merges two planes, the quarantined buildkitd_exec_t:file open hook stays UNGRANTED — open is named ONLY toward builder_state_t:file; NOT a writable-file bundle — no write/getattr/setattr/lock/unlink/append/map/execute rides the widening, the actual post-open file USE the trace records decides the next boundary, never the permission names), and the 4C-71 grant WIDENS THAT FILE RULE IN PLACE AGAIN by the 4C-70 canonical run 37606244308's own terminal lock boundary (requested=denied=0x40 result=-13 scontext=buildkitd_t:s0:c1 tcontext=builder_state_t:s0:c1 tclass=file, trace-ts=360.541014 — the FIRST post-open record of the buildkitd process, sitting between the entry-creation openat whose exit 360.540992 returned fd 5 and the same process's close(fd: 5) at 360.541029; the entry-creation openat passed WHOLE with zero in-window SELinux decisions — the 4C-69 create AND the 4C-70 read/open hooks both passed silently inside ONE syscall; decode(tclass=file,0x40) = exactly { lock } — the COMMON_FILE_SOCK_PERMS bit 6, the anti-collision neighbors setattr=0x20 and relabelfrom=0x80; THE AUTHORITY IS THE KERNEL DECISION, never the path name buildkitd.lock; the trace-side fd identity is recorded — fd 5 was the just-opened state-tree file and nothing else — and the lock syscall's own ENTER record was not captured that run, the tracer gap recorded as-is, the exact syscall form flock-vs-fcntl UNCLAIMED until a fresh run captures it; the delta is exactly +{ lock }, ONE rule carrying exactly { create read open lock }; NOT a writable-file bundle — the standing RootlessKit seven-perm rule carries lock too but is a DIFFERENT subject and a DIFFERENT owner and is NOT a template, and the ACTUAL production records after a successful lock decide the next boundary, never the permission names); the pathname caveat stands: the traced syscall pathname is the target-path attempt, the AVC tcontext is the denied path-walk/final-object component, and the final-component coincidence is never claimed from the trace alone; the quarantined non-terminal surfaces (tmp_t:dir write (0x4 — the kernel dir-class write bit; the 4C-65 deliverable's getattr misdecode corrected in prose), the fifos, cgroup/sysfs/nsfs/passwd_file/sysctl_fs search, the target-side open) stay UNGRANTED no matter how often they repeat; the exec chain / runtime must ADVANCE past the previous failure point (forward production progress: ret 0x0 or new span decisions — the absence of an AVC alone is not sufficient; each live type/class/permission its own boundary; no prediction is authority; a decision with denied=0 produces no AVC and no grant — the forward syscall/result evidence decides; the next state-tree permission or object-class hook is NOT implied — create/remove_name/read/open speculation grants nothing, the next terminal decision's own live set owns the next phase; dir:write is NOT a directory-entry-creation bundle; dir:add_name is NOT a creation bundle — file:create/dir:create/write/setattr/remove_name/rename stay their own live-evidence phases); the inherited-fd fifo_file records stay HANDLED/NON-TERMINAL; the confinement gate's PASS is this run's own re-proven precondition; the 4C-71 correction 3 causal contract: the flow's own per-op state-tree failure-response cleanup (the destructive unlink/unlinkat/rmdir walk after a prior production failure and its own subsequent traversal — close(fd) alone never opens the zone) joins NO terminal candidate and NO handling proof, its denials classify POST-FAILURE/CLEANUP and can NEVER be the NEXT-STARTUP-BOUNDARY owner, and the NEXT-BOUNDARY claim itself requires a genuine PRE-CLEANUP owner — a STARTUP-CAUSAL-classified decision that is NOT a standing quarantined surface — so a run whose last span denial is merely the teardown walk's own read can no longer mint a phase; the canonical 4C-71 run 37614701397's teardown-walk dir:read denial is accordingly reclassified and the runtime-root search denial is re-evaluated from the causal ordering, never pre-assigned, and the 4C-72 grant is the shared runtime-root dir search — the NEW pair/plane G rule allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search (the BARE singleton; decode(tclass=dir, 0x20000000) = exactly { search } — the standing kernel-side dir-class pin), provenance = the 4C-71 correction-3 fresh canonical run 37627672074's own terminal record (scontext=buildkitd_t:s0:c1, tcontext=builder_runtime_root_t:s0, tclass=dir, denied=0x20000000, trace-ts=365.096008, inside the terminal failing newfstatat(AT_FDCWD, /run/docker-helper-builder/ops/op_f537...) whose exit 365.096019 is the anchor with no fallback and whose first later enter 365.096032 is the state-tree cleanup-zone boundary itself); the rule is type-wide TE authority toward the SHARED root plane and grants NOTHING on the categorized builder_runtime_t:s0:cX — the next boundary follows the span's own live decision set, never the expectation; and the 4C-73 grant is the categorized runtime-tree dir getattr — the NEW pair/plane H rule allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir getattr (the BARE singleton; decode(tclass=dir, 0x10) = exactly { getattr } — the standing kernel-side dir-class pin the 4C-63/65 getattr grants live-proved; requested==denied so the requested-vs-denied rule degrades to the exact delta; dir:getattr is NOT a traversal/entry/creation bundle — the runtime tree's remaining dir permissions and its file/sock_file surfaces stay their own live-evidence phases, no sock_file access, no socket/connect), provenance = the 4C-72 canonical run 37644134366's own terminal record (scontext=buildkitd_t:s0:c1, tcontext=builder_runtime_t:s0:c1, tclass=dir, denied=0x10, trace-ts=515.987102, inside the terminal failing newfstatat(AT_FDCWD, /run/docker-helper-builder/ops/op_9ee65..., flag: 0) whose exit 515.987119 is the anchor with no fallback — the state-file entry-creation openat passed WHOLE (fd 5 at 515.987069, zero in-window decisions) before it, the first later enters 515.987130 (close(fd: 5)) and 515.987147 being the state-tree cleanup-zone boundary itself — the abandonment chain mechanically shown); the rule is the FIRST builder_runtime_t authority — type-wide TE authority toward the CATEGORIZED per-op plane, the MCS category constraints keep it operation-scoped in effect and the cross-operation reachability proof (4C-37) stays mandatory, the cross-operation gate stays OPEN/Critical; the next boundary follows the span's own live decision set, never the expectation; and the 4C-74 grant WIDENS THAT runtime-tree rule IN PLACE by the 4C-73 canonical run 37660355610's own terminal search boundary (requested=denied=0x20000000 result=-13 scontext=buildkitd_t:s0:c1 tcontext=builder_runtime_t:s0:c1 tclass=dir trace-ts=547.065089, inside the terminal failing sys_unlinkat(AT_FDCWD, /run/docker-helper-builder/ops/op_feaa..., flag: 0) whose exit 547.066700 is the anchor — the STALE RUNTIME-SOCKET REMOVAL stage on the flow's own pre-bind path, the runtime's own pre-bind cleanup of a stale socket path in its per-op runtime tree, NOT the post-failure state-tree teardown whose ZONE2 boundary began only later at 547.066726; the per-op runtime-tree newfstatat lookups had passed CLEAN (-> 0x0 twice) under the granted getattr before it — the denial inside the stale-socket unlinkat window is STARTUP-CAUSAL and owns the next phase, the teardown walk's own denials stay POST-FAILURE/CLEANUP, the correction-3 causal contract stands unchanged; requested==denied so the requested-vs-denied rule degrades to the exact delta; decode(tclass=dir, 0x20000000) = exactly { search } — the standing kernel-side dir-class pin the 4C-64/66/72 search grants live-proved; dir:search is the path-walk traversal component inside the stale-socket unlinkat's lookup and NOT an unlink bundle — write/remove_name (the entry-mutation hooks) and the socket object's own sock_file:unlink stay their own live-evidence phases, the execution-map expectations grant NOTHING; ONE rule carrying exactly { getattr search }, never split; the next boundary follows the span's own live decision set, never the expectation; the 4C-74 grant was PROVEN by the correction-1 canonical run 37683155675 (the OLD search boundary GONE, NO-PREANCHOR-POST=PASS, the causal machinery corrected — the errno-range predicate, the same-process untraced-owner decisions as production evidence, the /tmp-zone gate removed, the UNTRACED-OWNER second tier) and its own terminal record is the genuine PRE-CLEANUP owner: buildkitd_t:s0:c1 -> builder_runtime_t:s0:c1:dir requested=0x20000004 denied=0x4 result=-13 (the AF_UNIX bind attempt's dir WRITE hook, trace-ts=543.896475, the UNTRACED-OWNER second-tier anchor — the sys_bind enter/exit records were not traced; the sysctl_net_t:dir search denial at 543.896448 before it stayed HANDLED/NON-TERMINAL with the continuation proof by=543.896475 untraced-owner-decision; only close(fd: 8)/close(fd: 5), the ZONE2 state-tree teardown and the error-report write+exit_group(1) followed). The 4C-75 grant WIDENS THAT SAME RULE IN PLACE (ONE rule, never split): allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write } — the delta exactly +write (decode(tclass=dir, 0x4) = exactly { write }, the kernel-side pin; candidate = decode(denied), NEVER the whole requested mask; dir:write is NOT an unlink/creation bundle — add_name/remove_name/create and the socket object's own sock_file hooks stay their own live-evidence phases and dir-class/sock_file-class decisions are never combined; the module-borne buildkitd-named allow total STAYS EXACTLY EIGHT; the next boundary follows the span's own live decision set, never the expectation) ==="
+  echo "=== 4C-38..4C-76 post-TUN lifetime/readiness causal verdict (the 4C-62 run carries exactly the rootlesskit_t -> net_conf_t:file { read open } pair — the 4C-51 read widened in place by the 4C-52 open hook — beside the tmpfs_t:lnk_file { create read unlink } triple (the 4C-48 create + 4C-50 read widened in place by the 4C-53 unlink removal hook), the tmpfs_t:file { create write open mounton } grant (the 4C-54 create hook widened in place by the 4C-55 combined write|open boundary and the 4C-56 bind-mount mounton boundary) and the cgroup_t:dir mounton grant; the 4C-57 identity narrowing moved the payload's exec boundary off the generic bin_t label onto the private docker_helper_buildkitd_exec_t identity (the exact .fc relabel), the 4C-58/4C-59 grants widened the source-exec surface to { execute read open } (execute=0x4000, the image-read 0x40002={ read open }), the 4C-60 grant was the pointed process transition (transition=0x2) which SUCCEEDED live (buildkitd_t:s0:c1, the category preserved), the 4C-61 grant is the target-domain's own entrypoint (file:entrypoint=0x8000000, the kernel classmap) — the FIRST module-local runtime authority of docker_helper_buildkitd_t — the 4C-62 grant widened that rule IN PLACE by the combined target-side image-load boundary (0x4002={ read execute }, the kernel classmap) which SUCCEEDED live (BUILDKITD-EXECVE=SUCCEEDED — the image replacement completed and the runtime ran under buildkitd_t:s0:c1), the 4C-63 grant is the shared state-root dir getattr (dir:getattr=0x10, the kernel classmap) — the terminal-causal owner of the 4C-62 run's death — the 4C-64 grant widens that SAME rule IN PLACE by the 4C-63 run's own terminal dir:search boundary (search=0x20000000, the kernel classmap; ONE rule carrying exactly { getattr search }, never split), the 4C-65 grant is the categorized operation-state dir getattr (the FIRST builder_state_t authority; the NEW pair buildkitd_t -> builder_state_t:dir; dir:getattr=0x10 the terminal-causal owner of the 4C-64 run's death — the category handoff c1->c1 was live-proven, the op_<id> dir's own label proven separately by the sampler/live-stat as builder_state_t:s0:c1), and the 4C-66 grant widens THAT rule IN PLACE by the 4C-65 canonical run 37505792611's own terminal state-tree search boundary (search=0x20000000 the span's own last buildkitd decision — inside the fatal newfstatat(op_path, AT_SYMLINK_NOFOLLOW) whose exit 433.960259 is the anchor; the same pair's search also denied during the preceding mkdirat walk whose outcome shifted from the 4C-64 run's -17 EEXIST to -13 EACCES — the getattr grant moved the boundary deeper into the same walk; ONE rule carrying exactly { getattr search }, never split), and the 4C-67 grant widens THAT rule IN PLACE by the 4C-66 canonical run 37515172504's own terminal state-tree write boundary (the DENIED bit of the requested 0x20000004={ search write } decision — denied=0x4={ write }, the standing granted search is NOT the delta; grant candidate = decode(denied) = exactly { write }, NEVER decode(requested); the record sits inside the terminal failing sys_openat whose exit 459.610209 is the anchor, its enter and the op_path mkdirat/newfstatat records not captured in that run's window — recorded as-is, never reconstructed; ONE rule carrying exactly { getattr search write }, never split), and the 4C-68 grant widens THAT rule IN PLACE by the 4C-67 canonical run 37519761945's own terminal state-tree add_name boundary (the DENIED bit of the requested 0x24000000={ search add_name } decision — denied=0x4000000={ add_name }, the standing granted search is NOT the delta; grant candidate = decode(denied) = exactly { add_name }, NEVER decode(requested); the record sits inside the terminal failing sys_openat whose exit 345.120663 is the anchor, its enter and the op_path mkdirat/newfstatat records not captured in that run's window — recorded as-is, never reconstructed; ONE rule carrying exactly { getattr search write add_name }, never split), and the 4C-69 grant is the NEW categorized state-tree FILE plane — a NEW pair+class rule, NEVER a widening of the dir rule (the 4C-68 canonical run's own terminal record: requested=denied=0x8 result=-13 scontext=buildkitd_t:s0:c1 tcontext=builder_state_t:s0:c1 tclass=file, trace-ts=460.524213, inside the failing openat(..., O_RDONLY|O_CREAT|O_CLOEXEC, 0600) whose exit 460.524230 is the anchor; THE CLASS MATTERS — the authority is the PAIR (tclass=file, 0x8), the same bit number on the dir class is dir:create and is NOT this authority, grant candidate = decode(tclass, denied) = exactly { create } on file, NEVER decode(mask) without the class, the class-aware decode regression pins the tuple; requested==denied so no subtraction of standing bits is needed, the standing invariant candidate=decode(tclass,denied) preserved; file:create is NOT a file-IO bundle — open/read/write/getattr/setattr/lock/unlink/append/map/execute stay their own live-evidence phases and no conventional writable-file bundle is prepared in advance, the standing RootlessKit state-tree file rule a different subject and a different owner, the quarantined buildkitd_exec_t:file open a DIFFERENT pair — a same-permission coincidence never merges two planes; ONE rule carrying exactly { create }, never split; the dir rule byte-for-semantics unchanged), and the 4C-70 grant WIDENS THAT FILE RULE IN PLACE by the 4C-69 canonical run 37594876477's own terminal COMBINED boundary (requested=denied=0x40002 result=-13 scontext=buildkitd_t:s0:c1 tcontext=builder_state_t:s0:c1 tclass=file, trace-ts=374.504372, inside the anchor openat whose ENTER record was captured (AT_FDCWD, the per-op state path, O_RDONLY|O_CREAT|O_CLOEXEC, mode 0600) and whose exit 374.504398 is -13 EACCES — the SAME syscall already passed the previously granted file:create silently before the open/read hooks denied; decode(tclass=file,0x40002) = exactly { read open } — read=0x2 the common-prefix bit, open=0x40000 the COMMON_FILE_PERMS bit 18 — ONE kernel decision carrying both bits, never split into 4C-70a/4C-70b; the already-granted create bit is NOT part of the delta and NOT re-granted, the delta is exactly +{ read open }, ONE rule carrying exactly { create read open }; THE ANTI-MERGE BOUNDARY: the same mask 0x40002 appeared before as the 4C-59 source-exec image-read grant rootlesskit_t -> buildkitd_exec_t:file { read open } — same mask, same tclass, a DIFFERENT subject/target/security plane/semantic object, a same-mask coincidence never merges two planes, the quarantined buildkitd_exec_t:file open hook stays UNGRANTED — open is named ONLY toward builder_state_t:file; NOT a writable-file bundle — no write/getattr/setattr/lock/unlink/append/map/execute rides the widening, the actual post-open file USE the trace records decides the next boundary, never the permission names), and the 4C-71 grant WIDENS THAT FILE RULE IN PLACE AGAIN by the 4C-70 canonical run 37606244308's own terminal lock boundary (requested=denied=0x40 result=-13 scontext=buildkitd_t:s0:c1 tcontext=builder_state_t:s0:c1 tclass=file, trace-ts=360.541014 — the FIRST post-open record of the buildkitd process, sitting between the entry-creation openat whose exit 360.540992 returned fd 5 and the same process's close(fd: 5) at 360.541029; the entry-creation openat passed WHOLE with zero in-window SELinux decisions — the 4C-69 create AND the 4C-70 read/open hooks both passed silently inside ONE syscall; decode(tclass=file,0x40) = exactly { lock } — the COMMON_FILE_SOCK_PERMS bit 6, the anti-collision neighbors setattr=0x20 and relabelfrom=0x80; THE AUTHORITY IS THE KERNEL DECISION, never the path name buildkitd.lock; the trace-side fd identity is recorded — fd 5 was the just-opened state-tree file and nothing else — and the lock syscall's own ENTER record was not captured that run, the tracer gap recorded as-is, the exact syscall form flock-vs-fcntl UNCLAIMED until a fresh run captures it; the delta is exactly +{ lock }, ONE rule carrying exactly { create read open lock }; NOT a writable-file bundle — the standing RootlessKit seven-perm rule carries lock too but is a DIFFERENT subject and a DIFFERENT owner and is NOT a template, and the ACTUAL production records after a successful lock decide the next boundary, never the permission names); the pathname caveat stands: the traced syscall pathname is the target-path attempt, the AVC tcontext is the denied path-walk/final-object component, and the final-component coincidence is never claimed from the trace alone; the quarantined non-terminal surfaces (tmp_t:dir write (0x4 — the kernel dir-class write bit; the 4C-65 deliverable's getattr misdecode corrected in prose), the fifos, cgroup/sysfs/nsfs/passwd_file/sysctl_fs search, the target-side open) stay UNGRANTED no matter how often they repeat; the exec chain / runtime must ADVANCE past the previous failure point (forward production progress: ret 0x0 or new span decisions — the absence of an AVC alone is not sufficient; each live type/class/permission its own boundary; no prediction is authority; a decision with denied=0 produces no AVC and no grant — the forward syscall/result evidence decides; the next state-tree permission or object-class hook is NOT implied — create/remove_name/read/open speculation grants nothing, the next terminal decision's own live set owns the next phase; dir:write is NOT a directory-entry-creation bundle; dir:add_name is NOT a creation bundle — file:create/dir:create/write/setattr/remove_name/rename stay their own live-evidence phases); the inherited-fd fifo_file records stay HANDLED/NON-TERMINAL; the confinement gate's PASS is this run's own re-proven precondition; the 4C-71 correction 3 causal contract: the flow's own per-op state-tree failure-response cleanup (the destructive unlink/unlinkat/rmdir walk after a prior production failure and its own subsequent traversal — close(fd) alone never opens the zone) joins NO terminal candidate and NO handling proof, its denials classify POST-FAILURE/CLEANUP and can NEVER be the NEXT-STARTUP-BOUNDARY owner, and the NEXT-BOUNDARY claim itself requires a genuine PRE-CLEANUP owner — a STARTUP-CAUSAL-classified decision that is NOT a standing quarantined surface — so a run whose last span denial is merely the teardown walk's own read can no longer mint a phase; the canonical 4C-71 run 37614701397's teardown-walk dir:read denial is accordingly reclassified and the runtime-root search denial is re-evaluated from the causal ordering, never pre-assigned, and the 4C-72 grant is the shared runtime-root dir search — the NEW pair/plane G rule allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search (the BARE singleton; decode(tclass=dir, 0x20000000) = exactly { search } — the standing kernel-side dir-class pin), provenance = the 4C-71 correction-3 fresh canonical run 37627672074's own terminal record (scontext=buildkitd_t:s0:c1, tcontext=builder_runtime_root_t:s0, tclass=dir, denied=0x20000000, trace-ts=365.096008, inside the terminal failing newfstatat(AT_FDCWD, /run/docker-helper-builder/ops/op_f537...) whose exit 365.096019 is the anchor with no fallback and whose first later enter 365.096032 is the state-tree cleanup-zone boundary itself); the rule is type-wide TE authority toward the SHARED root plane and grants NOTHING on the categorized builder_runtime_t:s0:cX — the next boundary follows the span's own live decision set, never the expectation; and the 4C-73 grant is the categorized runtime-tree dir getattr — the NEW pair/plane H rule allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir getattr (the BARE singleton; decode(tclass=dir, 0x10) = exactly { getattr } — the standing kernel-side dir-class pin the 4C-63/65 getattr grants live-proved; requested==denied so the requested-vs-denied rule degrades to the exact delta; dir:getattr is NOT a traversal/entry/creation bundle — the runtime tree's remaining dir permissions and its file/sock_file surfaces stay their own live-evidence phases, no sock_file access, no socket/connect), provenance = the 4C-72 canonical run 37644134366's own terminal record (scontext=buildkitd_t:s0:c1, tcontext=builder_runtime_t:s0:c1, tclass=dir, denied=0x10, trace-ts=515.987102, inside the terminal failing newfstatat(AT_FDCWD, /run/docker-helper-builder/ops/op_9ee65..., flag: 0) whose exit 515.987119 is the anchor with no fallback — the state-file entry-creation openat passed WHOLE (fd 5 at 515.987069, zero in-window decisions) before it, the first later enters 515.987130 (close(fd: 5)) and 515.987147 being the state-tree cleanup-zone boundary itself — the abandonment chain mechanically shown); the rule is the FIRST builder_runtime_t authority — type-wide TE authority toward the CATEGORIZED per-op plane, the MCS category constraints keep it operation-scoped in effect and the cross-operation reachability proof (4C-37) stays mandatory, the cross-operation gate stays OPEN/Critical; the next boundary follows the span's own live decision set, never the expectation; and the 4C-74 grant WIDENS THAT runtime-tree rule IN PLACE by the 4C-73 canonical run 37660355610's own terminal search boundary (requested=denied=0x20000000 result=-13 scontext=buildkitd_t:s0:c1 tcontext=builder_runtime_t:s0:c1 tclass=dir trace-ts=547.065089, inside the terminal failing sys_unlinkat(AT_FDCWD, /run/docker-helper-builder/ops/op_feaa..., flag: 0) whose exit 547.066700 is the anchor — the STALE RUNTIME-SOCKET REMOVAL stage on the flow's own pre-bind path, the runtime's own pre-bind cleanup of a stale socket path in its per-op runtime tree, NOT the post-failure state-tree teardown whose ZONE2 boundary began only later at 547.066726; the per-op runtime-tree newfstatat lookups had passed CLEAN (-> 0x0 twice) under the granted getattr before it — the denial inside the stale-socket unlinkat window is STARTUP-CAUSAL and owns the next phase, the teardown walk's own denials stay POST-FAILURE/CLEANUP, the correction-3 causal contract stands unchanged; requested==denied so the requested-vs-denied rule degrades to the exact delta; decode(tclass=dir, 0x20000000) = exactly { search } — the standing kernel-side dir-class pin the 4C-64/66/72 search grants live-proved; dir:search is the path-walk traversal component inside the stale-socket unlinkat's lookup and NOT an unlink bundle — write/remove_name (the entry-mutation hooks) and the socket object's own sock_file:unlink stay their own live-evidence phases, the execution-map expectations grant NOTHING; ONE rule carrying exactly { getattr search }, never split; the next boundary follows the span's own live decision set, never the expectation; the 4C-74 grant was PROVEN by the correction-1 canonical run 37683155675 (the OLD search boundary GONE, NO-PREANCHOR-POST=PASS, the causal machinery corrected — the errno-range predicate, the same-process untraced-owner decisions as production evidence, the /tmp-zone gate removed, the UNTRACED-OWNER second tier) and its own terminal record is the genuine PRE-CLEANUP owner: buildkitd_t:s0:c1 -> builder_runtime_t:s0:c1:dir requested=0x20000004 denied=0x4 result=-13 (the AF_UNIX bind attempt's dir WRITE hook, trace-ts=543.896475, the UNTRACED-OWNER second-tier anchor — the sys_bind enter/exit records were not traced; the sysctl_net_t:dir search denial at 543.896448 before it stayed HANDLED/NON-TERMINAL with the continuation proof by=543.896475 untraced-owner-decision; only close(fd: 8)/close(fd: 5), the ZONE2 state-tree teardown and the error-report write+exit_group(1) followed). The 4C-75 grant WIDENS THAT SAME RULE IN PLACE (ONE rule, never split): allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write } — the delta exactly +write (decode(tclass=dir, 0x4) = exactly { write }, the kernel-side pin; candidate = decode(denied), NEVER the whole requested mask; dir:write is NOT an unlink/creation bundle — add_name/remove_name/create and the socket object's own sock_file hooks stay their own live-evidence phases and dir-class/sock_file-class decisions are never combined; the module-borne buildkitd-named allow total STAYS EXACTLY EIGHT; the next boundary follows the span's own live decision set, never the expectation; and the 4C-76 grant WIDENS THAT SAME RULE IN PLACE ONCE MORE (ONE rule, never split): allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write add_name } — the delta exactly +add_name (provenance = the 4C-76 canonical run 37997013594's own terminal record: requested=0x24000000 denied=0x4000000 result=-13 scontext=buildkitd_t:s0:c1 tcontext=builder_runtime_t:s0:c1 tclass=dir trace-ts=429.646505 — the AF_UNIX socket-path creation's dir add_name hook INSIDE the traced sys_bind window (the 4C-75 harness armed sys_enter_bind/sys_exit_bind; the §11 BIND-FD-IDENTITY chain proven from the same trace: the socket exit returned 0x8 and the bind record's fd field is 8); the sys_bind exit at 429.646514 (result -13 EACCES) is the span's terminal anchor with its own TRACED owning window — the UNTRACED-OWNER tier stays closed — genuine PRE-CLEANUP ownership, only the failure response followed; decode(tclass=dir, 0x4000000) = exactly { add_name }, the kernel-side pin; candidate = decode(denied), NEVER the whole requested mask; dir:add_name is NOT a creation/unlink bundle — create/remove_name/unlink/rmdir and the socket object's own sock_file hooks stay their own live-evidence phases and dir-class/sock_file-class decisions are never combined; the module-borne buildkitd-named allow total STAYS EXACTLY EIGHT; the next boundary follows the span's own live decision set, never the expectation; if the bind finally succeeded and the lifetime held, the startup staircase STOPS and 4C-37 resumes — no artificial 4C-77) ==="
   echo "POST-TUN-T0: ${POSTTUN_T0_EPOCH:-(not derived)}"
   echo "  derivation: trace-ts=$POSTTUN_T0_TRACE_TS attach-executor=${POSTTUN_ATTACH_WHO:-(none)} read-epoch=$POSTTUN_READ_EPOCH read-uptime=$POSTTUN_READ_UPTIME ring-last-ts=${POSTTUN_RING_LAST_TS:-(none)} clock-drift=${POSTTUN_CLOCK_DRIFT:-?}s"
   echo "--- the attach pair (the T0 anchor; the attach executor's own TUNSETIFF):"
@@ -6744,6 +6744,7 @@ REBUILD-STAGE=NOT-REACHED}"
   POSTTUN_BKD_OLD_RUNTIME_TREE_GETATTR=""
   POSTTUN_BKD_OLD_RUNTIME_TREE_SEARCH=""
   POSTTUN_BKD_OLD_RUNTIME_TREE_WRITE=""
+  POSTTUN_BKD_OLD_RUNTIME_TREE_ADDNAME=""
   POSTTUN_BKD_LOCK_SYSCALL_VERDICT=""
   POSTTUN_BKD_STATEFILE_FD_BINDING=""
   POSTTUN_BKD_BIN_IN_WINDOW=""
@@ -7035,6 +7036,34 @@ REBUILD-STAGE=NOT-REACHED}"
       | grep -a 'tclass=dir' \
       | grep -aE 'denied=0x4([^0-9a-fA-F]|$)' || true)"
     printf '%s\n' "${POSTTUN_BKD_OLD_RUNTIME_TREE_WRITE:-(none — the OLD categorized runtime-tree dir write (0x4) terminal boundary is gone from the whole span)}"
+    # The 4C-76 OLD boundary: the categorized runtime-tree dir ADD_NAME
+    # (0x4000000) records — the 4C-76 canonical run 37997013594's own
+    # terminal decision (the class-aware pair: tcontext=builder_runtime_t:
+    # s0:c<own> + tclass=dir + the single bit 0x4000000 = add_name on the
+    # dir class, the kernel-side numbering decode(dir,0x4000000) = exactly
+    # { add_name } pins, add_name=0x4000000 adjacent to remove_name=
+    # 0x8000000; the state-tree dir 0x4000000 shape is a DIFFERENT pair
+    # and the file-class shape is NOT this boundary, so the tcontext
+    # filter is part of the shape) — must be GONE from the whole span now
+    # that the pair's ONE rule carries exactly
+    # { getattr search write add_name } (the 4C-75 rule widened IN PLACE,
+    # never split). The record was the AF_UNIX socket-path creation's dir
+    # add_name hook INSIDE the traced sys_bind window — genuine
+    # PRE-CLEANUP ownership (the bind exit anchor with its own TRACED
+    # owning window; the §11 BIND-FD-IDENTITY chain proven from the same
+    # trace). Under the granted rule ANY surviving runtime-tree dir
+    # add_name record is the grant-not-effective FAIL shape — the repeat
+    # count never converts a denial into authority. The same-PAIR
+    # non-add_name records (getattr/search/write are granted too;
+    # read/open/... on the categorized runtime tree) are separate
+    # quarantined surfaces — they do NOT belong to this extraction (the
+    # pair's other perms never ride the add_name grant).
+    POSTTUN_BKD_OLD_RUNTIME_TREE_ADDNAME="$(printf '%s\n' "$POSTTUN_BKD_SPAN_DECISIONS" \
+      | grep -a 'scontext=system_u:system_r:docker_helper_buildkitd_t' \
+      | grep -aE 'tcontext=system_u:object_r:docker_helper_builder_runtime_t:s0:c[0-9]+([ \t]|$)' \
+      | grep -a 'tclass=dir' \
+      | grep -aE 'denied=0x4000000([^0-9a-fA-F]|$)' || true)"
+    printf '%s\n' "${POSTTUN_BKD_OLD_RUNTIME_TREE_ADDNAME:-(none — the OLD categorized runtime-tree dir add_name (0x4000000) terminal boundary is gone from the whole span)}"
     # The 4C-61 STANDING boundary (the 4C-60 record's entrypoint shape):
     # the granted entrypoint hook (0x8000000) must stay gone — its
     # reappearance inside the window is a standing break, not a new
@@ -7066,9 +7095,10 @@ REBUILD-STAGE=NOT-REACHED}"
   # the 4C-73 categorized runtime-tree dir getattr 0x10 ON tclass=dir,
   # the 4C-74 categorized runtime-tree dir search 0x20000000 ON
   # tclass=dir, the 4C-75 categorized runtime-tree dir write 0x4 ON
-  # tclass=dir — the class-aware pairs; the dir-class 0x8 dir:create,
-  # dir-class 0x40002 and dir-class 0x40 shapes are NOT granted shapes
-  # and stay live decisions) — the next hooks of the
+  # tclass=dir, the 4C-76 categorized runtime-tree dir add_name
+  # 0x4000000 ON tclass=dir — the class-aware pairs; the dir-class 0x8
+  # dir:create, dir-class 0x40002 and dir-class 0x40 shapes are NOT
+  # granted shapes and stay live decisions) — the next hooks of the
   # exec chain and the runtime surfaces, recorded live and never
   # assumed. The inherited-fd fifo_file records and every other
   # quarantined non-terminal surface print as the domain's own records
@@ -7104,6 +7134,9 @@ REBUILD-STAGE=NOT-REACHED}"
             if ($0 ~ /tcontext=system_u:object_r:docker_helper_builder_runtime_t:s0:c[0-9]+([ \t]|$)/ \
               && $0 ~ /tclass=dir/ \
               && $0 ~ /denied=0x4([^0-9a-fA-F]|$)/) next
+            if ($0 ~ /tcontext=system_u:object_r:docker_helper_builder_runtime_t:s0:c[0-9]+([ \t]|$)/ \
+              && $0 ~ /tclass=dir/ \
+              && $0 ~ /denied=0x4000000([^0-9a-fA-F]|$)/) next
             print
           }' || true)"
     printf '%s\n' "${POSTTUN_BKD_NEW_DECISION:-(none — no NEW decision inside the exec window; the advance must then come from ret=0x0)}"
@@ -7243,6 +7276,14 @@ REBUILD-STAGE=NOT-REACHED}"
   POSTTUN_OLD_BKD_RUNTIME_TREE_WRITE_PRESENT=0
   if [ -n "$POSTTUN_BKD_OLD_RUNTIME_TREE_WRITE" ]; then
     POSTTUN_OLD_BKD_RUNTIME_TREE_WRITE_PRESENT=1
+  fi
+  # The 4C-76 OLD-boundary flag: the granted categorized runtime-tree
+  # dir add_name must produce no AVC of its own; a surviving 0x4000000
+  # runtime-tree dir record in the span is the grant-not-effective FAIL
+  # shape.
+  POSTTUN_OLD_BKD_RUNTIME_TREE_ADDNAME_PRESENT=0
+  if [ -n "$POSTTUN_BKD_OLD_RUNTIME_TREE_ADDNAME" ]; then
+    POSTTUN_OLD_BKD_RUNTIME_TREE_ADDNAME_PRESENT=1
   fi
   # The future buildkitd domain records (the 4C-60 §11 contract): every
   # trace record in the window's span naming docker_helper_buildkitd_t
@@ -7585,6 +7626,18 @@ REBUILD-STAGE=NOT-REACHED}"
     && ! { printf '%s\n' "$POSTTUN_BKD_SPAN_TERMINAL" | grep -aqE 'tcontext=system_u:object_r:docker_helper_builder_runtime_t:s0:c[0-9]+([ \t]|$)' && printf '%s\n' "$POSTTUN_BKD_SPAN_TERMINAL" | grep -aqE 'tclass=dir' && printf '%s\n' "$POSTTUN_BKD_SPAN_TERMINAL" | grep -aqE 'denied=0x4([^0-9a-fA-F]|$)'; }; then
     POSTTUN_BKD_STATETREE75_TERMINAL_OK=1
   fi
+  # The 4C-76 progress gate (the §16 contract): the span's own terminal
+  # buildkitd decision EXISTS and is NOT the old categorized runtime-tree
+  # dir add_name shape (tclass=dir + 0x4000000 toward
+  # builder_runtime_t:s0:c<own> — the flow moved past the AF_UNIX
+  # socket-path creation's dir add_name hook; a later hook on the same
+  # or a later syscall, or the lifetime finally held). The absence of an
+  # AVC alone is NOT sufficient.
+  POSTTUN_BKD_STATETREE76_TERMINAL_OK=0
+  if [ -n "$POSTTUN_BKD_SPAN_TERMINAL" ] \
+    && ! { printf '%s\n' "$POSTTUN_BKD_SPAN_TERMINAL" | grep -aqE 'tcontext=system_u:object_r:docker_helper_builder_runtime_t:s0:c[0-9]+([ \t]|$)' && printf '%s\n' "$POSTTUN_BKD_SPAN_TERMINAL" | grep -aqE 'tclass=dir' && printf '%s\n' "$POSTTUN_BKD_SPAN_TERMINAL" | grep -aqE 'denied=0x4000000([^0-9a-fA-F]|$)'; }; then
+    POSTTUN_BKD_STATETREE76_TERMINAL_OK=1
+  fi
   POSTTUN_BKD_EXEC71_OK=0
   if [ -n "$POSTTUN_BKD_EXEC_PAIR" ] \
     && [ "$POSTTUN_OLD_BKD_STROOT_PRESENT" = 0 ] \
@@ -7669,6 +7722,26 @@ REBUILD-STAGE=NOT-REACHED}"
     && [ -z "$POSTTUN_BKD_BIN_IN_WINDOW" ] \
     && [ "$POSTTUN_BKD_STATETREE75_TERMINAL_OK" = 1 ]; then
     POSTTUN_BKD_EXEC75_OK=1
+  fi
+  POSTTUN_BKD_EXEC76_OK=0
+  if [ -n "$POSTTUN_BKD_EXEC_PAIR" ] \
+    && [ "$POSTTUN_OLD_BKD_STROOT_PRESENT" = 0 ] \
+    && [ "$POSTTUN_OLD_BKD_STROOT_SEARCH_PRESENT" = 0 ] \
+    && [ "$POSTTUN_OLD_BKD_STATETREE_PRESENT" = 0 ] \
+    && [ "$POSTTUN_OLD_BKD_STATETREE_SEARCH_PRESENT" = 0 ] \
+    && [ "$POSTTUN_OLD_BKD_STATETREE_WRITE_PRESENT" = 0 ] \
+    && [ "$POSTTUN_OLD_BKD_STATETREE_ADDNAME_PRESENT" = 0 ] \
+    && [ "$POSTTUN_OLD_BKD_STATETREE_FILECREATE_PRESENT" = 0 ] \
+    && [ "$POSTTUN_OLD_BKD_STATETREE_FILEREADOPEN_PRESENT" = 0 ] \
+    && [ "$POSTTUN_OLD_BKD_STATETREE_FILELOCK_PRESENT" = 0 ] \
+    && [ "$POSTTUN_OLD_BKD_RUNTIME_ROOT_SEARCH_PRESENT" = 0 ] \
+    && [ "$POSTTUN_OLD_BKD_RUNTIME_TREE_GETATTR_PRESENT" = 0 ] \
+    && [ "$POSTTUN_OLD_BKD_RUNTIME_TREE_SEARCH_PRESENT" = 0 ] \
+    && [ "$POSTTUN_OLD_BKD_RUNTIME_TREE_WRITE_PRESENT" = 0 ] \
+    && [ "$POSTTUN_OLD_BKD_RUNTIME_TREE_ADDNAME_PRESENT" = 0 ] \
+    && [ -z "$POSTTUN_BKD_BIN_IN_WINDOW" ] \
+    && [ "$POSTTUN_BKD_STATETREE76_TERMINAL_OK" = 1 ]; then
+    POSTTUN_BKD_EXEC76_OK=1
   fi
   # The 4C-66 OLD-boundary status echo (the §12 acceptance instrument):
   # the extraction above (the exec-pair branch) captured the state-tree
@@ -10235,61 +10308,19 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
       marker "4C-74=INCOMPLETE/RUNTIME-TREE-SEARCH-PROOF-INCOMPLETE"
     fi
   fi
-  # The 4C-75 phase block: the categorized operation-runtime dir write
-  # — the 4C-74 pair/plane H rule WIDENED IN PLACE (ONE rule, never
-  # split; allow docker_helper_buildkitd_t
-  # docker_helper_builder_runtime_t:dir { getattr search write }; the
-  # delta exactly +write; the authority is the KERNEL DECISION
-  # decode(tclass=dir, 0x4) = exactly { write } — the kernel-side
-  # dir-class pin (write=0x4, read=0x2, the 4C-72 prose correction's
-  # own pin), never the loaded policy's perms-file numbering, never the
-  # syscall pathname). The provenance is the 4C-74 correction-1
-  # canonical run 37683155675's own terminal record: requested=0x20000004
-  # denied=0x4 result=-13 tclass=dir trace-ts=543.896475 — the AF_UNIX
-  # bind attempt's dir WRITE hook, the UNTRACED-OWNER second-tier
-  # anchor (the sys_bind enter/exit records were not traced that run;
-  # the 4C-75 arming closes that gap — instrumentation only), genuine
-  # PRE-CLEANUP ownership (only close(fd: 8)/close(fd: 5), the ZONE2
-  # state-tree teardown and the error-report write+exit_group(1)
-  # followed); the sysctl_net_t:dir search denial before it stayed
-  # HANDLED/NON-TERMINAL with the continuation proof
-  # by=543.896475 untraced-owner-decision.
-  # The PASS contract: the OLD categorized runtime-tree dir write
-  # boundary (tcontext=builder_runtime_t:s0:c<own> + tclass=dir +
-  # denied=0x4 — the 4C-74 correction-1 canonical run's own terminal
-  # record) is GONE from the whole span, BuildKitd made FORWARD
-  # PRODUCTION PROGRESS past the bind-time dir-write hook (the span's
-  # own terminal buildkitd decision exists and is NOT the runtime-tree
-  # write shape — the absence of an AVC alone is NOT sufficient; a
-  # denied=0 decision produces no AVC, so the forward syscall/result
-  # evidence decides; no predetermined errno/result is required), the
-  # OLD dir-plane/state-root/file/runtime-root/getattr/search
-  # boundaries STAY gone (the standing re-proofs above — the widening
-  # rides the SAME pair and can never resurrect them), the generic
-  # bin_t execution stays ABSENT, the MCS category guard, the §9 per-op
-  # state labeling invariants and the §9 per-op RUNTIME labeling
-  # invariant (the actual op runtime-dir label proven live, root-typed
-  # divergence BLOCKED, no broader root-plane compensation) hold, and
-  # the runtime tree's next permission or object-class hook is NOT
-  # implied (the next terminal decision's own live set owns the next
-  # phase — one audited terminal decision, one evidenced boundary; no
-  # 4C-76 grant is prepared inside this phase; the §17/§18 observation
-  # stands: the same bind may next expose dir:add_name or the socket
-  # object's own sock_file:create/sock_file:write — each its own
-  # live-evidence phase, dir-class and sock_file-class decisions NEVER
-  # combined into one phase, the conventional AF_UNIX pathname-creation
-  # bundle NOT reconstructed; dir:write is NOT an unlink bundle).
-  # The §10/§11 instruments record the bind(2) progression inventory
-  # and the BIND-FD-IDENTITY verdict in the verdict body —
-  # instrumentation only, no policy authority.
-  # The §19 alternate outcome: if the bind finally succeeded and the
-  # lifetime held and the operation-A bindability returned a live pid,
-  # the startup staircase STOPS and the cross-operation isolation proof
-  # (4C-37) resumes — no artificial 4C-76 is created.
+  # The 4C-75 standing re-proof (the demoted phase block): the
+  # categorized operation-runtime dir write boundary stays GONE and the
+  # milestone stays OK under the 4C-76 widened rule — the 4C-76
+  # add_name rides the SAME pair's ONE rule (widened IN PLACE, never
+  # split), so any surviving write (0x4) runtime-tree record is the
+  # REGRESSED shape, never a new phase. The guards stay folded into the
+  # OK condition; the correction-3 causal contract stands (the next
+  # bind hook is NOT implied here — the 4C-76 phase block owns it).
+  # The §19 alternate outcome stands unchanged.
   if [ "$POSTTUN_OLD_BKD_RUNTIME_TREE_WRITE_PRESENT" = 1 ]; then
     POSTTUN_4C75_PHASE_OK=0
-    marker "4C-75-OLD-RUNTIME-TREE-WRITE-BOUNDARY=STILL-PRESENT"
-    marker "4C-75=FAIL/RUNTIME-TREE-WRITE-GRANT-NOT-EFFECTIVE"
+    marker "4C-75-OLD-RUNTIME-TREE-WRITE-BOUNDARY=REGRESSED"
+    marker "4C-75=INCOMPLETE/RUNTIME-TREE-WRITE-BOUNDARY-REGRESSED"
   else
     marker "OLD-BUILDKITD-RUNTIME-TREE-WRITE-BOUNDARY=GONE"
     if [ "$POSTTUN_BKD_EXEC75_OK" = 1 ] \
@@ -10316,28 +10347,26 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
         # records; the bind's next hook is the execution-map LIKELY
         # next boundary but only the span's own live decision set
         # proves it; if the teardown began with no further decision the
-        # honest outcome is the HOLD below, never an inferred grant.
+        # honest outcome is the HOLD below, never an inferred grant
+        # (the phase-specific 4C-76-CANDIDATE/NO-GO markers moved to
+        # the 4C-76 phase block, which owns the next hook).
         if [ -n "$POSTTUN_BKD_STARTUP_OWNER_TS" ]; then
-          marker "4C-76-CANDIDATE=$POSTTUN_BKD_STARTUP_OWNER_SHAPE (trace-ts=$POSTTUN_BKD_STARTUP_OWNER_TS; the genuine PRE-CLEANUP terminal owner — the exact tuple the next phase would own, no grant prepared inside this phase)"
           marker "4C-75=PASS/NEXT-BOUNDARY-CONFIRMED"
         else
           marker "4C-75=PASS/RUNTIME-TREE-WRITE-PROVEN"
           marker "4C-75-NEXT-BOUNDARY=HOLD/CAUSAL-OWNER-NOT-PROVEN (the span's terminal decision is ${POSTTUN_BKD_SPAN_TERMINAL_CLASS:-unclassified} — the failure-response cleanup owns it, never the next phase)"
           marker "4C-75-LIFETIME-NOTE=SOFTWARE-LIFECYCLE/NO-SELINUX-OWNER"
-          marker "4C-76=NO-GO"
         fi
       else
         # The pre-exec boundary outcome carries the same causal gate: a
         # boundary claim without a genuine PRE-CLEANUP owner is HOLD.
         if [ -n "$POSTTUN_BKD_STARTUP_OWNER_TS" ]; then
           marker "4C-75-OUTCOME=NEXT-STARTUP-BOUNDARY-CONFIRMED"
-          marker "4C-76-CANDIDATE=$POSTTUN_BKD_STARTUP_OWNER_SHAPE (trace-ts=$POSTTUN_BKD_STARTUP_OWNER_TS; the genuine PRE-CLEANUP terminal owner)"
           marker "4C-75=PASS/NEXT-BOUNDARY-CONFIRMED"
         else
           marker "4C-75-OUTCOME=NEXT-STARTUP-BOUNDARY-NOT-CONFIRMED"
           marker "4C-75=PASS/RUNTIME-TREE-WRITE-PROVEN"
           marker "4C-75-NEXT-BOUNDARY=HOLD/CAUSAL-OWNER-NOT-PROVEN"
-          marker "4C-76=NO-GO"
         fi
       fi
     elif [ "${POSTTUN_BKD_RT_PEROP_LABEL_OK:-1}" != 1 ]; then
@@ -10350,6 +10379,123 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
       POSTTUN_4C75_PHASE_OK=0
       marker "OLD-BUILDKITD-RUNTIME-TREE-WRITE-BOUNDARY=GONE"
       marker "4C-75=INCOMPLETE/RUNTIME-TREE-WRITE-PROOF-INCOMPLETE"
+    fi
+  fi
+  # The 4C-76 phase block: the categorized operation-runtime dir
+  # add_name — the 4C-75 triple/plane H rule WIDENED IN PLACE (ONE
+  # rule, never split; allow docker_helper_buildkitd_t
+  # docker_helper_builder_runtime_t:dir { getattr search write
+  # add_name }; the delta exactly +add_name; the authority is the
+  # KERNEL DECISION decode(tclass=dir, 0x4000000) = exactly
+  # { add_name } — the kernel-side dir-class pin (add_name=0x4000000,
+  # remove_name=0x8000000), never the loaded policy's perms-file
+  # numbering, never the syscall pathname). The provenance is the
+  # 4C-76 canonical run 37997013594's own terminal record:
+  # requested=0x24000000 denied=0x4000000 result=-13 tclass=dir
+  # trace-ts=429.646505 — the AF_UNIX socket-path creation's dir
+  # add_name hook INSIDE the traced sys_bind window (the §11
+  # BIND-FD-IDENTITY chain proven from the same trace: the socket exit
+  # returned 0x8 and the bind record's fd field is 8), the sys_bind
+  # exit at 429.646514 the span's terminal anchor with its own TRACED
+  # owning window (the UNTRACED-OWNER tier stays closed), genuine
+  # PRE-CLEANUP ownership (only the failure response followed).
+  # The PASS contract: the OLD categorized runtime-tree dir add_name
+  # boundary (tcontext=builder_runtime_t:s0:c<own> + tclass=dir +
+  # denied=0x4000000 — the 4C-76 canonical run's own terminal record)
+  # is GONE from the whole span, BuildKitd made FORWARD PRODUCTION
+  # PROGRESS past the bind-time dir-add_name hook (the span's own
+  # terminal buildkitd decision exists and is NOT the runtime-tree
+  # add_name shape — the absence of an AVC alone is NOT sufficient; a
+  # denied=0 decision produces no AVC, so the forward syscall/result
+  # evidence decides; no predetermined errno/result is required), the
+  # OLD dir-plane/state-root/file/runtime-root/getattr/search/write
+  # boundaries STAY gone (the standing re-proofs above — the widening
+  # rides the SAME pair and can never resurrect them), the generic
+  # bin_t execution stays ABSENT, the MCS category guard, the §9 per-op
+  # state labeling invariants and the §9 per-op RUNTIME labeling
+  # invariant (the actual op runtime-dir label proven live, root-typed
+  # divergence BLOCKED, no broader root-plane compensation) hold, and
+  # the runtime tree's next permission or object-class hook is NOT
+  # implied (the next terminal decision's own live set owns the next
+  # phase — one audited terminal decision, one evidenced boundary; no
+  # 4C-77 grant is prepared inside this phase; the §17/§18 observation
+  # stands: the same bind may next expose the socket object's own
+  # sock_file:create/sock_file:write or a later runtime-tree hook —
+  # each its own live-evidence phase, dir-class and sock_file-class
+  # decisions NEVER combined into one phase, the conventional AF_UNIX
+  # pathname-creation bundle NOT reconstructed; dir:add_name is NOT a
+  # creation bundle).
+  # The §10/§11 instruments record the bind(2) progression inventory
+  # and the BIND-FD-IDENTITY verdict in the verdict body —
+  # instrumentation only, no policy authority.
+  # The §19 alternate outcome: if the bind finally succeeded and the
+  # lifetime held and the operation-A bindability returned a live pid,
+  # the startup staircase STOPS and the cross-operation isolation proof
+  # (4C-37) resumes — no artificial 4C-77 is created.
+  if [ "$POSTTUN_OLD_BKD_RUNTIME_TREE_ADDNAME_PRESENT" = 1 ]; then
+    POSTTUN_4C76_PHASE_OK=0
+    marker "4C-76-OLD-RUNTIME-TREE-ADDNAME-BOUNDARY=STILL-PRESENT"
+    marker "4C-76=FAIL/RUNTIME-TREE-ADDNAME-GRANT-NOT-EFFECTIVE"
+  else
+    marker "OLD-BUILDKITD-RUNTIME-TREE-ADDNAME-BOUNDARY=GONE"
+    if [ "$POSTTUN_BKD_EXEC76_OK" = 1 ] \
+      && [ "$POSTTUN_BKD_MCS_OK" = 1 ] \
+      && [ "${POSTTUN_BKD_PEROP_LABEL_OK:-1}" = 1 ] \
+      && [ "${POSTTUN_BKD_STATE_FILE_LABEL_BAD:-0}" != 1 ] \
+      && [ "${POSTTUN_BKD_RT_PEROP_LABEL_OK:-1}" = 1 ]; then
+      POSTTUN_4C76_PHASE_OK=1
+      marker "BUILDKITD-RUNTIME-TREE-ADDNAME=OK"
+      marker "BUILDKITD-RUNTIME-TREE-CATEGORY-HANDOFF=${POSTTUN_BKD_RUNTIME_TREE_HANDOFF:-NOT-REACHED}"
+      if [ "$POSTTUN_BKD_EXECVE_SUCCEEDED" = 1 ] && [ -z "$POSTTUN_FIRST_FAIL_PID" ]; then
+        marker "POSTTUN-BKD-RESULTING-DOMAIN=$([ "$POSTTUN_BKD_DOMAIN_N" != 0 ] && echo proven || echo not-proven)"
+        marker "4C-76-OUTCOME=POST-TUN-LIFETIME-STABLE"
+        marker "TARGET-LIFETIME-BLOCKER=GONE"
+        marker "POST-TUN-LIFETIME=STABLE"
+        marker "4C-76=PASS/POST-TUN-LIFETIME-STABLE"
+        marker "4C-76-LIFETIME-NOTE=THE-STARTUP-STAIRCASE-STOPS/RESUME-4C-37 (no 4C-77 is created)"
+      elif [ "$POSTTUN_BKD_EXECVE_SUCCEEDED" = 1 ]; then
+        marker "POSTTUN-BKD-RESULTING-DOMAIN=$([ "$POSTTUN_BKD_DOMAIN_N" != 0 ] && echo proven || echo not-proven)"
+        marker "4C-76-OUTCOME=EXEC-RETURNED-LIFETIME-FAILED"
+        # The correction-3 causal gate stands here too: a NEXT-BOUNDARY
+        # claim requires a GENUINE PRE-CLEANUP owner — the extraction
+        # above already excludes the failure-response cleanup's own
+        # records; the bind's next hook is the execution-map LIKELY
+        # next boundary but only the span's own live decision set
+        # proves it; if the teardown began with no further decision the
+        # honest outcome is the HOLD below, never an inferred grant.
+        if [ -n "$POSTTUN_BKD_STARTUP_OWNER_TS" ]; then
+          marker "4C-77-CANDIDATE=$POSTTUN_BKD_STARTUP_OWNER_SHAPE (trace-ts=$POSTTUN_BKD_STARTUP_OWNER_TS; the genuine PRE-CLEANUP terminal owner — the exact tuple the next phase would own, no grant prepared inside this phase)"
+          marker "4C-76=PASS/NEXT-BOUNDARY-CONFIRMED"
+        else
+          marker "4C-76=PASS/RUNTIME-TREE-ADDNAME-PROVEN"
+          marker "4C-76-NEXT-BOUNDARY=HOLD/CAUSAL-OWNER-NOT-PROVEN (the span's terminal decision is ${POSTTUN_BKD_SPAN_TERMINAL_CLASS:-unclassified} — the failure-response cleanup owns it, never the next phase)"
+          marker "4C-76-LIFETIME-NOTE=SOFTWARE-LIFECYCLE/NO-SELINUX-OWNER"
+          marker "4C-77=NO-GO"
+        fi
+      else
+        # The pre-exec boundary outcome carries the same causal gate: a
+        # boundary claim without a genuine PRE-CLEANUP owner is HOLD.
+        if [ -n "$POSTTUN_BKD_STARTUP_OWNER_TS" ]; then
+          marker "4C-76-OUTCOME=NEXT-STARTUP-BOUNDARY-CONFIRMED"
+          marker "4C-77-CANDIDATE=$POSTTUN_BKD_STARTUP_OWNER_SHAPE (trace-ts=$POSTTUN_BKD_STARTUP_OWNER_TS; the genuine PRE-CLEANUP terminal owner)"
+          marker "4C-76=PASS/NEXT-BOUNDARY-CONFIRMED"
+        else
+          marker "4C-76-OUTCOME=NEXT-STARTUP-BOUNDARY-NOT-CONFIRMED"
+          marker "4C-76=PASS/RUNTIME-TREE-ADDNAME-PROVEN"
+          marker "4C-76-NEXT-BOUNDARY=HOLD/CAUSAL-OWNER-NOT-PROVEN"
+          marker "4C-77=NO-GO"
+        fi
+      fi
+    elif [ "${POSTTUN_BKD_RT_PEROP_LABEL_OK:-1}" != 1 ]; then
+      POSTTUN_4C76_PHASE_OK=0
+      marker "4C-76=BLOCKED/PER-OP-RUNTIME-LABEL-NOT-CONVERGED"
+    elif [ -z "$POSTTUN_BKD_EXEC_PAIR" ]; then
+      POSTTUN_4C76_PHASE_OK=0
+      marker "4C-76=INCOMPLETE/EXEC-WINDOW-NOT-CAPTURED"
+    else
+      POSTTUN_4C76_PHASE_OK=0
+      marker "OLD-BUILDKITD-RUNTIME-TREE-ADDNAME-BOUNDARY=GONE"
+      marker "4C-76=INCOMPLETE/RUNTIME-TREE-ADDNAME-PROOF-INCOMPLETE"
     fi
   fi
   marker "4C-38=PROVEN/PRIMARY-BOUNDARY-ESTABLISHED"
@@ -12440,6 +12586,11 @@ if [ "$I9_OK" = 1 ]; then
   fi
   if [ "${POSTTUN_ESTABLISHED:-0}" = 1 ] && [ "${POSTTUN_4C75_PHASE_OK:-0}" != 1 ]; then
     marker "BLOCKER=the 4C-75 runtime-tree-write milestone did not reach OK (see 53-posttun-verdict.txt; the accepted PASS contract requires the old categorized runtime-tree dir write terminal boundary GONE from the canonical span — the class-aware pair tclass=dir + denied=0x4 toward builder_runtime_t:s0:c<own>, the decode(dir, 0x4) = exactly { write }, the 4C-74 correction-1 canonical run 37683155675's own terminal record, the AF_UNIX bind attempt's dir WRITE hook, the UNTRACED-OWNER second-tier anchor — and the forward production progress past the bind-time dir-write hook — the span's own terminal buildkitd decision existing and NOT being the runtime-tree write shape; the absence of an AVC alone is not sufficient — a denied=0 decision produces no AVC, the forward syscall/result evidence decides; the actual per-op runtime-dir label is proven live and a root-typed divergence is the BLOCKED/PER-OP-RUNTIME-LABEL-NOT-CONVERGED outcome, never compensated with broader root-plane authority)"
+    finish INCOMPLETE
+    exit 0
+  fi
+  if [ "${POSTTUN_ESTABLISHED:-0}" = 1 ] && [ "${POSTTUN_4C76_PHASE_OK:-0}" != 1 ]; then
+    marker "BLOCKER=the 4C-76 runtime-tree-add_name milestone did not reach OK (see 53-posttun-verdict.txt; the accepted PASS contract requires the old categorized runtime-tree dir add_name terminal boundary GONE from the canonical span — the class-aware pair tclass=dir + denied=0x4000000 toward builder_runtime_t:s0:c<own>, the decode(dir, 0x4000000) = exactly { add_name }, the 4C-76 canonical run 37997013594's own terminal record, the AF_UNIX socket-path creation's dir add_name hook inside the traced sys_bind window, the bind exit anchor with its own TRACED owning window — and the forward production progress past the bind-time dir-add_name hook — the span's own terminal buildkitd decision existing and NOT being the runtime-tree add_name shape; the absence of an AVC alone is not sufficient — a denied=0 decision produces no AVC, the forward syscall/result evidence decides; the actual per-op runtime-dir label is proven live and a root-typed divergence is the BLOCKED/PER-OP-RUNTIME-LABEL-NOT-CONVERGED outcome, never compensated with broader root-plane authority)"
     finish INCOMPLETE
     exit 0
   fi

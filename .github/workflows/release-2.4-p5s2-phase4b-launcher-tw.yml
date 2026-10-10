@@ -149,7 +149,45 @@ jobs:
           # ref advances from the 4C-74-era pin to the commit carrying
           # that module; identical Go sources, so the binary is the same
           # program).
-          PHASE4B_PROOF_REF: 'be5ec61e9b5192b114d066e275e6c954420d94ed'
+          #
+          # 4C-76: the 4C-75 canonical run 37997013594 proved the
+          # categorized runtime-tree dir add_name grant live (the OLD
+          # boundary GONE; the 4C-75 write took effect with zero
+          # runtime-tree write denials in the span, the §11
+          # BIND-FD-IDENTITY chain proven from the same trace — the
+          # socket exit returned 0x8 and the bind record's fd field is
+          # 8 — and NO-PREANCHOR-POST=PASS under the corrected causal
+          # machinery) and its own terminal record is the genuine
+          # PRE-CLEANUP owner: buildkitd_t:s0:c1 ->
+          # builder_runtime_t:s0:c1:dir requested=0x24000000
+          # denied=0x4000000 (the AF_UNIX socket-path creation's dir
+          # add_name hook INSIDE the traced sys_bind window,
+          # trace-ts=429.646505, 9us before the bind exit anchor
+          # 429.646514 — the sys_bind enter/exit records WERE traced
+          # this run; only the failure response followed). The 4C-76
+          # grant WIDENS THAT SAME RULE IN PLACE (ONE rule, never
+          # split): allow docker_helper_buildkitd_t
+          # docker_helper_builder_runtime_t:dir { getattr search write
+          # add_name } — the delta exactly +add_name (candidate =
+          # decode(tclass=dir, denied=0x4000000) = exactly { add_name },
+          # NEVER the whole requested mask 0x24000000={ search add_name
+          # } — the standing search bit is not re-granted; dir:add_name
+          # is NOT a creation bundle — NOT create (the inode-make
+          # hook), NOT remove_name/unlink/rmdir (the removal hooks),
+          # NOT setattr/mounton, and the socket object's own
+          # sock_file:create/sock_file:write hooks stay their own
+          # live-evidence phases, never combined; no sock_file access,
+          # no socket/connect), the module-borne buildkitd-named allow
+          # total STAYS EXACTLY EIGHT, the 4C-76 harness keeps the
+          # bind(2) arming and the §10/§11 instruments (instrumentation
+          # only, no policy authority), and the §19 alternate applies:
+          # if the bind finally succeeded and the lifetime held, the
+          # startup staircase STOPS and the cross-operation isolation
+          # proof (4C-37) resumes — no artificial 4C-77 (the proof ref
+          # advances from the 4C-75-era pin to the commit carrying that
+          # module; identical Go sources, so the binary is the same
+          # program).
+          PHASE4B_PROOF_REF: 'f2885498f33ec31b70b6d826502173ebbcd5616f'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
