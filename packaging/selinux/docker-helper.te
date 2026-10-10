@@ -3627,7 +3627,90 @@ allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search;
 # transport) are DIFFERENT subjects and DIFFERENT owners — their
 # builder_runtime_t/builder_runtime_root_t rules stay byte-unchanged,
 # never merged and never templates.
-allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write };
+#
+# --- 4C-76: the categorized operation-runtime dir add_name — the 4C-75
+# --- rule widened IN PLACE (ONE rule, never split) ---
+#
+# The 4C-76 canonical run's (37997013594, the merged p3 composition's
+# own live proof) terminal record, live at the END of the buildkitd
+# process's own lifetime (the 4C-75 write took effect — zero
+# builder_runtime_t:dir write denials in the whole span — and the
+# runtime's NEXT production stage became the terminal):
+#
+#   buildkitd-57278 429.646505 selinux_audited: requested=0x24000000
+#     denied=0x4000000 audited=0x4000000 result=-13
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:docker_helper_builder_runtime_t:s0:c1
+#     tclass=dir — the AF_UNIX socket-path creation's dir add_name hook
+#     INSIDE the traced sys_bind window (the 4C-75 harness armed
+#     sys_enter_bind/sys_exit_bind; the §11 BIND-FD-IDENTITY chain is
+#     proven from the same trace: the socket exit returned 0x8 and the
+#     bind record's fd field is 8); the sys_bind exit at 429.646514
+#     (result -13 EACCES) is the span's terminal anchor with its own
+#     TRACED owning window (the UNTRACED-OWNER tier stays closed), the
+#     genuine PRE-CLEANUP owner: only the failure response (the ZONE2
+#     state-tree teardown, the error-report write, exit_group) followed.
+#
+# THE DELTA IS EXACTLY +add_name:
+#   - requested = 0x24000000 = { search add_name }; denied = 0x4000000 =
+#     { add_name }; the standing { getattr search write } grant is NOT
+#     the boundary — candidate = decode(tclass=dir, denied=0x4000000) =
+#     exactly { add_name }, NEVER the whole requested mask (the
+#     requested-vs-denied subtraction: the standing search bit is not
+#     re-granted);
+#   - decode(tclass=dir, 0x4000000) = exactly { add_name } — the
+#     kernel-side dir-class pin (add_name=0x4000000, remove_name=
+#     0x8000000 — the decode regression pins the tuple (dir,
+#     { add_name })); NO permission inference from the loaded policy's
+#     perms-file numbering (the class-aware decode regression pins the
+#     tuple);
+#   - dir:add_name is NOT a creation bundle: it grants the new-entry
+#     name-add hook on the directory object itself and NOT create (the
+#     inode-make hook), NOT remove_name/unlink/rmdir (the removal
+#     hooks), NOT setattr/mounton, NOT sock_file:create/write/open (the
+#     socket object's own class decisions are separate live-evidence
+#     phases) — the conventional AF_UNIX pathname-creation bundle is
+#     NOT reconstructed; the kernel emits each hook as its OWN decision
+#     and the next boundary's own live decision set owns the next phase
+#     (dir-class and sock_file-class decisions are never combined into
+#     one phase);
+#   - no read/open rides this widening; NOTHING on
+#     builder_runtime_t:file or builder_runtime_t:sock_file, no
+#     socket/connect — the daemon's sock_file transport authority is a
+#     DIFFERENT subject and a DIFFERENT owner and must never leak into
+#     this plane;
+#   - nothing on the sibling root/state types (builder_runtime_root_t,
+#     builder_state_root_t, builder_state_t) — PLANE G stays the bare
+#     search singleton on the ROOT pair and is NOT widened;
+#   - no process/process2 permission, no capability/cap_userns, no
+#     range_transition;
+#   - the frozen planes stay frozen: the three exec planes (the source
+#     { execute read open }, the transition { transition }, the target
+#     { entrypoint read execute }), the shared state-root rule (exactly
+#     { getattr search }), the categorized state-tree dir rule (exactly
+#     { getattr search write add_name }), the categorized state-tree
+#     file rule (exactly { create read open lock }), and the shared
+#     runtime-root rule (exactly { search }).
+# MCS: the TE rule encodes NO categories — the rule is the bare pair;
+# the c1 -> c1 admissibility stays the existing constraints' job (both
+# domains are proven mcs_constrained_type members). The op_<id> runtime
+# directory's own label is proven separately (the kernel-label sampler's
+# first/last/all read-backs and the live stat, all
+# builder_runtime_t:s0:c1 — the 4C-72 §9 instrument carries forward) —
+# never inferred from an AVC's tcontext.
+# SCOPE — READ CAREFULLY: the rule is type-wide TE authority
+# (buildkitd_t -> EVERY builder_runtime_t:dir
+# getattr+search+write+add_name), NOT path-scoped; the MCS category
+# constraints are what keep it operation-scoped in effect (a c1 subject
+# cannot reach a c2 per-op tree — the cross-operation reachability proof
+# (4C-37) stays mandatory and the cross-operation gate stays OPEN/
+# Critical until it holds). The category-scoped effect is NOT the 4C-37
+# isolation proof. The companion runtime owners (init_t provisioning,
+# the manager's own runtime management + relabel, the flow traversal,
+# the daemon transport) are DIFFERENT subjects and DIFFERENT owners —
+# their builder_runtime_t/builder_runtime_root_t rules stay
+# byte-unchanged, never merged and never templates.
+allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write add_name };
 
 # --- 4C-71: the categorized operation-state file lock — the 4C-70 file
 # --- rule widened IN PLACE (ONE rule, never split) ---
