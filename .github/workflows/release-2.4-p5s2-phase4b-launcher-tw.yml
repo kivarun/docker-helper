@@ -187,7 +187,47 @@ jobs:
           # advances from the 4C-75-era pin to the commit carrying that
           # module; identical Go sources, so the binary is the same
           # program).
-          PHASE4B_PROOF_REF: 'f2885498f33ec31b70b6d826502173ebbcd5616f'
+          #
+          # 4C-77: the 4C-76 canonical run 38027012897 proved the
+          # categorized runtime-tree dir add_name grant live (the OLD
+          # boundary GONE with zero runtime-tree add_name denials in the
+          # span) and its own terminal record is the genuine PRE-CLEANUP
+          # owner: buildkitd_t:s0:c1 -> builder_runtime_t:s0:c1:sock_file
+          # requested=0x8 denied=0x8 audited=0x8 (the AF_UNIX socket
+          # object's OWN inode-creation hook INSIDE the traced sys_bind
+          # window, trace-ts=552.895275, AFTER the granted dir
+          # search/write/add_name hooks had all passed silently in the
+          # same bind, 17us before the bind exit anchor 552.895292 with
+          # its own TRACED owning window; only the failure response
+          # followed). THE CLASS MATTERS (the task correction withdrew
+          # the dir-quintuple misread): the authority is the PAIR
+          # (tclass=sock_file, 0x8) — the same bit number on the dir
+          # class is dir:create and on the file class file:create and
+          # NEITHER is this authority; candidate = decode(tclass=sock_file,
+          # denied=0x8) = exactly { create }, requested==denied so no
+          # subtraction of standing bits is needed. The 4C-77 grant is a
+          # NEW pair+class plane (PLANE I), NEVER a widening of the dir
+          # rule: allow docker_helper_buildkitd_t
+          # docker_helper_builder_runtime_t:sock_file create — the FIRST
+          # builder_runtime_t sock_file authority of the buildkitd
+          # domain; NOT a writable-socket bundle (no
+          # write/open/getattr/setattr/unlink/rename/append/lock/map
+          # rides — the socket object's post-create USE stays its own
+          # live-evidence phase), NOT the daemon transport (the
+          # docker_helper_t { getattr open read write } rule is a
+          # DIFFERENT subject and a DIFFERENT owner, never merged), the
+          # manager/init provisioning surfaces byte-unchanged, no
+          # socket/connect process surface; the module-borne
+          # buildkitd-named allow total moves 8 -> EXACTLY NINE (the
+          # 4C-69 NEW-plane precedent: a new pair+class is a new plane,
+          # never a ninth widening — any TENTH rule trips), and the §19
+          # alternate applies: if the bind finally succeeded and the
+          # lifetime held, the startup staircase STOPS and the
+          # cross-operation isolation proof (4C-37) resumes — no
+          # artificial 4C-78 (the proof ref advances from the 4C-76-era
+          # pin to the commit carrying that module; identical Go
+          # sources, so the binary is the same program).
+          PHASE4B_PROOF_REF: '481201c82ee030319b68680da8bc12feb59bd909'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
