@@ -53,7 +53,11 @@ platform_preflight() {
 # packaging/nfpm.yaml); neither is build tooling. bindfs is installed for the
 # same reason: the candidate RPM Requires it (the SELinux workload read-only
 # projection backend) and the guest install path uses rpm -i without
-# dependency resolution. Required provisioning steps
+# dependency resolution. The Release 2.4 builder backend deps are aligned the
+# same way: the candidate RPM Requires rootlesskit and slirp4netns (the distro
+# rootless build backend the bundled BuildKit payload drives; shadow/kmod are
+# already satisfied by the Tumbleweed base — the 2.3.1-era live run's rpm -i
+# dependency error named exactly these two), and rpm -i does not resolve them. Required provisioning steps
 # (zypper refresh/install) explicitly propagate failure; the Docker
 # enable/start is deliberately best-effort because the common UAT preflight
 # will later prove whether Docker actually works.
@@ -71,6 +75,7 @@ platform_install_deps() {
     apparmor-abstractions \
     policycoreutils policycoreutils-python-utils \
     bindfs \
+    rootlesskit slirp4netns \
     tar gzip file curl docker \
     || return $?
 
