@@ -320,7 +320,49 @@ jobs:
           # proof ref advances from the 4C-78-era pin to the commit
           # carrying that module; identical Go sources, so the binary
           # is the same program).
-          PHASE4B_PROOF_REF: '09f6b75fe8baf03bb90d16495c83d54aa764fa4b'
+          #
+          # 4C-80: the 4C-79 canonical runs 38080262145 and 38081966935
+          # (FOUR independent attempts) proved the categorized
+          # runtime-tree sock_file unlink grant live (the OLD boundary
+          # GONE; the whole runtime-tree socket lifecycle SUCCEEDED —
+          # sys_socket -> fd 8, sys_bind(fd: 8) -> 0x0, the post-bind
+          # sys_unlinkat -> 0x0 with ZERO in-window denials) and the
+          # flow's NEXT production stage became the causal terminal:
+          # buildkitd_t:s0:c1 -> builder_state_t:s0:c1:dir
+          # requested=0x2 denied=0x2 result=-13 (the state-tree stage's
+          # terminal failing production sys_openat's dir read hook,
+          # trace-ts=427.727173, the twins 326.840806 / 571.620881 /
+          # 317.067678 the same shape; the owning openat exit anchor
+          # with its own TRACED owning window; the same-window
+          # state-tree dir remove_name record (requested=0x28000000
+          # denied=0x8000000) classified HANDLED/NON-TERMINAL by
+          # continuation proof and is NOT this boundary). decode(dir,
+          # 0x2) = exactly { read } — bit 1 of the COMMON_FILE_PERMS
+          # list the dir class shares; THE CLASS MATTERS — the same bit
+          # 0x2 on the file class is the GRANTED member of the
+          # state-tree file rule (the 4C-70/71 authority) and on the
+          # sock_file class the daemon transport's standing member, a
+          # same-bit coincidence never merges two planes. The 4C-80
+          # grant WIDENS THE PLANE E STATE-TREE DIR RULE IN PLACE (ONE
+          # rule, never split): allow docker_helper_buildkitd_t
+          # docker_helper_builder_state_t:dir { getattr search write
+          # add_name read } — the delta exactly +read; dir:read is NOT
+          # a directory-listing bundle — NOT remove_name (the
+          # HANDLED/NON-TERMINAL sibling stays its own live-evidence
+          # phase), NOT create/rmdir/rename/add_name (the granted
+          # member NOT re-granted), NOT setattr/mounton/lock/map — the
+          # conventional directory bundle NOT reconstructed; the
+          # state-tree file rule stays EXACTLY { create read open lock }
+          # and the runtime-tree PLANE H quintuple + PLANE I pair stay
+          # FROZEN; the module-borne buildkitd-named allow total STAYS
+          # EXACTLY NINE (any TENTH rule trips), and the §19 alternate
+          # applies: if the lifetime finally held, the startup
+          # staircase STOPS and the cross-operation isolation proof
+          # (4C-37) resumes — no artificial 4C-81 (the proof ref
+          # advances from the 4C-79-era pin to the commit carrying that
+          # module; identical Go sources, so the binary is the same
+          # program).
+          PHASE4B_PROOF_REF: '5d68d06aa88d9b80bc858247cf4e035eb50e57a1'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
