@@ -514,7 +514,41 @@ jobs:
           # has no type_transition edge — the runc probe runs inside
           # the daemon domain). The pin advances because the policy
           # module sources (the .fc) changed in the proof tree.
-          PHASE4B_PROOF_REF: '72e87ccffe3406a55a9a82631be0f081ccb787d0'
+          #
+          # 4C-85: the 4C-84 post-fix runs (38148461897, 38149512909)
+          # proved the labeling fix took effect AND named the next
+          # terminal owner: with the bundled buildkit-runc carrying the
+          # dedicated docker_helper_buildkitd_exec_t identity, the
+          # buildkitd OCI worker initializer's LookPath newfstatat on
+          # the FOUND candidate denies on its GETATTR hook —
+          # requested=0x10 denied=0x10 result=-13 scontext=
+          # buildkitd_t:s0:c1 tcontext=buildkitd_exec_t:s0 tclass=file
+          # (trace-ts=578.438806 and the twin 587.238555, INSIDE the
+          # TRACED newfstatat window; the "skipping oci worker" warning
+          # immediately after, then the "no worker found" fatal) — the
+          # LookPath stat's failure IS the swallowed initializer error.
+          # The 4C-85 grant WIDENS THE 4C-61/62 TARGET-SIDE RULE IN
+          # PLACE (ONE rule, never split): allow
+          # docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:
+          # file { entrypoint read execute getattr } — the delta
+          # exactly +getattr; decode(file, 0x10) = exactly { getattr }
+          # (bit 4 of the COMMON_FILE_PERMS list); THE CLASS MATTERS —
+          # the same bit 0x10 on the dir class is dir:getattr (the
+          # state-root/state-tree planes) and on the lnk_file class
+          # lnk_file:getattr, a same-bit coincidence never merges two
+          # planes; file:getattr is NOT an executable bundle — NOT
+          # create/unlink/write/append/lock/map — AND THE STANDING
+          # QUARANTINED buildkitd_exec_t:file open hook (0x40000) STAYS
+          # UNGRANTED and never rides this widening; NO generic
+          # bin_t:file execute grant, NO tmpfs_t:lnk_file read grant,
+          # NO transition edge; the module-borne buildkitd-named allow
+          # total STAYS EXACTLY NINE (any TENTH rule trips), and the
+          # §19 alternate applies: if the lifetime finally held, the
+          # startup staircase STOPS and the cross-operation isolation
+          # proof (4C-37) resumes — no artificial 4C-86 (the proof ref
+          # advances to the commit carrying that module; identical Go
+          # sources, so the binary is the same program).
+          PHASE4B_PROOF_REF: '635be06cf6afb3fe62aae8e44ed209299a2a8ffb'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
