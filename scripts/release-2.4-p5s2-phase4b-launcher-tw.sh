@@ -3438,6 +3438,33 @@ log "D: 4C-38 post-TUN lifetime observer armed (pid $POSTTUN_OBSERVER_PID)"
 } > "$EVIDENCE_DIR/55-host-mountinfo-before.txt" 2>&1
 
 START_RC=0
+# ---- 4C-37R death-window trace instance: a SEPARATE tracefs instance
+# ---- (its own buffer, decoupled from the provisioning ring) armed with
+# ---- the LOW-VOLUME event set only — sys_enter/exit_write (the
+# ---- payload's stderr lines ride the write buffer text), sys_enter/
+# ---- exit_exit_group (the voluntary exit status), sched_process_exit
+# ---- (the death order) and avc/selinux_audited — and NO cap_capable
+# ---- (the provisioning flood that fills the main ring within ~1s).
+# ---- The 4C-37R binder's live inventory proved the runtime tree exits
+# ---- ~1-4s after the launch while every existing ring ends before the
+# ---- death; this instance survives to it, so the payload's own fatal
+# ---- stderr line and its exit status become observable evidence.
+RXD_TRACE_INSTANCE=""
+if [ "$TRACE_ENABLED" = 1 ] && [ -d "$TRACING/instances" ]; then
+  rmdir "$TRACING/instances/deathwin" 2>/dev/null || true
+  if mkdir "$TRACING/instances/deathwin" 2>/dev/null; then
+    RXD_TRACE_INSTANCE="$TRACING/instances/deathwin"
+    echo 0 > "$RXD_TRACE_INSTANCE/tracing_on" 2>/dev/null || true
+    echo > "$RXD_TRACE_INSTANCE/trace" 2>/dev/null || true
+    echo 32768 > "$RXD_TRACE_INSTANCE/buffer_size_kb" 2>/dev/null || true
+    for RXDEV in syscalls/sys_enter_write syscalls/sys_exit_write \
+                 syscalls/sys_enter_exit_group syscalls/sys_exit_exit_group \
+                 sched/sched_process_exit avc/selinux_audited; do
+      echo 1 > "$RXD_TRACE_INSTANCE/events/$RXDEV/enable" 2>/dev/null || true
+    done
+    echo 1 > "$RXD_TRACE_INSTANCE/tracing_on" 2>/dev/null || true
+  fi
+fi
 START_OUT="$(printf 'START %s\n' "$OP_ID" | timeout 120 socat - UNIX-CONNECT:"$MANAGER_SOCK")" || START_RC=$?
 {
   echo "window-start: $T0"
@@ -11984,6 +12011,43 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
       marker "4C-82=INCOMPLETE/RUNTIME-TREE-SOCKFILE-SETATTR-PROOF-INCOMPLETE"
     fi
   fi
+  # ---- 4C-37R: read the death-window trace instance. The instance was
+  # ---- armed before the canonical START with the low-volume event set
+  # ---- (no cap_capable flood), so its ring survives to the runtime
+  # ---- tree's death — the payload's own fatal stderr line (the write
+  # ---- buffer text) and its voluntary exit status (the exit_group
+  # ---- error_code) are the observable evidence the manager's tail
+  # ---- cannot provide (the payload's stderr is silenced at /null; only
+  # ---- the rootlesskit wrapper's own lines reach the flow output).
+  if [ -n "${RXD_TRACE_INSTANCE:-}" ]; then
+    echo 0 > "$RXD_TRACE_INSTANCE/tracing_on" 2>/dev/null || true
+    cat "$RXD_TRACE_INSTANCE/trace" > /tmp/p4b-work/deathwin-raw.txt 2>/dev/null || true
+    for RXDEV in syscalls/sys_enter_write syscalls/sys_exit_write \
+                 syscalls/sys_enter_exit_group syscalls/sys_exit_exit_group \
+                 sched/sched_process_exit avc/selinux_audited; do
+      echo 0 > "$RXD_TRACE_INSTANCE/events/$RXDEV/enable" 2>/dev/null || true
+    done
+    rmdir "$RXD_TRACE_INSTANCE" 2>/dev/null || true
+    RXD_TRACE_INSTANCE=""
+    cp /tmp/p4b-work/deathwin-raw.txt "$EVIDENCE_DIR/62-runtime-death-trace-raw.txt" 2>/dev/null || true
+    {
+      echo "=== 4C-37R death-window trace (the low-volume instance ring; the payload's own fatal stderr line and exit status) ==="
+      echo "--- the buildkitd stderr write records (the quoted prefix after the hex; the tracer truncates the payload):"
+      grep -a "sys_write(fd: 2" /tmp/p4b-work/deathwin-raw.txt 2>/dev/null | grep -a "buildkitd" | tail -8 || true
+      echo "(end of the buildkitd write records)"
+      echo "--- the exit_group records of every buildkitd pid (error_code IS the exit status):"
+      grep -a "sys_enter_exit_group" /tmp/p4b-work/deathwin-raw.txt 2>/dev/null | grep -a "buildkitd" | tail -8 || true
+      echo "(end of the buildkitd exit records)"
+      echo "--- the sched_process_exit records (the death order, all comms):"
+      grep -a "sched_process_exit" /tmp/p4b-work/deathwin-raw.txt 2>/dev/null | grep -aE "buildkitd|exe|rootlesskit" | tail -12 || true
+      echo "(end of the process-exit records)"
+      echo "--- the last SELinux decisions in the window (the tail; the death's own decision context):"
+      grep -a "selinux_audited" /tmp/p4b-work/deathwin-raw.txt 2>/dev/null | tail -12 || true
+      echo "(end of the SELinux decision tail)"
+    } > "$EVIDENCE_DIR/62-runtime-death-trace.txt" 2>&1
+    cat "$EVIDENCE_DIR/62-runtime-death-trace.txt" >&2
+  fi
+
   # ---- 4C-L1: the software-lifecycle diagnostic verdict. DIAGNOSTIC
   # ---- ONLY (no policy authority, no new SELinux candidate, no 4C-82
   # ---- minting): the residual BuildKitd death is owned by the software
