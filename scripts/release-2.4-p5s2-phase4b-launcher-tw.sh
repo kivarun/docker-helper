@@ -2738,10 +2738,14 @@ RK_BKD_LABEL_OK=1
   echo "    buildctl matchpathcon:   $(matchpathcon /usr/libexec/docker-helper/buildkit/buildctl 2>/dev/null || true)"
   echo "    buildkit-runc:           $(matchpathcon /usr/libexec/docker-helper/buildkit/buildkit-runc 2>/dev/null || true)"
   BKD_LABEL_OK=0
+  # The 4C-84 labeling contract: buildkitd AND the bundled worker runtime
+  # binary carry the dedicated exec identity; the unrelated sibling
+  # buildctl keeps its distro label.
   if [ "$BKD_LABEL_TYPE" = "docker_helper_buildkitd_exec_t" ] \
     && matchpathcon /usr/libexec/docker-helper/buildkit/buildkitd 2>/dev/null | grep -aq 'object_r:docker_helper_buildkitd_exec_t:s0' \
     && ! matchpathcon /usr/libexec/docker-helper/buildkit/buildctl 2>/dev/null | grep -aq 'docker_helper_buildkitd_exec_t' \
-    && ! matchpathcon /usr/libexec/docker-helper/buildkit/buildkit-runc 2>/dev/null | grep -aq 'docker_helper_buildkitd_exec_t'; then
+    && matchpathcon /usr/libexec/docker-helper/buildkit/buildkit-runc 2>/dev/null | grep -aq 'object_r:docker_helper_buildkitd_exec_t:s0' \
+    && [ "$(stat -c '%C' /usr/libexec/docker-helper/buildkit/buildkit-runc 2>/dev/null || true)" = "system_u:object_r:docker_helper_buildkitd_exec_t:s0" ]; then
     BKD_LABEL_OK=1
   fi
   if [ "$BKD_TRANS_OK" = 1 ] && [ "$BKD_ZERO_ALLOW_OK" = 1 ] && [ "$BKD_BIN_CLOSED_OK" = 1 ]; then
@@ -2751,7 +2755,7 @@ RK_BKD_LABEL_OK=1
     PREFLIGHT_OK=0
   fi
   if [ "$BKD_LABEL_OK" = 1 ]; then
-    echo "PASS: the buildkitd file-context identity converged (the installed payload's own type is docker_helper_buildkitd_exec_t; the siblings keep their distro labels)"
+    echo "PASS: the buildkitd file-context identity converged (the installed payload's own type is docker_helper_buildkitd_exec_t; the bundled worker runtime carries the same identity per the 4C-84 labeling fix; buildctl keeps its distro label)"
   else
     echo "FAIL: the buildkitd file-context identity did not converge (installed type: ${BKD_LABEL_TYPE:-(undetermined)}; see 02-buildkitd-probe.txt)"
     PREFLIGHT_OK=0
