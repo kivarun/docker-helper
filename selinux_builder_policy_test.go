@@ -4444,7 +4444,7 @@ func buildkitdIdentityViolations(policy string) []string {
 	const canonicalTransition = "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;"
 	const canonicalEntry = "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr };"
 	const canonicalStateRoot = "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search };"
-	const canonicalStateTree = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open };"
+	const canonicalStateTree = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create };"
 	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock };"
 	const canonicalRuntimeRoot = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search;"
 	const canonicalRuntimeTree = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write add_name remove_name };"
@@ -4663,7 +4663,7 @@ func buildkitdIdentityViolations(policy string) []string {
 		}
 	}
 	if buildkitdNamedAllow != 9 {
-		violations = append(violations, fmt.Sprintf("the module must carry exactly the nine buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open }, the categorized state-tree file { create read open lock }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name }, the categorized runtime-tree sock_file { create unlink setattr }), found %d", buildkitdNamedAllow))
+		violations = append(violations, fmt.Sprintf("the module must carry exactly the nine buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create }, the categorized state-tree file { create read open lock }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name }, the categorized runtime-tree sock_file { create unlink setattr }), found %d", buildkitdNamedAllow))
 	}
 	// The shared runtime-root dir surface has exactly the standing
 	// owners above; a NEW or reshaped rule on the pair (any source,
@@ -5036,7 +5036,7 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 	// the SAME openat — the read bit PASSED silently under the 4C-80
 	// grant, the requested-vs-denied rule degrades to the exact delta) —
 	// the rule widened IN PLACE each phase, never split).
-	const canonicalStateTree = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open };"
+	const canonicalStateTree = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create };"
 	var withoutStateTree []string
 	stateTreeCount := 0
 	for _, line := range strings.Split(policy, "\n") {
@@ -5315,12 +5315,13 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		// kernel emits each hook as its own decision; none rides the
 		// open grant; dir-class and file-class decisions are never
 		// combined
-		{"the sextuple + remove_name", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open remove_name };"},
-		{"the sextuple + create", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create };"},
-		{"the sextuple + setattr", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open setattr };"},
-		{"the sextuple + rmdir", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open rmdir };"},
-		{"the sextuple + lock", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open lock };"},
-		{"the sextuple + mounton", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open mounton };"},
+		{"the old 4C-81 sextuple form (missing create)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open };"},
+		{"the septuple + remove_name", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name };"},
+		{"the septuple + setattr", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create setattr };"},
+		{"the septuple + rmdir", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create rmdir };"},
+		{"the septuple + rename", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create rename };"},
+		{"the septuple + mounton", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create mounton };"},
+		{"the septuple + lock", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create lock };"},
 		{"state-tree grant from the wrong source (the flow)", "allow docker_helper_rootlesskit_t docker_helper_builder_state_t:dir getattr;"},
 		{"state-tree grant from the wrong source (the manager)", "allow docker_helper_builder_t docker_helper_builder_state_t:dir getattr;"},
 		{"state-tree grant from the wrong source (the daemon)", "allow docker_helper_t docker_helper_builder_state_t:dir getattr;"},
@@ -6175,6 +6176,33 @@ func TestSELinuxPolicyKernelClassmapMaskPins(t *testing.T) {
 	}
 	if got := classDecode("file", 0x10); got != "(file, getattr)" {
 		t.Errorf("kernel classmap decode: the 4C-85 grant candidate must be the tuple (file, { getattr }) — the LookPath newfstatat's denied bit on the found candidate, got %s", got)
+	}
+	// The 4C-86 grant-candidate pin + the lifecycle-owner provenance
+	// (the 4C-85 canonical run 38152706541's own terminal records: the
+	// OCI worker state-dir mkdirat inside the op state tree — the dir
+	// CREATE hook denied requested=0x8 denied=0x8 result=-13
+	// tcontext=builder_state_t:s0:c1 tclass=dir inside the TRACED
+	// mkdirat window (the enter 581.390682, the exit -13), the fatal
+	// stderr "buildkitd: mkdir /var/lib/docker-helper-builder/ops/op_..."
+	// (0x7c) and the voluntary exit — the harness's conservative
+	// HANDLED/NON-TERMINAL classification SUPERSEDED by the same
+	// L1-class proof: the continuation after the denial was the
+	// failure-response path, the stderr names the mkdir as fatal).
+	//   (dir, 0x8) = { create } — the live-backed grant candidate;
+	//   (dir, 0x8000000) = { remove_name } — the GRANTED PLANE E
+	//     member, never the delta (a granted neighbor is never a
+	//     candidate);
+	//   (file, 0x8) = { create } — the 4C-69 state-tree FILE plane
+	//     grant, a DIFFERENT class and decision;
+	//   (sock_file, 0x8) = { create } — the PLANE I grant, a DIFFERENT
+	//     plane;
+	//   the widened septuple's own combined form decode(dir, 0x2404001e)
+	//     = exactly { create getattr search write add_name read open }.
+	if got := classDecode("dir", 0x2404001e); got != "(dir, read write create getattr open add_name search)" {
+		t.Errorf("kernel classmap decode: the widened PLANE E septuple's own combined form (0x2404001e) must decode to exactly { read write create getattr open add_name search } in kernel-bit order, got %s", got)
+	}
+	if got := classDecode("sock_file", 0x8); got != "(sock_file, create)" {
+		t.Errorf("kernel classmap decode: the 4C-86 anti-merge pin (sock_file, 0x8) must decode to { create } (the DIFFERENT plane — the PLANE I grant, never the state-tree dir plane), got %s", got)
 	}
 	// The dir-class same-bit companion: decode(dir, 0x8) also recovers
 	// exactly { create } (the shared prefix bit), but as the DIR tuple.

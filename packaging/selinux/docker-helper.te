@@ -3450,16 +3450,92 @@ allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr
 # builder_state_t:s0:c1) — never inferred from an AVC's tcontext.
 # SCOPE — READ CAREFULLY: the rule is type-wide TE authority
 # (buildkitd_t -> EVERY builder_state_t:dir
-# getattr+search+write+add_name+read+open), NOT path-scoped; the MCS
-# category constraints are what keep it operation-scoped in effect (a
-# c1 subject cannot reach a c2 per-op tree — the cross-operation
+# getattr+search+write+add_name+read+open+create), NOT path-scoped; the
+# MCS category constraints are what keep it operation-scoped in effect
+# (a c1 subject cannot reach a c2 per-op tree — the cross-operation
 # reachability proof (4C-37) stays mandatory and the cross-operation
 # gate stays OPEN/Critical until it holds). The companion runtime
 # owners (init_t provisioning, the manager's own state management, the
 # daemon transport) are DIFFERENT subjects and DIFFERENT owners — their
 # builder_state_t rules stay byte-unchanged, never merged and never
 # templates.
-allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open };
+#
+# --- 4C-86: the categorized operation-state dir create — the 4C-81
+# --- rule widened IN PLACE (ONE rule, never split) ---
+#
+# PROVENANCE (the 4C-85 canonical run 38152706541's own terminal
+# records, BOTH attempts, and the twin shape in 38148461897's own
+# successor shape): the 4C-85 getattr grant let the OCI worker's
+# initializer LookPath-stat the bundled buildkit-runc and the worker
+# init advanced through the exec into the WORKER STATE-DIR CREATION —
+# the OCI worker's own state directory inside the operation's per-op
+# state tree (the --root argument's tree). The mkdirat inside the op
+# state tree denies on its dir CREATE hook:
+#
+#   requested=0x8 denied=0x8 result=-13 scontext=buildkitd_t:s0:c1
+#     tcontext=builder_state_t:s0:c1 tclass=dir, trace-ts=581.390693
+#     and the twin 581.390906 (the 38152706541 attempt 1) and the
+#     twins 580.271275/580.284584 (attempt 2) — inside the TRACED
+#     sys_mkdirat window (the enter 581.390682, the exit -13 at
+#     581.390708), genuine PRE-CLEANUP ownership
+#   -> the fatal stderr: buildkitd: mkdir /var/lib/docker-helper-
+#     builder/ops/op_... (0x7c, the L1-class lifecycle evidence —
+#     the mkdir failure is the error the process reports and exits on)
+#   -> the failure response (the state-tree remove_name siblings at
+#     581.390946/581.390982, the POST-FAILURE/CLEANUP class) and the
+#     voluntary exit.
+#
+# THE LIFECYCLE-OWNER RECLASSIFICATION (the L1/L2 precedent joins the
+# causal contract as the standing tier): the harness's conservative
+# machinery emitted 4C-86=NO-GO because the span's terminal decision
+# classified HANDLED/NON-TERMINAL (the failure-response cleanup
+# follows the mkdirat) — the SAME conservative shape that mis-classified
+# the 4C-82 chmod owner before the L1 diagnostic proved the
+# continuation-after-the-denial WAS the failure-response path. The
+# stderr chain here proves the terminal ownership directly: the mkdir
+# failure is the logged error buildkitd reports and exits on. THE
+# TERMINAL LIFECYCLE OWNER IS THIS DENIAL — genuine PRE-CLEANUP
+# production ownership (the mkdirat runs BEFORE any failure response).
+#
+# THE MASK DECODE PIN: 0x8 = create (bit 3 of the COMMON_FILE_PERMS
+# list the dir class shares; the LIVE record corroborates the bit and
+# the kernel emitted the dir-class create hook inside the mkdirat's
+# may_create). THE CLASS MATTERS — the same bit number 0x8 on the file
+# class is file:create (the 4C-69 state-tree FILE plane grant — a
+# DIFFERENT pair and class) and on the sock_file class sock_file:create
+# (the PLANE I grant — a DIFFERENT plane) — a same-bit coincidence
+# never merges two planes; the dir-class 0x8000000 is remove_name (the
+# GRANTED member of PLANE E — the delta is NEVER the granted neighbor),
+# 0x4000000 is add_name (GRANTED), 0x10 is getattr (GRANTED);
+# decode(dir, 0x8) = exactly { create }, the class-aware decode
+# regression pins the tuple. requested==denied so no subtraction of
+# standing bits is needed — candidate = decode(tclass, denied) =
+# exactly { create }, the standing invariant
+# candidate=decode(tclass,denied) preserved.
+# THE DELTA IS EXACTLY +create:
+#   - dir:create is NOT a conventional mkdir bundle: it grants the
+#     state-tree dir's own create hook (the worker state dir's
+#     inode-creation inside its own per-op tree) and NOT remove_name
+#     (the GRANTED member — the delta is never a granted neighbor),
+#     NOT rmdir, NOT setattr, NOT rename, NOT mounton — the sibling
+#     removal surfaces stay their own live-evidence phases (the
+#     failure-response cleanup walk's own records stay
+#     POST-FAILURE/CLEANUP, never laundered);
+#   - NO state-tree FILE widening (the file rule stays byte-for-
+#     semantics exactly { create read open lock }), NO runtime-tree
+#     widening (PLANE H quintuple + PLANE I triple frozen), NO
+#     buildkitd_exec_t:file open (the standing quarantine), NO generic
+#     bin_t grant, NO tmpfs_t:lnk_file grant, NO cap_userns grant,
+#     NO cgroup_t grant;
+#   - the dir rules stay byte-for-semantics: the runtime-tree dir rule
+#     exactly { getattr search write add_name remove_name } (PLANE H),
+#     the shared state-root rule exactly { getattr search }, the
+#     shared runtime-root rule exactly { search };
+#   - the frozen planes stay frozen: the source-exec planes, the
+#     target-side exec-type rule exactly { entrypoint read execute
+#     getattr }, and the standing other-subject rules (a different
+#     subject and a different owner — never merged).
+allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create };
 
 # --- 4C-69: the categorized operation-state file create — the NEW
 # --- file-class plane (a NEW pair+class rule, NEVER a widening of the
