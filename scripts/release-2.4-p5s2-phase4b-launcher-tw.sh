@@ -3456,12 +3456,22 @@ if [ "$TRACE_ENABLED" = 1 ] && [ -d "$TRACING/instances" ]; then
     RXD_TRACE_INSTANCE="$TRACING/instances/deathwin"
     echo 0 > "$RXD_TRACE_INSTANCE/tracing_on" 2>/dev/null || true
     echo > "$RXD_TRACE_INSTANCE/trace" 2>/dev/null || true
-    echo 32768 > "$RXD_TRACE_INSTANCE/buffer_size_kb" 2>/dev/null || true
+    echo 16384 > "$RXD_TRACE_INSTANCE/buffer_size_kb" 2>/dev/null || true
     for RXDEV in syscalls/sys_enter_write syscalls/sys_exit_write \
                  syscalls/sys_enter_exit_group syscalls/sys_exit_exit_group \
                  sched/sched_process_exit avc/selinux_audited; do
       echo 1 > "$RXD_TRACE_INSTANCE/events/$RXDEV/enable" 2>/dev/null || true
     done
+    # The comm filters: without them the harness's own writes flood the
+    # instance (the first attempt's ring lost everything before +7s to
+    # the harness's own echo volume — 550k events dropped). The payload
+    # comm set is the death subject: buildkitd and the in-ns monitor
+    # (exe). selinux_audited stays unfiltered (low volume).
+    echo 'comm == "buildkitd"' > "$RXD_TRACE_INSTANCE/events/syscalls/sys_enter_write/filter" 2>/dev/null || true
+    echo 'comm == "buildkitd"' > "$RXD_TRACE_INSTANCE/events/syscalls/sys_exit_write/filter" 2>/dev/null || true
+    echo '(comm == "buildkitd") || (comm == "exe")' > "$RXD_TRACE_INSTANCE/events/syscalls/sys_enter_exit_group/filter" 2>/dev/null || true
+    echo '(comm == "buildkitd") || (comm == "exe")' > "$RXD_TRACE_INSTANCE/events/syscalls/sys_exit_exit_group/filter" 2>/dev/null || true
+    echo '(comm == "buildkitd") || (comm == "exe") || (comm == "rootlesskit")' > "$RXD_TRACE_INSTANCE/events/sched/sched_process_exit/filter" 2>/dev/null || true
     echo 1 > "$RXD_TRACE_INSTANCE/tracing_on" 2>/dev/null || true
   fi
 fi
