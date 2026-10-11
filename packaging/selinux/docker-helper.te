@@ -3200,7 +3200,108 @@ allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr
 # cannot reach a c2 per-op tree — the cross-operation reachability proof
 # (4C-37) stays mandatory and the cross-operation gate stays
 # OPEN/Critical until it holds).
-allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name };
+#
+# --- 4C-80: the categorized operation-state dir read — the 4C-68 rule
+# --- widened IN PLACE (ONE rule, never split) ---
+#
+# The 4C-79 canonical runs' (38080262145, 38081966935) own terminal
+# causal records, live at the END of the buildkitd process's own
+# lifetime (the whole runtime-tree socket lifecycle now passes WHOLE —
+# sys_socket -> fd 8, sys_bind(fd: 8) -> 0x0, the post-bind
+# sys_unlinkat -> 0x0 with ZERO in-window denials under the
+# 4C-77/78/79 grants — and the flow's NEXT production stage became the
+# causal terminal), FOUR independent attempts, the identical shape:
+#
+#   buildkitd-51747 427.727173 selinux_audited: requested=0x2
+#     denied=0x2 audited=0x2 result=-13
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:docker_helper_builder_state_t:s0:c1
+#     tclass=dir — the state-tree dir READ hook INSIDE the terminal
+#     failing production sys_openat(AT_FDCWD, the per-op state path,
+#     O_RDONLY|O_CLOEXEC) whose exit (trace-ts=427.727183) is the span's
+#     terminal anchor with its own TRACED owning window (the
+#     UNTRACED-OWNER tier stays closed); the attempt twins:
+#     buildkitd-43825 326.840806, buildkitd-43006 571.620881 (run
+#     38081966935 attempt 1), buildkitd-42423 317.067678 (attempt 3) —
+#     the same shape, requested=denied=0x2 tclass=dir. The preceding
+#     same-window state-tree dir remove_name record (requested=
+#     0x28000000 denied=0x8000000, the flow's own state-tree stage
+#     before the anchor) classified HANDLED/NON-TERMINAL by
+#     continuation proof (the openat enter followed) and is NOT this
+#     boundary; genuine PRE-CLEANUP ownership (the record sits INSIDE
+#     the terminal failing production syscall, BEFORE any
+#     failure-response cleanup — the correction-3 causal contract
+#     holds).
+#
+# THE MASK DECODE PIN (the kernel's static classmap numbering, NOT the
+# loaded policy's perms-file numbering): 0x2 = read (bit 1 of the
+# COMMON_FILE_PERMS list the dir class shares — the directory-read
+# hook, the fd-based readdir authority). THE CLASS MATTERS — the same
+# bit number 0x2 on the file class is file:read (the GRANTED member of
+# the state-tree file rule { create read open lock }, the 4C-70/71
+# authority) and on the sock_file class sock_file:read (the daemon
+# transport's standing member) — NEITHER is this authority, a same-bit
+# coincidence never merges two planes; decode(dir, 0x2) = exactly
+# { read }, the class-aware decode regression pins the tuple.
+# requested==denied so no subtraction of standing bits is needed —
+# candidate = decode(tclass=dir, denied=0x2) = exactly { read }, the
+# standing invariant candidate=decode(tclass,denied) preserved; NO
+# permission inference from the loaded policy's perms-file numbering.
+# THE DELTA IS EXACTLY +read:
+#   - dir:read is NOT a directory-listing/readdir bundle: it grants the
+#     directory's own READ hook (the open-for-reading authority) and
+#     NOT remove_name (the HANDLED/NON-TERMINAL sibling stays its own
+#     live-evidence phase — it becomes a candidate only if a fresh live
+#     proof names it the genuine terminal owner), NOT create/rmdir/
+#     rename/add_name (the granted member is NOT re-granted), NOT
+#     setattr/mounton/lock/map — the conventional directory bundle is
+#     NOT reconstructed; the kernel emits each hook as its OWN decision
+#     and the next boundary's own live decision set owns the next phase
+#     (dir-class/file-class/sock_file-class decisions are never
+#     combined into one phase);
+#   - no write/open/create/remove_name/setattr rides this widening; the
+#     state-tree FILE rule stays byte-for-semantics exactly
+#     { create read open lock } (its read is the file-class member, a
+#     DIFFERENT class and decision); nothing on
+#     builder_state_t:file/lnk_file or any other class of the per-op
+#     tree, nothing on the sibling root/runtime types
+#     (builder_state_root_t, builder_runtime_root_t, builder_runtime_t
+#     — the runtime-tree dir quintuple and the runtime-tree sock_file
+#     pair are FROZEN planes and are never widened here), and nothing
+#     on any quarantined surface (tmp_t:dir write, the fifos, nsfs,
+#     cgroup, sysctl_fs, sysfs, passwd_file, buildkitd_exec_t:file open
+#     — repeat count never converts a non-terminal denial into
+#     authority);
+#   - no process/process2 permission, no capability/cap_userns, no
+#     range_transition;
+#   - the frozen planes stay frozen: the three exec planes (the source
+#     { execute read open }, the transition { transition }, the target
+#     { entrypoint read execute }), the shared state-root rule (exactly
+#     { getattr search }), the shared runtime-root rule (exactly
+#     { search }), and the standing RootlessKit state-tree rule
+#     { search getattr read open write add_name remove_name lock }
+#     (a different subject and a different owner — its wider shape is
+#     NOT a template for BuildKitd; its dir READ member is the same
+#     permission on a DIFFERENT subject and a DIFFERENT owner, never
+#     merged).
+# MCS: the TE rule encodes NO categories — the rule is the bare pair;
+# the c1 -> c1 admissibility stays the existing constraints' job (both
+# domains are proven mcs_constrained_type members). The op_<id>
+# directory's own label is proven separately (the kernel-label sampler's
+# first/last/all read-backs and the live stat, all
+# builder_state_t:s0:c1) — never inferred from an AVC's tcontext.
+# SCOPE — READ CAREFULLY: the rule is type-wide TE authority
+# (buildkitd_t -> EVERY builder_state_t:dir
+# getattr+search+write+add_name+read), NOT path-scoped; the MCS
+# category constraints are what keep it operation-scoped in effect (a
+# c1 subject cannot reach a c2 per-op tree — the cross-operation
+# reachability proof (4C-37) stays mandatory and the cross-operation
+# gate stays OPEN/Critical until it holds). The companion runtime
+# owners (init_t provisioning, the manager's own state management, the
+# daemon transport) are DIFFERENT subjects and DIFFERENT owners — their
+# builder_state_t rules stay byte-unchanged, never merged and never
+# templates.
+allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read };
 
 # --- 4C-69: the categorized operation-state file create — the NEW
 # --- file-class plane (a NEW pair+class rule, NEVER a widening of the
