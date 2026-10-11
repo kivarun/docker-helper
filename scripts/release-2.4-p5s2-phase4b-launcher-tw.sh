@@ -3558,37 +3558,65 @@ echo "$MGR_AFTER" > "$EVIDENCE_DIR/07-manager-after.txt"
 
 
 # ============================================================
-# 4C-37: the cross-operation TUN isolation proof (proof-only)
+# 4C-37 (resumed: 4C-37R): the cross-operation TUN isolation proof
+# (proof-only)
 # ============================================================
-# ZERO policy delta. The proof establishes, on the LIVE production paths
-# of two simultaneously alive Build Operations with different MCS
+# ZERO policy delta. The proof establishes, on the LIVE production
+# paths of two simultaneously alive Build Operations with different MCS
 # categories, that the helper domain's authority performs the same-
-# operation attach (the 4C-36 clean chain) but stops at a REAL causal
-# boundary when applied to the other operation's namespace/socket state.
-# The vehicle is the composition's own entry path: a static helper
-# binary swapped by rename (the 4C-36 mechanism), which runs the control
-# leg against its own holder and the attack leg against operation A's
-# attached helper (the live member of A's netns), delivered inside the
-# vehicle's own binary tail (read via the helper's existing entry-file
-# authority).
+# operation attach (the 4C-36 clean chain) but stops at REAL causal
+# boundaries when applied to the other operation's identity surfaces:
+# the runtime tree's socket, the per-op state tree, and the other
+# operation's namespace set + attached TAP. The vehicle is the
+# composition's own entry path: a static helper binary swapped by
+# rename (the 4C-36 mechanism), which runs the control leg against its
+# own holder and the attack legs against operation A's bound anchor
+# (the live member of A's netns — the 4C-37R anchor class is the
+# buildkitd runtime tree itself), delivered inside the vehicle's own
+# binary tail (read via the helper's existing entry-file authority).
 # Lifecycle noise (the retained-flow signull/sigkill/signal denials of
 # 4C-36) is inventoried separately and never gates this phase.
 marker "CROSS-OP: isolation proof window start"
 CROSS_T0="$(date +%s)"
-# Attack-target binding: a LIVE member of operation A that holds the
-# netns and its attached tap0. The composition's flow lifetime is far
-# below a minute — the payload's readiness never completes and the whole
-# flow tree is gone within seconds of the attach (the holder pid in run
-# 37042643830, the attached helper in run 37044797662: both already gone
-# at their binding times), so the binding reads the LIVE SYSTEM, not a
-# remembered pid: every live member of the canonical op's flow domains
-# carrying operation A's own category (c1) is inventoried (pid, comm,
-# namespace inodes, label, tap0), and the binding takes the FIRST member
-# that holds tap0 in its own netns — the attached-helper shape. The scan
-# is forkless (plain bash reads) so it lands inside the flow's own short
-# alive window; the trace-derived attached-helper pid is the independent
-# cross-check, recorded here and compared in the verdict against the
-# already-harvested ring.
+# Attack-target binding (the 4C-37R binder): a LIVE member of operation
+# A that holds the netns and its attached tap0. The v1 binder's world no
+# longer exists: it scanned only the flow domains (rootlesskit_t /
+# slirp4netns_t:s0:c1), which was correct while the flow tree died
+# within seconds of the attach (the holder pid in run 37042643830, the
+# attached helper in run 37044797662: both already gone at their binding
+# times). With the runtime lifetime-stable (4C-86 PASS) the flow tree's
+# in-ns members exec into docker_helper_buildkitd_t:s0:c1 (the 4C-59
+# transition) and the SURVIVING tap0-holder set moved into the buildkitd
+# domain: the canonical run 38164337877's own records show the
+# /proc/self/exe re-exec chain (82578 -> 82621) forking the buildkitd
+# leader (82689) INSIDE operation A's user+net namespace pair, the
+# leader binding both sockets (570.641), the L1 lifecycle sampler
+# capturing the fork children alive at +0.7..+1.1s (their /proc ppid
+# already reparented to the in-ns monitor), and the leader's own
+# /proc entry gone by +1.2s — the v1 scan saw only the host-namespace
+# supervisors (the rootlesskit parent, the slirp4netns parent), which
+# never hold tap0 by topology, and returned NONE. The exact survivor
+# shape at binding time is exactly what this binder's live scan
+# history documents — no inference. The corrected anchor is the
+# RUNTIME itself: the binding scans
+# the FULL live member set — docker_helper_buildkitd_t:s0:c1 FIRST (the
+# runtime anchor class: the operation's persistent BuildKit identity,
+# the socket owner, the netns holder), the flow domains second (the
+# old attached-helper shape, kept so a topology shift stays
+# distinguishable from an absence) — every scan a full /proc pass with
+# the forkless per-member reads, the bound pid LIVE at selection. The
+# tap0 discriminator is unchanged and remains CORRECT: tap0 is present
+# in operation A's netns (the nsenter probe in 20-tap0-detail.txt, the
+# TUNSETIFF 0x400454ca -> 0x0 in the provisioning trace) and only
+# A's own netns carries it, so a tap0-holding member IS operation A's
+# netns holder regardless of its domain. The category filter is
+# unchanged (c1 only) and now also RECORDS every other-category member
+# it declines (the category-negative evidence). The scan retries on a
+# bounded loop (the provisioning window's own harvests delay the
+# section start; a young tree must be catchable) and records the full
+# scan history so the run documents the tree's observed lifetime shape.
+# The trace-derived pids (the attached helper AND the buildkitd exec)
+# are the independent cross-checks, compared in the verdict.
 CROSS_TRACE_PID="$(awk '
   $1 ~ /^slirp4netns-/ {
     n = split($1, seg, "-"); pid = seg[n]
@@ -3597,38 +3625,129 @@ CROSS_TRACE_PID="$(awk '
     else if (/sys_ioctl ->/) { pend[pid] = 0 }
   }
 ' "$EVIDENCE_DIR/30-trace-relevant.txt" 2>/dev/null | tail -1 || true)"
+CROSS_TRACE_BKD="$(awk '
+  $1 ~ /^buildkitd-/ && /sys_execve\(/ && /\/usr\/libexec\/docker-helper\/buildkit\/buildkitd"/ {
+    n = split($1, seg, "-"); print seg[n]
+  }
+' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | tail -1 || true)"
 CROSS_A_PID=""
+CROSS_A_CLASS=""
+CROSS_A_SCAN_N=0
+CROSS_A_SCAN_FIRST="$(date +%s.%N)"
+CROSS_A_DEADLINE=$(( $(date +%s) + 8 ))
 {
-  echo "=== 4C-37 A-side binding inventory (the attack target, bound from the live system) ==="
+  echo "=== 4C-37 A-side binding inventory (the 4C-37R binder; the attack target, bound from the live system) ==="
   echo "A operation:      $OP_ID (the canonical leg launched by the provisioning window just above)"
   echo "A trace helper:   ${CROSS_TRACE_PID:-(absent)} (the attached helper per the provisioning kernel trace)"
-  for P in /proc/[0-9]*; do
-    PID="${P#/proc/}"
-    LCTX=""
-    IFS= read -r LCTX 2>/dev/null < "$P/attr/current" || true
-    case "$LCTX" in
-      *":docker_helper_slirp4netns_t:s0:c1"|*":docker_helper_rootlesskit_t:s0:c1") ;;
-      *) continue ;;
-    esac
-    LCOMM=""
-    IFS= read -r LCOMM 2>/dev/null < "$P/comm" || true
-    echo "A live member: pid=$PID comm=$LCOMM ctx=$LCTX"
-    echo "  ns/user: $(readlink "$P/ns/user" 2>/dev/null || true)"
-    echo "  ns/net:  $(readlink "$P/ns/net" 2>/dev/null || true)"
-    LTAP=""
-    while IFS= read -r DEVLINE; do
-      case "$DEVLINE" in *"tap0:"*) LTAP="$DEVLINE"; break;; esac
-    done 2>/dev/null < "$P/net/dev" || true
-    echo "  tap0:    ${LTAP:-(absent)}"
-    if [ -z "$CROSS_A_PID" ] && [ -n "$LTAP" ]; then
-      CROSS_A_PID="$PID"
-      echo "  binding: SELECTED (the first live c1 member holding tap0)"
+  echo "A trace runtime:  ${CROSS_TRACE_BKD:-(absent)} (the buildkitd exec per the provisioning kernel trace)"
+  echo "THE PREVIOUS BINDER'S NONE REASON (provenance, run 38164337877): the v1 binder scanned only the flow domains (rootlesskit_t/slirp4netns_t:s0:c1); with the runtime lifetime-stable the flow tree's in-ns members exec into buildkitd_t:s0:c1 (the 4C-59 transition) and the surviving tap0-holder set moved into the buildkitd domain, so the v1 domain filter no longer covered the live tap0 holder — the host-ns supervisors it did see never hold tap0 by topology. The corrected anchor class is docker_helper_buildkitd_t:s0:c1."
+  while :; do
+    CROSS_A_SCAN_N=$((CROSS_A_SCAN_N + 1))
+    echo "--- scan#$CROSS_A_SCAN_N @$(date +%s.%N)"
+    RT_HOLDERS=0
+    FL_HOLDERS=0
+    RT_SEEN=0
+    FL_SEEN=0
+    OTHERCAT_SEEN=0
+    RT_FIRST=""
+    FL_FIRST=""
+    for P in /proc/[0-9]*; do
+      PID="${P#/proc/}"
+      LCTX=""
+      IFS= read -r LCTX 2>/dev/null < "$P/attr/current" || true
+      CLS=""
+      case "$LCTX" in
+        *":docker_helper_buildkitd_t:s0:c1") CLS=runtime ;;
+        *":docker_helper_rootlesskit_t:s0:c1"|*":docker_helper_slirp4netns_t:s0:c1") CLS=flow ;;
+        *":docker_helper_"*":s0:"*) CLS=othercat ;;
+        *) continue ;;
+      esac
+      LCOMM=""
+      IFS= read -r LCOMM 2>/dev/null < "$P/comm" || true
+      LNSU="$(readlink "$P/ns/user" 2>/dev/null || true)"
+      LNSN="$(readlink "$P/ns/net" 2>/dev/null || true)"
+      LNSM="$(readlink "$P/ns/mnt" 2>/dev/null || true)"
+      STATV=()
+      read -r -a STATV < "$P/stat" 2>/dev/null || STATV=()
+      LST="${STATV[21]:-?}"
+      LSTATE="${STATV[2]:-?}"
+      LCG=""
+      IFS= read -r LCG 2>/dev/null < "$P/cgroup" || true
+      LTAP=""
+      while IFS= read -r DEVLINE; do
+        case "$DEVLINE" in *"tap0:"*) LTAP="$DEVLINE"; break;; esac
+      done 2>/dev/null < "$P/net/dev" || true
+      if [ "$CLS" = othercat ]; then
+        OTHERCAT_SEEN=$((OTHERCAT_SEEN + 1))
+        echo "  other-category member (declined by the category filter): pid=$PID comm=$LCOMM ctx=$LCTX tap0=${LTAP:+present}"
+        continue
+      fi
+      case "$CLS" in
+        runtime) RT_SEEN=$((RT_SEEN + 1)) ;;
+        flow)    FL_SEEN=$((FL_SEEN + 1)) ;;
+      esac
+      echo "  A live member: pid=$PID class=$CLS comm=$LCOMM state=$LSTATE ctx=$LCTX start=$LST cgroup=$LCG"
+      echo "    ns/user: $LNSU  ns/net: $LNSN  ns/mnt: $LNSM"
+      echo "    tap0:    ${LTAP:-(absent)}"
+      if [ -n "$LTAP" ]; then
+        case "$CLS" in
+          runtime)
+            RT_HOLDERS=$((RT_HOLDERS + 1))
+            if [ -z "$RT_FIRST" ]; then RT_FIRST="$PID"; fi
+            ;;
+          flow)
+            FL_HOLDERS=$((FL_HOLDERS + 1))
+            if [ -z "$FL_FIRST" ]; then FL_FIRST="$PID"; fi
+            ;;
+        esac
+      fi
+    done
+    if [ -n "$RT_FIRST" ]; then
+      CROSS_A_PID="$RT_FIRST"
+      CROSS_A_CLASS=runtime
+      echo "  binding: SELECTED pid=$CROSS_A_PID (the runtime anchor: the live buildkitd_t:s0:c1 member holding operation A's attached tap0; the runtime class is the preference order, the flow class only the fallback)"
+    elif [ -n "$FL_FIRST" ]; then
+      CROSS_A_PID="$FL_FIRST"
+      CROSS_A_CLASS=flow
+      echo "  binding: SELECTED pid=$CROSS_A_PID (the flow fallback: the live flow-domain c1 member holding operation A's attached tap0 — the old attached-helper shape; no runtime-class member holds the netns)"
     fi
+    echo "  scan tallies: buildkitd-class=$RT_SEEN (tap0-holders=$RT_HOLDERS) flow-class=$FL_SEEN (tap0-holders=$FL_HOLDERS) other-category=$OTHERCAT_SEEN bound=$CROSS_A_PID"
+    if [ -n "$CROSS_A_PID" ]; then break; fi
+    if [ "$(date +%s)" -ge "$CROSS_A_DEADLINE" ]; then break; fi
+    sleep 0.4
   done
+  echo "scan history: first=$(date +%s.%N) scans=$CROSS_A_SCAN_N (the scan loop ran from $CROSS_A_SCAN_FIRST; the full history above documents the tree's observed lifetime shape at binding time)"
   if [ -n "$CROSS_A_PID" ]; then
-    echo "A bound pid:      $CROSS_A_PID (the first live c1 member holding tap0)"
+    echo "A bound pid:      $CROSS_A_PID (class=$CROSS_A_CLASS; the live c1 member holding operation A's attached tap0)"
+    echo "=== the bound anchor's detailed inventory (the 4C-37R identity fields) ==="
+    echo "  operation id:   $OP_ID"
+    echo "  session id:     (the workflow's op-launch path carries no separate session id — the operation record IS the identity; the manager journal's own START line below is the record)"
+    echo "  category:       c1 (the anchor's own context carries it)"
+    echo "  anchor ctx:     $(cat "/proc/$CROSS_A_PID/attr/current" 2>/dev/null)"
+    echo "  anchor comm:    $(cat "/proc/$CROSS_A_PID/comm" 2>/dev/null)"
+    ASTATV=()
+    read -r -a ASTATV < "/proc/$CROSS_A_PID/stat" 2>/dev/null || ASTATV=()
+    echo "  anchor state:   ${ASTATV[2]:-?}"
+    echo "  anchor start:   ${ASTATV[21]:-?} (the staleness guard: a reused pid cannot carry this starttime)"
+    echo "  ns/user:        $(readlink "/proc/$CROSS_A_PID/ns/user" 2>/dev/null)"
+    echo "  ns/net:         $(readlink "/proc/$CROSS_A_PID/ns/net" 2>/dev/null)"
+    echo "  ns/mnt:         $(readlink "/proc/$CROSS_A_PID/ns/mnt" 2>/dev/null)"
+    echo "  cgroup:         $(IFS= read -r L < "/proc/$CROSS_A_PID/cgroup" 2>/dev/null && echo "$L")"
+    echo "  tap0 (anchor):  $(grep -a 'tap0' "/proc/$CROSS_A_PID/net/dev" 2>/dev/null | head -1 || echo '(absent)')"
+    echo "  anchor fds:"
+    for F in "/proc/$CROSS_A_PID/fd/"*; do
+      echo "    $(basename "$F") -> $(readlink "$F" 2>/dev/null || true)"
+    done
+    echo "  op socket paths + labels:"
+    ls -Z "$RUNTIME_ROOT/ops/$OP_ID" 2>/dev/null || true
+    echo "  state roots + labels:"
+    ls -Zd "$STATE_ROOT/ops/$OP_ID" "$STATE_ROOT/ops/$OP_ID/root" "$STATE_ROOT/ops/$OP_ID/rootlesskit-state" 2>/dev/null || true
+    echo "  the manager journal's own record of the op:"
+    journalctl -u "$UNIT" --since "@$T0" --no-pager 2>/dev/null | grep -a "$OP_ID" | head -3 || true
+    echo "  tap0 expectation: REQUIRED as the discriminator (only operation A's netns carries the attached tap0; the anchor member's own /proc/net/dev proves the netns identity) — the anchor CLASS changed (buildkitd_t, was the flow attached-helper class), the tap0 requirement did not"
   else
-    echo "A bound pid:      NONE (no live c1 member holds the attached tap0)"
+    echo "A bound pid:      NONE"
+    echo "A NONE reason:    after $CROSS_A_SCAN_N live scans (last tallies: buildkitd-class=$RT_SEEN tap0-holders=$RT_HOLDERS, flow-class=$FL_SEEN tap0-holders=$FL_HOLDERS, other-category=$OTHERCAT_SEEN): no live c1 member of any class holds operation A's attached tap0 — the composition's netns is not held by any bindable member at binding time (HOLD with the exact missing signal: a live operation-A netns holder)"
   fi
 } > /tmp/p4b-work/cross-a-inventory.txt
 cat /tmp/p4b-work/cross-a-inventory.txt >&2
@@ -3710,7 +3829,7 @@ cp -p /usr/bin/slirp4netns /usr/bin/.cross-op-orig \
          marker "CROSS-OPERATION-ISOLATION=NOT_PROVEN"
          marker "BLOCKER=the cross-op window could not stage the vehicle (see 45-cross-op-isolation.txt)"
          CROSS_NOT_PROVEN=1; CROSS_WINDOW_DEAD=1; }
-  printf 'CROSS-OP-TARGETS %s\n' "$CROSS_A_PID" >> /usr/bin/.cross-op-vehicle
+  printf 'CROSS-OP-TARGETS %s %s\n' "$CROSS_A_PID" "$OP_ID" >> /usr/bin/.cross-op-vehicle
   # The expected sha is the STAGED inode's (with the appended target line
   # — the 4C-37 vehicle reads its targets from its own binary tail).
   CROSS_EXPECTED_SHA="$(sha256sum /usr/bin/.cross-op-vehicle 2>/dev/null | awk '{print $1}')"
@@ -3826,7 +3945,7 @@ fi
     echo "window-start: $CROSS_T0"
     echo "START: $CROSS_OP_ID (response: $CROSS_START_OUT)"
     echo "window-end: $(date +%s)"
-    echo "identity bindings: A(attached-helper-pid)=$CROSS_A_PID vehicle-op=$CROSS_OP_ID instance-pid=${CROSS_PID:-(not observed)}"
+    echo "identity bindings: A(anchor-pid class=$CROSS_A_CLASS)=$CROSS_A_PID vehicle-op=$CROSS_OP_ID instance-pid=${CROSS_PID:-(not observed)}"
     echo "placed vehicle sha256: $CROSS_PLACED_SHA"
     echo "placed vehicle label:  $CROSS_PLACED_CTX"
     echo "=== the vehicle's step/verdict lines that reached the journal (informational: rootlesskit wires the helper's stderr into its logrus debug writer, so at the default log level these lines are dropped — the kernel trace below is the authoritative channel) ==="
@@ -3834,12 +3953,17 @@ fi
     echo "(end of vehicle journal lines)"
     echo "=== A-side binding inventory (bound before the window) ==="
     cat /tmp/p4b-work/cross-a-inventory.txt
-    echo "=== A-side post-window re-check (the PID-reuse guard) ==="
+    echo "=== A-side post-window re-check (the PID-reuse guard; the required A-remains-alive outcome) ==="
+    CROSS_A_ALIVE=NO
     if [ -d "/proc/$CROSS_A_PID" ]; then
+      CROSS_A_ALIVE=YES
       echo "A alive at window end: YES"
       echo "A ns/user now:      $(readlink "/proc/$CROSS_A_PID/ns/user" 2>/dev/null)"
       echo "A ns/net  now:      $(readlink "/proc/$CROSS_A_PID/ns/net" 2>/dev/null)"
       echo "A attr/current now: $(cat "/proc/$CROSS_A_PID/attr/current" 2>/dev/null)"
+      echo "A tap0 now:         $(grep -a 'tap0' "/proc/$CROSS_A_PID/net/dev" 2>/dev/null | head -1 || echo '(absent)')"
+      echo "A op socket now:    $([ -S "$RUNTIME_ROOT/ops/$OP_ID/buildkitd.sock" ] && echo present || echo absent)"
+      echo "A op tree now:      $([ -d "$RUNTIME_ROOT/ops/$OP_ID" ] && echo present || echo absent) (runtime) / $([ -d "$STATE_ROOT/ops/$OP_ID" ] && echo present || echo absent) (state)"
     else
       echo "A alive at window end: NO"
     fi
@@ -3863,7 +3987,7 @@ fi
     echo "(end of raw journal tail)"
     echo "=== the vehicle's syscall/audit trace lines (the causal chain; NOT mixed with the cap_capable flood) ==="
     grep -a 'slirp4netns' /tmp/p4b-work/cross-trace.txt 2>/dev/null \
-      | grep -aE '/proc/[0-9]+/ns/|setns|/dev/net/tun|sys_ioctl|selinux_audited' | head -60 || true
+      | grep -aE '/proc/[0-9]+/ns/|setns|/dev/net/tun|sys_ioctl|sys_openat|docker-helper-builder/ops|selinux_audited' | head -80 || true
     echo "(end of cross-op syscall/audit lines)"
     echo "--- the vehicle's FAILED cap_capable lines (recorded; the cap boundary's own evidence):"
     grep -a 'slirp4netns' /tmp/p4b-work/cross-trace.txt 2>/dev/null \
@@ -3941,9 +4065,17 @@ fi
     CROSS_CONTROL_TSET="$(awk '/slirp4netns-/ && /sys_ioctl\(/ && /cmd: 0x400454ca/ { if (entered == 0) { entered = 1; enter_line = $0; vpid = substr($1, index($1, "-") + 1); next } } entered && substr($1, length($1) - length(vpid) + 1) == vpid && /sys_ioctl ->/ { print enter_line; print $0; done = 1; exit } END { if (entered == 1 && done == 0) { print enter_line; print "(exit line absent — the ring harvested inside the ioctl)" } }' /tmp/p4b-work/cross-trace.txt 2>/dev/null || true)"
     CROSS_CONTROL_RET="$(printf '%s\n' "$CROSS_CONTROL_TSET" | grep -aoE 'sys_ioctl -> 0x[0-9a-f]+' | tail -1 | awk '{print $NF}')"
     printf '%s\n' "${CROSS_CONTROL_TSET:-(absent in the kernel trace — the vehicle legs never ran)}"
-    echo "--- attack leg: the vehicle's traced steps against A's ns-holder pid $CROSS_A_PID (the causal chain; the leg stops at its first failing syscall):"
-    CROSS_ATTACK_SEQ="$(awk -v a="$CROSS_A_PID" '/slirp4netns-/ { if (index($0, "/proc/" a "/ns/") > 0) attack = 1; if (attack) print }' /tmp/p4b-work/cross-trace.txt 2>/dev/null | head -14 || true)"
-    if [ -n "$CROSS_ATTACK_SEQ" ]; then printf '%s\n' "$CROSS_ATTACK_SEQ"; else echo "(ABSENT — the attack leg never issued an A-targeted step in the kernel trace)"; fi
+    echo "--- attack legs: the vehicle's traced steps against operation A's identity surfaces (anchor pid $CROSS_A_PID, op $OP_ID; the causal chain; each leg stops at its first failing syscall):"
+    CROSS_ATTACK_SEQ="$(awk -v a="$CROSS_A_PID" -v op="$OP_ID" '/slirp4netns-/ { if (index($0, "/proc/" a "/ns/") > 0 || index($0, "ops/" op "/") > 0) attack = 1; if (attack) print }' /tmp/p4b-work/cross-trace.txt 2>/dev/null | head -24 || true)"
+    if [ -n "$CROSS_ATTACK_SEQ" ]; then printf '%s\n' "$CROSS_ATTACK_SEQ"; else echo "(ABSENT — the attack legs never issued an A-targeted step in the kernel trace)"; fi
+    echo "--- attack-sock leg: the openat on operation A's runtime socket (its exit is the whole leg's verdict; a negative exit is the policy boundary):"
+    CROSS_ATTACK_SOCK_PAIR="$(awk -v op="$OP_ID" '/slirp4netns-/ { if (index($0, "ops/" op "/buildkitd.sock") > 0 && /sys_openat\(/) { pend = 1; print; next } if (pend && /sys_openat ->/) { print; exit } }' /tmp/p4b-work/cross-trace.txt 2>/dev/null || true)"
+    printf '%s\n' "${CROSS_ATTACK_SOCK_PAIR:-(ABSENT — the attack-sock leg never issued its openat in the kernel trace)}"
+    CROSS_ATTACK_SOCK_EXIT="$(printf '%s\n' "$CROSS_ATTACK_SOCK_PAIR" | grep -aoE 'sys_openat -> 0x[0-9a-f]+' | tail -1 | awk '{print $NF}')"
+    echo "--- attack-state leg: the openat on operation A's state tree (its exit is the whole leg's verdict; a negative exit is the policy boundary):"
+    CROSS_ATTACK_STATE_PAIR="$(awk -v op="$OP_ID" '/slirp4netns-/ { if (index($0, "/var/lib/docker-helper-builder/ops/" op "/") > 0 && /sys_openat\(/) { pend = 1; print; next } if (pend && /sys_openat ->/) { print; exit } }' /tmp/p4b-work/cross-trace.txt 2>/dev/null || true)"
+    printf '%s\n' "${CROSS_ATTACK_STATE_PAIR:-(ABSENT — the attack-state leg never issued its openat in the kernel trace)}"
+    CROSS_ATTACK_STATE_EXIT="$(printf '%s\n' "$CROSS_ATTACK_STATE_PAIR" | grep -aoE 'sys_openat -> 0x[0-9a-f]+' | tail -1 | awk '{print $NF}')"
     echo "--- attack leg's terminal step (the first real boundary's syscall, return and errno):"
     CROSS_ATTACK_LAST_ENTER="$(printf '%s\n' "$CROSS_ATTACK_SEQ" | grep -aE 'sys_(openat|setns|ioctl)\(' | tail -1 || true)"
     CROSS_ATTACK_LAST_EXIT="$(printf '%s\n' "$CROSS_ATTACK_SEQ" | grep -aE 'sys_(openat|setns|ioctl) ->' | tail -1 || true)"
@@ -3959,6 +4091,8 @@ fi
       -13) CROSS_ATTACK_ERRNO_NAME="EACCES" ;;
       -1) CROSS_ATTACK_ERRNO_NAME="EPERM" ;;
       -2) CROSS_ATTACK_ERRNO_NAME="ENOENT" ;;
+      -6) CROSS_ATTACK_ERRNO_NAME="ENXIO" ;;
+      -16) CROSS_ATTACK_ERRNO_NAME="EBUSY" ;;
     esac
     echo "terminal enter: ${CROSS_ATTACK_LAST_ENTER:-(none)}"
     echo "terminal exit:  ${CROSS_ATTACK_LAST_EXIT:-(none)}"
@@ -3973,8 +4107,24 @@ fi
     echo "--- a successful attack TUNSETIFF (must be ABSENT — its presence is CROSS-OPERATION-ISOLATION=BROKEN):"
     CROSS_ATTACK_TUNSETIFF_OK="$(awk -v a="$CROSS_A_PID" '/slirp4netns-/ { if (index($0, "/proc/" a "/ns/") > 0) attack = 1; if (!attack) next; if (/sys_ioctl\(/ && /cmd: 0x400454ca/) { pend = 1; vpid = substr($1, index($1, "-") + 1); next } if (pend && substr($1, length($1) - length(vpid) + 1) == vpid && /sys_ioctl -> 0x0/) { print; exit } }' /tmp/p4b-work/cross-trace.txt 2>/dev/null || true)"
     printf '%s\n' "${CROSS_ATTACK_TUNSETIFF_OK:-(none — no successful attack TUNSETIFF in the kernel trace)}"
-    echo "--- identity checks (an ENOENT stop on the attack's first A-targeted step is IDENTITY-FAIL, not a boundary):"
-    echo "identity cross-check: trace attached-helper pid=${CROSS_TRACE_PID:-(absent)} / bound pid=${CROSS_A_PID:-(absent)}"
+    echo "--- identity checks (an ENOENT stop on the attack's first A-targeted step is IDENTITY-FAIL, not a boundary; the bound anchor is cross-checked against the trace-derived pids):"
+    echo "identity cross-check: trace attached-helper pid=${CROSS_TRACE_PID:-(absent)} / trace buildkitd pid=${CROSS_TRACE_BKD:-(absent)} / bound pid=${CROSS_A_PID:-(absent)} (class=$CROSS_A_CLASS)"
+    case "$CROSS_A_CLASS" in
+      runtime)
+        if [ "$CROSS_A_PID" = "$CROSS_TRACE_BKD" ]; then
+          echo "IDENTITY-OK: the bound anchor IS the trace's own buildkitd exec pid"
+        else
+          echo "IDENTITY-NOTE: the bound anchor differs from the trace buildkitd pid (a fork member of the same runtime tree binds when the leader already exited; the binding semantics are the ns-set + the attached tap0, both live-proven by the binder)"
+        fi
+        ;;
+      flow)
+        if [ "$CROSS_A_PID" = "$CROSS_TRACE_PID" ]; then
+          echo "IDENTITY-OK: the bound anchor IS the trace's own attach-helper pid (the old attached-helper shape)"
+        else
+          echo "IDENTITY-NOTE: the bound anchor differs from the trace attach-helper pid (the binding semantics are the ns-set + the attached tap0, both live-proven by the binder)"
+        fi
+        ;;
+    esac
     CROSS_ATTACK_FIRST_EXIT="$(printf '%s\n' "$CROSS_ATTACK_SEQ" | grep -aE 'sys_(openat|setns|ioctl) ->' | head -1 || true)"
     if printf '%s\n' "$CROSS_ATTACK_FIRST_EXIT" | grep -aqE 'sys_(openat|setns|ioctl) -> 0xfffffffffffffffe'; then
       echo "IDENTITY-FAIL: the attack's first A-targeted step returned ENOENT — the target binding was stale"
@@ -3997,6 +4147,59 @@ fi
       CROSS_OK=0
       CROSS_BROKEN=1
     fi
+    # NOTE (the 4C-37R semantics): a successful attack setns is NOT by
+    # itself a broken isolation — joining a same-owner child user
+    # namespace is the production attach path itself (the kernel's
+    # userns-owner rule grants the builder uid full capabilities over
+    # its own child userns, and the control leg exercises the same
+    # join against its own operation). The cross-operation boundary at
+    # this surface is the TAP device exclusivity (the TUNSETIFF stop)
+    # and the per-op plane unreachability (the sock/state legs); a
+    # successful attack TUNSETIFF is the BROKEN signal, and it is
+    # gated above.
+    # The attack-sock / attack-state legs: their openat IS the whole
+    # access attempt. A success-shaped exit (a small non-negative hex
+    # fd, NOT the sign-extended errno form 0xffff...) or an ENXIO stop
+    # (-6: the kernel's socket-open semantic refusing AFTER the
+    # permission hooks passed) means the policy stopped nothing —
+    # BROKEN. A negative errno exit is the boundary. An ABSENT pair
+    # means the leg never ran — the proof cannot conclude.
+    for LEG in sock state; do
+      eval "LEG_EXIT=\$CROSS_ATTACK_${LEG}_EXIT"
+      eval "LEG_PAIR=\$CROSS_ATTACK_${LEG}_PAIR"
+      if [ -z "$LEG_PAIR" ]; then
+        echo "GATE: the attack-$LEG leg never issued its openat in the kernel trace — the proof cannot conclude"
+        CROSS_OK=0
+      elif [ -z "$LEG_EXIT" ]; then
+        echo "GATE: the attack-$LEG leg's openat exit is absent from the kernel trace (the ring harvested inside the syscall) — the proof cannot conclude"
+        CROSS_OK=0
+      else
+        LEG_NUM=$(( LEG_EXIT ))
+        LEG_NAME=""
+        if [ "$LEG_NUM" -ge 0 ]; then
+          echo "GATE: the attack-$LEG leg's openat SUCCEEDED (exit $LEG_EXIT — operation A's surface was reachable) — CROSS-OPERATION-ISOLATION=BROKEN"
+          CROSS_OK=0
+          CROSS_BROKEN=1
+        elif [ "$LEG_NUM" -eq -6 ]; then
+          LEG_NAME="ENXIO"
+          echo "GATE: the attack-$LEG leg's openat was NOT policy-stopped ($LEG_NAME — the kernel's socket-open semantic refused after the permission hooks passed; B reached A's surface) — CROSS-OPERATION-ISOLATION=BROKEN"
+          CROSS_OK=0
+          CROSS_BROKEN=1
+        elif [ "$LEG_NUM" -eq -2 ]; then
+          LEG_NAME="ENOENT"
+          echo "GATE: the attack-$LEG leg stopped on $LEG_NAME — operation A's surface is gone (a dead or stale target identity, IDENTITY-FAIL), not a security boundary"
+          CROSS_OK=0
+        else
+          case "$LEG_NUM" in
+            -13) LEG_NAME="EACCES" ;;
+            -1) LEG_NAME="EPERM" ;;
+            -16) LEG_NAME="EBUSY" ;;
+          esac
+          echo "BOUNDARY: the attack-$LEG leg stopped at its openat (exit $LEG_EXIT${LEG_NAME:+ $LEG_NAME}) — the policy boundary held"
+        fi
+        eval "CROSS_ATTACK_${LEG}_NAME=\"\$LEG_NAME\""
+      fi
+    done
     if printf '%s\n' "$CROSS_ATTACK_FIRST_EXIT" | grep -aqE 'sys_(openat|setns|ioctl) -> 0xfffffffffffffffe'; then
       echo "GATE: the attack leg stopped on ENOENT — a stale target binding (IDENTITY-FAIL), not a security boundary"
       CROSS_OK=0
@@ -4010,6 +4213,9 @@ fi
   if [ "$CROSS_OK" = 1 ]; then
     marker "CROSS-OP-CONTROL=SUCCESS"
     marker "CROSS-OP-ATTACK-DENIED-AT=${CROSS_ATTACK_BOUNDARY_STEP:-unknown}:${CROSS_ATTACK_ERRNO:-unknown}${CROSS_ATTACK_ERRNO_NAME:+ ($CROSS_ATTACK_ERRNO_NAME)} target=${CROSS_ATTACK_BOUNDARY_TARGET:-unknown}"
+    marker "CROSS-OP-ATTACK-SOCK-DENIED-AT=${CROSS_ATTACK_SOCK_EXIT:-unknown}${CROSS_ATTACK_SOCK_NAME:+ ($CROSS_ATTACK_SOCK_NAME)} (operation A's runtime socket unreachable from B)"
+    marker "CROSS-OP-ATTACK-STATE-DENIED-AT=${CROSS_ATTACK_STATE_EXIT:-unknown}${CROSS_ATTACK_STATE_NAME:+ ($CROSS_ATTACK_STATE_NAME)} (operation A's state tree unreachable from B)"
+    marker "CROSS-OP-A-REMAINED-ALIVE=$CROSS_A_ALIVE"
     marker "CROSS-OPERATION-ISOLATION=HOLDS"
     marker "CROSS-OPERATION-GATE=CLOSED"
   elif [ "$CROSS_BROKEN" = 1 ]; then

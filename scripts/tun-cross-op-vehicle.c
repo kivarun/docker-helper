@@ -33,23 +33,26 @@
 //     ns-holder pid passed as the second-to-last argument). The control
 //     attaches to its own freshly created tap0 (the full production
 //     chain must return 0 — the same-operation baseline INSIDE this very
-//     run). The attack leg repeats the SAME production path against
-//     operation A's attached helper — the LIVE member of operation A's
-//     netns (the flow's own holder dies seconds after its attach; the
-//     helper holds the netns and the attached tap0 until the flow's
-//     teardown); step by step; the FIRST failing syscall (SELinux
-//     EACCES/EPERM or any other real boundary errno) STOPS the leg and
-//     is reported as BOUNDARY. An ENOENT on the proc path is NOT a
-//     boundary — it means the target identity was stale (reported as
-//     IDENTITY-FAIL). The A→B mirror direction is NOT
-//     runnable in this window: a third concurrent operation exceeds the
-//     product's ceiling of 2 — the single live cross direction plus the
-//     symmetric record set is the phase's scope.
+//     run). The attack legs repeat the SAME production access against
+//     operation A's identity — the LIVE member of operation A's netns
+//     (with the lifetime-stable BuildKit runtime the flow's persistent
+//     member set is the buildkitd tree itself: the anchor class is
+//     docker_helper_buildkitd_t:s0:c1, the same category the flow
+//     carried); three surfaces, three legs: A's runtime socket, A's
+//     state tree, and A's namespace set + attached TAP; step by step;
+//     the FIRST failing syscall (SELinux EACCES/EPERM or any other real
+//     boundary errno) STOPS the leg and is reported as BOUNDARY. An
+//     ENOENT on the target path is NOT a boundary — it means the target
+//     identity was stale (reported as IDENTITY-FAIL). The A→B mirror
+//     direction is NOT runnable in this window: a third concurrent
+//     operation exceeds the product's ceiling of 2 — the single live
+//     cross direction plus the symmetric record set is the phase's
+//     scope.
 //
-// Exit codes: 0 = control succeeded AND the attack leg stopped at a real
-// boundary; 5 = the control leg failed (the baseline is broken);
-// 6 = CROSS-OPERATION ISOLATION BROKEN (the attack leg completed the whole
-// attach path); 7 = the target delivery is broken; 9 = other.
+// Exit codes: 0 = control succeeded AND every attack leg stopped at a
+// real boundary; 5 = the control leg failed (the baseline is broken);
+// 6 = CROSS-OPERATION ISOLATION BROKEN (an attack leg completed its
+// access path); 7 = the target delivery is broken; 9 = other.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -81,9 +84,24 @@ static void step(const char *leg, const char *what, long rc, int err) {
 	if (n > 0) (void)write(2, buf, (size_t)n);
 }
 
-/* One production attach leg against the target pid. Returns 0 = every
- * step succeeded (the whole attach path completed), 1 = stopped at a real
- * boundary, 2 = the target identity was stale (ENOENT on the proc path).
+/* The 4C-37R attack surfaces. The original phase proved the
+ * namespace/TUN surface only; the resumed phase (against the
+ * lifetime-stable BuildKit runtime) must cover the operation's FULL
+ * identity: the runtime tree's socket, the state tree, and the
+ * namespace/attached-TAP set. Each leg is an independent open of one
+ * of operation A's identity surfaces; the SELinux boundary fires at
+ * the path walk or the object's own hook — the helper domain has NO
+ * authority toward the per-op runtime/state planes (the PLANE G/H/I
+ * and PLANE E/F rules are buildkitd_t pairs, never slirp4netns_t
+ * pairs), so the walk denies before any object is reached. A success
+ * would mean the policy stopped nothing (BROKEN). ENOENT means the
+ * surface no longer exists (the target identity was stale — A's tree
+ * is gone, never a boundary).
+ *
+ * One production attach leg against the target pid (the namespace
+ * surface). Returns 0 = every step succeeded (the whole attach path
+ * completed), 1 = stopped at a real boundary, 2 = the target identity
+ * was stale (ENOENT on the proc path).
  */
 static int attach_leg(const char *leg, int target_pid) {
 	char path[64];
@@ -139,6 +157,32 @@ static int attach_leg(const char *leg, int target_pid) {
 	return 0;
 }
 
+/* One direct-access leg against one of operation A's filesystem
+ * identity surfaces (the runtime socket or the state root). The same
+ * leg shape serves both: one open(2) is the whole attempt — the
+ * helper domain has no path authority toward the per-op planes, so
+ * the walk itself must deny. Returns the leg shape like attach_leg,
+ * plus 3 = the open was NOT policy-stopped: the walk and the object's
+ * own hook passed and the kernel refused for its own socket-open
+ * semantic (ENXIO — open(2) on a socket inode never returns a fd).
+ * ENXIO is a compromise signal, never a boundary: the policy allowed
+ * B to reach A's socket object.
+ */
+static int open_leg(const char *leg, const char *path, int flags) {
+	int rc, err;
+
+	rc = open(path, flags);
+	err = errno;
+	step(leg, "open-surface", rc, err);
+	if (rc < 0) {
+		if (err == ENOENT) return 2;
+		if (err == ENXIO) return 3;
+		return 1;
+	}
+	(void)close(rc);
+	return 0;
+}
+
 int main(int argc, char **argv) {
 	char buf[256];
 	int err;
@@ -187,7 +231,7 @@ int main(int argc, char **argv) {
 		(void)write(2, "VEHICLE-VERDICT TARGETS=UNREADABLE\n", 34);
 		return 7;
 	}
-	(void)lseek(fd, size - 96, SEEK_SET);
+	(void)lseek(fd, size - 128, SEEK_SET);
 	int total = (int)read(fd, buf, sizeof buf - 1);
 	close(fd);
 	if (total <= 0) {
@@ -204,8 +248,10 @@ int main(int argc, char **argv) {
 		return 7;
 	}
 	int pid_a = 0;
-	(void)sscanf(mark, "CROSS-OP-TARGETS %d", &pid_a);
-	if (pid_a <= 0) {
+	char op_a[64];
+	memset(op_a, 0, sizeof op_a);
+	(void)sscanf(mark, "CROSS-OP-TARGETS %d %63s", &pid_a, op_a);
+	if (pid_a <= 0 || op_a[0] == '\0') {
 		(void)write(2, "VEHICLE-VERDICT TARGETS=BINDING-FAIL\n", 36);
 		return 7;
 	}
@@ -213,11 +259,11 @@ int main(int argc, char **argv) {
 	 * attack must never target the vehicle's own operation or its own
 	 * parent (a self-targeted binding is a harness defect, not a
 	 * cross-operation result; a stale target is caught by the ENOENT
-	 * stop inside the attack leg itself).
+	 * stop inside the attack legs themselves).
 	 */
 	int idn = snprintf(buf, sizeof buf,
-			   "VEHICLE-ID self-pid=%d parent-pid=%d target-own=%d target-attack=%d\n",
-			   (int)getpid(), (int)getppid(), own_pid, pid_a);
+			   "VEHICLE-ID self-pid=%d parent-pid=%d target-own=%d target-attack=%d target-op=%s\n",
+			   (int)getpid(), (int)getppid(), own_pid, pid_a, op_a);
 	if (idn > 0) (void)write(2, buf, (size_t)idn);
 	if (pid_a == own_pid || pid_a == (int)getppid()) {
 		(void)write(2, "VEHICLE-VERDICT TARGETS=SELF-TARGET\n", 35);
@@ -232,14 +278,36 @@ int main(int argc, char **argv) {
 	(void)write(2, "VEHICLE-VERDICT CONTROL=SUCCESS\n", 31);
 
 	/* ATTACK B->A: the vehicle is operation B (the second slot, c2);
-	 * operation A is the first slot (c1), alive with its attached TAP.
+	 * operation A is the first slot (c1), alive with its BuildKit
+	 * runtime. Three independent identity surfaces, each its own leg
+	 * and its own boundary:
+	 *   attack-sock  — A's BuildKit runtime socket (the per-op
+	 *                  runtime plane's sock_file identity);
+	 *   attack-state — A's per-op state tree (the per-op state
+	 *                  plane);
+	 *   attack-a     — A's namespace set + attached TAP (the
+	 *                  production attach path against A's anchor).
+	 * The socket/state legs run FIRST: their openat is the whole
+	 * attempt, and their boundary (EACCES at the path walk — the
+	 * helper domain owns no authority toward the per-op planes) must
+	 * not be masked by an earlier stop inside the ns leg.
 	 */
+	char sockpath[160];
+	char statepath[160];
+	(void)snprintf(sockpath, sizeof sockpath,
+		       "/run/docker-helper-builder/ops/%s/buildkitd.sock", op_a);
+	(void)snprintf(statepath, sizeof statepath,
+		       "/var/lib/docker-helper-builder/ops/%s", op_a);
+	int shape_sock = open_leg("attack-sock", sockpath, O_RDONLY);
+	int shape_state = open_leg("attack-state", statepath, O_RDONLY | O_DIRECTORY);
 	int shape_a = attach_leg("attack-a", pid_a);
-	if (shape_a == 0) {
+	if (shape_sock == 0 || shape_sock == 3 ||
+	    shape_state == 0 || shape_state == 3 ||
+	    shape_a == 0) {
 		(void)write(2, "VEHICLE-VERDICT CROSS-OPERATION-ISOLATION=BROKEN\n", 48);
 		return 6;
 	}
-	if (shape_a == 2) {
+	if (shape_sock == 2 || shape_state == 2 || shape_a == 2) {
 		(void)write(2, "VEHICLE-VERDICT ATTACK-TARGET=IDENTITY-FAIL\n", 43);
 		return 9;
 	}
