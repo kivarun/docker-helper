@@ -2748,7 +2748,70 @@ allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;
 # pair's own identity hook; the cross-operation gate stays OPEN/Critical
 # until the cross-operation isolation proof (4C-37) holds for the now
 # reachable domain.
-allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute };
+#
+# --- 4C-85: the target-side exec-type file getattr — the 4C-61/62 rule
+# --- widened IN PLACE (ONE rule, never split) ---
+#
+# PROVENANCE (the 4C-84 labeling fix's own post-fix runs 38149512909
+# and 38148461897): the bundled buildkit-runc now carries the dedicated
+# docker_helper_buildkitd_exec_t identity (the 4C-84 .fc rule), and the
+# buildkitd_t's own OCI worker initializer LookPath-walks the exact
+# child PATH order — runc across the whole PATH (all ENOENT), then
+# buildkit-runc — selecting the bundled
+# /usr/libexec/docker-helper/buildkit/buildkit-runc. The LookPath's own
+# newfstatat on the FOUND candidate now denies on its GETATTR hook:
+#
+#   requested=0x10 denied=0x10 result=-13 scontext=buildkitd_t:s0:c1
+#     tcontext=buildkitd_exec_t:s0 tclass=file, trace-ts=578.438806
+#     (the 38148461897 run) and the twin 587.238555 (38149512909) —
+#     inside the TRACED sys_newfstatat window (the enter 578.438793,
+#     the exit -13 at 578.438819), genuine PRE-CLEANUP ownership, the
+#     "skipping oci worker" warning immediately after and the
+#     "no worker found, rebuild the buildkit daemon?" fatal — the
+#     LookPath stat's failure IS the swallowed initializer error.
+#
+# THE MASK DECODE PIN: 0x10 = getattr (bit 4 of the COMMON_FILE_PERMS
+# list the file class shares — the same live-proven convention as
+# dir:getattr=0x10 (the 4C-63/65/73 grants) and sock_file getattr —
+# THE CLASS MATTERS — the same bit number on the dir class is
+# dir:getattr (the state-root grant, a different plane) and on the
+# lnk_file class lnk_file:getattr — a same-bit coincidence never
+# merges two planes; decode(file, 0x10) = exactly { getattr }, the
+# class-aware decode regression pins the tuple. requested==denied so
+# no subtraction of standing bits is needed — candidate = decode(
+# tclass, denied) = exactly { getattr }, the standing invariant
+# candidate=decode(tclass,denied) preserved.
+# THE DELTA IS EXACTLY +getattr:
+#   - file:getattr is NOT an executable bundle: the exec-type rule
+#     carries { entrypoint read execute } + exactly the getattr hook
+#     (the LookPath stat) and NOT create/unlink/write/append/lock/map —
+#     and THE STANDING QUARANTINED buildkitd_exec_t:file open hook
+#     STAYS UNGRANTED (the 0x40000 record in the same span stays the
+#     quarantined surface — the open hook is NOT the getattr's
+#     neighbor and never rides this widening);
+#   - NO generic bin_t:file execute grant (the standing generic-exec
+#     quarantine holds — the 4C-84 bin_t record vanished by the RELABEL,
+#     never by a grant); NO tmpfs_t:lnk_file read grant (the
+#     /etc/localtime incidental sibling stays noise); NO transition
+#     edge (buildkitd_t execing its own entry type has no
+#     type_transition — the runc probe runs inside the daemon domain);
+#   - the dir rules stay byte-for-semantics: the state-tree dir rule
+#     exactly { getattr search write add_name read open } (PLANE E),
+#     the runtime-tree dir rule exactly { getattr search write
+#     add_name remove_name } (PLANE H), the state-tree file rule
+#     exactly { create read open lock }, the runtime-tree sock_file
+#     rule exactly { create unlink setattr } (PLANE I); NO dir
+#     widening, NO file grant, NO state-tree/runtime-tree widening;
+#   - the frozen planes stay frozen: the source-exec planes (the
+#     rootlesskit_t { execute read open } rule, the bare transition,
+#     the target-side rule is THIS rule), the shared state-root rule
+#     (exactly { getattr search }), the shared runtime-root rule
+#     (exactly { search }), and the standing other-subject rules (a
+#     different subject and a different owner — never merged).
+# MCS: the TE rule encodes NO categories — buildkitd_exec_t carries no
+# category (the file's own label is s0-categoriless); the rule is the
+# bare pair.
+allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr };
 
 # --- 4C-63: the shared state-root dir getattr — the terminal-causal owner ---
 #

@@ -4442,7 +4442,7 @@ func TestSELinuxPolicyRootlesskitIsolation(t *testing.T) {
 func buildkitdIdentityViolations(policy string) []string {
 	const canonicalExec = "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute read open };"
 	const canonicalTransition = "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;"
-	const canonicalEntry = "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute };"
+	const canonicalEntry = "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr };"
 	const canonicalStateRoot = "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search };"
 	const canonicalStateTree = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open };"
 	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock };"
@@ -4663,7 +4663,7 @@ func buildkitdIdentityViolations(policy string) []string {
 		}
 	}
 	if buildkitdNamedAllow != 9 {
-		violations = append(violations, fmt.Sprintf("the module must carry exactly the nine buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open }, the categorized state-tree file { create read open lock }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name }, the categorized runtime-tree sock_file { create unlink setattr }), found %d", buildkitdNamedAllow))
+		violations = append(violations, fmt.Sprintf("the module must carry exactly the nine buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open }, the categorized state-tree file { create read open lock }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name }, the categorized runtime-tree sock_file { create unlink setattr }), found %d", buildkitdNamedAllow))
 	}
 	// The shared runtime-root dir surface has exactly the standing
 	// owners above; a NEW or reshaped rule on the pair (any source,
@@ -4758,7 +4758,7 @@ func buildkitdIdentityViolations(policy string) []string {
 		}
 		if strings.HasPrefix(trimmed, "allow ") {
 			if strings.Contains(trimmed, "docker_helper_buildkitd_exec_t") && trimmed != canonicalExec && trimmed != canonicalEntry {
-				violations = append(violations, "the only allow rules naming the buildkitd exec type are the exact source-exec grant { execute read open } and the exact target-side { entrypoint read execute } grant: "+trimmed)
+				violations = append(violations, "the only allow rules naming the buildkitd exec type are the exact source-exec grant { execute read open } and the exact target-side { entrypoint read execute getattr } grant: "+trimmed)
 			}
 			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot && trimmed != canonicalRuntimeTree && trimmed != canonicalRuntimeSockFile {
 				violations = append(violations, "the only allow rules toward the buildkitd domain are the exact process transition grant, the exact target-entrypoint grant, and the exact state/runtime surfaces: "+trimmed)
@@ -4981,7 +4981,7 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 
 	// The 4C-61 target-entrypoint grant: exactly the canonical bare
 	// rule, once (non-comment lines only).
-	const canonicalEntry = "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute };"
+	const canonicalEntry = "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr };"
 	var withoutEntry []string
 	entryCount := 0
 	for _, line := range strings.Split(policy, "\n") {
@@ -5232,14 +5232,17 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		{"open instead of read", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint open execute };"},
 		{"getattr instead of execute", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read getattr };"},
 		{"map instead of execute", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read map };"},
-		{"fourth permission open", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute open };"},
-		{"fourth permission getattr", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr };"},
-		{"fourth permission map", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute map };"},
-		{"fourth permission execute_no_trans", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute execute_no_trans };"},
-		{"fourth permission execmod", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute execmod };"},
+		{"the old 4C-61/62 triple form (missing getattr)", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute };"},
+		{"fifth permission open (the standing quarantined surface)", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr open };"},
+		{"fifth permission write", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr write };"},
+		{"fifth permission append", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr append };"},
+		{"fifth permission map", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr map };"},
+		{"fifth permission lock", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr lock };"},
+		{"fifth permission execute_no_trans", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr execute_no_trans };"},
+		{"fifth permission execmod", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr execmod };"},
 		{"the slirp-style entry bundle copied whole", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read open execute getattr map };"},
-		{"target grant from the wrong source (the flow)", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { entrypoint read execute };"},
-		{"target grant from the manager", "allow docker_helper_builder_t docker_helper_buildkitd_exec_t:file { entrypoint read execute };"},
+		{"target grant from the wrong source (the flow)", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr };"},
+		{"target grant from the manager", "allow docker_helper_builder_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr };"},
 		{"target grant toward the wrong target", "allow docker_helper_buildkitd_t bin_t:file { entrypoint read execute };"},
 		{"target grant toward the slirp4netns exec type", "allow docker_helper_buildkitd_t docker_helper_slirp4netns_exec_t:file { entrypoint read execute };"},
 		{"target grant on the wrong class", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:process { entrypoint read execute };"},
@@ -6125,6 +6128,12 @@ func TestSELinuxPolicyKernelClassmapMaskPins(t *testing.T) {
 			perms = dirDecode(mask)
 		case "sock_file":
 			perms = sockFileDecode(mask)
+		case "lnk_file":
+			// The lnk_file class shares the COMMON_FILE_PERMS list the
+			// file class carries (the kernel classmap; the 4C-85
+			// anti-merge pin decodes the /etc/localtime incidental
+			// surface's own tuple).
+			perms = decode(mask)
 		default:
 			perms = nil
 		}
@@ -6143,6 +6152,29 @@ func TestSELinuxPolicyKernelClassmapMaskPins(t *testing.T) {
 	}
 	if got := classDecode("file", 0x40000); got != "(file, open)" {
 		t.Errorf("kernel classmap decode: file mask 0x40000 must decode to the tuple (file, { open }), got %s", got)
+	}
+	// The 4C-85 grant-candidate pin + the anti-merge set: the widened
+	// target-side rule's own delta is the tuple (file, { getattr }) —
+	// the LookPath newfstatat's denied 0x10 on the found candidate (the
+	// 4C-84 post-fix runs' terminal records: trace-ts=578.438806 and
+	// the twin 587.238555, inside the TRACED newfstatat window, the
+	// "skipping oci worker" warning immediately after). THE ANTI-MERGE:
+	// the same bit number means DIFFERENT decisions on different
+	// classes and DIFFERENT bits stay different decisions on the SAME
+	// class — (file, 0x4000)={ execute } (the 4C-58-era pin) is the
+	// EXEC hook, (file, 0x40000)={ open } is the STANDING QUARANTINED
+	// buildkitd_exec_t:file open hook (never granted), (lnk_file,
+	// 0x2)={ read } is the /etc/localtime incidental lnk_file surface
+	// (a DIFFERENT class, never the exec resolution) — a same-bit or
+	// same-class coincidence never merges two planes.
+	if got := classDecode("file", 0x4000); got != "(file, execute)" {
+		t.Errorf("kernel classmap decode: the 4C-85 anti-merge pin (file, 0x4000) must decode to { execute } (the EXEC hook, never the getattr), got %s", got)
+	}
+	if got := classDecode("lnk_file", 0x2); got != "(lnk_file, read)" {
+		t.Errorf("kernel classmap decode: the 4C-85 anti-merge pin (lnk_file, 0x2) must decode to { read } (the DIFFERENT class — the /etc/localtime incidental surface, never the exec resolution), got %s", got)
+	}
+	if got := classDecode("file", 0x10); got != "(file, getattr)" {
+		t.Errorf("kernel classmap decode: the 4C-85 grant candidate must be the tuple (file, { getattr }) — the LookPath newfstatat's denied bit on the found candidate, got %s", got)
 	}
 	// The dir-class same-bit companion: decode(dir, 0x8) also recovers
 	// exactly { create } (the shared prefix bit), but as the DIR tuple.

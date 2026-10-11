@@ -3582,10 +3582,11 @@ exit 0
 	// rootlesskit child domain), the newuidmap/newgidmap UID/GID-map
 	// helpers (P5-S2: dedicated exec domains entered only from the
 	// rootlesskit child domain), and — since 4C-57 — the bundled
-	// buildkitd payload (the narrowed executable identity, the exact
-	// canonical path only).
-	if len(restoreconCalls) != 12 {
-		t.Errorf("expected exactly 12 restorecon invocations, got %d: %v", len(restoreconCalls), restoreconCalls)
+	// buildkitd payload and — since 4C-84 — the bundled buildkit-runc
+	// worker runtime (the narrowed executable identity, the exact
+	// canonical paths only).
+	if len(restoreconCalls) != 13 {
+		t.Errorf("expected exactly 13 restorecon invocations, got %d: %v", len(restoreconCalls), restoreconCalls)
 	}
 	joined := strings.Join(restoreconCalls, "\n")
 	for _, want := range []string{
@@ -3618,18 +3619,19 @@ exit 0
 	// Every restorecon target must be a docker-helper-owned path: no Docker
 	// daemon/socket path may be relabeled by the installer.
 	allowedTargets := map[string]bool{
-		"/usr/bin/docker-helper":                        true,
-		"/usr/bin/bindfs":                               true,
-		"/usr/bin/rootlesskit":                          true,
-		"/usr/bin/slirp4netns":                          true,
-		"/usr/bin/newuidmap":                            true,
-		"/usr/bin/newgidmap":                            true,
-		"/usr/libexec/docker-helper/buildkit/buildkitd": true,
-		"/etc/docker-helper":                            true,
-		"/var/lib/docker-helper":                        true,
-		"/run/docker-helper":                            true,
-		"/run/docker-helper-builder":                    true,
-		"/var/lib/docker-helper-builder":                true,
+		"/usr/bin/docker-helper":                            true,
+		"/usr/bin/bindfs":                                   true,
+		"/usr/bin/rootlesskit":                              true,
+		"/usr/bin/slirp4netns":                              true,
+		"/usr/bin/newuidmap":                                true,
+		"/usr/bin/newgidmap":                                true,
+		"/usr/libexec/docker-helper/buildkit/buildkitd":     true,
+		"/usr/libexec/docker-helper/buildkit/buildkit-runc": true,
+		"/etc/docker-helper":                                true,
+		"/var/lib/docker-helper":                            true,
+		"/run/docker-helper":                                true,
+		"/run/docker-helper-builder":                        true,
+		"/var/lib/docker-helper-builder":                    true,
 	}
 	for _, c := range restoreconCalls {
 		target := c[strings.LastIndex(c, " ")+1:]
@@ -3706,7 +3708,7 @@ exit 0
 		if len(callsOf(t, env, "semodule")) == 0 {
 			t.Error("SElinux module load must happen once the floor is established")
 		}
-		if len(callsOf(t, env, "restorecon")) != 12 {
+		if len(callsOf(t, env, "restorecon")) != 13 {
 			t.Errorf("restorecon must still be applied on the SELinux path (got %d calls)", len(callsOf(t, env, "restorecon")))
 		}
 	})
