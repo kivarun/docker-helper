@@ -78,12 +78,14 @@ if command -v restorecon >/dev/null 2>&1; then
   restorecon /usr/bin/newgidmap 2>/dev/null || true
   # buildkitd is the bundled BuildKit daemon payload (the launch chain's
   # exec target); apply the shipped docker_helper_buildkitd_exec_t file
-  # context so the payload carries its private executable identity — the
-  # exact canonical path only (the .fc never covers the payload siblings:
-  # buildctl and buildkit-runc keep their distro labels as separate future
-  # boundaries). Label-only: restorecon never alters owner, mode, or
-  # xattrs.
+  # context so the payload carries its private executable identity —
+  # buildkit-runc joins the SAME identity (4C-84: the LookPath-selected
+  # worker runtime binary; the generic bin_t label denied its exec from
+  # the daemon domain). The exact canonical paths only — the .fc never
+  # covers the unrelated sibling buildctl. Label-only: restorecon never
+  # alters owner, mode, or xattrs.
   restorecon /usr/libexec/docker-helper/buildkit/buildkitd 2>/dev/null || true
+  restorecon /usr/libexec/docker-helper/buildkit/buildkit-runc 2>/dev/null || true
   restorecon -R /etc/docker-helper 2>/dev/null || true
   restorecon -R /var/lib/docker-helper 2>/dev/null || true
   # Relabel only the helper-owned /run/docker-helper dir itself to

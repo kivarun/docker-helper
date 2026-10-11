@@ -4830,9 +4830,12 @@ func buildkitdIdentityViolations(policy string) []string {
 //     surface; the rootlesskit child's process-transition surface stays
 //     the pointed set: the three launch helpers' standing brace rules +
 //     this edge);
-//   - the exact .fc entry labels exactly the canonical buildkitd path —
-//     one rule, the `--` regular-file form, no directory regex, no
-//     sibling (buildctl/buildkit-runc keep their distro labels);
+//   - the exact .fc entries label exactly the canonical buildkitd and
+//     buildkit-runc paths — two rules, the `--` regular-file form, no
+//     directory regex, no unrelated sibling (buildctl keeps its distro
+//     label; the 4C-84 labeling fix joins the bundled worker runtime
+//     binary to the same dedicated exec identity — never a generic
+//     bin_t:file execute grant);
 //   - the canonical path identity: the manager constant, the
 //     RootlessKit argv target, the packaged payload destination, and the
 //     .fc pattern are all exactly /usr/libexec/docker-helper/buildkit/
@@ -4876,9 +4879,12 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		t.Errorf("exactly one (structural) transition may name the buildkitd domain, found %d", buildkitdTransitions)
 	}
 
-	// The exact .fc entry: one rule, the canonical path, the `--` form;
-	// no rule other than the exact buildkitd path may carry the type (no
-	// directory regex, no sibling).
+	// The exact .fc entries: two rules, the exact canonical paths, the
+	// `--` form; no rule other than the exact buildkitd and
+	// buildkit-runc paths may carry the type (no directory regex, no
+	// unrelated sibling — buildctl keeps its distro label). The 4C-84
+	// labeling fix joins the bundled worker runtime binary to the SAME
+	// dedicated exec identity; no generic bin_t:file execute grant.
 	fcLines := 0
 	for _, line := range strings.Split(fc, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -4886,12 +4892,13 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 			continue
 		}
 		fcLines++
-		if trimmed != "/usr/libexec/docker-helper/buildkit/buildkitd  --  system_u:object_r:docker_helper_buildkitd_exec_t:s0" {
-			t.Errorf("the buildkitd fc rule must be the exact canonical path in the `--` form: %s", trimmed)
+		if trimmed != "/usr/libexec/docker-helper/buildkit/buildkitd  --  system_u:object_r:docker_helper_buildkitd_exec_t:s0" &&
+			trimmed != "/usr/libexec/docker-helper/buildkit/buildkit-runc  --  system_u:object_r:docker_helper_buildkitd_exec_t:s0" {
+			t.Errorf("the buildkitd fc rules must be the exact canonical paths in the `--` form: %s", trimmed)
 		}
 	}
-	if fcLines != 1 {
-		t.Errorf("exactly one buildkitd fc rule must exist, found %d", fcLines)
+	if fcLines != 2 {
+		t.Errorf("exactly two buildkitd fc rules must exist (the daemon and the bundled worker runtime), found %d", fcLines)
 	}
 
 	// The canonical path identity (the phase's four-congruent-owners
@@ -5646,12 +5653,15 @@ func TestSELinuxPolicyBuildkitdExecIdentitySiblingLabels(t *testing.T) {
 		for _, forbidden := range []string{
 			"/usr/libexec/docker-helper/buildkit(/.*)?",
 			"/usr/libexec/docker-helper/buildkit/buildctl",
-			"/usr/libexec/docker-helper/buildkit/buildkit-runc",
 			"/usr/libexec/docker-helper(/.*)?",
 		} {
 			if pattern == forbidden {
-				t.Errorf("no shipped fc rule may cover the buildkit siblings or the payload tree (separate future boundaries): %s", trimmed)
+				t.Errorf("no shipped fc rule may cover the buildkit siblings or the payload tree (buildctl keeps its distro label; the tree regex is never shipped): %s", trimmed)
 			}
+		}
+		if pattern == "/usr/libexec/docker-helper/buildkit/buildkit-runc" &&
+			!strings.Contains(trimmed, "system_u:object_r:docker_helper_buildkitd_exec_t:s0") {
+			t.Errorf("the shipped buildkit-runc rule must carry the dedicated exec identity exactly: %s", trimmed)
 		}
 	}
 	// The /usr/bin rules stay unaffected: the exact-label set is unchanged.
@@ -6781,7 +6791,7 @@ func TestSELinuxFCFirstMatchShape(t *testing.T) {
 		// identities stay unaffected.
 		{"/usr/libexec/docker-helper/buildkit/buildkitd", "docker_helper_buildkitd_exec_t"},
 		{"/usr/libexec/docker-helper/buildkit/buildctl", ""},
-		{"/usr/libexec/docker-helper/buildkit/buildkit-runc", ""},
+		{"/usr/libexec/docker-helper/buildkit/buildkit-runc", "docker_helper_buildkitd_exec_t"},
 		{"/usr/libexec/docker-helper/buildkit/sibling-arbitrary", ""},
 		{"/usr/libexec/docker-helper/buildkit", ""},
 		{"/usr/bin/docker-helper", "docker_helper_exec_t"},

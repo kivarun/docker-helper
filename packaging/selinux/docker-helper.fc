@@ -42,9 +42,28 @@
 # (builderManagerBuildkitd), the RootlessKit argv target, the package
 # payload destination and this rule are all exactly
 # /usr/libexec/docker-helper/buildkit/buildkitd. Never the directory,
-# never the siblings: buildctl and buildkit-runc keep their distro labels
-# and stay separate future executable boundaries.
+# never unrelated siblings: buildctl keeps its distro label.
+#
+# P5-S2 Phase 4C-84: the bundled BuildKit worker runtime executable joins
+# the SAME dedicated exec identity — the exact packaged path only. The
+# 4C-84 L3 live evidence (run 38146453086) proved buildkitd's worker
+# initializer LookPath-walks the exact child PATH order (runc across the
+# whole PATH, then buildkit-runc), selects the bundled
+# /usr/libexec/docker-helper/buildkit/buildkit-runc (the LAST probe,
+# found), and its exec is denied by the generic bin_t distro label —
+# bin_t:file execute (0x4000) is the ONLY AVC in the worker-init window
+# and the stderr chain ("skipping oci worker" warning, then "no worker
+# found, rebuild the buildkit daemon?") proves the terminal ownership.
+# The fix is the LABEL, never a generic bin_t:file execute grant (the
+# standing generic-exec quarantine holds): the bundled worker binary
+# carries the SAME private executable identity as the daemon itself,
+# whose execute/read plane buildkitd_t already owns (the 4C-61/62
+# target-side rule — no .te delta, no new rule, the allow count stays
+# exactly 9). No transition fires (buildkitd_t execing buildkitd_exec_t
+# has no type_transition edge: the runc probe runs inside the daemon
+# domain).
 /usr/libexec/docker-helper/buildkit/buildkitd  --  system_u:object_r:docker_helper_buildkitd_exec_t:s0
+/usr/libexec/docker-helper/buildkit/buildkit-runc  --  system_u:object_r:docker_helper_buildkitd_exec_t:s0
 /etc/docker-helper(/.*)?                system_u:object_r:docker_helper_config_t:s0
 /var/lib/docker-helper(/.*)?            system_u:object_r:docker_helper_state_t:s0
 /run/docker-helper(/.*)?                system_u:object_r:docker_helper_runtime_t:s0

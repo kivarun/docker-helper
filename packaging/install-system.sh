@@ -701,11 +701,17 @@ apply_selinux_restorecon() {
 	# mode, or xattrs.
 	"$RESTORECON" /usr/bin/newgidmap 2>/dev/null || true
 	# buildkitd: the bundled BuildKit daemon payload; the dedicated exec
-	# type (the exact canonical path only — the .fc never covers the
-	# payload siblings) is the narrowed executable identity the flow's
-	# eventual transition is bound to. Label-only, exact path: buildctl and
-	# buildkit-runc keep their distro labels.
+	# type (the exact canonical paths only — the .fc never covers the
+	# unrelated sibling buildctl) is the narrowed executable identity the
+	# flow's eventual transition is bound to. Label-only, exact paths:
+	# buildctl keeps its distro label.
 	"$RESTORECON" /usr/libexec/docker-helper/buildkit/buildkitd 2>/dev/null || true
+	# buildkit-runc: the bundled worker runtime binary the daemon's OCI
+	# worker initializer execs for its probe (4C-84: the L3 live evidence
+	# proved the LookPath selects this exact path and the generic bin_t
+	# label denied the exec). The SAME dedicated exec identity as the
+	# daemon — no generic bin_t:file execute grant.
+	"$RESTORECON" /usr/libexec/docker-helper/buildkit/buildkit-runc 2>/dev/null || true
 	"$RESTORECON" -R /run/docker-helper-builder 2>/dev/null || true
 	"$RESTORECON" -R /var/lib/docker-helper-builder 2>/dev/null || true
 	"$RESTORECON" -R /etc/docker-helper 2>/dev/null || true
