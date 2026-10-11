@@ -12072,8 +12072,19 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
       echo "--- the last SELinux decisions in the window (the tail; the death's own decision context):"
       grep -a "selinux_audited" /tmp/p4b-work/deathwin-raw.txt 2>/dev/null | tail -12 || true
       echo "(end of the SELinux decision tail)"
-      echo "--- the failing-open audit records under the per-op trees (the full path and errno of the fatal open; the tracer-truncated line's completion):"
-      ausearch -k p5s2rxd --raw 2>/dev/null | grep -a "type=SYSCALL\|type=PATH\|type=CWD" | tail -30 || true
+      echo "--- the failing-open audit records under the per-op trees (the full path and errno of the fatal open; the tracer-truncated line's completion; the audit.log may have ROTATED under the window's own record flood — all rotated generations are searched, and the PATH records are correlated by event id):"
+      RXD_AUD_LOGS="$(ls /var/log/audit/audit.log* 2>/dev/null || true)"
+      echo "audit generations searched: ${RXD_AUD_LOGS:-none}"
+      RXD_IDS="$(grep -ah 'key="p5s2rxd"' $RXD_AUD_LOGS 2>/dev/null | grep -a 'comm="buildkitd"' | grep -aoE 'msg=audit\([0-9.]+:[0-9]+\)' | sort -u || true)"
+      if [ -n "$RXD_IDS" ]; then
+        while IFS= read -r RXD_ID; do
+          [ -n "$RXD_ID" ] || continue
+          grep -ahF "$RXD_ID" $RXD_AUD_LOGS 2>/dev/null | grep -a 'type=PATH' | head -3 || true
+          grep -ahF "$RXD_ID" $RXD_AUD_LOGS 2>/dev/null | grep -a 'type=SYSCALL' | head -1 || true
+        done <<< "$RXD_IDS"
+      else
+        echo "(no buildkitd p5s2rxd SYSCALL record found in any audit generation)"
+      fi
       echo "(end of the failing-open audit records)"
     } > "$EVIDENCE_DIR/62-runtime-death-trace.txt" 2>&1
     cat "$EVIDENCE_DIR/62-runtime-death-trace.txt" >&2
