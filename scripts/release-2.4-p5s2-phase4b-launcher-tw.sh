@@ -11746,8 +11746,17 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
     marker "L1-CLASS=SEE-60-LIFECYCLE-DIAGNOSTIC (the stderr line was not captured from the journal or the trace — the sampler/trace evidence decides the classification)"
   fi
   if [ -z "$POSTTUN_BKD_STARTUP_OWNER_TS" ]; then
-    marker "NO-NEW-SELINUX-CANDIDATE=OK (no genuine PRE-CLEANUP terminal owner this run — the 4C-81 HOLD stands; no 4C-82 candidate minted; L1 is diagnostic-only)"
-    marker "4C-82=NO-GO (re-affirmed by the L1 diagnostic phase: no policy authority)"
+    marker "NO-NEW-SELINUX-CANDIDATE=OK (no genuine PRE-CLEANUP terminal owner this run — the standing HOLD stands; L1 is diagnostic-only)"
+    # NOTE: the 4C-82 key is deliberately NOT minted here. In the 4C-L1
+    # era this block emitted "4C-82=NO-GO (re-affirmed by the L1
+    # diagnostic phase: no policy authority)" — correct THEN (4C-82 was
+    # the unproven candidate). Once 4C-82 became the granted phase, the
+    # marker became a LOG CONTRADICTION (the verdict extractor's
+    # first-occurrence rule kept the PASS from the phase block, but the
+    # raw log carried a stale NO-GO next to the granted phase). The L1
+    # diagnostic phase is COMPLETE — its verdict keys stay in the
+    # 4C-L1-era artifacts (runs 38122254846 and 38123176526), never
+    # re-emitted by a granted-era run.
   fi
   marker "LIFECYCLE-DIAGNOSTIC=COMPLETE"
   marker "4C-38=INCOMPLETE/ORDER_NOT_ESTABLISHED"
