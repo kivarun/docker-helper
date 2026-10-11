@@ -13292,7 +13292,13 @@ VB_ARGV=(--net=slirp4netns --copy-up=/etc --disable-host-loopback
   /usr/libexec/docker-helper/buildkit/buildkitd
   --rootless
   "--root=$STATE_ROOT/ops/$VB_OP_ID/root"
-  "--addr=unix://$RUNTIME_ROOT/ops/$VB_OP_ID/buildkitd.sock")
+  "--addr=unix://$RUNTIME_ROOT/ops/$VB_OP_ID/buildkitd.sock"
+  # The 4C-83 canonical grammar carries the OTEL trace-socket redirect;
+  # the vehicle's leaf must match the canonical production grammar
+  # EXACTLY (the launcher's validation is the exact-rebuild contract)
+  # or the leaf dies at the grammar validation instead of reaching the
+  # setexec step this negative proves.
+  "--otel-socket-path=$RUNTIME_ROOT/ops/$VB_OP_ID/buildkit/otel-grpc.sock")
 systemd-run --collect --wait --unit="$LEGACY_UNIT_B" \
   --property=SELinuxContext="$BUILDER_T" \
   --uid=docker-helper-builder -- \
