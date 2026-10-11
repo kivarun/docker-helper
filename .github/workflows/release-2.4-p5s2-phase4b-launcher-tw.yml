@@ -548,7 +548,56 @@ jobs:
           # proof (4C-37) resumes — no artificial 4C-86 (the proof ref
           # advances to the commit carrying that module; identical Go
           # sources, so the binary is the same program).
-          PHASE4B_PROOF_REF: '635be06cf6afb3fe62aae8e44ed209299a2a8ffb'
+          #
+          # 4C-86: the 4C-85 canonical run 38152706541's own terminal
+          # records, BOTH attempts, prove the next terminal owner: with
+          # the LookPath stat passing (the 4C-85 getattr grant), the
+          # OCI worker init advanced through the exec into the WORKER
+          # STATE-DIR CREATION inside its own per-op state tree, and
+          # the mkdirat denies on its dir CREATE hook — requested=0x8
+          # denied=0x8 result=-13 scontext=buildkitd_t:s0:c1
+          # tcontext=builder_state_t:s0:c1 tclass=dir
+          # (trace-ts=581.390693 and the twin 581.390906, the
+          # attempt-2 twins 580.271275/580.284584, INSIDE the TRACED
+          # sys_mkdirat window), the fatal stderr "buildkitd: mkdir
+          # /var/lib/docker-helper-builder/ops/op_..." (0x7c), the
+          # failure response and the voluntary exit. THE
+          # LIFECYCLE-OWNER RECLASSIFICATION: the harness's
+          # conservative machinery emitted 4C-86=NO-GO because the
+          # terminal decision classified HANDLED/NON-TERMINAL — the
+          # SAME conservative shape that mis-classified the 4C-82
+          # chmod owner before the L1 diagnostic proved the
+          # continuation-after-the-denial WAS the failure-response
+          # path; the stderr chain proves the terminal ownership
+          # directly (the mkdir failure is the logged error the
+          # process reports and exits on). The 4C-86 grant WIDENS THE
+          # 4C-81 STATE-TREE DIR RULE IN PLACE (ONE rule, never
+          # split): allow docker_helper_buildkitd_t
+          # docker_helper_builder_state_t:dir { getattr search write
+          # add_name read open create } — the delta exactly +create;
+          # decode(dir, 0x8) = exactly { create } (bit 3 of the
+          # COMMON_FILE_PERMS list); THE CLASS MATTERS — the same bit
+          # 0x8 on the file class is file:create (the 4C-69
+          # state-tree FILE plane) and on the sock_file class
+          # sock_file:create (the PLANE I plane), a same-bit
+          # coincidence never merges two planes, and the dir-class
+          # 0x8000000 is remove_name (the GRANTED PLANE E member — the
+          # delta is NEVER the granted neighbor); dir:create is NOT a
+          # conventional mkdir bundle — NOT remove_name/rmdir/setattr/
+          # rename/mounton (the failure-response cleanup walk's own
+          # records stay POST-FAILURE/CLEANUP, never laundered); NO
+          # state-tree FILE widening, NO runtime-tree widening, NO
+          # buildkitd_exec_t:file open (the standing quarantine), NO
+          # generic bin_t grant, NO tmpfs_t:lnk_file grant, NO
+          # cap_userns grant, NO cgroup_t grant; the module-borne
+          # buildkitd-named allow total STAYS EXACTLY NINE (any TENTH
+          # rule trips), and the §19 alternate applies: if the
+          # lifetime finally held, the startup staircase STOPS and the
+          # cross-operation isolation proof (4C-37) resumes — no
+          # artificial 4C-87 (the proof ref advances to the commit
+          # carrying that module; identical Go sources, so the binary
+          # is the same program).
+          PHASE4B_PROOF_REF: 'ba57ac8f3d2ff330994ee27a5c002ed30977ebd1'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
