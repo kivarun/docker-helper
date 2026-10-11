@@ -14644,6 +14644,91 @@ if [ "$I9_OK" = 1 ]; then
     finish INCOMPLETE
     exit 0
   fi
+  # ============================================================
+  # 4C-37R runtime-exit diagnostic (proof-only; zero policy delta)
+  # ============================================================
+  # The 4C-37R binder's live inventory (BOTH attempts of run
+  # 38173150141) proved the operation-A BuildKit runtime tree ABSENT at
+  # binding time: 16 scans over ~8s saw buildkitd-class=0 /
+  # tap0-holders=0, while the launch itself SUCCEEDED (readiness OK,
+  # both sockets bound ~1s in) and the op stayed RUNNING. The payload's
+  # exit is untraced (the ring read precedes the exit) and unsurfaced:
+  # the manager dumps the flow's diagnostic tail ONLY on the LEADER's
+  # unexpected exit, and the leader hangs forever on the never-exiting
+  # slirp4netns parent — so a silently-dead payload inside a RUNNING op
+  # is invisible to every existing surface. This diagnostic makes the
+  # payload's own output observable the one way the product already
+  # provides: terminating the leader through the manager's own
+  # unexpected-exit path, whose handler dumps the bounded tail of the
+  # flow's output (the payload's stderr rides that chain) into the
+  # manager journal. The kill is identity-guarded: the pid is read from
+  # the op's own instance.pid and the kill fires only when the live
+  # /proc entry still carries the rootlesskit leader identity — a
+  # reused pid is never touched. It runs AFTER every milestone gate so
+  # the posttun lifetime subjects are done with the canonical flow. The
+  # dmesg tail rides along as the OOM-killer cross-check.
+  RXD_T="$(date +%s)"
+  RXD_OP_PID=""
+  RXD_VERDICT="skipped"
+  if [ -s "$RUNTIME_ROOT/ops/$OP_ID/instance.pid" ]; then
+    RXD_OP_PID="$(cat "$RUNTIME_ROOT/ops/$OP_ID/instance.pid" 2>/dev/null || true)"
+  fi
+  RXD_LEADER_OK=0
+  if [ -n "$RXD_OP_PID" ] && [ -r "/proc/$RXD_OP_PID/comm" ]; then
+    RXD_COMM="$(cat "/proc/$RXD_OP_PID/comm" 2>/dev/null || true)"
+    RXD_CTX="$(cat "/proc/$RXD_OP_PID/attr/current" 2>/dev/null || true)"
+    case "$RXD_COMM" in
+      rootlesskit)
+        case "$RXD_CTX" in
+          *":docker_helper_rootlesskit_t:"*) RXD_LEADER_OK=1 ;;
+        esac
+        ;;
+    esac
+  fi
+  {
+    echo "=== 4C-37R runtime-exit diagnostic (the payload's exit reason, via the manager's own unexpected-exit tail dump) ==="
+    echo "canonical op: $OP_ID"
+    echo "instance.pid: ${RXD_OP_PID:-(absent — the op tree is already gone)}"
+    if [ "$RXD_LEADER_OK" = 1 ]; then
+      echo "leader identity: pid=$RXD_OP_PID comm=$RXD_COMM ctx=$RXD_CTX (matched; killing through the manager's own unexpected-exit path)"
+    else
+      echo "leader identity: NOT MATCHED (pid=${RXD_OP_PID:-none} comm=${RXD_COMM:-none} ctx=${RXD_CTX:-none}) — no kill; the diagnostic cannot observe the tail"
+    fi
+    echo "--- the pre-kill live flow members (the binder's own shape, re-confirmed at diagnostic time):"
+    for P in /proc/[0-9]*; do
+      PCTX=""
+      IFS= read -r PCTX 2>/dev/null < "$P/attr/current" || true
+      case "$PCTX" in
+        *":docker_helper_rootlesskit_t:"*|*":docker_helper_slirp4netns_t:"*|*":docker_helper_buildkitd_t:"*)
+          echo "  pid=${P#/proc/} comm=$(cat "$P/comm" 2>/dev/null) ctx=$PCTX"
+          ;;
+      esac
+    done
+    if [ "$RXD_LEADER_OK" = 1 ]; then
+      kill -9 "$RXD_OP_PID" 2>/dev/null || true
+      sleep 3
+      RXD_VERDICT="captured"
+    fi
+    echo "--- the manager journal since the kill (the unexpected-exit handler's own tail dump; the payload's stderr rides the flow's output chain):"
+    journalctl -u "$UNIT" --since "@$RXD_T" --no-pager 2>/dev/null | tail -80 || true
+    echo "(end of the manager journal slice)"
+    echo "--- dmesg tail (the OOM-killer cross-check):"
+    dmesg 2>/dev/null | tail -40 || true
+    echo "(end of dmesg tail)"
+    echo "--- the post-kill live flow members (the terminal convergence's own result):"
+    for P in /proc/[0-9]*; do
+      PCTX=""
+      IFS= read -r PCTX 2>/dev/null < "$P/attr/current" || true
+      case "$PCTX" in
+        *":docker_helper_rootlesskit_t:"*|*":docker_helper_slirp4netns_t:"*|*":docker_helper_buildkitd_t:"*)
+          echo "  pid=${P#/proc/} comm=$(cat "$P/comm" 2>/dev/null) ctx=$PCTX"
+          ;;
+      esac
+    done
+    echo "diagnostic verdict: $RXD_VERDICT"
+  } > "$EVIDENCE_DIR/61-runtime-exit-diagnostic.txt" 2>&1
+  cat "$EVIDENCE_DIR/61-runtime-exit-diagnostic.txt" >&2
+  marker "RUNTIME-EXIT-DIAGNOSTIC=$RXD_VERDICT"
   if [ "${CROSS_NOT_PROVEN:-0}" = 1 ] || [ "${POSTTUN_NOT_ESTABLISHED:-0}" = 1 ]; then
     finish INCOMPLETE
     exit 0
