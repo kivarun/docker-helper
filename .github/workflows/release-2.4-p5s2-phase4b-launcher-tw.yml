@@ -408,7 +408,51 @@ jobs:
           # no artificial 4C-82 (the proof ref advances from the
           # 4C-80-era pin to the commit carrying that module; identical
           # Go sources, so the binary is the same program).
-          PHASE4B_PROOF_REF: 'b21fa62771650707b4df91b764785a6389cd63eb'
+          #
+          # 4C-82: the 4C-L1 diagnostic phase (runs 38122254846 and
+          # 38123176526, the software-lifecycle instrumentation)
+          # RECLASSIFIED the sock_file:setattr record toward
+          # builder_runtime_t:s0:c1 from HANDLED/NON-TERMINAL to the
+          # TERMINAL LIFECYCLE OWNER: the continuation after the denial
+          # was the failure-response path — the owning syscall is the
+          # buildkitd's own chmod(2) on the op socket path, its failure
+          # is the logged error the process reports and exits on:
+          # the setattr AVC requested=0x20 denied=0x20 result=-13
+          # tclass=sock_file (trace-ts=588.340645 and the twin
+          # 522.856860) -> the flow's failure response -> the stderr
+          # line "buildkitd: chmod /run/docker-helper-builder/ops/op_..."
+          # (0x76 = 118 bytes) -> the VOLUNTARY sys_exit_group(
+          # error_code: 1); no SIGKILL/SIGTERM was delivered to the
+          # leader. THE LIFECYCLE-PROVEN OWNER CLASS joins the causal
+          # contract: a decision whose owning syscall is untraced (the
+          # known tracer hole) but whose fatal ownership is proven by
+          # the process's own logged error and voluntary exit is a
+          # genuine PRE-CLEANUP terminal owner. The 4C-82 grant WIDENS
+          # THE PLANE I SOCK_FILE RULE IN PLACE (ONE rule, never
+          # split): allow docker_helper_buildkitd_t
+          # docker_helper_builder_runtime_t:sock_file { create unlink
+          # setattr } — the delta exactly +setattr; decode(sock_file,
+          # 0x20) = exactly { setattr } (bit 5 of the COMMON_FILE_PERMS
+          # layout); THE CLASS MATTERS — the same bit 0x20 on the dir
+          # class is dir:setattr (never granted on a buildkitd pair)
+          # and on the file class file:setattr (the quarantined
+          # surface), a same-bit coincidence never merges two planes;
+          # sock_file:setattr is NOT a chmod bundle — NOT create/unlink
+          # (the GRANTED members NOT re-granted), NOT
+          # write/open/getattr/read/rename/append/lock/map — the
+          # conventional socket bundle NOT reconstructed; the dir rules
+          # stay EXACTLY { getattr search write add_name remove_name }
+          # (PLANE H) and { getattr search write add_name read open }
+          # (PLANE E) and the state-tree file rule EXACTLY { create
+          # read open lock }; the module-borne buildkitd-named allow
+          # total STAYS EXACTLY NINE (any TENTH rule trips), and the
+          # §19 alternate applies: if the lifetime finally held, the
+          # startup staircase STOPS and the cross-operation isolation
+          # proof (4C-37) resumes — no artificial 4C-83 (the proof ref
+          # advances from the 4C-81-era pin to the commit carrying that
+          # module; identical Go sources, so the binary is the same
+          # program).
+          PHASE4B_PROOF_REF: 'db642b90dde9ed75e428b4889895d61d2c7d1eb8'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
