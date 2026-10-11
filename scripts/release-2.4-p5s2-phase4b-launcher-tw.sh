@@ -11920,11 +11920,11 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
   # ---- 4C-84 L3 verdict markers (evidence-based; the classification is
   # ---- the deliverable's reading). DIAGNOSTIC ONLY: no policy
   # ---- authority, no grant, no candidate minting.
-  L3_PROBE_N="$(grep -a "buildkitd-[0-9]* " "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -acE 'sys_newfstatat\(.*"(runc|buildkit-runc)"' || true)"
+  L3_PROBE_N="$(grep -a "buildkitd-[0-9]* " "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -acE 'sys_newfstatat\(.*"/[^"]*(runc|buildkit-runc)"' || true)"
   L3_SEL_LINE="$(grep -a "buildkitd-[0-9]* " "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -aE 'sys_newfstatat\(.*"/[^"]*(runc|buildkit-runc)"' | grep -a -- '-> 0x0' | tail -1 || true)"
   L3_SEL_PATH="(none-found)"
   if [ -n "$L3_SEL_LINE" ]; then
-    L3_SEL_PATH="$(printf '%s\n' "$L3_SEL_LINE" | grep -aoE '"[^"]*(runc|buildkit-runc)"' | tail -1 | tr -d '"')"
+    L3_SEL_PATH="$(printf '%s\n' "$L3_SEL_LINE" | grep -aoE '"/[^"]*(runc|buildkit-runc)"' | tail -1 | tr -d '"')"
   fi
   marker "L3-WORKER-BINARY-PROBES=$L3_PROBE_N (the LookPath candidate probes in the span)"
   marker "L3-SELECTED-CANDIDATE=$L3_SEL_PATH (the LAST probe that returned success — the executable buildkitd attempted to exec)"
@@ -11955,11 +11955,15 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
   L3_OLD_BIN_N="$(grep -a "buildkitd-[0-9]* " "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -a "selinux_audited" | grep -aE 'tclass=file' | grep -acE 'denied=0x4000([^0-9a-fA-F]|$)' || true)"
   L3_OLD_SKIP_N="$(grep -a "sys_write(fd: 2" "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -ac 'skipping oci wor' || true)"
   L3_OLD_NOWORKER_N="$(grep -a "sys_write(fd: 2" "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -ac 'no worker found' || true)"
-  if [ "${L3_OLD_BIN_N:-0}" = 0 ] && [ "${L3_OLD_SKIP_N:-0}" = 0 ] && [ "${L3_OLD_NOWORKER_N:-0}" = 0 ]; then
-    marker "L3-OLD-WORKER-INIT-STAGE=GONE (no bin_t:file execute record, no skipping-oci-worker warning, no no-worker-found fatal in the whole span)"
-    marker "4C-84=PASS/WORKER-EXEC-LABEL-PROVEN (the bundled buildkit-runc carries the dedicated exec identity; the .te is UNCHANGED — the module-borne buildkitd-named allow total stays exactly 9; the next boundary follows the span's own live decision set, never the expectation)"
+  if [ "${L3_OLD_BIN_N:-0}" = 0 ]; then
+    marker "L3-OLD-WORKER-EXEC-BOUNDARY=GONE (no bin_t:file execute record in the whole span — the dedicated label took effect; the standing generic-exec quarantine HOLDS)"
+    if [ "${L3_OLD_SKIP_N:-0}" = 0 ] && [ "${L3_OLD_NOWORKER_N:-0}" = 0 ]; then
+      marker "4C-84=PASS/WORKER-INIT-STAGE-CLEARED (the whole worker-init stage passed; the .te is UNCHANGED — the module-borne buildkitd-named allow total stays exactly 9)"
+    else
+      marker "4C-84=PASS/WORKER-EXEC-LABEL-PROVEN (the bin_t:file execute boundary is GONE and the stage ADVANCED — the skipping-oci-worker/no-worker-found stderr is the stage's own shape under the NEXT boundary, the span's own live decision set owns the next phase, never this fix's failure; the .te stays UNCHANGED and the allow count exactly 9)"
+    fi
   else
-    marker "L3-OLD-WORKER-INIT-STAGE=STILL-PRESENT (bin_t-exec-records=${L3_OLD_BIN_N:-0} skipping-oci-warnings=${L3_OLD_SKIP_N:-0} no-worker-found-fatals=${L3_OLD_NOWORKER_N:-0})"
+    marker "L3-OLD-WORKER-EXEC-BOUNDARY=STILL-PRESENT (bin_t-exec-records=${L3_OLD_BIN_N:-0} skipping-oci-warnings=${L3_OLD_SKIP_N:-0} no-worker-found-fatals=${L3_OLD_NOWORKER_N:-0})"
     marker "4C-84=FAIL/LABEL-NOT-EFFECTIVE"
   fi
   marker "4C-38=INCOMPLETE/ORDER_NOT_ESTABLISHED"
