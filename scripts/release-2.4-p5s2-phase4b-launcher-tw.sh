@@ -114,6 +114,10 @@ finish() {
     wait "$SAMPLER_PID" 2>/dev/null || true
     rm -f "$EVIDENCE_DIR"/.write-* 2>/dev/null || true
   }
+  [ -n "${L1_SAMPLER_PID:-}" ] && {
+    kill "$L1_SAMPLER_PID" 2>/dev/null || true
+    wait "$L1_SAMPLER_PID" 2>/dev/null || true
+  }
   printf '%s P5S2-P4B-RESULT=%s\n' "$PREFIX" "$1"
 }
 
@@ -1073,6 +1077,119 @@ mkfifo /tmp/p4b-work/.gate-clock 2>/dev/null || true
 ) > "$EVIDENCE_DIR/51-confinement-gate.txt" 2>&1 &
 GATE_WATCHER_PID=$!
 log "D: 4C-49 confinement-gate watcher armed (pid $GATE_WATCHER_PID)"
+
+# ---- 4C-L1: the software-lifecycle diagnostic sampler. READ-ONLY,
+# ---- DIAGNOSTIC ONLY (no policy authority, no flow mutation). It
+# ---- polls for the flow's buildkitd process at a cheap incremental
+# ---- cadence (one ns_last_pid read + backward comm reads for the
+# ---- born-since range, the same tier shape as the confinement-gate
+# ---- watcher) and, at the FIRST sight of a buildkitd-comm pid,
+# ---- captures ONCE the process identity facts the lifecycle diagnosis
+# ---- needs:
+# ----   L1-PROC-IDENT   pid, ppid, state, starttime, cwd, cmdline (the
+# ----                   argv, NUL-joined to spaces — the exact rootlesskit
+# ----                   exec form), the environment SUBSET filtered to a
+# ----                   strict non-secret allowlist (ROOTLESSKIT_*,
+# ----                   BUILDKIT*, XDG_RUNTIME_DIR, TMPDIR, HOME, PATH —
+# ----                   no token/credential-shaped values are ever
+# ----                   printed), and the fd list (the /proc fd symlinks,
+# ----                   the stdio wiring evidence);
+# ----   L1-PROC-SIGHT   each subsequent alive sighting (the bounded
+# ----                   heartbeat);
+# ----   L1-PROC-DEAD    the observed death (the pid's /proc entry
+# ----                   vanished between scans — the wall-clock bound,
+# ----                   never a duration claim) — then the sampler
+# ----                   exits.
+# ---- The argv/cwd/env evidence answers the L1 questions directly (the
+# ---- args/config/path owner, the socket path argument, the state
+# ---- root) without touching any flow authority. The sampler
+# ---- self-terminates (the death record, the wall cap, or the flow
+# ---- window's end) and is also killed by the harness's own finish.
+(
+  set +eu
+  declare -A L1SEEN=() L1CAPD=()
+  L1_END=$(( EPOCHSECONDS + 600 ))
+  L1_LASTPID=0
+  L1_ANY=0
+  while :; do
+    L1NEW=""
+    IFS= read -r L1NEW 2>/dev/null < /proc/sys/kernel/ns_last_pid || true
+    case "$L1NEW" in
+      ''|*[!0-9]*) L1NEW="" ;;
+    esac
+    if [ -n "$L1NEW" ] && [ "$L1NEW" -ge "$L1_LASTPID" ] && [ "$L1_LASTPID" -gt 0 ]; then
+      for (( L1P = L1NEW; L1P > L1_LASTPID; L1P-- )); do
+        [ -n "${L1SEEN[$L1P]:-}" ] && continue
+        L1SEEN[$L1P]=1
+        L1C=""
+        IFS= read -r L1C 2>/dev/null < "/proc/$L1P/comm" || continue
+        case "$L1C" in
+          buildkitd) ;;
+          *) continue ;;
+        esac
+        L1_ANY=$(( L1_ANY + 1 ))
+        if [ -n "${L1CAPD[$L1P]:-}" ]; then
+          printf '%s L1-PROC-SIGHT pid=%s\n' "$EPOCHREALTIME" "$L1P"
+          continue
+        fi
+        L1CAPD[$L1P]=1
+        L1STAT=""
+        IFS= read -r L1STAT 2>/dev/null < "/proc/$L1P/stat" || true
+        L1STATE="(none)"; L1PP="(none)"; L1START="(none)"
+        case "$L1STAT" in
+          *") "*)
+            L1BODY="${L1STAT#*) }"
+            set -- $L1BODY
+            L1STATE="${1:-"(none)"}"; L1PP="${2:-"(none)"}"; L1START="${20:-"(none)"}"
+            ;;
+        esac
+        L1CWD="(unavailable)"
+        L1CWD="$(readlink "/proc/$L1P/cwd" 2>/dev/null || true)"
+        [ -n "$L1CWD" ] || L1CWD="(unavailable)"
+        L1ARGS=""
+        L1ARGS="$(tr '\0' ' ' < "/proc/$L1P/cmdline" 2>/dev/null || true)"
+        [ -n "$L1ARGS" ] || L1ARGS="(unavailable)"
+        printf '%s L1-PROC-IDENT pid=%s comm=%s state=%s ppid=%s starttime=%s cwd=%s\n' \
+          "$EPOCHREALTIME" "$L1P" "$L1C" "$L1STATE" "$L1PP" "$L1START" "$L1CWD"
+        printf '  L1-PROC-ARGV pid=%s argv=%s\n' "$L1P" "$L1ARGS"
+        # The env SUBSET: the strict non-secret allowlist only. No
+        # token/credential-shaped value is ever printed.
+        while IFS= read -r L1EV; do
+          [ -n "$L1EV" ] && printf '  L1-PROC-ENV pid=%s %s\n' "$L1P" "$L1EV"
+        done <<< "$(tr '\0' '\n' < "/proc/$L1P/environ" 2>/dev/null | grep -aE '^(ROOTLESSKIT_[A-Za-z0-9_]*|BUILDKIT[A-Za-z0-9_]*|XDG_RUNTIME_DIR|TMPDIR|HOME|PATH)=' || true)"
+        # The fd list: the stdio wiring and the socket fds, existence
+        # and targets (the symlinks are printed as-is).
+        for L1FD in /proc/$L1P/fd/*; do
+          [ -e "$L1FD" ] || continue
+          printf '  L1-PROC-FD pid=%s %s -> %s\n' "$L1P" "${L1FD##*/}" "$(readlink "$L1FD" 2>/dev/null || echo '(unreadable)')"
+        done 2>/dev/null || true
+        printf '%s L1-PROC-CAPTURED pid=%s (the identity facts above are the first-sight capture; the death follows in the trace)\n' "$EPOCHREALTIME" "$L1P"
+      done
+      L1_LASTPID="$L1NEW"
+    else
+      L1_LASTPID=0
+    fi
+    # The death check: every captured buildkitd pid's /proc entry
+    # polled once per scan; a vanished entry is the observed death.
+    for L1DP in "${!L1CAPD[@]}"; do
+      [ -r "/proc/$L1DP/comm" ] || {
+        printf '%s L1-PROC-DEAD pid=%s (the /proc entry vanished between scans; the exact death instant and status come from the trace)\n' "$EPOCHREALTIME" "$L1DP"
+        printf '%s L1-SAMPLER-END reason=lifecycle-event-observed\n' "$EPOCHREALTIME"
+        exit 0
+      }
+    done
+    if [ "$EPOCHSECONDS" -ge "$L1_END" ]; then
+      printf '%s L1-SAMPLER-END reason=time-cap (any=%s)\n' "$EPOCHREALTIME" "$L1_ANY"
+      exit 0
+    fi
+    # The pacing: a plain bounded sleep (the L1 sampler is NOT
+    # gate-critical; a fork per tick is acceptable here — the tick body
+    # is one ns_last_pid read plus the born-since comm reads).
+    sleep 0.02
+  done
+) > "$EVIDENCE_DIR/60-lifecycle-sampler.txt" 2>&1 &
+L1_SAMPLER_PID=$!
+log "D: 4C-L1 lifecycle diagnostic sampler armed (pid $L1_SAMPLER_PID)"
 
 # The watcher-ready handshake: the backgrounded subshell fork plus its
 # first tick can lag the launch by seconds under the VM's own load (the
@@ -2951,6 +3068,7 @@ if [ -d "$TRACING/events/capability/cap_capable" ]; then
     echo "avc/selinux_audited available: $TRACE_AVC_ENABLED"
     echo "sys_enter_ioctl/sys_exit_ioctl available: $([ -d "$TRACING/events/syscalls/sys_exit_ioctl" ] && echo yes || echo no) (4C-33: the generic ioctl permission is granted; the TUNSETIFF command whitelist is NOT — any reached command is recorded numerically, fd/cmd/arg/ret)"
     echo "sys_enter_bind/sys_exit_bind available: $([ -d "$TRACING/events/syscalls/sys_enter_bind" ] && [ -d "$TRACING/events/syscalls/sys_exit_bind" ] && echo yes || echo no) (4C-75: the AF_UNIX bind(2) window — the enter carries fd/sockaddr-pointer/addrlen as the kernel exposes them, the exit carries the result; the sockaddr bytes are NOT dereferenced, the pathname fields are never inferred; sys_exit_socket is armed alongside for the socket->fd->bind identity chain — instrumentation only, no policy authority)"
+    echo "4C-L1 chmod family available: $(for ev in fchmod fchmodat fchmodat2 chmod; do [ -d "$TRACING/events/syscalls/sys_enter_$ev" ] && printf '%s ' "$ev"; done || true)(the software-lifecycle diagnostic arm — the residual BuildKitd death's own chmod errno becomes visible; DIAGNOSTIC ONLY, no policy authority)"
     echo "=== 4C-29 selinux_audited tracepoint format (recorded verbatim) ==="
     cat "$TRACING/events/avc/selinux_audited/format" 2>/dev/null || echo "(format file unavailable)"
     echo "=== 4C-31 sys_exit_ioctl tracepoint format (recorded verbatim: fd/cmd/arg/ret) ==="
@@ -2980,8 +3098,12 @@ if [ -d "$TRACING/events/capability/cap_capable" ]; then
               syscalls/sys_enter_rmdir syscalls/sys_exit_rmdir \
               syscalls/sys_enter_symlink syscalls/sys_exit_symlink \
               syscalls/sys_enter_symlinkat syscalls/sys_exit_symlinkat \
-              syscalls/sys_enter_readlink syscalls/sys_exit_readlink \
-              syscalls/sys_enter_readlinkat syscalls/sys_exit_readlinkat; do
+            syscalls/sys_enter_readlink syscalls/sys_exit_readlink \
+            syscalls/sys_enter_readlinkat syscalls/sys_exit_readlinkat \
+            syscalls/sys_enter_fchmod syscalls/sys_exit_fchmod \
+            syscalls/sys_enter_fchmodat syscalls/sys_exit_fchmodat \
+            syscalls/sys_enter_fchmodat2 syscalls/sys_exit_fchmodat2 \
+            syscalls/sys_enter_chmod syscalls/sys_exit_chmod; do
       echo "$ev: $([ -d "$TRACING/events/$ev" ] && echo yes || echo no)"
     done
     echo "=== 4C-29 live class/permission mapping evidence (RECORDED, not hardcoded — decode validation uses co-captured AVC records) ==="
@@ -11354,6 +11476,104 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
       marker "4C-81=INCOMPLETE/STATE-TREE-DIR-OPEN-PROOF-INCOMPLETE"
     fi
   fi
+  # ---- 4C-L1: the software-lifecycle diagnostic verdict. DIAGNOSTIC
+  # ---- ONLY (no policy authority, no new SELinux candidate, no 4C-82
+  # ---- minting): the residual BuildKitd death is owned by the software
+  # ---- lifecycle (the 4C-81 canonical runs' own HOLD — the span's last
+  # ---- SELinux decision was HANDLED/NON-TERMINAL and the openat span
+  # ---- carried zero in-window denials), and this section assembles the
+  # ---- lifecycle evidence the diagnosis needs: the manager's own
+  # ---- lifecycle tail (the unit journal, unwindowed — the
+  # ---- awaitInstanceExit diagnostics tail carries the flow's stderr
+  # ---- including the buildkitd error line), the L1 sampler's
+  # ---- first-sight identity capture (argv/cwd/env-subset/fds), the
+  # ---- final syscall sequence after the last SELinux decision of the
+  # ---- buildkitd pid, the chmod-family trace inventory (the 4C-L1 arm
+  # ---- addition), the signal inventory (manager-initiated teardown vs
+  # ---- voluntary exit), the exit record and status, the post-mortem
+  # ---- filesystem facts, and the L1 verdict markers. The §19 alternate
+  # ---- outcome stands: if the sampler's own evidence proved the
+  # ---- process lifetime-stable, the startup staircase STOPS and 4C-37
+  # ---- resumes — no policy grant rides on this section either way.
+  {
+    echo "=== 4C-L1 software-lifecycle diagnostic (the residual BuildKitd death owner; DIAGNOSTIC ONLY — no policy authority) ==="
+    echo "--- the manager's own lifecycle tail (the unit journal, unwindowed; the awaitInstanceExit diagnostics tail carries the flow's stderr incl. the buildkitd error line):"
+    journalctl -u "$UNIT" --no-pager 2>/dev/null | tail -80 || true
+    systemctl status "$UNIT" --no-pager -l 2>/dev/null | sed -n '1,14p' || true
+    echo "--- the L1 sampler (the buildkitd first-sight identity capture):"
+    cat "$EVIDENCE_DIR/60-lifecycle-sampler.txt" 2>/dev/null || echo "(the sampler file is missing — the sampler never ran)"
+    echo "--- the buildkitd pid(s) in the window (from the trace comm field; the LAST-record-wins pid is the diagnostic subject):"
+    L1_BPIDS="$(grep -aoE 'buildkitd-[0-9]+' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | sed 's/buildkitd-//' | sort -un || true)"
+    printf '  pids: %s\n' "${L1_BPIDS:-(none — no buildkitd-comm record in the window)}"
+    L1_BP=""
+    L1_BPTS=""
+    while read -r L1P; do
+      [ -n "$L1P" ] || continue
+      L1LAST="$(grep -a "buildkitd-$L1P " "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | tail -1 | awk '{print $4}' | sed 's/:$//' || true)"
+      case "$L1LAST" in
+        ''|*[!0-9.]*) continue ;;
+      esac
+      if [ -z "$L1_BPTS" ] || awk -v a="$L1LAST" -v b="$L1_BPTS" 'BEGIN{exit !(a+0 > b+0)}'; then
+        L1_BPTS="$L1LAST"; L1_BP="$L1P"
+      fi
+    done <<< "$L1_BPIDS"
+    echo "  the diagnostic subject pid: ${L1_BP:-(none)}"
+    if [ -n "$L1_BP" ]; then
+      echo "--- the final syscall sequence after the LAST SELinux decision of the buildkitd pid (the SELinux-clean tail; the bounded print):"
+      awk -v who="buildkitd-$L1_BP " '
+        /selinux_audited:/ { if (index($0, who) > 0) { lastsel = NR } }
+        { lines[NR] = $0 }
+        END {
+          if (lastsel == 0) { print "  (no SELinux decision record for the pid — the whole span is pre-first-decision)"; exit }
+          n = 0
+          for (i = lastsel + 1; i <= NR && n < 60; i++) { if (index(lines[i], who) > 0) { print lines[i]; n++ } }
+          if (n == 0) print "  (no further same-pid records after the last SELinux decision)"
+        }
+      ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true
+      echo "--- the exit record and status:"
+      grep -a "buildkitd-$L1_BP " "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -aE "sys_enter_exit_group|sched_process_exit" | tail -3 || true
+      echo "--- the chmod-family trace inventory (the 4C-L1 arm addition — the errno owner of the residual death):"
+      grep -a "buildkitd-$L1_BP " "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -aE "sys_(enter|exit)_fchmod|sys_(enter|exit)_fchmodat2?|sys_(enter|exit)_chmod" | tail -8 || true
+      echo "  (empty = the chmod-family records are absent from the window even under the 4C-L1 arm — recorded as-is, never reconstructed)"
+      echo "--- the signal inventory for the buildkitd pid (manager-initiated teardown vs voluntary exit):"
+      grep -a "buildkitd-$L1_BP " "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -aE "signal_deliver|signal_generate" | tail -8 || true
+      echo "  (the signal_generate lines carry the SENDING task's comm; a SIGKILL/SIGTERM generate aimed at the pid is the manager/parent teardown evidence; SIGURG is the Go runtime preemption signal, benign)"
+      echo "--- the first-sight and death timestamps from the sampler (the wall-clock bounds, never a duration claim):"
+      grep -a "L1-PROC-IDENT\|L1-PROC-DEAD\|L1-SAMPLER-END" "$EVIDENCE_DIR/60-lifecycle-sampler.txt" 2>/dev/null | head -6 || true
+    fi
+    echo "--- post-mortem filesystem facts (the runtime socket path and the op trees; existence only):"
+    for L1PTH in \
+      "/run/docker-helper-builder/ops/$OP_ID" \
+      "/run/docker-helper-builder/ops/$OP_ID/buildkitd.sock" \
+      "/var/lib/docker-helper-builder/ops/$OP_ID" \
+      "/var/lib/docker-helper-builder/ops/$OP_ID/root" \
+      "/var/lib/docker-helper-builder/ops/$OP_ID/root/buildkitd.lock" \
+      "/var/lib/docker-helper-builder/ops/$OP_ID/rootlesskit-state"; do
+      if [ -e "$L1PTH" ]; then
+        printf '  PRESENT %s (%s)\n' "$L1PTH" "$(stat -c '%F' "$L1PTH" 2>/dev/null || echo exists)"
+      else
+        printf '  ABSENT  %s\n' "$L1PTH"
+      fi
+    done
+    echo "--- the operation-A identity status (the op was created by the flow start; the daemon's own op record decides the rest):"
+    printf '  the op id: %s\n' "$OP_ID"
+    grep -a "op_$OP_ID\|operation.*fail\|failed" "$EVIDENCE_DIR/07-manager-after.txt" 2>/dev/null | tail -5 || true
+  } > "$EVIDENCE_DIR/60-lifecycle-diagnostic.txt" 2>&1
+  cat "$EVIDENCE_DIR/60-lifecycle-diagnostic.txt" >&2
+  # The L1 verdict markers (evidence-based; the classification itself is
+  # the deliverable's reading of 60-lifecycle-diagnostic.txt):
+  L1_STDERR_LINE="$(journalctl -u "$UNIT" --no-pager 2>/dev/null | grep -a 'buildkitd: ' | tail -1 || true)"
+  if [ -n "$L1_STDERR_LINE" ]; then
+    marker "L1-EVIDENCE-BUILDKITD-STDERR=$L1_STDERR_LINE"
+    marker "L1-CLASS=L1-A/SELF-EXIT-WITH-LOGGED-ERROR (the buildkitd own stderr error line is captured; the exact owner text is the L1 evidence)"
+  else
+    marker "L1-CLASS=SEE-60-LIFECYCLE-DIAGNOSTIC (the stderr line was not captured from the journal — the sampler/trace evidence decides the classification)"
+  fi
+  if [ -z "$POSTTUN_BKD_STARTUP_OWNER_TS" ]; then
+    marker "NO-NEW-SELINUX-CANDIDATE=OK (no genuine PRE-CLEANUP terminal owner this run — the 4C-81 HOLD stands; no 4C-82 candidate minted; L1 is diagnostic-only)"
+    marker "4C-82=NO-GO (re-affirmed by the L1 diagnostic phase: no policy authority)"
+  fi
+  marker "LIFECYCLE-DIAGNOSTIC=COMPLETE"
   marker "4C-38=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-39=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-40=INCOMPLETE/ORDER_NOT_ESTABLISHED"
