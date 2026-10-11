@@ -3483,9 +3483,16 @@ fi
 # preceded it (the window's last selinux_audited record predates the
 # fatal write by ~264ms), so the failure is a REAL filesystem outcome
 # whose path and errno the audit record carries in full. The rule
-# scopes to the per-op state/runtime trees only and to FAILING opens
-# only; the key is deleted by the death-trace read block.
-auditctl -a always,exit -F arch=b64 -S openat,open,openat2 -F dir=/var/lib/docker-helper-builder/ops/ -F success=0 -k p5s2rxd 2>/dev/null || true
+# scopes to FAILING opens only; the dir-scoped form is tried first and
+# the euid-agnostic fallback covers the same opens without the dir
+# filter (the first attempt's rule table carried NO p5s2rxd rule — the
+# combined -S list with the dir filter was rejected silently; the
+# auditctl error now lands in the arm's own evidence file). The key is
+# deleted by the death-trace read block.
+RXD_AUDIT_LOG="$EVIDENCE_DIR/18-auditctl-sysrules.txt"
+auditctl -a always,exit -F arch=b64 -S openat -F dir=/var/lib/docker-helper-builder/ops/ -F success=0 -k p5s2rxd >> "$RXD_AUDIT_LOG" 2>&1 \
+  || auditctl -a always,exit -F arch=b64 -S openat -F success=0 -k p5s2rxd >> "$RXD_AUDIT_LOG" 2>&1 \
+  || note "the 4C-37R failing-open audit rule could not be installed (see 18-auditctl-sysrules.txt)"
 START_OUT="$(printf 'START %s\n' "$OP_ID" | timeout 120 socat - UNIX-CONNECT:"$MANAGER_SOCK")" || START_RC=$?
 {
   echo "window-start: $T0"
