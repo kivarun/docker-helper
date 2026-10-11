@@ -485,7 +485,36 @@ jobs:
           # 4C-82-era commit to the commit carrying this fix, because
           # the binary itself must carry the redirect (Go sources
           # changed).
-          PHASE4B_PROOF_REF: '1ba2a86aa17a3cff103550473861283d17ae910a'
+          #
+          # 4C-84: the L3 diagnostic run 38146453086 attributed the
+          # worker-init fatal stage end to end. BuildKitd's OCI worker
+          # initializer LookPath-walks the exact child PATH order — runc
+          # across the whole PATH, then buildkit-runc — and selects the
+          # bundled /usr/libexec/docker-helper/buildkit/buildkit-runc
+          # (the LAST probe, found); the bundled binary carries the
+          # generic bin_t distro label (live-proven: bin_t:s0, mode
+          # -rwxr-xr-x, root:root, not a symlink, sha256 0acdd302...) so
+          # the exec is denied — the bin_t:file execute (0x4000) AVC is
+          # the ONLY exec-class denial in the worker-init window and the
+          # stderr chain (the "skipping oci worker" warning immediately
+          # after the denial, then "no worker found, rebuild the
+          # buildkit daemon?", then the voluntary exit 1) proves the
+          # terminal ownership. The tmpfs_t:lnk_file read sibling is the
+          # /etc/localtime open inside the log-timestamp formatting —
+          # never the exec resolution. NO generic bin_t:file execute
+          # grant (the standing generic-exec quarantine HOLDS): the fix
+          # is the LABEL — the shipped .fc gains the exact
+          # buildkit-runc rule carrying the SAME dedicated
+          # docker_helper_buildkitd_exec_t identity whose execute/read
+          # plane buildkitd_t already owns (the 4C-61/62 target-side
+          # rule), and the exact-path restorecon lands in the install
+          # script and the RPM posttrans. No .te delta: the
+          # module-borne buildkitd-named allow total stays exactly 9.
+          # No transition fires (buildkitd_t execing buildkitd_exec_t
+          # has no type_transition edge — the runc probe runs inside
+          # the daemon domain). The pin advances because the policy
+          # module sources (the .fc) changed in the proof tree.
+          PHASE4B_PROOF_REF: '72e87ccffe3406a55a9a82631be0f081ccb787d0'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
