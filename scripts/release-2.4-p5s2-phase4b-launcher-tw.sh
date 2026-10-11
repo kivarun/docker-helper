@@ -11787,6 +11787,28 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
     uname -r 2>/dev/null | sed 's/^/  kernel: /' || true
     grep -a -o -E '.{0,40}creating trace controller listener.{0,10}' /usr/libexec/docker-helper/buildkit/buildkitd 2>/dev/null | head -2 || true
     printf '  the otel-grpc default string occurrences: %s\n' "$(grep -a -c -F '/run/buildkit/otel-grpc.sock' /usr/libexec/docker-helper/buildkit/buildkitd 2>/dev/null || echo 0)"
+    echo "=== 4C-84 L3: the worker-init owner resolution (DIAGNOSTIC ONLY — no policy authority) ==="
+    echo "--- the worker-binary PATH probe chain (every buildkitd newfstatat naming a runc/buildkit-runc candidate, in order; the candidates buildkitd's own LookPath walks — the LAST candidate with a 0x0 result is the selected executable):"
+    grep -a "buildkitd-[0-9]* " "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -aE 'sys_newfstatat\(.*"(runc|buildkit-runc)"' | head -24 || true
+    echo "--- the exec-family records around the worker-init window (the exec syscall records themselves are a known tracer hole; the AVC and the stderr chain are the authority):"
+    grep -a "buildkitd-[0-9]* " "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -aE "sys_enter_execve|sys_enter_execveat" | head -6 || true
+    echo "--- every buildkitd file-class execute AVC and lnk_file-class read AVC in the span (the worker-init owner candidates):"
+    grep -a "buildkitd-[0-9]* " "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -a "selinux_audited" | grep -aE 'tclass=file' | grep -aE 'denied=0x4000([^0-9a-fA-F]|$)' | head -6 || true
+    grep -a "buildkitd-[0-9]* " "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -a "selinux_audited" | grep -aE 'tclass=lnk_file' | head -6 || true
+    echo "--- the stderr chain around the worker init (the warning + the fatal, the visible prefixes):"
+    grep -a "sys_write(fd: 2" "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -a "buildkitd-" | grep -aE '"(time=|buildkitd: )' | tail -6 || true
+    echo "--- the bundled worker binary facts (the label, the mode, the owner, the hash; the symlink state):"
+    for L3B in /usr/libexec/docker-helper/buildkit/buildkit-runc /usr/libexec/docker-helper/buildkit/buildkitd; do
+      if [ -e "$L3B" ]; then
+        ls -lZ "$L3B" 2>/dev/null || true
+        printf '  symlink: %s\n' "$([ -L "$L3B" ] && echo YES-target=$(readlink "$L3B" 2>/dev/null || echo unreadable) || echo no)"
+        printf '  sha256: %s\n' "$(sha256sum "$L3B" 2>/dev/null | awk '{print $1}' || echo unavailable)"
+      else
+        echo "  ABSENT $L3B"
+      fi
+    done
+    echo "--- the PATH seen by buildkitd (from the L1 sampler; the LookPath walks the exact PATH order):"
+    grep -a "L1-PROC-ENV pid=.* PATH=" "$EVIDENCE_DIR/60-lifecycle-sampler.txt" 2>/dev/null | head -2 || true
     echo "--- post-mortem filesystem facts (the runtime socket path and the op trees; existence only):"
     for L1PTH in \
       "/run/docker-helper-builder/ops/$OP_ID" \
@@ -11890,6 +11912,32 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
   else
     marker "L2-OLD-MKDIR-STAGE=STILL-PRESENT (mkdirat-records=${L2_OLD_MK_N:-0} cap-userns-records=${L2_OLD_CAP_N:-0} mkdir-stderr-lines=${L2_STDERR_MK_N:-0})"
     marker "4C-83=FAIL/REDIRECT-NOT-EFFECTIVE"
+  fi
+  # ---- 4C-84 L3 verdict markers (evidence-based; the classification is
+  # ---- the deliverable's reading). DIAGNOSTIC ONLY: no policy
+  # ---- authority, no grant, no candidate minting.
+  L3_PROBE_N="$(grep -a "buildkitd-[0-9]* " "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -acE 'sys_newfstatat\(.*"(runc|buildkit-runc)"' || true)"
+  L3_SEL_LINE="$(grep -a "buildkitd-[0-9]* " "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -aE 'sys_newfstatat\(.*"(runc|buildkit-runc)"' | grep -a -- '-> 0x0' | tail -1 || true)"
+  L3_SEL_PATH="(none-found)"
+  if [ -n "$L3_SEL_LINE" ]; then
+    L3_SEL_PATH="$(printf '%s\n' "$L3_SEL_LINE" | grep -aoE '"[^"]*(runc|buildkit-runc)"' | tail -1 | tr -d '"')"
+  fi
+  marker "L3-WORKER-BINARY-PROBES=$L3_PROBE_N (the LookPath candidate probes in the span)"
+  marker "L3-SELECTED-CANDIDATE=$L3_SEL_PATH (the LAST probe that returned success — the executable buildkitd attempted to exec)"
+  L3_EXEC_N="$(grep -a "buildkitd-[0-9]* " "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -a "selinux_audited" | grep -aE 'tclass=file' | grep -acE 'denied=0x4000([^0-9a-fA-F]|$)' || true)"
+  if [ "${L3_EXEC_N:-0}" -ge 1 ]; then
+    marker "L3-EXEC-AVC=bin_t:file-execute-PRESENT (the file-class 0x4000 execute denials in the span: $L3_EXEC_N; the worker-init owner candidate — the deliverable classifies)"
+  else
+    marker "L3-EXEC-AVC=file-execute-ABSENT (no file-class 0x4000 execute denial in the span)"
+  fi
+  L3_LNK_N="$(grep -a "buildkitd-[0-9]* " "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -a "selinux_audited" | grep -acE 'tclass=lnk_file' || true)"
+  marker "L3-LNK-SIBLING=lnk_file-records=$L3_LNK_N (the tmpfs_t:lnk_file read is the /etc/localtime open inside the log-timestamp formatting — the copy-up tmpfs symlink walk — never the exec resolution; the decode(lnk_file, 0x2) = { read } is the live-proven 4C-51/52 pin)"
+  marker "L3-CLASS-DECODE=file:0x4000=execute (the live-proven 4C-58-era kernel-side pin); lnk_file:0x2=read (the live-proven 4C-51/52 pin)"
+  L3_SKIP_N="$(grep -a "sys_write(fd: 2" "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -ac 'skipping oci wor' || true)"
+  if [ "${L3_SKIP_N:-0}" -ge 1 ]; then
+    marker "L3-STDERR-SKIPPING-OCI-WORKER=PRESENT (the OCI worker init failed and buildkitd warned and skipped it — the exec denial is the swallowed initializer error)"
+  else
+    marker "L3-STDERR-SKIPPING-OCI-WORKER=ABSENT (no skipping-oci-worker warning in the span)"
   fi
   marker "4C-38=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-39=INCOMPLETE/ORDER_NOT_ESTABLISHED"
