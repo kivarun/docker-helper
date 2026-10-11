@@ -3490,9 +3490,16 @@ fi
 # auditctl error now lands in the arm's own evidence file). The key is
 # deleted by the death-trace read block.
 RXD_AUDIT_LOG="$EVIDENCE_DIR/18-auditctl-sysrules.txt"
-auditctl -a always,exit -F arch=b64 -S openat -F dir=/var/lib/docker-helper-builder/ops/ -F success=0 -k p5s2rxd >> "$RXD_AUDIT_LOG" 2>&1 \
-  || auditctl -a always,exit -F arch=b64 -S openat -F success=0 -k p5s2rxd >> "$RXD_AUDIT_LOG" 2>&1 \
-  || note "the 4C-37R failing-open audit rule could not be installed (see 18-auditctl-sysrules.txt)"
+# Three INDEPENDENT rules (one per open syscall): the combined -S list
+# with the dir filter was rejected (dir is a WATCH field, not a syscall
+# filter field), and the single-openat fallback could miss an `open`
+# or `openat2` failure — the payload's Go runtime chooses the entry at
+# runtime, so the rule set covers all three. A per-rule failure is
+# recorded, never silently swallowed.
+for RXDS in openat open openat2; do
+  auditctl -a always,exit -F arch=b64 -S "$RXDS" -F success=0 -k p5s2rxd >> "$RXD_AUDIT_LOG" 2>&1 \
+    || printf 'p5s2rxd: the -S %s rule was rejected\n' "$RXDS" >> "$RXD_AUDIT_LOG"
+done
 START_OUT="$(printf 'START %s\n' "$OP_ID" | timeout 120 socat - UNIX-CONNECT:"$MANAGER_SOCK")" || START_RC=$?
 {
   echo "window-start: $T0"
