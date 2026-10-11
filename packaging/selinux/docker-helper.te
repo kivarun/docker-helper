@@ -3301,7 +3301,102 @@ allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr
 # daemon transport) are DIFFERENT subjects and DIFFERENT owners — their
 # builder_state_t rules stay byte-unchanged, never merged and never
 # templates.
-allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read };
+#
+# --- 4C-81: the categorized operation-state dir open — the 4C-80 rule
+# --- widened IN PLACE (ONE rule, never split) ---
+#
+# The 4C-80 canonical run's (38116950461, BOTH attempts) own terminal
+# causal records, live at the END of the buildkitd process's own
+# lifetime (the 4C-80 state-tree dir read took effect — the terminal
+# failing production sys_openat's read hook passed silently and the
+# SAME syscall's NEXT hook became the causal terminal):
+#
+#   buildkitd-64154 578.662151 selinux_audited: requested=0x40002
+#     denied=0x40000 audited=0x40000 result=-13
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:docker_helper_builder_state_t:s0:c1
+#     tclass=dir — the state-tree dir OPEN hook INSIDE the SAME
+#     terminal failing production sys_openat(AT_FDCWD, the per-op
+#     state path, O_RDONLY|O_CLOEXEC) whose exit is the span's terminal
+#     anchor with its own TRACED owning window (the UNTRACED-OWNER tier
+#     stays closed); the attempt-2 twin: buildkitd-64156 573.557454 the
+#     same shape (requested=0x40002 denied=0x40000 tclass=dir). THE
+#     REQUESTED-VS-DENIED RULE: requested = 0x40002 = { read open },
+#     denied = 0x40000 = { open } — the read bit PASSED silently under
+#     the 4C-80 grant (the grant's live effect recorded in the very
+#     denial that owns the next boundary) and is NOT the delta and is
+#     NOT re-granted; candidate = decode(denied) = exactly { open },
+#     NEVER decode(requested) = { read open }.
+#
+# THE MASK DECODE PIN (the kernel's static classmap numbering, NOT the
+# loaded policy's perms-file numbering): 0x40000 = open (bit 18 of the
+# COMMON_FILE_PERMS list the dir class shares — the directory-open
+# hook, the fd-based open authority). THE CLASS MATTERS — the same bit
+# number 0x40000 on the file class is file:open (the GRANTED member of
+# the state-tree file rule { create read open lock }, the 4C-70
+# authority, AND the standing QUARANTINED buildkitd_exec_t:file open
+# hook — a same-permission coincidence never merges two planes) and on
+# the sock_file class sock_file:open (the daemon transport's standing
+# member) — NEITHER is this authority; decode(dir, 0x40000) = exactly
+# { open }, the class-aware decode regression pins the tuple. The
+# dir-class read bit (0x2, the 4C-80 grant) is adjacent in the same
+# requested mask and stays its own granted member.
+# THE DELTA IS EXACTLY +open:
+#   - dir:open is NOT a directory-IO bundle: it grants the directory's
+#     own OPEN hook (the fd-producing authority) and NOT read (the
+#     4C-80 granted member, never re-granted), NOT remove_name (the
+#     HANDLED/NON-TERMINAL sibling stays its own live-evidence phase —
+#     it becomes a candidate only if a fresh live proof names it the
+#     genuine terminal owner), NOT create/rmdir/rename/add_name (the
+#     granted members are NOT re-granted), NOT setattr/mounton/lock/map
+#     — the conventional directory bundle is NOT reconstructed; the
+#     kernel emits each hook as its OWN decision and the next
+#     boundary's own live decision set owns the next phase (dir-class/
+#     file-class/sock_file-class decisions are never combined into one
+#     phase);
+#   - no write/create/remove_name/setattr/rename rides this widening;
+#     the state-tree FILE rule stays byte-for-semantics exactly
+#     { create read open lock } (its open is the file-class member, a
+#     DIFFERENT class and decision); nothing on
+#     builder_state_t:file/lnk_file or any other class of the per-op
+#     tree, nothing on the sibling root/runtime types
+#     (builder_state_root_t, builder_runtime_root_t, builder_runtime_t
+#     — the runtime-tree dir quintuple and the runtime-tree sock_file
+#     pair are FROZEN planes and are never widened here), and nothing
+#     on any quarantined surface (tmp_t:dir write, the fifos, nsfs,
+#     cgroup, sysctl_fs, sysfs, passwd_file, buildkitd_exec_t:file open
+#     — repeat count never converts a non-terminal denial into
+#     authority);
+#   - no process/process2 permission, no capability/cap_userns, no
+#     range_transition;
+#   - the frozen planes stay frozen: the three exec planes (the source
+#     { execute read open }, the transition { transition }, the target
+#     { entrypoint read execute }), the shared state-root rule (exactly
+#     { getattr search }), the shared runtime-root rule (exactly
+#     { search }), and the standing RootlessKit state-tree rule
+#     { search getattr read open write add_name remove_name lock }
+#     (a different subject and a different owner — its wider shape is
+#     NOT a template for BuildKitd; its dir OPEN member is the same
+#     permission on a DIFFERENT subject and a DIFFERENT owner, never
+#     merged).
+# MCS: the TE rule encodes NO categories — the rule is the bare pair;
+# the c1 -> c1 admissibility stays the existing constraints' job (both
+# domains are proven mcs_constrained_type members). The op_<id>
+# directory's own label is proven separately (the kernel-label sampler's
+# first/last/all read-backs and the live stat, all
+# builder_state_t:s0:c1) — never inferred from an AVC's tcontext.
+# SCOPE — READ CAREFULLY: the rule is type-wide TE authority
+# (buildkitd_t -> EVERY builder_state_t:dir
+# getattr+search+write+add_name+read+open), NOT path-scoped; the MCS
+# category constraints are what keep it operation-scoped in effect (a
+# c1 subject cannot reach a c2 per-op tree — the cross-operation
+# reachability proof (4C-37) stays mandatory and the cross-operation
+# gate stays OPEN/Critical until it holds). The companion runtime
+# owners (init_t provisioning, the manager's own state management, the
+# daemon transport) are DIFFERENT subjects and DIFFERENT owners — their
+# builder_state_t rules stay byte-unchanged, never merged and never
+# templates.
+allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open };
 
 # --- 4C-69: the categorized operation-state file create — the NEW
 # --- file-class plane (a NEW pair+class rule, NEVER a widening of the

@@ -4444,7 +4444,7 @@ func buildkitdIdentityViolations(policy string) []string {
 	const canonicalTransition = "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;"
 	const canonicalEntry = "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute };"
 	const canonicalStateRoot = "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search };"
-	const canonicalStateTree = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read };"
+	const canonicalStateTree = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open };"
 	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock };"
 	const canonicalRuntimeRoot = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search;"
 	const canonicalRuntimeTree = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write add_name remove_name };"
@@ -4590,7 +4590,7 @@ func buildkitdIdentityViolations(policy string) []string {
 		}
 	}
 	if stateTreeCount != 1 {
-		violations = append(violations, fmt.Sprintf("the buildkitd categorized state-tree { getattr search write add_name read } grant must exist exactly once in the exact canonical form, found %d: %s", stateTreeCount, canonicalStateTree))
+		violations = append(violations, fmt.Sprintf("the buildkitd categorized state-tree { getattr search write add_name read open } grant must exist exactly once in the exact canonical form, found %d: %s", stateTreeCount, canonicalStateTree))
 	}
 	stateFileCount := 0
 	for _, line := range strings.Split(policy, "\n") {
@@ -4647,7 +4647,7 @@ func buildkitdIdentityViolations(policy string) []string {
 	// The exact module-borne allow-rule total naming a buildkitd type:
 	// the nine planes only (A source-exec, B transition, C target-side,
 	// D shared state-root, E categorized state-tree dir
-	// { getattr search write add_name read }, F categorized
+	// { getattr search write add_name read open }, F categorized
 	// state-tree file { create read open lock }, G shared runtime-root
 	// dir { search }, H categorized runtime-tree dir
 	// { getattr search write add_name remove_name }, I categorized
@@ -4663,7 +4663,7 @@ func buildkitdIdentityViolations(policy string) []string {
 		}
 	}
 	if buildkitdNamedAllow != 9 {
-		violations = append(violations, fmt.Sprintf("the module must carry exactly the nine buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read }, the categorized state-tree file { create read open lock }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name }, the categorized runtime-tree sock_file { create unlink }), found %d", buildkitdNamedAllow))
+		violations = append(violations, fmt.Sprintf("the module must carry exactly the nine buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open }, the categorized state-tree file { create read open lock }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name }, the categorized runtime-tree sock_file { create unlink }), found %d", buildkitdNamedAllow))
 	}
 	// The shared runtime-root dir surface has exactly the standing
 	// owners above; a NEW or reshaped rule on the pair (any source,
@@ -4733,7 +4733,7 @@ func buildkitdIdentityViolations(policy string) []string {
 			continue
 		}
 		if strings.Contains(trimmed, " docker_helper_builder_state_t:dir ") && !standingStateTreeDirRules[trimmed] {
-			violations = append(violations, "the categorized state-tree dir surface has exactly the standing owners (init_t, the manager, the flow, the buildkitd { getattr search write add_name read } rule) — every other shape on the pair violates: "+trimmed)
+			violations = append(violations, "the categorized state-tree dir surface has exactly the standing owners (init_t, the manager, the flow, the buildkitd { getattr search write add_name read open } rule) — every other shape on the pair violates: "+trimmed)
 		}
 	}
 	// The categorized state-tree file surface has exactly the standing
@@ -5015,8 +5015,8 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		t.Error("the missing-state-root mutation must trip the buildkitd authority invariants")
 	}
 
-	// The 4C-68/80 categorized state-tree plane: exactly the
-	// { getattr search write add_name read } rule, once (the 4C-65 getattr is
+	// The 4C-68/80/81 categorized state-tree plane: exactly the
+	// { getattr search write add_name read open } rule, once (the 4C-65 getattr is
 	// the 4C-64 run's terminal-causal owner; the 4C-66 search is the
 	// 4C-65 canonical run's own terminal boundary; the 4C-67 write is the
 	// 4C-66 canonical run's own terminal boundary; the 4C-68 add_name is
@@ -5024,9 +5024,12 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 	// the requested 0x24000000 decision; the 4C-80 read is the 4C-79
 	// canonical runs' own terminal boundary (the DENIED bit 0x2 of the
 	// terminal failing production openat, AFTER the whole runtime-tree
-	// socket lifecycle passed whole) — the rule widened IN PLACE each
-	// phase, never split).
-	const canonicalStateTree = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read };"
+	// socket lifecycle passed whole); the 4C-81 open is the 4C-80
+	// canonical run's own terminal boundary (the DENIED bit 0x40000 of
+	// the SAME openat — the read bit PASSED silently under the 4C-80
+	// grant, the requested-vs-denied rule degrades to the exact delta) —
+	// the rule widened IN PLACE each phase, never split).
+	const canonicalStateTree = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open };"
 	var withoutStateTree []string
 	stateTreeCount := 0
 	for _, line := range strings.Split(policy, "\n") {
@@ -5263,12 +5266,14 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		{"parallel bare search rule beside the canonical pair", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir search;"},
 		{"split state-root grant", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir getattr;\nallow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir search;"},
 		{"duplicate of the state-root rule", canonicalStateRoot},
-		// the 4C-68/80 categorized state-tree plane (exactly the
-		// { getattr search write add_name read } quintuple; the
+		// the 4C-68/80/81 categorized state-tree plane (exactly the
+		// { getattr search write add_name read open } sextuple; the
 		// missing-rule case is covered by the withoutStateTree removal
-		// above; the 4C-80 read widened IN PLACE — the old 4C-68
-		// quadruple form is pinned below)
-		{"the old 4C-68 quadruple form (missing read)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name };"},
+		// above; the 4C-80 read and the 4C-81 open widened IN PLACE —
+		// the old 4C-68 quadruple and 4C-80 quintuple forms are pinned
+		// below)
+		{"the old 4C-68 quadruple form (missing read+open)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name };"},
+		{"the old 4C-80 quintuple form (missing open)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read };"},
 		{"the old 4C-67 triple form (missing add_name)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write };"},
 		{"the old 4C-66 pair form (missing write+add_name)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search };"},
 		{"the brace search-write form (missing getattr+add_name)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { search write };"},
@@ -5290,19 +5295,18 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		{"rmdir instead", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir rmdir;"},
 		{"mounton instead", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir mounton;"},
 		{"lock instead", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir lock;"},
-		// the sixth-permission sweep on the quintuple: dir:read is
-		// NOT a directory-listing bundle — the HANDLED/NON-TERMINAL
+		// the seventh-permission sweep on the sextuple: dir:open is
+		// NOT a directory-IO bundle — the HANDLED/NON-TERMINAL
 		// remove_name sibling stays its own live-evidence phase and the
 		// kernel emits each hook as its own decision; none rides the
-		// read grant; dir-class and file-class decisions are never
+		// open grant; dir-class and file-class decisions are never
 		// combined
-		{"the quintuple + remove_name", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read remove_name };"},
-		{"the quintuple + create", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read create };"},
-		{"the quintuple + setattr", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read setattr };"},
-		{"the quintuple + rmdir", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read rmdir };"},
-		{"the quintuple + open", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open };"},
-		{"the quintuple + lock", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read lock };"},
-		{"the quintuple + mounton", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read mounton };"},
+		{"the sextuple + remove_name", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open remove_name };"},
+		{"the sextuple + create", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create };"},
+		{"the sextuple + setattr", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open setattr };"},
+		{"the sextuple + rmdir", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open rmdir };"},
+		{"the sextuple + lock", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open lock };"},
+		{"the sextuple + mounton", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open mounton };"},
 		{"state-tree grant from the wrong source (the flow)", "allow docker_helper_rootlesskit_t docker_helper_builder_state_t:dir getattr;"},
 		{"state-tree grant from the wrong source (the manager)", "allow docker_helper_builder_t docker_helper_builder_state_t:dir getattr;"},
 		{"state-tree grant from the wrong source (the daemon)", "allow docker_helper_t docker_helper_builder_state_t:dir getattr;"},
@@ -5312,7 +5316,7 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		{"state-tree grant toward the wrong target (builder_runtime_root_t)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir getattr;"},
 		{"state-tree grant on the wrong class (file)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file getattr;"},
 		{"state-tree grant on the wrong class (file, add_name shape)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file add_name;"},
-		{"reordered brace of the state-tree quintuple", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { search write add_name read getattr };"},
+		{"reordered brace of the state-tree sextuple", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { search write add_name read open getattr };"},
 		{"split state-tree grant (getattr+search rule + write add_name rule)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search };\nallow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { write add_name };"},
 		{"split state-tree grant (getattr rule + search write add_name rule)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir getattr;\nallow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { search write add_name };"},
 		{"parallel bare write rule beside the canonical quadruple", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir write;"},
@@ -5322,7 +5326,7 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		// { create read open lock } rule, widened IN PLACE from the 4C-70
 		// triple; the missing-rule case is covered by the withoutStateFile
 		// removal above; the dir rule above stays byte-for-semantics the
-		// quintuple — a permission added to the dir rule is a dir-plane
+		// sextuple — a permission added to the dir rule is a dir-plane
 		// mutation, never the file plane)
 		// the old 4C-69 bare create form (missing read+open+lock)
 		{"the old 4C-69 bare create form (missing read+open+lock)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file create;"},
@@ -6507,6 +6511,44 @@ func TestSELinuxPolicyKernelClassmapMaskPins(t *testing.T) {
 	}
 	if got := classDecode("dir", 0x24000016); got != "(dir, read write getattr add_name search)" {
 		t.Errorf("kernel classmap decode: the widened state-tree quintuple's own combined form (0x24000016) must decode to exactly { read write getattr add_name search } in kernel-bit order, got %s", got)
+	}
+	// The 4C-81 grant-candidate pin (the 4C-80 canonical run
+	// 38116950461's own terminal causal records, BOTH attempts:
+	// requested=0x40002={read open} denied=0x40000 on tclass=dir toward
+	// builder_state_t:s0:c1, inside the SAME terminal failing production
+	// sys_openat(the per-op state path, O_RDONLY|O_CLOEXEC) whose exit
+	// is the anchor — the state-tree dir OPEN hook, the read bit PASSED
+	// silently under the 4C-80 grant and is NOT the delta):
+	//   (dir, 0x40000) = { open } — the live-backed grant candidate,
+	//     the tuple (dir, { open }), bit 18 of the COMMON_FILE_PERMS
+	//     list the dir class shares (the directory-open hook);
+	//   (file, 0x40000) = { open } — the same bit on the file class is
+	//     the GRANTED member of the state-tree file rule (the 4C-70
+	//     authority) AND the standing QUARANTINED buildkitd_exec_t:file
+	//     open hook, a DIFFERENT class and decision;
+	//   (sock_file, 0x40000) = { open } — the same bit on the sock_file
+	//     class is the daemon transport's standing member, a DIFFERENT
+	//     subject and a DIFFERENT owner;
+	//   the widened sextuple's own combined form decode(dir,
+	//     0x24040016) = { read write getattr open add_name search } —
+	//     ONE rule carrying exactly the sextuple.
+	// candidate = decode(denied) = exactly { open }, NEVER
+	// decode(requested) = { read open } — the standing read bit is NOT
+	// re-granted.
+	if got := classDecode("dir", 0x40000); got != "(dir, open)" {
+		t.Errorf("kernel classmap decode: the 4C-81 grant candidate must be the tuple (dir, { open }) — the live-backed directory-open pin (bit 18 of the common list the dir class shares), got %s", got)
+	}
+	if got := classDecode("file", 0x40000); got != "(file, open)" {
+		t.Errorf("kernel classmap decode: file 0x40000 must decode to { open } (the same bit 18 — a DIFFERENT class and decision from the dir plane; the granted state-tree file rule member and the quarantined buildkitd_exec_t open), got %s", got)
+	}
+	if got := classDecode("sock_file", 0x40000); got != "(sock_file, open)" {
+		t.Errorf("kernel classmap decode: sock_file 0x40000 must decode to { open } (the same bit 18 — a DIFFERENT subject and a DIFFERENT owner from the dir plane), got %s", got)
+	}
+	if got := classDecode("dir", 0x24040016); got != "(dir, read write getattr open add_name search)" {
+		t.Errorf("kernel classmap decode: the widened state-tree sextuple's own combined form (0x24040016) must decode to exactly { read write getattr open add_name search } in kernel-bit order, got %s", got)
+	}
+	if got := classDecode("dir", 0x40002); got != "(dir, read open)" {
+		t.Errorf("kernel classmap decode: dir 0x40002 must decode to { read open } — the requested mask's both members; only the denied bit 0x40000 = { open } is the grant candidate, never the whole requested mask, got %s", got)
 	}
 }
 
