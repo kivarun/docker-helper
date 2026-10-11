@@ -3475,6 +3475,17 @@ if [ "$TRACE_ENABLED" = 1 ] && [ -d "$TRACING/instances" ]; then
     echo 1 > "$RXD_TRACE_INSTANCE/tracing_on" 2>/dev/null || true
   fi
 fi
+# The failing-open audit rule (the death-window's own channel): the
+# payload's fatal stderr line is truncated by the tracer's print width
+# (the 4C-37R canonical run 38176200235's record carried
+# "buildkitd: open /var/lib/docker-helper-builder/ops/op_..." at 0x8d
+# bytes — the path and the errno text both cut), and NO SELinux denial
+# preceded it (the window's last selinux_audited record predates the
+# fatal write by ~264ms), so the failure is a REAL filesystem outcome
+# whose path and errno the audit record carries in full. The rule
+# scopes to the per-op state/runtime trees only and to FAILING opens
+# only; the key is deleted by the death-trace read block.
+auditctl -a always,exit -F arch=b64 -S openat,open,openat2 -F dir=/var/lib/docker-helper-builder/ops/ -F success=0 -k p5s2rxd 2>/dev/null || true
 START_OUT="$(printf 'START %s\n' "$OP_ID" | timeout 120 socat - UNIX-CONNECT:"$MANAGER_SOCK")" || START_RC=$?
 {
   echo "window-start: $T0"
@@ -12054,8 +12065,12 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
       echo "--- the last SELinux decisions in the window (the tail; the death's own decision context):"
       grep -a "selinux_audited" /tmp/p4b-work/deathwin-raw.txt 2>/dev/null | tail -12 || true
       echo "(end of the SELinux decision tail)"
+      echo "--- the failing-open audit records under the per-op trees (the full path and errno of the fatal open; the tracer-truncated line's completion):"
+      ausearch -k p5s2rxd --raw 2>/dev/null | grep -a "type=SYSCALL\|type=PATH\|type=CWD" | tail -30 || true
+      echo "(end of the failing-open audit records)"
     } > "$EVIDENCE_DIR/62-runtime-death-trace.txt" 2>&1
     cat "$EVIDENCE_DIR/62-runtime-death-trace.txt" >&2
+    auditctl -D -k p5s2rxd 2>/dev/null || true
   fi
 
   # ---- 4C-L1: the software-lifecycle diagnostic verdict. DIAGNOSTIC
