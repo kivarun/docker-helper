@@ -55,6 +55,21 @@ func builderRootlessKitArgv(opID, rtDir, stDir string) []string {
 		"--rootless",
 		"--root=" + filepath.Join(stDir, "root"),
 		"--addr=unix://" + opSocketPath(opID),
+		// The OTEL trace controller socket redirect (4C-83): buildkitd
+		// v0.33 defaults the trace socket to the system /run/buildkit
+		// whenever its rootless-config detection is false. The live L2
+		// evidence (run 38128544917) proved the detection breaks inside
+		// this composition — RunningInUserNS's stat("/proc/self/ns/user")
+		// hits the standing nsfs_t:file getattr denial and the "unexpected
+		// procfs state" branch returns false even though USER is carried
+		// and the uid map is mapped — so the default would mkdir the
+		// GLOBAL /run/buildkit (a cross-operation state surface the
+		// isolation model forbids) through an in-namespace root that
+		// cannot create it. The flag redirects the whole trace-socket
+		// stage into this operation's own runtime tree, where the
+		// manager pre-creates and provisions the buildkit directory and
+		// the existing categorized grants carry the socket lifecycle.
+		"--otel-socket-path=" + filepath.Join(rtDir, "buildkit", "otel-grpc.sock"),
 	}
 }
 

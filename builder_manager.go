@@ -504,7 +504,7 @@ func (m *builderManager) launchInstance(inst *builderInstance) bool {
 		m.removeReservation(inst)
 		return false
 	}
-	for _, dir := range []string{rtDir, filepath.Join(stDir, "rootlesskit-state"), filepath.Join(stDir, "root")} {
+	for _, dir := range []string{rtDir, filepath.Join(rtDir, "buildkit"), filepath.Join(stDir, "rootlesskit-state"), filepath.Join(stDir, "root")} {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			m.managerDiagf("START %s: cannot create instance dirs: %v", opID, err)
 			m.removeReservation(inst)
@@ -543,10 +543,19 @@ func (m *builderManager) launchInstance(inst *builderInstance) bool {
 	// Explicit child environment; no os.Environ() inheritance.
 	// USER names the builder identity for buildkitd's rootless-mode
 	// detection (isRootlessConfig: RunningInUserNS && $USER != "" &&
-	// $USER != "root"); without it buildkitd v0.33 falls back to the
-	// root defaults and its OTEL trace controller mkdirs /run/buildkit,
-	// which an in-namespace root cannot create (M0/M1 carried USER and
-	// are the proven composition).
+	// $USER != "root"). The 4C-83 L2 live evidence (run 38128544917)
+	// proved the USER carry alone is NOT sufficient: buildkitd's
+	// RunningInUserNS stat("/proc/self/ns/user") hits the standing
+	// nsfs_t:file getattr denial and its "unexpected procfs state"
+	// branch returns false, so the OTEL trace socket fell back to the
+	// system default /run/buildkit — the fatal mkdir stage owned by the
+	// cap_userns CAP_DAC_OVERRIDE denial inside the failing mkdirat
+	// window (the cap_capable trace ret 0: the kernel-side in-namespace
+	// capability passes, the SELinux self-pair check denies). The
+	// binding fix is the canonical argv's --otel-socket-path redirect
+	// into this operation's own runtime tree plus the pre-created and
+	// provisioned buildkit directory (mkdirAs then finds it existing
+	// and never runs its chown); USER stays for the identity semantics.
 	env := []string{
 		"HOME=" + builderManagerStateRoot,
 		"USER=" + builderManagerBuilderUser,

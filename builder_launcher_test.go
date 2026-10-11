@@ -575,8 +575,8 @@ func TestBuilderManagerSingleCompositionDecision(t *testing.T) {
 			setEvents++
 		}
 	}
-	if setEvents != 4 {
-		t.Fatalf("the same decision must drive provisioning: %d set events, want 4", setEvents)
+	if setEvents != 5 {
+		t.Fatalf("the same decision must drive provisioning: %d set events, want 5", setEvents)
 	}
 	if category, _ := builderManagerCategoryOf(t, m, opID); category != builderCategory(1) {
 		t.Fatalf("record category = %s, want c1", category)
@@ -626,8 +626,8 @@ func TestBuilderLauncherFailureRunsFailedStartLifecycle(t *testing.T) {
 			setEvents++
 		}
 	}
-	if setEvents != 4 {
-		t.Fatalf("the provisioning before the child failure: %d set events, want 4", setEvents)
+	if setEvents != 5 {
+		t.Fatalf("the provisioning before the child failure: %d set events, want 5", setEvents)
 	}
 	op2 := "op_fedcba9876543210fedcba9876543210"
 	if category := startWithCategory(t, m, op2); category != builderCategory(1) {

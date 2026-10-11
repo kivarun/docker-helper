@@ -44,6 +44,13 @@ func builderProvisionedPaths(opID, rtDir, stDir string) []builderProvisionedPath
 		{rel: "state/rootlesskit-state", path: filepath.Join(stDir, "rootlesskit-state"), objectType: builderStateObjectType},
 		{rel: "state/root", path: filepath.Join(stDir, "root"), objectType: builderStateObjectType},
 		{rel: "runtime", path: rtDir, objectType: builderRuntimeObjectType},
+		// The OTEL trace-socket parent (4C-83): pre-created by the
+		// manager so buildkitd's own mkdirAs finds it existing and skips
+		// its MkdirAll+Chown, and provisioned with the exact categorized
+		// context like every other required per-op path — the runtime
+		// relabel matrix is not recursive, so the directory needs its
+		// own explicit entry.
+		{rel: "runtime/buildkit", path: filepath.Join(rtDir, "buildkit"), objectType: builderRuntimeObjectType},
 	}
 }
 

@@ -117,12 +117,13 @@ func TestBuilderObjectContextCanonical(t *testing.T) {
 		t.Errorf("runtime c1023 context = %q", got)
 	}
 	// Type separation in the matrix: the three state paths carry the
-	// state type, the runtime path carries the runtime type, and each
-	// top-level path appears exactly once.
+	// state type, the runtime paths (the runtime dir and the OTEL
+	// trace-socket parent) carry the runtime type, and each path appears
+	// exactly once.
 	const opID = "op_0123456789abcdef0123456789abcdef"
 	paths := builderProvisionedPaths(opID, opRuntimeDir(opID), opStateDir(opID))
-	if len(paths) != 4 {
-		t.Fatalf("provisioning matrix has %d entries, want 4", len(paths))
+	if len(paths) != 5 {
+		t.Fatalf("provisioning matrix has %d entries, want 5", len(paths))
 	}
 	seen := map[string]bool{}
 	for _, p := range paths {
@@ -131,7 +132,7 @@ func TestBuilderObjectContextCanonical(t *testing.T) {
 		}
 		seen[p.path] = true
 		want := builderRuntimeObjectType
-		if p.rel != "runtime" {
+		if p.rel != "runtime" && p.rel != "runtime/buildkit" {
 			want = builderStateObjectType
 		}
 		if p.objectType != want {
@@ -141,7 +142,7 @@ func TestBuilderObjectContextCanonical(t *testing.T) {
 }
 
 // TestBuilderProvisioningSuccessOrderContextsBeforeSpawn proves the
-// successful provisioning: all four required paths receive their exact
+// successful provisioning: all five required paths receive their exact
 // expected contexts (type + the record's category), each in set-then-get
 // order, and every provisioning event strictly precedes the command
 // creation; the launch continues only after the last verification.
@@ -185,6 +186,8 @@ func TestBuilderProvisioningSuccessOrderContextsBeforeSpawn(t *testing.T) {
 		{"get", 2, builderStateObjectType},
 		{"set", 3, builderRuntimeObjectType},
 		{"get", 3, builderRuntimeObjectType},
+		{"set", 4, builderRuntimeObjectType},
+		{"get", 4, builderRuntimeObjectType},
 	}
 	entries := f.entries()
 	if len(entries) != len(wantOrder)+1 {
@@ -283,7 +286,7 @@ func TestBuilderProvisioningReadBackTerminalNULCanonicalizes(t *testing.T) {
 
 	opID := "op_0123456789abcdef0123456789abcdef"
 	// The first admission binds c1 (asserted after reservation); the
-	// kernel read-back convention is forced for all four paths up front so
+	// kernel read-back convention is forced for all five paths up front so
 	// the terminal-NUL path is deterministic.
 	paths := provisionMatrixPaths(opID)
 	for _, p := range paths {
@@ -305,8 +308,8 @@ func TestBuilderProvisioningReadBackTerminalNULCanonicalizes(t *testing.T) {
 	}
 
 	entries := f.entries()
-	if len(entries) != 9 {
-		t.Fatalf("observed %d events, want 8 provisioning events + 1 spawn", len(entries))
+	if len(entries) != 11 {
+		t.Fatalf("observed %d events, want 10 provisioning events + 1 spawn", len(entries))
 	}
 	if last := entries[len(entries)-1]; last.kind != "spawn" {
 		t.Fatalf("last event = %q at %q, want the spawn after full verification", last.kind, last.path)
