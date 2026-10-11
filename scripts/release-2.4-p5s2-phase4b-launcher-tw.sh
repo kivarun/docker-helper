@@ -12092,7 +12092,23 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
       else
         echo "(no buildkitd p5s2rxd SYSCALL record found in any audit generation)"
       fi
-      echo "(end of the failing-open audit records)"
+      echo "--- the flow-member p5s2rxd records (uid=475 — ANY failing open by the flow's uid; if even these are absent while the rule demonstrably fires for uid 0, the flow's own audit delivery is the anomaly):"
+      grep -ah 'key="p5s2rxd"' $RXD_AUD_LOGS 2>/dev/null | grep -a 'uid=475' | head -10 || true
+      echo "(end of the uid-475 records)"
+      echo "--- the p5s2rxd records inside the death window (T0+1..T0+6s, any comm):"
+      RXD_W0="$(awk -v t="${POSTTUN_T0_EPOCH:-0}" 'BEGIN{printf "%d", int(t)+1}')"
+      RXD_W1="$(awk -v t="${POSTTUN_T0_EPOCH:-0}" 'BEGIN{printf "%d", int(t)+6}')"
+      echo "window: [$RXD_W0, $RXD_W1]"
+      grep -ah 'key="p5s2rxd"' $RXD_AUD_LOGS 2>/dev/null | sed -n 's/.*msg=audit(\([0-9]*\)\..*/\1/p' | awk -v s="$RXD_W0" -v e="$RXD_W1" '$1+0 >= s+0 && $1+0 <= e+0 { n++ } END { print "records in window: " n+0 }' || true
+      grep -ah 'key="p5s2rxd"' $RXD_AUD_LOGS 2>/dev/null | sed -n 's/.*msg=audit(\([0-9]*\)\..*/\1/p' | awk -v s="$RXD_W0" -v e="$RXD_W1" '$1+0 >= s+0 && $1+0 <= e+0' >/dev/null || true
+      grep -ah 'key="p5s2rxd"' $RXD_AUD_LOGS 2>/dev/null | awk -v s="$RXD_W0" -v e="$RXD_W1" '{ ts=""; if (match($0, /msg=audit\([0-9]+\./)) { ts=substr($0, RSTART+10, RLENGTH-11) } ; if (ts != "" && ts+0 >= s+0 && ts+0 <= e+0) print }' | head -30 || true
+      echo "(end of the death-window records)"
+      echo "--- the loaded policy's dontaudit surface for the buildkitd domain (the silent-denial candidates: a denied open whose audit is suppressed produces NO AVC and NO audit record — exactly the observed shape):"
+      sesearch --dontaudit -s docker_helper_buildkitd_t 2>/dev/null | head -50 || true
+      echo "--- the dontaudit surface TARGETING the per-op state/runtime planes (any subject):"
+      sesearch --dontaudit -t docker_helper_builder_state_t 2>/dev/null | head -20 || true
+      sesearch --dontaudit -t docker_helper_builder_runtime_t 2>/dev/null | head -20 || true
+      echo "(end of the dontaudit surfaces)"
     } > "$EVIDENCE_DIR/62-runtime-death-trace.txt" 2>&1
     cat "$EVIDENCE_DIR/62-runtime-death-trace.txt" >&2
     auditctl -D -k p5s2rxd 2>/dev/null || true
