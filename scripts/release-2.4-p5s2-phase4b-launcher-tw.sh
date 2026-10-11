@@ -1153,11 +1153,21 @@ log "D: 4C-49 confinement-gate watcher armed (pid $GATE_WATCHER_PID)"
         printf '%s L1-PROC-IDENT pid=%s comm=%s state=%s ppid=%s starttime=%s cwd=%s\n' \
           "$EPOCHREALTIME" "$L1P" "$L1C" "$L1STATE" "$L1PP" "$L1START" "$L1CWD"
         printf '  L1-PROC-ARGV pid=%s argv=%s\n' "$L1P" "$L1ARGS"
+        # The uid_map: the userns proof (RunningInUserNS reads
+        # /proc/self/ns/user's inode; the uid_map's mapping shape is the
+        # same fact read side-band — a non-identity map = a userns).
+        L1UIDMAP="$(tr '\n' ';' < "/proc/$L1P/uid_map" 2>/dev/null || true)"
+        printf '  L1-PROC-UIDMAP pid=%s uid_map=%s\n' "$L1P" "${L1UIDMAP:-(unavailable)}"
         # The env SUBSET: the strict non-secret allowlist only. No
-        # token/credential-shaped value is ever printed.
+        # token/credential-shaped value is ever printed. USER/LOGNAME
+        # joined the 4C-83 L2 allowlist: buildkitd v0.33's
+        # isRootlessConfig gate reads $USER (RunningInUserNS && $USER
+        # != "" && $USER != "root") — the env fact that decides whether
+        # the OTEL trace socket lands in $XDG_RUNTIME_DIR/buildkit or
+        # the system default /run/buildkit.
         while IFS= read -r L1EV; do
           [ -n "$L1EV" ] && printf '  L1-PROC-ENV pid=%s %s\n' "$L1P" "$L1EV"
-        done <<< "$(tr '\0' '\n' < "/proc/$L1P/environ" 2>/dev/null | grep -aE '^(ROOTLESSKIT_[A-Za-z0-9_]*|BUILDKIT[A-Za-z0-9_]*|XDG_RUNTIME_DIR|TMPDIR|HOME|PATH)=' || true)"
+        done <<< "$(tr '\0' '\n' < "/proc/$L1P/environ" 2>/dev/null | grep -aE '^(ROOTLESSKIT_[A-Za-z0-9_]*|BUILDKIT[A-Za-z0-9_]*|XDG_RUNTIME_DIR|TMPDIR|HOME|PATH|USER|LOGNAME)=' || true)"
         # The fd list: the stdio wiring and the socket fds, existence
         # and targets (the symlinks are printed as-is).
         for L1FD in /proc/$L1P/fd/*; do
@@ -11713,10 +11723,76 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
       echo "--- the first-sight and death timestamps from the sampler (the wall-clock bounds, never a duration claim):"
       grep -a "L1-PROC-IDENT\|L1-PROC-DEAD\|L1-SAMPLER-END" "$EVIDENCE_DIR/60-lifecycle-sampler.txt" 2>/dev/null | head -6 || true
     fi
+    echo "=== 4C-83 L2: the mkdir /run/buildkit owner resolution (DIAGNOSTIC ONLY — no policy authority) ==="
+    echo "--- the mkdirat window (the LAST sys_mkdirat whose pathname names /run/buildkit; its enter, its exit, the surrounding probes, and EVERY buildkitd SELinux decision inside the window — the AVC set in the window is the fatal-owner evidence):"
+    L2_MK_ENTER_LINE="$(grep -aE 'sys_mkdirat\(.*"/run/buildkit"' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | tail -1 || true)"
+    if [ -n "$L2_MK_ENTER_LINE" ]; then
+      L2_MK_TS="$(printf '%s\n' "$L2_MK_ENTER_LINE" | awk '{print $4}' | sed 's/:$//')"
+      echo "  the mkdirat enter: $L2_MK_ENTER_LINE"
+      L2_MK_EXIT_TS="$(awk -v ts="$L2_MK_TS" '
+        { t = $4; sub(/:$/, "", t) }
+        (t+0) >= (ts+0) && /sys_mkdirat -> / { print t; exit }
+      ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | head -1)"
+      echo "  the mkdirat exit ts: ${L2_MK_EXIT_TS:-(not captured)}"
+      awk -v a="$L2_MK_TS" -v b="${L2_MK_EXIT_TS:-9999999999}" '
+        { t = $4; sub(/:$/, "", t) }
+        (t+0) >= (a+0) && (t+0) <= (b+0) && /buildkitd-[0-9]+ / { print "  in-window: " $0 }
+      ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | head -14 || true
+    else
+      echo "  (no mkdirat /run/buildkit record in the window — the stage did not occur this run)"
+    fi
+    echo "--- the tmp_t:dir write records with their owning mkdirat context (the /tmp quarantine resolution: the records must correlate with the /tmp/qemu-check probe windows, never the /run/buildkit window):"
+    awk '
+      /sys_mkdirat\(/ { ctx = $0 }
+      /selinux_audited:/ && /tclass=dir/ && /denied=0x4([^0-9a-fA-F]|$)/ && /tcontext=system_u:object_r:tmp_t:s0([ \t]|$)/ {
+        print "  AVC: " $0
+        print "    last mkdirat enter before it: " ctx
+      }
+    ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | head -30 || true
+    echo "--- the live classmap dump (the selinuxfs authority; for the file/dir/sock_file classes the Nth line, 0-based, is the permission at bit 1<<N):"
+    for L2C in dir file sock_file cap cap_userns; do
+      printf '  class %s perms:\n' "$L2C"
+      sed 's/^/    /' "/sys/fs/selinux/class/$L2C/perms" 2>/dev/null || echo "    (unavailable)"
+    done
+    echo "--- the live decode of the observed denied bits:"
+    L2_l2bitidx() {
+      local L2v=$(( $1 )) L2n=0
+      if [ "$L2v" -lt 1 ]; then echo ""; return; fi
+      while [ $(( L2v & 1 )) -eq 0 ]; do L2v=$(( L2v >> 1 )); L2n=$(( L2n + 1 )); done
+      if [ "$L2v" -ne 1 ]; then echo ""; return; fi
+      echo "$L2n"
+    }
+    for L2D in "dir:0x4" "dir:0x20000000" "cap_userns:0x2" "sock_file:0x20"; do
+      L2C="${L2D%%:*}"; L2HEX="${L2D#*:}"
+      L2IDX="$(L2_l2bitidx "$L2HEX")"
+      if [ -z "$L2IDX" ]; then
+        printf '  decode(%s, %s): not a single-bit mask\n' "$L2C" "$L2HEX"
+      else
+        L2NAME="$(awk -v i="$L2IDX" 'NR == i + 1 { print; exit }' "/sys/fs/selinux/class/$L2C/perms" 2>/dev/null || true)"
+        [ -n "$L2NAME" ] || L2NAME="(beyond the live class's declared perm list)"
+        printf '  decode(%s, %s): bit index %s -> %s\n' "$L2C" "$L2HEX" "$L2IDX" "$L2NAME"
+      fi
+    done
+    echo "  (NOTE: for the cap/cap_userns classes the kernel passes CAP_TO_MASK(cap) directly — security/selinux/hooks.c cred_has_capability: av = CAP_TO_MASK(cap), the class chosen by initns (CAPABILITY vs CAP_USERNS); the mask is the capability NUMBER, never the policy perm index. decode(cap_userns, 0x2) = capability 1 = CAP_DAC_OVERRIDE — the in-own-userns capability check (capable_wrt_inode_uidgid -> ns_capable(current_user_ns, ...)).)"
+    echo "--- the /run state at capture (the parent label, the fs type, the /run/buildkit absence):"
+    ls -ldZ /run 2>/dev/null || true
+    if [ -e /run/buildkit ]; then
+      ls -ldZ /run/buildkit 2>/dev/null || true
+    else
+      echo "  /run/buildkit: ABSENT at capture (nothing created it — the mkdir was denied)"
+    fi
+    stat -f -c '  /run fs type: %T' /run 2>/dev/null || true
+    echo "--- the buildkitd binary evidence (the version; the in-binary message templates corroborating the source-level path):"
+    "/usr/libexec/docker-helper/buildkit/buildkitd" --version 2>&1 | head -1 || true
+    uname -r 2>/dev/null | sed 's/^/  kernel: /' || true
+    grep -a -o -E '.{0,40}creating trace controller listener.{0,10}' /usr/libexec/docker-helper/buildkit/buildkitd 2>/dev/null | head -2 || true
+    printf '  the otel-grpc default string occurrences: %s\n' "$(grep -a -c -F '/run/buildkit/otel-grpc.sock' /usr/libexec/docker-helper/buildkit/buildkitd 2>/dev/null || echo 0)"
     echo "--- post-mortem filesystem facts (the runtime socket path and the op trees; existence only):"
     for L1PTH in \
       "/run/docker-helper-builder/ops/$OP_ID" \
       "/run/docker-helper-builder/ops/$OP_ID/buildkitd.sock" \
+      "/run/docker-helper-builder/ops/$OP_ID/buildkit" \
+      "/run/docker-helper-builder/ops/$OP_ID/buildkit/otel-grpc.sock" \
       "/var/lib/docker-helper-builder/ops/$OP_ID" \
       "/var/lib/docker-helper-builder/ops/$OP_ID/root" \
       "/var/lib/docker-helper-builder/ops/$OP_ID/root/buildkitd.lock" \
@@ -11759,6 +11835,42 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
     # re-emitted by a granted-era run.
   fi
   marker "LIFECYCLE-DIAGNOSTIC=COMPLETE"
+  # ---- 4C-83 L2 verdict markers (evidence-based; the classification is
+  # ---- the deliverable's reading). DIAGNOSTIC ONLY: no policy
+  # ---- authority, no grant, no candidate minting — the L2 phase ends
+  # ---- in an owner-resolution, and any product/config fix lands in a
+  # ---- separate explicit commit with its own live proof.
+  L2_MK_TS="$(grep -aE 'sys_mkdirat\(.*"/run/buildkit"' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | tail -1 | awk '{print $4}' | sed 's/:$//' || true)"
+  if [ -n "$L2_MK_TS" ]; then
+    marker "L2-MKDIR-STAGE=RECORDED (the mkdirat /run/buildkit enter at trace-ts=$L2_MK_TS)"
+    L2_MK_EXIT_TS="$(awk -v ts="$L2_MK_TS" '
+      { t = $4; sub(/:$/, "", t) }
+      (t+0) >= (ts+0) && /sys_mkdirat -> / { print t; exit }
+    ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | head -1)"
+    L2_WIN_AVCS="$(awk -v a="$L2_MK_TS" -v b="${L2_MK_EXIT_TS:-9999999999}" '
+      { t = $4; sub(/:$/, "", t) }
+      (t+0) >= (a+0) && (t+0) <= (b+0) && /selinux_audited:/ { print }
+    ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | head -6)"
+    L2_WIN_AVC_N=0
+    L2_WIN_CAP_N=0
+    L2_WIN_TMP_N=0
+    if [ -n "$L2_WIN_AVCS" ]; then
+      L2_WIN_AVC_N="$(printf '%s\n' "$L2_WIN_AVCS" | grep -ac selinux_audited || true)"
+      L2_WIN_CAP_N="$(printf '%s\n' "$L2_WIN_AVCS" | grep -ac 'tclass=cap_userns' || true)"
+      L2_WIN_TMP_N="$(printf '%s\n' "$L2_WIN_AVCS" | grep -acE 'tcontext=system_u:object_r:tmp_t:s0([ \t]|$)' || true)"
+    fi
+    if [ "${L2_WIN_AVC_N:-0}" -ge 1 ] && [ "${L2_WIN_AVC_N:-0}" = "${L2_WIN_CAP_N:-0}" ]; then
+      marker "L2-MKDIR-OWNER-AVC=CAP_USERNS-ONLY (every AVC inside the mkdirat window is the cap_userns self-pair check — the LSM layer of the failing in-own-userns capability check; no dir-class AVC for the /run walk)"
+    elif [ "${L2_WIN_AVC_N:-0}" -ge 1 ]; then
+      marker "L2-MKDIR-OWNER-AVC=MIXED ($L2_WIN_AVC_N AVCs inside the window — the deliverable classifies)"
+    else
+      marker "L2-MKDIR-OWNER-AVC=NONE (no AVC inside the mkdirat window — a DAC-only denial shape)"
+    fi
+    L2_TMP_N="$(grep -a "selinux_audited" "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -acE 'tcontext=system_u:object_r:tmp_t:s0([ \t]|$)' || true)"
+    marker "L2-TMP-QUARANTINE-RESOLUTION=tmp_t-records-in-window=$L2_TMP_N total-tmp-records=${L2_TMP_N:-0} in-the-mkdir-window=${L2_WIN_TMP_N:-0} (the quarantined staging-zone surface; the live correlation decides whether the old /tmp quarantine holds)"
+  else
+    marker "L2-MKDIR-STAGE=ABSENT (no mkdirat /run/buildkit record this run — the stage did not occur)"
+  fi
   marker "4C-38=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-39=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-40=INCOMPLETE/ORDER_NOT_ESTABLISHED"
