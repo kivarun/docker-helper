@@ -4193,7 +4193,106 @@ allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr se
 # runtime management + relabel, the daemon transport) are DIFFERENT
 # subjects and DIFFERENT owners — their builder_runtime_t rules stay
 # byte-unchanged, never merged and never templates.
-allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:sock_file { create unlink };
+#
+# --- 4C-82: the categorized operation-runtime sock_file setattr — the
+# --- 4C-79 rule widened IN PLACE (ONE rule, never split) ---
+#
+# THE L1 RECLASSIFICATION (the terminal-owner proof): the
+# sock_file:setattr record toward builder_runtime_t:s0:c1 was classified
+# HANDLED/NON-TERMINAL in the 4C-78/79/81 phases ("its owning syscall
+# was untraced and the unlinkat enter followed"). The 4C-L1 diagnostic
+# phase (runs 38122254846 and 38123176526, the software-lifecycle
+# instrumentation) PROVED that classification SUPERSEDED: the
+# continuation after the denial WAS THE FAILURE-RESPONSE PATH — the
+# owning syscall is the buildkitd's own chmod(2) on the op socket path,
+# its failure is the error BuildKitd REPORTS AND EXITS ON:
+#
+#   588.340645 selinux_audited: requested=0x20 denied=0x20 audited=0x20
+#     result=-13 scontext=system_u:system_r:docker_helper_buildkitd_t:
+#     s0:c1 tcontext=system_u:object_r:docker_helper_builder_runtime_t:
+#     s0:c1 tclass=sock_file — the chmod's own AVC (the chmod syscall
+#     enter/exit records fall in the known tracer hole; the AVC record
+#     and the stderr text are the authority, never a reconstruction)
+#   -> the flow's failure response: the socket unlink (0x0), the closes
+#   -> buildkitd-84323 sys_write(fd: 2) "buildkitd: chmod /run/
+#     docker-helper-builder/ops/op_338484759a44..." (0x76 = 118 bytes,
+#     the L1-logged error line)
+#   -> buildkitd-84323 sys_exit_group(error_code: 1) — the VOLUNTARY
+#     exit, status 1 (no SIGKILL/SIGTERM was delivered to the leader;
+#     the worker-group SIGKILLs afterward are the group teardown)
+#
+# The identical chain is proven in the 4C-L1 runs' own artifacts (the
+# 60-lifecycle-diagnostic.txt / 60-lifecycle-sampler.txt evidence, the
+# L1-CLASS=L1-A/SELF-EXIT-WITH-LOGGED-ERROR verdict) and in the 4C-81
+# canonical runs' own traces (the same shape at 420.864879/420.864882
+# and 522.857453/522.857455). THE TERMINAL LIFECYCLE OWNER IS THIS
+# DENIAL — genuine PRE-CLEANUP production ownership (the chmod runs
+# BEFORE any failure response; the L1 evidence tier joins the causal
+# contract as the lifecycle-proven owner class).
+#
+# THE MASK DECODE PIN (the kernel's static classmap numbering, NOT the
+# loaded policy's perms-file numbering): 0x20 = setattr (bit 5 of the
+# COMMON_FILE_PERMS list the sock_file class shares — the corrected
+# 4C-79 decoder layout; the LIVE L1 record corroborates both the class
+# and the bit). THE CLASS MATTERS — the same bit number 0x20 on the dir
+# class is dir:setattr (NOT granted on any buildkitd pair; the
+# dir-class setattr stays its own live-evidence phase) and on the file
+# class file:setattr (the quarantined surface; NOT the daemon
+# transport) — a same-bit coincidence never merges two planes;
+# decode(sock_file, 0x20) = exactly { setattr }, the class-aware decode
+# regression pins the tuple. requested==denied so no subtraction of
+# standing bits is needed — candidate = decode(tclass=sock_file,
+# denied=0x20) = exactly { setattr }, the standing invariant
+# candidate=decode(tclass,denied) preserved.
+# THE DELTA IS EXACTLY +setattr:
+#   - sock_file:setattr is NOT a chmod bundle: it grants the socket
+#     file's OWN attribute-change hook (the chmod the startup performs
+#     on its own just-bound socket) and NOT create/unlink (the GRANTED
+#     members are NOT re-granted), NOT write/open/getattr/read/rename/
+#     append/lock/map — the conventional socket bundle is NOT
+#     reconstructed; the kernel emits each hook as its OWN decision and
+#     the next boundary's own live decision set owns the next phase
+#     (sock_file-class and dir-class/file-class decisions are never
+#     combined into one phase);
+#   - the dir rules stay byte-for-semantics: the runtime-tree dir rule
+#     exactly { getattr search write add_name remove_name } (PLANE H,
+#     the ONE quintuple never split), the state-tree dir rule exactly
+#     { getattr search write add_name read open } (PLANE E); NO dir
+#     widening, NO dir setattr, NO dir:create/unlink;
+#   - the state-tree file rule stays exactly { create read open lock };
+#     nothing on builder_state_t:file/lnk_file, nothing on the sibling
+#     root types (builder_state_root_t, builder_runtime_root_t), and
+#     nothing on any quarantined surface (tmp_t:dir write, the fifos,
+#     nsfs, cgroup, sysctl_fs, sysfs, passwd_file, buildkitd_exec_t:
+#     file open — repeat count never converts a non-terminal denial
+#     into authority);
+#   - no process/process2 permission, no capability/cap_userns, no
+#     range_transition;
+#   - the frozen planes stay frozen: the three exec planes (the source
+#     { execute read open }, the transition { transition }, the target
+#     { entrypoint read execute }), the shared state-root rule (exactly
+#     { getattr search }), the shared runtime-root rule (exactly
+#     { search }), and the standing other-subject runtime rules (a
+#     different subject and a different owner — never merged).
+# MCS: the TE rule encodes NO categories — the rule is the bare pair;
+# the c1 -> c1 admissibility stays the existing constraints' job (both
+# domains are proven mcs_constrained_type members). The op_<id>
+# directory's own label is proven separately (the kernel-label sampler's
+# first/last/all read-backs and the live stat, all
+# builder_runtime_t:s0:c1) — never inferred from an AVC's tcontext.
+# SCOPE — READ CAREFULLY: the rule is type-wide TE authority
+# (buildkitd_t -> EVERY builder_runtime_t:sock_file
+# create+unlink+setattr), NOT path-scoped; the MCS category constraints
+# are what keep it operation-scoped in effect (a c1 subject cannot
+# reach a c2 per-op tree — the cross-operation reachability proof
+# (4C-37) stays mandatory and the cross-operation gate stays
+# OPEN/Critical until it holds). The category-scoped effect is NOT the
+# 4C-37 isolation proof. The companion runtime owners (init_t
+# provisioning, the manager's own runtime management + relabel, the
+# daemon transport) are DIFFERENT subjects and DIFFERENT owners — their
+# builder_runtime_t rules stay byte-unchanged, never merged and never
+# templates.
+allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:sock_file { create unlink setattr };
 
 # --- 4C-71: the categorized operation-state file lock — the 4C-70 file
 # --- rule widened IN PLACE (ONE rule, never split) ---
