@@ -1117,7 +1117,8 @@ log "D: 4C-49 confinement-gate watcher armed (pid $GATE_WATCHER_PID)"
     case "$L1NEW" in
       ''|*[!0-9]*) L1NEW="" ;;
     esac
-    if [ -n "$L1NEW" ] && [ "$L1NEW" -ge "$L1_LASTPID" ] && [ "$L1_LASTPID" -gt 0 ]; then
+    if [ -n "$L1NEW" ] && [ "$L1NEW" -ge "$L1_LASTPID" ]; then
+      if [ "$L1_LASTPID" -gt 0 ]; then
       for (( L1P = L1NEW; L1P > L1_LASTPID; L1P-- )); do
         [ -n "${L1SEEN[$L1P]:-}" ] && continue
         L1SEEN[$L1P]=1
@@ -1165,6 +1166,7 @@ log "D: 4C-49 confinement-gate watcher armed (pid $GATE_WATCHER_PID)"
         done 2>/dev/null || true
         printf '%s L1-PROC-CAPTURED pid=%s (the identity facts above are the first-sight capture; the death follows in the trace)\n' "$EPOCHREALTIME" "$L1P"
       done
+      fi
       L1_LASTPID="$L1NEW"
     else
       L1_LASTPID=0
@@ -11518,6 +11520,27 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
       fi
     done <<< "$L1_BPIDS"
     echo "  the diagnostic subject pid: ${L1_BP:-(none)}"
+    # The subject preference: the posttun machinery's own FIRST-DEATH
+    # pid when its comm is buildkitd (the flow's own buildkitd — the
+    # LAST-record-wins heuristic alone would pick a later cross-op
+    # probe's buildkitd). The group view (every buildkitd pid's exit
+    # record) is printed regardless: the leader's voluntary exit and
+    # the children's SIGKILL teardown are separate lifecycle facts.
+    case "${POSTTUN_FIRST_DEATH_COMM:-}" in
+      buildkitd)
+        L1_BP="$POSTTUN_FIRST_DEATH_PID"
+        echo "  the subject preference: the posttun FIRST-DEATH pid (comm=buildkitd)"
+        ;;
+    esac
+    echo "--- the exit records of EVERY buildkitd pid in the window (the group view: the leader's voluntary exit vs the children's teardown):"
+    while read -r L1P; do
+      [ -n "$L1P" ] || continue
+      grep -a "buildkitd-$L1P " "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -aE "sys_enter_exit_group|sched_process_exit|signal_deliver: sig=(9|15)" | tail -3 || true
+    done <<< "$L1_BPIDS"
+    echo "--- the buildkitd stderr write records visible in the trace (the quoted prefix after the hex; the tracer truncates the payload):"
+    grep -a "sys_write(fd: 2" "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -a "comm=buildkitd\|buildkitd-" | grep -a '"buildkitd: ' | head -4 || true
+    echo "--- the live process-tree snapshot at capture time (the manager instance cleanup's own state; the leader lingering is a lifecycle fact):"
+    ps -eo pid,ppid,comm,args 2>/dev/null | grep -aE "rootlesskit|buildkitd|slirp4netns" | grep -av grep | head -8 || true
     if [ -n "$L1_BP" ]; then
       echo "--- the final syscall sequence after the LAST SELinux decision of the buildkitd pid (the SELinux-clean tail; the bounded print):"
       awk -v who="buildkitd-$L1_BP " '
@@ -11532,9 +11555,14 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
       ' "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null || true
       echo "--- the exit record and status:"
       grep -a "buildkitd-$L1_BP " "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -aE "sys_enter_exit_group|sched_process_exit" | tail -3 || true
-      echo "--- the chmod-family trace inventory (the 4C-L1 arm addition — the errno owner of the residual death):"
-      grep -a "buildkitd-$L1_BP " "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -aE "sys_(enter|exit)_fchmod|sys_(enter|exit)_fchmodat2?|sys_(enter|exit)_chmod" | tail -8 || true
-      echo "  (empty = the chmod-family records are absent from the window even under the 4C-L1 arm — recorded as-is, never reconstructed)"
+      echo "--- the chmod-family trace inventory (the 4C-L1 arm addition — the errno owner of the residual death), ALL buildkitd pids:"
+      while read -r L1P; do
+        [ -n "$L1P" ] || continue
+        grep -a "buildkitd-$L1P " "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -aE "sys_(enter|exit)_fchmod|sys_(enter|exit)_fchmodat2?|sys_(enter|exit)_chmod" | tail -4 || true
+      done <<< "$L1_BPIDS"
+      echo "  (empty = the chmod syscall records are absent from the window even under the 4C-L1 arm — the tracer hole is a known gap; the AVC record and the stderr text are the authority, never a reconstruction)"
+      echo "--- the sock_file setattr-family SELinux records of the subject (the chmod's own AVC — setattr is the chmod hook on the object class):"
+      grep -a "buildkitd-$L1_BP " "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -a "selinux_audited" | grep -aE "denied=0x20([^0-9a-fA-F]|$)" | tail -4 || true
       echo "--- the signal inventory for the buildkitd pid (manager-initiated teardown vs voluntary exit):"
       grep -a "buildkitd-$L1_BP " "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -aE "signal_deliver|signal_generate" | tail -8 || true
       echo "  (the signal_generate lines carry the SENDING task's comm; a SIGKILL/SIGTERM generate aimed at the pid is the manager/parent teardown evidence; SIGURG is the Go runtime preemption signal, benign)"
@@ -11563,11 +11591,15 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
   # The L1 verdict markers (evidence-based; the classification itself is
   # the deliverable's reading of 60-lifecycle-diagnostic.txt):
   L1_STDERR_LINE="$(journalctl -u "$UNIT" --no-pager 2>/dev/null | grep -a 'buildkitd: ' | tail -1 || true)"
+  L1_TRACE_STDERR_LINE="$(grep -a "sys_write(fd: 2" "$EVIDENCE_DIR/30-trace-window.txt" 2>/dev/null | grep -a '"buildkitd: ' | tail -1 || true)"
   if [ -n "$L1_STDERR_LINE" ]; then
     marker "L1-EVIDENCE-BUILDKITD-STDERR=$L1_STDERR_LINE"
     marker "L1-CLASS=L1-A/SELF-EXIT-WITH-LOGGED-ERROR (the buildkitd own stderr error line is captured; the exact owner text is the L1 evidence)"
+  elif [ -n "$L1_TRACE_STDERR_LINE" ]; then
+    marker "L1-EVIDENCE-BUILDKITD-STDERR=(the trace-side write(fd: 2) record; the payload prefix follows) ${L1_TRACE_STDERR_LINE#*\"}"
+    marker "L1-CLASS=L1-A/SELF-EXIT-WITH-LOGGED-ERROR (the buildkitd own stderr error line is captured from the trace-side write record; the full text is tracer-truncated, the visible prefix is the L1 evidence)"
   else
-    marker "L1-CLASS=SEE-60-LIFECYCLE-DIAGNOSTIC (the stderr line was not captured from the journal — the sampler/trace evidence decides the classification)"
+    marker "L1-CLASS=SEE-60-LIFECYCLE-DIAGNOSTIC (the stderr line was not captured from the journal or the trace — the sampler/trace evidence decides the classification)"
   fi
   if [ -z "$POSTTUN_BKD_STARTUP_OWNER_TS" ]; then
     marker "NO-NEW-SELINUX-CANDIDATE=OK (no genuine PRE-CLEANUP terminal owner this run — the 4C-81 HOLD stands; no 4C-82 candidate minted; L1 is diagnostic-only)"
