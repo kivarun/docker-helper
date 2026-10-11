@@ -448,11 +448,44 @@ jobs:
           # total STAYS EXACTLY NINE (any TENTH rule trips), and the
           # §19 alternate applies: if the lifetime finally held, the
           # startup staircase STOPS and the cross-operation isolation
-          # proof (4C-37) resumes — no artificial 4C-83 (the proof ref
-          # advances from the 4C-81-era pin to the commit carrying that
-          # module; identical Go sources, so the binary is the same
-          # program).
-          PHASE4B_PROOF_REF: 'db642b90dde9ed75e428b4889895d61d2c7d1eb8'
+          # proof (4C-37) resumes — no artificial 4C-83.
+          #
+          # 4C-83: the L2 diagnostic run 38128544917 attributed the
+          # post-4C-82 fatal stage end to end. BuildKitd v0.33's
+          # RunningInUserNS() stat("/proc/self/ns/user") hits the
+          # standing nsfs_t:file getattr denial and its "unexpected
+          # procfs state" branch returns false even though USER is
+          # carried and the uid map is mapped; isRootlessConfig()
+          # therefore returned false and the OTEL trace socket fell
+          # back to the system default /run/buildkit/otel-grpc.sock;
+          # the mkdirat /run/buildkit (0x1f8) failed on its only
+          # in-window AVC — the cap_userns:0x2 self-pair denial, the
+          # LSM layer of the failing in-own-userns CAP_DAC_OVERRIDE
+          # check (the cap_capable trace shows cap=1 ret 0: the
+          # kernel-side capability passes, the SELinux self-pair check
+          # denies) — producing the fatal stderr
+          # "buildkitd: mkdir /run/buildkit: permission denied" and the
+          # voluntary exit 1. The tmp_t:dir-write records all belonged
+          # to the handled /tmp/qemu-check probe windows and never to
+          # the /run/buildkit window — the old /tmp quarantine HOLDS. A
+          # cap_userns grant was REJECTED as the fix because it would
+          # authorize the GLOBAL cross-operation /run/buildkit state
+          # surface the isolation model forbids. The fix is a
+          # PRODUCT-CONFIG redirect: the canonical argv carries
+          # --otel-socket-path=<rtDir>/buildkit/otel-grpc.sock and the
+          # manager pre-creates and provisions the buildkit directory
+          # with the exact categorized context (the provisioning matrix
+          # is not recursive, so the directory carries its own entry);
+          # buildkitd's own mkdirAs then finds it existing and never
+          # runs its MkdirAll+Chown, the socket lifecycle
+          # (create/setattr) rides the EXISTING 4C-77/4C-82 sock_file
+          # grants, and the .te stays byte-unchanged (the module-borne
+          # buildkitd-named allow total stays exactly 9; no policy
+          # authority changed in this phase). The pin advances from the
+          # 4C-82-era commit to the commit carrying this fix, because
+          # the binary itself must carry the redirect (Go sources
+          # changed).
+          PHASE4B_PROOF_REF: '1ba2a86aa17a3cff103550473861283d17ae910a'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
