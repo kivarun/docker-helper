@@ -628,9 +628,42 @@ jobs:
           # allow total STAYS EXACTLY NINE (any TENTH rule trips), and
           # the §19 alternate applies: if the lifetime finally held,
           # the startup staircase STOPS and the cross-operation
-          # isolation proof (4C-37) resumes — no artificial 4C-88 (the
-          # proof ref advances to the commit carrying that module;
-          # identical Go sources, so the binary is the same program).
+          # isolation proof (4C-37) resumes — no artificial 4C-89; and
+          # the 4C-88 grant WIDENS THE 4C-87 STATE-TREE DIR RULE IN
+          # PLACE (ONE rule, never split): allow
+          # docker_helper_buildkitd_t
+          # docker_helper_builder_state_t:dir { getattr search write
+          # add_name read open create remove_name rmdir } — the delta
+          # exactly +rmdir; provenance = the 4C-87 canonical run
+          # 38277632228's own death-window records (the DIRECT
+          # SUCCESSOR of the 4C-87 stale-entry-removal stage:
+          # requested==denied=0x40000000 result=-13 tclass=dir
+          # trace-ts=439.763130 and the twin 439.763157, the stderr
+          # warning msg="Failed to remove" (0x158 bytes) 94us after the
+          # denial — the 4C-87 remove_name grant let the walk pass and
+          # the SAME stage's directory-removal hook became the live
+          # boundary, the terminal chain ending in the voluntary
+          # exit_group(1)); decode(dir, 0x40000000) = exactly { rmdir }
+          # (bit 30 of the dir class's own tail); requested==denied so
+          # candidate = decode(denied) = exactly { rmdir }; THE CLASS
+          # MATTERS — the runtime-tree PLANE H rule carries NO rmdir
+          # (the runtime tree stays frozen); dir:rmdir is NOT a
+          # directory-removal bundle — NOT
+          # remove_name/setattr/rename/mounton/create/add_name; NO
+          # state-tree FILE widening (the 4C-87 file-write 0x40006/0x4
+          # and file-unlink 0x800 records are LATER phases' own
+          # evidence), NO cgroup_t grant (the cgroup_t:filesystem
+          # getattr record is a different class/surface with incomplete
+          # attribution), NO runtime-tree widening, NO
+          # buildkitd_exec_t:file open (the standing quarantine), NO
+          # generic bin_t grant, NO tmpfs_t:lnk_file grant, NO
+          # cap_userns grant; the module-borne buildkitd-named allow
+          # total STAYS EXACTLY NINE (any TENTH rule trips), and the
+          # §19 alternate applies: if the lifetime finally held, the
+          # startup staircase STOPS and the cross-operation isolation
+          # proof (4C-37) resumes — no artificial 4C-89 (the proof ref
+          # advances to the commit carrying that module; identical Go
+          # sources, so the binary is the same program).
           PHASE4B_PROOF_REF: '153b855b22f0d527d2f2becdf6a2e8a0da451967'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"

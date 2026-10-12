@@ -3593,7 +3593,63 @@ allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr
 #     target-side exec-type rule exactly { entrypoint read execute
 #     getattr }, the shared state-root rule exactly { getattr search },
 #     the shared runtime-root rule exactly { search }.
-allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name };
+# --- 4C-88: the delayed runtime self-maintenance state-tree dir
+# --- rmdir — the 4C-87 rule widened IN PLACE (ONE rule, never split) ---
+#
+# PROVENANCE (the 4C-87 canonical run 38277632228's own death-window
+# records, buildkitd pid 65003 — the DIRECT SUCCESSOR of the 4C-87
+# stale-entry-removal stage): the 4C-87 remove_name grant let the
+# stale-entry removal's path walk pass and the SAME stage's directory
+# removal hook became the live boundary. The rmdir of the stale state
+# directory denies:
+#
+#   requested=0x40000000 denied=0x40000000 result=-13
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:docker_helper_builder_state_t:s0:c1
+#     tclass=dir, trace-ts=439.763130 and the twin 439.763157
+#   -> the stderr warning: level=warning msg="Failed to remove"
+#     (0x158 bytes, 439.763251 — 94 microseconds after the denial; the
+#     SAME correlation the 4C-37R run 38181580505 showed for the
+#     remove_name shape — the stage's own message, now denying one
+#     hook deeper)
+#   -> the terminal causal chain continues (the cgroup_t:filesystem
+#     getattr 0x8 at 439.840822, the state-tree FILE write 0x40006/0x4
+#     at 439.844832, the state-tree dir rmdir again 439.844863, the
+#     state-tree FILE unlink 0x800 at 439.844964, the "failed check
+#     for" warning, the fatal "buildkitd: open /var/lib/docker-helper-
+#     builder/ops/op_..." (0x8d) and the voluntary exit_group(1) at
+#     439.846) — the whole tree dies and the operation-A runtime is
+#     unbindable at binder time.
+#
+# THE MASK DECODE PIN: 0x40000000 = rmdir (bit 30 of the dir class's
+# own tail; the LIVE record corroborates the bit — requested==denied so
+# the requested-vs-denied rule degrades to the exact delta — candidate
+# = decode(tclass, denied) = exactly { rmdir }, the standing invariant
+# candidate=decode(tclass,denied) preserved).
+# THE DELTA IS EXACTLY +rmdir:
+#   - dir:rmdir is NOT a directory-removal bundle: it grants the stale
+#     state directory's own rmdir hook and NOT remove_name (the 4C-87
+#     GRANTED member, never re-granted), NOT setattr, NOT rename, NOT
+#     mounton, NOT create/add_name (the granted members NOT
+#     re-granted), NOT the sock_file object's own unlink (a DIFFERENT
+#     class and owner) — the kernel emits each hook as its OWN
+#     decision and the next boundary's own live decision set owns the
+#     next phase;
+#   - NO state-tree FILE widening (the file rule stays byte-for-
+#     semantics exactly { create read open lock } — the 4C-87
+#     file-write 0x40006/0x4 and file-unlink 0x800 records are LATER
+#     phases' own evidence, never bundled here), NO cgroup_t grant
+#     (the cgroup_t:filesystem getattr record is a different
+#     class/surface with incomplete attribution until the full warning
+#     line is captured), NO runtime-tree widening (PLANE H quintuple +
+#     PLANE I triple frozen), NO buildkitd_exec_t:file open (the
+#     standing quarantine), NO generic bin_t grant, NO tmpfs_t:lnk_file
+#     grant, NO cap_userns grant;
+#   - the frozen planes stay frozen: the three exec planes, the
+#     target-side exec-type rule exactly { entrypoint read execute
+#     getattr }, the shared state-root rule exactly { getattr search },
+#     the shared runtime-root rule exactly { search }.
+allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name rmdir };
 
 # --- 4C-69: the categorized operation-state file create — the NEW
 # --- file-class plane (a NEW pair+class rule, NEVER a widening of the
