@@ -4445,7 +4445,7 @@ func buildkitdIdentityViolations(policy string) []string {
 	const canonicalEntry = "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr };"
 	const canonicalStateRoot = "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search };"
 	const canonicalStateTree = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name rmdir };"
-	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write };"
+	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr };"
 	const canonicalRuntimeRoot = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search;"
 	const canonicalRuntimeTree = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write add_name remove_name };"
 	// The categorized runtime-tree sock_file plane (PLANE I, the 4C-77
@@ -4603,7 +4603,7 @@ func buildkitdIdentityViolations(policy string) []string {
 		}
 	}
 	if stateFileCount != 1 {
-		violations = append(violations, fmt.Sprintf("the buildkitd categorized state-tree file { create read open lock write } grant must exist exactly once in the exact canonical form, found %d: %s", stateFileCount, canonicalStateFile))
+		violations = append(violations, fmt.Sprintf("the buildkitd categorized state-tree file { create read open lock write getattr } grant must exist exactly once in the exact canonical form, found %d: %s", stateFileCount, canonicalStateFile))
 	}
 	runtimeRootCount := 0
 	for _, line := range strings.Split(policy, "\n") {
@@ -4663,7 +4663,7 @@ func buildkitdIdentityViolations(policy string) []string {
 		}
 	}
 	if buildkitdNamedAllow != 9 {
-		violations = append(violations, fmt.Sprintf("the module must carry exactly the nine buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir }, the categorized state-tree file { create read open lock write }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name }, the categorized runtime-tree sock_file { create unlink setattr }), found %d", buildkitdNamedAllow))
+		violations = append(violations, fmt.Sprintf("the module must carry exactly the nine buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir }, the categorized state-tree file { create read open lock write getattr }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name }, the categorized runtime-tree sock_file { create unlink setattr }), found %d", buildkitdNamedAllow))
 	}
 	// The shared runtime-root dir surface has exactly the standing
 	// owners above; a NEW or reshaped rule on the pair (any source,
@@ -4748,7 +4748,7 @@ func buildkitdIdentityViolations(policy string) []string {
 			continue
 		}
 		if strings.Contains(trimmed, " docker_helper_builder_state_t:file ") && !standingStateTreeFileRules[trimmed] {
-			violations = append(violations, "the categorized state-tree file surface has exactly the standing owners (init_t, the manager, the flow, the buildkitd { create read open lock write } rule) — every other shape on the pair violates: "+trimmed)
+			violations = append(violations, "the categorized state-tree file surface has exactly the standing owners (init_t, the manager, the flow, the buildkitd { create read open lock write getattr } rule) — every other shape on the pair violates: "+trimmed)
 		}
 	}
 	for _, line := range strings.Split(policy, "\n") {
@@ -5067,7 +5067,7 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 	// WIDENED IN PLACE by the 4C-69 canonical run's own terminal combined
 	// 0x40002 decision (ONE rule, never split, never 4C-70a/4C-70b; the
 	// old bare form is now a mutation shape below).
-	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write };"
+	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr };"
 	var withoutStateFile []string
 	stateFileCount := 0
 	for _, line := range strings.Split(policy, "\n") {
@@ -5370,13 +5370,13 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		{"parallel bare write rule beside the canonical quadruple", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir write;"},
 		{"parallel bare add_name rule beside the canonical quadruple", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir add_name;"},
 		{"duplicate of the state-tree rule", canonicalStateTree},
-		// the 4C-71/89 categorized state-tree FILE plane (exactly the ONE
-		// { create read open lock write } quintuple, widened IN PLACE from
-		// the 4C-70 triple by the 4C-71 lock and the 4C-89 write; the
-		// missing-rule case is covered by the withoutStateFile removal
-		// above; the dir rule above stays byte-for-semantics the nonuple —
-		// a permission added to the dir rule is a dir-plane mutation,
-		// never the file plane)
+		// the 4C-71/89/91 categorized state-tree FILE plane (exactly the
+		// ONE { create read open lock write getattr } sextuple, widened IN
+		// PLACE from the 4C-70 triple by the 4C-71 lock, the 4C-89 write
+		// and the 4C-91 getattr; the missing-rule case is covered by the
+		// withoutStateFile removal above; the dir rule above stays
+		// byte-for-semantics the nonuple — a permission added to the dir
+		// rule is a dir-plane mutation, never the file plane)
 		// the old 4C-69 bare create form (missing read+open+lock)
 		{"the old 4C-69 bare create form (missing read+open+lock)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file create;"},
 		// the old 4C-70 triple form (missing lock)
@@ -5398,24 +5398,33 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		{"the state-file append instead", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file append;"},
 		{"the state-file map instead", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file map;"},
 		{"the state-file execute instead", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file execute;"},
-		// the sixth-permission sweep on the quintuple: file:write is
-		// NOT a writable-file bundle — the 4C-89 grant is the 4C-88
-		// canonical run 38283671136's own terminal causal record (the
-		// runtime's startup self-check open(O_RDWR)'s denied bit; the
-		// requested 0x40006 carries the GRANTED read 0x2 and open
-		// 0x40000, never re-granted); unlink/setattr/append/map/execute/
-		// getattr stay their own live-evidence phases and the kernel
-		// emits each hook as its own decision; none rides the write
-		// grant; the old quartet (the quintuple MINUS write) is now the
-		// OLD shape and the old-triple +write shape stays covered as the
-		// without-lock bundle
-		{"the old 4C-71 quartet form (missing write)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock };"},
-		{"the quintuple + getattr", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr };"},
-		{"the quintuple + setattr", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write setattr };"},
-		{"the quintuple + unlink", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write unlink };"},
-		{"the quintuple + append", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write append };"},
-		{"the quintuple + map", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write map };"},
-		{"the quintuple + execute", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write execute };"},
+		// the seventh-permission sweep on the sextuple: file:getattr is
+		// NOT a metadata bundle — the 4C-91 grant is the 4C-90
+		// classification run 38297354828's own terminal causal record
+		// (the containerdmeta.db openat SUCCEEDED under the granted
+		// create/open and the POST-OPEN fstat denied; the fatal
+		// "buildkitd: stat .../containerdmeta.db: permission denied"
+		// line is the fstat error surfacing); ioctl/unlink/setattr/
+		// append/map/execute stay their own live-evidence phases (ioctl
+		// is the 4C-90 fs-verity probe WARNING sibling, non-fatal by
+		// design; unlink is the cleanup/failure-response sibling) and
+		// the kernel emits each hook as its own decision; none rides the
+		// getattr grant; the old quintuple (the sextuple MINUS getattr)
+		// is now the OLD shape and the old-triple/old-quartet shapes stay
+		// covered as the without-write/without-lock regressions
+		{"the old 4C-89 quintuple form (missing getattr)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write };"},
+		{"the old 4C-71 quartet form (missing write and getattr)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock };"},
+		{"the sextuple + ioctl", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr ioctl };"},
+		{"the sextuple + setattr", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr setattr };"},
+		{"the sextuple + unlink", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr unlink };"},
+		{"the sextuple + append", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr append };"},
+		{"the sextuple + map", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr map };"},
+		{"the sextuple + execute", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr execute };"},
+		{"the old quintuple + ioctl (the forbidden paired grant)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write ioctl };"},
+		{"the old triple + write (missing lock)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open write };"},
+		{"the old triple + getattr (missing lock)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open getattr };"},
+		{"the old triple + setattr (missing lock)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open setattr };"},
+		{"the old triple + unlink (missing lock)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open unlink };"},
 		{"the old triple + write (missing lock)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open write };"},
 		{"the old triple + getattr (missing lock)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open getattr };"},
 		{"the old triple + setattr (missing lock)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open setattr };"},
@@ -6410,6 +6419,105 @@ func TestSELinuxPolicyKernelClassmapMaskPins(t *testing.T) {
 	}
 	if classDecode("dir", 0x10000) == classDecode("file", 0x4) {
 		t.Error("kernel classmap decode: the (dir, 0x10000) and (file, 0x4) tuples must stay DISTINCT authorities (the tclass-loss error) — the state-tree dir mounton surface is never the state-tree file write plane")
+	}
+
+	// The 4C-91 grant-candidate pin + the terminal-proximate provenance
+	// (the 4C-90 classification run 38297354828's own full-fidelity
+	// strace stderr tap, buildkitd leader pid 84066 — after the 4C-89
+	// write grant let the runtime's startup self-check open(O_RDWR)
+	// pass whole, the containerd/containerd metadata store opened its
+	// db (create+open SUCCEEDED) and the POST-OPEN fstat on its fd
+	// denied): fstat(12<.../root/runc-native/containerdmeta.db>) =
+	// -1 EACCES, the SELinux record requested=0x10 denied=0x10
+	// result=-13 scontext=buildkitd_t:s0:c1 tcontext=builder_state_t:
+	// s0:c1 tclass=file (the tap's two fstat failures — the fs-verity
+	// probe file's fstat and THIS containerdmeta.db fstat — correspond
+	// 1:1 to the two 0x10 AVCs the tracefs window carried), and the
+	// fatal stderr line CAPTURED WHOLE: "buildkitd: stat
+	// /var/lib/docker-helper-builder/ops/op_09b7ce.../root/runc-native/
+	// containerdmeta.db: permission denied" (0x8d) — Go's
+	// os.PathError{Op:"stat"} format is the fstat-on-open-fd error
+	// surfacing, the fatal line's path and the failing fstat's fd-path
+	// the SAME object; the voluntary exit_group(1) followed.
+	//   (file, 0x10) = { getattr } — the live-backed grant candidate
+	//     (bit 4 of the COMMON_FILE_PERMS list; requested==denied so
+	//     no subtraction of standing bits is needed);
+	//   (file, 0x1) = { ioctl } — the 4C-90 fs-verity probe warning
+	//     sibling's own tuple (bit 0), NON-FATAL by design (the
+	//     "failed check for fsverity support" warning and the flow
+	//     continued), never bundled;
+	//   (file, 0x800) = { unlink } — the cleanup/failure-response
+	//     sibling's own tuple (bit 11), never the owner;
+	//   (dir, 0x10000) = { mounton } — the 4C-90 non-terminal overlay
+	//     snapshotter probe's own tuple (the flow fell through to the
+	//     fuse-overlayfs probing), a DIFFERENT class and surface;
+	//   (filesystem, 0x8) = { getattr } — the cgroup statfs probe's
+	//     own tuple, a DIFFERENT tclass/surface, still HOLD;
+	//   the widened sextuple's own combined form
+	//     decode(file, 0x4005e) = exactly { read write create getattr lock open }.
+	if got := classDecode("file", 0x4005e); got != "(file, read write create getattr lock open)" {
+		t.Errorf("kernel classmap decode: the widened state-tree file sextuple's own combined form (0x4005e) must decode to exactly { read write create getattr lock open } in kernel-bit order, got %s", got)
+	}
+	if got := classDecode("file", 0x4004e); got != "(file, read write create lock open)" {
+		t.Errorf("kernel classmap decode: the OLD 4C-89 quintuple form (0x4004e, missing getattr) must still decode WITHOUT the getattr member — the removed shape is the regression, got %s", got)
+	}
+	if got := classDecode("file", 0x1); got != "(file, ioctl)" {
+		t.Errorf("kernel classmap decode: the 4C-90 fs-verity probe ioctl record's own tuple must be (file, { ioctl }) — a DIFFERENT authority from the 4C-91 getattr grant, got %s", got)
+	}
+	if classDecode("file", 0x1) == classDecode("file", 0x10) {
+		t.Error("kernel classmap decode: the (file, 0x1) and (file, 0x10) tuples must stay DISTINCT authorities (the tclass-loss error) — the fs-verity ioctl probe surface is never the metadata-db getattr plane")
+	}
+	if classDecode("filesystem", 0x8) == classDecode("file", 0x10) {
+		t.Error("kernel classmap decode: the (filesystem, 0x8) and (file, 0x10) tuples must stay DISTINCT authorities (the tclass-loss error) — the cgroup_t filesystem getattr probe surface is never the state-tree file getattr plane")
+	}
+	// The 4C-91 grant-candidate pin + the terminal-proximate provenance
+	// (the 4C-90 classification run 38297354828's own full-fidelity
+	// strace stderr tap, buildkitd leader pid 84066 — after the 4C-89
+	// write grant let the runtime's startup self-check open(O_RDWR)
+	// pass whole, the containerd/containerd metadata store opened its
+	// db (create+open SUCCEEDED) and the POST-OPEN fstat on its fd
+	// denied): fstat(12<.../root/runc-native/containerdmeta.db>) =
+	// -1 EACCES, the SELinux record requested=0x10 denied=0x10
+	// result=-13 scontext=buildkitd_t:s0:c1 tcontext=builder_state_t:
+	// s0:c1 tclass=file (the tap's two fstat failures — the fs-verity
+	// probe file's fstat and THIS containerdmeta.db fstat — correspond
+	// 1:1 to the two 0x10 AVCs the tracefs window carried), and the
+	// fatal stderr line CAPTURED WHOLE: "buildkitd: stat
+	// /var/lib/docker-helper-builder/ops/op_09b7ce.../root/runc-native/
+	// containerdmeta.db: permission denied" (0x8d) — Go's
+	// os.PathError{Op:"stat"} format is the fstat-on-open-fd error
+	// surfacing, the fatal line's path and the failing fstat's fd-path
+	// the SAME object; the voluntary exit_group(1) followed.
+	//   (file, 0x10) = { getattr } — the live-backed grant candidate
+	//     (bit 4 of the COMMON_FILE_PERMS list; requested==denied so
+	//     no subtraction of standing bits is needed);
+	//   (file, 0x1) = { ioctl } — the 4C-90 fs-verity probe warning
+	//     sibling's own tuple (bit 0), NON-FATAL by design (the
+	//     "failed check for fsverity support" warning and the flow
+	//     continued), never bundled;
+	//   (file, 0x800) = { unlink } — the cleanup/failure-response
+	//     sibling's own tuple (bit 11), never the owner;
+	//   (dir, 0x10000) = { mounton } — the 4C-90 non-terminal overlay
+	//     snapshotter probe's own tuple (the flow fell through to the
+	//     fuse-overlayfs probing), a DIFFERENT class and surface;
+	//   (filesystem, 0x8) = { getattr } — the cgroup statfs probe's
+	//     own tuple, a DIFFERENT tclass/surface, still HOLD;
+	//   the widened sextuple's own combined form
+	//     decode(file, 0x4005e) = exactly { read write create getattr lock open }.
+	if got := classDecode("file", 0x4005e); got != "(file, read write create getattr lock open)" {
+		t.Errorf("kernel classmap decode: the widened state-tree file sextuple's own combined form (0x4005e) must decode to exactly { read write create getattr lock open } in kernel-bit order, got %s", got)
+	}
+	if got := classDecode("file", 0x4004e); got != "(file, read write create lock open)" {
+		t.Errorf("kernel classmap decode: the OLD 4C-89 quintuple form (0x4004e, missing getattr) must still decode WITHOUT the getattr member — the removed shape is the regression, got %s", got)
+	}
+	if got := classDecode("file", 0x1); got != "(file, ioctl)" {
+		t.Errorf("kernel classmap decode: the 4C-90 fs-verity probe ioctl record's own tuple must be (file, { ioctl }) — a DIFFERENT authority from the 4C-91 getattr grant, got %s", got)
+	}
+	if classDecode("file", 0x1) == classDecode("file", 0x10) {
+		t.Error("kernel classmap decode: the (file, 0x1) and (file, 0x10) tuples must stay DISTINCT authorities (the tclass-loss error) — the fs-verity ioctl probe surface is never the metadata-db getattr plane")
+	}
+	if classDecode("filesystem", 0x8) == classDecode("file", 0x10) {
+		t.Error("kernel classmap decode: the (filesystem, 0x8) and (file, 0x10) tuples must stay DISTINCT authorities (the tclass-loss error) — the cgroup_t filesystem getattr probe surface is never the state-tree file getattr plane")
 	}
 	// THE CLASS BOUNDARY (the 4C-69 security regression): the two
 	// tuples are DISTINCT authorities even though their permission

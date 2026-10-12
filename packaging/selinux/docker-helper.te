@@ -3785,7 +3785,72 @@ allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr sear
 #     target-side exec-type rule exactly { entrypoint read execute
 #     getattr }, the shared state-root rule exactly { getattr search },
 #     the shared runtime-root rule exactly { search }.
-allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write };
+#
+# --- 4C-91: the delayed runtime metadata-db state-tree file getattr —
+# --- the 4C-89 rule widened IN PLACE (ONE rule, never split) ---
+#
+# PROVENANCE (the 4C-90 classification run 38297354828's own
+# full-fidelity strace stderr tap, buildkitd leader pid 84066 — the
+# DIRECT SUCCESSOR of the 4C-89 self-check stage: the 4C-89 write grant
+# let the runtime's startup self-check open(O_RDWR) pass whole and the
+# runtime's NEXT production stage became the fatal boundary — the
+# containerd/containerd metadata store opens its db and fstats it):
+# the containerdmeta.db openat SUCCEEDED (create+open are GRANTED
+# members) and the POST-OPEN fstat on its fd denied:
+#
+#   fstat(12</var/lib/docker-helper-builder/ops/op_09b7ce.../root/
+#     runc-native/containerdmeta.db>) = -1 EACCES
+#   -> the SELinux record: requested=0x10 denied=0x10 result=-13
+#     scontext=buildkitd_t:s0:c1 tcontext=builder_state_t:s0:c1
+#     tclass=file (the tracefs AVC pair; the tap's two fstat failures
+#     — the fs-verity probe file's fstat at tap .089573 and THIS
+#     containerdmeta.db fstat at tap .099149 — correspond 1:1 to the
+#     two 0x10 AVCs the tracefs window carried)
+#   -> the fatal stderr line (CAPTURED WHOLE by the 4C-90 tap):
+#     "buildkitd: stat /var/lib/docker-helper-builder/ops/op_09b7ce.../
+#     root/runc-native/containerdmeta.db: permission denied" (0x8d) —
+#     Go's os.PathError{Op:"stat"} format is the fstat-on-open-fd error
+#     surfacing; the fatal line's path and the failing fstat's fd-path
+#     are the SAME object
+#   -> the voluntary exit_group(1), the whole tree dead (tap .106593+).
+#
+# THE MASK DECODE PIN: 0x10 = getattr (bit 4 of the COMMON_FILE_PERMS
+# list the file class shares; the same bit on the dir class is
+# dir:getattr — the GRANTED state-root/state-tree PLANE E member, a
+# DIFFERENT pair and class, and the 4C-85 target-side exec-type
+# file:getattr grant is a DIFFERENT pair — a same-bit coincidence never
+# merges two planes). THE DELTA IS EXACTLY +getattr:
+#   - the openat itself SUCCEEDED (create+open are GRANTED members, NOT
+#     the delta and NOT re-granted); candidate = decode(denied) =
+#     exactly { getattr }, NEVER decode(requested) — there IS no
+#     requested/denied split here (requested==denied=0x10), the
+#     standing invariant candidate=decode(tclass,denied) preserved;
+#   - file:getattr is NOT a metadata bundle — NOT ioctl (the 4C-90
+#     fs-verity probe warning sibling, NON-FATAL: its failure is the
+#     logged "failed check for fsverity support" warning and the flow
+#     CONTINUED past it), NOT unlink (the cleanup/failure-response
+#     sibling — the probe-file removal and the buildkitd.lock walk,
+#     never the owner), NOT setattr/append/map/execute, NOT
+#     create/read/open/lock/write (the granted members NOT re-granted),
+#     NOT dir:mounton (the 4C-90 non-terminal overlay snapshotter probe
+#     — the mount EACCES fell through to the fuse-overlayfs probing),
+#     NOT cgroup_t:filesystem getattr (the statfs("/sys/fs/cgroup")
+#     probe — non-terminal in the same window: the flow continued ~23ms
+#     past it; attribution stays incomplete, the record stays HOLD);
+#   - NO state-tree file ioctl grant, NO paired getattr+ioctl grant
+#     (the 4C-90 classification proved ioctl is NOT the owner and NOT
+#     mechanically required — the fs-verity check treats its probe
+#     failure as "unsupported" by design), NO state-tree file unlink
+#     grant, NO state-tree dir mounton grant, NO cgroup_t grant, NO
+#     runtime-tree widening (PLANE H quintuple + PLANE I triple
+#     frozen), NO buildkitd_exec_t:file open (the standing
+#     quarantine), NO generic bin_t grant, NO tmpfs_t:lnk_file grant,
+#     NO cap_userns grant;
+#   - the frozen planes stay frozen: the three exec planes, the
+#     target-side exec-type rule exactly { entrypoint read execute
+#     getattr }, the shared state-root rule exactly { getattr search },
+#     the shared runtime-root rule exactly { search }.
+allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr };
 
 # --- 4C-72: the shared runtime-root dir search — the NEW pair/plane
 # --- (PLANE G); the bare singleton, never a widening of any existing

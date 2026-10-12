@@ -661,7 +661,7 @@ jobs:
           # total STAYS EXACTLY NINE (any TENTH rule trips), and the
           # §19 alternate applies: if the lifetime finally held, the
           # startup staircase STOPS and the cross-operation isolation
-          # proof (4C-37) resumes — no artificial 4C-90; and the 4C-89
+          # proof (4C-37) resumes — no artificial 4C-91; and the 4C-89
           # grant WIDENS THE 4C-71 STATE-TREE FILE RULE IN PLACE (ONE
           # rule, never split): allow docker_helper_buildkitd_t
           # docker_helper_builder_state_t:file { create read open lock
@@ -699,7 +699,40 @@ jobs:
           # total STAYS EXACTLY NINE (any TENTH rule trips), and the
           # §19 alternate applies: if the lifetime finally held, the
           # startup staircase STOPS and the cross-operation isolation
-          # proof (4C-37) resumes — no artificial 4C-90 (the proof ref
+          # proof (4C-37) resumes — no artificial 4C-92; and the 4C-91
+          # grant WIDENS THE 4C-89 STATE-TREE FILE RULE IN PLACE (ONE
+          # rule, never split): allow docker_helper_buildkitd_t
+          # docker_helper_builder_state_t:file { create read open lock
+          # write getattr } — the delta exactly +getattr; the 4C-90
+          # classification is the provenance (the 4C-90 diagnostic run
+          # 38297354828's own full-fidelity strace stderr tap, buildkitd
+          # leader pid 84066: the containerdmeta.db openat SUCCEEDED
+          # under the granted create/open and the POST-OPEN fstat on
+          # its fd denied EACCES, the fatal stderr line CAPTURED WHOLE
+          # "buildkitd: stat .../containerdmeta.db: permission denied"
+          # (0x8d), Go's os.PathError{Op:"stat"} format is the
+          # fstat-on-open-fd error surfacing, the voluntary
+          # exit_group(1) followed); decode(file, 0x10) = exactly
+          # { getattr } (bit 4 of the COMMON_FILE_PERMS list);
+          # requested==denied so candidate = decode(denied) = exactly
+          # { getattr }; THE CLASS MATTERS — the same bit 0x10 on the
+          # dir class is dir:getattr (the GRANTED PLANE E member) and
+          # the 4C-85 exec-type getattr grant is a DIFFERENT pair, a
+          # same-bit coincidence never merges two planes; file:getattr
+          # is NOT a metadata bundle — NOT ioctl (the fs-verity probe
+          # WARNING sibling, non-fatal by design — the NO-PAIRED-GRANT
+          # rule), NOT unlink (the cleanup sibling), NOT
+          # setattr/append/map/execute/create/read/open/lock/write;
+          # NO state-tree file ioctl grant, NO paired getattr+ioctl
+          # grant, NO state-tree file unlink grant, NO state-tree dir
+          # mounton grant, NO cgroup_t grant, NO runtime-tree widening,
+          # NO buildkitd_exec_t:file open (the standing quarantine), NO
+          # generic bin_t grant, NO tmpfs_t:lnk_file grant, NO
+          # cap_userns grant; the module-borne buildkitd-named allow
+          # total STAYS EXACTLY NINE (any TENTH rule trips), and the
+          # §19 alternate applies: if the lifetime finally held, the
+          # startup staircase STOPS and the cross-operation isolation
+          # proof (4C-37) resumes — no artificial 4C-92 (the proof ref
           # advances to the commit carrying that module; identical Go
           # sources, so the binary is the same program).
           PHASE4B_PROOF_REF: '8eebf7120712de5d0a6efd53a10ad52e13e53b34'
