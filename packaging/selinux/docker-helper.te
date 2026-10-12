@@ -3735,7 +3735,57 @@ allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr sear
 # it operation-scoped in effect (a c1 subject cannot reach a c2 per-op
 # tree — the cross-operation reachability proof (4C-37) stays mandatory
 # and the cross-operation gate stays OPEN/Critical until it holds).
-allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock };
+#
+# --- 4C-89: the delayed runtime self-check state-tree file write —
+# --- the 4C-71 rule widened IN PLACE (ONE rule, never split) ---
+#
+# PROVENANCE (the 4C-88 canonical run 38283671136's own death-window
+# records, buildkitd pid 82843 — the terminal-proximate shape after the
+# 4C-88 rmdir grant let the stale-entry-removal stage complete
+# silently): the runtime's own startup self-check opens its state file
+# for reading AND writing and the WRITE hook denies:
+#
+#   requested=0x40006={ read write open } denied=0x4 result=-13
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:docker_helper_builder_state_t:s0:c1
+#     tclass=file, trace-ts=580.568712 and the twin 580.569000
+#   -> the stderr warning: level=warning msg="failed check for"
+#     (0x15c bytes, 580.568934 — between the first write/unlink pair
+#     and the second write denial)
+#   -> the terminal chain continues (the state-tree FILE unlink 0x800
+#     at 580.568793/580.573048/580.573100, the fatal "buildkitd: open
+#     /var/lib/docker-helper-builder/ops/op_..." (0x8d) and the
+#     voluntary exit_group(1) at 580.573) — the whole tree dies and the
+#     operation-A runtime is unbindable at binder time.
+#
+# THE MASK DECODE PIN: 0x4 = write (bit 2 of the COMMON_FILE_PERMS list
+# the file class shares; the LIVE record corroborates the bit — the
+# requested 0x40006 carries read 0x2 and open 0x40000 TOO and BOTH are
+# GRANTED members, never the delta). THE DELTA IS EXACTLY +write:
+#   - requested 0x40006 = { read write open }; the standing read and
+#     open bits are NOT the delta and are NOT re-granted — candidate =
+#     decode(denied) = exactly { write }, NEVER decode(requested);
+#   - decode(file, 0x4) = exactly { write }, bit 2; THE CLASS MATTERS —
+#     the same bit 0x4 on the dir class is dir:write (the state-tree
+#     dir rule's GRANTED member, a DIFFERENT pair and class), on the
+#     sock_file class it is not a buildkitd member; file:write is NOT a
+#     writable-file bundle — NOT unlink (the interleaved sibling, its
+#     own live-evidence phase), NOT setattr, NOT append, NOT map, NOT
+#     execute, NOT create/read/open/lock (the granted members NOT
+#     re-granted), NOT dir:mounton (a DIFFERENT class), NOT
+#     cgroup_t:filesystem getattr (a DIFFERENT class and surface);
+#   - NO state-tree file unlink grant (the 0x800 sibling stays its own
+#     live-evidence phase), NO state-tree dir mounton grant (the 0x10000
+#     record observed earlier in the 4C-88 window, classified
+#     non-terminal in that run), NO cgroup_t grant, NO runtime-tree
+#     widening (PLANE H quintuple + PLANE I triple frozen), NO
+#     buildkitd_exec_t:file open (the standing quarantine), NO generic
+#     bin_t grant, NO tmpfs_t:lnk_file grant, NO cap_userns grant;
+#   - the frozen planes stay frozen: the three exec planes, the
+#     target-side exec-type rule exactly { entrypoint read execute
+#     getattr }, the shared state-root rule exactly { getattr search },
+#     the shared runtime-root rule exactly { search }.
+allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write };
 
 # --- 4C-72: the shared runtime-root dir search — the NEW pair/plane
 # --- (PLANE G); the bare singleton, never a widening of any existing
