@@ -379,7 +379,7 @@ marker "PREREQ=PASS"
 log 'A: toolchain + shipped module 1.2 + shipped composition install'
 zypper --non-interactive install -y checkpolicy container-selinux \
   policycoreutils-python-utils rootlesskit slirp4netns audit socat \
-  setools-console python3 curl \
+  setools-console python3 curl strace \
   > "$EVIDENCE_DIR/a-zypper-toolchain.log" 2>&1 \
   || { note "zypper install of the policy toolchain failed (see a-zypper-toolchain.log)"; finish INCOMPLETE; exit 0; }
 fail_toolchain=0
@@ -3500,6 +3500,61 @@ for RXDS in openat open openat2; do
   auditctl -a always,exit -F arch=b64 -S "$RXDS" -F success=0 -k p5s2rxd >> "$RXD_AUDIT_LOG" 2>&1 \
     || printf 'p5s2rxd: the -S %s rule was rejected\n' "$RXDS" >> "$RXD_AUDIT_LOG"
 done
+# The 4C-90 classification channel: the same failing-syscall audit form
+# over the stat/ioctl/unlink/mount/statfs families — the PATH records
+# carry the FULL denied path even when the strace tap cannot attach and
+# the tracefs truncates. Key p5s2rxd90, deleted with the p5s2rxd key at
+# the death-window read.
+for RXDS in newfstatat statx ioctl unlink unlinkat mount statfs fstatfs; do
+  auditctl -a always,exit -F arch=b64 -S "$RXDS" -F success=0 -k p5s2rxd90 >> "$RXD_AUDIT_LOG" 2>&1 \
+    || printf 'p5s2rxd90: the -S %s rule was rejected\n' "$RXDS" >> "$RXD_AUDIT_LOG"
+done
+# ---- 4C-90 strace stderr tap: the FULL-fidelity fatal-stage channel.
+# ---- The tracefs ring truncates the write buffer display (~31 chars)
+# ---- so the fatal "buildkitd: stat ..." line and the "failed check
+# ---- for" warning lose their path/errno tails; strace attached to the
+# ---- runtime leader records every write(2) payload WHOLE (-s 4096)
+# ---- with -yy fd->path mapping and the full syscall/errno sequence
+# ---- for the stat/ioctl/unlink/mount/statfs owners. The poller
+# ---- attaches to the FIRST buildkitd pid (the leader — its children
+# ---- fork later with the same comm); the fatal stage is ~2.5s into
+# ---- the flow so attach latency of ~100ms loses only pre-attach
+# ---- noise. kernel.yama.ptrace_scope is relaxed for the throwaway
+# ---- UAT VM and the old value recorded. DIAGNOSTIC ONLY: no policy
+# ---- authority, no grant, no contract change.
+RXD_STRACE_POLLER=""
+RXD_TAPLOG=/tmp/p4b-work/bkd-strace-full.txt
+RXD_TAPMETA=/tmp/p4b-work/bkd-tap-meta
+RXD_TAPERR=/tmp/p4b-work/bkd-strace-err
+RXD_YAMA_OLD="$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo unknown)"
+: > "$RXD_TAPMETA" 2>/dev/null || true
+: > "$RXD_TAPERR" 2>/dev/null || true
+rm -f "$RXD_TAPLOG" 2>/dev/null || true
+if command -v strace >/dev/null 2>&1; then
+  printf 'YAMA-SCOPE: old=%s new=0\nCLOCK-BRIDGE: epoch=%s uptime=%s\n' \
+    "$RXD_YAMA_OLD" "$(date +%s.%N)" "$(cut -d' ' -f1 /proc/uptime 2>/dev/null)" > "$RXD_TAPMETA"
+  echo 0 > /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || true
+  (
+    RXD_TAP_PID=""
+    for RXD_i in $(seq 1 400); do
+      RXD_TAP_PID="$(pgrep -x buildkitd 2>/dev/null | sort -n | head -1 || true)"
+      [ -n "$RXD_TAP_PID" ] && break
+      sleep 0.025
+    done
+    if [ -n "$RXD_TAP_PID" ]; then
+      printf 'TAP-ATTACH: pid=%s at=%s\n' "$RXD_TAP_PID" "$(date +%s.%N)" >> "$RXD_TAPMETA"
+      strace -f -ttt -yy -s 4096 \
+        -e trace=write,newfstatat,statx,lstat,fstat,ioctl,unlink,unlinkat,openat,open,openat2,mount,umount2,statfs,fstatfs,chmod,fchmod \
+        -p "$RXD_TAP_PID" -o "$RXD_TAPLOG" 2>"$RXD_TAPERR"
+      printf 'TAP-EXIT: rc=%s at=%s\n' "$?" "$(date +%s.%N)" >> "$RXD_TAPMETA"
+    else
+      printf 'TAP-ATTACH: no buildkitd pid found in 10s\n' >> "$RXD_TAPMETA"
+    fi
+  ) &
+  RXD_STRACE_POLLER=$!
+else
+  printf 'YAMA-SCOPE: not-relaxed (strace unavailable)\n' > "$RXD_TAPMETA"
+fi
 START_OUT="$(printf 'START %s\n' "$OP_ID" | timeout 120 socat - UNIX-CONNECT:"$MANAGER_SOCK")" || START_RC=$?
 {
   echo "window-start: $T0"
@@ -12388,6 +12443,161 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
     cat "$EVIDENCE_DIR/62-runtime-death-trace.txt" >&2
     auditctl -D -k p5s2rxd 2>/dev/null || true
   fi
+  auditctl -D -k p5s2rxd90 2>/dev/null || true
+
+  # ---- 4C-90 fatal-stat classification (DIAGNOSTIC ONLY — zero .te/
+  # ---- .fc delta, zero policy authority, no grant minted here). The
+  # ---- two independent full-fidelity channels armed before the START
+  # ---- (the strace stderr tap on the runtime leader + the p5s2rxd90
+  # ---- failing-syscall audit rules) are collected now. The tap gives
+  # ---- every write(2) payload WHOLE (the full fatal "buildkitd: stat
+  # ---- ..." line and the full "failed check for" warning) with the
+  # ---- full syscall/errno/path sequence around the fatal stage; the
+  # ---- audit channel gives the full PATH records when the tap cannot
+  # ---- attach. The mechanical classification keys on the LAST failing
+  # ---- syscall before the fatal write — the terminal candidate — and
+  # ---- tags the other shapes pre-fatal/post-fatal; the authoritative
+  # ---- classification is the deliverable's own reading of this
+  # ---- evidence, never the heuristic alone.
+  {
+    echo "=== 4C-90 fatal-stat classification evidence (the strace stderr tap + the p5s2rxd90 audit channel) ==="
+    echo "--- the tap lifecycle (attach latency and the clock bridge to the tracefs monotonic stamps):"
+    cat "$RXD_TAPMETA" 2>/dev/null || echo "(no tap meta)"
+    echo "--- the tap attach/stderr (a ptrace or SELinux denial lands here):"
+    cat "$RXD_TAPERR" 2>/dev/null || true
+    echo "--- the full-fidelity write(2) records carrying the payload's own stderr lines (WHOLE lines, -s 4096):"
+    if [ -s "$RXD_TAPLOG" ]; then
+      grep -anE '\[pid [0-9]+\] [0-9]+\.[0-9]+ write\(2' "$RXD_TAPLOG" | grep -aF '"time=' || echo "(no stderr writes captured)"
+    else
+      echo "(the tap log is empty or missing — see the attach/stderr section above)"
+    fi
+    echo "--- FULL-FATAL-STAT-LINE / FULL-FAILED-CHECK-LINE extraction:"
+    if [ -s "$RXD_TAPLOG" ]; then
+      RXD90_FATAL="$(grep -aE 'write\(2[^)]*\) *= [0-9]+' "$RXD_TAPLOG" | grep -aF '"buildkitd: ' | tail -1 || true)"
+      if [ -n "$RXD90_FATAL" ]; then
+        echo "FULL-FATAL-STAT-LINE=CAPTURED" | tee -a /tmp/p4b-work/bkd-class.txt
+        printf '%s\n' "$RXD90_FATAL"
+      else
+        echo "FULL-FATAL-STAT-LINE=UNAVAILABLE (no 'buildkitd: ' stderr write captured by the tap)" | tee -a /tmp/p4b-work/bkd-class.txt
+      fi
+      RXD90_CHECK="$(grep -aE 'write\(2[^)]*\) *= [0-9]+' "$RXD_TAPLOG" | grep -aF '"failed check for' | tail -1 || true)"
+      if [ -n "$RXD90_CHECK" ]; then
+        echo "FULL-FAILED-CHECK-LINE=CAPTURED" | tee -a /tmp/p4b-work/bkd-class.txt
+        printf '%s\n' "$RXD90_CHECK"
+      else
+        echo "FULL-FAILED-CHECK-LINE=UNAVAILABLE (no 'failed check for' stderr write captured by the tap)" | tee -a /tmp/p4b-work/bkd-class.txt
+      fi
+    else
+      echo "FULL-FATAL-STAT-LINE=UNAVAILABLE (the tap log is empty or missing)" | tee -a /tmp/p4b-work/bkd-class.txt
+      echo "FULL-FAILED-CHECK-LINE=UNAVAILABLE (the tap log is empty or missing)" | tee -a /tmp/p4b-work/bkd-class.txt
+    fi
+    echo "--- the FULL failing-syscall sequence around the fatal stage (every '= -1 E...' line, ordered; the op path prefix = /var/lib/docker-helper-builder/ops/$OP_ID):"
+    if [ -s "$RXD_TAPLOG" ]; then
+      grep -anE '= -1 [A-Z]+ \(' "$RXD_TAPLOG" | tail -60 || echo "(no failing syscalls captured)"
+    else
+      echo "(no tap log)"
+    fi
+    echo "--- the mechanical classification (the LAST failing syscall before the fatal write is the terminal candidate; the SELinux hook each syscall carries is fixed by the kernel: stat-family->getattr, ioctl->ioctl, unlink-family->unlink, mount->mounton, statfs-family->filesystem getattr):"
+    if [ -s "$RXD_TAPLOG" ]; then
+      awk '
+        function hook_of(sn) {
+          if (sn ~ /^(newfstatat|statx|lstat|fstat)$/) return "getattr";
+          if (sn == "ioctl") return "ioctl";
+          if (sn ~ /^(unlink|unlinkat)$/) return "unlink";
+          if (sn == "mount") return "mounton";
+          if (sn == "umount2") return "umount";
+          if (sn ~ /^(statfs|fstatfs)$/) return "fs-getattr";
+          if (sn ~ /^(open|openat|openat2)$/) return "open";
+          if (sn ~ /^(chmod|fchmod)$/) return "setattr";
+          return sn;
+        }
+        { lines[NR] = $0 }
+        /write\(2[^)]*\) *= [0-9]+/ && /"buildkitd: / { fatal_ln = NR; fatal_line = $0 }
+        END {
+          if (fatal_ln == 0) {
+            print "FATAL-STAT-OWNER=UNCLASSIFIED (no fatal stderr write captured by the tap)"
+            exit
+          }
+          print "FATAL-LINE: " fatal_line
+          last = ""; lastln = 0; lastname = ""; lasterrno = ""
+          for (i = 1; i < fatal_ln; i++) {
+            if (lines[i] ~ /= -1 [A-Z]+ \(/) {
+              l = lines[i]; sub(/^\[[^]]*\] [0-9]+\.[0-9]+ /, "", l)
+              split(l, a, "("); sn = a[1]
+              last = lines[i]; lastln = i; lastname = sn
+              if (match(l, / = -1 [A-Z]+/)) lasterrno = substr(l, RSTART+6, RLENGTH-6)
+            }
+          }
+          if (lastln == 0) {
+            print "FATAL-STAT-OWNER=UNCLASSIFIED (no failing syscall precedes the fatal write)"
+            exit
+          }
+          printf "FATAL-STAT-OWNER=terminal-candidate syscall=%s hook=%s errno=%s (the last failing syscall before the fatal write, tap line %d)\n", lastname, hook_of(lastname), lasterrno, lastln
+          print "TERMINAL-CANDIDATE-RECORD: " last
+          # the per-shape roles: every failing syscall in the tap window,
+          # tagged pre-fatal (sibling unless it IS the terminal candidate)
+          # or post-fatal (post-failure)
+          seen_getattr = 0; seen_ioctl = 0; seen_unlink = 0; seen_mounton = 0; seen_fsget = 0
+          for (i = 1; i <= NR; i++) {
+            if (lines[i] !~ /= -1 [A-Z]+ \(/) continue
+            l = lines[i]; sub(/^\[[^]]*\] [0-9]+\.[0-9]+ /, "", l)
+            split(l, a, "("); sn = a[1]; hk = hook_of(sn)
+            pos = (i < fatal_ln) ? "pre-fatal" : "post-fatal"
+            if (hk == "getattr" && pos == "pre-fatal") { seen_getattr = 1; print "FILE-GETATTR-SOURCE: " lines[i] }
+            if (hk == "ioctl" && pos == "pre-fatal") { seen_ioctl = 1; print "FILE-IOCTL-SOURCE: " lines[i] }
+            if (hk == "unlink" && pos == "pre-fatal") { seen_unlink = 1; print "FILE-UNLINK-SOURCE: " lines[i] }
+            if (hk == "mounton" && pos == "pre-fatal") { seen_mounton = 1; print "DIR-MOUNTON-SOURCE: " lines[i] }
+            if (hk == "fs-getattr" && pos == "pre-fatal") { seen_fsget = 1; print "CGROUP-FS-GETATTR-SOURCE: " lines[i] }
+          }
+          tc_hook = hook_of(lastname)
+          printf "FILE-GETATTR-ROLE=%s\n", (tc_hook == "getattr") ? "terminal-candidate" : (seen_getattr ? "pre-fatal-sibling" : "not-observed-by-tap")
+          printf "FILE-IOCTL-ROLE=%s\n", (tc_hook == "ioctl") ? "terminal-candidate" : (seen_ioctl ? "pre-fatal-sibling" : "not-observed-by-tap")
+          printf "FILE-UNLINK-ROLE=%s\n", (tc_hook == "unlink") ? "terminal-candidate" : (seen_unlink ? "pre-fatal-sibling" : "not-observed-by-tap")
+          printf "DIR-MOUNTON-ROLE=%s\n", (tc_hook == "mounton") ? "terminal-candidate" : (seen_mounton ? "pre-fatal-sibling" : "not-observed-by-tap")
+          printf "CGROUP-FILESYSTEM-GETATTR-ROLE=%s\n", (tc_hook == "fs-getattr") ? "terminal-candidate" : (seen_fsget ? "pre-fatal-sibling" : "not-observed-by-tap")
+        }
+      ' "$RXD_TAPLOG" 2>&1 | tee /tmp/p4b-work/bkd-class.txt
+    else
+      echo "FATAL-STAT-OWNER=UNCLASSIFIED (no tap log)"
+      echo "FILE-GETATTR-ROLE=not-observed-by-tap"
+      echo "FILE-IOCTL-ROLE=not-observed-by-tap"
+      echo "FILE-UNLINK-ROLE=not-observed-by-tap"
+      echo "DIR-MOUNTON-ROLE=not-observed-by-tap"
+      echo "CGROUP-FILESYSTEM-GETATTR-ROLE=not-observed-by-tap"
+      printf 'FATAL-STAT-OWNER=UNCLASSIFIED (no tap log)\n' > /tmp/p4b-work/bkd-class.txt
+    fi
+    echo "--- the p5s2rxd90 audit channel (the full PATH records when the tap cannot attach; all rotated generations searched):"
+    RXD90_LOGS="$(ls /var/log/audit/audit.log* 2>/dev/null || true)"
+    RXD90_HITS="$(grep -ah 'key="p5s2rxd90"' $RXD90_LOGS 2>/dev/null | grep -a 'comm="buildkitd"' | tail -40 || true)"
+    if [ -n "$RXD90_HITS" ]; then
+      printf '%s\n' "$RXD90_HITS"
+    else
+      echo "(no buildkitd p5s2rxd90 records found in any audit generation — the flood rotation or the tap's attach noise applies; the tap is the primary channel)"
+    fi
+    echo "--- the tap raw tail (the last 80 lines, the death context verbatim):"
+    tail -80 "$RXD_TAPLOG" 2>/dev/null || true
+    echo "--- the tap detachment (the tracee must survive the collector):"
+    if [ -n "${RXD_STRACE_POLLER:-}" ]; then
+      kill "$RXD_STRACE_POLLER" 2>/dev/null || true
+      wait "$RXD_STRACE_POLLER" 2>/dev/null || true
+    fi
+    RXD90_SPID="$(pgrep -f 'strace -f -ttt -yy' 2>/dev/null || true)"
+    if [ -n "$RXD90_SPID" ]; then
+      kill -TERM $RXD90_SPID 2>/dev/null || true
+      echo "detached strace: $RXD90_SPID"
+    else
+      echo "detached strace: (none running)"
+    fi
+  } > "$EVIDENCE_DIR/63-bkd-fatal-stderr.txt" 2>&1
+  cat "$EVIDENCE_DIR/63-bkd-fatal-stderr.txt" >&2
+  # The 4C-90 classification markers (the mechanical classification is
+  # advisory — the authoritative classification is the deliverable's
+  # reading of 63-bkd-fatal-stderr.txt; the tap's FULL lines make the
+  # evidence inspectable end to end).
+  RXD90_FATAL_STATUS="$(grep -a '^FULL-FATAL-STAT-LINE=' /tmp/p4b-work/bkd-class.txt 2>/dev/null | head -1 || true)"
+  [ -n "$RXD90_FATAL_STATUS" ] && marker "4C-90-${RXD90_FATAL_STATUS%%=*}=${RXD90_FATAL_STATUS#*=}"
+  grep -aE '^(FATAL-STAT-OWNER|FILE-GETATTR-ROLE|FILE-IOCTL-ROLE|FILE-UNLINK-ROLE|DIR-MOUNTON-ROLE|CGROUP-FILESYSTEM-GETATTR-ROLE)=' /tmp/p4b-work/bkd-class.txt 2>/dev/null \
+    | while IFS= read -r RXD90_KV; do [ -n "$RXD90_KV" ] && marker "4C-90-$RXD90_KV"; done
 
   # ---- 4C-L1: the software-lifecycle diagnostic verdict. DIAGNOSTIC
   # ---- ONLY (no policy authority, no new SELinux candidate, no 4C-82
