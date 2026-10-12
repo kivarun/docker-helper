@@ -631,7 +631,7 @@ jobs:
           # isolation proof (4C-37) resumes — no artificial 4C-88 (the
           # proof ref advances to the commit carrying that module;
           # identical Go sources, so the binary is the same program).
-          PHASE4B_PROOF_REF: 'ba57ac8f3d2ff330994ee27a5c002ed30977ebd1'
+          PHASE4B_PROOF_REF: 'ccaeafe37a92a46bc05e64e37c9dfdb78ab3c73b'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"
