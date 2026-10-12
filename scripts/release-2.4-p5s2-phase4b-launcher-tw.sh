@@ -4282,8 +4282,18 @@ fi
     # BROKEN. A negative errno exit is the boundary. An ABSENT pair
     # means the leg never ran — the proof cannot conclude.
     for LEG in sock state; do
-      eval "LEG_EXIT=\$CROSS_ATTACK_${LEG}_EXIT"
-      eval "LEG_PAIR=\$CROSS_ATTACK_${LEG}_PAIR"
+      # The leg's real variables are the uppercase CROSS_ATTACK_SOCK_EXIT/
+      # CROSS_ATTACK_STATE_EXIT pair (the extraction assignments above);
+      # the old eval "LEG_EXIT=\$CROSS_ATTACK_${LEG}_EXIT" spelled the
+      # lowercase $LEG into the name — an unbound CROSS_ATTACK_sock_EXIT
+      # under set -u (run 38303540829). Bind the real variables directly.
+      if [ "$LEG" = sock ]; then
+        LEG_PAIR="$CROSS_ATTACK_SOCK_PAIR"
+        LEG_EXIT="$CROSS_ATTACK_SOCK_EXIT"
+      else
+        LEG_PAIR="$CROSS_ATTACK_STATE_PAIR"
+        LEG_EXIT="$CROSS_ATTACK_STATE_EXIT"
+      fi
       if [ -z "$LEG_PAIR" ]; then
         echo "GATE: the attack-$LEG leg never issued its openat in the kernel trace — the proof cannot conclude"
         CROSS_OK=0
@@ -4314,7 +4324,11 @@ fi
           esac
           echo "BOUNDARY: the attack-$LEG leg stopped at its openat (exit $LEG_EXIT${LEG_NAME:+ $LEG_NAME}) — the policy boundary held"
         fi
-        eval "CROSS_ATTACK_${LEG}_NAME=\"\$LEG_NAME\""
+        if [ "$LEG" = sock ]; then
+          CROSS_ATTACK_SOCK_NAME="$LEG_NAME"
+        else
+          CROSS_ATTACK_STATE_NAME="$LEG_NAME"
+        fi
       fi
     done
     if printf '%s\n' "$CROSS_ATTACK_FIRST_EXIT" | grep -aqE 'sys_(openat|setns|ioctl) -> 0xfffffffffffffffe'; then
