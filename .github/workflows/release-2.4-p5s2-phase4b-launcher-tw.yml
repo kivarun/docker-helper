@@ -594,9 +594,43 @@ jobs:
           # rule trips), and the §19 alternate applies: if the
           # lifetime finally held, the startup staircase STOPS and the
           # cross-operation isolation proof (4C-37) resumes — no
-          # artificial 4C-87 (the proof ref advances to the commit
-          # carrying that module; identical Go sources, so the binary
-          # is the same program).
+          # artificial 4C-88; and the 4C-87 grant WIDENS THE 4C-86
+          # STATE-TREE DIR RULE IN PLACE (ONE rule, never split):
+          # allow docker_helper_buildkitd_t
+          # docker_helper_builder_state_t:dir { getattr search write
+          # add_name read open create remove_name } — the delta exactly
+          # +remove_name; provenance = the 4C-37R death-window run
+          # 38181580505's own terminal causal records (the delayed
+          # runtime self-maintenance stale-entry removal:
+          # requested=0x28000000={ search remove_name } denied=0x8000000
+          # result=-13 tclass=dir trace-ts=477.495253 and the twin
+          # 477.495272, the stderr warning msg="Failed to remove"
+          # (0x158 bytes) 173us after the denial, the terminal chain
+          # ending in the voluntary exit_group(1) — the binder-window
+          # death the post-TUN gates structurally cannot see, the
+          # death-window tracefs instrument the provenance channel);
+          # decode(dir, 0x8000000) = exactly { remove_name } (bit 27 of
+          # the dir class's own tail); candidate = decode(denied), NEVER
+          # decode(requested) — the standing search bit is NOT the
+          # delta; THE CLASS MATTERS — the same bit 0x8000000 on the
+          # file class is file:entrypoint (the 4C-61 grant) and the
+          # runtime-tree PLANE H rule carries the same permission on a
+          # DIFFERENT target type, a same-mask coincidence never merges
+          # two planes; dir:remove_name is NOT an unlink bundle — NOT
+          # rmdir/setattr/rename/mounton/create/add_name; NO state-tree
+          # FILE widening (the 4C-37R file-write denial 0x40006/0x4 is a
+          # LATER phase's own evidence), NO cgroup_t grant (the 4C-37R
+          # cgroup_t:filesystem getattr record is a different
+          # class/surface with incomplete attribution), NO runtime-tree
+          # widening, NO buildkitd_exec_t:file open (the standing
+          # quarantine), NO generic bin_t grant, NO tmpfs_t:lnk_file
+          # grant, NO cap_userns grant; the module-borne buildkitd-named
+          # allow total STAYS EXACTLY NINE (any TENTH rule trips), and
+          # the §19 alternate applies: if the lifetime finally held,
+          # the startup staircase STOPS and the cross-operation
+          # isolation proof (4C-37) resumes — no artificial 4C-88 (the
+          # proof ref advances to the commit carrying that module;
+          # identical Go sources, so the binary is the same program).
           PHASE4B_PROOF_REF: 'ba57ac8f3d2ff330994ee27a5c002ed30977ebd1'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"

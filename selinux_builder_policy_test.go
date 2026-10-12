@@ -4444,7 +4444,7 @@ func buildkitdIdentityViolations(policy string) []string {
 	const canonicalTransition = "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;"
 	const canonicalEntry = "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr };"
 	const canonicalStateRoot = "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search };"
-	const canonicalStateTree = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create };"
+	const canonicalStateTree = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name };"
 	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock };"
 	const canonicalRuntimeRoot = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search;"
 	const canonicalRuntimeTree = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write add_name remove_name };"
@@ -4590,7 +4590,7 @@ func buildkitdIdentityViolations(policy string) []string {
 		}
 	}
 	if stateTreeCount != 1 {
-		violations = append(violations, fmt.Sprintf("the buildkitd categorized state-tree { getattr search write add_name read open } grant must exist exactly once in the exact canonical form, found %d: %s", stateTreeCount, canonicalStateTree))
+		violations = append(violations, fmt.Sprintf("the buildkitd categorized state-tree { getattr search write add_name read open create remove_name } grant must exist exactly once in the exact canonical form, found %d: %s", stateTreeCount, canonicalStateTree))
 	}
 	stateFileCount := 0
 	for _, line := range strings.Split(policy, "\n") {
@@ -4663,7 +4663,7 @@ func buildkitdIdentityViolations(policy string) []string {
 		}
 	}
 	if buildkitdNamedAllow != 9 {
-		violations = append(violations, fmt.Sprintf("the module must carry exactly the nine buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create }, the categorized state-tree file { create read open lock }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name }, the categorized runtime-tree sock_file { create unlink setattr }), found %d", buildkitdNamedAllow))
+		violations = append(violations, fmt.Sprintf("the module must carry exactly the nine buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name }, the categorized state-tree file { create read open lock }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name }, the categorized runtime-tree sock_file { create unlink setattr }), found %d", buildkitdNamedAllow))
 	}
 	// The shared runtime-root dir surface has exactly the standing
 	// owners above; a NEW or reshaped rule on the pair (any source,
@@ -4733,7 +4733,7 @@ func buildkitdIdentityViolations(policy string) []string {
 			continue
 		}
 		if strings.Contains(trimmed, " docker_helper_builder_state_t:dir ") && !standingStateTreeDirRules[trimmed] {
-			violations = append(violations, "the categorized state-tree dir surface has exactly the standing owners (init_t, the manager, the flow, the buildkitd { getattr search write add_name read open } rule) — every other shape on the pair violates: "+trimmed)
+			violations = append(violations, "the categorized state-tree dir surface has exactly the standing owners (init_t, the manager, the flow, the buildkitd { getattr search write add_name read open create remove_name } rule) — every other shape on the pair violates: "+trimmed)
 		}
 	}
 	// The categorized state-tree file surface has exactly the standing
@@ -5022,8 +5022,9 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		t.Error("the missing-state-root mutation must trip the buildkitd authority invariants")
 	}
 
-	// The 4C-68/80/81 categorized state-tree plane: exactly the
-	// { getattr search write add_name read open } rule, once (the 4C-65 getattr is
+	// The 4C-68/80/81/86/87 categorized state-tree plane: exactly the
+	// { getattr search write add_name read open create remove_name }
+	// octuple, once (the 4C-65 getattr is
 	// the 4C-64 run's terminal-causal owner; the 4C-66 search is the
 	// 4C-65 canonical run's own terminal boundary; the 4C-67 write is the
 	// 4C-66 canonical run's own terminal boundary; the 4C-68 add_name is
@@ -5034,9 +5035,16 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 	// socket lifecycle passed whole); the 4C-81 open is the 4C-80
 	// canonical run's own terminal boundary (the DENIED bit 0x40000 of
 	// the SAME openat — the read bit PASSED silently under the 4C-80
-	// grant, the requested-vs-denied rule degrades to the exact delta) —
-	// the rule widened IN PLACE each phase, never split).
-	const canonicalStateTree = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create };"
+	// grant, the requested-vs-denied rule degrades to the exact delta);
+	// the 4C-86 create is the 4C-85 canonical run's own terminal-causal
+	// owner (the OCI worker's state-dir mkdirat, the lifecycle-proven
+	// terminal); and the 4C-87 remove_name is the 4C-37R death-window
+	// run 38181580505's own terminal causal record (the delayed runtime
+	// self-maintenance stale-entry removal, the "Failed to remove" stderr
+	// correlation, the whole tree's voluntary exit_group(1) after the
+	// state-tree FILE write denial — ONE rule widened IN PLACE each
+	// phase, never split).
+	const canonicalStateTree = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name };"
 	var withoutStateTree []string
 	stateTreeCount := 0
 	for _, line := range strings.Split(policy, "\n") {
@@ -5280,12 +5288,13 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		{"parallel bare search rule beside the canonical pair", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir search;"},
 		{"split state-root grant", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir getattr;\nallow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir search;"},
 		{"duplicate of the state-root rule", canonicalStateRoot},
-		// the 4C-68/80/81 categorized state-tree plane (exactly the
-		// { getattr search write add_name read open } sextuple; the
-		// missing-rule case is covered by the withoutStateTree removal
-		// above; the 4C-80 read and the 4C-81 open widened IN PLACE —
-		// the old 4C-68 quadruple and 4C-80 quintuple forms are pinned
-		// below)
+		// the 4C-68/80/81/86/87 categorized state-tree plane (exactly the
+		// { getattr search write add_name read open create remove_name }
+		// octuple; the missing-rule case is covered by the withoutStateTree
+		// removal above; the 4C-80 read, the 4C-81 open, the 4C-86 create
+		// and the 4C-87 remove_name widened IN PLACE — the old 4C-68
+		// quadruple, 4C-80 quintuple, 4C-81 sextuple and 4C-86 septuple
+		// forms are pinned below)
 		{"the old 4C-68 quadruple form (missing read+open)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name };"},
 		{"the old 4C-80 quintuple form (missing open)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read };"},
 		{"the old 4C-67 triple form (missing add_name)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write };"},
@@ -5309,19 +5318,29 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		{"rmdir instead", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir rmdir;"},
 		{"mounton instead", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir mounton;"},
 		{"lock instead", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir lock;"},
-		// the seventh-permission sweep on the sextuple: dir:open is
-		// NOT a directory-IO bundle — the HANDLED/NON-TERMINAL
-		// remove_name sibling stays its own live-evidence phase and the
-		// kernel emits each hook as its own decision; none rides the
-		// open grant; dir-class and file-class decisions are never
-		// combined
+		// the seventh-permission sweep on the octuple: dir:open is
+		// NOT a directory-IO bundle — the kernel emits each hook as
+		// its own decision; none rides the open grant; dir-class and
+		// file-class decisions are never combined (the remove_name
+		// sibling is the 4C-87 GRANTED member — never a granted
+		// neighbor re-granted)
 		{"the old 4C-81 sextuple form (missing create)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open };"},
-		{"the septuple + remove_name", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name };"},
-		{"the septuple + setattr", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create setattr };"},
-		{"the septuple + rmdir", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create rmdir };"},
-		{"the septuple + rename", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create rename };"},
-		{"the septuple + mounton", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create mounton };"},
-		{"the septuple + lock", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create lock };"},
+		// the eighth-permission sweep on the octuple: dir:remove_name is
+		// NOT a directory-removal bundle — the 4C-87 grant is the delayed
+		// runtime self-maintenance stale-entry removal's own hook (the
+		// 4C-37R death-window run 38181580505's terminal causal record,
+		// the "Failed to remove" stderr correlation); rmdir/setattr/
+		// rename/mounton/lock stay their own live-evidence phases and
+		// the kernel emits each hook as its own decision; none rides
+		// the remove_name grant; dir-class and file-class decisions are
+		// never combined; the 4C-86 septuple (the octuple MINUS
+		// remove_name) is now the OLD shape
+		{"the old 4C-86 septuple form (missing remove_name)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create };"},
+		{"the octuple + setattr", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name setattr };"},
+		{"the octuple + rmdir", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name rmdir };"},
+		{"the octuple + rename", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name rename };"},
+		{"the octuple + mounton", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name mounton };"},
+		{"the octuple + lock", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name lock };"},
 		{"state-tree grant from the wrong source (the flow)", "allow docker_helper_rootlesskit_t docker_helper_builder_state_t:dir getattr;"},
 		{"state-tree grant from the wrong source (the manager)", "allow docker_helper_builder_t docker_helper_builder_state_t:dir getattr;"},
 		{"state-tree grant from the wrong source (the daemon)", "allow docker_helper_t docker_helper_builder_state_t:dir getattr;"},
@@ -5703,6 +5722,17 @@ var kernelCommonFilePerms = []string{
 // dir carries add_name/remove_name/reparent/search/rmdir.
 var kernelFileOnlyPerms = []string{"execute_no_trans", "entrypoint"}
 var kernelDirOnlyPerms = []string{"add_name", "remove_name", "reparent", "search", "rmdir"}
+
+// kernelFilesystemPerms mirrors the kernel's static filesystem-class
+// permission order (linux/security/selinux/include/classmap.h: mount
+// remount unmount getattr relabelfrom relabelto transition associate
+// quotamod quotaget). The 4C-37R death-window record
+// cgroup_t:filesystem denied=0x8 carries getattr at bit 3 — a
+// DIFFERENT class from the dir/file planes, never merged with them.
+var kernelFilesystemPerms = []string{
+	"mount", "remount", "unmount", "getattr", "relabelfrom", "relabelto",
+	"transition", "associate", "quotamod", "quotaget",
+}
 
 // kernelProcessPerms mirrors the kernel's static process-class permission
 // order (linux/security/selinux/include/classmap.h: fork transition sigchld
@@ -6135,6 +6165,16 @@ func TestSELinuxPolicyKernelClassmapMaskPins(t *testing.T) {
 			// anti-merge pin decodes the /etc/localtime incidental
 			// surface's own tuple).
 			perms = decode(mask)
+		case "filesystem":
+			// The filesystem class carries its OWN permission list (the
+			// kernel classmap; the 4C-87 anti-merge pin decodes the
+			// 4C-37R death-window cgroup_t:filesystem record's own
+			// tuple — getattr at bit 3, never the dir/file planes).
+			for i, perm := range kernelFilesystemPerms {
+				if mask&(uint(1)<<uint(i)) != 0 {
+					perms = append(perms, perm)
+				}
+			}
 		default:
 			perms = nil
 		}
@@ -6208,6 +6248,59 @@ func TestSELinuxPolicyKernelClassmapMaskPins(t *testing.T) {
 	// exactly { create } (the shared prefix bit), but as the DIR tuple.
 	if got := classDecode("dir", 0x8); got != "(dir, create)" {
 		t.Errorf("kernel classmap decode: dir mask 0x8 must decode to the tuple (dir, { create }), got %s", got)
+	}
+	// The 4C-87 grant-candidate pin + the death-window provenance (the
+	// 4C-37R death-window run 38181580505's own records, buildkitd pid
+	// 78050 — the FIRST state-tree self-maintenance denial of the
+	// binder-window runtime death the post-TUN span gates structurally
+	// cannot see): the delayed runtime self-maintenance stale-entry
+	// removal inside the op state tree — the dir REMOVE_NAME hook
+	// denied requested=0x28000000={ search remove_name } denied=0x8000000
+	// result=-13 scontext=buildkitd_t:s0:c1 tcontext=builder_state_t:
+	// s0:c1 tclass=dir trace-ts=477.495253 and the twin 477.495272,
+	// correlated with buildkitd's own stderr warning level=warning
+	// msg="Failed to remove" (0x158 bytes, 477.495445 — 173us after the
+	// denial) and followed by the terminal chain (the state-tree FILE
+	// write denial 0x40006/0x4 at 478.057069, the "failed check for"
+	// warning, the fatal "buildkitd: open /var/lib/docker-helper-
+	// builder/ops/op_..." (0x8d) and the voluntary exit_group(1) at
+	// 478.063). The delta is decode(denied) = exactly { remove_name },
+	// NEVER decode(requested) — the standing search bit is NOT the
+	// delta and is NOT re-granted.
+	//   (dir, 0x8000000) = { remove_name } — the live-backed grant
+	//     candidate (the 4C-87 delta; on the state TREE the same mask
+	//     was never granted before — the runtime-tree PLANE H rule
+	//     carries it, a DIFFERENT target type);
+	//   (file, 0x4) = { write } — the 4C-37R state-tree FILE write
+	//     denial's own tuple (requested=0x40006 denied=0x4), a
+	//     DIFFERENT class and surface, a LATER phase's own evidence,
+	//     never bundled into this grant;
+	//   (filesystem, 0x8) = { getattr } — the 4C-37R
+	//     cgroup_t:filesystem getattr record's own tuple, a DIFFERENT
+	//     class and surface, NOT this authority;
+	//   the widened octuple's own combined form
+	//     decode(dir, 0x2c04001e) = exactly { read write create
+	//     getattr open add_name remove_name search }.
+	if got := classDecode("dir", 0x8000000); got != "(dir, remove_name)" {
+		t.Errorf("kernel classmap decode: the 4C-87 grant candidate must be the tuple (dir, { remove_name }) — the death-window stale-entry removal's denied bit, got %s", got)
+	}
+	if got := classDecode("dir", 0x28000000); got != "(dir, remove_name search)" {
+		t.Errorf("kernel classmap decode: the 4C-87 canonical record's requested mask (0x28000000) must decode to exactly { remove_name search } — the delta is the denied subset, never the whole requested mask, got %s", got)
+	}
+	if got := classDecode("file", 0x4); got != "(file, write)" {
+		t.Errorf("kernel classmap decode: the 4C-37R state-tree FILE write denial's own tuple must be (file, { write }) — a DIFFERENT class and surface from the 4C-87 dir grant, got %s", got)
+	}
+	if got := classDecode("filesystem", 0x8); got != "(filesystem, getattr)" {
+		t.Errorf("kernel classmap decode: the 4C-37R cgroup_t:filesystem getattr record's own tuple must be (filesystem, { getattr }) — a DIFFERENT class from the 4C-87 dir grant, got %s", got)
+	}
+	if classDecode("filesystem", 0x8) == classDecode("dir", 0x8) {
+		t.Error("kernel classmap decode: the (filesystem, 0x8) and (dir, 0x8) tuples must stay DISTINCT authorities (the tclass-loss error) — the cgroup filesystem getattr surface is never the state-tree dir plane")
+	}
+	if got := classDecode("dir", 0x2c04001e); got != "(dir, read write create getattr open add_name remove_name search)" {
+		t.Errorf("kernel classmap decode: the widened PLANE E octuple's own combined form (0x2c04001e) must decode to exactly { read write create getattr open add_name remove_name search } in kernel-bit order, got %s", got)
+	}
+	if got := classDecode("dir", 0x2404001e); got != "(dir, read write create getattr open add_name search)" {
+		t.Errorf("kernel classmap decode: the OLD 4C-86 septuple form (0x2404001e, missing remove_name) must still decode WITHOUT the remove_name member — the removed shape is the regression, got %s", got)
 	}
 	// THE CLASS BOUNDARY (the 4C-69 security regression): the two
 	// tuples are DISTINCT authorities even though their permission

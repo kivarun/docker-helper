@@ -3535,7 +3535,65 @@ allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr
 #     target-side exec-type rule exactly { entrypoint read execute
 #     getattr }, and the standing other-subject rules (a different
 #     subject and a different owner — never merged).
-allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create };
+# --- 4C-87: the delayed runtime self-maintenance state-tree dir
+# --- remove_name — the 4C-86 rule widened IN PLACE (ONE rule, never
+# --- split) ---
+#
+# PROVENANCE (the 4C-37R death-window trace's own records, run
+# 38181580505, buildkitd pid 78050 — the binder-window runtime death
+# the post-TUN span gates structurally cannot see): the 4C-86 create
+# grant let the OCI worker create its state directory and the runtime
+# advanced into its own STARTUP SELF-MAINTENANCE — the stale-entry
+# removal inside its own per-op state tree. The unlinkat's dir
+# REMOVE_NAME hook denies:
+#
+#   requested=0x28000000 denied=0x8000000 result=-13
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:docker_helper_builder_state_t:s0:c1
+#     tclass=dir, trace-ts=477.495253 and the twin 477.495272
+#   -> the stderr warning: level=warning msg="Failed to remove"
+#     (0x158 bytes, 477.495445 — 173 microseconds after the denial)
+#   -> the terminal causal chain continues (the state-tree FILE write
+#     denial 0x40006/0x4 at 478.057069, the "failed check for"
+#     warning, the fatal "buildkitd: open /var/lib/docker-helper-
+#     builder/ops/op_..." (0x8d) and the voluntary exit_group(1) at
+#     478.063) — the whole tree dies and the operation-A runtime is
+#     unbindable at binder time.
+#
+# THE DEATH-WINDOW INSTRUMENT IS THE PROVENANCE CHANNEL: the denial is
+# invisible to the post-TUN span gates (the ~1s ring expires before
+# the self-maintenance stage) and to the audit.log (the window's own
+# record flood rotates it past the death); the separate low-volume
+# tracefs instance with the comm filters survives to the death and
+# captured the decision, its stderr correlation, and the exit.
+#
+# THE DELTA IS EXACTLY +remove_name:
+#   - requested 0x28000000 = { search remove_name }; the standing
+#     search bit is NOT the delta and is NOT re-granted — candidate =
+#     decode(denied) = exactly { remove_name }, NEVER decode(requested);
+#   - decode(dir, 0x8000000) = exactly { remove_name }, bit 27 of the
+#     dir class's own tail (add_name=0x4000000 the adjacent neighbor);
+#     THE CLASS MATTERS — the same bit 0x8000000 on the file class is
+#     file:entrypoint (the 4C-61 grant, a same-mask coincidence never
+#     merges two planes); dir:remove_name is NOT an unlink bundle —
+#     NOT rmdir, NOT setattr, NOT rename, NOT mounton, NOT
+#     create/add_name (the granted members NOT re-granted), NOT the
+#     sock_file object's own unlink (a DIFFERENT class and owner);
+#   - NO state-tree FILE widening (the file rule stays byte-for-
+#     semantics exactly { create read open lock } — the 4C-37R
+#     file-write denial 0x40006/0x4 is a LATER phase's own evidence,
+#     never bundled here), NO cgroup_t grant (the 4C-37R
+#     cgroup_t:filesystem getattr record is a different class/surface
+#     with incomplete attribution until the full warning line is
+#     captured), NO runtime-tree widening (PLANE H quintuple + PLANE I
+#     triple frozen), NO buildkitd_exec_t:file open (the standing
+#     quarantine), NO generic bin_t grant, NO tmpfs_t:lnk_file grant,
+#     NO cap_userns grant;
+#   - the frozen planes stay frozen: the three exec planes, the
+#     target-side exec-type rule exactly { entrypoint read execute
+#     getattr }, the shared state-root rule exactly { getattr search },
+#     the shared runtime-root rule exactly { search }.
+allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name };
 
 # --- 4C-69: the categorized operation-state file create — the NEW
 # --- file-class plane (a NEW pair+class rule, NEVER a widening of the
