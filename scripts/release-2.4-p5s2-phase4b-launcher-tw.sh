@@ -12521,8 +12521,8 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
           print "FATAL-LINE: " fatal_line
           last = ""; lastln = 0; lastname = ""; lasterrno = ""
           for (i = 1; i < fatal_ln; i++) {
-            if (lines[i] ~ /= -1 [A-Z]+ \(/) {
-              l = lines[i]; sub(/^\[[^]]*\] [0-9]+\.[0-9]+ /, "", l)
+            if (lines[i] ~ /= -1 (EACCES|EPERM) \(/) {
+              l = lines[i]; sub(/^[0-9]+ [0-9]+\.[0-9]+ /, "", l)
               split(l, a, "("); sn = a[1]
               last = lines[i]; lastln = i; lastname = sn
               if (match(l, / = -1 [A-Z]+/)) lasterrno = substr(l, RSTART+6, RLENGTH-6)
@@ -12534,13 +12534,17 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
           }
           printf "FATAL-STAT-OWNER=terminal-candidate syscall=%s hook=%s errno=%s (the last failing syscall before the fatal write, tap line %d)\n", lastname, hook_of(lastname), lasterrno, lastln
           print "TERMINAL-CANDIDATE-RECORD: " last
-          # the per-shape roles: every failing syscall in the tap window,
-          # tagged pre-fatal (sibling unless it IS the terminal candidate)
-          # or post-fatal (post-failure)
+          # the per-shape roles: every failing syscall in the tap window
+          # (any errno — the plain-filesystem outcomes are context; the
+          # terminal candidate above keys on EACCES/EPERM only, since
+          # ENOTDIR/ENOENT/EISDIR/ENOTEMPTY are plain filesystem outcomes
+          # and can never be an SELinux denial errno), tagged pre-fatal
+          # (sibling unless it IS the terminal candidate) or post-fatal
+          # (post-failure)
           seen_getattr = 0; seen_ioctl = 0; seen_unlink = 0; seen_mounton = 0; seen_fsget = 0
           for (i = 1; i <= NR; i++) {
             if (lines[i] !~ /= -1 [A-Z]+ \(/) continue
-            l = lines[i]; sub(/^\[[^]]*\] [0-9]+\.[0-9]+ /, "", l)
+            l = lines[i]; sub(/^[0-9]+ [0-9]+\.[0-9]+ /, "", l)
             split(l, a, "("); sn = a[1]; hk = hook_of(sn)
             pos = (i < fatal_ln) ? "pre-fatal" : "post-fatal"
             if (hk == "getattr" && pos == "pre-fatal") { seen_getattr = 1; print "FILE-GETATTR-SOURCE: " lines[i] }
