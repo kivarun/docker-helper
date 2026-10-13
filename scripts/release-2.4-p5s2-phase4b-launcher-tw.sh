@@ -14064,6 +14064,21 @@ if [ "$POSTTUN_ESTABLISHED" = 1 ]; then
       marker "4C-91=INCOMPLETE/STATE-TREE-FILE-GETATTR-PROOF-INCOMPLETE"
     fi
   fi
+  # The 4C-37V structural repair: the ORDER_NOT_ESTABLISHED marker block
+  # below was the ELSE branch of this POSTTUN_ESTABLISHED if in the
+  # 4C-53-era wiring (the 3461793 shape: 4C-38=PROVEN/
+  # PRIMARY-BOUNDARY-ESTABLISHED in the established branch, the
+  # INCOMPLETE/ORDER_NOT_ESTABLISHED markers + POSTTUN_NOT_ESTABLISHED=1
+  # in the else). A later phase-block restructure stranded the else body
+  # INSIDE the established branch, so every established run ALSO emitted
+  # the INCOMPLETE/ORDER_NOT_ESTABLISHED markers and set
+  # POSTTUN_NOT_ESTABLISHED=1 unconditionally — RESULT=INCOMPLETE was
+  # structurally guaranteed regardless of the cross-operation verdict
+  # (run 38345199934: CROSS-OPERATION-ISOLATION=PROVEN yet
+  # RESULT=INCOMPLETE). Restore the pairing: the established branch
+  # emits the PROVEN marker, the else keeps the stranded block.
+  marker "4C-38=PROVEN/PRIMARY-BOUNDARY-ESTABLISHED"
+else
   marker "4C-38=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-39=INCOMPLETE/ORDER_NOT_ESTABLISHED"
   marker "4C-40=INCOMPLETE/ORDER_NOT_ESTABLISHED"
