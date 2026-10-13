@@ -2683,7 +2683,7 @@ RK_BKD_LABEL_OK=1
   S15_LAUNCHER_CGROUP_LINE="$(sesearch --allow -s docker_helper_builder_launcher_t -t cgroup_t -c dir /sys/fs/selinux/policy 2>/dev/null \
     | awk '$1 == "allow" && $2 == "docker_helper_builder_launcher_t" && $3 ~ /^cgroup_t/' || true)"
   printf '  module contribution (the concrete rule): %s\n' "${S15_LAUNCHER_CGROUP_LINE:-(empty)}"
-  S15_LAUNCHER_CGROUP_NORM="$(printf '%s\n' "${S15_LAUNCHER_CGROUP_LINE:-}" | sed 's/[{}]//g; s/  */ /g; s/^ //; s/ $//' || true)"
+  S15_LAUNCHER_CGROUP_NORM="$(printf '%s\n' "${S15_LAUNCHER_CGROUP_LINE:-}" | sed 's/[{}]//g; s/ ;/;/g; s/  */ /g; s/^ //; s/ $//' || true)"
   if [ "$S15_LAUNCHER_CGROUP_NORM" = "allow docker_helper_builder_launcher_t cgroup_t:dir search;" ]; then
     echo "  module contribution = exactly { search } (the bare singleton — the normalized comparison; the launcher stays authority-free beyond this one traversal hook)"
   else
@@ -2732,7 +2732,7 @@ RK_BKD_LABEL_OK=1
     "docker_helper_rootlesskit_t:allow docker_helper_rootlesskit_t cgroup_t:dir mounton search;" ; do
     sname="${spec%%:*}"; swant="${spec#*:}"
     raw="$(sesearch --allow -s "$sname" -t cgroup_t -c dir /sys/fs/selinux/policy 2>/dev/null | awk '$1 == "allow" && $3 == "cgroup_t:dir"' || true)"
-    got="$(printf '%s\n' "${raw:-}" | sed 's/[{}]//g; s/  */ /g; s/^ //; s/ $//' | sort -u | head -1)"
+    got="$(printf '%s\n' "${raw:-}" | sed 's/[{}]//g; s/ ;/;/g; s/  */ /g; s/^ //; s/ $//' | sort -u | head -1)"
     if [ "$got" != "$swant" ]; then
       echo "  STOP: the standing cgroup owner $sname drifted (want exactly its own loaded union: $swant)"
       BKD_ZERO_ALLOW_OK=0
