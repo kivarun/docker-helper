@@ -203,7 +203,9 @@ rm -rf "$WORK"
 mkdir -p "$WORK"
 tar xzf "$TARBALL" -C "$WORK"
 BUNDLE="$(find "$WORK" -maxdepth 1 -type d -name 'docker-helper-*' | head -1)"
-[ -n "$BUNDLE" ] && [ -x "$BUNDLE/install-system.sh" ] || fail "bundle missing install-system.sh"
+if [ -z "$BUNDLE" ] || [ ! -x "$BUNDLE/install-system.sh" ]; then
+	fail "bundle missing install-system.sh"
+fi
 
 INSTALL_OUT="$( cd "$BUNDLE" && ./install-system.sh --yes --allowed-root "$ALLOWED_ROOT" 2>&1 )" \
 	|| fail "install-system.sh failed:
@@ -234,7 +236,9 @@ fi
 say "=== P2: daemon and builder confinement ==="
 
 DAEMON_PID="$(systemctl show -p MainPID --value docker-helper.service)"
-[ -n "$DAEMON_PID" ] && [ "$DAEMON_PID" != "0" ] || fail "daemon MainPID is empty"
+if [ -z "$DAEMON_PID" ] || [ "$DAEMON_PID" = "0" ]; then
+	fail "daemon MainPID is empty"
+fi
 if [ "$HARVEST" = "1" ]; then
 	case "$(process_attr "$DAEMON_PID")" in
 		"docker-helper-system (enforce)"|"docker-helper-system (complain)") ;;
@@ -245,7 +249,9 @@ else
 		|| fail "daemon is not confined in docker-helper-system (enforce): got '$(process_attr "$DAEMON_PID")'"
 fi
 BUILDER_PID="$(systemctl show -p MainPID --value docker-helper-builder.service)"
-[ -n "$BUILDER_PID" ] && [ "$BUILDER_PID" != "0" ] || fail "builder MainPID is empty"
+if [ -z "$BUILDER_PID" ] || [ "$BUILDER_PID" = "0" ]; then
+	fail "builder MainPID is empty"
+fi
 if [ "$HARVEST" = "1" ]; then
 	case "$(process_attr "$BUILDER_PID")" in
 		"docker-helper-builder (enforce)"|"docker-helper-builder (complain)") ;;
@@ -308,7 +314,9 @@ SESSION_JSON="$(docker-helper session create --token-file "$CRED_FILE" "$WS" --j
 	|| fail "session create failed"
 SESSION_ID="$(printf '%s\n' "$SESSION_JSON" | grep -oP '"id": "\K[^"]+' | head -1)"
 SESSION_TOKEN="$(printf '%s\n' "$SESSION_JSON" | grep -oP '"token": "\K[^"]+' | head -1)"
-[ -n "$SESSION_ID" ] && [ -n "$SESSION_TOKEN" ] || fail "session create returned no id/token"
+if [ -z "$SESSION_ID" ] || [ -z "$SESSION_TOKEN" ]; then
+	fail "session create returned no id/token"
+fi
 export DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN"
 info "session created: $SESSION_ID"
 
