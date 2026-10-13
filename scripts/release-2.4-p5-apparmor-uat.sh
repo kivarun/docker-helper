@@ -107,6 +107,7 @@ audit_records() {
 	local filter="$1" line ts raw
 	raw="$( { dmesg 2>/dev/null || true; journalctl -k --since "@${AA_AUDIT_START_EPOCH}" --no-pager 2>/dev/null || true; } )"
 	printf '%s\n' "$raw" \
+		| sed -E 's/^.* audit: type=/audit: type=/' \
 		| grep -E "$filter" | while IFS= read -r line; do
 			ts="$(printf '%s\n' "$line" | audit_ts)"
 			if [ -n "$ts" ] && [ "$ts" -ge "$AA_AUDIT_START_EPOCH" ]; then
@@ -128,12 +129,12 @@ collect_denials_profile() {
 # acceptance.
 allowlist_shape_key() {
 	local line="$1" op name comm cls fam addr
-	op="$(printf '%s\n' "$line" | sed -n 's/ operation="\([^"]*\)".*/\1/p')"
-	name="$(printf '%s\n' "$line" | sed -n 's/ name="\([^"]*\)".*/\1/p')"
-	comm="$(printf '%s\n' "$line" | sed -n 's/ comm="\([^"]*\)".*/\1/p')"
-	cls="$(printf '%s\n' "$line" | sed -n 's/ class="\([^"]*\)".*/\1/p')"
-	fam="$(printf '%s\n' "$line" | sed -n 's/ family="\([^"]*\)".*/\1/p')"
-	addr="$(printf '%s\n' "$line" | sed -n 's/ addr="\([^"]*\)".*/\1/p')"
+	op="$(printf '%s\n' "$line" | sed -n 's/.* operation="\([^"]*\)".*/\1/p')"
+	name="$(printf '%s\n' "$line" | sed -n 's/.* name="\([^"]*\)".*/\1/p')"
+	comm="$(printf '%s\n' "$line" | sed -n 's/.* comm="\([^"]*\)".*/\1/p')"
+	cls="$(printf '%s\n' "$line" | sed -n 's/.* class="\([^"]*\)".*/\1/p')"
+	fam="$(printf '%s\n' "$line" | sed -n 's/.* family="\([^"]*\)".*/\1/p')"
+	addr="$(printf '%s\n' "$line" | sed -n 's/.* addr="\([^"]*\)".*/\1/p')"
 	case "$addr" in
 		"@docker_cli_"*) addr="@docker_cli_*" ;;
 	esac
