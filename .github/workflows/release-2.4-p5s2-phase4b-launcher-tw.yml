@@ -735,6 +735,35 @@ jobs:
           # proof (4C-37) resumes — no artificial 4C-92 (the proof ref
           # advances to the commit carrying that module; identical Go
           # sources, so the binary is the same program).
+          # 4C-37V (the verdict repair, ZERO policy delta — .te/.fc
+          # unchanged, the buildkitd allow count stays exactly 9, no new
+          # SELinux candidate): the canonical 4C-91 run 38304565815
+          # proved the vehicle's design stops at its FIRST failing
+          # syscall — the attack leg's openat("/proc/53475/ns/net")
+          # stopped at slirp4netns_t:s0:c2 -> buildkitd_t:s0:c1
+          # dir:search EACCES while the attack-sock/state legs never
+          # issued — and the old verdict mislabeled that proven boundary
+          # as NOT_PROVEN ("the legs are absent -> the proof cannot
+          # conclude"). cross_first_boundary_eval now evaluates the full
+          # FIRST_A_TARGETED_BOUNDARY contract (A bound live, B distinct,
+          # categories distinct, the actor is B's vehicle, the target is
+          # A's identity path, the denial is a SELinux EACCES/EPERM with
+          # its own selinux_audited record, no attack success, A alive,
+          # the control leg successful, the downstream legs absent BY the
+          # boundary) and a held contract emits
+          # CROSS-OPERATION-ISOLATION=PROVEN /
+          # CROSS-OPERATION-ISOLATION-MODE=FIRST_A_TARGETED_BOUNDARY;
+          # ENOENT/ENOTDIR stops, attack successes (TUNSETIFF or a leg),
+          # ENXIO compromise semantics, dead/absent A, same-category
+          # denials and non-vehicle actors all fail closed to
+          # NOT_PROVEN/FAIL. The negative/positive fixtures live in
+          # cross_isolation_verdict_test.go (the function is extracted
+          # verbatim from this script and driven through bash).
+          # §19 alternate applies: if the lifetime finally held, the
+          # startup staircase STOPS and the cross-operation isolation
+          # proof (4C-37) resumes — no artificial 4C-92 (the proof ref
+          # advances to the commit carrying that module; identical Go
+          # sources, so the binary is the same program).
           PHASE4B_PROOF_REF: 'eca177d3046fe897552195c78632d1f870738bb8'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"

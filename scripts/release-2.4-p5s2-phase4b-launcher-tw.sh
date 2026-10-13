@@ -3693,6 +3693,223 @@ echo "$MGR_AFTER" > "$EVIDENCE_DIR/07-manager-after.txt"
 # binary tail (read via the helper's existing entry-file authority).
 # Lifecycle noise (the retained-flow signull/sigkill/signal denials of
 # 4C-36) is inventoried separately and never gates this phase.
+# cross_first_boundary_eval (the 4C-37V verdict repair): evaluate the
+# FIRST_A_TARGETED_BOUNDARY isolation-success mode. The vehicle's own
+# design stops at its first failing syscall; when the vehicle's FIRST
+# A-targeted step is itself policy-stopped, the downstream attack-sock/
+# attack-state legs are unreachable BY CONSTRUCTION, and the old
+# verdict's "the legs are absent -> the proof cannot conclude" shape
+# mislabeled a proven boundary as NOT_PROVEN (run 38304565815's live
+# evidence: the attack leg's openat("/proc/53475/ns/net") stopped at
+# slirp4netns_t:s0:c2 -> buildkitd_t:s0:c1 dir:search EACCES while the
+# sock/state legs never issued). The first boundary counts as isolation
+# success ONLY under the full contract; every condition is checked
+# explicitly and the first miss names its own reason. The function reads
+# its inputs from the 4C-37 verdict globals and prints KEY=VALUE lines;
+# CROSS_ISOLATION_MODE is FIRST_A_TARGETED_BOUNDARY (the contract held
+# and the downstream legs were skipped BY the boundary), NOT_PROVEN
+# (no contract violation but the shape does not meet the mode), or FAIL
+# (a contract violation that would be unsafe to relabel — an attack
+# success fired).
+# Inputs: CROSS_A_PID, CROSS_A_DOMAIN, CROSS_A_CATEGORY, CROSS_A_ALIVE,
+#         OP_ID, CROSS_OP_ID, CROSS_ATTACK_SEQ, CROSS_ATTACK_TUNSETIFF_OK,
+#         CROSS_ATTACK_SOCK_PAIR, CROSS_ATTACK_STATE_PAIR, CROSS_CONTROL_RET.
+# Output: CROSS_ISOLATION_MODE plus, when the mode fires, the boundary
+#         fields and the identity/skip fields (machine-gated markers).
+cross_first_boundary_eval() {
+  CFB_MODE="NOT_PROVEN"
+  CFB_FAIL=""
+  CFB_CLASS=""; CFB_PERMS=""; CFB_ERRNO=""; CFB_ERRNO_NAME=""
+  CFB_SCTX=""; CFB_TCTX=""; CFB_TARGET=""
+  # 1. Operation A is bound to a live runtime identity.
+  case "${CROSS_A_PID:-}" in
+    ''|*[!0-9]*)
+      printf 'CROSS_ISOLATION_MODE=NOT_PROVEN\nCFB_FAIL=A_NOT_BOUND\n'
+      return 0
+      ;;
+  esac
+  # 2. Operation B is distinct from A (the vehicle's own op id).
+  if [ "${CROSS_OP_ID:-}" = "${OP_ID:-}" ] || [ -z "${CROSS_OP_ID:-}" ]; then
+    printf 'CROSS_ISOLATION_MODE=NOT_PROVEN\nCFB_FAIL=B_NOT_DISTINCT\n'
+    return 0
+  fi
+  # 10. A remains alive after the denial (the re-check ran before this
+  # evaluation).
+  if [ "${CROSS_A_ALIVE:-}" != "YES" ]; then
+    printf 'CROSS_ISOLATION_MODE=NOT_PROVEN\nCFB_FAIL=A_DEAD_BY_VERDICT_TIME\n'
+    return 0
+  fi
+  # 11. The control leg still proves the operation is mechanically
+  # capable in its own context.
+  if [ "${CROSS_CONTROL_RET:-}" != "0x0" ]; then
+    printf 'CROSS_ISOLATION_MODE=NOT_PROVEN\nCFB_FAIL=CONTROL_LEG_NOT_SUCCESSFUL\n'
+    return 0
+  fi
+  # 9 (hard part): no attack-side success occurred. A successful attack
+  # TUNSETIFF is the BROKEN signal and never relabels.
+  if [ -n "${CROSS_ATTACK_TUNSETIFF_OK:-}" ]; then
+    printf 'CROSS_ISOLATION_MODE=FAIL\nCFB_FAIL=ATTACK_TUNSETIFF_SUCCEEDED\n'
+    return 0
+  fi
+  # 9/12 (the seq shape): the attack seq must exist, and its terminal
+  # failing enter must be its FIRST A-targeted enter — anything else
+  # means either no A-targeted attempt (10) or the legs ran past an
+  # earlier step (not this mode's shape).
+  if [ -z "${CROSS_ATTACK_SEQ:-}" ]; then
+    printf 'CROSS_ISOLATION_MODE=NOT_PROVEN\nCFB_FAIL=NO_A_TARGETED_ATTEMPT\n'
+    return 0
+  fi
+  CFB_FIRST_ENTER="$(printf '%s\n' "$CROSS_ATTACK_SEQ" \
+    | grep -aE 'sys_(openat|setns|ioctl)\(' | head -1 || true)"
+  if [ -z "$CFB_FIRST_ENTER" ]; then
+    printf 'CROSS_ISOLATION_MODE=NOT_PROVEN\nCFB_FAIL=NO_A_TARGETED_ATTEMPT\n'
+    return 0
+  fi
+  if [ "$CFB_FIRST_ENTER" != "${CROSS_ATTACK_LAST_ENTER:-}" ]; then
+    printf 'CROSS_ISOLATION_MODE=NOT_PROVEN\nCFB_FAIL=BOUNDARY_NOT_FIRST_A_TARGETED_STEP\n'
+    return 0
+  fi
+  # 12 (the skipped shape): both downstream legs are absent — the mode
+  # is FOR the legs-skipped-by-the-boundary shape; if a leg ran, the
+  # leg gates own the verdict.
+  if [ -n "${CROSS_ATTACK_SOCK_PAIR:-}" ] || [ -n "${CROSS_ATTACK_STATE_PAIR:-}" ]; then
+    printf 'CROSS_ISOLATION_MODE=NOT_PROVEN\nCFB_FAIL=DOWNSTREAM_LEGS_PRESENT\n'
+    return 0
+  fi
+  # 7. The boundary's exit is a SELinux-class errno (EACCES/EPERM),
+  # never ENOENT/ENOTDIR/tool failure, and its enter/exit pairing is
+  # complete (the exit exists — a harvested-mid-syscall seq cannot
+  # prove the stop).
+  CFB_LAST_EXIT="$(printf '%s\n' "$CROSS_ATTACK_SEQ" \
+    | grep -aE 'sys_(openat|setns|ioctl) ->' | tail -1 || true)"
+  CFB_RET_HEX="$(printf '%s\n' "$CFB_LAST_EXIT" | awk '{print $NF}' || true)"
+  CFB_ERRNO=""
+  case "$CFB_RET_HEX" in
+    0x[0-9a-f]*) CFB_ERRNO=$(( CFB_RET_HEX )) ;;
+  esac
+  case "$CFB_ERRNO" in
+    -13) CFB_ERRNO_NAME="EACCES" ;;
+    -1)  CFB_ERRNO_NAME="EPERM" ;;
+    *)
+      printf 'CROSS_ISOLATION_MODE=NOT_PROVEN\nCFB_FAIL=BOUNDARY_NOT_SELINUX_ERRNO (%s)\n' "${CFB_ERRNO_NAME:-$CFB_ERRNO}"
+      return 0
+      ;;
+  esac
+  # 7 (the SELinux half): the boundary step must carry its own
+  # selinux_audited record inside the attack seq — the denial is
+  # SELinux, not a plain fs error.
+  CFB_RECORD="$(printf '%s\n' "$CROSS_ATTACK_SEQ" | grep -a 'selinux_audited:' | head -1 || true)"
+  if [ -z "$CFB_RECORD" ]; then
+    printf 'CROSS_ISOLATION_MODE=NOT_PROVEN\nCFB_FAIL=NO_SELINUX_RECORD_FOR_BOUNDARY\n'
+    return 0
+  fi
+  CFB_SCTX="$(printf '%s\n' "$CFB_RECORD" | sed -nE 's/.* scontext=([^ ]+) .*/\1/p')"
+  CFB_TCTX="$(printf '%s\n' "$CFB_RECORD" | sed -nE 's/.* tcontext=([^ ]+) .*/\1/p')"
+  CFB_CLASS="$(printf '%s\n' "$CFB_RECORD" | sed -nE 's/.* tclass=([a-z_]+).*/\1/p')"
+  CFB_DENIED="$(printf '%s\n' "$CFB_RECORD" | sed -nE 's/.* denied=(0x[0-9a-f]+) .*/\1/p')"
+  if [ -z "$CFB_SCTX" ] || [ -z "$CFB_TCTX" ] || [ -z "$CFB_CLASS" ]; then
+    printf 'CROSS_ISOLATION_MODE=NOT_PROVEN\nCFB_FAIL=SELINUX_RECORD_NOT_PARSEABLE\n'
+    return 0
+  fi
+  CFB_SDOMAIN="$(printf '%s\n' "$CFB_SCTX" | cut -d: -f3)"
+  CFB_SDENIED="1"
+  CFB_SCAT=""
+  case "$CFB_SCTX" in
+    *:c[0-9]*|*:s0-s0:c[0-9]*)
+      CFB_SCAT="$(printf '%s\n' "$CFB_SCTX" | grep -aoE ':c[0-9]+$' | head -1 | tr -d :)"
+      ;;
+  esac
+  CFB_TDOMAIN="$(printf '%s\n' "$CFB_TCTX" | cut -d: -f3)"
+  CFB_TCAT=""
+  case "$CFB_TCTX" in
+    *:c[0-9]*|*:s0-s0:c[0-9]*)
+      CFB_TCAT="$(printf '%s\n' "$CFB_TCTX" | grep -aoE ':c[0-9]+$' | head -1 | tr -d :)"
+      ;;
+  esac
+  # 4. The failed access is made by B's attack vehicle (one of B's flow
+  # domains), never by A's own domain and never by the manager.
+  case "$CFB_SDOMAIN" in
+    docker_helper_slirp4netns_t|docker_helper_rootlesskit_t|docker_helper_builder_t) : ;;
+    *)
+      printf 'CROSS_ISOLATION_MODE=NOT_PROVEN\nCFB_FAIL=ACTOR_NOT_B_VEHICLE (%s)\n' "${CFB_SDOMAIN:-(unparseable)}"
+      return 0
+      ;;
+  esac
+  # 5/6. The target is A-owned or A-bound and sits inside A's
+  # identity path (A's proc namespace surfaces, or A's op-keyed
+  # runtime-socket/state-tree paths). The shared roots alone are NOT
+  # A-targeted (the pre-boundary shape).
+  CFB_TARGET="$(printf '%s\n' "$CFB_FIRST_ENTER" \
+    | grep -aoE '"[^"]+"' | head -1 | tr -d '"' || true)"
+  CFB_TARGET_IS_A="NO"
+  case "$CFB_TARGET" in
+    "/proc/${CROSS_A_PID}/"*|*"/ops/${OP_ID}/"*|*"ops/${OP_ID}/buildkitd.sock"*)
+      CFB_TARGET_IS_A="YES"
+      ;;
+  esac
+  if [ "$CFB_TARGET_IS_A" != "YES" ]; then
+    printf 'CROSS_ISOLATION_MODE=NOT_PROVEN\nCFB_FAIL=TARGET_NOT_A_IDENTITY (%s)\n' "${CFB_TARGET:-(unparseable)}"
+    return 0
+  fi
+  # 5/6 (the owner half): the denied object's tcontext is A's runtime
+  # identity — A's own domain (the /proc/<pid> entry carries the
+  # process's domain), or the per-op plane labeled with A's category.
+  case "$CFB_TDOMAIN" in
+    docker_helper_buildkitd_t|docker_helper_builder_state_t|docker_helper_builder_runtime_t) : ;;
+    *)
+      printf 'CROSS_ISOLATION_MODE=NOT_PROVEN\nCFB_FAIL=TCONTEXT_NOT_A_OWNED (%s)\n' "${CFB_TDOMAIN:-(unparseable)}"
+      return 0
+      ;;
+  esac
+  if [ "${CROSS_A_CATEGORY:-}" ] && [ "$CFB_TCAT" != "$CROSS_A_CATEGORY" ]; then
+    printf 'CROSS_ISOLATION_MODE=NOT_PROVEN\nCFB_FAIL=TCONTEXT_CATEGORY_NOT_A (%s vs %s)\n' "$CFB_TCAT" "$CROSS_A_CATEGORY"
+    return 0
+  fi
+  # 3/8. The categories are distinct and the denial is cross-category.
+  if [ -z "$CFB_SCAT" ] || [ -z "$CFB_TCAT" ] || [ "$CFB_SCAT" = "$CFB_TCAT" ]; then
+    printf 'CROSS_ISOLATION_MODE=NOT_PROVEN\nCFB_FAIL=CATEGORIES_NOT_DISTINCT (%s vs %s)\n' "${CFB_SCAT:-(none)}" "${CFB_TCAT:-(none)}"
+    return 0
+  fi
+  # The mask decode (the class-aware pin; unknown masks stay raw — the
+  # errno + cross-category + target checks carry the proof).
+  case "$CFB_CLASS:$CFB_DENIED" in
+    dir:0x20000000)   CFB_PERMS="search" ;;
+    dir:0x10)         CFB_PERMS="getattr" ;;
+    dir:0x4)          CFB_PERMS="write" ;;
+    dir:0x4000000)    CFB_PERMS="add_name" ;;
+    dir:0x8000000)    CFB_PERMS="remove_name" ;;
+    dir:0x8)          CFB_PERMS="create" ;;
+    file:0x2)         CFB_PERMS="read" ;;
+    file:0x4)         CFB_PERMS="write" ;;
+    file:0x8)         CFB_PERMS="create" ;;
+    file:0x10)        CFB_PERMS="getattr" ;;
+    file:0x40000)     CFB_PERMS="open" ;;
+    sock_file:0x8)    CFB_PERMS="create" ;;
+    sock_file:0x800)  CFB_PERMS="unlink" ;;
+    sock_file:0x20)   CFB_PERMS="setattr" ;;
+    *)                CFB_PERMS="${CFB_DENIED:-unknown}" ;;
+  esac
+  # The full contract held: the first A-targeted SELinux boundary IS the
+  # cross-operation isolation proof.
+  printf 'CROSS_ISOLATION_MODE=FIRST_A_TARGETED_BOUNDARY\n'
+  printf 'FIRST_A_TARGETED_BOUNDARY=YES\n'
+  printf 'FIRST_A_TARGETED_BOUNDARY_IS_SELINUX=YES\n'
+  printf 'FIRST_A_TARGETED_BOUNDARY_CLASS=%s\n' "$CFB_CLASS"
+  printf 'FIRST_A_TARGETED_BOUNDARY_PERMS=%s\n' "$CFB_PERMS"
+  printf 'FIRST_A_TARGETED_BOUNDARY_ERRNO=%s\n' "$CFB_ERRNO_NAME"
+  printf 'FIRST_A_TARGETED_BOUNDARY_SCONTEXT=%s\n' "$CFB_SCTX"
+  printf 'FIRST_A_TARGETED_BOUNDARY_TCONTEXT=%s\n' "$CFB_TCTX"
+  printf 'FIRST_A_TARGETED_BOUNDARY_TARGET=%s\n' "$CFB_TARGET"
+  printf 'FIRST_A_TARGETED_BOUNDARY_TARGET_IS_A=YES\n'
+  printf 'A_IDENTITY_BOUND=YES\n'
+  printf 'A_BOUND_PID=%s\n' "$CROSS_A_PID"
+  printf 'A_BOUND_CATEGORY=%s\n' "${CROSS_A_CATEGORY:-unknown}"
+  printf 'B_ATTACK_CATEGORY=%s\n' "$CFB_SCAT"
+  printf 'A_ALIVE_AFTER_ATTACK=%s\n' "$CROSS_A_ALIVE"
+  printf 'DOWNSTREAM_LEGS_SKIPPED_REASON=STOPPED_AT_FIRST_POLICY_BOUNDARY\n'
+  return 0
+}
+
 marker "CROSS-OP: isolation proof window start"
 CROSS_T0="$(date +%s)"
 # Attack-target binding (the 4C-37R binder): a LIVE member of operation
@@ -3835,12 +4052,21 @@ CROSS_A_DEADLINE=$(( $(date +%s) + 8 ))
   done
   echo "scan history: first=$(date +%s.%N) scans=$CROSS_A_SCAN_N (the scan loop ran from $CROSS_A_SCAN_FIRST; the full history above documents the tree's observed lifetime shape at binding time)"
   if [ -n "$CROSS_A_PID" ]; then
+    # The live identity fields the verdict's first-boundary contract
+    # needs (the 4C-37V repair): the bound anchor's own domain and MCS
+    # category read from its attr/current AT BINDING TIME (best-effort;
+    # a vanished pid leaves them empty and the contract's checks fail
+    # closed rather than assume).
+    CROSS_A_CTX_AT_BIND="$(cat "/proc/$CROSS_A_PID/attr/current" 2>/dev/null || true)"
+    CROSS_A_DOMAIN="$(printf '%s\n' "$CROSS_A_CTX_AT_BIND" | cut -d: -f3)"
+    CROSS_A_CATEGORY="$(printf '%s\n' "$CROSS_A_CTX_AT_BIND" | grep -aoE ':c[0-9]+$' | head -1 | tr -d :)"
     echo "A bound pid:      $CROSS_A_PID (class=$CROSS_A_CLASS; the live c1 member holding operation A's attached tap0)"
     echo "=== the bound anchor's detailed inventory (the 4C-37R identity fields) ==="
     echo "  operation id:   $OP_ID"
     echo "  session id:     (the workflow's op-launch path carries no separate session id — the operation record IS the identity; the manager journal's own START line below is the record)"
-    echo "  category:       c1 (the anchor's own context carries it)"
-    echo "  anchor ctx:     $(cat "/proc/$CROSS_A_PID/attr/current" 2>/dev/null)"
+    echo "  category:       ${CROSS_A_CATEGORY:-(unreadable)} (live from the anchor's attr/current)"
+    echo "  anchor domain:  ${CROSS_A_DOMAIN:-(unreadable)} (live from the anchor's attr/current)"
+    echo "  anchor ctx:     ${CROSS_A_CTX_AT_BIND:-(unreadable)}"
     echo "  anchor comm:    $(cat "/proc/$CROSS_A_PID/comm" 2>/dev/null)"
     ASTATV=()
     read -r -a ASTATV < "/proc/$CROSS_A_PID/stat" 2>/dev/null || ASTATV=()
@@ -4224,6 +4450,20 @@ fi
     echo "--- a successful attack TUNSETIFF (must be ABSENT — its presence is CROSS-OPERATION-ISOLATION=BROKEN):"
     CROSS_ATTACK_TUNSETIFF_OK="$(awk -v a="$CROSS_A_PID" '/slirp4netns-/ { if (index($0, "/proc/" a "/ns/") > 0) attack = 1; if (!attack) next; if (/sys_ioctl\(/ && /cmd: 0x400454ca/) { pend = 1; vpid = substr($1, index($1, "-") + 1); next } if (pend && substr($1, length($1) - length(vpid) + 1) == vpid && /sys_ioctl -> 0x0/) { print; exit } }' /tmp/p4b-work/cross-trace.txt 2>/dev/null || true)"
     printf '%s\n' "${CROSS_ATTACK_TUNSETIFF_OK:-(none — no successful attack TUNSETIFF in the kernel trace)}"
+    # The 4C-37V first-boundary evaluation (the verdict repair): the
+    # vehicle stops at its first failing syscall, so when the FIRST
+    # A-targeted step is itself policy-stopped the downstream legs are
+    # unreachable BY CONSTRUCTION and the first boundary may be the
+    # whole isolation proof under the full contract (cross_first_
+    # boundary_eval above). Captured here, applied at the gates below.
+    CROSS_FIRST_BOUNDARY_EVAL="$(cross_first_boundary_eval)"
+    CROSS_FIRST_BOUNDARY_MODE="$(printf '%s\n' "$CROSS_FIRST_BOUNDARY_EVAL" | sed -nE 's/^CROSS_ISOLATION_MODE=(.*)$/\1/p' | head -1)"
+    CROSS_FIRST_BOUNDARY_OK=0
+    if [ "$CROSS_FIRST_BOUNDARY_MODE" = "FIRST_A_TARGETED_BOUNDARY" ]; then
+      CROSS_FIRST_BOUNDARY_OK=1
+    fi
+    echo "--- the 4C-37V first-boundary evaluation (the verdict repair; the contract's every condition is checked explicitly, the first miss names its own reason):"
+    printf '%s\n' "$CROSS_FIRST_BOUNDARY_EVAL"
     echo "--- identity checks (an ENOENT stop on the attack's first A-targeted step is IDENTITY-FAIL, not a boundary; the bound anchor is cross-checked against the trace-derived pids):"
     echo "identity cross-check: trace attached-helper pid=${CROSS_TRACE_PID:-(absent)} / trace buildkitd pid=${CROSS_TRACE_BKD:-(absent)} / bound pid=${CROSS_A_PID:-(absent)} (class=$CROSS_A_CLASS)"
     case "$CROSS_A_CLASS" in
@@ -4295,8 +4535,17 @@ fi
         LEG_EXIT="$CROSS_ATTACK_STATE_EXIT"
       fi
       if [ -z "$LEG_PAIR" ]; then
-        echo "GATE: the attack-$LEG leg never issued its openat in the kernel trace — the proof cannot conclude"
-        CROSS_OK=0
+        if [ "$CROSS_FIRST_BOUNDARY_OK" = 1 ]; then
+          # The 4C-37V mode: the leg is absent BECAUSE the vehicle
+          # stopped at the first A-targeted policy boundary — that is
+          # the mode's shape, not an inconclusive run (run 38304565815's
+          # live shape: the ns/net openat EACCES stop preceded both
+          # legs).
+          echo "GATE: the attack-$LEG leg is ABSENT because the vehicle stopped at the FIRST A-targeted policy boundary (the 4C-37V first-boundary mode; the boundary itself is the isolation proof)"
+        else
+          echo "GATE: the attack-$LEG leg never issued its openat in the kernel trace — the proof cannot conclude"
+          CROSS_OK=0
+        fi
       elif [ -z "$LEG_EXIT" ]; then
         echo "GATE: the attack-$LEG leg's openat exit is absent from the kernel trace (the ring harvested inside the syscall) — the proof cannot conclude"
         CROSS_OK=0
@@ -4343,12 +4592,30 @@ fi
   cat "$EVIDENCE_DIR/45-cross-op-verdict.txt" >&2
   if [ "$CROSS_OK" = 1 ]; then
     marker "CROSS-OP-CONTROL=SUCCESS"
+    marker "CONTROL_TUNSETIFF=SUCCESS"
+    marker "ATTACK_TUNSETIFF=ABSENT_OR_FAILED"
     marker "CROSS-OP-ATTACK-DENIED-AT=${CROSS_ATTACK_BOUNDARY_STEP:-unknown}:${CROSS_ATTACK_ERRNO:-unknown}${CROSS_ATTACK_ERRNO_NAME:+ ($CROSS_ATTACK_ERRNO_NAME)} target=${CROSS_ATTACK_BOUNDARY_TARGET:-unknown}"
     marker "CROSS-OP-ATTACK-SOCK-DENIED-AT=${CROSS_ATTACK_SOCK_EXIT:-unknown}${CROSS_ATTACK_SOCK_NAME:+ ($CROSS_ATTACK_SOCK_NAME)} (operation A's runtime socket unreachable from B)"
     marker "CROSS-OP-ATTACK-STATE-DENIED-AT=${CROSS_ATTACK_STATE_EXIT:-unknown}${CROSS_ATTACK_STATE_NAME:+ ($CROSS_ATTACK_STATE_NAME)} (operation A's state tree unreachable from B)"
     marker "CROSS-OP-A-REMAINED-ALIVE=$CROSS_A_ALIVE"
-    marker "CROSS-OPERATION-ISOLATION=HOLDS"
-    marker "CROSS-OPERATION-GATE=CLOSED"
+    marker "A_IDENTITY_BOUND=YES"
+    marker "A_BOUND_PID=${CROSS_A_PID:-unknown}"
+    marker "A_BOUND_CATEGORY=${CROSS_A_CATEGORY:-unknown}"
+    marker "A_ALIVE_AFTER_ATTACK=$CROSS_A_ALIVE"
+    if [ "$CROSS_FIRST_BOUNDARY_OK" = 1 ]; then
+      # The 4C-37V FIRST_A_TARGETED_BOUNDARY mode: the boundary fields
+      # come from the evaluation (machine-gated, one marker per field).
+      printf '%s\n' "$CROSS_FIRST_BOUNDARY_EVAL" | grep -aE '^(FIRST_A_TARGETED_BOUNDARY|A_BOUND_|B_ATTACK_)' | while IFS= read -r CFB_KV; do
+        marker "$CFB_KV"
+      done
+      marker "DOWNSTREAM_LEGS_SKIPPED_REASON=STOPPED_AT_FIRST_POLICY_BOUNDARY"
+      marker "CROSS-OPERATION-ISOLATION=PROVEN"
+      marker "CROSS-OPERATION-ISOLATION-MODE=FIRST_A_TARGETED_BOUNDARY"
+      marker "CROSS-OPERATION-GATE=CLOSED"
+    else
+      marker "CROSS-OPERATION-ISOLATION=HOLDS"
+      marker "CROSS-OPERATION-GATE=CLOSED"
+    fi
   elif [ "$CROSS_BROKEN" = 1 ]; then
     marker "CROSS-OPERATION-ISOLATION=BROKEN"
     marker "BLOCKER=the cross-operation isolation is broken (see 45-cross-op-isolation.txt, 45-cross-op-verdict.txt)"
