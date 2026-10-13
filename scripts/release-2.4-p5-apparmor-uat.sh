@@ -74,6 +74,24 @@ evidence() {
 	printf '%s\n' "$content" > "$EVIDENCE_DIR/$name"
 }
 
+# dump_diagnostics prints the failure-path diagnostics: the fresh unit
+# journals, the fresh AppArmor denial inventory, and the profile inventory.
+# Used on every functional failure so one run yields the complete evidence.
+dump_diagnostics() {
+	local header="$1"
+	printf '\n[P5AA] diagnostics: %s\n' "$header" >&2
+	journalctl -u docker-helper.service --since "@${AA_AUDIT_START_EPOCH}" --no-pager 2>/dev/null | tail -60 >&2 || true
+	journalctl -u docker-helper-builder.service --since "@${AA_AUDIT_START_EPOCH}" --no-pager 2>/dev/null | tail -60 >&2 || true
+	printf '\n[P5AA] fresh AppArmor audit records at failure time:\n' >&2
+	audit_records 'apparmor=' | tail -60 >&2 || true
+	{
+		journalctl -u docker-helper.service --since "@${AA_AUDIT_START_EPOCH}" --no-pager 2>/dev/null || true
+		journalctl -u docker-helper-builder.service --since "@${AA_AUDIT_START_EPOCH}" --no-pager 2>/dev/null || true
+	} > "$EVIDENCE_DIR/unit-journals.txt" 2>&1 || true
+	audit_records 'apparmor=' > "$EVIDENCE_DIR/apparmor-audit-tail.txt" 2>&1 || true
+	aa-status > "$EVIDENCE_DIR/aa-status-on-failure.txt" 2>&1 || true
+}
+
 AA_AUDIT_START_EPOCH=0
 AA_AUDIT_START_ISO=""
 
@@ -301,7 +319,7 @@ say "=== P4: docker run through the helper ==="
 PUID="$(id -u "$PRINCIPAL")"
 docker-helper pull alpine:3.24 || fail "docker-helper pull failed"
 RUN_OUT="$(docker-helper run --workdir /tmp alpine:3.24 -- sh -ec "test \"\$(id -u)\" = \"$PUID\" && echo P5AA-RUN-OK")" \
-	|| fail "docker-helper run failed: $RUN_OUT"
+	|| { dump_diagnostics "docker-helper run failed: $RUN_OUT"; fail "docker-helper run failed: $RUN_OUT"; }
 printf '%s\n' "$RUN_OUT" | grep -q 'P5AA-RUN-OK' || fail "run identity check failed: $RUN_OUT"
 MOUNT_OUT="$(docker-helper run --mount rw:/mnt/rw alpine:3.24 -- sh -ec 'echo mounted > /mnt/rw/p5aa.txt && echo P5AA-MOUNT-OK')" \
 	|| fail "mount run failed: $MOUNT_OUT"
@@ -323,23 +341,35 @@ OPS_RT=""
 OPS_ST=""
 BUILDKITD_PID=""
 OTEL_SOCK=""
-for _ in $(seq 1 120); do
+OPS_SEEN=0
+for _ in $(seq 1 240); do
 	kill -0 "$BUILD_PID" 2>/dev/null || break
 	for d in "$BUILDER_RT_ROOT"/ops/*/; do
 		[ -d "$d" ] || continue
 		OPS_RT="${d%/}"
+		OPS_SEEN=1
 		break
 	done
 	for d in "$BUILDER_ST_ROOT"/ops/*/; do
 		[ -d "$d" ] || continue
 		OPS_ST="${d%/}"
+		OPS_SEEN=1
 		break
 	done
 	[ -n "$OPS_RT" ] && [ -n "$OPS_ST" ] && break
-	sleep 0.5
+	sleep 0.25
 done
-[ -n "$OPS_RT" ] || fail "no per-operation runtime dir appeared under $BUILDER_RT_ROOT/ops/ during the build"
-[ -n "$OPS_ST" ] || fail "no per-operation state dir appeared under $BUILDER_ST_ROOT/ops/ during the build"
+if [ -n "$OPS_RT" ] && [ -n "$OPS_ST" ]; then
+	: # in-build assertions below
+else
+	# The per-op trees are created and removed inside the START round-trip
+	# when a launch fails (the failed-start convergence owns the removal),
+	# so a failed START leaves no stable residue. The journals and the
+	# denial inventory are the evidence.
+	dump_diagnostics "no stable per-operation dirs appeared (ops_seen=$OPS_SEEN); build log follows"
+	printf '%s\n' "$(cat "$BUILD_LOG" 2>/dev/null || true)" >&2
+	fail "no per-operation runtime/state dirs observed under the builder roots during the build"
+fi
 info "per-op runtime dir: $OPS_RT"
 info "per-op state dir: $OPS_ST"
 
@@ -368,7 +398,11 @@ done
 info "buildkit-runc execution observed: $RUNC_SEEN (1 = exec window observed, 0 = window missed; the RUN step's success below proves the OCI worker path)"
 evidence "buildkit-runc-observed.txt" "$RUNC_SEEN"
 
-wait "$BUILD_PID" || fail "docker-helper build failed (see $BUILD_LOG)"
+if ! wait "$BUILD_PID"; then
+	dump_diagnostics "docker-helper build failed; build log follows"
+	printf '%s\n' "$(cat "$BUILD_LOG" 2>/dev/null || true)" >&2
+	fail "docker-helper build failed (log: $BUILD_LOG)"
+fi
 evidence "build-output.txt" "$(cat "$BUILD_LOG")"
 
 RUN2_OUT="$(docker-helper run p5aa-curl:alpine3.24 -- sh -ec 'test -x /usr/bin/curl && echo P5AA-BUILD-IMAGE-OK')" \
