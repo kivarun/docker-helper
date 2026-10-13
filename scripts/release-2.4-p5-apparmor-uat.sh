@@ -431,16 +431,31 @@ info "managed-boundaries fragment carries the issued workspace boundary (root-js
 
 say "=== P7: generated workload profile prepare + cleanup ==="
 
-WL_PROFILE="$(grep -o 'docker-helper-workload-[A-Za-z0-9_-]*' /sys/kernel/security/apparmor/profiles 2>/dev/null | sort -u | head -1 || true)"
-[ -n "$WL_PROFILE" ] || fail "no generated workload profile found in the AppArmor profile inventory after a run"
-info "generated workload profile loaded: $WL_PROFILE"
+# The generated workload profile is a per-operation transient: the daemon
+# loads it for the operation's containers and unloads it at the operation's
+# terminal cleanup (2.2 workload-MAC lifecycle). Prove both halves against
+# one long-running operation: the profile appears while the container runs
+# and is gone after the operation finishes.
+( docker-helper run alpine:3.24 -- sleep 8 ) > "$EVIDENCE_DIR/p7-run-output.txt" 2>&1 &
+P7_PID=$!
+WL_PROFILE=""
+for _ in $(seq 1 120); do
+	kill -0 "$P7_PID" 2>/dev/null || break
+	WL_PROFILE="$(grep -o 'docker-helper-workload-[A-Za-z0-9_-]*' /sys/kernel/security/apparmor/profiles 2>/dev/null | sort -u | head -1 || true)"
+	[ -n "$WL_PROFILE" ] && break
+	sleep 0.25
+done
+[ -n "$WL_PROFILE" ] || { dump_diagnostics "no generated workload profile appeared while the run was in flight"; fail "no generated workload profile found in the AppArmor profile inventory while a run was in flight"; }
+info "generated workload profile loaded during the run: $WL_PROFILE"
 evidence "workload-profile.txt" "$WL_PROFILE"
+
+wait "$P7_PID" || fail "the P7 run failed (see p7-run-output.txt)"
+wait_for 30 bash -c "! grep -q 'docker-helper-workload-' /sys/kernel/security/apparmor/profiles 2>/dev/null" \
+	|| fail "generated workload profile $WL_PROFILE still loaded after the run finished (cleanup broken)"
+info "generated workload profile unloaded after the run finished"
 
 docker-helper session delete "$SESSION_ID" >/dev/null 2>&1 \
 	|| fail "session delete failed"
-wait_for 30 bash -c "! grep -q '^${WL_PROFILE} ' /sys/kernel/security/apparmor/profiles 2>/dev/null" \
-	|| fail "generated workload profile $WL_PROFILE still loaded after session delete (cleanup broken)"
-info "generated workload profile unloaded after session delete"
 
 # --- P8: AppArmor denial audit -----------------------------------------------
 
