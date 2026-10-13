@@ -786,7 +786,7 @@ jobs:
           # owners; the launcher stays authority-free beyond this one
           # traversal hook; the buildkitd-named allow count STAYS
           # EXACTLY NINE (a NON-buildkitd rule never trips the count).
-          PHASE4B_PROOF_REF: 'eca177d3046fe897552195c78632d1f870738bb8'
+          PHASE4B_PROOF_REF: '5b777679aee2521889db87daea5dc8851579f958'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"
           PROOF_REF="$(git rev-parse "$PHASE4B_PROOF_REF^{commit}")"

@@ -2717,17 +2717,27 @@ RK_BKD_LABEL_OK=1
     marker "NO-LAUNCHER-CGROUP-FILESYSTEM-GETATTR-GRANT=OK"
   fi
   echo "--- S15 standing-owner companion check (the OTHER subjects' cgroup rules are their own owners; each subject's concrete cgroup dir surface must stay EXACTLY its standing { search } singleton — the S15 grant must not have touched them):"
+  # The LOADED-POLICY REPRESENTATION FACT (the 4C-49 section's own
+  # documented lesson): the kernel's policy avtab COALESCES same-key
+  # rules into the perm UNION — the rootlesskit child carries the
+  # standing cgroup2-root-walk { search } rule AND the 4C-49
+  # move-mount-target bare mounton rule as TWO source rules/two owners,
+  # coalesced in the loaded form to ONE rule { mounton search }. The
+  # companion check therefore expects each subject's ACTUAL loaded
+  # union: the daemon and the builder carry only the search singleton;
+  # the rootlesskit child carries the coalesced { mounton search }.
   for spec in \
-    "docker_helper_t" \
-    "docker_helper_builder_t" \
-    "docker_helper_rootlesskit_t" ; do
-    raw="$(sesearch --allow -s "$spec" -t cgroup_t -c dir /sys/fs/selinux/policy 2>/dev/null | awk '$1 == "allow" && $3 == "cgroup_t:dir"' || true)"
+    "docker_helper_t:allow docker_helper_t cgroup_t:dir search;" \
+    "docker_helper_builder_t:allow docker_helper_builder_t cgroup_t:dir search;" \
+    "docker_helper_rootlesskit_t:allow docker_helper_rootlesskit_t cgroup_t:dir mounton search;" ; do
+    sname="${spec%%:*}"; swant="${spec#*:}"
+    raw="$(sesearch --allow -s "$sname" -t cgroup_t -c dir /sys/fs/selinux/policy 2>/dev/null | awk '$1 == "allow" && $3 == "cgroup_t:dir"' || true)"
     got="$(printf '%s\n' "${raw:-}" | sed 's/[{}]//g; s/  */ /g; s/^ //; s/ $//' | sort -u | head -1)"
-    if [ "$got" != "allow $spec cgroup_t:dir search;" ]; then
-      echo "  STOP: the standing cgroup owner $spec drifted (want exactly the bare { search } singleton)"
+    if [ "$got" != "$swant" ]; then
+      echo "  STOP: the standing cgroup owner $sname drifted (want exactly its own loaded union: $swant)"
       BKD_ZERO_ALLOW_OK=0
     else
-      echo "  $spec: the standing owner unchanged"
+      echo "  $sname: the standing owner unchanged (the loaded union: $got)"
     fi
   done
   echo "--- PLANE F (the 4C-71/89/91 categorized operation-state FILE surface): sesearch --allow -s docker_helper_buildkitd_t -t docker_helper_builder_state_t -c file (the domain's own categorized per-op state-tree FILE authority; must be EXACTLY the ONE { create read open lock write getattr } rule — the 4C-69 NEW pair+class plane WIDENED IN PLACE by the 4C-70 combined 0x40002 boundary, AGAIN by the 4C-70 canonical run's own terminal 0x40 lock boundary, AGAIN by the 4C-89 write (decode(file, 0x4) = exactly { write }, bit 2 of the COMMON_FILE_PERMS list — the 4C-88 canonical run 38283671136's own terminal causal records: the runtime's startup self-check open(O_RDWR) of its state file, requested=0x40006={ read write open } denied=0x4 result=-13 tclass=file toward builder_state_t:s0:c1 trace-ts=580.568712 and the twin 580.569000, correlated with buildkitd's own stderr warning msg="failed check for" (0x15c bytes, 580.568934) and followed by the terminal chain (the state-tree FILE unlink 0x800 at 580.568793/580.573048/580.573100, the fatal "buildkitd: open /var/lib/docker-helper-builder/ops/op_..." (0x8d) and the voluntary exit_group(1) at 580.573); the delta is decode(denied), NEVER decode(requested) — the standing read 0x2 and open 0x40000 bits are NOT the delta and are NOT re-granted), and AGAIN by the 4C-91 getattr (decode(file, 0x10) = exactly { getattr }, bit 4 — the 4C-90 classification run 38297354828's own full-fidelity strace stderr tap, buildkitd leader pid 84066: the containerdmeta.db openat SUCCEEDED under the granted create/open and the POST-OPEN fstat on its fd denied (the tap's two fstat failures — the fs-verity probe file's fstat at .089573 and THIS containerdmeta.db fstat at .099149 — correspond 1:1 to the two 0x10 AVCs the tracefs window carried), the fatal stderr line CAPTURED WHOLE: "buildkitd: stat /var/lib/docker-helper-builder/ops/op_09b7ce.../root/runc-native/containerdmeta.db: permission denied" (0x8d) — Go's os.PathError{Op:"stat"} format is the fstat-on-open-fd error surfacing, the fatal line's path and the failing fstat's fd-path the SAME object; requested==denied so the exact delta is decode(denied) = { getattr }), ONE rule never split, NEVER a widening of the dir rule which stays exactly the ONE { getattr search write add_name read open create remove_name rmdir } rule on its own class; the grant is NOT a writable-file bundle and NOT a metadata bundle — ioctl (the 4C-90 fs-verity probe WARNING sibling, non-fatal by design), unlink (the cleanup/failure-response sibling), setattr/append/map/execute stay closed; the other subjects' standing builder_state_t:file rules are their own owners and never count here):"
