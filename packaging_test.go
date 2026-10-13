@@ -5478,6 +5478,11 @@ func verifyRPMPackage(t *testing.T, rpmPath, rpmFile string) {
 	// AppArmor and systemd behavior stays in %post, unchanged.
 	for _, want := range []string{
 		"apparmor_parser --replace",
+		// Fail-closed builder-profile load: the builder unit binds the named
+		// profile, so a missing artifact must abort the scriptlet, never
+		// silently skip the load.
+		"if [ ! -f /etc/apparmor.d/docker-helper-builder ]",
+		"error: AppArmor builder profile missing",
 		"daemon-reload",
 		"enable docker-helper-builder.service",
 		"try-restart docker-helper.service",
@@ -6354,6 +6359,11 @@ func runScript(t *testing.T, scriptPath, fakeDir, logFile string, args []string,
 	// Replace migration state paths with test-controlled paths.
 	modified = strings.ReplaceAll(modified, "/var/lib/docker-helper/apparmor/managed-boundaries", "$AA_STATE_FILE")
 	modified = strings.ReplaceAll(modified, "/etc/apparmor.d/docker-helper.d/managed-roots", "$AA_LEGACY_FRAGMENT")
+	// Replace AppArmor profile destinations with test-controlled paths: the
+	// postinstall fail-closed load requires both installed files to exist,
+	// so the paths must never point at the real host /etc.
+	modified = strings.ReplaceAll(modified, "/etc/apparmor.d/docker-helper-builder", "$AA_BUILDER_PROFILE_DEST")
+	modified = strings.ReplaceAll(modified, "/etc/apparmor.d/docker-helper-system", "$AA_PROFILE_DEST")
 	// Replace builder runtime/state paths with test-controlled paths BEFORE
 	// the main paths (the builder strings contain the main stem as a
 	// prefix; every purge rm must land inside the test tree, never at the
@@ -6418,6 +6428,24 @@ exit 0
 		t.Fatal(err)
 	}
 
+	// Default: both installed AppArmor profiles are present at their
+	// destinations, so the postinstall fail-closed load proceeds. Tests
+	// override via AA_PROFILE_DEST / AA_BUILDER_PROFILE_DEST to exercise
+	// the missing-profile abort.
+	aaProfileDest := filepath.Join(tmpDir, "etc", "apparmor.d", "docker-helper-system")
+	aaBuilderProfileDest := filepath.Join(tmpDir, "etc", "apparmor.d", "docker-helper-builder")
+	if err := os.MkdirAll(filepath.Dir(aaProfileDest), 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, profile := range []struct{ path, content string }{
+		{aaProfileDest, "profile docker-helper-system {}\n"},
+		{aaBuilderProfileDest, "profile docker-helper-builder {}\n"},
+	} {
+		if err := os.WriteFile(profile.path, []byte(profile.content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	// Default: SELinux is not enforcing. Tests can override by providing
 	// their own SELINUX_ENFORCE_PATH via extraEnv and creating the file.
 	selinuxEnforcePath := filepath.Join(tmpDir, "sys", "fs", "selinux", "enforce")
@@ -6449,6 +6477,8 @@ exit 0
 		"TEST_RUN_SYSTEMD="+testRunDir,
 		"AA_ENABLED_PATH="+aaEnabledPath,
 		"AA_PROFILES_PATH="+aaProfilesPath,
+		"AA_PROFILE_DEST="+aaProfileDest,
+		"AA_BUILDER_PROFILE_DEST="+aaBuilderProfileDest,
 		"SELINUX_ENFORCE_PATH="+selinuxEnforcePath,
 		"AA_STATE_FILE="+aaStateFile,
 		"AA_LEGACY_FRAGMENT="+aaLegacyFragment,
@@ -6633,6 +6663,46 @@ func TestDebPostinstallDaemonReloadFailure(t *testing.T) {
 		if strings.Contains(c, "restart") {
 			t.Error("must not restart after daemon-reload failure")
 		}
+	}
+}
+
+// TestDebPostinstallMissingBuilderProfileAborts verifies the fail-closed
+// builder-profile load: a missing installed builder profile aborts the
+// package configuration AFTER the daemon profile loaded and BEFORE any
+// builder-profile parse (the builder unit binds the named profile, so a
+// missing artifact must never silently skip the load).
+func TestDebPostinstallMissingBuilderProfileAborts(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, false, false)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+
+	missing := filepath.Join(t.TempDir(), "absent", "docker-helper-builder")
+	out, _, code := runScript(t, "packaging/scripts/deb/postinstall.sh", fakeDir, logFile,
+		[]string{"configure"}, true, []string{"AA_BUILDER_PROFILE_DEST=" + missing})
+	if code == 0 {
+		t.Fatal("postinst must abort when the builder AppArmor profile is missing")
+	}
+	if !strings.Contains(out, "AppArmor builder profile missing") {
+		t.Error("postinst must report the missing builder AppArmor profile")
+	}
+	calls := readLifecycleScriptCalls(t, logFile)
+	systemReplaced, builderParsed := false, false
+	for _, c := range calls {
+		if !strings.Contains(c, "apparmor_parser") {
+			continue
+		}
+		if strings.Contains(c, "docker-helper-system") {
+			systemReplaced = true
+		}
+		if strings.Contains(c, "docker-helper-builder") {
+			builderParsed = true
+		}
+	}
+	if !systemReplaced {
+		t.Error("the daemon profile must load before the missing-builder-profile abort")
+	}
+	if builderParsed {
+		t.Error("the missing builder profile must never be passed to apparmor_parser")
 	}
 }
 
@@ -7050,6 +7120,46 @@ func TestRpmPostinstallActive(t *testing.T) {
 	}
 	if restarts != 1 {
 		t.Errorf("active service must receive exactly one restart operation, got %d", restarts)
+	}
+}
+
+// TestRpmPostinstallMissingBuilderProfileAborts verifies the fail-closed
+// builder-profile load: a missing installed builder profile aborts the
+// RPM scriptlet AFTER the daemon profile loaded and BEFORE any
+// builder-profile parse (the builder unit binds the named profile, so a
+// missing artifact must never silently skip the load).
+func TestRpmPostinstallMissingBuilderProfileAborts(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, false, false)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+
+	missing := filepath.Join(t.TempDir(), "absent", "docker-helper-builder")
+	out, _, code := runScript(t, "packaging/scripts/rpm/postinstall.sh", fakeDir, logFile,
+		[]string{"1"}, true, []string{"AA_BUILDER_PROFILE_DEST=" + missing})
+	if code == 0 {
+		t.Fatal("rpm postinstall must abort when the builder AppArmor profile is missing")
+	}
+	if !strings.Contains(out, "AppArmor builder profile missing") {
+		t.Error("rpm postinstall must report the missing builder AppArmor profile")
+	}
+	calls := readLifecycleScriptCalls(t, logFile)
+	systemReplaced, builderParsed := false, false
+	for _, c := range calls {
+		if !strings.Contains(c, "apparmor_parser") {
+			continue
+		}
+		if strings.Contains(c, "docker-helper-system") {
+			systemReplaced = true
+		}
+		if strings.Contains(c, "docker-helper-builder") {
+			builderParsed = true
+		}
+	}
+	if !systemReplaced {
+		t.Error("the daemon profile must load before the missing-builder-profile abort")
+	}
+	if builderParsed {
+		t.Error("the missing builder profile must never be passed to apparmor_parser")
 	}
 }
 

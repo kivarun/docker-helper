@@ -60,10 +60,17 @@ if [ "$aa_active" = "true" ]; then
   if ! apparmor_parser --replace --skip-read-cache /etc/apparmor.d/docker-helper-system; then
     exit 1
   fi
-  if [ -f /etc/apparmor.d/docker-helper-builder ]; then
-    if ! apparmor_parser --replace --skip-read-cache /etc/apparmor.d/docker-helper-builder; then
-      exit 1
-    fi
+  # Fail closed when the builder profile is missing: the builder unit
+  # binds the named profile, so a missing artifact must abort the
+  # package configuration instead of surfacing later as a failed unit
+  # start. The package layout unpacks before the scriptlet runs, so the
+  # file is present on every supported path (fresh install, upgrade).
+  if [ ! -f /etc/apparmor.d/docker-helper-builder ]; then
+    echo "error: AppArmor builder profile missing at /etc/apparmor.d/docker-helper-builder" >&2
+    exit 1
+  fi
+  if ! apparmor_parser --replace --skip-read-cache /etc/apparmor.d/docker-helper-builder; then
+    exit 1
   fi
 
   # Clean up legacy fragment after successful profile replacement.
