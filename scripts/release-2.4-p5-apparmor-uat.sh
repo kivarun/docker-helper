@@ -99,15 +99,13 @@ audit_ts() {
 	sed -n 's/.*audit(\([0-9][0-9]*\)\.[0-9]*:[0-9]*).*/\1/p' | head -1
 }
 
-# audit_records mirrors scripts/uat-mac-apparmor.sh: ONE source with
-# fallback (dmesg preferred, journalctl -k only when dmesg yields nothing),
-# filtered to the fresh audit window.
+# audit_records merges BOTH kernel-audit sources (the dmesg ring AND the
+# journalctl -k window) before the fresh-window filter: a truncated dmesg
+# ring or a lagging journal can each silently miss fresh DENIED records
+# when used alone; the merge plus sort -u closes that hole.
 audit_records() {
 	local filter="$1" line ts raw
-	raw="$(dmesg 2>/dev/null || true)"
-	if [ -z "$raw" ]; then
-		raw="$(journalctl -k --since "@${AA_AUDIT_START_EPOCH}" --no-pager 2>/dev/null || true)"
-	fi
+	raw="$( { dmesg 2>/dev/null || true; journalctl -k --since "@${AA_AUDIT_START_EPOCH}" --no-pager 2>/dev/null || true; } )"
 	printf '%s\n' "$raw" \
 		| grep -E "$filter" | while IFS= read -r line; do
 			ts="$(printf '%s\n' "$line" | audit_ts)"
@@ -119,6 +117,43 @@ audit_records() {
 
 collect_denials_profile() {
 	audit_records 'apparmor="DENIED"' | grep -F "profile=\"$1\"" || true
+}
+
+# allowlist_shape_key normalizes one docker-helper-system DENIED record
+# into its shape fields (operation|addr|name|comm|class|family — net bind
+# records carry addr instead of a file name). The shape layer pins WHICH
+# records the allowlist matchers may ever accept: an allowlisted record
+# whose normalized shape is not in the known set means a matcher started
+# matching something new, which is re-evidencing work, never silent
+# acceptance.
+allowlist_shape_key() {
+	local line="$1" op name comm cls fam addr
+	op="$(printf '%s\n' "$line" | sed -n 's/ operation="\([^"]*\)".*/\1/p')"
+	name="$(printf '%s\n' "$line" | sed -n 's/ name="\([^"]*\)".*/\1/p')"
+	comm="$(printf '%s\n' "$line" | sed -n 's/ comm="\([^"]*\)".*/\1/p')"
+	cls="$(printf '%s\n' "$line" | sed -n 's/ class="\([^"]*\)".*/\1/p')"
+	fam="$(printf '%s\n' "$line" | sed -n 's/ family="\([^"]*\)".*/\1/p')"
+	addr="$(printf '%s\n' "$line" | sed -n 's/ addr="\([^"]*\)".*/\1/p')"
+	case "$addr" in
+		"@docker_cli_"*) addr="@docker_cli_*" ;;
+	esac
+	printf '%s|%s|%s|%s|%s|%s\n' "$op" "$addr" "$name" "$comm" "$cls" "$fam"
+}
+
+# allowlist_shape_max prints the pinned maximum count for a known benign
+# shape (observed in the canonical enforcing run 38396271388; a small
+# tolerance absorbs scheduler jitter), or fails when the shape is unknown.
+allowlist_shape_max() {
+	case "$1" in
+		"open||/sys/fs/cgroup/system.slice/docker-helper.service/cpu.max|docker-helper|file|") echo 3 ;;
+		"open||/sys/fs/cgroup/system.slice/docker-helper.service/cpu.max|buildctl|file|") echo 3 ;;
+		"open||/etc/ssl/certs/|buildctl|file|") echo 3 ;;
+		"open||/etc/ssl/certs/|docker-buildx|file|") echo 3 ;;
+		"exec||/usr/libexec/git/git|docker-buildx|file|") echo 3 ;;
+		"exec||/usr/bin/git|docker-buildx|file|") echo 3 ;;
+		"bind|@docker_cli_*||docker|net|unix") echo 3 ;;
+		*) return 1 ;;
+	esac
 }
 
 # is_allowlisted_deny classifies one docker-helper-system deny record against
@@ -343,10 +378,14 @@ BUILD_LOG="$EVIDENCE_DIR/build-output.txt"
 ( cd "$ALLOWED_ROOT" && docker-helper build buildctx --dockerfile Dockerfile --image p5aa-curl:alpine3.24 ) > "$BUILD_LOG" 2>&1 &
 BUILD_PID=$!
 
-# While the build runs: the per-operation roots, the bundled buildkitd
-# process, and the OTEL socket redirect.
+# While the build runs: the per-operation roots (SAME-OP PAIRED: the op id
+# comes from the runtime dir basename and the state dir MUST carry the same
+# id — independent first-dir discovery could pair runtime from one
+# operation with state from another under stale or concurrent residue),
+# the bundled buildkitd process, and the OTEL socket redirect.
 OPS_RT=""
 OPS_ST=""
+OP_ID=""
 BUILDKITD_PID=""
 OTEL_SOCK=""
 OPS_SEEN=0
@@ -354,15 +393,16 @@ for _ in $(seq 1 240); do
 	kill -0 "$BUILD_PID" 2>/dev/null || break
 	for d in "$BUILDER_RT_ROOT"/ops/*/; do
 		[ -d "$d" ] || continue
+		OP_ID="$(basename "${d%/}")"
 		OPS_RT="${d%/}"
-		OPS_SEEN=1
-		break
-	done
-	for d in "$BUILDER_ST_ROOT"/ops/*/; do
-		[ -d "$d" ] || continue
-		OPS_ST="${d%/}"
-		OPS_SEEN=1
-		break
+		OPS_ST="$BUILDER_ST_ROOT/ops/$OP_ID"
+		if [ -d "$OPS_ST" ]; then
+			OPS_SEEN=1
+			break
+		fi
+		OPS_RT=""
+		OPS_ST=""
+		OP_ID=""
 	done
 	[ -n "$OPS_RT" ] && [ -n "$OPS_ST" ] && break
 	sleep 0.25
@@ -380,12 +420,39 @@ else
 fi
 info "per-op runtime dir: $OPS_RT"
 info "per-op state dir: $OPS_ST"
+# Same-op identity: the paired dirs must be one operation's runtime/state
+# pair under the canonical op_<32hex> grammar.
+[[ "$OP_ID" =~ ^op_[0-9a-f]{32}$ ]] \
+	|| fail "operation id '$OP_ID' is not the canonical op_<32hex> form"
+if [ "$(basename "$OPS_RT")" != "$OP_ID" ] || [ "$(basename "$OPS_ST")" != "$OP_ID" ]; then
+	fail "runtime/state pairing broken: runtime=$(basename "$OPS_RT") state=$(basename "$OPS_ST") op=$OP_ID"
+fi
+info "same-op pairing: $OP_ID (runtime + state)"
 
 BUILDKITD_PID="$(pgrep -f "exec $PAYLOAD_DIR/buildkitd" | head -1 || true)"
 [ -n "$BUILDKITD_PID" ] || BUILDKITD_PID="$(pgrep -f "$PAYLOAD_DIR/buildkitd" | head -1 || true)"
 [ -n "$BUILDKITD_PID" ] || fail "no bundled buildkitd process ran during the build (expected $PAYLOAD_DIR/buildkitd)"
-evidence "buildkitd-cmdline.txt" "$(tr '\0' ' ' < "/proc/$BUILDKITD_PID/cmdline" 2>/dev/null || true)"
-info "bundled buildkitd ran: pid=$BUILDKITD_PID"
+# Exact per-operation endpoint proof: the cmdline must be THIS operation's
+# buildkitd — root/addr/otel-socket all name the same op's paths — and must
+# never reference the global buildkit state paths the isolation model
+# forbids.
+BK_CMDLINE="$(tr '\0' '\n' < "/proc/$BUILDKITD_PID/cmdline" 2>/dev/null || true)"
+for want in \
+	"$PAYLOAD_DIR/buildkitd" \
+	"--rootless" \
+	"--root=$OPS_ST/root" \
+	"--addr=unix://$OPS_RT/buildkitd.sock" \
+	"--otel-socket-path=$OPS_RT/buildkit/otel-grpc.sock"; do
+	printf '%s\n' "$BK_CMDLINE" | grep -qxF -- "$want" \
+		|| fail "bundled buildkitd cmdline (op $OP_ID) missing $want"
+done
+for banned in /run/buildkit /var/lib/buildkit; do
+	if printf '%s\n' "$BK_CMDLINE" | grep -qF -- "$banned"; then
+		fail "bundled buildkitd cmdline (op $OP_ID) references the global $banned path"
+	fi
+done
+evidence "buildkitd-cmdline.txt" "$BK_CMDLINE"
+info "bundled buildkitd ran: pid=$BUILDKITD_PID (cmdline matches op $OP_ID)"
 
 # The CONFINED model's transition proof: the launch vehicle must run
 # under the DISTRO rootlesskit profile (the single owner of the userns
@@ -415,6 +482,11 @@ done
 RK_LABEL="$(cat "/proc/$RK_PID/attr/current" 2>/dev/null || true)"
 [ "$RK_LABEL" = "rootlesskit (unconfined)" ] \
 	|| fail "rootlesskit leader profile = '$RK_LABEL', want 'rootlesskit (unconfined)' (the distro rootlesskit profile must own the launch vehicle for AppArmor parity)"
+# The buildkitd child's label is RECORDED, never asserted as confinement:
+# the child inherits the same distro rootlesskit profile (observed
+# "rootlesskit (unconfined)" — the profile is deliberately unmediated), and
+# the AppArmor backend makes no deeper child-confinement claim. The
+# transition proof above is the leader's profile name.
 RK_CHILD_LABEL="$(cat "/proc/$BUILDKITD_PID/attr/current" 2>/dev/null || true)"
 info "rootlesskit leader: pid=$RK_PID profile=$RK_LABEL"
 info "buildkitd child profile (recorded): $RK_CHILD_LABEL"
@@ -472,9 +544,12 @@ FRAGMENT="$(cat "$AA_STATE_FILE")"
 evidence "managed-boundaries.txt" "$FRAGMENT"
 printf '%s\n' "$FRAGMENT" | grep -F "$WS" >/dev/null \
 	|| fail "managed-boundaries fragment does not carry the session workspace $WS"
-printf '%s\n' "$FRAGMENT" | grep -F '"/home/' >/dev/null \
-	|| fail "managed-boundaries fragment does not carry the root-json boundary form"
-info "managed-boundaries fragment carries the issued workspace boundary (root-json form)"
+# Root-json boundary form for the ACTUAL allowed root: the UAT fixes the
+# workspace under $ALLOWED_ROOT by construction, so the form check follows
+# the variable instead of a hard-coded /home prefix.
+printf '%s\n' "$FRAGMENT" | grep -F "\"$ALLOWED_ROOT" >/dev/null \
+	|| fail "managed-boundaries fragment does not carry the root-json boundary form for $ALLOWED_ROOT"
+info "managed-boundaries fragment carries the issued workspace boundary (root-json form for $ALLOWED_ROOT)"
 
 # --- P7: generated workload profile ------------------------------------------
 
@@ -528,15 +603,33 @@ if [ "$HARVEST" = "1" ]; then
 else
 	UNEXPECTED_SYSTEM=""
 	ALLOWLISTED=0
+	declare -A SHAPE_COUNT
 	while IFS= read -r line; do
 		[ -n "$line" ] || continue
 		if is_allowlisted_deny "$line"; then
 			ALLOWLISTED=$((ALLOWLISTED + 1))
+			shape_key="$(allowlist_shape_key "$line")"
+			SHAPE_COUNT["$shape_key"]=$(( ${SHAPE_COUNT["$shape_key"]:-0} + 1 ))
 			info "allowlisted benign deny: $line"
 		else
 			UNEXPECTED_SYSTEM+="$line"$'\n'
 		fi
 	done <<< "$SYSTEM_DENIALS"
+	# Shape drift control: every allowlisted record must normalize to a
+	# known benign probe shape and no shape may exceed its pinned maximum.
+	SHAPE_DRIFT=""
+	for shape_key in "${!SHAPE_COUNT[@]}"; do
+		shape_max="$(allowlist_shape_max "$shape_key" || true)"
+		if [ -z "$shape_max" ]; then
+			SHAPE_DRIFT+="unknown allowlisted shape: $shape_key"$'\n'
+		elif [ "${SHAPE_COUNT[$shape_key]}" -gt "$shape_max" ]; then
+			SHAPE_DRIFT+="allowlisted shape above its pinned maximum ($shape_key: ${SHAPE_COUNT[$shape_key]} > $shape_max)"$'\n'
+		fi
+	done
+	if [ -n "$SHAPE_DRIFT" ]; then
+		printf '\n[P5AA] allowlist shape drift:\n%s\n' "$SHAPE_DRIFT" >&2
+		fail "allowlisted AppArmor denial shapes drifted from the known benign set"
+	fi
 	if [ -n "$UNEXPECTED_SYSTEM" ]; then
 		printf '\n[P5AA] UNEXPECTED docker-helper-system DENIED records:\n%s\n' "$UNEXPECTED_SYSTEM" >&2
 		fail "unexpected AppArmor denials under docker-helper-system"
