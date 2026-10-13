@@ -353,11 +353,14 @@ else
 fi
 
 # File-context expectations (matchpathcon: the policy view, independent of file
-# existence).
+# existence). Each expectation is also recorded as durable evidence so the
+# shipped relabel coverage is auditable from the run artifacts alone.
 expect_context() {
   local path="$1" want="$2" got
   got="$(matchpathcon "$path" 2>/dev/null | awk '{print $2}')"
   [ "$got" = "$want" ] || fail "matchpathcon $path = '$got', want '$want'"
+  printf 'matchpathcon %s -> %s (live stat: %s)\n' "$path" "$got" "$(stat -c '%C' "$path" 2>/dev/null || echo absent)" \
+    >> "$EVIDENCE_DIR/shipped-label-expectations.txt"
 }
 expect_context /usr/bin/docker-helper system_u:object_r:docker_helper_exec_t:s0
 expect_context /usr/bin/rootlesskit system_u:object_r:docker_helper_rootlesskit_exec_t:s0
@@ -780,6 +783,8 @@ rpm -Uvh --replacepkgs "$RPM" >/dev/null || fail "rpm -U --replacepkgs failed"
 # motivated the shipped relabel).
 [ "$(stat -c '%C' /usr/bin/nsenter)" = "system_u:object_r:docker_helper_nsenter_exec_t:s0" ] \
   || fail "nsenter label wrong after the upgrade relabel: $(stat -c '%C' /usr/bin/nsenter)"
+printf 'p6-upgrade-relabel /usr/bin/nsenter -> %s\n' "$(stat -c '%C' /usr/bin/nsenter)" \
+  >> "$EVIDENCE_DIR/shipped-label-expectations.txt"
 # The distro helpers' own state must be UNCHANGED across the relabel: the
 # relabel path touches labels only — owner, mode, and the chkstat-applied
 # file capabilities stay exactly as recorded at install.
@@ -1397,6 +1402,8 @@ TAR_MGR_CTX="$(cat "/proc/$TAR_MGR_PID/attr/current" 2>/dev/null || true)"
 # the network-setup helper must land on its dedicated exec type here too.
 [ "$(stat -c '%C' /usr/bin/nsenter)" = "system_u:object_r:docker_helper_nsenter_exec_t:s0" ] \
   || fail "nsenter label wrong after the tarball install: $(stat -c '%C' /usr/bin/nsenter)"
+printf 'p7-tarball-install /usr/bin/nsenter -> %s\n' "$(stat -c '%C' /usr/bin/nsenter)" \
+  >> "$EVIDENCE_DIR/shipped-label-expectations.txt"
 [ "$(stat -c '%C' /run/docker-helper-builder/manager.sock)" = "system_u:object_r:docker_helper_builder_runtime_root_t:s0" ] \
   || fail "manager.sock label wrong after the tarball install: $(stat -c '%C' /run/docker-helper-builder/manager.sock)"
 [ "$(stat -c '%C' /var/lib/docker-helper-builder)" = "system_u:object_r:docker_helper_builder_state_root_t:s0" ] \
