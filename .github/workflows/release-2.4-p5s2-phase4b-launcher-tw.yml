@@ -18,6 +18,31 @@ on:
       - .github/workflows/release-2.4-p5s2-phase4b-launcher-tw.yml
       - scripts/release-2.4-p5s2-phase4b-launcher-tw.sh
       - scripts/release-2.4-p5s2-phase4b-launcher-tw-vm.sh
+      # Release 2.4 production owners: the canonical SELinux proof consumes
+      # the generated candidate set and the full runtime launch chain, so a
+      # production/packaging change must trigger it (no ambiguous
+      # semi-gating).
+      - build_driver.go
+      - builder_*.go
+      - operation*.go
+      - apparmor*.go
+      - workload_*.go
+      - selinux*.go
+      - mac_lifecycle.go
+      - build-buildkit-payload.sh
+      - build-packages.sh
+      - build-bundle.sh
+      - scripts/release-candidate.sh
+      - packaging/nfpm.yaml
+      - packaging/selinux/**
+      - packaging/apparmor/**
+      - packaging/systemd/**
+      - packaging/install-system.sh
+      - packaging/uninstall-system.sh
+      - packaging/scripts/**
+      - scripts/test-packaging-integration.sh
+      - packaging_test.go
+      - selinux_builder_policy_test.go
 
 permissions:
   contents: read
@@ -828,4 +853,4 @@ jobs:
         with:
           name: release-2.4-p5s2-phase4b-launcher-tw-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/release-2.4-p5s2-phase4b-launcher-evidence
-          if-no-files-found: warn
+          if-no-files-found: error

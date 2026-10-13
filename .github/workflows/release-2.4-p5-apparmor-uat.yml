@@ -50,6 +50,18 @@ on:
       - scripts/test-packaging-integration.sh
       - packaging_test.go
       - apparmor_test.go
+      # Release 2.4 production owners: a runtime change must trigger the
+      # release UATs that exercise it (no ambiguous semi-gating).
+      - build_driver.go
+      - builder_*.go
+      - operation*.go
+      - apparmor*.go
+      - workload_*.go
+      - selinux*.go
+      - mac_lifecycle.go
+      - packaging/apparmor/**
+      - packaging/selinux/**
+      - packaging/systemd/**
 
 permissions:
   contents: read
@@ -170,7 +182,7 @@ jobs:
         with:
           name: release-2.4-p5aa-harvest-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/p5aa-harvest-evidence
-          if-no-files-found: warn
+          if-no-files-found: error
 
       - name: Upload ENFORCING evidence
         if: always()
@@ -178,4 +190,4 @@ jobs:
         with:
           name: release-2.4-p5aa-enforcing-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/p5aa-enforcing-evidence
-          if-no-files-found: warn
+          if-no-files-found: error
