@@ -245,6 +245,26 @@ info "builder pid=$BUILDER_PID profile=$(process_attr "$BUILDER_PID")"
 
 say "=== P3: principal + credential + session create ==="
 
+# The installer returns before the daemon has bound its API socket (the
+# start is asynchronous), so the first API call can race the socket bind.
+# Wait (bounded, short interval) for the actual readiness condition — the
+# API socket serving GET /health — and fail fast if the service exits.
+DH_SOCK=/run/docker-helper/docker-helper.sock
+DH_READY=0
+for _ in $(seq 1 100); do
+	if [ -S "$DH_SOCK" ] && curl --silent --fail --max-time 1 \
+		--unix-socket "$DH_SOCK" http://localhost/health >/dev/null 2>&1; then
+		DH_READY=1
+		break
+	fi
+	if ! systemctl is-active --quiet docker-helper.service 2>/dev/null; then
+		fail "docker-helper.service exited/failed while waiting for the API socket"
+	fi
+	sleep 0.2
+done
+[ "$DH_READY" = "1" ] || fail "API socket did not become ready"
+info "API socket ready"
+
 WS="$ALLOWED_ROOT/p5aa-workspace"
 rm -rf "$WS"
 mkdir -p "$WS/rw" "$WS/ro" "$WS/buildctx"
