@@ -720,6 +720,12 @@ apply_selinux_restorecon() {
 	# rootlesskit child domain. Label-only: restorecon never alters owner,
 	# mode, or xattrs.
 	"$RESTORECON" /usr/bin/newgidmap 2>/dev/null || true
+	# nsenter: the distro helper RootlessKit's network setup execs to create
+	# the tap device inside the flow's namespaces; the dedicated exec type
+	# (P5-S2 Phase 4C-3) is executable only as the rootlesskit child's
+	# same-domain exec, and the distro bin_t label is denied for the flow
+	# domain. Label-only: restorecon never alters owner, mode, or xattrs.
+	"$RESTORECON" /usr/bin/nsenter 2>/dev/null || true
 	# buildkitd: the bundled BuildKit daemon payload; the dedicated exec
 	# type (the exact canonical paths only — the .fc never covers the
 	# unrelated sibling buildctl) is the narrowed executable identity the

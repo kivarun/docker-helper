@@ -76,6 +76,16 @@ if command -v restorecon >/dev/null 2>&1; then
   # child can exec it). Label-only: restorecon never alters owner, mode,
   # or xattrs.
   restorecon /usr/bin/newgidmap 2>/dev/null || true
+  # nsenter is a distro dependency of the launch vehicle (RootlessKit's
+  # network setup execs it to create the tap device inside the flow's
+  # namespaces); apply the shipped docker_helper_nsenter_exec_t file
+  # context so the rootlesskit child's same-domain exec is allowed — the
+  # distro bin_t label is denied for the flow domain (the live enforcing
+  # boundary evidence recorded in the policy, P5-S2 Phase 4C-3; the
+  # P5-S1 run reproduced it on a host whose nsenter still carried the
+  # distro label). Label-only: restorecon never alters owner, mode, or
+  # xattrs.
+  restorecon /usr/bin/nsenter 2>/dev/null || true
   # buildkitd is the bundled BuildKit daemon payload (the launch chain's
   # exec target); apply the shipped docker_helper_buildkitd_exec_t file
   # context so the payload carries its private executable identity —
