@@ -2710,9 +2710,16 @@ RK_BKD_LABEL_OK=1
       BKD_ZERO_ALLOW_OK=0
     fi
   done
+  # The RAW sesearch output includes the base policy's attribute-derived
+  # standing rules (source printed as the attribute, never the concrete
+  # launcher type) — the -z gate must use the same CONCRETE filter the
+  # quarantine loop uses, else a base-policy attribute rule silently
+  # suppresses the markers (run 38354043356: the quarantine was empty
+  # and the gate passed, but the markers never emitted because the raw
+  # file-class output was non-empty with attribute lines).
   if [ "$S15_LAUNCHER_CGROUP_NORM" = "allow docker_helper_builder_launcher_t cgroup_t:dir search;" ] \
-    && [ -z "$(sesearch --allow -s docker_helper_builder_launcher_t -t cgroup_t -c file /sys/fs/selinux/policy 2>/dev/null || true)" ] \
-    && [ -z "$(sesearch --allow -s docker_helper_builder_launcher_t -t cgroup_t -c filesystem /sys/fs/selinux/policy 2>/dev/null || true)" ]; then
+    && [ -z "$(sesearch --allow -s docker_helper_builder_launcher_t -t cgroup_t -c file /sys/fs/selinux/policy 2>/dev/null | awk '$1 == "allow" && $2 == "docker_helper_builder_launcher_t" && $3 ~ /^cgroup_t/' || true)" ] \
+    && [ -z "$(sesearch --allow -s docker_helper_builder_launcher_t -t cgroup_t -c filesystem /sys/fs/selinux/policy 2>/dev/null | awk '$1 == "allow" && $2 == "docker_helper_builder_launcher_t" && $3 ~ /^cgroup_t/' || true)" ]; then
     marker "NO-LAUNCHER-CGROUP-FILE-GRANT=OK"
     marker "NO-LAUNCHER-CGROUP-FILESYSTEM-GETATTR-GRANT=OK"
   fi
