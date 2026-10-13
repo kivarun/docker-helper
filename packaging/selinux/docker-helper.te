@@ -1025,6 +1025,52 @@ allow docker_helper_builder_launcher_t self:process { setexec };
 # launcher-stage mirror of the rootlesskit diag contract.
 allow docker_helper_builder_launcher_t docker_helper_builder_t:fifo_file { write };
 
+# --- S15: the launcher's cgroup2 root traversal (the launch-chain
+# --- closure item, NOT a 4C staircase permission) ---
+#
+# PROVENANCE (the canonical Release 2.4 proof run 38346501351's own
+# kernel trace, BOTH windows — the launcher hop runs on every operation
+# START, so the shape is a standing START-chain record, not a one-off):
+# the launcher child's Go-runtime startup walks the unified cgroup2 root
+# for container GOMAXPROCS detection — the same mechanic the manager
+# (docker_helper_t), the builder (docker_helper_builder_t) and the
+# flow child (docker_helper_rootlesskit_t) already carry from their own
+# live AVC evidence — and the launcher's walk is denied:
+#
+#   selinux_audited: requested=0x20000000 denied=0x20000000
+#     audited=0x20000000 result=-13
+#     scontext=system_u:system_r:docker_helper_builder_launcher_t:s0
+#     tcontext=system_u:object_r:cgroup_t:s0 tclass=dir
+#     trace-ts=507.652569 (the provisioning window, rootlesskit-84073
+#     comm — the launcher child before its setexeccon+execve) and the
+#     companion window's twin trace-ts=649.436387 (launcher 127645).
+#
+# decode(tclass=dir, 0x20000000) = exactly { search } — the standing
+# kernel-side dir-class pin the state-root/state-tree/runtime-tree
+# search grants live-proved. THE DELTA IS EXACTLY +search:
+#   - the walk is NON-TERMINAL (the Go runtime treats the failed walk
+#     as "no cgroup limit data" and continues — every canonical launch
+#     completed: the setexeccon applied, the transition fired, the flow
+#     launched, the whole proof finished RESULT=PASS) — the grant
+#     removes the audited denial from the launch chain, it does not
+#     change any lifecycle outcome;
+#   - cgroup_t:dir search is NOT a cgroup bundle — NOT read/open/
+#     getattr/write/add_name/remove_name/rmdir/mounton on the dir
+#     class, NOT file read/open/getattr (the cpu.max read the manager
+#     and rootlesskit carry is NOT re-granted here: the launcher dies
+#     at the execve before any cpu.max read and the canonical evidence
+#     shows NO launcher cgroup file record), NOT filesystem getattr
+#     (the buildkitd cgroup statfs probe is a DIFFERENT pair and stays
+#     HOLD), NOT cap_userns, NO broad cgroup_t access;
+#   - the other subjects' cgroup rules (docker_helper_t, the builder,
+#     rootlesskit) stay exactly their own owners and are never merged;
+#   - the launcher stays authority-free beyond this one traversal hook:
+#     no new state-tree/runtime-tree/sock_file/exec authority, no
+#     buildkitd rule change (the buildkitd-named allow count stays
+#     EXACTLY NINE — this is a NON-buildkitd rule), no policy
+#     relaxation outside the exact launcher cgroup dir search.
+allow docker_helper_builder_launcher_t cgroup_t:dir { search };
+
 # Hop 2: the ONLY transition into the flow domain (G32 r3 I9). The forced
 # setexeccon context (rootlesskit_t:s0:cX) is checked by the same
 # transition machinery: the transition permission toward the target type,

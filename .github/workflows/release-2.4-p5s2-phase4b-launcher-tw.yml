@@ -764,6 +764,28 @@ jobs:
           # proof (4C-37) resumes — no artificial 4C-92 (the proof ref
           # advances to the commit carrying that module; identical Go
           # sources, so the binary is the same program).
+          # S15 (the launch-chain closure item, NOT a 4C staircase
+          # permission): the module gains EXACTLY ONE non-buildkitd
+          # rule, allow docker_helper_builder_launcher_t cgroup_t:dir
+          # { search } — the launcher child's Go-runtime cgroup2-root
+          # traversal for container GOMAXPROCS detection, the same
+          # mechanic the manager, the builder and the rootlesskit child
+          # already carry from their own live AVC evidence, now
+          # live-backed for the LAUNCHER by the canonical Release 2.4
+          # proof run 38346501351's own kernel trace TWICE
+          # (trace-ts=507.652569 and the companion twin 649.436387; the
+          # launcher hop runs on every operation START);
+          # decode(dir, 0x20000000) = exactly { search }; the walk is
+          # NON-TERMINAL (the grant removes the audited denial from the
+          # launch chain, it changes no lifecycle outcome); NOT a cgroup
+          # bundle — NO dir read/open/getattr/write/add_name/remove_name/
+          # rmdir/mounton, NO cgroup_t:file rule at all, NO
+          # cgroup_t:filesystem getattr (the buildkitd cgroup statfs
+          # probe stays HOLD), NO cap_userns, NO broad cgroup_t access;
+          # the other subjects' cgroup rules stay exactly their own
+          # owners; the launcher stays authority-free beyond this one
+          # traversal hook; the buildkitd-named allow count STAYS
+          # EXACTLY NINE (a NON-buildkitd rule never trips the count).
           PHASE4B_PROOF_REF: 'eca177d3046fe897552195c78632d1f870738bb8'
         run: |
           git fetch --no-tags origin "$PHASE4B_PROOF_REF"

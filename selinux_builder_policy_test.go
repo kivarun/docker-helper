@@ -290,6 +290,172 @@ func TestSELinuxPolicyLauncherChainRootlesskitTransition(t *testing.T) {
 	}
 }
 
+// s15LauncherCgroupViolations returns one violation per broken S15
+// invariant: the launcher's cgroup2-root traversal grant (the launch-chain
+// closure item, explicitly NOT a 4C staircase permission) must be EXACTLY
+// the ONE bare dir { search } rule — search only, never a cgroup bundle —
+// with NO launcher cgroup_t:file rule at all (the launcher dies at the
+// execve before any cpu.max read), NO cgroup_t:filesystem getattr (the
+// buildkitd cgroup statfs probe is a different pair and stays HOLD), and
+// the three standing cgroup subjects (the daemon, the builder, the
+// rootlesskit child) unchanged at their own bare { search } dir
+// singletons. The buildkitd-named allow count must stay exactly nine
+// (a non-buildkitd rule never trips it, a buildkitd-named S15 rider
+// would).
+func s15LauncherCgroupViolations(policy string) []string {
+	var violations []string
+	const canonicalS15 = "allow docker_helper_builder_launcher_t cgroup_t:dir { search };"
+	s15Count := 0
+	var launcherCgroupLines []string
+	buildkitdNamedAllow := 0
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "allow ") {
+			continue
+		}
+		if strings.Contains(trimmed, "docker_helper_buildkitd") {
+			buildkitdNamedAllow++
+		}
+		if !strings.HasPrefix(trimmed, "allow docker_helper_builder_launcher_t cgroup_t:") {
+			continue
+		}
+		launcherCgroupLines = append(launcherCgroupLines, trimmed)
+		if trimmed == canonicalS15 {
+			s15Count++
+		}
+	}
+	if s15Count != 1 {
+		violations = append(violations, fmt.Sprintf("the launcher cgroup dir search grant must exist EXACTLY once in the canonical bare-singleton form, found %d", s15Count))
+	}
+	for _, l := range launcherCgroupLines {
+		if l == canonicalS15 {
+			continue
+		}
+		violations = append(violations, fmt.Sprintf("no launcher cgroup rule beyond the ONE bare dir { search } S15 grant may exist (no dir rider, no file class, no filesystem class): %s", l))
+	}
+	// The three standing cgroup subjects stay exactly their own owners.
+	for _, want := range []string{
+		"allow docker_helper_t cgroup_t:dir { search };",
+		"allow docker_helper_builder_t cgroup_t:dir { search };",
+		"allow docker_helper_rootlesskit_t cgroup_t:dir { search };",
+	} {
+		if !strings.Contains(policy, want) {
+			violations = append(violations, fmt.Sprintf("the standing cgroup owner drifted (must stay exactly its bare { search } dir singleton): %s", want))
+		}
+	}
+	if buildkitdNamedAllow != 9 {
+		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 9 (a NON-buildkitd S15 rule never trips it, a buildkitd-named rider would), found %d", buildkitdNamedAllow))
+	}
+	return violations
+}
+
+func TestSELinuxPolicyLauncherCgroupClosureS15(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	if v := s15LauncherCgroupViolations(policy); len(v) > 0 {
+		t.Errorf("the committed policy violates the S15 launcher cgroup closure invariants: %v", v)
+	}
+	// The decode pin + the anti-merge pins (the kernel classmap, the same
+	// bit-layout lesson the 4C staircase pinned): decode(dir, 0x20000000)
+	// = exactly { search }; decode(filesystem, 0x8) = exactly { getattr }
+	// — a DIFFERENT tuple (the buildkitd cgroup statfs probe surface,
+	// never the launcher traversal); the file-class read/open/getattr
+	// tuples are DIFFERENT authorities from the dir search traversal.
+	s15Decode := func(class string, mask uint) string {
+		names := []struct {
+			bit  uint
+			name string
+		}{}
+		switch class {
+		case "dir":
+			names = []struct {
+				bit  uint
+				name string
+			}{
+				{0x1, "ioctl"}, {0x2, "read"}, {0x4, "write"}, {0x8, "create"},
+				{0x10, "getattr"}, {0x20, "setattr"}, {0x40, "lock"}, {0x800, "unlink"},
+				{0x4000, "link"}, {0x8000, "rename"}, {0x10000, "mounton"},
+				{0x40000, "open"}, {0x4000000, "add_name"}, {0x8000000, "remove_name"},
+				{0x20000000, "search"}, {0x40000000, "rmdir"},
+			}
+		case "file":
+			names = []struct {
+				bit  uint
+				name string
+			}{
+				{0x1, "ioctl"}, {0x2, "read"}, {0x4, "write"}, {0x8, "create"},
+				{0x10, "getattr"}, {0x20, "setattr"}, {0x40, "lock"}, {0x800, "unlink"},
+				{0x40000, "open"},
+			}
+		case "filesystem":
+			names = []struct {
+				bit  uint
+				name string
+			}{
+				{0x1, "mount"}, {0x2, "remount"}, {0x4, "unmount"}, {0x8, "getattr"},
+				{0x10, "relabelfrom"}, {0x20, "relabelto"}, {0x40, "associate"},
+				{0x400, "quotamod"}, {0x800, "quotaget"},
+			}
+		}
+		perms := []string{}
+		for _, n := range names {
+			if mask&n.bit != 0 {
+				perms = append(perms, n.name)
+			}
+		}
+		return class + " { " + strings.Join(perms, " ") + " }"
+	}
+	if got := s15Decode("dir", 0x20000000); got != "dir { search }" {
+		t.Errorf("kernel classmap decode: the S15 grant candidate must be the tuple (dir, { search }), got %s", got)
+	}
+	if got := s15Decode("filesystem", 0x8); got != "filesystem { getattr }" {
+		t.Errorf("kernel classmap decode: the filesystem getattr tuple must stay (filesystem, { getattr }), got %s", got)
+	}
+	if s15Decode("filesystem", 0x8) == s15Decode("dir", 0x20000000) {
+		t.Error("kernel classmap decode: the (filesystem, 0x8) and (dir, 0x20000000) tuples must stay DISTINCT authorities (the tclass-loss error) — the buildkitd cgroup statfs probe surface is never the launcher traversal")
+	}
+	if got := s15Decode("file", 0x40002); got != "file { read open }" {
+		t.Errorf("kernel classmap decode: the file read|open tuple must stay (file, { read open }), got %s", got)
+	}
+	if s15Decode("file", 0x40002) == s15Decode("dir", 0x20000000) {
+		t.Error("kernel classmap decode: the file read|open tuple and the dir search tuple must stay DISTINCT authorities")
+	}
+	if s15Decode("file", 0x10) == s15Decode("dir", 0x20000000) {
+		t.Error("kernel classmap decode: the file getattr tuple and the dir search tuple must stay DISTINCT authorities")
+	}
+	// Mutations: the missing rule is the regression, every rider shape is
+	// forbidden, and a second launcher cgroup rule in any class trips.
+	mutations := []struct {
+		name string
+		rule string
+	}{
+		{"the rule removed (the pre-S15 regression)", ""},
+		{"dir read rider", "allow docker_helper_builder_launcher_t cgroup_t:dir { search read };"},
+		{"dir open rider", "allow docker_helper_builder_launcher_t cgroup_t:dir { search open };"},
+		{"dir getattr rider", "allow docker_helper_builder_launcher_t cgroup_t:dir { search getattr };"},
+		{"dir write rider", "allow docker_helper_builder_launcher_t cgroup_t:dir { search write };"},
+		{"dir add_name rider", "allow docker_helper_builder_launcher_t cgroup_t:dir { search add_name };"},
+		{"dir remove_name rider", "allow docker_helper_builder_launcher_t cgroup_t:dir { search remove_name };"},
+		{"dir rmdir rider", "allow docker_helper_builder_launcher_t cgroup_t:dir { search rmdir };"},
+		{"dir mounton rider", "allow docker_helper_builder_launcher_t cgroup_t:dir { search mounton };"},
+		{"file read/open (the manager's cpu.max shape, NOT the launcher's)", "allow docker_helper_builder_launcher_t cgroup_t:file { read open };"},
+		{"file getattr", "allow docker_helper_builder_launcher_t cgroup_t:file { getattr };"},
+		{"filesystem getattr (the buildkitd statfs shape)", "allow docker_helper_builder_launcher_t cgroup_t:filesystem { getattr };"},
+		{"second dir rule (split rule)", "allow docker_helper_builder_launcher_t cgroup_t:dir search;\nallow docker_helper_builder_launcher_t cgroup_t:dir getattr;"},
+		{"a buildkitd cgroup rider (the forbidden merge)", "allow docker_helper_buildkitd_t cgroup_t:dir { search };"},
+	}
+	for _, mut := range mutations {
+		mutated := policy
+		if mut.rule == "" {
+			mutated = strings.Replace(mutated, "allow docker_helper_builder_launcher_t cgroup_t:dir { search };", "", 1)
+		} else {
+			mutated = policy + "\n" + mut.rule
+		}
+		if len(s15LauncherCgroupViolations(mutated)) == 0 {
+			t.Errorf("mutation %q must trip the S15 launcher cgroup closure invariant", mut.name)
+		}
+	}
+}
+
 // TestSELinuxPolicyRootlesskitMovedAccess verifies the child domain's
 // non-state grants are exactly the rootlesskit-attributed evidence surface:
 // the Go-runtime startup reads mirrored from the proven manager rules
@@ -1018,7 +1184,16 @@ func TestSELinuxPolicyLauncherDomainSurface(t *testing.T) {
 			// the builder domain.
 			trimmed == "allow docker_helper_builder_launcher_t docker_helper_builder_t:fifo_file { write };",
 			// The structural chain's transitions (hop 2 lives here).
-			trimmed == "allow docker_helper_builder_launcher_t docker_helper_rootlesskit_t:process { transition };":
+			trimmed == "allow docker_helper_builder_launcher_t docker_helper_rootlesskit_t:process { transition };",
+			// The S15 launch-chain closure item (NOT a 4C staircase
+			// permission): the launcher child's Go-runtime cgroup2-root
+			// traversal for container GOMAXPROCS detection — the canonical
+			// Release 2.4 proof run 38346501351's own standing START-chain
+			// record, the same mechanic the manager, the builder and the
+			// rootlesskit child carry from their own live AVC evidence.
+			// EXACTLY the bare dir { search } singleton; the launcher stays
+			// authority-free beyond this one traversal hook.
+			trimmed == "allow docker_helper_builder_launcher_t cgroup_t:dir { search };":
 			// The structural chain's entry/bprm/transition grants.
 		case target == "self" && trimmed == "allow docker_helper_builder_launcher_t self:process { setexec };":
 			// The launcher's own forced-context write (self rule).
