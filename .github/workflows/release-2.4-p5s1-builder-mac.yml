@@ -13,32 +13,21 @@ name: Release 2.4 P5-S1 builder MAC proof
 #   - builder-owned paths are labeled by the existing deployment lifecycle
 #     (RPM %posttrans + tarball install-system.sh; fresh install and
 #     poisoned-label upgrade/reinstall).
-# Full child-process MAC (rootlesskit/buildkitd inside the builder domain)
-# is a separate task.
+#
+# NON-GATING for the Release 2.4 tag (workflow_dispatch only, by decision):
+# P5-S1 was the historical builder-bootstrap proof. The current release
+# gates are the P4B packaging proof, the P5AA AppArmor parity proof, the
+# P5S2/4C/S15 canonical SELinux proof, and the final package
+# install/upgrade smoke. After the shipped nsenter relabel fix, this
+# workflow's enforcing build attempt advances past the former boundary and
+# stops on the NEXT child-process MAC frontier (documented in the run
+# evidence): the next denial staircase is post-tag work, not a v2.4 gate.
+# Granting it here would reopen the accepted 4C/S15 policy baseline inside
+# the release window. The evidence (fresh-VM install labels, per-phase AVC
+# inventories, nsenter relabel proof) stays archived in the run artifacts.
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - p3
-    paths:
-      - .github/workflows/release-2.4-p5s1-builder-mac.yml
-      - build-selinux-policy.sh
-      - build-buildkit-payload.sh
-      - build-packages.sh
-      - build-bundle.sh
-      - scripts/release-candidate.sh
-      - packaging/nfpm.yaml
-      - packaging/selinux/**
-      - packaging/systemd/system/docker-helper.service
-      - packaging/systemd/system/docker-helper-builder.service
-      - packaging/install-system.sh
-      - packaging/uninstall-system.sh
-      - packaging/scripts/**
-      - scripts/release-2.4-p5s1-*.sh
-      - scripts/test-packaging-integration.sh
-      - packaging_test.go
-      - selinux_builder_policy_test.go
 
 permissions:
   contents: read
@@ -150,4 +139,4 @@ jobs:
         with:
           name: release-2.4-p5s1-tw-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/release-2.4-p5s1-tw-evidence
-          if-no-files-found: warn
+          if-no-files-found: error

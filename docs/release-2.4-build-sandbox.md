@@ -684,6 +684,20 @@ cgroup `cpu.max` best-effort read, the buildctl/buildx system TLS-root
 directory probe) are allowlisted by demonstrated-benign evidence and the
 policy is never widened to silence them.
 
+P5-S1 disposition (Release 2.4): the historical SELinux builder-bootstrap
+proof workflow is NON-GATING for the v2.4 tag (workflow_dispatch only).
+After the shipped nsenter relabel fix, its enforcing build attempt advances
+past the former boundary and stops on the NEXT child-process MAC frontier
+— the next denial staircase is post-tag work, not a release gate. The
+release gates are the P4B packaging proof (Ubuntu tarball/DEB + Tumbleweed
+RPM/tarball, including the nsenter relabel symmetry), the P5AA AppArmor
+parity proof (HARVEST + ENFORCING), the P5S2/4C/S15 canonical SELinux
+proof, and the final package install/upgrade smoke. Granting the P5-S1
+frontier inside the release window would reopen the accepted 4C/S15
+policy baseline; the run evidence (fresh-VM install labels, per-phase AVC
+inventories, the nsenter relabel proof) stays archived in the workflow
+artifacts.
+
 ## Builder authority
 
 The sandbox is narrower than exposing Docker authority to the caller.
