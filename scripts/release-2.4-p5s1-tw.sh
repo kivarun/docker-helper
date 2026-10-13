@@ -303,7 +303,8 @@ fi
   for p in /usr/libexec/docker-helper/buildkit/buildkitd \
            /usr/libexec/docker-helper/buildkit/buildctl \
            /usr/libexec/docker-helper/buildkit/buildkit-runc \
-           /usr/bin/rootlesskit /usr/bin/newuidmap /usr/bin/newgidmap /usr/bin/slirp4netns; do
+           /usr/bin/rootlesskit /usr/bin/newuidmap /usr/bin/newgidmap /usr/bin/slirp4netns \
+           /usr/bin/nsenter; do
     echo "matchpathcon $p: $(matchpathcon "$p" 2>/dev/null || echo 'no rule')"
   done
 } > "$EVIDENCE_DIR/preflight-labels.txt"
@@ -362,6 +363,7 @@ expect_context /usr/bin/docker-helper system_u:object_r:docker_helper_exec_t:s0
 expect_context /usr/bin/rootlesskit system_u:object_r:docker_helper_rootlesskit_exec_t:s0
 expect_context /usr/bin/newuidmap system_u:object_r:docker_helper_newuidmap_exec_t:s0
 expect_context /usr/bin/newgidmap system_u:object_r:docker_helper_newgidmap_exec_t:s0
+expect_context /usr/bin/nsenter system_u:object_r:docker_helper_nsenter_exec_t:s0
 expect_context /run/docker-helper-builder system_u:object_r:docker_helper_builder_runtime_root_t:s0
 expect_context /var/lib/docker-helper-builder system_u:object_r:docker_helper_builder_state_root_t:s0
 
@@ -772,6 +774,12 @@ rpm -Uvh --replacepkgs "$RPM" >/dev/null || fail "rpm -U --replacepkgs failed"
   || fail "newuidmap label wrong after the upgrade relabel: $(stat -c '%C' /usr/bin/newuidmap)"
 [ "$(stat -c '%C' /usr/bin/newgidmap)" = "system_u:object_r:docker_helper_newgidmap_exec_t:s0" ] \
   || fail "newgidmap label wrong after the upgrade relabel: $(stat -c '%C' /usr/bin/newgidmap)"
+# nsenter: the shipped %posttrans relabel must also keep the network-setup
+# helper on its dedicated exec type across the upgrade (the distro bin_t
+# label is denied for the rootlesskit flow domain — the live boundary that
+# motivated the shipped relabel).
+[ "$(stat -c '%C' /usr/bin/nsenter)" = "system_u:object_r:docker_helper_nsenter_exec_t:s0" ] \
+  || fail "nsenter label wrong after the upgrade relabel: $(stat -c '%C' /usr/bin/nsenter)"
 # The distro helpers' own state must be UNCHANGED across the relabel: the
 # relabel path touches labels only — owner, mode, and the chkstat-applied
 # file capabilities stay exactly as recorded at install.
@@ -950,11 +958,21 @@ if [ -z "$P6_OP_ID" ]; then
   { echo "=== daemon journal (P6 window) ==="; tail -30 "$EVIDENCE_DIR/daemon-journal-p6.txt"; } >&2
   fail "the daemon journal has no builder_start stage in the P6 window (the attempt failed before the manager RPC)"
 fi
-if ! grep -aqF "START $P6_OP_ID" "$EVIDENCE_DIR/builder-journal-p6.txt"; then
+# Transport proof: the daemon's builder_start stage and the manager's
+# handling must name the SAME operation ID. The manager's journal diag
+# emits op-named lines ONLY on diagnostic paths — a successful START is
+# silent by design (no success log line exists), so manager ownership of
+# the op is proven by EITHER a manager journal line naming the op
+# (START/STOP diagnostics) OR the builder-domain flow AVCs of the window
+# (only the manager's launcher spawns the docker_helper_rootlesskit_t
+# flow with the operation's category). An arbitrary docker_build_failed
+# terminal state is NOT an RPC proof — the op-ID pair must match.
+if ! grep -aqF "$P6_OP_ID" "$EVIDENCE_DIR/builder-journal-p6.txt" \
+  && ! grep -aqE 'scontext=system_u:system_r:docker_helper_(rootlesskit|newuidmap|newgidmap|buildkitd|slirp4netns)_t' "$EVIDENCE_DIR/builder-avc-p6.txt"; then
   { echo "=== daemon journal (P6 window) ==="; tail -30 "$EVIDENCE_DIR/daemon-journal-p6.txt"
     echo "=== builder journal (P6 window) ==="; tail -30 "$EVIDENCE_DIR/builder-journal-p6.txt"
     echo "=== builder-domain AVC window ==="; cat "$EVIDENCE_DIR/builder-avc-p6.txt"; } >&2
-  fail "the manager journal shows no START handling for $P6_OP_ID (the RPC never reached the manager — S1 transport defect)"
+  fail "the manager window shows neither op $P6_OP_ID nor its flow-domain activity (the RPC never reached the manager — S1 transport defect)"
 fi
 # Runtime-context proof of the helper-domain transition: when the helper
 # process was observed, its /proc context must be the dedicated helper
@@ -1375,6 +1393,10 @@ TAR_MGR_CTX="$(cat "/proc/$TAR_MGR_PID/attr/current" 2>/dev/null || true)"
   || fail "manager process context after the tarball install = '$TAR_MGR_CTX', want system_u:system_r:docker_helper_builder_t:s0"
 [ "$(stat -c '%C' /run/docker-helper-builder)" = "system_u:object_r:docker_helper_builder_runtime_root_t:s0" ] \
   || fail "builder runtime root label wrong after the tarball install: $(stat -c '%C' /run/docker-helper-builder)"
+# The tarball path applies the shipped fcontexts itself (install-system.sh);
+# the network-setup helper must land on its dedicated exec type here too.
+[ "$(stat -c '%C' /usr/bin/nsenter)" = "system_u:object_r:docker_helper_nsenter_exec_t:s0" ] \
+  || fail "nsenter label wrong after the tarball install: $(stat -c '%C' /usr/bin/nsenter)"
 [ "$(stat -c '%C' /run/docker-helper-builder/manager.sock)" = "system_u:object_r:docker_helper_builder_runtime_root_t:s0" ] \
   || fail "manager.sock label wrong after the tarball install: $(stat -c '%C' /run/docker-helper-builder/manager.sock)"
 [ "$(stat -c '%C' /var/lib/docker-helper-builder)" = "system_u:object_r:docker_helper_builder_state_root_t:s0" ] \

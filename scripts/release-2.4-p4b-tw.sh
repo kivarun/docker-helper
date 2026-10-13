@@ -218,7 +218,7 @@ assert_selinux_module_loaded() {
 # path — the assert is self-consistent and never pinned to a specific type.
 assert_canonical_third_party_labels() {
   local phase="$1" bin_path actual canonical
-  for bin_path in /usr/bin/rootlesskit /usr/bin/bindfs /usr/bin/slirp4netns /usr/bin/newuidmap; do
+  for bin_path in /usr/bin/rootlesskit /usr/bin/bindfs /usr/bin/slirp4netns /usr/bin/newuidmap /usr/bin/newgidmap /usr/bin/nsenter; do
     [ -e "$bin_path" ] || fail "$phase: third-party binary missing: $bin_path"
     actual="$(stat -c '%C' "$bin_path" 2>&1)" || fail "$phase: cannot stat $bin_path: $actual"
     canonical="$(matchpathcon "$bin_path" 2>/dev/null | awk '{print $2}')"
@@ -296,6 +296,13 @@ say "starting the builder service standalone (P4-A1 boundary asserts under the p
   || fail "/usr/bin/docker-helper label wrong: '$(stat -c %C /usr/bin/docker-helper 2>/dev/null)', want docker_helper_exec_t"
 [ "$(stat -c %C /usr/bin/bindfs 2>/dev/null)" = "system_u:object_r:docker_helper_bindfs_exec_t:s0" ] \
   || fail "/usr/bin/bindfs label wrong: '$(stat -c %C /usr/bin/bindfs 2>/dev/null)', want docker_helper_bindfs_exec_t"
+# The GID-map and network-setup helpers carry dedicated shipped exec types
+# applied by the %posttrans relabel; a fresh SELinux host must land on them
+# immediately (the distro bin_t label is denied for the flow domains).
+[ "$(stat -c %C /usr/bin/newgidmap 2>/dev/null)" = "system_u:object_r:docker_helper_newgidmap_exec_t:s0" ] \
+  || fail "/usr/bin/newgidmap label wrong: '$(stat -c %C /usr/bin/newgidmap 2>/dev/null)', want docker_helper_newgidmap_exec_t"
+[ "$(stat -c %C /usr/bin/nsenter 2>/dev/null)" = "system_u:object_r:docker_helper_nsenter_exec_t:s0" ] \
+  || fail "/usr/bin/nsenter label wrong: '$(stat -c %C /usr/bin/nsenter 2>/dev/null)', want docker_helper_nsenter_exec_t"
 systemctl start "$UNIT" || {
   journalctl -u "$UNIT" -b --no-pager > "$EVIDENCE_DIR/builder-start-failure-journal.txt" 2>&1 || true
   systemctl status "$UNIT" --no-pager > "$EVIDENCE_DIR/builder-start-status.txt" 2>&1 || true
