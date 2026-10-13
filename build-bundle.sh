@@ -390,7 +390,9 @@ for f in docker-helper install-system.sh uninstall-system.sh \
 done
 
 # Check the non-executable data files carry exactly 0644.
-for f in modules-load.d/docker-helper-builder.conf; do
+for f in modules-load.d/docker-helper-builder.conf \
+         apparmor/docker-helper-system apparmor/docker-helper-builder \
+         apparmor/local/curl; do
   PERMS=$(tar tzvf "$TARBALL" | grep "docker-helper-${VERSION}-linux-amd64/${f}$" | awk '{print $1}')
   if [[ "$PERMS" == -rw-r--r--* ]]; then
     echo "OK: $f is 0644"
