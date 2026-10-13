@@ -143,7 +143,7 @@ is_allowlisted_deny() {
 	fi
 	if echo "$line" | grep -q 'operation="open"' \
 		&& echo "$line" | grep -q 'name="/etc/ssl/certs/"' \
-		&& echo "$line" | grep -q 'comm="docker-buildx"'; then
+		&& echo "$line" | grep -qE 'comm="(docker-buildx|buildctl)"'; then
 		return 0
 	fi
 	return 1

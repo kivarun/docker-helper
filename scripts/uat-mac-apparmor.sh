@@ -150,9 +150,13 @@ is_allowlisted_deny() {
   # /etc/ssl/certs is a real directory (vs openSUSE where the paths resolve
   # elsewhere); the denied read of the directory itself is a benign best-effort
   # probe — the build and TLS E2E succeed without it, so it is not granted.
+  # The Release 2.4 client-side buildctl child (bundled buildkit buildctl,
+  # inherited into the daemon profile) makes the identical probe; the same
+  # tolerance applies (live P5 AppArmor parity UAT evidence, enforcing pass:
+  # the record is non-terminal and the build and TLS E2E succeed).
   if echo "$line" | grep -q 'operation="open"' \
     && echo "$line" | grep -q 'name="/etc/ssl/certs/"' \
-    && echo "$line" | grep -q 'comm="docker-buildx"'; then
+    && echo "$line" | grep -qE 'comm="(docker-buildx|buildctl)"'; then
     return 0
   fi
   return 1
