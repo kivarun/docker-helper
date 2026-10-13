@@ -80,6 +80,8 @@ func TestBuildSocketValidationTable(t *testing.T) {
 	if err := validateBuildKitSocketPath(validPath, identityOK); err != nil {
 		t.Fatalf("valid private builder-owned socket refused: %v", err)
 	}
+	// Owner-only (0600) and owner+group (0660) are both the private
+	// contract; world-accessible bits are the refusal boundary below.
 
 	// Missing endpoint: refused.
 	missingOp := "op_fedcba9876543210fedcba9876543210"
@@ -118,12 +120,14 @@ func TestBuildSocketValidationTable(t *testing.T) {
 		t.Fatal("regular file accepted as the BuildKit endpoint")
 	}
 
-	// Group-accessible mode: refused (the endpoint must stay private to
-	// the builder identity).
+	// The recorded buildkitd shape: containerd sys.GetLocalListener
+	// chmods 0660 unconditionally (the P4-A1 live proof asserts
+	// srw-rw----; the manager's awaitReadiness carries the same
+	// owner+group contract), so the owner+group endpoint is ACCEPTED.
 	groupOp := "op_55555555555555555555555555555555"
 	groupPath := bindBuilderSocket(t, groupOp, 0o660)
-	if err := validateBuildKitSocketPath(groupPath, identityOK); err == nil {
-		t.Fatal("group-accessible endpoint accepted")
+	if err := validateBuildKitSocketPath(groupPath, identityOK); err != nil {
+		t.Fatalf("owner+group endpoint (the recorded buildkitd shape) refused: %v", err)
 	}
 
 	// World-accessible mode: refused.

@@ -594,7 +594,15 @@ func validateBuildKitSocketPath(socketPath string, expectedUID func() (int, int,
 			return errors.New("buildkit socket is not owned by the builder identity")
 		}
 	}
-	if info.Mode().Perm()&0o077 != 0 {
+	// Private contract: owner-only or owner+group, never world-accessible.
+	// This is the recorded buildkitd socket shape (containerd
+	// sys.GetLocalListener chmods 0660 unconditionally; the P4-A1 live
+	// proof asserts srw-rw----, and the manager's awaitReadiness carries
+	// the same contract). The stricter owner-only shape this check
+	// originally demanded predates that evidence and would refuse every
+	// real endpoint; the world-accessible bits remain the refusal
+	// boundary (the live AppArmor harvest run surfaced the mismatch).
+	if info.Mode().Perm()&0o007 != 0 {
 		return errors.New("buildkit socket is not private")
 	}
 	return nil
