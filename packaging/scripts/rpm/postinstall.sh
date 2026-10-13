@@ -55,9 +55,15 @@ if [ "$aa_active" = "true" ]; then
     fi
   fi
 
-  # Load AppArmor profile.
+  # Load AppArmor profiles: the daemon profile and the dedicated builder
+  # backend profile (the builder unit binds the builder profile by name).
   if ! apparmor_parser --replace --skip-read-cache /etc/apparmor.d/docker-helper-system; then
     exit 1
+  fi
+  if [ -f /etc/apparmor.d/docker-helper-builder ]; then
+    if ! apparmor_parser --replace --skip-read-cache /etc/apparmor.d/docker-helper-builder; then
+      exit 1
+    fi
   fi
 
   # Clean up legacy fragment after successful profile replacement.

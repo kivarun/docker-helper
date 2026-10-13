@@ -90,6 +90,27 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	/usr/lib/docker/cli-plugins/docker-buildx rix,
 	/usr/libexec/docker/cli-plugins/docker-buildx rix,
 
+	# Release 2.4 builder backend transport (docs/release-2.4-implementation-plan.md §14):
+	# the daemon drives per-operation BuildKit through the builder manager RPC
+	# and runs the bundled buildctl client-side against the per-op socket.
+	# Transport only: the manager endpoint socket and the per-operation
+	# buildkitd sockets. The builder trees themselves stay builder-owned
+	# (confined by the separate docker-helper-builder profile); the daemon
+	# holds no builder-tree authority beyond these sockets.
+	/run/docker-helper-builder/manager.sock rw,
+	/run/docker-helper-builder/ops/** rw,
+	unix (connect,send,receive) type=stream peer=(label=docker-helper-builder),
+	# buildctl (inherited below) connects to the per-op buildkitd socket;
+	# the flow child carries the distro rootlesskit profile after the
+	# builder's px transition.
+	unix (connect,send,receive) type=stream peer=(label=rootlesskit),
+
+	# Bundled buildctl: the daemon's client-side build client (staged
+	# context read, DOCKER_CONFIG session state, registry network — all
+	# already granted). buildkitd/buildkit-runc are never execed by the
+	# daemon: they run inside the builder flow only.
+	/usr/libexec/docker-helper/buildkit/buildctl rix,
+
 	# Docker helper binary itself.
 	/usr/bin/docker-helper r,
 

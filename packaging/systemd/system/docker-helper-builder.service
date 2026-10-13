@@ -38,6 +38,16 @@ TimeoutStopSec=30s
 # ignored by systemd.
 SELinuxContext=system_u:system_r:docker_helper_builder_t:s0
 
+# P5 AppArmor binding: the unit pins the dedicated builder profile by name
+# (the same mechanism as the main daemon unit's AppArmorProfile=). The
+# profile is the AppArmor counterpart of the SELinux builder domain: builder
+# trees only, no Docker socket, no helper config/state, no workspace
+# authority; the launch vehicle execs into the distro rootlesskit profile
+# (the single owner of the userns permission under
+# apparmor_restrict_unprivileged_userns=1). On SELinux and MAC-less hosts
+# this line is ignored by systemd.
+AppArmorProfile=docker-helper-builder
+
 # NoNewPrivileges is deliberately ABSENT for this unit only (the recorded
 # Release-2.4 exception): RootlessKit's builder-side mechanics need the
 # setuid-root newuidmap/newgidmap elevation, which NoNewPrivileges=true

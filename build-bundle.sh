@@ -200,6 +200,8 @@ chmod 644 "$BUNDLE_DIR/modules-load.d/docker-helper-builder.conf"
 mkdir -p "$BUNDLE_DIR/apparmor/local"
 cp "$SCRIPT_DIR/packaging/apparmor/docker-helper-system" \
    "$BUNDLE_DIR/apparmor/docker-helper-system"
+cp "$SCRIPT_DIR/packaging/apparmor/docker-helper-builder" \
+   "$BUNDLE_DIR/apparmor/docker-helper-builder"
 cp "$SCRIPT_DIR/packaging/apparmor/local/curl" \
    "$BUNDLE_DIR/apparmor/local/curl"
 
@@ -337,6 +339,7 @@ EXPECTED_PATHS=(
   "docker-helper-${VERSION}-linux-amd64/systemd/system/docker-helper.service"
   "docker-helper-${VERSION}-linux-amd64/systemd/system/docker-helper-builder.service"
   "docker-helper-${VERSION}-linux-amd64/apparmor/docker-helper-system"
+  "docker-helper-${VERSION}-linux-amd64/apparmor/docker-helper-builder"
   "docker-helper-${VERSION}-linux-amd64/apparmor/local/curl"
   "docker-helper-${VERSION}-linux-amd64/selinux/docker_helper.pp"
   "docker-helper-${VERSION}-linux-amd64/buildkit/buildkitd"

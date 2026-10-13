@@ -1,0 +1,178 @@
+name: Release 2.4 P5 AppArmor parity UAT
+
+# P5 AppArmor backend parity: the CONFINED builder model proven on the
+# hosted Ubuntu 24.04 AppArmor runner through the GENERATED candidate
+# tarball and the documented install path:
+#   - the installer selects the AppArmor backend and installs/loads BOTH
+#     shipped profiles (docker-helper-system + the dedicated
+#     docker-helper-builder);
+#   - the daemon runs confined under docker-helper-system and the builder
+#     manager under docker-helper-builder (enforce);
+#   - session create, docker run, and docker build through the
+#     per-operation BuildKit flow work under confinement;
+#   - the bundled buildkitd/buildkit-runc payload, the per-op runtime/state
+#     roots, and the OTEL socket redirect are exercised; no global
+#     /run/buildkit path appears;
+#   - managed-boundaries reload and the generated workload profile
+#     prepare/cleanup lifecycle work;
+#   - uninstall removes/unloads both shipped profiles and leaves no
+#     helper-owned generated profiles loaded;
+#   - the fresh kernel-audit window carries no unexpected AppArmor DENIED
+#     records for the helper profiles.
+#
+# Each run performs TWO passes in one job:
+#   1. HARVEST pass: both profiles in complain mode (log-and-permit); the
+#      complete denial inventory is printed and uploaded as evidence for
+#      profile iterations (the repo's evidence-first policy rule);
+#   2. ENFORCING pass: the shipped profile bytes, enforcing — the parity
+#      proof. Any unexpected denial fails the job.
+# Each pass ends with a --purge uninstall, so the passes are independent.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - p3
+    paths:
+      - .github/workflows/release-2.4-p5-apparmor-uat.yml
+      - build-buildkit-payload.sh
+      - build-packages.sh
+      - build-bundle.sh
+      - scripts/release-candidate.sh
+      - packaging/nfpm.yaml
+      - packaging/apparmor/**
+      - packaging/systemd/system/docker-helper.service
+      - packaging/systemd/system/docker-helper-builder.service
+      - packaging/install-system.sh
+      - packaging/uninstall-system.sh
+      - packaging/scripts/**
+      - scripts/release-2.4-p5-apparmor-uat.sh
+      - scripts/test-packaging-integration.sh
+      - packaging_test.go
+      - apparmor_test.go
+
+permissions:
+  contents: read
+
+jobs:
+  packaging-static-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Validate packaging and proof scripts
+        run: |
+          bash -n build-buildkit-payload.sh
+          bash -n build-packages.sh
+          bash -n build-bundle.sh
+          bash -n scripts/release-candidate.sh
+          bash -n packaging/install-system.sh
+          bash -n packaging/uninstall-system.sh
+          sh -n packaging/scripts/rpm/postinstall.sh
+          sh -n packaging/scripts/rpm/posttrans.sh
+          sh -n packaging/scripts/lib/provision-builder.sh
+          bash -n scripts/release-2.4-p5-apparmor-uat.sh
+          shellcheck build-buildkit-payload.sh
+          shellcheck build-packages.sh
+          shellcheck build-bundle.sh
+          shellcheck packaging/install-system.sh
+          shellcheck packaging/uninstall-system.sh
+          shellcheck packaging/scripts/rpm/postinstall.sh
+          shellcheck packaging/scripts/rpm/posttrans.sh
+          shellcheck packaging/scripts/lib/provision-builder.sh
+          shellcheck scripts/release-2.4-p5-apparmor-uat.sh
+
+  packaging-build-and-go-tests:
+    # Builds the shared release payload ONCE through the canonical builders
+    # (so the candidate carries the current AppArmor profiles), runs the
+    # packaging integration Go tests in required-tool mode, then stages the
+    # immutable candidate set.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install packaging build toolchain
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y musl-tools checkpolicy semodule-utils rpm dpkg cpio gzip
+
+      - name: Install pinned nFPM (single owner)
+        run: |
+          scripts/install-nfpm.sh
+
+      - name: Packaging integration Go tests (required-tool mode)
+        run: |
+          bash scripts/test-packaging-integration.sh
+
+      - name: Build + stage the immutable candidate set (canonical producer)
+        run: |
+          scripts/release-candidate.sh 2.4.0 "${{ github.sha }}"
+
+      - name: Upload candidate set
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-2.4-p5aa-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/candidate
+          if-no-files-found: error
+
+  apparmor-parity-uat:
+    # Ubuntu 24.04 hosted runner: AppArmor active, SELinux absent, Docker
+    # available. HARVEST pass first (complain evidence), then the ENFORCING
+    # parity pass.
+    needs: packaging-build-and-go-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install platform dependencies
+        run: |
+          sudo -E env "PATH=$PATH" UAT_PLATFORM=ubuntu \
+            scripts/uat-blackbox.sh install-deps
+          sudo apt-get install -y apparmor-utils
+
+      - name: Download candidate set
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-2.4-p5aa-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/p5aa/candidate
+
+      - name: HARVEST pass (complain-mode evidence window)
+        run: |
+          sudo -E env "PATH=$PATH" P5AA_HARVEST=1 \
+            P5AA_CANDIDATE_DIR=/tmp/p5aa/candidate \
+            P5AA_EVIDENCE_DIR="$RUNNER_TEMP/p5aa-harvest-evidence" \
+            scripts/release-2.4-p5-apparmor-uat.sh
+
+      - name: ENFORCING pass (parity proof)
+        run: |
+          sudo -E env "PATH=$PATH" \
+            P5AA_CANDIDATE_DIR=/tmp/p5aa/candidate \
+            P5AA_EVIDENCE_DIR="$RUNNER_TEMP/p5aa-enforcing-evidence" \
+            scripts/release-2.4-p5-apparmor-uat.sh
+
+      - name: Upload HARVEST evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-2.4-p5aa-harvest-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/p5aa-harvest-evidence
+          if-no-files-found: warn
+
+      - name: Upload ENFORCING evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-2.4-p5aa-enforcing-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/p5aa-enforcing-evidence
+          if-no-files-found: warn

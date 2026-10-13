@@ -135,6 +135,11 @@ contents:
     file_info:
       mode: 0644
 
+  - src: packaging/apparmor/docker-helper-builder
+    dst: /etc/apparmor.d/docker-helper-builder
+    file_info:
+      mode: 0644
+
   - src: dist/man/docker-helper.1.gz
     dst: /usr/share/man/man1/docker-helper.1.gz
     file_info:

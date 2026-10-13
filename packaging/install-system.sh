@@ -51,6 +51,8 @@ BUILDKIT_BIN_DEST="${BUILDKIT_BIN_DEST:-/usr/libexec/docker-helper/buildkit}"
 BUILDKIT_DOC_DEST="${BUILDKIT_DOC_DEST:-/usr/share/doc/docker-helper/buildkit}"
 AA_PROFILE_SRC="${AA_PROFILE_SRC:-apparmor/docker-helper-system}"
 AA_PROFILE_DEST="${AA_PROFILE_DEST:-/etc/apparmor.d/docker-helper-system}"
+AA_BUILDER_PROFILE_SRC="${AA_BUILDER_PROFILE_SRC:-apparmor/docker-helper-builder}"
+AA_BUILDER_PROFILE_DEST="${AA_BUILDER_PROFILE_DEST:-/etc/apparmor.d/docker-helper-builder}"
 AA_STATE_FILE="${AA_STATE_FILE:-/var/lib/docker-helper/apparmor/managed-boundaries}"
 AA_LEGACY_FRAGMENT="${AA_LEGACY_FRAGMENT:-/etc/apparmor.d/docker-helper.d/managed-roots}"
 AA_PARSER="${AA_PARSER:-/usr/sbin/apparmor_parser}"
@@ -370,6 +372,10 @@ check_selected_mac_tools() {
 			error "AppArmor profile not found at $script_dir/$AA_PROFILE_SRC"
 			exit 1
 		fi
+		if [[ ! -f "$script_dir/$AA_BUILDER_PROFILE_SRC" ]]; then
+			error "AppArmor builder profile not found at $script_dir/$AA_BUILDER_PROFILE_SRC"
+			exit 1
+		fi
 	else
 		if ! command -v "$SEMODULE" >/dev/null 2>&1; then
 			error "semodule not found in PATH"
@@ -579,9 +585,14 @@ install_unit() {
 }
 
 install_apparmor_profile() {
-	info "Installing AppArmor profile to $AA_PROFILE_DEST"
+	info "Installing AppArmor profiles to $AA_PROFILE_DEST and $AA_BUILDER_PROFILE_DEST"
 	cp "$script_dir/$AA_PROFILE_SRC" "$AA_PROFILE_DEST"
 	chmod 0644 "$AA_PROFILE_DEST"
+	# The dedicated builder backend profile (Release 2.4): the builder
+	# unit binds it by name (AppArmorProfile=). Installed before either
+	# profile is loaded so the pair reaches the kernel together.
+	cp "$script_dir/$AA_BUILDER_PROFILE_SRC" "$AA_BUILDER_PROFILE_DEST"
+	chmod 0644 "$AA_BUILDER_PROFILE_DEST"
 }
 
 prepare_apparmor_state() {
@@ -642,6 +653,15 @@ load_apparmor_profile() {
 	info "Loading AppArmor profile $AA_PROFILE_DEST"
 	if ! "$AA_PARSER" --replace --skip-read-cache "$AA_PROFILE_DEST"; then
 		error "Failed to load AppArmor profile"
+		error "Installation aborted. Service will not be started."
+		exit 1
+	fi
+	# The builder backend profile: the builder unit binds it by name, and
+	# systemd fails the unit start closed when the named profile is not
+	# loaded, so the load is part of the same fail-closed install contract.
+	info "Loading AppArmor builder profile $AA_BUILDER_PROFILE_DEST"
+	if ! "$AA_PARSER" --replace --skip-read-cache "$AA_BUILDER_PROFILE_DEST"; then
+		error "Failed to load AppArmor builder profile"
 		error "Installation aborted. Service will not be started."
 		exit 1
 	fi

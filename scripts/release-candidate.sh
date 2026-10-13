@@ -186,7 +186,7 @@ dpkg-deb --info "$DEB" | grep -F "Package: docker-helper" >/dev/null \
 dpkg-deb --info "$DEB" | grep -F "Architecture: amd64" >/dev/null \
   || fail "DEB is not amd64: $DEB"
 for path in /usr/bin/docker-helper /usr/lib/systemd/system/docker-helper.service \
-  /etc/apparmor.d/docker-helper-system /usr/share/man/man1/docker-helper.1.gz \
+  /etc/apparmor.d/docker-helper-system /etc/apparmor.d/docker-helper-builder /usr/share/man/man1/docker-helper.1.gz \
   /usr/share/man/man5/docker-helper-config.5.gz /usr/share/doc/docker-helper/LICENSE; do
   dpkg-deb --contents "$DEB" | grep -F "$path" >/dev/null || fail "DEB missing $path"
 done
@@ -200,7 +200,7 @@ done
 [ "$(rpm -qp --queryformat '%{LICENSE}' "$RPM")" = "GPL-3.0-only" ] \
   || fail "RPM license is not GPL-3.0-only: $RPM"
 for path in /usr/bin/docker-helper /usr/lib/systemd/system/docker-helper.service \
-  /etc/apparmor.d/docker-helper-system /usr/share/man/man1/docker-helper.1.gz \
+  /etc/apparmor.d/docker-helper-system /etc/apparmor.d/docker-helper-builder /usr/share/man/man1/docker-helper.1.gz \
   /usr/share/man/man5/docker-helper-config.5.gz /usr/share/doc/docker-helper/LICENSE; do
   rpm -qpl "$RPM" | grep -F "$path" >/dev/null || fail "RPM missing $path"
 done

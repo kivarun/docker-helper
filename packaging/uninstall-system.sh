@@ -47,6 +47,7 @@ BUILDER_RUNTIME_DIR="${BUILDER_RUNTIME_DIR:-/run/docker-helper-builder}"
 SUBUID_DB="${SUBUID_DB:-/etc/subuid}"
 SUBGID_DB="${SUBGID_DB:-/etc/subgid}"
 AA_PROFILE_DEST="${AA_PROFILE_DEST:-/etc/apparmor.d/docker-helper-system}"
+AA_BUILDER_PROFILE_DEST="${AA_BUILDER_PROFILE_DEST:-/etc/apparmor.d/docker-helper-builder}"
 AA_STATE_FILE="${AA_STATE_FILE:-/var/lib/docker-helper/apparmor/managed-boundaries}"
 AA_LEGACY_FRAGMENT="${AA_LEGACY_FRAGMENT:-/etc/apparmor.d/docker-helper.d/managed-roots}"
 AA_PARSER="${AA_PARSER:-/usr/sbin/apparmor_parser}"
@@ -207,17 +208,22 @@ unload_apparmor_profile() {
 		return
 	fi
 
-	info "Unloading AppArmor profile docker-helper-system"
+	info "Unloading AppArmor profiles"
 	local parser_err=0
 	"$AA_PARSER" -R "$AA_PROFILE_DEST" || parser_err=$?
 	if [[ $parser_err -ne 0 ]]; then
 		warn "Failed to unload AppArmor profile (exit $parser_err, may not be loaded or already removed)"
 	fi
+	# The builder backend profile (Release 2.4): unload is best-effort
+	# like the main profile — absence (never installed/already removed)
+	# is a normal uninstall state, not a failure.
+	"$AA_PARSER" -R "$AA_BUILDER_PROFILE_DEST" || true
 }
 
 remove_apparmor_profile() {
-	info "Removing AppArmor profile $AA_PROFILE_DEST"
+	info "Removing AppArmor profiles"
 	rm -f "$AA_PROFILE_DEST"
+	rm -f "$AA_BUILDER_PROFILE_DEST"
 }
 
 # --- SELinux ---

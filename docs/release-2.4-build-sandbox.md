@@ -625,9 +625,46 @@ artifact `digests.txt`.
 - **P5-S2 — full child-process MAC:** the rootlesskit `{ lock }` grant on
   the builder state file and the rest of the rootlesskit/buildkitd/slirp4netns
   child surface, each entry evidence-driven from the harvested AVC windows
-  (the permissive harvest is the evidence base);
-- the AppArmor builder profile for the Ubuntu targets (the SELinux S1
-  boundary has no AppArmor counterpart yet).
+  (the permissive harvest is the evidence base).
+
+## P5 AppArmor builder-confinement record
+
+AppArmor backend parity follows the implementation plan §14
+(evidence-first). The builder confinement model is **CONFINED**:
+
+- `docker-helper-builder.service` binds a dedicated named profile
+  (`AppArmorProfile=docker-helper-builder`); the profile
+  (`packaging/apparmor/docker-helper-builder`) covers the manager's own
+  operations only — builder runtime/state trees, identity/passwd read,
+  Go-runtime startup reads (cgroup2 walk, somaxconn, own procfs), the
+  startup-purge /proc metadata reads, MAC-backend detection, the system
+  CA-bundle resolver candidates, the bounded SIGTERM→SIGKILL stop
+  escalation toward the flow profile, and the `px` transition of the launch
+  vehicle into the DISTRO `rootlesskit` profile.
+- The distro-shipped `rootlesskit` profile
+  (`/etc/apparmor.d/rootlesskit`, shipped by Ubuntu's apparmor package,
+  `flags=(unconfined)` + `userns,`) is the SINGLE owner of the userns
+  permission under `apparmor_restrict_unprivileged_userns=1`
+  (M0-proven). The builder profile deliberately carries NO parallel
+  rootlesskit userns policy; buildkitd/buildkit-runc/slirp4netns/
+  newuidmap/newgidmap executions and the flow's mount/network mechanics
+  are mediated by the distro profile (or run unconfined via `px`'s
+  fallback on hosts that ship no rootlesskit profile, preserving the
+  distro-no-restriction behavior).
+- The daemon profile gains ONLY the Release 2.4 transport surface:
+  the manager endpoint socket, the per-operation buildkitd sockets, the
+  unix transports toward the builder profile and the flow profile, and
+  the bundled `buildctl` client execution. No builder-tree authority,
+  no workspace authority broadening.
+
+The exact AppArmor parity claim: the docker-helper daemon, the builder
+manager, and the generated workload profiles are AppArmor-confined; the
+RootlessKit flow children run under the distro rootlesskit profile.
+Per-operation isolation is provided by the dedicated builder identity, the
+user namespace, per-operation state/runtime roots, and the absence of any
+shared daemon/cache path — NOT by per-operation MAC categories. The
+SELinux backend additionally confines the categorized flow domains with
+per-permission evidence; that depth is not claimed on the AppArmor backend.
 
 ## Builder authority
 

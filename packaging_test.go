@@ -1028,6 +1028,14 @@ func TestBuilderSystemUnitFile(t *testing.T) {
 	if got, ok := active("SELinuxContext="); !ok || got != "system_u:system_r:docker_helper_builder_t:s0" {
 		t.Errorf("SELinuxContext = %q (present %v), want system_u:system_r:docker_helper_builder_t:s0", got, ok)
 	}
+	// P5 AppArmor binding: the dedicated builder profile is pinned ONLY
+	// through the unit's AppArmorProfile= (the named-profile mechanism,
+	// same as the main daemon unit's binding). Omitting it would leave
+	// the builder manager unconfined on AppArmor hosts — the confinement
+	// model is CONFINED, and the unit is the single binding owner.
+	if got, ok := active("AppArmorProfile="); !ok || got != "docker-helper-builder" {
+		t.Errorf("AppArmorProfile = %q (present %v), want docker-helper-builder", got, ok)
+	}
 	// Namespace/SUID restrictions must stay omitted for rootlesskit.
 	for _, directive := range []string{"RestrictNamespaces=", "RestrictSUIDSGID="} {
 		if got, ok := active(directive); ok {
@@ -1557,6 +1565,231 @@ func TestSystemAppArmorProfileFile(t *testing.T) {
 	if !strings.Contains(content, "/var/lib/docker-helper/docker-helper.db-journal rwk,") {
 		t.Error("profile must grant rwk for docker-helper.db-journal")
 	}
+
+	// Release 2.4 builder backend transport: the daemon drives the
+	// per-operation BuildKit through the builder manager RPC and runs the
+	// bundled buildctl client-side. The daemon gets ONLY the transport
+	// sockets — never the builder trees.
+	if !strings.Contains(content, "/run/docker-helper-builder/manager.sock rw,") {
+		t.Error("profile must grant the builder manager endpoint socket")
+	}
+	if !strings.Contains(content, "/run/docker-helper-builder/ops/** rw,") {
+		t.Error("profile must grant the per-operation buildkitd sockets")
+	}
+	if strings.Contains(content, "/run/docker-helper-builder/** rw,") {
+		t.Error("profile must not grant the whole builder runtime tree (transport sockets only)")
+	}
+	if strings.Contains(content, "/var/lib/docker-helper-builder") {
+		t.Error("profile must not touch the builder state tree (builder-owned)")
+	}
+	if !strings.Contains(content, "unix (connect,send,receive) type=stream peer=(label=docker-helper-builder)") {
+		t.Error("profile must grant the builder manager unix transport")
+	}
+	if !strings.Contains(content, "unix (connect,send,receive) type=stream peer=(label=rootlesskit)") {
+		t.Error("profile must grant the per-op buildkitd unix transport (flow child label)")
+	}
+	if !strings.Contains(content, "/usr/libexec/docker-helper/buildkit/buildctl rix,") {
+		t.Error("profile must grant the bundled buildctl client execution")
+	}
+}
+
+// TestBuilderAppArmorProfileFile guards the dedicated builder backend
+// profile (Release 2.4 AppArmor parity, docs/release-2.4-implementation-plan.md
+// §14): the CONFINED builder model's own authority ceiling. The builder
+// manager holds NO daemon authority — no Docker socket, no helper
+// config/state/runtime trees, no admin token, no Session workspace paths —
+// and carries NO parallel rootlesskit userns policy (the distro rootlesskit
+// profile is the single owner of the userns permission).
+func TestBuilderAppArmorProfileFile(t *testing.T) {
+	path := "packaging/apparmor/docker-helper-builder"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("builder AppArmor profile %s not found: %v", path, err)
+	}
+	content := string(data)
+
+	// active strips comment lines: the profile's explanatory comments
+	// deliberately name the mechanisms it must NOT carry (userns, the
+	// payload binaries, the daemon trees), so the invariant checks below
+	// inspect only active rules.
+	var activeLines []string
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		activeLines = append(activeLines, trimmed)
+	}
+	active := strings.Join(activeLines, "\n")
+
+	// Named profile bound by the builder unit (no path attachment).
+	if !strings.Contains(active, "profile docker-helper-builder") {
+		t.Error("profile must be named profile docker-helper-builder")
+	}
+	if strings.Contains(active, "profile /usr/bin/docker-helper") {
+		t.Error("profile must not use path-based attachment")
+	}
+
+	// Builder-owned trees: the manager's only writable surface.
+	for _, rule := range []string{
+		"/run/docker-helper-builder/ rw,",
+		"/run/docker-helper-builder/** rw,",
+		"/var/lib/docker-helper-builder/ rw,",
+		"/var/lib/docker-helper-builder/** rw,",
+	} {
+		if !strings.Contains(active, rule) {
+			t.Errorf("profile must grant the builder tree: %s", rule)
+		}
+	}
+
+	// The launch vehicle transitions into the DISTRO rootlesskit profile:
+	// px (transition when the distro profile exists, unconfined fallback
+	// otherwise). No parallel userns rule, no generic bin_t execution.
+	if !strings.Contains(active, "/usr/bin/rootlesskit px,") {
+		t.Error("profile must transition the launch vehicle into the distro rootlesskit profile (px)")
+	}
+	if strings.Contains(active, "userns") {
+		t.Error("profile must not carry a parallel rootlesskit userns policy (the distro profile is the single owner)")
+	}
+	if strings.Contains(active, "/usr/bin/rootlesskit ix,") ||
+		strings.Contains(active, "/usr/bin/rootlesskit rix,") {
+		t.Error("profile must not inherit-execute rootlesskit (the flow must leave this profile)")
+	}
+
+	// The buildkitd/buildkit-runc payload is never execed by the manager
+	// itself: buildkitd runs inside the flow (distro profile), and the
+	// daemon-side buildctl client belongs to the daemon profile.
+	if strings.Contains(active, "buildkitd") || strings.Contains(active, "buildkit-runc") || strings.Contains(active, "buildctl") {
+		t.Error("profile must not name the BuildKit payload binaries (they execute inside the flow, not in the manager domain)")
+	}
+
+	// NO daemon authority.
+	for _, forbidden := range []string{
+		"/run/docker.sock",
+		"/var/run/docker.sock",
+		"/etc/docker-helper",
+		"/var/lib/docker-helper/",
+		"/run/docker-helper/",
+		"admin.token",
+		"docker-buildx",
+		"cli-plugins",
+	} {
+		if strings.Contains(active, forbidden) {
+			t.Errorf("builder profile must not grant daemon authority: %q", forbidden)
+		}
+	}
+
+	// No workspace/managed-boundary/workload-MAC state authority.
+	for _, forbidden := range []string{
+		"managed-boundaries",
+		"workload-mac",
+		"/home/",
+	} {
+		if strings.Contains(active, forbidden) {
+			t.Errorf("builder profile must not grant workspace/MAC-state authority: %q", forbidden)
+		}
+	}
+
+	// The daemon profile's capability set is NOT copied: the builder has
+	// no mount-pin sys_admin, no mac_admin (no profile replacement), and
+	// no dac_read_search (its own trees are its own identity).
+	for _, forbidden := range []string{
+		"capability sys_admin",
+		"capability mac_admin",
+		"capability dac_read_search",
+		"capability dac_override",
+	} {
+		if strings.Contains(active, forbidden) {
+			t.Errorf("builder profile must not carry the daemon capability set: %q", forbidden)
+		}
+	}
+
+	// The profile must not deny the capabilities the recorded builder
+	// capability floor needs: the unit's CapabilityBoundingSet floor and
+	// the rootlesskit/newuidmap elevation live outside this profile, but
+	// a deny rule here would break the same operation class.
+	for _, forbidden := range []string{
+		"deny capability setuid",
+		"deny capability setgid",
+		"deny capability dac_override",
+		"deny capability sys_admin",
+	} {
+		if strings.Contains(active, forbidden) {
+			t.Errorf("builder profile must not deny the builder capability floor: %q", forbidden)
+		}
+	}
+
+	// Startup reads (SELinux builder evidence, mapped to paths).
+	for _, rule := range []string{
+		"/etc/passwd r,",
+		"/sys/fs/cgroup/** r,",
+		"/proc/sys/net/core/somaxconn r,",
+		"/sys/module/apparmor/parameters/enabled r,",
+	} {
+		if !strings.Contains(active, rule) {
+			t.Errorf("profile must grant the startup read: %s", rule)
+		}
+	}
+
+	// System CA bundle candidates (builderResolveSystemCA): read-only,
+	// all four candidate paths covered.
+	for _, rule := range []string{
+		"/etc/ssl/ca-bundle.pem r,",
+		"/var/lib/ca-certificates/** r,",
+		"/etc/pki/tls/certs/** r,",
+		"/etc/ssl/certs/** r,",
+	} {
+		if !strings.Contains(active, rule) {
+			t.Errorf("profile must grant the CA candidate read: %s", rule)
+		}
+	}
+
+	// The bounded stop escalation toward the flow process groups.
+	if !strings.Contains(active, "signal (send) set=(term, kill) peer=rootlesskit,") {
+		t.Error("profile must grant the bounded stop escalation toward the flow profile")
+	}
+}
+
+// TestBuilderAppArmorProfilePackagingParity pins the builder profile
+// across every artifact format: the DEB/RPM contents entry, the tarball
+// membership, and both installers' placement/removal ownership.
+func TestBuilderAppArmorProfilePackagingParity(t *testing.T) {
+	nfpmData, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nfpm := string(nfpmData)
+	for _, want := range []string{
+		"src: packaging/apparmor/docker-helper-builder",
+		"dst: /etc/apparmor.d/docker-helper-builder",
+	} {
+		if !strings.Contains(nfpm, want) {
+			t.Errorf("nfpm.yaml must carry the builder profile contents entry: %s", want)
+		}
+	}
+
+	for path, wants := range map[string][]string{
+		"build-bundle.sh": {
+			"packaging/apparmor/docker-helper-builder",
+			"docker-helper-${VERSION}-linux-amd64/apparmor/docker-helper-builder",
+		},
+		"packaging/install-system.sh": {
+			"AA_BUILDER_PROFILE_SRC=\"${AA_BUILDER_PROFILE_SRC:-apparmor/docker-helper-builder}\"",
+			"AA_BUILDER_PROFILE_DEST=\"${AA_BUILDER_PROFILE_DEST:-/etc/apparmor.d/docker-helper-builder}\"",
+			"install_apparmor_profile",
+			"load_apparmor_profile",
+		},
+	} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range wants {
+			if !strings.Contains(string(data), want) {
+				t.Errorf("%s must carry the builder profile contract: %s", path, want)
+			}
+		}
+	}
 }
 
 // --- Optional parser syntax validation ---
@@ -1567,26 +1800,32 @@ func TestSystemAppArmorProfileParserSyntax(t *testing.T) {
 		t.Skip("apparmor_parser not available, skipping syntax validation")
 	}
 
-	// Read profile.
-	profileData, err := os.ReadFile("packaging/apparmor/docker-helper-system")
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Both shipped profiles must parse: the daemon profile and the
+	// dedicated builder profile (the builder unit binds it by name; a
+	// profile that does not parse fails every AppArmor install closed).
+	for _, name := range []string{"docker-helper-system", "docker-helper-builder"} {
+		t.Run(name, func(t *testing.T) {
+			profileData, err := os.ReadFile("packaging/apparmor/" + name)
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	// Write profile to temp file for parser. The managed boundaries include
-	// uses if-exists, so it is skipped when the state file is absent, which
-	// still validates the profile rules and the include directive syntax.
-	dir := t.TempDir()
-	profileFile := filepath.Join(dir, "docker-helper-system")
-	if err := os.WriteFile(profileFile, profileData, 0644); err != nil {
-		t.Fatal(err)
-	}
+			// Write profile to temp file for parser. The managed boundaries include
+			// uses if-exists, so it is skipped when the state file is absent, which
+			// still validates the profile rules and the include directive syntax.
+			dir := t.TempDir()
+			profileFile := filepath.Join(dir, name)
+			if err := os.WriteFile(profileFile, profileData, 0644); err != nil {
+				t.Fatal(err)
+			}
 
-	// Run parser in dry-run mode (-Q = dry run, -T = no cache).
-	cmd := exec.Command(parserPath, "-Q", "-T", profileFile)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("apparmor_parser syntax validation failed: %v\noutput: %s", err, out)
+			// Run parser in dry-run mode (-Q = dry run, -T = no cache).
+			cmd := exec.Command(parserPath, "-Q", "-T", profileFile)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("apparmor_parser syntax validation failed: %v\noutput: %s", err, out)
+			}
+		})
 	}
 }
 
@@ -1613,6 +1852,7 @@ func TestInstallSystemScriptContent(t *testing.T) {
 		"/usr/bin/docker-helper",
 		"/etc/systemd/system/docker-helper.service",
 		"/etc/apparmor.d/docker-helper-system",
+		"/etc/apparmor.d/docker-helper-builder",
 		"/var/lib/docker-helper/apparmor/managed-boundaries",
 		"/etc/apparmor.d/docker-helper.d/managed-roots",
 		"/usr/lib/modules-load.d/docker-helper-builder.conf",
@@ -1670,6 +1910,14 @@ func TestUninstallSystemScriptContent(t *testing.T) {
 	// Must check for root (UID 0) before any mutation.
 	if !strings.Contains(content, "id -u") || !strings.Contains(content, "-ne 0") {
 		t.Error("uninstall-system.sh must check for root (UID 0)")
+	}
+	// Both shipped profiles are unloaded and removed (the builder backend
+	// profile is the Release 2.4 addition; absence is a normal state).
+	if !strings.Contains(content, "AA_BUILDER_PROFILE_DEST=\"${AA_BUILDER_PROFILE_DEST:-/etc/apparmor.d/docker-helper-builder}\"") {
+		t.Error("uninstall-system.sh must own the builder profile destination constant")
+	}
+	if !strings.Contains(content, "rm -f \"$AA_BUILDER_PROFILE_DEST\"") {
+		t.Error("uninstall-system.sh must remove the builder profile file")
 	}
 	// Real system paths removed with --purge (behavioral tests override these).
 	for _, p := range []string{"/etc/docker-helper", "/var/lib/docker-helper", "/run/docker-helper"} {
@@ -2143,6 +2391,11 @@ exit 0
 	if err := os.WriteFile(filepath.Join(e.scriptDir, "apparmor", "docker-helper-system"), []byte("profile docker-helper-system {}"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	// The dedicated builder backend profile (Release 2.4): the installer
+	// preflight requires the bundled artifact before any mutation.
+	if err := os.WriteFile(filepath.Join(e.scriptDir, "apparmor", "docker-helper-builder"), []byte("profile docker-helper-builder {}"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	// Builder TUN kernel facility: the bundled modules-load.d asset.
 	if err := os.MkdirAll(filepath.Join(e.scriptDir, "modules-load.d"), 0755); err != nil {
 		t.Fatal(err)
@@ -2171,6 +2424,7 @@ exit 0
 		"MODULES_LOAD_DEST=" + e.dest("usr/lib/modules-load.d/docker-helper-builder.conf"),
 		"TUN_SYSFS=" + tunSysfs,
 		"AA_PROFILE_DEST=" + e.dest("etc/apparmor.d/docker-helper-system"),
+		"AA_BUILDER_PROFILE_DEST=" + e.dest("etc/apparmor.d/docker-helper-builder"),
 		"AA_STATE_FILE=" + e.dest("var/lib/docker-helper/apparmor/managed-boundaries"),
 		"AA_LEGACY_FRAGMENT=" + e.dest("etc/apparmor.d/docker-helper.d/managed-roots"),
 		"CONFIG_PATH=" + e.dest("etc/docker-helper/config.json"),
@@ -2227,6 +2481,7 @@ func newSystemUninstallScriptEnv(t *testing.T) *systemScriptEnv {
 		"SUBUID_DB=" + e.subuidDB,
 		"SUBGID_DB=" + e.subgidDB,
 		"AA_PROFILE_DEST=" + e.dest("etc/apparmor.d/docker-helper-system"),
+		"AA_BUILDER_PROFILE_DEST=" + e.dest("etc/apparmor.d/docker-helper-builder"),
 		"AA_STATE_FILE=" + e.dest("var/lib/docker-helper/apparmor/managed-boundaries"),
 		"AA_LEGACY_FRAGMENT=" + e.dest("etc/apparmor.d/docker-helper.d/managed-roots"),
 		"CONFIG_DIR=" + e.dest("etc/docker-helper"),

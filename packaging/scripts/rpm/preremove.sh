@@ -54,6 +54,15 @@ if [ -r /sys/kernel/security/apparmor/profiles ] && \
   }
 fi
 
+# The dedicated builder backend profile (Release 2.4): unload only if it is
+# actually loaded. Absence is the normal idempotent state.
+if [ -r /sys/kernel/security/apparmor/profiles ] && \
+   grep -q '^docker-helper-builder ' /sys/kernel/security/apparmor/profiles; then
+  unload_output=$(apparmor_parser -R /etc/apparmor.d/docker-helper-builder 2>&1) || {
+    echo "warning: failed to unload AppArmor profile docker-helper-builder: $unload_output" >&2
+  }
+fi
+
 # restore_third_party_binary_labels — after a verified-successful
 # docker_helper module removal the module's file-context rules are gone, so
 # the third-party binaries the deployment lifecycle relabeled at

@@ -1,0 +1,124 @@
+# Docker Helper — builder backend profile (Release 2.4).
+#
+# This profile confines the builder manager service
+# (docker-helper-builder.service, `docker-helper builder serve`): the
+# process that owns the per-operation BuildKit instance lifecycle, the
+# manager RPC endpoint, and the per-operation runtime/state trees.
+#
+# The profile deliberately holds NO daemon authority:
+#   - no Docker socket (the builder never talks to the Docker daemon);
+#   - no /etc/docker-helper config and no admin token;
+#   - no helper state/runtime trees (/var/lib/docker-helper,
+#     /run/docker-helper) and no Session workspace authority;
+#   - no generic network grant (the manager binds no TCP port; the flow
+#     networking lives in the launch vehicle below).
+# It is the AppArmor counterpart of the SELinux docker_helper_builder_t
+# domain: same responsibility, same authority ceiling.
+#
+# Launch vehicle: the manager execs the DISTRO /usr/bin/rootlesskit with
+# `px` — the exec transitions into the distro-shipped `rootlesskit`
+# profile (/etc/apparmor.d/rootlesskit), which is the single owner of the
+# `userns` permission required by Ubuntu's
+# apparmor_restrict_unprivileged_userns=1 (Release 2.4 M0-proven). This
+# profile therefore carries NO parallel rootlesskit userns policy, and
+# buildkitd/slirp4netns/newuidmap/newgidmap execs, flow mounts, TUN
+# setup, and flow networking are mediated by the distro profile (or run
+# unconfined on hosts that ship no rootlesskit profile, where px's
+# unconfined fallback preserves the distro-no-restriction behavior).
+#
+# Installation:
+#   sudo cp docker-helper-builder /etc/apparmor.d/
+#   sudo apparmor_parser -a /etc/apparmor.d/docker-helper-builder
+#
+# The systemd unit binds this profile by name:
+#   AppArmorProfile=docker-helper-builder
+
+#include <tunables/global>
+
+profile docker-helper-builder flags=(attach_disconnected,mediate_deleted) {
+	#include <abstractions/base>
+
+	# The builder unit execs the shared binary under this profile name.
+	# Entry is by profile name (AppArmorProfile=), like the daemon unit.
+	/usr/bin/docker-helper r,
+
+	# Builder-owned runtime/state trees (RuntimeDirectory/StateDirectory
+	# = docker-helper-builder): the manager socket, per-op runtime/state
+	# trees, instance.pid, and the launch diagnostics. Read-write over
+	# the whole tree — these are the builder's OWN durable trees; the
+	# daemon's access to them stays limited to the transport sockets in
+	# the daemon profile.
+	/run/docker-helper-builder/ rw,
+	/run/docker-helper-builder/** rw,
+	/var/lib/docker-helper-builder/ rw,
+	/var/lib/docker-helper-builder/** rw,
+
+	# Execution-identity verification: the startup identity guard and the
+	# per-START builder-user resolution read /etc/passwd (the same access
+	# the daemon profile grants for Docker user resolution).
+	/etc/passwd r,
+
+	# Go runtime startup reads, mirrored from the daemon profile (the
+	# manager is the same shared binary in a weaker domain):
+	#   - the cgroup2 walk for container GOMAXPROCS detection
+	#     (SELinux evidence: cgroup_t:dir { search } +
+	#     cgroup_t:file { read open }; AppArmor path mediation maps the
+	#     read-only cgroupfs surface to one read-only rule);
+	#   - the net-stack sysctl read (SELinux evidence:
+	#     sysctl_net_t:dir { search } + file { read open });
+	#   - own-process procfs introspection (mountinfo for the cgroup
+	#     detection, fd/status bookkeeping).
+	/sys/fs/cgroup/** r,
+	/proc/sys/net/core/somaxconn r,
+	owner /proc/@{pid}/fd/ r,
+	owner /proc/@{pid}/mountinfo r,
+	owner /proc/@{pid}/mounts r,
+	owner /proc/@{pid}/status r,
+	owner @{PROC}/@{pid}/cgroup r,
+
+	# Startup purge scan: enumerate /proc, stat each pid directory, then
+	# read the cmdline and cgroup path of same-identity candidates only
+	# (builderScanUnitOwnedGroups / builderVerifyPidOwnership). This is
+	# the AppArmor path mapping of the SELinux purge evidence
+	# (proc_t:dir { read } + <domain>:dir { getattr }): read-only
+	# process metadata, no writes, no signal-class grant here.
+	/proc/ r,
+	/proc/[0-9]*/ r,
+	/proc/[0-9]*/cmdline r,
+	/proc/[0-9]*/cgroup r,
+
+	# Per-START MAC-backend detection (builderProvisionGate ->
+	# detectLSM -> appArmorLSMActive) reads the AppArmor parameter before
+	# any provisioning or launch step; a failed detection fails the START
+	# closed.
+	/sys/module/apparmor/parameters/enabled r,
+
+	# START resolves the system CA bundle for the child SSL_CERT_FILE
+	# (fail closed without one). Read-only; both the Ubuntu layout and
+	# the openSUSE ca-bundle symlink target are covered, mirroring the
+	# daemon profile's certificate surface.
+	/etc/ssl/certs/ r,
+	/etc/ssl/certs/** r,
+	/etc/ssl/ca-bundle.pem r,
+	/var/lib/ca-certificates/ r,
+	/var/lib/ca-certificates/** r,
+	/etc/pki/tls/certs/ r,
+	/etc/pki/tls/certs/** r,
+
+	# The launch vehicle: transition into the DISTRO rootlesskit profile.
+	# `px` transitions when the distro profile exists (Ubuntu 24.04+;
+	# the userns permission stays owned by the distro profile) and falls
+	# back to unconfined on hosts without it (distros without the userns
+	# restriction). The SELinux launch chain (launcher child, categorized
+	# flow domain) is a SELinux-mechanics owner and has no AppArmor
+	# counterpart; the direct rootlesskit exec is the AppArmor flow path.
+	/usr/bin/rootlesskit px,
+
+	# The manager terminates its own flow process groups through the
+	# bounded SIGTERM -> SIGKILL escalation (terminateGroupBounded);
+	# the stop convergence refuses to complete while the group lives,
+	# so the delivery toward the flow's profile is a required operation.
+	# Send-only, term/kill-only, and only toward the distro rootlesskit
+	# profile the flow children carry.
+	signal (send) set=(term, kill) peer=rootlesskit,
+}
