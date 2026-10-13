@@ -166,7 +166,6 @@ command -v docker >/dev/null 2>&1 || fail "docker CLI not found"
 docker info >/dev/null 2>&1 || fail "docker daemon not reachable"
 [ -x "$AA_PARSER" ] || fail "apparmor_parser not found at $AA_PARSER"
 command -v systemctl >/dev/null 2>&1 || fail "systemd not available"
-command -v aa-complain >/dev/null 2>&1 || fail "aa-complain not found (install apparmor-utils)"
 [ -f "$TARBALL" ] || fail "candidate tarball missing: $TARBALL"
 getent passwd "$PRINCIPAL" >/dev/null 2>&1 || fail "principal '$PRINCIPAL' does not exist"
 [ "$PRINCIPAL" = "root" ] && fail "principal must not be root"
@@ -202,10 +201,14 @@ info "installer selected AppArmor; both profiles installed and loaded"
 
 if [ "$HARVEST" = "1" ]; then
 	# The evidence-harvest window: log-and-permit. The shipped profile BYTES
-	# stay in place; only the kernel mode changes for this run.
-	aa-complain "$AA_SYSTEM_DEST" || fail "aa-complain (system) failed"
-	aa-complain "$AA_BUILDER_DEST" || fail "aa-complain (builder) failed"
-	info "harvest mode: both profiles in complain mode for this window"
+	# stay in place; the profiles are reloaded from those exact bytes with
+	# the parser's load-time complain flag (no on-disk change, no
+	# apparmor-utils dependency).
+	"$AA_PARSER" --replace --skip-read-cache --Complain "$AA_SYSTEM_DEST" \
+		|| fail "complain-mode reload (system) failed"
+	"$AA_PARSER" --replace --skip-read-cache --Complain "$AA_BUILDER_DEST" \
+		|| fail "complain-mode reload (builder) failed"
+	info "harvest mode: both profiles reloaded in complain mode from the shipped bytes"
 fi
 
 # --- P2: confinement ---------------------------------------------------------
