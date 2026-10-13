@@ -314,7 +314,7 @@ info "run + workspace mount ok (managed boundary and workload profile exercised 
 say "=== P5: docker build through per-operation BuildKit ==="
 
 BUILD_LOG="$EVIDENCE_DIR/build-output.txt"
-( cd "$ALLOWED_ROOT" && docker-helper build p5aa-workspace/buildctx --dockerfile Dockerfile --image p5aa-curl:alpine3.24 ) > "$BUILD_LOG" 2>&1 &
+( cd "$ALLOWED_ROOT" && docker-helper build buildctx --dockerfile Dockerfile --image p5aa-curl:alpine3.24 ) > "$BUILD_LOG" 2>&1 &
 BUILD_PID=$!
 
 # While the build runs: the per-operation roots, the bundled buildkitd
