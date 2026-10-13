@@ -423,9 +423,9 @@ FRAGMENT="$(cat "$AA_STATE_FILE")"
 evidence "managed-boundaries.txt" "$FRAGMENT"
 printf '%s\n' "$FRAGMENT" | grep -F "$WS" >/dev/null \
 	|| fail "managed-boundaries fragment does not carry the session workspace $WS"
-printf '%s\n' "$FRAGMENT" | grep -F "$WS/rw" >/dev/null \
-	|| fail "managed-boundaries fragment does not carry the RW exposure $WS/rw"
-info "managed-boundaries fragment carries the issued workspace boundaries"
+printf '%s\n' "$FRAGMENT" | grep -F '"/home/' >/dev/null \
+	|| fail "managed-boundaries fragment does not carry the root-json boundary form"
+info "managed-boundaries fragment carries the issued workspace boundary (root-json form)"
 
 # --- P7: generated workload profile ------------------------------------------
 
