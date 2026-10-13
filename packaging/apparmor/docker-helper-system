@@ -266,11 +266,22 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	# Capability for reading/traversing private principal workspaces.
 	capability dac_read_search,
 
-	# Deny privilege escalation (except what is required above).
+	# dac_override: the Release 2.4 builder transport. The manager endpoint
+	# socket is a builder-owned 0600 pathname (the recorded owner+group-only
+	# contract; never world-accessible), and root's connect requires
+	# CAP_DAC_OVERRIDE at the generic DAC check. The SELinux backend carries
+	# the same grant for the same operation
+	# (docker_helper_t self:capability { dac_override }; proven in enforcing
+	# UAT), so this is backend parity, not new authority. It is deliberately
+	# moved out of the deny block below: an explicit deny would also enforce
+	# in complain mode and break the confined daemon's builder transport.
+	capability dac_override,
+
+	# Deny privilege escalation (except what is required above; dac_override
+	# moved to its own grant for the Release 2.4 builder transport).
 	deny /proc/sys/kernel/** w,
 	deny capability sys_ptrace,
 	deny capability sys_rawio,
-	deny capability dac_override,
 	deny capability setuid,
 	deny capability setgid,
 }

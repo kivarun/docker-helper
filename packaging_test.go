@@ -1566,6 +1566,20 @@ func TestSystemAppArmorProfileFile(t *testing.T) {
 		t.Error("profile must grant rwk for docker-helper.db-journal")
 	}
 
+	// The builder transport's DAC shape: the builder-owned 0600 manager
+	// socket requires dac_override for the root daemon's connect (the
+	// SELinux backend carries the same grant for the same operation), so
+	// the profile must grant it and must NOT deny it (an explicit deny
+	// would also enforce in complain mode and break the transport).
+	if !strings.Contains(content, "capability dac_override,") {
+		t.Error("profile must grant dac_override for the builder-owned 0600 manager socket transport")
+	}
+	for _, line := range strings.Split(content, "\n") {
+		if strings.Contains(strings.TrimSpace(line), "deny capability dac_override") {
+			t.Error("profile must not deny dac_override (the Release 2.4 builder transport requires it)")
+		}
+	}
+
 	// Release 2.4 builder backend transport: the daemon drives the
 	// per-operation BuildKit through the builder manager RPC and runs the
 	// bundled buildctl client-side. The daemon gets ONLY the transport
