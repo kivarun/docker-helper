@@ -387,13 +387,47 @@ BUILDKITD_PID="$(pgrep -f "exec $PAYLOAD_DIR/buildkitd" | head -1 || true)"
 evidence "buildkitd-cmdline.txt" "$(tr '\0' ' ' < "/proc/$BUILDKITD_PID/cmdline" 2>/dev/null || true)"
 info "bundled buildkitd ran: pid=$BUILDKITD_PID"
 
+# The CONFINED model's transition proof: the launch vehicle must run
+# under the DISTRO rootlesskit profile (the single owner of the userns
+# permission). `px` has an unconfined fallback on hosts without the
+# distro profile, so a functional build alone cannot prove the
+# transition — the process label is the proof. On the AppArmor parity
+# target (Ubuntu: the distro apparmor package ships
+# /etc/apparmor.d/rootlesskit) the leader label must be
+# "rootlesskit (enforce)". The distro profile is not touched by the
+# harvest window (only the two helper profiles are reloaded in complain
+# mode), so the assertion holds in both passes.
+RK_PID=""
+for rpid in $(pgrep -x rootlesskit); do
+	if tr '\0' ' ' < "/proc/$rpid/cmdline" 2>/dev/null \
+		| grep -qF -- "--state-dir=$OPS_ST/rootlesskit-state"; then
+		RK_PID="$rpid"
+		break
+	fi
+done
+[ -n "$RK_PID" ] || { dump_diagnostics "no rootlesskit leader found for the operation"; fail "no rootlesskit leader found for the operation (state-dir $OPS_ST/rootlesskit-state)"; }
+RK_LABEL="$(cat "/proc/$RK_PID/attr/current" 2>/dev/null || true)"
+[ "$RK_LABEL" = "rootlesskit (enforce)" ] \
+	|| fail "rootlesskit leader profile = '$RK_LABEL', want 'rootlesskit (enforce)' (the distro rootlesskit profile must own the launch vehicle for AppArmor parity)"
+RK_CHILD_LABEL="$(cat "/proc/$BUILDKITD_PID/attr/current" 2>/dev/null || true)"
+info "rootlesskit leader: pid=$RK_PID profile=$RK_LABEL"
+info "buildkitd child profile (recorded): $RK_CHILD_LABEL"
+evidence "flow-profile-labels.txt" "rootlesskit leader pid=$RK_PID attr/current=$RK_LABEL
+buildkitd child pid=$BUILDKITD_PID attr/current=$RK_CHILD_LABEL"
+
 wait_for 10 test -S "$OPS_RT/buildkit/otel-grpc.sock" \
 	|| fail "OTEL socket redirect missing: $OPS_RT/buildkit/otel-grpc.sock"
 OTEL_SOCK="$OPS_RT/buildkit/otel-grpc.sock"
 info "OTEL socket redirect present: $OTEL_SOCK"
 
-# The buildkit-runc execution window: the RUN step sleeps 6s; the OCI
-# worker execs the bundled buildkit-runc inside it.
+# The OCI worker path proof tiers:
+#   1. the successful RUN step proves the OCI worker path (a RUN step
+#      cannot execute without the worker's runc);
+#   2. the EXACT bundled buildkit-runc exec observation is best-effort:
+#      the exec window is short and the pgrep poll can miss it
+#      (observed=1 caught, observed=0 missed). No audit record exists
+#      for a successful exec, and the candidate bytes are never wrapped,
+#      so tier 2 is evidence-strengthening only, never the claim.
 RUNC_SEEN=0
 for _ in $(seq 1 40); do
 	kill -0 "$BUILD_PID" 2>/dev/null || break
@@ -403,7 +437,8 @@ for _ in $(seq 1 40); do
 	fi
 	sleep 0.25
 done
-info "buildkit-runc execution observed: $RUNC_SEEN (1 = exec window observed, 0 = window missed; the RUN step's success below proves the OCI worker path)"
+info "OCI worker path: exercised by the successful RUN step"
+info "exact bundled buildkit-runc exec observation: best-effort (observed=$RUNC_SEEN; 1 = exec window caught, 0 = window missed)"
 evidence "buildkit-runc-observed.txt" "$RUNC_SEEN"
 
 if ! wait "$BUILD_PID"; then
