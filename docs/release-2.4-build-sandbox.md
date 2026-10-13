@@ -666,6 +666,21 @@ shared daemon/cache path — NOT by per-operation MAC categories. The
 SELinux backend additionally confines the categorized flow domains with
 per-permission evidence; that depth is not claimed on the AppArmor backend.
 
+AppArmor parity REQUIRES the distro rootlesskit profile: the Ubuntu/AppArmor
+parity target carries `/etc/apparmor.d/rootlesskit` (shipped by the distro
+`apparmor` package), and the parity UAT asserts the launch vehicle's process
+label (`rootlesskit (enforce)`), not merely a functional build. On hosts
+without the distro profile the `px` rule falls back to unconfined: the flow
+stays FUNCTIONAL (the distro-no-restriction behavior), but that is an
+operational fallback, not AppArmor parity.
+
+The denial claim is exact, not absolute: the parity UAT requires no
+UNEXPECTED AppArmor DENIED records for the helper profiles in the fresh
+audit window. Known non-terminal probe denials (the daemon's own
+cgroup `cpu.max` best-effort read, the buildctl/buildx system TLS-root
+directory probe) are allowlisted by demonstrated-benign evidence and the
+policy is never widened to silence them.
+
 ## Builder authority
 
 The sandbox is narrower than exposing Docker authority to the caller.
