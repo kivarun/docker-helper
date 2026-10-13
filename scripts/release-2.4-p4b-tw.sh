@@ -466,6 +466,13 @@ docker info >/dev/null 2>&1 || fail "docker engine not reachable in the guest (r
 assert_provisioned yes
 assert_payload
 [ -f /etc/systemd/system/docker-helper-builder.service ] || fail "tarball install did not install the builder unit to /etc/systemd/system"
+# The tarball path applies the shipped fcontexts itself
+# (apply_selinux_restorecon): the GID-map and network-setup helpers must
+# land on their dedicated exec types on the tarball path too.
+[ "$(stat -c %C /usr/bin/newgidmap 2>/dev/null)" = "system_u:object_r:docker_helper_newgidmap_exec_t:s0" ] \
+  || fail "tarball path: /usr/bin/newgidmap label wrong: '$(stat -c %C /usr/bin/newgidmap 2>/dev/null)', want docker_helper_newgidmap_exec_t"
+[ "$(stat -c %C /usr/bin/nsenter 2>/dev/null)" = "system_u:object_r:docker_helper_nsenter_exec_t:s0" ] \
+  || fail "tarball path: /usr/bin/nsenter label wrong: '$(stat -c %C /usr/bin/nsenter 2>/dev/null)', want docker_helper_nsenter_exec_t"
 enabled="$(systemctl is-enabled "$UNIT" 2>/dev/null || true)"
 [ "$enabled" = "enabled" ] || fail "tarball install must enable the builder unit (got '$enabled')"
 [ "$(systemctl is-active "$UNIT" 2>/dev/null || true)" = "active" ] || fail "builder service not active after tarball install"
