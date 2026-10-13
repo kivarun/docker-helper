@@ -669,10 +669,13 @@ per-permission evidence; that depth is not claimed on the AppArmor backend.
 AppArmor parity REQUIRES the distro rootlesskit profile: the Ubuntu/AppArmor
 parity target carries `/etc/apparmor.d/rootlesskit` (shipped by the distro
 `apparmor` package), and the parity UAT asserts the launch vehicle's process
-label (`rootlesskit (enforce)`), not merely a functional build. On hosts
-without the distro profile the `px` rule falls back to unconfined: the flow
-stays FUNCTIONAL (the distro-no-restriction behavior), but that is an
-operational fallback, not AppArmor parity.
+label (`rootlesskit (unconfined)`), not merely a functional build. The distro
+profile is declared `flags=(unconfined)`: a NAMED attachment point that owns
+the `userns` permission and applies no file mediation, which is why AppArmor
+reports its mode as `(unconfined)`. The transition proof is the profile name —
+without the distro profile the `px` rule falls back and the flow keeps the
+caller's label: the flow stays FUNCTIONAL (the distro-no-restriction
+behavior), but that is an operational fallback, not AppArmor parity.
 
 The denial claim is exact, not absolute: the parity UAT requires no
 UNEXPECTED AppArmor DENIED records for the helper profiles in the fresh

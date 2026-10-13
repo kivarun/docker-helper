@@ -393,10 +393,16 @@ info "bundled buildkitd ran: pid=$BUILDKITD_PID"
 # distro profile, so a functional build alone cannot prove the
 # transition — the process label is the proof. On the AppArmor parity
 # target (Ubuntu: the distro apparmor package ships
-# /etc/apparmor.d/rootlesskit) the leader label must be
-# "rootlesskit (enforce)". The distro profile is not touched by the
-# harvest window (only the two helper profiles are reloaded in complain
-# mode), so the assertion holds in both passes.
+# /etc/apparmor.d/rootlesskit) the leader label is
+# "rootlesskit (unconfined)": the distro profile is declared
+# flags=(unconfined), i.e. a NAMED attachment point that owns the
+# userns permission and applies no file mediation, so AppArmor reports
+# its mode as (unconfined). The transition proof is the profile name:
+# without the distro profile the px fallback keeps the caller's label
+# (docker-helper-builder), never a rootlesskit label. The distro
+# profile is not touched by the harvest window (only the two helper
+# profiles are reloaded in complain mode), so the assertion holds in
+# both passes.
 RK_PID=""
 for rpid in $(pgrep -x rootlesskit); do
 	if tr '\0' ' ' < "/proc/$rpid/cmdline" 2>/dev/null \
@@ -407,8 +413,8 @@ for rpid in $(pgrep -x rootlesskit); do
 done
 [ -n "$RK_PID" ] || { dump_diagnostics "no rootlesskit leader found for the operation"; fail "no rootlesskit leader found for the operation (state-dir $OPS_ST/rootlesskit-state)"; }
 RK_LABEL="$(cat "/proc/$RK_PID/attr/current" 2>/dev/null || true)"
-[ "$RK_LABEL" = "rootlesskit (enforce)" ] \
-	|| fail "rootlesskit leader profile = '$RK_LABEL', want 'rootlesskit (enforce)' (the distro rootlesskit profile must own the launch vehicle for AppArmor parity)"
+[ "$RK_LABEL" = "rootlesskit (unconfined)" ] \
+	|| fail "rootlesskit leader profile = '$RK_LABEL', want 'rootlesskit (unconfined)' (the distro rootlesskit profile must own the launch vehicle for AppArmor parity)"
 RK_CHILD_LABEL="$(cat "/proc/$BUILDKITD_PID/attr/current" 2>/dev/null || true)"
 info "rootlesskit leader: pid=$RK_PID profile=$RK_LABEL"
 info "buildkitd child profile (recorded): $RK_CHILD_LABEL"
