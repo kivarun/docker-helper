@@ -94,11 +94,16 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	# the daemon drives per-operation BuildKit through the builder manager RPC
 	# and runs the bundled buildctl client-side against the per-op socket.
 	# Transport only: the manager endpoint socket and the per-operation
-	# buildkitd sockets. The builder trees themselves stay builder-owned
-	# (confined by the separate docker-helper-builder profile); the daemon
-	# holds no builder-tree authority beyond these sockets.
+	# buildkitd endpoint socket. The builder trees themselves stay
+	# builder-owned (confined by the separate docker-helper-builder
+	# profile); the daemon holds NO builder-tree authority beyond these
+	# two socket pathnames. AppArmor mediates the full path, so no
+	# directory rule is granted: the op id comes from the daemon's own
+	# operation records, the daemon never lists ops/, and the OTEL trace
+	# socket under ops/<op>/buildkit/ is buildkitd-internal (never read or
+	# written by the daemon or buildctl).
 	/run/docker-helper-builder/manager.sock rw,
-	/run/docker-helper-builder/ops/** rw,
+	/run/docker-helper-builder/ops/*/buildkitd.sock rw,
 	unix (connect,send,receive) type=stream peer=(label=docker-helper-builder),
 	# buildctl (inherited below) connects to the per-op buildkitd socket;
 	# the flow child carries the distro rootlesskit profile after the

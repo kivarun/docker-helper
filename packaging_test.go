@@ -1587,8 +1587,8 @@ func TestSystemAppArmorProfileFile(t *testing.T) {
 	if !strings.Contains(content, "/run/docker-helper-builder/manager.sock rw,") {
 		t.Error("profile must grant the builder manager endpoint socket")
 	}
-	if !strings.Contains(content, "/run/docker-helper-builder/ops/** rw,") {
-		t.Error("profile must grant the per-operation buildkitd sockets")
+	if !strings.Contains(content, "/run/docker-helper-builder/ops/*/buildkitd.sock rw,") {
+		t.Error("profile must grant the exact per-operation buildkitd endpoint socket")
 	}
 	if strings.Contains(content, "/run/docker-helper-builder/** rw,") {
 		t.Error("profile must not grant the whole builder runtime tree (transport sockets only)")
