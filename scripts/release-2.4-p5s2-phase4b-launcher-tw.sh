@@ -7651,6 +7651,29 @@ REBUILD-STAGE=NOT-REACHED}"
   POSTTUN_BKD_LOCK_SYSCALL_VERDICT=""
   POSTTUN_BKD_STATEFILE_FD_BINDING=""
   POSTTUN_BKD_BIN_IN_WINDOW=""
+  # The 4C-91-era set -u hardening extension (the run 38352645633
+  # defect class, the same shape as the run 37463078411 lesson): the
+  # LATER-extracted OLD-boundary variables (the state-tree dir
+  # read/open/create/remove_name/rmdir, the file write/getattr and the
+  # runtime-tree sock_file/exec-type surfaces added by the 4C-78..4C-91
+  # phases) were assigned inside the exec-pair branch only, but the
+  # gone-gate flags below read them unconditionally — an absent exec
+  # pair (this run: the attempt-1 network-setup failure shifted the
+  # harvest so the canonical buildkitd execve pair was not in the
+  # window) must produce the INCOMPLETE verdict, not an unbound-variable
+  # crash.
+  POSTTUN_BKD_OLD_EXEC_GETATTR=""
+  POSTTUN_BKD_OLD_RUNTIME_TREE_REMOVENAME=""
+  POSTTUN_BKD_OLD_RUNTIME_TREE_SOCKFILE_CREATE=""
+  POSTTUN_BKD_OLD_RUNTIME_TREE_SOCKFILE_SETATTR=""
+  POSTTUN_BKD_OLD_RUNTIME_TREE_SOCKFILE_UNLINK=""
+  POSTTUN_BKD_OLD_STATETREE_OPEN=""
+  POSTTUN_BKD_OLD_STATETREE_READ=""
+  POSTTUN_BKD_OLD_STATE_TREE_CREATE=""
+  POSTTUN_BKD_OLD_STATE_TREE_FILEGETATTR=""
+  POSTTUN_BKD_OLD_STATE_TREE_FILEWRITE=""
+  POSTTUN_BKD_OLD_STATE_TREE_REMOVE_NAME=""
+  POSTTUN_BKD_OLD_STATE_TREE_RMDIR=""
   if [ -n "$POSTTUN_BKD_EXEC_ENTER_TS" ] && [ -n "$POSTTUN_BKD_EXEC_EXIT_TS" ]; then
     POSTTUN_BKD_DECISIONS="$(awk -v a="$POSTTUN_BKD_EXEC_ENTER_TS" -v b="$POSTTUN_BKD_EXEC_EXIT_TS" -v who="$POSTTUN_BKD_EXEC_WHO" '
       { ts = $4; sub(/:$/, "", ts)
