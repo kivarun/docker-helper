@@ -1758,9 +1758,14 @@ func TestBuilderAppArmorProfileFile(t *testing.T) {
 		}
 	}
 
-	// The bounded stop escalation toward the flow process groups.
+	// The bounded stop escalation toward the flow profiles: rootlesskit
+	// (the launch vehicle subtree) and slirp4netns (the distro ships its
+	// own slirp4netns profile for the user-network helper).
 	if !strings.Contains(active, "signal (send) set=(term, kill) peer=rootlesskit,") {
-		t.Error("profile must grant the bounded stop escalation toward the flow profile")
+		t.Error("profile must grant the bounded stop escalation toward the rootlesskit flow profile")
+	}
+	if !strings.Contains(active, "signal (send) set=(term, kill) peer=slirp4netns,") {
+		t.Error("profile must grant the bounded stop escalation toward the slirp4netns flow profile")
 	}
 }
 

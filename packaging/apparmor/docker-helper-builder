@@ -117,8 +117,13 @@ profile docker-helper-builder flags=(attach_disconnected,mediate_deleted) {
 	# The manager terminates its own flow process groups through the
 	# bounded SIGTERM -> SIGKILL escalation (terminateGroupBounded);
 	# the stop convergence refuses to complete while the group lives,
-	# so the delivery toward the flow's profile is a required operation.
-	# Send-only, term/kill-only, and only toward the distro rootlesskit
-	# profile the flow children carry.
+	# so the delivery toward the flow's profiles is a required operation.
+	# Send-only, term/kill-only, and only toward the distro profiles the
+	# flow children carry: rootlesskit (the launch vehicle and the
+	# buildkitd subtree) and slirp4netns (the distro ships its own
+	# slirp4netns profile, which the user-network helper attaches;
+	# live enforcing evidence, P5 AppArmor parity UAT: denied { send }
+	# signal=term peer="slirp4netns" from the manager's group kill).
 	signal (send) set=(term, kill) peer=rootlesskit,
+	signal (send) set=(term, kill) peer=slirp4netns,
 }
