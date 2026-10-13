@@ -362,8 +362,8 @@ expect_context /usr/bin/docker-helper system_u:object_r:docker_helper_exec_t:s0
 expect_context /usr/bin/rootlesskit system_u:object_r:docker_helper_rootlesskit_exec_t:s0
 expect_context /usr/bin/newuidmap system_u:object_r:docker_helper_newuidmap_exec_t:s0
 expect_context /usr/bin/newgidmap system_u:object_r:docker_helper_newgidmap_exec_t:s0
-expect_context /run/docker-helper-builder system_u:object_r:docker_helper_builder_runtime_t:s0
-expect_context /var/lib/docker-helper-builder system_u:object_r:docker_helper_builder_state_t:s0
+expect_context /run/docker-helper-builder system_u:object_r:docker_helper_builder_runtime_root_t:s0
+expect_context /var/lib/docker-helper-builder system_u:object_r:docker_helper_builder_state_root_t:s0
 
 # The distro helpers' own on-disk state (P5-S2): docker-helper never
 # changes owner, mode, or the chkstat-applied file capabilities (the distro
@@ -547,7 +547,7 @@ if systemctl start "$UNIT" 2>"$EVIDENCE_DIR/p2h-start-stderr.txt"; then
   MGR_CTX="$(cat "/proc/$MGR_PID/attr/current" 2>/dev/null || true)"
   [ "$MGR_CTX" = "system_u:system_r:docker_helper_builder_t:s0" ] \
     || fail "manager process context = '$MGR_CTX', want system_u:system_r:docker_helper_builder_t:s0"
-  [ "$(stat -c '%C' /run/docker-helper-builder/manager.sock)" = "system_u:object_r:docker_helper_builder_runtime_t:s0" ] \
+  [ "$(stat -c '%C' /run/docker-helper-builder/manager.sock)" = "system_u:object_r:docker_helper_builder_runtime_root_t:s0" ] \
     || fail "manager.sock label wrong: $(stat -c '%C' /run/docker-helper-builder/manager.sock)"
   say "P2h permissive bootstrap OK (manager in docker_helper_builder_t, socket labeled)"
 else
@@ -614,11 +614,11 @@ if systemctl start "$UNIT" 2>"$EVIDENCE_DIR/p2-start-stderr.txt"; then
   [ "$MGR_CTX" = "system_u:system_r:docker_helper_builder_t:s0" ] \
     || fail "manager process context = '$MGR_CTX', want system_u:system_r:docker_helper_builder_t:s0"
   wait_for_builder_socket 50 || fail "manager socket did not appear after unit activation"
-  [ "$(stat -c '%C' /run/docker-helper-builder)" = "system_u:object_r:docker_helper_builder_runtime_t:s0" ] \
+  [ "$(stat -c '%C' /run/docker-helper-builder)" = "system_u:object_r:docker_helper_builder_runtime_root_t:s0" ] \
     || fail "runtime root label wrong: $(stat -c '%C' /run/docker-helper-builder)"
-  [ "$(stat -c '%C' /var/lib/docker-helper-builder)" = "system_u:object_r:docker_helper_builder_state_t:s0" ] \
+  [ "$(stat -c '%C' /var/lib/docker-helper-builder)" = "system_u:object_r:docker_helper_builder_state_root_t:s0" ] \
     || fail "state root label wrong: $(stat -c '%C' /var/lib/docker-helper-builder)"
-  [ "$(stat -c '%C' /run/docker-helper-builder/manager.sock)" = "system_u:object_r:docker_helper_builder_runtime_t:s0" ] \
+  [ "$(stat -c '%C' /run/docker-helper-builder/manager.sock)" = "system_u:object_r:docker_helper_builder_runtime_root_t:s0" ] \
     || fail "manager.sock label wrong: $(stat -c '%C' /run/docker-helper-builder/manager.sock)"
   [ "$(stat -c '%C' /usr/bin/rootlesskit)" = "system_u:object_r:docker_helper_rootlesskit_exec_t:s0" ] \
     || fail "/usr/bin/rootlesskit label wrong: $(stat -c '%C' /usr/bin/rootlesskit)"
@@ -757,9 +757,9 @@ chcon -t var_run_t /var/lib/docker-helper-builder \
 [ "$(stat -c '%C' /var/lib/docker-helper-builder)" = "system_u:object_r:var_run_t:s0" ] \
   || fail "state label poisoning did not take effect"
 rpm -Uvh --replacepkgs "$RPM" >/dev/null || fail "rpm -U --replacepkgs failed"
-[ "$(stat -c '%C' /var/lib/docker-helper-builder)" = "system_u:object_r:docker_helper_builder_state_t:s0" ] \
+[ "$(stat -c '%C' /var/lib/docker-helper-builder)" = "system_u:object_r:docker_helper_builder_state_root_t:s0" ] \
   || fail "the %posttrans relabel did not correct the builder state label (upgrade path broken)"
-[ "$(stat -c '%C' /run/docker-helper-builder/manager.sock)" = "system_u:object_r:docker_helper_builder_runtime_t:s0" ] \
+[ "$(stat -c '%C' /run/docker-helper-builder/manager.sock)" = "system_u:object_r:docker_helper_builder_runtime_root_t:s0" ] \
   || fail "manager.sock label wrong after the upgrade relabel"
 # The launch vehicle's user-network helper must carry the dedicated exec
 # type after the upgrade relabel (execution is allowed only from the
@@ -1373,11 +1373,11 @@ TAR_MGR_PID="$(systemctl show "$UNIT" -p MainPID --value)"
 TAR_MGR_CTX="$(cat "/proc/$TAR_MGR_PID/attr/current" 2>/dev/null || true)"
 [ "$TAR_MGR_CTX" = "system_u:system_r:docker_helper_builder_t:s0" ] \
   || fail "manager process context after the tarball install = '$TAR_MGR_CTX', want system_u:system_r:docker_helper_builder_t:s0"
-[ "$(stat -c '%C' /run/docker-helper-builder)" = "system_u:object_r:docker_helper_builder_runtime_t:s0" ] \
+[ "$(stat -c '%C' /run/docker-helper-builder)" = "system_u:object_r:docker_helper_builder_runtime_root_t:s0" ] \
   || fail "builder runtime root label wrong after the tarball install: $(stat -c '%C' /run/docker-helper-builder)"
-[ "$(stat -c '%C' /run/docker-helper-builder/manager.sock)" = "system_u:object_r:docker_helper_builder_runtime_t:s0" ] \
+[ "$(stat -c '%C' /run/docker-helper-builder/manager.sock)" = "system_u:object_r:docker_helper_builder_runtime_root_t:s0" ] \
   || fail "manager.sock label wrong after the tarball install: $(stat -c '%C' /run/docker-helper-builder/manager.sock)"
-[ "$(stat -c '%C' /var/lib/docker-helper-builder)" = "system_u:object_r:docker_helper_builder_state_t:s0" ] \
+[ "$(stat -c '%C' /var/lib/docker-helper-builder)" = "system_u:object_r:docker_helper_builder_state_root_t:s0" ] \
   || fail "builder state label wrong after the tarball install: $(stat -c '%C' /var/lib/docker-helper-builder)"
 [ "$(stat -c '%C' /usr/bin/rootlesskit)" = "system_u:object_r:docker_helper_rootlesskit_exec_t:s0" ] \
   || fail "rootlesskit label wrong after the tarball install: $(stat -c '%C' /usr/bin/rootlesskit)"
@@ -1404,7 +1404,7 @@ if ! ( cd "$BUNDLE" && ./install-system.sh --yes --allowed-root "$ALLOWED_ROOT" 
   tail -30 "$EVIDENCE_DIR/install-system-rerun.log"
   fail "install-system.sh rerun (upgrade) failed"
 fi
-[ "$(stat -c '%C' /var/lib/docker-helper-builder)" = "system_u:object_r:docker_helper_builder_state_t:s0" ] \
+[ "$(stat -c '%C' /var/lib/docker-helper-builder)" = "system_u:object_r:docker_helper_builder_state_root_t:s0" ] \
   || fail "the tarball relabel path did not correct the builder state label: $(stat -c '%C' /var/lib/docker-helper-builder)"
 # The installer's restoration restarted the manager: wait for the recreated
 # socket before asserting its label.
@@ -1415,9 +1415,9 @@ RERUN_MGR_PID="$(systemctl show "$UNIT" -p MainPID --value)"
 RERUN_MGR_CTX="$(cat "/proc/$RERUN_MGR_PID/attr/current" 2>/dev/null || true)"
 [ "$RERUN_MGR_CTX" = "system_u:system_r:docker_helper_builder_t:s0" ] \
   || fail "manager process context after the tarball rerun = '$RERUN_MGR_CTX', want system_u:system_r:docker_helper_builder_t:s0"
-[ "$(stat -c '%C' /run/docker-helper-builder)" = "system_u:object_r:docker_helper_builder_runtime_t:s0" ] \
+[ "$(stat -c '%C' /run/docker-helper-builder)" = "system_u:object_r:docker_helper_builder_runtime_root_t:s0" ] \
   || fail "builder runtime root label wrong after the tarball rerun: $(stat -c '%C' /run/docker-helper-builder)"
-[ "$(stat -c '%C' /run/docker-helper-builder/manager.sock)" = "system_u:object_r:docker_helper_builder_runtime_t:s0" ] \
+[ "$(stat -c '%C' /run/docker-helper-builder/manager.sock)" = "system_u:object_r:docker_helper_builder_runtime_root_t:s0" ] \
   || fail "manager.sock label wrong after the tarball rerun: $(stat -c '%C' /run/docker-helper-builder/manager.sock)"
 {
   echo "rerun_manager_pid=$RERUN_MGR_PID"
