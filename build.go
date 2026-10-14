@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
-	"time"
 
 	"github.com/distribution/reference"
 )
@@ -55,6 +54,24 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	// operation admission, or backend work.
 	if _, err := reference.ParseNormalizedNamed(req.Image); err != nil {
 		writeDockerActionRejected(ctx, w, http.StatusBadRequest, "build", "invalid_image", "invalid image", session.PrincipalName)
+		return
+	}
+
+	// Builder-manager admission reconciliation (external review F1): build
+	// admission stays closed while the builder-manager state is not proven
+	// known-clean for this daemon generation. A closed gate runs one
+	// bounded reconciliation first (the next build rechecks/reconciles, so
+	// manager recovery never requires a main-daemon restart); a refused
+	// reconciliation fails the build closed BEFORE any capacity
+	// reservation or operation admission. The unrelated surfaces
+	// (run/pull/registry-login) never consult this gate. The refusal is
+	// the established internal-error classification; the operational
+	// reason stays out of the public message.
+	if a.BuilderAdmission != nil && !a.BuilderAdmission.ensureOpen(a.builderManagerPurge) {
+		opLog(ctx).Warn("build admission refused: builder-manager state is not proven for this daemon generation",
+			slog.String("operation", "build"),
+		)
+		writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "build", "internal_error", "internal server error", session.PrincipalName)
 		return
 	}
 
@@ -292,22 +309,18 @@ type buildDriverRequest struct {
 	BuildArgKeys []string // validated, sorted
 	BuildArgs    map[string]string
 	DockerDir    string // session Docker config (credential owner)
-	StartedAt    time.Time
 }
 
 // buildStageResult is the ONE internal result model of the build driver
 // (§26): every stage classification lands here, and ONE terminal
 // transition owner after cleanup consumes it. exitCode is populated from
-// the failed child stage only (manager-control stages have no child);
-// commitSucceeded records that the commit stage was admitted and its
-// docker tag exited 0.
+// the failed child stage only (manager-control stages have no child).
 type buildStageResult struct {
-	ExitCode        *int
-	Err             error // child Wait error or stage failure detail
-	ResultCode      string
-	Message         string
-	Terminated      bool // refused admission: termination latch was set
-	CommitSucceeded bool
+	ExitCode   *int
+	Err        error // child Wait error or stage failure detail
+	ResultCode string
+	Message    string
+	Terminated bool // refused admission: termination latch was set
 }
 
 // operationForSession looks up an operation by ID and verifies it belongs

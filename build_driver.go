@@ -68,10 +68,6 @@ type buildDriver struct {
 	a   *App
 	op  *operation
 	req buildDriverRequest
-
-	// builderStarted flips true once manager START may have succeeded;
-	// every terminal path after that performs the mandatory STOP cleanup.
-	builderStarted bool
 }
 
 func newBuildDriver(a *App, op *operation, req buildDriverRequest) *buildDriver {
@@ -185,7 +181,7 @@ func (d *buildDriver) runStages() buildStageResult {
 	// NOT a cancellable operation stage (§19).
 	d.internalTagCleanupBestEffort()
 
-	return buildStageResult{ResultCode: "succeeded", CommitSucceeded: true}
+	return buildStageResult{ResultCode: "succeeded"}
 }
 
 // finish is the ONE terminal-transition owner after cleanup: staging
@@ -254,16 +250,6 @@ func (d *buildDriver) terminationResultCode() string {
 	return "docker_build_failed"
 }
 
-// terminationResultCodeAfterCommitAdmission resolves the result code when
-// termination arrived after the commit stage was admitted: the commit
-// outcome owns the result; cancellation can no longer downgrade it (§17).
-func (d *buildDriver) terminationResultCodeAfterCommitAdmission(commitOK bool) string {
-	if commitOK {
-		return "succeeded"
-	}
-	return "docker_build_failed"
-}
-
 // latchObserved reports whether the permanent termination latch is set
 // under op.mu.
 func (d *buildDriver) latchObserved() bool {
@@ -320,7 +306,6 @@ func (d *buildDriver) managerStartStage() buildStageResult {
 		d.logStage("builder_start", startErr)
 		return buildStageResult{Err: startErr}
 	}
-	d.builderStarted = true
 	d.logStage("builder_start", nil)
 	return buildStageResult{}
 }
@@ -472,9 +457,9 @@ func (d *buildDriver) internalTagCleanupBestEffort() {
 // startOperationCommitStage is the ONE commit-stage admission primitive
 // (§16). Under ONE op.mu critical section it: refuses when the termination
 // latch is set; asserts no current execution stage; installs the commit
-// command in the current-child slot; marks commitClaimed; and starts the
-// child while still holding the lock. The irreversible success point
-// remains `docker tag` exit 0, owned by the driver's Wait.
+// command in the current-child slot; and starts the child while still
+// holding the lock. The irreversible success point remains `docker tag`
+// exit 0, owned by the driver's Wait.
 func startOperationCommitStage(op *operation, cmd *exec.Cmd) buildStageResult {
 	op.mu.Lock()
 	if op.terminationRequested {
@@ -488,7 +473,6 @@ func startOperationCommitStage(op *operation, cmd *exec.Cmd) buildStageResult {
 	cmd.Stdout = op.LogBuffer
 	cmd.Stderr = op.LogBuffer
 	op.currentCmd = cmd
-	op.commitClaimed = true
 	err := cmd.Start()
 	if err != nil {
 		op.currentCmd = nil
@@ -504,7 +488,7 @@ func startOperationCommitStage(op *operation, cmd *exec.Cmd) buildStageResult {
 		// cancelled (§17) — even when a termination raced in.
 		return buildStageResult{ExitCode: extractExitCode(waitErr), Err: waitErr}
 	}
-	return buildStageResult{CommitSucceeded: true}
+	return buildStageResult{}
 }
 
 // buildctlArgsInput is the exact input of the buildctl argv mapping.
@@ -606,13 +590,4 @@ func validateBuildKitSocketPath(socketPath string, expectedUID func() (int, int,
 		return errors.New("buildkit socket is not private")
 	}
 	return nil
-}
-
-// exportDiagnosticsSummary captures bounded internal load diagnostics: the
-// `docker load` child stage writes into the operation LogBuffer like every
-// other stage (the existing explicitly chosen build-log policy), and no
-// additional public exposure exists.
-func exportDiagnosticsSummary(op *operation) string {
-	data, _, _ := op.LogBuffer.Range(0, logResponseChunkBytes)
-	return string(data)
 }

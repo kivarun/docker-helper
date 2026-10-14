@@ -147,8 +147,11 @@ subid_entry() {
     awk -F: -v u="$IDENTITY" '
         $1 == u {
             n++
-            if (n > 1) { print "DUPLICATE"; exit 0 }
-            print $2, $3
+            if (n == 1) { first = $2 " " $3 }
+        }
+        END {
+            if (n > 1) { print "DUPLICATE" }
+            else if (n == 1) { print first }
         }
     ' "$db"
 }
@@ -170,6 +173,34 @@ verify_subid() {
     return 0
 }
 
+# check_subid_overlap is the per-database overlap gate (external review
+# F5): after verify_subid succeeded for the builder entry in ONE database,
+# the builder interval is checked against EVERY other identity's interval
+# in that same database. A shared subordinate id would let another
+# identity create files the builder flow maps into its own user
+# namespace, so an overlap fails closed before any mutation. The writer
+# boundary is unchanged: this check only READS the databases; only
+# shadow-utils/usermod mutates them.
+check_subid_overlap() {
+    db="$1"
+    [ -f "$db" ] || return 0
+    entry="$(subid_entry "$db")" || fail "cannot read $db"
+    start="$(printf '%s' "$entry" | awk '{print $1}')"
+    count="$(printf '%s' "$entry" | awk '{print $2}')"
+    validate_subid_db "$db"
+    awk -F: -v u="$IDENTITY" -v bs="$start" -v bc="$count" '
+        /^[[:space:]]*($|#)/ { next }
+        $1 == u { next }
+        NF >= 3 {
+            os = $2 + 0; oc = $3 + 0
+            if (bs + 0 < os + oc && os < bs + 0 + bc + 0) {
+                print "OVERLAP:" $0 > "/dev/stderr"
+                exit 1
+            }
+        }
+    ' "$db" || fail "$db: the $IDENTITY subordinate range overlaps another identity's range; resolve the overlap manually and re-run"
+}
+
 # --- collision-free range computation ---------------------------------------
 # Every existing [start, start+count) interval from BOTH databases (one
 # numeric range will be written to both). A corrupt/nonnumeric entry fails
@@ -181,11 +212,15 @@ validate_subid_db() {
     [ -f "$db" ] || return 0
     awk -F: '
         /^[[:space:]]*($|#)/ { next }
-        NF >= 3 && ($2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/) {
+        NF < 3 {
             print "INVALID:" $0 > "/dev/stderr"
             exit 1
         }
-    ' "$db" || fail "$db holds a nonnumeric entry; resolve it manually and re-run"
+        ($2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/) {
+            print "INVALID:" $0 > "/dev/stderr"
+            exit 1
+        }
+    ' "$db" || fail "$db holds a malformed or nonnumeric entry; resolve it manually and re-run"
 }
 
 # Output: sorted "start count" lines over both databases.
@@ -223,10 +258,12 @@ converge_subids() {
     need_gid=1
     if verify_subid "$SUBUID_DB"; then
         need_uid=0
+        check_subid_overlap "$SUBUID_DB"
         log "$SUBUID_DB: $(grep "^$IDENTITY:" "$SUBUID_DB")"
     fi
     if verify_subid "$SUBGID_DB"; then
         need_gid=0
+        check_subid_overlap "$SUBGID_DB"
         log "$SUBGID_DB: $(grep "^$IDENTITY:" "$SUBGID_DB")"
     fi
     if [ "$need_uid" = 0 ] && [ "$need_gid" = 0 ]; then

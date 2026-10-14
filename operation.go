@@ -135,19 +135,10 @@ type operation struct {
 	// has not started yet, is currently running, has just exited, or the
 	// Operation is between stages.
 	terminationRequested bool
-	// commitClaimed marks that the build commit stage was ADMITTED (its
-	// child was started under op.mu with the termination latch still
-	// unset). Only the build flow reads it: after admission, a later
-	// termination may signal the commit child but must NOT classify the
-	// operation result as cancelled — the result follows the commit
-	// outcome. It is internal control state, never a claim that the image
-	// is committed (the irreversible success point stays docker tag
-	// exit 0).
-	commitClaimed bool
-	reason        terminationReason
-	forceOwned    bool          // true when force cleanup has been claimed for this operation
-	forceDone     chan struct{} // closed when shared force-cleanup phase completes
-	forceDeadline time.Time     // absolute deadline shared by owner and all followers
+	reason               terminationReason
+	forceOwned           bool          // true when force cleanup has been claimed for this operation
+	forceDone            chan struct{} // closed when shared force-cleanup phase completes
+	forceDeadline        time.Time     // absolute deadline shared by owner and all followers
 	// cidfile is the path to the Docker --cidfile for run operations.
 	// The helper determines this path before cmd.Start(); Docker CLI
 	// publishes the container ID into the file after the daemon creates

@@ -176,33 +176,10 @@ func builderVerifyIdentity() (uid int, gid int, err error) {
 	return uid, gid, nil
 }
 
-// peerCredentialsUnix reads SO_PEERCRED for a *net.UnixConn.
-func peerCredentialsUnix(conn *net.UnixConn) (uid, gid, pid int, err error) {
-	rawConn, rawErr := conn.SyscallConn()
-	if rawErr != nil {
-		return 0, 0, 0, rawErr
-	}
-	var ucred *unix.Ucred
-	var sockErr error
-	ctrlErr := rawConn.Control(func(fd uintptr) {
-		u, e := unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
-		if e != nil {
-			sockErr = e
-			return
-		}
-		ucred = u
-	})
-	if ctrlErr != nil {
-		return 0, 0, 0, ctrlErr
-	}
-	if sockErr != nil {
-		return 0, 0, 0, sockErr
-	}
-	if ucred == nil {
-		return 0, 0, 0, errors.New("SO_PEERCRED returned no credentials")
-	}
-	return int(ucred.Uid), int(ucred.Gid), int(ucred.Pid), nil
-}
+// peerCredentialsUnix is declared with its Linux implementation in
+// peer_credentials_linux.go (the non-Linux contract is the stub in
+// peer_credentials_stub.go): the untagged builder-manager code consumes
+// it through the package seams only.
 
 // builderInstancePhase is backend implementation state for one per-op
 // instance lifecycle (not a product/domain state; never exposed through

@@ -158,14 +158,14 @@ var builderWriteProcattrExec = func(context string) error {
 	}
 	if err != nil {
 		_ = builderProcattrClose(fd)
-		return fmt.Errorf("cannot write the forced exec context %q (tid %d, requested %d bytes, wrote %d): %w", context, unix.Gettid(), len(payload), n, err)
+		return fmt.Errorf("cannot write the forced exec context %q (tid %d, requested %d bytes, wrote %d): %w", context, builderGetTid(), len(payload), n, err)
 	}
 	if n != len(payload) {
 		_ = builderProcattrClose(fd)
-		return fmt.Errorf("short write of the forced exec context %q (tid %d, requested %d bytes, wrote %d)", context, unix.Gettid(), len(payload), n)
+		return fmt.Errorf("short write of the forced exec context %q (tid %d, requested %d bytes, wrote %d)", context, builderGetTid(), len(payload), n)
 	}
 	if err := builderProcattrClose(fd); err != nil {
-		return fmt.Errorf("cannot close the forced exec procattr after writing %q (tid %d): %w", context, unix.Gettid(), err)
+		return fmt.Errorf("cannot close the forced exec procattr after writing %q (tid %d): %w", context, builderGetTid(), err)
 	}
 	return nil
 }
@@ -194,14 +194,14 @@ var builderReadProcattrExec = func() ([]byte, error) {
 func builderVerifyProcattrExec(target string) error {
 	raw, err := builderReadProcattrExec()
 	if err != nil {
-		return fmt.Errorf("cannot read back the forced exec context (tid %d): %w", unix.Gettid(), err)
+		return fmt.Errorf("cannot read back the forced exec context (tid %d): %w", builderGetTid(), err)
 	}
 	got, err := decodeSELinuxXattrContext(raw)
 	if err != nil {
-		return fmt.Errorf("the forced exec context read back malformed (tid %d, %d raw bytes %q): %w", unix.Gettid(), len(raw), raw, err)
+		return fmt.Errorf("the forced exec context read back malformed (tid %d, %d raw bytes %q): %w", builderGetTid(), len(raw), raw, err)
 	}
 	if got != target {
-		return fmt.Errorf("the forced exec context did not stick (tid %d): want %q, got %q (%d raw bytes %q)", unix.Gettid(), target, got, len(raw), raw)
+		return fmt.Errorf("the forced exec context did not stick (tid %d): want %q, got %q (%d raw bytes %q)", builderGetTid(), target, got, len(raw), raw)
 	}
 	return nil
 }

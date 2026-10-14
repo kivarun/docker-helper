@@ -75,6 +75,79 @@ type App struct {
 	// socket validation (narrow test seam; production default is the real
 	// validation owner).
 	validateBuildKitSocketFn func(opID string) error
+	// BuilderAdmission owns the build-admission reconciliation state of the
+	// running daemon: build admission opens only after a bounded
+	// builder-manager PURGE proved the builder-manager state known-clean
+	// for this daemon generation. A started daemon constructs it; it is
+	// nil only in directly constructed test App fixtures, where admission
+	// is open and no reconciliation runs.
+	BuilderAdmission *builderAdmissionGate
+}
+
+// builderAdmissionGate is the build-admission reconciliation state of the
+// running daemon (external review F1). A main-daemon restart alone does
+// not converge builder-manager state: the manager (and any surviving
+// per-operation buildkitd) keeps accounting the previous daemon
+// generation's instances while the new OperationSupervisor forgot every
+// operation. Build admission therefore opens only when a bounded PURGE
+// through the existing P2 builder-manager client proved the manager state
+// known-clean for THIS daemon generation — the startup reconciliation.
+// While the manager state is unknown (manager unreachable, PURGE refused
+// or ambiguous), build admission stays closed and every build fails
+// closed before any capacity reservation or operation admission;
+// run/pull/registry-login remain available. The NEXT build attempt runs
+// one bounded reconciliation itself, so manager recovery never requires
+// restarting the main daemon.
+type builderAdmissionGate struct {
+	mu   sync.Mutex
+	open bool
+}
+
+func newBuilderAdmissionGate() *builderAdmissionGate {
+	return &builderAdmissionGate{}
+}
+
+// reconcileStartup performs the startup reconciliation: one bounded
+// builder-manager PURGE. Success opens build admission for this daemon
+// generation; every failure keeps it closed (the returned error is the
+// caller's operational diagnostic, never a secret).
+func (g *builderAdmissionGate) reconcileStartup(purge func() error) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	err := purge()
+	g.open = err == nil
+	return err
+}
+
+// ensureOpen reports whether build admission is open. When admission is
+// closed (manager state unknown for this daemon generation) it runs ONE
+// bounded reconciliation first — the next build rechecks/reconciles —
+// and opens on success. Concurrent closed-gate callers serialize on the
+// reconciliation.
+func (g *builderAdmissionGate) ensureOpen(purge func() error) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.open {
+		return true
+	}
+	if err := purge(); err != nil {
+		return false
+	}
+	g.open = true
+	return true
+}
+
+// builderManagerPurge runs one bounded PURGE through the existing P2
+// builder-manager client — the single manager RPC owner; this adds no
+// second supervisor and no protocol semantics.
+func (a *App) builderManagerPurge() error {
+	client := &builderManagerClient{}
+	if a.builderClientFn != nil {
+		client = a.builderClientFn()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), builderClientStopRead)
+	defer cancel()
+	return client.Purge(ctx)
 }
 
 // pinMountSource calls PinMountSourceFn if set, otherwise the

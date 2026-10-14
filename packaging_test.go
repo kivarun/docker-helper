@@ -1208,6 +1208,189 @@ func TestProvisionBuilderScript(t *testing.T) {
 // and the modprobe command). No host account state is touched: every
 // account database is a fixture, the fake id consults the fixture passwd,
 // and the fake modprobe writes only the fixture sysfs file.
+// TestProvisionBuilderSubidOverlap exercises the real provisioner's
+// subordinate-ID overlap gate (external review F5): when the builder
+// entry already exists in a subid database, its interval is checked
+// against every other identity's interval in that database. Overlaps fail
+// closed before any mutation, adjacent intervals are not overlaps, and
+// the duplicate-builder and malformed-line fail-closed shapes are
+// preserved. No host account state is touched: every database is a
+// fixture, and usermod/useradd fakes make any mutation loudly observable.
+func TestProvisionBuilderSubidOverlap(t *testing.T) {
+	scriptPath := "packaging/scripts/lib/provision-builder.sh"
+	absScript, err := filepath.Abs(scriptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// subidFixture builds the complete verify-only provisioner
+	// environment. The subuid/subgid fixtures carry the builder entry
+	// plus the given extra entries; the builder identity exists in the
+	// fixture passwd/group, and the TUN facility is already available so
+	// the subordinate-ID stage is the only variable.
+	subidFixture := func(t *testing.T, extraSubuid, extraSubgid []string) (string, []string) {
+		t.Helper()
+		base := t.TempDir()
+		fakeBin := filepath.Join(base, "fakes")
+		if err := os.MkdirAll(fakeBin, 0755); err != nil {
+			t.Fatal(err)
+		}
+		passwdDB := filepath.Join(base, "passwd")
+		shellPath := filepath.Join(base, "sbin", "nologin")
+		if err := os.MkdirAll(filepath.Dir(shellPath), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(shellPath, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(passwdDB, []byte(fmt.Sprintf("docker-helper-builder:x:475:475::/var/lib/docker-helper-builder:%s\n", shellPath)), 0644); err != nil {
+			t.Fatal(err)
+		}
+		groupDB := filepath.Join(base, "group")
+		if err := os.WriteFile(groupDB, []byte("docker-helper-builder:x:475:\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		idFake := fmt.Sprintf("#!/bin/sh\ngrep -q \"^$1:\" \"%s\"\n", passwdDB)
+		if err := os.WriteFile(filepath.Join(fakeBin, "id"), []byte(idFake), 0755); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"useradd", "usermod"} {
+			if err := os.WriteFile(filepath.Join(fakeBin, name), []byte(fmt.Sprintf("#!/bin/sh\necho \"%s: INVOKED $@\" >&2\nexit 1\n", name)), 0755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		writeDB := func(name string, extra []string) string {
+			db := filepath.Join(base, name)
+			lines := []string{"docker-helper-builder:100000:65536"}
+			lines = append(lines, extra...)
+			if err := os.WriteFile(db, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			return db
+		}
+		subuidDB := writeDB("subuid", extraSubuid)
+		subgidDB := writeDB("subgid", extraSubgid)
+		tunSysfs := filepath.Join(base, "sys", "class", "misc", "tun", "dev")
+		if err := os.MkdirAll(filepath.Dir(tunSysfs), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(tunSysfs, []byte("10:200\n"), 0444); err != nil {
+			t.Fatal(err)
+		}
+		env := append(os.Environ(),
+			"PW_DB="+passwdDB,
+			"GROUP_DB="+groupDB,
+			"SUBUID_DB="+subuidDB,
+			"SUBGID_DB="+subgidDB,
+			"TUN_SYSFS="+tunSysfs,
+			"BUILDER_SHELL="+shellPath,
+			"PATH="+fakeBin+":"+os.Getenv("PATH"),
+			"MODPROBE="+filepath.Join(fakeBin, "modprobe-absent"),
+		)
+		return fakeBin, env
+	}
+
+	// runProvisioner executes the real production script.
+	runProvisioner := func(t *testing.T, env []string) (string, error) {
+		t.Helper()
+		cmd := exec.Command("sh", absScript)
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+
+	t.Run("existing valid non-overlapping entries verify", func(t *testing.T) {
+		_, env := subidFixture(t, []string{"otheruser:200000:1000"}, []string{"otheruser:200000:1000"})
+		out, err := runProvisioner(t, env)
+		if err != nil {
+			t.Fatalf("the provisioner refused valid non-overlapping entries: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, "subordinate ranges verified") {
+			t.Errorf("the verify-only evidence is missing from the output:\n%s", out)
+		}
+		if strings.Contains(out, "usermod: INVOKED") || strings.Contains(out, "useradd: INVOKED") {
+			t.Errorf("valid existing entries must not trigger account mutation:\n%s", out)
+		}
+	})
+
+	t.Run("overlap only in subuid fails closed", func(t *testing.T) {
+		_, env := subidFixture(t, []string{"otheruser:110000:1000"}, []string{"otheruser:200000:1000"})
+		out, err := runProvisioner(t, env)
+		if err == nil {
+			t.Fatalf("the provisioner accepted a subuid overlap:\n%s", out)
+		}
+		if !strings.Contains(out, "overlaps another identity") {
+			t.Errorf("the refusal must name the overlap conflict:\n%s", out)
+		}
+		if strings.Contains(out, "usermod: INVOKED") {
+			t.Errorf("the overlap refusal must happen before any mutation:\n%s", out)
+		}
+	})
+
+	t.Run("overlap only in subgid fails closed", func(t *testing.T) {
+		_, env := subidFixture(t, []string{"otheruser:200000:1000"}, []string{"otheruser:110000:1000"})
+		out, err := runProvisioner(t, env)
+		if err == nil {
+			t.Fatalf("the provisioner accepted a subgid overlap:\n%s", out)
+		}
+		if !strings.Contains(out, "overlaps another identity") {
+			t.Errorf("the refusal must name the overlap conflict:\n%s", out)
+		}
+	})
+
+	t.Run("overlap in both fails closed", func(t *testing.T) {
+		_, env := subidFixture(t, []string{"otheruser:110000:1000"}, []string{"otheruser:120000:1000"})
+		out, err := runProvisioner(t, env)
+		if err == nil {
+			t.Fatalf("the provisioner accepted overlapping ranges in both databases:\n%s", out)
+		}
+	})
+
+	t.Run("adjacent intervals are not overlaps", func(t *testing.T) {
+		// [100000,165536) and [165536,165546) share no id.
+		_, env := subidFixture(t, []string{"otheruser:165536:10"}, []string{"otheruser:165536:10"})
+		out, err := runProvisioner(t, env)
+		if err != nil {
+			t.Fatalf("the provisioner refused adjacent (non-overlapping) intervals: %v\n%s", err, out)
+		}
+	})
+
+	t.Run("duplicate builder entry fails closed", func(t *testing.T) {
+		_, env := subidFixture(t, []string{"docker-helper-builder:300000:65536"}, nil)
+		out, err := runProvisioner(t, env)
+		if err == nil {
+			t.Fatalf("the provisioner accepted a duplicate builder entry:\n%s", out)
+		}
+		if !strings.Contains(out, "more than one docker-helper-builder entry") {
+			t.Errorf("the refusal must name the duplicate entry:\n%s", out)
+		}
+	})
+
+	t.Run("nonnumeric other-identity interval fails closed", func(t *testing.T) {
+		_, env := subidFixture(t, []string{"otheruser:notanumber:1000"}, nil)
+		out, err := runProvisioner(t, env)
+		if err == nil {
+			t.Fatalf("the provisioner accepted a nonnumeric interval in its allocation space:\n%s", out)
+		}
+		if !strings.Contains(out, "malformed or nonnumeric entry") {
+			t.Errorf("the refusal must name the malformed database entry:\n%s", out)
+		}
+	})
+
+	t.Run("malformed db line fails closed", func(t *testing.T) {
+		// A two-field line cannot be parsed as an allocation; it must not
+		// be silently skipped by the overlap sweep.
+		_, env := subidFixture(t, []string{"otheruser:200000"}, nil)
+		out, err := runProvisioner(t, env)
+		if err == nil {
+			t.Fatalf("the provisioner accepted a malformed db line:\n%s", out)
+		}
+		if !strings.Contains(out, "malformed or nonnumeric entry") {
+			t.Errorf("the refusal must name the malformed database entry:\n%s", out)
+		}
+	})
+}
+
 func TestProvisionBuilderTunConvergence(t *testing.T) {
 	scriptPath := "packaging/scripts/lib/provision-builder.sh"
 	absScript, err := filepath.Abs(scriptPath)

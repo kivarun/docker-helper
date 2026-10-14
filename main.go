@@ -402,6 +402,26 @@ func runDaemon(stdout, stderr io.Writer) error {
 			WorkloadMAC:         workloadMAC,
 		}
 
+		// Builder-manager startup reconciliation (external review F1): a
+		// main-daemon restart alone must converge the live builder-manager
+		// state before serving build admission — the manager (and any
+		// surviving per-operation buildkitd) still accounts the previous
+		// generation's instances while the new OperationSupervisor forgot
+		// every operation. One bounded PURGE through the existing P2
+		// client opens build admission; a manager outage or a refused
+		// PURGE keeps it closed (run/pull/registry-login stay available,
+		// and the next build re-runs the bounded reconciliation, so
+		// manager recovery never requires restarting the main daemon).
+		app.BuilderAdmission = newBuilderAdmissionGate()
+		if err := app.BuilderAdmission.reconcileStartup(app.builderManagerPurge); err != nil {
+			opLog(context.Background()).Warn("builder-manager startup reconciliation failed; build admission stays closed until a build re-proves the manager state",
+				slog.String("operation", "serve_startup"),
+				slog.String("error", err.Error()),
+			)
+		} else {
+			opLog(context.Background()).Info("builder-manager startup reconciliation converged; build admission open")
+		}
+
 		mux := http.NewServeMux()
 		registerRoutes(mux, app)
 

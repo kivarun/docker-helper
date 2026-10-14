@@ -173,12 +173,6 @@ func TestBuildDriverCancelAfterCommitAdmissionFollowsTagOutcome(t *testing.T) {
 	if !hasArgvWord(calls.argv(calls.count()-1), "tag") {
 		t.Fatalf("newest child is not the commit child:\n%s", calls.all())
 	}
-	op.mu.Lock()
-	claimed := op.commitClaimed
-	op.mu.Unlock()
-	if !claimed {
-		t.Fatal("commit admission not claimed before cancellation")
-	}
 
 	if err := supervisor.cancel(op.ID, nil); err != nil {
 		t.Fatalf("cancel: %v", err)
@@ -284,12 +278,6 @@ func TestOperationCommitAdmissionTerminationOrderings(t *testing.T) {
 			resCh <- res
 		}()
 		waitProcessReady(t, ready)
-		op.mu.Lock()
-		claimed := op.commitClaimed
-		op.mu.Unlock()
-		if !claimed {
-			t.Fatal("commit admission not claimed")
-		}
 
 		go func() {
 			defer wg.Done()

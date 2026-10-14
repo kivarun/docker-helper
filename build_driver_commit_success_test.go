@@ -84,8 +84,8 @@ func TestBuildDriverCommitSuccessCleanupOutcomes(t *testing.T) {
 
 // TestBuildDriverTerminateDuringPostCommitCleanup proves that terminating
 // the operation while the post-commit internal-tag cleanup child is running
-// cannot unmake the committed build: commitClaimed was set before the
-// termination, the latch is set, the blocked cleanup child is released and
+// cannot unmake the committed build: the commit child already started and
+// exited 0 before the termination, the latch is set, the blocked cleanup child is released and
 // SUCCEEDS on its fresh bounded context (not the terminated operation
 // context), and the final operation is succeeded with no additional tag or
 // cleanup child. Explicit cancel and daemon shutdown are separate cases.
@@ -131,13 +131,8 @@ func TestBuildDriverTerminateDuringPostCommitCleanup(t *testing.T) {
 			if !hasArgvWord(calls.argv(calls.count()-1), "rmi") {
 				t.Fatalf("newest child is not the post-commit cleanup child:\n%s", calls.all())
 			}
-			// The commit admission was claimed BEFORE the termination.
-			op.mu.Lock()
-			claimed := op.commitClaimed
-			op.mu.Unlock()
-			if !claimed {
-				t.Fatal("commit admission not claimed before termination")
-			}
+			// The commit admission is proven by the started children: the
+			// commit child started and exited 0 before the termination.
 
 			done := tc.terminate(t, supervisor, op)
 			waitTerminationLatched(t, op)
