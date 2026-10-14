@@ -567,6 +567,31 @@ install -m 0755 "$TRANSFERRED/docker-helper" /usr/bin/docker-helper
 restorecon /usr/bin/docker-helper 2>>"$EVIDENCE_DIR/01-composition-inputs.txt" || true
 install -m 0644 "$TRANSFERRED/docker-helper-builder.service" /etc/systemd/system/"$UNIT".service
 
+# Re-review R3: the INSTALLED production files must be the manifest-bound
+# candidate bytes. The transferred inputs were already verified against the
+# manifest above; this second chain binds the installed destinations
+# themselves, so the proof's composition identity covers the exact guest
+# files the runtime actually executes/loads. A mismatch is INCOMPLETE.
+{
+  echo "=== installed production file hashes (must match the manifest) ==="
+  sha256sum /usr/bin/docker-helper \
+    /etc/systemd/system/"$UNIT".service \
+    /usr/lib/modules-load.d/docker-helper-builder.conf 2>/dev/null || true
+} >> "$EVIDENCE_DIR/01-composition-inputs.txt"
+while IFS='=' read -r key want; do
+  case "$key" in
+    binary_sha256) file=/usr/bin/docker-helper ;;
+    unit_sha256) file=/etc/systemd/system/"$UNIT".service ;;
+    modules_load_sha256) file=/usr/lib/modules-load.d/docker-helper-builder.conf ;;
+    *) continue ;;
+  esac
+  got="$(sha256sum "$file" 2>/dev/null | awk '{print $1}')"
+  if [ "$got" != "$want" ]; then
+    note "installed guest file $file hashes $got, manifest says $want; the installed composition is not the manifest-bound candidate"
+    finish INCOMPLETE; exit 0
+  fi
+done < "$TRANSFERRED/manifest.txt"
+
 BUILDKIT_VERSION=v0.33.0
 BUILDKIT_TARBALL="buildkit-${BUILDKIT_VERSION}.linux-amd64.tar.gz"
 BUILDKIT_SHA256=b6242896d343100808dcbe37565caf381e0a444a6a83d7255926bb1519248ead

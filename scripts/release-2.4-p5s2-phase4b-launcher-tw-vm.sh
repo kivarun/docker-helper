@@ -12,13 +12,20 @@
 #
 #   Release gate mode (PHASE4B_RELEASE_GATE=1, default): the composition
 #   is the EXACT release candidate — the orchestrator's own checkout,
-#   pinned to the candidate SHA passed in PHASE4B_CANDIDATE_SHA. The
-#   binary, the shipped SELinux module sources, the builder unit, and the
-#   provisioning script all come from that one checkout; the manifest
-#   records the candidate SHA and the input hashes, and the guest evidence
-#   records the same manifest (the guest's hash chain verifies every
-#   transferred input against it). The verdict gate requires exactly one
-#   terminal verdict and that verdict must be PASS.
+#   pinned to the candidate SHA passed in PHASE4B_CANDIDATE_SHA, and the
+#   tested binary is the canonical release candidate artifact staged by
+#   scripts/release-candidate.sh (PHASE4B_CANDIDATE_DIR): the orchestrator
+#   verifies the candidate set against its own SHA256SUMS, binds it to the
+#   candidate SHA through candidate.manifest, and requires the tested
+#   binary to be byte-identical to the candidate tarball's docker-helper
+#   member (re-review R3 — no ad-hoc build on this path). The manifest
+#   records the candidate SHA, the candidate artifact hashes (tarball/DEB/
+#   RPM), the release version, the tested binary hash and the candidate
+#   binary hash, and the input hashes; the guest evidence records the same
+#   manifest (the guest's hash chain verifies every transferred input and
+#   every installed production file against it). The verdict gate requires
+#   exactly one terminal verdict, that verdict must be PASS, and the
+#   manifest must bind tested == candidate.
 #
 #   Historical experiment mode (PHASE4B_RELEASE_GATE=0): the composition
 #   is built from the TESTED PROOF COMMIT (PHASE4B_PROOF_REF) so the
@@ -50,6 +57,47 @@ if [ "$RELEASE_GATE" = "1" ]; then
   CHECKOUT_SHA="$(git -C "$UAT_REPO_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
   [ "$CHECKOUT_SHA" = "$CANDIDATE_SHA" ] \
     || fail "the composition checkout ($CHECKOUT_SHA) is not the release candidate ($CANDIDATE_SHA)"
+
+  # Re-review R3: the tested binary must BE the canonical release-candidate
+  # artifact. The candidate set was staged by scripts/release-candidate.sh
+  # (the same single producer P4B uses); the orchestrator verifies the set
+  # against its own SHA256SUMS, binds it to the candidate SHA through the
+  # producer's own candidate.manifest, and requires the transferred helper
+  # binary to be byte-identical to the tarball member the release actually
+  # ships. There is no ad-hoc build on this path.
+  CANDIDATE_DIR="${PHASE4B_CANDIDATE_DIR:-$UAT_REPO_DIR/dist/candidate}"
+  [ -f "$CANDIDATE_DIR/SHA256SUMS" ] \
+    || fail "the candidate set has no SHA256SUMS at $CANDIDATE_DIR (stage it with scripts/release-candidate.sh)"
+  [ -s "$CANDIDATE_DIR/candidate.manifest" ] \
+    || fail "the candidate set has no candidate.manifest at $CANDIDATE_DIR"
+  ( cd "$CANDIDATE_DIR" && sha256sum --check SHA256SUMS ) \
+    || fail "the candidate set failed its own SHA256SUMS verification"
+  SOURCE_SHA_RECORD="$(sed -n 's/^source_sha=//p' "$CANDIDATE_DIR/candidate.manifest")"
+  [ "$SOURCE_SHA_RECORD" = "$CANDIDATE_SHA" ] \
+    || fail "the candidate set was produced from source SHA $SOURCE_SHA_RECORD, not from the release candidate $CANDIDATE_SHA"
+  RELEASE_VERSION="$(sed -n 's/^version=//p' "$CANDIDATE_DIR/candidate.manifest")"
+  [ -n "$RELEASE_VERSION" ] || fail "the candidate manifest does not record its version"
+  shopt -s nullglob
+  candidate_tars=( "$CANDIDATE_DIR"/*.tar.gz )
+  shopt -u nullglob
+  [ "${#candidate_tars[@]}" -eq 1 ] \
+    || fail "expected exactly one candidate tarball in $CANDIDATE_DIR (found ${#candidate_tars[@]})"
+  CANDIDATE_TARBALL="$(basename "${candidate_tars[0]}")"
+  CANDIDATE_EXTRACT_DIR="$(mktemp -d)"
+  tar xzf "${candidate_tars[0]}" -C "$CANDIDATE_EXTRACT_DIR" \
+    || fail "cannot extract the candidate tarball for the tested-bytes binding"
+  candidate_bins=()
+  while IFS= read -r f; do candidate_bins+=("$f"); done \
+    < <(find "$CANDIDATE_EXTRACT_DIR" -type f -name docker-helper)
+  [ "${#candidate_bins[@]}" -eq 1 ] \
+    || fail "expected exactly one docker-helper member in the candidate tarball (found ${#candidate_bins[@]})"
+  CANDIDATE_BIN="${candidate_bins[0]}"
+  [ -x "$CANDIDATE_BIN" ] || fail "the candidate tarball member $CANDIDATE_BIN is not executable"
+  cmp -s "$CANDIDATE_BIN" "$HELPER_BIN" \
+    || fail "the tested helper binary is not the release candidate artifact (byte mismatch against the candidate tarball member)"
+  CANDIDATE_BIN_SHA="$(sha256sum "$CANDIDATE_BIN" | awk '{print $1}')"
+  rm -rf "$CANDIDATE_EXTRACT_DIR"
+  log "tested bytes bound: tested docker-helper sha256 $CANDIDATE_BIN_SHA == candidate artifact sha256 (candidate $CANDIDATE_SHA, version $RELEASE_VERSION)"
 else
   PROOF_SRC="${PHASE4B_PROOF_SRC:-$UAT_REPO_DIR/proof-src}"
 fi
@@ -114,6 +162,18 @@ vm_scp "$SCRIPT_DIR/release-2.4-p5s2-phase4b-launcher-tw.sh" \
   echo "unit_sha256=$(sha256sum "$PROOF_SRC/packaging/systemd/system/docker-helper-builder.service" | awk '{print $1}')"
   echo "provision_sha256=$(sha256sum "$PROOF_SRC/packaging/scripts/lib/provision-builder.sh" | awk '{print $1}')"
   echo "modules_load_sha256=$(sha256sum "$PROOF_SRC/packaging/modules-load.d/docker-helper-builder.conf" | awk '{print $1}')"
+  if [ "$RELEASE_GATE" = "1" ]; then
+    # Re-review R3: the manifest binds the tested bytes to the canonical
+    # candidate artifact bytes — the release version, the candidate set's
+    # own artifact hashes (tarball/DEB/RPM from the producer's SHA256SUMS),
+    # and the candidate tarball's docker-helper member, which the binding
+    # above proved byte-identical to the tested binary.
+    echo "release_version=$RELEASE_VERSION"
+    echo "candidate_tarball_sha256=$(awk -v f="$CANDIDATE_TARBALL" '$2==f {print $1}' "$CANDIDATE_DIR/SHA256SUMS")"
+    echo "candidate_deb_sha256=$(awk '$2 ~ /\.deb$/ {print $1}' "$CANDIDATE_DIR/SHA256SUMS")"
+    echo "candidate_rpm_sha256=$(awk '$2 ~ /\.rpm$/ {print $1}' "$CANDIDATE_DIR/SHA256SUMS")"
+    echo "candidate_binary_sha256=$CANDIDATE_BIN_SHA"
+  fi
 } > /tmp/p4b-vm-manifest
 vm_scp /tmp/p4b-vm-manifest opc@127.0.0.1:/tmp/p5s2-phase4b-launcher/manifest.txt
 
@@ -144,7 +204,7 @@ log 'run the verdict gate (external review F4: exactly one terminal verdict; PAS
   "$RUNNER_TEMP/p5s2-phase4b-guest.log" "$GUEST_RC" /tmp/p4b-vm-manifest
 
 if [ "$RELEASE_GATE" = "1" ]; then
-  log "openSUSE Tumbleweed Phase 4B release gate: candidate $CANDIDATE_SHA proved PASS on the exact candidate composition"
+  log "openSUSE Tumbleweed Phase 4B release gate: candidate $CANDIDATE_SHA proved PASS on the exact candidate composition (tested docker-helper sha256 $CANDIDATE_BIN_SHA == candidate artifact sha256)"
 else
   log 'openSUSE Tumbleweed Phase 4B launcher/provisioning proof reached a terminal measured outcome'
 fi

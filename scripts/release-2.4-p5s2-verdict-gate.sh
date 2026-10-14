@@ -13,7 +13,11 @@
 #     verdict, a FAIL, an INCOMPLETE, or two conflicting verdict lines
 #     fails the gate. The exact candidate composition manifest must be
 #     present and must record the candidate SHA and the binary hash
-#     (external review F3: the tested artifacts are the candidate's).
+#     (external review F3: the tested artifacts are the candidate's), and
+#     it must bind the tested binary hash to the canonical candidate
+#     artifact hash (re-review R3: the PASS belongs to the exact bytes
+#     intended for release — the release version, the candidate
+#     tarball/DEB/RPM hashes, and tested binary == candidate binary).
 #
 #   Historical experiment mode (PHASE4B_RELEASE_GATE=0):
 #     the pinned-proof investigation keeps its measured-outcome contract:
@@ -66,6 +70,26 @@ if [ "$MODE" = "1" ]; then
   fi
   if ! grep -q '^binary_sha256=[0-9a-f]\{64\}$' "$MANIFEST"; then
     printf 'verdict-gate: the manifest does not record the candidate binary hash\n' >&2
+    exit 1
+  fi
+  # Re-review R3: the PASS must belong to the exact bytes intended for
+  # release. The manifest must bind the release version, the candidate
+  # set's own artifact hashes (tarball/DEB/RPM), and the candidate binary
+  # hash, and the tested binary hash must EQUAL the candidate binary hash.
+  for key in release_version candidate_tarball_sha256 candidate_deb_sha256 candidate_rpm_sha256; do
+    if ! grep -q "^${key}=." "$MANIFEST"; then
+      printf 'verdict-gate: the manifest does not record %s (the tested bytes are not bound to the candidate set)\n' "$key" >&2
+      exit 1
+    fi
+  done
+  TESTED_BIN="$(sed -n 's/^binary_sha256=//p' "$MANIFEST")"
+  CANDIDATE_BIN="$(sed -n 's/^candidate_binary_sha256=//p' "$MANIFEST")"
+  if [ -z "$CANDIDATE_BIN" ]; then
+    printf 'verdict-gate: the manifest does not record candidate_binary_sha256\n' >&2
+    exit 1
+  fi
+  if [ "$TESTED_BIN" != "$CANDIDATE_BIN" ]; then
+    printf 'verdict-gate: the tested binary %s is not the candidate artifact binary %s\n' "$TESTED_BIN" "$CANDIDATE_BIN" >&2
     exit 1
   fi
   exit 0
