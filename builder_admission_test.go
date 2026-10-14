@@ -96,7 +96,7 @@ func seamManagerPeerIdentity(t *testing.T) {
 // newAdmissionTestApp builds the build-handler fixture: admin-authorized
 // app with staging seam, supervisor, and one authorized Session with a
 // Dockerfile in its workspace.
-func newAdmissionTestApp(t *testing.T) (*App, *operationSupervisor, string) {
+func newAdmissionTestApp(t *testing.T) (*App, *operationSupervisor, *CreatedSession) {
 	t.Helper()
 	app := newTestAppWithAdminTokenAndStaging(t)
 	supervisor := newOperationSupervisor()
@@ -114,7 +114,7 @@ func newAdmissionTestApp(t *testing.T) (*App, *operationSupervisor, string) {
 	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
-	return app, supervisor, result.Token
+	return app, supervisor, result
 }
 
 func postAdmissionBuild(app *App, token string) *httptest.ResponseRecorder {
@@ -200,13 +200,15 @@ func TestBuilderAdmissionGateReconcilesBuilderManagerState(t *testing.T) {
 
 // TestBuildAdmissionRefusedWhileManagerStateUnknown proves the handler
 // contract (external review F1): while the builder-manager state is not
-// proven for this daemon generation, the build is refused before any
-// capacity reservation or operation admission, the run surface stays
+// proven for this daemon generation, the build is refused closed after its
+// lifecycle/capacity reservation was acquired and released exactly once
+// (re-review R2 places the reservation first), the run surface stays
 // available, and a later build rechecks/reconciles and succeeds without a
 // main-daemon restart. The real client speaks the real wire protocol to a
 // test endpoint.
 func TestBuildAdmissionRefusedWhileManagerStateUnknown(t *testing.T) {
-	app, supervisor, token := newAdmissionTestApp(t)
+	app, supervisor, session := newAdmissionTestApp(t)
+	token := session.Token
 	app.BuilderAdmission = newBuilderAdmissionGate()
 	seamManagerPeerIdentity(t)
 
@@ -377,5 +379,95 @@ func TestBuilderAdmissionStartupReconcilePurgesLiveManagerState(t *testing.T) {
 	assertDirsAbsentAt(t, opID)
 	if !gate.ensureOpen(func() error { return nil }) {
 		t.Fatal("build admission stayed closed after the successful startup reconciliation")
+	}
+}
+
+// TestReviewBuildAtCapacityMustNotQueueBehindReconciliation proves the
+// handler ordering contract (re-review R2): the lifecycle/capacity
+// reservation is the immediate admission boundary and runs BEFORE any
+// blocking backend preparation, so a build at an exhausted capacity
+// ceiling is refused immediately with the single bounded capacity refusal
+// and never queues behind — or triggers — the closed admission gate's
+// builder-manager reconciliation.
+//
+// Regression shape: the pre-fix handler consulted the gate before the
+// reservation, so the same saturated build waited for the in-flight
+// bounded PURGE (here: a reconciliation that never completes while the
+// test observes) before its immediate capacity refusal.
+func TestReviewBuildAtCapacityMustNotQueueBehindReconciliation(t *testing.T) {
+	app, supervisor, session := newAdmissionTestApp(t)
+	app.BuilderAdmission = newBuilderAdmissionGate()
+	seamManagerPeerIdentity(t)
+
+	// The closed gate's reconciliation PURGE never completes while the
+	// test observes: any handler that queues behind it cannot answer
+	// within the observation window. The counter proves whether the
+	// refused request consulted the gate at all.
+	var purges atomic.Int32
+	releasePurge := make(chan struct{})
+	fakeManagerEndpoint(t, func(line string) string {
+		if line == builderManagerCmdPurge {
+			purges.Add(1)
+			<-releasePurge
+		}
+		return builderManagerRespOK
+	})
+
+	// Saturate the Session ceiling exactly: four live reservations, pure
+	// capacity accounting, no admitted operations.
+	var held []*capacityReservation
+	done := make(chan struct{})
+	w := httptest.NewRecorder()
+	t.Cleanup(func() {
+		// The blocked reconciliation (if any) unblocks first, then the
+		// handler drains against the still-saturated ceiling, and only
+		// then is the capacity accounting released — so a pre-fix handler
+		// resumed by this cleanup can never admit an operation.
+		close(releasePurge)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+		for _, r := range held {
+			r.Release()
+		}
+	})
+	for i := 0; i < maxConcurrentOperationsPerSession; i++ {
+		res, decision := supervisor.reserve(session.Session.ID, session.Session.LauncherID, operationKindRun)
+		if decision != admissionAccepted {
+			t.Fatalf("saturation reservation %d refused: %d", i+1, decision)
+		}
+		held = append(held, res)
+	}
+
+	body, _ := json.Marshal(map[string]string{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "example:test",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+session.Token)
+	go func() {
+		defer close(done)
+		app.handleBuild(w, req)
+	}()
+
+	// The instant of the answer is the assertion point: the refusal must
+	// come from the immediate capacity accounting, not from the gate.
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("the build at exhausted capacity did not answer within the observation window: it queued behind the closed admission gate's reconciliation (%d PURGE attempts observed)", purges.Load())
+	}
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("build at the capacity ceiling = %d, want %d (%s)", w.Code, http.StatusTooManyRequests, w.Body.String())
+	}
+	if code := decodeRejectedResponse(t, w); code != capacityRefusalCode {
+		t.Fatalf("capacity refusal code = %q, want %q", code, capacityRefusalCode)
+	}
+	// The refused request never consulted the closed gate: no
+	// reconciliation PURGE was even attempted.
+	if got := purges.Load(); got != 0 {
+		t.Fatalf("the capacity-refused build consulted the closed admission gate: %d PURGE attempts", got)
 	}
 }

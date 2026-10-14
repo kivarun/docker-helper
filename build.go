@@ -57,31 +57,17 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Builder-manager admission reconciliation (external review F1): build
-	// admission stays closed while the builder-manager state is not proven
-	// known-clean for this daemon generation. A closed gate runs one
-	// bounded reconciliation first (the next build rechecks/reconciles, so
-	// manager recovery never requires a main-daemon restart); a refused
-	// reconciliation fails the build closed BEFORE any capacity
-	// reservation or operation admission. The unrelated surfaces
-	// (run/pull/registry-login) never consult this gate. The refusal is
-	// the established internal-error classification; the operational
-	// reason stays out of the public message.
-	if a.BuilderAdmission != nil && !a.BuilderAdmission.ensureOpen(a.builderManagerPurge) {
-		opLog(ctx).Warn("build admission refused: builder-manager state is not proven for this daemon generation",
-			slog.String("operation", "build"),
-		)
-		writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "build", "internal_error", "internal server error", session.PrincipalName)
-		return
-	}
-
-	// Reserve fixed Release-2.2 capacity before any expensive
-	// preparation: the session-use lease, build-request probing, snapshot
-	// exposure resolution, and the build staging all happen while the
-	// reservation is held, and every failure path releases it exactly once.
-	// At a security ceiling the request is refused immediately; there is no
-	// queue and no waiting admission. Tests without a supervisor skip the
-	// reservation (the reservation and its release paths are nil-safe).
+	// Reserve fixed Release-2.2 capacity before any expensive or blocking
+	// preparation: the reservation is the immediate lifecycle/capacity
+	// admission boundary, and it is taken BEFORE the builder-manager
+	// reconciliation below (re-review R2). A saturated or closed surface
+	// is refused here without waiting for — or triggering — any backend
+	// reconciliation: there is no queue and no waiting admission. The
+	// session-use lease, build-request probing, snapshot exposure
+	// resolution, and the build staging all happen while the reservation
+	// is held, and every failure path releases it exactly once. Tests
+	// without a supervisor skip the reservation (the reservation and its
+	// release paths are nil-safe).
 	var reservation *capacityReservation
 	if a.OperationSupervisor != nil {
 		var decision admissionDecision
@@ -90,6 +76,31 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 			writeOperationAdmissionRejected(ctx, w, "build", decision, session.PrincipalName)
 			return
 		}
+	}
+
+	// Builder-manager admission reconciliation (external review F1): build
+	// admission stays closed while the builder-manager state is not proven
+	// known-clean for this daemon generation. A closed gate runs one
+	// bounded reconciliation first (the next build rechecks/reconciles, so
+	// manager recovery never requires a main-daemon restart); a refused
+	// reconciliation releases the just-acquired reservation and fails the
+	// build closed before any operation admission. The wait is explicitly
+	// bounded: every PURGE runs under the builderClientStopRead bound, and
+	// concurrent closed-gate callers serialize on the gate, so a follower
+	// waits at most for the in-flight bounded PURGE — the first success
+	// opens the gate for every follower. The unrelated surfaces
+	// (run/pull/registry-login) never consult this gate. The refusal is
+	// the established internal-error classification; the operational
+	// reason stays out of the public message.
+	if a.BuilderAdmission != nil && !a.BuilderAdmission.ensureOpen(a.builderManagerPurge) {
+		opLog(ctx).Warn("build admission refused: builder-manager state is not proven for this daemon generation",
+			slog.String("operation", "build"),
+		)
+		// The reservation was acquired but the operation is never admitted:
+		// release it exactly once on this refusal path.
+		reservation.Release()
+		writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "build", "internal_error", "internal server error", session.PrincipalName)
+		return
 	}
 
 	// Acquire session-use lease BEFORE any filesystem access that depends
