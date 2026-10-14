@@ -661,9 +661,12 @@ AppArmor backend parity follows the implementation plan §14
   (M0-proven). The builder profile deliberately carries NO parallel
   rootlesskit userns policy; buildkitd/buildkit-runc/slirp4netns/
   newuidmap/newgidmap executions and the flow's mount/network mechanics
-  are mediated by the distro profile (or run unconfined via `px`'s
-  fallback on hosts that ship no rootlesskit profile, preserving the
-  distro-no-restriction behavior).
+  are mediated by the distro profile. The builder profile's `px` exec of
+  `/usr/bin/rootlesskit` requires a suitable loaded rootlesskit profile:
+  `px` promises no unconfined fallback and no inherited caller label, so
+  on a host that ships no such profile the exec is denied and the build
+  fails closed — the build works only when the prerequisite profile is
+  loaded.
 - The daemon profile gains ONLY the Release 2.4 transport surface:
   the manager endpoint socket, the per-operation buildkitd sockets, the
   unix transports toward the builder profile and the flow profile, and
@@ -685,10 +688,12 @@ parity target carries `/etc/apparmor.d/rootlesskit` (shipped by the distro
 label (`rootlesskit (unconfined)`), not merely a functional build. The distro
 profile is declared `flags=(unconfined)`: a NAMED attachment point that owns
 the `userns` permission and applies no file mediation, which is why AppArmor
-reports its mode as `(unconfined)`. The transition proof is the profile name —
-without the distro profile the `px` rule falls back and the flow keeps the
-caller's label: the flow stays FUNCTIONAL (the distro-no-restriction
-behavior), but that is an operational fallback, not AppArmor parity.
+reports its mode as `(unconfined)`. The `px` rule itself already requires
+the prerequisite profile — it promises no unconfined fallback and no
+inherited caller label, so without a suitable loaded rootlesskit profile
+the exec is denied and the build fails closed. The transition proof is the
+profile name: it identifies WHICH loaded profile owns the vehicle, on a
+host where the loaded prerequisite profile is itself a parity requirement.
 
 The denial claim is exact, not absolute: the parity UAT requires no
 UNEXPECTED AppArmor DENIED records for the helper profiles in the fresh

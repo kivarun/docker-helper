@@ -457,20 +457,21 @@ info "bundled buildkitd ran: pid=$BUILDKITD_PID (cmdline matches op $OP_ID)"
 
 # The CONFINED model's transition proof: the launch vehicle must run
 # under the DISTRO rootlesskit profile (the single owner of the userns
-# permission). `px` has an unconfined fallback on hosts without the
-# distro profile, so a functional build alone cannot prove the
-# transition — the process label is the proof. On the AppArmor parity
-# target (Ubuntu: the distro apparmor package ships
-# /etc/apparmor.d/rootlesskit) the leader label is
+# permission). The builder profile execs /usr/bin/rootlesskit with `px`,
+# which REQUIRES a suitable loaded rootlesskit profile: `px` promises
+# neither an unconfined fallback nor an inherited caller label — on a
+# host without the prerequisite profile the exec is denied and the build
+# fails closed. The build therefore already requires the distro profile;
+# the process label is the proof of WHICH loaded profile owns the
+# transition. On the AppArmor parity target (Ubuntu: the distro apparmor
+# package ships /etc/apparmor.d/rootlesskit) the leader label is
 # "rootlesskit (unconfined)": the distro profile is declared
 # flags=(unconfined), i.e. a NAMED attachment point that owns the
 # userns permission and applies no file mediation, so AppArmor reports
-# its mode as (unconfined). The transition proof is the profile name:
-# without the distro profile the px fallback keeps the caller's label
-# (docker-helper-builder), never a rootlesskit label. The distro
-# profile is not touched by the harvest window (only the two helper
-# profiles are reloaded in complain mode), so the assertion holds in
-# both passes.
+# its mode as (unconfined). The transition proof is the profile name.
+# The distro profile is not touched by the harvest window (only the two
+# helper profiles are reloaded in complain mode), so the assertion holds
+# in both passes.
 RK_PID=""
 for rpid in $(pgrep -x rootlesskit); do
 	if tr '\0' ' ' < "/proc/$rpid/cmdline" 2>/dev/null \
