@@ -418,7 +418,7 @@ func TestM1DaemonSideArgvResidualDocumented(t *testing.T) {
 		{
 			path: "README.md",
 			contains: []string{
-				"accepted Release 2.2 residual of the daemon-side legacy Docker CLI argv",
+				"accepted residual of the buildctl argv",
 				"not a secret transport",
 			},
 		},

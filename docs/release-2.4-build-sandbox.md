@@ -2,8 +2,21 @@
 
 ## Status
 
-Accepted architectural direction for Release 2.4. Detailed implementation
-planning begins after Release 2.3 removes user-mode daemon support.
+Accepted architectural direction for Release 2.4, SHIPPED in Release 2.4.
+The sections below record the accepted design and its feasibility proofs;
+the shipped behavior is authoritative and is documented in
+`docs/architecture.md` ([Build](architecture.md#build)). In short: every
+build executes as the frozen sequence manager START -> buildkit socket
+validation -> buildctl -> manager STOP -> docker load -> internal-tag
+verification -> docker tag commit -> bounded internal-tag cleanup, inside
+a per-operation ephemeral rootless BuildKit instance launched by
+rootlesskit with slirp4netns user-space networking under the dedicated
+unprivileged `docker-helper-builder` identity, owned end to end by the
+builder manager (`docker-helper builder serve`) through its
+START/STOP/PURGE protocol.
+
+Detailed implementation planning began after Release 2.3 removed
+user-mode daemon support.
 
 The mandatory M0 build-sandbox feasibility probe is CLOSED (2026-09-21):
 composition A — a dedicated unprivileged builder user running rootless
@@ -719,9 +732,18 @@ and may be introduced only through an explicit docker-helper policy decision.
 Build networking is a separate policy dimension from filesystem/identity
 isolation.
 
-Release 2.4 must explicitly document and test the builder's network position.
-The feasibility/design pass must determine which network modes are supported
-and which party owns that choice. At minimum:
+The SHIPPED Release 2.4 network position: the per-operation sandbox runs
+rootlesskit with `--net=slirp4netns` and `--disable-host-loopback` —
+user-space networking with the host loopback removed, a server-owned
+argv with no caller-controlled network knob (no `RUN --network=host`
+entitlement, no server entitlement path). Release 2.4 ships NO egress
+allowlist, proxy, or network-deny capability, and none is promised: the
+sandbox's network position narrows the builder's reach (host loopback is
+unreachable, `RUN` traffic is NATed through slirp4netns) but is not a
+complete egress-isolation boundary. Workload containers keep Docker's
+default networking.
+
+The remaining design contract stands:
 
 - the caller cannot silently escalate to host networking or another privileged
   builder entitlement;

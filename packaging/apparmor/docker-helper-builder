@@ -22,9 +22,14 @@
 # apparmor_restrict_unprivileged_userns=1 (Release 2.4 M0-proven). This
 # profile therefore carries NO parallel rootlesskit userns policy, and
 # buildkitd/slirp4netns/newuidmap/newgidmap execs, flow mounts, TUN
-# setup, and flow networking are mediated by the distro profile (or run
-# unconfined on hosts that ship no rootlesskit profile, where px's
-# unconfined fallback preserves the distro-no-restriction behavior).
+# setup, and flow networking are mediated by the distro profile. There is
+# NO fallback promised by `px`: on a host that ships no rootlesskit
+# profile the exec is DENIED (px requires the matching profile; it never
+# degrades to unconfined or inherited execution). Deployments using the
+# builder flow under AppArmor must have the distro rootlesskit profile
+# loaded (the packaged install requirements do; a profile that ships
+# only with the userns restriction is still required by the recorded
+# M0 evidence, so keep the distro package installed).
 #
 # Installation:
 #   sudo cp docker-helper-builder /etc/apparmor.d/
@@ -106,12 +111,14 @@ profile docker-helper-builder flags=(attach_disconnected,mediate_deleted) {
 	/etc/pki/tls/certs/** r,
 
 	# The launch vehicle: transition into the DISTRO rootlesskit profile.
-	# `px` transitions when the distro profile exists (Ubuntu 24.04+;
-	# the userns permission stays owned by the distro profile) and falls
-	# back to unconfined on hosts without it (distros without the userns
-	# restriction). The SELinux launch chain (launcher child, categorized
-	# flow domain) is a SELinux-mechanics owner and has no AppArmor
-	# counterpart; the direct rootlesskit exec is the AppArmor flow path.
+	# `px` transitions into the distro profile (/etc/apparmor.d/rootlesskit,
+	# Ubuntu 24.04+; the userns permission stays owned by the distro
+	# profile) and DENIES the exec when that profile is not loaded — px
+	# promises no unconfined or inherited fallback, so the profile is a
+	# mandatory prerequisite of the builder flow on AppArmor hosts. The
+	# SELinux launch chain (launcher child, categorized flow domain) is a
+	# SELinux-mechanics owner and has no AppArmor counterpart; the direct
+	# rootlesskit exec is the AppArmor flow path.
 	/usr/bin/rootlesskit px,
 
 	# The manager terminates its own flow process groups through the

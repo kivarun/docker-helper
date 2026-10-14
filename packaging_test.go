@@ -1840,8 +1840,9 @@ func TestBuilderAppArmorProfileFile(t *testing.T) {
 	}
 
 	// The launch vehicle transitions into the DISTRO rootlesskit profile:
-	// px (transition when the distro profile exists, unconfined fallback
-	// otherwise). No parallel userns rule, no generic bin_t execution.
+	// px (a mandatory transition — the distro profile must be loaded;
+	// px promises no unconfined or inherited fallback). No parallel
+	// userns rule, no generic bin_t execution.
 	if !strings.Contains(active, "/usr/bin/rootlesskit px,") {
 		t.Error("profile must transition the launch vehicle into the distro rootlesskit profile (px)")
 	}
@@ -10255,8 +10256,8 @@ func TestUATBlackboxTriggerPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	ciContent := string(ci)
-	if !strings.Contains(ciContent, "push:") || !strings.Contains(ciContent, "branches: [main]") {
-		t.Error("ci.yml must keep the main-branch push trigger (ordinary pushes run CI)")
+	if !strings.Contains(ciContent, "push:") || !strings.Contains(ciContent, "branches: [main, release/2.4]") {
+		t.Error("ci.yml must keep the main-branch push trigger and run CI on the release/2.4 branch (the release branch must receive the full required checks)")
 	}
 
 	release, err := os.ReadFile(".github/workflows/release.yml")

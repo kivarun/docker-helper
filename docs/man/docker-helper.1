@@ -674,10 +674,18 @@ workspace (the daemon validates containment), and the Dockerfile path is
 relative to the context. \-\-build-arg may be
 repeated to pass multiple build arguments.
 Build arguments are not a secret transport: a value reaches the
-daemon-side Docker CLI child as \-\-build-arg K=V argv and is observable
-through /proc/<pid>/cmdline while that child runs (where host procfs
-policy permits), and Docker/BuildKit may retain ARG-related material in
-image history/provenance.
+server-owned bundled buildctl child as \fB\-\-opt build-arg:K=V\fR
+entries and is observable through /proc/<pid>/cmdline while that child
+runs (where host procfs policy permits), and Docker/BuildKit may retain
+ARG-related material in image history/provenance.
+The build itself never runs in the daemon's rootful Docker position:
+each build executes inside a per-operation rootless BuildKit sandbox
+launched by the \fBdocker-helper-builder\fR backend service (the builder
+manager owns the START/STOP/PURGE lifecycle of every per-operation
+instance), the buildctl client runs against the operation's private
+socket, and the resulting image is imported and committed by the
+trusted daemon through
+\fBdocker load\fR and \fBdocker tag\fR.
 Run and build are asynchronous operations under fixed concurrency
 ceilings (4 per session, 8 per daemon, of which 2 may be builds; a mount
 ceiling of 16 caller mounts per run applies): beyond a ceiling the
@@ -872,8 +880,11 @@ The daemon's own listeners are local only: a Unix socket plus a loopback
 HTTP listener. No remote or non-loopback listener exists.
 This is a statement about the daemon's own transport only: it
 does not promise anything about Docker workload or build networking.
-Builds and containers use the Docker/BuildKit default network position;
-docker-helper provides no workload or build network isolation.
+Workload containers use the Docker default network position; builds run
+inside the per-operation rootless BuildKit sandbox with user-space
+networking (slirp4netns, host loopback disabled). docker-helper provides
+no workload or build network isolation beyond those positions: there is
+no egress allowlist, proxy, or network-deny capability.
 .SH SEE ALSO
 .BR docker-helper-config (5),
 .BR apparmor (7),

@@ -71,16 +71,22 @@ policy:
 - filesystem access is restricted to each session's issued immutable
   filesystem snapshot (the workspace plus any issued disjoint roots);
 - every data-plane operation requires a session token;
-- all Docker commands go through a single process;
+- all Docker commands go through a single process, and builds are
+  delegated further to a per-operation rootless BuildKit sandbox under
+  the dedicated builder manager (builds never execute in the daemon's
+  Docker position);
 - the developer controls which filesystem snapshot each session is issued.
 
 docker-helper limits the host paths exposed through its supported Docker
-operations. It is not a complete sandbox: Docker/default networking remains
-available — for workload containers and for builds alike (the
-Docker/BuildKit builder executes with its own execution and network
-position, documented as the accepted build boundary pending the Release 2.4
-build sandbox) — and a validation or command-construction defect in this
-trusted Docker-facing service can compromise the host.
+operations. It is not a complete sandbox: Docker default networking
+remains available for workload containers, and a validation or
+command-construction defect in this trusted Docker-facing service can
+compromise the host. Builds do NOT run in that Docker position: Release
+2.4 executes every build inside a per-operation rootless BuildKit sandbox
+under the dedicated builder identity (the builder manager), with
+user-space networking and no host Docker authority
+([Build](#build)); no complete network-egress isolation is promised for
+either surface.
 
 ## High-level architecture
 
@@ -394,9 +400,19 @@ the current contract is Unix-authoritative with degraded-TCP startup.)
 
 ### systemd services
 
-The deployment ships one systemd system unit (see [systemd units and
-hardening](#systemd-units-and-hardening)). It carries the shutdown/restart
-contract ([Shutdown](#shutdown)) and the hardening profile.
+The deployment ships two systemd system units (see [systemd units and
+hardening](#systemd-units-and-hardening)):
+
+- `docker-helper.service` — the root-owned daemon. It carries the
+  shutdown/restart contract ([Shutdown](#shutdown)) and the hardening
+  profile.
+- `docker-helper-builder.service` — the dedicated unprivileged
+  `docker-helper-builder` backend service running `docker-helper builder
+  serve` (the builder manager that owns the per-operation rootless
+  BuildKit instances; see [Build](#build)). It is weakly ordered
+  `Before=docker-helper.service` only: builder unavailability fails
+  build requests closed while run/pull/registry-login stay available,
+  and the daemon recovers dynamically when the manager returns.
 
 ### Mandatory access control
 
@@ -1226,13 +1242,14 @@ not a path ceiling layered over the Principal's Unix DAC. Accepted semantics:
   not a reproduction of the Principal's host login credential set: host
   supplementary groups are not propagated, so permissions depending on
   those group memberships may differ.
-- Release 2.4 does not automatically close this boundary. The build sandbox
-  redesigns the builder execution/root/network boundary (see
-  [`release-2.4-build-sandbox.md`](release-2.4-build-sandbox.md)); moving
-  staging/read identity under an unprivileged Principal identity may
-  additionally narrow the helper's read authority, but only as a separate
-  explicit contract change — the accepted capability semantics never change
-  silently as a side effect of 2.4.
+- Release 2.4 ships the build sandbox: builder execution, root, and
+  network moved to the per-operation rootless BuildKit sandbox under the
+  builder manager (see
+  [`release-2.4-build-sandbox.md`](release-2.4-build-sandbox.md) and
+  [Build](#build)). Moving staging/read identity under an unprivileged
+  Principal identity may additionally narrow the helper's read authority,
+  but only as a separate explicit contract change — the accepted
+  capability semantics never change silently as a side effect of 2.4.
 
 The workspace authorization hierarchy has three policy ceilings, then one
 concrete selection:
@@ -2646,19 +2663,21 @@ Validation details:
   after admission stay fail-closed (a symlink inside the lexical
   workspace/context that resolves outside is refused);
 - build-arg names must match `^[A-Za-z_][A-Za-z0-9_]*$`;
-- build-arg keys are sorted for deterministic Docker argv;
+- build-arg keys are sorted for deterministic buildctl argv;
 - build-arg values are never logged or audited (only `build_arg_keys`);
-- build-arg values are passed to the daemon-side `docker` child as
-  `--build-arg K=V` argv entries, with the same accepted Release 2.2
-  residual as run environment values (observable through
-  `/proc/<pid>/cmdline` while the build child runs, where host procfs
-  policy permits; an accepted Release 2.2 residual). Build args
-  are explicitly NOT a secret transport and must not be used for
-  secrets; Docker/BuildKit may additionally retain ARG-related material
-  in image history/provenance — a property of build semantics that does
-  not disappear when the CLI argv exposure is later removed. The argv
-  class closes with the accepted Release 3 Engine API adapter migration;
-  no `--env-file`-style or BuildKit secret knob is introduced for it.
+- build-arg values are passed to the server-owned bundled `buildctl`
+  child as `--opt build-arg:K=V` entries (the argv mapping has exactly
+  one owner; no caller-controlled socket, frontend, network, entitlement,
+  cache, or output flag exists), with the same accepted residual as run environment values:
+  the value is observable through
+  `/proc/<pid>/cmdline` while the buildctl child runs, where host procfs
+  policy permits. Build args are explicitly NOT a secret transport and
+  must not be used for secrets; Docker/BuildKit may additionally retain
+  ARG-related material in image history/provenance — a property of build
+  semantics that does not disappear when the CLI argv exposure is later removed. The
+  argv class closes with the accepted Release 3 Engine API
+  adapter migration; no `--env-file`-style or BuildKit secret knob is
+  introduced for it.
 
 Build context and Dockerfile are read-only host inputs of the helper:
 after `validateBuildRequest` canonicalizes both paths, they are evaluated
@@ -2671,6 +2690,62 @@ staging owner writes only into helper-owned staging under the runtime
 directory; it never writes into the source tree, and the staged context
 carries no SUID/SGID privilege bits (see
 [Container security](#container-security)).
+
+#### Build execution: per-operation rootless BuildKit under the builder manager
+
+Release 2.4 does not run `docker build` in the daemon's rootful Docker
+position. Every build executes as the frozen server-owned sequence
+
+```
+manager START -> BuildKit socket validation -> buildctl (staged context,
+                 internal tag, docker-tar export into the operation's
+                 staging tree) -> manager STOP -> docker load ->
+                 internal-tag verification -> docker tag commit ->
+                 bounded internal-tag cleanup
+```
+
+driven by one build-driver goroutine that owns the whole sequence and the
+single terminal transition of the admitted Operation. The caller-facing
+contract is unchanged: `POST /build` returns 201 running, and the public
+result follows the `docker tag` commit outcome (the irreversible success
+point is `docker tag` exit 0 — everything after it is bounded cleanup
+that cannot downgrade the result; the imported internal tag
+`docker-helper-build/<op_id>` is removed by best-effort cleanup on every
+terminal path).
+
+Ownership and lifecycle:
+
+- the **builder manager** (`docker-helper builder serve`, dedicated
+  unprivileged `docker-helper-builder` identity, its own Unix socket with
+  SO_PEERCRED verification on both sides) is the single owner of builder
+  instances: it admits START per operation, terminates them through STOP,
+  and PURGE converges every live instance. Instance records, per-op
+  runtime/state directories, process-group kill, reap, and cleanup are
+  the manager's; the daemon never manipulates builder state directly.
+- the rootless execution chain per operation is rootlesskit
+  (`--net=slirp4netns`, `--copy-up=/etc`, `--disable-host-loopback`)
+  launching the pinned bundled `buildkitd` with `--rootless` and the
+  per-op socket/state paths; the manager pre-creates and provisions the
+  per-op directories. Under enforcing SELinux the chain runs through the
+  internal launcher re-exec (the categorized
+  `docker_helper_builder_launcher_t` step) into the per-operation
+  categorized flow domains; under AppArmor the manager execs the distro
+  `/usr/bin/rootlesskit` with `px`, which requires the distro rootlesskit
+  profile to be loaded — `px` promises NO unconfined fallback — and the
+  distro profile owns the userns/flow mediation there.
+- the manager performs a fail-closed startup purge of crash residue, and
+  the daemon's own startup reconciliation issues one bounded PURGE
+  through the manager client before build admission opens for a new
+  daemon generation: while the manager is unreachable or a PURGE is
+  refused, builds fail closed before any operation admission while
+  run/pull/registry-login stay available, and the next build re-runs the
+  bounded reconciliation, so manager recovery never requires restarting
+  the main daemon.
+- build networking is the sandbox's user-space position (slirp4netns with
+  host loopback disabled), NOT the Docker default network position of
+  workload containers. docker-helper does not claim complete network
+  egress isolation for builds: no egress allowlist, proxy, or
+  network-deny capability exists in Release 2.4.
 
 ### Run
 
@@ -3199,8 +3274,9 @@ contents into the staging tree, so every file inside the granted
 capability — not only files the host Principal could read under Unix DAC
 — becomes part of the staged context the builder consumes. This is the
 deliberate filesystem-capability semantics, not an access check gap; the
-builder's own execution/network position is the separately accepted build
-execution boundary (see [Current limitations and
+builder's execution/root/network boundary is the shipped per-operation
+rootless BuildKit sandbox under the builder manager (see
+[Build](#build), [Current limitations and
 non-goals](#current-limitations-and-non-goals) and
 [`release-2.4-build-sandbox.md`](release-2.4-build-sandbox.md)).
 
@@ -3573,11 +3649,24 @@ the next stop without a restart.
 
 ### systemd units and hardening
 
-One system unit is shipped: `packaging/systemd/system/docker-helper.service`.
-It is `Type=exec` with `Restart=on-failure`, `RestartSec=5s`,
+Two system units are shipped:
+`packaging/systemd/system/docker-helper.service` (the root-owned daemon)
+and `packaging/systemd/system/docker-helper-builder.service` (the
+dedicated unprivileged builder backend). The daemon unit is
+`Type=exec` with `Restart=on-failure`, `RestartSec=5s`,
 `TimeoutStopSec=45s`, `UMask=0077`, and `StartLimitIntervalSec=60s` /
 `StartLimitBurst=3` (restart limit: if reached, `systemctl reset-failed`
-before starting again).
+before starting again). The builder unit runs as the dedicated
+`docker-helper-builder` identity with its own runtime/state directories,
+`TimeoutStopSec=30s`, the default control-group kill mode (service stop
+settles the whole builder cgroup — the outer safety net over the
+manager's per-operation START/STOP/PURGE ownership), and the recorded
+Release-2.4 exceptions (`NoNewPrivileges` absent and user/namespace
+restrictions omitted because rootlesskit's setuid newuidmap/newgidmap
+elevation requires them; a capability bounding set for that elevation
+only). The unit files are the single MAC-binding owners for their
+services (`AppArmorProfile=`/`SELinuxContext=`); see
+[systemd services](#systemd-services).
 
 Hardening: `NoNewPrivileges=true`, `RestrictNamespaces=true`,
 `RestrictRealtime=true`. `RestrictSUIDSGID` is deliberately omitted
@@ -4400,10 +4489,10 @@ Non-goals of the current implementation:
   non-goal is only the Docker registry credential store beyond that
   per-Session login);
 - network management (creating or configuring Docker networks; workload
-  containers and builds use the Docker/BuildKit default networking — the
-  builder's own execution/network position is the accepted Release 2.2
-  build boundary, owned architecturally by the Release 2.4 build sandbox
-  design);
+  containers use Docker's default networking, and builds use the build
+  sandbox's own user-space network position — slirp4netns with host
+  loopback disabled; neither surface has an egress allowlist, proxy, or
+  network-deny capability in Release 2.4, and none is promised);
 - volume management beyond bind mounts.
 
 Project purpose, product boundary, and long-lived design principles are

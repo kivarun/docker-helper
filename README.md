@@ -919,16 +919,21 @@ Build args are not intended for secrets. Values may become visible in Docker
 build output depending on the Dockerfile/build process. Docker Helper audit
 records contain only `build_arg_keys`, never build-arg values.
 
-The daemon passes build args to its Docker CLI child as `--build-arg K=V`
-argv entries, so a value is observable through `/proc/<pid>/cmdline` while
-that child runs (where host procfs policy permits such observation) — an
-accepted Release 2.2 residual of the daemon-side legacy Docker CLI argv
+Build execution never runs in the daemon's rootful Docker position: each
+build is handed to the dedicated unprivileged `docker-helper-builder`
+backend service, which starts one ephemeral rootless BuildKit instance
+(rootlesskit with user-space networking, host loopback disabled) per
+operation under its START/STOP/PURGE ownership. The bundled `buildctl`
+client builds the staged context against that operation's private socket
+and exports a tar that the trusted daemon imports and commits through
+`docker load` and `docker tag`. Build args reach the bundled `buildctl`
+child as `--opt build-arg:K=V` entries, so a value is observable through
+`/proc/<pid>/cmdline` while that child runs (where host procfs policy
+permits such observation) — an accepted residual of the buildctl argv
 (the same accepted residual applies to run environment values, see
 "Passing secrets to a workload"). Build args are explicitly
 not a secret transport, and Docker/BuildKit may additionally retain
-ARG-related material in image history/provenance. A future release
-migration away from the legacy Docker CLI removes the argv exposure
-without making build args a secret mechanism.
+ARG-related material in image history/provenance.
 
 **Build-context ceilings.** The build context is staged into a helper-owned
 runtime directory before Docker sees it, and one build request has fixed,
@@ -1191,8 +1196,11 @@ Note: `docker-helper config show --json` (without a field) displays
   through the read-write alias is also visible through the read-only
   alias. Release 2.2 does not promise inode-level immutability or
   confidentiality between hard-link aliases.
-- Builds and containers use Docker's default networking; docker-helper
-  does not provide network isolation.
+- Workload containers use Docker's default networking, and builds run in
+  the build sandbox's own user-space network position (slirp4netns, host
+  loopback disabled); docker-helper does not provide network isolation
+  beyond those positions (no egress allowlist, proxy, or network-deny
+  capability).
 - docker-helper is a highly trusted component because it has access to
   the Docker daemon, so a validation or command-construction bug may
   compromise the host.
