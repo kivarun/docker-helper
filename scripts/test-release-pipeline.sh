@@ -95,6 +95,28 @@ printf 'man1\n' > "$D/man/docker-helper.1.gz"
 printf 'man5\n' > "$D/man/docker-helper-config.5.gz"
 EOF
 
+  # Mock pinned BuildKit payload builder (same name/contract as the real
+  # one: one output directory carrying the payload's usr/ tree). The
+  # producer's shared-payload member check and every format's payload
+  # identity verification consume these members, so the mock must lay out
+  # the exact real paths.
+  cat > "$repo/build-buildkit-payload.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+OUT="${1:?}"
+mkdir -p "$OUT/usr/libexec/docker-helper/buildkit" "$OUT/usr/share/doc/docker-helper/buildkit"
+printf 'fake-buildkitd\n' > "$OUT/usr/libexec/docker-helper/buildkit/buildkitd"
+printf 'fake-buildctl\n' > "$OUT/usr/libexec/docker-helper/buildkit/buildctl"
+printf 'fake-buildkit-runc\n' > "$OUT/usr/libexec/docker-helper/buildkit/buildkit-runc"
+printf 'fake-buildkit-license\n' > "$OUT/usr/share/doc/docker-helper/buildkit/LICENSE"
+printf 'fake-buildkit-manifest\n' > "$OUT/usr/share/doc/docker-helper/buildkit/MANIFEST"
+chmod 755 "$OUT/usr/libexec/docker-helper/buildkit/buildkitd" \
+          "$OUT/usr/libexec/docker-helper/buildkit/buildctl" \
+          "$OUT/usr/libexec/docker-helper/buildkit/buildkit-runc"
+chmod 644 "$OUT/usr/share/doc/docker-helper/buildkit/LICENSE" \
+          "$OUT/usr/share/doc/docker-helper/buildkit/MANIFEST"
+EOF
+
   # Mock artifact assemblers. Faithful mode (default): each format packs the
   # bytes of the shared payload it is handed. The fake DEB/RPM embed the staged
   # members as base64 blocks; the dpkg-deb/rpm2cpio shims model the real
@@ -112,13 +134,18 @@ D="$(cd "$(dirname "$0")" && pwd)/dist"
 mkdir -p "$D"
 if [ -n "$PAYLOAD" ]; then
   B="$D/docker-helper-${VERSION}-linux-amd64"
-  mkdir -p "$B/man" "$B/completions" "$B/selinux"
+  mkdir -p "$B/man" "$B/completions" "$B/selinux" "$B/buildkit"
   cp "$PAYLOAD/docker-helper" "$B/docker-helper"
   chmod 755 "$B/docker-helper"
   cp "$PAYLOAD/docker_helper.pp" "$B/selinux/docker_helper.pp"
   cp "$PAYLOAD/man/docker-helper.1.gz" "$B/man/docker-helper.1.gz"
   cp "$PAYLOAD/man/docker-helper-config.5.gz" "$B/man/docker-helper-config.5.gz"
   cp "$PAYLOAD/completions/docker-helper" "$B/completions/docker-helper"
+  # Pinned BuildKit payload at the real flat bundle layout (the payload's
+  # usr/ tree collapses into bundle-root buildkit/, exactly like the real
+  # builder).
+  cp -r "$PAYLOAD/buildkit/usr/libexec/docker-helper/buildkit/." "$B/buildkit/"
+  cp -r "$PAYLOAD/buildkit/usr/share/doc/docker-helper/buildkit/." "$B/buildkit/"
   printf 'bundle-content\n' > "$B/bundle-content.txt"
   tar czf "$D/docker-helper-${VERSION}-linux-amd64.tar.gz" \
     --owner=0 --group=0 --numeric-owner -C "$D" "docker-helper-${VERSION}-linux-amd64"
@@ -149,6 +176,12 @@ if [ -n "$PAYLOAD" ]; then
   cp "$PAYLOAD/man/docker-helper.1.gz" "$D/man/docker-helper.1.gz"
   cp "$PAYLOAD/man/docker-helper-config.5.gz" "$D/man/docker-helper-config.5.gz"
   cp "$PAYLOAD/completions/docker-helper" "$D/completions/docker-helper"
+  # BuildKit members staged for the package embedding below.
+  cp "$PAYLOAD/buildkit/usr/libexec/docker-helper/buildkit/buildkitd" "$D/buildkitd"
+  cp "$PAYLOAD/buildkit/usr/libexec/docker-helper/buildkit/buildctl" "$D/buildctl"
+  cp "$PAYLOAD/buildkit/usr/libexec/docker-helper/buildkit/buildkit-runc" "$D/buildkit-runc"
+  cp "$PAYLOAD/buildkit/usr/share/doc/docker-helper/buildkit/LICENSE" "$D/buildkit-license"
+  cp "$PAYLOAD/buildkit/usr/share/doc/docker-helper/buildkit/MANIFEST" "$D/buildkit-manifest"
 else
   printf '#!/usr/bin/env bash\necho "%s"\n' "${FAKE_BIN_VERSION:-$VERSION}" > "$D/docker-helper"
   chmod +x "$D/docker-helper"
@@ -168,6 +201,11 @@ embed() { # member-name file
   embed MAN1 "$D/man/docker-helper.1.gz"
   embed MAN5 "$D/man/docker-helper-config.5.gz"
   embed COMPLETION "$D/completions/docker-helper"
+  embed BKD "$D/buildkitd"
+  embed BCTL "$D/buildctl"
+  embed BRUNC "$D/buildkit-runc"
+  embed BLIC "$D/buildkit-license"
+  embed BMAN "$D/buildkit-manifest"
 } > "$D/docker-helper_${VERSION}_amd64.deb"
 {
   printf 'fake-rpm-%s\n' "$VERSION"
@@ -176,10 +214,16 @@ embed() { # member-name file
   embed MAN5 "$D/man/docker-helper-config.5.gz"
   embed COMPLETION "$D/completions/docker-helper"
   embed PP "$D/docker_helper.pp"
+  embed BKD "$D/buildkitd"
+  embed BCTL "$D/buildctl"
+  embed BRUNC "$D/buildkit-runc"
+  embed BLIC "$D/buildkit-license"
+  embed BMAN "$D/buildkit-manifest"
 } > "$D/docker-helper-${VERSION}-1.x86_64.rpm"
 EOF
   chmod +x "$repo/build-static.sh" "$repo/build-selinux-policy.sh" \
-    "$repo/build-manpages.sh" "$repo/build-bundle.sh" "$repo/build-packages.sh"
+    "$repo/build-manpages.sh" "$repo/build-buildkit-payload.sh" \
+    "$repo/build-bundle.sh" "$repo/build-packages.sh"
 
   # Mock package-identity tools (same CLI contract the producer uses).
   # dpkg-deb -x and rpm2cpio model the real extraction contract from the
@@ -198,7 +242,13 @@ if [ "$1" = "--contents" ]; then
     './etc/apparmor.d/docker-helper-system' \
     './usr/share/man/man1/docker-helper.1.gz' \
     './usr/share/man/man5/docker-helper-config.5.gz' \
-    './usr/share/doc/docker-helper/LICENSE'
+    './usr/share/doc/docker-helper/LICENSE' \
+    './etc/apparmor.d/docker-helper-builder' \
+    './usr/libexec/docker-helper/buildkit/buildkitd' \
+    './usr/libexec/docker-helper/buildkit/buildctl' \
+    './usr/libexec/docker-helper/buildkit/buildkit-runc' \
+    './usr/share/doc/docker-helper/buildkit/LICENSE' \
+    './usr/share/doc/docker-helper/buildkit/MANIFEST'
   exit 0
 fi
 if [ "$1" = "-x" ]; then
@@ -207,11 +257,18 @@ if [ "$1" = "-x" ]; then
     sed -n "/^$1$/,/^END$/p" "$deb" | sed '1d;$d' | base64 -d > "$dir/$2"
   }
   mkdir -p "$dir/usr/bin" "$dir/usr/share/man/man1" "$dir/usr/share/man/man5" \
-    "$dir/usr/share/bash-completion/completions"
+    "$dir/usr/share/bash-completion/completions" \
+    "$dir/usr/libexec/docker-helper/buildkit" \
+    "$dir/usr/share/doc/docker-helper/buildkit"
   extract BIN usr/bin/docker-helper
   extract MAN1 usr/share/man/man1/docker-helper.1.gz
   extract MAN5 usr/share/man/man5/docker-helper-config.5.gz
   extract COMPLETION usr/share/bash-completion/completions/docker-helper
+  extract BKD usr/libexec/docker-helper/buildkit/buildkitd
+  extract BCTL usr/libexec/docker-helper/buildkit/buildctl
+  extract BRUNC usr/libexec/docker-helper/buildkit/buildkit-runc
+  extract BLIC usr/share/doc/docker-helper/buildkit/LICENSE
+  extract BMAN usr/share/doc/docker-helper/buildkit/MANIFEST
   exit 0
 fi
 exit 1
@@ -234,7 +291,13 @@ if [ "$1" = "-qpl" ]; then
     '/etc/apparmor.d/docker-helper-system' \
     '/usr/share/man/man1/docker-helper.1.gz' \
     '/usr/share/man/man5/docker-helper-config.5.gz' \
-    '/usr/share/doc/docker-helper/LICENSE'
+    '/usr/share/doc/docker-helper/LICENSE' \
+    '/etc/apparmor.d/docker-helper-builder' \
+    '/usr/libexec/docker-helper/buildkit/buildkitd' \
+    '/usr/libexec/docker-helper/buildkit/buildctl' \
+    '/usr/libexec/docker-helper/buildkit/buildkit-runc' \
+    '/usr/share/doc/docker-helper/buildkit/LICENSE' \
+    '/usr/share/doc/docker-helper/buildkit/MANIFEST'
   exit 0
 fi
 exit 1
@@ -261,6 +324,11 @@ extract MAN1 usr/share/man/man1/docker-helper.1.gz
 extract MAN5 usr/share/man/man5/docker-helper-config.5.gz
 extract COMPLETION usr/share/bash-completion/completions/docker-helper
 extract PP usr/share/selinux/docker_helper.pp
+extract BKD usr/libexec/docker-helper/buildkit/buildkitd
+extract BCTL usr/libexec/docker-helper/buildkit/buildctl
+extract BRUNC usr/libexec/docker-helper/buildkit/buildkit-runc
+extract BLIC usr/share/doc/docker-helper/buildkit/LICENSE
+extract BMAN usr/share/doc/docker-helper/buildkit/MANIFEST
 python3 - "$tmp" <<'PYEOF'
 import os, sys
 
