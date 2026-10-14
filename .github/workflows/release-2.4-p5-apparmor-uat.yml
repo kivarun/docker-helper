@@ -40,6 +40,10 @@ on:
       # Release 2.4 production owners: a runtime change must trigger the
       # release UATs that exercise it (no ambiguous semi-gating).
       - main.go
+      - app.go
+      - build.go
+      - peer_credentials_linux.go
+      - peer_credentials_stub.go
       - build_driver.go
       - builder_*.go
       - operation*.go
@@ -50,6 +54,9 @@ on:
       - build-buildkit-payload.sh
       - build-packages.sh
       - build-bundle.sh
+      - build-static.sh
+      - go.mod
+      - go.sum
       - scripts/release-candidate.sh
       - packaging/**
       - scripts/test-packaging-integration.sh
