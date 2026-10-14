@@ -2891,3 +2891,145 @@ func TestBuilderManagerStartupPurgeUnitBoundary(t *testing.T) {
 		}
 	})
 }
+
+// TestFailedMkdirMustNotForgetOwnedRuntime pins the failed-mkdir
+// convergence contract of one START (external review F6): a mkdir failure
+// after earlier owned paths were created converges through the shared
+// START-failure cleanup owner — it never releases the reservation over
+// surviving residue, a cleanup that cannot prove the removal retains the
+// instance truthfully so a STOP never reports OK absent over residue, and
+// pre-existing foreign rtDir/stDir fail the START closed without being
+// adopted or deleted.
+func TestFailedMkdirMustNotForgetOwnedRuntime(t *testing.T) {
+	t.Run("failed mkdir converges owned residue", func(t *testing.T) {
+		m, _, stRoot := processTestManager(t)
+		seamCA(t)
+		opID := "op_0123456789abcdef0123456789abcdef"
+
+		// The state-side ops root loses its write permission, so the
+		// launch creates rtDir and rtDir/buildkit and then fails the
+		// state-side mkdir: the owned runtime tree exists at the failure
+		// instant. (The remove permission is restored so the convergence
+		// itself can run.)
+		opsDir := filepath.Join(stRoot, "ops")
+		if err := os.MkdirAll(opsDir, 0700); err != nil {
+			t.Fatalf("cannot create the state-side ops root: %v", err)
+		}
+		if err := os.Chmod(opsDir, 0o500); err != nil {
+			t.Fatalf("cannot make the state-side mkdir fail: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(opsDir, 0o700) })
+
+		startResp := make(chan string, 1)
+		go func() { startResp <- m.start(opID, nil) }()
+		select {
+		case resp := <-startResp:
+			if resp != builderManagerRespInternal {
+				t.Fatalf("START over a failed mkdir = %q, want internal", resp)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("START over a failed mkdir did not converge")
+		}
+
+		// The reservation is released only together with the owned residue:
+		// the map entry is gone AND every path this launch created is gone.
+		if !waitInstance(t, m, opID, false) {
+			t.Fatal("the failed START released its reservation over the failed mkdir")
+		}
+		assertDirsAbsentAt(t, opID)
+	})
+
+	t.Run("unprovable cleanup retains the instance and STOP refuses", func(t *testing.T) {
+		m, rtRoot, stRoot := processTestManager(t)
+		seamCA(t)
+		opID := "op_0123456789abcdef0123456789abcdef"
+		opsRoots := []string{filepath.Join(rtRoot, "ops"), filepath.Join(stRoot, "ops")}
+
+		// The last state-side mkdir fails AND the same instant removes the
+		// write permission of both ops roots, so the failed-start
+		// convergence cannot prove the residue removal.
+		orig := builderMkdirAll
+		builderMkdirAll = func(path string, perm os.FileMode) error {
+			if path == filepath.Join(stRoot, "ops", opID, "root") {
+				for _, d := range opsRoots {
+					if err := os.Chmod(d, 0o500); err != nil {
+						t.Errorf("cannot make the residue removal unprovable: %v", err)
+					}
+				}
+				return errors.New("synthetic mkdir failure with unprovable cleanup")
+			}
+			return orig(path, perm)
+		}
+		t.Cleanup(func() {
+			builderMkdirAll = orig
+			for _, d := range opsRoots {
+				_ = os.Chmod(d, 0o700)
+			}
+		})
+
+		startResp := make(chan string, 1)
+		go func() { startResp <- m.start(opID, nil) }()
+		select {
+		case resp := <-startResp:
+			if resp != builderManagerRespInternal {
+				t.Fatalf("START over a failed mkdir = %q, want internal", resp)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("START over a failed mkdir did not converge")
+		}
+
+		// The instance is retained truthfully: the reservation stays over
+		// the surviving residue, and a STOP refuses instead of reporting
+		// OK absent while the residue exists.
+		if !waitInstance(t, m, opID, true) {
+			t.Fatal("the reservation was released over residue the cleanup could not prove removed")
+		}
+		if _, err := os.Lstat(opRuntimeDir(opID)); err != nil {
+			t.Fatalf("runtime residue vanished while the cleanup was unprovable: %v", err)
+		}
+		if resp := m.stop(opID, 0); resp == builderManagerRespOK || resp == builderManagerRespOKAbsent {
+			t.Fatalf("STOP = %q over surviving residue, want a truthful refusal", resp)
+		}
+	})
+
+	t.Run("pre-existing foreign dirs are neither adopted nor deleted", func(t *testing.T) {
+		m, _, _ := processTestManager(t)
+		seamCA(t)
+		opID := "op_0123456789abcdef0123456789abcdef"
+
+		// Foreign residue that predates this START attempt: it must fail
+		// the START closed without ever being adopted or removed.
+		if err := os.MkdirAll(filepath.Join(opRuntimeDir(opID), "buildkit"), 0700); err != nil {
+			t.Fatalf("cannot create the foreign runtime dir: %v", err)
+		}
+		marker := filepath.Join(opRuntimeDir(opID), "foreign-marker")
+		if err := os.WriteFile(marker, []byte("foreign"), 0600); err != nil {
+			t.Fatalf("cannot create the foreign marker: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Join(opStateDir(opID), "root"), 0700); err != nil {
+			t.Fatalf("cannot create the foreign state dir: %v", err)
+		}
+
+		if resp := m.start(opID, nil); resp != builderManagerRespInternal {
+			t.Fatalf("START over pre-existing foreign dirs = %q, want internal (fail closed)", resp)
+		}
+
+		// The foreign paths are intact: not adopted, not deleted.
+		data, err := os.ReadFile(marker)
+		if err != nil || string(data) != "foreign" {
+			t.Fatalf("the pre-existing foreign runtime path was touched by the refused START: %v", err)
+		}
+		if _, err := os.Lstat(opStateDir(opID)); err != nil {
+			t.Fatalf("the pre-existing foreign state path was removed by the refused START: %v", err)
+		}
+		// Nothing was adopted: the refusal releases the reservation, and
+		// the next START still refuses until the operator resolves the
+		// foreign state.
+		if !waitInstance(t, m, opID, false) {
+			t.Fatal("the refused START left an instance record behind")
+		}
+		if resp := m.start(opID, nil); resp != builderManagerRespInternal {
+			t.Fatalf("a repeated START over the same foreign dirs = %q, want internal", resp)
+		}
+	})
+}

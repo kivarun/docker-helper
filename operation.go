@@ -657,7 +657,14 @@ func (s *operationSupervisor) terminateOperations(ctx context.Context, targetOp 
 	// section, so there is no intermediate state: either the child receives
 	// the signal, or the Operation is latched before any later stage could
 	// have been admitted.
-	var terminated []*operation
+	//
+	// A no-child interval is NOT a terminal state: an Operation between
+	// sequential stages, inside a cleanup-only interval (a manager STOP or
+	// the staging teardown), or not yet started is still nonterminal. Its
+	// stage driver owns the terminal transition — a latched stage admission
+	// refuses and every driver path converges to succeed/fail — so
+	// termination NEVER infers completion from the empty current-stage
+	// slots: the wait below observes op.done on every admitted Operation.
 	for _, op := range ops {
 		op.mu.Lock()
 		if op.reason == terminationNone {
@@ -676,23 +683,12 @@ func (s *operationSupervisor) terminateOperations(ctx context.Context, targetOp 
 		if op.currentCancel != nil {
 			op.currentCancel()
 		}
-		if op.currentCmd == nil && op.currentCancel == nil {
-			// No active execution stage: the operation is either pre-start
-			// (its handler owns the terminal transition on the refused
-			// start) or between sequential stages (its stage driver
-			// completes it). Both observe the latch and never admit
-			// another stage.
-			terminated = append(terminated, op)
-		}
 		op.mu.Unlock()
 	}
 
-	terminatedSet := make(map[*operation]struct{}, len(terminated))
-	for _, op := range terminated {
-		terminatedSet[op] = struct{}{}
-	}
-
-	// Phase 2: Wait for each operation to complete gracefully.
+	// Phase 2: Wait for every admitted Operation to reach its terminal
+	// transition. A no-child interval is still nonterminal unless op.done
+	// is closed, so no Operation is skipped here.
 	// For shutdown, wait only until forceStart (may be zero = skip graceful).
 	// For cancel, wait until ctx deadline.
 	var completed []*operation
@@ -703,9 +699,6 @@ func (s *operationSupervisor) terminateOperations(ctx context.Context, targetOp 
 			graceTimer := time.NewTimer(time.Until(forceStart))
 			defer graceTimer.Stop()
 			for _, op := range ops {
-				if _, ok := terminatedSet[op]; ok {
-					continue
-				}
 				select {
 				case <-op.done:
 					completed = append(completed, op)
@@ -719,9 +712,6 @@ func (s *operationSupervisor) terminateOperations(ctx context.Context, targetOp 
 	} else {
 		// Cancel: wait until each op completes or ctx deadline.
 		for _, op := range ops {
-			if _, ok := terminatedSet[op]; ok {
-				continue
-			}
 			select {
 			case <-op.done:
 				completed = append(completed, op)
@@ -734,7 +724,11 @@ func (s *operationSupervisor) terminateOperations(ctx context.Context, targetOp 
 
 forceCleanup:
 
-	// Phase 3: Force cleanup for remaining operations.
+	// Phase 3: Force cleanup for every Operation whose op.done is not
+	// closed by forceStart — a no-child-at-latch Operation is included
+	// exactly like a child-owning one (forceCleanupOperation re-checks the
+	// terminal state under op.mu, so an Operation that completed between
+	// the graceful deadline and here is skipped there).
 	// For shutdown: concurrent force cleanup under the shared deadline.
 	// For cancel: already handled sequentially above.
 	if isShutdown {
@@ -745,9 +739,6 @@ forceCleanup:
 
 		var wg sync.WaitGroup
 		for _, op := range ops {
-			if _, ok := terminatedSet[op]; ok {
-				continue
-			}
 			if _, ok := completedSet[op]; ok {
 				continue
 			}

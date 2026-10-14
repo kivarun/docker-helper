@@ -111,6 +111,12 @@ var (
 	// filesystem window so tests can hold a STOP's quiescence await
 	// against launch work that runs after the STOP's claim.
 	builderLaunchHold func(opID string)
+
+	// builderMkdirAll is the instance-directory creation seam
+	// (production: os.MkdirAll). Tests inject a partial-creation failure
+	// — earlier owned paths already exist — so the launch's failed-mkdir
+	// convergence is exercised through the real cleanup owner.
+	builderMkdirAll = os.MkdirAll
 )
 
 // builderNewRootlessKitCommand is the launch command-construction owner
@@ -505,9 +511,20 @@ func (m *builderManager) launchInstance(inst *builderInstance) bool {
 		return false
 	}
 	for _, dir := range []string{rtDir, filepath.Join(rtDir, "buildkit"), filepath.Join(stDir, "rootlesskit-state"), filepath.Join(stDir, "root")} {
-		if err := os.MkdirAll(dir, 0700); err != nil {
+		if err := builderMkdirAll(dir, 0700); err != nil {
 			m.managerDiagf("START %s: cannot create instance dirs: %v", opID, err)
-			m.removeReservation(inst)
+			// A mkdir failure after the first created path may leave OWNED
+			// residue on disk. The failure converges through the shared
+			// START-failure cleanup owner — never by releasing the
+			// reservation directly: a direct release would let a later
+			// STOP report OK absent over surviving paths (external review
+			// F6). The owner removes the launch's own residue and releases
+			// the reservation only when the removal is proven; a failed
+			// removal retains the instance truthfully for retry. The
+			// refuse-to-adopt checks above already failed closed on any
+			// pre-existing rtDir/stDir, so the removed tree is exactly the
+			// one this launch created.
+			m.convergeFailedStart(inst)
 			return false
 		}
 	}
