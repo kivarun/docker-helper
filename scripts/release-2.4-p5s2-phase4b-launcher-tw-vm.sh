@@ -86,12 +86,14 @@ if [ "$RELEASE_GATE" = "1" ]; then
   CANDIDATE_EXTRACT_DIR="$(mktemp -d)"
   tar xzf "${candidate_tars[0]}" -C "$CANDIDATE_EXTRACT_DIR" \
     || fail "cannot extract the candidate tarball for the tested-bytes binding"
-  candidate_bins=()
-  while IFS= read -r f; do candidate_bins+=("$f"); done \
-    < <(find "$CANDIDATE_EXTRACT_DIR" -type f -name docker-helper)
-  [ "${#candidate_bins[@]}" -eq 1 ] \
-    || fail "expected exactly one docker-helper member in the candidate tarball (found ${#candidate_bins[@]})"
-  CANDIDATE_BIN="${candidate_bins[0]}"
+  # The bundle layout is the producer's own (build-bundle.sh / the
+  # release-candidate payload member table): the binary member is the
+  # bundle root's docker-helper. The exact member path is used so the
+  # completion sibling (completions/docker-helper) can never be mistaken
+  # for the binary.
+  CANDIDATE_BIN="$CANDIDATE_EXTRACT_DIR/docker-helper-${RELEASE_VERSION}-linux-amd64/docker-helper"
+  [ -f "$CANDIDATE_BIN" ] \
+    || fail "the candidate tarball does not carry the docker-helper binary member at docker-helper-${RELEASE_VERSION}-linux-amd64/docker-helper"
   [ -x "$CANDIDATE_BIN" ] || fail "the candidate tarball member $CANDIDATE_BIN is not executable"
   cmp -s "$CANDIDATE_BIN" "$HELPER_BIN" \
     || fail "the tested helper binary is not the release candidate artifact (byte mismatch against the candidate tarball member)"
