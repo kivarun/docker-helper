@@ -248,6 +248,91 @@ func TestShutdownReturnsAfterChildStageDoneCloses(t *testing.T) {
 	<-done
 }
 
+// TestReviewShutdownMustAwaitCleanupAfterForceSignal proves the shutdown
+// force path's return contract (re-review R1): force-phase completion means
+// only that the force owner finished its kill/cleanup work — the Operation
+// may still be nonterminal, because the Operation's stage driver owns the
+// terminal transition. After the force signal, shutdown must keep waiting
+// for op.done of every nonterminal Operation until the same absolute
+// shutdown deadline, without completing the Operation itself and without
+// introducing a second cleanup owner.
+//
+// Regression shape (re-review R1 on top of F2): for a no-child/no-cidfile
+// Operation the force owner closes forceDone immediately, and the pre-fix
+// shutdown returned at that instant — while the Operation's between-stage
+// cleanup was still running and op.done was still open.
+//
+// The driver parks in the no-child interval, observes the force phase
+// complete, then performs an UNINTERRUPTIBLE between-stage cleanup interval
+// that outlives the force completion but ends well before the shared
+// deadline, and only then reaches the terminal transition. The pre-fix
+// shutdown returns inside that cleanup interval (op.done open); the fixed
+// shutdown returns only after op.done closed.
+func TestReviewShutdownMustAwaitCleanupAfterForceSignal(t *testing.T) {
+	supervisor := newOperationSupervisor()
+	op := admitShutdownProbeOperation(t, supervisor)
+	supervisor.beginShutdown()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// Park in the no-child interval until the force phase has claimed
+		// AND completed the Operation: exactly the instant the pre-fix
+		// shutdown returned.
+		for {
+			op.mu.Lock()
+			forceDone := op.forceDone
+			op.mu.Unlock()
+			completed := false
+			if forceDone != nil {
+				select {
+				case <-forceDone:
+					completed = true
+				default:
+				}
+			}
+			if completed {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		// The between-stage cleanup survives the force completion and ends
+		// well before the shared deadline; the driver alone owns the
+		// terminal transition — the supervisor never completes the
+		// Operation.
+		time.Sleep(300 * time.Millisecond)
+		op.fail(resultCancelled, "build cancelled", nil)
+	}()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	start := time.Now()
+	supervisor.terminateForShutdown(shutdownCtx, nil)
+	returned := time.Since(start)
+	cancel()
+
+	// The instant of return is the assertion point: shutdown must not
+	// return while the force-covered Operation is still nonterminal. The
+	// driver completes 300ms after the force phase, so a compliant await
+	// always finds op.done already closed here; the pre-fix return inside
+	// the cleanup interval finds it still open. The driver is joined only
+	// AFTER the return instant is captured.
+	select {
+	case <-op.done:
+		// Shutdown awaited the Operation's terminal transition.
+	default:
+		<-done
+		t.Fatal("shutdown returned while the force-covered operation is still nonterminal (op.done open)")
+	}
+	<-done
+	// The await must end at the terminal transition, not at the deadline:
+	// the deadline is 4s, the force reserve is 3s (forceStart at 1s), and
+	// the cleanup needs 300ms after the force completion, so a compliant
+	// return happens near the terminal transition, far inside the budget.
+	if returned > 2*time.Second {
+		t.Fatalf("shutdown waited until the deadline instead of the terminal transition: returned after %v", returned)
+	}
+}
+
 // TestShutdownForceCleanupCoversNonterminalOperation proves that force
 // cleanup covers every operation whose op.done is still open at
 // forceStart — including a between-stage operation with no current child

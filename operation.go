@@ -722,6 +722,15 @@ forceCleanup:
 	// the graceful deadline and here is skipped there).
 	// For shutdown: concurrent force cleanup under the shared deadline.
 	// For cancel: already handled sequentially above.
+	//
+	// Force-phase completion is NOT the terminal transition: forceDone
+	// closes when the force owner finished its kill/cleanup work, while
+	// the Operation's stage driver still owns succeed/fail (re-review R1).
+	// After the force signal, shutdown therefore keeps waiting for op.done
+	// of every nonterminal Operation until the same absolute shutdown
+	// deadline. The wait never completes an Operation and never takes over
+	// the terminal transition — the existing stage-driver owner (STOP/
+	// cleanup/finish audit) stays the sole owner.
 	if isShutdown {
 		completedSet := make(map[*operation]struct{}, len(completed))
 		for _, c := range completed {
@@ -737,6 +746,14 @@ forceCleanup:
 			go func(op *operation) {
 				defer wg.Done()
 				forceCleanupOperation(op, killContainer, forceDeadline)
+				if remaining := time.Until(forceDeadline); remaining > 0 {
+					timer := time.NewTimer(remaining)
+					defer timer.Stop()
+					select {
+					case <-op.done:
+					case <-timer.C:
+					}
+				}
 			}(op)
 		}
 		wg.Wait()
