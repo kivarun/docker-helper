@@ -1,27 +1,42 @@
-name: Release 2.4 P5-S2 Phase 4B live launcher/provisioning proof
+name: Release 2.4 P5-S2 SELinux release gate (Phase 4B launcher/provisioning proof)
 
-# One-off investigation job (Phase 4B): the live Tumbleweed proof of the
-# Phase 3 categorized provisioning and the Phase 4A launcher self-reexec
-# chain under the SHIPPED policy, on the clean production composition (the
-# binary, the module 1.2, the unit, and the provisioning script built from
-# the tested proof commit; rootlesskit + the pinned bundled buildkitd). No
-# guest allow-module, no policy or code change; a pre-boundary launcher
-# blocker or a denied provisioning relabel is recorded and the phase
-# stops. The Release GO stays closed.
+# The Release 2.4 P5-S2 SELinux release gate (external reviews F3/F4):
+# the live Tumbleweed proof of the Phase 3 categorized provisioning and
+# the Phase 4A launcher self-reexec chain under the SHIPPED policy, run on
+# the EXACT release candidate composition (the binary, the module 1.2,
+# the unit, and the provisioning script built from the pushed candidate
+# SHA — no pinned proof ref on the release-gate path). The guest reports
+# exactly one terminal verdict; the release gate passes only on
+# P5S2-P4B-RESULT=PASS with guest exit 0 on the exact candidate manifest
+# (FAIL/INCOMPLETE/missing/conflicting verdicts fail the workflow, and the
+# evidence collection always runs before the verdict gate).
+#
+# The historical pinned-proof investigation (PHASE4B_PROOF_REF) remains
+# available ONLY as workflow_dispatch experiment mode: dispatch with
+# historical_proof_ref set builds the composition from that pinned ref and
+# keeps the measured-outcome contract (every terminal outcome is a valid
+# measured result; the report assigns the verdict).
 
 on:
   workflow_dispatch:
+    inputs:
+      historical_proof_ref:
+        description: 'Historical pinned proof commit (experiment mode only). Empty = release gate on the pushed candidate.'
+        required: false
+        default: ''
+        type: string
   push:
     branches:
       - p3
+      - release/2.4
     paths:
-      - .github/workflows/release-2.4-p5s2-phase4b-launcher-tw.yml
-      - scripts/release-2.4-p5s2-phase4b-launcher-tw.sh
-      - scripts/release-2.4-p5s2-phase4b-launcher-tw-vm.sh
-      # Release 2.4 production owners: the canonical SELinux proof consumes
-      # the generated candidate set and the full runtime launch chain, so a
-      # production/packaging change must trigger it (no ambiguous
-      # semi-gating).
+      - .github/workflows/release-2.4-*
+      - scripts/release-2.4-*
+      # Release 2.4 production owners: the canonical SELinux release gate
+      # consumes the candidate composition and the full runtime launch
+      # chain, so a production/packaging/documentation change must trigger
+      # it (no ambiguous semi-gating).
+      - main.go
       - build_driver.go
       - builder_*.go
       - operation*.go
@@ -33,16 +48,13 @@ on:
       - build-packages.sh
       - build-bundle.sh
       - scripts/release-candidate.sh
-      - packaging/nfpm.yaml
-      - packaging/selinux/**
-      - packaging/apparmor/**
-      - packaging/systemd/**
-      - packaging/install-system.sh
-      - packaging/uninstall-system.sh
-      - packaging/scripts/**
+      - packaging/**
       - scripts/test-packaging-integration.sh
       - packaging_test.go
       - selinux_builder_policy_test.go
+      - docs/man/**
+      - docs/architecture.md
+      - README.md
 
 permissions:
   contents: read
@@ -55,7 +67,21 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Check out the tested proof commit for the composition
+      - name: Resolve the composition mode (release gate on the candidate; pinned experiment only by dispatch input)
+        env:
+          HISTORICAL_PROOF_REF: '${{ inputs.historical_proof_ref }}'
+        run: |
+          if [ -n "$HISTORICAL_PROOF_REF" ]; then
+            echo "historical experiment mode: the pinned proof ref $HISTORICAL_PROOF_REF owns the composition"
+            echo "PHASE4B_RELEASE_GATE=0" >> "$GITHUB_ENV"
+          else
+            echo "release gate mode: the candidate checkout is the composition"
+            echo "PHASE4B_RELEASE_GATE=1" >> "$GITHUB_ENV"
+            echo "PHASE4B_CANDIDATE_SHA=$GITHUB_SHA" >> "$GITHUB_ENV"
+          fi
+
+      - name: Check out the historical pinned proof commit for the composition (experiment mode only)
+        if: inputs.historical_proof_ref != ''
         env:
           # 4C-57: the composition's module now carries the dedicated
           # BuildKitd executable identity + process domain as STRUCTURE
@@ -818,13 +844,19 @@ jobs:
           echo "proof ref: $PROOF_REF"
           git worktree add "$GITHUB_WORKSPACE/proof-src" "$PROOF_REF"
           echo "$PROOF_REF" > "$GITHUB_WORKSPACE/proof-src/.phase4b-proof-ref"
+          echo "PHASE4B_PROOF_SRC=$GITHUB_WORKSPACE/proof-src" >> "$GITHUB_ENV"
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version-file: proof-src/go.mod
+          go-version-file: ${{ env.PHASE4B_PROOF_SRC != '' && 'proof-src/go.mod' || 'go.mod' }}
 
-      - name: Build the production binary from the tested proof commit
-        run: (cd proof-src && go build -o docker-helper .)
+      - name: Build the production binary from the composition source
+        run: |
+          if [ -n "$PHASE4B_PROOF_SRC" ]; then
+            (cd "$PHASE4B_PROOF_SRC" && go build -o "$GITHUB_WORKSPACE/docker-helper" .)
+          else
+            go build -o docker-helper .
+          fi
 
       - name: Build the 4C-34 negative-command probe (static, from the script commit)
         run: cc -O2 -static -o tun-command-probe scripts/tun-command-probe.c
@@ -840,14 +872,16 @@ jobs:
       - name: Run the Phase 4B Tumbleweed launcher/provisioning proof
         run: |
           UAT_REPO_DIR="${{ github.workspace }}" \
-          PHASE4B_PROOF_SRC="${{ github.workspace }}/proof-src" \
-          PHASE4B_HELPER_BIN="${{ github.workspace }}/proof-src/docker-helper" \
+          PHASE4B_RELEASE_GATE="${{ env.PHASE4B_RELEASE_GATE }}" \
+          PHASE4B_CANDIDATE_SHA="${{ env.PHASE4B_CANDIDATE_SHA }}" \
+          PHASE4B_PROOF_SRC="${{ env.PHASE4B_PROOF_SRC }}" \
+          PHASE4B_HELPER_BIN="${{ github.workspace }}/docker-helper" \
           PHASE4B_TUN_PROBE_BIN="${{ github.workspace }}/tun-command-probe" \
           PHASE4B_CROSS_VEHICLE_BIN="${{ github.workspace }}/tun-cross-op-vehicle" \
           PHASE4B_EVIDENCE_DIR="$RUNNER_TEMP/release-2.4-p5s2-phase4b-launcher-evidence" \
             scripts/release-2.4-p5s2-phase4b-launcher-tw-vm.sh
 
-      - name: Upload experiment evidence
+      - name: Upload evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

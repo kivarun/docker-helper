@@ -23,24 +23,13 @@ on:
   push:
     branches:
       - p3
+      - release/2.4
     paths:
-      - .github/workflows/release-2.4-p4b-packaging.yml
-      - build-buildkit-payload.sh
-      - build-packages.sh
-      - build-bundle.sh
-      - scripts/release-candidate.sh
-      - packaging/nfpm.yaml
-      - packaging/systemd/system/docker-helper.service
-      - packaging/systemd/system/docker-helper-builder.service
-      - packaging/install-system.sh
-      - packaging/uninstall-system.sh
-      - packaging/scripts/**
-      - scripts/release-2.4-p4b-*.sh
-      - scripts/uat-upgrade-baseline-fixture.sh
-      - scripts/test-packaging-integration.sh
-      - packaging_test.go
+      - .github/workflows/release-2.4-*
+      - scripts/release-2.4-*
       # Release 2.4 production owners: a runtime change must trigger the
       # release UATs that exercise it (no ambiguous semi-gating).
+      - main.go
       - build_driver.go
       - builder_*.go
       - operation*.go
@@ -48,9 +37,17 @@ on:
       - workload_*.go
       - selinux*.go
       - mac_lifecycle.go
-      - packaging/apparmor/**
-      - packaging/selinux/**
-      - packaging/systemd/**
+      - build-buildkit-payload.sh
+      - build-packages.sh
+      - build-bundle.sh
+      - scripts/release-candidate.sh
+      - packaging/**
+      - scripts/uat-upgrade-baseline-fixture.sh
+      - scripts/test-packaging-integration.sh
+      - packaging_test.go
+      - docs/man/**
+      - docs/architecture.md
+      - README.md
 
 permissions:
   contents: read
