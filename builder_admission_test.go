@@ -2,14 +2,12 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -30,13 +28,17 @@ func fakeManagerEndpoint(t *testing.T, reply func(line string) string) {
 	}
 	origPath := builderClientSocketPath
 	builderClientSocketPath = path
-	t.Cleanup(func() {
-		builderClientSocketPath = origPath
-		listener.Close()
-	})
-
 	done := make(chan struct{})
 	var handlers sync.WaitGroup
+	t.Cleanup(func() {
+		listener.Close()
+		<-done
+		handlers.Wait()
+		// The seam restores only after every handler goroutine ended, so
+		// no in-flight round trip can read the restored path.
+		builderClientSocketPath = origPath
+	})
+
 	go func() {
 		defer close(done)
 		for {
@@ -64,11 +66,6 @@ func fakeManagerEndpoint(t *testing.T, reply func(line string) string) {
 			}()
 		}
 	}()
-	t.Cleanup(func() {
-		listener.Close()
-		<-done
-		handlers.Wait()
-	})
 }
 
 func indexByte(s string, b byte) int {
@@ -104,6 +101,9 @@ func newAdmissionTestApp(t *testing.T) (*App, *operationSupervisor, string) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	supervisor := newOperationSupervisor()
 	app.OperationSupervisor = supervisor
+	// One command seam for the whole fixture: async run cleanup and the
+	// build driver both read it concurrently, so the test must never
+	// reassign it after a request started an operation.
 	app.ExecCommandContext = testBuildCmd("ok", 0)
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
@@ -220,9 +220,6 @@ func TestBuildAdmissionRefusedWhileManagerStateUnknown(t *testing.T) {
 
 	// The run surface never consults the gate: it stays available while
 	// the builder-manager state is unknown.
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
 	runBody, _ := json.Marshal(map[string]any{
 		"image":   "alpine:latest",
 		"command": []string{"echo", "hello"},
@@ -237,7 +234,6 @@ func TestBuildAdmissionRefusedWhileManagerStateUnknown(t *testing.T) {
 
 	// The build is refused closed BEFORE operation admission: the stable
 	// internal classification, and no operation exists in the supervisor.
-	app.ExecCommandContext = testBuildCmd("ok", 0)
 	w := postAdmissionBuild(app, token)
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("POST /build over an unproven manager state = %d, want 500 (fail closed)", w.Code)
@@ -270,6 +266,20 @@ func TestBuildAdmissionRefusedWhileManagerStateUnknown(t *testing.T) {
 	if admitted != 2 {
 		t.Fatalf("%d operations admitted after recovery, want 2 (the run operation and the recovered build)", admitted)
 	}
+
+	// Await the recovered build's terminal transition before the test
+	// returns: the driver's manager RPCs run on their own goroutine and
+	// must not outlive the endpoint seams this test restores on cleanup.
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode the created operation: %v", err)
+	}
+	opID, _ := resp["operation_id"].(string)
+	op := supervisor.lookup(opID)
+	if op == nil {
+		t.Fatal("the recovered build operation was not registered")
+	}
+	op.Wait()
 }
 
 // TestBuilderAdmissionStartupReconcilePurgesLiveManagerState simulates the
