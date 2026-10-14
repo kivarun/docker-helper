@@ -11,7 +11,14 @@ permissions:
 jobs:
   checks:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # The checks job runs the full test suite twice (plain and -race) plus
+    # vet, the non-Linux compile gate, the hygiene gate, and the release
+    # pipeline/UAT script suites. The Release 2.4 suite (the builder
+    # manager's process/RPC/UAT suites) outgrew the previous 10-minute
+    # job timeout, which cancelled the job mid-suite on the release
+    # branch the first time CI actually ran there (F7: CI must pass on
+    # release/2.4).
+    timeout-minutes: 45
 
     steps:
       - uses:  actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
