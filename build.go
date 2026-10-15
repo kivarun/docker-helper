@@ -78,24 +78,33 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Builder-manager admission reconciliation (external review F1): build
-	// admission stays closed while the builder-manager state is not proven
-	// known-clean for this daemon generation. A closed gate runs one
-	// bounded reconciliation first (the next build rechecks/reconciles, so
-	// manager recovery never requires a main-daemon restart); a refused
-	// reconciliation releases the just-acquired reservation and fails the
-	// build closed before any operation admission. The wait is explicitly
-	// bounded: every PURGE runs under the builderClientStopRead bound, and
-	// concurrent closed-gate callers serialize on the gate, so a follower
-	// waits at most for the in-flight bounded PURGE — the first success
-	// opens the gate for every follower. The unrelated surfaces
-	// (run/pull/registry-login) never consult this gate. The refusal is
-	// the established internal-error classification; the operational
-	// reason stays out of the public message.
-	if a.BuilderAdmission != nil && !a.BuilderAdmission.ensureOpen(a.builderManagerPurge) {
-		opLog(ctx).Warn("build admission refused: builder-manager state is not proven for this daemon generation",
-			slog.String("operation", "build"),
-		)
+	// Builder-manager admission reconciliation (external review F1, A1):
+	// build admission stays closed while the builder-manager state is not
+	// proven known-clean for this daemon generation. The gate runs at most
+	// one bounded reconciliation at a time; a concurrent request joins the
+	// in-flight attempt and receives exactly its result — a refused
+	// attempt refuses every joined request closed without a PURGE of its
+	// own, and a request arriving after the failed attempt resolved starts
+	// the next reconciliation (the next build rechecks/reconciles, so
+	// manager recovery never requires a main-daemon restart). This
+	// request's context bounds its own participation: a cancelled request
+	// stops waiting, starts no PURGE, and is refused closed. The wait is
+	// explicitly bounded: every PURGE runs under the builderClientStopRead
+	// bound, so a joined request waits at most for the in-flight bounded
+	// PURGE. The unrelated surfaces (run/pull/registry-login) never
+	// consult this gate. The refusal is the established internal-error
+	// classification; the operational reason stays out of the public
+	// message.
+	if a.BuilderAdmission != nil && !a.BuilderAdmission.ensureOpen(ctx, a.builderManagerPurge) {
+		if err := ctx.Err(); err != nil {
+			opLog(ctx).Warn("build admission abandoned: the request context ended during the builder-manager reconciliation",
+				slog.String("operation", "build"),
+			)
+		} else {
+			opLog(ctx).Warn("build admission refused: builder-manager state is not proven for this daemon generation",
+				slog.String("operation", "build"),
+			)
+		}
 		// The reservation was acquired but the operation is never admitted:
 		// release it exactly once on this refusal path.
 		reservation.Release()

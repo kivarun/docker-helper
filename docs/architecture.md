@@ -2737,10 +2737,18 @@ Ownership and lifecycle:
   the daemon's own startup reconciliation issues one bounded PURGE
   through the manager client before build admission opens for a new
   daemon generation: while the manager is unreachable or a PURGE is
-  refused, builds fail closed before any operation admission while
-  run/pull/registry-login stay available, and the next build re-runs the
-  bounded reconciliation, so manager recovery never requires restarting
-  the main daemon.
+  refused, builds fail closed after their capacity reservation, before
+  any operation admission, while run/pull/registry-login stay available,
+  and the next build re-runs the bounded reconciliation, so manager
+  recovery never requires restarting the main daemon. At most one
+  reconciliation PURGE runs at a time and it never holds the gate's
+  state mutex; a concurrent closed-gate build joins the in-flight
+  attempt and receives exactly that attempt's result — a refused attempt
+  refuses every joined build closed without a PURGE of its own, a
+  successful attempt admits the joined builds whose request context is
+  still valid, and a request whose context ends while it waits stops
+  waiting, starts no PURGE, and is refused closed; a request arriving
+  after a failed attempt resolved starts the next reconciliation.
 - build networking is the sandbox's user-space position (slirp4netns with
   host loopback disabled), NOT the Docker default network position of
   workload containers. docker-helper does not claim complete network

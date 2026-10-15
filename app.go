@@ -85,7 +85,7 @@ type App struct {
 }
 
 // builderAdmissionGate is the build-admission reconciliation state of the
-// running daemon (external review F1). A main-daemon restart alone does
+// running daemon (external review F1, A1). A main-daemon restart alone does
 // not converge builder-manager state: the manager (and any surviving
 // per-operation buildkitd) keeps accounting the previous daemon
 // generation's instances while the new OperationSupervisor forgot every
@@ -94,13 +94,42 @@ type App struct {
 // known-clean for THIS daemon generation — the startup reconciliation.
 // While the manager state is unknown (manager unreachable, PURGE refused
 // or ambiguous), build admission stays closed and every build fails
-// closed before any capacity reservation or operation admission;
+// closed after its capacity reservation, before any operation admission;
 // run/pull/registry-login remain available. The NEXT build attempt runs
 // one bounded reconciliation itself, so manager recovery never requires
 // restarting the main daemon.
+//
+// Concurrency (A1): at most one reconciliation PURGE runs at a time, and
+// the PURGE never holds the state mutex — the mutex owns only the gate
+// state and the attempt identity, for microseconds. A request that finds
+// an in-flight attempt JOINS exactly that attempt and waits for its
+// result with its own request context: a refused attempt refuses every
+// joined request closed without a PURGE of its own, a successful attempt
+// admits the joined requests whose context is still valid, and a request
+// whose context ends while it waits stops waiting, starts no PURGE, and
+// is refused. A request arriving after a failed attempt resolved may
+// start the next reconciliation. The attempt is the unit of result
+// identity: a joined request reads exactly its joined attempt's outcome,
+// never a later attempt's, so a follower of a failed purge can never be
+// admitted because a newer request's purge succeeded first.
 type builderAdmissionGate struct {
-	mu   sync.Mutex
+	mu sync.Mutex
+	// open reports whether a proven successful PURGE opened admission for
+	// this daemon generation. Written only under mu.
 	open bool
+	// attempt is the in-flight reconciliation attempt, or nil when no
+	// reconciliation is running. Written only under mu; the attempt itself
+	// is resolved exactly once by its owning goroutine.
+	attempt *builderAdmissionAttempt
+}
+
+// builderAdmissionAttempt is one in-flight reconciliation attempt of the
+// gate — the unit of attempt identity. succeeded is written before done is
+// closed and read only after done is closed, so the channel close carries
+// the result to every joined follower.
+type builderAdmissionAttempt struct {
+	done      chan struct{}
+	succeeded bool
 }
 
 func newBuilderAdmissionGate() *builderAdmissionGate {
@@ -110,7 +139,8 @@ func newBuilderAdmissionGate() *builderAdmissionGate {
 // reconcileStartup performs the startup reconciliation: one bounded
 // builder-manager PURGE. Success opens build admission for this daemon
 // generation; every failure keeps it closed (the returned error is the
-// caller's operational diagnostic, never a secret).
+// caller's operational diagnostic, never a secret). The startup runs
+// before the daemon serves requests, so the held mutex is uncontended.
 func (g *builderAdmissionGate) reconcileStartup(purge func() error) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -119,22 +149,85 @@ func (g *builderAdmissionGate) reconcileStartup(purge func() error) error {
 	return err
 }
 
-// ensureOpen reports whether build admission is open. When admission is
-// closed (manager state unknown for this daemon generation) it runs ONE
-// bounded reconciliation first — the next build rechecks/reconciles —
-// and opens on success. Concurrent closed-gate callers serialize on the
-// reconciliation.
-func (g *builderAdmissionGate) ensureOpen(purge func() error) bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.open {
-		return true
-	}
-	if err := purge(); err != nil {
+// ensureOpen reports whether THIS request may proceed into build
+// preparation: the builder-manager state is proven known-clean for this
+// daemon generation and the request's context is still valid. The request
+// context bounds the request's own participation (A1): a request whose
+// context ends while it waits for an in-flight reconciliation stops
+// waiting, starts no PURGE of its own, and is refused (its reservation is
+// released by the caller's refusal path); a request whose context ends
+// during its OWN reconciliation is likewise refused after the attempt
+// resolves — the already-started PURGE still completes within its
+// builderClientStopRead bound, and the gate result is published from the
+// purge's own outcome alone, so a cancelled request can never carry the
+// gate open nor slip into admission behind its own abandoned attempt.
+func (g *builderAdmissionGate) ensureOpen(ctx context.Context, purge func() error) bool {
+	if ctx.Err() != nil {
 		return false
 	}
-	g.open = true
-	return true
+	g.mu.Lock()
+	if g.open {
+		g.mu.Unlock()
+		return true
+	}
+	if g.attempt == nil {
+		// Lead: claim the attempt slot and run the bounded PURGE without
+		// holding the state mutex.
+		attempt := &builderAdmissionAttempt{done: make(chan struct{})}
+		g.attempt = attempt
+		g.mu.Unlock()
+		err := g.purgeAttempt(attempt, purge)
+		// The attempt is resolved and the gate published the purge's own
+		// outcome; this request proceeds only on a proven successful PURGE
+		// AND a still-valid context.
+		return err == nil && ctx.Err() == nil
+	}
+	// Follow: join the in-flight attempt and wait for exactly its result.
+	attempt := g.attempt
+	g.mu.Unlock()
+	select {
+	case <-attempt.done:
+		if !attempt.succeeded {
+			// The joined attempt was refused: fail closed without a PURGE
+			// of this request's own.
+			return false
+		}
+		return ctx.Err() == nil
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// purgeAttempt runs the claimed attempt's PURGE without holding the state
+// mutex and resolves the attempt exactly once. The deferred resolution
+// releases the attempt slot and gives every joined follower a terminal
+// result even when the PURGE does not return normally — a PURGE that
+// panics resolves as a refusal (the gate stays closed) while the panic
+// itself keeps unwinding to the handler boundary.
+func (g *builderAdmissionGate) purgeAttempt(attempt *builderAdmissionAttempt, purge func() error) (err error) {
+	returned := false
+	defer func() {
+		if !returned {
+			err = errors.New("builder-manager reconciliation did not return")
+		}
+		g.resolveAttempt(attempt, err)
+	}()
+	err = purge()
+	returned = true
+	return err
+}
+
+// resolveAttempt publishes one attempt's terminal result: the gate opens
+// only on a proven successful PURGE, the attempt slot is released so the
+// next request may start the next reconciliation, and the attempt's done
+// channel closes to wake every joined follower with this attempt's result.
+func (g *builderAdmissionGate) resolveAttempt(attempt *builderAdmissionAttempt, err error) {
+	g.mu.Lock()
+	g.open = err == nil
+	g.attempt = nil
+	g.mu.Unlock()
+	attempt.succeeded = err == nil
+	close(attempt.done)
 }
 
 // builderManagerPurge runs one bounded PURGE through the existing P2
