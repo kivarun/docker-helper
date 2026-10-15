@@ -692,6 +692,43 @@ func (h *gateProofHarness) postBuild(ctx context.Context) (*httptest.ResponseRec
 	return w, done
 }
 
+// gateObservedContext is a test-only observational context wrapper: Done()
+// delegates to the inner context's own done channel, so the cancellation
+// semantics are exactly the inner context's, and announces its first call.
+// It adds no cancellation behavior and reimplements no gate logic. In the
+// production ensureOpen the ONLY Done() call is the follower wait's select
+// (the entry check and the leader path use ctx.Err()); on the build handler
+// path nothing before the gate touches Done() either (every database call
+// uses the context-free QueryRow/Query forms), so the announcement is the
+// deterministic proof that the request reached the follower wait after the
+// in-flight attempt was captured under the gate mutex.
+type gateObservedContext struct {
+	context.Context
+	announced chan struct{}
+	once      sync.Once
+}
+
+func (c *gateObservedContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.announced) })
+	return c.Context.Done()
+}
+
+// postObservedBuild dispatches one valid build request whose request
+// context announces its Done() calls (see gateObservedContext). The
+// returned joined channel closes when the request enters the gate's
+// follower wait; the returned cancel cancels the inner context without
+// touching the announcement semantics.
+func (h *gateProofHarness) postObservedBuild() (*httptest.ResponseRecorder, <-chan struct{}, <-chan struct{}, context.CancelFunc) {
+	inner, cancel := context.WithCancel(context.Background())
+	observed := &gateObservedContext{Context: inner, announced: make(chan struct{})}
+	w, done := httptest.NewRecorder(), make(chan struct{})
+	go func() {
+		defer close(done)
+		h.app.handleBuild(w, newProofBuildRequest(h.t, h.token, observed))
+	}()
+	return w, done, observed.announced, cancel
+}
+
 // awaitPurgeStart waits for the Nth (1-based) controlled PURGE to start.
 func (h *gateProofHarness) awaitPurgeStart(n int) {
 	h.t.Helper()
@@ -762,11 +799,17 @@ func TestBuilderAdmissionConcurrentClosedGateWait(t *testing.T) {
 		default:
 		}
 
-		// The follower joins the leader's attempt: it acquires its capacity
-		// reservation (the reservation is taken immediately before the
-		// gate, so a reserved, not-yet-completed request is inside the
-		// ensureOpen wait) and cannot complete while the gate is held.
-		bW, bDone := h.postBuild(context.Background())
+		// The follower joins the leader's attempt. The capacity observation
+		// still pins the reservation accounting; the join itself is proven
+		// deterministically: the follower's request context announces the
+		// production ensureOpen's only Done() call, which happens when
+		// entering the follower wait AFTER the in-flight attempt was
+		// captured under the gate mutex. The leader's PURGE is still
+		// blocked at that point, so the signal proves the follower is
+		// parked in the joined attempt's wait — the refusal below can
+		// never race a late arrival.
+		bW, bDone, bJoined, bCancel := h.postObservedBuild()
+		defer bCancel()
 		if !gateProofWaitFor(t, "the follower's capacity reservation", 5*time.Second,
 			func() bool { return h.buildSlots() == 2 }) {
 			t.Fatal("the follower never acquired its capacity reservation")
@@ -777,6 +820,7 @@ func TestBuilderAdmissionConcurrentClosedGateWait(t *testing.T) {
 			t.Fatal("the follower completed while the leader still held the closed gate")
 		default:
 		}
+		gateProofAwaitEvent(t, "the follower's entry into the joined-attempt wait", bJoined, 5*time.Second)
 
 		// A third build at the occupied ceiling is refused immediately at
 		// its capacity reservation, while the leader's PURGE is still
@@ -807,9 +851,10 @@ func TestBuilderAdmissionConcurrentClosedGateWait(t *testing.T) {
 		if got := h.purges.Load(); got != 1 {
 			t.Fatalf("the follower started its own PURGE after the joined attempt was refused: %d PURGE attempts, want 1", got)
 		}
-		// Causal order: the follower was inside the gate wait (reserved,
-		// not completed) before the leader's refusal reply, and its refusal
-		// followed the joined attempt's resolution.
+		// Causal order: the follower was provably parked in the joined
+		// attempt's wait (the Done() announcement) before the leader's
+		// refusal was released, and its refusal followed the joined
+		// attempt's resolution.
 		events := h.events.snapshot()
 		i1, ib := gateProofEventIndex(events, "purge1:start"), gateProofEventIndex(events, "b:reserved")
 		ir, ic := gateProofEventIndex(events, "purge1:reply"), gateProofEventIndex(events, "c:refused")
@@ -840,11 +885,15 @@ func TestBuilderAdmissionConcurrentClosedGateWait(t *testing.T) {
 		aW, aDone := h.postBuild(context.Background())
 		h.awaitPurgeStart(1)
 
-		bW, bDone := h.postBuild(context.Background())
+		bW, bDone, bJoined, bCancel := h.postObservedBuild()
+		defer bCancel()
 		if !gateProofWaitFor(t, "the follower's capacity reservation", 5*time.Second,
 			func() bool { return h.buildSlots() == 2 }) {
 			t.Fatal("the follower never acquired its capacity reservation")
 		}
+		// The join barrier: the follower is provably parked in the joined
+		// attempt's wait before the reconciliation resolves.
+		gateProofAwaitEvent(t, "the follower's entry into the joined-attempt wait", bJoined, 5*time.Second)
 
 		// The single reconciliation succeeds: the gate opens for both
 		// valid participants, and neither runs a PURGE of its own.
@@ -872,12 +921,18 @@ func TestBuilderAdmissionConcurrentClosedGateWait(t *testing.T) {
 		aW, aDone := h.postBuild(context.Background())
 		h.awaitPurgeStart(1)
 
-		bCtx, bCancel := context.WithCancel(context.Background())
-		bW, bDone := h.postBuild(bCtx)
+		bW, bDone, bJoined, bCancel := h.postObservedBuild()
+		defer bCancel()
 		if !gateProofWaitFor(t, "the follower's capacity reservation", 5*time.Second,
 			func() bool { return h.buildSlots() == 2 }) {
 			t.Fatal("the follower never acquired its capacity reservation")
 		}
+		// The join barrier: the follower is provably parked in the joined
+		// attempt's wait. Cancelling now is therefore handled by the
+		// wait's own ctx.Done case — the entry check has long passed, so
+		// the test cannot mistake the entry refusal for the wait
+		// cancellation.
+		gateProofAwaitEvent(t, "the follower's entry into the joined-attempt wait", bJoined, 5*time.Second)
 
 		// Cancel the waiting follower: it must stop waiting while the
 		// leader's PURGE is still blocked — without starting a PURGE and
@@ -952,5 +1007,199 @@ func TestBuilderAdmissionConcurrentClosedGateWait(t *testing.T) {
 			t.Fatalf("%d operations registered, want exactly the post-recovery build", got)
 		}
 		h.drainAndVerify(aW.Body.String(), dW.Body.String())
+	})
+}
+
+// TestBuilderAdmissionGateAttemptJoin is the narrow deterministic proof of
+// the attempt-identity semantics, driven directly against the production
+// builderAdmissionGate.ensureOpen. The follower's context is the test-only
+// observational wrapper: production ensureOpen calls ctx.Done() exactly
+// once — when entering the follower wait, after the in-flight attempt was
+// captured under the gate mutex — and the entry check and the leader path
+// use ctx.Err(), never Done(). A leader whose PURGE is still blocked
+// therefore turns the announcement into a hard happens-before edge: the
+// follower has captured THIS attempt and is parked in its wait before the
+// attempt is resolved, so neither the refusal propagation nor the
+// cancellation below can be misattributed by scheduling.
+func TestBuilderAdmissionGateAttemptJoin(t *testing.T) {
+	t.Run("a refused joined attempt refuses the follower without a PURGE of its own", func(t *testing.T) {
+		gate := newBuilderAdmissionGate()
+
+		purge1Started := make(chan struct{})
+		release1 := make(chan error, 1)
+		var leaderPurges, followerPurges atomic.Int32
+		leaderDone := make(chan bool, 1)
+		go func() {
+			leaderDone <- gate.ensureOpen(context.Background(), func() error {
+				leaderPurges.Add(1)
+				close(purge1Started)
+				return <-release1
+			})
+		}()
+		gateProofAwaitEvent(t, "the leader's PURGE start", purge1Started, 5*time.Second)
+
+		observed := &gateObservedContext{Context: context.Background(), announced: make(chan struct{})}
+		followerDone := make(chan bool, 1)
+		go func() {
+			followerDone <- gate.ensureOpen(observed, func() error {
+				followerPurges.Add(1)
+				return nil
+			})
+		}()
+		// The join barrier: the follower is provably parked in the joined
+		// attempt's wait (the announcement fires only there), and the
+		// leader's PURGE is still blocked.
+		gateProofAwaitEvent(t, "the follower's entry into the joined-attempt wait", observed.announced, 5*time.Second)
+
+		release1 <- errBuilderStopNotConverged
+		select {
+		case admitted := <-leaderDone:
+			if admitted {
+				t.Fatal("the leader was admitted over a refused PURGE")
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timeout waiting for the leader's completion")
+		}
+		select {
+		case admitted := <-followerDone:
+			if admitted {
+				t.Fatal("the follower was admitted over the refused attempt it joined")
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timeout waiting for the follower's completion")
+		}
+		if got := followerPurges.Load(); got != 0 {
+			t.Fatalf("the joined follower ran %d reconciliations of its own, want 0", got)
+		}
+		if got := leaderPurges.Load(); got != 1 {
+			t.Fatalf("the leader ran %d PURGEs, want exactly its own one", got)
+		}
+
+		// A request arriving after the failed attempt resolved starts the
+		// next reconciliation, whose success opens the gate; the open gate
+		// never re-purges.
+		nextPurges := 0
+		if !gate.ensureOpen(context.Background(), func() error {
+			nextPurges++
+			return nil
+		}) {
+			t.Fatal("the gate stayed closed after a successful reconciliation")
+		}
+		if nextPurges != 1 {
+			t.Fatalf("the post-refusal request ran %d PURGEs, want exactly its own one", nextPurges)
+		}
+		if !gate.ensureOpen(context.Background(), func() error {
+			t.Error("the open gate re-purged")
+			return nil
+		}) {
+			t.Fatal("the gate stayed closed after the successful reconciliation")
+		}
+	})
+
+	t.Run("cancellation interrupts the waiting follower exactly at the joined-attempt wait", func(t *testing.T) {
+		gate := newBuilderAdmissionGate()
+
+		purge1Started := make(chan struct{})
+		release1 := make(chan error, 1)
+		var followerPurges atomic.Int32
+		leaderDone := make(chan bool, 1)
+		go func() {
+			leaderDone <- gate.ensureOpen(context.Background(), func() error {
+				close(purge1Started)
+				return <-release1
+			})
+		}()
+		gateProofAwaitEvent(t, "the leader's PURGE start", purge1Started, 5*time.Second)
+
+		inner, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		observed := &gateObservedContext{Context: inner, announced: make(chan struct{})}
+		followerDone := make(chan bool, 1)
+		go func() {
+			followerDone <- gate.ensureOpen(observed, func() error {
+				followerPurges.Add(1)
+				return nil
+			})
+		}()
+		// The join barrier: the follower is parked in the joined attempt's
+		// wait, so the cancellation below is handled by the wait's own
+		// ctx.Done case — the entry check has long passed.
+		gateProofAwaitEvent(t, "the follower's entry into the joined-attempt wait", observed.announced, 5*time.Second)
+		cancel()
+
+		select {
+		case admitted := <-followerDone:
+			if admitted {
+				t.Fatal("the cancelled follower was admitted")
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timeout waiting for the cancelled follower's completion")
+		}
+		if got := followerPurges.Load(); got != 0 {
+			t.Fatalf("the cancelled follower ran %d reconciliations, want 0", got)
+		}
+		// The abandoned follower left the leader's attempt untouched and in
+		// flight; the attempt then resolves on its own merits.
+		select {
+		case <-leaderDone:
+			t.Fatal("the leader completed while its PURGE was still blocked")
+		default:
+		}
+		release1 <- errBuilderStopNotConverged
+		select {
+		case admitted := <-leaderDone:
+			if admitted {
+				t.Fatal("the leader was admitted over a refused PURGE")
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timeout waiting for the leader's completion")
+		}
+	})
+
+	t.Run("a successful joined attempt admits the follower with a valid context", func(t *testing.T) {
+		gate := newBuilderAdmissionGate()
+
+		purge1Started := make(chan struct{})
+		release1 := make(chan error, 1)
+		var followerPurges atomic.Int32
+		leaderDone := make(chan bool, 1)
+		go func() {
+			leaderDone <- gate.ensureOpen(context.Background(), func() error {
+				close(purge1Started)
+				return <-release1
+			})
+		}()
+		gateProofAwaitEvent(t, "the leader's PURGE start", purge1Started, 5*time.Second)
+
+		observed := &gateObservedContext{Context: context.Background(), announced: make(chan struct{})}
+		followerDone := make(chan bool, 1)
+		go func() {
+			followerDone <- gate.ensureOpen(observed, func() error {
+				followerPurges.Add(1)
+				return nil
+			})
+		}()
+		gateProofAwaitEvent(t, "the follower's entry into the joined-attempt wait", observed.announced, 5*time.Second)
+
+		release1 <- nil
+		select {
+		case admitted := <-leaderDone:
+			if !admitted {
+				t.Fatal("the leader was refused over a successful PURGE")
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timeout waiting for the leader's completion")
+		}
+		select {
+		case admitted := <-followerDone:
+			if !admitted {
+				t.Fatal("the joined follower was refused after the attempt it joined succeeded")
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timeout waiting for the follower's completion")
+		}
+		if got := followerPurges.Load(); got != 0 {
+			t.Fatalf("the joined follower ran %d reconciliations of its own, want 0", got)
+		}
 	})
 }
