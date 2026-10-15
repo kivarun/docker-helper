@@ -2,13 +2,17 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -470,4 +474,442 @@ func TestReviewBuildAtCapacityMustNotQueueBehindReconciliation(t *testing.T) {
 	if got := purges.Load(); got != 0 {
 		t.Fatalf("the capacity-refused build consulted the closed admission gate: %d PURGE attempts", got)
 	}
+}
+
+// --- A1 proof: the concurrent closed-gate wait (proof only, no production change) ---
+
+// gateProofEvents is the ordered observation log of one proof scenario.
+// Every append is mutex-serialized; the asserted orderings are exactly the
+// ones carried by causal chains (channel handoffs between the test
+// goroutine, the HTTP handler goroutines, and the endpoint handler
+// goroutines), so the recorded order is deterministic, not timing-dependent.
+type gateProofEvents struct {
+	mu    sync.Mutex
+	items []string
+}
+
+func (e *gateProofEvents) add(event string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.items = append(e.items, event)
+}
+
+func (e *gateProofEvents) snapshot() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.items...)
+}
+
+// index returns the position of the first event with the given prefix.
+func (e *gateProofEvents) index(prefix string) int {
+	for i, event := range e.snapshot() {
+		if strings.HasPrefix(event, prefix) {
+			return i
+		}
+	}
+	return -1
+}
+
+// gateProofOutcome carries every requested observation of one scenario run.
+type gateProofOutcome struct {
+	events                  []string
+	purges                  int
+	followerStartedOwnPurge bool
+	aCode                   int
+	aErrCode                string
+	bCode                   int
+	bErrCode                string
+	bOperationID            string
+	opLogOutput             string
+	auditOutput             string
+	heldBuildSlots          int
+	heldGlobalSlots         int
+	registeredOps           int
+}
+
+// gateProofAwaitEvent waits for one channel signal with a hard bound.
+func gateProofAwaitEvent(t *testing.T, what string, ch <-chan struct{}, timeout time.Duration) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(timeout):
+		t.Fatalf("timeout waiting for %s", what)
+	}
+}
+
+// gateProofWaitFor waits for an observable state transition with a hard
+// bound. The 1ms poll is the bounded observation of an externally visible
+// transition (the supervisor capacity counters), the established pattern of
+// the shutdown tests; every actual synchronization step uses channels.
+func gateProofWaitFor(t *testing.T, what string, timeout time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if cond() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout waiting for %s", what)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// supervisorBuildSlotsHeld reads the supervisor's held global build slots.
+func supervisorBuildSlotsHeld(s *operationSupervisor) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.globalBuildCount
+}
+
+// newProofBuildRequest posts one valid build request with an explicit
+// request context (the cancellation scenario replaces it).
+func newProofBuildRequest(t *testing.T, token string, ctx context.Context) *http.Request {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "example:test",
+	})
+	if err != nil {
+		t.Fatalf("cannot encode the build request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	return req.WithContext(ctx)
+}
+
+// runGateReconciliationProof drives the A1 scenario through the real
+// production handler path: POST /build -> validation -> OperationSupervisor
+// reservation -> builderAdmissionGate.ensureOpen -> the real builder-manager
+// client PURGE round trip against the test endpoint. Two concurrent valid
+// build requests hit a closed gate; the first caller's PURGE is blocked by
+// the endpoint and is then released with a controlled outcome; the
+// secondPurgeReply decides the follower's own PURGE outcome (a refusal ends
+// the scenario closed; OK opens the gate and admits the follower's build).
+// Every blocking step has a bounded wait and a guaranteed cleanup release,
+// so the scenario cannot hang the test process.
+func runGateReconciliationProof(t *testing.T, cancelFollower bool, secondPurgeReply string) gateProofOutcome {
+	t.Helper()
+	app, supervisor, session := newAdmissionTestApp(t)
+	app.BuilderAdmission = newBuilderAdmissionGate()
+	seamManagerPeerIdentity(t)
+
+	// Capture the production operational/audit streams for the secret
+	// observation (the refusal path logs one static warn line).
+	logging.reset()
+	opBuf, auditBuf := new(bytes.Buffer), new(bytes.Buffer)
+	initLoggers(opBuf, auditBuf, slog.LevelWarn, true)
+	t.Cleanup(logging.reset)
+
+	var purges atomic.Int32
+	events := &gateProofEvents{}
+	purge1Started := make(chan struct{})
+	purge1Replied := make(chan struct{})
+	purge2Started := make(chan struct{})
+	release1 := make(chan string, 1)
+	release2 := make(chan string, 1)
+	fakeManagerEndpoint(t, func(line string) string {
+		if line != builderManagerCmdPurge {
+			return builderManagerRespOK
+		}
+		switch n := purges.Add(1); n {
+		case 1:
+			events.add("purge1:start")
+			close(purge1Started)
+			reply := <-release1
+			events.add("purge1:reply:" + reply)
+			close(purge1Replied)
+			return reply
+		case 2:
+			events.add("purge2:start")
+			close(purge2Started)
+			reply := <-release2
+			events.add("purge2:reply:" + reply)
+			return reply
+		default:
+			events.add(fmt.Sprintf("purge%d:start-unexpected", n))
+			return builderManagerRespInternal
+		}
+	})
+	// Guaranteed unblock: even a failing assertion releases every
+	// controlled PURGE so no handler goroutine can outlive the test.
+	t.Cleanup(func() {
+		for _, ch := range []chan string{release1, release2} {
+			select {
+			case ch <- builderManagerRespInternal:
+			default:
+			}
+		}
+	})
+
+	// Request A: reaches the closed gate first and holds it with its
+	// blocked PURGE.
+	aW, aDone := httptest.NewRecorder(), make(chan struct{})
+	go func() {
+		defer close(aDone)
+		app.handleBuild(aW, newProofBuildRequest(t, session.Token, context.Background()))
+	}()
+	gateProofAwaitEvent(t, "the first caller's PURGE start", purge1Started, 5*time.Second)
+	select {
+	case <-aDone:
+		t.Fatal("the first caller completed while its PURGE was still blocked")
+	default:
+	}
+
+	// Request B: dispatched while A holds the gate. Its capacity
+	// reservation is observable before the first PURGE is released; the
+	// reservation is taken immediately before the gate in the production
+	// order, so a reserved, not-yet-completed B is already inside the
+	// ensureOpen wait (the gate mutex is the only blocking step left).
+	bCtx, bCancel := context.WithCancel(context.Background())
+	defer bCancel()
+	bW, bDone := httptest.NewRecorder(), make(chan struct{})
+	go func() {
+		defer close(bDone)
+		app.handleBuild(bW, newProofBuildRequest(t, session.Token, bCtx))
+	}()
+	gateProofWaitFor(t, "the second caller's capacity reservation", 5*time.Second,
+		func() bool { return supervisorBuildSlotsHeld(supervisor) == 2 })
+	events.add("b:reserved")
+	select {
+	case <-bDone:
+		t.Fatal("the second caller completed while the first caller still held the closed gate")
+	default:
+	}
+
+	if cancelFollower {
+		bCancel()
+		events.add("b:cancelled")
+	}
+
+	// Release the first PURGE with a refusal: A fails closed.
+	release1 <- builderManagerRespInternal
+	gateProofAwaitEvent(t, "the first PURGE reply", purge1Replied, 5*time.Second)
+	select {
+	case <-aDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for the first caller's completion")
+	}
+	events.add("a:done")
+
+	// The A1 observation: after the in-flight PURGE is refused, does the
+	// follower complete without a reconciliation of its own (the
+	// documented bound), or does it start an additional PURGE?
+	select {
+	case <-purge2Started:
+		out := gateProofOutcome{followerStartedOwnPurge: true}
+		out.events = events.snapshot()
+		out.purges = int(purges.Load())
+		out.aCode, out.aErrCode = proofResponseCode(t, aW)
+		// Resolve the follower's own PURGE with the scenario's outcome and
+		// await its completion.
+		release2 <- secondPurgeReply
+		select {
+		case <-bDone:
+		case <-time.After(10 * time.Second):
+			t.Fatal("timeout waiting for the second caller's completion after its own PURGE")
+		}
+		events.add("b:done")
+		out.bCode, out.bErrCode = proofResponseCode(t, bW)
+		out.bOperationID = proofOperationID(t, bW)
+		proofDrain(t, supervisor, out.bOperationID)
+		out.opLogOutput, out.auditOutput = opBuf.String(), auditBuf.String()
+		out.heldBuildSlots, out.heldGlobalSlots, out.registeredOps = proofCapacity(t, supervisor)
+		return out
+	case <-bDone:
+		out := gateProofOutcome{followerStartedOwnPurge: false}
+		out.events = events.snapshot()
+		out.purges = int(purges.Load())
+		out.aCode, out.aErrCode = proofResponseCode(t, aW)
+		out.bCode, out.bErrCode = proofResponseCode(t, bW)
+		out.opLogOutput, out.auditOutput = opBuf.String(), auditBuf.String()
+		out.heldBuildSlots, out.heldGlobalSlots, out.registeredOps = proofCapacity(t, supervisor)
+		return out
+	case <-time.After(5 * time.Second):
+		t.Fatalf("neither an additional PURGE nor the follower's completion within the observation window (events: %s)",
+			strings.Join(events.snapshot(), " -> "))
+		return gateProofOutcome{}
+	}
+}
+
+// proofResponseCode records one request's HTTP status and public error code.
+func proofResponseCode(t *testing.T, w *httptest.ResponseRecorder) (int, string) {
+	t.Helper()
+	if w.Code != http.StatusInternalServerError {
+		return w.Code, ""
+	}
+	return w.Code, decodeAPIError(t, w.Body.Bytes()).Code
+}
+
+// proofOperationID extracts the admitted operation id from a 201 body.
+func proofOperationID(t *testing.T, w *httptest.ResponseRecorder) string {
+	t.Helper()
+	if w.Code != http.StatusCreated {
+		return ""
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode the admitted operation: %v", err)
+	}
+	opID, _ := resp["operation_id"].(string)
+	return opID
+}
+
+// proofDrain awaits a registered operation's terminal transition (bounded;
+// the fake build completes on its own) so no driver goroutine outlives the
+// endpoint seams.
+func proofDrain(t *testing.T, supervisor *operationSupervisor, opID string) {
+	t.Helper()
+	if opID == "" {
+		return
+	}
+	op := supervisor.lookup(opID)
+	if op == nil {
+		t.Fatalf("the admitted operation %s was not registered", opID)
+	}
+	select {
+	case <-op.done:
+	case <-time.After(10 * time.Second):
+		if err := supervisor.cancel(opID, nil); err != nil && err != ErrOperationAlreadyTerminal {
+			t.Fatalf("cannot cancel the admitted operation: %v", err)
+		}
+		select {
+		case <-op.done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the admitted operation did not reach a terminal state")
+		}
+	}
+}
+
+// proofCapacity snapshots the supervisor's held slots and registered
+// operations after the scenario drained.
+func proofCapacity(t *testing.T, s *operationSupervisor) (int, int, int) {
+	t.Helper()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.globalBuildCount, s.globalRunning, len(s.ops)
+}
+
+// assertNoProofSecret proves neither the public error bodies nor the
+// captured operational/audit streams carry the session bearer token.
+func assertNoProofSecret(t *testing.T, out gateProofOutcome, token string) {
+	t.Helper()
+	for _, stream := range map[string]string{
+		"the first response body":  fmt.Sprint(out.aErrCode),
+		"the second response body": fmt.Sprint(out.bErrCode),
+		"the operational log":      out.opLogOutput,
+		"the audit log":            out.auditOutput,
+	} {
+		if strings.Contains(stream, token) {
+			t.Fatalf("the session bearer token leaked into %s", stream)
+		}
+	}
+}
+
+// gateProofEventIndex returns the position of the first event with the
+// given prefix, or -1.
+func gateProofEventIndex(events []string, prefix string) int {
+	for i, event := range events {
+		if strings.HasPrefix(event, prefix) {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestBuilderAdmissionConcurrentClosedGateWait is the A1 proof (proof only,
+// no production change): two concurrent valid build requests at a closed
+// builder-admission gate, the first caller's PURGE blocked by the test
+// endpoint and then refused. It separates three questions:
+//
+//  1. the documented admission bound (build.go): a follower at the closed
+//     gate "waits at most for the in-flight bounded PURGE" — after the
+//     in-flight PURGE is REFUSED, the follower must therefore complete
+//     without a reconciliation of its own;
+//  2. the observed serialization behavior (each closed-gate caller runs
+//     its own bounded PURGE after a refused in-flight one);
+//  3. the request-cancellation behavior during the gate wait.
+//
+// The gate mutex wait itself is bounded by the in-flight PURGE (that part
+// of the documented claim holds); the first subtest fails exactly because
+// the refused in-flight PURGE is FOLLOWED by the follower's own bounded
+// PURGE, a second bounded interval the documented sentence does not state.
+func TestBuilderAdmissionConcurrentClosedGateWait(t *testing.T) {
+	t.Run("documented bound: the follower completes within the in-flight PURGE", func(t *testing.T) {
+		out := runGateReconciliationProof(t, false, builderManagerRespInternal)
+		// RED at the proof baseline: the follower started its own PURGE
+		// after the in-flight PURGE was refused. The documented claim
+		// ("waits at most for the in-flight bounded PURGE") does not hold
+		// for the refusal path: the follower's gate wait spans the
+		// in-flight PURGE AND its own bounded PURGE. This assertion is the
+		// reproducing red check and must not be weakened to green.
+		if out.followerStartedOwnPurge {
+			t.Fatalf("the follower started its own PURGE after the in-flight PURGE was refused: %d PURGE attempts total (events: %s)",
+				out.purges, strings.Join(out.events, " -> "))
+		}
+	})
+
+	t.Run("observed serialization: each closed-gate caller runs its own bounded PURGE", func(t *testing.T) {
+		out := runGateReconciliationProof(t, false, builderManagerRespInternal)
+		if out.purges != 2 {
+			t.Fatalf("observed %d PURGE attempts, want 2 (the in-flight one and the follower's own)", out.purges)
+		}
+		// Causal event order: the follower was already inside the gate
+		// wait (reserved, not completed) before the in-flight PURGE was
+		// released; the follower's own PURGE started only after the
+		// in-flight PURGE's refusal reply.
+		i1, ib := gateProofEventIndex(out.events, "purge1:start"), gateProofEventIndex(out.events, "b:reserved")
+		ir, i2 := gateProofEventIndex(out.events, "purge1:reply"), gateProofEventIndex(out.events, "purge2:start")
+		if !(i1 < ib && ib < ir && ir < i2) {
+			t.Fatalf("unexpected event order (purge1 start %d, follower reserved %d, purge1 reply %d, purge2 start %d): %s",
+				i1, ib, ir, i2, strings.Join(out.events, " -> "))
+		}
+		if out.aCode != http.StatusInternalServerError || out.aErrCode != "internal_error" {
+			t.Fatalf("the refused leader = %d/%q, want 500/internal_error", out.aCode, out.aErrCode)
+		}
+		if out.bCode != http.StatusInternalServerError || out.bErrCode != "internal_error" {
+			t.Fatalf("the refused follower = %d/%q, want 500/internal_error", out.bCode, out.bErrCode)
+		}
+		// The fail-closed invariant: both refusals left the public shape
+		// intact and released every held resource.
+		if out.heldBuildSlots != 0 || out.heldGlobalSlots != 0 {
+			t.Fatalf("capacity leaked after both refusals: build slots %d, global slots %d", out.heldBuildSlots, out.heldGlobalSlots)
+		}
+		if out.registeredOps != 0 {
+			t.Fatalf("%d operations were registered by refused builds", out.registeredOps)
+		}
+	})
+
+	t.Run("request cancellation is not honored during the gate wait", func(t *testing.T) {
+		out := runGateReconciliationProof(t, true, builderManagerRespOK)
+		// The follower's request context was cancelled BEFORE the in-flight
+		// PURGE was released; the follower still ran its own PURGE
+		// afterwards and, with it succeeding, still ADMITTED its build.
+		ic := gateProofEventIndex(out.events, "b:cancelled")
+		ir, i2 := gateProofEventIndex(out.events, "purge1:reply"), gateProofEventIndex(out.events, "purge2:start")
+		if !(ic >= 0 && ic < ir && ir < i2) {
+			t.Fatalf("unexpected cancellation event order (cancelled %d, purge1 reply %d, purge2 start %d): %s",
+				ic, ir, i2, strings.Join(out.events, " -> "))
+		}
+		if out.purges != 2 {
+			t.Fatalf("observed %d PURGE attempts, want 2: the cancelled follower still reconciled", out.purges)
+		}
+		if out.bCode != http.StatusCreated {
+			t.Fatalf("the cancelled follower = %d, want 201: the abandoned request still completed its admission", out.bCode)
+		}
+		if out.aCode != http.StatusInternalServerError || out.aErrCode != "internal_error" {
+			t.Fatalf("the refused leader = %d/%q, want 500/internal_error", out.aCode, out.aErrCode)
+		}
+		// The abandoned request's build became a real operation and held
+		// its capacity until it reached a terminal state (drained by the
+		// runner); nothing else was registered.
+		if out.registeredOps != 1 {
+			t.Fatalf("%d operations registered, want exactly the cancelled follower's admitted build", out.registeredOps)
+		}
+		if out.heldBuildSlots != 0 || out.heldGlobalSlots != 0 {
+			t.Fatalf("capacity leaked after the admitted build drained: build slots %d, global slots %d",
+				out.heldBuildSlots, out.heldGlobalSlots)
+		}
+	})
 }
