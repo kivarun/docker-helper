@@ -61,9 +61,9 @@ grep -q "R7-DIAG-RESULT=REPRODUCED" "$EVIDENCE_DIR/red.log" \
 log "phase RED: defect reproduced on the unprovisioned runner"
 
 # --- Phase GREEN: the R7-B dependency differential on the SAME bytes --------
-BUNDLE="$(find /tmp -maxdepth 2 -type d -name 'r7-bundle.*' | head -1)"
-[ -n "$BUNDLE" ] || fail "phase GREEN: bundle extract directory not found"
-sudo "$BUNDLE"/docker-helper-*/uninstall-system.sh --yes >/dev/null 2>&1 \
+BUNDLE="$(sudo cat "$EVIDENCE_DIR/red/r7-bundle-path" 2>/dev/null || true)"
+[ -n "$BUNDLE" ] || fail "phase GREEN: bundle path marker not found"
+sudo "$BUNDLE/uninstall-system.sh" --yes >/dev/null 2>&1 \
   || log "WARN: uninstall-system.sh exited non-zero (continuing)"
 
 if ! run_phase green install ok "$EVIDENCE_DIR/green.log"; then

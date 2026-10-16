@@ -122,12 +122,14 @@ if [ "$INSTALL_FMT" = "rpm" ]; then
   log "RPM installed: $(rpm -q docker-helper)"
 elif [ "$INSTALL_FMT" = "tarball" ]; then
   EXTRACT="$(mktemp -d /tmp/r7-bundle.XXXXXX)"
+  chmod 755 "$EXTRACT"
   tar xzf "$ARTIFACT" -C "$EXTRACT" || fail "tar extraction failed"
   BUNDLE="$(find "$EXTRACT" -maxdepth 1 -type d -name 'docker-helper-*' | head -1)"
   [ -n "$BUNDLE" ] && [ -x "$BUNDLE/install-system.sh" ] || fail "bundle/install-system.sh not found"
   (cd "$BUNDLE" && ./install-system.sh --yes --allowed-root "$ALLOWED_ROOT") \
     || fail "install-system.sh failed"
   log "tarball install complete"
+  printf '%s\n' "$BUNDLE" > "$EVIDENCE_DIR/r7-bundle-path"
 else
   fail "unknown R7_INSTALL '$INSTALL_FMT'"
 fi
@@ -190,10 +192,14 @@ chown -R "$PRINCIPAL:$PRINCIPAL" "$WS"
 
 # The principal must exist before the admin principal-selector session create
 # (the eager 'default' Launcher is provisioned at principal create — the same
-# sequence the UAT scenario runs).
-docker-helper principal create --no-credential "$PRINCIPAL" \
-  || fail "principal create failed"
-docker-helper principal allowed-root add "$PRINCIPAL" "$ALLOWED_ROOT" \
+# sequence the UAT scenario runs). The create tolerates a principal left by a
+# prior diagnostic phase on the same environment.
+if ! docker-helper principal create --no-credential "$PRINCIPAL" 2>/dev/null; then
+  docker-helper principal show "$PRINCIPAL" >/dev/null \
+    || fail "principal create failed and principal '$PRINCIPAL' is absent"
+fi
+docker-helper principal allowed-root add "$PRINCIPAL" "$ALLOWED_ROOT" 2>/dev/null \
+  || docker-helper principal show "$PRINCIPAL" >/dev/null \
   || fail "principal allowed-root add failed"
 
 SESS_JSON="$(curl --silent --max-time 5 \

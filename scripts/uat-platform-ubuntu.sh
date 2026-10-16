@@ -28,12 +28,23 @@ platform_preflight() {
 }
 
 # platform_install_deps installs the build/test toolchain via the native
-# package manager. Used by the workflow's install-deps provisioning step.
+# package manager AND the packaged runtime dependency contract of the builder
+# backend. Used by the workflow's install-deps provisioning step.
+#
+# The builder backend runtime trio (rootlesskit, slirp4netns, uidmap) mirrors
+# the candidate's declared runtime dependencies (packaging/nfpm.yaml deb
+# depends: the distro-owned rootless build backend the bundled BuildKit
+# payload drives — the P5AA AppArmor parity UAT installs the same trio; see
+# scripts/test-uat-platform-dependency-parity.sh, which fails when the
+# packaged contract and this provisioning drift apart). Without them the DEB
+# consumers cannot dpkg-install the candidate and the tarball consumers cannot
+# start the builder at all.
 platform_install_deps() {
   apt-get update -y
   DEBIAN_FRONTEND=noninteractive apt-get install -y \
     musl-tools checkpolicy semodule-utils apparmor-utils openssl \
-    tar gzip file curl
+    tar gzip file curl \
+    rootlesskit slirp4netns uidmap
 }
 
 # platform_default_principal returns the OS user mapped to the docker-helper
