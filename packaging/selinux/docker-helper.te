@@ -2767,7 +2767,7 @@ allow docker_helper_rootlesskit_t docker_helper_slirp4netns_t:process { signal s
 #   avc: denied { mounton } tclass=dir tcontext=tmp_t          (the target)
 #   avc: denied { mounton } tclass=dir
 #        tcontext=docker_helper_builder_state_t:s0:c1          (the source)
-allow docker_helper_buildkitd_t tmp_t:dir { write add_name create mounton };
+allow docker_helper_buildkitd_t tmp_t:dir { write add_name create mounton remove_name read };
 
 # R7 (green attempt, scope=selinux run 38977886885): the payload's own
 # namespace-internal mount authority. The temp-dir bind mount (the
@@ -2786,6 +2786,22 @@ allow docker_helper_buildkitd_t tmp_t:dir { write add_name create mounton };
 # evidence-driven staircase, and this is its first rung: sys_admin only,
 # self-scoped, no net_admin/ptrace/chroot ride-along.
 allow docker_helper_buildkitd_t self:cap_userns { sys_admin };
+
+# R7 (green attempt, scope=selinux run 38979563860): the mount's own
+# read-only flag application. The same bind mount
+# ([rbind ro], flags 20481 = MS_BIND|MS_REC|MS_RDONLY) now reaches the
+# flag-application stage and fails with EACCES at the kernel's remount hook:
+#
+#   avc: denied { remount } tclass=filesystem
+#        scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#        tcontext=system_u:object_r:fs_t:s0
+#
+# (mount -o bind,ro applies the read-only flag through the remount path on
+# the source superblock). Same-window records of buildkitd's own /tmp
+# lifecycle (the check/temp-dir surface its mount path exercises):
+# create file tmp_t, remove_name dir tmp_t, read dir tmp_t.
+allow docker_helper_buildkitd_t fs_t:filesystem { remount };
+allow docker_helper_buildkitd_t tmp_t:file { create };
 
 # --- R7 closing note: denials deliberately left CLOSED ---
 #
