@@ -234,14 +234,16 @@ head -n 40 "$EVIDENCE_DIR/r7-build-cli.log"
 # Section 5: post-build evidence (AVCs, journals, live process contexts)
 # ============================================================================
 log "=== section 5: post-build evidence ==="
+# R7-C core FIRST: the manager's own diag lines live in the builder service
+# journal (StandardError=journal); capture the journals before any
+# potentially slower evidence step.
+cap r7-builder-journal 200 bash -c "journalctl -u docker-helper-builder.service --no-pager | tail -200"
+cap r7-daemon-journal 120 bash -c "journalctl -u docker-helper.service --no-pager | tail -120"
 if command -v ausearch >/dev/null 2>&1; then
   cap r7-avc-full 400 ausearch -m AVC -m USER_AVC --start recent
 else
-  cap r7-avc-journal 200 bash -c "journalctl -k --no-pager --since \"@$BUILD_START_EPOCH\" 2>/dev/null | grep -i 'avc' || true"
+  cap r7-avc-journal 200 bash -c "journalctl -k --no-pager 2>/dev/null | grep -iE 'avc|apparmor=' | tail -200 || true"
 fi
-cap r7-daemon-journal 120 bash -c "journalctl -u docker-helper.service --no-pager --since \"@$BUILD_START_EPOCH\" | tail -120"
-# R7-C core: the manager's own diag lines live in the builder service journal.
-cap r7-builder-journal 200 bash -c "journalctl -u docker-helper-builder.service --no-pager --since \"@$BUILD_START_EPOCH\" | tail -200"
 if [ "$BACKEND" = "selinux" ]; then
   cap r7-process-contexts 40 bash -c 'ps -eZ 2>/dev/null | grep -E "docker-helper|buildkit|rootlesskit|slirp4netns|newuidmap|newgidmap" || true'
   cap r7-sesearch-builder-signal 30 bash -c 'sesearch -A -s docker_helper_builder_t -c process 2>/dev/null | head -30 || true'
