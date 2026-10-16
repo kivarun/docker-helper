@@ -1145,8 +1145,8 @@ allow docker_helper_rootlesskit_t passwd_file_t:file { read open getattr };
 # manager-owned state (the purge owns removal), and the child's only
 # state-tree socket is its own api.sock (comm="rootlesskit" denied
 # { create } and { unlink } on tclass=sock_file).
-allow docker_helper_rootlesskit_t docker_helper_builder_state_t:dir { search getattr read open write add_name remove_name lock };
-allow docker_helper_rootlesskit_t docker_helper_builder_state_t:file { create open read write getattr setattr lock };
+allow docker_helper_rootlesskit_t docker_helper_builder_state_t:dir { search getattr read open write add_name remove_name lock rmdir };
+allow docker_helper_rootlesskit_t docker_helper_builder_state_t:file { create open read write getattr setattr lock unlink };
 allow docker_helper_rootlesskit_t docker_helper_builder_state_t:sock_file { create unlink };
 
 # The child inherits the manager's inst.diag output pipe (Stdout/Stderr of
@@ -2736,9 +2736,21 @@ allow docker_helper_t docker_helper_buildctl_exec_t:file { execute execute_no_tr
 # The targets are exactly the flow's categorized child domains this
 # manager launched (the launcher self-reexec becomes the group leader, so
 # docker_helper_builder_launcher_t carries no distinct surviving process).
-allow docker_helper_builder_t docker_helper_buildkitd_t:process { signull signal };
-allow docker_helper_builder_t docker_helper_rootlesskit_t:process { signull signal };
-allow docker_helper_builder_t docker_helper_slirp4netns_t:process { signull signal };
+allow docker_helper_builder_t docker_helper_buildkitd_t:process { signull signal sigkill };
+allow docker_helper_builder_t docker_helper_rootlesskit_t:process { signull signal sigkill };
+allow docker_helper_builder_t docker_helper_slirp4netns_t:process { signull signal sigkill };
+
+# The rootlesskit parent's own child-process authority: at exit (and during
+# the flow's normal operation) rootlesskit signals its own children
+# (buildkitd, slirp4netns) — the same-category flow child pair:
+#   avc: denied { signal }  scontext=docker_helper_rootlesskit_t:s0:c1
+#        tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#   avc: denied { sigkill } scontext=docker_helper_rootlesskit_t:s0:c1
+#        tcontext=system_u:system_r:docker_helper_slirp4netns_t:s0:c1
+# (green attempt, scope=selinux run 38971500130; the exit-cleanup path is
+# exercised by every build). Send-only toward its own two child domains.
+allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { signal sigkill };
+allow docker_helper_rootlesskit_t docker_helper_slirp4netns_t:process { signal sigkill };
 
 # --- R7 closing note: denials deliberately left CLOSED ---
 #
@@ -3827,7 +3839,7 @@ allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr
 #   avc: denied { setattr } tclass=dir
 #        tcontext=system_u:object_r:docker_helper_builder_state_t:s0:c1
 #        name=new-450847510
-allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name rmdir setattr };
+allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name rmdir setattr rename };
 
 # --- 4C-69: the categorized operation-state file create — the NEW
 # --- file-class plane (a NEW pair+class rule, NEVER a widening of the
@@ -4033,7 +4045,7 @@ allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr sear
 #   avc: denied { rename } tclass=file
 #        tcontext=system_u:object_r:docker_helper_builder_state_t:s0:c1
 #        name=startedat.tmp
-allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr rename };
+allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr rename setattr unlink };
 
 # --- 4C-72: the shared runtime-root dir search — the NEW pair/plane
 # --- (PLANE G); the bare singleton, never a widening of any existing

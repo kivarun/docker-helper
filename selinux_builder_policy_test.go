@@ -204,8 +204,8 @@ func TestSELinuxPolicyBuilderStateRules(t *testing.T) {
 	for _, want := range []string{
 		"allow docker_helper_builder_t docker_helper_builder_state_t:dir { getattr search read open write add_name remove_name create rmdir setattr };",
 		"allow docker_helper_builder_t docker_helper_builder_state_t:file { create read write open getattr setattr unlink };",
-		"allow docker_helper_rootlesskit_t docker_helper_builder_state_t:dir { search getattr read open write add_name remove_name lock };",
-		"allow docker_helper_rootlesskit_t docker_helper_builder_state_t:file { create open read write getattr setattr lock };",
+		"allow docker_helper_rootlesskit_t docker_helper_builder_state_t:dir { search getattr read open write add_name remove_name lock rmdir };",
+		"allow docker_helper_rootlesskit_t docker_helper_builder_state_t:file { create open read write getattr setattr lock unlink };",
 		"allow docker_helper_rootlesskit_t docker_helper_builder_state_t:sock_file { create unlink };",
 	} {
 		if !strings.Contains(policy, want) {
@@ -349,8 +349,8 @@ func s15LauncherCgroupViolations(policy string) []string {
 			violations = append(violations, fmt.Sprintf("the standing cgroup owner drifted (must stay exactly its bare { search } dir singleton): %s", want))
 		}
 	}
-	if buildkitdNamedAllow != 11 {
-		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 11 (the S15 phase had exactly 9; R7 added the manager child-lifecycle rule and the per-op endpoint peer edge; a NON-buildkitd S15 rule never trips it), found %d", buildkitdNamedAllow))
+	if buildkitdNamedAllow != 12 {
+		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 12 (the S15 phase had exactly 9; R7 added the manager child-lifecycle rule, the per-op endpoint peer edge and the rootlesskit parent's buildkitd child-authority rule; a NON-buildkitd S15 rule never trips it), found %d", buildkitdNamedAllow))
 	}
 	return violations
 }
@@ -1191,7 +1191,7 @@ func TestSELinuxPolicyBuilderChildLifecycleAuthorityR7(t *testing.T) {
 		"docker_helper_rootlesskit_t",
 		"docker_helper_slirp4netns_t",
 	} {
-		canonical := fmt.Sprintf("allow docker_helper_builder_t %s:process { signull signal };", pair)
+		canonical := fmt.Sprintf("allow docker_helper_builder_t %s:process { signull signal sigkill };", pair)
 		count := 0
 		for _, line := range strings.Split(policy, "\n") {
 			if strings.TrimSpace(line) == canonical {
@@ -1210,8 +1210,8 @@ func TestSELinuxPolicyBuilderChildLifecycleAuthorityR7(t *testing.T) {
 		if !strings.Contains(trimmed, ":process ") {
 			continue
 		}
-		if !strings.Contains(trimmed, "{ signull signal };") && !strings.Contains(trimmed, "{ transition };") && !strings.Contains(trimmed, ":process transition;") {
-			t.Errorf("the builder manager's process-class authority must stay send-only { signull signal } or the standing transition edges: %s", trimmed)
+		if !strings.Contains(trimmed, "{ signull signal sigkill };") && !strings.Contains(trimmed, "{ transition };") && !strings.Contains(trimmed, ":process transition;") {
+			t.Errorf("the builder manager's process-class authority must stay send-only { signull signal sigkill } or the standing transition edges: %s", trimmed)
 		}
 	}
 }
@@ -4717,8 +4717,8 @@ func buildkitdIdentityViolations(policy string) []string {
 	const canonicalTransition = "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;"
 	const canonicalEntry = "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr };"
 	const canonicalStateRoot = "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search };"
-	const canonicalStateTree = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name rmdir setattr };"
-	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr rename };"
+	const canonicalStateTree = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name rmdir setattr rename };"
+	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr rename setattr unlink };"
 	const canonicalRuntimeRoot = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search;"
 	const canonicalRuntimeTree = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write add_name remove_name };"
 	// The categorized runtime-tree sock_file plane (PLANE I, the 4C-77
@@ -4731,7 +4731,7 @@ func buildkitdIdentityViolations(policy string) []string {
 	// manager's send-only { signull signal } toward the flow child — the
 	// STOP escalation and the liveness probes are the manager's REQUIRED
 	// operations (build_driver stage D runs on every build).
-	const canonicalManagerLifecycle = "allow docker_helper_builder_t docker_helper_buildkitd_t:process { signull signal };"
+	const canonicalManagerLifecycle = "allow docker_helper_builder_t docker_helper_buildkitd_t:process { signull signal sigkill };"
 	// The categorized state-tree dir surface's standing owners (the
 	// exact module lines): the daemon does NOT own one; every other
 	// subject's existing rule is its own owner and must stay unchanged —
@@ -4740,7 +4740,7 @@ func buildkitdIdentityViolations(policy string) []string {
 		"allow init_t docker_helper_builder_state_t:dir { create rmdir write remove_name setattr };":                                                    true,
 		"allow docker_helper_builder_t docker_helper_builder_state_t:dir { relabelto };":                                                                true,
 		"allow docker_helper_builder_t docker_helper_builder_state_t:dir { getattr search read open write add_name remove_name create rmdir setattr };": true,
-		"allow docker_helper_rootlesskit_t docker_helper_builder_state_t:dir { search getattr read open write add_name remove_name lock };":             true,
+		"allow docker_helper_rootlesskit_t docker_helper_builder_state_t:dir { search getattr read open write add_name remove_name lock rmdir };":       true,
 		canonicalStateTree: true,
 	}
 	// The categorized state-tree file surface's standing owners (the
@@ -4751,9 +4751,9 @@ func buildkitdIdentityViolations(policy string) []string {
 	// (the RootlessKit seven-perm shape is NOT a template for BuildKitd;
 	// any NEW or reshaped rule on the pair trips).
 	standingStateTreeFileRules := map[string]bool{
-		"allow init_t docker_helper_builder_state_t:file { unlink };":                                                           true,
-		"allow docker_helper_builder_t docker_helper_builder_state_t:file { create read write open getattr setattr unlink };":   true,
-		"allow docker_helper_rootlesskit_t docker_helper_builder_state_t:file { create open read write getattr setattr lock };": true,
+		"allow init_t docker_helper_builder_state_t:file { unlink };":                                                                  true,
+		"allow docker_helper_builder_t docker_helper_builder_state_t:file { create read write open getattr setattr unlink };":          true,
+		"allow docker_helper_rootlesskit_t docker_helper_builder_state_t:file { create open read write getattr setattr lock unlink };": true,
 		canonicalStateFile: true,
 	}
 	standingRootlesskitExecRules := map[string]string{
@@ -4931,9 +4931,9 @@ func buildkitdIdentityViolations(policy string) []string {
 	// G shared runtime-root dir { search }, H categorized runtime-tree dir
 	// { getattr search write add_name remove_name }, I categorized
 	// runtime-tree sock_file { create unlink setattr }, and the R7-added
-	// manager child-lifecycle { signull signal } authority and the
-	// daemon's per-op BuildKit endpoint { connectto } peer edge) — never
-	// "at least".
+	// manager child-lifecycle authority, the daemon's per-op BuildKit
+	// endpoint { connectto } peer edge and the rootlesskit parent's
+	// buildkitd child-authority rule) — never "at least".
 	buildkitdNamedAllow := 0
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -4944,8 +4944,8 @@ func buildkitdIdentityViolations(policy string) []string {
 			buildkitdNamedAllow++
 		}
 	}
-	if buildkitdNamedAllow != 11 {
-		violations = append(violations, fmt.Sprintf("the module must carry exactly the eleven buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir setattr }, the categorized state-tree file { create read open lock write getattr rename }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name }, the categorized runtime-tree sock_file { create unlink setattr }, and the R7 manager child-lifecycle { signull signal } authority plus the daemon's per-op BuildKit endpoint { connectto } peer edge), found %d", buildkitdNamedAllow))
+	if buildkitdNamedAllow != 12 {
+		violations = append(violations, fmt.Sprintf("the module must carry exactly the twelve buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir setattr }, the categorized state-tree file { create read open lock write getattr rename }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name }, the categorized runtime-tree sock_file { create unlink setattr }, and the R7 manager child-lifecycle { signull signal sigkill } authority, the daemon's per-op BuildKit endpoint { connectto } peer edge, and the rootlesskit parent's buildkitd child-authority rule), found %d", buildkitdNamedAllow))
 	}
 	// The shared runtime-root dir surface has exactly the standing
 	// owners above; a NEW or reshaped rule on the pair (any source,
@@ -5042,7 +5042,7 @@ func buildkitdIdentityViolations(policy string) []string {
 			if strings.Contains(trimmed, "docker_helper_buildkitd_exec_t") && trimmed != canonicalExec && trimmed != canonicalEntry {
 				violations = append(violations, "the only allow rules naming the buildkitd exec type are the exact source-exec grant { execute read open } and the exact target-side { entrypoint read execute getattr } grant: "+trimmed)
 			}
-			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot && trimmed != canonicalRuntimeTree && trimmed != canonicalRuntimeSockFile && trimmed != canonicalManagerLifecycle && trimmed != "allow docker_helper_t docker_helper_buildkitd_t:unix_stream_socket { connectto };" {
+			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot && trimmed != canonicalRuntimeTree && trimmed != canonicalRuntimeSockFile && trimmed != canonicalManagerLifecycle && trimmed != "allow docker_helper_t docker_helper_buildkitd_t:unix_stream_socket { connectto };" && trimmed != "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { signal sigkill };" {
 				violations = append(violations, "the only allow rules toward the buildkitd domain are the exact process transition grant, the exact target-entrypoint grant, and the exact state/runtime surfaces: "+trimmed)
 			}
 			fields := strings.Fields(trimmed)
@@ -5063,11 +5063,21 @@ func buildkitdIdentityViolations(policy string) []string {
 			if len(fields) >= 3 && fields[1] == "docker_helper_rootlesskit_t" && strings.Contains(fields[2], ":process") {
 				target := strings.SplitN(fields[2], ":", 2)[0]
 				if target == "docker_helper_buildkitd_t" {
-					if trimmed != canonicalTransition {
-						violations = append(violations, "the buildkitd process-transition grant must be the exact bare { transition } form: "+trimmed)
+					// The pointed transition edge stays bare { transition };
+					// the R7 parent child-authority rule ({ signal sigkill },
+					// the exit-cleanup kill of its own child, run
+					// 38971500130) is the ONE admitted second rule on the
+					// same pair — send-only, no other signal shape.
+					if trimmed != canonicalTransition && trimmed != "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { signal sigkill };" {
+						violations = append(violations, "the buildkitd process edges are the exact bare { transition } grant and the R7 parent child-authority { signal sigkill } rule: "+trimmed)
 					}
 				} else if standing, ok := standingRootlesskitTransitionRules[target]; ok {
-					if trimmed != standing {
+					// The R7 parent child-authority rule toward the flow's
+					// own slirp4netns child ({ signal sigkill }, the exit-
+					// cleanup kill, run 38971500130) is the ONE admitted
+					// second rule on the slirp4netns pair.
+					parentSlirp := "allow docker_helper_rootlesskit_t docker_helper_slirp4netns_t:process { signal sigkill };"
+					if trimmed != standing && trimmed != parentSlirp {
 						violations = append(violations, "no second permission sweep toward the standing helper transition (the existing owner's rule must stay unchanged): "+trimmed)
 					}
 				} else {
@@ -5326,7 +5336,7 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 	// correlation, the whole tree's voluntary exit_group(1) after the
 	// state-tree FILE write denial — ONE rule widened IN PLACE each
 	// phase, never split).
-	const canonicalStateTree = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name rmdir setattr };"
+	const canonicalStateTree = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name rmdir setattr rename };"
 	var withoutStateTree []string
 	stateTreeCount := 0
 	for _, line := range strings.Split(policy, "\n") {
@@ -5349,7 +5359,7 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 	// WIDENED IN PLACE by the 4C-69 canonical run's own terminal combined
 	// 0x40002 decision (ONE rule, never split, never 4C-70a/4C-70b; the
 	// old bare form is now a mutation shape below).
-	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr rename };"
+	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr rename setattr unlink };"
 	var withoutStateFile []string
 	stateFileCount := 0
 	for _, line := range strings.Split(policy, "\n") {
