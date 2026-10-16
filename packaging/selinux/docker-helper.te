@@ -2760,7 +2760,14 @@ allow docker_helper_rootlesskit_t docker_helper_slirp4netns_t:process { signal s
 # the entry add_name, the new inode create) — the temp-dir lifecycle
 # buildkitd owns inside the child namespace's /tmp. The removal bits stay
 # unevidenced (the build never reached the temp-dir removal).
-allow docker_helper_buildkitd_t tmp_t:dir { write add_name create };
+# R7 (green attempt, scope=selinux run 38976049083): the mount half of the
+# same lifecycle — the bind mount onto the just-created temp dir:
+#   failed to mount /tmp/buildkit-mount<rand>:
+#     [Type:bind Source:.../snapshots/snapshots/<id> Options:[rbind ro]]
+#   avc: denied { mounton } tclass=dir tcontext=tmp_t          (the target)
+#   avc: denied { mounton } tclass=dir
+#        tcontext=docker_helper_builder_state_t:s0:c1          (the source)
+allow docker_helper_buildkitd_t tmp_t:dir { write add_name create mounton };
 
 # --- R7 closing note: denials deliberately left CLOSED ---
 #
@@ -3849,7 +3856,7 @@ allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr
 #   avc: denied { setattr } tclass=dir
 #        tcontext=system_u:object_r:docker_helper_builder_state_t:s0:c1
 #        name=new-450847510
-allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name rmdir setattr rename };
+allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name rmdir setattr rename mounton };
 
 # --- 4C-69: the categorized operation-state file create — the NEW
 # --- file-class plane (a NEW pair+class rule, NEVER a widening of the
