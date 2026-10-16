@@ -120,6 +120,10 @@ if [ "$INSTALL_FMT" = "rpm" ]; then
   rpm -q docker-helper >/dev/null 2>&1 && rpm -e docker-helper >/dev/null 2>&1 || true
   rpm -i "$ARTIFACT" || fail "rpm -i failed"
   log "RPM installed: $(rpm -q docker-helper)"
+  # The RPM install adapter runs `docker-helper init --allowed-root` after
+  # `rpm -i` (the init provisions the config and starts the daemon; the RPM
+  # scriptlets do not). Without it the API socket never appears.
+  docker-helper init --allowed-root "$ALLOWED_ROOT" || fail "docker-helper init failed"
 elif [ "$INSTALL_FMT" = "tarball" ]; then
   EXTRACT="$(mktemp -d /tmp/r7-bundle.XXXXXX)"
   chmod 755 "$EXTRACT"
