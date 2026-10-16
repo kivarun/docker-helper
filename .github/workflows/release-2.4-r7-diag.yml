@@ -23,6 +23,14 @@ name: Release 2.4 R7 full-gate corrective diagnosis
 # is changed by this workflow.
 
 on:
+  # Push-scoped to the R7 corrective branch only: workflow_dispatch cannot
+  # dispatch a workflow that was never registered on the default branch, and
+  # the red-before / green-after diagnosis must run on the corrective SHA
+  # without touching main. The pinned inputs are the failed full-gate run
+  # whose candidate set the diagnosis consumes.
+  push:
+    branches:
+      - r7-full-gate-corrective
   workflow_dispatch:
     inputs:
       artifact_run_id:
@@ -33,6 +41,10 @@ on:
         description: 'Candidate artifact name (docker-helper-candidate-<run_id>-<attempt>)'
         required: true
         type: string
+
+env:
+  R7_FAILED_RUN_ID: '38944346311'
+  R7_FAILED_ARTIFACT: 'docker-helper-candidate-38944346311-1'
 
 permissions:
   contents: read
@@ -48,8 +60,8 @@ jobs:
       - name: Download the exact candidate set from the failed run
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: ${{ inputs.artifact_name }}
-          run-id: ${{ inputs.artifact_run_id }}
+          name: ${{ inputs.artifact_name || env.R7_FAILED_ARTIFACT }}
+          run-id: ${{ inputs.artifact_run_id || env.R7_FAILED_RUN_ID }}
           github-token: ${{ github.token }}
           path: /tmp/candidate
 
@@ -87,8 +99,8 @@ jobs:
       - name: Download the exact candidate set from the failed run
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: ${{ inputs.artifact_name }}
-          run-id: ${{ inputs.artifact_run_id }}
+          name: ${{ inputs.artifact_name || env.R7_FAILED_ARTIFACT }}
+          run-id: ${{ inputs.artifact_run_id || env.R7_FAILED_RUN_ID }}
           github-token: ${{ github.token }}
           path: /tmp/candidate
 
@@ -127,8 +139,8 @@ jobs:
       - name: Download the exact candidate set from the failed run
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: ${{ inputs.artifact_name }}
-          run-id: ${{ inputs.artifact_run_id }}
+          name: ${{ inputs.artifact_name || env.R7_FAILED_ARTIFACT }}
+          run-id: ${{ inputs.artifact_run_id || env.R7_FAILED_RUN_ID }}
           github-token: ${{ github.token }}
           path: /tmp/candidate
 
