@@ -1,0 +1,154 @@
+name: Release 2.4 R7 full-gate corrective diagnosis
+
+# Investigation workflow (R7, workflow_dispatch only, never publishes):
+# reproduces the failed full artifact-gate UAT failures on the EXACT candidate
+# bytes the failed run produced (cross-run artifact download; no rebuild) and
+# captures the evidence the gate's UAT diagnostics did not:
+#
+#   ubuntu-tarball — R7-C Ubuntu builder START refusal + the R7-B dependency
+#                    differential (skip vs install of the packaged runtime
+#                    dependency contract) on the hosted runner;
+#   selinux-vm     — R7-A the buildctl execution denial with the packaged
+#                    labels / live AVC records / differential sesearch proof,
+#                    plus the R7-D child-lifecycle records, on a disposable
+#                    ENFORCING Tumbleweed VM (RPM);
+#   apparmor-vm    — R7-C the Tumbleweed AppArmor builder START refusal with
+#                    the builder service journal and the AppArmor launch
+#                    vehicle prerequisites (distro rootlesskit profile, userns
+#                    restriction), on a disposable Tumbleweed VM (RPM).
+#
+# The three jobs consume the SAME producer artifact set; every guest verifies
+# the artifact SHA-256 before install. The scripts live under scripts/ and are
+# the only new mechanism; no production, MAC policy or UAT consumer behavior
+# is changed by this workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_run_id:
+        description: 'Run id whose producer artifact set is diagnosed (the failed full-gate run)'
+        required: true
+        type: string
+      artifact_name:
+        description: 'Candidate artifact name (docker-helper-candidate-<run_id>-<attempt>)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  ubuntu-tarball-diag:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Download the exact candidate set from the failed run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          run-id: ${{ inputs.artifact_run_id }}
+          github-token: ${{ github.token }}
+          path: /tmp/candidate
+
+      - name: Resolve exact candidate tarball from producer SHA256SUMS
+        run: |
+          read -r path sha < <(scripts/release-candidate-artifact.sh /tmp/candidate tar)
+          echo "UAT_TARBALL=$path" >> "$GITHUB_ENV"
+          echo "UAT_TARBALL_SHA256=$sha" >> "$GITHUB_ENV"
+
+      - name: Run the Ubuntu R7 diagnosis (red + dependency differential)
+        run: |
+          UAT_TARBALL="$UAT_TARBALL" \
+          UAT_TARBALL_SHA256="$UAT_TARBALL_SHA256" \
+            scripts/release-2.4-r7-diag-ubuntu.sh
+
+      - name: Upload R7 Ubuntu evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-2.4-r7-diag-ubuntu-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/release-2.4-r7-diag-ubuntu-evidence
+          if-no-files-found: error
+
+  selinux-vm-diag:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install QEMU and cloud-image tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage
+
+      - name: Download the exact candidate set from the failed run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          run-id: ${{ inputs.artifact_run_id }}
+          github-token: ${{ github.token }}
+          path: /tmp/candidate
+
+      - name: Resolve exact candidate RPM from producer SHA256SUMS
+        run: |
+          read -r path sha < <(scripts/release-candidate-artifact.sh /tmp/candidate rpm)
+          echo "UAT_RPM=$path" >> "$GITHUB_ENV"
+          echo "UAT_RPM_SHA256=$sha" >> "$GITHUB_ENV"
+
+      - name: Run the SELinux Tumbleweed VM diagnosis (R7-A/R7-C/R7-D)
+        run: |
+          UAT_REPO_DIR="${{ github.workspace }}" \
+          UAT_RPM="$UAT_RPM" \
+          UAT_RPM_SHA256="$UAT_RPM_SHA256" \
+            scripts/release-2.4-r7-diag-tw-selinux-vm.sh
+
+      - name: Upload R7 SELinux VM evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-2.4-r7-diag-selinux-vm-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/release-2.4-r7-diag-selinux-evidence
+          if-no-files-found: error
+
+  apparmor-vm-diag:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install QEMU and cloud-image tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage
+
+      - name: Download the exact candidate set from the failed run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          run-id: ${{ inputs.artifact_run_id }}
+          github-token: ${{ github.token }}
+          path: /tmp/candidate
+
+      - name: Resolve exact candidate RPM from producer SHA256SUMS
+        run: |
+          read -r path sha < <(scripts/release-candidate-artifact.sh /tmp/candidate rpm)
+          echo "UAT_RPM=$path" >> "$GITHUB_ENV"
+          echo "UAT_RPM_SHA256=$sha" >> "$GITHUB_ENV"
+
+      - name: Run the AppArmor Tumbleweed VM diagnosis (R7-C)
+        run: |
+          UAT_REPO_DIR="${{ github.workspace }}" \
+          UAT_RPM="$UAT_RPM" \
+          UAT_RPM_SHA256="$UAT_RPM_SHA256" \
+            scripts/release-2.4-r7-diag-tw-apparmor-vm.sh
+
+      - name: Upload R7 AppArmor VM evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-2.4-r7-diag-apparmor-vm-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/release-2.4-r7-diag-apparmor-evidence
+          if-no-files-found: error
