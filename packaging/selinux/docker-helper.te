@@ -2752,6 +2752,16 @@ allow docker_helper_builder_t docker_helper_slirp4netns_t:process { signull sign
 allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { signal sigkill };
 allow docker_helper_rootlesskit_t docker_helper_slirp4netns_t:process { signal sigkill };
 
+# R7 (green attempt, scope=selinux run 38973516904; the build's terminal
+# error text proves the fatality the recorded denial hinted at):
+#   error: failed to solve: failed to read dockerfile: failed to create
+#     temp dir: mkdir /tmp/buildkit-mount<rand>: permission denied
+# The one mkdir(2) operation's own three kernel hooks (the parent write,
+# the entry add_name, the new inode create) — the temp-dir lifecycle
+# buildkitd owns inside the child namespace's /tmp. The removal bits stay
+# unevidenced (the build never reached the temp-dir removal).
+allow docker_helper_buildkitd_t tmp_t:dir { write add_name create };
+
 # --- R7 closing note: denials deliberately left CLOSED ---
 #
 # Non-fatal for the observed path (the builder socket came up and passed

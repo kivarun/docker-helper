@@ -349,8 +349,8 @@ func s15LauncherCgroupViolations(policy string) []string {
 			violations = append(violations, fmt.Sprintf("the standing cgroup owner drifted (must stay exactly its bare { search } dir singleton): %s", want))
 		}
 	}
-	if buildkitdNamedAllow != 12 {
-		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 12 (the S15 phase had exactly 9; R7 added the manager child-lifecycle rule, the per-op endpoint peer edge and the rootlesskit parent's buildkitd child-authority rule; a NON-buildkitd S15 rule never trips it), found %d", buildkitdNamedAllow))
+	if buildkitdNamedAllow != 13 {
+		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 13 (the S15 phase had exactly 9; R7 added the manager child-lifecycle rule, the per-op endpoint peer edge, the rootlesskit parent's buildkitd child-authority rule and the buildkitd temp-dir mkdir rule; a NON-buildkitd S15 rule never trips it), found %d", buildkitdNamedAllow))
 	}
 	return violations
 }
@@ -3234,7 +3234,12 @@ func TestSELinuxPolicyRootlesskitTmpDirWrite(t *testing.T) {
 					violations = append(violations, "the tmp copy-up grant must be the exact { write add_name create mounton } dir shape (no split rules, no duplicates, no fifth permission — search rides the standing base surface, the RemoveAll surface stays cleanup): "+trimmed)
 				}
 			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, " tmp_t:"):
-				violations = append(violations, "tmp_t authority is unique to the rootlesskit child domain: "+trimmed)
+				// R7 (run 38973516904): the buildkitd temp-dir mkdir inside
+				// the child namespace's /tmp is the ONE admitted second
+				// subject (the build's own temp-dir lifecycle, fatal-evidenced).
+				if trimmed != "allow docker_helper_buildkitd_t tmp_t:dir { write add_name create };" {
+					violations = append(violations, "tmp_t authority is unique to the rootlesskit child domain (and the R7-evidenced buildkitd temp-dir mkdir): "+trimmed)
+				}
 			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t ") &&
 				strings.Contains(trimmed, "tmp_t:") && !strings.Contains(trimmed, " tmp_t:"):
 				violations = append(violations, "the flow child's tmp copy-up authority names a confusable sibling target (user_tmp_t is not the evidenced tmp_t): "+trimmed)
@@ -4932,8 +4937,9 @@ func buildkitdIdentityViolations(policy string) []string {
 	// { getattr search write add_name remove_name }, I categorized
 	// runtime-tree sock_file { create unlink setattr }, and the R7-added
 	// manager child-lifecycle authority, the daemon's per-op BuildKit
-	// endpoint { connectto } peer edge and the rootlesskit parent's
-	// buildkitd child-authority rule) — never "at least".
+	// endpoint { connectto } peer edge, the rootlesskit parent's
+	// buildkitd child-authority rule and the buildkitd temp-dir mkdir
+	// rule) — never "at least".
 	buildkitdNamedAllow := 0
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -4944,8 +4950,8 @@ func buildkitdIdentityViolations(policy string) []string {
 			buildkitdNamedAllow++
 		}
 	}
-	if buildkitdNamedAllow != 12 {
-		violations = append(violations, fmt.Sprintf("the module must carry exactly the twelve buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir setattr }, the categorized state-tree file { create read open lock write getattr rename }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name }, the categorized runtime-tree sock_file { create unlink setattr }, and the R7 manager child-lifecycle { signull signal sigkill } authority, the daemon's per-op BuildKit endpoint { connectto } peer edge, and the rootlesskit parent's buildkitd child-authority rule), found %d", buildkitdNamedAllow))
+	if buildkitdNamedAllow != 13 {
+		violations = append(violations, fmt.Sprintf("the module must carry exactly the thirteen buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir setattr }, the categorized state-tree file { create read open lock write getattr rename }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name }, the categorized runtime-tree sock_file { create unlink setattr }, and the R7 manager child-lifecycle { signull signal sigkill } authority, the daemon's per-op BuildKit endpoint { connectto } peer edge, the rootlesskit parent's buildkitd child-authority rule, and the buildkitd temp-dir mkdir rule), found %d", buildkitdNamedAllow))
 	}
 	// The shared runtime-root dir surface has exactly the standing
 	// owners above; a NEW or reshaped rule on the pair (any source,
@@ -5042,7 +5048,7 @@ func buildkitdIdentityViolations(policy string) []string {
 			if strings.Contains(trimmed, "docker_helper_buildkitd_exec_t") && trimmed != canonicalExec && trimmed != canonicalEntry {
 				violations = append(violations, "the only allow rules naming the buildkitd exec type are the exact source-exec grant { execute read open } and the exact target-side { entrypoint read execute getattr } grant: "+trimmed)
 			}
-			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot && trimmed != canonicalRuntimeTree && trimmed != canonicalRuntimeSockFile && trimmed != canonicalManagerLifecycle && trimmed != "allow docker_helper_t docker_helper_buildkitd_t:unix_stream_socket { connectto };" && trimmed != "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { signal sigkill };" {
+			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot && trimmed != canonicalRuntimeTree && trimmed != canonicalRuntimeSockFile && trimmed != canonicalManagerLifecycle && trimmed != "allow docker_helper_t docker_helper_buildkitd_t:unix_stream_socket { connectto };" && trimmed != "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { signal sigkill };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:dir { write add_name create };" {
 				violations = append(violations, "the only allow rules toward the buildkitd domain are the exact process transition grant, the exact target-entrypoint grant, and the exact state/runtime surfaces: "+trimmed)
 			}
 			fields := strings.Fields(trimmed)
