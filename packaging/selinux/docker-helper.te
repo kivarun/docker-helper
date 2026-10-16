@@ -2769,6 +2769,24 @@ allow docker_helper_rootlesskit_t docker_helper_slirp4netns_t:process { signal s
 #        tcontext=docker_helper_builder_state_t:s0:c1          (the source)
 allow docker_helper_buildkitd_t tmp_t:dir { write add_name create mounton };
 
+# R7 (green attempt, scope=selinux run 38977886885): the payload's own
+# namespace-internal mount authority. The temp-dir bind mount (the
+# snapshot source -> /tmp/buildkit-mount target) failed with EPERM and the
+# AVC names the exact subject permission:
+#
+#   err: operation not permitted
+#   avc: denied { sys_admin } tclass=cap_userns
+#        scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#
+# The rootless mount work buildkitd performs for its OWN snapshots and
+# local mounts requires CAP_SYS_ADMIN inside the flow's user namespace —
+# the same authority class the rootlesskit child domain already carries
+# (self:cap_userns { sys_admin ... }, the launch vehicle's own mount
+# work). The separate-domain rule means buildkitd's authority is its own
+# evidence-driven staircase, and this is its first rung: sys_admin only,
+# self-scoped, no net_admin/ptrace/chroot ride-along.
+allow docker_helper_buildkitd_t self:cap_userns { sys_admin };
+
 # --- R7 closing note: denials deliberately left CLOSED ---
 #
 # Non-fatal for the observed path (the builder socket came up and passed

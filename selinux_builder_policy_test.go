@@ -349,8 +349,8 @@ func s15LauncherCgroupViolations(policy string) []string {
 			violations = append(violations, fmt.Sprintf("the standing cgroup owner drifted (must stay exactly its bare { search } dir singleton): %s", want))
 		}
 	}
-	if buildkitdNamedAllow != 13 {
-		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 13 (the S15 phase had exactly 9; R7 added the manager child-lifecycle rule, the per-op endpoint peer edge, the rootlesskit parent's buildkitd child-authority rule and the buildkitd temp-dir lifecycle rule; a NON-buildkitd S15 rule never trips it), found %d", buildkitdNamedAllow))
+	if buildkitdNamedAllow != 14 {
+		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 13 (the S15 phase had exactly 9; R7 added the manager child-lifecycle rule, the per-op endpoint peer edge, the rootlesskit parent's buildkitd child-authority rule the buildkitd temp-dir lifecycle rule and the payload cap_userns sys_admin rule; a NON-buildkitd S15 rule never trips it), found %d", buildkitdNamedAllow))
 	}
 	return violations
 }
@@ -2355,9 +2355,12 @@ func TestSELinuxPolicyNewuidmapIsolation(t *testing.T) {
 			case "allow docker_helper_rootlesskit_t self:cap_userns { sys_admin sys_ptrace sys_chroot net_admin };",
 				"allow docker_helper_newuidmap_t self:cap_userns sys_admin;",
 				"allow docker_helper_newgidmap_t self:cap_userns sys_admin;",
-				"allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace sys_admin };":
+				"allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace sys_admin };",
+				// R7 (run 38977886885): the payload's own namespace-internal
+				// mount authority (buildkitd's snapshot/local-mount work).
+				"allow docker_helper_buildkitd_t self:cap_userns { sys_admin };":
 			default:
-				t.Errorf("no cap_userns grant may exist beyond the four evidenced in-namespace grants (rootlesskit { sys_admin sys_ptrace sys_chroot net_admin }, UID-map helper sys_admin, GID-map helper sys_admin, slirp4netns { sys_ptrace sys_admin }): %s", trimmed)
+				t.Errorf("no cap_userns grant may exist beyond the five evidenced in-namespace grants (rootlesskit { sys_admin sys_ptrace sys_chroot net_admin }, UID-map helper sys_admin, GID-map helper sys_admin, slirp4netns { sys_ptrace sys_admin }, and the R7 buildkitd { sys_admin }): %s", trimmed)
 			}
 		}
 	}
@@ -2869,9 +2872,14 @@ func TestSELinuxPolicyCapUsernsShape(t *testing.T) {
 					rootlesskitCapUsernsRules++
 				case "allow docker_helper_newuidmap_t self:cap_userns sys_admin;",
 					"allow docker_helper_newgidmap_t self:cap_userns sys_admin;",
-					"allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace sys_admin };":
+					"allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace sys_admin };",
+					// R7 (run 38977886885): the payload's own namespace-
+					// internal mount authority — the fifth evidenced
+					// in-namespace grant (buildkitd's snapshot/local-mount
+					// work requires CAP_SYS_ADMIN inside the flow userns).
+					"allow docker_helper_buildkitd_t self:cap_userns { sys_admin };":
 				default:
-					violations = append(violations, fmt.Sprintf("no cap_userns rule may exist beyond the four evidenced in-namespace grants (rootlesskit { sys_admin sys_ptrace sys_chroot net_admin }, newuidmap sys_admin, newgidmap sys_admin, slirp4netns { sys_ptrace sys_admin }; the manager, the launcher, and other subjects get none): %s", trimmed))
+					violations = append(violations, fmt.Sprintf("no cap_userns rule may exist beyond the five evidenced in-namespace grants (rootlesskit { sys_admin sys_ptrace sys_chroot net_admin }, newuidmap sys_admin, newgidmap sys_admin, slirp4netns { sys_ptrace sys_admin }, and the R7 buildkitd { sys_admin }; the manager, the launcher, and other subjects get none): %s", trimmed))
 				}
 			case strings.Contains(trimmed, ":capability ") && strings.Contains(trimmed, "docker_helper_rootlesskit_t"):
 				violations = append(violations, fmt.Sprintf("the rootlesskit child domain must keep zero plain self:capability surfaces (no plain sys_ptrace/sys_chroot: the live AVCs name cap_userns): %s", trimmed))
@@ -4938,8 +4946,9 @@ func buildkitdIdentityViolations(policy string) []string {
 	// runtime-tree sock_file { create unlink setattr }, and the R7-added
 	// manager child-lifecycle authority, the daemon's per-op BuildKit
 	// endpoint { connectto } peer edge, the rootlesskit parent's
-	// buildkitd child-authority rule and the buildkitd temp-dir
-	// lifecycle rule) — never "at least".
+	// buildkitd child-authority rule, the buildkitd temp-dir lifecycle
+	// rule and the payload cap_userns sys_admin rule) — never
+	// "at least".
 	buildkitdNamedAllow := 0
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -4950,8 +4959,8 @@ func buildkitdIdentityViolations(policy string) []string {
 			buildkitdNamedAllow++
 		}
 	}
-	if buildkitdNamedAllow != 13 {
-		violations = append(violations, fmt.Sprintf("the module must carry exactly the thirteen buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir setattr }, the categorized state-tree file { create read open lock write getattr rename }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name }, the categorized runtime-tree sock_file { create unlink setattr }, and the R7 manager child-lifecycle { signull signal sigkill } authority, the daemon's per-op BuildKit endpoint { connectto } peer edge, the rootlesskit parent's buildkitd child-authority rule, and the buildkitd temp-dir lifecycle rule), found %d", buildkitdNamedAllow))
+	if buildkitdNamedAllow != 14 {
+		violations = append(violations, fmt.Sprintf("the module must carry exactly the fourteen buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir setattr }, the categorized state-tree file { create read open lock write getattr rename }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name }, the categorized runtime-tree sock_file { create unlink setattr }, and the R7 manager child-lifecycle { signull signal sigkill } authority, the daemon's per-op BuildKit endpoint { connectto } peer edge, the rootlesskit parent's buildkitd child-authority rule, the buildkitd temp-dir lifecycle rule, and the payload cap_userns sys_admin rule), found %d", buildkitdNamedAllow))
 	}
 	// The shared runtime-root dir surface has exactly the standing
 	// owners above; a NEW or reshaped rule on the pair (any source,
@@ -5048,7 +5057,7 @@ func buildkitdIdentityViolations(policy string) []string {
 			if strings.Contains(trimmed, "docker_helper_buildkitd_exec_t") && trimmed != canonicalExec && trimmed != canonicalEntry {
 				violations = append(violations, "the only allow rules naming the buildkitd exec type are the exact source-exec grant { execute read open } and the exact target-side { entrypoint read execute getattr } grant: "+trimmed)
 			}
-			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot && trimmed != canonicalRuntimeTree && trimmed != canonicalRuntimeSockFile && trimmed != canonicalManagerLifecycle && trimmed != "allow docker_helper_t docker_helper_buildkitd_t:unix_stream_socket { connectto };" && trimmed != "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { signal sigkill };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:dir { write add_name create mounton };" {
+			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot && trimmed != canonicalRuntimeTree && trimmed != canonicalRuntimeSockFile && trimmed != canonicalManagerLifecycle && trimmed != "allow docker_helper_t docker_helper_buildkitd_t:unix_stream_socket { connectto };" && trimmed != "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { signal sigkill };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:dir { write add_name create mounton };" && trimmed != "allow docker_helper_buildkitd_t self:cap_userns { sys_admin };" {
 				violations = append(violations, "the only allow rules toward the buildkitd domain are the exact process transition grant, the exact target-entrypoint grant, and the exact state/runtime surfaces: "+trimmed)
 			}
 			fields := strings.Fields(trimmed)
