@@ -171,6 +171,15 @@ if vm_ssh "test -d '$GUEST_EVIDENCE_DIR'" 2>/dev/null; then
   tar -xzf "$EVIDENCE_DIR/guest-evidence.tar.gz" -C "$EVIDENCE_DIR/guest" 2>/dev/null || true
 fi
 
-grep -q "R7-DIAG-RESULT=REPRODUCED" "$RUNNER_TEMP/r7-diag-guest.log" \
-  || fail "the R7 AppArmor diagnosis did not reproduce the defect (guest exit $GUEST_RC)"
-log 'R7 AppArmor diagnosis REPRODUCED (red-before evidence captured)'
+VERDICT="$(grep -oE 'R7-DIAG-RESULT=[A-Z-]+' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"
+case "$VERDICT" in
+  "R7-DIAG-RESULT=REPRODUCED")
+    log 'R7 AppArmor diagnosis REPRODUCED (the defect is still live on this branch; red evidence captured)'
+    ;;
+  "R7-DIAG-RESULT=BUILD-OK")
+    log 'R7 AppArmor diagnosis BUILD-OK (the corrective holds on this branch; green evidence captured)'
+    ;;
+  *)
+    fail "the R7 AppArmor diagnosis produced no verdict (guest exit $GUEST_RC)"
+    ;;
+esac

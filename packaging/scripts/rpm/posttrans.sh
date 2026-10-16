@@ -91,11 +91,16 @@ if command -v restorecon >/dev/null 2>&1; then
   # context so the payload carries its private executable identity —
   # buildkit-runc joins the SAME identity (4C-84: the LookPath-selected
   # worker runtime binary; the generic bin_t label denied its exec from
-  # the daemon domain). The exact canonical paths only — the .fc never
-  # covers the unrelated sibling buildctl. Label-only: restorecon never
-  # alters owner, mode, or xattrs.
+  # the daemon domain). The exact canonical paths only. Label-only:
+  # restorecon never alters owner, mode, or xattrs.
   restorecon /usr/libexec/docker-helper/buildkit/buildkitd 2>/dev/null || true
   restorecon /usr/libexec/docker-helper/buildkit/buildkit-runc 2>/dev/null || true
+  # buildctl carries its OWN private exec identity (R7-A: the failed full
+  # artifact-gate run proved the generic bin_t distro label is unusable
+  # for the confined daemon domain — the standing bin_t grant carries no
+  # execute_no_trans, so the in-domain exec failed closed). Label-only:
+  # restorecon never alters owner, mode, or xattrs.
+  restorecon /usr/libexec/docker-helper/buildkit/buildctl 2>/dev/null || true
   restorecon -R /etc/docker-helper 2>/dev/null || true
   restorecon -R /var/lib/docker-helper 2>/dev/null || true
   # Relabel only the helper-owned /run/docker-helper dir itself to

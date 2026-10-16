@@ -299,9 +299,13 @@ func TestSELinuxPolicyLauncherChainRootlesskitTransition(t *testing.T) {
 // buildkitd cgroup statfs probe is a different pair and stays HOLD), and
 // the three standing cgroup subjects (the daemon, the builder, the
 // rootlesskit child) unchanged at their own bare { search } dir
-// singletons. The buildkitd-named allow count must stay exactly nine
-// (a non-buildkitd rule never trips it, a buildkitd-named S15 rider
-// would).
+// singletons. The buildkitd-named allow count is pinned as an edit
+// tripwire: it was exactly nine through the S15 phase, and the R7 full-gate
+// corrective added exactly ONE buildkitd-named rule (the manager's
+// child-lifecycle { signull signal } authority, run 38944346311) — ten.
+// A buildkitd-named rider on the LAUNCHER cgroup surface is still
+// forbidden by the launcher assertions above; the count pin catches any
+// unreviewed bulk drift.
 func s15LauncherCgroupViolations(policy string) []string {
 	var violations []string
 	const canonicalS15 = "allow docker_helper_builder_launcher_t cgroup_t:dir { search };"
@@ -343,8 +347,8 @@ func s15LauncherCgroupViolations(policy string) []string {
 			violations = append(violations, fmt.Sprintf("the standing cgroup owner drifted (must stay exactly its bare { search } dir singleton): %s", want))
 		}
 	}
-	if buildkitdNamedAllow != 9 {
-		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 9 (a NON-buildkitd S15 rule never trips it, a buildkitd-named rider would), found %d", buildkitdNamedAllow))
+	if buildkitdNamedAllow != 10 {
+		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 10 (the S15 phase had exactly 9; R7 added exactly the manager child-lifecycle rule; a NON-buildkitd S15 rule never trips it), found %d", buildkitdNamedAllow))
 	}
 	return violations
 }
@@ -1119,6 +1123,97 @@ func mcsMembershipViolations(policy string, want []string) []string {
 // unrelated docker-helper domain, and a duplicate or malformed membership
 // line (membership must be declared in the exact canonical single-attribute
 // form).
+// TestSELinuxPolicyBuildctlExecIdentityR7 protects the R7-A delta (the
+// failed full artifact-gate run 38944346311): the bundled buildctl payload
+// carries its OWN exact executable identity, execed IN the daemon domain
+// (execute_no_trans — the standing bin_t grant has no execute_no_trans and
+// the generic label failed closed), and nothing else touches the identity.
+func TestSELinuxPolicyBuildctlExecIdentityR7(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	if !strings.Contains(policy, "type docker_helper_buildctl_exec_t, file_type, exec_type;") {
+		t.Error("the .te must declare the buildctl exec type")
+	}
+	canonicalAllow := "allow docker_helper_t docker_helper_buildctl_exec_t:file { execute_no_trans read open getattr map };"
+	if !strings.Contains(policy, canonicalAllow) {
+		t.Errorf("the daemon's in-domain buildctl exec grant must exist in the exact canonical form: %s", canonicalAllow)
+	}
+	allowCount := 0
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || !strings.HasPrefix(trimmed, "allow ") {
+			continue
+		}
+		if strings.Contains(trimmed, "docker_helper_buildctl_exec_t") {
+			allowCount++
+		}
+	}
+	if allowCount != 1 {
+		t.Errorf("exactly ONE allow rule may name the buildctl exec type (the daemon's in-domain exec), found %d", allowCount)
+	}
+	fc := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.fc")
+	canonicalFC := "/usr/libexec/docker-helper/buildkit/buildctl  --  system_u:object_r:docker_helper_buildctl_exec_t:s0"
+	if !strings.Contains(fc, canonicalFC) {
+		t.Errorf("the .fc must label the exact buildctl path with its own exec identity: %s", canonicalFC)
+	}
+	for _, line := range strings.Split(fc, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || trimmed == "" {
+			continue
+		}
+		if strings.Contains(trimmed, "docker-helper/buildkit/") && !strings.Contains(trimmed, "/usr/libexec/docker-helper/buildkit/build") {
+			t.Errorf("the .fc must never cover the payload tree by directory regex: %s", trimmed)
+		}
+	}
+	// Both shipped install paths must land the new label (label-only
+	// restorecon, exact path).
+	installer := readSELinuxPolicyFile(t, "packaging/install-system.sh")
+	if !strings.Contains(installer, `"$RESTORECON" /usr/libexec/docker-helper/buildkit/buildctl 2>/dev/null || true`) {
+		t.Error("install-system.sh must restorecon the exact buildctl path (the tarball install path)")
+	}
+	posttrans := readSELinuxPolicyFile(t, "packaging/scripts/rpm/posttrans.sh")
+	if !strings.Contains(posttrans, "restorecon /usr/libexec/docker-helper/buildkit/buildctl 2>/dev/null || true") {
+		t.Error("rpm posttrans must restorecon the exact buildctl path (the RPM install path)")
+	}
+}
+
+// TestSELinuxPolicyBuilderChildLifecycleAuthorityR7 protects the R7-D delta:
+// the manager's send-only child-lifecycle authority (the STOP escalation's
+// signal and the liveness probes' signull) toward exactly the three flow
+// child domains — the SELinux counterpart of the builder profile's
+// signal (send) set=(term,kill) peer rules. No receive side, no other
+// targets, no other process-class authority.
+func TestSELinuxPolicyBuilderChildLifecycleAuthorityR7(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	for _, pair := range []string{
+		"docker_helper_buildkitd_t",
+		"docker_helper_rootlesskit_t",
+		"docker_helper_slirp4netns_t",
+	} {
+		canonical := fmt.Sprintf("allow docker_helper_builder_t %s:process { signull signal };", pair)
+		count := 0
+		for _, line := range strings.Split(policy, "\n") {
+			if strings.TrimSpace(line) == canonical {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf("the manager's child-lifecycle grant toward %s must exist exactly once in the canonical form: %s", pair, canonical)
+		}
+	}
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || !strings.HasPrefix(trimmed, "allow docker_helper_builder_t ") {
+			continue
+		}
+		if !strings.Contains(trimmed, ":process ") {
+			continue
+		}
+		if !strings.Contains(trimmed, "{ signull signal };") && !strings.Contains(trimmed, "{ transition };") && !strings.Contains(trimmed, ":process transition;") {
+			t.Errorf("the builder manager's process-class authority must stay send-only { signull signal } or the standing transition edges: %s", trimmed)
+		}
+	}
+}
+
 func TestSELinuxPolicyMCSMembership(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
 	want := []string{
@@ -2978,8 +3073,9 @@ func TestSELinuxPolicyRootlesskitRootMounton(t *testing.T) {
 			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t ") &&
 				strings.Contains(trimmed, ":dir ") && strings.Contains(trimmed, "mounton") &&
 				!strings.Contains(trimmed, " tmp_t:") && !strings.Contains(trimmed, " etc_t:") &&
-				!strings.Contains(trimmed, " tmpfs_t:") && !strings.Contains(trimmed, " cgroup_t:"):
-				violations = append(violations, "the flow child's dir mounton authority is granted only on root_t (4C-39), tmp_t (the copy-up owner), etc_t (the tmpfs-mount owner), tmpfs_t (the 4C-47 move-mount owner) and cgroup_t (the 4C-49 cgroup-preservation move owner) — any other target is ungranted: "+trimmed)
+				!strings.Contains(trimmed, " tmpfs_t:") && !strings.Contains(trimmed, " cgroup_t:") &&
+				!strings.Contains(trimmed, " sysfs_t:"):
+				violations = append(violations, "the flow child's dir mounton authority is granted only on root_t (4C-39), tmp_t (the copy-up owner), etc_t (the tmpfs-mount owner), tmpfs_t (the 4C-47 move-mount owner), cgroup_t (the 4C-49 cgroup-preservation move owner) and sysfs_t (the R7 evidenced /sys projection mount, run 38944346311) — any other target is ungranted: "+trimmed)
 			}
 		}
 		if count == 0 {
@@ -4629,6 +4725,11 @@ func buildkitdIdentityViolations(policy string) []string {
 	// builder_runtime_t sock_file authority of the buildkitd domain,
 	// never a widening of the dir rule, never the daemon transport.
 	const canonicalRuntimeSockFile = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:sock_file { create unlink setattr };"
+	// The R7 manager child-lifecycle authority (run 38944346311): the
+	// manager's send-only { signull signal } toward the flow child — the
+	// STOP escalation and the liveness probes are the manager's REQUIRED
+	// operations (build_driver stage D runs on every build).
+	const canonicalManagerLifecycle = "allow docker_helper_builder_t docker_helper_buildkitd_t:process { signull signal };"
 	// The categorized state-tree dir surface's standing owners (the
 	// exact module lines): the daemon does NOT own one; every other
 	// subject's existing rule is its own owner and must stay unchanged —
@@ -4820,13 +4921,16 @@ func buildkitdIdentityViolations(policy string) []string {
 		violations = append(violations, fmt.Sprintf("the buildkitd categorized runtime-tree sock_file { create unlink setattr } grant must exist exactly once in the exact bare canonical form, found %d: %s", runtimeSockFileCount, canonicalRuntimeSockFile))
 	}
 	// The exact module-borne allow-rule total naming a buildkitd type:
-	// the nine planes only (A source-exec, B transition, C target-side,
-	// D shared state-root, E categorized state-tree dir
-	// { getattr search write add_name read open }, F categorized
-	// state-tree file { create read open lock }, G shared runtime-root
-	// dir { search }, H categorized runtime-tree dir
+	// the ten evidenced planes only (A source-exec, B transition,
+	// C target-side { entrypoint read execute getattr }, D shared
+	// state-root, E categorized state-tree dir
+	// { getattr search write add_name read open create remove_name rmdir },
+	// F categorized state-tree file { create read open lock write getattr },
+	// G shared runtime-root dir { search }, H categorized runtime-tree dir
 	// { getattr search write add_name remove_name }, I categorized
-	// runtime-tree sock_file { create unlink setattr }) — never "at least".
+	// runtime-tree sock_file { create unlink setattr }, and the R7-added
+	// manager child-lifecycle { signull signal } authority) — never
+	// "at least".
 	buildkitdNamedAllow := 0
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -4837,8 +4941,8 @@ func buildkitdIdentityViolations(policy string) []string {
 			buildkitdNamedAllow++
 		}
 	}
-	if buildkitdNamedAllow != 9 {
-		violations = append(violations, fmt.Sprintf("the module must carry exactly the nine buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir }, the categorized state-tree file { create read open lock write getattr }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name }, the categorized runtime-tree sock_file { create unlink setattr }), found %d", buildkitdNamedAllow))
+	if buildkitdNamedAllow != 10 {
+		violations = append(violations, fmt.Sprintf("the module must carry exactly the ten buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir }, the categorized state-tree file { create read open lock write getattr }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name }, the categorized runtime-tree sock_file { create unlink setattr }, and the R7 manager child-lifecycle { signull signal } authority), found %d", buildkitdNamedAllow))
 	}
 	// The shared runtime-root dir surface has exactly the standing
 	// owners above; a NEW or reshaped rule on the pair (any source,
@@ -4935,7 +5039,7 @@ func buildkitdIdentityViolations(policy string) []string {
 			if strings.Contains(trimmed, "docker_helper_buildkitd_exec_t") && trimmed != canonicalExec && trimmed != canonicalEntry {
 				violations = append(violations, "the only allow rules naming the buildkitd exec type are the exact source-exec grant { execute read open } and the exact target-side { entrypoint read execute getattr } grant: "+trimmed)
 			}
-			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot && trimmed != canonicalRuntimeTree && trimmed != canonicalRuntimeSockFile {
+			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot && trimmed != canonicalRuntimeTree && trimmed != canonicalRuntimeSockFile && trimmed != canonicalManagerLifecycle {
 				violations = append(violations, "the only allow rules toward the buildkitd domain are the exact process transition grant, the exact target-entrypoint grant, and the exact state/runtime surfaces: "+trimmed)
 			}
 			fields := strings.Fields(trimmed)
@@ -5879,12 +5983,15 @@ func TestSELinuxPolicyBuildkitdExecIdentitySiblingLabels(t *testing.T) {
 		pattern := fields[0]
 		for _, forbidden := range []string{
 			"/usr/libexec/docker-helper/buildkit(/.*)?",
-			"/usr/libexec/docker-helper/buildkit/buildctl",
 			"/usr/libexec/docker-helper(/.*)?",
 		} {
 			if pattern == forbidden {
-				t.Errorf("no shipped fc rule may cover the buildkit siblings or the payload tree (buildctl keeps its distro label; the tree regex is never shipped): %s", trimmed)
+				t.Errorf("no shipped fc rule may cover the buildkit payload tree by regex; every payload member is labeled by its own exact-path rule: %s", trimmed)
 			}
+		}
+		if pattern == "/usr/libexec/docker-helper/buildkit/buildctl" &&
+			!strings.Contains(trimmed, "system_u:object_r:docker_helper_buildctl_exec_t:s0") {
+			t.Errorf("the shipped buildctl rule must carry its own R7-A exec identity exactly: %s", trimmed)
 		}
 		if pattern == "/usr/libexec/docker-helper/buildkit/buildkit-runc" &&
 			!strings.Contains(trimmed, "system_u:object_r:docker_helper_buildkitd_exec_t:s0") {
@@ -7329,13 +7436,13 @@ func TestSELinuxFCFirstMatchShape(t *testing.T) {
 		{"/run/docker-helper/builds/op_ac4cbdc1ae4d4d3fa39943de5fcf2e6f/context", "docker_helper_runtime_t"},
 		{"/run/docker-helper/builds", "docker_helper_runtime_t"},
 		{"/run/docker-helper/manager.sock", "docker_helper_runtime_t"},
-		// 4C-57: the exact buildkitd exec identity and the negative
-		// siblings — ONLY the canonical daemon binary carries the type;
-		// the payload siblings and the directory itself keep their distro
-		// labels (no shipped rule matches them), and the /usr/bin exec
+		// 4C-57: the exact buildkitd exec identity; R7-A: buildctl's own
+		// exec identity (run 38944346311 proved the distro label unusable
+		// for the confined daemon). The remaining negative siblings — the
+		// directory itself keeps no shipped rule, and the /usr/bin exec
 		// identities stay unaffected.
 		{"/usr/libexec/docker-helper/buildkit/buildkitd", "docker_helper_buildkitd_exec_t"},
-		{"/usr/libexec/docker-helper/buildkit/buildctl", ""},
+		{"/usr/libexec/docker-helper/buildkit/buildctl", "docker_helper_buildctl_exec_t"},
 		{"/usr/libexec/docker-helper/buildkit/buildkit-runc", "docker_helper_buildkitd_exec_t"},
 		{"/usr/libexec/docker-helper/buildkit/sibling-arbitrary", ""},
 		{"/usr/libexec/docker-helper/buildkit", ""},

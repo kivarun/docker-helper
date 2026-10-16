@@ -727,10 +727,9 @@ apply_selinux_restorecon() {
 	# domain. Label-only: restorecon never alters owner, mode, or xattrs.
 	"$RESTORECON" /usr/bin/nsenter 2>/dev/null || true
 	# buildkitd: the bundled BuildKit daemon payload; the dedicated exec
-	# type (the exact canonical paths only — the .fc never covers the
-	# unrelated sibling buildctl) is the narrowed executable identity the
-	# flow's eventual transition is bound to. Label-only, exact paths:
-	# buildctl keeps its distro label.
+	# type (the exact canonical paths only) is the narrowed executable
+	# identity the flow's eventual transition is bound to. Label-only,
+	# exact paths.
 	"$RESTORECON" /usr/libexec/docker-helper/buildkit/buildkitd 2>/dev/null || true
 	# buildkit-runc: the bundled worker runtime binary the daemon's OCI
 	# worker initializer execs for its probe (4C-84: the L3 live evidence
@@ -738,6 +737,11 @@ apply_selinux_restorecon() {
 	# label denied the exec). The SAME dedicated exec identity as the
 	# daemon — no generic bin_t:file execute grant.
 	"$RESTORECON" /usr/libexec/docker-helper/buildkit/buildkit-runc 2>/dev/null || true
+	# buildctl: the bundled BuildKit client the daemon execs in its own
+	# domain for every build operation; its OWN private exec identity
+	# (R7-A: the failed full artifact-gate run proved the generic bin_t
+	# distro label is unusable for the confined daemon domain). Label-only.
+	"$RESTORECON" /usr/libexec/docker-helper/buildkit/buildctl 2>/dev/null || true
 	"$RESTORECON" -R /run/docker-helper-builder 2>/dev/null || true
 	"$RESTORECON" -R /var/lib/docker-helper-builder 2>/dev/null || true
 	"$RESTORECON" -R /etc/docker-helper 2>/dev/null || true

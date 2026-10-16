@@ -42,7 +42,8 @@
 # (builderManagerBuildkitd), the RootlessKit argv target, the package
 # payload destination and this rule are all exactly
 # /usr/libexec/docker-helper/buildkit/buildkitd. Never the directory,
-# never unrelated siblings: buildctl keeps its distro label.
+# never the other siblings (each payload member owns its own exact-path
+# rule).
 #
 # P5-S2 Phase 4C-84: the bundled BuildKit worker runtime executable joins
 # the SAME dedicated exec identity — the exact packaged path only. The
@@ -62,6 +63,13 @@
 # exactly 9). No transition fires (buildkitd_t execing buildkitd_exec_t
 # has no type_transition edge: the runc probe runs inside the daemon
 # domain).
+# R7-A (failed release run 38944346311): buildctl joins the payload's
+# private-identity model with its OWN exec type - the failed gate proved
+# the generic bin_t distro label is unusable for the confined daemon
+# domain (the standing bin_t grant carries no execute_no_trans, so the
+# in-domain exec failed closed with EACCES). The exact packaged path
+# only; the buildkitd/buildkit-runc siblings keep their own rule.
+/usr/libexec/docker-helper/buildkit/buildctl  --  system_u:object_r:docker_helper_buildctl_exec_t:s0
 /usr/libexec/docker-helper/buildkit/buildkitd  --  system_u:object_r:docker_helper_buildkitd_exec_t:s0
 /usr/libexec/docker-helper/buildkit/buildkit-runc  --  system_u:object_r:docker_helper_buildkitd_exec_t:s0
 /etc/docker-helper(/.*)?                system_u:object_r:docker_helper_config_t:s0

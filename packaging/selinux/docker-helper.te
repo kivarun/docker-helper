@@ -79,6 +79,7 @@ module docker_helper 1.2;
 		type container_var_run_t;
 		type user_home_dir_t;
 		type fs_t;
+		type sysfs_t;
 		type usr_t;
 		type lib_t;
 		type net_conf_t;
@@ -88,6 +89,7 @@ module docker_helper 1.2;
 		type cgroup_t;
 		type proc_t;
 		type sysctl_net_t;
+		type sysctl_fs_t;
 		type sysctl_t;
 		type kernel_t;
 		type root_t;
@@ -127,7 +129,7 @@ module docker_helper 1.2;
 		class capability2 { wake_alarm kill };
 		class user_namespace { create };
 		class cap_userns { sys_admin sys_ptrace sys_chroot net_admin };
-		class process { transition siginh noatsecure rlimitinh sigkill setexec };
+		class process { transition siginh noatsecure rlimitinh sigkill setexec signull signal };
 		class process2 { nnp_transition };
 	}
 
@@ -2629,11 +2631,14 @@ allow docker_helper_rootlesskit_t tmpfs_t:file { create write open mounton };
 # names them, or the next surface; live evidence
 # only; the harness captures the new terminal boundary).
 #
-# buildctl and buildkit-runc stay SEPARATE future executable boundaries:
-# the .fc carries NO rule for them, no directory regex covers the
-# payload tree, and they keep their distro labels. A future phase that
-# needs one of them adds its own exact executable identity with its own
-# live evidence.
+# buildctl and buildkit-runc each carry their OWN exact executable identity
+# since their live evidence arrived: buildkit-runc joined the buildkitd
+# identity at 4C-84 (the LookPath-selected worker runtime binary), and
+# buildctl received its own private identity at R7-A (the failed full
+# artifact-gate run proved the distro bin_t label is unusable for the
+# confined daemon - see the R7-A section below). No directory regex covers
+# the payload tree: every payload member is labeled by its own exact-path
+# rule.
 type docker_helper_buildkitd_exec_t, file_type, exec_type;
 type docker_helper_buildkitd_t, domain;
 role system_r types docker_helper_buildkitd_t;
@@ -2644,6 +2649,122 @@ role system_r types docker_helper_buildkitd_t;
 # transition bundle (siginh/noatsecure/rlimitinh/dyntransition/setexec)
 # is NOT copied here.
 type_transition docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:process docker_helper_buildkitd_t;
+
+# --- R7-A: the daemon's buildctl executable identity (full artifact-gate
+# --- evidence, failed release run 38944346311) ---
+#
+# The full artifact gate's openSUSE SELinux consumers failed every build at
+# the buildctl stage with:
+#
+#   {"stage":"buildctl","error":"fork/exec /usr/libexec/docker-helper/
+#    buildkit/buildctl: permission denied", ...}
+#
+# and the guest audit record named the exact boundary:
+#
+#   avc:  denied  { execute_no_trans } for  pid=3954 comm="docker-helper"
+#         path="/usr/libexec/docker-helper/buildkit/buildctl" dev="vda3"
+#         scontext=system_u:system_r:docker_helper_t:s0
+#         tcontext=system_u:object_r:bin_t:s0
+#         tclass=file permissive=0
+#
+# CAUSE: the daemon domain's standing bin_t grant
+# (allow docker_helper_t bin_t:file { execute read open getattr map }, the
+# bounded semanage-interpreter surface) has NO execute_no_trans, and
+# buildctl carried the generic bin_t distro label by deliberate policy
+# (the pre-R7 fc comment: "buildctl keeps its distro label"). An in-domain
+# execve of a distro-labeled binary without a transition rule requires
+# execute_no_trans - denied - so the exec failed closed with EACCES. The
+# label, not the file mode (the payload member is 0755, and the AppArmor
+# backend proves the same exec succeeds where mediation is path-based).
+#
+# THE FIX IS THE LABEL, NEVER A GENERIC bin_t:file WIDENING (the standing
+# generic-exec quarantine holds; the bounded bin_t grant stays exactly as
+# it is). buildctl gets its OWN private executable identity - the exact
+# packaged path only, mirroring the 4C-57 buildkitd shape:
+#   - type docker_helper_buildctl_exec_t (file_type, exec_type): the exact
+#     executable identity of the bundled BuildKit client payload;
+#   - the .fc entry below names exactly
+#     /usr/libexec/docker-helper/buildkit/buildctl - never the directory,
+#     never the buildkitd/buildkit-runc siblings;
+#   - the daemon allow is the IN-DOMAIN exec chain's own hooks: the daemon
+#     execs buildctl with NO transition (the same shape as the proven
+#     container_runtime_exec_t docker exec: execute_no_trans, not a
+#     transition edge). No process/domain edge, no entrypoint, no
+#     range_transition, no capability, no execute (no transition exists
+#     for this type, so the bare execute hook stays ungranted).
+# Scope caveat: type-wide TE authority on a product-scoped exact-path
+# executable (NOT operation-scoped); the cross-operation gate stays
+# OPEN/Critical.
+type docker_helper_buildctl_exec_t, file_type, exec_type;
+allow docker_helper_t docker_helper_buildctl_exec_t:file { execute_no_trans read open getattr map };
+
+# --- R7: the remaining evidenced rungs of the builder chain and the
+# --- manager's child-lifecycle authority (failed release run 38944346311;
+# --- every rule cites its own live AVC record from that run) ---
+#
+# The full artifact gate's SELinux consumers exposed the next layer of the
+# accepted P5-S1 denial staircase in ONE live run (the standalone release
+# gates exercise the launcher/provisioning chain but never the full build).
+# Each rule below carries the EXACT denied bit from its own record; the
+# deliberately closed probes stay closed (see the closing note at the end
+# of this section).
+
+# --- R7-D: the manager's own child-lifecycle authority ---
+#
+# The STOP convergence and the liveness probes are the manager's REQUIRED
+# operations (terminateGroupBounded's term->kill escalation, the
+# group-gone kill(pid,0) probes, the startup/periodic reconciliation).
+# The failed run recorded the denials from the abortive stop of a
+# partially-started instance; the same surface is exercised by every
+# successful build's mandatory STOP (build_driver stage D) — this is an
+# independent lifecycle defect, not abortive-cleanup noise. The AppArmor
+# counterpart (the builder profile's signal (send) set=(term,kill)
+# peer=rootlesskit/slirp4netns rules) already carries the same authority,
+# so the SELinux side grants the same ceiling:
+#
+#   avc: denied { signal } scontext=system_u:system_r:docker_helper_builder_t:s0
+#        tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 (and
+#        the rootlesskit_t / slirp4netns_t peers)
+#   avc: denied { signull } ... (the liveness probes, recurring across the
+#        run: 18:33:18, 18:33:25, 18:33:37, 18:44:17, 18:51:44)
+#
+# Send-only; no receive side, no other signal sets, no other targets.
+# The targets are exactly the flow's categorized child domains this
+# manager launched (the launcher self-reexec becomes the group leader, so
+# docker_helper_builder_launcher_t carries no distinct surviving process).
+allow docker_helper_builder_t docker_helper_buildkitd_t:process { signull signal };
+allow docker_helper_builder_t docker_helper_rootlesskit_t:process { signull signal };
+allow docker_helper_builder_t docker_helper_slirp4netns_t:process { signull signal };
+
+# --- R7 closing note: denials deliberately left CLOSED ---
+#
+# Non-fatal for the observed path (the builder socket came up and passed
+# the driver's owner/mode validation; the build failed at buildctl), each
+# with its standing documented owner:
+#   * rootlesskit_t -> bin_t:file execute (getsubids): the 4C-2 boundary.
+#   * docker_helper_newuidmap_t / docker_helper_newgidmap_t ->
+#     passwd_file_t:file getattr (/etc/passwd): the map helpers completed
+#     their work.
+#   * docker_helper_buildkitd_t -> nsfs_t:file getattr (user:[...]): the
+#     4C-83 RunningInUserNS probe — the 4C-83 binding fix owns the false
+#     branch.
+#   * docker_helper_buildkitd_t -> container_runtime_exec_t:file getattr
+#     (/usr/sbin/runc): the 4C-84 LookPath walk terminates on the labeled
+#     bundled buildkit-runc.
+#   * the inherited-fd fifo_file write/ioctl records (rootlesskit_t and
+#     buildkitd_t toward the manager's diag pipes): the standing
+#     HANDLED/NON-TERMINAL 4C evidence; a required-fd future failure owns
+#     its own phase.
+#
+# RECORDED BUT FATALITY-UNPROVEN — the remaining same-run records
+# (buildkitd_t: the exec-file open, the state-tree mounton/ioctl/unlink
+# probes, the tmp_t dir write, the container_var_run_t/cgroup_t dir
+# searches, the cgroup_t/fs_t filesystem getattrs, the sysctl fs/net dir
+# searches, the tmpfs_t lnk_file read; rootlesskit_t: the sysfs_t /sys
+# mounton, the net_conf_t getattr, the tmp_t dir read/remove_name). The
+# builder socket came up with every one of them denied, so none is a
+# proven cause; NONE is granted. A future rung needs its own live
+# evidence that the hook is FATAL (the next green-run boundary owns it).
 
 # --- 4C-58 + 4C-59: the source-side execute + executable-image read/open
 # --- permissions on the private identity ---
