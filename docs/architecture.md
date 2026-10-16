@@ -110,10 +110,43 @@ reference client     curl / native adapter
       │
 docker-helper daemon
       │
-    Docker CLI
+      ├──────────────────────────────────────────┐
+      │                                          │
+    run, pull, registry login                   │
+      │                                          │
+      │                                            build driver (in-daemon)
+      │                                          │
+      │                                            builder manager (docker-helper builder serve; dedicated
+      │                                            unprivileged docker-helper-builder identity)
+      │                                          │
+      │                                            managed BuildKit instance lifecycle (manager START /
+      │                                            STOP / PURGE): rootlesskit → bundled buildkitd
+      │                                          │
+      │                                            bundled buildctl (driven by the build driver) against
+      │                                            the operation's private BuildKit socket
+      │                                          │
+      │                                            docker-tar export of the built image into the
+      │                                            operation's staging tree
+      ▼                                          │
+    Docker CLI  ◄── trusted daemon image commit ─┘
+      │            (docker load → verification → docker tag)
       │
     Docker Engine
 ```
+
+The daemon's data plane has two branches. The trusted branch holds every
+Docker Engine position: run, pull, and registry login execute through the
+Docker CLI, and the sandboxed build's result is published from there too —
+the exported image tar is imported and committed by the trusted daemon
+itself (`docker load`, internal-tag verification, `docker tag`). The
+sandboxed branch holds no Docker Engine authority: each build executes as
+a per-operation rootless BuildKit instance whose lifecycle is owned by the
+dedicated builder manager — a local service under an unprivileged identity
+with its own Unix socket, not a second HTTP API — and the image leaves the
+sandbox only as the exported tar. The daemon's build driver owns the whole
+sequence: manager START, the bundled `buildctl` build against the
+operation's private BuildKit socket, manager STOP, and the trusted commit.
+The authoritative build description lives in [Build](#build).
 
 There are exactly four bearer classes, described by the [authority
 model](#authority-model): the admin token authenticates the administrator, a

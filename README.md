@@ -890,8 +890,11 @@ curl --unix-socket /run/docker-helper/docker-helper.sock \
 
 ### Build
 
-`POST /build` starts an asynchronous Docker build and returns immediately
-with an `operation_id`. The build runs in the background.
+`POST /build` creates an asynchronous Operation and returns immediately
+with an `operation_id` and the status `running`. The build itself executes
+in a sandboxed per-operation rootless BuildKit instance; when it finishes,
+the resulting image is published by the trusted daemon through `docker
+load` and `docker tag`.
 
 ```bash
 docker_helper_session_header | \
@@ -903,7 +906,7 @@ curl --unix-socket /run/docker-helper/docker-helper.sock \
 ```
 
 Optional `build_args` (map of string keys to string values) passes
-build-time variables to Docker:
+build-time variables through the bundled `buildctl` to BuildKit:
 
 ```bash
 docker_helper_session_header | \
