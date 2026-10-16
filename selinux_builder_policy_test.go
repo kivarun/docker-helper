@@ -4717,8 +4717,8 @@ func buildkitdIdentityViolations(policy string) []string {
 	const canonicalTransition = "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;"
 	const canonicalEntry = "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr };"
 	const canonicalStateRoot = "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search };"
-	const canonicalStateTree = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name rmdir };"
-	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr };"
+	const canonicalStateTree = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name rmdir setattr };"
+	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr rename };"
 	const canonicalRuntimeRoot = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search;"
 	const canonicalRuntimeTree = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write add_name remove_name };"
 	// The categorized runtime-tree sock_file plane (PLANE I, the 4C-77
@@ -4945,7 +4945,7 @@ func buildkitdIdentityViolations(policy string) []string {
 		}
 	}
 	if buildkitdNamedAllow != 11 {
-		violations = append(violations, fmt.Sprintf("the module must carry exactly the eleven buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir }, the categorized state-tree file { create read open lock write getattr }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name }, the categorized runtime-tree sock_file { create unlink setattr }, and the R7 manager child-lifecycle { signull signal } authority plus the daemon's per-op BuildKit endpoint { connectto } peer edge), found %d", buildkitdNamedAllow))
+		violations = append(violations, fmt.Sprintf("the module must carry exactly the eleven buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir setattr }, the categorized state-tree file { create read open lock write getattr rename }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name }, the categorized runtime-tree sock_file { create unlink setattr }, and the R7 manager child-lifecycle { signull signal } authority plus the daemon's per-op BuildKit endpoint { connectto } peer edge), found %d", buildkitdNamedAllow))
 	}
 	// The shared runtime-root dir surface has exactly the standing
 	// owners above; a NEW or reshaped rule on the pair (any source,
@@ -5015,7 +5015,7 @@ func buildkitdIdentityViolations(policy string) []string {
 			continue
 		}
 		if strings.Contains(trimmed, " docker_helper_builder_state_t:dir ") && !standingStateTreeDirRules[trimmed] {
-			violations = append(violations, "the categorized state-tree dir surface has exactly the standing owners (init_t, the manager, the flow, the buildkitd { getattr search write add_name read open create remove_name rmdir } rule) — every other shape on the pair violates: "+trimmed)
+			violations = append(violations, "the categorized state-tree dir surface has exactly the standing owners (init_t, the manager, the flow, the buildkitd { getattr search write add_name read open create remove_name rmdir setattr } rule) — every other shape on the pair violates: "+trimmed)
 		}
 	}
 	// The categorized state-tree file surface has exactly the standing
@@ -5030,7 +5030,7 @@ func buildkitdIdentityViolations(policy string) []string {
 			continue
 		}
 		if strings.Contains(trimmed, " docker_helper_builder_state_t:file ") && !standingStateTreeFileRules[trimmed] {
-			violations = append(violations, "the categorized state-tree file surface has exactly the standing owners (init_t, the manager, the flow, the buildkitd { create read open lock write getattr } rule) — every other shape on the pair violates: "+trimmed)
+			violations = append(violations, "the categorized state-tree file surface has exactly the standing owners (init_t, the manager, the flow, the buildkitd { create read open lock write getattr rename } rule) — every other shape on the pair violates: "+trimmed)
 		}
 	}
 	for _, line := range strings.Split(policy, "\n") {
@@ -5326,7 +5326,7 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 	// correlation, the whole tree's voluntary exit_group(1) after the
 	// state-tree FILE write denial — ONE rule widened IN PLACE each
 	// phase, never split).
-	const canonicalStateTree = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name rmdir };"
+	const canonicalStateTree = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name rmdir setattr };"
 	var withoutStateTree []string
 	stateTreeCount := 0
 	for _, line := range strings.Split(policy, "\n") {
@@ -5349,7 +5349,7 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 	// WIDENED IN PLACE by the 4C-69 canonical run's own terminal combined
 	// 0x40002 decision (ONE rule, never split, never 4C-70a/4C-70b; the
 	// old bare form is now a mutation shape below).
-	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr };"
+	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr rename };"
 	var withoutStateFile []string
 	stateFileCount := 0
 	for _, line := range strings.Split(policy, "\n") {

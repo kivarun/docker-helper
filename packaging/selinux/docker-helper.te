@@ -3820,7 +3820,14 @@ allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr
 #     target-side exec-type rule exactly { entrypoint read execute
 #     getattr }, the shared state-root rule exactly { getattr search },
 #     the shared runtime-root rule exactly { search }.
-allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name rmdir };
+# R7 (green attempt, scope=selinux run 38969233313): + setattr - the
+# snapshotter chmods its own per-op snapshot dirs (chmod .../root/
+# runc-native/snapshots/snapshots/new-<id> to 0755; the build's terminal
+# boundary: "failed to chmod ... to 0755: permission denied"):
+#   avc: denied { setattr } tclass=dir
+#        tcontext=system_u:object_r:docker_helper_builder_state_t:s0:c1
+#        name=new-450847510
+allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name rmdir setattr };
 
 # --- 4C-69: the categorized operation-state file create — the NEW
 # --- file-class plane (a NEW pair+class rule, NEVER a widening of the
@@ -4021,7 +4028,12 @@ allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr sear
 #     target-side exec-type rule exactly { entrypoint read execute
 #     getattr }, the shared state-root rule exactly { getattr search },
 #     the shared runtime-root rule exactly { search }.
-allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr };
+# R7 (green attempt, scope=selinux run 38969233313): + rename - the
+# startedat lease file's own tmp-file rename in the same tree:
+#   avc: denied { rename } tclass=file
+#        tcontext=system_u:object_r:docker_helper_builder_state_t:s0:c1
+#        name=startedat.tmp
+allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr rename };
 
 # --- 4C-72: the shared runtime-root dir search — the NEW pair/plane
 # --- (PLANE G); the bare singleton, never a widening of any existing
