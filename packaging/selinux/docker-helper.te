@@ -6229,6 +6229,24 @@ allow docker_helper_t docker_helper_builder_runtime_root_t:sock_file { getattr o
 allow docker_helper_t docker_helper_builder_runtime_t:dir { search };
 allow docker_helper_t docker_helper_builder_runtime_t:sock_file { getattr open read write };
 allow docker_helper_t docker_helper_builder_t:unix_stream_socket { connectto };
+# R7 (green attempt, scope=selinux run 38962433177): the per-op BuildKit
+# endpoint peer edge — buildctl (running in the daemon domain) dials the
+# per-op buildkitd socket and the kernel checks the PEER process domain:
+#
+#   avc:  denied  { connectto } for  pid=3981 comm="buildctl"
+#         path="/run/docker-helper-builder/ops/<op>/buildkitd.sock"
+#         scontext=system_u:system_r:docker_helper_t:s0
+#         tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#         tclass=unix_stream_socket permissive=0
+#
+# (the sock_file grants above already carry the endpoint file surface —
+# the "daemon dials ... the per-op buildkitd sockets" contract of this
+# transport block). The refpolicy MCS connectto constraint is
+# ((h1 dom h2) or (t1 != mcs_constrained_type)); docker_helper_t is NOT an
+# mcs_constrained_type member, so the constraint does not apply — this is
+# purely the missing allow. Connect-only: no listen/accept/no server side,
+# no other peer domain.
+allow docker_helper_t docker_helper_buildkitd_t:unix_stream_socket { connectto };
 
 # --- docker_helper_container_t: custom container domain ---
 

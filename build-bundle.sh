@@ -38,6 +38,7 @@
 #   apparmor/
 #       docker-helper
 #       docker-helper-system
+#       rootlesskit
 #       local/
 #         curl
 #   selinux/
@@ -204,6 +205,11 @@ cp "$SCRIPT_DIR/packaging/apparmor/docker-helper-builder" \
    "$BUNDLE_DIR/apparmor/docker-helper-builder"
 cp "$SCRIPT_DIR/packaging/apparmor/local/curl" \
    "$BUNDLE_DIR/apparmor/local/curl"
+# R7-C: the distro-standard rootlesskit profile fallback (the builder
+# profile's fail-closed `px` launch vehicle needs a target profile on hosts
+# whose distro ships no rootlesskit profile).
+cp "$SCRIPT_DIR/packaging/apparmor/rootlesskit" \
+   "$BUNDLE_DIR/apparmor/rootlesskit"
 
 # SELinux policy module (both MAC backends ship in the bundle; the installer
 # selects the active one)

@@ -3325,3 +3325,104 @@ func TestSystemProfileAdminTokenReplacementSurface(t *testing.T) {
 		}
 	}
 }
+
+// TestAppArmorRootlesskitFallbackProfileContract protects the R7-C delta
+// (the failed full artifact-gate run 38944346311, openSUSE AppArmor
+// consumer): the builder profile's launch vehicle execs the distro
+// /usr/bin/rootlesskit with `px` — a fail-closed profile transition with no
+// unconfined or inherited fallback — and the Tumbleweed rootlesskit package
+// ships no profile, so the builder START failed closed with
+// "rootlesskit spawn failed: fork/exec /usr/bin/rootlesskit: permission
+// denied". The shipped fallback carries the distro-standard profile shape
+// at the product-scoped path and every install path provisions it ONLY
+// when /etc/apparmor.d/rootlesskit carries no distro-owned profile.
+func TestAppArmorRootlesskitFallbackProfileContract(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/rootlesskit")
+	if err != nil {
+		t.Fatalf("packaging/apparmor/rootlesskit not found: %v", err)
+	}
+	profile := string(data)
+	for _, want := range []string{
+		"profile rootlesskit /usr/bin/rootlesskit flags=(unconfined) {",
+		"userns,",
+		"include if exists <local/rootlesskit>",
+	} {
+		if !strings.Contains(profile, want) {
+			t.Errorf("the shipped rootlesskit fallback profile must carry the distro-standard shape member %q", want)
+		}
+	}
+	// The fallback grants nothing beyond the userns permission: no docker-
+	// helper flow surface (execs, mounts, signals, networking) may ride it.
+	for _, forbidden := range []string{
+		"buildkit", "slirp4netns", "newuidmap", "newgidmap", "mount",
+		"signal", "network", "capability", "/usr/libexec/docker-helper",
+	} {
+		for _, line := range strings.Split(profile, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			if strings.Contains(trimmed, forbidden) {
+				t.Errorf("the rootlesskit fallback profile must stay the minimal distro shape (no %q authority): %s", forbidden, trimmed)
+			}
+		}
+	}
+
+	nfpm, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatalf("packaging/nfpm.yaml not found: %v", err)
+	}
+	if !strings.Contains(string(nfpm), "dst: /usr/share/docker-helper/apparmor/rootlesskit") {
+		t.Error("the package must ship the fallback profile at the product-scoped path /usr/share/docker-helper/apparmor/rootlesskit")
+	}
+	if strings.Contains(string(nfpm), "dst: /etc/apparmor.d/rootlesskit") {
+		t.Error("the package must NOT own /etc/apparmor.d/rootlesskit (the distro owns that path when it ships a profile)")
+	}
+
+	// Every install path provisions absence-only (the distro-owned profile
+	// is never overwritten) and cleans up a failed provisioning.
+	for _, installer := range []struct {
+		path    string
+		guard   string
+		cleanup string
+	}{
+		{
+			path:    "packaging/scripts/rpm/postinstall.sh",
+			guard:   `[ ! -e /etc/apparmor.d/rootlesskit ]`,
+			cleanup: `rm -f /etc/apparmor.d/rootlesskit`,
+		},
+		{
+			path:    "packaging/scripts/deb/postinstall.sh",
+			guard:   `[ ! -e /etc/apparmor.d/rootlesskit ]`,
+			cleanup: `rm -f /etc/apparmor.d/rootlesskit`,
+		},
+		{
+			path:    "packaging/install-system.sh",
+			guard:   `[[ -e /etc/apparmor.d/rootlesskit ]]`,
+			cleanup: `rm -f /etc/apparmor.d/rootlesskit`,
+		},
+	} {
+		script, err := os.ReadFile(installer.path)
+		if err != nil {
+			t.Fatalf("%s not found: %v", installer.path, err)
+		}
+		content := string(script)
+		if !strings.Contains(content, "/usr/share/docker-helper/apparmor/rootlesskit") && !strings.Contains(content, "AA_ROOTLESSKIT_FALLBACK_SRC") {
+			t.Errorf("%s must source the shipped fallback profile (the product-scoped path or the bundle var)", installer.path)
+		}
+		if !strings.Contains(content, installer.guard) {
+			t.Errorf("%s must provision the fallback ONLY when /etc/apparmor.d/rootlesskit carries no profile (absence guard missing)", installer.path)
+		}
+		if !strings.Contains(content, installer.cleanup) {
+			t.Errorf("%s must remove a partially provisioned profile file on failure (a broken file would fail the boot-time profile load)", installer.path)
+		}
+	}
+
+	bundle, err := os.ReadFile("build-bundle.sh")
+	if err != nil {
+		t.Fatalf("build-bundle.sh not found: %v", err)
+	}
+	if !strings.Contains(string(bundle), "packaging/apparmor/rootlesskit") {
+		t.Error("build-bundle.sh must carry apparmor/rootlesskit into the release bundle")
+	}
+}

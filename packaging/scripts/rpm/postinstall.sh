@@ -73,6 +73,29 @@ if [ "$aa_active" = "true" ]; then
     exit 1
   fi
 
+  # R7-C: the builder profile's launch vehicle execs the distro
+  # /usr/bin/rootlesskit with `px` — a fail-closed profile transition that
+  # requires a target profile for the executable. Ubuntu's apparmor package
+  # ships /etc/apparmor.d/rootlesskit; distros whose rootlesskit package
+  # ships none (openSUSE Tumbleweed) leave the exec denied and the builder
+  # START fails closed ("rootlesskit spawn failed: fork/exec
+  # /usr/bin/rootlesskit: permission denied", run 38944346311). Provision
+  # the shipped distro-standard shape ONLY when the path carries no
+  # profile — never overwrite a distro-owned one. Best-effort, matching the
+  # builder's weak unit ordering: builder unavailability fails BUILD
+  # requests closed while run/pull/registry-login stay available.
+  if [ ! -e /etc/apparmor.d/rootlesskit ] && \
+     [ -f /usr/share/docker-helper/apparmor/rootlesskit ]; then
+    if cp /usr/share/docker-helper/apparmor/rootlesskit /etc/apparmor.d/rootlesskit \
+       && chmod 0644 /etc/apparmor.d/rootlesskit \
+       && apparmor_parser --replace --skip-read-cache /etc/apparmor.d/rootlesskit; then
+      echo "provisioned the distro-standard rootlesskit AppArmor profile (no distro-owned profile present)"
+    else
+      rm -f /etc/apparmor.d/rootlesskit
+      echo "warning: could not provision the rootlesskit profile fallback; the builder flow fails closed without it" >&2
+    fi
+  fi
+
   # Clean up legacy fragment after successful profile replacement.
   if [ -f "$AA_LEGACY_FRAGMENT" ] && [ -f "$AA_STATE_FILE" ]; then
     rm -f "$AA_LEGACY_FRAGMENT"

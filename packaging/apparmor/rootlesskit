@@ -1,0 +1,42 @@
+# The distro-standard rootlesskit AppArmor profile — the exact shape the
+# Ubuntu `apparmor` package ships as /etc/apparmor.d/rootlesskit and the
+# upstream Docker rootless documentation prescribes as the manual step for
+# non-dpkg installs.
+#
+# docker-helper ships this file at its product-scoped payload path
+# (/usr/share/docker-helper/apparmor/rootlesskit) and the install scriptlets
+# provision it AT /etc/apparmor.d/rootlesskit ONLY when that path carries no
+# distro-owned profile: the builder profile's launch vehicle execs
+# /usr/bin/rootlesskit with `px` — a fail-closed profile transition with no
+# unconfined or inherited fallback — so a host without any rootlesskit
+# profile (Tumbleweed's rootlesskit package ships none; the failed full
+# artifact-gate run 38944346311 recorded the resulting
+# "rootlesskit spawn failed: fork/exec /usr/bin/rootlesskit: permission
+# denied") cannot start the builder flow at all. Where a distro-owned
+# profile exists it stays the single owner and this file is never copied.
+#
+# The profile itself is intentionally the minimal distro shape: a named,
+# attached profile whose only authority is the `userns` permission the
+# AppArmor userns restriction gates (the distro profile remains the single
+# owner of that permission; this fallback exists so a host without a distro
+# profile has one). The profile does NOT grant docker-helper flow surfaces:
+# buildkitd/slirp4netns/newuidmap/newgidmap execs, flow mounts, TUN setup
+# and flow networking stay mediated by whatever the distro's own rootlesskit
+# profile shape carries — the builder flow's child execs run under the
+# distro profiles exactly as on a host with the distro-shipped profile.
+# Site-specific additions stay in the local/ fragment the distro shape
+# already includes.
+#
+# The uninstaller leaves a provisioned /etc/apparmor.d/rootlesskit in place:
+# it is the standard distro shape for /usr/bin/rootlesskit, other rootless
+# tooling on the host may rely on it, and removing it would silently break
+# the builder flow of a later reinstall.
+
+include <tunables/global>
+
+profile rootlesskit /usr/bin/rootlesskit flags=(unconfined) {
+  userns,
+
+  # Site-specific additions and overrides. See local/README for details.
+  include if exists <local/rootlesskit>
+}

@@ -86,6 +86,7 @@ func TestSELinuxPolicyBuilderDaemonTransportExact(t *testing.T) {
 		"allow docker_helper_t docker_helper_builder_runtime_t:dir { search };",
 		"allow docker_helper_t docker_helper_builder_runtime_t:sock_file { getattr open read write };",
 		"allow docker_helper_t docker_helper_builder_t:unix_stream_socket { connectto };",
+		"allow docker_helper_t docker_helper_buildkitd_t:unix_stream_socket { connectto };",
 	}
 	for _, line := range want {
 		if !strings.Contains(policy, line) {
@@ -300,9 +301,10 @@ func TestSELinuxPolicyLauncherChainRootlesskitTransition(t *testing.T) {
 // the three standing cgroup subjects (the daemon, the builder, the
 // rootlesskit child) unchanged at their own bare { search } dir
 // singletons. The buildkitd-named allow count is pinned as an edit
-// tripwire: it was exactly nine through the S15 phase, and the R7 full-gate
-// corrective added exactly ONE buildkitd-named rule (the manager's
-// child-lifecycle { signull signal } authority, run 38944346311) — ten.
+// tripwire: it was exactly nine through the S15 phase; the R7 full-gate
+// corrective added exactly TWO buildkitd-named rules (the manager's
+// child-lifecycle { signull signal } authority and the daemon's per-op
+// BuildKit endpoint { connectto } peer edge, run 38944346311) — eleven.
 // A buildkitd-named rider on the LAUNCHER cgroup surface is still
 // forbidden by the launcher assertions above; the count pin catches any
 // unreviewed bulk drift.
@@ -347,8 +349,8 @@ func s15LauncherCgroupViolations(policy string) []string {
 			violations = append(violations, fmt.Sprintf("the standing cgroup owner drifted (must stay exactly its bare { search } dir singleton): %s", want))
 		}
 	}
-	if buildkitdNamedAllow != 10 {
-		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 10 (the S15 phase had exactly 9; R7 added exactly the manager child-lifecycle rule; a NON-buildkitd S15 rule never trips it), found %d", buildkitdNamedAllow))
+	if buildkitdNamedAllow != 11 {
+		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 11 (the S15 phase had exactly 9; R7 added the manager child-lifecycle rule and the per-op endpoint peer edge; a NON-buildkitd S15 rule never trips it), found %d", buildkitdNamedAllow))
 	}
 	return violations
 }
@@ -4929,7 +4931,8 @@ func buildkitdIdentityViolations(policy string) []string {
 	// G shared runtime-root dir { search }, H categorized runtime-tree dir
 	// { getattr search write add_name remove_name }, I categorized
 	// runtime-tree sock_file { create unlink setattr }, and the R7-added
-	// manager child-lifecycle { signull signal } authority) — never
+	// manager child-lifecycle { signull signal } authority and the
+	// daemon's per-op BuildKit endpoint { connectto } peer edge) — never
 	// "at least".
 	buildkitdNamedAllow := 0
 	for _, line := range strings.Split(policy, "\n") {
@@ -4941,8 +4944,8 @@ func buildkitdIdentityViolations(policy string) []string {
 			buildkitdNamedAllow++
 		}
 	}
-	if buildkitdNamedAllow != 10 {
-		violations = append(violations, fmt.Sprintf("the module must carry exactly the ten buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir }, the categorized state-tree file { create read open lock write getattr }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name }, the categorized runtime-tree sock_file { create unlink setattr }, and the R7 manager child-lifecycle { signull signal } authority), found %d", buildkitdNamedAllow))
+	if buildkitdNamedAllow != 11 {
+		violations = append(violations, fmt.Sprintf("the module must carry exactly the eleven buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir }, the categorized state-tree file { create read open lock write getattr }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name }, the categorized runtime-tree sock_file { create unlink setattr }, and the R7 manager child-lifecycle { signull signal } authority plus the daemon's per-op BuildKit endpoint { connectto } peer edge), found %d", buildkitdNamedAllow))
 	}
 	// The shared runtime-root dir surface has exactly the standing
 	// owners above; a NEW or reshaped rule on the pair (any source,
@@ -5039,7 +5042,7 @@ func buildkitdIdentityViolations(policy string) []string {
 			if strings.Contains(trimmed, "docker_helper_buildkitd_exec_t") && trimmed != canonicalExec && trimmed != canonicalEntry {
 				violations = append(violations, "the only allow rules naming the buildkitd exec type are the exact source-exec grant { execute read open } and the exact target-side { entrypoint read execute getattr } grant: "+trimmed)
 			}
-			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot && trimmed != canonicalRuntimeTree && trimmed != canonicalRuntimeSockFile && trimmed != canonicalManagerLifecycle {
+			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot && trimmed != canonicalRuntimeTree && trimmed != canonicalRuntimeSockFile && trimmed != canonicalManagerLifecycle && trimmed != "allow docker_helper_t docker_helper_buildkitd_t:unix_stream_socket { connectto };" {
 				violations = append(violations, "the only allow rules toward the buildkitd domain are the exact process transition grant, the exact target-entrypoint grant, and the exact state/runtime surfaces: "+trimmed)
 			}
 			fields := strings.Fields(trimmed)

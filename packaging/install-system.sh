@@ -52,6 +52,7 @@ BUILDKIT_DOC_DEST="${BUILDKIT_DOC_DEST:-/usr/share/doc/docker-helper/buildkit}"
 AA_PROFILE_SRC="${AA_PROFILE_SRC:-apparmor/docker-helper-system}"
 AA_PROFILE_DEST="${AA_PROFILE_DEST:-/etc/apparmor.d/docker-helper-system}"
 AA_BUILDER_PROFILE_SRC="${AA_BUILDER_PROFILE_SRC:-apparmor/docker-helper-builder}"
+AA_ROOTLESSKIT_FALLBACK_SRC="${AA_ROOTLESSKIT_FALLBACK_SRC:-apparmor/rootlesskit}"
 AA_BUILDER_PROFILE_DEST="${AA_BUILDER_PROFILE_DEST:-/etc/apparmor.d/docker-helper-builder}"
 AA_STATE_FILE="${AA_STATE_FILE:-/var/lib/docker-helper/apparmor/managed-boundaries}"
 AA_LEGACY_FRAGMENT="${AA_LEGACY_FRAGMENT:-/etc/apparmor.d/docker-helper.d/managed-roots}"
@@ -376,6 +377,11 @@ check_selected_mac_tools() {
 			error "AppArmor builder profile not found at $script_dir/$AA_BUILDER_PROFILE_SRC"
 			exit 1
 		fi
+		if [[ ! -f "$script_dir/$AA_ROOTLESSKIT_FALLBACK_SRC" ]]; then
+			error "AppArmor rootlesskit fallback profile not found at $script_dir/$AA_ROOTLESSKIT_FALLBACK_SRC"
+			error "the release bundle must carry apparmor/rootlesskit."
+			exit 1
+		fi
 	else
 		if ! command -v "$SEMODULE" >/dev/null 2>&1; then
 			error "semodule not found in PATH"
@@ -649,7 +655,40 @@ install_completion() {
 	chmod 0644 "$completion_dest"
 }
 
+# provision_rootlesskit_profile installs the shipped distro-standard
+# rootlesskit profile ONLY when /etc/apparmor.d/rootlesskit carries no
+# distro-owned profile. The builder profile's launch vehicle execs
+# /usr/bin/rootlesskit with `px` — a fail-closed profile transition with no
+# unconfined or inherited fallback — so a host whose distro ships no
+# rootlesskit profile (openSUSE Tumbleweed's rootlesskit package ships
+# none; run 38944346311 recorded the resulting spawn refusal) cannot start
+# the builder flow at all. A distro-owned profile stays the single owner
+# and is never overwritten. Best-effort with cleanup: a failed provisioning
+# removes the partial file (a broken profile file would fail the boot-time
+# apparmor.service profile load) and leaves the builder flow failing closed
+# at START, consistent with the builder unit's weak ordering.
+provision_rootlesskit_profile() {
+	local src="$script_dir/$AA_ROOTLESSKIT_FALLBACK_SRC"
+	if [[ -e /etc/apparmor.d/rootlesskit ]]; then
+		info "Distro-owned rootlesskit profile present at /etc/apparmor.d/rootlesskit; leaving it untouched"
+		return 0
+	fi
+	if [[ ! -f "$src" ]]; then
+		warn "rootlesskit fallback profile missing from the bundle; the builder flow fails closed without it"
+		return 0
+	fi
+	info "Provisioning the distro-standard rootlesskit profile (no distro-owned profile present)"
+	if ! cp "$src" /etc/apparmor.d/rootlesskit \
+		|| ! chmod 0644 /etc/apparmor.d/rootlesskit \
+		|| ! "$AA_PARSER" --replace --skip-read-cache /etc/apparmor.d/rootlesskit; then
+		rm -f /etc/apparmor.d/rootlesskit
+		warn "could not provision the rootlesskit profile fallback; the builder flow fails closed without it"
+		return 0
+	fi
+}
+
 load_apparmor_profile() {
+	provision_rootlesskit_profile
 	info "Loading AppArmor profile $AA_PROFILE_DEST"
 	if ! "$AA_PARSER" --replace --skip-read-cache "$AA_PROFILE_DEST"; then
 		error "Failed to load AppArmor profile"

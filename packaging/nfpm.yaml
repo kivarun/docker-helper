@@ -157,6 +157,14 @@ contents:
 
   - src: packaging/apparmor/local/curl
     dst: /usr/share/docker-helper/apparmor/local/curl
+  # R7-C: the distro-standard rootlesskit profile shape, shipped at the
+  # product-scoped path only. The install scriptlets provision it at
+  # /etc/apparmor.d/rootlesskit ONLY when no distro-owned profile exists
+  # there (Ubuntu's apparmor package ships one; Tumbleweed's rootlesskit
+  # package ships none), so /etc/apparmor.d/rootlesskit stays distro-owned
+  # whenever a distro provides it.
+  - src: packaging/apparmor/rootlesskit
+    dst: /usr/share/docker-helper/apparmor/rootlesskit
     file_info:
       mode: 0644
 
