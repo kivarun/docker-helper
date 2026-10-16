@@ -2688,15 +2688,19 @@ type_transition docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:proce
 #     never the buildkitd/buildkit-runc siblings;
 #   - the daemon allow is the IN-DOMAIN exec chain's own hooks: the daemon
 #     execs buildctl with NO transition (the same shape as the proven
-#     container_runtime_exec_t docker exec: execute_no_trans, not a
-#     transition edge). No process/domain edge, no entrypoint, no
-#     range_transition, no capability, no execute (no transition exists
-#     for this type, so the bare execute hook stays ungranted).
+#     container_runtime_exec_t docker exec). The kernel's execve always
+#     checks the bare execute hook on the file (the green attempt at the
+#     label-only { execute_no_trans read open getattr map } grant recorded
+#     exactly docker_helper_t -> docker_helper_buildctl_exec_t:file
+#     denied { execute } - the same-second correction evidence, scope=
+#     selinux run 38959936861), then execute_no_trans for the in-domain
+#     continuation. No process/domain edge, no entrypoint, no
+#     range_transition, no capability.
 # Scope caveat: type-wide TE authority on a product-scoped exact-path
 # executable (NOT operation-scoped); the cross-operation gate stays
 # OPEN/Critical.
 type docker_helper_buildctl_exec_t, file_type, exec_type;
-allow docker_helper_t docker_helper_buildctl_exec_t:file { execute_no_trans read open getattr map };
+allow docker_helper_t docker_helper_buildctl_exec_t:file { execute execute_no_trans read open getattr map };
 
 # --- R7: the remaining evidenced rungs of the builder chain and the
 # --- manager's child-lifecycle authority (failed release run 38944346311;

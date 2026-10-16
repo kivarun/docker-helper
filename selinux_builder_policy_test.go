@@ -1133,7 +1133,7 @@ func TestSELinuxPolicyBuildctlExecIdentityR7(t *testing.T) {
 	if !strings.Contains(policy, "type docker_helper_buildctl_exec_t, file_type, exec_type;") {
 		t.Error("the .te must declare the buildctl exec type")
 	}
-	canonicalAllow := "allow docker_helper_t docker_helper_buildctl_exec_t:file { execute_no_trans read open getattr map };"
+	canonicalAllow := "allow docker_helper_t docker_helper_buildctl_exec_t:file { execute execute_no_trans read open getattr map };"
 	if !strings.Contains(policy, canonicalAllow) {
 		t.Errorf("the daemon's in-domain buildctl exec grant must exist in the exact canonical form: %s", canonicalAllow)
 	}
