@@ -188,13 +188,23 @@ USER 65534:65534
 EOF
 chown -R "$PRINCIPAL:$PRINCIPAL" "$WS"
 
-SESS_JSON="$(curl --silent --fail --max-time 5 \
+# The principal must exist before the admin principal-selector session create
+# (the eager 'default' Launcher is provisioned at principal create — the same
+# sequence the UAT scenario runs).
+docker-helper principal create --no-credential "$PRINCIPAL" \
+  || fail "principal create failed"
+docker-helper principal allowed-root add "$PRINCIPAL" "$ALLOWED_ROOT" \
+  || fail "principal allowed-root add failed"
+
+SESS_JSON="$(curl --silent --max-time 5 \
   --unix-socket "$DH_SOCK" -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d "{\"workspace\":\"$WS\",\"principal\":\"$PRINCIPAL\"}" http://localhost/sessions)" \
-  || fail "session create failed"
-SESS_TOKEN="$(printf '%s\n' "$SESS_JSON" | grep -oE '"token": *"[^"]+"' | head -1 | sed 's/.*"token": *"//;s/"$//')"
-[ -n "$SESS_TOKEN" ] || fail "session token missing"
+  -d "{\"workspace\":\"$WS\",\"principal\":\"$PRINCIPAL\"}" \
+  -o "$EVIDENCE_DIR/r7-session-response.json" -w '%{http_code}' http://localhost/sessions)" \
+  || { cat "$EVIDENCE_DIR/r7-session-response.json"; fail "session create request failed"; }
+log "session create HTTP $SESS_JSON"
+SESS_TOKEN="$(grep -oE '"token": *"[^"]+"' "$EVIDENCE_DIR/r7-session-response.json" | head -1 | sed 's/.*"token": *"//;s/"$//')"
+[ -n "$SESS_TOKEN" ] || fail "session token missing (response: $(head -c 400 "$EVIDENCE_DIR/r7-session-response.json"))"
 log "session created"
 
 export DOCKER_HELPER_SESSION_TOKEN="$SESS_TOKEN"
