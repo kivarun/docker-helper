@@ -2803,6 +2803,27 @@ allow docker_helper_buildkitd_t self:cap_userns { sys_admin };
 allow docker_helper_buildkitd_t fs_t:filesystem { remount };
 allow docker_helper_buildkitd_t tmp_t:file { create };
 
+# R7 (green attempt, scope=selinux run 38981152749): the payload's own
+# outbound network client authority. The build now reaches the source
+# resolution and fails at the resolver's first syscall:
+#
+#   error: failed to solve: alpine:3.24: failed to resolve source metadata
+#     for docker.io/library/alpine:3.24: failed to do request: Head
+#     "https://registry-1.docker.io/...": dial tcp: lookup
+#     registry-1.docker.io on 10.0.2.3:53: dial udp 10.0.2.3:53: socket:
+#     permission denied
+#   avc: denied { create } tclass=udp_socket
+#        scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#
+# The resolver (10.0.2.3 is the slirp4netns DNS proxy) and the HTTPS
+# registry request are ONE evidenced operation: the Go client chain is
+# udp socket create/setopt/connect/read/write (the lookup) then the tcp
+# dial (the Head request). Client-side only, self-scoped: no listen/accept
+# surface, no bind-to-port authority beyond the resolver's ephemeral
+# behavior, no raw/socketpair surfaces.
+allow docker_helper_buildkitd_t self:udp_socket { create setopt connect getattr read write };
+allow docker_helper_buildkitd_t self:tcp_socket { create setopt connect getattr read write };
+
 # --- R7 closing note: denials deliberately left CLOSED ---
 #
 # Non-fatal for the observed path (the builder socket came up and passed
