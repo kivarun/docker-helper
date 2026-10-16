@@ -26,6 +26,10 @@
 #   * consumers resolve exactly one artifact of the requested type from the
 #     producer SHA256SUMS.
 #
+# The Release workflow timeout contract is also covered: the release.yml
+# checks job runs the same full suite as CI and must track CI's proven
+# timeout values (T-WF below; R6).
+#
 # Usage: scripts/test-release-pipeline.sh
 
 set -u
@@ -770,6 +774,41 @@ cp -r "$CAND" "$CAND3"
 rm "$CAND3/SHA256SUMS"
 expect_fail "artifact resolver rejects a candidate set without SHA256SUMS" "SHA256SUMS missing" \
   scripts/release-candidate-artifact.sh "$CAND3" "deb"
+
+# --- T-WF: release.yml checks-timeout parity with ci.yml ----------------------------
+#
+# The Release pipeline checks job runs the SAME full test suite twice (plain
+# and -race) as CI's checks job, so its job timeout and the explicit go test
+# bounds must track CI's proven values: a stale Release timeout cancels the
+# tag-push checks job mid-suite and blocks the release (R6). The two shipped
+# workflow files are the required fixture; the assertion is parity of the
+# checks job timeout and of every go test invocation inside it.
+
+wf_checks_block() {
+  awk '/^  checks:$/ { inblk = 1; next } inblk && /^  [^ ]/ { exit } inblk' "$1"
+}
+wf_checks_timeout() { printf '%s\n' "$1" | awk '/timeout-minutes:/ { print $2; exit }'; }
+wf_checks_go_tests() { printf '%s\n' "$1" | grep -E '^ +run: go test ' | sed 's/^ *run: //'; }
+
+CI_WF="$SRC_DIR/.github/workflows/ci.yml"
+REL_WF="$SRC_DIR/.github/workflows/release.yml"
+CI_BLOCK="$(wf_checks_block "$CI_WF")"
+REL_BLOCK="$(wf_checks_block "$REL_WF")"
+CI_TIMEOUT="$(wf_checks_timeout "$CI_BLOCK")"
+REL_TIMEOUT="$(wf_checks_timeout "$REL_BLOCK")"
+CI_GO_TESTS="$(wf_checks_go_tests "$CI_BLOCK")"
+REL_GO_TESTS="$(wf_checks_go_tests "$REL_BLOCK")"
+
+if [ -n "$CI_BLOCK" ] && [ -n "$REL_BLOCK" ] && [ -n "$CI_TIMEOUT" ] \
+  && [ -n "$REL_TIMEOUT" ] && [ -n "$CI_GO_TESTS" ] && [ -n "$REL_GO_TESTS" ]; then
+  if [ "$CI_TIMEOUT" = "$REL_TIMEOUT" ] && [ "$CI_GO_TESTS" = "$REL_GO_TESTS" ]; then
+    ok "release.yml checks timeout contract is in parity with ci.yml (job=${CI_TIMEOUT}m; go test bounds identical)"
+  else
+    bad "release.yml checks timeout contract drifted from ci.yml (job: ci=${CI_TIMEOUT}m release=${REL_TIMEOUT}m; go test ci=[$(printf '%s' "$CI_GO_TESTS" | tr '\n' ';')] release=[$(printf '%s' "$REL_GO_TESTS" | tr '\n' ';')])"
+  fi
+else
+  bad "could not parse the checks job timeout contract from ci.yml/release.yml"
+fi
 
 # --- Summary -----------------------------------------------------------------------
 echo

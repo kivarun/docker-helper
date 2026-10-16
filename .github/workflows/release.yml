@@ -109,7 +109,12 @@ jobs:
 
   checks:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The checks job runs the same full test suite twice (plain and -race)
+    # as CI. Its timeout and the explicit go test bounds below must track
+    # CI's proven values: the Release 2.4 suite (the builder manager's
+    # process/RPC/UAT suites) outgrew the previous 15-minute job timeout,
+    # which would cancel the tag-push checks job mid-suite (R6).
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -133,10 +138,13 @@ jobs:
           fi
 
       - name: Tests
-        run: go test ./...
+        # The Release 2.4 suite exceeds the go test default 10-minute
+        # package timeout; the explicit bound must fit inside the job
+        # timeout above (same proven values as ci.yml).
+        run: go test -timeout 35m ./...
 
       - name: Race tests
-        run: go test -race ./...
+        run: go test -race -timeout 35m ./...
 
       - name: Vet
         run: go vet ./...
