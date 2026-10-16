@@ -219,6 +219,7 @@ func TestBuildBundleScriptContent(t *testing.T) {
 		"docker-helper", "install-system.sh", "uninstall-system.sh",
 		"systemd/system/docker-helper.service",
 		"apparmor", "apparmor/docker-helper-system",
+		"apparmor/docker-helper-builder", "apparmor/rootlesskit",
 		"apparmor/local/curl",
 		"selinux", "selinux/docker_helper.pp",
 		"build-selinux-policy.sh",
@@ -2599,6 +2600,11 @@ exit 0
 	if err := os.WriteFile(filepath.Join(e.scriptDir, "apparmor", "docker-helper-builder"), []byte("profile docker-helper-builder {}"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	// The R7-C rootlesskit fallback profile: the installer preflight
+	// requires the bundled artifact before any mutation.
+	if err := os.WriteFile(filepath.Join(e.scriptDir, "apparmor", "rootlesskit"), []byte("profile rootlesskit /usr/bin/rootlesskit flags=(unconfined) { userns, }"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	// Builder TUN kernel facility: the bundled modules-load.d asset.
 	if err := os.MkdirAll(filepath.Join(e.scriptDir, "modules-load.d"), 0755); err != nil {
 		t.Fatal(err)
@@ -4047,8 +4053,8 @@ exit 0
 	// buildkitd payload and — since 4C-84 — the bundled buildkit-runc
 	// worker runtime (the narrowed executable identity, the exact
 	// canonical paths only).
-	if len(restoreconCalls) != 14 {
-		t.Errorf("expected exactly 14 restorecon invocations, got %d: %v", len(restoreconCalls), restoreconCalls)
+	if len(restoreconCalls) != 15 {
+		t.Errorf("expected exactly 15 restorecon invocations, got %d: %v", len(restoreconCalls), restoreconCalls)
 	}
 	joined := strings.Join(restoreconCalls, "\n")
 	for _, want := range []string{
@@ -4091,6 +4097,7 @@ exit 0
 		"/usr/bin/nsenter":                                  true,
 		"/usr/libexec/docker-helper/buildkit/buildkitd":     true,
 		"/usr/libexec/docker-helper/buildkit/buildkit-runc": true,
+		"/usr/libexec/docker-helper/buildkit/buildctl":      true,
 		"/etc/docker-helper":                                true,
 		"/var/lib/docker-helper":                            true,
 		"/run/docker-helper":                                true,
@@ -4172,7 +4179,7 @@ exit 0
 		if len(callsOf(t, env, "semodule")) == 0 {
 			t.Error("SElinux module load must happen once the floor is established")
 		}
-		if len(callsOf(t, env, "restorecon")) != 14 {
+		if len(callsOf(t, env, "restorecon")) != 15 {
 			t.Errorf("restorecon must still be applied on the SELinux path (got %d calls)", len(callsOf(t, env, "restorecon")))
 		}
 	})
