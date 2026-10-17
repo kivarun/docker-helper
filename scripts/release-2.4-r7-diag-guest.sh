@@ -251,7 +251,9 @@ docker-helper pull alpine:3.24 || log "pull failed (continuing; build may still 
 # as it has one full capture (or the deadline passes).
 (
   deadline=$(( $(date +%s) + 180 ))
-  while [ "$(date +%s)" -lt "$deadline" ]; do
+  samples=0
+  while [ "$(date +%s)" -lt "$deadline" ] && [ "$samples" -lt 240 ]; do
+    samples=$((samples + 1))
     # Match the BUILDKITD process by its exact comm (pgrep -f also
     # matches the rootlesskit wrapper's argv and the rootlesskit setup
     # chain's transient fork churn). The buildkitd process exists from
@@ -276,8 +278,8 @@ docker-helper pull alpine:3.24 || log "pull failed (continuing; build may still 
           echo "${pad}  gid_map:"; sed "s/^/${pad}    /" "/proc/$p/gid_map" 2>&1
           echo "${pad}  caps=$(grep -hE '^CapEff' "/proc/$p/status" 2>/dev/null)"
           echo "${pad}  groups=$(grep -h '^Groups' "/proc/$p/status" 2>/dev/null)"
-          echo "${pad}  mountinfo (ops/containerd-mount/overlay lines):"
-          grep -E "docker-helper-builder|containerd-mount" "/proc/$p/mountinfo" 2>/dev/null | sed "s/^/${pad}    /"
+          echo "${pad}  mountinfo (raw, unfiltered - the definitive view):"
+          sed "s/^/${pad}    /" "/proc/$p/mountinfo" 2>&1
           for c in $(cat "/proc/$p/task/*/children" 2>/dev/null); do
             descend "$c" $((depth + 1))
           done
@@ -308,12 +310,13 @@ docker-helper pull alpine:3.24 || log "pull failed (continuing; build may still 
         done
       } >>"$EVIDENCE_DIR/r7-mapping-buildkitd.log" 2>&1
       # Do NOT break on the first match: the RUN step's mounts (the
-      # overlay snapshot mounts and the containerd-mount binds) appear
-      # LATER in the build. Keep sampling the mountinfo until the
-      # deadline so the failing window's mount structure is captured.
-      sleep 2
+      # overlay snapshot mounts and the containerd-mount binds) are
+      # TRANSIENT (they live only while the callback runs). Sample
+      # fast and keep the raw mountinfo of every sample so the failing
+      # window's mount structure is captured.
+      sleep 0.5
     fi
-    sleep 1
+    sleep 0.3
   done
 ) &
 MAP_POLLER=$!
