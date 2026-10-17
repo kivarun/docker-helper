@@ -2904,6 +2904,25 @@ allow docker_helper_slirp4netns_t http_port_t:tcp_socket { name_connect };
 allow docker_helper_buildkitd_t cert_t:dir { search };
 allow docker_helper_buildkitd_t cert_t:file { read open getattr };
 
+# R7 (green attempt, scope=selinux run 38993742091): the RUN step's
+# containerd-mount temp dir. The base image now downloads AND extracts;
+# the first RUN step fails creating its mount-staging dir in the op's own
+# runtime tree:
+#
+#   #5 ERROR: failed to create temp dir: mkdir
+#     /run/docker-helper-builder/ops/<op>/containerd-mount944337541:
+#     permission denied
+#   avc: denied { create } tclass=dir
+#        scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#        tcontext=system_u:object_r:docker_helper_builder_runtime_t:s0:c1
+#        name=containerd-mount944337541
+#
+# The one mkdir(2)'s own three kernel hooks (parent write, entry
+# add_name, new inode create) inside the op's OWN categorized runtime
+# tree; the removal hook is the same lifecycle's other half and stays on
+# the canonical rule below (the runtime-tree owner's rule carries the
+# full { getattr search write add_name create remove_name } set).
+
 # --- R7 closing note: denials deliberately left CLOSED ---
 #
 # Non-fatal for the observed path (the builder socket came up and passed
@@ -4719,7 +4738,7 @@ allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search;
 # the flow traversal, the daemon transport) are DIFFERENT subjects and
 # DIFFERENT owners — their builder_runtime_t/builder_runtime_root_t
 # rules stay byte-unchanged, never merged and never templates.
-allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write add_name remove_name };
+allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write add_name create remove_name };
 
 # --- 4C-77: the categorized operation-runtime sock_file create — the NEW
 # --- pair+class plane (PLANE I), NEVER a widening of the dir rule ---

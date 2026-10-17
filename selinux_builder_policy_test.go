@@ -350,7 +350,7 @@ func s15LauncherCgroupViolations(policy string) []string {
 		}
 	}
 	if buildkitdNamedAllow != 21 {
-		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 13 (the S15 phase had exactly 9; R7 added the manager child-lifecycle rule, the per-op endpoint peer edge, the rootlesskit parent's buildkitd child-authority rule the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin rule, the source-superblock remount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial and the trust-anchor read pair; a NON-buildkitd S15 rule never trips it), found %d", buildkitdNamedAllow))
+		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 21 (the S15 phase had exactly 9; R7 added the manager child-lifecycle rule, the per-op endpoint peer edge, the rootlesskit parent's buildkitd child-authority rule the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin rule, the source-superblock remount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial and the trust-anchor read pair; a NON-buildkitd S15 rule never trips it), found %d", buildkitdNamedAllow))
 	}
 	return violations
 }
@@ -4748,7 +4748,7 @@ func buildkitdIdentityViolations(policy string) []string {
 	const canonicalStateTree = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name rmdir setattr rename mounton };"
 	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr rename setattr unlink };"
 	const canonicalRuntimeRoot = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search;"
-	const canonicalRuntimeTree = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write add_name remove_name };"
+	const canonicalRuntimeTree = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write add_name create remove_name };"
 	// The categorized runtime-tree sock_file plane (PLANE I, the 4C-77
 	// NEW pair+class rule): exactly the ONE { create unlink } rule — the
 	// AF_UNIX socket object's own inode-creation hook, the FIRST
@@ -4935,7 +4935,7 @@ func buildkitdIdentityViolations(policy string) []string {
 		}
 	}
 	if runtimeTreeCount != 1 {
-		violations = append(violations, fmt.Sprintf("the buildkitd categorized runtime-tree dir { getattr search write add_name remove_name } grant must exist exactly once in the exact bare canonical form, found %d: %s", runtimeTreeCount, canonicalRuntimeTree))
+		violations = append(violations, fmt.Sprintf("the buildkitd categorized runtime-tree dir { getattr search write add_name create remove_name } grant must exist exactly once in the exact bare canonical form, found %d: %s", runtimeTreeCount, canonicalRuntimeTree))
 	}
 	runtimeSockFileCount := 0
 	for _, line := range strings.Split(policy, "\n") {
@@ -5452,7 +5452,7 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 	// a copy of the RootlessKit/manager/daemon runtime owners, and never
 	// a widening of the PLANE G root-plane search (the root getattr has
 	// no live evidence).
-	const canonicalRuntimeTree = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write add_name remove_name };"
+	const canonicalRuntimeTree = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write add_name create remove_name };"
 	var withoutRuntimeTree []string
 	runtimeTreeCount := 0
 	for _, line := range strings.Split(policy, "\n") {
