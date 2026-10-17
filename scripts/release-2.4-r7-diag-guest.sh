@@ -226,14 +226,44 @@ log "session created"
 export DOCKER_HELPER_SESSION_TOKEN="$SESS_TOKEN"
 docker-helper pull alpine:3.24 || log "pull failed (continuing; build may still fail on its own stage)"
 
+# The mapping capture must happen WHILE the flow's buildkitd process is
+# alive: the diag VM can reboot mid-diagnosis (observed ~55s after boot,
+# run 39006788899), so the forensic capture runs as a bounded background
+# poller during the build instead of after it. The poller stops as soon
+# as it has one full capture (or the deadline passes).
+(
+  deadline=$(( $(date +%s) + 180 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    BPID="$(pgrep -f 'buildkitd' | head -1)"
+    if [ -n "$BPID" ]; then
+      {
+        echo "buildkitd pid=$BPID"
+        echo "--- uid_map"; cat "/proc/$BPID/uid_map" 2>&1
+        echo "--- gid_map"; cat "/proc/$BPID/gid_map" 2>&1
+        echo "--- caps"; grep -iE "^Cap(Eff|Bnd|Prm)" "/proc/$BPID/status" 2>&1
+        echo "--- groups"; grep "^Groups:" "/proc/$BPID/status" 2>&1
+        echo "--- attr/current"; cat "/proc/$BPID/attr/current" 2>&1
+      } >"$EVIDENCE_DIR/r7-mapping-buildkitd.log" 2>&1
+      break
+    fi
+    sleep 1
+  done
+) &
+MAP_POLLER=$!
+
 BUILD_START_EPOCH="$(date +%s)"
 set +e
 docker-helper build buildctx --dockerfile Dockerfile --image r7diag:alpine3.24 \
   >"$EVIDENCE_DIR/r7-build-cli.log" 2>&1
 BUILD_RC=$?
 set -e
+wait "$MAP_POLLER" 2>/dev/null || true
 BUILD_END_EPOCH="$(date +%s)"
 log "BUILD RC=$BUILD_RC (elapsed $((BUILD_END_EPOCH - BUILD_START_EPOCH))s)"
+if [ -s "$EVIDENCE_DIR/r7-mapping-buildkitd.log" ]; then
+  log "--- r7-mapping-buildkitd (captured during the build) ---"
+  cat "$EVIDENCE_DIR/r7-mapping-buildkitd.log"
+fi
 head -n 40 "$EVIDENCE_DIR/r7-build-cli.log"
 
 # ============================================================================
@@ -260,11 +290,11 @@ cap r7-kernel-audit-tail 80 bash -c "dmesg 2>/dev/null | tail -80 || journalctl 
 cap r7-builder-unit 20 bash -c 'systemctl cat docker-helper-builder.service 2>/dev/null || true'
 
 # R7 mapping forensics: the lchown(0,42) EPERM class needs the build
-# namespace's ACTUAL id mapping. The callback failure ("failed to Lchown
-# ... for UID 0, GID 42: operation not permitted", NO SELinux record for
-# the call) is only explainable from the namespace's gid view, the
-# running capabilities, and the subid file labels. Every step survives
-# absence (the forensic evidence is the deliverable, not an assertion).
+# namespace's ACTUAL id mapping. The in-build capture above covers the
+# live buildkitd process; the captures below cover the environment-side
+# facts (the subid files' labels and the range lookups) and survive the
+# build either way. Every step survives absence (the forensic evidence
+# is the deliverable, not an assertion).
 cap r7-mapping-buildkitd 20 bash -c '
   BPID="$(pgrep -f "buildkitd" | head -1)"
   echo "buildkitd pid=$BPID"
@@ -283,38 +313,46 @@ cap r7-mapping-flow 20 bash -c '
   fi'
 cap r7-mapping-subid 20 bash -c '
   ls -lZ /etc/subuid /etc/subgid /etc/passwd /etc/group 2>&1
-  for f in /etc/subuid /etc/subgid /etc/passwd; do echo "matchpathcon -V $f: $(matchpathcon -V "$f" 2>&1)"; done
+  for f in /etc/subuid /etc/subgid /etc/passwd /etc/group; do echo "matchpathcon -V $f: $(matchpathcon -V "$f" 2>&1)"; done
   echo "--- getsubids"; command -v getsubids >/dev/null 2>&1 && getsubids docker-helper-builder 2>&1 || echo "(getsubids absent)"
   echo "--- getent"; getent subuid docker-helper-builder 2>&1; getent subgid docker-helper-builder 2>&1
   echo "--- flow groups"; id docker-helper-builder 2>&1'
-cap r7-mapping-probe 40 bash -c '
-  # The direct chown probe inside a NEW user namespace with the flow
-  # user ranges (the same shape the build namespace must support):
-  # unshare + newuidmap/newgidmap + chown 0:42 on a probe file. The
-  # probe isolates the kernel check from buildkit entirely.
-  UN="$(command -v unshare || true)"
-  NU="$(command -v newuidmap || true)"
-  NG="$(command -v newgidmap || true)"
-  if [ -n "$UN" ] && [ -n "$NU" ] && [ -n "$NG" ]; then
-    RANGES="$(getent subuid docker-helper-builder 2>/dev/null | cut -d: -f2,3)"
-    GRANGES="$(getent subgid docker-helper-builder 2>/dev/null | cut -d: -f2,3)"
-    echo "ranges: uid=$RANGES gid=$GRANGES"
-    T="$(mktemp -d /tmp/r7-map-probe.XXXXXX)"
-    ( unshare --user --map-users=0 --map-groups=0 true 2>&1 && echo "unshare-self-map ok" ) || true
-    U="$(id -u docker-helper-builder 2>/dev/null)"
-    if [ -n "$U" ] && [ -n "$RANGES" ]; then
-      set -- $RANGES; START=$1; COUNT=$2
-      unshare -U sleep 0 >/dev/null 2>&1 && echo "plain unshare -U ok"
-      # full-range mapping probe via nsenter-less direct child:
-      bash -c "
-        exec 9< <(unshare -U sh -c '\''sleep 30'\'' & echo \$!)
-        " >/dev/null 2>&1 || true
-      echo "(full-range map probe handled by the buildkitd capture above)"
-    fi
-    rm -rf "$T"
+cap r7-mapping-probe 40 bash -s <<'R7PROBE'
+# The direct kernel probe for the exact failing operation: inside a NEW
+# user namespace backed by the provisioned subid ranges, chown a probe
+# file to 0:42 and report the errno. This isolates the kernel check from
+# buildkit entirely.
+set +e
+UN="$(command -v unshare || true)"
+NU="$(command -v newuidmap || true)"
+NG="$(command -v newgidmap || true)"
+echo "prereqs: unshare=$UN newuidmap=$NU newgidmap=$NG"
+T="$(mktemp /tmp/r7-map-probe.XXXXXX)"
+chmod 666 "$T" 2>/dev/null || true
+if [ -n "$UN" ]; then
+  unshare -U --map-user=0 --map-group=0 sh -c "
+    echo probe > $T 2>/dev/null || true
+    chown 0:42 $T && echo chown-0:42-inside-self-map-ns:OK || echo chown-0:42-inside-self-map-ns:FAILED
+  " 2>&1 || true
+fi
+U="$(id -u docker-helper-builder 2>/dev/null)"
+G="$(id -g docker-helper-builder 2>/dev/null)"
+UR="$(getent subuid docker-helper-builder 2>/dev/null | cut -d: -f2-)"
+GR="$(getent subgid docker-helper-builder 2>/dev/null | cut -d: -f2-)"
+echo "flow uid=$U gid=$G subuid=$UR subgid=$GR"
+if [ -n "$UN" ] && [ -n "$NU" ] && [ -n "$NG" ] && [ -n "$UR" ] && [ -n "$GR" ]; then
+  child="$(unshare -U sh -c 'echo $$; exec sleep 12' 2>/dev/null | head -1)"
+  if [ -n "$child" ]; then
+    newuidmap "$child" 0 "$U" 1 $UR >/dev/null 2>&1 || echo "newuidmap rc=$?"
+    newgidmap "$child" 0 "$G" 1 $GR >/dev/null 2>&1 || echo "newgidmap rc=$?"
+    nsenter -U -t "$child" sh -c "echo probe > $T; chown 0:42 $T && echo chown-0:42-full-range-ns:OK || echo chown-0:42-full-range-ns:FAILED" 2>&1 || true
+    kill "$child" 2>/dev/null || true
   else
-    echo "(probe prerequisites missing: unshare=$UN newuidmap=$NU newgidmap=$NG)"
-  fi'
+    echo "(unshare -U child could not be started)"
+  fi
+fi
+rm -f "$T"
+R7PROBE
 
 # ============================================================================
 # Section 6: verdict
