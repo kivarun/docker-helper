@@ -89,7 +89,15 @@ ALLOWED_ROOT="$PRINCIPAL_HOME"
 # ============================================================================
 # Section 1: environment + dependency-contract evidence (R7-B)
 # ============================================================================
+# The diag VM reboots mid-diagnosis (observed ~55s after boot, runs
+# 39006788899+). Every phase writes a state marker; a re-entry (the
+# runner re-invokes this script over a fresh SSH session after the
+# reboot) skips completed phases and finishes the remaining ones. The
+# runner loops the invocation until the verdict appears.
+STATE_DIR=/tmp/r7-diag-state
+mkdir -p "$STATE_DIR"
 log "=== section 1: platform + dependency evidence (R7-B) ==="
+if [ -f "$STATE_DIR/sec1" ]; then log "phase marker: section 1 done; skipping"; else
 cat /etc/os-release
 cap r7-packages-runtime 20 bash -c 'rpm -qa 2>/dev/null | grep -Ei "rootlesskit|slirp4netns|uidmap|^shadow|apparmor|libselinux|policycoreutils" | sort || dpkg -l 2>/dev/null | grep -Ei "rootlesskit|slirp4netns|uidmap" || true'
 for b in rootlesskit slirp4netns newuidmap newgidmap getsubids; do
@@ -118,9 +126,12 @@ else
   log "R7_RUNTIME_DEPS=skip: reproducing the gate's unprovisioned environment"
 fi
 
+touch "$STATE_DIR/sec1"
+fi
 # ============================================================================
 # Section 2: exact candidate install (never rebuilds)
 # ============================================================================
+if [ -f "$STATE_DIR/sec2" ]; then log "phase marker: section 2 done; skipping"; else
 log "=== section 2: candidate install ($INSTALL_FMT) ==="
 if [ "$INSTALL_FMT" = "rpm" ]; then
   rpm -q docker-helper >/dev/null 2>&1 && rpm -e docker-helper >/dev/null 2>&1 || true
@@ -162,6 +173,9 @@ done
 [ "$READY" = 1 ] || fail "daemon API socket not ready"
 log "daemon ready on $DH_SOCK"
 
+touch "$STATE_DIR/sec2"
+fi
+
 # ============================================================================
 # Section 3: pre-build MAC/policy evidence (R7-A labels, R7-C prerequisites)
 # ============================================================================
@@ -188,13 +202,6 @@ cap r7-builder-confinement 6 bash -c 'BPID="$(systemctl show -p MainPID --value 
 # Section 4: minimal build reproduction through the REAL daemon
 # ============================================================================
 log "=== section 4: build reproduction ==="
-# The diag VM reboots mid-diagnosis (observed ~55s after boot, runs
-# 39006788899+). Every phase writes a marker; a re-entry (the runner
-# re-invokes this script over a fresh SSH session after the reboot)
-# skips completed phases and finishes the remaining ones. The runner
-# loops the invocation until the verdict appears.
-STATE_DIR=/tmp/r7-diag-state
-mkdir -p "$STATE_DIR"
 if [ -f "$STATE_DIR/build-rc" ]; then
   log "phase marker: build already reproduced (rc=$(cat "$STATE_DIR/build-rc")); skipping to forensics"
   BUILD_RC="$(cat "$STATE_DIR/build-rc")"
