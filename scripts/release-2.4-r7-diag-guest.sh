@@ -296,6 +296,17 @@ if command -v auditctl >/dev/null 2>&1 \
     echo "--- auditctl -s:"
     auditctl -s 2>&1
   } >>"$LCHOWN_FORENSICS"
+  # The image ships a blanket '-a never,task' rule: it matches every task
+  # at creation and disables the audit context for them, so AVC records
+  # still flow but SYSCALL records never do (diag run 39048041228: 82 AVC
+  # records, zero SYSCALL records, while the lchown EPERM provably fired
+  # and its always,exit rule was loaded). Remove it for the trace window
+  # — this only enables kernel syscall-audit logging and changes no MAC
+  # decision — and restore it in the teardown below.
+  echo "--- removing the blanket never,task rule for the trace window:" >>"$LCHOWN_FORENSICS"
+  auditctl -d never,task >>"$LCHOWN_FORENSICS" 2>&1 || true
+  echo "--- rules after never,task removal:" >>"$LCHOWN_FORENSICS"
+  auditctl -l >>"$LCHOWN_FORENSICS" 2>&1
 fi
 if [ "$LCHOWN_TRACE" = none ] && ! command -v strace >/dev/null 2>&1; then
   if command -v zypper >/dev/null 2>&1; then
@@ -534,14 +545,26 @@ MAP_POLLER=$!
   # consumes only newline-terminated lines, so a partially written line
   # is picked up on the next cycle instead of being parsed in half.
   process_event_bytes() { # $1 = complete new lines
-    local serial evline w v syscall a1 a2 a3 apid ok
+    local serial evline w v syscall a1 a2 a3 apid ok mode
     printf '%s\n' "$1" >>"$EV_SEEN"
     for serial in $(printf '%s\n' "$1" | grep -oE 'msg=audit\([0-9]+\.[0-9]+:[0-9]+' | sed 's/.*://' | sort -u); do
       evline="$(printf '%s\n' "$1" | grep -F -- ":$serial)" | grep -E 'syscall=(lchown|fchownat)' | head -1)"
-      [ -n "$evline" ] || continue
+      mode=""
+      [ -n "$evline" ] && mode=syscall
+      if [ -z "$mode" ]; then
+        # Fallback trigger: the LSM face of the same check. If a blanket
+        # never,task rule survives, the capability check still emits its
+        # AVC: denied { chown } on tclass=cap_userns is the SELinux gate
+        # of ns_capable(<userns>, CAP_CHOWN) — the exact predicate the
+        # lchown EPERM lives behind. The AVC's pid= is the triggering
+        # task's TID.
+        evline="$(printf '%s\n' "$1" | grep -F -- ":$serial)" | grep 'tclass=cap_userns' | grep 'denied  { chown }' | head -1)"
+        [ -n "$evline" ] && mode=cap_userns
+        [ -n "$mode" ] || continue
+      fi
       [ -n "${SEEN_SERIALS[$serial]:-}" ] || SEEN_SERIALS[$serial]=1 || true
       {
-        echo "== lchown-trace event serial=$serial mechanism=$LCHOWN_TRACE ts=$(date +%s.%N)"
+        echo "== lchown-trace event serial=$serial mechanism=$LCHOWN_TRACE mode=$mode ts=$(date +%s.%N)"
         printf '%s\n' "$1" | grep -F -- ":$serial)" | sed 's/^/event: /'
       } >>"$LCHOWN_FORENSICS"
       syscall=""; a1=""; a2=""; a3=""; apid=""
@@ -555,10 +578,26 @@ MAP_POLLER=$!
         esac
       done
       ok=no
-      if [ "$syscall" = lchown ] && [ "$a1" = 0 ] && [ "$a2" = 42 ] && [ -n "$apid" ]; then ok=yes; fi
-      if [ "$syscall" = fchownat ] && [ "$a2" = 0 ] && [ "$a3" = 42 ] && [ -n "$apid" ]; then ok=yes; fi
-      if [ "$ok" = yes ]; then
-        echo "-- verified $syscall(uid=0,gid=42) event: caller tid=$apid" >>"$LCHOWN_FORENSICS"
+      if [ "$mode" = syscall ]; then
+        if [ "$syscall" = lchown ] && [ "$a1" = 0 ] && [ "$a2" = 42 ] && [ -n "$apid" ]; then ok=yes; fi
+        if [ "$syscall" = fchownat ] && [ "$a2" = 0 ] && [ "$a3" = 42 ] && [ -n "$apid" ]; then ok=yes; fi
+      elif [ "$mode" = cap_userns ]; then
+        for w in $evline; do
+          case "$w" in
+            capability=0)
+              # CAP_CHOWN. The record proves the LSM gate of the
+              # capability check was the failing predicate for this TID.
+              echo "-- cap_userns chown-denial trigger (CAP_CHOWN, capability=0): caller tid=$apid" >>"$LCHOWN_FORENSICS"
+              ok=yes;;
+          esac
+        done
+      fi
+      if [ "$ok" = yes ] && [ -n "$apid" ]; then
+        if [ "$mode" = cap_userns ]; then
+          echo "-- verified cap_userns chown-denial event (CAP_CHOWN): caller tid=$apid" >>"$LCHOWN_FORENSICS"
+        else
+          echo "-- verified $syscall(uid=0,gid=42) event: caller tid=$apid" >>"$LCHOWN_FORENSICS"
+        fi
         snapshot_task "$apid" "lchown-trace-serial-$serial"
       else
         echo "-- unverified trace record (args/parse mismatch, no snapshot): syscall=$syscall a1=$a1 a2=$a2 a3=$a3 pid=$apid" >>"$LCHOWN_FORENSICS"
@@ -699,6 +738,8 @@ if [ "$LCHOWN_TRACE" = audit ]; then
   {
     auditctl -d always,exit -F arch=b64 -S lchown -F a1=0 -F a2=42 -k r7lchown 2>&1 || true
     auditctl -d always,exit -F arch=b64 -S fchownat -F a2=0 -F a3=42 -k r7lchown 2>&1 || true
+    echo "--- restoring the blanket never,task rule:"
+    auditctl -a never,task 2>&1 || true
     echo "--- audit rules after cleanup:"
     auditctl -l 2>&1 || true
     if command -v ausearch >/dev/null 2>&1; then
@@ -748,6 +789,13 @@ elif [ "$BACKEND" = "apparmor" ]; then
   cap r7-process-contexts 40 bash -c 'ps auxZ 2>/dev/null | grep -E "docker-helper|buildkit|rootlesskit|slirp4netns|newuidmap|newgidmap" || true'
 fi
 cap r7-kernel-audit-tail 80 bash -c "dmesg 2>/dev/null | tail -80 || journalctl -k --no-pager | tail -80"
+# The lchown trace records land in the disk-backed audit.log, which
+# survives the diag VM's mid-run reboot; this recovery net runs on every
+# invocation (also the re-entry that skips the build) so a trace window
+# cut short by the reboot is still recovered.
+if command -v ausearch >/dev/null 2>&1; then
+  cap r7-lchown-ausearch 200 ausearch -k r7lchown -i --start today
+fi
 cap r7-lchown-events-head 120 bash -c "head -n 120 '$EVIDENCE_DIR/r7-lchown-events-seen.log' 2>/dev/null || true"
 cap r7-builder-unit 20 bash -c 'systemctl cat docker-helper-builder.service 2>/dev/null || true'
 
