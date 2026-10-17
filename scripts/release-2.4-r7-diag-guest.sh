@@ -237,12 +237,28 @@ docker-helper pull alpine:3.24 || log "pull failed (continuing; build may still 
     BPID="$(pgrep -f 'buildkitd' | head -1)"
     if [ -n "$BPID" ]; then
       {
-        echo "buildkitd pid=$BPID"
-        echo "--- uid_map"; cat "/proc/$BPID/uid_map" 2>&1
-        echo "--- gid_map"; cat "/proc/$BPID/gid_map" 2>&1
-        echo "--- caps"; grep -iE "^Cap(Eff|Bnd|Prm)" "/proc/$BPID/status" 2>&1
-        echo "--- groups"; grep "^Groups:" "/proc/$BPID/status" 2>&1
-        echo "--- attr/current"; cat "/proc/$BPID/attr/current" 2>&1
+        # The pgrep match is the rootlesskit WRAPPER (its argv names
+        # buildkitd); the launcher chain's child processes (the real
+        # buildkitd, inside the child user namespace) are its
+        # descendants. Capture the wrapper AND every descendant's
+        # namespace view: the wrapper stays in the init userns by
+        # design; the namespace mapping lives on the descendants.
+        echo "matched pid=$BPID"
+        descend() {
+          local p="$1" depth="$2" i pad
+          pad=""; i=0; while [ $i -lt $depth ]; do pad="$pad  "; i=$((i+1)); done
+          echo "${pad}pid=$p"
+          echo "${pad}  comm=$(cat "/proc/$p/comm" 2>/dev/null)"
+          echo "${pad}  attr/current=$(cat "/proc/$p/attr/current" 2>/dev/null)"
+          echo "${pad}  uid_map:"; sed "s/^/${pad}    /" "/proc/$p/uid_map" 2>&1
+          echo "${pad}  gid_map:"; sed "s/^/${pad}    /" "/proc/$p/gid_map" 2>&1
+          echo "${pad}  caps=$(grep -hE '^CapEff' "/proc/$p/status" 2>/dev/null)"
+          echo "${pad}  groups=$(grep -h '^Groups' "/proc/$p/status" 2>/dev/null)"
+          for c in $(cat "/proc/$p/task/*/children" 2>/dev/null); do
+            descend "$c" $((depth + 1))
+          done
+        }
+        descend "$BPID" 0
       } >"$EVIDENCE_DIR/r7-mapping-buildkitd.log" 2>&1
       break
     fi
