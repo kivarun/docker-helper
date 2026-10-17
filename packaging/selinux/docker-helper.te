@@ -2872,6 +2872,20 @@ allow docker_helper_slirp4netns_t net_conf_t:file { read open };
 # { name_connect }). Port-class only: no node/netif/peer authority.
 allow docker_helper_buildkitd_t http_port_t:tcp_socket { name_connect };
 
+# R7 (green attempt, scope=selinux run 38991030101): the proxy's own
+# registry egress. The dial reaches the proxy and slirp4netns opens its
+# own host-side TCP connection to the registry port:
+#
+#   error: ... dial tcp 44.215.247.20:443: connect: network is unreachable
+#   avc: denied { name_connect } tclass=tcp_socket (40 records)
+#        scontext=system_u:system_r:docker_helper_slirp4netns_t:s0:c1
+#        tcontext=system_u:object_r:http_port_t:s0
+#
+# (the proxy translates the guest's unreachable into the "network is
+# unreachable" the guest sees). The same port-class grant the daemon and
+# the payload carry. Port-class only.
+allow docker_helper_slirp4netns_t http_port_t:tcp_socket { name_connect };
+
 # --- R7 closing note: denials deliberately left CLOSED ---
 #
 # Non-fatal for the observed path (the builder socket came up and passed
