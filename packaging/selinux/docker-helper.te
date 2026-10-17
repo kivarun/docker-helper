@@ -3038,6 +3038,39 @@ allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:lnk_file { creat
 # permission and every other namespace path stays closed.
 allow docker_helper_buildkitd_t nsfs_t:file getattr;
 
+# R7 (green attempt, scope=selinux run 39023951708 at e6826204): the
+# unprivileged mount-flags probe on the first context bind. With the
+# user-namespace probe granted, the build passes extraction, the mount
+# callback's ownership normalization and the whole previous staircase;
+# the FIRST Dockerfile-load step now dies one hook before its mount:
+#
+#   #1 ERROR: failed to get unprivileged mount flags for
+#     {Type:bind Source:/var/lib/docker-helper-builder/ops/<op>/
+#       root/runc-native/snapshots/snapshots/1 Target:
+#       Options:[rbind rw]}: permission denied
+#
+#   avc:  denied  { getattr } for  comm="buildkitd" name="/" dev="vda3"
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:fs_t:s0 tclass=filesystem permissive=0
+#
+# buildkit's GetUnprivilegedMountFlags statfs(2)'s the bind SOURCE —
+# the op's own snapshot path inside the state tree, on the state tree's
+# host superblock (vda3 xfs, globally labelled fs_t) — before mounting
+# it; the statfs's SELinux filesystem:getattr check denies, statfs
+# returns EACCES, and the step fails "permission denied" before any
+# mount(2). The same pair closed every build in the run (the main
+# build, the eight regression ops, the workload-MAC S16 op; three
+# independent buildkitd pids 3958/72745/99793). This is the R7 closing
+# note's "cgroup_t/fs_t filesystem getattrs" record with the fs_t
+# half's fatality now PROVEN. The companion cgroup_t:filesystem getattr
+# (statfs /sys/fs/cgroup inside buildkitd's rootless detection) remains
+# the standing non-fatal startup probe: the detection completed and the
+# build proceeded past it. The grant is the ONE getattr bit on the ONE
+# filesystem class; the standing fs_t { remount unmount } pair stays
+# its own source-superblock owner, no remount/unmount expansion rides,
+# and no other filesystem target, class or permission opens.
+allow docker_helper_buildkitd_t fs_t:filesystem getattr;
+
 # --- R7 closing note: denials deliberately left CLOSED ---
 #
 # Non-fatal for the observed path (the builder socket came up and passed
@@ -3058,9 +3091,11 @@ allow docker_helper_buildkitd_t nsfs_t:file getattr;
 # RECORDED BUT FATALITY-UNPROVEN — the remaining same-run records
 # (buildkitd_t: the exec-file open, the state-tree mounton/ioctl/unlink
 # probes, the tmp_t dir write, the container_var_run_t/cgroup_t dir
-# searches, the cgroup_t/fs_t filesystem getattrs, the sysctl fs/net dir
-# searches, the tmpfs_t lnk_file read; rootlesskit_t: the sysfs_t /sys
-# mounton, the net_conf_t getattr, the tmp_t dir read/remove_name). The
+# searches, the cgroup_t filesystem getattr — its fs_t half moved UP to
+# the granted rule with the fatality proven, run 39023951708 — the
+# sysctl fs/net dir searches, the tmpfs_t lnk_file read; rootlesskit_t:
+# the sysfs_t /sys mounton, the net_conf_t getattr, the tmp_t dir
+# read/remove_name). The
 # builder socket came up with every one of them denied, so none is a
 # proven cause; NONE is granted. A future rung needs its own live
 # evidence that the hook is FATAL (the next green-run boundary owns it).
