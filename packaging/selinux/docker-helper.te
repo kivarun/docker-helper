@@ -2973,6 +2973,32 @@ allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file { create 
 # the dir rule.
 allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:lnk_file { create };
 
+# R7 (root-cause confirmation, scope=selinux run 38999078250 + the
+# differential full-gate run 39002831855): the uid-map helpers' input
+# stat. The AppArmor consumer (same Tumbleweed kernel family, same
+# builder bytes) completes the identical build including the mount
+# callback's ownership normalization; the SELinux consumer fails at
+#
+#   failed to Lchown ".../containerd-mount<rand>/etc/shadow" for
+#     UID 0, GID 42: lchown ...: operation not permitted
+#
+# with NO SELinux record for the call itself (kernel-internal EPERM —
+# the chown target's gid has no mapping inside the build namespace).
+# The chain: /etc/subgid maps the full range (the provisioner's own log:
+# docker-helper-builder:165536:65536), so gid 42 IS mappable — IF the
+# helpers' range lookup succeeds. The recorded AVCs name the failure:
+#
+#   avc: denied { getattr } tclass=file tcontext=passwd_file_t
+#        comm=newuidmap   /   comm=newgidmap
+#
+# the helpers stat the id files (/etc/passwd, /etc/group, /etc/subuid,
+# /etc/subgid — all passwd_file_t on this distro) before reading them;
+# the standing read+open grants omit getattr, so the range lookup dies
+# at the stat, newuidmap/newgidmap fail, and rootlesskit falls back to
+# the single-uid mapping (no subid range) — gid 42 unmapped. The fix is
+# the stat bit on the standing pair, in place (the two canonical rules
+# above carry it; this block is the evidence record).
+
 # --- R7 closing note: denials deliberately left CLOSED ---
 #
 # Non-fatal for the observed path (the builder socket came up and passed
@@ -6072,7 +6098,7 @@ allow docker_helper_newuidmap_t self:capability setuid;
 # non-blocking (the user name was determined successfully without it) and
 # stays ungranted; the blocking failure moved to the target-process dir
 # stat above.
-allow docker_helper_newuidmap_t passwd_file_t:file { read open };
+allow docker_helper_newuidmap_t passwd_file_t:file { read open getattr };
 
 # --- docker_helper_newgidmap_t: the rootlesskit GID-map helper domain (P5-S2) ---
 #
@@ -6273,7 +6299,7 @@ allow docker_helper_newgidmap_t self:capability setgid;
 # The helper's passwd getattr denial (run 36306315923 record 552) also
 # occurred and is NON-blocking — the flow continued past it to the next
 # failure; getattr stays ungranted (never treated as a grant mandate).
-allow docker_helper_newgidmap_t passwd_file_t:file { read open };
+allow docker_helper_newgidmap_t passwd_file_t:file { read open getattr };
 
 # The child's user-namespace creation itself: rootlesskit creates the userns
 # that hosts the buildkitd instance. Live enforcing AVC evidence (P5-S1
