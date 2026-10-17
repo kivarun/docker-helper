@@ -2824,6 +2824,24 @@ allow docker_helper_buildkitd_t tmp_t:file { create };
 allow docker_helper_buildkitd_t self:udp_socket { create setopt connect getattr read write };
 allow docker_helper_buildkitd_t self:tcp_socket { create setopt connect getattr read write };
 
+# R7 (green attempt, scope=selinux run 38982713632): the flow's forwarding
+# proxy sockets. The buildkitd resolver query now leaves the child, but the
+# lookup times out because the slirp4netns proxy itself could not create
+# its DNS relay socket:
+#
+#   lookup registry-1.docker.io on 10.0.2.3:53: read udp
+#     10.0.2.15:<port>->10.0.2.3:53: i/o timeout
+#   avc: denied { create } tclass=udp_socket
+#        scontext=system_u:system_r:docker_helper_slirp4netns_t:s0:c1
+#
+# slirp4netns terminates the guest's sessions in userspace and opens its
+# OWN host-side sockets: the DNS relay (udp) and the guest's forwarded
+# TCP egress (the registry HTTPS dial is the same request chain's next
+# hop). Client-side, self-scoped; the tun/TUNSETIFF surface and the
+# cap_userns authority stay exactly as evidenced before.
+allow docker_helper_slirp4netns_t self:udp_socket { create setopt connect getattr read write };
+allow docker_helper_slirp4netns_t self:tcp_socket { create setopt connect getopt getattr read write };
+
 # --- R7 closing note: denials deliberately left CLOSED ---
 #
 # Non-fatal for the observed path (the builder socket came up and passed
