@@ -260,6 +260,37 @@ docker-helper pull alpine:3.24 || log "pull failed (continuing; build may still 
         }
         descend "$BPID" 0
       } >"$EVIDENCE_DIR/r7-mapping-buildkitd.log" 2>&1
+      # The wrapper may not have forked the in-namespace child yet at
+      # match time; give it a moment and extend the capture with the
+      # descendants once they exist.
+      childwait=0
+      while [ "$childwait" -lt 15 ]; do
+        kids="$(cat "/proc/$BPID/task/"*"/children" 2>/dev/null | tr '\n' ' ')"
+        [ -n "$kids" ] && break
+        sleep 1
+        childwait=$((childwait + 1))
+      done
+      {
+        echo "matched pid=$BPID children=$kids"
+        for c in $kids; do
+          echo "child pid=$c"
+          echo "  comm=$(cat "/proc/$c/comm" 2>/dev/null)"
+          echo "  attr/current=$(cat "/proc/$c/attr/current" 2>/dev/null)"
+          echo "  uid_map:"; sed 's/^/    /' "/proc/$c/uid_map" 2>&1
+          echo "  gid_map:"; sed 's/^/    /' "/proc/$c/gid_map" 2>&1
+          echo "  caps=$(grep -hE '^CapEff' "/proc/$c/status" 2>/dev/null)"
+          echo "  groups=$(grep -h '^Groups' "/proc/$c/status" 2>/dev/null)"
+          gkids="$(cat "/proc/$c/task/"*"/children" 2>/dev/null | tr '\n' ' ')"
+          for g in $gkids; do
+            echo "grandchild pid=$g"
+            echo "  comm=$(cat "/proc/$g/comm" 2>/dev/null)"
+            echo "  attr/current=$(cat "/proc/$g/attr/current" 2>/dev/null)"
+            echo "  uid_map:"; sed 's/^/    /' "/proc/$g/uid_map" 2>&1
+            echo "  gid_map:"; sed 's/^/    /' "/proc/$g/gid_map" 2>&1
+            echo "  caps=$(grep -hE '^CapEff' "/proc/$g/status" 2>/dev/null)"
+          done
+        done
+      } >>"$EVIDENCE_DIR/r7-mapping-buildkitd.log" 2>&1
       break
     fi
     sleep 1
