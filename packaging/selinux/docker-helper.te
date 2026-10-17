@@ -2933,6 +2933,17 @@ allow docker_helper_buildkitd_t cert_t:file { read open getattr };
 # — mounton joins the runtime-tree dir rule, unmount joins the
 # source-superblock rule (the same mount/unmount lifecycle).
 
+# R7 (green attempt, scope=selinux run 38997462594): the symlink farm's
+# real landing spot — through the rbind view the target's /bin IS the
+# snapshot's bin dir, so the symlink(2) lands on the categorized state
+# tree, not the runtime tree:
+#   avc: denied { create } tclass=lnk_file
+#        scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#        tcontext=system_u:object_r:docker_helper_builder_state_t:s0:c1
+#        name=arch
+# (the parent dir's add_name hook is already on the state-tree dir rule).
+allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file { create };
+
 # R7 (green attempt, scope=selinux run 38995970391): the mount target's
 # own population. The RUN step's bind mount now succeeds; the mount
 # callback then populates the target (the busybox multi-call symlink
@@ -4244,6 +4255,7 @@ allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr sear
 #        tcontext=system_u:object_r:docker_helper_builder_state_t:s0:c1
 #        name=startedat.tmp
 allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr rename setattr unlink };
+allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file { create };
 
 # --- 4C-72: the shared runtime-root dir search — the NEW pair/plane
 # --- (PLANE G); the bare singleton, never a widening of any existing
