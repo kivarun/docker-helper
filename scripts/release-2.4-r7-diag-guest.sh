@@ -234,7 +234,11 @@ docker-helper pull alpine:3.24 || log "pull failed (continuing; build may still 
 (
   deadline=$(( $(date +%s) + 180 ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    BPID="$(pgrep -f 'buildkitd' | head -1)"
+    # Match the BUILDKITD process by its exact comm (pgrep -f also
+    # matches the rootlesskit wrapper's argv and the rootlesskit setup
+    # chain's transient fork churn). The buildkitd process exists from
+    # the namespace setup until the build's end.
+    BPID="$(pgrep -x buildkitd | head -1)"
     if [ -n "$BPID" ]; then
       {
         # The pgrep match is the rootlesskit WRAPPER (its argv names
@@ -260,16 +264,6 @@ docker-helper pull alpine:3.24 || log "pull failed (continuing; build may still 
         }
         descend "$BPID" 0
       } >"$EVIDENCE_DIR/r7-mapping-buildkitd.log" 2>&1
-      # The wrapper may not have forked the in-namespace child yet at
-      # match time; give it a moment and extend the capture with the
-      # descendants once they exist.
-      childwait=0
-      while [ "$childwait" -lt 15 ]; do
-        kids="$(cat "/proc/$BPID/task/"*"/children" 2>/dev/null | tr '\n' ' ')"
-        [ -n "$kids" ] && break
-        sleep 1
-        childwait=$((childwait + 1))
-      done
       {
         echo "matched pid=$BPID children=$kids"
         for c in $kids; do
