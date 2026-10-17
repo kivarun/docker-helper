@@ -2842,6 +2842,20 @@ allow docker_helper_buildkitd_t self:tcp_socket { create setopt connect getattr 
 allow docker_helper_slirp4netns_t self:udp_socket { create setopt connect getattr read write };
 allow docker_helper_slirp4netns_t self:tcp_socket { create setopt connect getopt getattr read write };
 
+# R7 (green attempt, scope=selinux run 38985262949): the relay's upstream
+# resolver configuration. The DNS relay socket now exists, but the lookup
+# still times out because slirp4netns cannot read the host's resolver
+# configuration (the file that tells the relay where to forward):
+#
+#   avc: denied { read } tclass=file
+#        scontext=system_u:system_r:docker_helper_slirp4netns_t:s0:c1
+#        tcontext=system_u:object_r:net_conf_t:s0   (48 records, the relay
+#                                                    re-reading the config)
+#
+# The same net_conf surface the flow's other domains already carry
+# (rootlesskit { read open }). Read-only.
+allow docker_helper_slirp4netns_t net_conf_t:file { read open };
+
 # --- R7 closing note: denials deliberately left CLOSED ---
 #
 # Non-fatal for the observed path (the builder socket came up and passed

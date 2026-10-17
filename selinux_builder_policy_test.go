@@ -1844,8 +1844,8 @@ func helperDomainPolicyViolations(policy string) []string {
 			// the count clauses and the slirp4netns test's string
 			// scans); a file grant toward any OTHER target is a
 			// pre-grant of an unproven boundary.
-			if rule.class == "file" && rule.target != "docker_helper_slirp4netns_exec_t" && rule.target != "docker_helper_rootlesskit_t" && rule.target != "nsfs_t" {
-				violations = append(violations, fmt.Sprintf("the helper domain's file authority is only its own entry type plus the rootlesskit target-SID read (no other file target): allow %s %s:%s", rule.source, rule.target, rule.class))
+			if rule.class == "file" && rule.target != "docker_helper_slirp4netns_exec_t" && rule.target != "docker_helper_rootlesskit_t" && rule.target != "nsfs_t" && rule.target != "net_conf_t" {
+				violations = append(violations, fmt.Sprintf("the helper domain's file authority is only its own entry type, the rootlesskit target-SID read, the nsfs namespace-handle read and the R7 relay resolver-config read (run 38985262949; no other file target): allow %s %s:%s", rule.source, rule.target, rule.class))
 			}
 			// The helper's capability surface: no plain capability/
 			// capability2 grant of any target; the only cap_userns
@@ -4357,6 +4357,7 @@ func TestSELinuxPolicyRootlesskitNetconfFile(t *testing.T) {
 		var violations []string
 		pairCount := 0
 		daemonCount := 0
+		slirpCount := 0
 		for _, line := range strings.Split(text, "\n") {
 			trimmed := strings.TrimSpace(line)
 			if strings.HasPrefix(trimmed, "#") {
@@ -4369,10 +4370,16 @@ func TestSELinuxPolicyRootlesskitNetconfFile(t *testing.T) {
 					violations = append(violations, "the resolved-/etc read-open pair must be the exact brace pair shape (no bare single-perm form, no split read/open rules, no reordering, no second rule — getattr/write/append/setattr/create/unlink/rename/link/execute/map/relabel* are distinct hooks): "+trimmed)
 				}
 			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, " net_conf_t:file"):
-				if trimmed == pinnedDaemonNetconf {
+				switch {
+				case trimmed == pinnedDaemonNetconf:
 					daemonCount++
-				} else {
-					violations = append(violations, "the daemon's braced net_conf_t:file { read open getattr } rule is the module's only other net_conf_t:file surface: "+trimmed)
+				case trimmed == "allow docker_helper_slirp4netns_t net_conf_t:file { read open };":
+					// R7 (run 38985262949): the relay's upstream resolver
+					// configuration read — the DNS relay cannot forward
+					// without reading the host's resolver config.
+					slirpCount++
+				default:
+					violations = append(violations, "the module's net_conf_t:file surfaces are the rootlesskit pair, the daemon's braced rule and the R7 slirp4netns relay pair: "+trimmed)
 				}
 			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, " net_conf_t:lnk_file"):
 				violations = append(violations, "the class confusion is forbidden — the lnk_file class surface of net_conf_t is not this pair: "+trimmed)
@@ -4387,6 +4394,9 @@ func TestSELinuxPolicyRootlesskitNetconfFile(t *testing.T) {
 		}
 		if daemonCount != 1 {
 			violations = append(violations, fmt.Sprintf("the module's own standing daemon net_conf_t read-open-getattr rule must appear exactly once, found %d", daemonCount))
+		}
+		if slirpCount != 1 {
+			violations = append(violations, fmt.Sprintf("the R7 slirp4netns relay resolver-config pair must appear exactly once, found %d", slirpCount))
 		}
 		return violations
 	}
