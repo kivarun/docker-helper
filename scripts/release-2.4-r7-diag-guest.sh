@@ -211,6 +211,101 @@ cap r7-builder-identity 10 bash -c 'id docker-helper-builder 2>&1; getent subuid
 cap r7-daemon-confinement 6 bash -c 'DHPID="$(systemctl show -p MainPID --value docker-helper.service)"; echo "daemon pid=$DHPID"; cat "/proc/$DHPID/attr/current" 2>/dev/null || true; echo'
 cap r7-builder-confinement 6 bash -c 'BPID="$(systemctl show -p MainPID --value docker-helper-builder.service)"; echo "builder pid=$BPID"; cat "/proc/$BPID/attr/current" 2>/dev/null || true; echo'
 
+# R7-A install stabilization: the diag VM reboots mid-diagnosis (~55s
+# after boot, run 39006788899+), and a reboot landing inside the RPM
+# transaction leaves the just-installed environment half-configured.
+# Observed shapes:
+#   * run 39048909303 SELinux: buildkitd/buildkit-runc relabeled by the
+#     posttrans, buildctl left at the distro bin_t (the transaction died
+#     between adjacent restorecon lines) — the build then died at
+#     "fork/exec buildctl: permission denied" before ever reaching the
+#     lchown window;
+#   * the same run, AppArmor: the post-reboot build raced the boot-time
+#     AppArmor profile load and died with apparmor="DENIED" ...
+#     "profile transition not found" on /usr/bin/rootlesskit before any
+#     build step.
+# This step verifies and, where needed, repairs the install the diag
+# itself just performed — diagnostic-environment stabilization only; it
+# never touches product bytes, policy sources, or MAC mode — and records
+# the before/after state so the flakiness stays documented.
+STAB_LOG="$EVIDENCE_DIR/r7-install-stabilization.log"
+stab_list() {
+  for f in /usr/bin/docker-helper /usr/bin/rootlesskit /usr/bin/newuidmap \
+           /usr/bin/newgidmap /usr/bin/nsenter \
+           /usr/libexec/docker-helper/buildkit/buildctl \
+           /usr/libexec/docker-helper/buildkit/buildkitd \
+           /usr/libexec/docker-helper/buildkit/buildkit-runc; do
+    if [ ! -e "$f" ]; then printf '%s MISSING\n' "$f"; continue; fi
+    printf '%s actual=%s computed_type=%s\n' "$f" \
+      "$(ls -lZd "$f" 2>&1 | awk '{print $1, $3, $4}')" \
+      "$(matchpathcon "$f" 2>/dev/null | awk '{print $2}' | awk -F: '{print $3}')"
+  done
+}
+if [ "$BACKEND" = "selinux" ] && command -v restorecon >/dev/null 2>&1 && command -v semodule >/dev/null 2>&1; then
+  {
+    echo "=== pre-repair state ($(date +%H:%M:%S)):"
+    stab_list
+    repaired=0
+    for f in /usr/libexec/docker-helper/buildkit/buildctl \
+             /usr/libexec/docker-helper/buildkit/buildkitd \
+             /usr/libexec/docker-helper/buildkit/buildkit-runc \
+             /usr/bin/rootlesskit /usr/bin/newuidmap /usr/bin/newgidmap \
+             /usr/bin/nsenter /usr/bin/docker-helper; do
+      [ -e "$f" ] || continue
+      t="$(matchpathcon "$f" 2>/dev/null | awk '{print $2}' | awk -F: '{print $3}')"
+      case "$t" in
+        docker_helper_*) ;;
+        *)
+          echo "--- relabeling $f (computed type '$t' is not a docker_helper type)"
+          restorecon "$f" 2>&1 || true
+          repaired=$((repaired + 1));;
+      esac
+    done
+    t="$(matchpathcon /usr/libexec/docker-helper/buildkit/buildctl 2>/dev/null | awk '{print $2}' | awk -F: '{print $3}')"
+    if [ "$t" != docker_helper_buildctl_exec_t ]; then
+      echo "--- buildctl rule absent: reloading the shipped policy module"
+      PP="$(rpm -ql docker-helper 2>/dev/null | grep 'docker_helper\.pp$' | head -1)"
+      echo "--- module path: ${PP:-NOT-FOUND}"
+      if [ -n "$PP" ]; then
+        semodule -i "$PP" 2>&1 || true
+        restorecon /usr/libexec/docker-helper/buildkit/buildctl 2>&1 || true
+        repaired=$((repaired + 1))
+      fi
+    fi
+    echo "=== post-repair state (repaired=$repaired):"
+    stab_list
+  } >"$STAB_LOG" 2>&1
+  log "install stabilization (selinux): repaired=$repaired (evidence: $STAB_LOG)"
+elif [ "$BACKEND" = "apparmor" ]; then
+  {
+    echo "=== pre-repair state ($(date +%H:%M:%S)):"
+    aa-status 2>&1 | grep -E "docker-helper|rootlesskit" | head -10 || true
+    loaded=0
+    for _ in $(seq 1 30); do
+      if aa-status 2>/dev/null | grep -q "docker-helper-builder" \
+         && aa-status 2>/dev/null | grep -q "rootlesskit"; then
+        loaded=1; break
+      fi
+      sleep 0.5
+    done
+    echo "--- profiles settled wait: loaded=$loaded"
+    if [ "$loaded" != 1 ]; then
+      echo "--- force-loading the shipped profiles:"
+      apparmor_parser --replace --skip-read-cache /etc/apparmor.d/docker-helper-system 2>&1 || true
+      apparmor_parser --replace --skip-read-cache /etc/apparmor.d/docker-helper-builder 2>&1 || true
+      if [ -e /etc/apparmor.d/rootlesskit ]; then
+        apparmor_parser --replace --skip-read-cache /etc/apparmor.d/rootlesskit 2>&1 || true
+      fi
+      repaired=1
+    else
+      repaired=0
+    fi
+    echo "=== post-repair state (repaired=$repaired):"
+    aa-status 2>&1 | grep -E "docker-helper|rootlesskit" | head -10 || true
+  } >"$STAB_LOG" 2>&1
+  log "install stabilization (apparmor): repaired=$repaired (evidence: $STAB_LOG)"
+fi
+
 # ============================================================================
 # Section 4: minimal build reproduction through the REAL daemon
 # ============================================================================
