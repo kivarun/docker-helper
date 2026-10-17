@@ -22,6 +22,13 @@
 #   R7-D  the manager's child-lifecycle surface during STOP/liveness:
 #         the exact categorized child contexts (ps) and the signal/signull
 #         AVC records.
+#   R7-A  the lchown(0,42) ownership forensics: while the mount callback
+#         runs, the /etc/shadow inode's st_dev/st_ino/uid/gid sampled from
+#         BOTH sides of the build namespace boundary (in-namespace via
+#         nsenter, host via the bind source and /proc/<pid>/root), the
+#         bind's mountinfo (idmapped marker), and the VM's idmapped-mount
+#         kernel support — the inputs for naming the first failing kernel
+#         predicate, on the SELinux and the AppArmor VM alike.
 #
 # The script is evidence-first: every collection step survives build failure,
 # and the terminal verdict line states only what was observed:
@@ -321,6 +328,92 @@ docker-helper pull alpine:3.24 || log "pull failed (continuing; build may still 
 ) &
 MAP_POLLER=$!
 
+# R7-A ownership-forensics poller: capture the /etc/shadow inode's
+# identity from BOTH sides of the build namespace boundary WHILE the
+# mount callback runs, so the first failing kernel predicate of the
+# lchown(0,42) EPERM can be named from recorded facts alone:
+#   * the in-namespace view — nsenter -U -m into the real buildkitd and
+#     stat the containerd-mount*/etc/shadow: the ids buildkitd's own
+#     lchown acts on and the ids the kernel maps through the mount;
+#   * the host view — stat the bind SOURCE (the state-tree snapshot
+#     dir) and the same containerd-mount path through /proc/<pid>/root
+#     (path resolution inside the child mount namespace, ids presented
+#     in the READER's user namespace, i.e. the host's);
+#   * st_dev + st_ino equality across the views proves one and the same
+#     inode (bind mounts and idmapped mounts never change st_ino; an
+#     idmapped presentation changes only uid/gid);
+#   * the mountinfo lines naming the bind (an "idmapped" option marker,
+#     if the kernel applied an id mapping to the mount) plus this VM's
+#     idmapped-mount kernel support.
+# The callback window is sub-second: the loop runs at a 40ms cadence
+# and every sample carries its millisecond timestamp.
+(
+  deadline=$(( $(date +%s) + 300 ))
+  HOST_RT_ROOT=/run/docker-helper-builder/ops
+  ST_ROOT=/var/lib/docker-helper-builder/ops
+  statline() { # $1 = view label, $2 = path
+    [ -e "$2" ] || { printf '%s %s MISSING\n' "$1" "$2"; return; }
+    # %D st_dev (hex)  %i ino  %u uid  %g gid  %f mode(hex)  %F type
+    printf '%s %s %s\n' "$1" "$2" "$(stat -L -c '%D %i %u %g %F' "$2" 2>&1)"
+  }
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    # The real buildkitd: a pgrep -x buildkitd match whose uid_map
+    # carries the child user namespace (>= 2 mapping lines). The
+    # rootlesskit wrapper stays in the init userns.
+    P=""
+    for cand in $(pgrep -x buildkitd); do
+      if [ "$(grep -c . "/proc/$cand/uid_map" 2>/dev/null)" -ge 2 ]; then P="$cand"; break; fi
+    done
+    [ -n "$P" ] || { sleep 0.2; continue; }
+    OP="$(tr '\0' '\n' <"/proc/$P/cmdline" | sed -n 's/^--root=//p' | head -1)"
+    OP="$(basename "$(dirname "$OP")" 2>/dev/null)"
+    [ -n "$OP" ] || OP=UNKNOWN
+    TS="$(date +%s.%N)"
+    {
+      echo "== sample ts=$TS bkpid=$P op=$OP"
+      # Every containerd-mount dir in the child's own mount namespace
+      # view (the path buildkitd's callback itself operates on).
+      MNTS="$(nsenter -t "$P" -U -m -- /bin/sh -c \
+        "ls -1d /run/docker-helper-builder/ops/$OP/containerd-mount* 2>/dev/null" 2>&1)"
+      echo "innsmount-dirs: ${MNTS:-none}"
+      for d in $MNTS; do
+        # The in-namespace stat of the dir and of the callback's target
+        # file: the lchown acts on exactly this presentation.
+        statline "INNS-dir " "$d"
+        statline "INNS-shadow " "$d/etc/shadow"
+        echo "INNS-mountinfo-bind: $(grep -E "containerd-mount|idmapped" "/proc/$P/mountinfo" 2>/dev/null | head -4 | tr '\n' '|')"
+      done
+      # Host view of the SAME inodes: the bind source (state tree) and
+      # the runtime-tree mountpoint through the child's /proc root
+      # (ids presented in the host's user namespace).
+      for d in /proc/"$P"/root/run/docker-helper-builder/ops/"$OP"/containerd-mount*; do
+        [ -e "$d" ] || continue
+        statline "HOSTROOT-dir " "$d"
+        statline "HOSTROOT-shadow " "$d/etc/shadow"
+      done
+      for s in "$ST_ROOT"/"$OP"/root/runc-native/snapshots/snapshots/*; do
+        [ -e "$s" ] || continue
+        statline "HOSTSRC-shadow " "$s/etc/shadow"
+        statline "HOSTSRC-dir " "$s"
+      done
+      statline "HOST-direct-runtime " "$HOST_RT_ROOT/$OP"
+      # One-time idmapped-mount support evidence (first sample only).
+      if [ ! -s "$EVIDENCE_DIR/r7-idmap-support.txt" ]; then
+        {
+          echo "kernel=$(uname -r)"
+          zgrep -hE 'CONFIG_IDMAP_MOUNTS|CONFIG_XFS_FS|CONFIG_OVERLAY_FS|CONFIG_TMPFS_XATTR|CONFIG_SHIFT_FS' /proc/config.gz 2>/dev/null || true
+          grep -hE 'CONFIG_IDMAP_MOUNTS|CONFIG_XFS_FS|CONFIG_OVERLAY_FS|CONFIG_TMPFS_XATTR|CONFIG_SHIFT_FS' "/boot/config-$(uname -r)" 2>/dev/null || true
+          echo "--- findmnt state tree:"; findmnt -T "$ST_ROOT" -o TARGET,SOURCE,FSTYPE,OPTIONS 2>&1 || true
+          echo "--- findmnt runtime tree:"; findmnt -T "$HOST_RT_ROOT" -o TARGET,SOURCE,FSTYPE,OPTIONS 2>&1 || true
+          echo "--- any live idmapped mounts:"; grep -h 'idmapped' /proc/[0-9]*/mountinfo 2>/dev/null | head -5 || echo none
+        } >"$EVIDENCE_DIR/r7-idmap-support.txt" 2>&1
+      fi
+    } >>"$EVIDENCE_DIR/r7-ownership-forensics.log" 2>&1
+    sleep 0.04
+  done
+) &
+OWN_POLLER=$!
+
 BUILD_START_EPOCH="$(date +%s)"
 set +e
 docker-helper build buildctx --dockerfile Dockerfile --image r7diag:alpine3.24 \
@@ -328,6 +421,7 @@ docker-helper build buildctx --dockerfile Dockerfile --image r7diag:alpine3.24 \
 BUILD_RC=$?
 set -e
 wait "$MAP_POLLER" 2>/dev/null || true
+wait "$OWN_POLLER" 2>/dev/null || true
 BUILD_END_EPOCH="$(date +%s)"
 log "BUILD RC=$BUILD_RC (elapsed $((BUILD_END_EPOCH - BUILD_START_EPOCH))s)"
 printf '%s\n' "$BUILD_RC" >"$STATE_DIR/build-rc"
@@ -336,6 +430,14 @@ fi
 if [ -s "$EVIDENCE_DIR/r7-mapping-buildkitd.log" ]; then
   log "--- r7-mapping-buildkitd (captured during the build) ---"
   cat "$EVIDENCE_DIR/r7-mapping-buildkitd.log"
+fi
+if [ -s "$EVIDENCE_DIR/r7-ownership-forensics.log" ]; then
+  log "--- r7-ownership-forensics (captured during the build) ---"
+  cat "$EVIDENCE_DIR/r7-ownership-forensics.log"
+fi
+if [ -s "$EVIDENCE_DIR/r7-idmap-support.txt" ]; then
+  log "--- r7-idmap-support ---"
+  cat "$EVIDENCE_DIR/r7-idmap-support.txt"
 fi
 head -n 40 "$EVIDENCE_DIR/r7-build-cli.log"
 
