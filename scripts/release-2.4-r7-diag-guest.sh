@@ -460,6 +460,9 @@ MAP_POLLER=$!
   STRACE_LINENO=0
   STRACE_PID=""
   DONE_SINCE=""
+  BKPID_CURRENT=""
+  EVENTS_PROCESSED=0
+  SEEN_EVENTS=0
   declare -A SEEN_SERIALS=()
   statline() { # $1 = view label, $2 = path (read in the diag shell's own namespace)
     local out rc
@@ -503,11 +506,22 @@ MAP_POLLER=$!
   # credentials and capabilities (Uid/Gid/CapEff from the per-thread
   # status — the main PID's CapEff is NOT evidence for the callback
   # thread), the actual uid_map/gid_map, and the mountinfo lines (mount
-  # IDs included) for the containerd-mount binds. The main thread is
-  # captured side by side for the thread-vs-main comparison, plus a
-  # one-line-per-thread namespace/capability inventory.
+  # IDs included) for the containerd-mount binds. When the TID has
+  # already exited (observed: the failing fchownat ran on the buildkitd
+  # leader thread and the whole process exited ~126ms after the EPERM),
+  # the process context is captured instead via the poller's live
+  # buildkitd pid, explicitly marked as a fallback.
   snapshot_task() { # $1 = tid, $2 = reason label
     local t="$1" why="$2" tgid wt w
+    if [ ! -d "/proc/$t" ]; then
+      echo "-- task snapshot tid=$t reason=$why ts=$(date +%s.%N): TID already exited (the flow process tears down within ~100ms of the failed callback); capturing the process context instead" >>"$LCHOWN_FORENSICS"
+      t="$BKPID_CURRENT"
+      if [ -z "$t" ] || [ ! -d "/proc/$t" ]; then
+        echo "-- process-context fallback unavailable: no live buildkitd pid" >>"$LCHOWN_FORENSICS"
+        return
+      fi
+      why="$why +process-context-fallback"
+    fi
     {
       echo "-- task snapshot tid=$t reason=$why ts=$(date +%s.%N)"
       echo "ns-user: $(readlink "/proc/$t/ns/user" 2>&1)"
@@ -519,13 +533,15 @@ MAP_POLLER=$!
       echo "mountinfo-mount-id: $(grep -E 'containerd-mount' "/proc/$t/mountinfo" 2>/dev/null | awk '{print $1}' | head -4 | tr '\n' ' ')"
       tgid="$(awk '/^Tgid:/{print $2}' "/proc/$t/status" 2>/dev/null)"
       echo "tgid: ${tgid:-unknown}"
-      if [ -n "$tgid" ] && [ "$tgid" != "$t" ] && [ -d "/proc/$tgid" ]; then
-        echo "-- main-thread comparison (the callback thread's own status above, the main thread's below):"
-        echo "main-ns-user: $(readlink "/proc/$tgid/ns/user" 2>&1)"
-        echo "main-ns-mnt: $(readlink "/proc/$tgid/ns/mnt" 2>&1)"
-        grep -E '^(Uid|Gid|CapInh|CapPrm|CapEff|CapBnd|CapAmb):' "/proc/$tgid/status" 2>&1 | sed 's/^/main-status: /'
-        echo "main-uid_map:"; sed 's/^/  /' "/proc/$tgid/uid_map" 2>&1
-        echo "main-gid_map:"; sed 's/^/  /' "/proc/$tgid/gid_map" 2>&1
+      if [ -n "$tgid" ] && [ -d "/proc/$tgid" ]; then
+        if [ "$tgid" != "$t" ]; then
+          echo "-- main-thread comparison (the callback thread's own status above, the main thread's below):"
+          echo "main-ns-user: $(readlink "/proc/$tgid/ns/user" 2>&1)"
+          echo "main-ns-mnt: $(readlink "/proc/$tgid/ns/mnt" 2>&1)"
+          grep -E '^(Uid|Gid|CapInh|CapPrm|CapEff|CapBnd|CapAmb):' "/proc/$tgid/status" 2>&1 | sed 's/^/main-status: /'
+          echo "main-uid_map:"; sed 's/^/  /' "/proc/$tgid/uid_map" 2>&1
+          echo "main-gid_map:"; sed 's/^/  /' "/proc/$tgid/gid_map" 2>&1
+        fi
         echo "thread-ns-inventory:"
         for wt in "/proc/$tgid/task/"*; do
           w="${wt##*/}"
@@ -548,7 +564,9 @@ MAP_POLLER=$!
     local serial evline w v syscall a1 a2 a3 apid ok mode
     printf '%s\n' "$1" >>"$EV_SEEN"
     for serial in $(printf '%s\n' "$1" | grep -oE 'msg=audit\([0-9]+\.[0-9]+:[0-9]+' | sed 's/.*://' | sort -u); do
-      evline="$(printf '%s\n' "$1" | grep -F -- ":$serial)" | grep -E 'syscall=(lchown|fchownat)' | head -1)"
+      # audit.log renders the syscall field NUMERICALLY (94=lchown,
+      # 260=fchownat on x86_64; ausearch -i renders it symbolically).
+      evline="$(printf '%s\n' "$1" | grep -F -- ":$serial)" | grep -E 'syscall=(lchown|fchownat|94|260)' | head -1)"
       mode=""
       [ -n "$evline" ] && mode=syscall
       if [ -z "$mode" ]; then
@@ -579,8 +597,8 @@ MAP_POLLER=$!
       done
       ok=no
       if [ "$mode" = syscall ]; then
-        if [ "$syscall" = lchown ] && [ "$a1" = 0 ] && [ "$a2" = 42 ] && [ -n "$apid" ]; then ok=yes; fi
-        if [ "$syscall" = fchownat ] && [ "$a2" = 0 ] && [ "$a3" = 42 ] && [ -n "$apid" ]; then ok=yes; fi
+        if { [ "$syscall" = lchown ] || [ "$syscall" = 94 ]; } && [ "$a1" = 0 ] && [ "$a2" = 42 ] && [ -n "$apid" ]; then ok=yes; fi
+        if { [ "$syscall" = fchownat ] || [ "$syscall" = 260 ]; } && [ "$a2" = 0 ] && [ "$a3" = 42 ] && [ -n "$apid" ]; then ok=yes; fi
       elif [ "$mode" = cap_userns ]; then
         for w in $evline; do
           case "$w" in
@@ -598,6 +616,7 @@ MAP_POLLER=$!
         else
           echo "-- verified $syscall(uid=0,gid=42) event: caller tid=$apid" >>"$LCHOWN_FORENSICS"
         fi
+        EVENTS_PROCESSED=$((EVENTS_PROCESSED + 1))
         snapshot_task "$apid" "lchown-trace-serial-$serial"
       else
         echo "-- unverified trace record (args/parse mismatch, no snapshot): syscall=$syscall a1=$a1 a2=$a2 a3=$a3 pid=$apid" >>"$LCHOWN_FORENSICS"
@@ -649,6 +668,13 @@ MAP_POLLER=$!
     for cand in $(pgrep -x buildkitd); do
       if [ "$(grep -c . "/proc/$cand/uid_map" 2>/dev/null)" -ge 2 ]; then P="$cand"; break; fi
     done
+    if [ -n "$P" ]; then
+      BKPID_CURRENT="$P"
+    elif [ -n "$BKPID_CURRENT" ]; then
+      # Guard against pid reuse: only keep the fallback pid while it is
+      # still a live buildkitd.
+      if [ "$(cat "/proc/$BKPID_CURRENT/comm" 2>/dev/null)" != buildkitd ]; then BKPID_CURRENT=""; fi
+    fi
     # strace fallback: attach the moment the real buildkitd appears. The
     # repeated -p list covers the threads that already exist; -f follows
     # threads created after the attach.
@@ -659,6 +685,13 @@ MAP_POLLER=$!
         -o "$STRACE_LOG" 2>"$EVIDENCE_DIR/r7-lchown-strace.err" &
       STRACE_PID=$!
       echo "strace attached: pid=$STRACE_PID tasks:$PARGS" >>"$LCHOWN_FORENSICS"
+    fi
+    # An event just landed: process it immediately (the flow process can
+    # exit ~100ms after the failed callback — the snapshot races the
+    # teardown), and only then resume the inode sampling cadence.
+    if [ "$EVENTS_PROCESSED" -gt "$SEEN_EVENTS" ]; then
+      SEEN_EVENTS="$EVENTS_PROCESSED"
+      continue
     fi
     TS="$(date +%s.%N)"
     {
