@@ -3010,7 +3010,15 @@ allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:lnk_file { creat
 
 # R7 (root-cause confirmation, scope=selinux run 38999078250 + the
 # differential full-gate run 39002831855): the uid-map helpers' input
-# stat. The AppArmor consumer (same Tumbleweed kernel family, same
+# stat. STALE-CAUSALITY, MARKED FOR CORRECTION: the chain below (the
+# helpers' range lookup dies at the stat -> single-uid fallback ->
+# gid 42 unmapped -> the lchown EPERM) is DISPROVEN — the diag mapping
+# evidence showed the FULL subid range mapped (uid_map == gid_map), and
+# the lchown EPERM persisted after the passwd_file_t getattr grant
+# (run 39004244393) and after the user-namespace detection fix (runs
+# 39023951708, 39029159060). Keep this block for its AVC record only;
+# the causal rewrite is scheduled with the ownership-forensics task.
+# The AppArmor consumer (same Tumbleweed kernel family, same
 # builder bytes) completes the identical build including the mount
 # callback's ownership normalization; the SELinux consumer fails at
 #
@@ -3037,7 +3045,16 @@ allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:lnk_file { creat
 # R7 (root-cause closure, the diag mapping/mountinfo evidence + the
 # AppArmor differential full-gate run 39002831855 + the enforcing UAT
 # record, latest scope=selinux run 39004244393): the user-namespace
-# probe itself. The standing 4C-83 record is FATAL on this path — the
+# probe itself. STALE-CAUSALITY, MARKED FOR CORRECTION: the "the layer
+# unpack runs in NON-userns mode (empty ID map) -> the archive's raw
+# ids reach the lchown unmapped" chain below is DISPROVEN as the
+# lchown's cause — with the probe granted, the user-namespace detection
+# succeeds (the rootless-only unprivileged-mount-flags probe ran at the
+# Dockerfile load, run 39023951708) yet the lchown EPERM persisted
+# (runs 39023951708, 39029159060). The grant itself stands: the nsfs
+# getattr denial was real and was the pipeline's terminal boundary at
+# its rung. The causal rewrite is scheduled with the ownership-forensics
+# task. The standing 4C-83 record is FATAL on this path — the
 # exact AVC (every enforcing run since the 4C-83 window, identical
 # modulo pid/ino; latest live record):
 #
