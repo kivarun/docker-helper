@@ -54,7 +54,18 @@ vm_ssh 'rm -rf /tmp/r7-diag && mkdir -p /tmp/r7-diag'
 vm_scp "$SCRIPT_DIR/release-2.4-r7-diag-guest.sh" opc@127.0.0.1:/tmp/r7-diag/release-2.4-r7-diag-guest.sh
 
 set +e
-vm_ssh 'sudo bash -s' <<RMT >"$RUNNER_TEMP/r7-diag-guest.log" 2>&1
+# The diag VM reboots mid-diagnosis (observed ~55s after boot; runs
+# 39006788899+). The guest script is phased with state markers under
+# /tmp/r7-diag-state and the evidence lives in a tmpfs dir, so each
+# invocation's evidence is collected immediately and the invocation is
+# repeated over fresh SSH sessions until the verdict appears.
+VERDICT=""
+for attempt in 1 2 3; do
+  if [ "$attempt" -gt 1 ]; then
+    log "re-entry: waiting for SSH after the observed mid-diagnosis reboot"
+    vm_wait_ssh
+  fi
+  vm_ssh 'sudo bash -s' <<RMT >"$RUNNER_TEMP/r7-diag-guest.log" 2>&1
 export R7_BACKEND=selinux R7_INSTALL=rpm
 export R7_ARTIFACT=/opt/uat-import/docker-helper.rpm
 export R7_ARTIFACT_SHA256="$UAT_RPM_SHA256"
@@ -63,28 +74,34 @@ export R7_RUNTIME_DEPS=install
 export R7_EVIDENCE_DIR='$GUEST_EVIDENCE_DIR'
 bash /tmp/r7-diag/release-2.4-r7-diag-guest.sh
 RMT
-GUEST_RC=$?
-cat "$RUNNER_TEMP/r7-diag-guest.log"
+  GUEST_RC=$?
+  cat "$RUNNER_TEMP/r7-diag-guest.log"
+
+  log "collect guest evidence (survives the verdict; attempt $attempt)"
+  mkdir -p "$EVIDENCE_DIR"
+  cp "$RUNNER_TEMP/r7-diag-guest.log" "$EVIDENCE_DIR/guest.log"
+  if vm_ssh "test -d '$GUEST_EVIDENCE_DIR'" 2>/dev/null; then
+    vm_ssh "tar -C '$GUEST_EVIDENCE_DIR' -czf - ." > "$EVIDENCE_DIR/guest-evidence.tar.gz" || true
+    mkdir -p "$EVIDENCE_DIR/guest"
+    tar -xzf "$EVIDENCE_DIR/guest-evidence.tar.gz" -C "$EVIDENCE_DIR/guest" 2>/dev/null || true
+  fi
+
+  VERDICT="$(grep -oE 'R7-DIAG-RESULT=[A-Z-]+' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"
+  case "$VERDICT" in
+    "R7-DIAG-RESULT=REPRODUCED")
+      log 'R7 SELinux diagnosis REPRODUCED (the defect is still live on this branch; red evidence captured)'
+      break
+      ;;
+    "R7-DIAG-RESULT=BUILD-OK")
+      log 'R7 SELinux diagnosis BUILD-OK (the corrective holds on this branch; green evidence captured)'
+      break
+      ;;
+    *)
+      if [ "$attempt" -eq 3 ]; then
+        fail "the R7 SELinux diagnosis produced no verdict (guest exit $GUEST_RC)"
+      fi
+      log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
+      ;;
+  esac
+done
 set -e
-
-log 'collect guest evidence (survives the verdict)'
-mkdir -p "$EVIDENCE_DIR"
-cp "$RUNNER_TEMP/r7-diag-guest.log" "$EVIDENCE_DIR/guest.log"
-if vm_ssh "test -d '$GUEST_EVIDENCE_DIR'" 2>/dev/null; then
-  vm_ssh "tar -C '$GUEST_EVIDENCE_DIR' -czf - ." > "$EVIDENCE_DIR/guest-evidence.tar.gz" || true
-  mkdir -p "$EVIDENCE_DIR/guest"
-  tar -xzf "$EVIDENCE_DIR/guest-evidence.tar.gz" -C "$EVIDENCE_DIR/guest" 2>/dev/null || true
-fi
-
-VERDICT="$(grep -oE 'R7-DIAG-RESULT=[A-Z-]+' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"
-case "$VERDICT" in
-  "R7-DIAG-RESULT=REPRODUCED")
-    log 'R7 SELinux diagnosis REPRODUCED (the defect is still live on this branch; red evidence captured)'
-    ;;
-  "R7-DIAG-RESULT=BUILD-OK")
-    log 'R7 SELinux diagnosis BUILD-OK (the corrective holds on this branch; green evidence captured)'
-    ;;
-  *)
-    fail "the R7 SELinux diagnosis produced no verdict (guest exit $GUEST_RC)"
-    ;;
-esac

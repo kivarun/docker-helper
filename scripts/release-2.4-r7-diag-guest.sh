@@ -188,6 +188,17 @@ cap r7-builder-confinement 6 bash -c 'BPID="$(systemctl show -p MainPID --value 
 # Section 4: minimal build reproduction through the REAL daemon
 # ============================================================================
 log "=== section 4: build reproduction ==="
+# The diag VM reboots mid-diagnosis (observed ~55s after boot, runs
+# 39006788899+). Every phase writes a marker; a re-entry (the runner
+# re-invokes this script over a fresh SSH session after the reboot)
+# skips completed phases and finishes the remaining ones. The runner
+# loops the invocation until the verdict appears.
+STATE_DIR=/tmp/r7-diag-state
+mkdir -p "$STATE_DIR"
+if [ -f "$STATE_DIR/build-rc" ]; then
+  log "phase marker: build already reproduced (rc=$(cat "$STATE_DIR/build-rc")); skipping to forensics"
+  BUILD_RC="$(cat "$STATE_DIR/build-rc")"
+else
 ADMIN_TOKEN="$(cat /etc/docker-helper/admin.token 2>/dev/null || true)"
 [ -n "$ADMIN_TOKEN" ] || fail "admin token unreadable"
 
@@ -301,6 +312,9 @@ set -e
 wait "$MAP_POLLER" 2>/dev/null || true
 BUILD_END_EPOCH="$(date +%s)"
 log "BUILD RC=$BUILD_RC (elapsed $((BUILD_END_EPOCH - BUILD_START_EPOCH))s)"
+printf '%s\n' "$BUILD_RC" >"$STATE_DIR/build-rc"
+touch "$STATE_DIR/build-done"
+fi
 if [ -s "$EVIDENCE_DIR/r7-mapping-buildkitd.log" ]; then
   log "--- r7-mapping-buildkitd (captured during the build) ---"
   cat "$EVIDENCE_DIR/r7-mapping-buildkitd.log"
