@@ -2949,7 +2949,12 @@ allow docker_helper_buildkitd_t cert_t:file { read open getattr };
 #     GID 0: lchown ...: permission denied
 #   avc: denied { setattr } tclass=lnk_file
 #        tcontext=docker_helper_builder_state_t:s0:c1
-allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file { create setattr };
+# R7 (green attempt, scope=selinux run 39000061621): the callback's
+# post-create lstat verification of the same symlink:
+#   mount callback failed ...: lstat .../bin/arch: permission denied
+#   avc: denied { getattr } tclass=lnk_file
+#        tcontext=docker_helper_builder_state_t:s0:c1
+allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file { create setattr getattr };
 
 # R7 (green attempt, scope=selinux run 38995970391): the mount target's
 # own population. The RUN step's bind mount now succeeds; the mount
