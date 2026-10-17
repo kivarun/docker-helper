@@ -193,17 +193,22 @@ func TestSELinuxPolicyBuilderNoCapabilities(t *testing.T) {
 
 // TestSELinuxPolicyBuilderStateRules verifies the builder state-tree grants
 // stay exact: the manager's dir rule unchanged from the P5-S1 proof (the
-// startup purge's tree traversal + the per-op dir lifecycle) and the
+// startup purge's tree traversal + the per-op dir lifecycle), the
 // manager's file rule without the lock permission (the lock moved to the
-// rootlesskit child domain, P5-S2). The child's own state-tree grants are
-// the rootlesskit-attributed evidence surface: the rootlesskit-state dir
-// lifecycle plus the state-lock flock, without unlink/rmdir (the purge owns
-// removal) and with the child's own api.sock socket lifecycle.
+// rootlesskit child domain, P5-S2), and the R7 stop/purge lnk_file rung
+// (run 39029159060: the manager's removal of the extracted layer's
+// symlink farm after a build that died inside the mount callback — the
+// per-inode unlink hook that lets the STOP converge; readlink stays
+// closed until its own evidence rung). The child's own state-tree grants
+// are the rootlesskit-attributed evidence surface: the rootlesskit-state
+// dir lifecycle plus the state-lock flock, without unlink/rmdir (the
+// purge owns removal) and with the child's own api.sock socket lifecycle.
 func TestSELinuxPolicyBuilderStateRules(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
 	for _, want := range []string{
 		"allow docker_helper_builder_t docker_helper_builder_state_t:dir { getattr search read open write add_name remove_name create rmdir setattr };",
 		"allow docker_helper_builder_t docker_helper_builder_state_t:file { create read write open getattr setattr unlink };",
+		"allow docker_helper_builder_t docker_helper_builder_state_t:lnk_file unlink;",
 		"allow docker_helper_rootlesskit_t docker_helper_builder_state_t:dir { search getattr read open write add_name remove_name lock rmdir };",
 		"allow docker_helper_rootlesskit_t docker_helper_builder_state_t:file { create open read write getattr setattr lock unlink };",
 		"allow docker_helper_rootlesskit_t docker_helper_builder_state_t:sock_file { create unlink };",
@@ -211,6 +216,29 @@ func TestSELinuxPolicyBuilderStateRules(t *testing.T) {
 		if !strings.Contains(policy, want) {
 			t.Errorf("the builder state-tree grant must be exact: %q", want)
 		}
+	}
+	// The manager's state-tree lnk_file surface is exactly the ONE bare
+	// unlink rule (the run-39029159060 stop-convergence hook): no second
+	// rule, no widened permission set, no readlink — the lnk_file:read
+	// denials of the same run are recorded in the module's evidence
+	// comment and stay CLOSED until they prove necessary for the
+	// convergence on their own live rung.
+	lnkCount := 0
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || !strings.HasPrefix(trimmed, "allow docker_helper_builder_t docker_helper_builder_state_t:lnk_file") {
+			continue
+		}
+		lnkCount++
+		if trimmed != "allow docker_helper_builder_t docker_helper_builder_state_t:lnk_file unlink;" {
+			t.Errorf("the manager's state-tree lnk_file authority must be exactly the ONE bare unlink rule (no second bit — lnk_file:read stays closed until its own rung): %s", trimmed)
+		}
+	}
+	// The missing-rule mutation: a module without the rule fails the
+	// exact-once check above (found 0); an extra or reshaped rule fails
+	// the exact-shape check above.
+	if lnkCount != 1 {
+		t.Errorf("the manager's state-tree lnk_file grant must exist exactly once, found %d", lnkCount)
 	}
 }
 

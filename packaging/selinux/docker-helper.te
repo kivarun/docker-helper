@@ -884,6 +884,41 @@ allow docker_helper_builder_t docker_helper_builder_state_t:dir { relabelto };
 allow docker_helper_builder_t docker_helper_builder_state_t:dir { getattr search read open write add_name remove_name create rmdir setattr };
 allow docker_helper_builder_t docker_helper_builder_state_t:file { create read write open getattr setattr unlink };
 
+# R7 (stop/purge convergence, scope=selinux run 39029159060 at 0f708f38):
+# the manager's removal of the extracted layer's symlink farm. A build
+# that dies inside the mount callback leaves the extracted tree —
+# including the image's applet symlinks — in the op's state tree; the
+# manager's STOP then removes the exact operation directories and hits
+# the symlink inodes:
+#
+#   avc:  denied  { unlink } for  pid=3004 comm="docker-helper"
+#     name="tar" dev="vda3" ino=10486709
+#     scontext=system_u:system_r:docker_helper_builder_t:s0
+#     tcontext=system_u:object_r:docker_helper_builder_state_t:s0:c1
+#     tclass=lnk_file permissive=0
+#
+# The per-inode unlink hook rides the standing dir rule's remove_name
+# half; without it the stop cannot converge ("builder stop did not
+# converge" -> ERR internal, the instance entry stays retained), and
+# every later daemon generation's startup PURGE fails on the same
+# leftover — build admission stays closed and every build in the new
+# generation is refused (run 39029159060: six denial pairs per
+# generation, 649 unlink + 649 read records total, group 10 and S15
+# builds 500'd with "BuildKit never started"). The AppArmor consumer's
+# path-based profile lets its manager clean the same tree; the SELinux
+# type model needs this one bit.
+#
+# Deliberately NOT granted: lnk_file read (readlink) — the same run
+# recorded 649 { read } denials on the same inodes and the UAT must
+# show whether readlink is required for the convergence (if it is,
+# that bit comes back with its own evidence and its own rung); lnk_file
+# getattr/setattr/write/append/map/execute; any other subject or
+# target. unlink(2) on a symlink never dereferences it — the removal
+# stays inside the categorized operation trees (the parent-dir
+# add_name/remove_name hooks are the standing dir rule's), so no link
+# traversal outside the op's own state authority opens.
+allow docker_helper_builder_t docker_helper_builder_state_t:lnk_file unlink;
+
 # G32 r3 root split: the manager's ROOT-level operations re-pointed to the
 # root types. Exactly the operations the manager performs at root level:
 # startup lstat/verify of both roots, the ops-container lifecycle (create,
