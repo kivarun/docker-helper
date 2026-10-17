@@ -23,12 +23,18 @@
 #         the exact categorized child contexts (ps) and the signal/signull
 #         AVC records.
 #   R7-A  the lchown(0,42) ownership forensics: while the mount callback
-#         runs, the /etc/shadow inode's st_dev/st_ino/uid/gid sampled from
-#         BOTH sides of the build namespace boundary (in-namespace via
-#         nsenter, host via the bind source and /proc/<pid>/root), the
-#         bind's mountinfo (idmapped marker), and the VM's idmapped-mount
-#         kernel support — the inputs for naming the first failing kernel
-#         predicate, on the SELinux and the AppArmor VM alike.
+#         runs, the /etc/shadow inode's st_dev/st_ino/uid/gid sampled
+#         from BOTH sides of the build namespace boundary (in-namespace
+#         via nsenter -U -m with the stat itself inside the namespaces,
+#         host via the bind source and /proc/<pid>/root) with an
+#         explicit inode-match verdict per pair, plus the exact syscall
+#         trace of lchown/fchownat(0,42) via kernel audit rules
+#         (strace fallback): the calling TID, its per-thread
+#         namespace/capability context (uid_map/gid_map, CapEff — not
+#         the main PID's), the mount namespace and mount ID of the
+#         operation, the target inode, and the VM's idmapped-mount
+#         kernel support — the inputs for naming the first failing
+#         kernel predicate, on the SELinux and the AppArmor VM alike.
 #
 # The script is evidence-first: every collection step survives build failure,
 # and the terminal verdict line states only what was observed:
@@ -251,6 +257,71 @@ log "session created"
 export DOCKER_HELPER_SESSION_TOKEN="$SESS_TOKEN"
 docker-helper pull alpine:3.24 || log "pull failed (continuing; build may still fail on its own stage)"
 
+# R7-A lchown trace setup: capture the EXACT failing syscall — its TID,
+# arguments, result and target inode — plus the calling thread's
+# namespace and capability context. Kernel syscall auditing (auditctl)
+# is the primary mechanism: rules are filtered to the exact failing
+# argument pattern (uid=0 gid=42), audit runs in the kernel, changes no
+# process behavior and no SELinux decision. strace (ptrace) is the
+# fallback. The event stream is consumed continuously during the build;
+# the ownership poller below snapshots /proc/<tid> the moment an event
+# appears, so the thread's own CapEff — not the main PID's — is the
+# capability evidence.
+LCHOWN_TRACE=none
+EV_STREAM="$EVIDENCE_DIR/r7-lchown-events.raw"
+EV_SEEN="$EVIDENCE_DIR/r7-lchown-events-seen.log"
+LCHOWN_FORENSICS="$EVIDENCE_DIR/r7-lchown-forensics.log"
+STRACE_LOG="$EVIDENCE_DIR/r7-lchown-strace.log"
+: >"$EV_STREAM"
+: >"$EV_SEEN"
+: >"$LCHOWN_FORENSICS"
+{
+  echo "trace-tool probe ($(date +%H:%M:%S)):"
+  echo "auditctl=$(command -v auditctl || echo MISSING) strace=$(command -v strace || echo MISSING) ausearch=$(command -v ausearch || echo MISSING)"
+} >"$LCHOWN_FORENSICS"
+if ! command -v auditctl >/dev/null 2>&1 && command -v zypper >/dev/null 2>&1; then
+  log "installing the audit package for syscall tracing (diagnostic tooling only)"
+  timeout 120 zypper --non-interactive install -y audit >>"$LCHOWN_FORENSICS" 2>&1 || true
+elif ! command -v auditctl >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+  log "installing the auditd package for syscall tracing (diagnostic tooling only)"
+  timeout 120 apt-get install -y auditd >>"$LCHOWN_FORENSICS" 2>&1 || true
+fi
+if command -v auditctl >/dev/null 2>&1 \
+  && auditctl -a always,exit -F arch=b64 -S lchown -F a1=0 -F a2=42 -k r7lchown >>"$LCHOWN_FORENSICS" 2>&1 \
+  && auditctl -a always,exit -F arch=b64 -S fchownat -F a2=0 -F a3=42 -k r7lchown >>"$LCHOWN_FORENSICS" 2>&1; then
+  LCHOWN_TRACE=audit
+  {
+    echo "--- audit rules installed (key r7lchown):"
+    auditctl -l 2>&1
+    echo "--- auditctl -s:"
+    auditctl -s 2>&1
+  } >>"$LCHOWN_FORENSICS"
+fi
+if [ "$LCHOWN_TRACE" = none ] && ! command -v strace >/dev/null 2>&1; then
+  if command -v zypper >/dev/null 2>&1; then
+    timeout 120 zypper --non-interactive install -y strace >>"$LCHOWN_FORENSICS" 2>&1 || true
+  elif command -v apt-get >/dev/null 2>&1; then
+    timeout 120 apt-get install -y strace >>"$LCHOWN_FORENSICS" 2>&1 || true
+  fi
+fi
+EV_CONSUMER_PID=""
+EV_SOURCE=none
+if pgrep -x auditd >/dev/null 2>&1 && [ -r /var/log/audit/audit.log ]; then
+  tail -n 0 -F /var/log/audit/audit.log >>"$EV_STREAM" 2>/dev/null &
+  EV_CONSUMER_PID=$!
+  EV_SOURCE=audit.log
+elif command -v journalctl >/dev/null 2>&1; then
+  journalctl -kf -o short-iso >>"$EV_STREAM" 2>/dev/null &
+  EV_CONSUMER_PID=$!
+  EV_SOURCE=journalctl-k
+elif command -v dmesg >/dev/null 2>&1; then
+  dmesg --follow >>"$EV_STREAM" 2>/dev/null &
+  EV_CONSUMER_PID=$!
+  EV_SOURCE=dmesg-follow
+fi
+echo "LCHOWN_TRACE=$LCHOWN_TRACE EV_SOURCE=$EV_SOURCE consumer_pid=${EV_CONSUMER_PID:-none}" >>"$LCHOWN_FORENSICS"
+log "lchown trace mechanism: $LCHOWN_TRACE (event source: $EV_SOURCE)"
+
 # The mapping capture must happen WHILE the flow's buildkitd process is
 # alive: the diag VM can reboot mid-diagnosis (observed ~55s after boot,
 # run 39006788899), so the forensic capture runs as a bounded background
@@ -259,6 +330,7 @@ docker-helper pull alpine:3.24 || log "pull failed (continuing; build may still 
 (
   deadline=$(( $(date +%s) + 180 ))
   samples=0
+  exits=0
   while [ "$(date +%s)" -lt "$deadline" ] && [ "$samples" -lt 240 ]; do
     samples=$((samples + 1))
     # Match the BUILDKITD process by its exact comm (pgrep -f also
@@ -323,6 +395,16 @@ docker-helper pull alpine:3.24 || log "pull failed (continuing; build may still 
       # window's mount structure is captured.
       sleep 0.5
     fi
+    # The build command has returned: take a few trailing samples (they
+    # document the teardown) and finish cleanly instead of waiting out
+    # the full deadline.
+    if [ -f "$STATE_DIR/build-done" ]; then
+      exits=$((exits + 1))
+      if [ "$exits" -ge 6 ]; then
+        echo "== mapping-poller exit: build-done observed" >>"$EVIDENCE_DIR/r7-mapping-buildkitd.log"
+        break
+      fi
+    fi
     sleep 0.3
   done
 ) &
@@ -332,31 +414,195 @@ MAP_POLLER=$!
 # identity from BOTH sides of the build namespace boundary WHILE the
 # mount callback runs, so the first failing kernel predicate of the
 # lchown(0,42) EPERM can be named from recorded facts alone:
-#   * the in-namespace view — nsenter -U -m into the real buildkitd and
-#     stat the containerd-mount*/etc/shadow: the ids buildkitd's own
-#     lchown acts on and the ids the kernel maps through the mount;
-#   * the host view — stat the bind SOURCE (the state-tree snapshot
-#     dir) and the same containerd-mount path through /proc/<pid>/root
-#     (path resolution inside the child mount namespace, ids presented
-#     in the READER's user namespace, i.e. the host's);
-#   * st_dev + st_ino equality across the views proves one and the same
-#     inode (bind mounts and idmapped mounts never change st_ino; an
-#     idmapped presentation changes only uid/gid);
+#   * the in-namespace view — the stat itself is executed INSIDE the
+#     real buildkitd's user and mount namespaces (nsenter -t <pid>
+#     -U -m -- stat ...): the presentation the callback's own lchown
+#     acts on. (The previous revision ran the INNS-* stat in the diag
+#     shell's own namespace — fixed here; nsenter/stat errors are
+#     recorded verbatim and are never masked as MISSING.)
+#   * the host view — the same path through /proc/<pid>/root (path
+#     resolution inside the child mount namespace, ids presented in
+#     the reader's user namespace, i.e. the host's), the bind SOURCE
+#     (the state-tree snapshot), and the diag shell's own view of the
+#     runtime tree.
+#   * two-sided proof is claimed ONLY when both views of a pair
+#     resolved to the same st_dev + st_ino; then both views' numeric
+#     uid/gid are recorded. Mismatches and stat/nsenter errors are
+#     recorded as unproven, with the raw error text preserved.
 #   * the mountinfo lines naming the bind (an "idmapped" option marker,
 #     if the kernel applied an id mapping to the mount) plus this VM's
 #     idmapped-mount kernel support.
-# The callback window is sub-second: the loop runs at a 40ms cadence
-# and every sample carries its millisecond timestamp.
+# The mount callback window is sub-second: a cheap /proc/<pid>/mountinfo
+# check gates the expensive in-namespace stat so the full sample fires
+# the moment the bind appears, while the state-tree (HOSTSRC) timeline
+# keeps a 40ms cadence throughout. The same cycle consumes the lchown
+# trace stream (audit or strace) and snapshots /proc/<tid> the moment a
+# matching syscall event appears. When the build command has returned
+# (build-done marker), the poller drains the trace stream for a short
+# grace window and finishes cleanly instead of waiting out its full
+# deadline.
 (
   deadline=$(( $(date +%s) + 300 ))
   HOST_RT_ROOT=/run/docker-helper-builder/ops
   ST_ROOT=/var/lib/docker-helper-builder/ops
-  statline() { # $1 = view label, $2 = path
-    [ -e "$2" ] || { printf '%s %s MISSING\n' "$1" "$2"; return; }
-    # %D st_dev (hex)  %i ino  %u uid  %g gid  %f mode(hex)  %F type
-    printf '%s %s %s\n' "$1" "$2" "$(stat -L -c '%D %i %u %g %F' "$2" 2>&1)"
+  EV_LINENO=0
+  STRACE_LINENO=0
+  STRACE_PID=""
+  DONE_SINCE=""
+  declare -A SEEN_SERIALS=()
+  statline() { # $1 = view label, $2 = path (read in the diag shell's own namespace)
+    local out rc
+    if [ ! -e "$2" ]; then printf '%s %s MISSING\n' "$1" "$2"; return; fi
+    out="$(stat -L -c '%D %i %u %g %F' "$2" 2>&1)"; rc=$?
+    if [ "$rc" -eq 0 ]; then
+      printf '%s %s %s\n' "$1" "$2" "$out"
+    else
+      printf '%s %s STAT-ERROR rc=%d: %s\n' "$1" "$2" "$rc" "$out"
+    fi
+  }
+  # The stat itself MUST run inside the target's user and mount
+  # namespaces: the containerd-mount bind exists only in the buildkitd
+  # mount namespace, and that is the presentation the lchown acts on.
+  nsstatline() { # $1 = view label, $2 = target pid, $3 = path
+    local out rc
+    out="$(nsenter -t "$2" -U -m -- stat -L -c '%D %i %u %g %F' "$3" 2>&1)"; rc=$?
+    if [ "$rc" -eq 0 ]; then
+      printf '%s %s %s\n' "$1" "$3" "$out"
+    else
+      printf '%s %s STAT-ERROR rc=%d: %s\n' "$1" "$3" "$rc" "$out"
+    fi
+  }
+  # Two-sided identity verdict for one INNS/HOSTROOT pair: proven only
+  # when both views parsed AND resolved to the same st_dev+st_ino; then
+  # both views' numeric uid/gid are recorded side by side. A view error,
+  # an absent view, or an inode mismatch is recorded as unproven.
+  pairverdict() { # $1 = pair label, $2 = INNS line, $3 = HOSTROOT line
+    printf '%s %s\n' "$1" "$(printf '%s\n%s\n' "$2" "$3" | awk '
+      { if ($3 == "MISSING" || $3 == "STAT-ERROR") bad = 1
+        if (NR == 1) { d1 = $3; i1 = $4; u1 = $5; g1 = $6 }
+        if (NR == 2) { d2 = $3; i2 = $4; u2 = $5; g2 = $6 } }
+      END {
+        if (bad) { print "twosided-proof=NO (a view errored or missing; raw views recorded above)"; exit 0 }
+        if (d1 == "" || d2 == "") { print "twosided-proof=NO (a view absent)"; exit 0 }
+        if (d1 != d2 || i1 != i2) { printf "twosided-proof=NO (inode mismatch: inns=(%s,%s) host=(%s,%s))\n", d1, i1, d2, i2; exit 0 }
+        printf "inode-match=YES twosided-proof=YES inns=(dev=%s ino=%s uid=%s gid=%s) host=(dev=%s ino=%s uid=%s gid=%s)\n", d1, i1, u1, g1, d2, i2, u2, g2
+      }')"
+  }
+  # Snapshot one task's identity: its OWN user/mount namespaces, its OWN
+  # credentials and capabilities (Uid/Gid/CapEff from the per-thread
+  # status — the main PID's CapEff is NOT evidence for the callback
+  # thread), the actual uid_map/gid_map, and the mountinfo lines (mount
+  # IDs included) for the containerd-mount binds. The main thread is
+  # captured side by side for the thread-vs-main comparison, plus a
+  # one-line-per-thread namespace/capability inventory.
+  snapshot_task() { # $1 = tid, $2 = reason label
+    local t="$1" why="$2" tgid wt w
+    {
+      echo "-- task snapshot tid=$t reason=$why ts=$(date +%s.%N)"
+      echo "ns-user: $(readlink "/proc/$t/ns/user" 2>&1)"
+      echo "ns-mnt: $(readlink "/proc/$t/ns/mnt" 2>&1)"
+      grep -E '^(Name|Tgid|Pid|NSpid|Uid|Gid|CapInh|CapPrm|CapEff|CapBnd|CapAmb):' "/proc/$t/status" 2>&1 | sed 's/^/status: /'
+      echo "uid_map:"; sed 's/^/  /' "/proc/$t/uid_map" 2>&1
+      echo "gid_map:"; sed 's/^/  /' "/proc/$t/gid_map" 2>&1
+      echo "mountinfo-containerd: $(grep -E 'containerd-mount' "/proc/$t/mountinfo" 2>/dev/null | head -4 | tr '\n' '|')"
+      echo "mountinfo-mount-id: $(grep -E 'containerd-mount' "/proc/$t/mountinfo" 2>/dev/null | awk '{print $1}' | head -4 | tr '\n' ' ')"
+      tgid="$(awk '/^Tgid:/{print $2}' "/proc/$t/status" 2>/dev/null)"
+      echo "tgid: ${tgid:-unknown}"
+      if [ -n "$tgid" ] && [ "$tgid" != "$t" ] && [ -d "/proc/$tgid" ]; then
+        echo "-- main-thread comparison (the callback thread's own status above, the main thread's below):"
+        echo "main-ns-user: $(readlink "/proc/$tgid/ns/user" 2>&1)"
+        echo "main-ns-mnt: $(readlink "/proc/$tgid/ns/mnt" 2>&1)"
+        grep -E '^(Uid|Gid|CapInh|CapPrm|CapEff|CapBnd|CapAmb):' "/proc/$tgid/status" 2>&1 | sed 's/^/main-status: /'
+        echo "main-uid_map:"; sed 's/^/  /' "/proc/$tgid/uid_map" 2>&1
+        echo "main-gid_map:"; sed 's/^/  /' "/proc/$tgid/gid_map" 2>&1
+        echo "thread-ns-inventory:"
+        for wt in "/proc/$tgid/task/"*; do
+          w="${wt##*/}"
+          echo "  tid=$w ns-user=$(readlink "$wt/ns/user" 2>&1) comm=$(cat "$wt/comm" 2>/dev/null) capEff=$(awk '/^CapEff:/{print $2}' "$wt/status" 2>/dev/null)"
+        done
+      fi
+    } >>"$LCHOWN_FORENSICS" 2>&1
+  }
+  # Consume the newly arrived audit trace lines and process every
+  # complete lchown/fchownat event once. Audit records group by their
+  # event serial (msg=audit(...:SERIAL)) in every transport (auditd's
+  # audit.log and the kernel-printk fallbacks alike), so the whole
+  # serial group is recorded and the SYSCALL record (identified by its
+  # syscall= field, not by transport-specific type names) is parsed for
+  # the caller TID, the verified arguments and the result. The target
+  # inode comes from the serial's PATH records. Line-count tracking
+  # consumes only newline-terminated lines, so a partially written line
+  # is picked up on the next cycle instead of being parsed in half.
+  process_event_bytes() { # $1 = complete new lines
+    local serial evline w v syscall a1 a2 a3 apid ok
+    printf '%s\n' "$1" >>"$EV_SEEN"
+    for serial in $(printf '%s\n' "$1" | grep -oE 'msg=audit\([0-9]+\.[0-9]+:[0-9]+' | sed 's/.*://' | sort -u); do
+      evline="$(printf '%s\n' "$1" | grep -F -- ":$serial)" | grep -E 'syscall=(lchown|fchownat)' | head -1)"
+      [ -n "$evline" ] || continue
+      [ -n "${SEEN_SERIALS[$serial]:-}" ] || SEEN_SERIALS[$serial]=1 || true
+      {
+        echo "== lchown-trace event serial=$serial mechanism=$LCHOWN_TRACE ts=$(date +%s.%N)"
+        printf '%s\n' "$1" | grep -F -- ":$serial)" | sed 's/^/event: /'
+      } >>"$LCHOWN_FORENSICS"
+      syscall=""; a1=""; a2=""; a3=""; apid=""
+      for w in $evline; do
+        case "$w" in
+          syscall=*) syscall="${w#syscall=}";;
+          a1=*) v="$(printf '%d' "0x${w#a1=}")" && a1="$v";;
+          a2=*) v="$(printf '%d' "0x${w#a2=}")" && a2="$v";;
+          a3=*) v="$(printf '%d' "0x${w#a3=}")" && a3="$v";;
+          pid=*) apid="${w#pid=}";;
+        esac
+      done
+      ok=no
+      if [ "$syscall" = lchown ] && [ "$a1" = 0 ] && [ "$a2" = 42 ] && [ -n "$apid" ]; then ok=yes; fi
+      if [ "$syscall" = fchownat ] && [ "$a2" = 0 ] && [ "$a3" = 42 ] && [ -n "$apid" ]; then ok=yes; fi
+      if [ "$ok" = yes ]; then
+        echo "-- verified $syscall(uid=0,gid=42) event: caller tid=$apid" >>"$LCHOWN_FORENSICS"
+        snapshot_task "$apid" "lchown-trace-serial-$serial"
+      else
+        echo "-- unverified trace record (args/parse mismatch, no snapshot): syscall=$syscall a1=$a1 a2=$a2 a3=$a3 pid=$apid" >>"$LCHOWN_FORENSICS"
+      fi
+    done
   }
   while [ "$(date +%s)" -lt "$deadline" ]; do
+    # --- lchown trace stream consumption (audit or strace) -------------
+    if [ "$LCHOWN_TRACE" = audit ]; then
+      total="$(wc -l <"$EV_STREAM" 2>/dev/null || echo 0)"
+      if [ "$total" -lt "$EV_LINENO" ]; then EV_LINENO=0; fi
+      if [ "$total" -gt "$EV_LINENO" ]; then
+        # head -n caps the chunk to the newline-terminated lines wc -l
+        # counted: tail alone would leak the trailing partial line (and
+        # re-emit it once it is completed).
+        chunk="$(tail -n +"$((EV_LINENO + 1))" "$EV_STREAM" 2>/dev/null | head -n "$total")"
+        EV_LINENO="$total"
+        process_event_bytes "$chunk"
+      fi
+    elif [ "$LCHOWN_TRACE" = strace ]; then
+      total="$(wc -l <"$STRACE_LOG" 2>/dev/null || echo 0)"
+      if [ "$total" -lt "$STRACE_LINENO" ]; then STRACE_LINENO=0; fi
+      if [ "$total" -gt "$STRACE_LINENO" ]; then
+        chunk="$(tail -n +"$((STRACE_LINENO + 1))" "$STRACE_LOG" 2>/dev/null | head -n "$total")"
+        STRACE_LINENO="$total"
+        printf '%s\n' "$chunk" >>"$EV_SEEN"
+        for t in $(printf '%s\n' "$chunk" | grep -E '(l|f)chown(at)?\(' | sed -E 's/^\[pid +([0-9]+)\].*/\1/;t;s/^([0-9]+)\b.*/\1/'); do
+          echo "== strace lchown/fchownat observed: tid=$t ts=$(date +%s.%N)" >>"$LCHOWN_FORENSICS"
+          snapshot_task "$t" "strace-lchown"
+        done
+      fi
+    fi
+    if [ -f "$STATE_DIR/build-done" ]; then
+      # The build command has returned: keep only draining the trace
+      # stream for a short grace window (the audit record lands before
+      # buildctl exits, so this rarely waits), then finish cleanly.
+      if [ -z "$DONE_SINCE" ]; then DONE_SINCE="$(date +%s)"; fi
+      if [ "$(( $(date +%s) - DONE_SINCE ))" -ge 5 ]; then
+        echo "== ownership-poller exit: build-done observed (trace drained)" >>"$LCHOWN_FORENSICS"
+        break
+      fi
+      sleep 0.04
+      continue
+    fi
     # The real buildkitd: a pgrep -x buildkitd match whose uid_map
     # carries the child user namespace (>= 2 mapping lines). The
     # rootlesskit wrapper stays in the init userns.
@@ -364,39 +610,55 @@ MAP_POLLER=$!
     for cand in $(pgrep -x buildkitd); do
       if [ "$(grep -c . "/proc/$cand/uid_map" 2>/dev/null)" -ge 2 ]; then P="$cand"; break; fi
     done
-    [ -n "$P" ] || { sleep 0.2; continue; }
-    OP="$(tr '\0' '\n' <"/proc/$P/cmdline" | sed -n 's/^--root=//p' | head -1)"
-    OP="$(basename "$(dirname "$OP")" 2>/dev/null)"
-    [ -n "$OP" ] || OP=UNKNOWN
+    # strace fallback: attach the moment the real buildkitd appears. The
+    # repeated -p list covers the threads that already exist; -f follows
+    # threads created after the attach.
+    if [ "$LCHOWN_TRACE" = strace ] && [ -n "$P" ] && [ -z "$STRACE_PID" ]; then
+      PARGS=""
+      for t in "/proc/$P/task/"*; do PARGS="$PARGS -p ${t##*/}"; done
+      strace -f -qq -tt -s 400 -e trace=lchown,fchownat,chown,fchown $PARGS \
+        -o "$STRACE_LOG" 2>"$EVIDENCE_DIR/r7-lchown-strace.err" &
+      STRACE_PID=$!
+      echo "strace attached: pid=$STRACE_PID tasks:$PARGS" >>"$LCHOWN_FORENSICS"
+    fi
     TS="$(date +%s.%N)"
     {
-      echo "== sample ts=$TS bkpid=$P op=$OP"
-      # Every containerd-mount dir in the child's own mount namespace
-      # view (the path buildkitd's callback itself operates on).
-      MNTS="$(nsenter -t "$P" -U -m -- /bin/sh -c \
-        "ls -1d /run/docker-helper-builder/ops/$OP/containerd-mount* 2>/dev/null" 2>&1)"
-      echo "innsmount-dirs: ${MNTS:-none}"
-      for d in $MNTS; do
-        # The in-namespace stat of the dir and of the callback's target
-        # file: the lchown acts on exactly this presentation.
-        statline "INNS-dir " "$d"
-        statline "INNS-shadow " "$d/etc/shadow"
-        echo "INNS-mountinfo-bind: $(grep -E "containerd-mount|idmapped" "/proc/$P/mountinfo" 2>/dev/null | head -4 | tr '\n' '|')"
-      done
-      # Host view of the SAME inodes: the bind source (state tree) and
-      # the runtime-tree mountpoint through the child's /proc root
-      # (ids presented in the host's user namespace).
-      for d in /proc/"$P"/root/run/docker-helper-builder/ops/"$OP"/containerd-mount*; do
-        [ -e "$d" ] || continue
-        statline "HOSTROOT-dir " "$d"
-        statline "HOSTROOT-shadow " "$d/etc/shadow"
-      done
-      for s in "$ST_ROOT"/"$OP"/root/runc-native/snapshots/snapshots/*; do
-        [ -e "$s" ] || continue
-        statline "HOSTSRC-shadow " "$s/etc/shadow"
+      echo "== sample ts=$TS bkpid=${P:-none}"
+      # The state-tree timeline is sampled every cycle: it records when
+      # each snapshot's /etc/shadow first appears and with which
+      # host-side uid/gid (extraction-time vs post-remap evidence).
+      for s in "$ST_ROOT"/*/root/runc-*/snapshots/snapshots/*; do
+        [ -d "$s" ] || continue
+        if [ -d "$s/fs" ]; then SD="$s/fs"; else SD="$s"; fi
+        statline "HOSTSRC-shadow " "$SD/etc/shadow"
         statline "HOSTSRC-dir " "$s"
       done
-      statline "HOST-direct-runtime " "$HOST_RT_ROOT/$OP"
+      if [ -z "$P" ]; then
+        echo "buildkitd: absent"
+      else
+        OP="$(tr '\0' '\n' <"/proc/$P/cmdline" | sed -n 's/^--root=//p' | head -1)"
+        OP="$(basename "$(dirname "$OP")" 2>/dev/null)"
+        [ -n "$OP" ] || OP=UNKNOWN
+        # Cheap window gate: the containerd-mount BIND exists only while
+        # the mount callback runs (the bare dir also shows up in the
+        # host's tmpfs view, but the bind is the lchown's presentation).
+        BINDS="$(grep -E 'containerd-mount' "/proc/$P/mountinfo" 2>/dev/null || true)"
+        echo "bind-window: $([ -n "$BINDS" ] && echo LIVE || echo absent)"
+        echo "runtime-mount-dirs(host-view): $(for d in "$HOST_RT_ROOT"/"$OP"/containerd-mount*; do [ -e "$d" ] && printf '%s ' "$d"; done)"
+        statline "HOST-direct-runtime " "$HOST_RT_ROOT/$OP"
+        if [ -n "$BINDS" ]; then
+          MDIRS="$(printf '%s\n' "$BINDS" | awk '$5 ~ /containerd-mount/ {print $5}')"
+          for d in $MDIRS; do
+            echo "bind-mountinfo: $(printf '%s\n' "$BINDS" | grep -F " $d " | head -2 | tr '\n' '|')"
+            inns_dir="$(nsstatline "INNS-dir " "$P" "$d")"; printf '%s\n' "$inns_dir"
+            inns_sh="$(nsstatline "INNS-shadow " "$P" "$d/etc/shadow")"; printf '%s\n' "$inns_sh"
+            host_dir="$(statline "HOSTROOT-dir " "/proc/$P/root$d")"; printf '%s\n' "$host_dir"
+            host_sh="$(statline "HOSTROOT-shadow " "/proc/$P/root$d/etc/shadow")"; printf '%s\n' "$host_sh"
+            pairverdict "PAIR-dir:" "$inns_dir" "$host_dir"
+            pairverdict "PAIR-shadow:" "$inns_sh" "$host_sh"
+          done
+        fi
+      fi
       # One-time idmapped-mount support evidence (first sample only).
       if [ ! -s "$EVIDENCE_DIR/r7-idmap-support.txt" ]; then
         {
@@ -420,12 +682,32 @@ docker-helper build buildctx --dockerfile Dockerfile --image r7diag:alpine3.24 \
   >"$EVIDENCE_DIR/r7-build-cli.log" 2>&1
 BUILD_RC=$?
 set -e
+BUILD_END_EPOCH="$(date +%s)"
+# Signal both pollers to finish their evidence collection and exit
+# cleanly (short grace windows) instead of waiting out their full
+# deadlines after the build is already over.
+touch "$STATE_DIR/build-done"
+printf '%s\n' "$BUILD_RC" >"$STATE_DIR/build-rc"
 wait "$MAP_POLLER" 2>/dev/null || true
 wait "$OWN_POLLER" 2>/dev/null || true
-BUILD_END_EPOCH="$(date +%s)"
+# Trace teardown: stop the event stream consumer, stop any strace
+# attach, remove the audit rules (the VM keeps no diag residue), and
+# pull the audit-side recovery net for the trace window.
+if [ -n "$EV_CONSUMER_PID" ]; then kill "$EV_CONSUMER_PID" 2>/dev/null || true; fi
+if [ -n "$STRACE_PID" ]; then kill "$STRACE_PID" 2>/dev/null || true; fi
+if [ "$LCHOWN_TRACE" = audit ]; then
+  {
+    auditctl -d always,exit -F arch=b64 -S lchown -F a1=0 -F a2=42 -k r7lchown 2>&1 || true
+    auditctl -d always,exit -F arch=b64 -S fchownat -F a2=0 -F a3=42 -k r7lchown 2>&1 || true
+    echo "--- audit rules after cleanup:"
+    auditctl -l 2>&1 || true
+    if command -v ausearch >/dev/null 2>&1; then
+      echo "--- ausearch -k r7lchown (recovery net over the trace window):"
+      ausearch -k r7lchown -i --start recent 2>&1 || true
+    fi
+  } >>"$LCHOWN_FORENSICS" 2>&1
+fi
 log "BUILD RC=$BUILD_RC (elapsed $((BUILD_END_EPOCH - BUILD_START_EPOCH))s)"
-printf '%s\n' "$BUILD_RC" >"$STATE_DIR/build-rc"
-touch "$STATE_DIR/build-done"
 fi
 if [ -s "$EVIDENCE_DIR/r7-mapping-buildkitd.log" ]; then
   log "--- r7-mapping-buildkitd (captured during the build) ---"
@@ -434,6 +716,10 @@ fi
 if [ -s "$EVIDENCE_DIR/r7-ownership-forensics.log" ]; then
   log "--- r7-ownership-forensics (captured during the build) ---"
   cat "$EVIDENCE_DIR/r7-ownership-forensics.log"
+fi
+if [ -s "$EVIDENCE_DIR/r7-lchown-forensics.log" ]; then
+  log "--- r7-lchown-forensics (lchown TID + namespace/capability context) ---"
+  cat "$EVIDENCE_DIR/r7-lchown-forensics.log"
 fi
 if [ -s "$EVIDENCE_DIR/r7-idmap-support.txt" ]; then
   log "--- r7-idmap-support ---"
@@ -462,15 +748,18 @@ elif [ "$BACKEND" = "apparmor" ]; then
   cap r7-process-contexts 40 bash -c 'ps auxZ 2>/dev/null | grep -E "docker-helper|buildkit|rootlesskit|slirp4netns|newuidmap|newgidmap" || true'
 fi
 cap r7-kernel-audit-tail 80 bash -c "dmesg 2>/dev/null | tail -80 || journalctl -k --no-pager | tail -80"
+cap r7-lchown-events-head 120 bash -c "head -n 120 '$EVIDENCE_DIR/r7-lchown-events-seen.log' 2>/dev/null || true"
 cap r7-builder-unit 20 bash -c 'systemctl cat docker-helper-builder.service 2>/dev/null || true'
 
 # R7 mapping forensics: the lchown(0,42) EPERM class needs the build
 # namespace's ACTUAL id mapping. The in-build capture above covers the
-# live buildkitd process; the captures below cover the environment-side
-# facts (the subid files' labels and the range lookups) and survive the
-# build either way. Every step survives absence (the forensic evidence
-# is the deliverable, not an assertion).
-cap r7-mapping-buildkitd 20 bash -c '
+# live buildkitd process (r7-mapping-buildkitd.log, written by the map
+# poller while the process was alive — this post-build capture is a
+# separate file so it never truncates the live one); the captures below
+# cover the environment-side facts (the subid files' labels and the
+# range lookups) and survive the build either way. Every step survives
+# absence (the forensic evidence is the deliverable, not an assertion).
+cap r7-mapping-buildkitd-postbuild 20 bash -c '
   BPID="$(pgrep -f "buildkitd" | head -1)"
   echo "buildkitd pid=$BPID"
   if [ -n "$BPID" ]; then
