@@ -2383,7 +2383,7 @@ var newuidmapDomainSurface = []string{
 	"allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:file { write open };",
 	"allow docker_helper_newuidmap_t self:cap_userns sys_admin;",
 	"allow docker_helper_newuidmap_t self:capability setuid;",
-	"allow docker_helper_newuidmap_t passwd_file_t:file { read open };",
+	"allow docker_helper_newuidmap_t passwd_file_t:file { read open getattr };",
 }
 
 // newuidmapDomainPolicyViolations scans the module's parsed rules against
@@ -2508,9 +2508,12 @@ func TestSELinuxPolicyNewuidmapDomainSurface(t *testing.T) {
 		{"process ptrace toward the child domain", "allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:process ptrace;", "no process-class grant toward the rootlesskit child domain"},
 		{"process signal toward the child domain", "allow docker_helper_newuidmap_t docker_helper_rootlesskit_t:process signal;", "no process-class grant toward the rootlesskit child domain"},
 		{"extra target type (builder state tree)", "allow docker_helper_newuidmap_t docker_helper_builder_state_t:file { write };", "unexpected target type"},
-		{"widened passwd grant", "allow docker_helper_newuidmap_t passwd_file_t:file { read open getattr };", "unexpected rule"},
-		{"extra passwd getattr grant", "allow docker_helper_newuidmap_t passwd_file_t:file { read getattr };", "unexpected rule"},
-		{"regressed passwd open grant", "allow docker_helper_newuidmap_t passwd_file_t:file { read };", "unexpected rule"},
+		// R7 (runs 38999078250 + 39002831855): the range-lookup stat is now
+		// part of the canonical pair shape; regressions and further
+		// widenings stay forbidden.
+		{"widened passwd grant (write added)", "allow docker_helper_newuidmap_t passwd_file_t:file { read open getattr write };", "unexpected rule"},
+		{"regressed passwd getattr grant", "allow docker_helper_newuidmap_t passwd_file_t:file { read open };", "unexpected rule"},
+		{"regressed passwd open grant", "allow docker_helper_newuidmap_t passwd_file_t:file { read getattr };", "unexpected rule"},
 		{"widened helper cap_userns", "allow docker_helper_newuidmap_t self:cap_userns { sys_admin setuid };", "cap_userns surface is exactly"},
 		{"extra helper cap_userns permission", "allow docker_helper_newuidmap_t self:cap_userns setuid;", "cap_userns surface is exactly"},
 		{"widened helper setuid capability", "allow docker_helper_newuidmap_t self:capability { setuid sys_admin };", "plain capability surface is exactly"},
@@ -2607,7 +2610,7 @@ var newgidmapDomainSurface = []string{
 	"allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:fifo_file { write };",
 	"allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:dir { read open getattr search };",
 	"allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:file { write open };",
-	"allow docker_helper_newgidmap_t passwd_file_t:file { read open };",
+	"allow docker_helper_newgidmap_t passwd_file_t:file { read open getattr };",
 	"allow docker_helper_newgidmap_t self:cap_userns sys_admin;",
 	"allow docker_helper_newgidmap_t self:capability setgid;",
 }
@@ -2770,8 +2773,11 @@ func TestSELinuxPolicyNewgidmapDomainSurface(t *testing.T) {
 		{"process signal toward the child domain", "allow docker_helper_newgidmap_t docker_helper_rootlesskit_t:process signal;", "", "no process-class grant toward the rootlesskit child domain"},
 		{"regressed passwd read grant", "allow docker_helper_newgidmap_t passwd_file_t:file { read };", "", "unexpected rule"},
 		{"regressed passwd open grant", "allow docker_helper_newgidmap_t passwd_file_t:file { open };", "", "unexpected rule"},
-		{"widened passwd grant (getattr added)", "allow docker_helper_newgidmap_t passwd_file_t:file { read open getattr };", "", "unexpected rule"},
-		{"removed passwd grant", "", "allow docker_helper_newgidmap_t passwd_file_t:file { read open };\n", "must carry exactly 7 allow rule"},
+		// R7 (runs 38999078250 + 39002831855): the range-lookup stat is
+		// now part of the canonical pair shape; a further widening stays
+		// forbidden.
+		{"widened passwd grant (write added)", "allow docker_helper_newgidmap_t passwd_file_t:file { read open getattr write };", "", "unexpected rule"},
+		{"removed passwd grant", "", "allow docker_helper_newgidmap_t passwd_file_t:file { read open getattr };\n", "must carry exactly 7 allow rule"},
 		{"userdb fallback dir search", "allow docker_helper_newgidmap_t init_var_run_t:dir { search };", "", "unexpected target type"},
 		{"userdb fallback unix_dgram_socket", "allow docker_helper_newgidmap_t self:unix_dgram_socket { create };", "", "only self-targeted grants"},
 		{"builder state tree", "allow docker_helper_newgidmap_t docker_helper_builder_state_t:file { write };", "", "unexpected target type"},
