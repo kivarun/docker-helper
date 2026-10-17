@@ -350,7 +350,7 @@ func s15LauncherCgroupViolations(policy string) []string {
 		}
 	}
 	if buildkitdNamedAllow != 23 {
-		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 21 (the S15 phase had exactly 9; R7 added the manager child-lifecycle rule, the per-op endpoint peer edge, the rootlesskit parent's buildkitd child-authority rule the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create and the snapshot-tree symlink-create; a NON-buildkitd S15 rule never trips it), found %d", buildkitdNamedAllow))
+		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 23 (the S15 phase had exactly 9; R7 added the manager child-lifecycle rule, the per-op endpoint peer edge, the rootlesskit parent's buildkitd child-authority rule the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create and the snapshot-tree symlink-create; a NON-buildkitd S15 rule never trips it), found %d", buildkitdNamedAllow))
 	}
 	return violations
 }

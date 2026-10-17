@@ -4255,7 +4255,6 @@ allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr sear
 #        tcontext=system_u:object_r:docker_helper_builder_state_t:s0:c1
 #        name=startedat.tmp
 allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr rename setattr unlink };
-allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file { create };
 
 # --- 4C-72: the shared runtime-root dir search — the NEW pair/plane
 # --- (PLANE G); the bare singleton, never a widening of any existing
