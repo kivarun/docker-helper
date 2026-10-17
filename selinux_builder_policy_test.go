@@ -380,7 +380,7 @@ func s15LauncherCgroupViolations(policy string) []string {
 		}
 	}
 	if buildkitdNamedAllow != 25 {
-		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 25 (the S15 phase had exactly 9; R7 added the manager child-lifecycle rule, the per-op endpoint peer edge, the rootlesskit parent's buildkitd child-authority rule the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr and the unprivileged-mount-flags statfs getattr; a NON-buildkitd S15 rule never trips it), found %d", buildkitdNamedAllow))
+		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 25 (the S15 phase had exactly 9; R7 added the manager child-lifecycle rule, the per-op endpoint peer edge, the rootlesskit parent's buildkitd child-authority rule the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr and the unprivileged-mount-flags statfs getattr; a NON-buildkitd S15 rule never trips it), found %d", buildkitdNamedAllow))
 	}
 	return violations
 }
@@ -2362,17 +2362,20 @@ func TestSELinuxPolicyNewuidmapIsolation(t *testing.T) {
 			}
 		}
 	}
-	// The module's cap_userns rules are EXACTLY the four evidenced
+	// The module's cap_userns rules are EXACTLY the five evidenced
 	// grants: the rootlesskit child's { sys_admin sys_ptrace sys_chroot
 	// net_admin } set, the UID-map helper's sys_admin bit, the GID-map
-	// helper's sys_admin bit, and the slirp4netns helper's sys_ptrace
+	// helper's sys_admin bit, the slirp4netns helper's sys_ptrace
 	// bit (all in-namespace, all self-targeted; the GID bit is the R5
 	// gid_map-write boundary, the child's sys_ptrace bit is the 4C-3
 	// nsenter ptrace_may_access boundary, its sys_chroot bit is the 4C-4
 	// mount-namespace reassociation boundary, its net_admin bit is the
 	// 4C-15 tun_set_iff() CAP_NET_ADMIN boundary, and the helper's
 	// sys_ptrace bit is the 4C-25 proc-namespace-link dereference's
-	// ptrace-may-access prerequisite). No other subject — the manager,
+	// ptrace-may-access prerequisite), and the R7 buildkitd payload's
+	// { sys_admin chown } set (the snapshot/local-mount CAP_SYS_ADMIN
+	// work, plus the audit-serial-650 fchownat(0,42) CAP_CHOWN fixup —
+	// the proven lchown EPERM predicate). No other subject — the manager,
 	// the launcher, the daemon, or any other helper — gets a cap_userns
 	// rule.
 	for _, line := range strings.Split(policy, "\n") {
@@ -2387,10 +2390,12 @@ func TestSELinuxPolicyNewuidmapIsolation(t *testing.T) {
 				"allow docker_helper_newgidmap_t self:cap_userns sys_admin;",
 				"allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace sys_admin };",
 				// R7 (run 38977886885): the payload's own namespace-internal
-				// mount authority (buildkitd's snapshot/local-mount work).
-				"allow docker_helper_buildkitd_t self:cap_userns { sys_admin };":
+				// mount authority (buildkitd's snapshot/local-mount work);
+				// widened by the R7 CAP_CHOWN rung (diag run 39049763739,
+				// audit serial 650): the layer-apply fchownat(0,42) fixup.
+				"allow docker_helper_buildkitd_t self:cap_userns { sys_admin chown };":
 			default:
-				t.Errorf("no cap_userns grant may exist beyond the five evidenced in-namespace grants (rootlesskit { sys_admin sys_ptrace sys_chroot net_admin }, UID-map helper sys_admin, GID-map helper sys_admin, slirp4netns { sys_ptrace sys_admin }, and the R7 buildkitd { sys_admin }): %s", trimmed)
+				t.Errorf("no cap_userns grant may exist beyond the five evidenced in-namespace grants (rootlesskit { sys_admin sys_ptrace sys_chroot net_admin }, UID-map helper sys_admin, GID-map helper sys_admin, slirp4netns { sys_ptrace sys_admin }, and the R7 buildkitd { sys_admin chown }): %s", trimmed)
 			}
 		}
 	}
@@ -2899,8 +2904,8 @@ func TestSELinuxPolicyCapUsernsShape(t *testing.T) {
 			}
 			switch {
 			case strings.Contains(trimmed, "class cap_userns "):
-				if trimmed != "class cap_userns { sys_admin sys_ptrace sys_chroot net_admin };" {
-					violations = append(violations, fmt.Sprintf("the require block's cap_userns declaration is exactly the four evidenced in-namespace bits: %s", trimmed))
+				if trimmed != "class cap_userns { sys_admin sys_ptrace sys_chroot net_admin chown };" {
+					violations = append(violations, fmt.Sprintf("the require block's cap_userns declaration is exactly the evidenced in-namespace bits (the four 4C bits plus the R7 audit-serial-650 chown bit): %s", trimmed))
 				}
 			case strings.Contains(trimmed, ":cap_userns "):
 				switch trimmed {
@@ -2912,10 +2917,13 @@ func TestSELinuxPolicyCapUsernsShape(t *testing.T) {
 					// R7 (run 38977886885): the payload's own namespace-
 					// internal mount authority — the fifth evidenced
 					// in-namespace grant (buildkitd's snapshot/local-mount
-					// work requires CAP_SYS_ADMIN inside the flow userns).
-					"allow docker_helper_buildkitd_t self:cap_userns { sys_admin };":
+					// work requires CAP_SYS_ADMIN inside the flow userns);
+					// widened by the R7 CAP_CHOWN rung (diag run
+					// 39049763739, audit serial 650): the layer-apply
+					// fchownat(0,42) ownership fixup.
+					"allow docker_helper_buildkitd_t self:cap_userns { sys_admin chown };":
 				default:
-					violations = append(violations, fmt.Sprintf("no cap_userns rule may exist beyond the five evidenced in-namespace grants (rootlesskit { sys_admin sys_ptrace sys_chroot net_admin }, newuidmap sys_admin, newgidmap sys_admin, slirp4netns { sys_ptrace sys_admin }, and the R7 buildkitd { sys_admin }; the manager, the launcher, and other subjects get none): %s", trimmed))
+					violations = append(violations, fmt.Sprintf("no cap_userns rule may exist beyond the five evidenced in-namespace grants (rootlesskit { sys_admin sys_ptrace sys_chroot net_admin }, newuidmap sys_admin, newgidmap sys_admin, slirp4netns { sys_ptrace sys_admin }, and the R7 buildkitd { sys_admin chown }; the manager, the launcher, and other subjects get none): %s", trimmed))
 				}
 			case strings.Contains(trimmed, ":capability ") && strings.Contains(trimmed, "docker_helper_rootlesskit_t"):
 				violations = append(violations, fmt.Sprintf("the rootlesskit child domain must keep zero plain self:capability surfaces (no plain sys_ptrace/sys_chroot: the live AVCs name cap_userns): %s", trimmed))
@@ -2938,10 +2946,11 @@ func TestSELinuxPolicyCapUsernsShape(t *testing.T) {
 		t.Errorf("the committed policy violates the cap_userns/capability shape invariants: %v", violations)
 	}
 	for _, rule := range []string{
-		"class cap_userns { sys_admin sys_ptrace sys_chroot net_admin };",
+		"class cap_userns { sys_admin sys_ptrace sys_chroot net_admin chown };",
 		"allow docker_helper_rootlesskit_t self:cap_userns { sys_admin sys_ptrace sys_chroot net_admin };",
 		"allow docker_helper_newuidmap_t self:cap_userns sys_admin;",
 		"allow docker_helper_newgidmap_t self:cap_userns sys_admin;",
+		"allow docker_helper_buildkitd_t self:cap_userns { sys_admin chown };",
 		"allow docker_helper_newuidmap_t self:capability setuid;",
 		"allow docker_helper_newgidmap_t self:capability setgid;",
 		"typeattribute docker_helper_rootlesskit_t mcs_constrained_type;",
@@ -2996,6 +3005,13 @@ func TestSELinuxPolicyCapUsernsShape(t *testing.T) {
 		{"cap_userns for the manager", "allow docker_helper_builder_t self:cap_userns sys_admin;"},
 		{"cap_userns for the launcher", "allow docker_helper_builder_launcher_t self:cap_userns sys_admin;"},
 		{"cap_userns for slirp4netns", "allow docker_helper_slirp4netns_t self:cap_userns sys_admin;"},
+		{"cap_userns chown for the manager", "allow docker_helper_builder_t self:cap_userns chown;"},
+		{"cap_userns chown for the launcher", "allow docker_helper_builder_launcher_t self:cap_userns chown;"},
+		{"cap_userns chown ride-along for the rootlesskit child", "allow docker_helper_rootlesskit_t self:cap_userns { sys_admin sys_ptrace sys_chroot net_admin chown };"},
+		{"cap_userns chown ride-along for slirp4netns", "allow docker_helper_slirp4netns_t self:cap_userns { sys_ptrace sys_admin chown };"},
+		{"parallel buildkitd cap_userns chown rule", "allow docker_helper_buildkitd_t self:cap_userns chown;"},
+		{"parallel buildkitd cap_userns sys_admin rule", "allow docker_helper_buildkitd_t self:cap_userns sys_admin;"},
+		{"widened cap_userns require declaration +net_raw (the chown bit must not ride with an unproven bit)", "class cap_userns { sys_admin sys_ptrace sys_chroot net_admin chown net_raw };"},
 	} {
 		if violations := capUsernsShapeViolations(policy + "\n" + mut.rule); len(violations) == 0 {
 			t.Errorf("mutation %q must fail the cap_userns/capability shape invariant", mut.name)
@@ -3018,6 +3034,23 @@ func TestSELinuxPolicyCapUsernsShape(t *testing.T) {
 			regressed.oldRule, 1)
 		if violations := capUsernsShapeViolations(mutated); len(violations) == 0 {
 			t.Errorf("the %q rootlesskit cap_userns shape must fail the shape invariant", regressed.name)
+		}
+	}
+	// The R7 CAP_CHOWN rung's missing-bit regressions (the pre-serial-650
+	// sys_admin-only shape and the chown-only shape) must fail the shape
+	// invariant: no shortened set is the evidenced buildkitd grant.
+	for _, regressed := range []struct {
+		name    string
+		oldRule string
+	}{
+		{"missing chown (the pre-serial-650 shape must trip again)", "allow docker_helper_buildkitd_t self:cap_userns { sys_admin };"},
+		{"missing sys_admin (chown-only shape)", "allow docker_helper_buildkitd_t self:cap_userns { chown };"},
+	} {
+		mutated := strings.Replace(policy,
+			"allow docker_helper_buildkitd_t self:cap_userns { sys_admin chown };",
+			regressed.oldRule, 1)
+		if violations := capUsernsShapeViolations(mutated); len(violations) == 0 {
+			t.Errorf("the %q buildkitd cap_userns shape must fail the shape invariant", regressed.name)
 		}
 	}
 }
@@ -5112,7 +5145,7 @@ func buildkitdIdentityViolations(policy string) []string {
 			if strings.Contains(trimmed, "docker_helper_buildkitd_exec_t") && trimmed != canonicalExec && trimmed != canonicalEntry {
 				violations = append(violations, "the only allow rules naming the buildkitd exec type are the exact source-exec grant { execute read open } and the exact target-side { entrypoint read execute getattr } grant: "+trimmed)
 			}
-			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot && trimmed != canonicalRuntimeTree && trimmed != canonicalRuntimeSockFile && trimmed != canonicalManagerLifecycle && trimmed != "allow docker_helper_t docker_helper_buildkitd_t:unix_stream_socket { connectto };" && trimmed != "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { signal sigkill };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:dir { write add_name create mounton remove_name read };" && trimmed != "allow docker_helper_buildkitd_t self:cap_userns { sys_admin };" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem { remount unmount };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:file { create };" && trimmed != "allow docker_helper_buildkitd_t self:udp_socket { create setopt connect getattr read write };" && trimmed != "allow docker_helper_buildkitd_t self:tcp_socket { create setopt connect getattr read write getopt };" && trimmed != "allow docker_helper_buildkitd_t http_port_t:tcp_socket { name_connect };" && trimmed != "allow docker_helper_buildkitd_t cert_t:dir { search };" && trimmed != "allow docker_helper_buildkitd_t cert_t:file { read open getattr };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:lnk_file { create };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file { create setattr getattr };" && trimmed != "allow docker_helper_buildkitd_t nsfs_t:file getattr;" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem getattr;" {
+			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot && trimmed != canonicalRuntimeTree && trimmed != canonicalRuntimeSockFile && trimmed != canonicalManagerLifecycle && trimmed != "allow docker_helper_t docker_helper_buildkitd_t:unix_stream_socket { connectto };" && trimmed != "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { signal sigkill };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:dir { write add_name create mounton remove_name read };" && trimmed != "allow docker_helper_buildkitd_t self:cap_userns { sys_admin chown };" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem { remount unmount };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:file { create };" && trimmed != "allow docker_helper_buildkitd_t self:udp_socket { create setopt connect getattr read write };" && trimmed != "allow docker_helper_buildkitd_t self:tcp_socket { create setopt connect getattr read write getopt };" && trimmed != "allow docker_helper_buildkitd_t http_port_t:tcp_socket { name_connect };" && trimmed != "allow docker_helper_buildkitd_t cert_t:dir { search };" && trimmed != "allow docker_helper_buildkitd_t cert_t:file { read open getattr };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:lnk_file { create };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file { create setattr getattr };" && trimmed != "allow docker_helper_buildkitd_t nsfs_t:file getattr;" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem getattr;" {
 				violations = append(violations, "the only allow rules toward the buildkitd domain are the exact process transition grant, the exact target-entrypoint grant, and the exact state/runtime surfaces: "+trimmed)
 			}
 			fields := strings.Fields(trimmed)

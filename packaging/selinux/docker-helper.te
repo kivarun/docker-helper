@@ -128,7 +128,7 @@ module docker_helper 1.2;
 		class capability { dac_read_search dac_override sys_admin fowner setuid setgid };
 		class capability2 { wake_alarm kill };
 		class user_namespace { create };
-		class cap_userns { sys_admin sys_ptrace sys_chroot net_admin };
+		class cap_userns { sys_admin sys_ptrace sys_chroot net_admin chown };
 		class process { transition siginh noatsecure rlimitinh sigkill setexec signull signal };
 		class process2 { nnp_transition };
 	}
@@ -2818,9 +2818,43 @@ allow docker_helper_buildkitd_t tmp_t:dir { write add_name create mounton remove
 # the same authority class the rootlesskit child domain already carries
 # (self:cap_userns { sys_admin ... }, the launch vehicle's own mount
 # work). The separate-domain rule means buildkitd's authority is its own
-# evidence-driven staircase, and this is its first rung: sys_admin only,
-# self-scoped, no net_admin/ptrace/chroot ride-along.
-allow docker_helper_buildkitd_t self:cap_userns { sys_admin };
+# evidence-driven staircase: the first rung is sys_admin only
+# (self-scoped, no net_admin/ptrace/chroot ride-along).
+#
+# R7 CAP_CHOWN rung (enforcing proof, ownership-forensics diag run
+# 39049763739 at branch head 78b9d023, audit serial 650): the layer
+# apply's per-entry ownership fixup — fchownat(AT_FDCWD,
+# .../containerd-mount<rand>/etc/shadow, 0, 42) — returned EPERM and the
+# same audit event names the exact predicate (the error string says
+# "lchown"; the kernel syscall is fchownat):
+#
+#   err: operation not permitted
+#   avc: denied { chown } for pid=3251 comm="buildkitd" capability=0
+#        scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#        tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#        tclass=cap_userns permissive=0
+#   type=SYSCALL syscall=260 success=no exit=-1
+#        a0=ffffffffffffff9c a1=<path> a2=0 a3=2a items=1
+#        pid=3251 uid=473 gid=473 euid=473 fsuid=473
+#        comm="buildkitd" exe="/usr/libexec/docker-helper/buildkit/
+#          buildkitd" subj=...buildkitd_t:s0:c1 key="r7lchown"
+#   type=PATH name=".../containerd-mount1885598223/etc/shadow"
+#        inode=7346072 dev=fd:03 mode=0100640 ouid=473 ogid=473
+#        obj=system_u:object_r:docker_helper_builder_state_t:s0:c1
+#
+# The caller is the buildkitd leader thread itself (tid == tgid == 3251);
+# the flow's uid_map/gid_map map BOTH target ids (0 -> 473,
+# 1..65536 -> 165536+; ns gid 42 -> 165577) and CapEff carries CAP_CHOWN
+# — the commoncap hook passes (LSM hooks run in order and short-circuit,
+# so the very existence of this AVC proves the cred check passed), and
+# the denial is the SELinux cap_userns gate alone. The AppArmor
+# differential closes the proof: the identical fchownat(0,42) on the
+# AppArmor VM succeeds (audit success=yes exit=0, identical PATH
+# pre-state ouid=473 ogid=473 — the apply leaves the file at ns (0,0) on
+# both backends), so this one permission is the whole SELinux divergence.
+# One bit, self-scoped, appended to the existing rule — no parallel
+# allow.
+allow docker_helper_buildkitd_t self:cap_userns { sys_admin chown };
 
 # R7 (green attempt, scope=selinux run 38979563860): the mount's own
 # read-only flag application. The same bind mount
@@ -3010,80 +3044,61 @@ allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:lnk_file { creat
 
 # R7 (root-cause confirmation, scope=selinux run 38999078250 + the
 # differential full-gate run 39002831855): the uid-map helpers' input
-# stat. STALE-CAUSALITY, MARKED FOR CORRECTION: the chain below (the
-# helpers' range lookup dies at the stat -> single-uid fallback ->
-# gid 42 unmapped -> the lchown EPERM) is DISPROVEN — the diag mapping
-# evidence showed the FULL subid range mapped (uid_map == gid_map), and
-# the lchown EPERM persisted after the passwd_file_t getattr grant
-# (run 39004244393) and after the user-namespace detection fix (runs
-# 39023951708, 39029159060). Keep this block for its AVC record only;
-# the causal rewrite is scheduled with the ownership-forensics task.
-# The AppArmor consumer (same Tumbleweed kernel family, same
-# builder bytes) completes the identical build including the mount
-# callback's ownership normalization; the SELinux consumer fails at
-#
-#   failed to Lchown ".../containerd-mount<rand>/etc/shadow" for
-#     UID 0, GID 42: lchown ...: operation not permitted
-#
-# with NO SELinux record for the call itself (kernel-internal EPERM —
-# the chown target's gid has no mapping inside the build namespace).
-# The chain: /etc/subgid maps the full range (the provisioner's own log:
-# docker-helper-builder:165536:65536), so gid 42 IS mappable — IF the
-# helpers' range lookup succeeds. The recorded AVCs name the failure:
+# stat. CAUSALITY CORRECTED (the ownership-forensics diag runs
+# 39048444265 + 39049763739, audit serial 650): the chain once proposed
+# here — the helpers' range lookup dying at the stat -> single-uid
+# fallback -> gid 42 unmapped -> the lchown EPERM — is DISPROVEN. The
+# mapping evidence showed the FULL subid range mapped (buildkitd's own
+# uid_map == gid_map = "0 473 1" + "1 165536 65536", captured live
+# inside the failing build window), and the lchown EPERM persisted after
+# this getattr grant (run 39004244393) and after the user-namespace
+# detection fix (runs 39023951708, 39029159060). The PROVEN lchown cause
+# is the SELinux cap_userns { chown } gate on the buildkitd child user
+# namespace (the buildkitd rule above; the AppArmor differential — the
+# identical fchownat(0,42) succeeding with an identical PATH pre-state —
+# closes it). This block's grant stands for its OWN recorded denial —
+# the helpers stat the id files (/etc/passwd, /etc/group, /etc/subuid,
+# /etc/subgid — all passwd_file_t on this distro) before reading them,
+# and the standing read+open grants omitted getattr:
 #
 #   avc: denied { getattr } tclass=file tcontext=passwd_file_t
 #        comm=newuidmap   /   comm=newgidmap
 #
-# the helpers stat the id files (/etc/passwd, /etc/group, /etc/subuid,
-# /etc/subgid — all passwd_file_t on this distro) before reading them;
-# the standing read+open grants omit getattr, so the range lookup dies
-# at the stat, newuidmap/newgidmap fail, and rootlesskit falls back to
-# the single-uid mapping (no subid range) — gid 42 unmapped. The fix is
-# the stat bit on the standing pair, in place (the two canonical rules
+# The stat bit on the standing pair is in place (the two canonical rules
 # above carry it; this block is the evidence record).
 
 # R7 (root-cause closure, the diag mapping/mountinfo evidence + the
 # AppArmor differential full-gate run 39002831855 + the enforcing UAT
 # record, latest scope=selinux run 39004244393): the user-namespace
-# probe itself. STALE-CAUSALITY, MARKED FOR CORRECTION: the "the layer
-# unpack runs in NON-userns mode (empty ID map) -> the archive's raw
-# ids reach the lchown unmapped" chain below is DISPROVEN as the
-# lchown's cause — with the probe granted, the user-namespace detection
-# succeeds (the rootless-only unprivileged-mount-flags probe ran at the
-# Dockerfile load, run 39023951708) yet the lchown EPERM persisted
-# (runs 39023951708, 39029159060). The grant itself stands: the nsfs
-# getattr denial was real and was the pipeline's terminal boundary at
-# its rung. The causal rewrite is scheduled with the ownership-forensics
-# task. The standing 4C-83 record is FATAL on this path — the
-# exact AVC (every enforcing run since the 4C-83 window, identical
-# modulo pid/ino; latest live record):
+# probe. CAUSALITY CORRECTED (the ownership-forensics diag runs
+# 39048444265 + 39049763739, audit serial 650): the chain once proposed
+# here — "the probe denied -> the detection fails -> the layer unpack
+# runs in NON-userns mode (empty ID map) -> the archive's raw ids reach
+# the lchown unmapped -> chown(0,42) needs ns_capable(init_user_ns,
+# CAP_CHOWN) -> the capability LSM denies BEFORE the SELinux hook -> no
+# AVC for the call" — is DISPROVEN end to end. With the probe granted
+# the user-namespace detection succeeds (the rootless-only
+# unprivileged-mount-flags probe ran at the Dockerfile load, run
+# 39023951708) yet the lchown EPERM persisted (runs 39023951708,
+# 39029159060), the mapping hypothesis is removed by the live capture
+# (buildkitd's own uid_map == gid_map = "0 473 1" + "1 165536 65536" —
+# the FULL subid range, ns gid 42 mappable at 165577), and the failing
+# fchownat itself now HAS its SELinux record: audit serial 650 names the
+# cap_userns { chown } denial on the buildkitd child user namespace (the
+# buildkitd rule above). The grant stands for its OWN recorded denial —
+# the namespace magic link's getattr in RunningInUserNS's
+# stat("/proc/self/ns/user") (the standing 4C-83 record, FATAL on its
+# path, every enforcing run since the 4C-83 window, identical modulo
+# pid/ino; latest live record):
 #
 #   avc:  denied  { getattr } for  pid=3950 comm="buildkitd"
 #     path="user:[4026532286]" dev="nsfs" ino=4026532286
 #     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
 #     tcontext=system_u:object_r:nsfs_t:s0 tclass=file permissive=0
 #
-# The chain: buildkitd's RunningInUserNS stat("/proc/self/ns/user") —
-# the namespace magic link's inode getattr — dies at the SELinux file
-# getattr check, the "unexpected procfs state" branch returns false,
-# and the layer unpack runs in NON-userns mode (empty ID map). The
-# archive's raw ids then reach the lchown unmapped: chown(0,42) needs
-# ns_capable(init_user_ns, CAP_CHOWN), the process holds its
-# capabilities only inside its own namespace, and the capability LSM
-# denies BEFORE the SELinux hook — no AVC, just the recorded
-#
-#   failed to Lchown ".../containerd-mount<rand>/etc/shadow" for
-#     UID 0, GID 42: lchown ...: operation not permitted
-#
-# The differential proves the mechanism: the AppArmor consumer (same
-# Tumbleweed kernel family, same builder bytes) completes the identical
-# build including the ownership normalization, because its profile does
-# not deny the probe and the unpack runs in rootless mode with the ids
-# mapped at extraction. The diag mapping evidence removes the mapping
-# hypothesis: buildkitd's own uid_map == gid_map = "0 473 1" +
-# "1 165536 65536" — the FULL subid range, gid 42 mappable at 165578 —
-# captured live inside the failing build window. The grant is the ONE
-# getattr bit on the probe's file class. Scope: nsfs_t is a GLOBAL
+# With the probe granted, the user-namespace detection succeeds and the
+# build proceeds through extraction and the whole previous staircase.
+# Scope: nsfs_t is a GLOBAL
 # label (the slirp 4C-29 scope shape); the probe's read/open surface
 # stays closed (the namespace-handle read/open pair is the slirp
 # helper's own 4C-29 authority, a different subject); every other nsfs
