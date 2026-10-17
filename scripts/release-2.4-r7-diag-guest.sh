@@ -63,10 +63,16 @@ mkdir -p "$EVIDENCE_DIR"
 
 # cap: run a command, capture combined output to a file, echo it bounded.
 cap() { # <name> <max-lines> <cmd...>
-  local name="$1" maxn="$2"; shift 2
+  # Evidence collection must never abort the diagnostic: every capture is
+  # best-effort by definition. The caller's exit status is recorded into
+  # the capture so a failed probe is still visible evidence.
+  local name="$1" maxn="$2" rc; shift 2
   "$@" >"$EVIDENCE_DIR/$name.log" 2>&1
+  rc=$?
+  [ "$rc" -eq 0 ] || printf 'capture rc=%d\n' "$rc" >>"$EVIDENCE_DIR/$name.log"
   log "--- $name (evidence: $EVIDENCE_DIR/$name.log, first $maxn lines) ---"
   head -n "$maxn" "$EVIDENCE_DIR/$name.log"
+  return 0
 }
 
 [ "$(id -u)" = "0" ] || fail "must run as root"
