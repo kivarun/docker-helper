@@ -2933,6 +2933,23 @@ allow docker_helper_buildkitd_t cert_t:file { read open getattr };
 # — mounton joins the runtime-tree dir rule, unmount joins the
 # source-superblock rule (the same mount/unmount lifecycle).
 
+# R7 (green attempt, scope=selinux run 38995970391): the mount target's
+# own population. The RUN step's bind mount now succeeds; the mount
+# callback then populates the target (the busybox multi-call symlink
+# farm):
+#
+#   #5 ERROR: mount callback failed on .../containerd-mount4172521356:
+#     symlink /bin/busybox .../containerd-mount4172521356/bin/arch:
+#     permission denied
+#   avc: denied { create } tclass=lnk_file
+#        scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#        tcontext=system_u:object_r:docker_helper_builder_runtime_t:s0:c1
+#
+# The runtime-tree owner's lnk_file surface: create (the symlink farm
+# the mount callback materializes). The dir add_name hook is already on
+# the dir rule.
+allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:lnk_file { create };
+
 # --- R7 closing note: denials deliberately left CLOSED ---
 #
 # Non-fatal for the observed path (the builder socket came up and passed
