@@ -2942,7 +2942,14 @@ allow docker_helper_buildkitd_t cert_t:file { read open getattr };
 #        tcontext=system_u:object_r:docker_helper_builder_state_t:s0:c1
 #        name=arch
 # (the parent dir's add_name hook is already on the state-tree dir rule).
-allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file { create };
+# R7 (green attempt, scope=selinux run 38999078250): the callback's
+# ownership fixup — lchown on the just-created symlink (the uid-mapping
+# normalization the mount callback performs):
+#   failed to Lchown ".../containerd-mount<rand>/bin/arch" for UID 0,
+#     GID 0: lchown ...: permission denied
+#   avc: denied { setattr } tclass=lnk_file
+#        tcontext=docker_helper_builder_state_t:s0:c1
+allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file { create setattr };
 
 # R7 (green attempt, scope=selinux run 38995970391): the mount target's
 # own population. The RUN step's bind mount now succeeds; the mount
