@@ -276,6 +276,8 @@ docker-helper pull alpine:3.24 || log "pull failed (continuing; build may still 
           echo "${pad}  gid_map:"; sed "s/^/${pad}    /" "/proc/$p/gid_map" 2>&1
           echo "${pad}  caps=$(grep -hE '^CapEff' "/proc/$p/status" 2>/dev/null)"
           echo "${pad}  groups=$(grep -h '^Groups' "/proc/$p/status" 2>/dev/null)"
+          echo "${pad}  mountinfo (ops/containerd-mount/overlay lines):"
+          grep -E "docker-helper-builder|containerd-mount" "/proc/$p/mountinfo" 2>/dev/null | sed "s/^/${pad}    /"
           for c in $(cat "/proc/$p/task/*/children" 2>/dev/null); do
             descend "$c" $((depth + 1))
           done
@@ -399,9 +401,11 @@ if [ -n "$UN" ]; then
 fi
 U="$(id -u docker-helper-builder 2>/dev/null)"
 G="$(id -g docker-helper-builder 2>/dev/null)"
-UR="$(getent subuid docker-helper-builder 2>/dev/null | cut -d: -f2-)"
-GR="$(getent subgid docker-helper-builder 2>/dev/null | cut -d: -f2-)"
-echo "flow uid=$U gid=$G subuid=$UR subgid=$GR"
+# getent has no subuid/subgid database on this distro; getsubids is the
+# shadow tool that resolves the provisioned ranges.
+UR="$(getsubids -u docker-helper-builder 2>/dev/null | awk '{print $3, $4}')"
+GR="$(getsubids -g docker-helper-builder 2>/dev/null | awk '{print $3, $4}')"
+echo "flow uid=$U gid=$G subuid=[$UR] subgid=[$GR]"
 if [ -n "$UN" ] && [ -n "$NU" ] && [ -n "$NG" ] && [ -n "$UR" ] && [ -n "$GR" ]; then
   child="$(unshare -U sh -c 'echo $$; exec sleep 12' 2>/dev/null | head -1)"
   if [ -n "$child" ]; then

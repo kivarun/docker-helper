@@ -17,6 +17,12 @@ name: Release 2.4 R7 full-gate corrective diagnosis
 #                    vehicle prerequisites (distro rootlesskit profile, userns
 #                    restriction), on a disposable Tumbleweed VM (RPM).
 #
+# SCOPE NOTE: the default artifact source is the FAILED full-gate run's
+# producer set (the RED fixture). It exists to reproduce and to collect
+# forensic evidence on the exact bytes that failed; it is NOT a
+# green-candidate confirmation instrument and must not be used to
+# validate fixes landed at a later SHA (those are validated by the
+# uat-blackbox workflow at that SHA).
 # The three jobs consume the SAME producer artifact set; every guest verifies
 # the artifact SHA-256 before install. The scripts live under scripts/ and are
 # the only new mechanism; no production, MAC policy or UAT consumer behavior

@@ -77,16 +77,19 @@ RMT
   GUEST_RC=$?
   cat "$RUNNER_TEMP/r7-diag-guest.log"
 
+  # Per-attempt evidence files: each attempt's console log and evidence
+  # tarball is preserved under its own suffix (a later attempt never
+  # overwrites an earlier attempt's captured evidence).
   log "collect guest evidence (survives the verdict; attempt $attempt)"
   mkdir -p "$EVIDENCE_DIR"
-  cp "$RUNNER_TEMP/r7-diag-guest.log" "$EVIDENCE_DIR/guest.log"
+  cp "$RUNNER_TEMP/r7-diag-guest.log" "$EVIDENCE_DIR/guest-attempt$attempt.log"
   if vm_ssh "test -d '$GUEST_EVIDENCE_DIR'" 2>/dev/null; then
-    vm_ssh "tar -C '$GUEST_EVIDENCE_DIR' -czf - ." > "$EVIDENCE_DIR/guest-evidence.tar.gz" || true
-    mkdir -p "$EVIDENCE_DIR/guest"
-    tar -xzf "$EVIDENCE_DIR/guest-evidence.tar.gz" -C "$EVIDENCE_DIR/guest" 2>/dev/null || true
+    vm_ssh "tar -C '$GUEST_EVIDENCE_DIR' -czf - ." > "$EVIDENCE_DIR/guest-evidence-attempt$attempt.tar.gz" || true
+    mkdir -p "$EVIDENCE_DIR/guest-attempt$attempt"
+    tar -xzf "$EVIDENCE_DIR/guest-evidence-attempt$attempt.tar.gz" -C "$EVIDENCE_DIR/guest-attempt$attempt" 2>/dev/null || true
   fi
 
-  VERDICT="$(grep -oE 'R7-DIAG-RESULT=[A-Z-]+' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"
+  VERDICT="$(grep -aoE 'R7-DIAG-RESULT=[A-Z-]+' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"
   case "$VERDICT" in
     "R7-DIAG-RESULT=REPRODUCED")
       log 'R7 SELinux diagnosis REPRODUCED (the defect is still live on this branch; red evidence captured)'
