@@ -283,8 +283,10 @@ docker-helper pull alpine:3.24 || log "pull failed (continuing; build may still 
           done
         }
         descend "$BPID" 0
-      } >"$EVIDENCE_DIR/r7-mapping-buildkitd.log" 2>&1
+      } >>"$EVIDENCE_DIR/r7-mapping-buildkitd.log" 2>&1
+      kids=""
       {
+        echo "--- sample $(date +%H:%M:%S) ---"
         echo "matched pid=$BPID children=$kids"
         for c in $kids; do
           echo "child pid=$c"
