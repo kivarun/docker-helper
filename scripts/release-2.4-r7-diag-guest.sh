@@ -305,7 +305,11 @@ docker-helper pull alpine:3.24 || log "pull failed (continuing; build may still 
           done
         done
       } >>"$EVIDENCE_DIR/r7-mapping-buildkitd.log" 2>&1
-      break
+      # Do NOT break on the first match: the RUN step's mounts (the
+      # overlay snapshot mounts and the containerd-mount binds) appear
+      # LATER in the build. Keep sampling the mountinfo until the
+      # deadline so the failing window's mount structure is captured.
+      sleep 2
     fi
     sleep 1
   done
