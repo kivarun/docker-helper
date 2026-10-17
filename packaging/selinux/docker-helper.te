@@ -2886,6 +2886,24 @@ allow docker_helper_buildkitd_t http_port_t:tcp_socket { name_connect };
 # the payload carry. Port-class only.
 allow docker_helper_slirp4netns_t http_port_t:tcp_socket { name_connect };
 
+# R7 (green attempt, scope=selinux run 38992640499): the TLS trust-store
+# read. The TCP dial and the TLS handshake now proceed; the handshake
+# fails at certificate verification because buildkitd cannot reach the
+# system CA bundle:
+#
+#   tls: failed to verify certificate: x509: failed to load system roots
+#     and no roots provided; open /var/lib/ca-certificates/ca-bundle.pem:
+#     permission denied
+#   avc: denied { search } tclass=dir
+#        scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#        tcontext=system_u:object_r:cert_t:s0   name=ca-certificates
+#
+# Read-only traversal into the distro trust anchor tree (the same
+# Trusted CA preparation boundary the product already owns; the file
+# read follows on the bundle file itself once the dir is traversable).
+allow docker_helper_buildkitd_t cert_t:dir { search };
+allow docker_helper_buildkitd_t cert_t:file { read open getattr };
+
 # --- R7 closing note: denials deliberately left CLOSED ---
 #
 # Non-fatal for the observed path (the builder socket came up and passed
