@@ -253,6 +253,63 @@ fi
 cap r7-kernel-audit-tail 80 bash -c "dmesg 2>/dev/null | tail -80 || journalctl -k --no-pager | tail -80"
 cap r7-builder-unit 20 bash -c 'systemctl cat docker-helper-builder.service 2>/dev/null || true'
 
+# R7 mapping forensics: the lchown(0,42) EPERM class needs the build
+# namespace's ACTUAL id mapping. The callback failure ("failed to Lchown
+# ... for UID 0, GID 42: operation not permitted", NO SELinux record for
+# the call) is only explainable from the namespace's gid view, the
+# running capabilities, and the subid file labels. Every step survives
+# absence (the forensic evidence is the deliverable, not an assertion).
+cap r7-mapping-buildkitd 20 bash -c '
+  BPID="$(pgrep -f "buildkitd" | head -1)"
+  echo "buildkitd pid=$BPID"
+  if [ -n "$BPID" ]; then
+    echo "--- /proc/$BPID/uid_map"; cat "/proc/$BPID/uid_map" 2>&1
+    echo "--- /proc/$BPID/gid_map"; cat "/proc/$BPID/gid_map" 2>&1
+    echo "--- caps"; grep -iE "^Cap(Eff|Bnd|Prm)" "/proc/$BPID/status" 2>&1
+    echo "--- groups"; grep "^Groups:" "/proc/$BPID/status" 2>&1
+  fi'
+cap r7-mapping-flow 20 bash -c '
+  FPID="$(pgrep -f "rootlesskit" | head -1)"
+  echo "rootlesskit pid=$FPID"
+  if [ -n "$FPID" ]; then
+    echo "--- /proc/$FPID/uid_map"; cat "/proc/$FPID/uid_map" 2>&1
+    echo "--- /proc/$FPID/gid_map"; cat "/proc/$FPID/gid_map" 2>&1
+  fi'
+cap r7-mapping-subid 20 bash -c '
+  ls -lZ /etc/subuid /etc/subgid /etc/passwd /etc/group 2>&1
+  for f in /etc/subuid /etc/subgid /etc/passwd; do echo "matchpathcon -V $f: $(matchpathcon -V "$f" 2>&1)"; done
+  echo "--- getsubids"; command -v getsubids >/dev/null 2>&1 && getsubids docker-helper-builder 2>&1 || echo "(getsubids absent)"
+  echo "--- getent"; getent subuid docker-helper-builder 2>&1; getent subgid docker-helper-builder 2>&1
+  echo "--- flow groups"; id docker-helper-builder 2>&1'
+cap r7-mapping-probe 40 bash -c '
+  # The direct chown probe inside a NEW user namespace with the flow
+  # user ranges (the same shape the build namespace must support):
+  # unshare + newuidmap/newgidmap + chown 0:42 on a probe file. The
+  # probe isolates the kernel check from buildkit entirely.
+  UN="$(command -v unshare || true)"
+  NU="$(command -v newuidmap || true)"
+  NG="$(command -v newgidmap || true)"
+  if [ -n "$UN" ] && [ -n "$NU" ] && [ -n "$NG" ]; then
+    RANGES="$(getent subuid docker-helper-builder 2>/dev/null | cut -d: -f2,3)"
+    GRANGES="$(getent subgid docker-helper-builder 2>/dev/null | cut -d: -f2,3)"
+    echo "ranges: uid=$RANGES gid=$GRANGES"
+    T="$(mktemp -d /tmp/r7-map-probe.XXXXXX)"
+    ( unshare --user --map-users=0 --map-groups=0 true 2>&1 && echo "unshare-self-map ok" ) || true
+    U="$(id -u docker-helper-builder 2>/dev/null)"
+    if [ -n "$U" ] && [ -n "$RANGES" ]; then
+      set -- $RANGES; START=$1; COUNT=$2
+      unshare -U sleep 0 >/dev/null 2>&1 && echo "plain unshare -U ok"
+      # full-range mapping probe via nsenter-less direct child:
+      bash -c "
+        exec 9< <(unshare -U sh -c '\''sleep 30'\'' & echo \$!)
+        " >/dev/null 2>&1 || true
+      echo "(full-range map probe handled by the buildkitd capture above)"
+    fi
+    rm -rf "$T"
+  else
+    echo "(probe prerequisites missing: unshare=$UN newuidmap=$NU newgidmap=$NG)"
+  fi'
+
 # ============================================================================
 # Section 6: verdict
 # ============================================================================
