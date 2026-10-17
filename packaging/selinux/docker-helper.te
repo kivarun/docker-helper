@@ -3023,7 +3023,30 @@ allow docker_helper_buildkitd_t cert_t:file { read open getattr };
 #   mount callback failed ...: lstat .../bin/arch: permission denied
 #   avc: denied { getattr } tclass=lnk_file
 #        tcontext=docker_helper_builder_state_t:s0:c1
-allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file { create setattr getattr };
+# R7 (proof-only, the agreed snapshot-symlink readlink rung; enforcing
+# evidence UAT run 39063033862 audit serial 826 and UAT run 39066935506
+# audit serial 811 — two independent runs reproduce the identical fatal
+# shape): the solver's snapshot-preparation readlink of the staged
+# symlink farm — the parent-copy phase resolves each staged symlink
+# before the cache-key prepare:
+#   #5 ERROR: failed to prepare sha256:74d9… as sk4q5…: copying of
+#     parent failed: failed to read link:
+#     .../root/runc-native/snapshots/snapshots/3/bin/arch:
+#     readlink .../snapshots/3/bin/arch: permission denied
+#   avc: denied { read } for pid=3967 comm="buildkitd" name="arch"
+#        dev="vda3" ino=10488342
+#        scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#        tcontext=system_u:object_r:docker_helper_builder_state_t:s0:c1
+#        tclass=lnk_file permissive=0
+# (identical modulo pid/ino in the second run: pid=3946 name="arch"
+# ino=10488351). readlink(2) is the lnk_file:read hook; the standing set
+# { create setattr getattr } covers the farm's create/fixup/verify but
+# not the read — one bit appended to the existing rule, no parallel
+# allow. Deliberately NOT granted here, each on its own causal evidence:
+# cap_userns:fsetid (serials 820/821), dac_override/dac_read_search
+# (serials 2093/2094), and tmpfs_t:lnk_file read (the /etc ssl/pki/
+# localtime symlinks) — different targets, different predicates.
+allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file { create setattr getattr read };
 
 # R7 (green attempt, scope=selinux run 38995970391): the mount target's
 # own population. The RUN step's bind mount now succeeds; the mount
