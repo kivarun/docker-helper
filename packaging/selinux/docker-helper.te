@@ -2800,7 +2800,7 @@ allow docker_helper_buildkitd_t self:cap_userns { sys_admin };
 # the source superblock). Same-window records of buildkitd's own /tmp
 # lifecycle (the check/temp-dir surface its mount path exercises):
 # create file tmp_t, remove_name dir tmp_t, read dir tmp_t.
-allow docker_helper_buildkitd_t fs_t:filesystem { remount };
+allow docker_helper_buildkitd_t fs_t:filesystem { remount unmount };
 allow docker_helper_buildkitd_t tmp_t:file { create };
 
 # R7 (green attempt, scope=selinux run 38981152749): the payload's own
@@ -2922,6 +2922,16 @@ allow docker_helper_buildkitd_t cert_t:file { read open getattr };
 # tree; the removal hook is the same lifecycle's other half and stays on
 # the canonical rule below (the runtime-tree owner's rule carries the
 # full { getattr search write add_name create remove_name } set).
+# R7 (green attempt, scope=selinux run 38994896277): the RUN step's own
+# bind mount onto the just-created containerd-mount dir (the snapshot
+# source -> the runtime-tree target, flags 20480 = MS_BIND|MS_REC) and
+# the teardown unmount of the same source superblock:
+#   #5 ERROR: failed to mount .../containerd-mount432970002:
+#     ... err: permission denied
+#   avc: denied { mounton } tclass=dir tcontext=...builder_runtime_t:c1
+#   avc: denied { unmount } tclass=filesystem tcontext=fs_t
+# — mounton joins the runtime-tree dir rule, unmount joins the
+# source-superblock rule (the same mount/unmount lifecycle).
 
 # --- R7 closing note: denials deliberately left CLOSED ---
 #
@@ -4738,7 +4748,7 @@ allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search;
 # the flow traversal, the daemon transport) are DIFFERENT subjects and
 # DIFFERENT owners — their builder_runtime_t/builder_runtime_root_t
 # rules stay byte-unchanged, never merged and never templates.
-allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write add_name create remove_name };
+allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write add_name create remove_name mounton };
 
 # --- 4C-77: the categorized operation-runtime sock_file create — the NEW
 # --- pair+class plane (PLANE I), NEVER a widening of the dir rule ---
