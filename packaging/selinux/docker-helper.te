@@ -2821,8 +2821,12 @@ allow docker_helper_buildkitd_t tmp_t:file { create };
 # dial (the Head request). Client-side only, self-scoped: no listen/accept
 # surface, no bind-to-port authority beyond the resolver's ephemeral
 # behavior, no raw/socketpair surfaces.
+# R7 (green attempt, scope=selinux run 38988740197): the dial's post-
+# connect getsockopt hook (the TLS-setup layer reads the socket state):
+#   dial tcp 3.213.98.10:443: getsockopt: permission denied
+# — the tcp rule gains getopt in place.
 allow docker_helper_buildkitd_t self:udp_socket { create setopt connect getattr read write };
-allow docker_helper_buildkitd_t self:tcp_socket { create setopt connect getattr read write };
+allow docker_helper_buildkitd_t self:tcp_socket { create setopt connect getattr read write getopt };
 
 # R7 (green attempt, scope=selinux run 38982713632): the flow's forwarding
 # proxy sockets. The buildkitd resolver query now leaves the child, but the
