@@ -2856,6 +2856,18 @@ allow docker_helper_slirp4netns_t self:tcp_socket { create setopt connect getopt
 # (rootlesskit { read open }). Read-only.
 allow docker_helper_slirp4netns_t net_conf_t:file { read open };
 
+# R7 (green attempt, scope=selinux run 38987222675): the registry dial's
+# port-class permission. The DNS relay works and the lookup resolves; the
+# HTTPS request then fails at the port label:
+#
+#   dial tcp 100.60.105.131:443: connect: permission denied
+#   (tclass=tcp_socket, the http_port_t name_connect hook)
+#
+# The same port-class grant the daemon already carries for its own
+# registry access (allow docker_helper_t http_port_t:tcp_socket
+# { name_connect }). Port-class only: no node/netif/peer authority.
+allow docker_helper_buildkitd_t http_port_t:tcp_socket { name_connect };
+
 # --- R7 closing note: denials deliberately left CLOSED ---
 #
 # Non-fatal for the observed path (the builder socket came up and passed
