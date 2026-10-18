@@ -143,12 +143,21 @@ log "=== section 3: loaded-policy analysis ==="
 cap mcs-members 60 seinfo -a mcs_constrained_type -x
 cap trusted-subjects 30 seinfo -a mlstrustedsubject -x
 cap trusted-objects 30 seinfo -a mlstrustedobject -x
-cap constraints-all 200 sesearch --constraint
+# seinfo --constrain <class> is the constraint listing on this setools
+# generation (sesearch has no --constraint option here — the failed
+# attempt is recorded in the first dispatch's evidence).
+cap constraints-all 300 seinfo --constrain
 for c in file dir lnk_file sock_file process unix_stream_socket fifo_file filesystem; do
-  cap "constraints-$c" 40 "sesearch" --constraint -c "$c"
+  cap "constraints-$c" 40 seinfo --constrain "$c"
 done
-# The work order's seinfo --constrain spelling — recorded, expected unsupported.
-cap seinfo-constrain-attempt 6 seinfo --constrain file
+# The loaded TE allow on the live-probe pair (requirement: the denial must
+# be attributable to MCS, so the TE allow must be proven present first).
+cap sesearch-state-allow 12 sesearch -A -s docker_helper_buildkitd_t \
+  -t docker_helper_builder_state_t -c file
+cap sesearch-runtime-allow 12 sesearch -A -s docker_helper_buildkitd_t \
+  -t docker_helper_builder_runtime_t
+cap sesearch-state-readpair 12 sesearch -A -s docker_helper_buildkitd_t \
+  -t docker_helper_builder_state_t -c dir
 
 for t in docker_helper_buildkitd_t docker_helper_rootlesskit_t docker_helper_builder_t \
          docker_helper_t docker_helper_builder_launcher_t docker_helper_container_t \
@@ -172,8 +181,7 @@ for c in file dir lnk_file sock_file; do
     FORM="t1"
   elif grep -Eq "t2 == mcs_constrained_type" "$EVIDENCE_DIR/constraints-$c.log"; then
     FORM="t2"
-  elif [ -s "$EVIDENCE_DIR/constraints-$c.log" ] \
-       && grep -q "mlsconstrain" "$EVIDENCE_DIR/constraints-$c.log"; then
+  elif grep -qE "^mlsconstrain" "$EVIDENCE_DIR/constraints-$c.log"; then
     FORM="unconditional"
   fi
   log "MCS-FORM[$c]=$FORM"
@@ -203,9 +211,12 @@ log "TRUSTED-SUBJECT-EXCEPTION=$TRUSTED_ANY"
 # ============================================================================
 log "=== section 5: live cross-category probes ==="
 LIVE_VERDICT="BLOCKED:no-process"
-avc_tail() { # label — dump the freshest AVC records for the evidence
-  dmesg 2>/dev/null | grep "avc:" | tail -40 > "$EVIDENCE_DIR/$1.log" || true
-  [ -s "$EVIDENCE_DIR/$1.log" ] || journalctl -k --no-pager 2>/dev/null | grep "avc:" | tail -40 > "$EVIDENCE_DIR/$1.log" || true
+# AVC capture is ausearch-based (auditd owns kernel AVC records here —
+# dmesg/journalctl proved empty in the first dispatch).
+avc_tail() { # <label> <window-ts> — dump the AVC records since the window start
+  ausearch -m AVC -ts "$2" --just-one 2>/dev/null | head -0 >/dev/null || true
+  ausearch -m AVC -ts "$2" 2>/dev/null > "$EVIDENCE_DIR/$1.log"
+  [ -s "$EVIDENCE_DIR/$1.log" ] || { printf '(no AVC records since %s)\n' "$2" > "$EVIDENCE_DIR/$1.log"; }
   head -6 "$EVIDENCE_DIR/$1.log" || true
 }
 # control: does the runcon machinery work AT ALL for a same-domain level change?
@@ -219,13 +230,26 @@ fi
 # grant from the admin domain — expected to be denied; that denial is
 # itself the security fact)
 BKD_OK=0
+TS1="$(date +'%x %T')"
 if OUT="$(runcon -t docker_helper_buildkitd_t -l s0:c1 id -Z 2>"$EVIDENCE_DIR/runcon-bkd.err")"; then
   BKD_OK=1
   log "builder-domain test process: OK ($OUT)"
   printf '%s\n' "$OUT" > "$EVIDENCE_DIR/runcon-bkd.ok"
 else
   log "builder-domain test process DENIED (rc=$?, err: $(head -3 "$EVIDENCE_DIR/runcon-bkd.err"))"
-  avc_tail runcon-bkd-avc
+  avc_tail runcon-bkd-avc "$TS1"
+fi
+# the system_r-shaped attempt: the module's roles do contain the type, so
+# the context FORM is valid and the kernel checks the actual transition
+# permission — expected denied with an attributable AVC record.
+TS2="$(date +'%x %T')"
+if OUT="$(runcon -r system_r -t docker_helper_buildkitd_t -l s0:c1 id -Z 2>"$EVIDENCE_DIR/runcon-bkd-systemr.err")"; then
+  BKD_OK=1
+  log "builder-domain test process (system_r): OK ($OUT)"
+  printf '%s\n' "$OUT" > "$EVIDENCE_DIR/runcon-bkd.ok"
+else
+  log "builder-domain test process (system_r) DENIED (rc=$?, err: $(head -3 "$EVIDENCE_DIR/runcon-bkd-systemr.err"))"
+  avc_tail runcon-bkd-systemr-avc "$TS2"
 fi
 if [ "$BKD_OK" = 1 ]; then
   # DAC equalized: mode 0666 root-owned fixtures — any denial is SELinux.
@@ -238,6 +262,12 @@ if [ "$BKD_OK" = 1 ]; then
     && chcon -t docker_helper_builder_state_t -l s0:c2 "$FIX/c2.log" \
     || { log "fixture labeling failed"; LIVE_VERDICT="BLOCKED:fixture-labeling"; }
   if [ "$LIVE_VERDICT" != "BLOCKED:fixture-labeling" ]; then
+    # requirements 1+2: the full subject getcon and both getfilecon values
+    runcon -t docker_helper_buildkitd_t -l s0:c1 id -Z > "$EVIDENCE_DIR/probe-subject-con.txt" 2>&1
+    getfilecon "$FIX/c1.log" > "$EVIDENCE_DIR/probe-c1-filecon.txt" 2>&1
+    getfilecon "$FIX/c2.log" > "$EVIDENCE_DIR/probe-c2-filecon.txt" 2>&1
+    log "subject: $(cat "$EVIDENCE_DIR/probe-subject-con.txt"); c1: $(cat "$EVIDENCE_DIR/probe-c1-filecon.txt"); c2: $(cat "$EVIDENCE_DIR/probe-c2-filecon.txt")"
+    TS3="$(date +'%x %T')"
     POS="$(runcon -t docker_helper_buildkitd_t -l s0:c1 \
         sh -c "printf 'pos-append\n' >> '$FIX/c1.log' && cat '$FIX/c1.log'" 2>&1)"
     POS_RC=$?
@@ -247,7 +277,7 @@ if [ "$BKD_OK" = 1 ]; then
     log "positive control (c1->c1): rc=$POS_RC out=$(printf '%s' "$POS" | head -1)"
     log "negative control (c1->c2): rc=$NEG_RC out=$(printf '%s' "$NEG" | head -1)"
     if [ "$POS_RC" -eq 0 ] && [ "$NEG_RC" -ne 0 ]; then
-      avc_tail crosscat-avc
+      avc_tail crosscat-avc "$TS3"
       if grep -q "scontext=.*docker_helper_buildkitd_t" "$EVIDENCE_DIR/crosscat-avc.log" 2>/dev/null \
          && grep -q "tclass=file" "$EVIDENCE_DIR/crosscat-avc.log" 2>/dev/null; then
         LIVE_VERDICT="PASS"
@@ -317,9 +347,10 @@ EOF
     wait "$BLD_JOB"; BLD_RC=$?
     log "cgroup-build rc=$BLD_RC (terminal failure expected: $(tail -1 "$EVIDENCE_DIR/cgroup-build.log" 2>/dev/null))"
     sleep 1
-    avc_tail cgroup-avc-ordered
+    CG_TS="$(date +'%x %T' -d '-10 minutes')"
+    avc_tail cgroup-avc-ordered "$CG_TS"
     # The ordered cgroup denial set for THIS window only.
-    dmesg 2>/dev/null | grep "avc:" | grep -E "cgroup" > "$EVIDENCE_DIR/cgroup-avc-this-run.log" || true
+    ausearch -m AVC -ts "$CG_TS" 2>/dev/null | grep -E "cgroup" > "$EVIDENCE_DIR/cgroup-avc-this-run.log" || true
     log "cgroup AVC records this run: $(wc -l < "$EVIDENCE_DIR/cgroup-avc-this-run.log")"
     cap runc-version 4 bash -c '/usr/libexec/docker-helper/buildkit/buildkit-runc --version 2>&1 || true'
     CGROUP_STATUS="collected"
