@@ -37,8 +37,17 @@ name: Release 2.4 R7 full-gate corrective diagnosis
 #                    BLOCKED — never PASS — when no test process can be
 #                    created), and the cgroup-finding forensics (the ordered
 #                    denial set, the RUNNING buildkitd's mount-namespace
-#                    mountinfo, the bundled runc version). Security proof
-#                    only: NO grants, NO production changes.
+#                    mountinfo, the bundled runc version). The kernel-
+#                    decision matrix (a disposable libselinux helper using
+#                    security_compute_av_raw with class/permission NAMES)
+#                    decides the same-category/cross-category pairs on the
+#                    loaded policy for file read/write/append, dir
+#                    search/write/add_name/remove_name, lnk_file read,
+#                    sock_file getattr and unix_stream_socket connectto —
+#                    with the socket surface captured separately (the
+#                    loaded unix_stream_socket class has no mlsconstrain)
+#                    and never extrapolated from the file/dir proof.
+#                    Security proof only: NO grants, NO production changes.
 #
 # SCOPE NOTE: the default artifact source is the FAILED full-gate run's
 # producer set (the RED fixture). It exists to reproduce and to collect

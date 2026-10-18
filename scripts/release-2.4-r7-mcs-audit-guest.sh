@@ -28,10 +28,26 @@
 #      in the ACTUAL docker_helper_buildkitd_t:s0:c1 domain; on success
 #      run the positive control (append+read the op's own c1-labeled
 #      state fixture), the negative control (the identical c2-labeled
-#      fixture), and traversal of the other operation's fixtures — with
+#      fixture), traversal of the other operation's fixtures — with
 #      DAC equalized (mode 0666, root-owned) so the denial can only be
 #      SELinux; on failure record the exact transition-denial evidence
 #      and mark the live proof BLOCKED (never PASS);
+#   D2. the kernel-decision matrix: a disposable libselinux helper
+#      (guest-side build, class/permission NAMES via
+#      string_to_security_class/string_to_av_perm) queries
+#      security_compute_av_raw on the LOADED policy for the real UAT
+#      contexts — buildkitd_t:s0:c1 and :s0:c2 against
+#      builder_state_t:s0:c1/:s0:c2 — over file read/write/append,
+#      dir search/write/add_name/remove_name, lnk_file read,
+#      sock_file getattr and unix_stream_socket connectto, both
+#      directions plus both same-category controls; the verdict
+#      requires same-category ALLOW, cross-category DENY for every
+#      queried permission and no permissive-domain exception;
+#   D3. the socket-plane facts: the loaded unix_stream_socket class has
+#      no mlsconstrain — the socket decision surface is captured
+#      separately (connectto TE allows toward the state/runtime types,
+#      the sock_file constraints, the permissive-domain list) and the
+#      file/dir MCS proof is NOT extrapolated onto it;
 #   E. the cgroup finding forensics (read-only): reproduce the terminal
 #      failure with a minimal build, capture the ORDERED cgroup AVC set,
 #      the RUNNING buildkitd's mount namespace mountinfo (is a cgroup2
@@ -137,6 +153,90 @@ else
 fi
 
 # ============================================================================
+# Section 2b: the libselinux kernel-decision helper (guest-side build)
+# ============================================================================
+# A small disposable C helper queries the LOADED policy's access decisions
+# through libselinux's security_compute_av_raw — the same constraint and TE
+# evaluation the kernel performs on those exact policy bytes — with class
+# and permission NAMES (string_to_security_class / string_to_av_perm), not
+# hardcoded bit masks. Guest-side diagnostic tooling only.
+if [ -f "$STATE_DIR/sec2b" ]; then
+  log "phase marker: section 2b done; skipping"
+else
+  log "=== section 2b: kernel-decision helper toolchain ==="
+  if ! command -v gcc >/dev/null 2>&1 || [ ! -e /usr/include/selinux/selinux.h ]; then
+    zypper --non-interactive install -y gcc libselinux-devel \
+      >"$EVIDENCE_DIR/toolchain-install.log" 2>&1 \
+      || fail "toolchain install failed (evidence: $EVIDENCE_DIR/toolchain-install.log)"
+  fi
+  command -v gcc >/dev/null 2>&1 || fail "gcc unavailable"
+  [ -e /usr/include/selinux/selinux.h ] || fail "libselinux-devel unavailable"
+  cat > "$EVIDENCE_DIR/mcs_av_probe.c" <<'CEOF'
+/* mcs_av_probe.c — R7 kernel-policy decision matrix probe.
+ * Queries security_compute_av_raw (the loaded policy's own decision
+ * computation, the same evaluation the kernel performs on those bytes)
+ * for named class/permission pairs across categorized contexts.
+ * Output: one TSV line per query:
+ *   scon tcon class perm allowed decided auditallow auditdeny permissive
+ */
+#include <selinux/selinux.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static const char *SCON_C1 = "system_u:system_r:docker_helper_buildkitd_t:s0:c1";
+static const char *SCON_C2 = "system_u:system_r:docker_helper_buildkitd_t:s0:c2";
+static const char *TOBJ_C1 = "system_u:object_r:docker_helper_builder_state_t:s0:c1";
+static const char *TOBJ_C2 = "system_u:object_r:docker_helper_builder_state_t:s0:c2";
+
+struct q { const char *cls; const char *perm; };
+static struct q QUERIES[] = {
+  { "file", "read" }, { "file", "write" }, { "file", "append" },
+  { "dir", "search" }, { "dir", "write" }, { "dir", "add_name" },
+  { "dir", "remove_name" },
+  { "lnk_file", "read" },
+  { "sock_file", "getattr" },
+  { "unix_stream_socket", "connectto" },
+};
+
+int main(void) {
+  struct av_decision avd;
+  const char *scons[2] = { SCON_C1, SCON_C2 };
+  const char *tcons[2] = { TOBJ_C1, TOBJ_C2 };
+  size_t si, ti, qi;
+  for (si = 0; si < 2; si++) {
+    for (ti = 0; ti < 2; ti++) {
+      for (qi = 0; qi < sizeof(QUERIES)/sizeof(QUERIES[0]); qi++) {
+        security_class_t cls = string_to_security_class(QUERIES[qi].cls);
+        if (!cls) { printf("ERR\tclass %s unknown\n", QUERIES[qi].cls); continue; }
+        access_vector_t bit = string_to_av_perm(cls, QUERIES[qi].perm);
+        if (!bit) { printf("ERR\tperm %s %s unknown\n", QUERIES[qi].cls, QUERIES[qi].perm); continue; }
+        memset(&avd, 0, sizeof(avd));
+        if (security_compute_av_raw(scons[si], tcons[ti], cls, bit, &avd) < 0) {
+          printf("ERR\tcompute_av failed\n");
+          continue;
+        }
+        printf("%s\t%s\t%s\t%s\t%u\t%u\t%u\t%u\t%u\n",
+               scons[si], tcons[ti], QUERIES[qi].cls, QUERIES[qi].perm,
+               (avd.allowed & bit) ? 1 : 0,
+               (avd.decided & bit) ? 1 : 0,
+               (avd.auditallow & bit) ? 1 : 0,
+               (avd.auditdeny & bit) ? 1 : 0,
+               (avd.flags & SELINUX_AVD_FLAGS_PERMISSIVE) ? 1 : 0);
+      }
+    }
+  }
+  return 0;
+}
+CEOF
+  gcc -O2 -o "$EVIDENCE_DIR/mcs_av_probe" "$EVIDENCE_DIR/mcs_av_probe.c" -lselinux \
+    >"$EVIDENCE_DIR/helper-build.log" 2>&1 \
+    || fail "helper build failed (evidence: $EVIDENCE_DIR/helper-build.log)"
+  log "kernel-decision helper built: $EVIDENCE_DIR/mcs_av_probe"
+  touch "$STATE_DIR/sec2b"
+fi
+
+# ============================================================================
 # Section 3: loaded-policy analysis — constraints + membership
 # ============================================================================
 log "=== section 3: loaded-policy analysis ==="
@@ -158,6 +258,21 @@ cap sesearch-runtime-allow 12 sesearch -A -s docker_helper_buildkitd_t \
   -t docker_helper_builder_runtime_t
 cap sesearch-state-readpair 12 sesearch -A -s docker_helper_buildkitd_t \
   -t docker_helper_builder_state_t -c dir
+# Socket-plane isolation facts (§3 of the R7 kernel-decision work order):
+# the loaded unix_stream_socket class has NO mlsconstrain — the socket
+# decision surface is TE-allow-driven and must NOT be extrapolated from
+# the file/dir MCS proof. Captured separately.
+cap sesearch-connectto-any 20 sesearch -A -s docker_helper_buildkitd_t \
+  -c unix_stream_socket -p connectto
+cap sesearch-connectto-state 20 sesearch -A -s docker_helper_buildkitd_t \
+  -t docker_helper_builder_state_t -c unix_stream_socket
+cap sesearch-connectto-runtime 20 sesearch -A -s docker_helper_buildkitd_t \
+  -t docker_helper_builder_runtime_t -c unix_stream_socket
+cap sesearch-socket-all 30 sesearch -A -s docker_helper_buildkitd_t \
+  -t docker_helper_builder_state_t -c sock_file,unix_stream_socket
+cap constraints-sockfile-mls 40 seinfo --constrain sock_file
+cap constraints-uss-mls 40 seinfo --constrain unix_stream_socket
+cap permissive-domains 10 bash -c 'semanage permissive -l 2>/dev/null | grep -i docker || echo "(no docker-helper permissive domain)"'
 
 for t in docker_helper_buildkitd_t docker_helper_rootlesskit_t docker_helper_builder_t \
          docker_helper_t docker_helper_builder_launcher_t docker_helper_container_t \
@@ -319,6 +434,79 @@ fi
 log "LIVE-NEGATIVE=$LIVE_VERDICT"
 
 # ============================================================================
+# Section 5a: the kernel-decision matrix (libselinux security_compute_av_raw)
+# ============================================================================
+log "=== section 5a: kernel-policy decision matrix ==="
+KERNEL_AV_VERDICT="BLOCKED:not-run"
+if [ -x "$EVIDENCE_DIR/mcs_av_probe" ]; then
+  "$EVIDENCE_DIR/mcs_av_probe" > "$EVIDENCE_DIR/kernel-av-matrix.tsv" 2>&1 \
+    || fail "kernel-decision helper failed (evidence: $EVIDENCE_DIR/kernel-av-matrix.tsv)"
+  log "kernel-AV matrix: $(wc -l < "$EVIDENCE_DIR/kernel-av-matrix.tsv") rows (evidence: $EVIDENCE_DIR/kernel-av-matrix.tsv)"
+  head -6 "$EVIDENCE_DIR/kernel-av-matrix.tsv"
+  # Verdict: same-category pairs (c1->c1, c2->c2) must ALLOW; cross-category
+  # (c1->c2, c2->c1) must DENY — for every queried permission; and no
+  # permissive-domain exception may appear anywhere in the matrix.
+  # Columns: scon tcon class perm allowed decided auditallow auditdeny permissive
+  KA_OK=1; KA_REASON=""
+  if grep -q "^ERR" "$EVIDENCE_DIR/kernel-av-matrix.tsv"; then
+    KA_OK=0; KA_REASON="helper-error:$(grep '^ERR' "$EVIDENCE_DIR/kernel-av-matrix.tsv" | head -1)"
+  else
+    for CLASSPERM in "file read" "file write" "file append" "dir search" "dir write" \
+                     "dir add_name" "dir remove_name" "lnk_file read" "sock_file getattr" \
+                     "unix_stream_socket connectto"; do
+      set -- $CLASSPERM; KCLS="$1"; KPERM="$2"
+      for KROW in "c1 c1 allow" "c2 c2 allow" "c1 c2 deny" "c2 c1 deny"; do
+        set -- $KROW; KS="$1"; KT="$2"; KEXP="$3"
+        # Columns are TAB-separated; match the category suffix on each
+        # context field exactly (awk split, no regex over the whole line).
+        KROWLINE="$(awk -F'\t' -v s="$KS" -v t="$KT" -v c="$KCLS" -v p="$KPERM" \
+          '$1 ~ ("s0:" s "$") && $2 ~ ("s0:" t "$") && $3 == c && $4 == p { print; exit }' \
+          "$EVIDENCE_DIR/kernel-av-matrix.tsv")"
+        if [ -z "$KROWLINE" ]; then
+          KA_OK=0; KA_REASON="$KCLS:$KPERM $KS->$KT row-missing"; break 2
+        fi
+        KALLOWED="$(printf '%s' "$KROWLINE" | awk '{print $5}')"
+        KPERMIS="$(printf '%s' "$KROWLINE" | awk '{print $9}')"
+        if [ "$KPERMIS" = "1" ]; then
+          KA_OK=0; KA_REASON="$KCLS:$KPERM $KS->$KT permissive-domain-exception"; break 2
+        fi
+        case "$KEXP" in
+          allow) [ "$KALLOWED" = "1" ] || { KA_OK=0; KA_REASON="$KCLS:$KPERM $KS->$KT expected-allow-got-$KALLOWED"; break 2; } ;;
+          deny)  [ "$KALLOWED" = "0" ] || { KA_OK=0; KA_REASON="$KCLS:$KPERM $KS->$KT expected-deny-got-$KALLOWED"; break 2; } ;;
+        esac
+      done
+    done
+  fi
+  [ "$KA_OK" = 1 ] && KERNEL_AV_VERDICT="PASS" || KERNEL_AV_VERDICT="FAIL:$KA_REASON"
+  log "KERNEL-AV=$KERNEL_AV_VERDICT"
+else
+  log "kernel-decision helper absent; matrix not run"
+fi
+
+# Structural re-assertion (independent of the kernel matrix): the loaded
+# constraint form is subject-gated, the builder subject is a member, no
+# trusted exception exists.
+STRUCTURAL_VERDICT="PASS"
+[ "$MCS_FORM" = "t1" ] || STRUCTURAL_VERDICT="FAIL:constraint-form=$MCS_FORM"
+[ "$SUBJ_BKD" = "member" ] || STRUCTURAL_VERDICT="FAIL:buildkitd-not-member"
+[ "$TRUSTED_ANY" = "no" ] || STRUCTURAL_VERDICT="FAIL:trusted-subject-exception=$TRUSTED_ANY"
+log "STRUCTURAL=$STRUCTURAL_VERDICT"
+
+# Socket isolation verdict: the loaded unix_stream_socket class has no
+# mlsconstrain, so cross-operation socket isolation is TE-allow-driven.
+# The probe matrix still decides sock_file:getattr (traversal, MCS-gated)
+# and unix_stream_socket:connectto (TE-only) per pair — no extrapolation.
+if grep -q "mlsconstrain" "$EVIDENCE_DIR/constraints-uss-mls.log" 2>/dev/null; then
+  SOCKET_NOTE="mlsconstrain-present-on-unix_stream_socket"
+else
+  SOCKET_NOTE="no-mlsconstrain-on-unix_stream_socket"
+fi
+CT_STATE="$(grep -c 'connectto' "$EVIDENCE_DIR/sesearch-connectto-state.log" 2>/dev/null || echo 0)"
+CT_RUNTIME="$(grep -c 'connectto' "$EVIDENCE_DIR/sesearch-connectto-runtime.log" 2>/dev/null || echo 0)"
+log "SOCKET: $SOCKET_NOTE; connectto allows toward builder_state_t=$CT_STATE, builder_runtime_t=$CT_RUNTIME"
+log "R7-MCS-SOCKET=NOTE=$SOCKET_NOTE;CONNECTTO-STATE=$CT_STATE;CONNECTTO-RUNTIME=$CT_RUNTIME"
+
+# ============================================================================
 # Section 6: cgroup finding forensics (read-only; NO grants)
 # ============================================================================
 log "=== section 6: cgroup finding forensics ==="
@@ -406,5 +594,6 @@ else
   esac
 fi
 log "R7-MCS-AUDIT=CONSTRAINTS=$MCS_FORM;SUBJECT-BUILDKITD=$SUBJ_BKD;OBJECT-STATE=$OBJ_STATE;LIVE-NEGATIVE=$LIVE_VERDICT;CGROUP-FORENSIC=$CGROUP_STATUS"
+log "R7-MCS-STATUSES=STRUCTURAL=$STRUCTURAL_VERDICT;KERNEL-AV=$KERNEL_AV_VERDICT;LIVE-SYSCALL=$LIVE_VERDICT"
 log "R7-MCS-ISOLATION=$ISOLATION"
 exit 0
