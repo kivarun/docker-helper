@@ -174,14 +174,19 @@ log "=== section 4: MCS-form verdict ==="
 MCS_FORM="none"
 for c in file dir lnk_file sock_file; do
   FORM="none"
-  if grep -Eq "t1 == mcs_constrained_type" "$EVIDENCE_DIR/constraints-$c.log" \
-     && grep -Eq "t2 == mcs_constrained_type" "$EVIDENCE_DIR/constraints-$c.log"; then
+  # The loaded form is the EXCEPTION form: (h1 dom h2 or t1 !=
+  # mcs_constrained_type) — the constraint bites exactly when the
+  # subject IS a member. The exception mention and the direct mention
+  # are both subject-side gating.
+  T1=$(grep -Ec "t1 (!=|==) mcs_constrained_type" "$EVIDENCE_DIR/constraints-$c.log")
+  T2=$(grep -Ec "t2 (!=|==) mcs_constrained_type" "$EVIDENCE_DIR/constraints-$c.log")
+  if [ "$T1" -gt 0 ] && [ "$T2" -gt 0 ]; then
     FORM="t1+t2"
-  elif grep -Eq "t1 == mcs_constrained_type" "$EVIDENCE_DIR/constraints-$c.log"; then
+  elif [ "$T1" -gt 0 ]; then
     FORM="t1"
-  elif grep -Eq "t2 == mcs_constrained_type" "$EVIDENCE_DIR/constraints-$c.log"; then
+  elif [ "$T2" -gt 0 ]; then
     FORM="t2"
-  elif grep -qE "^mlsconstrain" "$EVIDENCE_DIR/constraints-$c.log"; then
+  elif grep -q "mlsconstrain" "$EVIDENCE_DIR/constraints-$c.log"; then
     FORM="unconditional"
   fi
   log "MCS-FORM[$c]=$FORM"
@@ -191,9 +196,10 @@ done
 log "MCS-FORM[summary]=$MCS_FORM"
 
 member_of() { # <type> — is the type a mcs_constrained_type member? (evidence: mcs-members.log)
-  # seinfo -a ... -x prints member names one per TAB-indented line — the
-  # delimiter class must include the tab.
-  grep -qE "(^|[ \t,])$1([ \t,]|\$)" "$EVIDENCE_DIR/mcs-members.log"
+  # seinfo -a ... -x prints member names one per TAB-indented line; the
+  # delimiter class must include whitespace (POSIX class — \t is not an
+  # escape inside grep -E).
+  grep -qE "(^|[[:space:],])$1([[:space:],]|$)" "$EVIDENCE_DIR/mcs-members.log"
 }
 SUBJ_BKD=not-member; member_of docker_helper_buildkitd_t && SUBJ_BKD=member
 SUBJ_RLK=not-member; member_of docker_helper_rootlesskit_t && SUBJ_RLK=member
@@ -219,12 +225,14 @@ LIVE_VERDICT="BLOCKED:no-process"
 # `journalctl -k` never sees them (the first two dispatches proved both
 # halves of this).
 avc_tail() { # <label> — dump the recent AVC records for the evidence
-  if pgrep -x auditd >/dev/null 2>&1 && command -v ausearch >/dev/null 2>&1; then
-    ausearch -m AVC -m USER_AVC --start recent 2>/dev/null > "$EVIDENCE_DIR/$1.log" || true
-    [ -s "$EVIDENCE_DIR/$1.log" ] || printf '(auditd running; no AVC records in the recent window)\n' > "$EVIDENCE_DIR/$1.log"
-  else
-    journalctl --no-pager 2>/dev/null | grep -i "avc" | tail -60 > "$EVIDENCE_DIR/$1.log" || true
-    [ -s "$EVIDENCE_DIR/$1.log" ] || printf '(no auditd; no AVC records in the system journal)\n' > "$EVIDENCE_DIR/$1.log"
+  : > "$EVIDENCE_DIR/$1.log"
+  if command -v ausearch >/dev/null 2>&1 && pgrep -x auditd >/dev/null 2>&1; then
+    ausearch -m AVC -m USER_AVC --start recent 2>/dev/null >> "$EVIDENCE_DIR/$1.log" || true
+  fi
+  JN="$(journalctl --no-pager 2>/dev/null | grep -i "avc" | tail -60 || true)"
+  [ -n "$JN" ] && printf '%s\n' "$JN" >> "$EVIDENCE_DIR/$1.log"
+  if [ ! -s "$EVIDENCE_DIR/$1.log" ]; then
+    printf '(no AVC records from auditd or the system journal)\n' > "$EVIDENCE_DIR/$1.log"
   fi
   log "avc capture [$1]: $(wc -l < "$EVIDENCE_DIR/$1.log") records (auditd: $(pgrep -x auditd >/dev/null 2>&1 && echo yes || echo no))"
   head -6 "$EVIDENCE_DIR/$1.log" || true
