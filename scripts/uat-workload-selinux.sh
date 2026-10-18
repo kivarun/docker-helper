@@ -1913,17 +1913,47 @@ else
     zypper --non-interactive install -y inotify-tools >/dev/null 2>&1 || true
   fi
   if command -v inotifywait >/dev/null 2>&1; then
-    RT_EVENT_CAPTURE=active
     RT_FIFO=/tmp/uat-wls-privacy-events
     rm -f "$RT_FIFO"
-    mkfifo "$RT_FIFO" 2>/dev/null || RT_EVENT_CAPTURE=unavailable
-    if [ "$RT_EVENT_CAPTURE" = "active" ]; then
-      inotifywait -m -r -q -e create,attrib,moved_to --format '' \
-        /run/docker-helper-builder/ops /var/lib/docker-helper-builder/ops \
-        > "$RT_FIFO" 2>/dev/null &
-      RT_INO_PID=$!
-      exec 3<"$RT_FIFO"
-      RT_EVENT_EVENTS=0
+    if mkfifo "$RT_FIFO" 2>/dev/null; then
+      # The sampler's own functional self-test (fail-closed): a scratch
+      # watcher outside the op trees must observe a touch's create and
+      # attrib events, or the event capture is recorded unavailable and
+      # the fixed poller stays. An empty --format template produced no
+      # output lines in the first dispatch (events observed: 0 while the
+      # builds lived) — the template emits the event name.
+      RT_SELF_FIFO=/tmp/uat-wls-privacy-selftest
+      RT_SELF_DIR=/tmp/uat-wls-privacy-selftest-dir
+      rm -rf "$RT_SELF_DIR"; mkdir -p "$RT_SELF_DIR"
+      if mkfifo "$RT_SELF_FIFO" 2>/dev/null; then
+        inotifywait -m -q -e create,attrib --format '%e' "$RT_SELF_DIR" \
+          > "$RT_SELF_FIFO" 2>/dev/null &
+        RT_SELF_PID=$!
+        exec 4<"$RT_SELF_FIFO"
+        touch "$RT_SELF_DIR/probe"
+        RT_SELF_EVENTS=0
+        RT_SELF_END=$(( $(date +%s) + 2 ))
+        while [ "$(date +%s)" -lt "$RT_SELF_END" ]; do
+          if read -t 1 -r -u 4 _; then
+            RT_SELF_EVENTS=$((RT_SELF_EVENTS + 1))
+          fi
+        done
+        exec 4<&-
+        kill "$RT_SELF_PID" 2>/dev/null || true
+        wait "$RT_SELF_PID" 2>/dev/null || true
+        rm -rf "$RT_SELF_DIR" "$RT_SELF_FIFO"
+      fi
+      if [ "${RT_SELF_EVENTS:-0}" -ge 1 ]; then
+        RT_EVENT_CAPTURE=active
+        inotifywait -m -r -q -e create,attrib,moved_to --format '%e' \
+          /run/docker-helper-builder/ops /var/lib/docker-helper-builder/ops \
+          > "$RT_FIFO" 2>/dev/null &
+        RT_INO_PID=$!
+        exec 3<"$RT_FIFO"
+        RT_EVENT_EVENTS=0
+      else
+        info "R7-privacy selftest: the inotify sampler observed no events; falling back to the fixed poller"
+      fi
     fi
   fi
   RT_DEADLINE=$(( $(date +%s) + 180 ))
