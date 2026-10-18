@@ -379,8 +379,8 @@ func s15LauncherCgroupViolations(policy string) []string {
 			violations = append(violations, fmt.Sprintf("the standing cgroup owner drifted (must stay exactly its bare { search } dir singleton): %s", want))
 		}
 	}
-	if buildkitdNamedAllow != 25 {
-		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 25 (the S15 phase had exactly 9; R7 added the manager child-lifecycle rule, the per-op endpoint peer edge, the rootlesskit parent's buildkitd child-authority rule the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr and the unprivileged-mount-flags statfs getattr; a NON-buildkitd S15 rule never trips it), found %d", buildkitdNamedAllow))
+	if buildkitdNamedAllow != 26 {
+		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 26 (the S15 phase had exactly 9; R7 added the manager child-lifecycle rule, the per-op endpoint peer edge, the rootlesskit parent's buildkitd child-authority rule the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr, the unprivileged-mount-flags statfs getattr and the OCI-worker process-group setup rule; a NON-buildkitd S15 rule never trips it), found %d", buildkitdNamedAllow))
 	}
 	return violations
 }
@@ -5019,6 +5019,21 @@ func buildkitdIdentityViolations(policy string) []string {
 	if runtimeSockFileCount != 1 {
 		violations = append(violations, fmt.Sprintf("the buildkitd categorized runtime-tree sock_file { create unlink setattr } grant must exist exactly once in the exact bare canonical form, found %d: %s", runtimeSockFileCount, canonicalRuntimeSockFile))
 	}
+	// The R7 OCI-worker process-group setup authority (UAT run
+	// 39074498186, serials 1323/1324 + the S15 probe reproduction
+	// 9089/9090): exactly the ONE self:process setpgid rule — the forked
+	// child's pre-exec setpgid(2) on itself, the parent's exec.Cmd.Start
+	// surfacing the child-side EACCES as the fatal fork/exec PathError.
+	// No other domain, no other process permission.
+	setpgidCount := 0
+	for _, line := range strings.Split(policy, "\n") {
+		if strings.TrimSpace(line) == "allow docker_helper_buildkitd_t self:process setpgid;" {
+			setpgidCount++
+		}
+	}
+	if setpgidCount != 1 {
+		violations = append(violations, fmt.Sprintf("the buildkitd OCI-worker process-group setup grant must exist exactly once in the exact canonical form, found %d", setpgidCount))
+	}
 	// The exact module-borne allow-rule total naming a buildkitd type:
 	// the ten evidenced planes only (A source-exec, B transition,
 	// C target-side { entrypoint read execute getattr }, D shared
@@ -5031,12 +5046,13 @@ func buildkitdIdentityViolations(policy string) []string {
 	// manager child-lifecycle authority, the daemon's per-op BuildKit
 	// endpoint { connectto } peer edge, the rootlesskit parent's
 	// buildkitd child-authority rule, the buildkitd temp-dir lifecycle
-	// rule, the payload cap_userns sys_admin rule, the source-superblock
-	// remount rule, the /tmp file-create rule, the outbound udp/tcp
-	// client pair, the registry port-class dial, the trust-anchor read
-	// pair, the runtime-tree symlink-create, the snapshot-tree symlink
-	// pair, the user-namespace probe getattr and the
-	// unprivileged-mount-flags statfs getattr) — never "at least".
+	// rule, the payload cap_userns sys_admin+chown rule, the
+	// source-superblock remount/unmount rule, the /tmp file-create rule,
+	// the outbound udp/tcp client pair, the registry port-class dial,
+	// the trust-anchor read pair, the runtime-tree symlink-create, the
+	// snapshot-tree symlink pair, the user-namespace probe getattr, the
+	// unprivileged-mount-flags statfs getattr and the OCI-worker
+	// process-group setup rule) — never "at least".
 	buildkitdNamedAllow := 0
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -5047,8 +5063,8 @@ func buildkitdIdentityViolations(policy string) []string {
 			buildkitdNamedAllow++
 		}
 	}
-	if buildkitdNamedAllow != 25 {
-		violations = append(violations, fmt.Sprintf("the module must carry exactly the twenty-five buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir setattr }, the categorized state-tree file { create read open lock write getattr rename }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name }, the categorized runtime-tree sock_file { create unlink setattr }, and the R7 manager child-lifecycle { signull signal sigkill } authority, the daemon's per-op BuildKit endpoint { connectto } peer edge, the rootlesskit parent's buildkitd child-authority rule, the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr and the unprivileged-mount-flags statfs getattr), found %d", buildkitdNamedAllow))
+	if buildkitdNamedAllow != 26 {
+		violations = append(violations, fmt.Sprintf("the module must carry exactly the twenty-six buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir setattr }, the categorized state-tree file { create read open lock write getattr rename }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name }, the categorized runtime-tree sock_file { create unlink setattr }, and the R7 manager child-lifecycle { signull signal sigkill } authority, the daemon's per-op BuildKit endpoint { connectto } peer edge, the rootlesskit parent's buildkitd child-authority rule, the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr, the unprivileged-mount-flags statfs getattr and the OCI-worker process-group setup rule), found %d", buildkitdNamedAllow))
 	}
 	// The shared runtime-root dir surface has exactly the standing
 	// owners above; a NEW or reshaped rule on the pair (any source,
@@ -5145,7 +5161,7 @@ func buildkitdIdentityViolations(policy string) []string {
 			if strings.Contains(trimmed, "docker_helper_buildkitd_exec_t") && trimmed != canonicalExec && trimmed != canonicalEntry {
 				violations = append(violations, "the only allow rules naming the buildkitd exec type are the exact source-exec grant { execute read open } and the exact target-side { entrypoint read execute getattr } grant: "+trimmed)
 			}
-			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot && trimmed != canonicalRuntimeTree && trimmed != canonicalRuntimeSockFile && trimmed != canonicalManagerLifecycle && trimmed != "allow docker_helper_t docker_helper_buildkitd_t:unix_stream_socket { connectto };" && trimmed != "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { signal sigkill };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:dir { write add_name create mounton remove_name read };" && trimmed != "allow docker_helper_buildkitd_t self:cap_userns { sys_admin chown };" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem { remount unmount };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:file { create };" && trimmed != "allow docker_helper_buildkitd_t self:udp_socket { create setopt connect getattr read write };" && trimmed != "allow docker_helper_buildkitd_t self:tcp_socket { create setopt connect getattr read write getopt };" && trimmed != "allow docker_helper_buildkitd_t http_port_t:tcp_socket { name_connect };" && trimmed != "allow docker_helper_buildkitd_t cert_t:dir { search };" && trimmed != "allow docker_helper_buildkitd_t cert_t:file { read open getattr };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:lnk_file { create };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file { create setattr getattr read };" && trimmed != "allow docker_helper_buildkitd_t nsfs_t:file getattr;" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem getattr;" {
+			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot && trimmed != canonicalRuntimeTree && trimmed != canonicalRuntimeSockFile && trimmed != canonicalManagerLifecycle && trimmed != "allow docker_helper_t docker_helper_buildkitd_t:unix_stream_socket { connectto };" && trimmed != "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { signal sigkill };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:dir { write add_name create mounton remove_name read };" && trimmed != "allow docker_helper_buildkitd_t self:cap_userns { sys_admin chown };" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem { remount unmount };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:file { create };" && trimmed != "allow docker_helper_buildkitd_t self:udp_socket { create setopt connect getattr read write };" && trimmed != "allow docker_helper_buildkitd_t self:tcp_socket { create setopt connect getattr read write getopt };" && trimmed != "allow docker_helper_buildkitd_t http_port_t:tcp_socket { name_connect };" && trimmed != "allow docker_helper_buildkitd_t cert_t:dir { search };" && trimmed != "allow docker_helper_buildkitd_t cert_t:file { read open getattr };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:lnk_file { create };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file { create setattr getattr read };" && trimmed != "allow docker_helper_buildkitd_t nsfs_t:file getattr;" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem getattr;" && trimmed != "allow docker_helper_buildkitd_t self:process setpgid;" {
 				violations = append(violations, "the only allow rules toward the buildkitd domain are the exact process transition grant, the exact target-entrypoint grant, and the exact state/runtime surfaces: "+trimmed)
 			}
 			fields := strings.Fields(trimmed)
@@ -5852,6 +5868,17 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		{"widened snapshot-tree lnk_file set +write", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file { create setattr getattr read write };"},
 		{"the pre-serial-826 shape appended (missing read)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file { create setattr getattr };"},
 		{"the manager's unlink shape copied into the buildkitd lnk_file rule", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file unlink;"},
+		// the OCI-worker process-group setup rule's own shapes: the
+		// canonical rule is the bare self:process setpgid singleton (UAT
+		// 39074498186 serials 1323/1324 + the S15 probe reproduction
+		// 9089/9090, the fatal "fork/exec buildkit-runc" whose exec never
+		// ran); no signal/capability ride-along, no explicit-target
+		// parallel spelling, no other domain's process authority copied
+		// into the worker domain
+		{"widened process-group setup +signal ride-along", "allow docker_helper_buildkitd_t self:process { setpgid signal };"},
+		{"the manager's process authority shape copied into the worker", "allow docker_helper_buildkitd_t self:process { signull signal sigkill };"},
+		{"parallel explicit-target setpgid spelling beside the self form", "allow docker_helper_buildkitd_t docker_helper_buildkitd_t:process setpgid;"},
+		{"split process-group setup (bare setpgid + parallel self rule)", "allow docker_helper_buildkitd_t self:process setpgid;\nallow docker_helper_buildkitd_t self:process setpgid;"},
 		{"the wrong class (dir:lock)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir lock;"},
 		{"the wrong class (dir:{ create read open lock })", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { create read open lock };"},
 		// wrong source/target on the create shape and on the widened shape

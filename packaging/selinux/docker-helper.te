@@ -129,7 +129,7 @@ module docker_helper 1.2;
 		class capability2 { wake_alarm kill };
 		class user_namespace { create };
 		class cap_userns { sys_admin sys_ptrace sys_chroot net_admin chown };
-		class process { transition siginh noatsecure rlimitinh sigkill setexec signull signal };
+		class process { transition siginh noatsecure rlimitinh sigkill setexec signull signal setpgid };
 		class process2 { nnp_transition };
 	}
 
@@ -2786,6 +2786,33 @@ allow docker_helper_builder_t docker_helper_slirp4netns_t:process { signull sign
 # exercised by every build). Send-only toward its own two child domains.
 allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { signal sigkill };
 allow docker_helper_rootlesskit_t docker_helper_slirp4netns_t:process { signal sigkill };
+
+# R7 (enforcing evidence, scope=selinux UAT run 39074498186): the OCI
+# worker's process-group setup. The solver passed the whole snapshot
+# staircase (the lnk_file read rung below) and reached the RUN step's
+# execution; buildkitd's runc worker spawns the bundled buildkit-runc
+# with Go SysProcAttr{Setpgid} — the forked child's pre-exec setup calls
+# setpgid(2) on itself and the SELinux process:setpgid hook denies
+# between the child's own domain and itself; Go reports the child-side
+# setup failure through the fork pipe and the parent's exec.Cmd.Start
+# surfaces it verbatim, so the exec never ran:
+#   #5 ERROR: process "/bin/sh -c apk add --no-cache curl ca-certificates"
+#     did not complete successfully: fork/exec
+#     /usr/libexec/docker-helper/buildkit/buildkit-runc: permission denied
+#   avc:  denied  { setpgid } for  pid=3974 comm="buildkitd"
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tclass=process permissive=0
+# (serial 1323; the worker's second spawn the same second, serial 1324
+# pid=3975. Two independent reproductions in the same run: the
+# workload-MAC S15 probe build died the same way at 22:34:01 — serials
+# 9089/9090, pids 257660/257661.) The proof the exec itself never ran:
+# zero execute/execute_no_trans/map/entrypoint denials name
+# buildkit-runc or buildkitd_exec_t in the run's 280 AVC records; the
+# last record before each fatal is the setpgid pair. The ONE self:process
+# permission; no other domain, no other process permission (the signal
+# and transition edges stay their own subjects' standing rules).
+allow docker_helper_buildkitd_t self:process setpgid;
 
 # R7 (green attempt, scope=selinux run 38973516904; the build's terminal
 # error text proves the fatality the recorded denial hinted at):
