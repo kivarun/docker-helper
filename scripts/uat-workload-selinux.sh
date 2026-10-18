@@ -1870,12 +1870,6 @@ RT_SEINFO_BIN="$(command -v seinfo || true)"
 if [ -z "$RT_SESEARCH_BIN" ] || [ -z "$RT_SEINFO_BIN" ]; then
   acc_blocked "R7 runtime privacy: sesearch/seinfo unavailable (the loaded-policy pins cannot run)"
 else
-  ( DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" dh build runtime-privacy \
-      --dockerfile Dockerfile --image uat-privacy-a:2.2 \
-      >/tmp/uat-wls-privacy-a.log 2>&1 ) & RT_PID_A=$!
-  ( DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" dh build runtime-privacy \
-      --dockerfile Dockerfile --image uat-privacy-b:2.2 \
-      >/tmp/uat-wls-privacy-b.log 2>&1 ) & RT_PID_B=$!
   RT_SURVEY=/tmp/uat-wls-privacy-survey.txt
   : > "$RT_SURVEY"
   # The short-lived runc dir and runc-log.json died inside the fixed
@@ -1947,7 +1941,7 @@ else
         RT_EVENT_CAPTURE=active
         inotifywait -m -r -q -e create,attrib,moved_to --format '%e' \
           /run/docker-helper-builder/ops /var/lib/docker-helper-builder/ops \
-          > "$RT_FIFO" 2>/dev/null &
+          > "$RT_FIFO" 2>/tmp/uat-wls-privacy-inotify.err &
         RT_INO_PID=$!
         exec 3<"$RT_FIFO"
         RT_EVENT_EVENTS=0
@@ -1956,6 +1950,12 @@ else
       fi
     fi
   fi
+  ( DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" dh build runtime-privacy \
+      --dockerfile Dockerfile --image uat-privacy-a:2.2 \
+      >/tmp/uat-wls-privacy-a.log 2>&1 ) & RT_PID_A=$!
+  ( DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" dh build runtime-privacy \
+      --dockerfile Dockerfile --image uat-privacy-b:2.2 \
+      >/tmp/uat-wls-privacy-b.log 2>&1 ) & RT_PID_B=$!
   RT_DEADLINE=$(( $(date +%s) + 180 ))
   while kill -0 "$RT_PID_A" 2>/dev/null || kill -0 "$RT_PID_B" 2>/dev/null; do
     if [ "$(date +%s)" -ge "$RT_DEADLINE" ]; then
@@ -1972,11 +1972,13 @@ else
     fi
   done
   if [ "$RT_EVENT_CAPTURE" = "active" ]; then
+    RT_INO_ALIVE=no
+    kill -0 "$RT_INO_PID" 2>/dev/null && RT_INO_ALIVE=yes
     exec 3<&-
     kill "$RT_INO_PID" 2>/dev/null || true
     wait "$RT_INO_PID" 2>/dev/null || true
   fi
-  info "R7-privacy capture: event-driven=$RT_EVENT_CAPTURE (events observed: ${RT_EVENT_EVENTS:-0})"
+  info "R7-privacy capture: event-driven=$RT_EVENT_CAPTURE (events observed: ${RT_EVENT_EVENTS:-0}; watcher survived: ${RT_INO_ALIVE:-n/a}; watcher stderr: $(head -2 /tmp/uat-wls-privacy-inotify.err 2>/dev/null || echo none))"
   wait "$RT_PID_A"; RT_RC_A=$?
   wait "$RT_PID_B"; RT_RC_B=$?
   RT_OPS="$(grep '^op ' "$RT_SURVEY" | awk '{ print $2 }' | awk '!seen[$0]++')"
