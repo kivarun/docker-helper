@@ -145,8 +145,14 @@ else
 fi
 
 log '== 7. transfer and run the R7 guest diagnostic'
+R7_MODE="${R7_MODE:-diag}"
+case "$R7_MODE" in
+  diag)       GUEST_SCRIPT='release-2.4-r7-diag-guest.sh' ;;
+  stop-proof) GUEST_SCRIPT='release-2.4-r7-stop-proof-guest.sh' ;;
+  *) fail "unknown R7_MODE '$R7_MODE' (diag | stop-proof)" ;;
+esac
 vm_ssh 'rm -rf /tmp/r7-diag && mkdir -p /tmp/r7-diag'
-vm_scp "$SCRIPT_DIR/release-2.4-r7-diag-guest.sh" opc@127.0.0.1:/tmp/r7-diag/release-2.4-r7-diag-guest.sh
+vm_scp "$SCRIPT_DIR/$GUEST_SCRIPT" "opc@127.0.0.1:/tmp/r7-diag/$GUEST_SCRIPT"
 
 set +e
 # The diag VM reboots mid-diagnosis (observed ~55s after boot; runs
@@ -159,15 +165,24 @@ for attempt in 1 2 3; do
     log "re-entry: waiting for SSH after the observed mid-diagnosis reboot"
     vm_wait_ssh
   fi
-  vm_ssh 'sudo bash -s' <<RMT >"$RUNNER_TEMP/r7-diag-guest.log" 2>&1
+  if [ "$R7_MODE" = "stop-proof" ]; then
+    vm_ssh 'sudo bash -s' <<RMT >"$RUNNER_TEMP/r7-diag-guest.log" 2>&1
+export R7_ARTIFACT=/opt/uat-import/docker-helper.rpm
+export R7_ARTIFACT_SHA256="$UAT_RPM_SHA256"
+export R7_EVIDENCE_DIR='$GUEST_EVIDENCE_DIR'
+bash /tmp/r7-diag/$GUEST_SCRIPT
+RMT
+  else
+    vm_ssh 'sudo bash -s' <<RMT >"$RUNNER_TEMP/r7-diag-guest.log" 2>&1
 export R7_BACKEND=apparmor R7_INSTALL=rpm
 export R7_ARTIFACT=/opt/uat-import/docker-helper.rpm
 export R7_ARTIFACT_SHA256="$UAT_RPM_SHA256"
 export R7_EXPECT=fail
 export R7_RUNTIME_DEPS=install
 export R7_EVIDENCE_DIR='$GUEST_EVIDENCE_DIR'
-bash /tmp/r7-diag/release-2.4-r7-diag-guest.sh
+bash /tmp/r7-diag/$GUEST_SCRIPT
 RMT
+  fi
   GUEST_RC=$?
   cat "$RUNNER_TEMP/r7-diag-guest.log"
 
@@ -183,6 +198,25 @@ RMT
     tar -xzf "$EVIDENCE_DIR/guest-evidence-attempt$attempt.tar.gz" -C "$EVIDENCE_DIR/guest-attempt$attempt" 2>/dev/null || true
   fi
 
+  if [ "$R7_MODE" = "stop-proof" ]; then
+    VERDICT="$(grep -aoE 'R7-STOP-PROOF=(PASS|FAIL:[^ ]+)' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"
+    case "$VERDICT" in
+      R7-STOP-PROOF=PASS)
+        log 'R7 STOP-isolation proof PASSED (no surviving descendant, no residue, admission reopens)'
+        break
+        ;;
+      R7-STOP-PROOF=FAIL*)
+        fail "R7 STOP-isolation proof FAILED: $VERDICT (evidence: $EVIDENCE_DIR)"
+        ;;
+      *)
+        if [ "$attempt" -eq 3 ]; then
+          fail "the R7 STOP-isolation proof produced no verdict (guest exit $GUEST_RC)"
+        fi
+        log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
+        ;;
+    esac
+    continue
+  fi
   VERDICT="$(grep -aoE 'R7-DIAG-RESULT=[A-Z-]+' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"
   case "$VERDICT" in
     "R7-DIAG-RESULT=REPRODUCED")

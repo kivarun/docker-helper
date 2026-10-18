@@ -15,7 +15,15 @@ name: Release 2.4 R7 full-gate corrective diagnosis
 #   apparmor-vm    — R7-C the Tumbleweed AppArmor builder START refusal with
 #                    the builder service journal and the AppArmor launch
 #                    vehicle prerequisites (distro rootlesskit profile, userns
-#                    restriction), on a disposable Tumbleweed VM (RPM).
+#                    restriction), on a disposable Tumbleweed VM (RPM);
+#                    mode=stop-proof instead runs the R7 STOP-isolation proof
+#                    on the same AppArmor consumer: the full process-tree
+#                    capture (PID/PPID/PGID/SID/exe/cgroup) of a live
+#                    `RUN sleep 300` build, the graceful-cancel and the
+#                    emergency-STOP teardowns, the whole-tree survivor scan
+#                    at the terminal moment (the false-STOP-OK proof), the
+#                    runtime/state dir + mount residue checks and the
+#                    post-teardown admission build.
 #
 # SCOPE NOTE: the default artifact source is the FAILED full-gate run's
 # producer set (the RED fixture). It exists to reproduce and to collect
@@ -47,6 +55,11 @@ on:
         description: 'Candidate artifact name (docker-helper-candidate-<run_id>-<attempt>)'
         required: true
         type: string
+      mode:
+        description: 'diag = the R7 red/green diagnosis; stop-proof = the R7 STOP-isolation proof (AppArmor consumer only)'
+        required: false
+        type: string
+        default: 'diag'
 
 env:
   R7_FAILED_RUN_ID: '38944346311'
@@ -58,6 +71,7 @@ permissions:
 
 jobs:
   ubuntu-tarball-diag:
+    if: inputs.mode != 'stop-proof'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -92,6 +106,7 @@ jobs:
           if-no-files-found: error
 
   selinux-vm-diag:
+    if: inputs.mode != 'stop-proof'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -156,11 +171,12 @@ jobs:
           echo "UAT_RPM=$path" >> "$GITHUB_ENV"
           echo "UAT_RPM_SHA256=$sha" >> "$GITHUB_ENV"
 
-      - name: Run the AppArmor Tumbleweed VM diagnosis (R7-C)
+      - name: Run the AppArmor Tumbleweed VM diagnosis (R7-C) / STOP-isolation proof
         run: |
           UAT_REPO_DIR="${{ github.workspace }}" \
           UAT_RPM="$UAT_RPM" \
           UAT_RPM_SHA256="$UAT_RPM_SHA256" \
+          R7_MODE="${{ inputs.mode || 'diag' }}" \
             scripts/release-2.4-r7-diag-tw-apparmor-vm.sh
 
       - name: Upload R7 AppArmor VM evidence
