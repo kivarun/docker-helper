@@ -3402,11 +3402,11 @@ allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;
 # THE DELTA IS EXACTLY +getattr:
 #   - file:getattr is NOT an executable bundle: the exec-type rule
 #     carries { entrypoint read execute } + exactly the getattr hook
-#     (the LookPath stat) and NOT create/unlink/write/append/lock/map —
-#     and THE STANDING QUARANTINED buildkitd_exec_t:file open hook
-#     STAYS UNGRANTED (the 0x40000 record in the same span stays the
-#     quarantined surface — the open hook is NOT the getattr's
-#     neighbor and never rides this widening);
+#     (the LookPath stat) and NOT create/unlink/write/append/lock/map;
+#     at the 4C-85 time the buildkitd_exec_t:file open hook was still
+#     the standing quarantined surface — the R7 rung below later
+#     granted it from its OWN enforcing evidence, never as a ride-along
+#     on this widening;
 #   - NO generic bin_t:file execute grant (the standing generic-exec
 #     quarantine holds — the 4C-84 bin_t record vanished by the RELABEL,
 #     never by a grant); NO tmpfs_t:lnk_file read grant (the
@@ -3429,7 +3429,44 @@ allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;
 # MCS: the TE rule encodes NO categories — buildkitd_exec_t carries no
 # category (the file's own label is s0-categoriless); the rule is the
 # bare pair.
-allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr };
+#
+# --- R7: the target-side exec-type file open — the 4C-61/62/85 rule
+# --- widened IN PLACE by exactly ONE permission (ONE rule, never split) ---
+#
+# R7 (enforcing evidence, scope=selinux UAT run 39100507194): the bundled
+# OCI runtime's exec itself. The setpgid rung above passed: buildkitd's
+# forked child completed its pre-exec process-group setup and reached the
+# execve, whose kernel path opens the exec target first — and the file
+# open hook denies on the dedicated exec identity:
+#
+#   avc:  denied  { open } for  pid=3993 comm="buildkitd"
+#     path="/usr/libexec/docker-helper/buildkit/buildkit-runc" dev="vda3"
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:docker_helper_buildkitd_exec_t:s0
+#     tclass=file permissive=0
+# (serial 1342; the worker's second spawn the same second, serial 1343
+# pid=3994. Two independent reproductions in the same run: the workload-
+# MAC S15 probe build died the same way at 05:42:03 — serials 9110/9111,
+# pids 257752/257753.) Go surfaces the child-side exec failure through
+# the fork pipe and the parent's exec.Cmd.Start reports it verbatim, so
+# the runtime never ran:
+#   #5 ERROR: process "/bin/sh -c apk add --no-cache curl ca-certificates"
+#     did not complete successfully: fork/exec
+#     /usr/libexec/docker-helper/buildkit/buildkit-runc: permission denied
+#
+# THE DELTA IS EXACTLY +open: the ONE widened-in-place rule, no parallel
+# allow, no execute_no_trans and no map (the predicted next boundary is
+# a PREDICTION, not evidence — it stays ungranted), no write/append/lock,
+# no execmod, no range_transition, no MCS/category change, and NO generic
+# execution grant on bin_t/usr_t or any other type (the generic-exec
+# quarantine holds). SCOPE: the authority is the exec TYPE's own open
+# hook, not a path-specific permission — docker_helper_buildkitd_exec_t
+# is the dedicated identity the 4C-84 .fc rules give to BOTH bundled
+# binaries (buildkitd and buildkit-runc), so this one rule serves the
+# pair's exec-image open hooks and nothing else; the same-type authority
+# buildkitd already exercises on its own image (read/execute/getattr
+# since 4C-61/62/85) is the standing shape this rung completes.
+allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr open };
 
 # --- 4C-63: the shared state-root dir getattr — the terminal-causal owner ---
 #
