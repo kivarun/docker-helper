@@ -3455,8 +3455,9 @@ allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;
 #     /usr/libexec/docker-helper/buildkit/buildkit-runc: permission denied
 #
 # THE DELTA IS EXACTLY +open: the ONE widened-in-place rule, no parallel
-# allow, no execute_no_trans and no map (the predicted next boundary is
-# a PREDICTION, not evidence — it stays ungranted), no write/append/lock,
+# allow, no map (and, at this rung's time, the no-transition exec hook was
+# still the predicted next boundary — later granted by its own R7 rung
+# below), no write/append/lock,
 # no execmod, no range_transition, no MCS/category change, and NO generic
 # execution grant on bin_t/usr_t or any other type (the generic-exec
 # quarantine holds). SCOPE: the authority is the exec TYPE's own open
@@ -3466,7 +3467,51 @@ allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;
 # pair's exec-image open hooks and nothing else; the same-type authority
 # buildkitd already exercises on its own image (read/execute/getattr
 # since 4C-61/62/85) is the standing shape this rung completes.
-allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr open };
+#
+# --- R7: the target-side exec-type execute_no_trans — the 4C-61/62/85/open
+# --- rule widened IN PLACE by exactly ONE permission (ONE rule, never split) ---
+#
+# R7 (enforcing evidence, scope=selinux UAT run 39113037607): the no-
+# transition exec decision itself. The open rung passed: the forked child
+# opened the exec target and the kernel reached the transition decision —
+# and because NO type_transition names this (source, entry) pair (the
+# standing module shape: buildkitd_t execing its own exec type has no
+# transition edge), the decision is the no-transition hook and it denies:
+#
+#   avc:  denied  { execute_no_trans } for  pid=3984 comm="buildkitd"
+#     path="/usr/libexec/docker-helper/buildkit/buildkit-runc" dev="vda3"
+#     ino=25166250
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:docker_helper_buildkitd_exec_t:s0
+#     tclass=file permissive=0
+# (serial 1319; the worker's second spawn the same second, serial 1320
+# pid=3985. Two independent reproductions in the same run: the workload-
+# MAC S15 probe build died the same way at 09:08:44 — serials 8689/8690,
+# pids 239817/239818.) Go surfaces the child-side exec failure through the
+# fork pipe and the parent's exec.Cmd.Start reports it verbatim, so the
+# runtime never ran:
+#   #5 ERROR: process "/bin/sh -c apk add --no-cache curl ca-certificates"
+#     did not complete successfully: fork/exec
+#     /usr/libexec/docker-helper/buildkit/buildkit-runc: permission denied
+#
+# THE DELTA IS EXACTLY +execute_no_trans: the ONE widened-in-place rule,
+# no parallel allow, no map, no execmod, no write/append/lock, no
+# range_transition, no MCS/category change, and NO generic execution grant
+# on bin_t/usr_t or any other type (the generic-exec quarantine holds).
+# THE DOMAIN-TRANSITION MODEL IS UNCHANGED: this hook is not a weakened
+# transition — it is the exec-continuation permission the kernel checks
+# when NO transition applies to the pair, which is exactly this module's
+# standing shape (no type_transition names buildkitd_t as SOURCE on its
+# own exec type; the only transition into the domain stays the standing
+# rootlesskit launch edge). The exec keeps the process inside
+# docker_helper_buildkitd_t — the denial record's own scontext
+# (buildkitd_t:s0:c1) is the forked child already carrying the domain and
+# the operation's MCS category — and the category preservation stays a
+# live per-operation proof, never a pre-declared map. SCOPE: the exec
+# TYPE's own no-transition exec hook, not path-specific — the dedicated
+# identity covers BOTH bundled binaries (buildkitd and buildkit-runc), so
+# one rule serves the pair's exec-image continuation and nothing else.
+allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr open execute_no_trans };
 
 # --- 4C-63: the shared state-root dir getattr — the terminal-causal owner ---
 #

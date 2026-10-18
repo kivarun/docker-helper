@@ -4764,10 +4764,11 @@ func TestSELinuxPolicyRootlesskitIsolation(t *testing.T) {
 //			   buildkitd_t:process — exactly the bare { transition } rule;
 //	  C. the target executable surface: buildkitd_t ->
 //	     buildkitd_exec_t:file — exactly the
-//	     { entrypoint read execute getattr open } rule (the 4C-61
-//	     entrypoint widened IN PLACE by the 4C-62 combined image-load
-//	     boundary, the 4C-85 LookPath getattr and the R7 exec-image
-//	     open rung (run 39100507194), ONE rule on one pair, never
+//	     { entrypoint read execute getattr open execute_no_trans } rule
+//	     (the 4C-61 entrypoint widened IN PLACE by the 4C-62 combined
+//	     image-load boundary, the 4C-85 LookPath getattr, the R7
+//	     exec-image open rung (run 39100507194) and the R7 no-transition
+//	     exec rung (run 39113037607), ONE rule on one pair, never
 //	     split; the conventional entry bundle is NOT copied);
 //	  D. the shared state-root surface: buildkitd_t ->
 //	     builder_state_root_t:dir — exactly the ONE { getattr search }
@@ -4814,7 +4815,7 @@ func TestSELinuxPolicyRootlesskitIsolation(t *testing.T) {
 func buildkitdIdentityViolations(policy string) []string {
 	const canonicalExec = "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { execute read open };"
 	const canonicalTransition = "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;"
-	const canonicalEntry = "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr open };"
+	const canonicalEntry = "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr open execute_no_trans };"
 	const canonicalStateRoot = "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search };"
 	const canonicalStateTree = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name rmdir setattr rename mounton };"
 	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr rename setattr unlink };"
@@ -5038,7 +5039,8 @@ func buildkitdIdentityViolations(policy string) []string {
 	}
 	// The exact module-borne allow-rule total naming a buildkitd type:
 	// the ten evidenced planes only (A source-exec, B transition,
-	// C target-side { entrypoint read execute getattr open }, D shared
+	// C target-side { entrypoint read execute getattr open
+	// execute_no_trans }, D shared
 	// state-root, E categorized state-tree dir
 	// { getattr search write add_name read open create remove_name rmdir },
 	// F categorized state-tree file { create read open lock write getattr },
@@ -5066,7 +5068,7 @@ func buildkitdIdentityViolations(policy string) []string {
 		}
 	}
 	if buildkitdNamedAllow != 26 {
-		violations = append(violations, fmt.Sprintf("the module must carry exactly the twenty-six buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr open }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir setattr }, the categorized state-tree file { create read open lock write getattr rename }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name }, the categorized runtime-tree sock_file { create unlink setattr }, and the R7 manager child-lifecycle { signull signal sigkill } authority, the daemon's per-op BuildKit endpoint { connectto } peer edge, the rootlesskit parent's buildkitd child-authority rule, the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr, the unprivileged-mount-flags statfs getattr and the OCI-worker process-group setup rule), found %d", buildkitdNamedAllow))
+		violations = append(violations, fmt.Sprintf("the module must carry exactly the twenty-six buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr open execute_no_trans }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir setattr }, the categorized state-tree file { create read open lock write getattr rename }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name }, the categorized runtime-tree sock_file { create unlink setattr }, and the R7 manager child-lifecycle { signull signal sigkill } authority, the daemon's per-op BuildKit endpoint { connectto } peer edge, the rootlesskit parent's buildkitd child-authority rule, the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr, the unprivileged-mount-flags statfs getattr and the OCI-worker process-group setup rule), found %d", buildkitdNamedAllow))
 	}
 	// The shared runtime-root dir surface has exactly the standing
 	// owners above; a NEW or reshaped rule on the pair (any source,
@@ -5161,7 +5163,7 @@ func buildkitdIdentityViolations(policy string) []string {
 		}
 		if strings.HasPrefix(trimmed, "allow ") {
 			if strings.Contains(trimmed, "docker_helper_buildkitd_exec_t") && trimmed != canonicalExec && trimmed != canonicalEntry {
-				violations = append(violations, "the only allow rules naming the buildkitd exec type are the exact source-exec grant { execute read open } and the exact target-side { entrypoint read execute getattr open } grant: "+trimmed)
+				violations = append(violations, "the only allow rules naming the buildkitd exec type are the exact source-exec grant { execute read open } and the exact target-side { entrypoint read execute getattr open execute_no_trans } grant: "+trimmed)
 			}
 			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot && trimmed != canonicalRuntimeTree && trimmed != canonicalRuntimeSockFile && trimmed != canonicalManagerLifecycle && trimmed != "allow docker_helper_t docker_helper_buildkitd_t:unix_stream_socket { connectto };" && trimmed != "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { signal sigkill };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:dir { write add_name create mounton remove_name read };" && trimmed != "allow docker_helper_buildkitd_t self:cap_userns { sys_admin chown };" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem { remount unmount };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:file { create };" && trimmed != "allow docker_helper_buildkitd_t self:udp_socket { create setopt connect getattr read write };" && trimmed != "allow docker_helper_buildkitd_t self:tcp_socket { create setopt connect getattr read write getopt };" && trimmed != "allow docker_helper_buildkitd_t http_port_t:tcp_socket { name_connect };" && trimmed != "allow docker_helper_buildkitd_t cert_t:dir { search };" && trimmed != "allow docker_helper_buildkitd_t cert_t:file { read open getattr };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:lnk_file { create };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file { create setattr getattr read };" && trimmed != "allow docker_helper_buildkitd_t nsfs_t:file getattr;" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem getattr;" && trimmed != "allow docker_helper_buildkitd_t self:process setpgid;" {
 				violations = append(violations, "the only allow rules toward the buildkitd domain are the exact process transition grant, the exact target-entrypoint grant, and the exact state/runtime surfaces: "+trimmed)
@@ -5393,10 +5395,10 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 	}
 
 	// The 4C-61 target-entrypoint grant (widened IN PLACE by the 4C-62
-	// image-load boundary, the 4C-85 LookPath getattr and the R7
-	// exec-image open rung): exactly the canonical widened rule, once
-	// (non-comment lines only).
-	const canonicalEntry = "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr open };"
+	// image-load boundary, the 4C-85 LookPath getattr, the R7 exec-image
+	// open rung and the R7 no-transition exec rung): exactly the
+	// canonical widened rule, once (non-comment lines only).
+	const canonicalEntry = "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr open execute_no_trans };"
 	var withoutEntry []string
 	entryCount := 0
 	for _, line := range strings.Split(policy, "\n") {
@@ -5657,17 +5659,19 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		{"map instead of execute", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read map };"},
 		{"the old 4C-61/62 triple form (missing getattr)", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute };"},
 		{"the old 4C-61/62/85 quadruple form (missing open)", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr };"},
-		{"the quintuple + write", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr open write };"},
-		{"the quintuple + append", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr open append };"},
-		{"the quintuple + map", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr open map };"},
-		{"the quintuple + lock", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr open lock };"},
-		{"the quintuple + execute_no_trans", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr open execute_no_trans };"},
-		{"the quintuple + execmod", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr open execmod };"},
+		{"the old R7 open-quintuple form (missing execute_no_trans)", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr open };"},
+		{"the sextuple + write", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr open execute_no_trans write };"},
+		{"the sextuple + append", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr open execute_no_trans append };"},
+		{"the sextuple + map", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr open execute_no_trans map };"},
+		{"the sextuple + lock", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr open execute_no_trans lock };"},
+		{"the sextuple + execmod", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr open execute_no_trans execmod };"},
 		{"the slirp-style entry bundle copied whole", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read open execute getattr map };"},
 		{"parallel bare open rule beside the canonical entry grant", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file open;"},
+		{"parallel bare execute_no_trans rule beside the canonical entry grant", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file execute_no_trans;"},
 		{"the open rung on the generic executable type", "allow docker_helper_buildkitd_t bin_t:file open;"},
-		{"target grant from the wrong source (the flow)", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr open };"},
-		{"target grant from the manager", "allow docker_helper_builder_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr open };"},
+		{"the execute_no_trans rung on the generic executable type", "allow docker_helper_buildkitd_t bin_t:file execute_no_trans;"},
+		{"target grant from the wrong source (the flow)", "allow docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr open execute_no_trans };"},
+		{"target grant from the manager", "allow docker_helper_builder_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr open execute_no_trans };"},
 		{"target grant toward the wrong target", "allow docker_helper_buildkitd_t bin_t:file { entrypoint read execute };"},
 		{"target grant toward the slirp4netns exec type", "allow docker_helper_buildkitd_t docker_helper_slirp4netns_exec_t:file { entrypoint read execute };"},
 		{"target grant on the wrong class", "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:process { entrypoint read execute };"},
@@ -6109,6 +6113,12 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		{"duplicate transition declaration", "type_transition docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:process docker_helper_buildkitd_t;"},
 		{"parallel transition from the manager", "type_transition docker_helper_builder_t docker_helper_buildkitd_exec_t:process docker_helper_buildkitd_t;"},
 		{"parallel transition from the launcher", "type_transition docker_helper_builder_launcher_t docker_helper_buildkitd_exec_t:process docker_helper_buildkitd_t;"},
+		// the R7 no-transition exec rung keeps the domain-transition model
+		// unchanged: the exec is the no-transition hook BECAUSE no
+		// type_transition names the (buildkitd_t, buildkitd_exec_t) pair —
+		// a self-transition declaration would flip the exec onto the
+		// transition+entrypoint decision path and change the model
+		{"self-transition on the exec pair (the transition-model change)", "type_transition docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:process docker_helper_buildkitd_t;"},
 	} {
 		_, mutTransitions := parseSELinuxRules(policy + "\n" + mut.rule)
 		count := 0
