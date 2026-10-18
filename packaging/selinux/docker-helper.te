@@ -4607,6 +4607,68 @@ allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr sear
 # evidence is the UAT harness's runtime-privacy section).
 allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr rename setattr unlink append };
 
+# --- R7: the cgroup2 root traversal — the bare NEW cgroup_t pair ---
+# --- (dir { search } singleton; never a widening of any existing ---
+# --- cgroup rule) ---
+#
+# R7 (enforcing evidence, scope=selinux UAT run 39142656535 + the MCS
+# audit diag run 39148734878 + UAT run 39154060683): the executed bundled
+# OCI runtime's cgroup-v2 detection failed with the runtime's own fatal
+# text at the RUN step:
+#
+#   runc run failed: no cgroup mount found in mountinfo
+#
+# while the builder's mount namespace DOES contain the expected cgroup2
+# mount (captured live from the RUNNING buildkitd's /proc/<pid>/mountinfo:
+# "... /sys/fs/cgroup ro,nosuid,nodev,noexec,relatime shared:195 master:7
+# - cgroup2 cgroup2 rw,seclabel,nsdelegate,memory_recursiveprot,
+# memory_hugetlb_accounting" — mounted read-only in the builder namespace,
+# the same superblock the host mounts rw), and runc's /proc/self/mountinfo
+# read produced NO AVC — the read succeeded and the detection proceeded to
+# mountpoint verification, where the SELinux denials blocked it:
+#
+#   avc:  denied  { search } for  pid=3103 comm="buildkitd" name="/"
+#     dev="cgroup2" ino=1
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:cgroup_t:s0 tclass=dir permissive=0
+#   (audit serial 1169; the first denial in the wave)
+#   avc:  denied  { search } for  pid=3133 comm="buildkit-runc" ... (1171)
+#   avc:  denied  { search } for  pid=3133 comm="buildkit-runc" ... (1172)
+#   avc:  denied  { getattr } for  pid=3133 comm="buildkit-runc"
+#     dev="cgroup2" ino=1 tclass=filesystem permissive=0        (1173)
+#   avc:  denied  { getattr } for  pid=3133 comm="buildkit-runc"
+#     path="/sys/fs/cgroup" tclass=dir permissive=0             (1175)
+#   avc:  denied  { search } for  pid=3138 comm="buildkit-runc" ... (1176)
+#   avc:  denied  { search } for  pid=3138 comm="buildkit-runc" ... (1177)
+#
+# (UAT 39142656535's own wave: serials 1345-1353, op_7d17412f..., the
+# S15 repro serials 10339-10347, op_78542c9f...; UAT 39154060683
+# reproduced the same fatal at #5 0.308.) The FIRST hook in the sequence
+# is the dir traversal itself: the kernel checks search on the directory
+# before any open/stat on its children, so the traversal grant is the
+# minimal first hook the detection walk needs.
+#
+# THE DELTA IS EXACTLY THE ONE BARE DIR { search } SINGLETON: no
+# dir:getattr, no filesystem:getattr (the cgroup statfs verification hook
+# is a DIFFERENT class/permission and stays unevidenced-by-this-rung),
+# no file read/open (the cpu.max-style leaf reads are the OTHER cgroup
+# subjects' standing authorities, never the buildkitd's), no mounton
+# (the rootlesskit child's standing mount authority is not shared), no
+# write/add_name/remove_name, no capability, no transition, no MCS
+# change. The rule is NOT a duplication of any macro or attribute grant:
+# cgroup_t comes from the base policy's require block, the module
+# declares no macros, and the committed-policy tests pin the rule as the
+# buildkitd domain's ONLY cgroup_t authority (the count pin moves 26 -> 27
+# by exactly this one rule).
+# SCOPE: type-wide TE authority over cgroup_t:dir objects — NOT limited
+# to /sys/fs/cgroup specifically; every cgroup_t:dir object the subject
+# can otherwise reach becomes searchable, and the cross-operation
+# boundary stays owned by the MCS category constraints exactly as every
+# other builder plane requires. The three standing cgroup subjects (the
+# daemon, the builder, the rootlesskit child) keep their own bare
+# { search } dir singletons unchanged.
+allow docker_helper_buildkitd_t cgroup_t:dir { search };
+
 # --- 4C-72: the shared runtime-root dir search — the NEW pair/plane
 # --- (PLANE G); the bare singleton, never a widening of any existing
 # --- rule ---
