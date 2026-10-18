@@ -529,7 +529,13 @@ if [ -x "$EVIDENCE_DIR/mcs_av_probe" ]; then
       if [ "$KPERMIS" != "0" ]; then
         KA_OK=0; KA_REASON="$KTAG permissive-domain-exception"; break
       fi
-      if [ "$KALLOWED" != "$KEXPECT" ]; then
+      # the expectation column is verbal; the allowed column is numeric
+      case "$KEXPECT" in
+        allow) KWANT=1 ;;
+        deny) KWANT=0 ;;
+        *) KA_OK=0; KA_REASON="$KTAG unknown-expectation"; break ;;
+      esac
+      if [ "$KALLOWED" != "$KWANT" ]; then
         KA_OK=0; KA_REASON="$KTAG expected-$KEXPECT-got-$KALLOWED"; break
       fi
     done < "$EVIDENCE_DIR/kernel-av-matrix.tsv"
