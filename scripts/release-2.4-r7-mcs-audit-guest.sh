@@ -176,55 +176,116 @@ else
  * Queries security_compute_av_raw (the loaded policy's own decision
  * computation, the same evaluation the kernel performs on those bytes)
  * for named class/permission pairs across categorized contexts.
- * Output: one TSV line per query:
- *   scon tcon class perm allowed decided auditallow auditdeny permissive
+ * Every row self-describes its expectation:
+ *   scon tcon class perm allowed decided auditallow auditdeny permissive expect
+ * expect: allow | deny — the shell verdict checks allowed==expect,
+ * decided==1 (every query must be a DECIDED kernel evaluation) and
+ * permissive==0 (no permissive-domain exception) on every row.
+ * Socket surface (the unix_stream_socket class carries NO mlsconstrain):
+ * the targets are the actual process-domain socket object types — the
+ * daemon's (docker_helper_t), own-op and foreign-op buildkitd peers —
+ * plus the real per-op endpoint sock_file labels (builder_runtime_t in
+ * the runtime tree); the daemon's own connectto edge is included as the
+ * control-plane contrast (the trusted plane is category-unrestricted by
+ * design).
  */
 #include <selinux/selinux.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
-static const char *SCON_C1 = "system_u:system_r:docker_helper_buildkitd_t:s0:c1";
-static const char *SCON_C2 = "system_u:system_r:docker_helper_buildkitd_t:s0:c2";
-static const char *TOBJ_C1 = "system_u:object_r:docker_helper_builder_state_t:s0:c1";
-static const char *TOBJ_C2 = "system_u:object_r:docker_helper_builder_state_t:s0:c2";
+static const char *S_C1 = "system_u:system_r:docker_helper_buildkitd_t:s0:c1";
+static const char *S_C2 = "system_u:system_r:docker_helper_buildkitd_t:s0:c2";
+static const char *T_STATE_C1 = "system_u:object_r:docker_helper_builder_state_t:s0:c1";
+static const char *T_STATE_C2 = "system_u:object_r:docker_helper_builder_state_t:s0:c2";
+static const char *T_RUNTIME_C1 = "system_u:object_r:docker_helper_builder_runtime_t:s0:c1";
+static const char *T_RUNTIME_C2 = "system_u:object_r:docker_helper_builder_runtime_t:s0:c2";
+static const char *T_DAEMON = "system_u:system_r:docker_helper_t:s0";
+static const char *S_DAEMON = "system_u:system_r:docker_helper_t:s0";
+static const char *T_PEER_C1 = "system_u:system_r:docker_helper_buildkitd_t:s0:c1";
+static const char *T_PEER_C2 = "system_u:system_r:docker_helper_buildkitd_t:s0:c2";
 
-struct q { const char *cls; const char *perm; };
-static struct q QUERIES[] = {
-  { "file", "read" }, { "file", "write" }, { "file", "append" },
-  { "dir", "search" }, { "dir", "write" }, { "dir", "add_name" },
-  { "dir", "remove_name" },
-  { "lnk_file", "read" },
-  { "sock_file", "getattr" },
-  { "unix_stream_socket", "connectto" },
-};
+struct q { const char *scon, *tcon, *cls, *perm, *expect; };
+
+static struct q ROWS[128];
+static size_t NROWS;
+static struct q *row(void) { return &ROWS[NROWS++]; }
+
+static void add_mcs_block(const char *scon, const char *tcon, const char *same) {
+  static const char *perms[] = { "read", "write", "append" };
+  for (size_t i = 0; i < 3; i++) {
+    struct q *r = row();
+    r->scon = scon; r->tcon = tcon; r->cls = "file"; r->perm = perms[i]; r->expect = same;
+  }
+  static const char *dperms[] = { "search", "write", "add_name", "remove_name" };
+  for (size_t i = 0; i < 4; i++) {
+    struct q *r = row();
+    r->scon = scon; r->tcon = tcon; r->cls = "dir"; r->perm = dperms[i]; r->expect = same;
+  }
+  struct q *lr = row();
+  lr->scon = scon; lr->tcon = tcon; lr->cls = "lnk_file"; lr->perm = "read"; lr->expect = same;
+  struct q *sr = row();
+  sr->scon = scon; sr->tcon = tcon; sr->cls = "sock_file"; sr->perm = "getattr"; sr->expect = "deny";
+}
 
 int main(void) {
-  struct av_decision avd;
-  const char *scons[2] = { SCON_C1, SCON_C2 };
-  const char *tcons[2] = { TOBJ_C1, TOBJ_C2 };
-  size_t si, ti, qi;
-  for (si = 0; si < 2; si++) {
-    for (ti = 0; ti < 2; ti++) {
-      for (qi = 0; qi < sizeof(QUERIES)/sizeof(QUERIES[0]); qi++) {
-        security_class_t cls = string_to_security_class(QUERIES[qi].cls);
-        if (!cls) { printf("ERR\tclass %s unknown\n", QUERIES[qi].cls); continue; }
-        access_vector_t bit = string_to_av_perm(cls, QUERIES[qi].perm);
-        if (!bit) { printf("ERR\tperm %s %s unknown\n", QUERIES[qi].cls, QUERIES[qi].perm); continue; }
-        memset(&avd, 0, sizeof(avd));
-        if (security_compute_av_raw(scons[si], tcons[ti], cls, bit, &avd) < 0) {
-          printf("ERR\tcompute_av failed\n");
-          continue;
-        }
-        printf("%s\t%s\t%s\t%s\t%u\t%u\t%u\t%u\t%u\n",
-               scons[si], tcons[ti], QUERIES[qi].cls, QUERIES[qi].perm,
-               (avd.allowed & bit) ? 1 : 0,
-               (avd.decided & bit) ? 1 : 0,
-               (avd.auditallow & bit) ? 1 : 0,
-               (avd.auditdeny & bit) ? 1 : 0,
-               (avd.flags & SELINUX_AVD_FLAGS_PERMISSIVE) ? 1 : 0);
+  /* the MCS matrix over the categorized state tree (same-category allow,
+   * both cross directions deny; the sock_file state-tree traversal stays
+   * uniformly TE-denied) */
+  add_mcs_block(S_C1, T_STATE_C1, "allow");
+  add_mcs_block(S_C1, T_STATE_C2, "deny");
+  add_mcs_block(S_C2, T_STATE_C1, "deny");
+  add_mcs_block(S_C2, T_STATE_C2, "allow");
+  /* the per-op endpoint sock_file surface (runtime tree): uniformly
+   * TE-denied for the buildkitd domain (no getattr/write grant) */
+  const char *sockperm[] = { "getattr", "write" };
+  for (size_t i = 0; i < 2; i++)
+    for (size_t s = 0; s < 2; s++)
+      for (size_t t = 0; t < 2; t++) {
+        struct q *r = row();
+        r->scon = s ? S_C2 : S_C1;
+        r->tcon = t ? T_RUNTIME_C2 : T_RUNTIME_C1;
+        r->cls = "sock_file"; r->perm = sockperm[i]; r->expect = "deny";
       }
+  /* the buildkitd socket surface: NO unix_stream_socket grant exists for
+   * the domain — connectto is TE-denied toward every peer shape (the
+   * daemon's socket, own-op and foreign-op buildkitd sockets) */
+  {
+    struct q *r1 = row(); r1->scon = S_C1; r1->tcon = T_DAEMON; r1->cls = "unix_stream_socket"; r1->perm = "connectto"; r1->expect = "deny";
+    struct q *r2 = row(); r2->scon = S_C2; r2->tcon = T_DAEMON; r2->cls = "unix_stream_socket"; r2->perm = "connectto"; r2->expect = "deny";
+    struct q *r3 = row(); r3->scon = S_C1; r3->tcon = T_PEER_C1; r3->cls = "unix_stream_socket"; r3->perm = "connectto"; r3->expect = "deny";
+    struct q *r4 = row(); r4->scon = S_C1; r4->tcon = T_PEER_C2; r4->cls = "unix_stream_socket"; r4->perm = "connectto"; r4->expect = "deny";
+    struct q *r5 = row(); r5->scon = S_C2; r5->tcon = T_PEER_C2; r5->cls = "unix_stream_socket"; r5->perm = "connectto"; r5->expect = "deny";
+  }
+  /* the daemon's standing per-op endpoint edge: the trusted control
+   * plane is category-unrestricted BY DESIGN (docker_helper_t is not an
+   * mcs_constrained_type member and unix_stream_socket carries no
+   * mlsconstrain) — the kernel must ALLOW both the own-op and the
+   * foreign-op endpoint; a denial would break the production flow */
+  {
+    struct q *r1 = row(); r1->scon = S_DAEMON; r1->tcon = T_PEER_C1; r1->cls = "unix_stream_socket"; r1->perm = "connectto"; r1->expect = "allow";
+    struct q *r2 = row(); r2->scon = S_DAEMON; r2->tcon = T_PEER_C2; r2->cls = "unix_stream_socket"; r2->perm = "connectto"; r2->expect = "allow";
+  }
+
+  for (size_t i = 0; i < NROWS; i++) {
+    struct q *r = &ROWS[i];
+    security_class_t cls = string_to_security_class(r->cls);
+    if (!cls) { printf("ERR\tclass %s unknown\n", r->cls); continue; }
+    access_vector_t bit = string_to_av_perm(cls, r->perm);
+    if (!bit) { printf("ERR\tperm %s %s unknown\n", r->cls, r->perm); continue; }
+    struct av_decision avd;
+    memset(&avd, 0, sizeof(avd));
+    if (security_compute_av_raw(r->scon, r->tcon, cls, bit, &avd) < 0) {
+      printf("ERR\tcompute_av failed\n");
+      continue;
     }
+    printf("%s\t%s\t%s\t%s\t%u\t%u\t%u\t%u\t%u\t%s\n",
+           r->scon, r->tcon, r->cls, r->perm,
+           (avd.allowed & bit) ? 1 : 0,
+           (avd.decided & bit) ? 1 : 0,
+           (avd.auditallow & bit) ? 1 : 0,
+           (avd.auditdeny & bit) ? 1 : 0,
+           (avd.flags & SELINUX_AVD_FLAGS_PERMISSIVE) ? 1 : 0,
+           r->expect);
   }
   return 0;
 }
@@ -264,6 +325,8 @@ cap sesearch-state-readpair 12 sesearch -A -s docker_helper_buildkitd_t \
 # the file/dir MCS proof. Captured separately.
 cap sesearch-connectto-any 20 sesearch -A -s docker_helper_buildkitd_t \
   -c unix_stream_socket -p connectto
+cap sesearch-daemon-edge 12 sesearch -A -s docker_helper_t \
+  -t docker_helper_buildkitd_t -c unix_stream_socket
 cap sesearch-connectto-state 20 sesearch -A -s docker_helper_buildkitd_t \
   -t docker_helper_builder_state_t -c unix_stream_socket
 cap sesearch-connectto-runtime 20 sesearch -A -s docker_helper_buildkitd_t \
@@ -443,61 +506,46 @@ if [ -x "$EVIDENCE_DIR/mcs_av_probe" ]; then
     || fail "kernel-decision helper failed (evidence: $EVIDENCE_DIR/kernel-av-matrix.tsv)"
   log "kernel-AV matrix: $(wc -l < "$EVIDENCE_DIR/kernel-av-matrix.tsv") rows (evidence: $EVIDENCE_DIR/kernel-av-matrix.tsv)"
   head -6 "$EVIDENCE_DIR/kernel-av-matrix.tsv"
-  # Verdict: the MCS-gated permission set must show same-category ALLOW
-  # and cross-category DENY for BOTH directions; the TE-only surface
-  # (sock_file traversal, unix_stream_socket connectto) carries NO
-  # loaded mlsconstrain, so the correct expectation there is a UNIFORM
-  # denial on every pair — any allow would be an unexpected TE grant.
-  # No permissive-domain exception may appear anywhere in the matrix.
-  # Columns: scon tcon class perm allowed decided auditallow auditdeny permissive
+  # Every row self-describes its expectation (allow|deny); the verdict
+  # checks on EVERY row: allowed==expect, decided==1 (every query must
+  # be a decided kernel evaluation - an undecided query is a harness or
+  # policy anomaly, never a pass) and permissive==0 (no permissive-domain
+  # exception anywhere).
+  # Columns: scon tcon class perm allowed decided auditallow auditdeny permissive expect
   KA_OK=1; KA_REASON=""
   if grep -q "^ERR" "$EVIDENCE_DIR/kernel-av-matrix.tsv"; then
     KA_OK=0; KA_REASON="helper-error:$(grep '^ERR' "$EVIDENCE_DIR/kernel-av-matrix.tsv" | head -1)"
   else
-    for KCLASSPERM in "file read" "file write" "file append" "dir search" "dir write" \
-                      "dir add_name" "dir remove_name" "lnk_file read"; do
-      set -- $KCLASSPERM; KCLS="$1"; KPERM="$2"
-      for KROW in "c1 c1 allow" "c2 c2 allow" "c1 c2 deny" "c2 c1 deny"; do
-        set -- $KROW; KS="$1"; KT="$2"; KEXP="$3"
-        # Columns are TAB-separated; match the category suffix on each
-        # context field exactly (awk split, no regex over the whole line).
-        KROWLINE="$(awk -F'\t' -v s="$KS" -v t="$KT" -v c="$KCLS" -v p="$KPERM" \
-          '$1 ~ ("s0:" s "$") && $2 ~ ("s0:" t "$") && $3 == c && $4 == p { print; exit }' \
-          "$EVIDENCE_DIR/kernel-av-matrix.tsv")"
-        if [ -z "$KROWLINE" ]; then
-          KA_OK=0; KA_REASON="$KCLS:$KPERM $KS->$KT row-missing"; break 2
-        fi
-        KALLOWED="$(printf '%s' "$KROWLINE" | awk '{print $5}')"
-        KPERMIS="$(printf '%s' "$KROWLINE" | awk '{print $9}')"
-        if [ "$KPERMIS" = "1" ]; then
-          KA_OK=0; KA_REASON="$KCLS:$KPERM $KS->$KT permissive-domain-exception"; break 2
-        fi
-        case "$KEXP" in
-          allow) [ "$KALLOWED" = "1" ] || { KA_OK=0; KA_REASON="$KCLS:$KPERM $KS->$KT expected-allow-got-$KALLOWED"; break 2; } ;;
-          deny)  [ "$KALLOWED" = "0" ] || { KA_OK=0; KA_REASON="$KCLS:$KPERM $KS->$KT expected-deny-got-$KALLOWED"; break 2; } ;;
-        esac
-      done
-    done
-    # The TE-only socket surface: uniformly denied on EVERY pair — the
-    # cross-operation socket endpoint is unreachable by TE regardless of
-    # category, and no category pair may smuggle an allow through.
+    KROW_N=0
+    while IFS=$'\t' read -r KSCON KTCON KCLS KPERM KALLOWED KDECIDED KAALLOW KADEFY KPERMIS KEXPECT; do
+      [ -n "$KEXPECT" ] || continue
+      KROW_N=$((KROW_N + 1))
+      KS="$(printf '%s' "$KSCON" | awk -F:s0 '{print $2}')"
+      KT="$(printf '%s' "$KTCON" | awk -F:s0 '{print $2}')"
+      KTAG="$KCLS:$KPERM $KS->$KT"
+      if [ "$KDECIDED" != "1" ]; then
+        KA_OK=0; KA_REASON="$KTAG undecided-decision"; break
+      fi
+      if [ "$KPERMIS" != "0" ]; then
+        KA_OK=0; KA_REASON="$KTAG permissive-domain-exception"; break
+      fi
+      if [ "$KALLOWED" != "$KEXPECT" ]; then
+        KA_OK=0; KA_REASON="$KTAG expected-$KEXPECT-got-$KALLOWED"; break
+      fi
+    done < "$EVIDENCE_DIR/kernel-av-matrix.tsv"
+    if [ "$KA_OK" = 1 ] && [ "$KROW_N" -lt 40 ]; then
+      KA_OK=0; KA_REASON="matrix-incomplete:rows=$KROW_N (the full expectation table must be decided)"
+    fi
     if [ "$KA_OK" = 1 ]; then
-      for KCLASSPERM in "sock_file getattr" "unix_stream_socket connectto"; do
-        set -- $KCLASSPERM; KCLS="$1"; KPERM="$2"
-        if awk -F'\t' -v c="$KCLS" -v p="$KPERM" \
-            '$3 == c && $4 == p && $5 != 0 { print; exit }' \
-            "$EVIDENCE_DIR/kernel-av-matrix.tsv" | grep -q .; then
-          KA_OK=0; KA_REASON="$KCLS:$KPERM unexpected-TE-allow-on-the-socket-surface"; break
-        fi
-      done
+      KERNEL_AV_VERDICT="PASS ($KROW_N rows)"
+    else
+      KERNEL_AV_VERDICT="FAIL:$KA_REASON"
     fi
   fi
-  [ "$KA_OK" = 1 ] && KERNEL_AV_VERDICT="PASS" || KERNEL_AV_VERDICT="FAIL:$KA_REASON"
   log "KERNEL-AV=$KERNEL_AV_VERDICT"
 else
   log "kernel-decision helper absent; matrix not run"
 fi
-
 # Structural re-assertion (independent of the kernel matrix): the loaded
 # constraint form is subject-gated, the builder subject is a member, no
 # trusted exception exists.
@@ -508,9 +556,14 @@ STRUCTURAL_VERDICT="PASS"
 log "STRUCTURAL=$STRUCTURAL_VERDICT"
 
 # Socket isolation verdict: the loaded unix_stream_socket class has no
-# mlsconstrain, so cross-operation socket isolation is TE-allow-driven.
-# The probe matrix still decides sock_file:getattr (traversal, MCS-gated)
-# and unix_stream_socket:connectto (TE-only) per pair — no extrapolation.
+# mlsconstrain, so socket isolation is TE-allow-driven — recorded from
+# BOTH directions: the buildkitd domain holds NO unix_stream_socket
+# grant (connectto toward any peer shape is TE-denied, the kernel matrix
+# decides the real process-domain targets), while the DAEMON's standing
+# per-op endpoint edge (docker_helper_t -> buildkitd_t connectto) is
+# category-blind BY DESIGN — the trusted control plane is not an
+# mcs_constrained_type member. This section is evidence, NOT a proof of
+# full socket isolation.
 if grep -q "mlsconstrain" "$EVIDENCE_DIR/constraints-uss-mls.log" 2>/dev/null; then
   SOCKET_NOTE="mlsconstrain-present-on-unix_stream_socket"
 else
@@ -518,8 +571,10 @@ else
 fi
 CT_STATE="$(grep -c 'connectto' "$EVIDENCE_DIR/sesearch-connectto-state.log" 2>/dev/null || echo 0)"
 CT_RUNTIME="$(grep -c 'connectto' "$EVIDENCE_DIR/sesearch-connectto-runtime.log" 2>/dev/null || echo 0)"
-log "SOCKET: $SOCKET_NOTE; connectto allows toward builder_state_t=$CT_STATE, builder_runtime_t=$CT_RUNTIME"
-log "R7-MCS-SOCKET=NOTE=$SOCKET_NOTE;CONNECTTO-STATE=$CT_STATE;CONNECTTO-RUNTIME=$CT_RUNTIME"
+CT_BKD_ANY="$(grep -c 'connectto' "$EVIDENCE_DIR/sesearch-connectto-any.log" 2>/dev/null || echo 0)"
+CT_DAEMON_EDGE="$(grep -c 'docker_helper_t docker_helper_buildkitd_t:unix_stream_socket' "$EVIDENCE_DIR/sesearch-daemon-edge.log" 2>/dev/null || echo 0)"
+log "SOCKET: $SOCKET_NOTE; buildkitd connectto allows (any target)=$CT_BKD_ANY, toward builder_state_t=$CT_STATE, builder_runtime_t=$CT_RUNTIME; daemon edge=$CT_DAEMON_EDGE"
+log "R7-MCS-SOCKET=NOTE=$SOCKET_NOTE;BKD-CONNECTTO-ANY=$CT_BKD_ANY;CONNECTTO-STATE=$CT_STATE;CONNECTTO-RUNTIME=$CT_RUNTIME;DAEMON-EDGE=$CT_DAEMON_EDGE"
 
 # ============================================================================
 # Section 6: cgroup finding forensics (read-only; NO grants)
