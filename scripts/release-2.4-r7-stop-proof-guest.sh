@@ -290,7 +290,7 @@ capture_tree() {
     nspid="$(grep '^NSpid:' "/proc/$pid/status" 2>/dev/null | awk '{print $2}' || true)"
     cg="$(cat "/proc/$pid/cgroup" 2>/dev/null | head -1 || true)"
     printf '%s %s %s %s %s %s %s %s\n' "$pid" "$ppid" "$pgrp" "$sess" "$comm" "$exe" "${nspid:--}" "$cg" >>"$out"
-    grep -h 'docker-helper-builder' "/proc/$pid/mounts" 2>/dev/null \
+    grep -h "docker-helper-builder/ops/" "/proc/$pid/mounts" 2>/dev/null \
       | sed "s/^/pid=$pid /" >>"$EVIDENCE_DIR/$tag-mounts.txt" || true
   done <"$EVIDENCE_DIR/$tag-closure.txt"
   log "captured $tag: $(wc -l <"$EVIDENCE_DIR/$tag-closure.txt") processes, $(sort -u -k3 "$EVIDENCE_DIR/$tag-closure.txt" | wc -l) distinct pgids"
@@ -372,13 +372,17 @@ survivor_proof() {
       esac
     done
   done
-  # (5) no mount entry naming the builder roots in any live namespace
-  # (the captured members' cgroup paths are recorded in the tree evidence;
-  # a container's private cgroup namespace makes its host-side path
-  # non-attributive, so the pid/comm/exe/pgid nets above carry the proof)
+  # (5) no mount entry for THIS operation's per-op subtrees in any live
+  # namespace (the standing ROOT mounts of the builder runtime/state roots
+  # — the service namespace's tmpfs/xfs holders — are infrastructure, not
+  # per-op residue; only ops/<op> entries are). The captured members'
+  # cgroup paths are recorded in the tree evidence; a container's private
+  # cgroup namespace makes its host-side path non-attributive, so the
+  # pid/comm/exe/pgid nets above carry the proof.
   for p in /proc/[0-9]*; do
-    if grep -h 'docker-helper-builder' "$p/mounts" 2>/dev/null | grep -q .; then
-      echo "SURVIVOR-MOUNT pid=${p#/proc/}: $(grep -h 'docker-helper-builder' "$p/mounts" | head -2 | tr '\n' '|')"
+    hits="$(grep -h "docker-helper-builder/ops/$op" "$p/mounts" 2>/dev/null | head -2 | tr '\n' '|')"
+    if [ -n "$hits" ]; then
+      echo "SURVIVOR-MOUNT pid=${p#/proc/}: $hits"
       findings=$((findings + 1))
     fi
   done
