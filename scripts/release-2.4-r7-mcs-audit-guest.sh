@@ -443,18 +443,20 @@ if [ -x "$EVIDENCE_DIR/mcs_av_probe" ]; then
     || fail "kernel-decision helper failed (evidence: $EVIDENCE_DIR/kernel-av-matrix.tsv)"
   log "kernel-AV matrix: $(wc -l < "$EVIDENCE_DIR/kernel-av-matrix.tsv") rows (evidence: $EVIDENCE_DIR/kernel-av-matrix.tsv)"
   head -6 "$EVIDENCE_DIR/kernel-av-matrix.tsv"
-  # Verdict: same-category pairs (c1->c1, c2->c2) must ALLOW; cross-category
-  # (c1->c2, c2->c1) must DENY — for every queried permission; and no
-  # permissive-domain exception may appear anywhere in the matrix.
+  # Verdict: the MCS-gated permission set must show same-category ALLOW
+  # and cross-category DENY for BOTH directions; the TE-only surface
+  # (sock_file traversal, unix_stream_socket connectto) carries NO
+  # loaded mlsconstrain, so the correct expectation there is a UNIFORM
+  # denial on every pair — any allow would be an unexpected TE grant.
+  # No permissive-domain exception may appear anywhere in the matrix.
   # Columns: scon tcon class perm allowed decided auditallow auditdeny permissive
   KA_OK=1; KA_REASON=""
   if grep -q "^ERR" "$EVIDENCE_DIR/kernel-av-matrix.tsv"; then
     KA_OK=0; KA_REASON="helper-error:$(grep '^ERR' "$EVIDENCE_DIR/kernel-av-matrix.tsv" | head -1)"
   else
-    for CLASSPERM in "file read" "file write" "file append" "dir search" "dir write" \
-                     "dir add_name" "dir remove_name" "lnk_file read" "sock_file getattr" \
-                     "unix_stream_socket connectto"; do
-      set -- $CLASSPERM; KCLS="$1"; KPERM="$2"
+    for KCLASSPERM in "file read" "file write" "file append" "dir search" "dir write" \
+                      "dir add_name" "dir remove_name" "lnk_file read"; do
+      set -- $KCLASSPERM; KCLS="$1"; KPERM="$2"
       for KROW in "c1 c1 allow" "c2 c2 allow" "c1 c2 deny" "c2 c1 deny"; do
         set -- $KROW; KS="$1"; KT="$2"; KEXP="$3"
         # Columns are TAB-separated; match the category suffix on each
@@ -476,6 +478,19 @@ if [ -x "$EVIDENCE_DIR/mcs_av_probe" ]; then
         esac
       done
     done
+    # The TE-only socket surface: uniformly denied on EVERY pair — the
+    # cross-operation socket endpoint is unreachable by TE regardless of
+    # category, and no category pair may smuggle an allow through.
+    if [ "$KA_OK" = 1 ]; then
+      for KCLASSPERM in "sock_file getattr" "unix_stream_socket connectto"; do
+        set -- $KCLASSPERM; KCLS="$1"; KPERM="$2"
+        if awk -F'\t' -v c="$KCLS" -v p="$KPERM" \
+            '$3 == c && $4 == p && $5 != 0 { print; exit }' \
+            "$EVIDENCE_DIR/kernel-av-matrix.tsv" | grep -q .; then
+          KA_OK=0; KA_REASON="$KCLS:$KPERM unexpected-TE-allow-on-the-socket-surface"; break
+        fi
+      done
+    fi
   fi
   [ "$KA_OK" = 1 ] && KERNEL_AV_VERDICT="PASS" || KERNEL_AV_VERDICT="FAIL:$KA_REASON"
   log "KERNEL-AV=$KERNEL_AV_VERDICT"
