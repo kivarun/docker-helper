@@ -229,12 +229,22 @@ avc_tail() { # <label> — dump the recent AVC records for the evidence
   if command -v ausearch >/dev/null 2>&1 && pgrep -x auditd >/dev/null 2>&1; then
     ausearch -m AVC -m USER_AVC --start recent 2>/dev/null >> "$EVIDENCE_DIR/$1.log" || true
   fi
-  JN="$(journalctl --no-pager 2>/dev/null | grep -i "avc" | tail -60 || true)"
-  [ -n "$JN" ] && printf '%s\n' "$JN" >> "$EVIDENCE_DIR/$1.log"
-  if [ ! -s "$EVIDENCE_DIR/$1.log" ]; then
-    printf '(no AVC records from auditd or the system journal)\n' > "$EVIDENCE_DIR/$1.log"
+  # ausearch can yield nothing while the raw log still holds the records
+  # (the UAT harness's proven fallback): merge the raw log tail too —
+  # this guest has essentially no other audit traffic.
+  if [ -f /var/log/audit/audit.log ]; then
+    tail -n 200 /var/log/audit/audit.log >> "$EVIDENCE_DIR/$1.log" 2>/dev/null || true
   fi
-  log "avc capture [$1]: $(wc -l < "$EVIDENCE_DIR/$1.log") records (auditd: $(pgrep -x auditd >/dev/null 2>&1 && echo yes || echo no))"
+  # State diagnostics: the audit subsystem's own status and the log size,
+  # so an empty capture is distinguishable from a dropped one.
+  {
+    command -v auditctl >/dev/null 2>&1 && auditctl -s 2>&1 | head -3
+    wc -l /var/log/audit/audit.log 2>/dev/null || echo "audit.log: absent"
+  } > "$EVIDENCE_DIR/$1-audit-state.log" 2>&1 || true
+  if [ ! -s "$EVIDENCE_DIR/$1.log" ]; then
+    printf '(no AVC records from ausearch, the raw audit log, or the system journal)\\n' > "$EVIDENCE_DIR/$1.log"
+  fi
+  log "avc capture [$1]: $(wc -l < "$EVIDENCE_DIR/$1.log") lines (auditd: $(pgrep -x auditd >/dev/null 2>&1 && echo yes || echo no); audit-state: $(head -2 "$EVIDENCE_DIR/$1-audit-state.log" | tr '\n' ' '))"
   head -6 "$EVIDENCE_DIR/$1.log" || true
 }
 # control: does the runcon machinery work AT ALL for a same-domain level change?
