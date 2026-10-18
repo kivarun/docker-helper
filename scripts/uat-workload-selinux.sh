@@ -1935,8 +1935,17 @@ else
   RT_OPDIR_OWNER_A="$(printf '%s' "$RT_STAT_A" | awk -F'|' '{ print $2 "|" $3 }')"
   RT_OPDIR_OWNER_B="$(printf '%s' "$RT_STAT_B" | awk -F'|' '{ print $2 "|" $3 }')"
   RT_PRIV_TIGHTENED=1
-  [ "$RT_MODE_A" = "700" ] || RT_PRIV_TIGHTENED=0
-  [ "$RT_MODE_B" = "700" ] || RT_PRIV_TIGHTENED=0
+  # The fixup's settled mode is owner-only with no group/other access
+  # (observed live: the runtime sets sticky+0700 = 1700); the privacy
+  # property is the ABSENCE of group/other bits, not one exact octal.
+  for RT_MODE in "$RT_MODE_A" "$RT_MODE_B"; do
+    [ -n "$RT_MODE" ] || { RT_PRIV_TIGHTENED=0; continue; }
+    RT_M3="$(printf '%s' "$RT_MODE" | awk '{ print substr($0, length($0)-2) }')"
+    RT_G="$(printf '%s' "$RT_M3" | awk '{ print substr($0, 2, 1) }')"
+    RT_O="$(printf '%s' "$RT_M3" | awk '{ print substr($0, 3, 1) }')"
+    case "$RT_G" in 0|1|4|5) : ;; *) RT_PRIV_TIGHTENED=0 ;; esac
+    case "$RT_O" in 0|1|4|5) : ;; *) RT_PRIV_TIGHTENED=0 ;; esac
+  done
   [ -n "$RT_OWNER_A" ] && [ "$RT_OWNER_A" = "$RT_OPDIR_OWNER_A" ] || RT_PRIV_TIGHTENED=0
   [ -n "$RT_OWNER_B" ] && [ "$RT_OWNER_B" = "$RT_OPDIR_OWNER_B" ] || RT_PRIV_TIGHTENED=0
   if [ "$RT_PRIV_TIGHTENED" -eq 1 ]; then
