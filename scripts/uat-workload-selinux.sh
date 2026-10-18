@@ -1866,8 +1866,9 @@ RUN sleep 15
 RUN echo PRIVACY-BUILD-DONE
 EOF
 RT_SESEARCH_BIN="$(command -v sesearch || true)"
-if [ -z "$RT_SESEARCH_BIN" ]; then
-  acc_blocked "R7 runtime privacy: sesearch unavailable (the loaded-policy pin cannot run)"
+RT_SEINFO_BIN="$(command -v seinfo || true)"
+if [ -z "$RT_SESEARCH_BIN" ] || [ -z "$RT_SEINFO_BIN" ]; then
+  acc_blocked "R7 runtime privacy: sesearch/seinfo unavailable (the loaded-policy pins cannot run)"
 else
   ( DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" dh build runtime-privacy \
       --dockerfile Dockerfile --image uat-privacy-a:2.2 \
@@ -1888,6 +1889,14 @@ else
       printf 'op %s %s\n' "$RT_OP" "$(stat -c '%a|%U|%G|%C' "$RT_OPDIR" 2>/dev/null)" >> "$RT_SURVEY"
       if [ -d "$RT_OPDIR/runc" ]; then
         printf 'runc %s %s\n' "$RT_OP" "$(stat -c '%a|%U|%G|%C' "$RT_OPDIR/runc" 2>/dev/null)" >> "$RT_SURVEY"
+      fi
+    done
+    for RT_STDIR in /var/lib/docker-helper-builder/ops/*; do
+      [ -d "$RT_STDIR" ] || continue
+      RT_OP="$(basename "$RT_STDIR")"
+      printf 'state-op %s %s\n' "$RT_OP" "$(stat -c '%a|%U|%G|%C' "$RT_STDIR" 2>/dev/null)" >> "$RT_SURVEY"
+      if [ -f "$RT_STDIR/root/runc-native/executor/runc-log.json" ]; then
+        printf 'runc-log %s %s\n' "$RT_OP" "$(stat -c '%a|%U|%G|%C' "$RT_STDIR/root/runc-native/executor/runc-log.json" 2>/dev/null)" >> "$RT_SURVEY"
       fi
     done
     sleep 0.3
@@ -1934,42 +1943,85 @@ else
   RT_OWNER_B="$(printf '%s' "$RT_RUNC_LAST_B" | awk -F'|' '{ print $2 "|" $3 }')"
   RT_OPDIR_OWNER_A="$(printf '%s' "$RT_STAT_A" | awk -F'|' '{ print $2 "|" $3 }')"
   RT_OPDIR_OWNER_B="$(printf '%s' "$RT_STAT_B" | awk -F'|' '{ print $2 "|" $3 }')"
+  # Two DISTINCT mode invariants, classified on the LAST THREE octal
+  # digits (any special-bit prefix is ignored — 1700 is sticky+0700):
+  #   rt_priv_owner_only MODE -> 1 iff group digit == 0 AND other
+  #   digit == 0 (the owner-only invariant: ANY group/other access,
+  #   read r-4 / write w-2 / execute x-1, violates);
+  #   rt_priv_no_write MODE   -> 1 iff neither digit carries the write
+  #   bit (2,3=w/wx, 6,7=rw/rwx violate; read-only 4,5 does NOT).
+  # The runc dirs are judged by owner-only; the shared tree path (the
+  # runtime root, ops/, the op dirs) by no-write only (the flow
+  # identity must be able to traverse the shared path).
+  rt_priv_owner_only() {
+    local m g o
+    m="$(printf '%s' "$1" | awk '{ print substr($0, length($0)-2) }')"
+    case "$m" in ???) : ;; *) return 1 ;; esac
+    g="$(printf '%s' "$m" | awk '{ print substr($0, 2, 1) }')"
+    o="$(printf '%s' "$m" | awk '{ print substr($0, 3, 1) }')"
+    [ "$g" = "0" ] && [ "$o" = "0" ]
+  }
+  rt_priv_no_write() {
+    local m g o
+    m="$(printf '%s' "$1" | awk '{ print substr($0, length($0)-2) }')"
+    case "$m" in ???) : ;; *) return 1 ;; esac
+    g="$(printf '%s' "$m" | awk '{ print substr($0, 2, 1) }')"
+    o="$(printf '%s' "$m" | awk '{ print substr($0, 3, 1) }')"
+    case "$g" in 2|3|6|7) return 1 ;; esac
+    case "$o" in 2|3|6|7) return 1 ;; esac
+    return 0
+  }
+  # The classifier's own regression table (fail-closed: a classifier
+  # that disagrees with this table fails the section, never the UAT
+  # silently passing a mis-classified mode). Encoded in shell exit
+  # semantics: 0 = the property HOLDS, 1 = the property is VIOLATED.
+  #   0700 owner-only HOLDS no-write HOLDS; 1700 (sticky+0700)
+  #   owner-only HOLDS no-write HOLDS; 0711 owner-only VIOLATED
+  #   (group/other execute is access) no-write HOLDS; 1755 owner-only
+  #   VIOLATED no-write HOLDS (group r-x / other r-x is read-only,
+  #   never write); 0722 owner-only VIOLATED no-write VIOLATED
+  #   (group/other write).
+  RT_SELFTEST_RC=0
+  for RT_CASE in 0700:0:0 1700:0:0 0711:1:0 1755:1:0 0722:1:1; do
+    RT_CASE_M="$(printf '%s' "$RT_CASE" | cut -d: -f1)"
+    RT_CASE_OO="$(printf '%s' "$RT_CASE" | cut -d: -f2)"
+    RT_CASE_NW="$(printf '%s' "$RT_CASE" | cut -d: -f3)"
+    rt_priv_owner_only "$RT_CASE_M"; RT_GOT_OO=$?
+    rt_priv_no_write "$RT_CASE_M"; RT_GOT_NW=$?
+    [ "$RT_GOT_OO" -eq "$RT_CASE_OO" ] || { RT_SELFTEST_RC=1; info "R7-privacy selftest: owner-only mis-classified $RT_CASE_M (got $RT_GOT_OO want $RT_CASE_OO)"; }
+    [ "$RT_GOT_NW" -eq "$RT_CASE_NW" ] || { RT_SELFTEST_RC=1; info "R7-privacy selftest: no-write mis-classified $RT_CASE_M (got $RT_GOT_NW want $RT_CASE_NW)"; }
+  done
+  if [ "$RT_SELFTEST_RC" -ne 0 ]; then
+    acc_fail "R7 runtime privacy: the mode classifier disagrees with its own regression table (owner-only/no-write invariant split)"
+  fi
   RT_PRIV_TIGHTENED=1
   # The fixup's settled mode is owner-only with no group/other access
   # (observed live: the runtime sets sticky+0700 = 1700); the privacy
-  # property is the ABSENCE of group/other bits, not one exact octal.
+  # property is the ABSENCE of group/other access, classified by the
+  # owner-only invariant above — group/other read or execute is NOT
+  # absence of access.
   for RT_MODE in "$RT_MODE_A" "$RT_MODE_B"; do
     [ -n "$RT_MODE" ] || { RT_PRIV_TIGHTENED=0; continue; }
-    RT_M3="$(printf '%s' "$RT_MODE" | awk '{ print substr($0, length($0)-2) }')"
-    RT_G="$(printf '%s' "$RT_M3" | awk '{ print substr($0, 2, 1) }')"
-    RT_O="$(printf '%s' "$RT_M3" | awk '{ print substr($0, 3, 1) }')"
-    case "$RT_G" in 0|1|4|5) : ;; *) RT_PRIV_TIGHTENED=0 ;; esac
-    case "$RT_O" in 0|1|4|5) : ;; *) RT_PRIV_TIGHTENED=0 ;; esac
+    rt_priv_owner_only "$RT_MODE" || RT_PRIV_TIGHTENED=0
   done
   [ -n "$RT_OWNER_A" ] && [ "$RT_OWNER_A" = "$RT_OPDIR_OWNER_A" ] || RT_PRIV_TIGHTENED=0
   [ -n "$RT_OWNER_B" ] && [ "$RT_OWNER_B" = "$RT_OPDIR_OWNER_B" ] || RT_PRIV_TIGHTENED=0
   if [ "$RT_PRIV_TIGHTENED" -eq 1 ]; then
-    acc_ok "R7 runtime privacy: the fixup TIGHTENED the ops' own runc dirs (settled modes A=$RT_MODE_A B=$RT_MODE_B, owners ${RT_OWNER_A%%|*}/${RT_OWNER_B%%|*} match the op trees' flow identity; first-seen pre-fixup stats recorded: A=${RT_RUNC_FIRST_A:-never-seen} B=${RT_RUNC_FIRST_B:-never-seen})"
+    acc_ok "R7 runtime privacy: the fixup TIGHTENED the ops' own runc dirs (settled modes A=$RT_MODE_A B=$RT_MODE_B owner-only, owners ${RT_OWNER_A%%|*}/${RT_OWNER_B%%|*} match the op trees' flow identity; first-seen pre-fixup stats recorded: A=${RT_RUNC_FIRST_A:-never-seen} B=${RT_RUNC_FIRST_B:-never-seen})"
   else
-    acc_fail "R7 runtime privacy: the settled runc dir is not owner-restricted (A=$RT_MODE_A B=$RT_MODE_B) or an owner drifted from the op tree's flow identity"
+    acc_fail "R7 runtime privacy: the settled runc dir is not owner-only (A=$RT_MODE_A B=$RT_MODE_B) or an owner drifted from the op tree's flow identity"
   fi
   RT_WIDENED=0
   for RT_PATH in /run/docker-helper-builder /run/docker-helper-builder/ops; do
     RT_M="$(stat -c '%a' "$RT_PATH" 2>/dev/null)"
-    RT_M3="$(printf '%s' "$RT_M" | awk '{ print substr($0, length($0)-2) }')"
-    RT_G="$(printf '%s' "$RT_M3" | awk '{ print substr($0, 2, 1) }')"
-    RT_O="$(printf '%s' "$RT_M3" | awk '{ print substr($0, 3, 1) }')"
-    case "$RT_G" in 2|3|6|7) RT_WIDENED=1 ;; esac
-    case "$RT_O" in 2|3|6|7) RT_WIDENED=1 ;; esac
+    rt_priv_no_write "$RT_M" || RT_WIDENED=1
   done
   for RT_OP in $RT_OPS; do
     RT_M="$(grep "^op $RT_OP " "$RT_SURVEY" | head -1 | awk '{ print $3 }' | awk -F'|' '{ print $1 }')"
-    case "$RT_M" in
-      [0-7][2-7][0-7]|[0-7][0-7][2-7]) RT_WIDENED=1 ;;
-    esac
+    rt_priv_no_write "$RT_M" || RT_WIDENED=1
   done
   if [ "$RT_WIDENED" -eq 0 ] && [ -n "$RT_OPS" ]; then
-    acc_ok "R7 runtime privacy: no group/other write anywhere on the observed tree path (the runtime root, ops/, every observed op dir) — no writable path toward another operation or the shared runtime root"
+    acc_ok "R7 runtime privacy: no group/other WRITE anywhere on the observed tree path (the runtime root, ops/, every observed op dir — read-only group/other bits are not write) — no writable path toward another operation or the shared runtime root"
   else
     acc_fail "R7 runtime privacy: unexpected group/other write on the shared runtime path or an op dir"
   fi
@@ -2004,6 +2056,78 @@ else
     acc_ok "R7 runtime privacy: the loaded policy's concrete buildkitd_t -> builder_runtime_t:dir grant is EXACTLY the one canonical rule with NO category (sesearch): $(printf '%s' "$RT_SESEARCH_HIT" | head -1)"
   else
     acc_fail "R7 runtime privacy: the loaded buildkitd_t -> builder_runtime_t:dir grant is not exactly the one category-blind canonical rule (hits=$RT_SESEARCH_N): $(printf '%s' "$RT_SESEARCH_HIT" | head -2)"
+  fi
+  # The R7 append rung's cross-operation boundary on the categorized
+  # STATE tree: the append grant is type-wide TE authority, so the
+  # isolation evidence must be the MCS constraint chain, not one
+  # category string. Captured live on the same two concurrent builds:
+  #   - each op's state-tree dir carries its own category and the two
+  #     live operations' state categories are DISTINCT;
+  #   - the executor's own runc-log.json (the file the append grant
+  #     serves) carries ITS OWN op's state-tree category;
+  #   - the loaded policy's concrete buildkitd_t ->
+  #     builder_state_t:file grant is EXACTLY the one canonical rule
+  #     with NO category (sesearch) — the category-blind TE grant;
+  #   - the type is an mcs_constrained member (seinfo), so the base
+  #     policy's MCS constraints govern every process->object access —
+  #     the same machinery the workload plane proves live (S13). No
+  #     harness can force buildkitd_t:s0:c1 to ATTEMPT another op's
+  #     state tree; the constraint chain above is the negative proof
+  #     surface this consumer offers.
+  RT_ST_A=""; RT_ST_B=""
+  RT_LOG_FIRST_A=""; RT_LOG_FIRST_B=""
+  RT_LOG_LAST_A=""; RT_LOG_LAST_B=""
+  RT_ST_COUNT=0
+  for RT_OP in $RT_OPS; do
+    RT_ST="$(grep "^state-op $RT_OP " "$RT_SURVEY" | head -1 | awk '{ print $3 }')"
+    RT_LOG_FIRST="$(grep "^runc-log $RT_OP " "$RT_SURVEY" | head -1 | awk '{ print $3 }')"
+    RT_LOG_LAST="$(grep "^runc-log $RT_OP " "$RT_SURVEY" | tail -1 | awk '{ print $3 }')"
+    RT_ST_COUNT=$((RT_ST_COUNT + 1))
+    if [ "$RT_ST_COUNT" -eq 1 ]; then
+      RT_ST_A="$RT_ST"; RT_LOG_FIRST_A="$RT_LOG_FIRST"; RT_LOG_LAST_A="$RT_LOG_LAST"
+    elif [ "$RT_ST_COUNT" -eq 2 ]; then
+      RT_ST_B="$RT_ST"; RT_LOG_FIRST_B="$RT_LOG_FIRST"; RT_LOG_LAST_B="$RT_LOG_LAST"
+    fi
+    info "R7-privacy state op=$RT_OP dir=${RT_ST:-unobserved} runc_log_first=${RT_LOG_FIRST:-never-seen} runc_log_last=${RT_LOG_LAST:-never-seen}"
+  done
+  RT_ST_CTX_A="$(printf '%s' "$RT_ST_A" | awk -F'|' '{ print $4 }')"
+  RT_ST_CTX_B="$(printf '%s' "$RT_ST_B" | awk -F'|' '{ print $4 }')"
+  if [ "$RT_ST_COUNT" -ge 2 ] && [ -n "$RT_ST_CTX_A" ] && [ -n "$RT_ST_CTX_B" ] \
+      && [ "$RT_ST_CTX_A" != "$RT_ST_CTX_B" ]; then
+    acc_ok "R7 runtime privacy: the two concurrent operations' categorized STATE trees carried DISTINCT categories (${RT_ST_CTX_A##*:s0} vs ${RT_ST_CTX_B##*:s0})"
+  else
+    acc_fail "R7 runtime privacy: the concurrent state trees did not show two distinct categories (state trees seen: $RT_ST_COUNT)"
+  fi
+  RT_LOG_CTX_A="$(printf '%s' "$RT_LOG_LAST_A" | awk -F'|' '{ print $4 }')"
+  RT_LOG_CTX_B="$(printf '%s' "$RT_LOG_LAST_B" | awk -F'|' '{ print $4 }')"
+  if [ -n "$RT_LOG_CTX_A" ] && [ -n "$RT_LOG_CTX_B" ] \
+      && [ "$RT_LOG_CTX_A" = "$RT_ST_CTX_A" ] && [ "$RT_LOG_CTX_B" = "$RT_ST_CTX_B" ]; then
+    acc_ok "R7 runtime privacy: each observed executor runc-log.json carries ITS OWN operation's state-tree category (live: A=${RT_LOG_CTX_A##*:s0} B=${RT_LOG_CTX_B##*:s0}; the append grant's object is per-op labeled, first-seen A=${RT_LOG_FIRST_A:-never-seen} B=${RT_LOG_FIRST_B:-never-seen})"
+  else
+    acc_fail "R7 runtime privacy: the executor runc-log.json context did not match its own operation's state tree (A=${RT_LOG_CTX_A:-never-seen} B=${RT_LOG_CTX_B:-never-seen})"
+  fi
+  RT_ST_SESEARCH_OUT="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t \
+    -t docker_helper_builder_state_t -c file /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+  RT_ST_SESEARCH_HIT="$(printf '%s\n' "$RT_ST_SESEARCH_OUT" | grep 'docker_helper_buildkitd_t docker_helper_builder_state_t:file' || true)"
+  RT_ST_SESEARCH_N="$(printf '%s\n' "$RT_ST_SESEARCH_HIT" | grep -c . || true)"
+  RT_ST_SESEARCH_OK=1
+  [ "$RT_ST_SESEARCH_N" -eq 1 ] || RT_ST_SESEARCH_OK=0
+  if [ "$RT_ST_SESEARCH_OK" -eq 1 ]; then
+    for RT_PERM in append create getattr lock open read rename setattr unlink write; do
+      printf '%s\n' "$RT_ST_SESEARCH_HIT" | grep -q "$RT_PERM" || RT_ST_SESEARCH_OK=0
+    done
+    printf '%s\n' "$RT_ST_SESEARCH_HIT" | grep -Eq '\b(map|execute|execmod|link|relabelto|relabelfrom)\b' && RT_ST_SESEARCH_OK=0
+  fi
+  if [ "$RT_ST_SESEARCH_OK" -eq 1 ]; then
+    acc_ok "R7 runtime privacy: the loaded policy's concrete buildkitd_t -> builder_state_t:file grant is EXACTLY the one canonical rule with NO category (sesearch): $(printf '%s' "$RT_ST_SESEARCH_HIT" | head -1)"
+  else
+    acc_fail "R7 runtime privacy: the loaded buildkitd_t -> builder_state_t:file grant is not exactly the one category-blind canonical rule (hits=$RT_ST_SESEARCH_N): $(printf '%s' "$RT_ST_SESEARCH_HIT" | head -2)"
+  fi
+  RT_ST_SEINFO="$("$RT_SEINFO_BIN" -xt docker_helper_builder_state_t /sys/fs/selinux/policy 2>/dev/null || true)"
+  if printf '%s' "$RT_ST_SEINFO" | grep -q 'mcs_constrained'; then
+    acc_ok "R7 runtime privacy: docker_helper_builder_state_t is an mcs_constrained type (seinfo) — the base policy's MCS constraints govern every process->object access on the state tree (the workload plane proves the same machinery live, S13)"
+  else
+    acc_fail "R7 runtime privacy: docker_helper_builder_state_t did not show the mcs_constrained attribute (seinfo output: ${RT_ST_SEINFO:-absent})"
   fi
 fi
 
