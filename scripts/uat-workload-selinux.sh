@@ -1939,8 +1939,13 @@ else
       fi
       if [ "${RT_SELF_EVENTS:-0}" -ge 1 ]; then
         RT_EVENT_CAPTURE=active
+        # Watch the PARENT roots: the ops roots themselves are created
+        # (and pruned) by the builder flow, so a watcher armed on them
+        # before the builds dies with "No such file or directory" (the
+        # 39166421342 dispatch); the parents exist from service start
+        # and inotifywait -r adopts newly created subtrees dynamically.
         inotifywait -m -r -q -e create,attrib,moved_to --format '%e' \
-          /run/docker-helper-builder/ops /var/lib/docker-helper-builder/ops \
+          /run/docker-helper-builder /var/lib/docker-helper-builder \
           > "$RT_FIFO" 2>/tmp/uat-wls-privacy-inotify.err &
         RT_INO_PID=$!
         exec 3<"$RT_FIFO"
