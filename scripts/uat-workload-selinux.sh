@@ -2068,12 +2068,26 @@ else
   #   - the loaded policy's concrete buildkitd_t ->
   #     builder_state_t:file grant is EXACTLY the one canonical rule
   #     with NO category (sesearch) — the category-blind TE grant;
-  #   - the type is an mcs_constrained member (seinfo), so the base
-  #     policy's MCS constraints govern every process->object access —
-  #     the same machinery the workload plane proves live (S13). No
-  #     harness can force buildkitd_t:s0:c1 to ATTEMPT another op's
-  #     state tree; the constraint chain above is the negative proof
-  #     surface this consumer offers.
+  #   - the loaded policy's concrete buildkitd_t ->
+  #     builder_state_t:file grant is EXACTLY the one canonical rule
+  #     with NO category (sesearch) — the category-blind TE grant;
+  #   - the SUBJECT side of the MCS chain: the loaded constraints are
+  #     subject-gated exception form (h1 dom h2 or t1 !=
+  #     mcs_constrained_type), so the enforcement bites exactly when
+  #     the SUBJECT type is a member — the builder subject
+  #     (docker_helper_buildkitd_t) IS one (seinfo -a), carries NO
+  #     trusted-subject exemption, and the loaded file-class write/read
+  #     constraint set names the attribute (seinfo --constrain file) —
+  #     the object type carries only file_type BY DESIGN. The module
+  #     contract (TestSELinuxPolicyMCSMembership) pins the exact
+  #     six-member subject set; this consumer pin asserts the loaded
+  #     congruence of the enforcement machinery itself. No harness can
+  #     force buildkitd_t:s0:c1 to ATTEMPT another op's state tree; the
+  #     constraint chain above is the negative proof surface this
+  #     consumer offers (the live cross-category probe in the actual
+  #     builder domain is BLOCKED on every consumer: the domain is not
+  #     enterable from any admin context — the transition denial is
+  #     itself a security fact, R7 MCS-audit evidence).
   RT_ST_A=""; RT_ST_B=""
   RT_LOG_FIRST_A=""; RT_LOG_FIRST_B=""
   RT_LOG_LAST_A=""; RT_LOG_LAST_B=""
@@ -2124,10 +2138,23 @@ else
     acc_fail "R7 runtime privacy: the loaded buildkitd_t -> builder_state_t:file grant is not exactly the one category-blind canonical rule (hits=$RT_ST_SESEARCH_N): $(printf '%s' "$RT_ST_SESEARCH_HIT" | head -2)"
   fi
   RT_ST_SEINFO="$("$RT_SEINFO_BIN" -a mcs_constrained_type -x 2>/dev/null || true)"
-  if printf '%s' "$RT_ST_SEINFO" | grep -q 'docker_helper_builder_state_t'; then
-    acc_ok "R7 runtime privacy: docker_helper_builder_state_t is an mcs_constrained type member (seinfo -a mcs_constrained_type -x) — the base policy's MCS constraints govern every process->object access on the state tree (the workload plane proves the same machinery live, S13)"
+  if printf '%s' "$RT_ST_SEINFO" | grep -q 'docker_helper_buildkitd_t'; then
+    acc_ok "R7 runtime privacy: the builder subject docker_helper_buildkitd_t is an mcs_constrained_type member on the loaded policy (seinfo -a mcs_constrained_type -x) — the loaded MCS constraints are subject-gated exception form (t1), so the enforcement bites this subject exactly as the module contract pins it"
   else
-    acc_fail "R7 runtime privacy: docker_helper_builder_state_t did not show the mcs_constrained_type membership (seinfo output: ${RT_ST_SEINFO:-absent})"
+    acc_fail "R7 runtime privacy: the builder subject docker_helper_buildkitd_t did not show the mcs_constrained_type membership on the loaded policy (seinfo output: ${RT_ST_SEINFO:-absent})"
+  fi
+  RT_ST_SEINFO_BKD_ATTRS="$("$RT_SEINFO_BIN" -t docker_helper_buildkitd_t -x 2>/dev/null || true)"
+  if printf '%s' "$RT_ST_SEINFO_BKD_ATTRS" | grep -q 'mlstrustedsubject'; then
+    acc_fail "R7 runtime privacy: the builder subject docker_helper_buildkitd_t carries a trusted-subject exemption that would bypass the MCS constraints (type attributes: $RT_ST_SEINFO_BKD_ATTRS)"
+  else
+    acc_ok "R7 runtime privacy: the builder subject docker_helper_buildkitd_t carries no trusted-subject exemption (seinfo -t -x) — no loaded-policy exception releases the MCS enforcement"
+  fi
+  RT_ST_CONSTRAINTS="$("$RT_SEINFO_BIN" --constrain file 2>/dev/null || true)"
+  if printf '%s' "$RT_ST_CONSTRAINTS" | grep -q 'append' \
+     && printf '%s' "$RT_ST_CONSTRAINTS" | grep -q 'mcs_constrained_type'; then
+    acc_ok "R7 runtime privacy: the loaded file-class MCS constraint set governs the append permission through the mcs_constrained_type subject attribute (seinfo --constrain file)"
+  else
+    acc_fail "R7 runtime privacy: the loaded file-class constraint set does not show the mcs_constrained_type-gated append coverage (seinfo --constrain file output: ${RT_ST_CONSTRAINTS:-absent})"
   fi
 fi
 
