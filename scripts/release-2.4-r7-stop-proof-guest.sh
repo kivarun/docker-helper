@@ -300,8 +300,8 @@ capture_tree() {
 # wait_liveness <op_id> — wait until buildkit-runc AND the OCI workload are
 # live under THIS op's instance tree (rooted at the recorded instance.pid).
 wait_liveness() {
-  local op="$1" inst="" i
-  for i in $(seq 1 240); do
+  local op="$1" inst=""
+  for _ in $(seq 1 240); do
     inst="$(cat "/run/docker-helper-builder/ops/$op/instance.pid" 2>/dev/null || true)"
     [ -n "$inst" ] && [ -d "/proc/$inst" ] || { sleep 0.5; continue; }
     proc_rows >"$EVIDENCE_DIR/liveness-rows.tsv"
@@ -412,6 +412,9 @@ await_terminal() {
 }
 
 # run_scenario <tag> <image> <kill_buildctl:0|1> — one full proof scenario.
+# Every failure path after a successful start best-effort cancels the
+# started op first: a leaked RUNNING build would saturate the fixed build
+# capacity and poison the retry attempts.
 run_scenario() {
   local tag="$1" image="$2" killbuildctl="$3" op resp inst
   log "=== scenario $tag: starting build ($image) ==="
@@ -420,7 +423,10 @@ run_scenario() {
     -d "{\"context\":\"ctx\",\"dockerfile\":\"Dockerfile\",\"image\":\"$image\"}" \
     -o "$EVIDENCE_DIR/$tag-build-response.json" -w '%{http_code}' http://localhost/build)" \
     || fail "scenario $tag: build start request failed"
-  [ "$resp" = "200" ] || fail "scenario $tag: build start HTTP $resp ($(head -c 300 "$EVIDENCE_DIR/$tag-build-response.json"))"
+  case "$resp" in
+    200|201) ;;
+    *) fail "scenario $tag: build start HTTP $resp ($(head -c 300 "$EVIDENCE_DIR/$tag-build-response.json"))";;
+  esac
   op="$(sed -n 's/.*"operation_id": *"\([^"]*\)".*/\1/p' "$EVIDENCE_DIR/$tag-build-response.json")"
   [ -n "$op" ] || fail "scenario $tag: operation_id missing ($(head -c 300 "$EVIDENCE_DIR/$tag-build-response.json"))"
   log "scenario $tag: op $op running"
@@ -429,6 +435,9 @@ run_scenario() {
     curl --silent --max-time 5 --unix-socket "$DH_SOCK" \
       -H "Authorization: Bearer $SESS_TOKEN" \
       "http://localhost/operations/$op/logs" >"$EVIDENCE_DIR/$tag-op-logs.txt" 2>&1 || true
+    curl --silent --max-time 10 --unix-socket "$DH_SOCK" \
+      -H "Authorization: Bearer $SESS_TOKEN" -X POST \
+      -o /dev/null "http://localhost/operations/$op/cancel" 2>/dev/null || true
     echo "R7-STOP-PROOF=FAIL:$tag the RUN step never became live (buildkit-runc/workload absent; see $tag-op-logs.txt)"
     return 1
   fi
@@ -439,7 +448,13 @@ run_scenario() {
   if [ "$killbuildctl" = 1 ]; then
     log "scenario $tag: EMERGENCY path — SIGKILL the buildctl client mid-RUN"
     pgrep -x buildctl >"$EVIDENCE_DIR/$tag-buildctl-pids.txt" 2>/dev/null || true
-    [ -s "$EVIDENCE_DIR/$tag-buildctl-pids.txt" ] || { echo "R7-STOP-PROOF=FAIL:$tag no buildctl process found to kill"; return 1; }
+    if [ ! -s "$EVIDENCE_DIR/$tag-buildctl-pids.txt" ]; then
+      curl --silent --max-time 10 --unix-socket "$DH_SOCK" \
+        -H "Authorization: Bearer $SESS_TOKEN" -X POST \
+        -o /dev/null "http://localhost/operations/$op/cancel" 2>/dev/null || true
+      echo "R7-STOP-PROOF=FAIL:$tag no buildctl process found to kill"
+      return 1
+    fi
     pkill -9 -x buildctl || true
     sleep 1
     log "scenario $tag: buildctl killed; the driver's failure path must STOP the live tree"
@@ -449,11 +464,17 @@ run_scenario() {
       -H "Authorization: Bearer $SESS_TOKEN" -X POST \
       -o "$EVIDENCE_DIR/$tag-cancel-response.json" -w '%{http_code}' \
       "http://localhost/operations/$op/cancel")" \
-      || fail "scenario $tag: cancel request failed"
-    [ "$resp" = "200" ] || fail "scenario $tag: cancel HTTP $resp ($(head -c 300 "$EVIDENCE_DIR/$tag-cancel-response.json"))"
+      || { echo "R7-STOP-PROOF=FAIL:$tag the cancel request failed"; return 1; }
+    if [ "$resp" != "200" ]; then
+      echo "R7-STOP-PROOF=FAIL:$tag cancel HTTP $resp ($(head -c 300 "$EVIDENCE_DIR/$tag-cancel-response.json"))"
+      return 1
+    fi
   fi
 
   if ! await_terminal "$op" 180 "$tag"; then
+    curl --silent --max-time 10 --unix-socket "$DH_SOCK" \
+      -H "Authorization: Bearer $SESS_TOKEN" -X POST \
+      -o /dev/null "http://localhost/operations/$op/cancel" 2>/dev/null || true
     echo "R7-STOP-PROOF=FAIL:$tag the operation did not reach a terminal state within 180s"
     return 1
   fi
@@ -527,7 +548,7 @@ EOF
     -d '{"context":"ctx2","dockerfile":"Dockerfile","image":"r7-stop-admission:1"}' \
     -o "$EVIDENCE_DIR/admission-build-response.json" -w '%{http_code}' http://localhost/build)" \
     || fail "admission build start failed"
-  [ "$resp" = "200" ] || fail "admission build start HTTP $resp"
+  [ "$resp" = "200" ] || [ "$resp" = "201" ] || fail "admission build start HTTP $resp"
   admop="$(sed -n 's/.*"operation_id": *"\([^"]*\)".*/\1/p' "$EVIDENCE_DIR/admission-build-response.json")"
   [ -n "$admop" ] || fail "admission operation_id missing"
   admok=0
