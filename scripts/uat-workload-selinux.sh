@@ -2137,18 +2137,6 @@ else
   else
     acc_fail "R7 runtime privacy: the loaded buildkitd_t -> builder_state_t:file grant is not exactly the one category-blind canonical rule (hits=$RT_ST_SESEARCH_N): $(printf '%s' "$RT_ST_SESEARCH_HIT" | head -2)"
   fi
-  RT_ST_SEINFO="$("$RT_SEINFO_BIN" -a mcs_constrained_type -x 2>/dev/null || true)"
-  if rt_mcs_member_ok "$RT_ST_SEINFO"; then
-    acc_ok "R7 runtime privacy: the builder subject docker_helper_buildkitd_t is an mcs_constrained_type member on the loaded policy (seinfo -a mcs_constrained_type -x) — the loaded MCS constraints are subject-gated exception form (t1), so the enforcement bites this subject exactly as the module contract pins it"
-  else
-    acc_fail "R7 runtime privacy: the builder subject docker_helper_buildkitd_t did not show the mcs_constrained_type membership on the loaded policy (seinfo output: ${RT_ST_SEINFO:-absent})"
-  fi
-  RT_ST_SEINFO_BKD_ATTRS="$("$RT_SEINFO_BIN" -t docker_helper_buildkitd_t -x 2>/dev/null || true)"
-  if printf '%s' "$RT_ST_SEINFO_BKD_ATTRS" | grep -q 'mlstrustedsubject'; then
-    acc_fail "R7 runtime privacy: the builder subject docker_helper_buildkitd_t carries a trusted-subject exemption that would bypass the MCS constraints (type attributes: $RT_ST_SEINFO_BKD_ATTRS)"
-  else
-    acc_ok "R7 runtime privacy: the builder subject docker_helper_buildkitd_t carries no trusted-subject exemption (seinfo -t -x) — no loaded-policy exception releases the MCS enforcement"
-  fi
   # The single-expression constraint matcher (the pin's core): ONE
   # mlsconstrain file line must carry BOTH the append permission AND the
   # subject-gated mcs_constrained_type gating (t1, the loaded exception
@@ -2186,6 +2174,18 @@ else
   rt_mcs_member_ok 'attribute mcs_constrained_type; container_t svirt_t' && { RT_MCS_SELFTEST_RC=1; info "R7-privacy selftest: the subject-absent member list was accepted"; }
   if [ "$RT_MCS_SELFTEST_RC" -ne 0 ]; then
     acc_fail "R7 runtime privacy: the MCS contract matchers disagree with their own regression table (single-expression form, membership)"
+  fi
+  RT_ST_SEINFO="$("$RT_SEINFO_BIN" -a mcs_constrained_type -x 2>/dev/null || true)"
+  if rt_mcs_member_ok "$RT_ST_SEINFO"; then
+    acc_ok "R7 runtime privacy: the builder subject docker_helper_buildkitd_t is an mcs_constrained_type member on the loaded policy (seinfo -a mcs_constrained_type -x) — the loaded MCS constraints are subject-gated exception form (t1), so the enforcement bites this subject exactly as the module contract pins it"
+  else
+    acc_fail "R7 runtime privacy: the builder subject docker_helper_buildkitd_t did not show the mcs_constrained_type membership on the loaded policy (seinfo output: ${RT_ST_SEINFO:-absent})"
+  fi
+  RT_ST_SEINFO_BKD_ATTRS="$("$RT_SEINFO_BIN" -t docker_helper_buildkitd_t -x 2>/dev/null || true)"
+  if printf '%s' "$RT_ST_SEINFO_BKD_ATTRS" | grep -q 'mlstrustedsubject'; then
+    acc_fail "R7 runtime privacy: the builder subject docker_helper_buildkitd_t carries a trusted-subject exemption that would bypass the MCS constraints (type attributes: $RT_ST_SEINFO_BKD_ATTRS)"
+  else
+    acc_ok "R7 runtime privacy: the builder subject docker_helper_buildkitd_t carries no trusted-subject exemption (seinfo -t -x) — no loaded-policy exception releases the MCS enforcement"
   fi
   RT_ST_CONSTRAINTS="$("$RT_SEINFO_BIN" --constrain file 2>/dev/null || true)"
   RT_ST_CONSTRAINT_LINE="$(printf '%s\n' "$RT_ST_CONSTRAINTS" | grep 'mlsconstrain file' | grep 'append' | head -1 || true)"
