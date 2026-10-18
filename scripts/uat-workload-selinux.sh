@@ -2138,7 +2138,7 @@ else
     acc_fail "R7 runtime privacy: the loaded buildkitd_t -> builder_state_t:file grant is not exactly the one category-blind canonical rule (hits=$RT_ST_SESEARCH_N): $(printf '%s' "$RT_ST_SESEARCH_HIT" | head -2)"
   fi
   RT_ST_SEINFO="$("$RT_SEINFO_BIN" -a mcs_constrained_type -x 2>/dev/null || true)"
-  if printf '%s' "$RT_ST_SEINFO" | grep -q 'docker_helper_buildkitd_t'; then
+  if rt_mcs_member_ok "$RT_ST_SEINFO"; then
     acc_ok "R7 runtime privacy: the builder subject docker_helper_buildkitd_t is an mcs_constrained_type member on the loaded policy (seinfo -a mcs_constrained_type -x) — the loaded MCS constraints are subject-gated exception form (t1), so the enforcement bites this subject exactly as the module contract pins it"
   else
     acc_fail "R7 runtime privacy: the builder subject docker_helper_buildkitd_t did not show the mcs_constrained_type membership on the loaded policy (seinfo output: ${RT_ST_SEINFO:-absent})"
@@ -2149,12 +2149,50 @@ else
   else
     acc_ok "R7 runtime privacy: the builder subject docker_helper_buildkitd_t carries no trusted-subject exemption (seinfo -t -x) — no loaded-policy exception releases the MCS enforcement"
   fi
+  # The single-expression constraint matcher (the pin's core): ONE
+  # mlsconstrain file line must carry BOTH the append permission AND the
+  # subject-gated mcs_constrained_type gating (t1, the loaded exception
+  # form). Grepping 'append' and the attribute independently across the
+  # whole listing would accept a base-policy change that moved them into
+  # different expressions — a false positive the isolation contract
+  # cannot afford.
+  rt_mcs_constraint_ok() {
+    local l="$1"
+    printf '%s' "$l" | grep -q 'mlsconstrain file' || return 1
+    printf '%s' "$l" | grep -Eq '\{[^}]*\bappend\b[^}]*\}' || return 1
+    printf '%s' "$l" | grep -Eq 't1 != mcs_constrained_type' || return 1
+    return 0
+  }
+  # The membership matcher: the loaded mcs_constrained_type member list
+  # must still name the builder subject.
+  rt_mcs_member_ok() {
+    printf '%s' "$1" | grep -q 'docker_helper_buildkitd_t'
+  }
+  # The matchers' own regression table (fail-closed: a matcher that
+  # disagrees with this table fails the section, never the UAT silently
+  # passing a mis-shaped contract). The real loaded form passes; every
+  # negative mutant — missing append, t1->t2 substitution, attribute
+  # absent, wrong permission set, subject absent from the member list —
+  # must FAIL.
+  RT_MCS_SELFTEST_RC=0
+  RT_MCS_REAL='   mlsconstrain file { append link rename setattr unlink write } (h1 dom h2 or t1 != mcs_constrained_type);'
+  rt_mcs_constraint_ok "$RT_MCS_REAL" || { RT_MCS_SELFTEST_RC=1; info "R7-privacy selftest: the real constraint line was rejected"; }
+  rt_mcs_constraint_ok '   mlsconstrain file { link rename setattr unlink write } (h1 dom h2 or t1 != mcs_constrained_type);' && { RT_MCS_SELFTEST_RC=1; info "R7-privacy selftest: the missing-append mutant was accepted"; }
+  rt_mcs_constraint_ok '   mlsconstrain file { append link rename setattr unlink write } (h1 dom h2 or t2 != mcs_constrained_type);' && { RT_MCS_SELFTEST_RC=1; info "R7-privacy selftest: the t1->t2 mutant was accepted"; }
+  rt_mcs_constraint_ok '   mlsconstrain file { append link rename setattr unlink write } (h1 dom h2);' && { RT_MCS_SELFTEST_RC=1; info "R7-privacy selftest: the no-attribute mutant was accepted"; }
+  rt_mcs_constraint_ok '   mlsconstrain file { read write } (h1 dom h2 or t1 != mcs_constrained_type);' && { RT_MCS_SELFTEST_RC=1; info "R7-privacy selftest: the wrong-permission-set line was accepted"; }
+  RT_MCS_MEMBERS_SAMPLE='attribute mcs_constrained_type; container_t docker_helper_buildkitd_t docker_helper_rootlesskit_t'
+  rt_mcs_member_ok "$RT_MCS_MEMBERS_SAMPLE" || { RT_MCS_SELFTEST_RC=1; info "R7-privacy selftest: the real member list was rejected"; }
+  rt_mcs_member_ok 'attribute mcs_constrained_type; container_t svirt_t' && { RT_MCS_SELFTEST_RC=1; info "R7-privacy selftest: the subject-absent member list was accepted"; }
+  if [ "$RT_MCS_SELFTEST_RC" -ne 0 ]; then
+    acc_fail "R7 runtime privacy: the MCS contract matchers disagree with their own regression table (single-expression form, membership)"
+  fi
   RT_ST_CONSTRAINTS="$("$RT_SEINFO_BIN" --constrain file 2>/dev/null || true)"
-  if printf '%s' "$RT_ST_CONSTRAINTS" | grep -q 'append' \
-     && printf '%s' "$RT_ST_CONSTRAINTS" | grep -q 'mcs_constrained_type'; then
-    acc_ok "R7 runtime privacy: the loaded file-class MCS constraint set governs the append permission through the mcs_constrained_type subject attribute (seinfo --constrain file)"
+  RT_ST_CONSTRAINT_LINE="$(printf '%s\n' "$RT_ST_CONSTRAINTS" | grep 'mlsconstrain file' | grep 'append' | head -1 || true)"
+  if [ -n "$RT_ST_CONSTRAINT_LINE" ] && rt_mcs_constraint_ok "$RT_ST_CONSTRAINT_LINE"; then
+    acc_ok "R7 runtime privacy: ONE loaded file-class constraint expression governs the append permission through the subject-gated mcs_constrained_type gating (seinfo --constrain file): $RT_ST_CONSTRAINT_LINE"
   else
-    acc_fail "R7 runtime privacy: the loaded file-class constraint set does not show the mcs_constrained_type-gated append coverage (seinfo --constrain file output: ${RT_ST_CONSTRAINTS:-absent})"
+    acc_fail "R7 runtime privacy: no single loaded file-class constraint expression carries the append permission with the t1-gated mcs_constrained_type gating (seinfo --constrain file output: ${RT_ST_CONSTRAINTS:-absent})"
   fi
 fi
 
