@@ -1878,11 +1878,18 @@ else
       >/tmp/uat-wls-privacy-b.log 2>&1 ) & RT_PID_B=$!
   RT_SURVEY=/tmp/uat-wls-privacy-survey.txt
   : > "$RT_SURVEY"
-  RT_DEADLINE=$(( $(date +%s) + 180 ))
-  while kill -0 "$RT_PID_A" 2>/dev/null || kill -0 "$RT_PID_B" 2>/dev/null; do
-    if [ "$(date +%s)" -ge "$RT_DEADLINE" ]; then
-      break
-    fi
+  # The short-lived runc dir and runc-log.json died inside the fixed
+  # 0.3s poll window in earlier runs (never-seen). The capture is now
+  # EVENT-DRIVEN: a recursive inotify watcher over both op-tree roots
+  # feeds a FIFO, and every create/attrib/moved_to event triggers an
+  # immediate stat survey (the fixup chmod fires attrib; the runc dir
+  # creation and the runc-log.json creation fire create) — the survey
+  # samples within microseconds of each lifecycle event instead of
+  # racing a fixed interval. A 1s read timeout keeps a heartbeat sweep
+  # for missed events. When the tool is unavailable the fixed poller
+  # stays the fallback and never-seen keeps meaning FAIL (the gate is
+  # never weakened by the absence of the observation tool).
+  rt_priv_survey_once() {
     for RT_OPDIR in /run/docker-helper-builder/ops/*; do
       [ -d "$RT_OPDIR" ] || continue
       RT_OP="$(basename "$RT_OPDIR")"
@@ -1899,8 +1906,47 @@ else
         printf 'runc-log %s %s\n' "$RT_OP" "$(stat -c '%a|%U|%G|%C' "$RT_STDIR/root/runc-native/executor/runc-log.json" 2>/dev/null)" >> "$RT_SURVEY"
       fi
     done
-    sleep 0.3
+  }
+  RT_EVENT_CAPTURE=unavailable
+  RT_INO_PID=""
+  if ! command -v inotifywait >/dev/null 2>&1; then
+    zypper --non-interactive install -y inotify-tools >/dev/null 2>&1 || true
+  fi
+  if command -v inotifywait >/dev/null 2>&1; then
+    RT_EVENT_CAPTURE=active
+    RT_FIFO=/tmp/uat-wls-privacy-events
+    rm -f "$RT_FIFO"
+    mkfifo "$RT_FIFO" 2>/dev/null || RT_EVENT_CAPTURE=unavailable
+    if [ "$RT_EVENT_CAPTURE" = "active" ]; then
+      inotifywait -m -r -q -e create,attrib,moved_to --format '' \
+        /run/docker-helper-builder/ops /var/lib/docker-helper-builder/ops \
+        > "$RT_FIFO" 2>/dev/null &
+      RT_INO_PID=$!
+      exec 3<"$RT_FIFO"
+      RT_EVENT_EVENTS=0
+    fi
+  fi
+  RT_DEADLINE=$(( $(date +%s) + 180 ))
+  while kill -0 "$RT_PID_A" 2>/dev/null || kill -0 "$RT_PID_B" 2>/dev/null; do
+    if [ "$(date +%s)" -ge "$RT_DEADLINE" ]; then
+      break
+    fi
+    if [ "$RT_EVENT_CAPTURE" = "active" ]; then
+      if read -t 1 -r -u 3 RT_EVT; then
+        RT_EVENT_EVENTS=$((RT_EVENT_EVENTS + 1))
+      fi
+      rt_priv_survey_once
+    else
+      rt_priv_survey_once
+      sleep 0.3
+    fi
   done
+  if [ "$RT_EVENT_CAPTURE" = "active" ]; then
+    exec 3<&-
+    kill "$RT_INO_PID" 2>/dev/null || true
+    wait "$RT_INO_PID" 2>/dev/null || true
+  fi
+  info "R7-privacy capture: event-driven=$RT_EVENT_CAPTURE (events observed: ${RT_EVENT_EVENTS:-0})"
   wait "$RT_PID_A"; RT_RC_A=$?
   wait "$RT_PID_B"; RT_RC_B=$?
   RT_OPS="$(grep '^op ' "$RT_SURVEY" | awk '{ print $2 }' | awk '!seen[$0]++')"
