@@ -4818,7 +4818,7 @@ func buildkitdIdentityViolations(policy string) []string {
 	const canonicalEntry = "allow docker_helper_buildkitd_t docker_helper_buildkitd_exec_t:file { entrypoint read execute getattr open execute_no_trans };"
 	const canonicalStateRoot = "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:dir { getattr search };"
 	const canonicalStateTree = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr search write add_name read open create remove_name rmdir setattr rename mounton };"
-	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr rename setattr unlink };"
+	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr rename setattr unlink append };"
 	const canonicalRuntimeRoot = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search;"
 	const canonicalRuntimeTree = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write add_name create remove_name mounton setattr };"
 	// The categorized runtime-tree sock_file plane (PLANE I, the 4C-77
@@ -4983,7 +4983,7 @@ func buildkitdIdentityViolations(policy string) []string {
 		}
 	}
 	if stateFileCount != 1 {
-		violations = append(violations, fmt.Sprintf("the buildkitd categorized state-tree file { create read open lock write getattr } grant must exist exactly once in the exact canonical form, found %d: %s", stateFileCount, canonicalStateFile))
+		violations = append(violations, fmt.Sprintf("the buildkitd categorized state-tree file { create read open lock write getattr rename setattr unlink append } grant must exist exactly once in the exact canonical form, found %d: %s", stateFileCount, canonicalStateFile))
 	}
 	runtimeRootCount := 0
 	for _, line := range strings.Split(policy, "\n") {
@@ -5045,7 +5045,8 @@ func buildkitdIdentityViolations(policy string) []string {
 	// execute_no_trans }, D shared
 	// state-root, E categorized state-tree dir
 	// { getattr search write add_name read open create remove_name rmdir },
-	// F categorized state-tree file { create read open lock write getattr },
+	// F categorized state-tree file { create read open lock write
+	// getattr rename setattr unlink append },
 	// G shared runtime-root dir { search }, H categorized runtime-tree dir
 	// { getattr search write add_name create remove_name mounton setattr }, I categorized
 	// runtime-tree sock_file { create unlink setattr }, and the R7-added
@@ -5070,7 +5071,7 @@ func buildkitdIdentityViolations(policy string) []string {
 		}
 	}
 	if buildkitdNamedAllow != 26 {
-		violations = append(violations, fmt.Sprintf("the module must carry exactly the twenty-six buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr open execute_no_trans }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir setattr }, the categorized state-tree file { create read open lock write getattr rename }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name create remove_name mounton setattr }, the categorized runtime-tree sock_file { create unlink setattr }, and the R7 manager child-lifecycle { signull signal sigkill } authority, the daemon's per-op BuildKit endpoint { connectto } peer edge, the rootlesskit parent's buildkitd child-authority rule, the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr, the unprivileged-mount-flags statfs getattr and the OCI-worker process-group setup rule), found %d", buildkitdNamedAllow))
+		violations = append(violations, fmt.Sprintf("the module must carry exactly the twenty-six buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr open execute_no_trans }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir setattr }, the categorized state-tree file { create read open lock write getattr rename setattr unlink append }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name create remove_name mounton setattr }, the categorized runtime-tree sock_file { create unlink setattr }, and the R7 manager child-lifecycle { signull signal sigkill } authority, the daemon's per-op BuildKit endpoint { connectto } peer edge, the rootlesskit parent's buildkitd child-authority rule, the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr, the unprivileged-mount-flags statfs getattr and the OCI-worker process-group setup rule), found %d", buildkitdNamedAllow))
 	}
 	// The shared runtime-root dir surface has exactly the standing
 	// owners above; a NEW or reshaped rule on the pair (any source,
@@ -5155,7 +5156,7 @@ func buildkitdIdentityViolations(policy string) []string {
 			continue
 		}
 		if strings.Contains(trimmed, " docker_helper_builder_state_t:file ") && !standingStateTreeFileRules[trimmed] {
-			violations = append(violations, "the categorized state-tree file surface has exactly the standing owners (init_t, the manager, the flow, the buildkitd { create read open lock write getattr rename setattr unlink } rule) — every other shape on the pair violates: "+trimmed)
+			violations = append(violations, "the categorized state-tree file surface has exactly the standing owners (init_t, the manager, the flow, the buildkitd { create read open lock write getattr rename setattr unlink append } rule) — every other shape on the pair violates: "+trimmed)
 		}
 	}
 	for _, line := range strings.Split(policy, "\n") {
@@ -5486,7 +5487,7 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 	// WIDENED IN PLACE by the 4C-69 canonical run's own terminal combined
 	// 0x40002 decision (ONE rule, never split, never 4C-70a/4C-70b; the
 	// old bare form is now a mutation shape below).
-	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr rename setattr unlink };"
+	const canonicalStateFile = "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr rename setattr unlink append };"
 	var withoutStateFile []string
 	stateFileCount := 0
 	for _, line := range strings.Split(policy, "\n") {
@@ -5498,7 +5499,7 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		withoutStateFile = append(withoutStateFile, line)
 	}
 	if stateFileCount != 1 {
-		t.Errorf("the buildkitd categorized state-tree file { create read open lock } grant must exist exactly once, found %d", stateFileCount)
+		t.Errorf("the buildkitd categorized state-tree file { create read open lock write getattr rename setattr unlink append } grant must exist exactly once, found %d", stateFileCount)
 	}
 	if violations := buildkitdIdentityViolations(strings.Join(withoutStateFile, "\n")); len(violations) == 0 {
 		t.Error("the missing-state-file mutation must trip the buildkitd authority invariants")
@@ -5938,6 +5939,28 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		{"parallel bare create rule beside the canonical triple", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file create;"},
 		{"parallel bare read rule beside the canonical triple", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file read;"},
 		{"duplicate of the state-file rule", canonicalStateFile},
+		// the R7 append rung on the categorized state-tree FILE plane:
+		// exactly the ONE widened decuple rule (the 4C-69/70/71 + R7
+		// rule WIDENED IN PLACE by the R7 append rung, run 39137800162's
+		// own terminal runc-log.json O_APPEND open — the file EXISTS,
+		// the create/open grant held; write and append are DIFFERENT
+		// permissions — ONE rule never split); the missing bit, every
+		// parallel/duplicate shape, every forbidden ride-along, the
+		// wrong targets and the wrong sources trip
+		{"the old R7 pre-append form (missing append)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr rename setattr unlink };"},
+		{"parallel bare append rule beside the canonical state-file rule", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file append;"},
+		{"the decuple + execute", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr rename setattr unlink append execute };"},
+		{"the decuple + map", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr rename setattr unlink append map };"},
+		{"the decuple + link", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr rename setattr unlink append link };"},
+		{"the decuple + relabelfrom", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr rename setattr unlink append relabelfrom };"},
+		{"the decuple + relabelto", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr rename setattr unlink append relabelto };"},
+		{"the decuple + execmod", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr rename setattr unlink append execmod };"},
+		{"the append rung on the shared state root (file class)", "allow docker_helper_buildkitd_t docker_helper_builder_state_root_t:file append;"},
+		{"the append rung on the generic file type (attribute)", "allow docker_helper_buildkitd_t file_type:file append;"},
+		{"the append rung on the generic tmp file type", "allow docker_helper_buildkitd_t tmp_t:file append;"},
+		{"the append rung from the wrong source (the flow)", "allow docker_helper_rootlesskit_t docker_helper_builder_state_t:file append;"},
+		{"the append rung from the wrong source (the manager)", "allow docker_helper_builder_t docker_helper_builder_state_t:file append;"},
+		{"the append rung from the wrong source (the daemon)", "allow docker_helper_t docker_helper_builder_state_t:file append;"},
 		// the 4C-72 shared runtime-root dir plane (exactly the ONE bare
 		// search rule; the missing-rule case is covered by the
 		// withoutRuntimeRoot removal above; the appended buildkitd-source

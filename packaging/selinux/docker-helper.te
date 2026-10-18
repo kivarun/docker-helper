@@ -4550,9 +4550,11 @@ allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr sear
 #     failure as "unsupported" by design), NO state-tree file unlink
 #     grant, NO state-tree dir mounton grant, NO cgroup_t grant, NO
 #     runtime-tree widening (PLANE H quintuple + PLANE I triple
-#     frozen), NO buildkitd_exec_t:file open (the standing
-#     quarantine), NO generic bin_t grant, NO tmpfs_t:lnk_file grant,
-#     NO cap_userns grant;
+#     frozen), NO buildkitd_exec_t:file open grant AT THE 4C-90 TIME
+#     (the standing quarantine then — the R7 exec-image open rung later
+#     granted it from its own enforcing evidence, never as a ride-along
+#     on this plane), NO generic bin_t grant, NO tmpfs_t:lnk_file
+#     grant, NO cap_userns grant;
 #   - the frozen planes stay frozen: the three exec planes, the
 #     target-side exec-type rule exactly { entrypoint read execute
 #     getattr }, the shared state-root rule exactly { getattr search },
@@ -4562,7 +4564,48 @@ allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir { getattr sear
 #   avc: denied { rename } tclass=file
 #        tcontext=system_u:object_r:docker_helper_builder_state_t:s0:c1
 #        name=startedat.tmp
-allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr rename setattr unlink };
+#
+# --- R7: the categorized state-tree file append — the 4C-69/70/71 +
+# --- R7 rule widened IN PLACE by exactly ONE permission (ONE rule,
+# --- never split) ---
+#
+# R7 (enforcing evidence, scope=selinux UAT run 39137800162): the
+# executed bundled OCI runtime's own executor log. The runtime-dir
+# setattr rung passed and buildkit-runc's executor setup proceeded to
+# open its own log file for append inside this op's own categorized
+# state tree, and the append hook denies:
+#
+#   avc:  denied  { append } for  pid=3982 comm="buildkit-runc"
+#     path="/var/lib/docker-helper-builder/ops/op_1d02b963fe61e71be64d3d06e383771e/root/runc-native/executor/runc-log.json"
+#     dev="vda3" ino=26215057
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:docker_helper_builder_state_t:s0:c1
+#     tclass=file permissive=0
+# (serial 1339; the worker's second spawn the same second, serial 1343
+# pid=3987. Two independent reproductions in the same run: the workload-
+# MAC S15 probe build died the same way at 15:07:43 — serials 10333/10337,
+# pids 258097/258102.) The file itself EXISTS (created earlier in the
+# flow — the state-file create/open grant held); an open(2) with
+# O_APPEND requires the append permission specifically — SELinux
+# separates write from append, and the standing write grant does not
+# carry it. The build's fatal text is the runtime's own open error, the
+# RUN step ending exit code: 1.
+#
+# THE DELTA IS EXACTLY +append: the ONE widened-in-place rule, no
+# parallel allow, no execute/map/execmod, no link, no relabelfrom or
+# relabelto, no ioctl, no write ride-along (write is already a granted
+# member — the append hook is a DIFFERENT permission the O_APPEND open
+# hook checks on its own), no transition/type/fcontext/MCS change, no
+# capability/cap_userns, and NOTHING on the shared state root or any
+# generic file type. SCOPE: the authority is the state-tree FILE
+# class's own append hook, type-wide TE authority — the op's whole
+# categorized state-tree file surface, not the runc-log.json path
+# specifically; the cross-operation boundary is owned by the MCS
+# category constraints exactly as every other state-tree plane
+# requires (the type carries the categorized per-op labels; a c1
+# subject cannot reach a c2 tree; the live per-operation category
+# evidence is the UAT harness's runtime-privacy section).
+allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read open lock write getattr rename setattr unlink append };
 
 # --- 4C-72: the shared runtime-root dir search — the NEW pair/plane
 # --- (PLANE G); the bare singleton, never a widening of any existing
