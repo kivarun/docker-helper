@@ -24,6 +24,21 @@ name: Release 2.4 R7 full-gate corrective diagnosis
 #                    at the terminal moment (the false-STOP-OK proof), the
 #                    runtime/state dir + mount residue checks and the
 #                    post-teardown admission build.
+#   selinux-vm     — mode=mcs-audit instead runs the R7 MCS-isolation audit
+#                    on the same enforcing SELinux consumer: the loaded
+#                    policy's constraint expressions verbatim (file, dir,
+#                    lnk_file, sock_file, process, unix_stream_socket,
+#                    fifo_file, filesystem), the mcs_constrained_type and
+#                    trusted-subject membership facts for every docker-helper
+#                    domain and object type, the per-class MCS-form verdict
+#                    (t1/t2/unconditional), the live cross-category probe
+#                    attempt in the ACTUAL docker_helper_buildkitd_t:s0:c1
+#                    domain (positive/negative controls with DAC equalized,
+#                    BLOCKED — never PASS — when no test process can be
+#                    created), and the cgroup-finding forensics (the ordered
+#                    denial set, the RUNNING buildkitd's mount-namespace
+#                    mountinfo, the bundled runc version). Security proof
+#                    only: NO grants, NO production changes.
 #
 # SCOPE NOTE: the default artifact source is the FAILED full-gate run's
 # producer set (the RED fixture). It exists to reproduce and to collect
@@ -56,7 +71,7 @@ on:
         required: true
         type: string
       mode:
-        description: 'diag = the R7 red/green diagnosis; stop-proof = the R7 STOP-isolation proof (AppArmor consumer only)'
+        description: 'diag = the R7 red/green diagnosis; stop-proof = the R7 STOP-isolation proof (AppArmor consumer only); mcs-audit = the R7 MCS-isolation audit (SELinux consumer only)'
         required: false
         type: string
         default: 'diag'
@@ -71,7 +86,7 @@ permissions:
 
 jobs:
   ubuntu-tarball-diag:
-    if: inputs.mode != 'stop-proof'
+    if: inputs.mode != 'stop-proof' && inputs.mode != 'mcs-audit'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -131,11 +146,12 @@ jobs:
           echo "UAT_RPM=$path" >> "$GITHUB_ENV"
           echo "UAT_RPM_SHA256=$sha" >> "$GITHUB_ENV"
 
-      - name: Run the SELinux Tumbleweed VM diagnosis (R7-A/R7-C/R7-D)
+      - name: Run the SELinux Tumbleweed VM diagnosis (R7-A/R7-C/R7-D) / MCS audit
         run: |
           UAT_REPO_DIR="${{ github.workspace }}" \
           UAT_RPM="$UAT_RPM" \
           UAT_RPM_SHA256="$UAT_RPM_SHA256" \
+          R7_MODE="${{ inputs.mode || 'diag' }}" \
             scripts/release-2.4-r7-diag-tw-selinux-vm.sh
 
       - name: Upload R7 SELinux VM evidence
@@ -147,6 +163,7 @@ jobs:
           if-no-files-found: error
 
   apparmor-vm-diag:
+    if: inputs.mode != 'stop-proof' && inputs.mode != 'mcs-audit'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:

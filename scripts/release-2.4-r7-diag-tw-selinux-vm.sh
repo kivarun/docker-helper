@@ -16,6 +16,11 @@
 #   UAT_RPM             host path to the exact candidate RPM
 #   UAT_RPM_SHA256      expected SHA-256 of that RPM
 #   R7_DIAG_EVIDENCE_DIR  host evidence directory (default under /tmp)
+#   R7_MODE             diag (default) = the R7 red/green diagnosis;
+#                       mcs-audit = the R7 MCS-isolation audit (the loaded
+#                       policy's constraint semantics + membership + the
+#                       live cross-category probe attempt + the cgroup
+#                       forensics; NO grants, NO production changes)
 
 set -Eeuo pipefail
 
@@ -24,6 +29,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UAT_REPO_DIR="${UAT_REPO_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 EVIDENCE_DIR="${R7_DIAG_EVIDENCE_DIR:-/tmp/release-2.4-r7-diag-selinux-evidence}"
 GUEST_EVIDENCE_DIR='/tmp/r7-diag-evidence'
+R7_MODE="${R7_MODE:-diag}"
+case "$R7_MODE" in
+  diag) GUEST_SCRIPT='release-2.4-r7-diag-guest.sh' ;;
+  mcs-audit) GUEST_SCRIPT='release-2.4-r7-mcs-audit-guest.sh' ;;
+  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit)" ;;
+esac
 
 log()  { printf '%s %s\n' "$PREFIX" "$*"; }
 fail() { printf '%s FAILED: %s\n' "$PREFIX" "$*" >&2; exit 1; }
@@ -51,7 +62,7 @@ vm_selinux_two_stage_docker
 
 log '== 7. transfer and run the R7 guest diagnostic'
 vm_ssh 'rm -rf /tmp/r7-diag && mkdir -p /tmp/r7-diag'
-vm_scp "$SCRIPT_DIR/release-2.4-r7-diag-guest.sh" opc@127.0.0.1:/tmp/r7-diag/release-2.4-r7-diag-guest.sh
+vm_scp "$SCRIPT_DIR/$GUEST_SCRIPT" opc@127.0.0.1:/tmp/r7-diag/release-2.4-r7-diag-guest.sh
 
 set +e
 # The diag VM reboots mid-diagnosis (observed ~55s after boot; runs
@@ -89,6 +100,21 @@ RMT
     tar -xzf "$EVIDENCE_DIR/guest-evidence-attempt$attempt.tar.gz" -C "$EVIDENCE_DIR/guest-attempt$attempt" 2>/dev/null || true
   fi
 
+  if [ "$R7_MODE" = "mcs-audit" ]; then
+    VERDICT="$(grep -aoE 'R7-MCS-AUDIT=.*' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"
+    case "$VERDICT" in
+      R7-MCS-AUDIT=*)
+        log "R7 MCS audit verdict: $VERDICT"
+        break
+        ;;
+      *)
+        if [ "$attempt" -eq 3 ]; then
+          fail "the R7 MCS audit produced no verdict (guest exit $GUEST_RC)"
+        fi
+        log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
+        ;;
+    esac
+  else
   VERDICT="$(grep -aoE 'R7-DIAG-RESULT=[A-Z-]+' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"
   case "$VERDICT" in
     "R7-DIAG-RESULT=REPRODUCED")
@@ -106,5 +132,6 @@ RMT
       log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
       ;;
   esac
+  fi
 done
 set -e
