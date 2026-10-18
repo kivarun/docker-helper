@@ -5084,7 +5084,47 @@ allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search;
 # the flow traversal, the daemon transport) are DIFFERENT subjects and
 # DIFFERENT owners — their builder_runtime_t/builder_runtime_root_t
 # rules stay byte-unchanged, never merged and never templates.
-allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write add_name create remove_name mounton };
+#
+# --- R7: the categorized runtime-tree dir setattr — the 4C-73..78 rule
+# --- widened IN PLACE by exactly ONE permission (ONE rule, never split) ---
+#
+# R7 (enforcing evidence, scope=selinux UAT run 39133235511): the executed
+# bundled OCI runtime's own runtime-dir fixup. The execute_no_trans rung
+# passed and the bundled buildkit-runc RAN for the first time on the
+# enforcing consumer; its rootless startup chmods the per-operation
+# runtime directory it owns inside this op's own tree and the setattr
+# hook denies:
+#
+#   avc:  denied  { setattr } for  pid=3980 comm="buildkit-runc"
+#     name="runc" dev="tmpfs" ino=2395
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:docker_helper_builder_runtime_t:s0:c1
+#     tclass=dir permissive=0
+# (serial 1331; the worker's second spawn the same second, serial 1335
+# pid=3985. Two independent reproductions in the same run: the workload-
+# MAC S15 probe build died the same way at 14:02:50 — serials 9095/9099,
+# pids 257757/257762.) The target is the op's OWN runtime-tree child
+# (ops/<op_id>/runc — runc's $XDG_RUNTIME_DIR fixup, the runtime's own
+# error names the chmod), same category on both sides of the decision.
+#
+# THE DELTA IS EXACTLY +setattr: the ONE widened-in-place rule, no
+# parallel allow, no rename/relabelto/relabelfrom, no rmdir, no lock,
+# no dir:create/unlink rides, NOTHING on builder_runtime_t:file, no
+# builder_runtime_root_t/tmpfs_t grant (the shared runtime root stays
+# the bare search singleton), no capability/cap_userns, no
+# range_transition, no MCS/category change, no .fc change, and the
+# companion runtime owners stay byte-unchanged. PRIVACY SHAPE: the
+# fixup the bit serves is the runtime TIGHTENING its own owner applies
+# (the per-op runtime dir's mode restriction), never a widening for any
+# other local identity; the rule stays type-wide TE authority with the
+# cross-operation effect owned by the MCS category constraints exactly
+# as the SCOPE paragraph above requires — the live privacy evidence
+# (the per-op category allocation, the runc dir's own category match,
+# the mode/uid/gid capture before and after the fixup, the concurrent
+# distinct-category operations and the post-STOP residue absence) is
+# the UAT harness's runtime-privacy section, never inferred from one
+# scontext/tcontext category match alone.
+allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write add_name create remove_name mounton setattr };
 
 # --- 4C-77: the categorized operation-runtime sock_file create — the NEW
 # --- pair+class plane (PLANE I), NEVER a widening of the dir rule ---

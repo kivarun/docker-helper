@@ -54,6 +54,15 @@
 #      0700 is not bypassable from the strongest reachable workload
 #      privilege (Principal UID, no capabilities, no-new-privileges).
 #
+# R7 corrective evidence (auxiliary, outside the S-matrix numbering): the
+# runtime-privacy section before S15 captures the LIVE evidence for the
+# executed bundled OCI runtime's own per-op runtime-dir fixup (the
+# buildkitd_t -> builder_runtime_t:dir setattr rung): two concurrent
+# operations with distinct per-op categories, each op's runc dir context
+# matching its own tree, the fixup's mode/owner tightening, no group/other
+# widening on the tree path, post-terminal residue absence, and the
+# category-blind loaded-policy grant pin.
+#
 # Fail-closed contract: PASS -> continue; FAIL -> gate red; BLOCKED -> a
 # required dependency/evidence is unavailable -> gate red. Missing AVC or
 # projection evidence is never counted as success.
@@ -1818,6 +1827,175 @@ if build_hostile_image; then
   fi
 else
   acc_blocked "S14 hostile fixture build failed (source-image escalation proof impossible)"
+fi
+
+# --- R7 corrective evidence: the executed OCI runtime's runtime-dir fixup ---
+say "R7 runtime privacy: buildkit-runc's per-op runtime-dir fixup (setattr rung)"
+# The R7 setattr rung serves the executed bundled buildkit-runc's own
+# $XDG_RUNTIME_DIR fixup (chmod on ops/<op_id>/runc inside its OWN
+# categorized per-op runtime tree). The rule is type-wide TE authority;
+# the cross-operation effect is owned by the MCS category constraints.
+# This section captures the LIVE evidence the policy comment requires —
+# never one scontext/tcontext category match alone:
+#   - the per-op category allocation is real: TWO CONCURRENT builds get
+#     two distinct ops/<id> runtime trees with DISTINCT SELinux
+#     categories (the lowest-free per-operation pool, G32 r3 §4.1);
+#   - each observed ops/<id>/runc dir carries the SAME SELinux context
+#     as its own op's runtime tree (live stat, both sides);
+#   - the fixup's effect is a TIGHTENING: the settled runc dir mode is
+#     exactly owner-rwx (no group/other access) and its owner matches
+#     the op tree's own flow identity; the first-seen (pre-fixup race
+#     window) and settled (post-fixup) stats are both recorded;
+#   - no group/other write appears anywhere on the observed tree path
+#     (the runtime root, ops/, the op dir) — no widening for any other
+#     local identity, no writable path toward another operation or the
+#     shared runtime root;
+#   - after both builds reach terminal, the whole per-op trees are gone
+#     (no leftover restricted dirs);
+#   - the loaded policy's concrete buildkitd_t -> builder_runtime_t:dir
+#     grant is EXACTLY the one canonical rule and carries NO category
+#     (the sesearch pin) — the category-blind TE grant documented in
+#     the module; the cross-operation denial itself is the MCS
+#     constraint's, which the workload plane proves live (S13).
+RT_PRIV_CTX="$TREE/work/runtime-privacy"
+rm -rf "$RT_PRIV_CTX"
+mkdir -p "$RT_PRIV_CTX"
+cat > "$RT_PRIV_CTX/Dockerfile" <<'EOF'
+FROM alpine:3.24
+RUN sleep 15
+RUN echo PRIVACY-BUILD-DONE
+EOF
+RT_SESEARCH_BIN="$(command -v sesearch || true)"
+if [ -z "$RT_SESEARCH_BIN" ]; then
+  acc_blocked "R7 runtime privacy: sesearch unavailable (the loaded-policy pin cannot run)"
+else
+  ( DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" dh build runtime-privacy \
+      --dockerfile Dockerfile --image uat-privacy-a:2.2 \
+      >/tmp/uat-wls-privacy-a.log 2>&1 ) & RT_PID_A=$!
+  ( DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" dh build runtime-privacy \
+      --dockerfile Dockerfile --image uat-privacy-b:2.2 \
+      >/tmp/uat-wls-privacy-b.log 2>&1 ) & RT_PID_B=$!
+  RT_SURVEY=/tmp/uat-wls-privacy-survey.txt
+  : > "$RT_SURVEY"
+  RT_DEADLINE=$(( $(date +%s) + 180 ))
+  while kill -0 "$RT_PID_A" 2>/dev/null || kill -0 "$RT_PID_B" 2>/dev/null; do
+    if [ "$(date +%s)" -ge "$RT_DEADLINE" ]; then
+      break
+    fi
+    for RT_OPDIR in /run/docker-helper-builder/ops/*; do
+      [ -d "$RT_OPDIR" ] || continue
+      RT_OP="$(basename "$RT_OPDIR")"
+      printf 'op %s %s\n' "$RT_OP" "$(stat -c '%a|%U|%G|%C' "$RT_OPDIR" 2>/dev/null)" >> "$RT_SURVEY"
+      if [ -d "$RT_OPDIR/runc" ]; then
+        printf 'runc %s %s\n' "$RT_OP" "$(stat -c '%a|%U|%G|%C' "$RT_OPDIR/runc" 2>/dev/null)" >> "$RT_SURVEY"
+      fi
+    done
+    sleep 0.3
+  done
+  wait "$RT_PID_A"; RT_RC_A=$?
+  wait "$RT_PID_B"; RT_RC_B=$?
+  RT_OPS="$(grep '^op ' "$RT_SURVEY" | awk '{ print $2 }' | awk '!seen[$0]++')"
+  RT_OP_COUNT=0
+  RT_STAT_A=""; RT_STAT_B=""
+  RT_RUNC_FIRST_A=""; RT_RUNC_FIRST_B=""
+  RT_RUNC_LAST_A=""; RT_RUNC_LAST_B=""
+  for RT_OP in $RT_OPS; do
+    RT_OP_COUNT=$((RT_OP_COUNT + 1))
+    RT_STAT="$(grep "^op $RT_OP " "$RT_SURVEY" | head -1 | awk '{ print $3 }')"
+    RT_RUNC_FIRST="$(grep "^runc $RT_OP " "$RT_SURVEY" | head -1 | awk '{ print $3 }')"
+    RT_RUNC_LAST="$(grep "^runc $RT_OP " "$RT_SURVEY" | tail -1 | awk '{ print $3 }')"
+    if [ "$RT_OP_COUNT" -eq 1 ]; then
+      RT_STAT_A="$RT_STAT"; RT_RUNC_FIRST_A="$RT_RUNC_FIRST"; RT_RUNC_LAST_A="$RT_RUNC_LAST"
+    elif [ "$RT_OP_COUNT" -eq 2 ]; then
+      RT_STAT_B="$RT_STAT"; RT_RUNC_FIRST_B="$RT_RUNC_FIRST"; RT_RUNC_LAST_B="$RT_RUNC_LAST"
+    fi
+    info "R7-privacy op=$RT_OP dir=${RT_STAT:-unobserved} runc_first=${RT_RUNC_FIRST:-never-seen} runc_last=${RT_RUNC_LAST:-never-seen}"
+  done
+  # stat tuples are mode|uid|gid|context
+  RT_CTX_A="$(printf '%s' "$RT_STAT_A" | awk -F'|' '{ print $4 }')"
+  RT_CTX_B="$(printf '%s' "$RT_STAT_B" | awk -F'|' '{ print $4 }')"
+  if [ "$RT_OP_COUNT" -ge 2 ] && [ -n "$RT_CTX_A" ] && [ -n "$RT_CTX_B" ] \
+      && [ "$RT_CTX_A" != "$RT_CTX_B" ]; then
+    acc_ok "R7 runtime privacy: two concurrent operations carried DISTINCT runtime-tree categories (${RT_CTX_A##*:s0} vs ${RT_CTX_B##*:s0})"
+  else
+    acc_fail "R7 runtime privacy: the per-operation category allocation did not show two distinct concurrent categories (ops seen: $RT_OP_COUNT)"
+  fi
+  RT_RUNC_CTX_A="$(printf '%s' "$RT_RUNC_LAST_A" | awk -F'|' '{ print $4 }')"
+  RT_RUNC_CTX_B="$(printf '%s' "$RT_RUNC_LAST_B" | awk -F'|' '{ print $4 }')"
+  if [ -n "$RT_RUNC_CTX_A" ] && [ -n "$RT_RUNC_CTX_B" ] \
+      && [ "$RT_RUNC_CTX_A" = "$RT_CTX_A" ] && [ "$RT_RUNC_CTX_B" = "$RT_CTX_B" ]; then
+    acc_ok "R7 runtime privacy: each observed runc dir's SELinux context equals its own operation's runtime-tree context (the match is per-op, on top of the distinct categories proven above — never one bare s0:c1 match)"
+  else
+    acc_fail "R7 runtime privacy: the runc dir's context did not match its own operation's tree (runc A=${RT_RUNC_CTX_A:-never-seen} B=${RT_RUNC_CTX_B:-never-seen})"
+  fi
+  RT_MODE_A="$(printf '%s' "$RT_RUNC_LAST_A" | awk -F'|' '{ print $1 }')"
+  RT_MODE_B="$(printf '%s' "$RT_RUNC_LAST_B" | awk -F'|' '{ print $1 }')"
+  RT_OWNER_A="$(printf '%s' "$RT_RUNC_LAST_A" | awk -F'|' '{ print $2 "|" $3 }')"
+  RT_OWNER_B="$(printf '%s' "$RT_RUNC_LAST_B" | awk -F'|' '{ print $2 "|" $3 }')"
+  RT_OPDIR_OWNER_A="$(printf '%s' "$RT_STAT_A" | awk -F'|' '{ print $2 "|" $3 }')"
+  RT_OPDIR_OWNER_B="$(printf '%s' "$RT_STAT_B" | awk -F'|' '{ print $2 "|" $3 }')"
+  RT_PRIV_TIGHTENED=1
+  [ "$RT_MODE_A" = "700" ] || RT_PRIV_TIGHTENED=0
+  [ "$RT_MODE_B" = "700" ] || RT_PRIV_TIGHTENED=0
+  [ -n "$RT_OWNER_A" ] && [ "$RT_OWNER_A" = "$RT_OPDIR_OWNER_A" ] || RT_PRIV_TIGHTENED=0
+  [ -n "$RT_OWNER_B" ] && [ "$RT_OWNER_B" = "$RT_OPDIR_OWNER_B" ] || RT_PRIV_TIGHTENED=0
+  if [ "$RT_PRIV_TIGHTENED" -eq 1 ]; then
+    acc_ok "R7 runtime privacy: the fixup TIGHTENED the ops' own runc dirs (settled modes A=$RT_MODE_A B=$RT_MODE_B, owners ${RT_OWNER_A%%|*}/${RT_OWNER_B%%|*} match the op trees' flow identity; first-seen pre-fixup stats recorded: A=${RT_RUNC_FIRST_A:-never-seen} B=${RT_RUNC_FIRST_B:-never-seen})"
+  else
+    acc_fail "R7 runtime privacy: the settled runc dir is not owner-restricted (A=$RT_MODE_A B=$RT_MODE_B) or an owner drifted from the op tree's flow identity"
+  fi
+  RT_WIDENED=0
+  for RT_PATH in /run/docker-helper-builder /run/docker-helper-builder/ops; do
+    RT_M="$(stat -c '%a' "$RT_PATH" 2>/dev/null)"
+    RT_M3="$(printf '%s' "$RT_M" | awk '{ print substr($0, length($0)-2) }')"
+    RT_G="$(printf '%s' "$RT_M3" | awk '{ print substr($0, 2, 1) }')"
+    RT_O="$(printf '%s' "$RT_M3" | awk '{ print substr($0, 3, 1) }')"
+    case "$RT_G" in 2|3|6|7) RT_WIDENED=1 ;; esac
+    case "$RT_O" in 2|3|6|7) RT_WIDENED=1 ;; esac
+  done
+  for RT_OP in $RT_OPS; do
+    RT_M="$(grep "^op $RT_OP " "$RT_SURVEY" | head -1 | awk '{ print $3 }' | awk -F'|' '{ print $1 }')"
+    case "$RT_M" in
+      [0-7][2-7][0-7]|[0-7][0-7][2-7]) RT_WIDENED=1 ;;
+    esac
+  done
+  if [ "$RT_WIDENED" -eq 0 ] && [ -n "$RT_OPS" ]; then
+    acc_ok "R7 runtime privacy: no group/other write anywhere on the observed tree path (the runtime root, ops/, every observed op dir) — no writable path toward another operation or the shared runtime root"
+  else
+    acc_fail "R7 runtime privacy: unexpected group/other write on the shared runtime path or an op dir"
+  fi
+  RT_RESIDUE_OK=1
+  for RT_OP in $RT_OPS; do
+    if [ -d "/run/docker-helper-builder/ops/$RT_OP" ]; then
+      RT_RESIDUE_OK=0
+    fi
+  done
+  if [ "$RT_RESIDUE_OK" -eq 1 ] && [ "$RT_OP_COUNT" -ge 1 ]; then
+    acc_ok "R7 runtime privacy: after both builds reached terminal, every observed per-op runtime tree is gone (no leftover restricted dirs)"
+  else
+    acc_fail "R7 runtime privacy: per-op runtime-tree residue survived the terminal convergence"
+  fi
+  if [ "$RT_RC_A" -eq 0 ] && [ "$RT_RC_B" -eq 0 ]; then
+    acc_ok "R7 runtime privacy: both concurrent sleep builds completed the FULL image lifecycle on the enforcing consumer (the bundled OCI runtime executed the RUN steps, then build, load, verify, tag, cleanup)"
+  else
+    acc_fail "R7 runtime privacy: a concurrent sleep build did not complete (rcA=$RT_RC_A rcB=$RT_RC_B): $(redact </tmp/uat-wls-privacy-a.log | tail -3) | $(redact </tmp/uat-wls-privacy-b.log | tail -3)"
+  fi
+  RT_SESEARCH_OUT="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t \
+    -t docker_helper_builder_runtime_t -c dir /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+  RT_SESEARCH_HIT="$(printf '%s\n' "$RT_SESEARCH_OUT" | grep 'docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir' || true)"
+  RT_SESEARCH_N="$(printf '%s\n' "$RT_SESEARCH_HIT" | grep -c . || true)"
+  RT_SESEARCH_OK=1
+  [ "$RT_SESEARCH_N" -eq 1 ] || RT_SESEARCH_OK=0
+  if [ "$RT_SESEARCH_OK" -eq 1 ]; then
+    for RT_PERM in add_name create getattr mounton remove_name search setattr write; do
+      printf '%s\n' "$RT_SESEARCH_HIT" | grep -q "$RT_PERM" || RT_SESEARCH_OK=0
+    done
+  fi
+  if [ "$RT_SESEARCH_OK" -eq 1 ]; then
+    acc_ok "R7 runtime privacy: the loaded policy's concrete buildkitd_t -> builder_runtime_t:dir grant is EXACTLY the one canonical rule with NO category (sesearch): $(printf '%s' "$RT_SESEARCH_HIT" | head -1)"
+  else
+    acc_fail "R7 runtime privacy: the loaded buildkitd_t -> builder_runtime_t:dir grant is not exactly the one category-blind canonical rule (hits=$RT_SESEARCH_N): $(printf '%s' "$RT_SESEARCH_HIT" | head -2)"
+  fi
 fi
 
 # --- scenario S15: helper-created build staging strips SUID/SGID (C1) ---------
