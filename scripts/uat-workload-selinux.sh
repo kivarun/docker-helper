@@ -2123,11 +2123,11 @@ else
   else
     acc_fail "R7 runtime privacy: the loaded buildkitd_t -> builder_state_t:file grant is not exactly the one category-blind canonical rule (hits=$RT_ST_SESEARCH_N): $(printf '%s' "$RT_ST_SESEARCH_HIT" | head -2)"
   fi
-  RT_ST_SEINFO="$("$RT_SEINFO_BIN" -xt docker_helper_builder_state_t /sys/fs/selinux/policy 2>/dev/null || true)"
-  if printf '%s' "$RT_ST_SEINFO" | grep -q 'mcs_constrained'; then
-    acc_ok "R7 runtime privacy: docker_helper_builder_state_t is an mcs_constrained type (seinfo) — the base policy's MCS constraints govern every process->object access on the state tree (the workload plane proves the same machinery live, S13)"
+  RT_ST_SEINFO="$("$RT_SEINFO_BIN" -a mcs_constrained_type -x 2>/dev/null || true)"
+  if printf '%s' "$RT_ST_SEINFO" | grep -q 'docker_helper_builder_state_t'; then
+    acc_ok "R7 runtime privacy: docker_helper_builder_state_t is an mcs_constrained type member (seinfo -a mcs_constrained_type -x) — the base policy's MCS constraints govern every process->object access on the state tree (the workload plane proves the same machinery live, S13)"
   else
-    acc_fail "R7 runtime privacy: docker_helper_builder_state_t did not show the mcs_constrained attribute (seinfo output: ${RT_ST_SEINFO:-absent})"
+    acc_fail "R7 runtime privacy: docker_helper_builder_state_t did not show the mcs_constrained_type membership (seinfo output: ${RT_ST_SEINFO:-absent})"
   fi
 fi
 
