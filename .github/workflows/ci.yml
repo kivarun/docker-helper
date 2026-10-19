@@ -72,8 +72,10 @@ jobs:
       - name: Local dev VM harness tests
         run: bash scripts/test-dev-vm-local.sh
 
-      - name: Agent launcher alias tests
-        run: bash scripts/lab/test-agent-aliases.sh
+      - name: Agent provisioning tests
+        run: |
+          bash scripts/lab/test-agent-aliases.sh
+          bash scripts/lab/test-setup-agent-user.sh
 
   selinux-policy:
     runs-on: ubuntu-latest

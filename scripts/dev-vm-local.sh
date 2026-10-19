@@ -70,6 +70,11 @@ fail() {
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# In-guest trust marker: setup-agent-user.sh runs only where this exists and
+# its embedded machine-id matches the guest. Written by this trusted driver.
+LAB_VM_MARKER="/etc/docker-helper-lab-vm"
+LAB_VM_MARKER_TAG="docker-helper-lab-vm"
+
 # --- persistent state + local posture (exported BEFORE the lib sources the
 # --- harness, so the harness reads them at source time) ---
 VM_WORKDIR="${DEV_VM_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/docker-helper-dev-vm}"
@@ -164,6 +169,18 @@ echo "ISOLATED_OK"
 RMT
 }
 
+# Stamp the guest with the trust marker (fixed tag + guest machine-id). The
+# in-guest provisioning requires it, so a stray marker on the physical host
+# (whose machine-id differs) cannot pass.
+write_lab_marker() {
+  local mid
+  mid="$(vm_ssh 'cat /etc/machine-id')" || return 1
+  [ -n "$mid" ] || return 1
+  printf '%s 1 %s\n' "$LAB_VM_MARKER_TAG" "$mid" \
+    | vm_ssh "sudo tee $LAB_VM_MARKER >/dev/null"
+  log "lab VM marker written: $LAB_VM_MARKER"
+}
+
 # ---------------------------------------------------------------------------
 # operations
 # ---------------------------------------------------------------------------
@@ -191,6 +208,7 @@ cmd_create() {
       fail "network isolation self-check failed on the prepared VM"
     fi
   fi
+  write_lab_marker || fail "could not write the lab VM marker"
   log "VM created and running (SELinux enforcing, isolated=${VM_NET_ISOLATED:-0})"
 }
 
@@ -204,6 +222,7 @@ cmd_start() {
   fi
   log "starting VM from existing disk (ssh 127.0.0.1:$VM_SSH_PORT)"
   vm_init
+  write_lab_marker || fail "could not write the lab VM marker"
   log "VM started"
 }
 

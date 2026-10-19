@@ -11,7 +11,10 @@
 #   3. the Session is deleted on normal exit;
 #   4. the Session is deleted when the launcher is interrupted (SIGINT);
 #   5. the workspace is passed in the form the installed CLI advertises
-#      (--workspace flag vs positional WORKSPACE).
+#      (--workspace flag vs positional WORKSPACE);
+#   6. the model gets only the bearer: no docker.sock, no GH_TOKEN, no admin
+#      token, no principal credential;
+#   7. the images are pinned by OCI digest (no floating :latest).
 #
 # Usage: scripts/lab/test-agent-aliases.sh
 
@@ -35,6 +38,9 @@ ok()  { PASS=$((PASS+1)); printf 'ok   - %s\n' "$1"; }
 bad() { FAIL=$((FAIL+1)); printf 'FAIL - %s\n' "$1"; }
 contains() { # desc needle haystack
   case "$3" in *"$2"*) ok "$1" ;; *) bad "$1 (missing '$2' in '$3')" ;; esac
+}
+not_contains() { # desc needle haystack
+  case "$3" in *"$2"*) bad "$1 (unexpected '$2' in '$3')" ;; *) ok "$1" ;; esac
 }
 
 # --- stubs -----------------------------------------------------------------
@@ -110,7 +116,24 @@ contains "container sets no-new-privileges" "--security-opt no-new-privileges=tr
 contains "container is --rm --init" "--rm -it --init" "$dargv"
 contains "helper runtime dir is read-only" "$WORK/run:/run/docker-helper:ro" "$dargv"
 contains "workspace is a private relabel" "$WS:/workspace:Z" "$dargv"
-contains "image is the base image" "ghcr.io/kivarun/opencode-docker/base:latest" "$dargv"
+
+# model gets only the bearer: no docker.sock, no admin token, no principal cred
+not_contains "container does not mount docker.sock" "docker.sock" "$dargv"
+not_contains "container does not get GH_TOKEN" "-e GH_TOKEN" "$dargv"
+not_contains "container does not get an admin token" "ADMIN_TOKEN" "$dargv"
+not_contains "container does not mount the principal credential" "/.config/docker-helper" "$dargv"
+
+# images pinned by OCI digest
+contains "base image is digest-pinned" \
+  "ghcr.io/kivarun/opencode-docker/base@sha256:f6c6dd302f447ec05d93f9f6ffba92dd726dcf1a82c6181733bae10e0012b970" "$dargv"
+not_contains "base image is not floating" "base:latest" "$dargv"
+
+# a second launcher carries its own pinned digest
+: > "$DOCKER_REC"
+( cd "$WS" && oc-go26 echo hi )
+contains "go26 image is digest-pinned" \
+  "ghcr.io/kivarun/opencode-docker/go26@sha256:076273633dd33218b0a0f0d783cb80539a4066c1e59dee1b069a96db971830b7" \
+  "$(cat "$DOCKER_REC" 2>/dev/null || true)"
 
 # positional CLI (release/2.4 line): same launch, no --workspace flag
 unset DH_HELP_WORKSPACE

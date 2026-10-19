@@ -1,36 +1,43 @@
 #!/usr/bin/env bash
 #
-# setup-agent-user.sh — provision a dedicated local 'agent' Linux user that can
-# run opencode-docker agents through docker-helper.
+# setup-agent-user.sh — provision the dedicated 'agent' account INSIDE the
+# local lab VM.
 #
-# Run as root on the docker-helper host (openSUSE Tumbleweed):
+# Run as root in the GUEST (the VM's opc account has passwordless sudo). The
+# script refuses to run on the physical host: it requires the lab marker
+# written by the trusted VM bootstrap (scripts/dev-vm-local.sh) and verifies
+# that the marker's embedded machine-id matches the running system.
 #
-#   sudo bash scripts/lab/setup-agent-user.sh
+#   # from the physical host, with the lab scripts copied into the VM:
+#   scripts/dev-vm-local.sh ssh 'sudo bash /opt/lab/setup-agent-user.sh'
+#
+# "host" below means the GUEST VM; the physical host's /etc, /home, SSH config
+# and docker-helper config are not touched.
 #
 # Idempotent. It:
-#   1. creates the 'agent' user and its workspace root, and adds it to the
-#      'docker' group (the launcher runs `docker run`);
-#   2. installs the given SSH public key for root and for agent;
-#   3. ensures a global allowed root covers the agent home;
-#   4. creates the docker-helper principal 'agent' (its 'default' Launcher and
+#   1. creates the 'agent' account and its workspace root, and adds it to the
+#      'docker' group (the trusted launcher drives `docker run`);
+#   2. ensures a global allowed root covers the agent home;
+#   3. creates the docker-helper principal 'agent' (its 'default' Launcher and
 #      default allowed root are provisioned atomically with it), issues a
-#      principal credential and installs it, as the agent user, into
+#      principal credential and installs it, as the agent account, into
 #      ~agent/.config/docker-helper/credential.token (never printed);
-#   5. installs scripts/lab/agent-aliases.sh as ~agent/.bash_aliases and sources
+#   4. installs scripts/lab/agent-aliases.sh as ~agent/.bash_aliases and sources
 #      it from ~agent/.bashrc.
 #
-# The agent then launches agents with `oc`, `oc-go26`, `oc-dotnet10` from a
-# workspace below ~/work.
+# It does NOT manage SSH keys: VM access stays with the dev-vm-local.sh SSH
+# identity, and the agent account gets no SSH of its own.
 #
 # Env overrides: AGENT_USER, AGENT_HOME, AGENT_WORKROOT, AGENT_DOCKER_GROUP,
-#                AGENT_PUBKEY.
+#                LAB_VM_MARKER, LAB_VM_MARKER_TAG.
 set -euo pipefail
 
 AGENT_USER="${AGENT_USER:-agent}"
 AGENT_HOME="${AGENT_HOME:-/home/$AGENT_USER}"
 AGENT_WORKROOT="${AGENT_WORKROOT:-$AGENT_HOME/work}"
 AGENT_DOCKER_GROUP="${AGENT_DOCKER_GROUP:-docker}"
-AGENT_PUBKEY="${AGENT_PUBKEY:-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICbxCMSaYTbiml8YqWkJcoTOQBmRcyzQBtUZskk5JgML michael@kazakov}"
+LAB_VM_MARKER="${LAB_VM_MARKER:-/etc/docker-helper-lab-vm}"
+LAB_VM_MARKER_TAG="${LAB_VM_MARKER_TAG:-docker-helper-lab-vm}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ALIASES_SRC="$SCRIPT_DIR/agent-aliases.sh"
@@ -38,18 +45,36 @@ ALIASES_SRC="$SCRIPT_DIR/agent-aliases.sh"
 log() { printf '[setup-agent-user] %s\n' "$*"; }
 die() { printf '[setup-agent-user] ERROR: %s\n' "$*" >&2; exit 1; }
 
-[ "$(id -u)" = 0 ] || die "must run as root (sudo bash $0)"
+[ "$(id -u)" = 0 ] || die "must run as root in the guest (sudo bash $0)"
+
+# --- 0. lab-VM guard (fail closed on the physical host) ---------------------
+# The marker is written by the trusted VM bootstrap and carries the guest
+# machine-id, so a stray copy on the physical host does not pass. KVM/QEMU
+# presence alone is deliberately not trusted.
+require_lab_vm() {
+  [ -r "$LAB_VM_MARKER" ] \
+    || die "not the lab VM: missing $LAB_VM_MARKER (created by scripts/dev-vm-local.sh)"
+  local tag ver mid
+  read -r tag ver mid _ < "$LAB_VM_MARKER" || die "malformed lab VM marker $LAB_VM_MARKER"
+  [ "$tag" = "$LAB_VM_MARKER_TAG" ] || die "unexpected lab VM marker tag '$tag'"
+  [ "$ver" = 1 ] || die "unsupported lab VM marker version '$ver'"
+  [ -r /etc/machine-id ] || die "no /etc/machine-id to verify the marker"
+  [ "$mid" = "$(cat /etc/machine-id)" ] || die "lab VM marker machine-id mismatch (physical host?)"
+}
+require_lab_vm
 
 DH="$(command -v docker-helper)" || die "docker-helper not found in PATH"
 command -v jq >/dev/null 2>&1 || die "jq not found in PATH"
 [ -f "$ALIASES_SRC" ] || die "missing $ALIASES_SRC"
 
-# --- 1. user, workspace root, docker access --------------------------------
+# --- 1. account, workspace root, docker access ------------------------------
+# The 'agent' account is the trusted launcher, so it may hold docker access.
+# The untrusted model is the container process and gets no docker group.
 if id "$AGENT_USER" >/dev/null 2>&1; then
-  log "user $AGENT_USER already exists"
+  log "account $AGENT_USER already exists"
 else
-  log "creating user $AGENT_USER"
-  useradd -m -s /bin/bash -c "docker-helper agent" "$AGENT_USER"
+  log "creating account $AGENT_USER"
+  useradd -m -s /bin/bash -c "docker-helper agent launcher" "$AGENT_USER"
 fi
 
 install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" "$AGENT_WORKROOT"
@@ -65,24 +90,7 @@ else
   log "WARN: group $AGENT_DOCKER_GROUP missing; add it before launching agents"
 fi
 
-# --- 2. ssh key for root and agent -----------------------------------------
-install_key() { # <home> <owner>
-  local home="$1" owner="$2"
-  install -d -m 0700 -o "$owner" -g "$owner" "$home/.ssh"
-  [ -f "$home/.ssh/authorized_keys" ] || : > "$home/.ssh/authorized_keys"
-  chown "$owner:$owner" "$home/.ssh/authorized_keys"
-  chmod 0600 "$home/.ssh/authorized_keys"
-  if grep -qxF "$AGENT_PUBKEY" "$home/.ssh/authorized_keys"; then
-    log "ssh key already present for $owner"
-  else
-    log "adding ssh key for $owner"
-    printf '%s\n' "$AGENT_PUBKEY" >> "$home/.ssh/authorized_keys"
-  fi
-}
-install_key /root root
-install_key "$AGENT_HOME" "$AGENT_USER"
-
-# --- 3. global allowed root (authorization ceiling) -------------------------
+# --- 2. global allowed root (authorization ceiling) -------------------------
 if "$DH" config allowed-root list 2>/dev/null | grep -qF "$AGENT_HOME"; then
   log "global allowed root already covers $AGENT_HOME"
 else
@@ -90,7 +98,7 @@ else
   "$DH" config allowed-root add "$AGENT_HOME" --access read_write
 fi
 
-# --- 4. create the principal / issue the credential (token captured once) ---
+# --- 3. create the principal / issue the credential (token captured once) ---
 CRED_FILE="$AGENT_HOME/.config/docker-helper/credential.token"
 TOKEN=""
 if "$DH" principal show "$AGENT_USER" >/dev/null 2>&1; then
@@ -113,7 +121,7 @@ if [ -n "$TOKEN" ]; then
   log "credential installed for $AGENT_USER"
 fi
 
-# --- 5. opencode home + launcher aliases -----------------------------------
+# --- 4. opencode home + launcher aliases -----------------------------------
 install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" \
   "$AGENT_HOME/.opencode-docker/.config/opencode" \
   "$AGENT_HOME/.opencode-docker/.local/share/opencode"
@@ -129,5 +137,5 @@ else
   chown "$AGENT_USER:$AGENT_USER" "$AGENT_HOME/.bashrc"
 fi
 
-log "done: user=$AGENT_USER home=$AGENT_HOME workroot=$AGENT_WORKROOT"
-log "next: log in as $AGENT_USER, cd ~/work/<project>, then run: oc | oc-go26 | oc-dotnet10"
+log "done: account=$AGENT_USER home=$AGENT_HOME workroot=$AGENT_WORKROOT"
+log "next: as $AGENT_USER, cd ~/work/<project>, then run: oc | oc-go26 | oc-dotnet10"
