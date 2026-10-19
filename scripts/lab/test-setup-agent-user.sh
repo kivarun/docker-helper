@@ -6,11 +6,19 @@
 # What this protects (one invariant per test):
 #   1. the lab-VM guard fails closed (missing marker, wrong tag, wrong
 #      machine-id) and passes for a correct marker;
-#   2. a good run creates the account, grants the docker group, creates the
-#      principal + credential, and installs the launcher aliases;
-#   3. root / agent SSH config is not touched (no .ssh handling);
-#   4. a second run is idempotent (no duplicate principal/credential);
-#   5. the agent is the trusted launcher (docker group), never the model.
+#   2. a fresh run creates a DEDICATED-uid account (useradd -u, never -o) and
+#      grants the docker group;
+#   3. an existing account with the wrong uid is migrated with usermod -u and
+#      the home is re-owned (no silent ownership breakage);
+#   4. a good run creates the principal + credential and installs the aliases;
+#   5. a second run is idempotent (no duplicate principal/credential);
+#   6. an existing principal with a valid installed credential is reused
+#      (no create, no rotate);
+#   7. a missing local credential does NOT rotate implicitly -- it fails closed;
+#   8. --recover-credential performs the explicit rotate and reinstall;
+#   9. the one-time token never leaks to stdout/stderr;
+#  10. root / agent SSH config is not touched (no .ssh handling);
+#  11. the agent is the trusted launcher (docker group), never the model.
 #
 # Usage: scripts/lab/test-setup-agent-user.sh
 
@@ -35,12 +43,13 @@ count() { grep -cF "$1" "$2" 2>/dev/null || true; }
 
 # --- stubs -----------------------------------------------------------------
 SHIM="$WORK/shim"; mkdir -p "$SHIM"
-REC="$WORK/rec"; : > "$REC"
+REC="$WORK/rec"
+AGENT_HOME="$WORK/home"
 
 cat > "$SHIM/id" <<'SH'
 #!/bin/sh
 case "${1:-}" in
-  -u) echo 0 ;;
+  -u) if [ -n "${2:-}" ]; then cat "$UIDMARK" 2>/dev/null || echo 1001; else echo 0; fi ;;
   -nG) if [ -f "$GROUPMARK" ]; then echo "agent docker"; else echo "agent"; fi ;;
   "") echo "uid=0(root)" ;;
   *) [ -f "$USERMARK" ] ;;
@@ -50,11 +59,12 @@ cat > "$SHIM/useradd" <<'SH'
 #!/bin/sh
 echo "useradd $*" >> "$REC"
 : > "$USERMARK"
+echo 1001 > "$UIDMARK"
 SH
 cat > "$SHIM/usermod" <<'SH'
 #!/bin/sh
 echo "usermod $*" >> "$REC"
-: > "$GROUPMARK"
+if [ "${1:-}" = "-u" ]; then echo "$2" > "$UIDMARK"; else : > "$GROUPMARK"; fi
 SH
 cat > "$SHIM/getent" <<'SH'
 #!/bin/sh
@@ -63,6 +73,7 @@ exit 0
 SH
 cat > "$SHIM/chown" <<'SH'
 #!/bin/sh
+echo "chown $*" >> "$REC"
 exit 0
 SH
 cat > "$SHIM/install" <<'SH'
@@ -105,24 +116,33 @@ case "$1 $2" in
       add) shift 3; echo "$1" > "$ALLOWED" ;;
     esac ;;
   "principal show") [ -f "$PRINCIPAL" ] ;;
-  "principal create") : > "$PRINCIPAL"; printf '{"token":"dhc_TESTTOKEN"}\n' ;;
-  "principal credential") printf '{"token":"dhc_TESTTOKEN"}\n' ;;
+  "principal create") : > "$PRINCIPAL"; printf '{"token":"dhc_NEWTOKEN"}\n' ;;
+  "principal credential") printf '{"token":"dhc_ROTTOKEN"}\n' ;;
   "credential install")
-    cat >/dev/null
+    tok="$(cat)"
     mkdir -p "$AGENT_HOME/.config/docker-helper"
-    printf 'dhc_TESTTOKEN\n' > "$AGENT_HOME/.config/docker-helper/credential.token" ;;
+    printf '%s\n' "$tok" > "$AGENT_HOME/.config/docker-helper/credential.token" ;;
+  "self --json") [ -f "$SELFOK" ] && printf '{"ok":true,"type":"principal"}\n' ;;
 esac
 SH
 chmod +x "$SHIM"/*
+# The `self` probe is matched on "$1 $2"; a bare `self` is not used by setup.
 
 export PATH="$SHIM:$PATH"
-export REC AGENT_HOME="$WORK/home" ALLOWED="$WORK/allowed" PRINCIPAL="$WORK/principal"
-export USERMARK="$WORK/usermark" GROUPMARK="$WORK/groupmark"
+export REC AGENT_HOME ALLOWED="$WORK/allowed" PRINCIPAL="$WORK/principal"
+export USERMARK="$WORK/usermark" UIDMARK="$WORK/uidmark" GROUPMARK="$WORK/groupmark" SELFOK="$WORK/selfok"
 MID="$(cat /etc/machine-id)"
 MARKER="$WORK/marker"
+CRED="$AGENT_HOME/.config/docker-helper/credential.token"
 
-run_setup() { # <marker-path>
-  LAB_VM_MARKER="$1" AGENT_HOME="$AGENT_HOME" bash "$SETUP"
+run_setup() { # <marker-path> [setup-args...]
+  local marker="$1"; shift
+  LAB_VM_MARKER="$marker" AGENT_HOME="$AGENT_HOME" bash "$SETUP" "$@"
+}
+reset_state() {
+  : > "$REC"
+  rm -f "$USERMARK" "$UIDMARK" "$PRINCIPAL" "$SELFOK" "$ALLOWED"
+  rm -rf "$AGENT_HOME"; mkdir -p "$AGENT_HOME"
 }
 
 # --- 1. guard --------------------------------------------------------------
@@ -136,13 +156,15 @@ if run_setup "$MARKER" >/dev/null 2>&1; then bad "guard: wrong tag accepted"; el
 printf 'docker-helper-lab-vm 1 deadbeef\n' > "$MARKER"
 if run_setup "$MARKER" >/dev/null 2>&1; then bad "guard: wrong machine-id accepted"; else ok "guard: wrong machine-id refused"; fi
 
-# --- 2/5. good run ---------------------------------------------------------
+# --- 2. fresh run: dedicated uid, no -o ------------------------------------
+reset_state
 printf 'docker-helper-lab-vm 1 %s\n' "$MID" > "$MARKER"
-: > "$REC"
-if run_setup "$MARKER" >/dev/null 2>&1; then ok "good run succeeds"; else bad "good run failed"; fi
-
+: > "$SELFOK"
+out="$(run_setup "$MARKER" 2>&1)" && ok "fresh run succeeds" || bad "fresh run failed: $out"
 rec="$(cat "$REC")"
-contains "account created" "useradd" "$rec"
+contains "fresh run uses useradd -u 1001" "useradd -u 1001 " "$rec"
+not_contains "fresh run does NOT use useradd -o" "useradd -o" "$rec"
+contains "fresh run re-owns the home tree" "chown -R agent:agent $AGENT_HOME" "$rec"
 contains "agent added to docker group" "usermod -aG docker agent" "$rec"
 contains "principal created" "dh principal create agent" "$rec"
 contains "credential installed" "dh credential install --force" "$rec"
@@ -151,18 +173,69 @@ contains "global allowed root added" "dh config allowed-root add $AGENT_HOME" "$
 cmp -s "$ALIASES" "$AGENT_HOME/.bash_aliases" && ok "installed aliases match the source" || bad "installed aliases differ"
 grep -qF '.bash_aliases' "$AGENT_HOME/.bashrc" && ok "bashrc sources the aliases" || bad "bashrc does not source the aliases"
 
+# --- 9. token never leaks to stdout/stderr ---------------------------------
+not_contains "new token does not leak to output" "dhc_NEWTOKEN" "$out"
+
 # no SSH-key management
 [ -e "$AGENT_HOME/.ssh" ] && bad "agent .ssh was created" || ok "agent .ssh untouched"
 not_contains "install never touches /root" "/root" "$rec"
 not_contains "install never touches .ssh" ".ssh" "$rec"
 
-# --- 3. idempotent re-run --------------------------------------------------
-: > "$REC"
-if run_setup "$MARKER" >/dev/null 2>&1; then ok "second run succeeds"; else bad "second run failed"; fi
+# --- 3. uid migration ------------------------------------------------------
+reset_state
+printf 'docker-helper-lab-vm 1 %s\n' "$MID" > "$MARKER"
+: > "$SELFOK"
+: > "$USERMARK"; echo 1000 > "$UIDMARK"; : > "$PRINCIPAL"
+mkdir -p "$AGENT_HOME/.config/docker-helper"; : > "$CRED"
+out="$(run_setup "$MARKER" 2>&1)" && ok "migration run succeeds" || bad "migration run failed: $out"
 rec="$(cat "$REC")"
-check "no duplicate principal create" "0" "$(count 'dh principal create' "$REC")"
-check "no duplicate credential create/install" "0" "$(count 'dh credential install' "$REC")"
-not_contains "no duplicate useradd" "useradd" "$rec"
+contains "migration uses usermod -u 1001" "usermod -u 1001 agent" "$rec"
+not_contains "migration does not useradd" "useradd" "$rec"
+contains "migration re-owns the home tree" "chown -R agent:agent $AGENT_HOME" "$rec"
+
+# --- 5. idempotent re-run (valid credential reused) ------------------------
+reset_state
+printf 'docker-helper-lab-vm 1 %s\n' "$MID" > "$MARKER"
+: > "$USERMARK"; echo 1001 > "$UIDMARK"; : > "$PRINCIPAL"; : > "$SELFOK"
+mkdir -p "$AGENT_HOME/.config/docker-helper"; printf 'dhc_OLD\n' > "$CRED"
+: > "$REC"
+if run_setup "$MARKER" >/dev/null 2>&1; then ok "re-run with valid credential succeeds"; else bad "re-run failed"; fi
+rec="$(cat "$REC")"
+check "re-run does not rotate" "0" "$(count 'principal credential rotate' "$REC")"
+check "re-run does not create principal" "0" "$(count 'principal create' "$REC")"
+check "re-run does not reinstall credential" "0" "$(count 'credential install' "$REC")"
+not_contains "re-run does not useradd" "useradd" "$rec"
+
+# --- 7. missing local credential: fail closed, no implicit rotate ----------
+reset_state
+printf 'docker-helper-lab-vm 1 %s\n' "$MID" > "$MARKER"
+: > "$USERMARK"; echo 1001 > "$UIDMARK"; : > "$PRINCIPAL"; : > "$SELFOK"
+# no credential file
+: > "$REC"
+if run_setup "$MARKER" >/dev/null 2>&1; then bad "missing credential accepted"; else ok "missing credential fails closed"; fi
+check "missing credential does not rotate" "0" "$(count 'principal credential rotate' "$REC")"
+check "missing credential does not create" "0" "$(count 'principal create' "$REC")"
+
+# --- 8. explicit recovery rotates and reinstalls ---------------------------
+reset_state
+printf 'docker-helper-lab-vm 1 %s\n' "$MID" > "$MARKER"
+: > "$USERMARK"; echo 1001 > "$UIDMARK"; : > "$PRINCIPAL"; : > "$SELFOK"
+: > "$REC"
+out="$(run_setup "$MARKER" --recover-credential 2>&1)" && ok "recovery run succeeds" || bad "recovery run failed: $out"
+rec="$(cat "$REC")"
+contains "recovery rotates the credential" "dh principal credential rotate agent" "$rec"
+contains "recovery reinstalls the credential" "dh credential install --force" "$rec"
+not_contains "recovery token does not leak" "dhc_ROTTOKEN" "$out"
+
+# --- 6. present-but-invalid credential fails closed (no rotate) ------------
+reset_state
+printf 'docker-helper-lab-vm 1 %s\n' "$MID" > "$MARKER"
+: > "$USERMARK"; echo 1001 > "$UIDMARK"; : > "$PRINCIPAL"
+mkdir -p "$AGENT_HOME/.config/docker-helper"; printf 'dhc_STALE\n' > "$CRED"
+# SELFOK absent -> self fails
+: > "$REC"
+if run_setup "$MARKER" >/dev/null 2>&1; then bad "invalid credential accepted"; else ok "invalid credential fails closed"; fi
+check "invalid credential does not rotate" "0" "$(count 'principal credential rotate' "$REC")"
 
 echo
 printf 'setup-agent-user tests: %d passed, %d failed\n' "$PASS" "$FAIL"

@@ -125,8 +125,25 @@ _oc_run() (
     local -a selinux_opts=()
     [[ -n "$selinux_type" ]] && selinux_opts=(--security-opt "label=type:$selinux_type")
 
+    # The container runs as the guest launcher's own uid/gid. The
+    # opencode-docker image's built-in user is uid 1000, which differs from the
+    # dedicated agent uid, so an explicit --user keeps the agent-owned bind
+    # mounts writable by owner without widening DAC or SELinux.
+    local -a user_opt=(--user "$(id -u):$(id -g)")
+
+    # OpenCode writes under $HOME (.config, .local, .cache) and /tmp/opencode;
+    # bind each from the agent-owned tree so the non-image uid can write.
+    local -a home_mounts=(
+        -v "$opencode_home/.config:/home/opencode/.config:Z"
+        -v "$opencode_home/.local:/home/opencode/.local:Z"
+        -v "$opencode_home/.cache:/home/opencode/.cache:Z"
+        -v "$opencode_home/tmp:/tmp/opencode:Z"
+    )
+    [[ -d "$opencode_home/.ssh" ]] && home_mounts+=(-v "$opencode_home/.ssh:/home/opencode/.ssh:Z")
+
     docker run --rm -it \
         --init \
+        "${user_opt[@]}" \
         --cap-drop ALL \
         --security-opt no-new-privileges=true \
         "${selinux_opts[@]}" \
@@ -134,8 +151,7 @@ _oc_run() (
         -e LLM_KEY \
         -e DOCKER_HELPER_SESSION_TOKEN \
         -v "$PWD:/workspace:Z" \
-        -v "$opencode_home/.config:/home/opencode/.config:Z" \
-        -v "$opencode_home/.local/share/opencode:/home/opencode/.local/share/opencode:Z" \
+        "${home_mounts[@]}" \
         -v "$helper_runtime_dir:/run/docker-helper:ro" \
         "${extra_mounts[@]}" \
         -w /workspace \

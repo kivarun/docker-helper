@@ -28,10 +28,18 @@
 # It does NOT manage SSH keys: VM access stays with the dev-vm-local.sh SSH
 # identity, and the agent account gets no SSH of its own.
 #
-# The agent uid is pinned to the opencode-docker image's 'opencode' uid (1000)
-# so the container process can traverse the agent home and write the
-# bind-mounted ~/.opencode-docker trees. On the openSUSE cloud image the admin
-# account already owns uid 1000, so the agent is created with a non-unique uid.
+# The agent account gets a DEDICATED uid (default 1001), distinct from the
+# admin account (uid 1000). The opencode-docker image runs as uid 1000, so the
+# launchers pass --user "$(id -u):$(id -g)" and bind-mount the agent-owned
+# OpenCode state directories; the container identity then matches the guest
+# account and the mounts stay writable without loosening SELinux/DAC.
+#
+# Credential lifecycle: a fresh principal is created with an issued credential;
+# an existing principal reuses its installed credential when that credential
+# still authenticates. A missing (or non-authenticating) local credential is
+# NOT rotated implicitly -- --recover-credential performs the explicit rotate.
+#
+# Usage: setup-agent-user.sh [--recover-credential]
 #
 # Env overrides: AGENT_USER, AGENT_HOME, AGENT_WORKROOT, AGENT_DOCKER_GROUP,
 #                AGENT_UID, LAB_VM_MARKER, LAB_VM_MARKER_TAG.
@@ -41,9 +49,17 @@ AGENT_USER="${AGENT_USER:-agent}"
 AGENT_HOME="${AGENT_HOME:-/home/$AGENT_USER}"
 AGENT_WORKROOT="${AGENT_WORKROOT:-$AGENT_HOME/work}"
 AGENT_DOCKER_GROUP="${AGENT_DOCKER_GROUP:-docker}"
-AGENT_UID="${AGENT_UID:-1000}"
+AGENT_UID="${AGENT_UID:-1001}"
 LAB_VM_MARKER="${LAB_VM_MARKER:-/etc/docker-helper-lab-vm}"
 LAB_VM_MARKER_TAG="${LAB_VM_MARKER_TAG:-docker-helper-lab-vm}"
+
+RECOVER_CREDENTIAL=0
+for arg in "$@"; do
+  case "$arg" in
+    --recover-credential) RECOVER_CREDENTIAL=1 ;;
+    *) die "unknown argument '$arg' (only --recover-credential)" ;;
+  esac
+done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ALIASES_SRC="$SCRIPT_DIR/agent-aliases.sh"
@@ -75,15 +91,29 @@ command -v jq >/dev/null 2>&1 || die "jq not found in PATH"
 
 # --- 1. account, workspace root, docker access ------------------------------
 # The 'agent' account is the trusted launcher, so it may hold docker access.
-# The untrusted model is the container process and gets no docker group.
+# The untrusted model is the container process and gets no docker group. The
+# agent uid is dedicated (never the admin account's), so DAC never conflates
+# the two accounts.
 if id "$AGENT_USER" >/dev/null 2>&1; then
-  log "account $AGENT_USER already exists"
+  current_uid="$(id -u "$AGENT_USER")"
+  if [ "$current_uid" != "$AGENT_UID" ]; then
+    log "migrating account $AGENT_USER uid $current_uid -> $AGENT_UID"
+    # usermod -u also rewrites ownership of the account's home tree; the
+    # explicit chown below re-normalizes any leftover ownership. Existing
+    # credential content is unaffected (the daemon matches the token hash,
+    # not the uid).
+    usermod -u "$AGENT_UID" "$AGENT_USER"
+  else
+    log "account $AGENT_USER already exists (uid $current_uid)"
+  fi
 else
-  log "creating account $AGENT_USER (uid $AGENT_UID, matching the container user)"
-  # -o: the openSUSE cloud admin account already owns uid 1000; the container
-  # image's 'opencode' user is uid 1000, so the launcher must share that uid.
-  useradd -o -u "$AGENT_UID" -m -s /bin/bash -c "docker-helper agent launcher" "$AGENT_USER"
+  log "creating account $AGENT_USER (uid $AGENT_UID, distinct from the admin account)"
+  useradd -u "$AGENT_UID" -m -s /bin/bash -c "docker-helper agent launcher" "$AGENT_USER"
 fi
+
+# Normalize ownership of the whole home: covers a uid migration and any
+# pre-existing parent left at its old owner by `install -d`.
+chown -R "$AGENT_USER:$AGENT_USER" "$AGENT_HOME"
 
 install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" "$AGENT_WORKROOT"
 
@@ -106,37 +136,61 @@ else
   "$DH" config allowed-root add "$AGENT_HOME" --access read_write
 fi
 
-# --- 3. create the principal / issue the credential (token captured once) ---
+# --- 3. principal + credential (fail-closed; explicit recovery) -------------
+# The daemon stores only the token hash. An existing local credential is reused
+# when it still authenticates; a missing or non-authenticating one is NOT
+# rotated implicitly (that would silently invalidate any other copy of the
+# bearer). --recover-credential performs the explicit rotate.
 CRED_FILE="$AGENT_HOME/.config/docker-helper/credential.token"
-TOKEN=""
+
+credential_valid() {
+  local out
+  out="$(su -s /bin/bash "$AGENT_USER" -c "$DH self --json" 2>/dev/null)" || return 1
+  printf '%s' "$out" | jq -e 'select(.ok == true and .type == "principal")' >/dev/null 2>&1
+}
+
+install_token() { # token in $1 (never printed)
+  install -d -m 0700 -o "$AGENT_USER" -g "$AGENT_USER" "$AGENT_HOME/.config"
+  printf '%s\n' "$1" | su -s /bin/bash "$AGENT_USER" -c "$DH credential install --force"
+}
+
 if "$DH" principal show "$AGENT_USER" >/dev/null 2>&1; then
-  log "principal $AGENT_USER already exists"
-  if [ -f "$CRED_FILE" ]; then
-    log "credential already installed at $CRED_FILE"
-  else
-    # The daemon still holds the principal's credential (its bearer was only
-    # on disk), so mint a replacement rather than colliding on create.
-    log "minting a replacement credential for the existing principal $AGENT_USER"
+  if [ "$RECOVER_CREDENTIAL" = 1 ]; then
+    log "recovering credential: rotating the $AGENT_USER default credential"
     TOKEN="$("$DH" principal credential rotate "$AGENT_USER" --json | jq -er '.token')"
+    install_token "$TOKEN"
+    unset TOKEN
+    credential_valid || die "rotated credential does not authenticate"
+    log "credential rotated and installed for $AGENT_USER"
+  elif [ -f "$CRED_FILE" ]; then
+    if credential_valid; then
+      log "reusing the installed credential at $CRED_FILE"
+    else
+      die "principal $AGENT_USER exists and $CRED_FILE is present but does not authenticate; re-run with --recover-credential (rotates the bearer)"
+    fi
+  else
+    die "principal $AGENT_USER exists but $CRED_FILE is missing; re-run with --recover-credential (rotates the bearer)"
   fi
 else
   log "creating principal $AGENT_USER (default Launcher + default allowed root)"
   TOKEN="$("$DH" principal create "$AGENT_USER" --issue-credential --json | jq -er '.token')"
-fi
-
-if [ -n "$TOKEN" ]; then
-  install -d -m 0700 -o "$AGENT_USER" -g "$AGENT_USER" "$AGENT_HOME/.config"
-  printf '%s\n' "$TOKEN" | su -s /bin/bash "$AGENT_USER" -c "$DH credential install --force"
+  install_token "$TOKEN"
   unset TOKEN
+  credential_valid || die "newly issued credential does not authenticate"
   log "credential installed for $AGENT_USER"
 fi
 
 # --- 4. opencode home + launcher aliases -----------------------------------
+# The container runs as the agent uid (via --user) and writes these
+# bind-mounted paths.
 install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" \
   "$AGENT_HOME/.opencode-docker/.config/opencode" \
-  "$AGENT_HOME/.opencode-docker/.local/share/opencode"
+  "$AGENT_HOME/.opencode-docker/.local/share/opencode" \
+  "$AGENT_HOME/.opencode-docker/.local/state" \
+  "$AGENT_HOME/.opencode-docker/.cache" \
+  "$AGENT_HOME/.opencode-docker/tmp"
 # install -d leaves already-existing parents at their old owner, so normalize
-# the whole tree: the container (uid 1000) writes these bind-mounted paths.
+# the whole tree.
 chown -R "$AGENT_USER:$AGENT_USER" "$AGENT_HOME/.opencode-docker"
 
 install -m 0644 -o "$AGENT_USER" -g "$AGENT_USER" \
