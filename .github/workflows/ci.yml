@@ -69,6 +69,9 @@ jobs:
           bash scripts/test-upgrade-baseline-fixture.sh
           bash scripts/test-uat-runtime-dir-file-diag.sh
 
+      - name: Local dev VM harness tests
+        run: bash scripts/test-dev-vm-local.sh
+
   selinux-policy:
     runs-on: ubuntu-latest
     timeout-minutes: 5

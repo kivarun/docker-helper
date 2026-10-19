@@ -33,6 +33,7 @@
 # directly (GRUB2-BLS accepts direct edits to the entries).
 #
 # Public interface (after sourcing; only these are stable):
+#   vm_attach               prepare workdir + SSH transport + EXIT trap (no boot)
 #   vm_init                 boot the VM and leave it SSH-ready (nonzero on failure)
 #   vm_ssh <args...>        run a remote command; exit status == remote status
 #   vm_scp <args...>        scp into the guest
@@ -44,7 +45,12 @@
 #   vm_serial_tail          print the last serial-log lines (diagnostics)
 #
 # Env inputs:
-#   UAT_KEEP   keep the VM/workdir on failure for debugging
+#   UAT_KEEP         keep the VM/workdir on failure for debugging
+#   VM_WORKDIR       fixed workdir instead of a fresh mktemp dir (local mode)
+#   VM_PERSIST       leave the VM running and the workdir in place on exit
+#   VM_KVM_LOCAL     never sudo-chmod /dev/kvm; fail when KVM is unusable
+#   VM_ACCEL         force kvm|tcg (empty selects kvm when /dev/kvm is usable)
+#   VM_NET_ISOLATED  boot the NIC with the slirp restrict=on isolation switch
 #
 # Exposed state (read-only for callers):
 #   VM_WORKDIR        scratch dir (also the working directory after vm_init)
@@ -60,15 +66,28 @@
 
 set -euo pipefail
 
-VM_USER="opc"
-VM_SSH_PORT=2222
-VM_IMG_NAME="openSUSE-Tumbleweed-Minimal-VM.x86_64-Cloud.qcow2"
-VM_IMG_DIR="tumbleweed/appliances/$VM_IMG_NAME"
-VM_MARKER="/var/log/tumbleweed-vm-uat.marker"
+VM_USER="${VM_USER:-opc}"
+VM_SSH_PORT="${VM_SSH_PORT:-2222}"
+VM_IMG_NAME="${VM_IMG_NAME:-openSUSE-Tumbleweed-Minimal-VM.x86_64-Cloud.qcow2}"
+VM_IMG_DIR="${VM_IMG_DIR:-tumbleweed/appliances/$VM_IMG_NAME}"
+VM_MARKER="${VM_MARKER:-/var/log/tumbleweed-vm-uat.marker}"
 VM_KEEP="${UAT_KEEP:-}"
 
-VM_WORKDIR=""
-VM_ACCEL="tcg"
+# Optional local/persistent-lifecycle knobs. Every one defaults to the exact
+# historical CI behavior, so an unmodified sourcing script is unaffected:
+#   VM_WORKDIR       fixed workdir instead of a fresh mktemp dir
+#   VM_PERSIST       leave the VM running and the workdir in place on exit
+#   VM_KVM_LOCAL     never sudo-chmod /dev/kvm; fail when KVM is unusable
+#   VM_ACCEL         force kvm|tcg (empty selects automatically)
+#   VM_NET_ISOLATED  boot the NIC with the slirp restrict=on isolation switch
+VM_WORKDIR="${VM_WORKDIR:-}"
+VM_PERSIST="${VM_PERSIST:-}"
+VM_KVM_LOCAL="${VM_KVM_LOCAL:-}"
+VM_ACCEL="${VM_ACCEL:-}"
+VM_NET_ISOLATED="${VM_NET_ISOLATED:-}"
+# Path to the KVM device (overridable so tests can point at a fixture).
+VM_KVM_DEV="${VM_KVM_DEV:-/dev/kvm}"
+
 VM_CPU_OPTS="-cpu max"
 VM_IMG_SHA256=""
 VM_BOOT_TIME="n/a"
@@ -76,7 +95,13 @@ VM_LAST_REBOOT_SECS="n/a"
 VM_SSH_OPTS=()
 
 vm_log()  { printf '[tumbleweed-vm] %s\n' "$*"; }
-vm_fail() { printf '[tumbleweed-vm] FAILED: %s\n' "$*" >&2; exit 1; }
+vm_fail() {
+  printf '[tumbleweed-vm] FAILED: %s\n' "$*" >&2
+  if [ -n "$VM_WORKDIR" ] && [ -f "$VM_WORKDIR/serial.log" ]; then
+    vm_serial_tail
+  fi
+  exit 1
+}
 
 # --- transport (preserves remote exit status: vm_ssh returns ssh's status) ---
 vm_ssh() { ssh "${VM_SSH_OPTS[@]}" -p "$VM_SSH_PORT" "${VM_USER}@127.0.0.1" "$@"; }
@@ -93,6 +118,12 @@ vm_serial_tail() {
 vm_cleanup() {
   if [ -n "$VM_KEEP" ]; then
     vm_log "UAT_KEEP set: leaving workdir at $VM_WORKDIR"
+    return 0
+  fi
+  if [ -n "$VM_PERSIST" ]; then
+    # Persistent lifecycle: the caller owns stop/destroy. Leave the running VM
+    # and its workdir intact so the next invocation resumes the same disk.
+    vm_log "VM_PERSIST set: leaving VM running and workdir at $VM_WORKDIR"
     return 0
   fi
   if [ -n "$VM_WORKDIR" ] && [ -f "$VM_WORKDIR/qemu.pid" ]; then
@@ -123,18 +154,25 @@ vm_fetch_or_fail() {
   return 1
 }
 
-vm_prepare_image() {
-  vm_log "== download official Tumbleweed Cloud image + checksum =="
-  vm_fetch_or_fail "$VM_IMG_NAME" \
-    "https://download.opensuse.org/$VM_IMG_DIR" \
-    "https://ftp.fau.de/opensuse/$VM_IMG_DIR" \
-    "https://mirror.library.ucy.ac.cy/linux/opensuse/$VM_IMG_DIR" \
-    || vm_fail "image download failed from all mirrors"
-  vm_fetch_or_fail "$VM_IMG_NAME.sha256" \
-    "https://download.opensuse.org/$VM_IMG_DIR.sha256" \
-    "https://ftp.fau.de/opensuse/$VM_IMG_DIR.sha256" \
-    "https://mirror.library.ucy.ac.cy/linux/opensuse/$VM_IMG_DIR.sha256" \
-    || vm_fail "checksum download failed from all mirrors"
+vm_ensure_base_image() {
+  # Download the base image + checksum only when absent, then always verify
+  # the SHA-256. This makes a persistent workdir cheap to re-enter while the
+  # pristine base image (the qcow2 backing file) stays immutable.
+  if [ -f "$VM_WORKDIR/$VM_IMG_NAME" ] && [ -f "$VM_WORKDIR/$VM_IMG_NAME.sha256" ]; then
+    vm_log "== reuse existing base image + checksum =="
+  else
+    vm_log "== download official Tumbleweed Cloud image + checksum =="
+    vm_fetch_or_fail "$VM_IMG_NAME" \
+      "https://download.opensuse.org/$VM_IMG_DIR" \
+      "https://ftp.fau.de/opensuse/$VM_IMG_DIR" \
+      "https://mirror.library.ucy.ac.cy/linux/opensuse/$VM_IMG_DIR" \
+      || vm_fail "image download failed from all mirrors"
+    vm_fetch_or_fail "$VM_IMG_NAME.sha256" \
+      "https://download.opensuse.org/$VM_IMG_DIR.sha256" \
+      "https://ftp.fau.de/opensuse/$VM_IMG_DIR.sha256" \
+      "https://mirror.library.ucy.ac.cy/linux/opensuse/$VM_IMG_DIR.sha256" \
+      || vm_fail "checksum download failed from all mirrors"
+  fi
 
   local expected actual
   expected="$(awk '{print $1}' "$VM_WORKDIR/$VM_IMG_NAME.sha256")"
@@ -143,6 +181,15 @@ vm_prepare_image() {
   [ "$actual" = "$expected" ] || vm_fail "image checksum mismatch (expected $expected, got $actual)"
   VM_IMG_SHA256="$actual"
   vm_log "image SHA-256 verified: $VM_IMG_SHA256"
+}
+
+vm_prepare_image() {
+  vm_ensure_base_image
+
+  if [ -f "$VM_WORKDIR/disk.qcow2" ]; then
+    vm_log "overlay disk already present (reusing $VM_WORKDIR/disk.qcow2)"
+    return 0
+  fi
 
   # The Cloud image ships its root partition sized to be grown; grow the
   # overlay so cloud-init growpart expands root at first boot. The pristine
@@ -155,7 +202,12 @@ vm_prepare_image() {
 
 vm_seed() {
   vm_log "== cloud-init NoCloud seed =="
-  ssh-keygen -t ed25519 -N "" -f "$VM_WORKDIR/id_ed25519" >/dev/null
+  # Reuse the SSH key across boots of a persistent workdir: cloud-init only
+  # re-runs on a changed instance-id, so a regenerated key would never reach
+  # the guest. user-data/meta-data are rewritten from the current key.
+  if [ ! -f "$VM_WORKDIR/id_ed25519" ]; then
+    ssh-keygen -t ed25519 -N "" -f "$VM_WORKDIR/id_ed25519" >/dev/null
+  fi
   local pub
   pub="$(cat "$VM_WORKDIR/id_ed25519.pub")"
 
@@ -189,22 +241,60 @@ instance-id: tumbleweed-vm-uat-001
 local-hostname: tw-vm-uat
 EOF
 
-  cloud-localds "$VM_WORKDIR/seed.iso" "$VM_WORKDIR/user-data" "$VM_WORKDIR/meta-data"
+  vm_write_seed_iso
+}
+
+# vm_write_seed_iso builds the NoCloud seed ISO. cloud-localds stays the
+# canonical CI tool; when it is absent (a plain developer host) the exact
+# equivalent xorriso invocation is used. user-data/meta-data generation is
+# never duplicated.
+vm_write_seed_iso() {
+  if command -v cloud-localds >/dev/null 2>&1; then
+    cloud-localds "$VM_WORKDIR/seed.iso" "$VM_WORKDIR/user-data" "$VM_WORKDIR/meta-data"
+  else
+    xorriso -as mkisofs \
+      -V cidata -J -r \
+      -o "$VM_WORKDIR/seed.iso" \
+      "$VM_WORKDIR/user-data" "$VM_WORKDIR/meta-data" >/dev/null 2>&1
+  fi
+}
+
+# vm_netdev builds the single slirp user netdev. Host-to-guest SSH is always a
+# loopback hostfwd; the guest->outside path is the slirp user stack, and
+# VM_NET_ISOLATED adds restrict=on so the guest cannot reach the host or its
+# LAN (it keeps only the slirp-assigned address: DHCP advertises no gateway or
+# DNS, and outbound routing is off). No bridge, no TAP, no root.
+# VM_NET_ISOLATED is a value flag: empty or 0/no/off/false disables it, any
+# other value enables it (so DEV_VM_NET_ISOLATED=0 in the local driver actually
+# opens the network instead of being treated as a non-empty "on").
+vm_netdev() {
+  local netdev="user,id=net0,hostfwd=tcp:127.0.0.1:$VM_SSH_PORT-:22"
+  case "${VM_NET_ISOLATED:-}" in
+    ""|0|no|off|false) ;;
+    *) netdev="$netdev,restrict=on" ;;
+  esac
+  printf '%s' "$netdev"
 }
 
 vm_boot() {
   vm_log "== boot VM (accelerator=$VM_ACCEL, $VM_CPU_OPTS) =="
+  local netdev
+  netdev="$(vm_netdev)"
+  # 9>&-: a persistent-lifecycle driver holds its single-instance lock on fd 9;
+  # closing it for the daemonized qemu keeps the lock owned by the short-lived
+  # driver process instead of the long-lived VM, so stop/status/destroy do not
+  # deadlock against a running VM. Harmless when fd 9 is not in use.
   qemu-system-x86_64 \
     -machine "accel=$VM_ACCEL" \
     $VM_CPU_OPTS \
     -smp 2 -m 3072 \
     -drive file="$VM_WORKDIR/disk.qcow2",if=virtio,format=qcow2 \
     -drive file="$VM_WORKDIR/seed.iso",if=virtio,format=raw \
-    -netdev user,id=net0,hostfwd=tcp:127.0.0.1:$VM_SSH_PORT-:22 \
+    -netdev "$netdev" \
     -device virtio-net-pci,netdev=net0 \
     -display none \
     -serial file:"$VM_WORKDIR/serial.log" \
-    -daemonize -pidfile "$VM_WORKDIR/qemu.pid"
+    -daemonize -pidfile "$VM_WORKDIR/qemu.pid" 9>&-
 
   sleep 2
   [ -s "$VM_WORKDIR/qemu.pid" ] || vm_fail "qemu did not start (no pidfile)"
@@ -245,34 +335,57 @@ vm_wait_ssh() {
   fi
 }
 
-# --- main entry: workdir, accelerator, image, seed, boot, wait-for-SSH ---
-vm_init() {
-  VM_WORKDIR="$(mktemp -d /tmp/tumbleweed-vm-uat.XXXXXX)"
+# --- workdir + SSH transport + EXIT trap, without booting ---
+# vm_init calls this; a persistent-lifecycle driver calls it for stop/status/
+# ssh/destroy so the transport stays single-owned here.
+vm_attach() {
+  if [ -z "$VM_WORKDIR" ]; then
+    VM_WORKDIR="$(mktemp -d /tmp/tumbleweed-vm-uat.XXXXXX)"
+  else
+    mkdir -p "$VM_WORKDIR"
+  fi
   cd "$VM_WORKDIR"
   VM_SSH_OPTS=(-i "$VM_WORKDIR/id_ed25519" -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o LogLevel=ERROR)
   trap vm_cleanup EXIT
+}
 
-  vm_log "== 1. virtualization + accelerator =="
-  if [ -e /dev/kvm ]; then
-    VM_ACCEL="kvm"
+# --- accelerator selection (KVM when usable, else TCG) ---
+vm_select_accel() {
+  if [ -z "$VM_ACCEL" ]; then
+    if [ -n "$VM_KVM_LOCAL" ]; then
+      [ -e "$VM_KVM_DEV" ] || vm_fail "VM_KVM_LOCAL: $VM_KVM_DEV is absent (set VM_ACCEL=tcg to force TCG)"
+      VM_ACCEL="kvm"
+    elif [ -e "$VM_KVM_DEV" ]; then
+      VM_ACCEL="kvm"
+    else
+      VM_ACCEL="tcg"
+    fi
+  fi
+  if [ "$VM_ACCEL" = "kvm" ]; then
+    if [ ! -e "$VM_KVM_DEV" ]; then
+      vm_fail "accelerator=kvm requested but $VM_KVM_DEV is absent"
+    elif [ -r "$VM_KVM_DEV" ] && [ -w "$VM_KVM_DEV" ]; then
+      vm_log "kvm access: direct"
+    elif [ -n "$VM_KVM_LOCAL" ]; then
+      # Local mode never mutates /dev/kvm perms; require group membership.
+      vm_fail "no read/write access to $VM_KVM_DEV and VM_KVM_LOCAL forbids 'sudo chmod'; add this user to the kvm group"
+    else
+      # GitHub-hosted runner path: /dev/kvm is 0660 root:kvm and the runner
+      # has passwordless sudo, so grant access and run qemu as the user.
+      sudo -n chmod 666 "$VM_KVM_DEV" || vm_fail "could not grant $VM_KVM_DEV access via sudo"
+      vm_log "kvm access: granted (sudo chmod 666 $VM_KVM_DEV)"
+    fi
   fi
   VM_CPU_OPTS="-cpu max"
   [ "$VM_ACCEL" = "kvm" ] && VM_CPU_OPTS="-cpu host"
-  if [ "$VM_ACCEL" = "kvm" ]; then
-    if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
-      vm_log "kvm access: direct"
-    else
-      # On GitHub-hosted runners /dev/kvm is 0660 root:kvm and the runner user
-      # is not in the kvm group; the runner has passwordless sudo, so grant
-      # access via chmod 666 and run qemu as the runner user. Confined to the
-      # ephemeral job VM.
-      sudo -n chmod 666 /dev/kvm || vm_fail "could not grant /dev/kvm access via sudo"
-      vm_log "kvm access: granted (sudo chmod 666 /dev/kvm)"
-    fi
-  fi
   vm_log "accelerator=$VM_ACCEL ($VM_CPU_OPTS)"
+}
 
+# --- main entry: workdir, accelerator, image, seed, boot, wait-for-SSH ---
+vm_init() {
+  vm_attach
+  vm_select_accel
   vm_prepare_image
   vm_seed
   vm_boot
