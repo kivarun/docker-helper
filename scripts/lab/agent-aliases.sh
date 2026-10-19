@@ -141,12 +141,27 @@ _oc_run() (
     )
     [[ -d "$opencode_home/.ssh" ]] && home_mounts+=(-v "$opencode_home/.ssh:/home/opencode/.ssh:Z")
 
+    # The runtime bind-mounts its --init binary with the host label (bin_t),
+    # which the custom container domain cannot execute. Bind the same binary
+    # explicitly with a container-domain relabel (:Z); --init then execs the
+    # mounted file. Resolution is best-effort (distros place it differently).
+    local docker_init="" cand
+    for cand in "$(command -v docker-init 2>/dev/null || true)" \
+                /usr/bin/docker-init /usr/libexec/docker/docker-init /sbin/docker-init; do
+        [[ -n "$cand" && -x "$cand" ]] || continue
+        docker_init="$(readlink -f "$cand")"
+        break
+    done
+    local -a init_mount=()
+    [[ -n "$docker_init" ]] && init_mount=(-v "$docker_init:/sbin/docker-init:Z")
+
     docker run --rm -it \
         --init \
         "${user_opt[@]}" \
         --cap-drop ALL \
         --security-opt no-new-privileges=true \
         "${selinux_opts[@]}" \
+        "${init_mount[@]}" \
         -e LLM_SERVER \
         -e LLM_KEY \
         -e DOCKER_HELPER_SESSION_TOKEN \
