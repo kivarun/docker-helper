@@ -3180,9 +3180,13 @@ allow docker_helper_buildkitd_t nsfs_t:file getattr;
 # independent buildkitd pids 3958/72745/99793). This is the R7 closing
 # note's "cgroup_t/fs_t filesystem getattrs" record with the fs_t
 # half's fatality now PROVEN. The companion cgroup_t:filesystem getattr
-# (statfs /sys/fs/cgroup inside buildkitd's rootless detection) remains
-# the standing non-fatal startup probe: the detection completed and the
-# build proceeded past it. The grant is the ONE getattr bit on the ONE
+# (statfs /sys/fs/cgroup) was then believed a non-fatal startup probe;
+# the R7 full-gate corrective later PROVED the same class FATAL inside
+# the bundled OCI runtime's cgroup-v2 detection (the denial drives the
+# erroneous cgroup-v1 fallback and the runtime's own "no cgroup mount
+# found in mountinfo" fatal) and granted it at the R7 buildkitd cgroup2
+# statfs rung below, from that rung's own enforcing evidence. The grant
+# is the ONE getattr bit on the ONE
 # filesystem class; the standing fs_t { remount unmount } pair stays
 # its own source-superblock owner, no remount/unmount expansion rides,
 # and no other filesystem target, class or permission opens.
@@ -4668,6 +4672,90 @@ allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { create read
 # daemon, the builder, the rootlesskit child) keep their own bare
 # { search } dir singletons unchanged.
 allow docker_helper_buildkitd_t cgroup_t:dir { search };
+
+# --- R7: the cgroup2 statfs detection — the bare NEW cgroup_t pair ---
+# --- (filesystem { getattr } singleton; never a widening of any ---
+# --- existing cgroup rule) ---
+#
+# R7 (enforcing evidence, UAT run 39163362751 serial 1329 + UAT run
+# 39168003071 serial 1334, both at the post-traversal state): after the
+# cgroup2 root traversal opened, the bundled buildkit-runc's cgroup-v2
+# detection STILL failed with the unchanged runtime fatal
+#
+#   runc run failed: no cgroup mount found in mountinfo
+#
+# and the first denied operation after the traversal wave is the
+# buildkit-runc statfs probe:
+#
+#   avc:  denied  { getattr } for  pid=<runc> comm="buildkit-runc"
+#     name="/" dev="cgroup2" ino=1
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:cgroup_t:s0 tclass=filesystem
+#     permissive=0
+#
+# (39163362751: serial 1329; 39168003071: serial 1334 — the same hook,
+# the same class/permission/target at both SHAs).
+#
+# CAUSAL PROOF FROM THE PINNED SOURCES (verified before the grant, not
+# from AVC adjacency): the bundled buildkit-runc is the buildkit v0.33.0
+# payload's opencontainers/runc v1.4.3 (buildkit's Dockerfile pins
+# RUNC_VERSION=v1.4.3 and builds the runc image stage from that tag),
+# and runc v1.4.3's go.mod pins github.com/opencontainers/cgroups
+# v0.0.6. In that exact module:
+#   - IsCgroup2UnifiedMode (utils.go) stats the constant unified
+#     mountpoint "/sys/fs/cgroup"; ON ERROR st.Type stays zero and the
+#     function logs "statfs /sys/fs/cgroup: %v; assuming cgroup v1" and
+#     reports cgroup v1 — the SELinux filesystem:getattr denial makes
+#     the statfs fail with EACCES, so a cgroup2 host is MISDETECTED as
+#     v1;
+#   - manager.NewWithPaths (manager/new.go) selects the cgroup-v1 fs
+#     manager on that false;
+#   - the v1 manager's path resolution (fs/paths.go rootPath) first
+#     probes the default root: Lstat("/sys/fs/cgroup") is the
+#     cgroup_t:dir getattr record (39163362751 serial 1331 /
+#     39168003071 serial 1336 — DOWNSTREAM of the statfs, the v1 fast
+#     path the misclassification opened; it would fail the tmpfs check
+#     anyway and stays UNGRANTED), then falls through to
+#     GetCgroupMounts(false) -> getCgroupMountsV1, whose mountinfo
+#     filter is FSTypeFilter("cgroup") — an EXACT fstype match that
+#     excludes the namespace's only cgroup mount (fstype "cgroup2");
+#     the empty list is returned to rootPath as len(mi) < 1 and
+#     fs/paths.go raises exactly the observed fatal:
+#     "no cgroup mount found in mountinfo".
+#   - the cpu.max file reads (the launcher serial 722 and the buildkitd
+#     serial 736 in run 39163362751 — the same probes at 727/741 in run
+#     39168003071; the runc serials 1328/1333 and the second runc pid
+#     1332/1337) are the Go runtimes' own GOMAXPROCS probes and the
+#     standing graceful-degradation surface — they PRECEDE the manager
+#     probe, no code path links them to the fatal, and they stay
+#     UNGRANTED here (each subject's cgroup file authority is its own
+#     rung's decision).
+# The grant makes the detection's statfs SUCCEED (isUnified = the
+# cgroup2 superblock magic), so the fatal disappears because the v2
+# path is taken — not because the hook was silenced.
+#
+# THE DELTA IS EXACTLY THE ONE BARE FILESYSTEM { getattr } SINGLETON:
+# no cgroup_t:file read/open, no cgroup_t:dir getattr/read/open (the
+# dir getattr stays the misclassification's downstream v1 record), no
+# mounton, no mount/remount/unmount/relabel/swapon/quotaon (the
+# filesystem class's write-family stays closed — the namespace's
+# cgroup2 mount stays READ-ONLY and any creation/limit-write hook is a
+# later, separately evidenced rung), no capability, no transition, no
+# MCS change. cgroup_t comes from the base policy's require block, the
+# module declares no macros, and the committed-policy tests pin the
+# buildkitd domain's cgroup authority at EXACTLY the two canonical
+# singletons (the traversal dir { search } + this filesystem getattr;
+# the count pin moves 27 -> 28 by exactly this one rule).
+# SCOPE: type-wide TE authority over cgroup_t:filesystem objects — NOT
+# limited to the /sys/fs/cgroup superblock specifically; every cgroup
+# superblock labeled cgroup_t the subject can otherwise reach becomes
+# getattr-able, and the cross-operation boundary stays owned by the MCS
+# category constraints exactly as every other builder plane requires
+# (cgroup_t:s0 is a global label with no category component; the
+# subject's own c1 category grants nothing beyond the daemon's own
+# plane here). The standing cgroup subjects (the daemon, the builder,
+# the launcher, the rootlesskit child) keep their own rules unchanged.
+allow docker_helper_buildkitd_t cgroup_t:filesystem getattr;
 
 # --- 4C-72: the shared runtime-root dir search — the NEW pair/plane
 # --- (PLANE G); the bare singleton, never a widening of any existing

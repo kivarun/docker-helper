@@ -324,8 +324,9 @@ func TestSELinuxPolicyLauncherChainRootlesskitTransition(t *testing.T) {
 // closure item, explicitly NOT a 4C staircase permission) must be EXACTLY
 // the ONE bare dir { search } rule — search only, never a cgroup bundle —
 // with NO launcher cgroup_t:file rule at all (the launcher dies at the
-// execve before any cpu.max read), NO cgroup_t:filesystem getattr (the
-// buildkitd cgroup statfs probe is a different pair and stays HOLD), and
+// execve before any cpu.max read), NO launcher cgroup_t:filesystem
+// getattr (the buildkitd cgroup statfs probe is a different pair, owned
+// by its own R7 rung — never the launcher's), and
 // the three standing cgroup subjects (the daemon, the builder, the
 // rootlesskit child) unchanged at their own bare { search } dir
 // singletons. The buildkitd-named allow count is pinned as an edit
@@ -379,22 +380,39 @@ func s15LauncherCgroupViolations(policy string) []string {
 			violations = append(violations, fmt.Sprintf("the standing cgroup owner drifted (must stay exactly its bare { search } dir singleton): %s", want))
 		}
 	}
-	if buildkitdNamedAllow != 27 {
-		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 27 (the S15 phase had exactly 9; R7 added the manager child-lifecycle rule, the per-op endpoint peer edge, the rootlesskit parent's buildkitd child-authority rule the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr, the unprivileged-mount-flags statfs getattr, the OCI-worker process-group setup rule and the cgroup2 root traversal singleton; a NON-buildkitd S15 rule never trips it), found %d", buildkitdNamedAllow))
+	if buildkitdNamedAllow != 28 {
+		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 28 (the S15 phase had exactly 9; R7 added the manager child-lifecycle rule, the per-op endpoint peer edge, the rootlesskit parent's buildkitd child-authority rule the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr, the unprivileged-mount-flags statfs getattr, the OCI-worker process-group setup rule, the cgroup2 root traversal singleton and the cgroup2 statfs detection filesystem getattr singleton; a NON-buildkitd S15 rule never trips it), found %d", buildkitdNamedAllow))
 	}
 	return violations
 }
 
-// TestSELinuxPolicyBuildkitdCgroupTraversal pins the R7 cgroup2 root
-// traversal rung: the buildkitd domain's ONLY cgroup_t authority is the
-// ONE bare dir { search } singleton — no dir rider (getattr/read/open/
-// write/add_name/remove_name/rmdir/rename/mounton), no file class, no
-// filesystem class (the cgroup statfs verification hook stays
-// unevidenced), no other domain gains a cgroup rule — and the rule is
-// not a duplication of any other cgroup grant.
-func TestSELinuxPolicyBuildkitdCgroupTraversal(t *testing.T) {
+// TestSELinuxPolicyBuildkitdCgroupAuthority pins the buildkitd domain's
+// cgroup_t authority at EXACTLY the two canonical singletons, each its
+// own proven surface:
+//   - the R7 cgroup2 root traversal rung's ONE bare dir { search }
+//     singleton (UAT run 39142656535's ordered denial wave) — no dir
+//     rider (getattr/read/open/write/add_name/remove_name/rmdir/rename/
+//     mounton);
+//   - the R7 cgroup2 statfs detection rung's ONE bare filesystem
+//     getattr singleton (UAT runs 39163362751 serial 1329 /
+//     39168003071 serial 1334 + the pinned opencontainers/cgroups
+//     v0.0.6 source proof: the denied statfs misdrives
+//     IsCgroup2UnifiedMode into the erroneous v1 fallback whose
+//     "no cgroup mount found in mountinfo" is the runtime's own
+//     fatal) — no filesystem rider (mount/remount/unmount/relabelfrom/
+//     relabelto/associate/quotamod/quotaget), no brace-form alias of
+//     the bare rule;
+//   - no cgroup_t:file class grant for the buildkitd at all (the
+//     cpu.max reads are the OTHER subjects' standing authorities and
+//     the Go runtimes' graceful probes, never linked to the fatal),
+//     no other domain gains a cgroup rule, and no rule is a
+//     duplication of any other cgroup grant.
+func TestSELinuxPolicyBuildkitdCgroupAuthority(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
-	const canonical = "allow docker_helper_buildkitd_t cgroup_t:dir { search };"
+	const (
+		canonicalTraversal = "allow docker_helper_buildkitd_t cgroup_t:dir { search };"
+		canonicalStatfs    = "allow docker_helper_buildkitd_t cgroup_t:filesystem getattr;"
+	)
 	// The standing cgroup subjects keep exactly their own authorities;
 	// no NEW domain joined and no standing authority widened.
 	want := map[string][]string{
@@ -405,10 +423,12 @@ func TestSELinuxPolicyBuildkitdCgroupTraversal(t *testing.T) {
 	}
 	// checkPolicy recomputes the full invariant set over any policy text
 	// (the baseline and every mutation): exactly one canonical buildkitd
-	// traversal, no other buildkitd cgroup rule, every standing owner's
-	// authority present EXACTLY once, and no unknown cgroup rule.
+	// traversal singleton, exactly one canonical statfs singleton, no
+	// other buildkitd cgroup rule, every standing owner's authority
+	// present EXACTLY once, and no unknown cgroup rule.
 	checkPolicy := func(text string) (failed bool, reason string) {
-		canon := 0
+		traversal := 0
+		statfs := 0
 		var others []string
 		for _, line := range strings.Split(text, "\n") {
 			trimmed := strings.TrimSpace(line)
@@ -416,17 +436,23 @@ func TestSELinuxPolicyBuildkitdCgroupTraversal(t *testing.T) {
 				continue
 			}
 			if strings.Contains(trimmed, "docker_helper_buildkitd_t") {
-				if trimmed == canonical {
-					canon++
-				} else {
+				switch trimmed {
+				case canonicalTraversal:
+					traversal++
+				case canonicalStatfs:
+					statfs++
+				default:
 					return true, "non-canonical buildkitd cgroup rule: " + trimmed
 				}
 			} else {
 				others = append(others, trimmed)
 			}
 		}
-		if canon != 1 {
-			return true, "the canonical traversal count is not exactly one"
+		if traversal != 1 {
+			return true, "the canonical traversal singleton count is not exactly one"
+		}
+		if statfs != 1 {
+			return true, "the canonical statfs singleton count is not exactly one"
 		}
 		known := map[string]int{}
 		for _, rules := range want {
@@ -449,43 +475,62 @@ func TestSELinuxPolicyBuildkitdCgroupTraversal(t *testing.T) {
 		return false, ""
 	}
 	if failed, reason := checkPolicy(policy); failed {
-		t.Errorf("the committed policy violates the cgroup traversal invariants: %s", reason)
+		t.Errorf("the committed policy violates the buildkitd cgroup authority invariants: %s", reason)
 	}
 	// Mutations: every forbidden shape must trip the invariant set.
+	// target "" appends the rule; "traversal"/"statfs" names the
+	// singleton a removal ("") or a displacement ("REPLACE:...") acts on.
+	singleton := map[string]string{"traversal": canonicalTraversal, "statfs": canonicalStatfs}
 	for _, mut := range []struct {
-		name string
-		rule string
+		name   string
+		target string
+		rule   string
 	}{
-		{"missing search (the singleton removed)", ""},
-		{"parallel duplicate search", "allow docker_helper_buildkitd_t cgroup_t:dir { search };\n"},
-		{"dir getattr rider", "allow docker_helper_buildkitd_t cgroup_t:dir { getattr };\n"},
-		{"dir read rider", "allow docker_helper_buildkitd_t cgroup_t:dir { read };\n"},
-		{"dir open rider", "allow docker_helper_buildkitd_t cgroup_t:dir { open };\n"},
-		{"dir mounton rider", "allow docker_helper_buildkitd_t cgroup_t:dir mounton;\n"},
-		{"filesystem getattr grant", "allow docker_helper_buildkitd_t cgroup_t:filesystem { getattr };\n"},
-		{"file read grant", "allow docker_helper_buildkitd_t cgroup_t:file { read };\n"},
-		// A wrong-type/wrong-domain grant displaces the canonical rule —
+		{"missing search (the traversal singleton removed)", "traversal", ""},
+		{"missing statfs getattr (the detection singleton removed)", "statfs", ""},
+		{"parallel duplicate search", "", "allow docker_helper_buildkitd_t cgroup_t:dir { search };\n"},
+		{"parallel duplicate statfs getattr", "", "allow docker_helper_buildkitd_t cgroup_t:filesystem getattr;\n"},
+		{"dir getattr rider", "", "allow docker_helper_buildkitd_t cgroup_t:dir { getattr };\n"},
+		{"dir read rider", "", "allow docker_helper_buildkitd_t cgroup_t:dir { read };\n"},
+		{"dir open rider", "", "allow docker_helper_buildkitd_t cgroup_t:dir { open };\n"},
+		{"dir mounton rider", "", "allow docker_helper_buildkitd_t cgroup_t:dir mounton;\n"},
+		{"file read ride-along", "", "allow docker_helper_buildkitd_t cgroup_t:file { read };\n"},
+		{"file read open ride-along (the standing subjects' pair shape)", "", "allow docker_helper_buildkitd_t cgroup_t:file { read open };\n"},
+		{"filesystem mount ride-along", "", "allow docker_helper_buildkitd_t cgroup_t:filesystem { mount };\n"},
+		{"filesystem remount ride-along", "", "allow docker_helper_buildkitd_t cgroup_t:filesystem { remount };\n"},
+		{"filesystem unmount ride-along", "", "allow docker_helper_buildkitd_t cgroup_t:filesystem { unmount };\n"},
+		{"filesystem relabelfrom ride-along", "", "allow docker_helper_buildkitd_t cgroup_t:filesystem { relabelfrom };\n"},
+		{"filesystem mount remount sweep (displaces the singleton)", "statfs", "REPLACE:allow docker_helper_buildkitd_t cgroup_t:filesystem { mount remount };"},
+		{"brace-form alias of the bare getattr rule", "statfs", "REPLACE:allow docker_helper_buildkitd_t cgroup_t:filesystem { getattr };"},
+		{"statfs wrong target type (fs_t displacement)", "statfs", "REPLACE:allow docker_helper_buildkitd_t fs_t:filesystem getattr;"},
+		{"statfs wrong source domain (launcher displacement)", "statfs", "REPLACE:allow docker_helper_builder_launcher_t cgroup_t:filesystem getattr;"},
+		// A wrong-type/wrong-domain grant displaces the traversal rule —
 		// the singleton disappears and a non-cgroup (or duplicated)
 		// authority appears; appending alone would leave the canonical
 		// rule intact and the cgroup-only scan blind to a tmp_t target.
-		{"wrong target type", "REPLACE:allow docker_helper_buildkitd_t tmp_t:dir { search };"},
-		{"wrong source domain", "REPLACE:allow docker_helper_builder_launcher_t cgroup_t:dir { search };"},
+		{"traversal wrong target type", "traversal", "REPLACE:allow docker_helper_buildkitd_t tmp_t:dir { search };"},
+		{"traversal wrong source domain", "traversal", "REPLACE:allow docker_helper_builder_launcher_t cgroup_t:dir { search };"},
 	} {
 		mutated := policy
-		if mut.rule == "" {
-			mutated = strings.Replace(policy, canonical+"\n", "", 1)
-		} else if after, ok := strings.CutPrefix(mut.rule, "REPLACE:"); ok {
-			mutated = strings.Replace(policy, canonical, after, 1)
-		} else {
+		switch {
+		case mut.target != "" && mut.rule == "":
+			mutated = strings.Replace(policy, singleton[mut.target]+"\n", "", 1)
+		case mut.target != "" && strings.HasPrefix(mut.rule, "REPLACE:"):
+			after, _ := strings.CutPrefix(mut.rule, "REPLACE:")
+			mutated = strings.Replace(policy, singleton[mut.target], after, 1)
+		default:
 			mutated = policy + mut.rule
 		}
 		if failed, _ := checkPolicy(mutated); !failed {
-			t.Errorf("mutation %q must trip the cgroup traversal invariants", mut.name)
+			t.Errorf("mutation %q must trip the buildkitd cgroup authority invariants", mut.name)
 		}
 	}
-	// The removal mutation must actually remove the singleton.
-	if removed := strings.Replace(policy, canonical+"\n", "", 1); removed == policy {
+	// The removal mutations must actually remove their singletons.
+	if removed := strings.Replace(policy, canonicalTraversal+"\n", "", 1); removed == policy {
 		t.Fatal("the standing cgroup traversal line was not found for the removal mutation")
+	}
+	if removed := strings.Replace(policy, canonicalStatfs+"\n", "", 1); removed == policy {
+		t.Fatal("the standing cgroup statfs line was not found for the removal mutation")
 	}
 }
 
@@ -4673,6 +4718,10 @@ func TestSELinuxPolicyRootlesskitCgroupMounton(t *testing.T) {
 	pinnedCgroupMounton := "allow docker_helper_rootlesskit_t cgroup_t:dir mounton;"
 	pinnedCgroupSearch := "allow docker_helper_rootlesskit_t cgroup_t:dir { search };"
 	pinnedCgroupFilePair := "allow docker_helper_rootlesskit_t cgroup_t:file { read open };"
+	// The R7 cgroup2 statfs detection rung's buildkitd singleton: the ONE
+	// module rule on the cgroup_t:filesystem class, a different subject
+	// and a different surface from the rootlesskit move-mount grant.
+	pinnedBuildkitdCgroupStatfs := "allow docker_helper_buildkitd_t cgroup_t:filesystem getattr;"
 	if !strings.Contains(policy, pinnedCgroupMounton) {
 		t.Fatalf("the rootlesskit child domain's cgroup move-mount surface must be exact: %q", pinnedCgroupMounton)
 	}
@@ -4693,8 +4742,10 @@ func TestSELinuxPolicyRootlesskitCgroupMounton(t *testing.T) {
 	// and the builder are prior live-evidenced contributions, not part
 	// of this grant); the standing search rule and the file pair must
 	// each appear exactly once; no cgroup_t:file permission beyond the
-	// standing pairs and no cgroup_t:filesystem surface may ride (the
-	// class confusion).
+	// standing pairs and no cgroup_t:filesystem surface beyond the ONE
+	// buildkitd statfs detection getattr singleton may ride (the class
+	// confusion; the rootlesskit child itself carries NO filesystem
+	// surface).
 	cgroupMountonViolations := func(text string) []string {
 		var violations []string
 		mountonCount := 0
@@ -4726,8 +4777,10 @@ func TestSELinuxPolicyRootlesskitCgroupMounton(t *testing.T) {
 				}
 			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, " cgroup_t:file") && strings.Contains(trimmed, "mounton"):
 				violations = append(violations, "no cgroup_t:file mounton shape may exist for any subject: "+trimmed)
-			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, " cgroup_t:filesystem"):
-				violations = append(violations, "the class confusion is forbidden — the filesystem class surface of cgroup_t (mount/remount/unmount) is not this grant: "+trimmed)
+			case strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t cgroup_t:filesystem"):
+				violations = append(violations, "the class confusion is forbidden — the filesystem class surface of cgroup_t is never the rootlesskit move-mount grant: "+trimmed)
+			case strings.HasPrefix(trimmed, "allow ") && strings.Contains(trimmed, " cgroup_t:filesystem") && trimmed != pinnedBuildkitdCgroupStatfs:
+				violations = append(violations, "the cgroup_t:filesystem surface has exactly ONE module rule — the buildkitd statfs detection getattr singleton (the R7 detection rung); any mount/remount/unmount write-family shape or second rule is the class confusion: "+trimmed)
 			}
 		}
 		if mountonCount == 0 {
@@ -5163,8 +5216,9 @@ func buildkitdIdentityViolations(policy string) []string {
 	// the trust-anchor read pair, the runtime-tree symlink-create, the
 	// snapshot-tree symlink pair, the user-namespace probe getattr, the
 	// unprivileged-mount-flags statfs getattr, the OCI-worker
-	// process-group setup rule and the cgroup2 root traversal dir
-	// { search } singleton) — never "at least".
+	// process-group setup rule, the cgroup2 root traversal dir
+	// { search } singleton and the cgroup2 statfs detection filesystem
+	// getattr singleton) — never "at least".
 	buildkitdNamedAllow := 0
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -5175,8 +5229,8 @@ func buildkitdIdentityViolations(policy string) []string {
 			buildkitdNamedAllow++
 		}
 	}
-	if buildkitdNamedAllow != 27 {
-		violations = append(violations, fmt.Sprintf("the module must carry exactly the twenty-seven buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr open execute_no_trans }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir setattr }, the categorized state-tree file { create read open lock write getattr rename setattr unlink append }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name create remove_name mounton setattr }, the categorized runtime-tree sock_file { create unlink setattr }, and the R7 manager child-lifecycle { signull signal sigkill } authority, the daemon's per-op BuildKit endpoint { connectto } peer edge, the rootlesskit parent's buildkitd child-authority rule, the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr, the unprivileged-mount-flags statfs getattr, the OCI-worker process-group setup rule and the cgroup2 root traversal dir { search } singleton), found %d", buildkitdNamedAllow))
+	if buildkitdNamedAllow != 28 {
+		violations = append(violations, fmt.Sprintf("the module must carry exactly the twenty-eight buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr open execute_no_trans }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir setattr }, the categorized state-tree file { create read open lock write getattr rename setattr unlink append }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name create remove_name mounton setattr }, the categorized runtime-tree sock_file { create unlink setattr }, and the R7 manager child-lifecycle { signull signal sigkill } authority, the daemon's per-op BuildKit endpoint { connectto } peer edge, the rootlesskit parent's buildkitd child-authority rule, the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr, the unprivileged-mount-flags statfs getattr, the OCI-worker process-group setup rule, the cgroup2 root traversal dir { search } singleton and the cgroup2 statfs detection filesystem getattr singleton), found %d", buildkitdNamedAllow))
 	}
 	// The shared runtime-root dir surface has exactly the standing
 	// owners above; a NEW or reshaped rule on the pair (any source,
@@ -5273,7 +5327,7 @@ func buildkitdIdentityViolations(policy string) []string {
 			if strings.Contains(trimmed, "docker_helper_buildkitd_exec_t") && trimmed != canonicalExec && trimmed != canonicalEntry {
 				violations = append(violations, "the only allow rules naming the buildkitd exec type are the exact source-exec grant { execute read open } and the exact target-side { entrypoint read execute getattr open execute_no_trans } grant: "+trimmed)
 			}
-			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot && trimmed != canonicalRuntimeTree && trimmed != canonicalRuntimeSockFile && trimmed != canonicalManagerLifecycle && trimmed != "allow docker_helper_t docker_helper_buildkitd_t:unix_stream_socket { connectto };" && trimmed != "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { signal sigkill };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:dir { write add_name create mounton remove_name read };" && trimmed != "allow docker_helper_buildkitd_t self:cap_userns { sys_admin chown };" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem { remount unmount };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:file { create };" && trimmed != "allow docker_helper_buildkitd_t self:udp_socket { create setopt connect getattr read write };" && trimmed != "allow docker_helper_buildkitd_t self:tcp_socket { create setopt connect getattr read write getopt };" && trimmed != "allow docker_helper_buildkitd_t http_port_t:tcp_socket { name_connect };" && trimmed != "allow docker_helper_buildkitd_t cert_t:dir { search };" && trimmed != "allow docker_helper_buildkitd_t cert_t:file { read open getattr };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:lnk_file { create };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file { create setattr getattr read };" && trimmed != "allow docker_helper_buildkitd_t nsfs_t:file getattr;" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem getattr;" && trimmed != "allow docker_helper_buildkitd_t self:process setpgid;" && trimmed != "allow docker_helper_buildkitd_t cgroup_t:dir { search };" {
+			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot && trimmed != canonicalRuntimeTree && trimmed != canonicalRuntimeSockFile && trimmed != canonicalManagerLifecycle && trimmed != "allow docker_helper_t docker_helper_buildkitd_t:unix_stream_socket { connectto };" && trimmed != "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { signal sigkill };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:dir { write add_name create mounton remove_name read };" && trimmed != "allow docker_helper_buildkitd_t self:cap_userns { sys_admin chown };" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem { remount unmount };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:file { create };" && trimmed != "allow docker_helper_buildkitd_t self:udp_socket { create setopt connect getattr read write };" && trimmed != "allow docker_helper_buildkitd_t self:tcp_socket { create setopt connect getattr read write getopt };" && trimmed != "allow docker_helper_buildkitd_t http_port_t:tcp_socket { name_connect };" && trimmed != "allow docker_helper_buildkitd_t cert_t:dir { search };" && trimmed != "allow docker_helper_buildkitd_t cert_t:file { read open getattr };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:lnk_file { create };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file { create setattr getattr read };" && trimmed != "allow docker_helper_buildkitd_t nsfs_t:file getattr;" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem getattr;" && trimmed != "allow docker_helper_buildkitd_t self:process setpgid;" && trimmed != "allow docker_helper_buildkitd_t cgroup_t:dir { search };" && trimmed != "allow docker_helper_buildkitd_t cgroup_t:filesystem getattr;" {
 				violations = append(violations, "the only allow rules toward the buildkitd domain are the exact process transition grant, the exact target-entrypoint grant, and the exact state/runtime surfaces: "+trimmed)
 			}
 			fields := strings.Fields(trimmed)
