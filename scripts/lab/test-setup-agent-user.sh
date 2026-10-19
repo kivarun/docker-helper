@@ -50,6 +50,7 @@ cat > "$SHIM/id" <<'SH'
 #!/bin/sh
 case "${1:-}" in
   -u) if [ -n "${2:-}" ]; then cat "$UIDMARK" 2>/dev/null || echo 1001; else echo 0; fi ;;
+  -g) echo 1001 ;;
   -nG) if [ -f "$GROUPMARK" ]; then echo "agent docker"; else echo "agent"; fi ;;
   "") echo "uid=0(root)" ;;
   *) [ -f "$USERMARK" ] ;;
@@ -64,7 +65,10 @@ SH
 cat > "$SHIM/usermod" <<'SH'
 #!/bin/sh
 echo "usermod $*" >> "$REC"
-if [ "${1:-}" = "-u" ]; then echo "$2" > "$UIDMARK"; else : > "$GROUPMARK"; fi
+if [ "${1:-}" = "-u" ]; then
+  [ -n "${USERMOD_FAIL:-}" ] && exit 8
+  echo "$2" > "$UIDMARK"
+else : > "$GROUPMARK"; fi
 SH
 cat > "$SHIM/getent" <<'SH'
 #!/bin/sh
@@ -74,6 +78,11 @@ SH
 cat > "$SHIM/chown" <<'SH'
 #!/bin/sh
 echo "chown $*" >> "$REC"
+exit 0
+SH
+cat > "$SHIM/sed" <<'SH'
+#!/bin/sh
+echo "sed $*" >> "$REC"
 exit 0
 SH
 cat > "$SHIM/install" <<'SH'
@@ -115,7 +124,7 @@ case "$1 $2" in
       list) [ -f "$ALLOWED" ] && cat "$ALLOWED" ;;
       add) shift 3; echo "$1" > "$ALLOWED" ;;
     esac ;;
-  "principal show") [ -f "$PRINCIPAL" ] ;;
+  "principal show") [ -f "$PRINCIPAL" ] && printf '{"uid":1000,"gid":1000}\n' ;;
   "principal create") : > "$PRINCIPAL"; printf '{"token":"dhc_NEWTOKEN"}\n' ;;
   "principal credential") printf '{"token":"dhc_ROTTOKEN"}\n' ;;
   "credential install")
@@ -187,9 +196,12 @@ printf 'docker-helper-lab-vm 1 %s\n' "$MID" > "$MARKER"
 : > "$SELFOK"
 : > "$USERMARK"; echo 1000 > "$UIDMARK"; : > "$PRINCIPAL"
 mkdir -p "$AGENT_HOME/.config/docker-helper"; : > "$CRED"
+export USERMOD_FAIL=1
 out="$(run_setup "$MARKER" 2>&1)" && ok "migration run succeeds" || bad "migration run failed: $out"
+unset USERMOD_FAIL
 rec="$(cat "$REC")"
 contains "migration uses usermod -u 1001" "usermod -u 1001 agent" "$rec"
+contains "migration falls back to a passwd edit when usermod refuses" "uid updated via /etc/passwd" "$out"
 not_contains "migration does not useradd" "useradd" "$rec"
 contains "migration re-owns the home tree" "chown -R agent:agent $AGENT_HOME" "$rec"
 
@@ -199,7 +211,8 @@ printf 'docker-helper-lab-vm 1 %s\n' "$MID" > "$MARKER"
 : > "$USERMARK"; echo 1001 > "$UIDMARK"; : > "$PRINCIPAL"; : > "$SELFOK"
 mkdir -p "$AGENT_HOME/.config/docker-helper"; printf 'dhc_OLD\n' > "$CRED"
 : > "$REC"
-if run_setup "$MARKER" >/dev/null 2>&1; then ok "re-run with valid credential succeeds"; else bad "re-run failed"; fi
+out="$(run_setup "$MARKER" 2>&1)" && ok "re-run with valid credential succeeds" || bad "re-run failed: $out"
+contains "principal record realigned to the OS uid" "realigning principal agent record" "$out"
 rec="$(cat "$REC")"
 check "re-run does not rotate" "0" "$(count 'principal credential rotate' "$REC")"
 check "re-run does not create principal" "0" "$(count 'principal create' "$REC")"

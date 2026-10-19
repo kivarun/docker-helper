@@ -88,6 +88,7 @@ require_lab_vm
 DH="$(command -v docker-helper)" || die "docker-helper not found in PATH"
 command -v jq >/dev/null 2>&1 || die "jq not found in PATH"
 [ -f "$ALIASES_SRC" ] || die "missing $ALIASES_SRC"
+DH_DB="${DOCKER_HELPER_DB:-/var/lib/docker-helper/docker-helper.db}"
 
 # --- 1. account, workspace root, docker access ------------------------------
 # The 'agent' account is the trusted launcher, so it may hold docker access.
@@ -98,11 +99,15 @@ if id "$AGENT_USER" >/dev/null 2>&1; then
   current_uid="$(id -u "$AGENT_USER")"
   if [ "$current_uid" != "$AGENT_UID" ]; then
     log "migrating account $AGENT_USER uid $current_uid -> $AGENT_UID"
-    # usermod -u also rewrites ownership of the account's home tree; the
-    # explicit chown below re-normalizes any leftover ownership. Existing
-    # credential content is unaffected (the daemon matches the token hash,
-    # not the uid).
-    usermod -u "$AGENT_UID" "$AGENT_USER"
+    # usermod -u also rewrites ownership of the account's home tree. It
+    # refuses (exit 8) while the OLD uid is still used by a live process, which
+    # is exactly this case: the admin account shares uid 1000 and runs the
+    # provisioning session. Fall back to a direct passwd edit; the explicit
+    # chown below re-owns the home tree and credential.
+    if ! usermod -u "$AGENT_UID" "$AGENT_USER"; then
+      sed -i "s#^$AGENT_USER:\([^:]*\):$current_uid:#$AGENT_USER:\1:$AGENT_UID:#" /etc/passwd
+      log "uid updated via /etc/passwd (usermod refused: old uid in use)"
+    fi
   else
     log "account $AGENT_USER already exists (uid $current_uid)"
   fi
@@ -142,6 +147,31 @@ fi
 # rotated implicitly (that would silently invalidate any other copy of the
 # bearer). --recover-credential performs the explicit rotate.
 CRED_FILE="$AGENT_HOME/.config/docker-helper/credential.token"
+
+# The principal record stores the uid/gid it was created with (informational:
+# authorization uses paths, not the uid). A uid migration would otherwise leave
+# that record stale, so realign it directly. The daemon reads the row per
+# request, so no restart is needed. Skipped when the CLI/DB is unavailable.
+sync_principal_uid() {
+  "$DH" principal show "$AGENT_USER" >/dev/null 2>&1 || return 0
+  local p_uid p_gid want_gid
+  p_uid="$("$DH" principal show "$AGENT_USER" --json 2>/dev/null | jq -r '.uid // empty')"
+  p_gid="$("$DH" principal show "$AGENT_USER" --json 2>/dev/null | jq -r '.gid // empty')"
+  [ -n "$p_uid" ] || return 0
+  want_gid="$(id -g "$AGENT_USER")"
+  [ "$p_uid" = "$AGENT_UID" ] && [ "$p_gid" = "$want_gid" ] && return 0
+  log "realigning principal $AGENT_USER record uid/gid $p_uid:$p_gid -> $AGENT_UID:$want_gid"
+  [ -f "$DH_DB" ] || return 0
+  command -v python3 >/dev/null 2>&1 || { log "  (python3 missing; record left as-is)"; return 0; }
+  python3 - "$DH_DB" "$AGENT_USER" "$AGENT_UID" "$want_gid" <<'PY'
+import sqlite3, sys
+db, user, uid, gid = sys.argv[1:5]
+c = sqlite3.connect(db)
+c.execute("UPDATE principals SET uid = ?, gid = ? WHERE username = ?", (int(uid), int(gid), user))
+c.commit()
+PY
+}
+sync_principal_uid
 
 credential_valid() {
   local out
