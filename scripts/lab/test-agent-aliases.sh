@@ -109,10 +109,12 @@ dh="$(cat "$DH_REC" 2>/dev/null || true)"
 dargv="$(cat "$DOCKER_REC" 2>/dev/null || true)"
 
 contains "launch creates a session for \$PWD (--workspace CLI)" "create session create --workspace $WS" "$dh"
-contains "launch deletes the session" "delete session delete --id dhs_TEST" "$dh"
+contains "launch deletes the session (positional SESSION_ID)" "delete session delete dhs_TEST" "$dh"
+not_contains "session delete does not use --id" "--id" "$dh"
 contains "container gets the session bearer" "-e DOCKER_HELPER_SESSION_TOKEN" "$dargv"
 contains "container drops caps" "--cap-drop ALL" "$dargv"
 contains "container sets no-new-privileges" "--security-opt no-new-privileges=true" "$dargv"
+contains "container runs in the helper workload SELinux domain" "--security-opt label=type:docker_helper_container_t" "$dargv"
 contains "container is --rm --init" "--rm -it --init" "$dargv"
 contains "helper runtime dir is read-only" "$WORK/run:/run/docker-helper:ro" "$dargv"
 contains "workspace is a private relabel" "$WS:/workspace:Z" "$dargv"
@@ -151,7 +153,7 @@ for _ in $(seq 1 50); do [ -s "$DOCKER_REC" ] && break; sleep 0.1; done
 kill -INT "$oc_pid" 2>/dev/null || true
 wait "$oc_pid" 2>/dev/null || true
 dh="$(cat "$DH_REC" 2>/dev/null || true)"
-contains "SIGINT deletes the session" "delete session delete --id dhs_TEST" "$dh"
+contains "SIGINT deletes the session" "delete session delete dhs_TEST" "$dh"
 
 echo
 printf 'agent-aliases tests: %d passed, %d failed\n' "$PASS" "$FAIL"

@@ -28,14 +28,20 @@
 # It does NOT manage SSH keys: VM access stays with the dev-vm-local.sh SSH
 # identity, and the agent account gets no SSH of its own.
 #
+# The agent uid is pinned to the opencode-docker image's 'opencode' uid (1000)
+# so the container process can traverse the agent home and write the
+# bind-mounted ~/.opencode-docker trees. On the openSUSE cloud image the admin
+# account already owns uid 1000, so the agent is created with a non-unique uid.
+#
 # Env overrides: AGENT_USER, AGENT_HOME, AGENT_WORKROOT, AGENT_DOCKER_GROUP,
-#                LAB_VM_MARKER, LAB_VM_MARKER_TAG.
+#                AGENT_UID, LAB_VM_MARKER, LAB_VM_MARKER_TAG.
 set -euo pipefail
 
 AGENT_USER="${AGENT_USER:-agent}"
 AGENT_HOME="${AGENT_HOME:-/home/$AGENT_USER}"
 AGENT_WORKROOT="${AGENT_WORKROOT:-$AGENT_HOME/work}"
 AGENT_DOCKER_GROUP="${AGENT_DOCKER_GROUP:-docker}"
+AGENT_UID="${AGENT_UID:-1000}"
 LAB_VM_MARKER="${LAB_VM_MARKER:-/etc/docker-helper-lab-vm}"
 LAB_VM_MARKER_TAG="${LAB_VM_MARKER_TAG:-docker-helper-lab-vm}"
 
@@ -73,8 +79,10 @@ command -v jq >/dev/null 2>&1 || die "jq not found in PATH"
 if id "$AGENT_USER" >/dev/null 2>&1; then
   log "account $AGENT_USER already exists"
 else
-  log "creating account $AGENT_USER"
-  useradd -m -s /bin/bash -c "docker-helper agent launcher" "$AGENT_USER"
+  log "creating account $AGENT_USER (uid $AGENT_UID, matching the container user)"
+  # -o: the openSUSE cloud admin account already owns uid 1000; the container
+  # image's 'opencode' user is uid 1000, so the launcher must share that uid.
+  useradd -o -u "$AGENT_UID" -m -s /bin/bash -c "docker-helper agent launcher" "$AGENT_USER"
 fi
 
 install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" "$AGENT_WORKROOT"
@@ -106,8 +114,10 @@ if "$DH" principal show "$AGENT_USER" >/dev/null 2>&1; then
   if [ -f "$CRED_FILE" ]; then
     log "credential already installed at $CRED_FILE"
   else
-    log "issuing a credential for the existing principal $AGENT_USER"
-    TOKEN="$("$DH" principal credential create "$AGENT_USER" --json | jq -er '.token')"
+    # The daemon still holds the principal's credential (its bearer was only
+    # on disk), so mint a replacement rather than colliding on create.
+    log "minting a replacement credential for the existing principal $AGENT_USER"
+    TOKEN="$("$DH" principal credential rotate "$AGENT_USER" --json | jq -er '.token')"
   fi
 else
   log "creating principal $AGENT_USER (default Launcher + default allowed root)"
@@ -125,6 +135,9 @@ fi
 install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" \
   "$AGENT_HOME/.opencode-docker/.config/opencode" \
   "$AGENT_HOME/.opencode-docker/.local/share/opencode"
+# install -d leaves already-existing parents at their old owner, so normalize
+# the whole tree: the container (uid 1000) writes these bind-mounted paths.
+chown -R "$AGENT_USER:$AGENT_USER" "$AGENT_HOME/.opencode-docker"
 
 install -m 0644 -o "$AGENT_USER" -g "$AGENT_USER" \
   "$ALIASES_SRC" "$AGENT_HOME/.bash_aliases"

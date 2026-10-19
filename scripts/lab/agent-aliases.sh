@@ -60,7 +60,7 @@ _dh_session_create() {
             <<<"$response"
     )" || {
         command docker-helper session delete \
-            --id "$DOCKER_HELPER_SESSION_ID" >/dev/null 2>&1 || true
+            "$DOCKER_HELPER_SESSION_ID" >/dev/null 2>&1 || true
         unset DOCKER_HELPER_SESSION_ID
         return 1
     }
@@ -70,8 +70,8 @@ _dh_session_create() {
 
 _dh_session_delete() {
     [[ -n "${DOCKER_HELPER_SESSION_ID:-}" ]] || return 0
-    command docker-helper session delete \
-        --id "$DOCKER_HELPER_SESSION_ID" >/dev/null
+    # SESSION_ID is positional on both the release/2.4 and newer lines.
+    command docker-helper session delete "$DOCKER_HELPER_SESSION_ID" >/dev/null
 }
 
 # --- launcher ---------------------------------------------------------------
@@ -116,10 +116,20 @@ _oc_run() (
     # the model provider auth; no GH_TOKEN, no admin token, no principal
     # credential. No docker.sock: the helper socket directory is mounted
     # read-only and authority comes solely from the bearer.
+    #
+    # Under SELinux the container must run in the helper's workload domain
+    # (docker_helper_container_t) to reach the helper socket; the shipped
+    # policy grants socket access only to that domain. On an AppArmor host the
+    # SELinux label is inert (OPENCODE_DOCKER_SELINUX_TYPE may be emptied).
+    local selinux_type="${OPENCODE_DOCKER_SELINUX_TYPE-docker_helper_container_t}"
+    local -a selinux_opts=()
+    [[ -n "$selinux_type" ]] && selinux_opts=(--security-opt "label=type:$selinux_type")
+
     docker run --rm -it \
         --init \
         --cap-drop ALL \
         --security-opt no-new-privileges=true \
+        "${selinux_opts[@]}" \
         -e LLM_SERVER \
         -e LLM_KEY \
         -e DOCKER_HELPER_SESSION_TOKEN \
