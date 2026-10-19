@@ -9,7 +9,9 @@
 #   2. the container argv carries the isolation posture (cap-drop ALL,
 #      no-new-privileges, --rm --init, read-only helper dir, :Z workspace);
 #   3. the Session is deleted on normal exit;
-#   4. the Session is deleted when the launcher is interrupted (SIGINT).
+#   4. the Session is deleted when the launcher is interrupted (SIGINT);
+#   5. the workspace is passed in the form the installed CLI advertises
+#      (--workspace flag vs positional WORKSPACE).
 #
 # Usage: scripts/lab/test-agent-aliases.sh
 
@@ -40,9 +42,20 @@ SHIM="$WORK/shim"; mkdir -p "$SHIM" "$WORK/run"
 
 cat > "$SHIM/docker-helper" <<'SH'
 #!/bin/sh
-# Only the two subcommands the launcher uses.
+# Only the subcommands the launcher uses. DH_HELP_WORKSPACE toggles whether the
+# `session create --help` probe advertises --workspace (flag form) or not.
 case "$1 $2" in
   "session create")
+    for a in "$@"; do
+      if [ "$a" = "--help" ]; then
+        if [ -n "${DH_HELP_WORKSPACE:-}" ]; then
+          echo "Usage: docker-helper session create [--workspace DIR] [--json]"
+        else
+          echo "Usage: docker-helper session create [--json] WORKSPACE"
+        fi
+        exit 0
+      fi
+    done
     printf '%s\n' "create $*" >> "$DH_REC"
     printf '{"session":{"id":"dhs_TEST"},"token":"dht_SECRET"}\n'
     ;;
@@ -82,13 +95,14 @@ WS="$WORK/ws"; mkdir -p "$WS"
 source "$ALIASES"
 
 # --- 1/2/3. normal launch: session lifecycle + container argv --------------
+export DH_HELP_WORKSPACE=1
 : > "$DH_REC"; : > "$DOCKER_REC"
 ( cd "$WS" && oc echo hi )
 
 dh="$(cat "$DH_REC" 2>/dev/null || true)"
 dargv="$(cat "$DOCKER_REC" 2>/dev/null || true)"
 
-contains "launch creates a session for \$PWD" "create session create --workspace $WS" "$dh"
+contains "launch creates a session for \$PWD (--workspace CLI)" "create session create --workspace $WS" "$dh"
 contains "launch deletes the session" "delete session delete --id dhs_TEST" "$dh"
 contains "container gets the session bearer" "-e DOCKER_HELPER_SESSION_TOKEN" "$dargv"
 contains "container drops caps" "--cap-drop ALL" "$dargv"
@@ -97,6 +111,13 @@ contains "container is --rm --init" "--rm -it --init" "$dargv"
 contains "helper runtime dir is read-only" "$WORK/run:/run/docker-helper:ro" "$dargv"
 contains "workspace is a private relabel" "$WS:/workspace:Z" "$dargv"
 contains "image is the base image" "ghcr.io/kivarun/opencode-docker/base:latest" "$dargv"
+
+# positional CLI (release/2.4 line): same launch, no --workspace flag
+unset DH_HELP_WORKSPACE
+: > "$DH_REC"; : > "$DOCKER_REC"
+( cd "$WS" && oc echo hi )
+dh="$(cat "$DH_REC" 2>/dev/null || true)"
+contains "launch creates a session for \$PWD (positional CLI)" "create session create $WS --json" "$dh"
 
 # --- 4. SIGINT still deletes the session -----------------------------------
 : > "$DH_REC"; : > "$DOCKER_REC"

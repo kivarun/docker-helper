@@ -18,16 +18,31 @@
 # Host requirements: docker, docker-helper, jq.
 
 # --- docker-helper session lifecycle ---------------------------------------
+# `session create` takes WORKSPACE positionally on the release/2.4 line and via
+# `--workspace` on newer lines; probe the installed CLI once per launch and
+# cache the form so the aliases work on either.
+_DH_WS_STYLE=""
+_dh_workspace_style() {
+    if [[ -z "$_DH_WS_STYLE" ]]; then
+        if command docker-helper session create --help 2>&1 | grep -q -- '--workspace'; then
+            _DH_WS_STYLE=flag
+        else
+            _DH_WS_STYLE=positional
+        fi
+    fi
+    printf '%s' "$_DH_WS_STYLE"
+}
+
 _dh_session_create() {
     local response
 
     unset DOCKER_HELPER_SESSION_ID DOCKER_HELPER_SESSION_TOKEN
 
-    response="$(
-        command docker-helper session create \
-            --workspace "$PWD" \
-            --json
-    )" || return 1
+    if [[ "$(_dh_workspace_style)" == flag ]]; then
+        response="$(command docker-helper session create --workspace "$PWD" --json)" || return 1
+    else
+        response="$(command docker-helper session create "$PWD" --json)" || return 1
+    fi
 
     DOCKER_HELPER_SESSION_ID="$(
         jq -er '.session.id | select(type == "string" and length > 0)' \
