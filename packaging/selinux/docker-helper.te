@@ -5607,6 +5607,66 @@ allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr se
 # templates.
 allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:sock_file { create unlink setattr };
 
+# --- R7: the OCI runtime's exec.fifo creation — the bare NEW ---
+# --- builder_runtime_t pair (fifo_file { create } singleton; never a ---
+# --- widening of any existing runtime-tree rule) ---
+#
+# R7 (enforcing evidence, UAT run 39298755688 serial 1325 + its S15
+# probe reproduction serial 10301; the first dispatch 39293937577
+# serial 1320 carries the same hook): after the cgroup2 statfs
+# detection opened, the bundled buildkit-runc reached the NEXT terminal
+# stage and died with the runtime's own fatal
+#
+#   runc run failed: mkfifo /run/docker-helper-builder/ops/op_<id>/
+#     runc/<rand>/exec.fifo: permission denied
+#
+# at
+#
+#   avc:  denied  { create } for  pid=<runc> comm="buildkit-runc"
+#     name="exec.fifo"
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:docker_helper_builder_runtime_t:s0:c1
+#     tclass=fifo_file permissive=0
+#
+# (main build serial 1325 pid 3988, op_1720ff7d...; the S15 repro
+# serial 10301). The direct mkfifo -> fifo_file:create link is the
+# pinned source: runc v1.4.3's Container.createExecFifo
+# (libcontainer/container_linux.go:447-470) runs unix.Mkfifo(fifoName,
+# 0o622) on the per-execution state dir under the op's runtime tree and
+# returns the PathError{Op: "mkfifo"} the fatal carries; the stage sits
+# strictly AFTER the container creation's cgroup-manager selection (the
+# previous rung's boundary — factory_linux.go:58 precedes
+# container_linux.go:324), so the terminal moved one lifecycle stage
+# deeper exactly as the detection rung predicted.
+#
+# THE DELTA IS EXACTLY THE ONE BARE FIFO_FILE { create } SINGLETON:
+# no fifo_file read/write/open/getattr/setattr/unlink/append/ioctl —
+# the create's own follow-ups are SEPARATE hooks owned by separate
+# future rungs (the createExecFifo chmod/chown setattr pair — the
+# umask shrinks 0o622 before the chmod, so the chmod's setattr check
+# always fires; the parent's includeExecFifo open/read; the init
+# child's exec-fifo write; the failure-path os.Remove unlink), and no
+# other runtime-tree or runtime-root class/permission widens. No
+# macros, no second rule, no capability, no transition, no MCS change,
+# no fcontext change, no production Go change. docker_helper_builder_
+# runtime_t is the module's own type; the committed-policy tests pin
+# the rule as the buildkitd domain's ONLY runtime-tree fifo_file
+# authority (the count pin moves 28 -> 29 by exactly this one rule).
+# SCOPE: type-wide TE authority over builder_runtime_t:fifo_file — NOT
+# limited to the exec.fifo name (no path/name authority exists in TE;
+# the exec.fifo name owns nothing); the cross-operation boundary stays
+# owned by the MCS category constraints exactly as every other
+# per-op plane requires — the same-category c1 -> c1 pair resolves and
+# both cross-category directions stay denied, proven on the LOADED
+# policy by the kernel-decision matrix's fifo_file create rows
+# (decided=1, no permissive exception) in the MCS-audit diag. The MCS
+# protection of the create hook is NOT transferable by inference to
+# any future fifo_file permission: each further hook (setattr/read/
+# open/write/unlink) needs its own rung's kernel-decision rows.
+# The standing runtime-tree owners (the dir rule, the sock_file rule,
+# the lnk_file rule, the other subjects' rules) stay byte-unchanged.
+allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:fifo_file create;
+
 # --- 4C-71: the categorized operation-state file lock — the 4C-70 file
 # --- rule widened IN PLACE (ONE rule, never split) ---
 #

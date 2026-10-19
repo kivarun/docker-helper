@@ -380,8 +380,8 @@ func s15LauncherCgroupViolations(policy string) []string {
 			violations = append(violations, fmt.Sprintf("the standing cgroup owner drifted (must stay exactly its bare { search } dir singleton): %s", want))
 		}
 	}
-	if buildkitdNamedAllow != 28 {
-		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 28 (the S15 phase had exactly 9; R7 added the manager child-lifecycle rule, the per-op endpoint peer edge, the rootlesskit parent's buildkitd child-authority rule the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr, the unprivileged-mount-flags statfs getattr, the OCI-worker process-group setup rule, the cgroup2 root traversal singleton and the cgroup2 statfs detection filesystem getattr singleton; a NON-buildkitd S15 rule never trips it), found %d", buildkitdNamedAllow))
+	if buildkitdNamedAllow != 29 {
+		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 29 (the S15 phase had exactly 9; R7 added the manager child-lifecycle rule, the per-op endpoint peer edge, the rootlesskit parent's buildkitd child-authority rule the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr, the unprivileged-mount-flags statfs getattr, the OCI-worker process-group setup rule, the cgroup2 root traversal singleton, the cgroup2 statfs detection filesystem getattr singleton and the runtime-tree exec.fifo fifo_file create singleton; a NON-buildkitd S15 rule never trips it), found %d", buildkitdNamedAllow))
 	}
 	return violations
 }
@@ -5217,8 +5217,9 @@ func buildkitdIdentityViolations(policy string) []string {
 	// snapshot-tree symlink pair, the user-namespace probe getattr, the
 	// unprivileged-mount-flags statfs getattr, the OCI-worker
 	// process-group setup rule, the cgroup2 root traversal dir
-	// { search } singleton and the cgroup2 statfs detection filesystem
-	// getattr singleton) — never "at least".
+	// { search } singleton, the cgroup2 statfs detection filesystem
+	// getattr singleton and the runtime-tree exec.fifo fifo_file create
+	// singleton) — never "at least".
 	buildkitdNamedAllow := 0
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -5229,8 +5230,8 @@ func buildkitdIdentityViolations(policy string) []string {
 			buildkitdNamedAllow++
 		}
 	}
-	if buildkitdNamedAllow != 28 {
-		violations = append(violations, fmt.Sprintf("the module must carry exactly the twenty-eight buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr open execute_no_trans }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir setattr }, the categorized state-tree file { create read open lock write getattr rename setattr unlink append }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name create remove_name mounton setattr }, the categorized runtime-tree sock_file { create unlink setattr }, and the R7 manager child-lifecycle { signull signal sigkill } authority, the daemon's per-op BuildKit endpoint { connectto } peer edge, the rootlesskit parent's buildkitd child-authority rule, the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr, the unprivileged-mount-flags statfs getattr, the OCI-worker process-group setup rule, the cgroup2 root traversal dir { search } singleton and the cgroup2 statfs detection filesystem getattr singleton), found %d", buildkitdNamedAllow))
+	if buildkitdNamedAllow != 29 {
+		violations = append(violations, fmt.Sprintf("the module must carry exactly the twenty-nine buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr open execute_no_trans }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir setattr }, the categorized state-tree file { create read open lock write getattr rename setattr unlink append }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name create remove_name mounton setattr }, the categorized runtime-tree sock_file { create unlink setattr }, and the R7 manager child-lifecycle { signull signal sigkill } authority, the daemon's per-op BuildKit endpoint { connectto } peer edge, the rootlesskit parent's buildkitd child-authority rule, the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr, the unprivileged-mount-flags statfs getattr, the OCI-worker process-group setup rule, the cgroup2 root traversal dir { search } singleton, the cgroup2 statfs detection filesystem getattr singleton and the runtime-tree exec.fifo fifo_file create singleton), found %d", buildkitdNamedAllow))
 	}
 	// The shared runtime-root dir surface has exactly the standing
 	// owners above; a NEW or reshaped rule on the pair (any source,
@@ -5327,7 +5328,7 @@ func buildkitdIdentityViolations(policy string) []string {
 			if strings.Contains(trimmed, "docker_helper_buildkitd_exec_t") && trimmed != canonicalExec && trimmed != canonicalEntry {
 				violations = append(violations, "the only allow rules naming the buildkitd exec type are the exact source-exec grant { execute read open } and the exact target-side { entrypoint read execute getattr open execute_no_trans } grant: "+trimmed)
 			}
-			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot && trimmed != canonicalRuntimeTree && trimmed != canonicalRuntimeSockFile && trimmed != canonicalManagerLifecycle && trimmed != "allow docker_helper_t docker_helper_buildkitd_t:unix_stream_socket { connectto };" && trimmed != "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { signal sigkill };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:dir { write add_name create mounton remove_name read };" && trimmed != "allow docker_helper_buildkitd_t self:cap_userns { sys_admin chown };" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem { remount unmount };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:file { create };" && trimmed != "allow docker_helper_buildkitd_t self:udp_socket { create setopt connect getattr read write };" && trimmed != "allow docker_helper_buildkitd_t self:tcp_socket { create setopt connect getattr read write getopt };" && trimmed != "allow docker_helper_buildkitd_t http_port_t:tcp_socket { name_connect };" && trimmed != "allow docker_helper_buildkitd_t cert_t:dir { search };" && trimmed != "allow docker_helper_buildkitd_t cert_t:file { read open getattr };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:lnk_file { create };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file { create setattr getattr read };" && trimmed != "allow docker_helper_buildkitd_t nsfs_t:file getattr;" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem getattr;" && trimmed != "allow docker_helper_buildkitd_t self:process setpgid;" && trimmed != "allow docker_helper_buildkitd_t cgroup_t:dir { search };" && trimmed != "allow docker_helper_buildkitd_t cgroup_t:filesystem getattr;" {
+			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot && trimmed != canonicalRuntimeTree && trimmed != canonicalRuntimeSockFile && trimmed != canonicalManagerLifecycle && trimmed != "allow docker_helper_t docker_helper_buildkitd_t:unix_stream_socket { connectto };" && trimmed != "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { signal sigkill };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:dir { write add_name create mounton remove_name read };" && trimmed != "allow docker_helper_buildkitd_t self:cap_userns { sys_admin chown };" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem { remount unmount };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:file { create };" && trimmed != "allow docker_helper_buildkitd_t self:udp_socket { create setopt connect getattr read write };" && trimmed != "allow docker_helper_buildkitd_t self:tcp_socket { create setopt connect getattr read write getopt };" && trimmed != "allow docker_helper_buildkitd_t http_port_t:tcp_socket { name_connect };" && trimmed != "allow docker_helper_buildkitd_t cert_t:dir { search };" && trimmed != "allow docker_helper_buildkitd_t cert_t:file { read open getattr };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:lnk_file { create };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file { create setattr getattr read };" && trimmed != "allow docker_helper_buildkitd_t nsfs_t:file getattr;" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem getattr;" && trimmed != "allow docker_helper_buildkitd_t self:process setpgid;" && trimmed != "allow docker_helper_buildkitd_t cgroup_t:dir { search };" && trimmed != "allow docker_helper_buildkitd_t cgroup_t:filesystem getattr;" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:fifo_file create;" {
 				violations = append(violations, "the only allow rules toward the buildkitd domain are the exact process transition grant, the exact target-entrypoint grant, and the exact state/runtime surfaces: "+trimmed)
 			}
 			fields := strings.Fields(trimmed)
@@ -6330,6 +6331,127 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		}
 		if count != 2 {
 			t.Errorf("mutation %q must produce a second transition into the buildkitd domain (the exactly-one edge invariant), got %d", mut.name, count)
+		}
+	}
+}
+
+// TestSELinuxPolicyBuildkitdRuntimeFifo pins the R7 exec.fifo creation
+// rung: the buildkitd domain's ONLY runtime-tree fifo_file authority is
+// the ONE bare fifo_file { create } singleton — the runc
+// createExecFifo's unix.Mkfifo hook (UAT run 39298755688 serial 1325,
+// op_1720ff7d...; the S15 repro serial 10301) — with NO rider
+// (read/write/open/getattr/setattr/unlink/append/ioctl: the create's
+// own chmod/chown setattr hook, the parent's includeExecFifo open/read
+// and the init child's write are separate future rungs), no parallel
+// rule, no wrong source (the daemon transport, the manager, the
+// launcher, the flow), no wrong target (the categorized state tree,
+// the SHARED runtime root, a generic type), no wrong class, and the
+// standing runtime-tree owners (the dir rule, the sock_file rule, the
+// lnk_file rule) plus the shared runtime-root bare dir search stay
+// byte-unchanged with the shared runtime root gaining NO fifo
+// authority from any subject.
+func TestSELinuxPolicyBuildkitdRuntimeFifo(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	const canonicalFifo = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:fifo_file create;"
+	// checkPolicy recomputes the full invariant set over any policy text:
+	// exactly ONE allow rule may name builder_runtime_t:fifo_file (the
+	// canonical buildkitd create singleton), and no rule may name a
+	// fifo_file authority on the shared runtime root from ANY subject.
+	checkPolicy := func(text string) (failed bool, reason string) {
+		count := 0
+		for _, line := range strings.Split(text, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if !strings.HasPrefix(trimmed, "allow ") || !strings.Contains(trimmed, ":fifo_file ") {
+				continue
+			}
+			if strings.Contains(trimmed, "docker_helper_builder_runtime_root_t") {
+				return true, "the shared runtime root gains NO fifo authority from any subject: " + trimmed
+			}
+			if !strings.Contains(trimmed, "docker_helper_builder_runtime_t") {
+				continue
+			}
+			if trimmed != canonicalFifo {
+				return true, "non-canonical runtime-tree fifo_file rule: " + trimmed
+			}
+			count++
+		}
+		if count != 1 {
+			return true, "the canonical runtime-tree fifo_file create singleton count is not exactly one"
+		}
+		return false, ""
+	}
+	if failed, reason := checkPolicy(policy); failed {
+		t.Errorf("the committed policy violates the runtime-tree fifo invariants: %s", reason)
+	}
+	// The removal must actually remove the singleton, and its absence
+	// must trip the buildkitd authority invariants (the count/whitelist
+	// owners).
+	withoutFifo := strings.Replace(policy, canonicalFifo+"\n", "", 1)
+	if withoutFifo == policy {
+		t.Fatal("the standing runtime-tree fifo line was not found for the removal mutation")
+	}
+	if violations := buildkitdIdentityViolations(withoutFifo); len(violations) == 0 {
+		t.Error("the missing-runtime-tree-fifo mutation must trip the buildkitd authority invariants")
+	}
+	// Mutation guards: every forbidden shape must trip the invariant set
+	// — either the fifo-surface scan or the buildkitd authority owners
+	// (the whitelist, the state-tree and the runtime-tree file/sock_file
+	// scans) for the shapes the fifo scan is blind to.
+	for _, mut := range []struct {
+		name string
+		rule string
+	}{
+		{"parallel duplicate of the singleton", canonicalFifo + "\n"},
+		{"read ride-along", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:fifo_file { create read };\n"},
+		{"write ride-along", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:fifo_file { create write };\n"},
+		{"open ride-along", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:fifo_file { create open };\n"},
+		{"unlink ride-along", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:fifo_file { create unlink };\n"},
+		{"ioctl ride-along", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:fifo_file { create ioctl };\n"},
+		{"setattr ride-along (the createExecFifo chmod/chown hook)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:fifo_file { create setattr };\n"},
+		{"getattr ride-along", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:fifo_file { create getattr };\n"},
+		{"bare read second rule", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:fifo_file read;\n"},
+		{"bare write second rule", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:fifo_file write;\n"},
+		{"bare unlink second rule (the failure-path os.Remove)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:fifo_file unlink;\n"},
+		{"brace-single-perm alias of the bare rule", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:fifo_file { create };\n"},
+		{"wrong source (the daemon transport)", "allow docker_helper_t docker_helper_builder_runtime_t:fifo_file create;\n"},
+		{"wrong source (the manager)", "allow docker_helper_builder_t docker_helper_builder_runtime_t:fifo_file create;\n"},
+		{"wrong source (the launcher)", "allow docker_helper_builder_launcher_t docker_helper_builder_runtime_t:fifo_file create;\n"},
+		{"wrong source (the flow)", "allow docker_helper_rootlesskit_t docker_helper_builder_runtime_t:fifo_file create;\n"},
+		{"wrong target (the categorized state tree)", "allow docker_helper_buildkitd_t docker_helper_builder_state_t:fifo_file create;\n"},
+		{"wrong target (the SHARED runtime root)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:fifo_file create;\n"},
+		{"wrong target (a generic type)", "allow docker_helper_buildkitd_t tmp_t:fifo_file create;\n"},
+		{"wrong class (the file class)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:file create;\n"},
+		{"wrong class (the sock_file class)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:sock_file create;\n"},
+		{"shared runtime root fifo from the daemon", "allow docker_helper_t docker_helper_builder_runtime_root_t:fifo_file create;\n"},
+	} {
+		tripped := false
+		if failed, _ := checkPolicy(policy + mut.rule); failed {
+			tripped = true
+		}
+		if !tripped && len(buildkitdIdentityViolations(policy+mut.rule)) > 0 {
+			tripped = true
+		}
+		if !tripped {
+			t.Errorf("mutation %q must trip the runtime-tree fifo invariants", mut.name)
+		}
+	}
+	// The standing runtime-tree owners stay byte-unchanged, each exactly
+	// once; the shared runtime root keeps exactly its bare dir search
+	// and NO fifo authority.
+	for _, want := range []string{
+		"allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir { getattr search write add_name create remove_name mounton setattr };",
+		"allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:sock_file { create unlink setattr };",
+		"allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:lnk_file { create };",
+		"allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:dir search;",
+	} {
+		count := 0
+		for _, line := range strings.Split(policy, "\n") {
+			if strings.TrimSpace(line) == want {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf("the standing runtime-tree owner drifted (count %d): %s", count, want)
 		}
 	}
 }
