@@ -246,6 +246,17 @@ int main(void) {
         r->tcon = t ? T_RUNTIME_C2 : T_RUNTIME_C1;
         r->cls = "sock_file"; r->perm = sockperm[i]; r->expect = "deny";
       }
+  /* the R7 exec.fifo rung's kernel-AV rows: the buildkitd domain's ONE
+   * runtime-tree fifo_file create grant — the same-category pairs resolve
+   * (the grant is type-wide TE authority; the subject-gated MCS
+   * constraint passes the own category), both cross-category directions
+   * stay DENIED by the constraint (decided=1, never permissive) */
+  {
+    struct q *r1 = row(); r1->scon = S_C1; r1->tcon = T_RUNTIME_C1; r1->cls = "fifo_file"; r1->perm = "create"; r1->expect = "allow";
+    struct q *r2 = row(); r2->scon = S_C2; r2->tcon = T_RUNTIME_C2; r2->cls = "fifo_file"; r2->perm = "create"; r2->expect = "allow";
+    struct q *r3 = row(); r3->scon = S_C1; r3->tcon = T_RUNTIME_C2; r3->cls = "fifo_file"; r3->perm = "create"; r3->expect = "deny";
+    struct q *r4 = row(); r4->scon = S_C2; r4->tcon = T_RUNTIME_C1; r4->cls = "fifo_file"; r4->perm = "create"; r4->expect = "deny";
+  }
   /* the buildkitd socket surface: NO unix_stream_socket grant exists for
    * the domain — connectto is TE-denied toward every peer shape (the
    * daemon's socket, own-op and foreign-op buildkitd sockets) */
@@ -634,6 +645,19 @@ EOF
       log "buildkitd pid not observed (the builder may have failed before spawn)"
     fi
     wait "$BLD_JOB"; BLD_RC=$?
+    # The R7 exec.fifo post-mortem (read-only): the created FIFO's own
+    # artifact evidence — mode, uid/gid and SELinux context — captured
+    # from the runtime tree immediately after the terminal failure (the
+    # operation cleanup may already have removed the tree; both outcomes
+    # are evidence).
+    cap exec-fifo-postmortem 20 bash -c '
+      find /run/docker-helper-builder/ops -type p -name exec.fifo 2>/dev/null | head -4 | while read -r f; do
+        stat -c "fifo-mode %a %U:%G %n" "$f" 2>/dev/null
+        ls -Zdn "$f" 2>/dev/null
+      done
+      [ -d /run/docker-helper-builder/ops ] || echo "(no runtime ops tree present)"
+      find /run/docker-helper-builder/ops -maxdepth 3 -type d -name runc 2>/dev/null | head -3
+    '
     log "cgroup-build rc=$BLD_RC (terminal failure expected: $(tail -1 "$EVIDENCE_DIR/cgroup-build.log" 2>/dev/null))"
     sleep 1
     avc_tail cgroup-avc-ordered
