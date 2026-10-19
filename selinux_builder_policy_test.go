@@ -242,6 +242,138 @@ func TestSELinuxPolicyBuilderStateRules(t *testing.T) {
 	}
 }
 
+// TestSELinuxPolicyBuilderRuntimeFifoRecovery verifies the R7 recovery
+// rung (UAT run 39307799540 at 25df1eb1): the manager's ONE bare
+// fifo_file { unlink } rule on the categorized runtime tree — the
+// analog of the state-tree lnk_file recovery rung (run 39029159060),
+// one lifecycle stage later. Without it the created exec.fifo survives
+// every remover (runc's failure path, the manager's cleanup retries,
+// systemd's stop-time removal — the latter two recorded in the module's
+// evidence comment, the latter NOT granted), removeInstanceDirs never
+// converges, the startup purge fails closed, build admission stays
+// closed and every later build returns the API 500 instead of its own
+// result. The invariant set:
+//   - exactly the ONE bare unlink singleton for the manager; no
+//     setattr/read/write/open/getattr/append/ioctl/create (setattr
+//     stays the standing chmod boundary), no parallel rule, no
+//     brace-form alias;
+//   - no OTHER subject gains a runtime-tree or runtime-root fifo
+//     authority: not the buildkitd (its create is its own rung's
+//     singleton), not init_t (systemd's independent cleanup contract
+//     needs its own causal proof), not the daemon, the launcher, the
+//     flow or any container/untrusted domain;
+//   - no wrong target: the categorized state tree, the SHARED runtime
+//     root and generic types gain no fifo unlink from any subject;
+//   - no wrong class: the manager's file/sock_file/lnk_file/dir
+//     inventories stay byte-unchanged.
+func TestSELinuxPolicyBuilderRuntimeFifoRecovery(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	const (
+		canonicalUnlink = "allow docker_helper_builder_t docker_helper_builder_runtime_t:fifo_file unlink;"
+		canonicalCreate = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:fifo_file create;"
+	)
+	// checkPolicy recomputes the full invariant set over any policy text:
+	// exactly ONE manager unlink singleton, exactly ONE buildkitd create
+	// singleton, and NO other fifo_file rule naming either runtime type
+	// from any subject.
+	checkPolicy := func(text string) (failed bool, reason string) {
+		unlinkCount, createCount := 0, 0
+		for _, line := range strings.Split(text, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if !strings.HasPrefix(trimmed, "allow ") || !strings.Contains(trimmed, ":fifo_file ") {
+				continue
+			}
+			// The manager's OWN fifo authority is exactly the ONE
+			// runtime-tree unlink rule: any other manager fifo rule (any
+			// other target — the shared root, the state tree, a generic
+			// type) is the wrong-target shape.
+			if strings.Contains(trimmed, "docker_helper_builder_t ") && strings.Contains(trimmed, ":fifo_file ") && trimmed != canonicalUnlink {
+				return true, "the manager's fifo authority is exactly the ONE runtime-tree unlink rule: " + trimmed
+			}
+			// The invariant owns the builder trees' fifo surface for the
+			// other subjects too; the daemon's usr_t/workspace_t relabel
+			// pairs are other owners' surfaces.
+			if !strings.Contains(trimmed, "docker_helper_builder_runtime") &&
+				!strings.Contains(trimmed, "docker_helper_builder_state_t") {
+				continue
+			}
+			switch trimmed {
+			case canonicalUnlink:
+				unlinkCount++
+			case canonicalCreate:
+				createCount++
+			default:
+				return true, "non-canonical builder-tree fifo_file rule: " + trimmed
+			}
+		}
+		if unlinkCount != 1 {
+			return true, "the manager's unlink singleton count is not exactly one"
+		}
+		if createCount != 1 {
+			return true, "the buildkitd's create singleton count is not exactly one"
+		}
+		return false, ""
+	}
+	if failed, reason := checkPolicy(policy); failed {
+		t.Errorf("the committed policy violates the runtime-tree fifo recovery invariants: %s", reason)
+	}
+	// The removal must actually remove the singleton, and its absence
+	// must trip the exact-once check.
+	withoutUnlink := strings.Replace(policy, canonicalUnlink+"\n", "", 1)
+	if withoutUnlink == policy {
+		t.Fatal("the standing manager fifo unlink line was not found for the removal mutation")
+	}
+	if failed, _ := checkPolicy(withoutUnlink); !failed {
+		t.Error("the missing-unlink mutation must trip the runtime-tree fifo recovery invariants")
+	}
+	// Mutation guards: every forbidden shape must trip the invariant set.
+	for _, mut := range []struct {
+		name string
+		rule string
+	}{
+		{"parallel duplicate of the unlink singleton", canonicalUnlink + "\n"},
+		{"setattr ride-along (the standing chmod boundary)", "allow docker_helper_builder_t docker_helper_builder_runtime_t:fifo_file { unlink setattr };\n"},
+		{"read ride-along", "allow docker_helper_builder_t docker_helper_builder_runtime_t:fifo_file { unlink read };\n"},
+		{"write ride-along", "allow docker_helper_builder_t docker_helper_builder_runtime_t:fifo_file { unlink write };\n"},
+		{"open ride-along", "allow docker_helper_builder_t docker_helper_builder_runtime_t:fifo_file { unlink open };\n"},
+		{"getattr ride-along", "allow docker_helper_builder_t docker_helper_builder_runtime_t:fifo_file { unlink getattr };\n"},
+		{"create ride-along (the buildkitd rung's shape)", "allow docker_helper_builder_t docker_helper_builder_runtime_t:fifo_file { unlink create };\n"},
+		{"bare create second rule (the manager must not create fifos)", "allow docker_helper_builder_t docker_helper_builder_runtime_t:fifo_file create;\n"},
+		{"brace-single-perm alias of the bare rule", "allow docker_helper_builder_t docker_helper_builder_runtime_t:fifo_file { unlink };\n"},
+		{"wrong source (the buildkitd)", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:fifo_file unlink;\n"},
+		{"wrong source (init_t, systemd's stop-time removal)", "allow init_t docker_helper_builder_runtime_t:fifo_file unlink;\n"},
+		{"wrong source (the daemon)", "allow docker_helper_t docker_helper_builder_runtime_t:fifo_file unlink;\n"},
+		{"wrong source (the launcher)", "allow docker_helper_builder_launcher_t docker_helper_builder_runtime_t:fifo_file unlink;\n"},
+		{"wrong source (the flow)", "allow docker_helper_rootlesskit_t docker_helper_builder_runtime_t:fifo_file unlink;\n"},
+		{"wrong target (the categorized state tree)", "allow docker_helper_builder_t docker_helper_builder_state_t:fifo_file unlink;\n"},
+		{"wrong target (the SHARED runtime root)", "allow docker_helper_builder_t docker_helper_builder_runtime_root_t:fifo_file unlink;\n"},
+		{"wrong target (a generic type)", "allow docker_helper_builder_t tmp_t:fifo_file unlink;\n"},
+		{"shared runtime root fifo from the buildkitd", "allow docker_helper_buildkitd_t docker_helper_builder_runtime_root_t:fifo_file create;\n"},
+		{"shared runtime root fifo from init_t", "allow init_t docker_helper_builder_runtime_root_t:fifo_file unlink;\n"},
+	} {
+		if failed, _ := checkPolicy(policy + mut.rule); !failed {
+			t.Errorf("mutation %q must trip the runtime-tree fifo recovery invariants", mut.name)
+		}
+	}
+	// The standing inventories stay byte-unchanged, each exactly once.
+	for _, want := range []string{
+		"allow docker_helper_builder_t docker_helper_builder_runtime_t:dir { getattr search read open write add_name remove_name create rmdir setattr };",
+		"allow docker_helper_builder_t docker_helper_builder_runtime_t:sock_file { create getattr setattr unlink };",
+		"allow docker_helper_builder_t docker_helper_builder_runtime_t:file { create read write open getattr setattr unlink };",
+		"allow docker_helper_builder_t docker_helper_builder_state_t:lnk_file unlink;",
+	} {
+		count := 0
+		for _, line := range strings.Split(policy, "\n") {
+			if strings.TrimSpace(line) == want {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf("the standing manager inventory drifted (count %d): %s", count, want)
+		}
+	}
+}
+
 // TestSELinuxPolicyLauncherChainRootlesskitTransition verifies the G32 r3
 // launch chain: the only production transition into the flow domain is the
 // launcher edge (builder_t self-reexec -> docker_helper_builder_launcher_t
@@ -5292,6 +5424,26 @@ func buildkitdIdentityViolations(policy string) []string {
 			violations = append(violations, "the buildkitd domain's ONLY runtime-tree sock_file authority is the exact { create unlink setattr } rule (the 4C-77 AF_UNIX socket inode-creation hook widened IN PLACE by the 4C-79 socket-file unlink hook and AGAIN by the 4C-82 socket-file setattr hook — the L1 lifecycle-proven chmod owner; write/open/getattr/read/rename/append/lock/map stay closed and the daemon transport is a different subject and a different owner): "+trimmed)
 		}
 	}
+	// The categorized runtime-tree fifo_file surface has exactly the TWO
+	// standing owners: the buildkitd's ONE bare create singleton (the R7
+	// exec.fifo rung, UAT 39298755688 serial 1325) and the manager's ONE
+	// bare unlink singleton (the R7 recovery rung, UAT 39307799540 — the
+	// analog of the state-tree lnk_file recovery rung); every other
+	// shape on the class (any subject, any permission set, the shared
+	// runtime root) trips here.
+	standingRuntimeFifoRules := map[string]bool{
+		"allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:fifo_file create;": true,
+		"allow docker_helper_builder_t docker_helper_builder_runtime_t:fifo_file unlink;":   true,
+	}
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || !strings.HasPrefix(trimmed, "allow ") {
+			continue
+		}
+		if strings.Contains(trimmed, ":fifo_file") && strings.Contains(trimmed, "docker_helper_builder_runtime") && !standingRuntimeFifoRules[trimmed] {
+			violations = append(violations, "the runtime-tree fifo_file surface has exactly the TWO standing owners (the buildkitd exec.fifo create singleton and the manager's bare unlink singleton; no setattr/read/write/open/getattr/append/ioctl, no second rule, no shared-root authority from any subject): "+trimmed)
+		}
+	}
 	// The categorized state-tree dir surface has exactly the standing
 	// owners above; a NEW or reshaped rule on the pair (any source,
 	// including attribute/broad forms) trips here.
@@ -6352,13 +6504,18 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 // authority from any subject.
 func TestSELinuxPolicyBuildkitdRuntimeFifo(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
-	const canonicalFifo = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:fifo_file create;"
+	const (
+		canonicalFifo       = "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:fifo_file create;"
+		canonicalFifoUnlink = "allow docker_helper_builder_t docker_helper_builder_runtime_t:fifo_file unlink;"
+	)
 	// checkPolicy recomputes the full invariant set over any policy text:
-	// exactly ONE allow rule may name builder_runtime_t:fifo_file (the
-	// canonical buildkitd create singleton), and no rule may name a
-	// fifo_file authority on the shared runtime root from ANY subject.
+	// exactly ONE allow rule may name builder_runtime_t:fifo_file create
+	// (the canonical buildkitd create singleton), exactly ONE the
+	// manager's bare unlink singleton (the R7 recovery rung's separate
+	// owner), and no rule may name a fifo_file authority on the shared
+	// runtime root from ANY subject.
 	checkPolicy := func(text string) (failed bool, reason string) {
-		count := 0
+		count, unlinkCount := 0, 0
 		for _, line := range strings.Split(text, "\n") {
 			trimmed := strings.TrimSpace(line)
 			if !strings.HasPrefix(trimmed, "allow ") || !strings.Contains(trimmed, ":fifo_file ") {
@@ -6370,13 +6527,20 @@ func TestSELinuxPolicyBuildkitdRuntimeFifo(t *testing.T) {
 			if !strings.Contains(trimmed, "docker_helper_builder_runtime_t") {
 				continue
 			}
-			if trimmed != canonicalFifo {
+			switch trimmed {
+			case canonicalFifo:
+				count++
+			case canonicalFifoUnlink:
+				unlinkCount++
+			default:
 				return true, "non-canonical runtime-tree fifo_file rule: " + trimmed
 			}
-			count++
 		}
 		if count != 1 {
 			return true, "the canonical runtime-tree fifo_file create singleton count is not exactly one"
+		}
+		if unlinkCount != 1 {
+			return true, "the manager's unlink singleton count is not exactly one"
 		}
 		return false, ""
 	}

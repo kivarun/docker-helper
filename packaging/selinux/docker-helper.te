@@ -860,6 +860,93 @@ allow docker_helper_builder_t docker_helper_builder_runtime_t:dir { getattr sear
 allow docker_helper_builder_t docker_helper_builder_runtime_t:sock_file { create getattr setattr unlink };
 allow docker_helper_builder_t docker_helper_builder_runtime_t:file { create read write open getattr setattr unlink };
 
+# R7 (recovery-first, scope=selinux UAT run 39307799540 at 25df1eb1):
+# the manager's removal of the operation's own created exec.fifo — the
+# direct analog of the state-tree lnk_file recovery rung below (run
+# 39029159060), one lifecycle stage later. After the exec.fifo create
+# rung opened, the enforcing run proved the full recovery chain:
+# runc's createExecFifo creates the fifo (create granted), the chmod
+# hits the standing fifo_file:setattr boundary (deliberately NOT fixed
+# here — the next functional blocker, its own rung), the run dies, and
+# the created fifo then survives EVERY current remover:
+#
+#   avc:  denied  { unlink } for  pid=<runc> comm="buildkit-runc"
+#     name="exec.fifo" dev="tmpfs" ino=2393
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:docker_helper_builder_runtime_t:s0:c1
+#     tclass=fifo_file permissive=0                       (1323, runc's
+#     failure-path os.Remove)
+#   avc:  denied  { unlink } for  pid=3009 comm="docker-helper"
+#     ... scontext=system_u:system_r:docker_helper_builder_t:s0 ...
+#     tclass=fifo_file permissive=0     (1464, 1523, 1970-1977, ...: the
+#     manager's cleanup retries, the SAME inode)
+#   avc:  denied  { unlink } for  pid=1 comm="systemd" ...
+#     scontext=system_u:system_r:init_t:s0 ...            (3085-3107,
+#     3518-3645: systemd's stop-time RuntimeDirectory removal and
+#     tmpfiles cleanup — a SEPARATE mechanism, recorded and NOT granted)
+#
+# The consequence chain observed in the same run: removeInstanceDirs'
+# verified-disappearance check fails ("runtime dir still present after
+# removal") -> runStopAttempt returns errBuilderStopNotConverged -> the
+# instance entry stays retained; the startup purge's own RemoveAll
+# fails closed ("residue still present after removal") -> the
+# builder-manager's startup reconciliation refuses -> build admission
+# stays closed -> every subsequent build returns the API's
+# internal_error 500 instead of its own build result (the D1
+# regression, the S15 build and the privacy scenario's concurrent
+# builds all 500'd; the mount-pin regression's fresh-AVC window and
+# the S13 unexpected-AVC check tripped on the leftover's unlink
+# records).
+#
+# CLEANUP OWNERSHIP (verified before the grant): the manager is the
+# sole legitimate per-op cleanup owner — runStopAttempt ->
+# removeInstanceDirs (builder_manager.go:992: the canonical-op-id
+# guard, RemoveAll over exactly opRuntimeDir/opStateDir, the
+# verified-disappearance Lstat, truthful retain-for-retry on
+# failure), the launch-race pre-spawn convergence (:588), and the
+# startup purge purgeOpResidue (:1410, the fail-closed ownership and
+# liveness proofs before any removal) all funnel through the same two
+# canonical directories, and the unit's own contract states per-op
+# ownership stays the manager's START/STOP/PURGE contract (KillMode=
+# control-group is the process-settling net, not the tree owner).
+# The manager's standing inventory already covers every other object
+# class the recovery trees contain: the dir rule's remove_name+rmdir
+# (the tree walk and the directory removal), file unlink (instance.pid
+# and the runc state files), sock_file unlink (buildkitd.sock), and
+# the state tree additionally carries its own lnk_file unlink (the
+# 39029159060 rung). The fifo is the ONE missing class; unlink(2)
+# never dereferences the fifo — the removal stays inside the
+# categorized operation trees (the parent-dir add_name/remove_name
+# hooks are the standing dir rule's), so no fifo traversal outside
+# the op's own runtime authority opens. The recovery trees of this
+# rung's scenario (a build dead inside createExecFifo) contain no
+# symlink farm; the runtime-tree lnk_file unlink question for trees
+# of builds that progressed into the mount-callback stage is a
+# separate, not-yet-exercised boundary — recorded, not granted here.
+#
+# THE DELTA IS EXACTLY THE ONE BARE FIFO_FILE { unlink } SINGLETON:
+# deliberately NOT granted — fifo_file setattr/read/write/open/
+# getattr/append/ioctl/create (setattr stays the standing chmod
+# boundary the recovery UAT must keep reproducing; the buildkitd's
+# create is its own rung's singleton), the buildkitd_t and init_t
+# unlink (runc's failure path and systemd's independent cleanup
+# contract stay denied — each needs its own causal proof rung), any
+# other subject or target, any runtime-root fifo authority, no MCS/
+# fcontext/transition change, no production Go change, no weakening
+# of the canonical operation-ID guard or the process-quiescence
+# contract (the cleanup still runs only after the verified group
+# death and only over the exact canonical op id).
+# SCOPE: type-wide TE authority over builder_runtime_t:fifo_file — NOT
+# limited to the exec.fifo name; the cross-operation boundary stays
+# owned by the constrained parent-dir hooks exactly as every other
+# per-op plane requires. RECORDED EXPLICITLY: the loaded policy's
+# fifo_file mlsconstrain set does NOT cover unlink (it covers open/
+# relabelfrom/create/relabelto) — the ABSENCE of an unlink constraint
+# is NOT an MCS protection claim; the removal's confinement is the
+# parent-directory reachability (the constrained dir hooks), never
+# the unlink permission itself.
+allow docker_helper_builder_t docker_helper_builder_runtime_t:fifo_file unlink;
+
 # G32 r3 §4.2 provisioning relabel (P5-S2 Phase 3): the manager assigns
 # each required top-level per-op directory its exact FULL context —
 # per-op type plus the operation's MCS category — by writing
