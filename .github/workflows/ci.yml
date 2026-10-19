@@ -72,6 +72,9 @@ jobs:
       - name: Local dev VM harness tests
         run: bash scripts/test-dev-vm-local.sh
 
+      - name: Agent launcher alias tests
+        run: bash scripts/lab/test-agent-aliases.sh
+
   selinux-policy:
     runs-on: ubuntu-latest
     timeout-minutes: 5
