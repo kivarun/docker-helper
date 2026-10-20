@@ -11,22 +11,26 @@
 #   1. a fresh run creates a DEDICATED-uid account (useradd -u, never -o) and
 #      grants the docker group;
 #   2. a fresh run picks the next UNIQUE uid through NSS when the preferred
-#      one is taken (no -o, no silent collision);
-#   3. an existing account with an incompatible uid FAILS CLOSED: no usermod,
-#      no useradd, no /etc/passwd edit, no other mutation;
-#   4. a principal record disagreeing with the OS account FAILS CLOSED before
+#      one is taken (no -o, no silent collision); two taken uids -> next free;
+#   3. an existing account with an ALLOCATED uid differing from the preferred
+#      one is accepted when its identity is coherent (unique in NSS, distinct
+#      from opc, principal and ownership consistent) -- interrupted
+#      provisioning resumes without changing the identity;
+#   4. an account sharing the admin account's (opc) uid FAILS CLOSED: no
+#      usermod, no useradd, no /etc/passwd edit, no other mutation;
+#   5. a principal record disagreeing with the OS account FAILS CLOSED before
 #      any helper mutation (no allowed-root add, no credential ops);
-#   5. a good run creates the principal + credential and installs the aliases;
-#   6. a second run is idempotent (no duplicate principal/credential);
-#   7. an existing principal with a valid installed credential is reused
+#   6. a good run creates the principal + credential and installs the aliases;
+#   7. a second run is idempotent (no duplicate principal/credential);
+#   8. an existing principal with a valid installed credential is reused
 #      (no create, no rotate);
-#   8. a credential of a DIFFERENT principal is not accepted (fail-closed);
-#   9. a missing local credential does NOT rotate implicitly -- it fails closed;
-#  10. --recover-credential performs the explicit rotate and reinstall;
-#  11. the one-time token never leaks to stdout/stderr;
-#  12. root / agent SSH config is not touched (no .ssh handling);
-#  13. the agent is the trusted launcher (docker group), never the model;
-#  14. post-provisioning verification runs (unique uid + ownership proof).
+#   9. a credential of a DIFFERENT principal is not accepted (fail-closed);
+#  10. a missing local credential does NOT rotate implicitly -- it fails closed;
+#  11. --recover-credential performs the explicit rotate and reinstall;
+#  12. the one-time token never leaks to stdout/stderr;
+#  13. root / agent SSH config is not touched (no .ssh handling);
+#  14. the agent is the trusted launcher (docker group), never the model;
+#  15. post-provisioning verification runs (unique uid + ownership proof).
 #
 # Usage: scripts/lab/test-setup-agent-user.sh
 
@@ -71,7 +75,12 @@ AGENT_HOME="$WORK/home"
 cat > "$SHIM/id" <<'SH'
 #!/bin/sh
 case "${1:-}" in
-  -u) if [ -n "${2:-}" ]; then cat "$UIDMARK" 2>/dev/null || echo 1001; else echo 0; fi ;;
+  -u)
+    case "${2:-}" in
+      opc) echo 1000 ;;
+      "") echo 0 ;;
+      *) cat "$UIDMARK" 2>/dev/null || echo 1001 ;;
+    esac ;;
   -g) cat "$UIDMARK" 2>/dev/null || echo 1001 ;;
   -nG) if [ -f "$GROUPMARK" ]; then echo "agent docker"; else echo "agent"; fi ;;
   "") echo "uid=0(root)" ;;
@@ -103,7 +112,7 @@ cat > "$SHIM/getent" <<'SH'
 #!/bin/sh
 # passwd/group NSS lookups driven by the stub state:
 #   USERMARK set            -> the agent account exists at $UIDMARK
-#   TAKEN_UID               -> a foreign USER occupies that uid
+#   TAKEN_UIDS              -> foreign USERS occupy those uids
 #   TAKEN_GID               -> a foreign GROUP occupies that gid
 #   DUP_UID                 -> the passwd dump contains a duplicate uid
 uid="$UIDMARK"
@@ -114,8 +123,10 @@ case "${1:-}" in
     if [ -n "$uid" ] && { [ "${2:-}" = agent ] || [ "${2:-}" = "$(cat "$UIDMARK")" ]; }; then
       printf 'agent:x:%s:\n' "$(cat "$UIDMARK")"; exit 0
     fi
-    if [ -n "${TAKEN_UID:-}" ] && [ "${2:-}" = "$TAKEN_UID" ]; then
-      printf 'other:x:%s:\n' "$TAKEN_UID"; exit 0
+    if [ -n "${TAKEN_UIDS:-}" ]; then
+      for t in $TAKEN_UIDS; do
+        if [ "${2:-}" = "$t" ]; then printf 'other:x:%s:\n' "$t"; exit 0; fi
+      done
     fi
     if [ -z "${2:-}" ]; then
       [ -n "$uid" ] && printf 'agent:x:%s:\n' "$(cat "$UIDMARK")"
@@ -234,7 +245,7 @@ reset_state() {
   : > "$REC"
   rm -f "$USERMARK" "$UIDMARK" "$PRINCIPAL" "$SELFOK" "$ALLOWED"
   rm -rf "$AGENT_HOME"; mkdir -p "$AGENT_HOME"
-  unset TAKEN_UID TAKEN_GID DUP_UID PRINCIPAL_STALE_UID WRONG_SELF USERMOD_FAIL 2>/dev/null || true
+  unset TAKEN_UIDS TAKEN_GID DUP_UID PRINCIPAL_STALE_UID WRONG_SELF USERMOD_FAIL 2>/dev/null || true
 }
 
 # --- 1. fresh run: dedicated uid, no -o -------------------------------------
@@ -267,12 +278,19 @@ not_contains "install never touches .ssh" ".ssh" "$rec"
 
 # --- 2. unique uid through NSS when the preferred one is taken --------------
 reset_state
-export TAKEN_UID=1001
+export TAKEN_UIDS="1001"
 : > "$SELFOK"
 out="$(run_setup)" && ok "run with taken preferred uid succeeds" || bad "run with taken uid failed: $out"
 rec="$(cat "$REC")"
 contains "next unique uid is picked (1002)" "useradd -u 1002 " "$rec"
 not_contains "collision is never forced with -o" "useradd -o" "$rec"
+
+# --- 2a. two taken uids -> the next free uid is picked (1003) ---------------
+reset_state
+export TAKEN_UIDS="1001 1002"
+: > "$SELFOK"
+out="$(run_setup)" && ok "run with two taken uids succeeds" || bad "run with two taken uids failed: $out"
+contains "the next free uid is picked (1003)" "useradd -u 1003 " "$(cat "$REC")"
 
 # --- 2b. uid taken by a GROUP also counts as taken ---------------------------
 reset_state
@@ -281,17 +299,50 @@ export TAKEN_GID=1001
 out="$(run_setup)" && ok "run with taken gid succeeds" || bad "run with taken gid failed: $out"
 contains "uid colliding with a group is skipped" "useradd -u 1002 " "$(cat "$REC")"
 
-# --- 3. existing account with an incompatible uid: fail-closed --------------
+# --- 2c. an existing account with an ALLOCATED uid != preferred is accepted --
+# The account was created with uid 1002 (1001 was taken at the time); a
+# re-run must accept the coherent allocated identity, not demand 1001.
+reset_state
+: > "$USERMARK"; echo 1002 > "$UIDMARK"; : > "$PRINCIPAL"; : > "$SELFOK"
+mkdir -p "$AGENT_HOME/.config/docker-helper"; printf 'dhc_OLD\n' > "$CRED"
+: > "$REC"
+out="$(run_setup)" && ok "allocated uid 1002 is accepted on re-run" || bad "allocated-uid re-run failed: $out"
+rec="$(cat "$REC")"
+not_contains "allocated-uid re-run does not useradd" "useradd" "$rec"
+not_contains "allocated-uid re-run does not usermod -u" "usermod -u" "$rec"
+check "allocated-uid re-run does not rotate" "0" "$(count 'principal credential rotate' "$REC")"
+contains "allocated-uid re-run logs the allocated identity" "allocated uid 1002" "$out"
+contains "allocated-uid re-run verifies the result" "verified: unique uid" "$out"
+
+# --- 3. an account sharing the admin account's uid: fail-closed -------------
 reset_state
 : > "$USERMARK"; echo 1000 > "$UIDMARK"
 : > "$REC"
-if out="$(run_setup)"; then bad "incompatible existing uid was accepted"; else ok "incompatible existing uid fails closed"; fi
+if out="$(run_setup)"; then bad "opc uid collision was accepted"; else ok "opc uid collision fails closed"; fi
 rec="$(cat "$REC")"
-not_contains "fail-closed does not usermod the account" "usermod -u" "$rec"
-not_contains "fail-closed does not useradd" "useradd" "$rec"
-not_contains "fail-closed does not edit /etc/passwd" "sed " "$rec"
-not_contains "fail-closed does not touch the helper" "dh " "$rec"
-contains "fail-closed explains the recovery path" "fail-closed" "$out"
+not_contains "collision fail-closed does not usermod the account" "usermod -u" "$rec"
+not_contains "collision fail-closed does not useradd" "useradd" "$rec"
+not_contains "collision fail-closed does not edit /etc/passwd" "sed " "$rec"
+not_contains "collision fail-closed does not touch the helper" "dh " "$rec"
+contains "collision fail-closed names the admin account" "shares uid 1000 with the admin account opc" "$out"
+
+# --- 3b. interrupted first provisioning resumes predictably -----------------
+# The account was created with uid 1002 (1001 was taken) but the principal
+# was never created. The re-run must accept the allocated identity and finish
+# provisioning WITHOUT changing the uid.
+reset_state
+: > "$USERMARK"; echo 1002 > "$UIDMARK"
+export TAKEN_UIDS="1001"
+: > "$SELFOK"
+: > "$REC"
+out="$(run_setup)" && ok "interrupted provisioning resumes" || bad "resume failed: $out"
+unset TAKEN_UIDS
+rec="$(cat "$REC")"
+not_contains "resume does not recreate the account" "useradd" "$rec"
+not_contains "resume does not change the identity" "usermod -u" "$rec"
+contains "resume creates the principal" "dh principal create agent" "$rec"
+contains "resume installs the credential" "dh credential install --force" "$rec"
+contains "resume verifies the result" "verified: unique uid" "$out"
 
 # --- 4. stale principal record (uid/gid disagree with the OS): fail-closed --
 reset_state

@@ -34,13 +34,20 @@
 # identity, and the agent account gets no SSH of its own.
 #
 # UID policy (fail-closed; the lab VM is disposable):
-#   * a fresh account gets a UNIQUE uid (NSS-checked against users AND
-#     groups; never useradd -o);
+#   * PREFERRED uid (AGENT_UID, default 1001) is only the starting point for
+#     the FIRST creation: a fresh account gets a UNIQUE uid (NSS-checked
+#     against users AND groups; never useradd -o), taking the next free one
+#     when the preferred is taken;
+#   * ALLOCATED uid is the identity the account actually carries. An existing
+#     account is ACCEPTED when its identity is coherent -- the uid resolves
+#     uniquely to this account through NSS, differs from the admin account
+#     (opc), and agrees with the principal record and the file ownership
+#     (verified below) -- even when it differs from the preferred uid. An
+#     interrupted first provisioning is therefore resumable;
+#   * an incompatible or ambiguous state FAILS CLOSED: no usermod -u and no
+#     direct /etc/passwd, /etc/shadow, or /etc/group edit here; recreate the
+#     disposable VM or perform an explicitly controlled migration instead;
 #   * the opc/admin account's uid is never modified;
-#   * an existing account with an incompatible uid FAILS CLOSED -- there is
-#     no usermod -u and no direct /etc/passwd, /etc/shadow, or /etc/group
-#     edit here; recreate the disposable VM or perform an explicitly
-#     controlled migration instead.
 #   * the docker-helper principal record stores the uid/gid resolved at
 #     creation and the daemon uses it as the workload execution identity;
 #     there is no supported CLI to rewrite it, so a principal record that
@@ -94,9 +101,11 @@ command -v jq >/dev/null 2>&1 || die "jq not found in PATH"
 # The untrusted model is the container process and gets no docker group.
 #
 # UID policy (see header): a fresh account gets a UNIQUE uid found through
-# NSS (users AND groups are checked, so useradd never needs -o); an existing
-# account with an incompatible uid fails closed. opc/admin uids are never
-# touched and system files are never edited.
+# NSS (users AND groups are checked, so useradd never needs -o), starting at
+# the preferred AGENT_UID. An existing account is accepted on its ALLOCATED
+# uid when the identity is coherent (unique in NSS, distinct from the admin
+# account, consistent with the principal record and file ownership); an
+# incompatible or ambiguous state fails closed.
 find_free_uid() { # $1 = preferred uid; prints the first free uid >= preferred
   local uid="$1" max=60000
   while [ "$uid" -le "$max" ]; do
@@ -110,13 +119,25 @@ find_free_uid() { # $1 = preferred uid; prints the first free uid >= preferred
   return 1
 }
 
+opc_uid=""
+if id opc >/dev/null 2>&1; then
+  opc_uid="$(id -u opc)"
+fi
+
 if id "$AGENT_USER" >/dev/null 2>&1; then
   current_uid="$(id -u "$AGENT_USER")"
-  if [ "$current_uid" = "$AGENT_UID" ]; then
-    log "account $AGENT_USER already exists (uid $current_uid)"
-  else
-    die "account $AGENT_USER exists with uid $current_uid, expected $AGENT_UID: fail-closed (no uid migration here); recreate the disposable VM or perform an explicitly controlled migration"
+  # Early identity checks for an existing account: the allocated uid must
+  # resolve uniquely to THIS account and must never be the admin account's.
+  uid_entries="$(getent passwd | awk -F: -v u="$current_uid" '$3 == u' | wc -l)"
+  [ "$uid_entries" = 1 ] \
+    || die "uid $current_uid of $AGENT_USER is not unique in NSS ($uid_entries passwd entries): fail-closed"
+  [ "$(getent passwd "$current_uid" | cut -d: -f1)" = "$AGENT_USER" ] \
+    || die "uid $current_uid does not resolve to $AGENT_USER via NSS: fail-closed"
+  if [ -n "$opc_uid" ]; then
+    [ "$current_uid" != "$opc_uid" ] \
+      || die "account $AGENT_USER shares uid $current_uid with the admin account opc: fail-closed (recreate the disposable VM)"
   fi
+  log "account $AGENT_USER already exists (allocated uid $current_uid; coherence verified below)"
 else
   agent_uid="$(find_free_uid "$AGENT_UID")" \
     || die "no free uid at or above $AGENT_UID (NSS users and groups all taken)"
