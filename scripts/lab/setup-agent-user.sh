@@ -15,34 +15,44 @@
 # and docker-helper config are not touched.
 #
 # Idempotent. It:
-#   1. creates the 'agent' account and its workspace root, and adds it to the
-#      'docker' group (the trusted launcher drives `docker run`);
-#   2. ensures a global allowed root covers the agent home;
-#   3. creates the docker-helper principal 'agent' (its 'default' Launcher and
+#   1. creates the 'agent' account with a unique uid and its workspace root,
+#      and adds it to the 'docker' group (the trusted launcher drives
+#      `docker run`);
+#   2. refuses to continue when the docker-helper principal record disagrees
+#      with the OS account (fail-closed, see the UID policy below);
+#   3. ensures a global allowed root covers the agent home;
+#   4. creates the docker-helper principal 'agent' (its 'default' Launcher and
 #      default allowed root are provisioned atomically with it), issues a
 #      principal credential and installs it, as the agent account, into
 #      ~agent/.config/docker-helper/credential.token (never printed);
-#   4. installs scripts/lab/agent-aliases.sh as ~agent/.bash_aliases and sources
-#      it from ~agent/.bashrc.
+#   5. installs scripts/lab/agent-aliases.sh as ~agent/.bash_aliases and sources
+#      it from ~agent/.bashrc;
+#   6. verifies the result: unique uid, agent-owned credential and OpenCode
+#      state.
 #
 # It does NOT manage SSH keys: VM access stays with the dev-vm-local.sh SSH
 # identity, and the agent account gets no SSH of its own.
 #
-# The agent account gets a DEDICATED uid (default 1001), distinct from the
-# admin account (uid 1000). The opencode-docker image runs as uid 1000, so the
-# launchers pass --user "$(id -u):$(id -g)" and bind-mount the agent-owned
-# OpenCode state directories; the container identity then matches the guest
-# account and the mounts stay writable without loosening SELinux/DAC.
-#
-# Credential lifecycle: a fresh principal is created with an issued credential;
-# an existing principal reuses its installed credential when that credential
-# still authenticates. A missing (or non-authenticating) local credential is
-# NOT rotated implicitly -- --recover-credential performs the explicit rotate.
+# UID policy (fail-closed; the lab VM is disposable):
+#   * a fresh account gets a UNIQUE uid (NSS-checked against users AND
+#     groups; never useradd -o);
+#   * the opc/admin account's uid is never modified;
+#   * an existing account with an incompatible uid FAILS CLOSED -- there is
+#     no usermod -u and no direct /etc/passwd, /etc/shadow, or /etc/group
+#     edit here; recreate the disposable VM or perform an explicitly
+#     controlled migration instead.
+#   * the docker-helper principal record stores the uid/gid resolved at
+#     creation and the daemon uses it as the workload execution identity;
+#     there is no supported CLI to rewrite it, so a principal record that
+#     disagrees with the OS account FAILS CLOSED (recreate the lab principal
+#     through the supported CLI or re-provision the VM). Lab scripts never
+#     write the helper database directly.
 #
 # Usage: setup-agent-user.sh [--recover-credential]
 #
 # Env overrides: AGENT_USER, AGENT_HOME, AGENT_WORKROOT, AGENT_DOCKER_GROUP,
-#                AGENT_UID, LAB_VM_MARKER, LAB_VM_MARKER_TAG.
+#                AGENT_UID.
+# The lab-VM guard has no environment overrides (see lab-vm-guard.sh).
 set -euo pipefail
 
 AGENT_USER="${AGENT_USER:-agent}"
@@ -50,8 +60,12 @@ AGENT_HOME="${AGENT_HOME:-/home/$AGENT_USER}"
 AGENT_WORKROOT="${AGENT_WORKROOT:-$AGENT_HOME/work}"
 AGENT_DOCKER_GROUP="${AGENT_DOCKER_GROUP:-docker}"
 AGENT_UID="${AGENT_UID:-1001}"
-LAB_VM_MARKER="${LAB_VM_MARKER:-/etc/docker-helper-lab-vm}"
-LAB_VM_MARKER_TAG="${LAB_VM_MARKER_TAG:-docker-helper-lab-vm}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ALIASES_SRC="$SCRIPT_DIR/agent-aliases.sh"
+
+log() { printf '[setup-agent-user] %s\n' "$*"; }
+die() { printf '[setup-agent-user] ERROR: %s\n' "$*" >&2; exit 1; }
 
 RECOVER_CREDENTIAL=0
 for arg in "$@"; do
@@ -61,63 +75,57 @@ for arg in "$@"; do
   esac
 done
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ALIASES_SRC="$SCRIPT_DIR/agent-aliases.sh"
-
-log() { printf '[setup-agent-user] %s\n' "$*"; }
-die() { printf '[setup-agent-user] ERROR: %s\n' "$*" >&2; exit 1; }
-
 [ "$(id -u)" = 0 ] || die "must run as root in the guest (sudo bash $0)"
 
 # --- 0. lab-VM guard (fail closed on the physical host) ---------------------
-# The marker is written by the trusted VM bootstrap and carries the guest
-# machine-id, so a stray copy on the physical host does not pass. KVM/QEMU
-# presence alone is deliberately not trusted.
-require_lab_vm() {
-  [ -r "$LAB_VM_MARKER" ] \
-    || die "not the lab VM: missing $LAB_VM_MARKER (created by scripts/dev-vm-local.sh)"
-  local tag ver mid
-  read -r tag ver mid _ < "$LAB_VM_MARKER" || die "malformed lab VM marker $LAB_VM_MARKER"
-  [ "$tag" = "$LAB_VM_MARKER_TAG" ] || die "unexpected lab VM marker tag '$tag'"
-  [ "$ver" = 1 ] || die "unsupported lab VM marker version '$ver'"
-  [ -r /etc/machine-id ] || die "no /etc/machine-id to verify the marker"
-  [ "$mid" = "$(cat /etc/machine-id)" ] || die "lab VM marker machine-id mismatch (physical host?)"
-}
+# Shared guard (lab-vm-guard.sh): marker tag, marker version, and machine-id
+# are all verified before ANY state change. KVM/QEMU presence alone is
+# deliberately not trusted.
+# shellcheck source=lab-vm-guard.sh
+. "$SCRIPT_DIR/lab-vm-guard.sh"
 require_lab_vm
 
 DH="$(command -v docker-helper)" || die "docker-helper not found in PATH"
 command -v jq >/dev/null 2>&1 || die "jq not found in PATH"
 [ -f "$ALIASES_SRC" ] || die "missing $ALIASES_SRC"
-DH_DB="${DOCKER_HELPER_DB:-/var/lib/docker-helper/docker-helper.db}"
 
 # --- 1. account, workspace root, docker access ------------------------------
 # The 'agent' account is the trusted launcher, so it may hold docker access.
-# The untrusted model is the container process and gets no docker group. The
-# agent uid is dedicated (never the admin account's), so DAC never conflates
-# the two accounts.
+# The untrusted model is the container process and gets no docker group.
+#
+# UID policy (see header): a fresh account gets a UNIQUE uid found through
+# NSS (users AND groups are checked, so useradd never needs -o); an existing
+# account with an incompatible uid fails closed. opc/admin uids are never
+# touched and system files are never edited.
+find_free_uid() { # $1 = preferred uid; prints the first free uid >= preferred
+  local uid="$1" max=60000
+  while [ "$uid" -le "$max" ]; do
+    if ! getent passwd "$uid" >/dev/null 2>&1 \
+       && ! getent group "$uid" >/dev/null 2>&1; then
+      printf '%s' "$uid"
+      return 0
+    fi
+    uid=$((uid + 1))
+  done
+  return 1
+}
+
 if id "$AGENT_USER" >/dev/null 2>&1; then
   current_uid="$(id -u "$AGENT_USER")"
-  if [ "$current_uid" != "$AGENT_UID" ]; then
-    log "migrating account $AGENT_USER uid $current_uid -> $AGENT_UID"
-    # usermod -u also rewrites ownership of the account's home tree. It
-    # refuses (exit 8) while the OLD uid is still used by a live process, which
-    # is exactly this case: the admin account shares uid 1000 and runs the
-    # provisioning session. Fall back to a direct passwd edit; the explicit
-    # chown below re-owns the home tree and credential.
-    if ! usermod -u "$AGENT_UID" "$AGENT_USER"; then
-      sed -i "s#^$AGENT_USER:\([^:]*\):$current_uid:#$AGENT_USER:\1:$AGENT_UID:#" /etc/passwd
-      log "uid updated via /etc/passwd (usermod refused: old uid in use)"
-    fi
-  else
+  if [ "$current_uid" = "$AGENT_UID" ]; then
     log "account $AGENT_USER already exists (uid $current_uid)"
+  else
+    die "account $AGENT_USER exists with uid $current_uid, expected $AGENT_UID: fail-closed (no uid migration here); recreate the disposable VM or perform an explicitly controlled migration"
   fi
 else
-  log "creating account $AGENT_USER (uid $AGENT_UID, distinct from the admin account)"
-  useradd -u "$AGENT_UID" -m -s /bin/bash -c "docker-helper agent launcher" "$AGENT_USER"
+  agent_uid="$(find_free_uid "$AGENT_UID")" \
+    || die "no free uid at or above $AGENT_UID (NSS users and groups all taken)"
+  log "creating account $AGENT_USER (unique uid $agent_uid, distinct from the admin account)"
+  useradd -u "$agent_uid" -m -s /bin/bash -c "docker-helper agent launcher" "$AGENT_USER"
 fi
 
-# Normalize ownership of the whole home: covers a uid migration and any
-# pre-existing parent left at its old owner by `install -d`.
+# Normalize ownership of the whole home: covers a pre-existing parent left at
+# its old owner by `install -d`.
 chown -R "$AGENT_USER:$AGENT_USER" "$AGENT_HOME"
 
 install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" "$AGENT_WORKROOT"
@@ -133,7 +141,28 @@ else
   log "WARN: group $AGENT_DOCKER_GROUP missing; add it before launching agents"
 fi
 
-# --- 2. global allowed root (authorization ceiling) -------------------------
+# --- 2. principal record consistency (fail-closed; never DB-edited) ---------
+# The principal record stores the uid/gid the daemon resolved from the OS
+# account at creation time, and the daemon uses it as the workload execution
+# identity. docker-helper v2.3.0 has no supported CLI to rewrite these
+# fields ('principal set' only supports 'enabled'), so a record that
+# disagrees with the OS account is an inconsistent environment: fail closed
+# and point at the supported recovery paths. Lab scripts never write the
+# helper database (no sqlite3, no direct UPDATE/DELETE).
+check_principal_identity() {
+  local p_json p_uid p_gid os_uid os_gid
+  p_json="$("$DH" principal show "$AGENT_USER" --json 2>/dev/null)" || return 0
+  p_uid="$(printf '%s' "$p_json" | jq -r '.uid // empty')"
+  p_gid="$(printf '%s' "$p_json" | jq -r '.gid // empty')"
+  [ -n "$p_uid" ] || return 0
+  os_uid="$(id -u "$AGENT_USER")"
+  os_gid="$(id -g "$AGENT_USER")"
+  [ "$p_uid" = "$os_uid" ] && [ "$p_gid" = "$os_gid" ] && return 0
+  die "principal $AGENT_USER record uid/gid $p_uid:$p_gid disagrees with the OS account $os_uid:$os_gid: fail-closed (docker-helper has no supported migration); recreate the lab principal with the supported CLI (principal delete + principal create --issue-credential) or re-provision the disposable VM"
+}
+check_principal_identity
+
+# --- 3. global allowed root (authorization ceiling) -------------------------
 if "$DH" config allowed-root list 2>/dev/null | grep -qF "$AGENT_HOME"; then
   log "global allowed root already covers $AGENT_HOME"
 else
@@ -141,42 +170,23 @@ else
   "$DH" config allowed-root add "$AGENT_HOME" --access read_write
 fi
 
-# --- 3. principal + credential (fail-closed; explicit recovery) -------------
+# --- 4. principal credential (fail-closed; explicit recovery) ---------------
 # The daemon stores only the token hash. An existing local credential is reused
-# when it still authenticates; a missing or non-authenticating one is NOT
-# rotated implicitly (that would silently invalidate any other copy of the
-# bearer). --recover-credential performs the explicit rotate.
+# when it still authenticates AND belongs to exactly this principal; a missing
+# or non-authenticating one is NOT rotated implicitly (that would silently
+# invalidate any other copy of the bearer). --recover-credential performs the
+# explicit rotate.
 CRED_FILE="$AGENT_HOME/.config/docker-helper/credential.token"
 
-# The principal record stores the uid/gid it was created with (informational:
-# authorization uses paths, not the uid). A uid migration would otherwise leave
-# that record stale, so realign it directly. The daemon reads the row per
-# request, so no restart is needed. Skipped when the CLI/DB is unavailable.
-sync_principal_uid() {
-  "$DH" principal show "$AGENT_USER" >/dev/null 2>&1 || return 0
-  local p_uid p_gid want_gid
-  p_uid="$("$DH" principal show "$AGENT_USER" --json 2>/dev/null | jq -r '.uid // empty')"
-  p_gid="$("$DH" principal show "$AGENT_USER" --json 2>/dev/null | jq -r '.gid // empty')"
-  [ -n "$p_uid" ] || return 0
-  want_gid="$(id -g "$AGENT_USER")"
-  [ "$p_uid" = "$AGENT_UID" ] && [ "$p_gid" = "$want_gid" ] && return 0
-  log "realigning principal $AGENT_USER record uid/gid $p_uid:$p_gid -> $AGENT_UID:$want_gid"
-  [ -f "$DH_DB" ] || return 0
-  command -v python3 >/dev/null 2>&1 || { log "  (python3 missing; record left as-is)"; return 0; }
-  python3 - "$DH_DB" "$AGENT_USER" "$AGENT_UID" "$want_gid" <<'PY'
-import sqlite3, sys
-db, user, uid, gid = sys.argv[1:5]
-c = sqlite3.connect(db)
-c.execute("UPDATE principals SET uid = ?, gid = ? WHERE username = ?", (int(uid), int(gid), user))
-c.commit()
-PY
-}
-sync_principal_uid
-
+# A credential is valid only when it authenticates, classifies as a principal
+# credential, and resolves to the EXPECTED principal -- never accept another
+# principal's credential. The expected username crosses jq through --arg, not
+# through string interpolation.
 credential_valid() {
   local out
   out="$(su -s /bin/bash "$AGENT_USER" -c "$DH self --json" 2>/dev/null)" || return 1
-  printf '%s' "$out" | jq -e 'select(.ok == true and .type == "principal")' >/dev/null 2>&1
+  printf '%s' "$out" | jq -e --arg expected "$AGENT_USER" \
+    '.ok == true and .type == "principal" and .resource.username == $expected' >/dev/null 2>&1
 }
 
 install_token() { # token in $1 (never printed)
@@ -210,7 +220,7 @@ else
   log "credential installed for $AGENT_USER"
 fi
 
-# --- 4. opencode home + launcher aliases -----------------------------------
+# --- 5. opencode home + launcher aliases -----------------------------------
 # The container runs as the agent uid (via --user) and writes these
 # bind-mounted paths.
 install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" \
@@ -235,4 +245,21 @@ else
 fi
 
 log "done: account=$AGENT_USER home=$AGENT_HOME workroot=$AGENT_WORKROOT"
+
+# --- 6. post-provisioning verification (uid uniqueness, ownership) ---------
+# Prove the invariants the provisioning promised: the agent uid is unique in
+# NSS (exactly one passwd entry), and the credential plus the OpenCode state
+# the container writes are owned by the agent account.
+final_uid="$(id -u "$AGENT_USER")"
+final_uid_entries="$(getent passwd | awk -F: -v u="$final_uid" '$3 == u' | wc -l)"
+[ "$final_uid_entries" = 1 ] \
+  || die "uid $final_uid is not uniquely owned by $AGENT_USER ($final_uid_entries passwd entries)"
+[ "$(getent passwd "$final_uid" | cut -d: -f1)" = "$AGENT_USER" ] \
+  || die "uid $final_uid does not resolve to $AGENT_USER via NSS"
+for verified in "$CRED_FILE" "$AGENT_HOME/.opencode-docker" "$AGENT_HOME/.bash_aliases" "$AGENT_WORKROOT"; do
+  [ "$(stat -c '%U' "$verified")" = "$AGENT_USER" ] \
+    || die "$verified is not owned by $AGENT_USER"
+done
+log "verified: unique uid $final_uid; credential, OpenCode state, aliases and workroot owned by $AGENT_USER"
+
 log "next: as $AGENT_USER, cd ~/work/<project>, then run: oc | oc-go26 | oc-dotnet10"
