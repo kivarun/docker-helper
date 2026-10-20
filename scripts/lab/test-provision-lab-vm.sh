@@ -103,6 +103,21 @@ run_driver() { # stage...
   return "$RC"
 }
 
+# qemu argv evidence source (the pgrep stub reads this file); the isolated
+# argv is the default so the happy-path flows find a provably isolated VM.
+QEMU_ARGV="$WORK/qemu.argv"
+cat > "$WORK/pgrep" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *qemu-system*) cat "$QEMU_ARGV" 2>/dev/null ;;
+  *) exit 1 ;;
+esac
+SH
+chmod +x "$WORK/pgrep"
+ISOLATED_ARGV="qemu-system-x86_64 -machine q35 -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22,restrict=on -device virtio-net-pci,netdev=net0 -drive file=$WORK/vmstate/disk.qcow2,if=virtio,format=qcow2"
+ONLINE_ARGV="qemu-system-x86_64 -machine q35 -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22 -device virtio-net-pci,netdev=net0 -drive file=$WORK/vmstate/disk.qcow2,if=virtio,format=qcow2"
+printf '1234 %s\n' "$ISOLATED_ARGV" > "$QEMU_ARGV"
+
 # --- 1/2/3. the full sequence -------------------------------------------------
 : > "$REC"
 echo stopped > "$STATE"
@@ -205,6 +220,45 @@ if [ -n "$preflight_stop" ] && [ -n "$preflight_open" ] && [ "$preflight_stop" -
   ok "F2/preflight: a leftover open VM is stopped before the window opens"
 else
   bad "F2/preflight: the leftover open VM was not closed first"
+fi
+
+# --- F3. verify refuses anything it cannot prove isolated --------------------
+run_verify() { # the VM state must be set by the caller
+  : > "$REC"
+  PATH="$WORK:$PATH" bash "$REPO/lab/provision-lab-vm.sh" verify >"$WORK/out" 2>&1
+  RC=$?
+  OUT="$(cat "$WORK/out")"
+  return "$RC"
+}
+
+echo stopped > "$STATE"
+if run_verify; then bad "F3: verify ran with the VM stopped"; else ok "F3: verify refuses a stopped VM"; fi
+echo running > "$STATE"
+
+echo running > "$STATE"; printf '1234 %s\n' "$ONLINE_ARGV" > "$QEMU_ARGV"
+if run_verify; then bad "F3: verify accepted an ONLINE VM"; else ok "F3: verify refuses a VM booted with the network open"; fi
+contains "F3: the refusal names the missing isolation" "restrict=on" "$OUT"
+
+printf '1234 %s\n1235 %s\n' "$ISOLATED_ARGV" "$ISOLATED_ARGV" > "$QEMU_ARGV"
+if run_verify; then bad "F3: verify accepted an ambiguous QEMU state"; else ok "F3: verify refuses an ambiguous QEMU PID set"; fi
+
+: > "$QEMU_ARGV"
+if run_verify; then bad "F3: verify accepted a missing QEMU process"; else ok "F3: verify refuses when no QEMU process matches the VM disk"; fi
+
+printf '1234 %s\n' "$ISOLATED_ARGV" > "$QEMU_ARGV"
+if FAIL_ON=probe-vm-isolation run_verify; then bad "F3: verify ran without a passing probe"; else ok "F3: verify refuses when the network probe cannot run"; fi
+
+# a lying state file must not produce a PASS: the argv evidence decides
+echo isolated-not-running-marker > "$STATE"; : > "$QEMU_ARGV"
+if run_verify; then bad "F3: a substituted state produced a PASS"; else ok "F3: verify does not trust bookkeeping state alone"; fi
+
+echo running > "$STATE"; printf '1234 %s\n' "$ISOLATED_ARGV" > "$QEMU_ARGV"
+if run_verify; then
+  ok "F3: a provably isolated VM allows the integration"
+  contains "F3: the probe ran before the integration" "STUB probe-vm-isolation ran" "$OUT"
+  contains "F3: the integration ran after the probe" "sudo bash /opt/lab/integration-agent-vm.sh" "$(cat "$REC")"
+else
+  bad "F3: the isolated case failed: $OUT"
 fi
 
 echo

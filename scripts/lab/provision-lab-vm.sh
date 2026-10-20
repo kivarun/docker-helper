@@ -227,10 +227,50 @@ stage_isolate() {
   log "isolate stage done"
 }
 
+# --- F3: verify proves isolation, it never assumes it ------------------------
+# A running VM may have been booted with the network open, so the actual
+# QEMU command line of THIS VM's disk is inspected on the host: exactly one
+# QEMU process, exactly one user-mode netdev backend carrying restrict=on,
+# and the loopback SSH hostfwd as the only host->guest channel. The guest
+# egress posture is then re-proved with the full host+guest isolation probe.
+# No environment variable of the current shell is consulted. Any ambiguity
+# or missing evidence is fail-closed; verify never changes the network mode.
+verify_vm_isolation() {
+  local workdir disk evidence pid cmdline netdev_arg
+  workdir="$(vm_workdir)"
+  [ -n "$workdir" ] || die "cannot determine the VM workdir (dev-vm-local.sh status)"
+  disk="$workdir/disk.qcow2"
+  command -v pgrep >/dev/null 2>&1 \
+    || die "cannot inspect the QEMU process (pgrep unavailable); refusing to verify"
+  evidence="$(pgrep -af 'qemu-system' 2>/dev/null | grep -F -- "$disk" || true)"
+  [ -n "$evidence" ] || die "no QEMU process found for $disk: the VM is not provably running"
+  [ "$(printf '%s\n' "$evidence" | wc -l)" = 1 ] \
+    || die "ambiguous QEMU state: multiple processes match $disk"
+  pid="$(printf '%s' "$evidence" | awk '{print $1}')"
+  cmdline="$(printf '%s' "$evidence" | cut -d' ' -f2-)"
+  [ "$(printf '%s' "$cmdline" | grep -oE ' (-netdev|-nic) ' | wc -l)" = 1 ] \
+    || die "unexpected additional network backends in the QEMU command line"
+  netdev_arg="$(printf '%s' "$cmdline" | sed -n 's/.* -netdev \([^ ]*\).*/\1/p')"
+  [ -n "$netdev_arg" ] || die "no -netdev backend found in the QEMU command line"
+  case "$netdev_arg" in
+    *restrict=on*) ;;
+    *) die "the VM's netdev is not isolated (restrict=on missing)" ;;
+  esac
+  case "$netdev_arg" in
+    *hostfwd=tcp:127.0.0.1:*) ;;
+    *) die "the loopback SSH host->guest channel is missing" ;;
+  esac
+  log "QEMU pid $pid verified: single slirp backend with restrict=on, loopback SSH hostfwd"
+}
+
 stage_verify() {
   if [ "$(vm_state)" != running ]; then
     die "the VM is not running (run the isolate stage first)"
   fi
+  verify_vm_isolation
+  log "re-proving guest egress isolation with the full host+guest probe"
+  bash "$SCRIPT_DIR/probe-vm-isolation.sh" host \
+    || die "the network isolation probe failed: refusing to integrate"
   log "running the offline integration suite inside the VM"
   "$DEVVM" ssh 'sudo bash /opt/lab/integration-agent-vm.sh' < /dev/null \
     || die "offline integration failed"
