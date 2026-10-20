@@ -18,7 +18,11 @@
 #   8. --init uses a lab-owned VERIFIED COPY of docker-init: no :z/:Z relabel
 #      ever targets a system executable, the copy stays byte-identical
 #      (refreshed on drift), and an unverifiable copy fails the launch closed;
-#   9. the mounted source set is an allowlist of lab-owned paths: no implicit
+#   9. the copy is a STANDALONE regular file at an independent inode: a
+#      symlink or hardlink alias of the system binary is replaced, a parent
+#      directory symlink escaping the lab home is refused, and the system
+#      binary's inode/mode never change;
+#  10. the mounted source set is an allowlist of lab-owned paths: no implicit
 #      SSH credentials (or any other unlisted directory) ride along.
 #
 # Usage: scripts/lab/test-agent-aliases.sh
@@ -129,6 +133,7 @@ contains "container runs as the guest launcher uid" "--user $(id -u):$(id -g)" "
 contains "container runs in the helper workload SELinux domain" "--security-opt label=type:docker_helper_container_t" "$dargv"
 DH_INIT_SRC="$(readlink -f "$SHIM/docker-init")"
 INIT_COPY="$OPENCODE_DOCKER_HOME/init/docker-init"
+INIT_SYS_SNAP="$(stat -c '%d:%i %a' "$DH_INIT_SRC")"
 contains "init binary is the lab-owned verified copy" "$INIT_COPY:/sbin/docker-init:ro,z" "$dargv"
 not_contains "system docker-init is never a mount source" "$DH_INIT_SRC:" "$dargv"
 cmp -s "$DH_INIT_SRC" "$INIT_COPY" && ok "init copy is byte-identical to the system binary" || bad "init copy drifted from the system binary"
@@ -205,8 +210,40 @@ printf 'DRIFT\n' >> "$INIT_COPY"
 ( cd "$WS" && oc echo hi )
 cmp -s "$DH_INIT_SRC" "$INIT_COPY" && ok "drifted init copy is refreshed from the system binary" || bad "drifted init copy was not refreshed"
 
+# --- 2b2. a symlinked copy is replaced by a standalone inode ---------------
+# A symlink to the system binary would route the ro,z relabel onto the system
+# inode; the launcher must replace it with an independent regular file.
+ln -sf "$DH_INIT_SRC" "$INIT_COPY"
+: > "$DH_REC"; : > "$DOCKER_REC"
+( cd "$WS" && oc echo hi )
+if [ ! -L "$INIT_COPY" ] && [ -f "$INIT_COPY" ]; then
+  ok "symlinked copy is replaced by a standalone regular file"
+else
+  bad "symlinked copy survived the launch"
+fi
+if [ "$(stat -c '%d:%i' "$INIT_COPY")" != "$(stat -c '%d:%i' "$DH_INIT_SRC")" ]; then
+  ok "replacement copy has an independent inode"
+else
+  bad "replacement copy still aliases the system inode"
+fi
+cmp -s "$DH_INIT_SRC" "$INIT_COPY" && ok "replacement copy is byte-identical" || bad "replacement copy content differs"
+
+# --- 2b3. a hardlinked copy is replaced by an independent inode ------------
+# A hardlink aliases the system inode even with identical content; device and
+# inode must differ after the launch.
+rm -f "$INIT_COPY"
+ln "$DH_INIT_SRC" "$INIT_COPY"
+: > "$DH_REC"; : > "$DOCKER_REC"
+( cd "$WS" && oc echo hi )
+if [ "$(stat -c '%d:%i' "$INIT_COPY")" != "$(stat -c '%d:%i' "$DH_INIT_SRC")" ]; then
+  ok "hardlinked copy is replaced by an independent inode"
+else
+  bad "hardlinked copy survived the launch"
+fi
+cmp -s "$DH_INIT_SRC" "$INIT_COPY" && ok "hardlink replacement is byte-identical" || bad "hardlink replacement content differs"
+
 # --- 2c. init copy failure is fail-closed (no launch) ----------------------
-# Drift the copy AND make the lab init dir unwritable: the refresh (rm+cp)
+# Drift the copy AND make the lab init dir unwritable: the staged publication
 # must fail the launch before docker runs, and the session must still be
 # deleted by the launcher cleanup.
 printf 'DRIFT\n' >> "$INIT_COPY"
@@ -219,6 +256,21 @@ if [ "$launch_rc" != 0 ]; then ok "unverifiable init copy fails the launch"; els
 if [ -s "$DOCKER_REC" ]; then bad "failed launch still invoked docker"; else ok "failed launch did not invoke docker"; fi
 dh="$(cat "$DH_REC" 2>/dev/null || true)"
 contains "failed launch still deletes its session" "delete session delete dhs_TEST" "$dh"
+
+# --- 2b4. a parent directory symlink that escapes the lab home is refused --
+# Point the init directory at the shim directory (which contains a
+# docker-init): the content would "work", so the refusal must come from the
+# path-escape check, not from missing content.
+rm -rf "$OPENCODE_DOCKER_HOME/init"
+ln -s "$SHIM" "$OPENCODE_DOCKER_HOME/init"
+: > "$DH_REC"; : > "$DOCKER_REC"
+( cd "$WS" && oc echo hi ) >/dev/null 2>&1
+esc_rc=$?
+if [ "$esc_rc" != 0 ]; then ok "escaped init directory refuses the launch"; else bad "escaped init directory was accepted"; fi
+if [ -s "$DOCKER_REC" ]; then bad "escaped init dir still invoked docker"; else ok "escaped init dir did not invoke docker"; fi
+dh="$(cat "$DH_REC" 2>/dev/null || true)"
+contains "escaped init dir launch still deletes its session" "delete session delete dhs_TEST" "$dh"
+rm -f "$OPENCODE_DOCKER_HOME/init"
 
 # images pinned by OCI digest
 contains "base image is digest-pinned" \
@@ -249,6 +301,10 @@ kill -INT "$oc_pid" 2>/dev/null || true
 wait "$oc_pid" 2>/dev/null || true
 dh="$(cat "$DH_REC" 2>/dev/null || true)"
 contains "SIGINT deletes the session" "delete session delete dhs_TEST" "$dh"
+
+# --- 3b. the system docker-init is untouched across every launch -----------
+check "system docker-init inode/mode unchanged across all launches" \
+  "$INIT_SYS_SNAP" "$(stat -c '%d:%i %a' "$DH_INIT_SRC")"
 
 echo
 printf 'agent-aliases tests: %d passed, %d failed\n' "$PASS" "$FAIL"

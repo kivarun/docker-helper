@@ -149,6 +149,21 @@ _oc_run() (
     # it would mutate a system executable of the guest. Instead a lab-owned
     # COPY of the same binary is verified and bind-mounted; the relabel then
     # touches only the copy inside the agent-owned lab tree.
+    #
+    # The published copy must be a STANDALONE regular file at an independent
+    # inode: a symlink (or a hardlink) to the system binary would make the
+    # ro,z relabel land on the system inode — exactly what must never happen.
+    # A SHA-256 match alone does NOT prove independence, so device/inode are
+    # compared explicitly, the copy is published atomically (temp file +
+    # rename) and re-verified immediately before it is handed to Docker.
+    #
+    # TOCTOU boundary (documented residual risk): between the final
+    # verification and the docker mount the copy could in principle be
+    # swapped by another process able to write the lab init directory. That
+    # directory is owned by the trusted launcher account; the untrusted model
+    # cannot reach it (it is not mounted into any container), and the guest
+    # root is the trusted provisioning domain. No policy change is made for
+    # this; the trust boundary is the launcher account itself.
     local docker_init="" cand
     for cand in "$(command -v docker-init 2>/dev/null || true)" \
                 /usr/bin/docker-init /usr/libexec/docker/docker-init /sbin/docker-init; do
@@ -158,25 +173,72 @@ _oc_run() (
     done
     local -a init_mount=()
     if [[ -n "$docker_init" ]]; then
-        [[ -r "$docker_init" ]] \
-            || { echo "resolved docker-init is not readable: $docker_init" >&2; return 1; }
+        [[ -r "$docker_init" && -f "$docker_init" ]] \
+            || { echo "resolved docker-init is not a readable regular file: $docker_init" >&2; return 1; }
         local init_copy_dir="$opencode_home/init"
         local init_copy="$init_copy_dir/docker-init"
+
+        # Every significant path component must stay inside the agent-owned
+        # lab root: a symlinked directory that resolves outside
+        # $opencode_home is refused (the relabel must never land outside the
+        # lab tree).
+        local home_real init_dir_real
+        home_real="$(readlink -f -- "$opencode_home")" \
+            || { echo "cannot resolve the lab home: $opencode_home" >&2; return 1; }
+        init_dir_real="$(readlink -f -- "$init_copy_dir")" \
+            || { echo "cannot resolve the lab init directory: $init_copy_dir" >&2; return 1; }
+        [[ "$init_dir_real" == "$home_real/"* && "$init_dir_real" != "$home_real" ]] \
+            || { echo "lab init directory escapes the lab home: $init_copy_dir" >&2; return 1; }
+
         mkdir -p "$init_copy_dir" 2>/dev/null \
             || { echo "cannot create the lab init directory: $init_copy_dir" >&2; return 1; }
-        # The copy must stay byte-identical to the system binary. Refresh it
-        # when it is missing or drifted (rm first: a copy relabeled for a
-        # previous container run may not be writable in place). A failure here
-        # is fail-closed: never launch with an unverified init binary.
-        if [[ ! -f "$init_copy" ]] \
-           || [[ "$(sha256sum -- "$docker_init" | awk '{print $1}')" \
-                 != "$(sha256sum -- "$init_copy" | awk '{print $1}')" ]]; then
-            rm -f -- "$init_copy" \
-                || { echo "cannot refresh the lab docker-init copy" >&2; return 1; }
-            cp -- "$docker_init" "$init_copy" \
-                || { echo "cannot copy docker-init into the lab tree" >&2; return 1; }
-            chmod 0755 -- "$init_copy"
+
+        # Refresh when the existing path is not a standalone, byte-identical
+        # regular file: missing, a symlink, a hardlink alias of the system
+        # binary, or drifted content. Publication is atomic (temp file +
+        # rename), so a relabeled copy from a previous run never needs to be
+        # written in place and a partial copy is never visible.
+        local src_sum copy_sum needs_refresh=0
+        src_sum="$(sha256sum -- "$docker_init" | awk '{print $1}')" \
+            || { echo "cannot hash the system docker-init" >&2; return 1; }
+        if [[ -L "$init_copy" ]]; then
+            needs_refresh=1
+        elif [[ ! -f "$init_copy" ]]; then
+            needs_refresh=1
+        else
+            copy_sum="$(sha256sum -- "$init_copy" | awk '{print $1}')" || copy_sum=""
+            if [[ "$(stat -c '%d:%i' -- "$init_copy")" == "$(stat -c '%d:%i' -- "$docker_init")" ]] \
+               || [[ "$copy_sum" != "$src_sum" ]]; then
+                needs_refresh=1
+            fi
         fi
+        if [[ "$needs_refresh" = 1 ]]; then
+            local tmp=""
+            tmp="$(mktemp -- "$init_copy_dir/.docker-init.XXXXXX")" \
+                || { echo "cannot stage the lab docker-init copy" >&2; return 1; }
+            if ! cp -- "$docker_init" "$tmp" || ! chmod 0755 -- "$tmp"; then
+                rm -f -- "$tmp"
+                echo "cannot copy docker-init into the lab tree" >&2
+                return 1
+            fi
+            if ! mv -f -- "$tmp" "$init_copy"; then
+                rm -f -- "$tmp"
+                echo "cannot publish the lab docker-init copy" >&2
+                return 1
+            fi
+            tmp=""
+        fi
+
+        # FINAL verification of the exact file about to be mounted. Failure is
+        # fail-closed: the launch never falls back to the system binary.
+        [[ -f "$init_copy" && ! -L "$init_copy" ]] \
+            || { echo "lab docker-init copy is not a standalone regular file" >&2; return 1; }
+        [[ "$(stat -c '%d:%i' -- "$init_copy")" != "$(stat -c '%d:%i' -- "$docker_init")" ]] \
+            || { echo "lab docker-init copy aliases the system binary (hardlink)" >&2; return 1; }
+        copy_sum="$(sha256sum -- "$init_copy" | awk '{print $1}')"
+        [[ "$copy_sum" = "$src_sum" ]] \
+            || { echo "lab docker-init copy does not match the system binary" >&2; return 1; }
+
         # Read-only shared relabel (ro,z): the container only execs the binary;
         # the shared label stays stable across concurrent launches instead of
         # being re-pinned to each container's single-use :Z categories.
