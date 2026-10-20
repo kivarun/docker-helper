@@ -65,6 +65,12 @@ vm_selinux_two_stage_docker
 log '== 7. transfer and run the R7 guest diagnostic'
 vm_ssh 'rm -rf /tmp/r7-diag && mkdir -p /tmp/r7-diag'
 vm_scp "$SCRIPT_DIR/$GUEST_SCRIPT" opc@127.0.0.1:/tmp/r7-diag/release-2.4-r7-diag-guest.sh
+if [ "$R7_MODE" = "bprime" ]; then
+  # The B′ gate evaluator rides along: the guest invokes it for the
+  # machine-readable verdict; the host re-uses it for the job gate below.
+  vm_scp "$SCRIPT_DIR/release-2.4-r7-bprime-verdict.sh" \
+    opc@127.0.0.1:/tmp/r7-diag/release-2.4-r7-bprime-verdict.sh
+fi
 
 set +e
 # The diag VM reboots mid-diagnosis (observed ~55s after boot; runs
@@ -165,3 +171,17 @@ RMT
   fi
 done
 set -e
+
+# The B′ job conclusion must REFLECT the machine verdict: a BLOCKED or FAIL
+# result is a failed gate (the evidence artifacts still upload; the
+# workflow-level upload step runs under `if: always()`).
+if [ "$R7_MODE" = "bprime" ]; then
+  FINAL_VERDICT="$(grep -aoE 'R7-BPRIME-VERDICT=.*' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"
+  if [ -z "$FINAL_VERDICT" ]; then
+    fail "the R7 B′ run produced no machine verdict"
+  fi
+  if ! bash "$SCRIPT_DIR/release-2.4-r7-bprime-verdict.sh" --gate "$FINAL_VERDICT"; then
+    fail "the R7 B′ gate did not reach BPRIME-VIABLE: $FINAL_VERDICT"
+  fi
+  log "R7 B′ gate: BPRIME-VIABLE"
+fi

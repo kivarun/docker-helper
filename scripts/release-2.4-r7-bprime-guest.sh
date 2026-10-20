@@ -156,8 +156,8 @@ cap fsuse-full 40 seinfo --fs_use
 cap class-defaults 12 seinfo --default file
 # Baseline: NO type transition from buildkitd_t on tmpfs_t (the B′ delta).
 cap baseline-transitions 20 bash -c 'sesearch -T -s docker_helper_buildkitd_t; echo ---; sesearch -T -t tmpfs_t -s docker_helper_buildkitd_t; echo "(empty above = no baseline transition)"'
-sha256sum /sys/fs/selinux/policy | awk '{print $1}' > "$EVIDENCE_DIR/policy-sha-before"
-log "baseline policy sha256: $(cat "$EVIDENCE_DIR/policy-sha-before")"
+sha256sum /sys/fs/selinux/policy | awk '{print $1}' > "$EVIDENCE_DIR/policy-sha-before.log"
+log "baseline policy sha256: $(cat "$EVIDENCE_DIR/policy-sha-before.log")"
 touch "$STATE_DIR/sec3"
 fi
 
@@ -321,9 +321,13 @@ log "experimental module loaded"
 cap module-listed 6 bash -c 'semodule -l | grep -i bprime || semodule -lfull 2>/dev/null | grep -i bprime || echo "(module name not listed — check loaded policy below)"'
 cap loaded-transition 10 bash -c 'sesearch -T -s docker_helper_buildkitd_t -t tmpfs_t -c file; echo ---ALL---; sesearch -T -t tmpfs_t -s docker_helper_buildkitd_t'
 # THE CRITICAL NEGATIVE: the new type must be deny-all — zero allow rules.
-cap newtype-allows 20 bash -c 'sesearch -A -t docker_helper_runc_memfd_t; echo "(empty = deny-all: no allow references the new type)"; echo ---SUBJ---; sesearch -A -s docker_helper_runc_memfd_t'
-sha256sum /sys/fs/selinux/policy | awk '{print $1}' > "$EVIDENCE_DIR/policy-sha-loaded"
-log "loaded policy sha256: $(cat "$EVIDENCE_DIR/policy-sha-loaded")"
+# Raw output only (an empty result is the EXPECTED pass shape; the header
+# keeps the file non-empty for the fail-closed evaluator).
+cap newtype-allows 20 bash -c 'echo "# sesearch -A -t docker_helper_runc_memfd_t (empty = deny-all)"; sesearch -A -t docker_helper_runc_memfd_t; echo "# sesearch -A -s docker_helper_runc_memfd_t (empty = no subject authority)"; sesearch -A -s docker_helper_runc_memfd_t'
+# The type must carry NO attribute membership (deliberately not file_type).
+cap newtype-attrs 10 bash -c 'seinfo -x -t docker_helper_runc_memfd_t'
+sha256sum /sys/fs/selinux/policy | awk '{print $1}' > "$EVIDENCE_DIR/policy-sha-loaded.log"
+log "loaded policy sha256: $(cat "$EVIDENCE_DIR/policy-sha-loaded.log")"
 log "=== POST-load create-decision matrix ==="
 create_matrix after
 log "=== POST-load future-permission kernel-decision matrix (all-DENY expected; MCS-gating facts) ==="
@@ -439,10 +443,20 @@ fi
 if [ -f "$STATE_DIR/sec8" ]; then log "phase marker: section 8 done; skipping"; else
 log "=== section 8: rollback (module removal + restoration proof) ==="
 semodule -r docker_helper_r7bprime || fail "experimental module removal failed"
-cap rollback-module-list 6 bash -c 'semodule -l | grep -i bprime && echo "STILL LOADED (FAIL)" || echo "(module absent — removed)"'
-cap rollback-transition 8 bash -c 'sesearch -T -s docker_helper_buildkitd_t -t tmpfs_t -c file; echo "(empty = transition removed)"'
-sha256sum /sys/fs/selinux/policy | awk '{print $1}' > "$EVIDENCE_DIR/policy-sha-after-rollback"
-log "post-rollback policy sha256: $(cat "$EVIDENCE_DIR/policy-sha-after-rollback")"
+if semodule -l 2>/dev/null | grep -qi bprime; then
+  printf 'module-still-loaded\n' > "$EVIDENCE_DIR/rollback-module-list.log"
+else
+  printf 'module-removed\n' > "$EVIDENCE_DIR/rollback-module-list.log"
+fi
+log "module removal: $(cat "$EVIDENCE_DIR/rollback-module-list.log")"
+# Raw sesearch output (the header keeps the file non-empty for the
+# fail-closed evaluator; ANY new-type line here is a rollback failure).
+{
+  echo "# sesearch -T -s docker_helper_buildkitd_t -t tmpfs_t -c file (empty = transition removed)"
+  sesearch -T -s docker_helper_buildkitd_t -t tmpfs_t -c file
+} > "$EVIDENCE_DIR/rollback-transition.log" 2>&1
+sha256sum /sys/fs/selinux/policy | awk '{print $1}' > "$EVIDENCE_DIR/policy-sha-after-rollback.log"
+log "post-rollback policy sha256: $(cat "$EVIDENCE_DIR/policy-sha-after-rollback.log")"
 log "=== POST-rollback create-decision matrix (must equal the PRE matrix) ==="
 create_matrix rollback
 # END-TO-END restoration proof: a fresh build must fail exactly as before
@@ -475,46 +489,14 @@ touch "$STATE_DIR/sec8"
 fi
 
 # ============================================================================
-# Verdict
+# Verdict — the fail-closed ten-check evaluator (precise identity
+# classification, audit dedup, rollback proof). The evaluator is the single
+# authority for the machine-readable verdict; the guest only records it.
 # ============================================================================
-LIVE_LABEL="none"
-if [ -s "$EVIDENCE_DIR/bprime-runc-avc-c1.log" ]; then
-  # The memfd write AVCs carry the HEX-encoded path ("/memfd:…" =
-  # 2F6D656D66643A…); match on that, not on a literal "memfd".
-  L="$(grep -a '2F6D656D66643A' "$EVIDENCE_DIR/bprime-runc-avc-c1.log" | grep -a 'denied  { write }' | head -1)"
-  [ -z "$L" ] && L="$(grep -a 'denied  { write }' "$EVIDENCE_DIR/bprime-runc-avc-c1.log" | head -1)"
-  [ -n "$L" ] && LIVE_LABEL="$L"
-fi
-OTHER_RELABEL="none"
-for t in c1 c2; do
-  [ -s "$EVIDENCE_DIR/bprime-runc-avc-$t.log" ] || continue
-  while IFS= read -r line; do
-    case "$line" in
-      *2F6D656D66643A*) ;;                      # the memfd clone itself
-      *docker_helper_runc_memfd_t*) OTHER_RELABEL="$OTHER_RELABEL;$line" ;;
-    esac
-  done < "$EVIDENCE_DIR/bprime-runc-avc-$t.log"
-done
-if [ "$OTHER_RELABEL" = "none" ]; then
-  CNT="$(grep -ac 'runc_memfd_t' "$EVIDENCE_DIR/bprime-newtype-avc.log" 2>/dev/null || echo 0)"
-  [ "${CNT:-0}" -gt 0 ] && OTHER_RELABEL="see-bprime-newtype-avc.log($CNT)"
-fi
-ROLLBACK="unknown"
-if [ -f "$EVIDENCE_DIR/policy-sha-after-rollback" ] \
-   && [ "$(cat "$EVIDENCE_DIR/policy-sha-after-rollback")" = "$(cat "$EVIDENCE_DIR/policy-sha-before")" ]; then
-  ROLLBACK="restored-byte-identical"
-else
-  ROLLBACK="sha-mismatch-or-missing"
-fi
-case "$LIVE_LABEL" in
-  *docker_helper_runc_memfd_t*)
-    case "$OTHER_RELABEL" in
-      none) DECISION="BPRIME-VIABLE" ;;
-      *) DECISION="BPRIME-BLOCKED" ;;
-    esac
-    ;;
-  *tmpfs_t*) DECISION="BPRIME-FAIL" ;;
-  *) DECISION="BPRIME-BLOCKED" ;;
-esac
-log "R7-BPRIME-VERDICT=LIVE-LABEL=$LIVE_LABEL;OTHER-RELABEL=$OTHER_RELABEL;ROLLBACK=$ROLLBACK;DECISION=$DECISION"
+bash /tmp/r7-diag/release-2.4-r7-bprime-verdict.sh "$EVIDENCE_DIR" \
+  > "$EVIDENCE_DIR/bprime-verdict.log" 2>&1
+VERDICT_RC=$?
+log "bprime evaluator exit=$VERDICT_RC"
+cat "$EVIDENCE_DIR/bprime-verdict.log"
 exit 0
+
