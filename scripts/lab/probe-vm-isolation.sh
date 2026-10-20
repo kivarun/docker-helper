@@ -8,14 +8,22 @@
 #   probe-vm-isolation.sh host [PORT]     run on the PHYSICAL HOST:
 #       1. detect the host's LAN IPv4 (and IPv6, when available);
 #       2. start CONTROLLED TCP listeners (IPv4 0.0.0.0:PORT, IPv6 :::PORT)
-#          and self-verify they accept connections — endpoints are proven
-#          available BEFORE the guest probes them. The harness never touches
-#          the host firewall: only userspace listeners are started.
-#       3. stream the guard library plus this script into the guest over the
+#          that COUNT accepted connections in counter files. The harness
+#          never touches the host firewall: only userspace listeners run.
+#       3. PREPARE phase: prove each listener accepts from the physical host
+#          (loopback AND the LAN endpoint it will be probed on, IPv6
+#          included) — endpoints are proven available BEFORE the guest
+#          probes them. A listener that did not start FAILS the probe.
+#       4. DRAIN phase: wait (bounded, counter-driven) until every
+#          preparation connection has been accounted, then fixate the
+#          BASELINE counter values. No log clearing, no races: only the
+#          DELTA after the baseline matters.
+#       5. stream the guard library plus this script into the guest over the
 #          host->guest SSH path (that transport is itself the SSH evidence)
-#          and run the guest probe there;
-#       4. assert the listener logs stayed EMPTY — no guest connection ever
-#          reached a real, accepting endpoint.
+#          and run the guest probe there.
+#       6. VERIFY phase: listeners must still be alive and the counter delta
+#          must be zero — no guest connection ever reached a real, accepting
+#          endpoint. A dead listener makes the verdict INCOMPLETE and fails.
 #
 #   probe-vm-isolation.sh guest GW_HOST GW_PORT LAN4_HOST LAN4_PORT \
 #                                 [LAN6_HOST LAN6_PORT]
@@ -163,52 +171,65 @@ probe_host() { # [PORT]
   local devvm="$SCRIPT_DIR/../dev-vm-local.sh"
   [ -f "$devvm" ] || probe_host_fail "cannot find scripts/dev-vm-local.sh next to this probe"
 
-  local lan4 lan6 work log4 log6 pid4 pid6 stream
+  local lan4 lan6 work cnt4 cnt6 pid4 pid6 stream
   lan4="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src") print $(i+1)}' | head -1)"
   [ -n "$lan4" ] || probe_host_fail "cannot determine the host's LAN IPv4 source address"
   lan6="$(ip -6 route get 2606:4700::1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src") print $(i+1)}' | head -1)"
 
   work="$(mktemp -d)" || probe_host_fail "mktemp failed"
-  log4="$work/listener4.log" log6="$work/listener6.log" stream="$work/probe-stream.sh"
-  : > "$log4"; : > "$log6"
+  cnt4="$work/accepts4" cnt6="$work/accepts6" stream="$work/probe-stream.sh"
+  : > "$cnt4"; : > "$cnt6"
 
-  python3 - "$port" "$log4" <<'PY' & pid4=$!
+  # Each listener counts accepted connections in its counter file (the only
+  # writer is the listener itself; readers poll). No log clearing anywhere:
+  # the verdict uses the DELTA after an explicitly fixated baseline.
+  python3 - "$port" "$cnt4" <<'PY' & pid4=$!
 import socket, sys
-port, log = int(sys.argv[1]), sys.argv[2]
+port, cnt = int(sys.argv[1]), sys.argv[2]
 s = socket.socket(socket.AF_INET)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 s.bind(("0.0.0.0", port))
 s.listen(8)
+n = 0
 while True:
     try:
         c, _ = s.accept()
     except OSError:
         break
-    with open(log, "a") as f:
-        f.write("accepted\n")
+    n += 1
+    with open(cnt, "w") as f:
+        f.write(str(n))
     c.close()
 PY
   if [ -n "$lan6" ]; then
-    python3 - "$port" "$log6" <<'PY' & pid6=$!
+    python3 - "$port" "$cnt6" <<'PY' & pid6=$!
 import socket, sys
-port, log = int(sys.argv[1]), sys.argv[2]
+port, cnt = int(sys.argv[1]), sys.argv[2]
 s = socket.socket(socket.AF_INET6)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
 s.bind(("::", port))
 s.listen(8)
+n = 0
 while True:
     try:
         c, _ = s.accept()
     except OSError:
         break
-    with open(log, "a") as f:
-        f.write("accepted\n")
+    n += 1
+    with open(cnt, "w") as f:
+        f.write(str(n))
     c.close()
 PY
   else
     pid6=""
   fi
+
+  count_of() { cat "$1" 2>/dev/null || echo 0; }
+  listener_alive() {
+    kill -0 "$pid4" 2>/dev/null || return 1
+    [ -z "$pid6" ] || kill -0 "$pid6" 2>/dev/null
+  }
 
   cleanup_listeners() {
     [ -n "$pid4" ] && kill "$pid4" 2>/dev/null
@@ -218,8 +239,9 @@ PY
   }
   trap cleanup_listeners EXIT
 
-  # Endpoints must be PROVEN available before the guest probes them: wait for
-  # the listeners to accept (bounded polling, no blind sleep).
+  # --- PREPARE phase: every listener must accept from the host side, on the
+  # exact endpoints the guest will later probe. A listener that did not start
+  # is a FAIL, never a PASS.
   local ready=0
   for _ in $(seq 1 20); do
     if tcp_reachable 127.0.0.1 "$port"; then ready=1; break; fi
@@ -228,13 +250,30 @@ PY
   [ "$ready" = 1 ] || probe_host_fail "IPv4 listener not accepting on port $port"
   tcp_reachable "$lan4" "$port" || probe_host_fail "LAN IPv4 endpoint not accepting: $lan4:$port"
   if [ -n "$lan6" ]; then
-    tcp_reachable ::1 "$port" || probe_host_fail "IPv6 listener not accepting on port $port"
+    tcp_reachable ::1 "$port" || probe_host_fail "IPv6 listener not accepting on loopback"
+    tcp_reachable "$lan6" "$port" || probe_host_fail "LAN IPv6 endpoint not accepting: [$lan6]:$port"
   fi
   printf 'prepared endpoints: 0.0.0.0:%s, %s:%s%s\n' "$port" "$lan4" "$port" \
     "$( [ -n "$lan6" ] && printf ', [%s]:%s' "$lan6" "$port" )"
 
-  # Stream guard library + this script into the guest over SSH; the guest
-  # probe running over this transport is the host->guest SSH evidence.
+  # --- DRAIN phase: wait until every preparation connection has been counted
+  # (IPv4 and, when present, IPv6), then fixate the baselines. Counter-driven
+  # (no blind clearing, no races).
+  local drained=0
+  for _ in $(seq 1 50); do
+    drained=1
+    if [ "$(count_of "$cnt4")" -lt 2 ]; then drained=0; fi
+    if [ -n "$lan6" ] && [ "$(count_of "$cnt6")" -lt 2 ]; then drained=0; fi
+    [ "$drained" = 1 ] && break
+    sleep 0.1
+  done
+  [ "$drained" = 1 ] || probe_host_fail "listeners did not account the preparation connections"
+  local baseline4 baseline6
+  baseline4="$(count_of "$cnt4")"
+  baseline6="$(count_of "$cnt6")"
+  listener_alive || probe_host_fail "a listener died before the guest probes"
+
+  # --- guest probes over the host->guest SSH path (the SSH evidence itself).
   { cat "$SCRIPT_DIR/lab-vm-guard.sh"; printf '\n'; cat "$SELF"; } > "$stream"
   local guest_args="guest 10.0.2.2 $port $lan4 $port"
   [ -n "$lan6" ] && guest_args="$guest_args $lan6 $port"
@@ -245,10 +284,28 @@ PY
     bad "guest probe failed (see its output above)"
   fi
 
-  if [ -s "$log4" ] || { [ -n "$pid6" ] && [ -s "$log6" ]; }; then
-    bad "a guest connection REACHED a controlled host listener"
+  # --- VERIFY phase: listeners alive, counter delta zero on BOTH families
+  # (stability-checked so a connection accepted in flight cannot be missed).
+  if ! listener_alive; then
+    bad "a listener died during the guest probes (verdict INCOMPLETE)"
   else
-    ok "no guest connection reached any controlled listener"
+    local final1_4 final2_4 final1_6="" final2_6="" delta=""
+    final1_4="$(count_of "$cnt4")"
+    [ -n "$lan6" ] && final1_6="$(count_of "$cnt6")"
+    sleep 0.3
+    final2_4="$(count_of "$cnt4")"
+    [ -n "$lan6" ] && final2_6="$(count_of "$cnt6")"
+    if [ "$final1_4" != "$baseline4" ] || [ "$final2_4" != "$baseline4" ]; then
+      delta="$delta ipv4"
+    fi
+    if [ -n "$lan6" ] && { [ "$final1_6" != "$baseline6" ] || [ "$final2_6" != "$baseline6" ]; }; then
+      delta="$delta ipv6"
+    fi
+    if [ -n "$delta" ]; then
+      bad "a guest connection REACHED a controlled host listener (baseline ${baseline4}/${baseline6:--}, now ${final2_4}/${final2_6:--}):$delta"
+    else
+      ok "no guest connection reached any controlled listener"
+    fi
   fi
 
   summary
