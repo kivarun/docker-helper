@@ -78,6 +78,7 @@ jobs:
           bash scripts/lab/test-setup-agent-user.sh
           bash scripts/lab/test-lab-vm-guard.sh
           bash scripts/lab/test-probe-vm-isolation.sh
+          bash scripts/lab/test-integration-hygiene.sh
 
   selinux-policy:
     runs-on: ubuntu-latest
