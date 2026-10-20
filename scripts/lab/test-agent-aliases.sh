@@ -590,7 +590,14 @@ export SSH_ADD_FAIL=1
 : > "$DH_REC"; : > "$DOCKER_REC"
 ( cd "$WS" && oc echo hi ) >/dev/null 2>&1
 unset SSH_ADD_FAIL
-remaining="$(ls "$OPENCODE_DOCKER_HOME/agent-ssh" 2>/dev/null | grep -vc '^run.foreign$' || true)"
+remaining=0
+for d in "$OPENCODE_DOCKER_HOME/agent-ssh"/run.*; do
+  [ -d "$d" ] || continue
+  case "$(basename "$d")" in
+    run.foreign) ;;
+    *) remaining=$((remaining+1)) ;;
+  esac
+done
 check "F5: a failed ssh-add removed its own run dir" "0" "$remaining"
 if kill -0 "$foreign_pid" 2>/dev/null && [ -d "$foreign_dir" ]; then
   ok "F5: a failed launch left the foreign live run untouched"
