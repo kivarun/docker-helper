@@ -97,7 +97,7 @@ on:
         required: true
         type: string
       mode:
-        description: 'diag = the R7 red/green diagnosis; stop-proof = the R7 STOP-isolation proof (AppArmor consumer only); mcs-audit = the R7 MCS-isolation audit (SELinux consumer only); exeseal = the R7 exeseal boundary probe (SELinux consumer only)'
+        description: 'diag = the R7 red/green diagnosis; stop-proof = the R7 STOP-isolation proof (AppArmor consumer only); mcs-audit = the R7 MCS-isolation audit (SELinux consumer only); exeseal = the R7 exeseal boundary probe (SELinux consumer only); bprime = the R7 B′ isolated memfd type-transition proof (SELinux consumer only)'
         required: false
         type: string
         default: 'diag'
@@ -112,7 +112,7 @@ permissions:
 
 jobs:
   ubuntu-tarball-diag:
-    if: inputs.mode != 'stop-proof' && inputs.mode != 'mcs-audit' && inputs.mode != 'exeseal'
+    if: inputs.mode != 'stop-proof' && inputs.mode != 'mcs-audit' && inputs.mode != 'exeseal' && inputs.mode != 'bprime'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -189,7 +189,7 @@ jobs:
           if-no-files-found: error
 
   apparmor-vm-diag:
-    if: inputs.mode != 'stop-proof' && inputs.mode != 'mcs-audit' && inputs.mode != 'exeseal'
+    if: inputs.mode != 'stop-proof' && inputs.mode != 'mcs-audit' && inputs.mode != 'exeseal' && inputs.mode != 'bprime'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
