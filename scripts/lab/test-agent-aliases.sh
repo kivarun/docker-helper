@@ -248,9 +248,9 @@ chmod 0600 "$OPENCODE_AGENT_SSH_KEY"
 dargv="$(cat "$DOCKER_REC" 2>/dev/null || true)"
 contains "lab CA copy is mounted read-only" "$OPENCODE_DOCKER_HOME/ca:/etc/opencode-ca:ro,z" "$dargv"
 contains "NODE_EXTRA_CA_CERTS points at the mounted copy" "-e NODE_EXTRA_CA_CERTS=/etc/opencode-ca/lab-ca.crt" "$dargv"
-contains "SSL_CERT_FILE points at the mounted copy" "-e SSL_CERT_FILE=/etc/opencode-ca/lab-ca.crt" "$dargv"
-contains "CURL_CA_BUNDLE points at the mounted copy" "-e CURL_CA_BUNDLE=/etc/opencode-ca/lab-ca.crt" "$dargv"
-contains "GIT_SSL_CAINFO points at the mounted copy" "-e GIT_SSL_CAINFO=/etc/opencode-ca/lab-ca.crt" "$dargv"
+not_contains "F6: without a combined bundle the client trust variables are NOT overridden" "SSL_CERT_FILE" "$dargv"
+not_contains "F6: without a combined bundle curl trust is NOT overridden" "CURL_CA_BUNDLE" "$dargv"
+not_contains "F6: without a combined bundle git trust is NOT overridden" "GIT_SSL_CAINFO" "$dargv"
 contains "gitconfig copy is mounted read-only" "$OPENCODE_DOCKER_HOME/git/gitconfig:/home/opencode/.gitconfig:ro,z" "$dargv"
 contains "public ssh material is mounted read-only" "$OPENCODE_DOCKER_HOME/ssh:/home/opencode/.ssh:ro,z" "$dargv"
 contains "the ssh-agent socket dir is the only agent mount" "/ssh-agent:ro" "$dargv"
@@ -265,6 +265,17 @@ else
 fi
 contains "opencode LSP tool flag is passed" "-e OPENCODE_EXPERIMENTAL_LSP_TOOL=true" "$dargv"
 contains "opencode exa flag is passed" "-e OPENCODE_ENABLE_EXA=1" "$dargv"
+
+# F6: with a combined bundle the client trust variables point at it
+printf 'PUBLIC-CA-1\n-----BEGIN CERTIFICATE-----\nplaceholder\n-----END CERTIFICATE-----\n' > "$OPENCODE_DOCKER_HOME/ca/combined-ca-bundle.crt"
+: > "$DH_REC"; : > "$DOCKER_REC"
+( cd "$WS" && oc echo hi )
+dargv="$(cat "$DOCKER_REC" 2>/dev/null || true)"
+contains "F6: NODE_EXTRA_CA_CERTS still adds the corporate CA" "-e NODE_EXTRA_CA_CERTS=/etc/opencode-ca/lab-ca.crt" "$dargv"
+contains "F6: SSL_CERT_FILE uses the combined bundle" "-e SSL_CERT_FILE=/etc/opencode-ca/combined-ca-bundle.crt" "$dargv"
+contains "F6: CURL_CA_BUNDLE uses the combined bundle" "-e CURL_CA_BUNDLE=/etc/opencode-ca/combined-ca-bundle.crt" "$dargv"
+contains "F6: GIT_SSL_CAINFO uses the combined bundle" "-e GIT_SSL_CAINFO=/etc/opencode-ca/combined-ca-bundle.crt" "$dargv"
+rm -f "$OPENCODE_DOCKER_HOME/ca/combined-ca-bundle.crt"
 
 # the full mounted source allowlist with every capability present; the
 # ssh-agent run directory is unique per launch, so it is taken from the argv

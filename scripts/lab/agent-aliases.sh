@@ -248,6 +248,9 @@ _oc_run() (
         local -a ca_files=()
         local ca_path
         for ca_path in "$ca_dir"/*.crt; do
+            # the combined bundle is a companion artifact, not a second
+            # corporate CA — the ambiguity check applies to root choices
+            [[ "$ca_path" == */combined-ca-bundle.crt ]] && continue
             [[ -f "$ca_path" ]] && ca_files+=("$ca_path")
         done
         if (( ${#ca_files[@]} > 1 )); then
@@ -258,12 +261,22 @@ _oc_run() (
             local ca_name
             ca_name="$(basename -- "${ca_files[0]}")"
             extra_mounts+=(-v "$ca_dir:/etc/opencode-ca:ro,z")
-            docker_env+=(
-                -e "NODE_EXTRA_CA_CERTS=/etc/opencode-ca/$ca_name"
-                -e "SSL_CERT_FILE=/etc/opencode-ca/$ca_name"
-                -e "CURL_CA_BUNDLE=/etc/opencode-ca/$ca_name"
-                -e "GIT_SSL_CAINFO=/etc/opencode-ca/$ca_name"
-            )
+            # NODE_EXTRA_CA_CERTS ADDS the corporate CA to Node's own trust;
+            # it never replaces the image's public set (F6).
+            docker_env+=(-e "NODE_EXTRA_CA_CERTS=/etc/opencode-ca/$ca_name")
+            # SSL_CERT_FILE/CURL_CA_BUNDLE/GIT_SSL_CAINFO REPLACE the client
+            # trust source, so they may only point at a combined bundle
+            # (image public CAs + the corporate CA) built as a lab-owned
+            # file. Without it these variables must not be set at all: a
+            # single corporate certificate would disable trust in every
+            # public CA for those clients.
+            if [[ -f "$ca_dir/combined-ca-bundle.crt" ]]; then
+                docker_env+=(
+                    -e "SSL_CERT_FILE=/etc/opencode-ca/combined-ca-bundle.crt"
+                    -e "CURL_CA_BUNDLE=/etc/opencode-ca/combined-ca-bundle.crt"
+                    -e "GIT_SSL_CAINFO=/etc/opencode-ca/combined-ca-bundle.crt"
+                )
+            fi
         fi
     fi
 
