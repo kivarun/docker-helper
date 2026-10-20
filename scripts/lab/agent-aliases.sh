@@ -133,18 +133,22 @@ _oc_run() (
 
     # OpenCode writes under $HOME (.config, .local, .cache) and /tmp/opencode;
     # bind each from the agent-owned tree so the non-image uid can write.
+    # No other directory is mounted implicitly: SSH credentials, agent
+    # configuration, and host secrets must never ride along with a launch.
     local -a home_mounts=(
         -v "$opencode_home/.config:/home/opencode/.config:Z"
         -v "$opencode_home/.local:/home/opencode/.local:Z"
         -v "$opencode_home/.cache:/home/opencode/.cache:Z"
         -v "$opencode_home/tmp:/tmp/opencode:Z"
     )
-    [[ -d "$opencode_home/.ssh" ]] && home_mounts+=(-v "$opencode_home/.ssh:/home/opencode/.ssh:Z")
 
-    # The runtime bind-mounts its --init binary with the host label (bin_t),
-    # which the custom container domain cannot execute. Bind the same binary
-    # explicitly with a container-domain relabel (:Z); --init then execs the
-    # mounted file. Resolution is best-effort (distros place it differently).
+    # --init under the confined container domain. The runtime bind-mounts its
+    # own init binary from the host filesystem, whose system label the custom
+    # container domain cannot execute (live AVC: exec /sbin/docker-init:
+    # permission denied). Relabeling THAT system inode with :Z is forbidden:
+    # it would mutate a system executable of the guest. Instead a lab-owned
+    # COPY of the same binary is verified and bind-mounted; the relabel then
+    # touches only the copy inside the agent-owned lab tree.
     local docker_init="" cand
     for cand in "$(command -v docker-init 2>/dev/null || true)" \
                 /usr/bin/docker-init /usr/libexec/docker/docker-init /sbin/docker-init; do
@@ -153,7 +157,31 @@ _oc_run() (
         break
     done
     local -a init_mount=()
-    [[ -n "$docker_init" ]] && init_mount=(-v "$docker_init:/sbin/docker-init:Z")
+    if [[ -n "$docker_init" ]]; then
+        [[ -r "$docker_init" ]] \
+            || { echo "resolved docker-init is not readable: $docker_init" >&2; return 1; }
+        local init_copy_dir="$opencode_home/init"
+        local init_copy="$init_copy_dir/docker-init"
+        mkdir -p "$init_copy_dir" 2>/dev/null \
+            || { echo "cannot create the lab init directory: $init_copy_dir" >&2; return 1; }
+        # The copy must stay byte-identical to the system binary. Refresh it
+        # when it is missing or drifted (rm first: a copy relabeled for a
+        # previous container run may not be writable in place). A failure here
+        # is fail-closed: never launch with an unverified init binary.
+        if [[ ! -f "$init_copy" ]] \
+           || [[ "$(sha256sum -- "$docker_init" | awk '{print $1}')" \
+                 != "$(sha256sum -- "$init_copy" | awk '{print $1}')" ]]; then
+            rm -f -- "$init_copy" \
+                || { echo "cannot refresh the lab docker-init copy" >&2; return 1; }
+            cp -- "$docker_init" "$init_copy" \
+                || { echo "cannot copy docker-init into the lab tree" >&2; return 1; }
+            chmod 0755 -- "$init_copy"
+        fi
+        # Read-only shared relabel (ro,z): the container only execs the binary;
+        # the shared label stays stable across concurrent launches instead of
+        # being re-pinned to each container's single-use :Z categories.
+        init_mount=(-v "$init_copy:/sbin/docker-init:ro,z")
+    fi
 
     docker run --rm -it \
         --init \

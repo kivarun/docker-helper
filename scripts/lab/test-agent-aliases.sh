@@ -14,7 +14,12 @@
 #      (--workspace flag vs positional WORKSPACE);
 #   6. the model gets only the bearer: no docker.sock, no GH_TOKEN, no admin
 #      token, no principal credential;
-#   7. the images are pinned by OCI digest (no floating :latest).
+#   7. the images are pinned by OCI digest (no floating :latest);
+#   8. --init uses a lab-owned VERIFIED COPY of docker-init: no :z/:Z relabel
+#      ever targets a system executable, the copy stays byte-identical
+#      (refreshed on drift), and an unverifiable copy fails the launch closed;
+#   9. the mounted source set is an allowlist of lab-owned paths: no implicit
+#      SSH credentials (or any other unlisted directory) ride along.
 #
 # Usage: scripts/lab/test-agent-aliases.sh
 
@@ -34,8 +39,9 @@ trap cleanup_work EXIT
 
 PASS=0
 FAIL=0
-ok()  { PASS=$((PASS+1)); printf 'ok   - %s\n' "$1"; }
+ok() { PASS=$((PASS+1)); printf 'ok   - %s\n' "$1"; }
 bad() { FAIL=$((FAIL+1)); printf 'FAIL - %s\n' "$1"; }
+check() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (want '$2' got '$3')"; fi; }
 contains() { # desc needle haystack
   case "$3" in *"$2"*) ok "$1" ;; *) bad "$1 (missing '$2' in '$3')" ;; esac
 }
@@ -45,6 +51,11 @@ not_contains() { # desc needle haystack
 
 # --- stubs -----------------------------------------------------------------
 SHIM="$WORK/shim"; mkdir -p "$SHIM" "$WORK/run"
+
+# A stand-in system docker-init: deterministic init-copy resolution regardless
+# of whether the CI host has Docker installed.
+printf '#!/bin/sh\nexit 0\n' > "$SHIM/docker-init"
+chmod 0755 "$SHIM/docker-init"
 
 cat > "$SHIM/docker-helper" <<'SH'
 #!/bin/sh
@@ -116,7 +127,11 @@ contains "container drops caps" "--cap-drop ALL" "$dargv"
 contains "container sets no-new-privileges" "--security-opt no-new-privileges=true" "$dargv"
 contains "container runs as the guest launcher uid" "--user $(id -u):$(id -g)" "$dargv"
 contains "container runs in the helper workload SELinux domain" "--security-opt label=type:docker_helper_container_t" "$dargv"
-contains "docker-init is relabeled for the container domain" ":/sbin/docker-init:Z" "$dargv"
+DH_INIT_SRC="$(readlink -f "$SHIM/docker-init")"
+INIT_COPY="$OPENCODE_DOCKER_HOME/init/docker-init"
+contains "init binary is the lab-owned verified copy" "$INIT_COPY:/sbin/docker-init:ro,z" "$dargv"
+not_contains "system docker-init is never a mount source" "$DH_INIT_SRC:" "$dargv"
+cmp -s "$DH_INIT_SRC" "$INIT_COPY" && ok "init copy is byte-identical to the system binary" || bad "init copy drifted from the system binary"
 contains "container is --rm --init" "--rm -it --init" "$dargv"
 contains "helper runtime dir is read-only" "$WORK/run:/run/docker-helper:ro" "$dargv"
 contains "workspace is a private relabel" "$WS:/workspace:Z" "$dargv"
@@ -129,6 +144,81 @@ not_contains "container does not mount docker.sock" "docker.sock" "$dargv"
 not_contains "container does not get GH_TOKEN" "-e GH_TOKEN" "$dargv"
 not_contains "container does not get an admin token" "ADMIN_TOKEN" "$dargv"
 not_contains "container does not mount the principal credential" "/.config/docker-helper" "$dargv"
+
+# REGRESSION: no :z/:Z relabel may ever target a SYSTEM executable. Parse the
+# mount pairs and forbid system-path sources on any relabeled mount.
+zsrc_hits=""
+prev=""
+for w in $dargv; do
+  if [ "$prev" = "-v" ]; then
+    src="${w%%:*}"
+    opts="${w##*:}"
+    case "$opts" in
+      *z*|*Z*)
+        case "$src" in
+          /usr/*|/sbin/*|/bin/*|/lib/*|/lib64/*|/libexec/*|/etc/*|/var/lib/*|/opt/*) \
+            zsrc_hits="$zsrc_hits $src" ;;
+        esac
+        ;;
+    esac
+  fi
+  prev="$w"
+done
+if [ -z "$zsrc_hits" ]; then
+  ok "no relabeled (:z/:Z) mount sources a system executable"
+else
+  bad "relabeled mount sources system executables:$zsrc_hits"
+fi
+
+# The mounted source set is an ALLOWLIST: exactly the agent-owned OpenCode
+# state, the workspace, the verified init copy, and the read-only helper
+# runtime dir. Any additional implicit mount (SSH credentials, agent config,
+# anything else) fails here.
+mounted_srcs=""
+prev=""
+for w in $dargv; do
+  [ "$prev" = "-v" ] && mounted_srcs="$mounted_srcs${w%%:*}
+"
+  prev="$w"
+done
+check "mounted sources are exactly the lab allowlist" \
+  "$INIT_COPY
+$WS
+$OPENCODE_DOCKER_HOME/.config
+$OPENCODE_DOCKER_HOME/.local
+$OPENCODE_DOCKER_HOME/.cache
+$OPENCODE_DOCKER_HOME/tmp
+$WORK/run" \
+  "$(printf '%s' "$mounted_srcs" | sed '/^$/d')"
+
+# --- 6b. no implicit SSH credential mount ----------------------------------
+mkdir -p "$OPENCODE_DOCKER_HOME/.ssh"
+printf 'SSHKEY-MARKER\n' > "$OPENCODE_DOCKER_HOME/.ssh/id_ed25519"
+: > "$DH_REC"; : > "$DOCKER_REC"
+( cd "$WS" && oc echo hi )
+dargv="$(cat "$DOCKER_REC" 2>/dev/null || true)"
+not_contains "present .ssh dir is NOT mounted" ".ssh" "$dargv"
+
+# --- 2b. the init copy is verified and refreshed on drift ------------------
+printf 'DRIFT\n' >> "$INIT_COPY"
+: > "$DH_REC"; : > "$DOCKER_REC"
+( cd "$WS" && oc echo hi )
+cmp -s "$DH_INIT_SRC" "$INIT_COPY" && ok "drifted init copy is refreshed from the system binary" || bad "drifted init copy was not refreshed"
+
+# --- 2c. init copy failure is fail-closed (no launch) ----------------------
+# Drift the copy AND make the lab init dir unwritable: the refresh (rm+cp)
+# must fail the launch before docker runs, and the session must still be
+# deleted by the launcher cleanup.
+printf 'DRIFT\n' >> "$INIT_COPY"
+chmod 0555 "$OPENCODE_DOCKER_HOME/init"
+: > "$DH_REC"; : > "$DOCKER_REC"
+( cd "$WS" && oc echo hi ) >/dev/null 2>&1
+launch_rc=$?
+chmod 0755 "$OPENCODE_DOCKER_HOME/init"
+if [ "$launch_rc" != 0 ]; then ok "unverifiable init copy fails the launch"; else bad "launch proceeded with an unverifiable init copy"; fi
+if [ -s "$DOCKER_REC" ]; then bad "failed launch still invoked docker"; else ok "failed launch did not invoke docker"; fi
+dh="$(cat "$DH_REC" 2>/dev/null || true)"
+contains "failed launch still deletes its session" "delete session delete dhs_TEST" "$dh"
 
 # images pinned by OCI digest
 contains "base image is digest-pinned" \
