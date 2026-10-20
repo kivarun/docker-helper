@@ -67,6 +67,61 @@ stop_vm_if_running() {
   fi
 }
 
+# --- online window lifecycle (single owner) ---------------------------------
+# F2: after the VM boots with the network open, EVERY exit path must close
+# the window: a successful stage stops the VM and verifies the stop; a
+# failure (EXIT trap, INT, TERM or a plain command error) attempts the stop
+# and preserves the original exit code. A FAILED stop must never look like
+# success: it reports CRITICAL with the actual VM state and the recovery
+# command instead. The trap is installed only for the online stage and is
+# removed on the normal path, so no competing cleanup owners exist.
+# SIGKILL cannot be trapped (documented residual risk): the preflight of the
+# next online run stops any leftover open VM before opening a new window.
+ONLINE_VM_STARTED=0
+
+online_window_stop_failure() { # REASON
+  printf 'CRITICAL: %s\n' "$1" >&2
+  printf 'CRITICAL: the VM may still be running with the network OPEN.\n' >&2
+  printf 'CRITICAL: current VM state: %s\n' "$(vm_state)" >&2
+  printf 'CRITICAL: recovery: scripts/dev-vm-local.sh stop   (then re-run provision-lab-vm.sh online)\n' >&2
+}
+
+online_cleanup() { # ORIGINAL_RC
+  local rc="$1"
+  trap - EXIT INT TERM
+  if [ "$ONLINE_VM_STARTED" = 1 ]; then
+    log "the online window is closing: stopping the VM"
+    if ! "$DEVVM" stop; then
+      ONLINE_VM_STARTED=0
+      online_window_stop_failure "the VM stop command failed"
+      exit 1
+    fi
+    ONLINE_VM_STARTED=0
+    if [ "$(vm_state)" = running ]; then
+      online_window_stop_failure "the VM is still running after the stop command"
+      exit 1
+    fi
+    log "VM stopped; the online window is closed"
+  fi
+  exit "$rc"
+}
+
+# Normal-path close: stop the VM and PROVE it is stopped before the stage
+# may report success. Never claims isolation was restored by itself.
+close_online_window() {
+  trap - EXIT INT TERM
+  ONLINE_VM_STARTED=0
+  log "closing the online window: stopping the VM"
+  if ! "$DEVVM" stop; then
+    online_window_stop_failure "the VM stop command failed"
+    exit 1
+  fi
+  if [ "$(vm_state)" = running ]; then
+    online_window_stop_failure "the VM is still running after the stop command"
+    exit 1
+  fi
+}
+
 stage_snapshot() {
   local workdir disk
   stop_vm_if_running
@@ -130,8 +185,13 @@ verify_positive_tls() {
 
 stage_online() {
   stop_vm_if_running
+  log "preflight: any leftover online VM from a killed previous run is closed before this window opens"
   log "booting with the network OPEN (temporary provisioning window)"
   DEV_VM_NET_ISOLATED=0 "$DEVVM" start || die "VM start (network open) failed"
+  ONLINE_VM_STARTED=1
+  trap 'online_cleanup "$?"' EXIT
+  trap 'online_cleanup 130' INT
+  trap 'online_cleanup 143' TERM
 
   copy_lab_scripts
 
@@ -154,9 +214,8 @@ stage_online() {
 
   pull_pinned_images
 
-  log "stopping the VM before returning to the isolated posture"
-  stop_vm_if_running
-  log "online stage done"
+  close_online_window
+  log "online stage done (VM stopped; the isolated posture is restored on the next boot)"
 }
 
 stage_isolate() {

@@ -41,7 +41,11 @@ cp "$SRC_DIR/lab/provision-lab-vm.sh" "$REPO/lab/"
 # scripts are only RECORDED by the stub driver, never executed here.
 for f in "$SRC_DIR"/lab/*.sh; do cp "$f" "$REPO/lab/"; done
 for stub in probe-vm-isolation integration-agent-vm provision-operator-files; do
-  printf '#!/usr/bin/env bash\necho "STUB %s ran"\n' "$stub" > "$REPO/lab/$stub.sh"
+  cat > "$REPO/lab/$stub.sh" <<SH
+#!/usr/bin/env bash
+[ "\${FAIL_ON:-}" = "$stub" ] && { echo "stub $stub injected failure" >&2; exit 1; }
+echo "STUB $stub ran"
+SH
 done
 STATE="$WORK/state"; echo stopped > "$STATE"
 DISK="$WORK/vmstate/disk.qcow2"; : > "$DISK"
@@ -56,12 +60,24 @@ case "\${1:-}" in
     printf 'workdir:  %s\n' "$WORK/vmstate"
     printf 'ssh:      127.0.0.1:2222 (user opc)\n' ;;
   stop)
-    echo stop >> "$REC"; echo stopped > "$STATE" ;;
+    echo stop >> "$REC"
+    if [ "\${FAIL_ON:-}" = stop ]; then echo "stub: stop failed" >&2; exit 1; fi
+    echo stopped > "$STATE" ;;
   start)
     echo "start isolated=\${DEV_VM_NET_ISOLATED:-unset}" >> "$REC"; echo running > "$STATE" ;;
   ssh)
     shift; echo "ssh \$1" >> "$REC"
-    if [ "\$1" = "sudo tee /opt/lab/extra" ]; then cat > /dev/null; else cat > /dev/null 2>/dev/null || true; fi
+    cat > /dev/null 2>/dev/null || true
+    case "\$1" in
+      *setup-agent-user.sh*)
+        n=\$(( \$(cat "$WORK/setupcount" 2>/dev/null || echo 0) + 1 ))
+        echo "\$n" > "$WORK/setupcount"
+        if [ "\${FAIL_ON:-}" = "setup\$n" ]; then echo "stub: setup phase \$n failed" >&2; exit 1; fi ;;
+      *install-docker-vm*) [ "\${FAIL_ON:-}" = docker ] && { echo "stub: docker install failed" >&2; exit 1; } ;;
+      *install-docker-helper*) [ "\${FAIL_ON:-}" = helper ] && { echo "stub: helper install failed" >&2; exit 1; } ;;
+      *curl\ --cacert*) [ "\${FAIL_ON:-}" = tls ] && { echo "stub: positive TLS failed" >&2; exit 1; } ;;
+      *docker\ pull*) [ "\${FAIL_ON:-}" = pull ] && { echo "stub: pull failed" >&2; exit 1; } ;;
+    esac
     exit 0 ;;
   *) echo "stub: unknown op \$1" >&2; exit 2 ;;
 esac
@@ -137,6 +153,59 @@ contains "verify names the prerequisite" "isolate stage first" "$OUT"
 
 # --- 7. unknown stage -----------------------------------------------------------
 if run_driver bogus; then bad "unknown stage accepted"; else ok "unknown stage fails"; fi
+
+# --- F2. the online window closes on ANY failure --------------------------------
+# Injection on every post-start transition: the VM must be stopped, the
+# failure must not look like success, and a failing stop must produce an
+# explicit CRITICAL with the recovery command.
+run_f2() { # FAIL_ON_VALUE
+  echo stopped > "$STATE"; : > "$REC"; rm -f "$SNAPMARK"; rm -f "$WORK/setupcount"
+  FAIL_ON="$1" run_driver online
+}
+
+f2_case() { # NAME
+  local name="$1"
+  if [ "$RC" = 0 ]; then bad "F2/$name: the online stage reported success"; else ok "F2/$name: the failure is not a success"; fi
+  if printf '%s' "$OUT" | grep -q "online stage done"; then bad "F2/$name: false success message"; else ok "F2/$name: no success message"; fi
+  local seq2 open_line stop_line
+  seq2="$(cat "$REC")"
+  open_line="$(printf '%s' "$seq2" | grep -n '^start isolated=0$' | head -1 | cut -d: -f1)"
+  stop_line="$(printf '%s' "$seq2" | grep -n '^stop$' | head -1 | cut -d: -f1)"
+  if [ -n "$open_line" ] && [ -n "$stop_line" ] && [ "$stop_line" -gt "$open_line" ]; then
+    ok "F2/$name: the VM was stopped after the failure"
+  else
+    bad "F2/$name: the VM was left with the network open"
+  fi
+  check "F2/$name: final VM state is stopped" "stopped" "$(cat "$STATE")"
+}
+
+for injected in docker setup1 helper setup2 provision-operator-files pull; do
+  run_f2 "$injected"
+  f2_case "$injected"
+done
+
+export LAB_CA_SOURCE="$WORK/ca-src"; export LAB_CA_TEST_URL="https://ca-test.example/"
+run_f2 tls
+unset LAB_CA_SOURCE LAB_CA_TEST_URL
+f2_case tls
+
+run_f2 stop
+if [ "$RC" != 0 ]; then ok "F2/stop: the stop failure propagates"; else bad "F2/stop: tolerated"; fi
+contains "F2/stop: CRITICAL is reported" "CRITICAL" "$OUT"
+contains "F2/stop: the recovery command is given" "dev-vm-local.sh stop" "$OUT"
+not_contains "F2/stop: no false success" "online stage done" "$OUT"
+check "F2/stop: the VM state is honestly still running" "running" "$(cat "$STATE")"
+
+# the preflight closes a leftover open VM from a killed previous run
+echo running > "$STATE"; : > "$REC"; rm -f "$SNAPMARK"
+run_driver online
+preflight_stop="$(printf '%s' "$(cat "$REC")" | grep -n '^stop$' | head -1 | cut -d: -f1)"
+preflight_open="$(printf '%s' "$(cat "$REC")" | grep -n '^start isolated=0$' | head -1 | cut -d: -f1)"
+if [ -n "$preflight_stop" ] && [ -n "$preflight_open" ] && [ "$preflight_stop" -lt "$preflight_open" ]; then
+  ok "F2/preflight: a leftover open VM is stopped before the window opens"
+else
+  bad "F2/preflight: the leftover open VM was not closed first"
+fi
 
 echo
 printf 'provision-lab-vm tests: %d passed, %d failed\n' "$PASS" "$FAIL"
