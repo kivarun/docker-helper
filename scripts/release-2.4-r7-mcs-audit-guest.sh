@@ -646,6 +646,24 @@ EOF
           --dockerfile Dockerfile --image uat-mcs-audit:2.2 \
           >"$EVIDENCE_DIR/cgroup-build.log" 2>&1 ) &
     BLD_JOB=$!
+    # The R7 setattr rung's LIVE fifo capture: the exec.fifo exists only
+    # between createExecFifo's create/chmod/chown and the run's terminal
+    # failure — the manager's cleanup removes the whole tree at stop, so
+    # the post-mortem below proves convergence, not the final object
+    # state. Poll the build window (read-only) for the fifo's FINAL
+    # post-chmod/post-chown mode/uid/gid/context.
+    rm -f "$EVIDENCE_DIR/exec-fifo-live.txt"
+    ( for _ in $(seq 1 400); do
+        for f in $(find /run/docker-helper-builder/ops -type p -name exec.fifo 2>/dev/null); do
+          stat -c "live-fifo mode=%a uid=%u gid=%g %n" "$f" >>"$EVIDENCE_DIR/exec-fifo-live.txt" 2>&1
+          ls -Zdn "$f" >>"$EVIDENCE_DIR/exec-fifo-live.txt" 2>&1
+        done
+        kill -0 "$BLD_JOB" 2>/dev/null || break
+        sleep 0.02
+      done
+      [ -s "$EVIDENCE_DIR/exec-fifo-live.txt" ] || echo "(no live exec.fifo observed in the build window)" >>"$EVIDENCE_DIR/exec-fifo-live.txt"
+    ) &
+    FIFO_CAP=$!
     BKD_PID=""
     for _ in $(seq 1 150); do
       BKD_PID="$(pgrep -f '/usr/libexec/docker-helper/buildkit/buildkitd' | head -1 || true)"
@@ -664,6 +682,8 @@ EOF
       log "buildkitd pid not observed (the builder may have failed before spawn)"
     fi
     wait "$BLD_JOB"; BLD_RC=$?
+    wait "$FIFO_CAP" 2>/dev/null || true
+    cap exec-fifo-live 8 cat "$EVIDENCE_DIR/exec-fifo-live.txt"
     # The R7 exec.fifo post-mortem (read-only): the created FIFO's own
     # artifact evidence — mode, uid/gid and SELinux context — captured
     # from the runtime tree immediately after the terminal failure (the
