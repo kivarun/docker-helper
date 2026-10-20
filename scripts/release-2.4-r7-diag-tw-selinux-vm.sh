@@ -33,7 +33,8 @@ R7_MODE="${R7_MODE:-diag}"
 case "$R7_MODE" in
   diag) GUEST_SCRIPT='release-2.4-r7-diag-guest.sh' ;;
   mcs-audit) GUEST_SCRIPT='release-2.4-r7-mcs-audit-guest.sh' ;;
-  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit)" ;;
+  exeseal) GUEST_SCRIPT='release-2.4-r7-exeseal-guest.sh' ;;
+  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal)" ;;
 esac
 
 log()  { printf '%s %s\n' "$PREFIX" "$*"; }
@@ -110,6 +111,20 @@ RMT
       *)
         if [ "$attempt" -eq 3 ]; then
           fail "the R7 MCS audit produced no verdict (guest exit $GUEST_RC)"
+        fi
+        log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
+        ;;
+    esac
+  elif [ "$R7_MODE" = "exeseal" ]; then
+    VERDICT="$(grep -aoE 'R7-EXESEAL-VERDICT=.*' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"
+    case "$VERDICT" in
+      R7-EXESEAL-VERDICT=*)
+        log "R7 exeseal probe verdict: $VERDICT"
+        break
+        ;;
+      *)
+        if [ "$attempt" -eq 3 ]; then
+          fail "the R7 exeseal probe produced no verdict (guest exit $GUEST_RC)"
         fi
         log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
         ;;

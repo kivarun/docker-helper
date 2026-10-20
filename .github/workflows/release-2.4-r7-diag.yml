@@ -49,6 +49,23 @@ name: Release 2.4 R7 full-gate corrective diagnosis
 #                    and never extrapolated from the file/dir proof.
 #                    Security proof only: NO grants, NO production changes.
 #
+#   selinux-vm     — mode=exeseal instead runs the R7 exeseal boundary probe
+#                    on the same enforcing SELinux consumer: the strace -f
+#                    real-path trace of the bundled buildkit-runc's
+#                    CloneSelfExe (sealedOverlayfs fsopen/fsconfig/fsmount
+#                    sequence with per-step errno, then the memfd
+#                    create/copy/seal sequence) in the actual
+#                    docker_helper_buildkitd_t:s0:c1 domain, the runc
+#                    process context/capabilities/namespace inventory, the
+#                    build-window AVC records, a guest-built source-faithful
+#                    C probe (the same syscall sequences as unconfined root
+#                    = kernel-side baselines, inside a fresh unprivileged
+#                    user namespace, and the memfd-vs-pathname labeling
+#                    differential under an s0:c1-level subject), and the
+#                    loaded policy's memfd_class policycap / tmpfs_t
+#                    authority inventory. Forensic evidence only: NO grants,
+#                    NO production changes, NO policy module loads.
+#
 # SCOPE NOTE: the default artifact source is the FAILED full-gate run's
 # producer set (the RED fixture). It exists to reproduce and to collect
 # forensic evidence on the exact bytes that failed; it is NOT a
@@ -80,7 +97,7 @@ on:
         required: true
         type: string
       mode:
-        description: 'diag = the R7 red/green diagnosis; stop-proof = the R7 STOP-isolation proof (AppArmor consumer only); mcs-audit = the R7 MCS-isolation audit (SELinux consumer only)'
+        description: 'diag = the R7 red/green diagnosis; stop-proof = the R7 STOP-isolation proof (AppArmor consumer only); mcs-audit = the R7 MCS-isolation audit (SELinux consumer only); exeseal = the R7 exeseal boundary probe (SELinux consumer only)'
         required: false
         type: string
         default: 'diag'
@@ -95,7 +112,7 @@ permissions:
 
 jobs:
   ubuntu-tarball-diag:
-    if: inputs.mode != 'stop-proof' && inputs.mode != 'mcs-audit'
+    if: inputs.mode != 'stop-proof' && inputs.mode != 'mcs-audit' && inputs.mode != 'exeseal'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -172,7 +189,7 @@ jobs:
           if-no-files-found: error
 
   apparmor-vm-diag:
-    if: inputs.mode != 'stop-proof' && inputs.mode != 'mcs-audit'
+    if: inputs.mode != 'stop-proof' && inputs.mode != 'mcs-audit' && inputs.mode != 'exeseal'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
