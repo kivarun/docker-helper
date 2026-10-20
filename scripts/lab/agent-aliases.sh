@@ -75,8 +75,23 @@ _dh_session_delete() {
 }
 
 # --- launcher ---------------------------------------------------------------
-# Runs in a subshell so DOCKER_HELPER_SESSION_ID/TOKEN never leak into the
-# caller's shell.
+# Runs in a subshell so DOCKER_HELPER_SESSION_ID/TOKEN and the ssh-agent
+# environment never leak into the caller's shell.
+#
+# Optional capabilities (provisioned by provision-operator-files.sh; each one
+# activates only when its lab-managed artifact exists):
+#   * corporate CA: a lab-owned copy under $OPENCODE_DOCKER_HOME/ca is mounted
+#     read-only and exposed through NODE_EXTRA_CA_CERTS / SSL_CERT_FILE /
+#     CURL_CA_BUNDLE / GIT_SSL_CAINFO (the container is started by plain
+#     `docker run`, so Docker Helper's own CA injection does not apply);
+#   * gitconfig: a lab-owned copy under $OPENCODE_DOCKER_HOME/git is mounted
+#     read-only;
+#   * SSH: a dedicated ssh-agent is started as the launcher, the provisioned
+#     key is loaded into it, and ONLY the agent socket plus public host keys
+#     enter the container. The private key and the agent's ~/.ssh are never
+#     mounted. TRUST BOUNDARY: the model holding the ssh-agent socket can
+#     authenticate via SSH as the key's owner — that is this lab agent's
+#     intended capability, not an accident.
 _oc_run() (
     local image="$1"
     shift
@@ -84,21 +99,26 @@ _oc_run() (
     local helper_runtime_dir="${DOCKER_HELPER_RUNTIME_DIR:-/run/docker-helper}"
     local opencode_home="${OPENCODE_DOCKER_HOME:-$HOME/.opencode-docker}"
     local exchange_dir="${OPENCODE_EXCHANGE_DIR:-$HOME/agent-exchange}"
+    local agent_ssh_key="${OPENCODE_AGENT_SSH_KEY:-$HOME/.ssh/id_ed25519_opencode}"
     local session_id=""
+    local ssh_agent_pid=""
     local -a extra_mounts=()
+    local -a docker_env=()
 
     [[ -S "$helper_runtime_dir/docker-helper.sock" ]] || {
         echo "docker-helper socket not found: $helper_runtime_dir/docker-helper.sock" >&2
         return 1
     }
 
-    # Delete the Session on every exit path. trap - first so a signal-driven
-    # run does not re-enter cleanup through the EXIT trap.
+    # Delete the Session on every exit path, and stop the per-launch ssh-agent
+    # this launcher started. trap - first so a signal-driven run does not
+    # re-enter cleanup through the EXIT trap.
     cleanup() {
         local rc="$?"
         trap - EXIT INT TERM
         DOCKER_HELPER_SESSION_ID="$session_id" _dh_session_delete || \
             echo "warning: failed to delete docker-helper session $session_id" >&2
+        [ -z "$ssh_agent_pid" ] || kill "$ssh_agent_pid" 2>/dev/null || true
         exit "$rc"
     }
     trap cleanup EXIT INT TERM
@@ -113,9 +133,10 @@ _oc_run() (
     fi
 
     # Only the Session bearer enters the container. LLM_SERVER/LLM_KEY carry
-    # the model provider auth; no GH_TOKEN, no admin token, no principal
-    # credential. No docker.sock: the helper socket directory is mounted
-    # read-only and authority comes solely from the bearer.
+    # the model provider auth; GH_AGENT_TOKEN is passed ONLY when the
+    # operator explicitly exports it for this launch. No docker.sock, no
+    # admin token, no principal credential. No private key either: SSH goes
+    # through a per-launch ssh-agent socket only.
     #
     # Under SELinux the container must run in the helper's workload domain
     # (docker_helper_container_t) to reach the helper socket; the shipped
@@ -141,6 +162,78 @@ _oc_run() (
         -v "$opencode_home/.cache:/home/opencode/.cache:Z"
         -v "$opencode_home/tmp:/tmp/opencode:Z"
     )
+
+    # Model capability flags carried by the operator launcher.
+    docker_env+=(-e OPENCODE_EXPERIMENTAL_LSP_TOOL=true -e OPENCODE_ENABLE_EXA=1)
+    [[ -n "${GH_AGENT_TOKEN:-}" ]] && docker_env+=(-e GH_AGENT_TOKEN)
+
+    # --- corporate CA (lab-owned copy; never a system CA file) ---------------
+    # The container is created by plain `docker run`, so Docker Helper's own
+    # CA injection (POST /run only) does not apply. The lab copy is mounted
+    # read-only and exported to the usual TLS client variables; the image's
+    # own system store cannot be updated inside a non-root pinned image.
+    local ca_dir="$opencode_home/ca"
+    if [[ -d "$ca_dir" ]]; then
+        local -a ca_files=()
+        local ca_path
+        for ca_path in "$ca_dir"/*.crt; do
+            [[ -f "$ca_path" ]] && ca_files+=("$ca_path")
+        done
+        if (( ${#ca_files[@]} > 1 )); then
+            echo "ambiguous CA provisioning: multiple certificates in $ca_dir" >&2
+            return 1
+        fi
+        if [[ -n "${ca_files[0]:-}" ]]; then
+            local ca_name
+            ca_name="$(basename -- "${ca_files[0]}")"
+            extra_mounts+=(-v "$ca_dir:/etc/opencode-ca:ro,z")
+            docker_env+=(
+                -e "NODE_EXTRA_CA_CERTS=/etc/opencode-ca/$ca_name"
+                -e "SSL_CERT_FILE=/etc/opencode-ca/$ca_name"
+                -e "CURL_CA_BUNDLE=/etc/opencode-ca/$ca_name"
+                -e "GIT_SSL_CAINFO=/etc/opencode-ca/$ca_name"
+            )
+        fi
+    fi
+
+    # --- gitconfig (lab-owned copy, read-only) --------------------------------
+    if [[ -f "$opencode_home/git/gitconfig" ]]; then
+        extra_mounts+=(-v "$opencode_home/git/gitconfig:/home/opencode/.gitconfig:ro,z")
+    fi
+
+    # --- public SSH host keys (lab-owned, read-only) --------------------------
+    # Only public material enters the container: known_hosts for verifying
+    # trusted servers. The private key and the agent's own ~/.ssh never do.
+    if [[ -d "$opencode_home/ssh" ]]; then
+        extra_mounts+=(-v "$opencode_home/ssh:/home/opencode/.ssh:ro,z")
+    fi
+
+    # --- SSH agent forwarding (dedicated per-launch agent) -------------------
+    # The launcher starts a fresh ssh-agent, loads the provisioned key and
+    # passes ONLY the socket. A passphrase-protected key cannot be loaded
+    # non-interactively: that is a fail-closed launch error, not a silent
+    # degradation.
+    if [[ -f "$agent_ssh_key" ]]; then
+        local agent_dir="$opencode_home/agent-ssh"
+        mkdir -p "$agent_dir" 2>/dev/null && chmod 0700 "$agent_dir" \
+            || { echo "cannot prepare the ssh-agent directory: $agent_dir" >&2; return 1; }
+        rm -f -- "$agent_dir/agent.sock"
+        local agent_env
+        if ! agent_env="$(ssh-agent -a "$agent_dir/agent.sock")"; then
+            echo "cannot start the per-launch ssh-agent" >&2
+            return 1
+        fi
+        eval "$agent_env"
+        ssh_agent_pid="$SSH_AGENT_PID"
+        if ! SSH_ASKPASS_REQUIRE=never ssh-add -- "$agent_ssh_key" </dev/null; then
+            kill "$ssh_agent_pid" 2>/dev/null || true
+            ssh_agent_pid=""
+            echo "cannot load $agent_ssh_key into the ssh-agent (passphrase-protected keys are not supported by the non-interactive launcher)" >&2
+            return 1
+        fi
+        extra_mounts+=(-v "$agent_dir:/ssh-agent:ro")
+        docker_env+=(-e SSH_AUTH_SOCK=/ssh-agent/agent.sock)
+    fi
 
     # --init under the confined container domain. The runtime bind-mounts its
     # own init binary from the host filesystem, whose system label the custom
@@ -252,6 +345,7 @@ _oc_run() (
         --security-opt no-new-privileges=true \
         "${selinux_opts[@]}" \
         "${init_mount[@]}" \
+        "${docker_env[@]}" \
         -e LLM_SERVER \
         -e LLM_KEY \
         -e DOCKER_HELPER_SESSION_TOKEN \
@@ -266,8 +360,6 @@ _oc_run() (
 # --- images (pinned by OCI digest for reproducibility) ----------------------
 _OC_BASE='ghcr.io/kivarun/opencode-docker/base@sha256:f6c6dd302f447ec05d93f9f6ffba92dd726dcf1a82c6181733bae10e0012b970'
 _OC_GO26='ghcr.io/kivarun/opencode-docker/go26@sha256:076273633dd33218b0a0f0d783cb80539a4066c1e59dee1b069a96db971830b7'
-_OC_DOTNET10='ghcr.io/kivarun/opencode-docker/dotnet10@sha256:683beb7dc1e94defabf0bb81b23e99be86530765205e63e52fcb31d53523f3e6'
 
-oc()          { _oc_run "$_OC_BASE" "$@"; }
-oc-go26()     { _oc_run "$_OC_GO26" "$@"; }
-oc-dotnet10() { _oc_run "$_OC_DOTNET10" "$@"; }
+oc()      { _oc_run "$_OC_BASE" "$@"; }
+oc-go26() { _oc_run "$_OC_GO26" "$@"; }

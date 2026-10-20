@@ -14,21 +14,23 @@
 # "host" below means the GUEST VM; the physical host's /etc, /home, SSH config
 # and docker-helper config are not touched.
 #
-# Idempotent. It:
+# Idempotent, in two phases driven by whether docker-helper is installed:
 #   1. creates the 'agent' account with a unique uid and its workspace root,
 #      and adds it to the 'docker' group (the trusted launcher drives
 #      `docker run`);
-#   2. refuses to continue when the docker-helper principal record disagrees
-#      with the OS account (fail-closed, see the UID policy below);
-#   3. ensures a global allowed root covers the agent home;
-#   4. creates the docker-helper principal 'agent' (its 'default' Launcher and
-#      default allowed root are provisioned atomically with it), issues a
-#      principal credential and installs it, as the agent account, into
-#      ~agent/.config/docker-helper/credential.token (never printed);
-#   5. installs scripts/lab/agent-aliases.sh as ~agent/.bash_aliases and sources
-#      it from ~agent/.bashrc;
-#   6. verifies the result: unique uid, agent-owned credential and OpenCode
-#      state.
+#   2. installs the launcher aliases and prepares the OpenCode state tree;
+#   3. WITHOUT docker-helper: stops here with an explicit log (the helper
+#      install needs the agent home as its minimal --allowed-root); re-run
+#      after install-docker-helper-v230.sh;
+#   4. WITH docker-helper: refuses to continue when the docker-helper
+#      principal record disagrees with the OS account (fail-closed, see the
+#      UID policy below), ensures a global allowed root covers the agent
+#      home, creates the docker-helper principal 'agent' (its 'default'
+#      Launcher and default allowed root are provisioned atomically with it),
+#      issues a principal credential and installs it, as the agent account,
+#      into ~agent/.config/docker-helper/credential.token (never printed);
+#   5. verifies the result: unique uid, agent-owned credential (when present)
+#      and OpenCode state.
 #
 # It does NOT manage SSH keys: VM access stays with the dev-vm-local.sh SSH
 # identity, and the agent account gets no SSH of its own.
@@ -92,8 +94,6 @@ done
 . "$SCRIPT_DIR/lab-vm-guard.sh"
 require_lab_vm
 
-DH="$(command -v docker-helper)" || die "docker-helper not found in PATH"
-command -v jq >/dev/null 2>&1 || die "jq not found in PATH"
 [ -f "$ALIASES_SRC" ] || die "missing $ALIASES_SRC"
 
 # --- 1. account, workspace root, docker access ------------------------------
@@ -162,7 +162,47 @@ else
   log "WARN: group $AGENT_DOCKER_GROUP missing; add it before launching agents"
 fi
 
-# --- 2. principal record consistency (fail-closed; never DB-edited) ---------
+# --- 2. opencode home + launcher aliases -----------------------------------
+# The container runs as the agent uid (via --user) and writes these
+# bind-mounted paths.
+install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" \
+  "$AGENT_HOME/.opencode-docker/.config/opencode" \
+  "$AGENT_HOME/.opencode-docker/.local/share/opencode" \
+  "$AGENT_HOME/.opencode-docker/.local/state" \
+  "$AGENT_HOME/.opencode-docker/.cache" \
+  "$AGENT_HOME/.opencode-docker/tmp"
+# install -d leaves already-existing parents at their old owner, so normalize
+# the whole tree.
+chown -R "$AGENT_USER:$AGENT_USER" "$AGENT_HOME/.opencode-docker"
+
+install -m 0644 -o "$AGENT_USER" -g "$AGENT_USER" \
+  "$ALIASES_SRC" "$AGENT_HOME/.bash_aliases"
+if grep -qF '.bash_aliases' "$AGENT_HOME/.bashrc" 2>/dev/null; then
+  log "$AGENT_HOME/.bashrc already sources .bash_aliases"
+else
+  log "wiring $AGENT_HOME/.bash_aliases into $AGENT_HOME/.bashrc"
+  printf '\n# docker-helper agent launchers\n[ -f "$HOME/.bash_aliases" ] && . "$HOME/.bash_aliases"\n' \
+    >> "$AGENT_HOME/.bashrc"
+  chown "$AGENT_USER:$AGENT_USER" "$AGENT_HOME/.bashrc"
+fi
+
+# --- 3. docker-helper phase gate -------------------------------------------
+# The account, workspace and launcher aliases are OS-level state and are
+# provisioned first, so install-docker-helper-v230.sh can pass the agent home
+# as the minimal --allowed-root (the daemon requires an existing directory).
+# When docker-helper is not installed yet, this script stops here with an
+# explicit log and a success status: re-run it after the helper install to
+# provision the principal, allowed root and credential. Nothing helper-related
+# is skipped silently.
+if ! command -v docker-helper >/dev/null 2>&1; then
+  log "docker-helper not found in PATH: account=$AGENT_USER workspace+aliases provisioned; re-run this script after install-docker-helper-v230.sh to provision the principal, allowed root and credential"
+  exit 0
+fi
+DH="$(command -v docker-helper)" || die "docker-helper not found in PATH"
+command -v jq >/dev/null 2>&1 || die "jq not found in PATH"
+CRED_FILE="$AGENT_HOME/.config/docker-helper/credential.token"
+
+# --- 4. principal record consistency (fail-closed; never DB-edited) ---------
 # The principal record stores the uid/gid the daemon resolved from the OS
 # account at creation time, and the daemon uses it as the workload execution
 # identity. docker-helper v2.3.0 has no supported CLI to rewrite these
@@ -183,7 +223,7 @@ check_principal_identity() {
 }
 check_principal_identity
 
-# --- 3. global allowed root (authorization ceiling) -------------------------
+# --- 5. global allowed root (authorization ceiling) -------------------------
 if "$DH" config allowed-root list 2>/dev/null | grep -qF "$AGENT_HOME"; then
   log "global allowed root already covers $AGENT_HOME"
 else
@@ -191,13 +231,12 @@ else
   "$DH" config allowed-root add "$AGENT_HOME" --access read_write
 fi
 
-# --- 4. principal credential (fail-closed; explicit recovery) ---------------
+# --- 6. principal credential (fail-closed; explicit recovery) ---------------
 # The daemon stores only the token hash. An existing local credential is reused
 # when it still authenticates AND belongs to exactly this principal; a missing
 # or non-authenticating one is NOT rotated implicitly (that would silently
 # invalidate any other copy of the bearer). --recover-credential performs the
 # explicit rotate.
-CRED_FILE="$AGENT_HOME/.config/docker-helper/credential.token"
 
 # A credential is valid only when it authenticates, classifies as a principal
 # credential, and resolves to the EXPECTED principal -- never accept another
@@ -241,46 +280,27 @@ else
   log "credential installed for $AGENT_USER"
 fi
 
-# --- 5. opencode home + launcher aliases -----------------------------------
-# The container runs as the agent uid (via --user) and writes these
-# bind-mounted paths.
-install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" \
-  "$AGENT_HOME/.opencode-docker/.config/opencode" \
-  "$AGENT_HOME/.opencode-docker/.local/share/opencode" \
-  "$AGENT_HOME/.opencode-docker/.local/state" \
-  "$AGENT_HOME/.opencode-docker/.cache" \
-  "$AGENT_HOME/.opencode-docker/tmp"
-# install -d leaves already-existing parents at their old owner, so normalize
-# the whole tree.
-chown -R "$AGENT_USER:$AGENT_USER" "$AGENT_HOME/.opencode-docker"
-
-install -m 0644 -o "$AGENT_USER" -g "$AGENT_USER" \
-  "$ALIASES_SRC" "$AGENT_HOME/.bash_aliases"
-if grep -qF '.bash_aliases' "$AGENT_HOME/.bashrc" 2>/dev/null; then
-  log "$AGENT_HOME/.bashrc already sources .bash_aliases"
-else
-  log "wiring $AGENT_HOME/.bash_aliases into $AGENT_HOME/.bashrc"
-  printf '\n# docker-helper agent launchers\n[ -f "$HOME/.bash_aliases" ] && . "$HOME/.bash_aliases"\n' \
-    >> "$AGENT_HOME/.bashrc"
-  chown "$AGENT_USER:$AGENT_USER" "$AGENT_HOME/.bashrc"
-fi
-
 log "done: account=$AGENT_USER home=$AGENT_HOME workroot=$AGENT_WORKROOT"
 
-# --- 6. post-provisioning verification (uid uniqueness, ownership) ---------
+# --- 7. post-provisioning verification (uid uniqueness, ownership) ---------
 # Prove the invariants the provisioning promised: the agent uid is unique in
-# NSS (exactly one passwd entry), and the credential plus the OpenCode state
-# the container writes are owned by the agent account.
+# NSS (exactly one passwd entry), and the files the launcher and container
+# rely on are owned by the agent account. The credential exists only after
+# the docker-helper phase, so its ownership is verified conditionally.
 final_uid="$(id -u "$AGENT_USER")"
 final_uid_entries="$(getent passwd | awk -F: -v u="$final_uid" '$3 == u' | wc -l)"
 [ "$final_uid_entries" = 1 ] \
   || die "uid $final_uid is not uniquely owned by $AGENT_USER ($final_uid_entries passwd entries)"
 [ "$(getent passwd "$final_uid" | cut -d: -f1)" = "$AGENT_USER" ] \
   || die "uid $final_uid does not resolve to $AGENT_USER via NSS"
-for verified in "$CRED_FILE" "$AGENT_HOME/.opencode-docker" "$AGENT_HOME/.bash_aliases" "$AGENT_WORKROOT"; do
+verified_list=("$AGENT_HOME/.opencode-docker" "$AGENT_HOME/.bash_aliases" "$AGENT_WORKROOT")
+if [ -f "$CRED_FILE" ]; then
+  verified_list=("$CRED_FILE" "${verified_list[@]}")
+fi
+for verified in "${verified_list[@]}"; do
   [ "$(stat -c '%U' "$verified")" = "$AGENT_USER" ] \
     || die "$verified is not owned by $AGENT_USER"
 done
-log "verified: unique uid $final_uid; credential, OpenCode state, aliases and workroot owned by $AGENT_USER"
+log "verified: unique uid $final_uid; OpenCode state, aliases and workroot owned by $AGENT_USER"
 
-log "next: as $AGENT_USER, cd ~/work/<project>, then run: oc | oc-go26 | oc-dotnet10"
+log "next: as $AGENT_USER, cd ~/work/<project>, then run: oc | oc-go26"

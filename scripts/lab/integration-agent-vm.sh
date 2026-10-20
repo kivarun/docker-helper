@@ -59,9 +59,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/lab-vm-guard.sh"
 require_lab_vm
 
-PASS=0; FAIL=0
-ok()  { PASS=$((PASS+1)); printf 'ok   - %s\n' "$1"; }
-bad() { FAIL=$((FAIL+1)); printf 'FAIL - %s\n' "$1"; }
+PASS=0; FAIL=0; SKIP=0
+ok()   { PASS=$((PASS+1)); printf 'ok   - %s\n' "$1"; }
+bad()  { FAIL=$((FAIL+1)); printf 'FAIL - %s\n' "$1"; }
+skip() { SKIP=$((SKIP+1)); printf 'skip - %s\n' "$1"; }
 check() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (want '$2' got '$3')"; fi; }
 contains() { case "$3" in *"$2"*) ok "$1" ;; *) bad "$1 (missing '$2' in '$3')" ;; esac; }
 not_contains() { case "$3" in *"$2"*) bad "$1 (unexpected '$2')" ;; *) ok "$1" ;; esac; }
@@ -85,6 +86,7 @@ install -d -m 0750 -o "$AGENT_USER" -g "$AGENT_USER" "$RUN_DIR"
 cleanup() {
   # Restore a moved credential first, then remove only THIS run's directory.
   [ -e "$CRED_MOVED" ] && mv -f "$CRED_MOVED" "$CRED" 2>/dev/null
+  [ -z "${tls_srv_pid:-}" ] || kill "$tls_srv_pid" 2>/dev/null || true
   rm -rf -- "$ITEST_DIR"
 }
 trap cleanup EXIT
@@ -93,6 +95,20 @@ trap 'cleanup; exit 143' TERM
 
 # --- 1. pinned version ------------------------------------------------------
 check "docker-helper version is v$EXPECT_VERSION" "$EXPECT_VERSION" "$("$DH" version)"
+
+# --- 1b. Docker runtime inside the VM ---------------------------------------
+docker_version="$(docker version --format '{{.Server.Version}}' 2>/dev/null)" \
+  && ok "docker server version: $docker_version" || bad "docker version failed"
+systemctl is-active --quiet docker && ok "docker.service is active" || bad "docker.service is not active"
+[ -S /run/docker.sock ] && ok "docker socket present" || bad "docker socket missing"
+sock_ctx="$(stat -c '%C' /run/docker.sock 2>/dev/null || echo unknown)"
+case "$sock_ctx" in
+  *var_run_t*) ok "docker socket SELinux context: $sock_ctx" ;;
+  *) bad "unexpected docker socket SELinux context: $sock_ctx" ;;
+esac
+sudo -u "$AGENT_USER" docker info >/dev/null 2>&1 \
+  && ok "the agent (trusted launcher) reaches the docker daemon" \
+  || bad "the agent cannot reach the docker daemon"
 
 # --- 2. uid uniqueness ------------------------------------------------------
 opc_uid="$(id -u opc)"
@@ -153,6 +169,39 @@ unset tc_tok2
 sudo -u "$AGENT_USER" "$DH" self --json >/dev/null 2>&1 \
   && ok "default agent credential untouched by the test rotation" \
   || bad "default agent credential broken by the test rotation"
+
+# --- 7b. corporate CA provisioning (optional; provisioned by the operator) --
+# The helper injection path (trusted_ca_path + trusted_ca_injection=auto) is
+# verified through the supported CLI surface; the container-facing lab copy
+# must be byte-identical to the trust-store anchor. With no CA provisioned
+# these checks are an explicit SKIP, never a silent pass.
+ca_anchor=""
+for cand in /etc/pki/trust/anchors/*; do
+  # The helper copy identifies the provisioned CA uniquely.
+  if [ -f "/etc/docker-helper/$(basename "$cand").crt" ]; then
+    ca_anchor="$cand"
+    break
+  fi
+done
+if [ -n "$ca_anchor" ]; then
+  ca_name="$(basename "$ca_anchor")"
+  tcp_inj="$(docker-helper config show --json 2>/dev/null | jq -r '.trusted_ca_injection // empty')"
+  check "trusted_ca_injection is auto" "auto" "$tcp_inj"
+  tcp_path="$(docker-helper config show --json 2>/dev/null | jq -r '.trusted_ca_path // empty')"
+  check "trusted_ca_path points at the helper-owned copy" "/etc/docker-helper/$ca_name.crt" "$tcp_path"
+  check "anchor and helper CA copy are byte-identical" \
+    "$(sha256sum < "$ca_anchor" | awk '{print $1}')" \
+    "$(sha256sum < "/etc/docker-helper/$ca_name.crt" | awk '{print $1}')"
+  if [ -f "$AGENT_HOME/.opencode-docker/ca/$ca_name.crt" ]; then
+    check "anchor and container CA copy are byte-identical" \
+      "$(sha256sum < "$ca_anchor" | awk '{print $1}')" \
+      "$(sha256sum < "$AGENT_HOME/.opencode-docker/ca/$ca_name.crt" | awk '{print $1}')"
+  else
+    bad "container-facing CA copy missing: $AGENT_HOME/.opencode-docker/ca/$ca_name.crt"
+  fi
+else
+  skip "corporate CA checks (no CA provisioned)"
+fi
 
 # --- 8/9/10. real launcher end-to-end ---------------------------------------
 ws="$AGENT_HOME/work/itest"
@@ -237,8 +286,18 @@ contains "container gets only the session bearer env" "-e DOCKER_HELPER_SESSION_
 not_contains "container has no docker.sock" "docker.sock" "$argv"
 not_contains "container has no admin token" "ADMIN" "$argv"
 not_contains "container has no principal credential" "/.config/docker-helper" "$argv"
-not_contains "container has no implicit .ssh mount" ".ssh" "$argv"
+not_contains "the agent's real .ssh is never a mount source" "-v $AGENT_HOME/.ssh" "$argv"
+not_contains "the private ssh key is never a mount source" "$AGENT_HOME/.ssh/id_ed25519_opencode" "$argv"
 
+# SSH agent forwarding (optional; only when the operator provisioned a key).
+if [ -f "$AGENT_HOME/.ssh/id_ed25519_opencode" ]; then
+  contains "the ssh-agent socket dir is mounted for the model" \
+    "$AGENT_HOME/.opencode-docker/agent-ssh:/ssh-agent:ro" "$argv"
+  contains "SSH_AUTH_SOCK points at the forwarded socket" \
+    "-e SSH_AUTH_SOCK=/ssh-agent/agent.sock" "$argv"
+else
+  skip "ssh-agent forwarding argv checks (no agent key provisioned)"
+fi
 # init binary: the mount source is the lab copy, never the system binary.
 init_copy="$AGENT_HOME/.opencode-docker/init/docker-init"
 contains "init mount target is the runtime init path" ":/sbin/docker-init:ro,z" "$argv"
@@ -277,6 +336,86 @@ grep -q 'DHFAIL' "$ITEST_DIR/oc-fail.out" \
   && ok "the failure came from the session-create path (DHFAIL marker)" \
   || bad "the intended failure path was not reached (no DHFAIL marker)"
 
+# --- 11b. TLS trust is ENFORCED inside the container (negative evidence) -----
+# A throwaway self-signed TLS server runs in the guest (untrusted for the
+# container): the container TLS client must REFUSE the handshake. An error
+# that is not a certificate error would be inconclusive and is reported as
+# FAIL. When the CA is provisioned, the container env must carry
+# NODE_EXTRA_CA_CERTS pointing at the mounted lab copy.
+if command -v openssl >/dev/null 2>&1 && [ -n "$(ip -4 -o addr show docker0 2>/dev/null | awk '{print $4; exit}')" ]; then
+  bridge_ip="$(ip -4 -o addr show docker0 2>/dev/null | awk '{split($4,a,"/"); print a[1]; exit}')"
+  tcert="$ITEST_DIR/tls-srv.crt"; tkey="$ITEST_DIR/tls-srv.key"
+  openssl req -x509 -newkey rsa:2048 -nodes -batch -subj "/CN=lab-foreign-tls" \
+    -keyout "$tkey" -out "$tcert" -days 1 >/dev/null 2>&1 \
+    || bad "cannot generate the throwaway TLS test certificate"
+  openssl s_server -accept 9443 -cert "$tcert" -key "$tkey" -www >/dev/null 2>&1 &
+  tls_srv_pid=$!
+  srv_ready=0
+  for _ in $(seq 1 20); do
+    if timeout 2 bash -c "exec 3<>/dev/tcp/$bridge_ip/9443" 2>/dev/null; then srv_ready=1; break; fi
+    sleep 0.1
+  done
+  if [ "$srv_ready" = 1 ]; then
+    ARGV_TLS="$RUN_DIR/argv-tls"
+    install -m 0600 -o "$AGENT_USER" -g "$AGENT_USER" /dev/null "$ARGV_TLS"
+    RUNNER_TLS="$ITEST_DIR/run-tls.sh"
+    cat > "$RUNNER_TLS" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+export PATH="$SHIM_DIR:$PATH"
+cd "$1"
+docker() { printf '%s\n' "$*" >> "$ARGV_REC"; command docker "$@"; }
+# shellcheck source=/dev/null
+source "$HOME/.bash_aliases"
+if command -v curl >/dev/null 2>&1; then
+  env_out="$(oc sh -c 'printenv NODE_EXTRA_CA_CERTS || true' 2>&1 || true)"
+  printf '%s\n' "$env_out" > "$CA_ENV_OUT"
+  set +e
+  tls_out="$(oc sh -c "curl -sS --max-time 6 https://$TLS_TARGET_IP:9443/" 2>&1)"
+  tls_rc=$?
+  set -e
+  printf '%s\n' "$tls_out" > "$TLS_OUT"
+  printf 'TLS_NEG_RC=%s\n' "$tls_rc" >> "$ARGV_REC"
+else
+  printf 'NO_CURL\n' >> "$ARGV_REC"
+fi
+SH
+    chmod 0755 "$RUNNER_TLS"
+    sudo -u "$AGENT_USER" env ARGV_REC="$ARGV_TLS" SHIM_DIR="$SHIM" \
+      TLS_TARGET_IP="$bridge_ip" \
+      CA_ENV_OUT="$RUN_DIR/ca-env.out" TLS_OUT="$RUN_DIR/tls.out" \
+      script -qec "bash $RUNNER_TLS $ws" /dev/null >"$ITEST_DIR/oc-tls.out" 2>&1
+    kill "$tls_srv_pid" 2>/dev/null || true
+    tls_srv_pid=""
+    if grep -q 'NO_CURL' "$ARGV_TLS"; then
+      skip "in-container TLS check (curl is not available in the image)"
+    else
+      tls_neg_rc="$(printf '%s' "$(cat "$ARGV_TLS")" | sed -n 's/^TLS_NEG_RC=//p')"
+      if [ -n "$tls_neg_rc" ] && [ "$tls_neg_rc" != 0 ]; then
+        ok "the container refused the untrusted TLS endpoint (rc $tls_neg_rc)"
+      else
+        bad "the container accepted or hung on the untrusted TLS endpoint (TLS_NEG_RC=$tls_neg_rc)"
+      fi
+      if grep -Eqi 'certificate|ssl' "$RUN_DIR/tls.out" 2>/dev/null; then
+        ok "the refusal is a certificate-validation failure, not a connection error"
+      else
+        bad "the TLS refusal could not be attributed to certificate validation: $(tail -c 200 "$RUN_DIR/tls.out" 2>/dev/null)"
+      fi
+    fi
+    if [ -n "$ca_anchor" ]; then
+      check "NODE_EXTRA_CA_CERTS reaches the container" \
+        "/etc/opencode-ca/$ca_name" \
+        "$(cat "$RUN_DIR/ca-env.out" 2>/dev/null | head -1)"
+    fi
+  else
+    skip "in-container TLS check (the throwaway server did not become reachable)"
+  fi
+  kill "$tls_srv_pid" 2>/dev/null || true
+  tls_srv_pid=""
+else
+  skip "in-container TLS check (openssl or the docker bridge is unavailable)"
+fi
+
 # --- 12. system docker-init unchanged ---------------------------------------
 init_after="$(stat -c '%n %C %u:%g %a' "$init_sys")"
 init_inode_after="$(stat -c '%i' "$init_sys")"
@@ -302,5 +441,5 @@ n_sessions="$(sudo -u "$AGENT_USER" "$DH" session list --json | jq '.sessions | 
 check "no orphan Session at the end" "0" "$n_sessions"
 
 echo
-printf 'agent VM integration: %d passed, %d failed\n' "$PASS" "$FAIL"
+printf 'agent VM integration: %d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP"
 [ "$FAIL" = 0 ]
