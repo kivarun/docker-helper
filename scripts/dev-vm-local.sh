@@ -70,10 +70,14 @@ fail() {
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# In-guest trust marker: setup-agent-user.sh runs only where this exists and
-# its embedded machine-id matches the guest. Written by this trusted driver.
-LAB_VM_MARKER="/etc/docker-helper-lab-vm"
-LAB_VM_MARKER_TAG="docker-helper-lab-vm"
+# In-guest trust marker: the destructive lab scripts run only where this
+# exists and its embedded machine-id matches the guest. Written by this
+# trusted driver; the marker contract (tag, version, path) is owned by the
+# shared guard library the guest scripts enforce it with.
+# shellcheck source=lab/lab-vm-guard.sh
+. "$SCRIPT_DIR/lab/lab-vm-guard.sh"
+LAB_VM_MARKER="$LAB_VM_GUARD_MARKER_PATH"
+LAB_VM_MARKER_TAG="$LAB_VM_GUARD_TAG"
 
 # --- persistent state + local posture (exported BEFORE the lib sources the
 # --- harness, so the harness reads them at source time) ---

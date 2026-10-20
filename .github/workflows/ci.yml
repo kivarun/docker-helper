@@ -76,6 +76,7 @@ jobs:
         run: |
           bash scripts/lab/test-agent-aliases.sh
           bash scripts/lab/test-setup-agent-user.sh
+          bash scripts/lab/test-lab-vm-guard.sh
 
   selinux-policy:
     runs-on: ubuntu-latest

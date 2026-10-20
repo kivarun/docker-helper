@@ -18,8 +18,14 @@
 # bundled policy, relabels narrowly, installs the systemd unit and starts the
 # service.
 #
+# The lab-VM guard runs before ANY state change (no download, no dependency
+# install, no service stop): this script stops a service, removes a binary
+# and installs a daemon, so it must never run on the physical host.
+#
 # Env overrides: DH_V230_URL, DH_V230_SHA256, DH_V230_VERSION, DH_V230_COMMIT.
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DH_V230_VERSION="${DH_V230_VERSION:-2.3.0}"
 DH_V230_COMMIT="${DH_V230_COMMIT:-dcb886f09ad5c09b18a4083f82331e2205cc3177}"
@@ -30,6 +36,12 @@ log() { printf '[install-dh-v%s] %s\n' "$DH_V230_VERSION" "$*"; }
 die() { printf '[install-dh-v%s] ERROR: %s\n' "$DH_V230_VERSION" "$*" >&2; exit 1; }
 
 [ "$(id -u)" = 0 ] || die "must run as root in the guest"
+
+# --- lab-VM guard (fail closed on the physical host; before ANY mutation) ---
+# shellcheck source=lab-vm-guard.sh
+. "$SCRIPT_DIR/lab-vm-guard.sh"
+require_lab_vm
+
 command -v systemctl >/dev/null 2>&1 || die "systemctl not found"
 [ "$(cat /sys/fs/selinux/enforce 2>/dev/null || echo 0)" = 1 ] || die "SELinux is not enforcing"
 
