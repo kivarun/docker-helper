@@ -118,6 +118,28 @@ oc_lab_mount_source_ok() { # KIND(dir|file) PATH LAB_ROOT
     return 0
 }
 
+# --- per-launch ssh-agent lifecycle (F5) ------------------------------------
+# Each launch owns a private run directory (mktemp -d, 0700) holding its own
+# agent socket, so concurrent launches never share a socket pathname and one
+# launch can never destroy another's socket. The sweep below removes ONLY
+# resources whose recorded pid is gone — it never uses pkill-style user-wide
+# kills, so live launches are untouched.
+_oc_ssh_stale_cleanup() {
+    local base="${OPENCODE_DOCKER_HOME:-$HOME/.opencode-docker}/agent-ssh"
+    [ -d "$base" ] || return 0
+    local d pid
+    for d in "$base"/run.*; do
+        [ -d "$d" ] || continue
+        pid=""
+        [ -f "$d/agent.pid" ] && pid="$(cat "$d/agent.pid" 2>/dev/null)"
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            continue
+        fi
+        [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+        rm -rf -- "$d"
+    done
+}
+
 # --- launcher ---------------------------------------------------------------
 # Runs in a subshell so DOCKER_HELPER_SESSION_ID/TOKEN and the ssh-agent
 # environment never leak into the caller's shell.
@@ -146,6 +168,7 @@ _oc_run() (
     local agent_ssh_key="${OPENCODE_AGENT_SSH_KEY:-$HOME/.ssh/id_ed25519_opencode}"
     local session_id=""
     local ssh_agent_pid=""
+    local ssh_run_dir=""
     local -a extra_mounts=()
     local -a docker_env=()
 
@@ -163,6 +186,7 @@ _oc_run() (
         DOCKER_HELPER_SESSION_ID="$session_id" _dh_session_delete || \
             echo "warning: failed to delete docker-helper session $session_id" >&2
         [ -z "$ssh_agent_pid" ] || kill "$ssh_agent_pid" 2>/dev/null || true
+        [ -z "$ssh_run_dir" ] || rm -rf -- "$ssh_run_dir"
         exit "$rc"
     }
     trap cleanup EXIT INT TERM
@@ -260,29 +284,41 @@ _oc_run() (
     fi
 
     # --- SSH agent forwarding (dedicated per-launch agent) -------------------
-    # The launcher starts a fresh ssh-agent, loads the provisioned key and
-    # passes ONLY the socket. A passphrase-protected key cannot be loaded
-    # non-interactively: that is a fail-closed launch error, not a silent
-    # degradation.
+    # A private run directory per launch (F5): its own socket, its own agent,
+    # its own cleanup. A stale sweep first removes run dirs whose recorded
+    # agent is gone (crash leftovers); live launches are never touched. The
+    # launcher pid is recorded BEFORE the agent starts so a concurrent sweep
+    # cannot mistake a starting launch for stale. A passphrase-protected key
+    # cannot be loaded non-interactively: that is a fail-closed launch error,
+    # not a silent degradation.
     if [[ -f "$agent_ssh_key" ]]; then
-        local agent_dir="$opencode_home/agent-ssh"
-        mkdir -p "$agent_dir" 2>/dev/null && chmod 0700 "$agent_dir" \
-            || { echo "cannot prepare the ssh-agent directory: $agent_dir" >&2; return 1; }
-        rm -f -- "$agent_dir/agent.sock"
+        _oc_ssh_stale_cleanup
+        local run_dir
+        mkdir -p "$opencode_home/agent-ssh" 2>/dev/null \
+            || { echo "cannot prepare the ssh-agent base directory" >&2; return 1; }
+        run_dir="$(mktemp -d "$opencode_home/agent-ssh/run.XXXXXX")" \
+            || { echo "cannot allocate the ssh-agent run directory" >&2; return 1; }
+        ssh_run_dir="$run_dir"
+        printf '%s\n' "$$" > "$run_dir/launcher.pid"
         local agent_env
-        if ! agent_env="$(ssh-agent -a "$agent_dir/agent.sock")"; then
+        if ! agent_env="$(ssh-agent -a "$run_dir/agent.sock")"; then
+            rm -rf -- "$run_dir"
+            ssh_run_dir=""
             echo "cannot start the per-launch ssh-agent" >&2
             return 1
         fi
         eval "$agent_env"
         ssh_agent_pid="$SSH_AGENT_PID"
+        printf '%s\n' "$ssh_agent_pid" > "$run_dir/agent.pid"
         if ! SSH_ASKPASS_REQUIRE=never ssh-add -- "$agent_ssh_key" </dev/null; then
             kill "$ssh_agent_pid" 2>/dev/null || true
             ssh_agent_pid=""
+            rm -rf -- "$run_dir"
+            ssh_run_dir=""
             echo "cannot load $agent_ssh_key into the ssh-agent (passphrase-protected keys are not supported by the non-interactive launcher)" >&2
             return 1
         fi
-        extra_mounts+=(-v "$agent_dir:/ssh-agent:ro")
+        extra_mounts+=(-v "$run_dir:/ssh-agent:ro")
         docker_env+=(-e SSH_AUTH_SOCK=/ssh-agent/agent.sock)
     fi
 

@@ -92,7 +92,7 @@ SH
 cat > "$SHIM/docker" <<'SH'
 #!/bin/sh
 printf '%s\n' "$*" >> "$DOCKER_REC"
-[ -n "${STUB_SLEEP:-}" ] && sleep 30
+[ -n "${STUB_SLEEP:-}" ] && sleep "${STUB_SLEEP_SECONDS:-30}"
 exit 0
 SH
 
@@ -108,6 +108,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$sock" ] || { echo "usage: ssh-agent -a socket" >&2; exit 2; }
+python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' "$sock" 2>/dev/null || : > "$sock"
 sleep 300 >/dev/null 2>&1 &
 pid=$!
 echo "$pid" > "$SSH_AGENT_PIDFILE"
@@ -252,7 +253,7 @@ contains "CURL_CA_BUNDLE points at the mounted copy" "-e CURL_CA_BUNDLE=/etc/ope
 contains "GIT_SSL_CAINFO points at the mounted copy" "-e GIT_SSL_CAINFO=/etc/opencode-ca/lab-ca.crt" "$dargv"
 contains "gitconfig copy is mounted read-only" "$OPENCODE_DOCKER_HOME/git/gitconfig:/home/opencode/.gitconfig:ro,z" "$dargv"
 contains "public ssh material is mounted read-only" "$OPENCODE_DOCKER_HOME/ssh:/home/opencode/.ssh:ro,z" "$dargv"
-contains "the ssh-agent socket dir is the only agent mount" "$OPENCODE_DOCKER_HOME/agent-ssh:/ssh-agent:ro" "$dargv"
+contains "the ssh-agent socket dir is the only agent mount" "/ssh-agent:ro" "$dargv"
 contains "SSH_AUTH_SOCK points at the forwarded socket" "-e SSH_AUTH_SOCK=/ssh-agent/agent.sock" "$dargv"
 contains "ssh-add loaded the provisioned key" "ssh-add -- $OPENCODE_AGENT_SSH_KEY" "$(cat "$SSH_ADD_REC" 2>/dev/null || true)"
 not_contains "the private key file is never a mount source" "$OPENCODE_AGENT_SSH_KEY:" "$dargv"
@@ -265,7 +266,9 @@ fi
 contains "opencode LSP tool flag is passed" "-e OPENCODE_EXPERIMENTAL_LSP_TOOL=true" "$dargv"
 contains "opencode exa flag is passed" "-e OPENCODE_ENABLE_EXA=1" "$dargv"
 
-# the full mounted source allowlist with every capability present
+# the full mounted source allowlist with every capability present; the
+# ssh-agent run directory is unique per launch, so it is taken from the argv
+agent_ssh_mount="$(printf '%s' "$dargv" | grep -oE '\-v [^ ]*agent-ssh/run[^ :]*:/ssh-agent:ro' | head -1 | sed 's/^-v //; s|:/ssh-agent:ro$||')"
 mounted_srcs=""
 prev=""
 for w in $dargv; do
@@ -284,7 +287,7 @@ $WORK/run
 $OPENCODE_DOCKER_HOME/ca
 $OPENCODE_DOCKER_HOME/git/gitconfig
 $OPENCODE_DOCKER_HOME/ssh
-$OPENCODE_DOCKER_HOME/agent-ssh" \
+$agent_ssh_mount" \
   "$(printf '%s' "$mounted_srcs" | sed '/^$/d')"
 
 # --- 7a. GH_AGENT_TOKEN is opt-in -------------------------------------------
@@ -520,6 +523,102 @@ if oc_lab_mount_source_ok file "$OPENCODE_DOCKER_HOME/git/gitconfig" "$OPENCODE_
 else
   ok "F4/unit: the gate refuses a symlinked file source"
 fi
+
+# --- F5. concurrent launches own private ssh-agent sockets -------------------
+# The previous design used one shared socket path: the next launch's rm -f
+# broke the running launch's agent. Each launch must own a private run dir.
+mkdir -p "$(dirname "$OPENCODE_AGENT_SSH_KEY")"
+printf 'PRIVATE-KEY\n' > "$OPENCODE_AGENT_SSH_KEY"
+f4_reset  # start from a clean capability layout (the F4 cases left traps)
+
+f5_socket_of() { # RECFILE -> the agent-ssh mount source of that record
+  printf '%s' "$(cat "$1" 2>/dev/null || true)" \
+    | grep -oE "\-v [^ ]*agent-ssh/run[^ :]*:/ssh-agent:ro" \
+    | head -1 | sed 's/^-v //; s|:/ssh-agent:ro$||'
+}
+
+# F5.1 two overlapping launches get different socket paths; the first is not
+# broken by the second
+: > "$DH_REC"; : > "$DOCKER_REC"
+( export STUB_SLEEP=1 STUB_SLEEP_SECONDS=6; cd "$WS" && oc echo first ) &
+a_pid=$!
+for _ in $(seq 1 50); do grep -q "agent-ssh/run" "$DOCKER_REC" 2>/dev/null && break; sleep 0.1; done
+a_sock="$(f5_socket_of "$DOCKER_REC")"
+if [ -n "$a_sock" ]; then ok "F5: the first launch mounts its own run socket"; else bad "F5: no agent-ssh run mount for the first launch"; fi
+if [ -S "$a_sock/agent.sock" ]; then ok "F5: the first launch's socket exists while it runs"; else bad "F5: the first launch's socket is missing (a_sock=$a_sock; ls: $(ls -la "$a_sock" 2>&1 | tail -2))"; fi
+
+: > "$DH_REC"; : > "$DOCKER_REC"
+( cd "$WS" && oc echo second )
+b_sock="$(f5_socket_of "$DOCKER_REC")"
+if [ -n "$b_sock" ] && [ "$a_sock" != "$b_sock" ]; then
+  ok "F5: concurrent launches use different socket paths"
+else
+  bad "F5: concurrent launches share a socket path ('$a_sock' vs '$b_sock')"
+fi
+if [ -S "$a_sock/agent.sock" ]; then
+  ok "F5: the second launch did not break the first launch's socket"
+else
+  bad "F5: the second launch destroyed the first launch's socket"
+fi
+if grep -q 'delete session delete dhs_TEST' "$DH_REC"; then
+  ok "F5: the second launch deleted its own session"
+else
+  bad "F5: the second launch did not delete its session"
+fi
+wait "$a_pid" 2>/dev/null || true
+unset STUB_SLEEP STUB_SLEEP_SECONDS
+if [ ! -e "$a_sock" ]; then ok "F5: the first launch cleaned its own run dir"; else bad "F5: the first launch left its run dir"; fi
+
+# F5.2 a failed ssh-add cleans only its own agent; a foreign live run survives
+foreign_dir="$OPENCODE_DOCKER_HOME/agent-ssh/run.foreign"
+mkdir -p "$foreign_dir"
+sleep 20 >/dev/null 2>&1 &
+foreign_pid=$!
+printf '%s\n' "$foreign_pid" > "$foreign_dir/agent.pid"
+export SSH_ADD_FAIL=1
+: > "$DH_REC"; : > "$DOCKER_REC"
+( cd "$WS" && oc echo hi ) >/dev/null 2>&1
+unset SSH_ADD_FAIL
+remaining="$(ls "$OPENCODE_DOCKER_HOME/agent-ssh" 2>/dev/null | grep -vc '^run.foreign$' || true)"
+check "F5: a failed ssh-add removed its own run dir" "0" "$remaining"
+if kill -0 "$foreign_pid" 2>/dev/null && [ -d "$foreign_dir" ]; then
+  ok "F5: a failed launch left the foreign live run untouched"
+else
+  bad "F5: a failed launch touched the foreign live run"
+fi
+kill "$foreign_pid" 2>/dev/null || true
+rm -rf "$foreign_dir"
+
+# F5.3 the stale-resource sweep removes only dead launches (no pkill)
+sleep 20 >/dev/null 2>&1 &
+live_pid=$!
+mkdir -p "$foreign_dir"; printf '%s\n' "$live_pid" > "$foreign_dir/agent.pid"
+dead_dir="$OPENCODE_DOCKER_HOME/agent-ssh/run.dead"
+mkdir -p "$dead_dir"; printf '%s\n' "999999" > "$dead_dir/agent.pid"
+( cd "$WS" && oc echo hi ) >/dev/null 2>&1
+if [ ! -e "$dead_dir" ]; then ok "F5: the sweep removed the dead run dir"; else bad "F5: the sweep left the dead run dir"; fi
+if [ -d "$foreign_dir" ] && kill -0 "$live_pid" 2>/dev/null; then
+  ok "F5: the sweep never touches a live run"
+else
+  bad "F5: the sweep removed a live run"
+fi
+kill "$live_pid" 2>/dev/null || true; rm -rf "$foreign_dir"
+
+# F5.4 an interrupted launcher cleans its Session, its agent and its dir
+: > "$DH_REC"; : > "$DOCKER_REC"
+( export STUB_SLEEP=1 STUB_SLEEP_SECONDS=30; cd "$WS" && oc echo bye ) &
+oc_pid=$!
+for _ in $(seq 1 50); do grep -q "agent-ssh/run" "$DOCKER_REC" 2>/dev/null && break; sleep 0.1; done
+int_sock="$(f5_socket_of "$DOCKER_REC")"
+kill -INT "$oc_pid" 2>/dev/null || true
+wait "$oc_pid" 2>/dev/null || true
+unset STUB_SLEEP STUB_SLEEP_SECONDS
+if grep -q 'delete session delete dhs_TEST' "$DH_REC" && [ -n "$int_sock" ] && [ ! -e "$int_sock" ]; then
+  ok "F5: an interrupted launcher cleans its session, agent and run dir"
+else
+  bad "F5: an interrupted launcher left resources behind (sock=$int_sock)"
+fi
+rm -f "$OPENCODE_AGENT_SSH_KEY"
 
 echo
 printf 'agent-aliases tests: %d passed, %d failed\n' "$PASS" "$FAIL"
