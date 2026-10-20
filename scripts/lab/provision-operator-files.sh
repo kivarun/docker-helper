@@ -153,6 +153,9 @@ append_payload() { # VAR FILE — embed the file as one base64 assignment line
 
 cat > "$GUEST" <<'HDR'
 # --- guest-side installer (streamed; runs as root inside the lab VM) ---------
+# LAB_GUEST_ROOT is a test seam: when set, every guest filesystem path is
+# prefixed with it (behavioral tests execute this installer against a safe
+# test root). In the real VM it is unset and the real paths are used.
 set -euo pipefail
 require_lab_vm
 log() { printf '[operator-files] %s\n' "$*"; }
@@ -160,7 +163,9 @@ die() { printf '[operator-files] ERROR: %s\n' "$*" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || die "must run as root in the guest"
 command -v openssl >/dev/null 2>&1 || die "openssl not found in the guest"
 command -v update-ca-certificates >/dev/null 2>&1 || die "update-ca-certificates not found in the guest"
-AGENT_HOME="/home/$AGENT_USER"
+LAB_GUEST_ROOT="${LAB_GUEST_ROOT:-}"
+AGENT_HOME="$LAB_GUEST_ROOT/home/$AGENT_USER"
+ETC="$LAB_GUEST_ROOT/etc"
 HDR
 
 if [ -n "$SSH_KEY_SRC" ]; then
@@ -183,10 +188,60 @@ cat >> "$GUEST" <<'BODY'
 
 AGENT_OCODE="$AGENT_HOME/.opencode-docker"
 
-decode_to() { # DEST MODE OWNER b64var
+decode_to() { # DEST MODE OWNER:GROUP b64var
+  [ ! -L "$1" ] || die "refusing to write through a symlink: $1"
   printf '%s' "${!4}" | base64 -d > "$1"
   chmod "$2" "$1"
   chown "$3" "$1"
+}
+
+# F1: authorization material is append-only. Existing content is never
+# truncated; updates run under an exclusive lock, publish atomically
+# (temp file + rename inside the target directory) and are verified for the
+# final owner/mode. Symlinked targets and symlinked directories are refused,
+# and the lock re-checks the target so a concurrent swap cannot slip through.
+# Deduplication: authorized_keys compares KEY TYPE + KEY DATA (fields 1 and
+# 2), so the same key with a different comment is never duplicated;
+# known_hosts compares whole lines, which preserves hashed entries verbatim.
+merge_into() { # TARGET MODE OWNER:GROUP NEWFILE DEDUPE(auth|line)
+  local target="$1" mode="$2" owner_group="$3" newfile="$4" dedupe="$5"
+  local dir lock exist rc
+  dir="$(dirname -- "$target")"
+  [ -d "$dir" ] && [ ! -L "$dir" ] || die "refusing to update: $dir is not a real directory"
+  [ ! -L "$target" ] || die "refusing to update through a symlink: $target"
+  command -v flock >/dev/null 2>&1 || die "flock is not available in the guest"
+  lock="$dir/.provision.lock"
+  if [ -f "$target" ]; then exist="$target"; else exist="/dev/null"; fi
+  rc=0
+  (
+    flock -x 9 || exit 4
+    # re-check under the lock: another writer may have replaced the target
+    [ ! -L "$target" ] || exit 3
+    tmp="$(mktemp -- "$dir/.provision.XXXXXX")" || exit 5
+    if [ -f "$target" ]; then
+      cat -- "$target" > "$tmp" || { rm -f -- "$tmp"; exit 6; }
+    fi
+    if [ -s "$newfile" ]; then
+      # FILENAME==ARGV[1] (not NR==FNR): with an empty or absent existing
+      # file, NR==FNR misclassifies every record of the new file as the
+      # first file's records and silently drops them.
+      if ! awk -v dedupe="$dedupe" '
+          FILENAME==ARGV[1] { if (dedupe=="auth") seen[$1" "$2]=1; else seen[$0]=1; next }
+          { if (dedupe=="auth") { k=$1" "$2; if (!(k in seen)) { seen[k]=1; print } }
+            else if (!($0 in seen)) print }' \
+        "$exist" "$newfile" >> "$tmp"; then
+        rm -f -- "$tmp"
+        exit 7
+      fi
+    fi
+    chmod "$mode" "$tmp" || { rm -f -- "$tmp"; exit 8; }
+    chown "$owner_group" "$tmp" || { rm -f -- "$tmp"; exit 9; }
+    mv -f -- "$tmp" "$target" || { rm -f -- "$tmp"; exit 10; }
+    exit 0
+  ) 9> "$lock" || rc=$?
+  [ "$rc" = 0 ] || die "update of $target failed (step $rc); previous content preserved"
+  [ "$(stat -c '%04a' -- "$target")" = "$mode" ] || die "mode verification failed for $target"
+  [ "$(stat -c '%U:%G' -- "$target")" = "$owner_group" ] || die "owner verification failed for $target"
 }
 
 # --- agent ssh key -----------------------------------------------------------
@@ -194,33 +249,34 @@ if [ -n "${SSH_KEY_B64:-}" ]; then
   install -d -m 0700 -o "$AGENT_USER" -g "$AGENT_USER" "$AGENT_HOME/.ssh"
   decode_to "$AGENT_HOME/.ssh/id_ed25519_opencode" 0600 "$AGENT_USER:$AGENT_USER" SSH_KEY_B64
   decode_to "$AGENT_HOME/.ssh/id_ed25519_opencode.pub" 0644 "$AGENT_USER:$AGENT_USER" SSH_PUB_B64
-  # authorized_keys: append the agent public key without duplicates.
-  install -m 0600 -o "$AGENT_USER" -g "$AGENT_USER" /dev/null "$AGENT_HOME/.ssh/authorized_keys"
-  SSH_PUB_LINE="$(awk '{print $1, $2}' "$AGENT_HOME/.ssh/id_ed25519_opencode.pub") opencode-agent"
-  if ! grep -qxF -- "$SSH_PUB_LINE" "$AGENT_HOME/.ssh/authorized_keys"; then
-    printf '%s\n' "$SSH_PUB_LINE" >> "$AGENT_HOME/.ssh/authorized_keys"
-    chown "$AGENT_USER:$AGENT_USER" "$AGENT_HOME/.ssh/authorized_keys"
-  fi
+  # authorized_keys: the agent key is appended by KEY TYPE + KEY DATA, never
+  # duplicating and never removing existing entries.
+  new_auth="$AGENT_HOME/.ssh/.provision-new.$$"
+  awk '{print $1, $2, "opencode-agent"}' "$AGENT_HOME/.ssh/id_ed25519_opencode.pub" > "$new_auth"
+  merge_into "$AGENT_HOME/.ssh/authorized_keys" 0600 "$AGENT_USER:$AGENT_USER" "$new_auth" auth
+  rm -f -- "$new_auth"
   log "agent ssh key installed (0600) and authorized_keys updated"
 fi
 
 # --- corporate CA ------------------------------------------------------------
 if [ -n "${CA_B64:-}" ]; then
-  decode_to "/etc/pki/trust/anchors/$CA_NAME" 0644 "root:root" CA_B64
-  update-ca-certificates >/dev/null 2>&1 || die "update-ca-certificates failed"
-  # The system trust store must now resolve this CA (a real positive check:
-  # the anchor is accepted as a trusted root out of the regenerated bundle).
-  openssl verify -CAfile /etc/ssl/ca-bundle.pem "/etc/pki/trust/anchors/$CA_NAME" >/dev/null \
-    || die "the CA is not resolvable from the guest trust store"
+  decode_to "$ETC/pki/trust/anchors/$CA_NAME" 0644 "root:root" CA_B64
+  if [ -z "$LAB_GUEST_ROOT" ]; then
+    update-ca-certificates >/dev/null 2>&1 || die "update-ca-certificates failed"
+    # A real positive check: the anchor must be accepted as a trusted root out
+    # of the REGENERATED system bundle, not merely exist on disk.
+    openssl verify -CAfile "$ETC/ssl/ca-bundle.pem" "$ETC/pki/trust/anchors/$CA_NAME" >/dev/null \
+      || die "the CA is not resolvable from the guest trust store"
+  fi
   # Helper-owned copy for Docker Helper CA injection (lab-managed file).
-  install -d -m 0755 /etc/docker-helper
-  decode_to "/etc/docker-helper/$CA_NAME.crt" 0644 "root:root" CA_B64
-  command -v restorecon >/dev/null 2>&1 && restorecon "/etc/docker-helper/$CA_NAME.crt"
+  install -d -m 0755 "$ETC/docker-helper"
+  decode_to "$ETC/docker-helper/$CA_NAME.crt" 0644 "root:root" CA_B64
+  command -v restorecon >/dev/null 2>&1 && restorecon "$ETC/docker-helper/$CA_NAME.crt"
   # Container-facing lab copy (agent-owned; the relabel touches only this copy).
   install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" "$AGENT_OCODE/ca"
   decode_to "$AGENT_OCODE/ca/$CA_NAME.crt" 0644 "$AGENT_USER:$AGENT_USER" CA_B64
   # Configure through the supported CLI only; never edit config.json directly.
-  docker-helper config set trusted_ca_path "/etc/docker-helper/$CA_NAME.crt" >/dev/null \
+  docker-helper config set trusted_ca_path "$ETC/docker-helper/$CA_NAME.crt" >/dev/null \
     || die "config set trusted_ca_path failed"
   docker-helper config set trusted_ca_injection auto >/dev/null \
     || die "config set trusted_ca_injection failed"
@@ -238,15 +294,15 @@ fi
 # --- known_hosts ---------------------------------------------------------------
 if [ -n "${KNOWN_HOSTS_B64:-}" ]; then
   install -d -m 0700 -o "$AGENT_USER" -g "$AGENT_USER" "$AGENT_HOME/.ssh"
-  # Merge without duplicates into the agent's own known_hosts.
-  install -m 0644 -o "$AGENT_USER" -g "$AGENT_USER" /dev/null "$AGENT_HOME/.ssh/known_hosts"
-  printf '%s' "${KNOWN_HOSTS_B64}" | base64 -d | while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    grep -qxF -- "$line" "$AGENT_HOME/.ssh/known_hosts" \
-      || printf '%s\n' "$line" >> "$AGENT_HOME/.ssh/known_hosts"
-  done
-  chown "$AGENT_USER:$AGENT_USER" "$AGENT_HOME/.ssh/known_hosts"
-  # Container-facing copy (public material only; mounted read-only).
+  # Merge WITHOUT truncation into the agent's own known_hosts: existing
+  # entries (including hashed ones) survive every run.
+  new_kh="$AGENT_HOME/.ssh/.provision-new.$$"
+  printf '%s' "${KNOWN_HOSTS_B64}" | base64 -d > "$new_kh"
+  merge_into "$AGENT_HOME/.ssh/known_hosts" 0644 "$AGENT_USER:$AGENT_USER" "$new_kh" line
+  rm -f -- "$new_kh"
+  # Container-facing copy (public material only; mounted read-only). This is
+  # a provisioner-owned derived copy: the operator source is its single
+  # source of truth, so it is republished (not merged) on every run.
   install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" "$AGENT_OCODE/ssh"
   decode_to "$AGENT_OCODE/ssh/known_hosts" 0644 "$AGENT_USER:$AGENT_USER" KNOWN_HOSTS_B64
   log "known_hosts installed (agent + container copy)"

@@ -83,7 +83,14 @@ contains "guest installer requires the lab guard" "require_lab_vm" "$STREAM"
 contains "guest installer creates a 0700 .ssh" 'install -d -m 0700' "$STREAM"
 contains "guest installer writes the key 0600" '0600 "$AGENT_USER:$AGENT_USER" SSH_KEY_B64' "$STREAM"
 contains "guest installer writes the pub 0644" 'id_ed25519_opencode.pub" 0644' "$STREAM"
-contains "authorized_keys appended without duplicates" 'grep -qxF' "$STREAM"
+contains "authorized_keys updated by the merge mechanism" 'merge_into "$AGENT_HOME/.ssh/authorized_keys"' "$STREAM"
+contains "known_hosts merged without truncation" 'merge_into "$AGENT_HOME/.ssh/known_hosts"' "$STREAM"
+contains "updates are locked and atomically published" 'flock -x 9' "$STREAM"
+if printf '%s' "$STREAM" | grep -q '/dev/null "$AGENT_HOME/.ssh/authorized_keys"\|/dev/null "$AGENT_HOME/.ssh/known_hosts"'; then
+  bad "the clobber pattern is still present"
+else
+  ok "no truncating install of authorization material"
+fi
 if printf '%s' "$STREAM" | grep -q -- '-----BEGIN OPENSSH PRIVATE KEY-----'; then
   bad "the raw private key leaked into the stream (must be base64 payload only)"
 else
@@ -116,9 +123,9 @@ rm -f "$KEY_DIR/id_ed25519_opencode.pub"
 rm -f "$CAPTURE"
 LAB_CA_SOURCE="$WORK/lab-ca" run_prov
 if [ "$RC" = 0 ]; then ok "valid CA provisions"; else bad "valid CA run failed: $OUT"; fi
-contains "trust anchor installed" "/etc/pki/trust/anchors/" "$STREAM"
+contains "trust anchor installed" '$ETC/pki/trust/anchors/' "$STREAM"
 contains "system store regenerated and verified" "openssl verify -CAfile" "$STREAM"
-contains "helper-owned copy installed" "/etc/docker-helper/" "$STREAM"
+contains "helper-owned copy installed" '$ETC/docker-helper/' "$STREAM"
 contains "restorecon runs on the helper copy" "restorecon" "$STREAM"
 contains "helper CA configured via the CLI" "config set trusted_ca_path" "$STREAM"
 contains "injection enabled via the CLI" "config set trusted_ca_injection auto" "$STREAM"
@@ -157,6 +164,98 @@ if [ -n "$guard_line" ] && [ -n "$guest_line" ] && [ "$guard_line" -lt "$guest_l
 else
   bad "the stream lacks the lab guard (guard=$guard_line guest=$guest_line)"
 fi
+
+# --- F1. behavioral execution of the guest-side installer -----------------------
+# The generated guest script is EXECUTED against a safe test root
+# (LAB_GUEST_ROOT) with stubbed guest tooling; assertions observe real file
+# states, not source patterns. The agent user maps to the test user so the
+# real chown/stat verification runs as the file owner.
+GUEST_USER="$(id -un)"
+GUEST_ROOT="$WORK/guestroot"
+GUEST_SHIM="$WORK/guestshim"; mkdir -p "$GUEST_SHIM"
+printf '#!/bin/sh\necho 0\n' > "$GUEST_SHIM/id"
+printf '#!/bin/sh\necho "dh $*" >> "%s"\nexit 0\n' "$WORK/guestdh.rec" > "$GUEST_SHIM/docker-helper"
+printf '#!/bin/sh\nexit 0\n' > "$GUEST_SHIM/update-ca-certificates"
+chmod +x "$GUEST_SHIM"/*
+AK="$GUEST_ROOT/home/$GUEST_USER/.ssh/authorized_keys"
+KH="$GUEST_ROOT/home/$GUEST_USER/.ssh/known_hosts"
+
+# Capture the CURRENT generated guest body for the current env, then execute
+# it with a stubbed guard and a safe test root.
+execute_guest_body() {
+  STREAM_CAPTURE="$CAPTURE" \
+  LAB_AGENT_SSH_KEY="$KEY_DIR/id_ed25519_opencode" \
+  LAB_KNOWN_HOSTS_SOURCE="${GUEST_KH_SRC:-}" AGENT_USER="$GUEST_USER" \
+    bash "$REPO/lab/provision-operator-files.sh" >"$WORK/out" 2>&1 || return 1
+  awk 'f{print} /# --- guest-side installer/{f=1}' "$CAPTURE" > "$WORK/guest-body.sh"
+  { printf 'require_lab_vm() { :; }\n'; cat "$WORK/guest-body.sh"; } \
+    | PATH="$GUEST_SHIM:$PATH" LAB_GUEST_ROOT="$GUEST_ROOT" AGENT_USER="$GUEST_USER" bash -s
+}
+
+printf 'host-key-1\n|1|hashedentrymarker= ssh-ed25519 AAAAHASHED1 host-one\n' > "$WORK/op-kh"
+export GUEST_KH_SRC="$WORK/op-kh"
+
+# F1.1 first run creates authorized_keys/known_hosts correctly
+rm -rf "$GUEST_ROOT"; mkdir -p "$GUEST_ROOT/home/$GUEST_USER"
+if execute_guest_body; then ok "F1: guest installer runs on the test root"; else bad "F1: guest installer failed: $(cat "$WORK/out")"; fi
+[ "$(stat -c '%a' "$AK" 2>/dev/null)" = 600 ] && ok "F1: authorized_keys mode 0600" || bad "F1: authorized_keys mode wrong ($(stat -c '%a' "$AK" 2>/dev/null))"
+[ "$(stat -c '%U' "$AK" 2>/dev/null)" = "$GUEST_USER" ] || bad "F1: authorized_keys owner wrong"
+[ "$(stat -c '%a' "$KH" 2>/dev/null)" = 644 ] && ok "F1: known_hosts mode 0644" || bad "F1: known_hosts mode wrong"
+grep -q 'opencode-agent' "$AK" && ok "F1: agent key present in authorized_keys" || bad "F1: agent key missing"
+grep -qF 'host-key-1' "$KH" && ok "F1: provided known_hosts entry installed" || bad "F1: known_hosts entry missing"
+grep -qF '|1|hashedentrymarker=' "$KH" && ok "F1: hashed known_hosts entry preserved" || bad "F1: hashed entry lost"
+
+# F1.2 second run with the same data is byte-identical
+cp "$AK" "$WORK/ak.first"; cp "$KH" "$WORK/kh.first"
+if execute_guest_body; then ok "F1: re-run succeeds"; else bad "F1: re-run failed"; fi
+cmp -s "$AK" "$WORK/ak.first" && ok "F1: re-run is byte-identical (authorized_keys)" || bad "F1: re-run changed authorized_keys"
+cmp -s "$KH" "$WORK/kh.first" && ok "F1: re-run is byte-identical (known_hosts)" || bad "F1: re-run changed known_hosts"
+
+# F1.3 adding a NEW key preserves old entries (authorized_keys keeps history)
+printf 'ssh-ed25519 AAAAOTHERKEY2 other-operator@host\n' >> "$AK"
+printf 'foreign-host ssh-ed25519 AAAAFOREIGNKH\n' >> "$KH"
+if execute_guest_body; then ok "F1: third run succeeds"; else bad "F1: third run failed"; fi
+grep -qF 'AAAAOTHERKEY2' "$AK" && ok "F1: pre-existing foreign key preserved" || bad "F1: foreign key destroyed"
+grep -qF 'AAAAFOREIGNKH' "$KH" && ok "F1: pre-existing foreign known_hosts entry preserved" || bad "F1: foreign known_hosts entry destroyed"
+grep -q 'opencode-agent' "$AK" && ok "F1: agent key still present" || bad "F1: agent key lost"
+
+# F1.4 the same key with a different comment is not duplicated
+n_before="$(grep -c 'ssh-ed25519' "$AK" || true)"
+if execute_guest_body; then ok "F1: fourth run succeeds"; else bad "F1: fourth run failed"; fi
+n_after="$(grep -c 'ssh-ed25519' "$AK" || true)"
+check "F1: same key with a different comment does not duplicate" "$n_before" "$n_after"
+
+# F1.5 existing known_hosts are not lost across updates
+printf 'host-key-2 extra-host\n' >> "$WORK/op-kh"
+if execute_guest_body; then ok "F1: known_hosts update run succeeds"; else bad "F1: known_hosts update failed"; fi
+for marker in 'host-key-1' '|1|hashedentrymarker=' 'host-key-2'; do
+  grep -qF "$marker" "$KH" && ok "F1: known_hosts keeps '$marker'" || bad "F1: known_hosts lost '$marker'"
+done
+
+# F1.6 symlinked authorization files are refused fail-closed
+mv "$AK" "$WORK/ak.real"
+printf 'FOREIGN-CONTENT\n' > "$WORK/foreign-file"
+ln -s "$WORK/foreign-file" "$AK"
+if execute_guest_body 2>"$WORK/guest.err"; then bad "F1: symlinked authorized_keys accepted"; else ok "F1: symlinked authorized_keys refused"; fi
+[ "$(cat "$WORK/foreign-file")" = "FOREIGN-CONTENT" ] \
+  && ok "F1: the symlink target was not written" || bad "F1: the symlink target was modified"
+rm -f "$AK"; mv "$WORK/ak.real" "$AK"
+
+# F1.7 an update failure preserves the original content
+cat > "$GUEST_SHIM/chown" <<SH
+#!/bin/sh
+case "\$*" in
+  *.provision.*) exit 1 ;;
+  *) exec /bin/chown "\$@" ;;
+esac
+SH
+chmod +x "$GUEST_SHIM/chown"
+cp "$AK" "$WORK/ak.before-failure"
+cp "$KH" "$WORK/kh.before-failure"
+if execute_guest_body 2>"$WORK/guest.err"; then bad "F1: injected update failure was tolerated"; else ok "F1: update failure fails closed"; fi
+cmp -s "$AK" "$WORK/ak.before-failure" && ok "F1: original authorized_keys preserved on failure" || bad "F1: authorized_keys destroyed on failure"
+cmp -s "$KH" "$WORK/kh.before-failure" && ok "F1: original known_hosts preserved on failure" || bad "F1: known_hosts destroyed on failure"
+rm -f "$GUEST_SHIM/chown"
 
 echo
 printf 'provision-operator-files tests: %d passed, %d failed\n' "$PASS" "$FAIL"
