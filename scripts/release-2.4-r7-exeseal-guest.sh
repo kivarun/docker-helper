@@ -160,13 +160,19 @@ if [ -f "$STATE_DIR/sec3" ]; then log "phase marker: section 3 done; skipping"; 
 log "=== section 3: loaded-policy + filesystem inventory ==="
 command -v sesearch >/dev/null 2>&1 || { timeout 180 zypper --non-interactive install -y setools-console >/dev/null 2>&1 || true; }
 # The memfd labeling capability and class presence (the option-B kernel gate).
-cap policycaps 30 seinfo --policycaps
+cap policycaps 30 seinfo --polcap
 cap memfd-class 10 bash -c 'seinfo -x -c memfd_file 2>&1; seinfo -x -c anon_inode 2>&1; echo ---; sesearch -A -c memfd_file 2>&1 | head -5; sesearch -A -c anon_inode 2>&1 | head -5'
+# The tmpfs labeling model on the LOADED policy: the fs_use behavior, any
+# genfscon fallback, and the per-class user/role/range defaults that govern
+# object creation MLS (source vs target range).
+cap fsuse-genfs 14 bash -c 'seinfo --fs_use tmpfs 2>&1; echo ---; seinfo --fs_use overlay 2>&1; echo ---; seinfo --genfscon tmpfs 2>&1 | head -4; seinfo --genfscon overlay 2>&1 | head -4'
+cap class-defaults 20 bash -c 'seinfo --default file 2>&1; seinfo --default dir 2>&1; seinfo --default fifo_file 2>&1; seinfo --default filesystem 2>&1'
 # Option-C authority inventory: EVERY allow that touches tmpfs_t:file and
 # tmpfs_t:dir, and any type transition into/out of tmpfs_t.
 cap tmpfs-allows 60 bash -c 'sesearch -A -t tmpfs_t -c file; echo ---DIR---; sesearch -A -t tmpfs_t -c dir; echo ---FS---; sesearch -A -t tmpfs_t -c filesystem'
 cap tmpfs-transitions 30 bash -c 'sesearch -T -t tmpfs_t; echo ---FROM---; sesearch -T -s docker_helper_buildkitd_t'
 cap buildkitd-tmpfs 12 bash -c 'sesearch -A -s docker_helper_buildkitd_t -t tmpfs_t || true; echo "(buildkitd_t -> tmpfs_t allows listed above, if any)"'
+cap tmpfs-attrs 8 seinfo -x -t tmpfs_t
 # The constraint expressions that govern the relevant classes.
 cap constraints-file 40 seinfo --constrain file
 cap constraints-dir 40 seinfo --constrain dir
@@ -274,11 +280,35 @@ static void report_ns(void)
 	}
 }
 
-/* ovl <binary-dir> <dummy-lower-dir> — the exact sealedOverlayfs sequence */
+/* The probe's own real executable path (the runc-faithful binDir/name). */
+static void self_exe_dir_name(char *dir, size_t dirsz, char *name, size_t namesz)
+{
+	char exe[1024];
+	ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+	if (n <= 0) {
+		snprintf(dir, dirsz, "/usr/bin");
+		snprintf(name, namesz, "true");
+		return;
+	}
+	exe[n] = 0;
+	char *slash = strrchr(exe, '/');
+	if (!slash) {
+		snprintf(dir, dirsz, ".");
+		snprintf(name, namesz, "%s", exe);
+		return;
+	}
+	snprintf(dir, dirsz, "%s", exe);
+	dir[slash - exe] = 0;
+	snprintf(name, namesz, "%s", slash + 1);
+}
+
+/* ovl <binary-dir> <dummy-lower-dir> <binary-name> — the exact
+ * sealedOverlayfs sequence */
 static int cmd_ovl(char **argv)
 {
 	const char *lower1 = argv[0];
 	const char *lower2 = argv[1];
+	const char *binname = argv[2];
 	char lowerstr[4096];
 	int ctx, mnt, exe;
 	long rc;
@@ -311,8 +341,8 @@ static int cmd_ovl(char **argv)
 		return 1;
 	mnt = (int)rc;
 
-	rc = openat(mnt, "true", O_PATH | O_NOFOLLOW | O_CLOEXEC, 0);
-	step("openat(overlayfd, true, O_PATH|O_NOFOLLOW)", rc);
+	rc = openat(mnt, binname, O_PATH | O_NOFOLLOW | O_CLOEXEC, 0);
+	step("openat(overlayfd, binname, O_PATH|O_NOFOLLOW)", rc);
 	if (rc < 0)
 		return 1;
 	exe = (int)rc;
@@ -404,7 +434,9 @@ static int cmd_userns(char **argv)
 		close(fd);
 		printf("USERNS-ENTERED uid=%d\n", getuid());
 		report_caps();
-		_exit(cmd_ovl(argv));
+		int r = cmd_ovl(argv);
+		fflush(stdout);
+		_exit(r);
 	}
 	int st;
 	waitpid(p, &st, 0);
@@ -421,12 +453,12 @@ int main(int argc, char **argv)
 	report_caps();
 	report_ns();
 	if (!strcmp(argv[1], "ovl")) {
-		if (argc < 4)
+		if (argc < 5)
 			return 2;
 		return cmd_ovl(argv + 2);
 	}
 	if (!strcmp(argv[1], "userns")) {
-		if (argc < 4)
+		if (argc < 5)
 			return 2;
 		return cmd_userns(argv + 2);
 	}
@@ -448,32 +480,47 @@ fi
 # ============================================================================
 if [ -f "$STATE_DIR/sec5" ]; then log "phase marker: section 5 done; skipping"; else
 log "=== section 5: probe matrix (kernel-side baselines) ==="
-BIN_DIR="$(dirname "$(command -v true)")"
+# runc-faithful binary-dir/name: the probe's own real /proc/self/exe path
+# (sealedOverlayfs lowerdir=dirname:/tmpfs-dummy, openat name=basename).
+SELF_EXE="$(readlink -f /proc/self/exe 2>/dev/null || echo /usr/bin/true)"
+SELF_DIR="$(dirname "$SELF_EXE")"
+SELF_NAME="$(basename "$SELF_EXE")"
 
 # 5a. sealedOverlayfs sequence as unconfined root (full SELinux allows,
 #     init-userns caps): every errno here is a KERNEL verdict, not SELinux.
-cap probe-ovl-unconfined 20 "$EVIDENCE_DIR/exeseal_probe" ovl "$BIN_DIR" /dev/shm
+cap probe-ovl-unconfined 20 "$EVIDENCE_DIR/exeseal_probe" ovl "$SELF_DIR" /dev/shm "$SELF_NAME"
 
 # 5b. The same sequence inside a fresh unprivileged user namespace:
 #     the overlayfs-in-userns kernel-support verdict for this kernel.
-cap probe-ovl-userns 24 "$EVIDENCE_DIR/exeseal_probe" userns "$BIN_DIR" /dev/shm
+cap probe-ovl-userns 24 "$EVIDENCE_DIR/exeseal_probe" userns "$SELF_DIR" /dev/shm "$SELF_NAME"
 
 # 5c. memfd sequence as unconfined root: create/label/write/chmod/seal.
 cap probe-memfd-unconfined 20 "$EVIDENCE_DIR/exeseal_probe" memfd /proc/self/exe
 
 # 5d. The memfd-vs-pathname labeling differential under an s0:c1-level
 #     subject (runcon -l only — level change, no domain transition).
+#     The probe binary must sit on an ENTRYPOINT-allowed executable type
+#     for the level-constrained exec: /usr/local/bin is bin_t on this
+#     distro (the /tmp placement was denied entrypoint in the first rung's
+#     evidence — recorded honestly in probe-avc-window).
+install -m 755 "$EVIDENCE_DIR/exeseal_probe" /usr/local/bin/r7-exeseal-probe
+restorecon /usr/local/bin/r7-exeseal-probe >/dev/null 2>&1 || true
+PROBE_BIN=/usr/local/bin/r7-exeseal-probe
+ls -Z "$PROBE_BIN" >"$EVIDENCE_DIR/probe-bin-label.log" 2>&1
 LEVEL_OK="$(runcon -l s0:c1 id -Z 2>/dev/null)" || LEVEL_OK=""
 if [ -n "$LEVEL_OK" ]; then
   log "level-only runcon control: OK ($LEVEL_OK)"
-  cap probe-memfd-c1 24 runcon -l s0:c1 "$EVIDENCE_DIR/exeseal_probe" memfd /proc/self/exe
+  cap probe-memfd-c1 24 runcon -l s0:c1 "$PROBE_BIN" memfd /proc/self/exe
   rm -f /dev/shm/r7px /dev/shm/r7pd /dev/shm/r7pf
   cap probe-path-contrast-c1 24 runcon -l s0:c1 bash -c '
     touch /dev/shm/r7px; mkdir /dev/shm/r7pd; mkfifo /dev/shm/r7pf
-    ls -Zd /dev/shm/r7px /dev/shm/r7pd /dev/shm/r7pf 2>&1
+    ls -Zd /dev/shm /dev/shm/r7px /dev/shm/r7pd /dev/shm/r7pf 2>&1
     id -Z'
   rm -f /dev/shm/r7px; rm -rf /dev/shm/r7pd; rm -f /dev/shm/r7pf
   cap probe-path-contrast-unconfined 12 bash -c 'touch /dev/shm/r7py; ls -Zd /dev/shm/r7py; rm -f /dev/shm/r7py'
+  # The overlay sequence under the c1 level too (SELinux-side view from a
+  # categorized unconfined subject).
+  cap probe-ovl-c1 20 runcon -l s0:c1 "$PROBE_BIN" ovl "$SELF_DIR" /dev/shm "$SELF_NAME"
 else
   log "level-only runcon control FAILED — differential skipped (evidence in probe-path-contrast log)"
   printf 'level-only runcon control failed; differential not run\n' >"$EVIDENCE_DIR/probe-memfd-c1.log"
@@ -483,6 +530,7 @@ fi
 # 5e. The AVC window for the probe runs themselves (read-only): which
 #     SELinux permissions the probe's own steps consumed or would need.
 avc_tail probe-avc-window
+rm -f "$PROBE_BIN"
 touch "$STATE_DIR/sec5"
 fi
 
@@ -525,43 +573,55 @@ EOF
         >"$EVIDENCE_DIR/build.log" 2>&1 ) &
     BLD_JOB=$!
 
-    # Attach strace -f the moment the per-op buildkitd appears (the RUN
-    # stage — the runc spawn — is seconds behind the pull/extract stages).
+    # Attach strace -f the moment the REAL buildkitd daemon appears (comm
+    # exactly "buildkitd" — pgrep -f also matches the rootlesskit wrapper's
+    # cmdline, which attached to the wrong process in the first rung's
+    # evidence and missed the exeseal window entirely). The RUN stage —
+    # the runc spawn — is seconds behind the pull/extract stages.
     STRACE_PID=""
     for _ in $(seq 1 400); do
-      BKD_PID="$(pgrep -f '/usr/libexec/docker-helper/buildkit/buildkitd' | head -1 || true)"
+      BKD_PID="$(pgrep -x buildkitd | head -1 || true)"
       if [ -n "$BKD_PID" ]; then
         strace -f -qq -tt -s 120 -y \
           -e trace=fsopen,fsconfig,fsmount,move_mount,open_tree,mount,umount2,memfd_create,sendfile,pwrite64,write,fchmod,fchmodat,fchmodat2,fchown,fchownat,execve,execveat,openat,readlink,readlinkat,statfs,fstatfs,fcntl,unshare,setns,faccessat,faccessat2,mknod,mknodat,mount_setattr \
           -p "$BKD_PID" -o "$STRACE_LOG" \
           2>"$EVIDENCE_DIR/runc-exeseal-strace.err" &
         STRACE_PID=$!
-        log "strace attached to buildkitd pid $BKD_PID"
+        log "strace attached to buildkitd pid $BKD_PID (comm-exact)"
         break
       fi
       kill -0 "$BLD_JOB" 2>/dev/null || break
       sleep 0.05
     done
 
-    # Daemon context/caps/namespace inventory (read-only /proc reads).
-    cap buildkitd-inventory 24 bash -c "
-      p=$BKD_PID
-      [ -n \"\$p\" ] || p=\$(pgrep -f '/usr/libexec/docker-helper/buildkit/buildkitd' | head -1)
+    # Daemon context/caps/namespace inventory (read-only /proc reads) for
+    # the REAL buildkitd (comm-exact) and its rootlesskit wrapper.
+    cap buildkitd-inventory 30 bash -c "
+      p=\$(pgrep -x buildkitd | head -1)
       if [ -n \"\$p\" ]; then
-        echo \"pid=\$p\"
+        echo \"real-buildkitd pid=\$p\"
         cat /proc/\$p/attr/current 2>&1
         grep -E '^(Uid|Gid|Cap(Inh|Prm|Eff|Bnd|Amb)|NoNewPrivs|NSpid)' /proc/\$p/status
         ls -l /proc/\$p/ns/user /proc/\$p/ns/mnt 2>&1
-        cat /proc/\$p/uid_map 2>&1
-        grep -cE 'overlay|tmpfs' /proc/\$p/mountinfo 2>&1
+        echo '--- uid_map:'; cat /proc/\$p/uid_map 2>&1
+        echo '--- tmpfs/overlay mounts visible:'
+        grep -E ' - (tmpfs|overlay) ' /proc/\$p/mountinfo 2>&1 | head -6
       else
-        echo '(buildkitd pid not observed)'
+        echo '(real buildkitd pid not observed)'
+      fi
+      w=\$(pgrep -f 'rootlesskit' | head -1)
+      if [ -n \"\$w\" ]; then
+        echo \"rootlesskit-wrapper pid=\$w\"
+        cat /proc/\$w/attr/current 2>&1
+        grep -E '^(CapEff|CapBnd|NoNewPrivs)' /proc/\$w/status
+        ls -l /proc/\$w/ns/user /proc/\$w/ns/mnt 2>&1
       fi"
 
     # The buildkit-runc process poller: 10ms loop, one snapshot per pid.
     (
+      echo "poller-start ts=$(date +%s.%N)" >"$EVIDENCE_DIR/runc-proc-inventory.log"
       SEEN=""
-      for _ in $(seq 1 8000); do
+      for _ in $(seq 1 20000); do
         for p in $(pgrep -x buildkit-runc 2>/dev/null); do
           case "$SEEN" in *"|$p|"*) ;; *)
             SEEN="$SEEN|$p|"
@@ -581,6 +641,7 @@ EOF
         kill -0 "$BLD_JOB" 2>/dev/null || break
         sleep 0.01
       done
+      echo "poller-end seen=$SEEN" >>"$EVIDENCE_DIR/runc-proc-inventory.log"
       [ -s "$EVIDENCE_DIR/runc-proc-inventory.log" ] || echo "(no buildkit-runc pid observed)" >"$EVIDENCE_DIR/runc-proc-inventory.log"
     ) &
     RUNC_CAP=$!
