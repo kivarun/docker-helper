@@ -281,6 +281,48 @@ if [ -n "${CA_B64:-}" ]; then
   docker-helper config set trusted_ca_injection auto >/dev/null \
     || die "config set trusted_ca_injection failed"
   docker-helper config show trusted_ca_path >/dev/null 2>&1 || die "config show failed"
+  # F6: build the combined trust bundle for the container's non-Node TLS
+  # clients. The image's own public CA set is extracted from the pinned base
+  # image with a one-off read-only container; the combined file is a
+  # self-contained LAB-OWNED artifact — the guest system bundle and the
+  # physical host trust store are never modified. If the image bundle cannot
+  # be extracted, the combined bundle is NOT created and the launcher falls
+  # back to NODE_EXTRA_CA_CERTS only: public trust stays intact, corporate
+  # trust for non-Node clients stays unavailable (logged explicitly).
+  if [ -z "$LAB_GUEST_ROOT" ]; then
+    base_image=""
+    if [ -f /opt/lab/agent-aliases.sh ]; then
+      base_image="$(bash -c 'source /opt/lab/agent-aliases.sh 2>/dev/null; printf "%s" "$_OC_BASE"' 2>/dev/null || true)"
+    fi
+    corp_ca="$ETC/docker-helper/$CA_NAME.crt"
+    combined="$AGENT_OCODE/ca/combined-ca-bundle.crt"
+    built=0
+    if [ -n "$base_image" ] && command -v docker >/dev/null 2>&1; then
+      img_bundle=""
+      for cand in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/ca-bundle.pem; do
+        img_out="$(docker run --rm --entrypoint /bin/sh "$base_image" -c "cat '$cand' 2>/dev/null || true")" || img_out=""
+        if printf '%s' "$img_out" | grep -q -- '-----BEGIN CERTIFICATE-----'; then
+          img_bundle="$img_out"
+          break
+        fi
+      done
+      if [ -n "$img_bundle" ]; then
+        { printf '%s\n' "$img_bundle"; cat -- "$corp_ca"; } > "$combined" \
+          || die "cannot build the combined CA bundle"
+        chmod 0644 "$combined"
+        chown "$AGENT_USER:$AGENT_USER" "$combined"
+        n_certs="$(grep -c -- 'BEGIN CERTIFICATE' "$combined" || true)"
+        [ "$n_certs" -gt 1 ] || die "the combined CA bundle does not contain the public CA set"
+        openssl verify -CAfile "$combined" "$corp_ca" >/dev/null \
+          || die "the corporate CA is not trusted by the combined bundle"
+        built=1
+        log "combined CA bundle built ($n_certs certificates: image public set + corporate CA)"
+      fi
+    fi
+    if [ "$built" = 0 ]; then
+      log "WARNING: the image CA bundle could not be extracted; the launcher will expose the corporate CA only through NODE_EXTRA_CA_CERTS (public trust intact, non-Node corporate trust unavailable)"
+    fi
+  fi
   log "corporate CA installed (trust store + helper injection + container copy)"
 fi
 

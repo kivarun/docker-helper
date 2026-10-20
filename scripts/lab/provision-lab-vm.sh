@@ -169,18 +169,84 @@ pull_pinned_images() {
   done <<< "$refs"
 }
 
-verify_positive_tls() {
-  # Optional positive CA evidence during the online window: a REAL corporate
-  # TLS endpoint must validate against the provisioned CA copy. Requires
-  # LAB_CA_SOURCE (the CA name derives from it) and LAB_CA_TEST_URL.
-  [ -n "${LAB_CA_SOURCE:-}" ] || return 0
-  [ -n "${LAB_CA_TEST_URL:-}" ] || return 0
-  local ca_name
-  ca_name="$(basename -- "$LAB_CA_SOURCE")"
-  log "positive TLS check against $LAB_CA_TEST_URL with the provisioned CA"
-  "$DEVVM" ssh "curl --cacert '/etc/docker-helper/$ca_name.crt' -fsS --max-time 20 '$LAB_CA_TEST_URL' >/dev/null && echo CA_TLS_OK" < /dev/null \
-    | grep -q CA_TLS_OK || die "the corporate CA did not validate $LAB_CA_TEST_URL"
-  log "positive TLS evidence recorded"
+base_image_ref() {
+  SCRIPT_DIR="$SCRIPT_DIR" bash -c '
+    # shellcheck source=/dev/null
+    source "$SCRIPT_DIR/agent-aliases.sh"
+    printf "%s" "$_OC_BASE"
+  '
+}
+
+pull_pinned_images() {
+  log "pre-pulling the pinned OCI images as the agent account"
+  local refs
+  refs="$(
+    SCRIPT_DIR="$SCRIPT_DIR" bash -c '
+      # shellcheck source=/dev/null
+      source "$SCRIPT_DIR/agent-aliases.sh"
+      printf "%s\n%s\n" "$_OC_BASE" "$_OC_GO26"
+    '
+  )" || die "cannot resolve the pinned image digests"
+  local ref
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    log "pulling $ref"
+    "$DEVVM" ssh "sudo -u agent -H docker pull '$ref'" < /dev/null \
+      || die "image pull failed: $ref"
+  done <<< "$refs"
+}
+
+# F6 runtime evidence, gathered in the online window with REAL controlled
+# endpoints (the model is never launched here; these are one-off diagnostic
+# containers without any session):
+#   1. corporate TLS positive — the guest validates a live corporate endpoint
+#      against the provisioned CA copy;
+#   2. corporate TLS positive — a one-off container with the lab CA mount
+#      validates the same endpoint (requires the combined bundle);
+#   3. public TLS positive — the same container setup still trusts a public
+#      CA chain, proving the corporate CA did not replace public trust.
+verify_online_tls() {
+  # (1) guest-level corporate positive
+  if [ -n "${LAB_CA_SOURCE:-}" ] && [ -n "${LAB_CA_TEST_URL:-}" ]; then
+    local ca_name
+    ca_name="$(basename -- "$LAB_CA_SOURCE")"
+    log "positive TLS check (guest) against $LAB_CA_TEST_URL with the provisioned CA"
+    "$DEVVM" ssh "curl --cacert '/etc/docker-helper/$ca_name.crt' -fsS --max-time 20 '$LAB_CA_TEST_URL' >/dev/null && echo CA_TLS_OK" < /dev/null \
+      | grep -q CA_TLS_OK || die "the corporate CA did not validate $LAB_CA_TEST_URL"
+    log "positive TLS evidence recorded (guest)"
+    # (2)/(3) container-level evidence through a one-off diagnostic container
+    local base_image container_env=""
+    base_image="$(base_image_ref)" || base_image=""
+    if [ -n "$base_image" ]; then
+      if "$DEVVM" ssh "test -f '/home/agent/.opencode-docker/ca/combined-ca-bundle.crt'" < /dev/null; then
+        container_env="-e NODE_EXTRA_CA_CERTS=/etc/opencode-ca/$ca_name -e SSL_CERT_FILE=/etc/opencode-ca/combined-ca-bundle.crt -e CURL_CA_BUNDLE=/etc/opencode-ca/combined-ca-bundle.crt -e GIT_SSL_CAINFO=/etc/opencode-ca/combined-ca-bundle.crt"
+        log "positive TLS check (container, corporate) against $LAB_CA_TEST_URL"
+        "$DEVVM" ssh "docker run --rm -v '/home/agent/.opencode-docker/ca:/etc/opencode-ca:ro,z' $container_env --entrypoint /bin/sh '$base_image' -c 'curl -fsS --max-time 20 \"$LAB_CA_TEST_URL\" >/dev/null && echo CONTAINER_CA_OK'" < /dev/null \
+          | grep -q CONTAINER_CA_OK \
+          || die "the container did not validate the corporate endpoint with the combined bundle"
+        log "positive TLS evidence recorded (container, corporate)"
+      else
+        log "container corporate TLS evidence skipped: the combined bundle was not built (non-Node corporate trust stays unavailable)"
+      fi
+    else
+      log "container TLS evidence skipped: the pinned image reference is unavailable"
+    fi
+  fi
+  # (3b) public TLS positive — with or without a provisioned CA
+  local public_url="${LAB_PUBLIC_TLS_URL:-https://www.gnu.org/}"
+  local base_image container_env=""
+  base_image="$(base_image_ref)" || base_image=""
+  if [ -n "$base_image" ]; then
+    if [ -n "${LAB_CA_SOURCE:-}" ] \
+       && "$DEVVM" ssh "test -f '/home/agent/.opencode-docker/ca/combined-ca-bundle.crt'" < /dev/null; then
+      container_env="-e NODE_EXTRA_CA_CERTS=/etc/opencode-ca/$(basename -- "$LAB_CA_SOURCE") -e SSL_CERT_FILE=/etc/opencode-ca/combined-ca-bundle.crt -e CURL_CA_BUNDLE=/etc/opencode-ca/combined-ca-bundle.crt -e GIT_SSL_CAINFO=/etc/opencode-ca/combined-ca-bundle.crt"
+    fi
+    log "positive TLS check (container, public) against $public_url"
+    "$DEVVM" ssh "docker run --rm ${container_env:+-v '/home/agent/.opencode-docker/ca:/etc/opencode-ca:ro,z' }$container_env --entrypoint /bin/sh '$base_image' -c 'curl -fsS --max-time 20 \"$public_url\" >/dev/null && echo CONTAINER_PUBLIC_OK'" < /dev/null \
+      | grep -q CONTAINER_PUBLIC_OK \
+      || die "the container lost trust in the public CA chain (TLS trust was replaced, not extended)"
+    log "positive TLS evidence recorded (container, public)"
+  fi
 }
 
 stage_online() {
@@ -210,7 +276,7 @@ stage_online() {
   log "transferring operator files (optional items)"
   bash "$SCRIPT_DIR/provision-operator-files.sh" || die "operator file provisioning failed"
 
-  verify_positive_tls
+  verify_online_tls
 
   pull_pinned_images
 
@@ -297,7 +363,7 @@ usage: provision-lab-vm.sh snapshot|online|isolate|verify|all
   all       snapshot -> online -> isolate -> verify
 
 Optional operator env: LAB_AGENT_SSH_KEY, LAB_CA_SOURCE,
-LAB_GITCONFIG_SOURCE, LAB_KNOWN_HOSTS_SOURCE, LAB_CA_TEST_URL (online).
+LAB_GITCONFIG_SOURCE, LAB_KNOWN_HOSTS_SOURCE, LAB_CA_TEST_URL, LAB_PUBLIC_TLS_URL (online).
 EOF
     ;;
   *) die "unknown stage '$stage' (snapshot|online|isolate|verify|all)" ;;

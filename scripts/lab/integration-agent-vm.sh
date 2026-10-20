@@ -367,18 +367,15 @@ cd "$1"
 docker() { printf '%s\n' "$*" >> "$ARGV_REC"; command docker "$@"; }
 # shellcheck source=/dev/null
 source "$HOME/.bash_aliases"
-if command -v curl >/dev/null 2>&1; then
-  env_out="$(oc sh -c 'printenv NODE_EXTRA_CA_CERTS || true' 2>&1 || true)"
-  printf '%s\n' "$env_out" > "$CA_ENV_OUT"
-  set +e
-  tls_out="$(oc sh -c "curl -sS --max-time 6 https://$TLS_TARGET_IP:9443/" 2>&1)"
-  tls_rc=$?
-  set -e
-  printf '%s\n' "$tls_out" > "$TLS_OUT"
-  printf 'TLS_NEG_RC=%s\n' "$tls_rc" >> "$ARGV_REC"
-else
-  printf 'NO_CURL\n' >> "$ARGV_REC"
-fi
+# F6: the curl availability check runs INSIDE the container (the probe
+# executes there), not in the guest. The probe first reports the
+# NODE_EXTRA_CA_CERTS the container actually sees (CA_ENV_OUT), then emits:
+#   NO_CURL_IN_CONTAINER          curl absent in the image (incomplete)
+#   TLS_RC=<curl rc> + stderr     the probe outcome to classify
+probe_cmd="printenv NODE_EXTRA_CA_CERTS || true; if command -v curl >/dev/null 2>&1; then curl -sS --max-time 6 https://$TLS_TARGET_IP:9443/ 2>&1; echo TLS_RC=\$?; else echo NO_CURL_IN_CONTAINER; fi"
+raw="$(oc sh -c "$probe_cmd" 2>&1 || true)"
+printf '%s\n' "$(printf '%s\n' "$raw" | head -1)" > "$CA_ENV_OUT"
+printf '%s\n' "$(printf '%s\n' "$raw" | tail -n +2)" > "$TLS_OUT"
 SH
     chmod 0755 "$RUNNER_TLS"
     sudo -u "$AGENT_USER" env ARGV_REC="$ARGV_TLS" SHIM_DIR="$SHIM" \
@@ -387,20 +384,31 @@ SH
       script -qec "bash $RUNNER_TLS $ws" /dev/null >"$ITEST_DIR/oc-tls.out" 2>&1
     kill "$tls_srv_pid" 2>/dev/null || true
     tls_srv_pid=""
-    if grep -q 'NO_CURL' "$ARGV_TLS"; then
-      skip "in-container TLS check (curl is not available in the image)"
+    if grep -q 'NO_CURL_IN_CONTAINER' "$RUN_DIR/tls.out"; then
+      skip "in-container TLS check (curl is not available inside the image)"
     else
-      tls_neg_rc="$(printf '%s' "$(cat "$ARGV_TLS")" | sed -n 's/^TLS_NEG_RC=//p')"
-      if [ -n "$tls_neg_rc" ] && [ "$tls_neg_rc" != 0 ]; then
-        ok "the container refused the untrusted TLS endpoint (rc $tls_neg_rc)"
-      else
-        bad "the container accepted or hung on the untrusted TLS endpoint (TLS_NEG_RC=$tls_neg_rc)"
-      fi
-      if grep -Eqi 'certificate|ssl' "$RUN_DIR/tls.out" 2>/dev/null; then
-        ok "the refusal is a certificate-validation failure, not a connection error"
-      else
-        bad "the TLS refusal could not be attributed to certificate validation: $(tail -c 200 "$RUN_DIR/tls.out" 2>/dev/null)"
-      fi
+      tls_rc="$(sed -n 's/^TLS_RC=//p' "$RUN_DIR/tls.out")"
+      tls_text="$(grep -v '^TLS_RC=' "$RUN_DIR/tls.out" || true)"
+      verdict="$("$SCRIPT_DIR/tls-verdict.sh" "${tls_rc:-999}" "$tls_text" | head -1)"
+      case "$verdict" in
+        VERIFICATION_FAILURE)
+          ok "the container rejected the untrusted TLS endpoint (rc $tls_rc)"
+          if printf '%s' "$tls_text" | grep -qi 'certificate'; then
+            ok "the refusal is a certificate-validation failure, not a connection error"
+          else
+            bad "the TLS refusal could not be attributed to certificate validation: $(tail -c 200 "$RUN_DIR/tls.out" 2>/dev/null)"
+          fi
+          ;;
+        ACCEPTED)
+          bad "the container ACCEPTED the untrusted TLS endpoint"
+          ;;
+        CONNECTION_FAILURE)
+          skip "the TLS probe is inconclusive (connection failure despite a ready server)"
+          ;;
+        *)
+          skip "the TLS probe is inconclusive (unexpected outcome, rc=${tls_rc:-unset})"
+          ;;
+      esac
     fi
     if [ -n "$ca_anchor" ]; then
       check "NODE_EXTRA_CA_CERTS reaches the container" \

@@ -75,7 +75,10 @@ case "\${1:-}" in
         if [ "\${FAIL_ON:-}" = "setup\$n" ]; then echo "stub: setup phase \$n failed" >&2; exit 1; fi ;;
       *install-docker-vm*) [ "\${FAIL_ON:-}" = docker ] && { echo "stub: docker install failed" >&2; exit 1; } ;;
       *install-docker-helper*) [ "\${FAIL_ON:-}" = helper ] && { echo "stub: helper install failed" >&2; exit 1; } ;;
-      *curl\ --cacert*) [ "\${FAIL_ON:-}" = tls ] && { echo "stub: positive TLS failed" >&2; exit 1; } ;;
+      *curl\ --cacert*) [ "\${FAIL_ON:-}" = tls ] && { echo "stub: positive TLS failed" >&2; exit 1; }
+        echo CA_TLS_OK ;;
+      *CONTAINER_CA_OK*) echo CONTAINER_CA_OK ;;
+      *CONTAINER_PUBLIC_OK*) echo CONTAINER_PUBLIC_OK ;;
       *docker\ pull*) [ "\${FAIL_ON:-}" = pull ] && { echo "stub: pull failed" >&2; exit 1; } ;;
     esac
     exit 0 ;;
