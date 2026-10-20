@@ -428,12 +428,98 @@ oc_pid=$!
 for _ in $(seq 1 50); do [ -s "$DOCKER_REC" ] && break; sleep 0.1; done
 kill -INT "$oc_pid" 2>/dev/null || true
 wait "$oc_pid" 2>/dev/null || true
+unset STUB_SLEEP
 dh="$(cat "$DH_REC" 2>/dev/null || true)"
 contains "SIGINT deletes the session" "delete session delete dhs_TEST" "$dh"
 
 # --- 3b. the system docker-init is untouched across every launch -----------
 check "system docker-init inode/mode unchanged across all launches" \
   "$INIT_SYS_SNAP" "$(stat -c '%d:%i %a' "$DH_INIT_SRC")"
+
+# --- F4. every lab-managed relabel mount source is safety-gated --------------
+# The launcher must refuse to run docker when a relabeled source could touch
+# anything outside the agent-owned lab tree. Each case exercises the real
+# launcher flow; refusal is observed through the docker record.
+OUTSIDE="$WORK/outside-f4"; mkdir -p "$OUTSIDE"
+printf 'SYSTEM-INODE-MARKER\n' > "$OUTSIDE/system-like-file"
+outside_inode="$(stat -c '%d:%i' "$OUTSIDE/system-like-file")"
+
+f4_reset() {
+  rm -rf "$OPENCODE_DOCKER_HOME/ca" "$OPENCODE_DOCKER_HOME/git" "$OPENCODE_DOCKER_HOME/ssh"
+  mkdir -p "$OPENCODE_DOCKER_HOME/ca" "$OPENCODE_DOCKER_HOME/git" "$OPENCODE_DOCKER_HOME/ssh"
+  printf 'CA-CERT\n' > "$OPENCODE_DOCKER_HOME/ca/lab-ca.crt"
+  printf '[user]\n\tname = agent\n' > "$OPENCODE_DOCKER_HOME/git/gitconfig"
+  printf 'known hosts\n' > "$OPENCODE_DOCKER_HOME/ssh/known_hosts"
+}
+
+f4_expect_refusal() { # CASE
+  : > "$DH_REC"; : > "$DOCKER_REC"
+  ( cd "$WS" && oc echo hi ) >"$WORK/f4.err" 2>&1
+  [ "${F4_DEBUG:-}" = "$1" ] && { echo "DEBUG[$1] $(cat "$WORK/f4.err")"; cat "$DOCKER_REC"; } >&2
+  if [ -s "$DOCKER_REC" ]; then
+    bad "F4/$1: docker run was reached despite the unsafe mount source"
+  else
+    ok "F4/$1: the launch is refused before docker runs"
+  fi
+  if grep -q 'session create' "$DH_REC" && grep -q 'session delete' "$DH_REC"; then
+    ok "F4/$1: the session is still cleaned up after the refusal"
+  else
+    bad "F4/$1: the session lifecycle was broken by the refusal"
+  fi
+}
+
+# F4.1 a normal lab CA copy still launches
+f4_reset
+: > "$DH_REC"; : > "$DOCKER_REC"
+( cd "$WS" && oc echo hi ) >/dev/null 2>&1
+[ -s "$DOCKER_REC" ] && ok "F4/normal: a clean lab CA copy launches" || bad "F4/normal: a clean CA copy was refused"
+
+# F4.2 the CA directory itself is a symlink out of the lab tree
+f4_reset; rm -rf "$OPENCODE_DOCKER_HOME/ca"; ln -s "$OUTSIDE" "$OPENCODE_DOCKER_HOME/ca"
+f4_expect_refusal "ca-dir-symlink"
+
+# F4.3 a symlink INSIDE the CA directory points at a foreign file
+f4_reset; ln -s "$OUTSIDE/system-like-file" "$OPENCODE_DOCKER_HOME/ca/evil.crt"
+f4_expect_refusal "ca-entry-symlink"
+[ "$(stat -c '%d:%i' "$OUTSIDE/system-like-file")" = "$outside_inode" ] \
+  && ok "F4/ca-entry-symlink: the foreign inode was not relabeled" \
+  || bad "F4/ca-entry-symlink: the foreign inode changed"
+
+# F4.4 a hardlink inside the CA directory aliases a foreign inode
+f4_reset; ln "$OUTSIDE/system-like-file" "$OPENCODE_DOCKER_HOME/ca/hardlink.crt"
+f4_expect_refusal "ca-entry-hardlink"
+[ "$(stat -c '%d:%i' "$OUTSIDE/system-like-file")" = "$outside_inode" ] \
+  && ok "F4/ca-entry-hardlink: the foreign inode was not relabeled" \
+  || bad "F4/ca-entry-hardlink: the foreign inode changed"
+
+# F4.5 the gitconfig source is a symlink
+f4_reset; rm -f "$OPENCODE_DOCKER_HOME/git/gitconfig"; ln -s "$OUTSIDE/system-like-file" "$OPENCODE_DOCKER_HOME/git/gitconfig"
+f4_expect_refusal "gitconfig-symlink"
+
+# F4.6 a symlink inside the container-facing ssh directory
+f4_reset; ln -sf "$OUTSIDE/system-like-file" "$OPENCODE_DOCKER_HOME/ssh/known_hosts"
+f4_expect_refusal "ssh-entry-symlink"
+
+# F4.7 the parent directory of the gitconfig escapes the lab tree
+f4_reset; rm -rf "$OPENCODE_DOCKER_HOME/git"; mkdir -p "$OUTSIDE/etc-like"
+printf '[user]\n' > "$OUTSIDE/etc-like/gitconfig"
+ln -s "$OUTSIDE/etc-like" "$OPENCODE_DOCKER_HOME/git"
+f4_expect_refusal "gitconfig-parent-escape"
+
+# F4.8 a refusal never mutates the foreign inode (content + inode stable)
+f4_reset; ln -s "$OUTSIDE/system-like-file" "$OPENCODE_DOCKER_HOME/ca/evil.crt"
+f4_expect_refusal "final-content-check"
+[ "$(cat "$OUTSIDE/system-like-file")" = "SYSTEM-INODE-MARKER" ] \
+  && ok "F4: the foreign file content is unchanged after refusals" \
+  || bad "F4: the foreign file content changed"
+
+# F4.9 the unit-level gate refuses a symlinked file source directly
+ln -sf "$OUTSIDE/system-like-file" "$OPENCODE_DOCKER_HOME/git/gitconfig"
+if oc_lab_mount_source_ok file "$OPENCODE_DOCKER_HOME/git/gitconfig" "$OPENCODE_DOCKER_HOME" 2>/dev/null; then
+  bad "F4/unit: the gate accepted a symlinked file source"
+else
+  ok "F4/unit: the gate refuses a symlinked file source"
+fi
 
 echo
 printf 'agent-aliases tests: %d passed, %d failed\n' "$PASS" "$FAIL"
