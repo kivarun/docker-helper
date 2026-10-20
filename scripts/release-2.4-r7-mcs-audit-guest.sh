@@ -257,6 +257,25 @@ int main(void) {
     struct q *r3 = row(); r3->scon = S_C1; r3->tcon = T_RUNTIME_C2; r3->cls = "fifo_file"; r3->perm = "create"; r3->expect = "deny";
     struct q *r4 = row(); r4->scon = S_C2; r4->tcon = T_RUNTIME_C1; r4->cls = "fifo_file"; r4->perm = "create"; r4->expect = "deny";
   }
+  /* the R7 exec.fifo setattr rung's kernel-AV rows: the create grant
+   * widened IN PLACE with the createExecFifo chmod/chown setattr
+   * permission. RECORDED HONESTLY: the loaded policy's fifo_file
+   * mlsconstrain set covers open/relabelfrom/create/relabelto — it
+   * does NOT cover setattr, so BOTH cross-category directions resolve
+   * ALLOW at the object layer (decided=1, never permissive). This is
+   * NOT an MCS-DENY claim and must not be presented as one: the
+   * cross-operation isolation stays owned by the reachability layer —
+   * the standing dir matrix rows above (cross-category dir
+   * search/add_name denied), the DAC 0700 per-op dirs, and the absence
+   * of ANY fifo_file open grant on the runtime tree (open is
+   * MLS-constrained and TE-denied for every subject), which closes the
+   * pre-opened-FD channel. */
+  {
+    struct q *r1 = row(); r1->scon = S_C1; r1->tcon = T_RUNTIME_C1; r1->cls = "fifo_file"; r1->perm = "setattr"; r1->expect = "allow";
+    struct q *r2 = row(); r2->scon = S_C2; r2->tcon = T_RUNTIME_C2; r2->cls = "fifo_file"; r2->perm = "setattr"; r2->expect = "allow";
+    struct q *r3 = row(); r3->scon = S_C1; r3->tcon = T_RUNTIME_C2; r3->cls = "fifo_file"; r3->perm = "setattr"; r3->expect = "allow";
+    struct q *r4 = row(); r4->scon = S_C2; r4->tcon = T_RUNTIME_C1; r4->cls = "fifo_file"; r4->perm = "setattr"; r4->expect = "allow";
+  }
   /* the buildkitd socket surface: NO unix_stream_socket grant exists for
    * the domain — connectto is TE-denied toward every peer shape (the
    * daemon's socket, own-op and foreign-op buildkitd sockets) */
