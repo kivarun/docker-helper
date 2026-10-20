@@ -176,7 +176,7 @@ LABEL_NO_MOVE="$(printf '%s\n' "$RAW" \
   | grep -a "$MEMFD_HEX" \
   | grep -a "object_r:$BASETYPE:" \
   | grep -a 'tclass=file' \
-  | sed -n 's/.*msg=audit([0-9.]*:\([0-9]*\)).*/\1/p' | tr '\n' ' ' || true)"
+  | sed -n 's/.*msg=audit([0-9.]*:\([0-9]*\)).*/\1/p')"
 {
   printf 'memfd-create trace lines (strace FD identity):\n'
   printf '%s\n' "$MEMFD_CREATE_LINES"
@@ -233,22 +233,28 @@ else
 fi
 
 # 5. before/after create matrices show EXACTLY the expected change
-if have create-matrix-before.log && have create-matrix-after.log; then
-  PAIR1="system_u:system_r:docker_helper_buildkitd_t:s0:c1 x system_u:object_r:tmpfs_t:s0 x file"
-  PAIR2="system_u:system_r:docker_helper_buildkitd_t:s0:c2 x system_u:object_r:tmpfs_t:s0 x file"
-  ok=1
-  for pair in "$PAIR1" "$PAIR2"; do
-    before="$(grep -aF "$pair" "$EV/create-matrix-before.log" | sed 's/.*-> //')"
-    after="$(grep -aF "$pair" "$EV/create-matrix-after.log" | sed 's/.*-> //')"
-    [ "$before" = "system_u:object_r:tmpfs_t:s0" ] || ok=0
-    [ "$after" = "system_u:object_r:$NEWTYPE:s0" ] || ok=0
-  done
-  if [ "$ok" -eq 1 ] \
-     && diff <(grep -avF -e "$PAIR1" -e "$PAIR2" "$EV/create-matrix-before.log") \
-             <(grep -avF -e "$PAIR1" -e "$PAIR2" "$EV/create-matrix-after.log") >/dev/null 2>&1; then
-    chk 5 pass
+#    (byte comparison via sha256sum digests: the guest environment has no
+#    diffutils — diff/cmp are not guaranteed to exist)
+if command -v sha256sum >/dev/null 2>&1; then
+  if have create-matrix-before.log && have create-matrix-after.log; then
+    PAIR1="system_u:system_r:docker_helper_buildkitd_t:s0:c1 x system_u:object_r:tmpfs_t:s0 x file"
+    PAIR2="system_u:system_r:docker_helper_buildkitd_t:s0:c2 x system_u:object_r:tmpfs_t:s0 x file"
+    ok=1
+    for pair in "$PAIR1" "$PAIR2"; do
+      before="$(grep -aF "$pair" "$EV/create-matrix-before.log" | sed 's/.*-> //')"
+      after="$(grep -aF "$pair" "$EV/create-matrix-after.log" | sed 's/.*-> //')"
+      [ "$before" = "system_u:object_r:tmpfs_t:s0" ] || ok=0
+      [ "$after" = "system_u:object_r:$NEWTYPE:s0" ] || ok=0
+    done
+    h_before="$(grep -avF -e "$PAIR1" -e "$PAIR2" "$EV/create-matrix-before.log" | sha256sum | sed -n 's/^\([0-9a-f][0-9a-f]*\) .*/\1/p')"
+    h_after="$(grep -avF -e "$PAIR1" -e "$PAIR2" "$EV/create-matrix-after.log" | sha256sum | sed -n 's/^\([0-9a-f][0-9a-f]*\) .*/\1/p')"
+    if [ "$ok" -eq 1 ] && [ -n "$h_before" ] && [ "$h_before" = "$h_after" ]; then
+      chk 5 pass
+    else
+      chk 5 fail
+    fi
   else
-    chk 5 fail
+    chk 5 blocked
   fi
 else
   chk 5 blocked
@@ -292,11 +298,18 @@ else
 fi
 
 # 9. the post-rollback create matrix is byte-identical to the baseline
-if have create-matrix-before.log && have create-matrix-rollback.log; then
-  if cmp -s "$EV/create-matrix-before.log" "$EV/create-matrix-rollback.log"; then
-    chk 9 pass
+#    (sha256 digests; no cmp/diff in the guest environment)
+if command -v sha256sum >/dev/null 2>&1; then
+  if have create-matrix-before.log && have create-matrix-rollback.log; then
+    s_before="$(sha256sum "$EV/create-matrix-before.log" | sed -n 's/^\([0-9a-f][0-9a-f]*\) .*/\1/p')"
+    s_roll="$(sha256sum "$EV/create-matrix-rollback.log" | sed -n 's/^\([0-9a-f][0-9a-f]*\) .*/\1/p')"
+    if [ -n "$s_before" ] && [ "$s_before" = "$s_roll" ]; then
+      chk 9 pass
+    else
+      chk 9 fail
+    fi
   else
-    chk 9 fail
+    chk 9 blocked
   fi
 else
   chk 9 blocked
