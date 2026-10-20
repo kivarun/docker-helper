@@ -5752,7 +5752,69 @@ allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:sock_file { crea
 # open/write/unlink) needs its own rung's kernel-decision rows.
 # The standing runtime-tree owners (the dir rule, the sock_file rule,
 # the lnk_file rule, the other subjects' rules) stay byte-unchanged.
-allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:fifo_file create;
+#
+# R7 (setattr rung, scope=selinux UAT run 39319486878 at f9e7a705
+# serials 1331 + its S15 reproduction 10311; the enforcing recovery run
+# proved the create grant open and the manager's unlink recovery
+# converged): after the create rung opened, the SAME createExecFifo
+# sequence reached its NEXT hook and died with the runtime's own fatal
+#
+#   runc run failed: chmod /run/docker-helper-builder/ops/op_<id>/
+#     runc/<rand>/exec.fifo: permission denied
+#
+# at
+#
+#   avc:  denied  { setattr } for  pid=4013 comm="buildkit-runc"
+#     name="exec.fifo" dev="tmpfs" ino=2393
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:docker_helper_builder_runtime_t:s0:c1
+#     tclass=fifo_file permissive=0                       (1331; the S15
+#     repro serial 10311)
+#
+# The pinned source: runc v1.4.3's Container.createExecFifo
+# (libcontainer/container_linux.go:447-470) runs, on the per-execution
+# state dir, unix.Mkfifo(fifoName, 0o622) -> os.Chmod(fifoName, 0o622)
+# ("Ensure permission bits (can be different because of umask)") ->
+# os.Chown(fifoName, rootuid, rootgid). The chmod is a SEPARATE
+# setattr hook that ALWAYS fires after the granted create: it
+# re-asserts the requested 0o622 against the process umask (upstream
+# OCI semantics preserved — no mode is changed by this rung). The
+# empirically observed pre-chmod mode was 0622 (the diag post-mortem
+# captured the created fifo at prw--w--w- 473:473 with the chmod
+# denied — the creating process's umask did not shrink the request in
+# this environment), so the chmod's intended final mode equals the
+# observed mode; the following chown is the SECOND setattr point of
+# the same sequence (its outcome is the UAT's next determination).
+#
+# THE DELTA IS EXACTLY ONE NEW PERMISSION ON THE EXISTING CREATE
+# SINGLETON — the rule widens IN PLACE to { create setattr }; it stays
+# the buildkitd domain's ONLY runtime-tree fifo_file rule and the
+# buildkitd-named allow-count stays 29 (one rule, not a second one).
+# Deliberately NOT granted: fifo_file read/write/open/getattr/append/
+# ioctl/unlink/lock (the parent's includeExecFifo open/read and the
+# init child's write are separate future rungs; runc's failure-path
+# os.Remove unlink stays denied — the manager's recovery unlink owns
+# the cleanup), no third fifo rule, no manager-rights change, no
+# domain transition, no MCS/fcontext change, no production Go/OCI
+# change. SCOPE: type-wide TE authority over builder_runtime_t:fifo_file
+# — NOT limited to the exec.fifo name. RECORDED EXPLICITLY AND HONESTLY:
+# the loaded policy's fifo_file mlsconstrain set covers open/
+# relabelfrom/create/relabelto — it does NOT cover setattr — so the
+# kernel-AV setattr matrix rows resolve BOTH cross-category directions
+# ALLOW at the object layer. That is NOT an MCS-DENY claim: the
+# cross-operation isolation stays owned by the reachability layer (the
+# constrained parent-dir hooks the standing dir rules and the dir
+# matrix rows own — cross-category dir search denied — plus the DAC
+# 0700 per-op dirs, plus the absence of ANY fifo_file open grant on
+# the runtime tree — open is MLS-constrained and TE-denied for every
+# subject, so no domain can hold a pre-opened FD to a foreign fifo and
+# no chmod-by-fd path exists). A foreign-category subject cannot NAME
+# a foreign op's exec.fifo through the parent-directory traversal;
+# the four-way split (direct object permission / path reachability /
+# pre-opened-FD use / other local users' DAC reach) is recorded in the
+# rung's report. The create rows' subject-gated MCS protection stays
+# byte-unchanged; the standing runtime-tree owners stay byte-unchanged.
+allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:fifo_file { create setattr };
 
 # --- 4C-71: the categorized operation-state file lock — the 4C-70 file
 # --- rule widened IN PLACE (ONE rule, never split) ---
