@@ -416,6 +416,31 @@ reset_state
 export DUP_UID=1
 if run_setup >/dev/null 2>&1; then bad "duplicate uid accepted by the post-verification"; else ok "duplicate uid fails the post-verification"; fi
 
+# --- 15. phase 1: without docker-helper the account is provisioned and the
+#         helper-dependent parts are explicitly deferred (re-run instruction) --
+reset_state
+: > "$SELFOK"
+unset TAKEN_UIDS TAKEN_GID DUP_UID PRINCIPAL_STALE_UID WRONG_SELF USERMOD_FAIL 2>/dev/null || true
+mkdir -p "$WORK/shim-p1"
+for f in "$SHIM"/*; do
+  [ "$(basename "$f")" = docker-helper ] && continue
+  ln -s "$f" "$WORK/shim-p1/$(basename "$f")"
+done
+# The phase-1 PATH must not resolve any docker-helper (shim or the real
+# binary that may exist on a dev workstation): shim-p1 only, then /usr/bin
+# and /bin.
+out="$(PATH="$WORK/shim-p1:/usr/bin:/bin" bash "$SETUP" 2>&1)" \
+  && ok "phase-1 run (no docker-helper) succeeds" || bad "phase-1 run failed: $out"
+rec="$(cat "$REC")"
+contains "phase-1 creates the account" "useradd -u 1001 " "$rec"
+contains "phase-1 installs the aliases" "install -m 0644 -o agent -g agent" "$rec"
+not_contains "phase-1 never creates a principal" "principal create" "$rec"
+not_contains "phase-1 never installs a credential" "credential install" "$rec"
+not_contains "phase-1 never adds an allowed root" "allowed-root add" "$rec"
+[ -f "$AGENT_HOME/.bash_aliases" ] && ok "phase-1 aliases installed" || bad "phase-1 aliases missing"
+contains "phase-1 logs the re-run instruction" "re-run this script after install-docker-helper-v230.sh" "$out"
+not_contains "phase-1 does not claim the credential" "credential installed for agent" "$out"
+
 echo
 printf 'setup-agent-user tests: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

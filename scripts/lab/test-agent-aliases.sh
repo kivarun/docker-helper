@@ -96,7 +96,33 @@ printf '%s\n' "$*" >> "$DOCKER_REC"
 exit 0
 SH
 
-chmod +x "$SHIM/docker-helper" "$SHIM/docker"
+# ssh-agent stub: a real background process stands in for the agent so the
+# launcher's cleanup (kill "$SSH_AGENT_PID") is observable.
+cat > "$SHIM/ssh-agent" <<'SH'
+#!/bin/sh
+sock=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -a) sock="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$sock" ] || { echo "usage: ssh-agent -a socket" >&2; exit 2; }
+sleep 300 >/dev/null 2>&1 &
+pid=$!
+echo "$pid" > "$SSH_AGENT_PIDFILE"
+echo "SSH_AUTH_SOCK=$sock; export SSH_AUTH_SOCK;"
+echo "SSH_AGENT_PID=$pid; export SSH_AGENT_PID;"
+echo "Agent pid $pid"
+SH
+cat > "$SHIM/ssh-add" <<'SH'
+#!/bin/sh
+printf 'ssh-add %s\n' "$*" >> "$SSH_ADD_REC"
+[ -n "${SSH_ADD_FAIL:-}" ] && exit 1
+exit 0
+SH
+
+chmod +x "$SHIM/docker-helper" "$SHIM/docker" "$SHIM/ssh-agent" "$SHIM/ssh-add"
 
 # A real AF_UNIX socket at the expected path (kept bound by a background pid).
 python3 -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); time.sleep(300)' \
@@ -106,9 +132,11 @@ for _ in $(seq 1 20); do [ -S "$WORK/run/docker-helper.sock" ] && break; sleep 0
 
 export PATH="$SHIM:$PATH"
 export DH_REC="$WORK/dh.rec" DOCKER_REC="$WORK/docker.rec"
+export SSH_AGENT_PIDFILE="$WORK/ssh-agent.pid" SSH_ADD_REC="$WORK/ssh-add.rec"
 export DOCKER_HELPER_RUNTIME_DIR="$WORK/run"
 export OPENCODE_DOCKER_HOME="$WORK/ochome"
 export OPENCODE_EXCHANGE_DIR="$WORK/absent-exchange"
+export OPENCODE_AGENT_SSH_KEY="$WORK/agent-ssh-key/id_ed25519_opencode"
 mkdir -p "$OPENCODE_DOCKER_HOME/.config" "$OPENCODE_DOCKER_HOME/.local/share"
 WS="$WORK/ws"; mkdir -p "$WS"
 
@@ -149,6 +177,7 @@ not_contains "container does not mount docker.sock" "docker.sock" "$dargv"
 not_contains "container does not get GH_TOKEN" "-e GH_TOKEN" "$dargv"
 not_contains "container does not get an admin token" "ADMIN_TOKEN" "$dargv"
 not_contains "container does not mount the principal credential" "/.config/docker-helper" "$dargv"
+not_contains "the agent's real .ssh is never a mount source" "-v $HOME/.ssh" "$dargv"
 
 # REGRESSION: no :z/:Z relabel may ever target a SYSTEM executable. Parse the
 # mount pairs and forbid system-path sources on any relabeled mount.
@@ -203,6 +232,106 @@ printf 'SSHKEY-MARKER\n' > "$OPENCODE_DOCKER_HOME/.ssh/id_ed25519"
 ( cd "$WS" && oc echo hi )
 dargv="$(cat "$DOCKER_REC" 2>/dev/null || true)"
 not_contains "present .ssh dir is NOT mounted" ".ssh" "$dargv"
+rm -rf "$OPENCODE_DOCKER_HOME/.ssh"
+
+# --- 7. capability layer: CA, gitconfig, ssh material, ssh-agent -----------
+mkdir -p "$OPENCODE_DOCKER_HOME/ca" "$OPENCODE_DOCKER_HOME/git" "$OPENCODE_DOCKER_HOME/ssh"
+printf 'CA-CERT\n' > "$OPENCODE_DOCKER_HOME/ca/lab-ca.crt"
+printf '[user]\n\tname = agent\n' > "$OPENCODE_DOCKER_HOME/git/gitconfig"
+printf 'known hosts\n' > "$OPENCODE_DOCKER_HOME/ssh/known_hosts"
+mkdir -p "$(dirname "$OPENCODE_AGENT_SSH_KEY")"
+printf 'PRIVATE-KEY\n' > "$OPENCODE_AGENT_SSH_KEY"
+chmod 0600 "$OPENCODE_AGENT_SSH_KEY"
+: > "$DH_REC"; : > "$DOCKER_REC"; : > "$SSH_ADD_REC"
+( cd "$WS" && oc echo hi )
+dargv="$(cat "$DOCKER_REC" 2>/dev/null || true)"
+contains "lab CA copy is mounted read-only" "$OPENCODE_DOCKER_HOME/ca:/etc/opencode-ca:ro,z" "$dargv"
+contains "NODE_EXTRA_CA_CERTS points at the mounted copy" "-e NODE_EXTRA_CA_CERTS=/etc/opencode-ca/lab-ca.crt" "$dargv"
+contains "SSL_CERT_FILE points at the mounted copy" "-e SSL_CERT_FILE=/etc/opencode-ca/lab-ca.crt" "$dargv"
+contains "CURL_CA_BUNDLE points at the mounted copy" "-e CURL_CA_BUNDLE=/etc/opencode-ca/lab-ca.crt" "$dargv"
+contains "GIT_SSL_CAINFO points at the mounted copy" "-e GIT_SSL_CAINFO=/etc/opencode-ca/lab-ca.crt" "$dargv"
+contains "gitconfig copy is mounted read-only" "$OPENCODE_DOCKER_HOME/git/gitconfig:/home/opencode/.gitconfig:ro,z" "$dargv"
+contains "public ssh material is mounted read-only" "$OPENCODE_DOCKER_HOME/ssh:/home/opencode/.ssh:ro,z" "$dargv"
+contains "the ssh-agent socket dir is the only agent mount" "$OPENCODE_DOCKER_HOME/agent-ssh:/ssh-agent:ro" "$dargv"
+contains "SSH_AUTH_SOCK points at the forwarded socket" "-e SSH_AUTH_SOCK=/ssh-agent/agent.sock" "$dargv"
+contains "ssh-add loaded the provisioned key" "ssh-add -- $OPENCODE_AGENT_SSH_KEY" "$(cat "$SSH_ADD_REC" 2>/dev/null || true)"
+not_contains "the private key file is never a mount source" "$OPENCODE_AGENT_SSH_KEY:" "$dargv"
+AGENT_PID="$(cat "$SSH_AGENT_PIDFILE" 2>/dev/null || true)"
+if [ -n "$AGENT_PID" ] && ! kill -0 "$AGENT_PID" 2>/dev/null; then
+  ok "the per-launch ssh-agent is stopped after the launch"
+else
+  bad "the per-launch ssh-agent survived the launch"
+fi
+contains "opencode LSP tool flag is passed" "-e OPENCODE_EXPERIMENTAL_LSP_TOOL=true" "$dargv"
+contains "opencode exa flag is passed" "-e OPENCODE_ENABLE_EXA=1" "$dargv"
+
+# the full mounted source allowlist with every capability present
+mounted_srcs=""
+prev=""
+for w in $dargv; do
+  [ "$prev" = "-v" ] && mounted_srcs="$mounted_srcs${w%%:*}
+"
+  prev="$w"
+done
+check "mounted sources with capabilities are exactly the lab allowlist" \
+  "$INIT_COPY
+$WS
+$OPENCODE_DOCKER_HOME/.config
+$OPENCODE_DOCKER_HOME/.local
+$OPENCODE_DOCKER_HOME/.cache
+$OPENCODE_DOCKER_HOME/tmp
+$WORK/run
+$OPENCODE_DOCKER_HOME/ca
+$OPENCODE_DOCKER_HOME/git/gitconfig
+$OPENCODE_DOCKER_HOME/ssh
+$OPENCODE_DOCKER_HOME/agent-ssh" \
+  "$(printf '%s' "$mounted_srcs" | sed '/^$/d')"
+
+# --- 7a. GH_AGENT_TOKEN is opt-in -------------------------------------------
+: > "$DOCKER_REC"
+( cd "$WS" && oc echo hi )
+not_contains "GH_AGENT_TOKEN is not passed by default" "-e GH_AGENT_TOKEN" "$(cat "$DOCKER_REC")"
+export GH_AGENT_TOKEN=gh-agent-token-marker
+: > "$DOCKER_REC"
+( cd "$WS" && oc echo hi )
+unset GH_AGENT_TOKEN
+contains "GH_AGENT_TOKEN passed only when explicitly exported" "-e GH_AGENT_TOKEN" "$(cat "$DOCKER_REC")"
+
+# --- 7b. ambiguous CA provisioning fails the launch -------------------------
+printf 'CA2\n' > "$OPENCODE_DOCKER_HOME/ca/second.crt"
+: > "$DH_REC"; : > "$DOCKER_REC"
+( cd "$WS" && oc echo hi ) >/dev/null 2>&1
+amb_rc=$?
+if [ "$amb_rc" != 0 ]; then ok "ambiguous CA provisioning fails the launch"; else bad "ambiguous CA provisioning was accepted"; fi
+rm -f "$OPENCODE_DOCKER_HOME/ca/second.crt"
+
+# --- 7c. an unloadable ssh key fails the launch and stops the agent ---------
+export SSH_ADD_FAIL=1
+: > "$SSH_ADD_REC"; : > "$DH_REC"; : > "$DOCKER_REC"
+( cd "$WS" && oc echo hi ) >/dev/null 2>&1
+addfail_rc=$?
+unset SSH_ADD_FAIL
+if [ "$addfail_rc" != 0 ]; then ok "an unloadable ssh key fails the launch"; else bad "launch proceeded without the ssh key loaded"; fi
+grep -q "ssh-add -- $OPENCODE_AGENT_SSH_KEY" "$SSH_ADD_REC" && ok "the failed add attempted the provisioned key" || bad "the failed add did not attempt the key"
+AGENT_PID="$(cat "$SSH_AGENT_PIDFILE" 2>/dev/null || true)"
+if [ -n "$AGENT_PID" ] && ! kill -0 "$AGENT_PID" 2>/dev/null; then
+  ok "the ssh-agent is stopped after a failed add"
+else
+  bad "the ssh-agent survived a failed add"
+fi
+
+# --- 7d. without a provisioned ssh key there is no agent and no ssh mount ---
+rm -f "$OPENCODE_AGENT_SSH_KEY"
+: > "$SSH_ADD_REC"; : > "$DH_REC"; : > "$DOCKER_REC"
+( cd "$WS" && oc echo hi )
+dargv="$(cat "$DOCKER_REC" 2>/dev/null || true)"
+not_contains "no key: no ssh-agent socket mount" "/ssh-agent" "$dargv"
+not_contains "no key: no SSH_AUTH_SOCK env" "SSH_AUTH_SOCK" "$dargv"
+not_contains "no key: ssh-add never ran" "ssh-add" "$(cat "$SSH_ADD_REC" 2>/dev/null || true)"
+
+# --- 7e. oc-dotnet10 is gone -------------------------------------------------
+if type -t oc-dotnet10 >/dev/null 2>&1; then bad "oc-dotnet10 is still defined"; else ok "oc-dotnet10 removed"; fi
+if grep -q "dotnet10" "$ALIASES"; then bad "dotnet10 image is still referenced"; else ok "dotnet10 digest removed"; fi
 
 # --- 2b. the init copy is verified and refreshed on drift ------------------
 printf 'DRIFT\n' >> "$INIT_COPY"
