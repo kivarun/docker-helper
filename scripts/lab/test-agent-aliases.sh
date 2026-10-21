@@ -684,9 +684,13 @@ rm -rf "$foreign_dir"
 # F5.3 the stale-resource sweep removes only dead launches (no pkill)
 sleep 20 >/dev/null 2>&1 &
 live_pid=$!
-mkdir -p "$foreign_dir"; printf '%s\n' "$live_pid" > "$foreign_dir/agent.pid"
+mkdir -p "$foreign_dir"
+printf '%s\n' "$live_pid" > "$foreign_dir/agent.pid"
+printf '%s\n' "$live_pid" > "$foreign_dir/launcher.pid"
 dead_dir="$OPENCODE_DOCKER_HOME/agent-ssh/run.dead"
-mkdir -p "$dead_dir"; printf '%s\n' "999999" > "$dead_dir/agent.pid"
+mkdir -p "$dead_dir"
+printf '%s\n' "999999" > "$dead_dir/agent.pid"
+printf '%s\n' "999999" > "$dead_dir/launcher.pid"
 ( cd "$WS" && oc echo hi ) >/dev/null 2>&1
 if [ ! -e "$dead_dir" ]; then ok "F5: the sweep removed the dead run dir"; else bad "F5: the sweep left the dead run dir"; fi
 if [ -d "$foreign_dir" ] && kill -0 "$live_pid" 2>/dev/null; then
@@ -696,7 +700,83 @@ else
 fi
 kill "$live_pid" 2>/dev/null || true; rm -rf "$foreign_dir"
 
+# --- R3. the stale sweep is race-safe and never guesses ----------------------
+# Ownership and completion must both be proven before a run dir is removed;
+# a missing launcher.pid is NEVER proof of staleness. The scenarios below are
+# deterministic pid-state setups, not sleep races.
+r3_base="$OPENCODE_DOCKER_HOME/agent-ssh"
+mkdir -p "$r3_base"
+
+# R3.1 a live launcher without agent.pid yet (the allocation race): kept
+mkdir -p "$r3_base/run.starting"
+printf '%s\n' "$$" > "$r3_base/run.starting/launcher.pid"
+_oc_ssh_stale_cleanup
+if [ -d "$r3_base/run.starting" ]; then
+  ok "R3: a live launcher without agent.pid is not swept"
+else
+  bad "R3: the sweep destroyed a launching run dir"
+fi
+
+# R3.2 a dir with no pidfiles at all is suspicious: never auto-removed
+mkdir -p "$r3_base/run.suspicious"
+_oc_ssh_stale_cleanup
+if [ -d "$r3_base/run.suspicious" ]; then
+  ok "R3: a suspicious dir without pidfiles is not auto-removed"
+else
+  bad "R3: the sweep auto-removed a suspicious dir"
+fi
+
+# R3.3 a dead launcher with a live agent: the agent is never killed on a
+# pid we cannot prove ownership of; the dir stays for manual review
+mkdir -p "$r3_base/run.orphan-agent"
+printf '%s\n' "999999" > "$r3_base/run.orphan-agent/launcher.pid"
+sleep 20 >/dev/null 2>&1 &
+orphan_agent_pid=$!
+printf '%s\n' "$orphan_agent_pid" > "$r3_base/run.orphan-agent/agent.pid"
+_oc_ssh_stale_cleanup
+if [ -d "$r3_base/run.orphan-agent" ] && kill -0 "$orphan_agent_pid" 2>/dev/null; then
+  ok "R3: a live agent behind a dead launcher is left for manual review"
+else
+  bad "R3: the sweep killed or deleted an unproven live agent"
+fi
+kill "$orphan_agent_pid" 2>/dev/null || true
+rm -rf "$r3_base/run.orphan-agent"
+
+# R3.4 a provably dead launch (both pids dead) is swept
+mkdir -p "$r3_base/run.expired"
+printf '%s\n' "999998" > "$r3_base/run.expired/launcher.pid"
+printf '%s\n' "999997" > "$r3_base/run.expired/agent.pid"
+_oc_ssh_stale_cleanup
+if [ ! -e "$r3_base/run.expired" ]; then
+  ok "R3: a provably dead launch is swept"
+else
+  bad "R3: a provably dead launch survived the sweep"
+fi
+
+# R3.5 the launcher pid must be the real subshell pid (BASHPID), not the
+# parent's $$: during a live launch launcher.pid differs from this shell
+mkdir -p "$(dirname "$OPENCODE_AGENT_SSH_KEY")"
+printf 'PRIVATE-KEY\n' > "$OPENCODE_AGENT_SSH_KEY"
+f4_reset
+: > "$DH_REC"; : > "$DOCKER_REC"
+( export STUB_SLEEP=1 STUB_SLEEP_SECONDS=6; cd "$WS" && oc echo first ) &
+r3_pid=$!
+for _ in $(seq 1 50); do grep -q "agent-ssh/run" "$DOCKER_REC" 2>/dev/null && break; sleep 0.1; done
+r3_sock="$(f5_socket_of "$DOCKER_REC")"
+r3_launcher_pid="$(cat "$r3_sock/launcher.pid" 2>/dev/null || true)"
+if [ -n "$r3_launcher_pid" ] && [ "$r3_launcher_pid" != "$$" ]; then
+  ok "R3: launcher.pid records the real launch process (BASHPID)"
+else
+  bad "R3: launcher.pid is the parent's pid ($$) or missing ('$r3_launcher_pid')"
+fi
+wait "$r3_pid" 2>/dev/null || true
+unset STUB_SLEEP STUB_SLEEP_SECONDS
+rm -f "$OPENCODE_AGENT_SSH_KEY"
+rm -rf "$r3_base/run.starting" "$r3_base/run.suspicious"
+
 # F5.4 an interrupted launcher cleans its Session, its agent and its dir
+mkdir -p "$(dirname "$OPENCODE_AGENT_SSH_KEY")"
+printf 'PRIVATE-KEY\n' > "$OPENCODE_AGENT_SSH_KEY"
 : > "$DH_REC"; : > "$DOCKER_REC"
 ( export STUB_SLEEP=1 STUB_SLEEP_SECONDS=30; cd "$WS" && oc echo bye ) &
 oc_pid=$!

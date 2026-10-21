@@ -97,24 +97,45 @@ else
     return 1 2>/dev/null || exit 1
 fi
 
-# --- per-launch ssh-agent lifecycle (F5) ------------------------------------
+# --- per-launch ssh-agent lifecycle (F5/R3) ----------------------------------
 # Each launch owns a private run directory (mktemp -d, 0700) holding its own
 # agent socket, so concurrent launches never share a socket pathname and one
 # launch can never destroy another's socket. The sweep below removes ONLY
-# resources whose recorded pid is gone — it never uses pkill-style user-wide
-# kills, so live launches are untouched.
+# resources whose ownership and completion are BOTH proven, and never uses
+# pkill-style user-wide kills:
+#   * launcher.pid (the real subshell pid, BASHPID) is the ownership anchor:
+#     a directory WITHOUT it is suspicious and is never removed
+#     automatically;
+#   * a live launcher.pid means the launch is running or still initializing
+#     (the agent.pid may not exist yet — that is exactly the allocation
+#     race): the directory is left alone;
+#   * a dead launcher.pid plus an absent agent.pid is provably finished and
+#     may be swept;
+#   * a dead launcher.pid with a LIVE agent.pid cannot prove that the agent
+#     process is ours (a pid may be reused), so neither the agent nor the
+#     directory is touched: the directory stays for manual operator review;
+#   * each launcher's own cleanup (normal exit, failed ssh-add, INT, TERM)
+#     remains independent and removes exactly its own directory.
 _oc_ssh_stale_cleanup() {
     local base="${OPENCODE_DOCKER_HOME:-$HOME/.opencode-docker}/agent-ssh"
     [ -d "$base" ] || return 0
-    local d pid
+    local d launcher_pid agent_pid
     for d in "$base"/run.*; do
         [ -d "$d" ] || continue
-        pid=""
-        [ -f "$d/agent.pid" ] && pid="$(cat "$d/agent.pid" 2>/dev/null)"
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        if [ ! -f "$d/launcher.pid" ]; then
+            echo "note: suspicious ssh-agent run dir without launcher.pid, left for manual review: $d" >&2
             continue
         fi
-        [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+        launcher_pid="$(cat "$d/launcher.pid" 2>/dev/null)"
+        [ -n "$launcher_pid" ] || { echo "note: unreadable launcher.pid, left for manual review: $d" >&2; continue; }
+        kill -0 "$launcher_pid" 2>/dev/null && continue
+        if [ -f "$d/agent.pid" ]; then
+            agent_pid="$(cat "$d/agent.pid" 2>/dev/null)"
+            if [ -n "$agent_pid" ] && kill -0 "$agent_pid" 2>/dev/null; then
+                echo "note: live agent behind a dead launcher, left for manual review: $d (agent pid $agent_pid)" >&2
+                continue
+            fi
+        fi
         rm -rf -- "$d"
     done
 }
@@ -291,7 +312,7 @@ _oc_run() (
         run_dir="$(mktemp -d "$opencode_home/agent-ssh/run.XXXXXX")" \
             || { echo "cannot allocate the ssh-agent run directory" >&2; return 1; }
         ssh_run_dir="$run_dir"
-        printf '%s\n' "$$" > "$run_dir/launcher.pid"
+        printf '%s\n' "$BASHPID" > "$run_dir/launcher.pid"
         local agent_env
         if ! agent_env="$(ssh-agent -a "$run_dir/agent.sock")"; then
             rm -rf -- "$run_dir"
