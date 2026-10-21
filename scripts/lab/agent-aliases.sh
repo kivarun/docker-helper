@@ -30,7 +30,9 @@
 _DH_WS_STYLE=""
 _dh_workspace_style() {
     if [[ -z "$_DH_WS_STYLE" ]]; then
-        if command docker-helper session create --help 2>&1 | grep -q -- '--workspace'; then
+        # UAT-7: capture the help output fully before matching — no early-exit
+        # reader that could SIGPIPE the probe; a failed probe cannot pass.
+        if dh_help="$(command docker-helper session create --help 2>&1)" && printf '%s' "$dh_help" | grep -q -- '--workspace'; then
             _DH_WS_STYLE=flag
         else
             _DH_WS_STYLE=positional

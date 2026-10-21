@@ -137,7 +137,9 @@ stage_snapshot() {
   [ -n "$workdir" ] || die "cannot determine the VM workdir (dev-vm-local.sh status)"
   disk="$workdir/disk.qcow2"
   [ -f "$disk" ] || die "no VM disk at $disk (create the VM first)"
-  if qemu-img snapshot -l "$disk" 2>/dev/null | awk '{print $2}' | grep -qx 'pre-provisioning'; then
+  # UAT-7: awk consumes the whole listing and decides alone — no early-exit
+  # reader that could SIGPIPE the writer and misread an existing snapshot.
+  if qemu-img snapshot -l "$disk" 2>/dev/null | awk '$2 == "pre-provisioning" { found = 1 } END { exit found ? 0 : 1 }'; then
     log "snapshot 'pre-provisioning' already exists (kept)"
   else
     log "taking internal snapshot 'pre-provisioning' of $disk"
@@ -195,6 +197,33 @@ base_image_ref() {
   '
 }
 
+# UAT-7: every marker-based diagnostic runs through this helper. The old
+# `ssh ... | grep -q MARKER` closed the read pipe as soon as grep matched,
+# SIGPIPE-killing the SSH driver mid-stream (rc 141) and turning a real
+# PASS into a false FAIL under set -o pipefail. The helper instead consumes
+# the WHOLE command output first, checks the exit status separately, and
+# only then searches the completed output for the marker. Fail-closed: an
+# SSH/Docker/curl failure stays a failure even when the marker text appears
+# in its output, and a zero exit without the marker is a failure too. The
+# captured output is never printed — only the exit status and the caller's
+# message reach the log — so tokens, certificate contents and other secret
+# material in diagnostic payloads cannot leak.
+ssh_diag_expect() { # MARKER FAILURE_MESSAGE -- cmd...
+  local marker="$1" failmsg="$2"
+  shift 2
+  [ "${1:-}" = "--" ] || die "internal: ssh_diag_expect requires --"
+  shift
+  local out rc
+  if out="$("$@" < /dev/null 2>&1)"; then rc=0; else rc=$?; fi
+  if [ "$rc" -ne 0 ]; then
+    die "$failmsg (the diagnostic command exited $rc)"
+  fi
+  case "$out" in
+    *"$marker"*) return 0 ;;
+    *) die "$failmsg (exit 0, but no $marker in the completed output)" ;;
+  esac
+}
+
 # F6 runtime evidence, gathered in the online window with REAL controlled
 # endpoints (the model is never launched here; these are one-off diagnostic
 # containers without any session):
@@ -237,8 +266,8 @@ verify_online_tls() {
     local ca_name
     ca_name="$(basename -- "$LAB_CA_SOURCE")"
     log "positive TLS check (guest) against $LAB_CA_TEST_URL with the provisioned CA"
-    "$DEVVM" ssh "curl --cacert $(ssh_sq "/etc/docker-helper/$ca_name.crt") -fsS --max-time 20 $(ssh_sq "$LAB_CA_TEST_URL") >/dev/null && echo CA_TLS_OK" < /dev/null \
-      | grep -q CA_TLS_OK || die "the corporate CA did not validate $LAB_CA_TEST_URL"
+    ssh_diag_expect CA_TLS_OK "the corporate CA did not validate $LAB_CA_TEST_URL" -- \
+      "$DEVVM" ssh "curl --cacert $(ssh_sq "/etc/docker-helper/$ca_name.crt") -fsS --max-time 20 $(ssh_sq "$LAB_CA_TEST_URL") >/dev/null && echo CA_TLS_OK"
     log "positive TLS evidence recorded (guest)"
     # (2)/(3) container-level evidence through a one-off diagnostic container
     local base_image container_env=""
@@ -257,12 +286,10 @@ verify_online_tls() {
         log "positive TLS check (container, corporate) against $LAB_CA_TEST_URL"
         # F6: the certificate must be really present and readable inside the
         # diagnostic container before any positive claim is made.
-        "$DEVVM" ssh "sudo -u agent -H docker run --rm -v $(ssh_sq '/home/agent/.opencode-docker/ca:/etc/opencode-ca:ro,z') $container_env --entrypoint /bin/sh $(ssh_sq "$base_image") -c $(ssh_sq "test -r /etc/opencode-ca/$ca_name.crt && test -r /etc/opencode-ca/combined-ca-bundle.crt && echo CONTAINER_CA_CERT_READABLE")" < /dev/null \
-          | grep -q CONTAINER_CA_CERT_READABLE \
-          || die "the corporate CA certificate is not readable inside the diagnostic container"
-        "$DEVVM" ssh "sudo -u agent -H docker run --rm -v $(ssh_sq '/home/agent/.opencode-docker/ca:/etc/opencode-ca:ro,z') $container_env --entrypoint /bin/sh $(ssh_sq "$base_image") -c $(ssh_sq "curl -fsS --max-time 20 '$LAB_CA_TEST_URL' >/dev/null && echo CONTAINER_CA_OK")" < /dev/null \
-          | grep -q CONTAINER_CA_OK \
-          || die "the container did not validate the corporate endpoint with the combined bundle"
+        ssh_diag_expect CONTAINER_CA_CERT_READABLE "the corporate CA certificate is not readable inside the diagnostic container" -- \
+          "$DEVVM" ssh "sudo -u agent -H docker run --rm -v $(ssh_sq '/home/agent/.opencode-docker/ca:/etc/opencode-ca:ro,z') $container_env --entrypoint /bin/sh $(ssh_sq "$base_image") -c $(ssh_sq "test -r /etc/opencode-ca/$ca_name.crt && test -r /etc/opencode-ca/combined-ca-bundle.crt && echo CONTAINER_CA_CERT_READABLE")"
+        ssh_diag_expect CONTAINER_CA_OK "the container did not validate the corporate endpoint with the combined bundle" -- \
+          "$DEVVM" ssh "sudo -u agent -H docker run --rm -v $(ssh_sq '/home/agent/.opencode-docker/ca:/etc/opencode-ca:ro,z') $container_env --entrypoint /bin/sh $(ssh_sq "$base_image") -c $(ssh_sq "curl -fsS --max-time 20 '$LAB_CA_TEST_URL' >/dev/null && echo CONTAINER_CA_OK")"
         log "positive TLS evidence recorded (container, corporate)"
       elif "$DEVVM" ssh "test -f '/home/agent/.opencode-docker/ca/$ca_name.crt'" < /dev/null; then
         # F6: without the combined bundle, curl has no corporate trust, but
@@ -270,9 +297,8 @@ verify_online_tls() {
         # chain when Node exists in the pinned image.
         container_env="-e NODE_EXTRA_CA_CERTS=/etc/opencode-ca/$ca_name.crt"
         log "positive TLS check (container, corporate, Node-only) against $LAB_CA_TEST_URL"
-        "$DEVVM" ssh "sudo -u agent -H docker run --rm -v $(ssh_sq '/home/agent/.opencode-docker/ca:/etc/opencode-ca:ro,z') $container_env --entrypoint /bin/sh $(ssh_sq "$base_image") -c $(ssh_sq "test -r /etc/opencode-ca/$ca_name.crt && test -x /usr/bin/node && node -e \"require('https').get('$LAB_CA_TEST_URL', r => { console.log('CONTAINER_CA_NODE_OK'); process.exit(0); }).on('error', () => { console.log('CONTAINER_CA_NODE_FAIL'); process.exit(1); })\"")" < /dev/null \
-          | grep -q CONTAINER_CA_NODE_OK \
-          || die "the container did not validate the corporate endpoint through Node"
+        ssh_diag_expect CONTAINER_CA_NODE_OK "the container did not validate the corporate endpoint through Node" -- \
+          "$DEVVM" ssh "sudo -u agent -H docker run --rm -v $(ssh_sq '/home/agent/.opencode-docker/ca:/etc/opencode-ca:ro,z') $container_env --entrypoint /bin/sh $(ssh_sq "$base_image") -c $(ssh_sq "test -r /etc/opencode-ca/$ca_name.crt && test -x /usr/bin/node && node -e \"require('https').get('$LAB_CA_TEST_URL', r => { console.log('CONTAINER_CA_NODE_OK'); process.exit(0); }).on('error', () => { console.log('CONTAINER_CA_NODE_FAIL'); process.exit(1); })\"")"
         log "positive TLS evidence recorded (container, corporate, Node-only)"
       else
         log "container corporate TLS evidence skipped: no corporate trust available in the diagnostic container"
@@ -300,9 +326,8 @@ verify_online_tls() {
       fi
     fi
     log "positive TLS check (container, public) against $public_url"
-    "$DEVVM" ssh "sudo -u agent -H docker run --rm ${container_env:+-v $(ssh_sq '/home/agent/.opencode-docker/ca:/etc/opencode-ca:ro,z')} $container_env --entrypoint /bin/sh $(ssh_sq "$base_image") -c $(ssh_sq "curl -fsS --max-time 20 '$public_url' >/dev/null && echo CONTAINER_PUBLIC_OK")" < /dev/null \
-      | grep -q CONTAINER_PUBLIC_OK \
-      || die "the container lost trust in the public CA chain (TLS trust was replaced, not extended)"
+    ssh_diag_expect CONTAINER_PUBLIC_OK "the container lost trust in the public CA chain (TLS trust was replaced, not extended)" -- \
+      "$DEVVM" ssh "sudo -u agent -H docker run --rm ${container_env:+-v $(ssh_sq '/home/agent/.opencode-docker/ca:/etc/opencode-ca:ro,z')} $container_env --entrypoint /bin/sh $(ssh_sq "$base_image") -c $(ssh_sq "curl -fsS --max-time 20 '$public_url' >/dev/null && echo CONTAINER_PUBLIC_OK")"
     log "positive TLS evidence recorded (container, public)"
   fi
 }

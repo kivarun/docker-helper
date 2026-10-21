@@ -86,6 +86,7 @@ case "\${1:-}" in
     esac
     echo running > "$STATE" ;;
   ssh)
+    [ "\${FAIL_ON:-}" = ssh-down ] && { echo "stub: ssh connection failed" >&2; exit 255; }
     shift; echo "ssh \$1" >> "$REC"
     cat > /dev/null 2>/dev/null || true
     case "\$1" in
@@ -101,7 +102,18 @@ case "\${1:-}" in
       *CONTAINER_CA_NODE_OK*)
         if [ -f "$WORK/node-present" ]; then echo CONTAINER_CA_NODE_OK; else echo "stub: node absent in image" >&2; exit 1; fi ;;
       *CONTAINER_CA_OK*) echo CONTAINER_CA_OK ;;
-      *CONTAINER_PUBLIC_OK*) echo CONTAINER_PUBLIC_OK ;;
+      *CONTAINER_PUBLIC_OK*)
+        case "\${FAIL_ON:-}" in
+          public-fail) echo "stub: docker run failed" >&2; exit 1 ;;
+          public-silent) exit 0 ;;
+          public-marker-fail) echo CONTAINER_PUBLIC_OK; echo "stub: docker died after the marker" >&2; exit 1 ;;
+        esac
+        if [ "\${UAT7_EARLY_TAIL:-}" = 1 ]; then
+          echo CONTAINER_PUBLIC_OK
+          echo "diag echo: admin token LABUAT7SECRETVALUE" >&2
+          head -c 200000 /dev/zero | tr '\0' 'x'
+        fi
+        echo CONTAINER_PUBLIC_OK ;;
       *oc_lab_mount_source_ok*)
         # UAT-3/F1: the guest mount gate runs INSIDE the agent's context. The
         # real guest semantics: the agent home is 0700 agent:agent, so a gate
@@ -327,6 +339,75 @@ if [ -n "$gate_line" ] && [ -n "$docker_line" ] && [ "$gate_line" -lt "$docker_l
   ok "R5: the gate is consulted before the diagnostic docker run"
 else
   bad "R5: the diagnostic docker run is not gated (gate=$gate_line docker=$docker_line)"
+fi
+
+# --- UAT-7. the marker diagnostics consume the whole driver output -----------
+# The old `ssh ... | grep -q MARKER` diagnostics closed the read pipe as
+# soon as grep matched; the SSH driver's remaining output then died with
+# SIGPIPE (rc 141) and, under set -o pipefail, turned a real PASS into a
+# false FAIL (the real UAT reproduction). A marker is now searched only
+# AFTER the driver output is fully consumed and its exit status is checked
+# separately: an SSH/Docker/TLS failure must never pass because the marker
+# text appeared somewhere in its output, a zero exit without the marker is
+# not evidence, and the captured payload is never printed.
+uat7_run() { # [EXTRA-ENV...] — run the online diagnostics with a fresh state
+  : > "$REC"; echo stopped > "$STATE"; rm -f "$SNAPMARK"
+  # the combined-bundle fixture puts the corporate container evidence on the
+  # deterministic curl path (no dependence on the Node fixture)
+  : > "$WORK/combined-present"; : > "$WORK/node-present"
+  run_driver online
+}
+
+# U7.1 RED: the marker appears early, a large driver tail follows it —
+# the diagnostics must still pass (and print nothing of the payload)
+if LAB_CA_SOURCE="$WORK/ca-src" LAB_CA_TEST_URL="https://corp.example.test/" UAT7_EARLY_TAIL=1 uat7_run online; then
+  ok "UAT-7: an early marker with a large trailing output still passes"
+else
+  bad "UAT-7 RED: the SIGPIPE race turned a real PASS into a failure (rc $RC): $(printf '%s' "$OUT" | grep -E 'ERROR|CRITICAL|exited|marker' | head -3)"
+fi
+contains "UAT-7: the public evidence is recorded" "positive TLS evidence recorded (container, public)" "$OUT"
+case "$OUT" in
+  *LABUAT7SECRETVALUE*) bad "UAT-7: the diagnostic payload leaked into the output" ;;
+  *) ok "UAT-7: the diagnostic payload is not printed" ;;
+esac
+case "$OUT" in
+  *xxxxxxxxxxxxxxxxxxxx*) bad "UAT-7: the driver tail leaked into the output" ;;
+  *) ok "UAT-7: the driver tail is not printed" ;;
+esac
+
+# U7.2 a failed diagnostic cannot pass on the marker alone
+if LAB_CA_SOURCE="$WORK/ca-src" LAB_CA_TEST_URL="https://corp.example.test/" FAIL_ON=public-marker-fail uat7_run online; then
+  bad "UAT-7 RED: a failed diagnostic passed because its output contained the marker"
+else
+  ok "UAT-7: a failed diagnostic cannot pass on the marker alone"
+fi
+
+# U7.3 an SSH-level connection failure fails the diagnostic
+if LAB_CA_SOURCE="$WORK/ca-src" LAB_CA_TEST_URL="https://corp.example.test/" FAIL_ON=ssh-down uat7_run online; then
+  bad "UAT-7: an SSH connection failure passed the diagnostic"
+else
+  ok "UAT-7: an SSH connection failure fails the diagnostic"
+fi
+
+# U7.4 a zero exit without the marker is not evidence
+if LAB_CA_SOURCE="$WORK/ca-src" LAB_CA_TEST_URL="https://corp.example.test/" FAIL_ON=public-silent uat7_run online; then
+  bad "UAT-7: a marker-less exit 0 passed the diagnostic"
+else
+  ok "UAT-7: a zero exit without the marker fails the diagnostic"
+fi
+
+# U7.5 a Docker failure (an error, no marker) fails the diagnostic
+if LAB_CA_SOURCE="$WORK/ca-src" LAB_CA_TEST_URL="https://corp.example.test/" FAIL_ON=public-fail uat7_run online; then
+  bad "UAT-7: a docker failure passed the diagnostic"
+else
+  ok "UAT-7: a docker failure fails the diagnostic"
+fi
+
+# U7.6 the guest TLS failure keeps failing
+if LAB_CA_SOURCE="$WORK/ca-src" LAB_CA_TEST_URL="https://corp.example.test/" FAIL_ON=tls uat7_run online; then
+  bad "UAT-7: the guest TLS failure passed the diagnostic"
+else
+  ok "UAT-7: the guest TLS failure fails the diagnostic"
 fi
 
 # --- R2. the lifecycle owns the online start ATTEMPT itself ------------------
