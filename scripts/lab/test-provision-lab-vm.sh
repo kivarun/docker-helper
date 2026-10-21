@@ -97,6 +97,8 @@ case "\${1:-}" in
       *CONTAINER_PUBLIC_OK*) echo CONTAINER_PUBLIC_OK ;;
       *lab-mount-gate*) [ "\${FAIL_ON:-}" = gate ] && { echo "stub: mount gate refused" >&2; exit 1; }
         exit 0 ;;
+      *combined-ca-bundle.crt*)
+        if [ -f "$WORK/combined-present" ]; then exit 0; else exit 1; fi ;;
       *docker\ pull*) [ "\${FAIL_ON:-}" = pull ] && { echo "stub: pull failed" >&2; exit 1; } ;;
     esac
     exit 0 ;;
@@ -407,6 +409,54 @@ if printf '%s' "$rec" | grep 'docker run' | grep -vq 'sudo -u agent -H docker ru
   bad "F1: an unprivileged docker run path exists"
 else
   ok "F1: no diagnostic docker run bypasses the agent authorization"
+fi
+
+# --- F2. the TLS diagnostics follow the launcher's trust contract ------------
+f2_tls_run() { # -> the recorded docker run lines of the online stage
+  : > "$REC"; echo stopped > "$STATE"; rm -f "$SNAPMARK"; rm -f "$WORK/setupcount"
+  run_driver online >/dev/null 2>&1
+  RC=$?
+  printf '%s' "$(cat "$REC")" | grep 'docker run'
+}
+
+# F2/a: no CA at all -> no trust-replacing variables anywhere
+rm -f "$WORK/combined-present"
+envs="$(f2_tls_run | grep -o '\-e [A-Z_]*' | sort -u | tr '\n' ' ')"
+if printf '%s' "$envs" | grep -qE 'SSL_CERT_FILE|CURL_CA_BUNDLE|GIT_SSL_CAINFO|NODE_EXTRA_CA_CERTS'; then
+  bad "F2/a: trust variables set without any provisioned CA"
+else
+  ok "F2/a: no CA -> no trust variables at all"
+fi
+
+# F2/b: CA + combined bundle -> the full launcher contract
+: > "$WORK/combined-present"
+: > "$REC"; echo stopped > "$STATE"; rm -f "$SNAPMARK"
+LAB_CA_SOURCE="$WORK/ca-src" run_driver online >/dev/null 2>&1
+envs="$(printf '%s' "$(cat "$REC")" | grep 'docker run' | grep -oE '\-e [A-Z_]+=[^ ]*' | sort -u | tr '\n' ' ')"
+for want in NODE_EXTRA_CA_CERTS SSL_CERT_FILE CURL_CA_BUNDLE GIT_SSL_CAINFO; do
+  if printf '%s' "$envs" | grep -q "$want"; then ok "F2/b: $want is set with the combined bundle"; else bad "F2/b: $want missing with the combined bundle (envs=$envs)"; fi
+done
+
+# F2/c: CA WITHOUT the combined bundle -> NODE only, no replacing variables,
+# and no container corporate check that could produce a false PASS
+rm -f "$WORK/combined-present"
+: > "$REC"; echo stopped > "$STATE"; rm -f "$SNAPMARK"
+LAB_CA_SOURCE="$WORK/ca-src" run_driver online >/dev/null 2>&1
+rec="$(cat "$REC")"
+if printf '%s' "$rec" | grep 'docker run' | grep -q 'NODE_EXTRA_CA_CERTS'; then
+  ok "F2/c: NODE_EXTRA_CA_CERTS is set with the corporate CA"
+else
+  bad "F2/c: NODE_EXTRA_CA_CERTS missing"
+fi
+if printf '%s' "$rec" | grep 'docker run' | grep -qE 'SSL_CERT_FILE|CURL_CA_BUNDLE|GIT_SSL_CAINFO'; then
+  bad "F2/c: replacing trust variables point at a nonexistent combined bundle: $(printf '%s' "$rec" | grep 'docker run' | grep -oE '\-e (SSL_CERT_FILE|CURL_CA_BUNDLE|GIT_SSL_CAINFO)=[^ ]*' | head -2)"
+else
+  ok "F2/c: no replacing trust variables without the combined bundle"
+fi
+if printf '%s' "$rec" | grep 'docker run' | grep -q 'CONTAINER_CA_OK'; then
+  bad "F2/c: a container corporate check ran without its required evidence"
+else
+  ok "F2/c: no container corporate check without the combined bundle"
 fi
 
 echo

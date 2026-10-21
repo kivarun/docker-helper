@@ -238,8 +238,13 @@ verify_online_tls() {
       if ! guest_ca_source_ok; then
         die "the diagnostic CA mount source failed the shared mount gate: refusing to run docker"
       fi
+      # F2: the diagnostics follow the launcher's trust contract exactly —
+      # NODE_EXTRA_CA_CERTS only when the corporate certificate exists, the
+      # replacing variables only when the combined bundle exists. A missing
+      # combined bundle never produces a false PASS: the container corporate
+      # check is skipped with an explicit note instead.
       if "$DEVVM" ssh "test -f '/home/agent/.opencode-docker/ca/combined-ca-bundle.crt'" < /dev/null; then
-        container_env="-e NODE_EXTRA_CA_CERTS=/etc/opencode-ca/$ca_name -e SSL_CERT_FILE=/etc/opencode-ca/combined-ca-bundle.crt -e CURL_CA_BUNDLE=/etc/opencode-ca/combined-ca-bundle.crt -e GIT_SSL_CAINFO=/etc/opencode-ca/combined-ca-bundle.crt"
+        container_env="-e NODE_EXTRA_CA_CERTS=/etc/opencode-ca/$ca_name.crt -e SSL_CERT_FILE=/etc/opencode-ca/combined-ca-bundle.crt -e CURL_CA_BUNDLE=/etc/opencode-ca/combined-ca-bundle.crt -e GIT_SSL_CAINFO=/etc/opencode-ca/combined-ca-bundle.crt"
         log "positive TLS check (container, corporate) against $LAB_CA_TEST_URL"
         "$DEVVM" ssh "sudo -u agent -H docker run --rm -v $(ssh_sq '/home/agent/.opencode-docker/ca:/etc/opencode-ca:ro,z') $container_env --entrypoint /bin/sh $(ssh_sq "$base_image") -c $(ssh_sq "curl -fsS --max-time 20 '$LAB_CA_TEST_URL' >/dev/null && echo CONTAINER_CA_OK")" < /dev/null \
           | grep -q CONTAINER_CA_OK \
@@ -261,7 +266,14 @@ verify_online_tls() {
       if ! guest_ca_source_ok; then
         die "the diagnostic CA mount source failed the shared mount gate: refusing to run docker"
       fi
-      container_env="-e NODE_EXTRA_CA_CERTS=/etc/opencode-ca/$(basename -- "$LAB_CA_SOURCE") -e SSL_CERT_FILE=/etc/opencode-ca/combined-ca-bundle.crt -e CURL_CA_BUNDLE=/etc/opencode-ca/combined-ca-bundle.crt -e GIT_SSL_CAINFO=/etc/opencode-ca/combined-ca-bundle.crt"
+      # F2: NODE_EXTRA_CA_CERTS only when the corporate copy exists; the
+      # replacing variables only when the combined bundle exists.
+      if "$DEVVM" ssh "test -f '/home/agent/.opencode-docker/ca/$(basename -- "$LAB_CA_SOURCE").crt'" < /dev/null; then
+        container_env="-e NODE_EXTRA_CA_CERTS=/etc/opencode-ca/$(basename -- "$LAB_CA_SOURCE").crt"
+      fi
+      if "$DEVVM" ssh "test -f '/home/agent/.opencode-docker/ca/combined-ca-bundle.crt'" < /dev/null; then
+        container_env="$container_env -e SSL_CERT_FILE=/etc/opencode-ca/combined-ca-bundle.crt -e CURL_CA_BUNDLE=/etc/opencode-ca/combined-ca-bundle.crt -e GIT_SSL_CAINFO=/etc/opencode-ca/combined-ca-bundle.crt"
+      fi
     fi
     log "positive TLS check (container, public) against $public_url"
     "$DEVVM" ssh "sudo -u agent -H docker run --rm ${container_env:+-v $(ssh_sq '/home/agent/.opencode-docker/ca:/etc/opencode-ca:ro,z')} $container_env --entrypoint /bin/sh $(ssh_sq "$base_image") -c $(ssh_sq "curl -fsS --max-time 20 '$public_url' >/dev/null && echo CONTAINER_PUBLIC_OK")" < /dev/null \
