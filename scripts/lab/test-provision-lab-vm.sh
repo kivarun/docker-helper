@@ -93,6 +93,9 @@ case "\${1:-}" in
       *install-docker-helper*) [ "\${FAIL_ON:-}" = helper ] && { echo "stub: helper install failed" >&2; exit 1; } ;;
       *curl\ --cacert*) [ "\${FAIL_ON:-}" = tls ] && { echo "stub: positive TLS failed" >&2; exit 1; }
         echo CA_TLS_OK ;;
+      *CONTAINER_CA_CERT_READABLE*) echo CONTAINER_CA_CERT_READABLE ;;
+      *CONTAINER_CA_NODE_OK*)
+        if [ -f "$WORK/node-present" ]; then echo CONTAINER_CA_NODE_OK; else echo "stub: node absent in image" >&2; exit 1; fi ;;
       *CONTAINER_CA_OK*) echo CONTAINER_CA_OK ;;
       *CONTAINER_PUBLIC_OK*) echo CONTAINER_PUBLIC_OK ;;
       *lab-mount-gate*) [ "\${FAIL_ON:-}" = gate ] && { echo "stub: mount gate refused" >&2; exit 1; }
@@ -374,12 +377,13 @@ fi
 
 # --- R6. driver-supplied URLs are validated before any guest command ---------
 r6_url_case() { # LABEL VALUE EXPECT(accept|reject)
+  : > "$WORK/combined-present"; : > "$WORK/node-present"
   : > "$REC"; echo stopped > "$STATE"; rm -f "$SNAPMARK"; rm -f "$WORK/setupcount"
   LAB_CA_SOURCE="$WORK/ca-src" LAB_CA_TEST_URL="$2" run_driver online
   if [ "$3" = reject ]; then
     if [ "$RC" != 0 ]; then ok "R6/driver-url/$1: rejected"; else bad "R6/driver-url/$1: accepted"; fi
   else
-    if [ "$RC" = 0 ]; then ok "R6/driver-url/$1: accepted"; else bad "R6/driver-url/$1: rejected: $(tail -1 "$WORK/out")"; fi
+    if [ "$RC" = 0 ]; then ok "R6/driver-url/$1: accepted"; else bad "R6/driver-url/$1: rejected: $(tail -3 "$WORK/out" | tr '\n' '|')"; fi
   fi
   if printf '%s' "$(cat "$REC")" | grep -qF 'touch BAD'; then
     bad "R6/driver-url/$1: the payload reached a guest command"
@@ -431,7 +435,7 @@ fi
 # F2/b: CA + combined bundle -> the full launcher contract
 : > "$WORK/combined-present"
 : > "$REC"; echo stopped > "$STATE"; rm -f "$SNAPMARK"
-LAB_CA_SOURCE="$WORK/ca-src" run_driver online >/dev/null 2>&1
+LAB_CA_SOURCE="$WORK/ca-src" LAB_CA_TEST_URL="https://corp.example.test/" run_driver online >/dev/null 2>&1
 envs="$(printf '%s' "$(cat "$REC")" | grep 'docker run' | grep -oE '\-e [A-Z_]+=[^ ]*' | sort -u | tr '\n' ' ')"
 for want in NODE_EXTRA_CA_CERTS SSL_CERT_FILE CURL_CA_BUNDLE GIT_SSL_CAINFO; do
   if printf '%s' "$envs" | grep -q "$want"; then ok "F2/b: $want is set with the combined bundle"; else bad "F2/b: $want missing with the combined bundle (envs=$envs)"; fi
@@ -441,7 +445,7 @@ done
 # and no container corporate check that could produce a false PASS
 rm -f "$WORK/combined-present"
 : > "$REC"; echo stopped > "$STATE"; rm -f "$SNAPMARK"
-LAB_CA_SOURCE="$WORK/ca-src" run_driver online >/dev/null 2>&1
+LAB_CA_SOURCE="$WORK/ca-src" LAB_CA_TEST_URL="https://corp.example.test/" run_driver online >/dev/null 2>&1
 rec="$(cat "$REC")"
 if printf '%s' "$rec" | grep 'docker run' | grep -q 'NODE_EXTRA_CA_CERTS'; then
   ok "F2/c: NODE_EXTRA_CA_CERTS is set with the corporate CA"
@@ -454,9 +458,63 @@ else
   ok "F2/c: no replacing trust variables without the combined bundle"
 fi
 if printf '%s' "$rec" | grep 'docker run' | grep -q 'CONTAINER_CA_OK'; then
-  bad "F2/c: a container corporate check ran without its required evidence"
+  bad "F2/c: a curl-based corporate check ran without the combined bundle"
 else
-  ok "F2/c: no container corporate check without the combined bundle"
+  ok "F2/c: no curl-based corporate check without the combined bundle"
+fi
+if printf '%s' "$rec" | grep 'docker run' | grep -q 'CONTAINER_CA_NODE_OK'; then
+  ok "F2/c: the Node-only corporate check covers the CA-without-combined case"
+else
+  bad "F2/c: no Node-only corporate evidence for CA without the combined bundle"
+fi
+
+# --- F6. the certificate path and its in-container evidence ------------------
+# F6/a: the NODE_EXTRA_CA_CERTS path carries the .crt suffix that matches the
+# provisioner's and launcher's naming contract.
+: > "$REC"; echo stopped > "$STATE"; rm -f "$SNAPMARK"
+LAB_CA_SOURCE="$WORK/ca-src" run_driver online >/dev/null 2>&1
+if printf '%s' "$(cat "$REC")" | grep 'docker run' | grep -q 'NODE_EXTRA_CA_CERTS=/etc/opencode-ca/ca-src.crt'; then
+  ok "F6/a: NODE_EXTRA_CA_CERTS uses the .crt naming contract"
+else
+  bad "F6/a: NODE_EXTRA_CA_CERTS path diverges from the provisioner naming"
+fi
+
+# F6/b: the corporate container check proves the certificate is readable
+# inside the container before claiming success.
+: > "$WORK/combined-present"
+: > "$REC"; echo stopped > "$STATE"; rm -f "$SNAPMARK"
+LAB_CA_SOURCE="$WORK/ca-src" LAB_CA_TEST_URL="https://corp.example.test/" run_driver online >/dev/null 2>&1
+if printf '%s' "$(cat "$REC")" | grep 'docker run' | grep -q 'CONTAINER_CA_CERT_READABLE'; then
+  ok "F6/b: the corporate container check verifies certificate readability"
+else
+  bad "F6/b: no in-container certificate readability evidence: $(printf '%s' "$(cat "$REC")" | grep -c 'docker run') docker runs recorded"
+fi
+
+# F6/c: without the combined bundle, the corporate chain is validated through
+# Node when the image provides it.
+rm -f "$WORK/combined-present"; : > "$WORK/node-present"
+: > "$REC"; echo stopped > "$STATE"; rm -f "$SNAPMARK"
+LAB_CA_SOURCE="$WORK/ca-src" LAB_CA_TEST_URL="https://corp.example.test/" run_driver online >/dev/null 2>&1
+if printf '%s' "$(cat "$REC")" | grep 'docker run' | grep -q 'CONTAINER_CA_NODE_OK'; then
+  ok "F6/c: the corporate chain is validated through Node without the combined bundle"
+else
+  bad "F6/c: no Node-based corporate TLS evidence"
+fi
+
+# F6/d: when Node is absent in the image, the missing evidence fails the
+# online stage and closes the window (no false PASS).
+rm -f "$WORK/node-present"
+echo stopped > "$STATE"; rm -f "$SNAPMARK"
+LAB_CA_SOURCE="$WORK/ca-src" LAB_CA_TEST_URL="https://corp.example.test/" run_driver online >/dev/null 2>&1; rc=$?
+if [ "$rc" != 0 ]; then
+  ok "F6/d: missing Node evidence fails the online stage"
+else
+  bad "F6/d: a missing Node TLS evidence produced a PASS"
+fi
+if [ "$(cat "$STATE")" = stopped ]; then
+  ok "F6/d: the online window is closed on the failed diagnostic"
+else
+  bad "F6/d: the online window stayed open after the failed diagnostic"
 fi
 
 echo

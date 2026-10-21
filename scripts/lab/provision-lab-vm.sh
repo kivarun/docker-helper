@@ -246,12 +246,27 @@ verify_online_tls() {
       if "$DEVVM" ssh "test -f '/home/agent/.opencode-docker/ca/combined-ca-bundle.crt'" < /dev/null; then
         container_env="-e NODE_EXTRA_CA_CERTS=/etc/opencode-ca/$ca_name.crt -e SSL_CERT_FILE=/etc/opencode-ca/combined-ca-bundle.crt -e CURL_CA_BUNDLE=/etc/opencode-ca/combined-ca-bundle.crt -e GIT_SSL_CAINFO=/etc/opencode-ca/combined-ca-bundle.crt"
         log "positive TLS check (container, corporate) against $LAB_CA_TEST_URL"
+        # F6: the certificate must be really present and readable inside the
+        # diagnostic container before any positive claim is made.
+        "$DEVVM" ssh "sudo -u agent -H docker run --rm -v $(ssh_sq '/home/agent/.opencode-docker/ca:/etc/opencode-ca:ro,z') $container_env --entrypoint /bin/sh $(ssh_sq "$base_image") -c $(ssh_sq "test -r /etc/opencode-ca/$ca_name.crt && test -r /etc/opencode-ca/combined-ca-bundle.crt && echo CONTAINER_CA_CERT_READABLE")" < /dev/null \
+          | grep -q CONTAINER_CA_CERT_READABLE \
+          || die "the corporate CA certificate is not readable inside the diagnostic container"
         "$DEVVM" ssh "sudo -u agent -H docker run --rm -v $(ssh_sq '/home/agent/.opencode-docker/ca:/etc/opencode-ca:ro,z') $container_env --entrypoint /bin/sh $(ssh_sq "$base_image") -c $(ssh_sq "curl -fsS --max-time 20 '$LAB_CA_TEST_URL' >/dev/null && echo CONTAINER_CA_OK")" < /dev/null \
           | grep -q CONTAINER_CA_OK \
           || die "the container did not validate the corporate endpoint with the combined bundle"
         log "positive TLS evidence recorded (container, corporate)"
+      elif "$DEVVM" ssh "test -f '/home/agent/.opencode-docker/ca/$ca_name.crt'" < /dev/null; then
+        # F6: without the combined bundle, curl has no corporate trust, but
+        # Node honours NODE_EXTRA_CA_CERTS alone — use it for the corporate
+        # chain when Node exists in the pinned image.
+        container_env="-e NODE_EXTRA_CA_CERTS=/etc/opencode-ca/$ca_name.crt"
+        log "positive TLS check (container, corporate, Node-only) against $LAB_CA_TEST_URL"
+        "$DEVVM" ssh "sudo -u agent -H docker run --rm -v $(ssh_sq '/home/agent/.opencode-docker/ca:/etc/opencode-ca:ro,z') $container_env --entrypoint /bin/sh $(ssh_sq "$base_image") -c $(ssh_sq "test -r /etc/opencode-ca/$ca_name.crt && test -x /usr/bin/node && node -e \"require('https').get('$LAB_CA_TEST_URL', r => { console.log('CONTAINER_CA_NODE_OK'); process.exit(0); }).on('error', () => { console.log('CONTAINER_CA_NODE_FAIL'); process.exit(1); })\"")" < /dev/null \
+          | grep -q CONTAINER_CA_NODE_OK \
+          || die "the container did not validate the corporate endpoint through Node"
+        log "positive TLS evidence recorded (container, corporate, Node-only)"
       else
-        log "container corporate TLS evidence skipped: the combined bundle was not built (non-Node corporate trust stays unavailable)"
+        log "container corporate TLS evidence skipped: no corporate trust available in the diagnostic container"
       fi
     else
       log "container TLS evidence skipped: the pinned image reference is unavailable"
