@@ -241,7 +241,7 @@ verify_online_tls() {
       if "$DEVVM" ssh "test -f '/home/agent/.opencode-docker/ca/combined-ca-bundle.crt'" < /dev/null; then
         container_env="-e NODE_EXTRA_CA_CERTS=/etc/opencode-ca/$ca_name -e SSL_CERT_FILE=/etc/opencode-ca/combined-ca-bundle.crt -e CURL_CA_BUNDLE=/etc/opencode-ca/combined-ca-bundle.crt -e GIT_SSL_CAINFO=/etc/opencode-ca/combined-ca-bundle.crt"
         log "positive TLS check (container, corporate) against $LAB_CA_TEST_URL"
-        "$DEVVM" ssh "docker run --rm -v $(ssh_sq '/home/agent/.opencode-docker/ca:/etc/opencode-ca:ro,z') $container_env --entrypoint /bin/sh $(ssh_sq "$base_image") -c $(ssh_sq "curl -fsS --max-time 20 '$LAB_CA_TEST_URL' >/dev/null && echo CONTAINER_CA_OK")" < /dev/null \
+        "$DEVVM" ssh "sudo -u agent -H docker run --rm -v $(ssh_sq '/home/agent/.opencode-docker/ca:/etc/opencode-ca:ro,z') $container_env --entrypoint /bin/sh $(ssh_sq "$base_image") -c $(ssh_sq "curl -fsS --max-time 20 '$LAB_CA_TEST_URL' >/dev/null && echo CONTAINER_CA_OK")" < /dev/null \
           | grep -q CONTAINER_CA_OK \
           || die "the container did not validate the corporate endpoint with the combined bundle"
         log "positive TLS evidence recorded (container, corporate)"
@@ -264,7 +264,7 @@ verify_online_tls() {
       container_env="-e NODE_EXTRA_CA_CERTS=/etc/opencode-ca/$(basename -- "$LAB_CA_SOURCE") -e SSL_CERT_FILE=/etc/opencode-ca/combined-ca-bundle.crt -e CURL_CA_BUNDLE=/etc/opencode-ca/combined-ca-bundle.crt -e GIT_SSL_CAINFO=/etc/opencode-ca/combined-ca-bundle.crt"
     fi
     log "positive TLS check (container, public) against $public_url"
-    "$DEVVM" ssh "docker run --rm ${container_env:+-v $(ssh_sq '/home/agent/.opencode-docker/ca:/etc/opencode-ca:ro,z')} $container_env --entrypoint /bin/sh $(ssh_sq "$base_image") -c $(ssh_sq "curl -fsS --max-time 20 '$public_url' >/dev/null && echo CONTAINER_PUBLIC_OK")" < /dev/null \
+    "$DEVVM" ssh "sudo -u agent -H docker run --rm ${container_env:+-v $(ssh_sq '/home/agent/.opencode-docker/ca:/etc/opencode-ca:ro,z')} $container_env --entrypoint /bin/sh $(ssh_sq "$base_image") -c $(ssh_sq "curl -fsS --max-time 20 '$public_url' >/dev/null && echo CONTAINER_PUBLIC_OK")" < /dev/null \
       | grep -q CONTAINER_PUBLIC_OK \
       || die "the container lost trust in the public CA chain (TLS trust was replaced, not extended)"
     log "positive TLS evidence recorded (container, public)"

@@ -391,6 +391,24 @@ done
 r6_url_case "valid-path" "https://corporate.example/health" accept
 r6_url_case "valid-port" "https://ca.corp.example:8443/pkix" accept
 
+# --- F1. diagnostic containers run as the authorized docker user -------------
+# Rootful Docker access belongs to the agent account only; opc must not gain
+# it. Every diagnostic docker run must therefore be executed as agent inside
+# the guest.
+: > "$REC"; echo stopped > "$STATE"; rm -f "$SNAPMARK"
+run_driver online
+rec="$(cat "$REC")"
+if printf '%s' "$rec" | grep -q 'sudo -u agent -H docker run'; then
+  ok "F1: the diagnostics run docker as the agent account"
+else
+  bad "F1: a diagnostic docker run is not executed as agent"
+fi
+if printf '%s' "$rec" | grep 'docker run' | grep -vq 'sudo -u agent -H docker run'; then
+  bad "F1: an unprivileged docker run path exists"
+else
+  ok "F1: no diagnostic docker run bypasses the agent authorization"
+fi
+
 echo
 printf 'provision-lab-vm tests: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
