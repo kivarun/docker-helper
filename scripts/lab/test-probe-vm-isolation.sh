@@ -399,15 +399,8 @@ case "$first" in
   *) bad "UAT-5: an unexpected verdict for python3 absent: $first" ;;
 esac
 
-# U5.2 the kernel refuses AF_INET6 -> PASS with the positively confirmed reason
-shim="$(uat5_pyshim 1)"
-out="$(uat5_verdict "$shim")"; first="$(uat5_first_line "$out")"
-case "$first" in
-  ok*"demonstrably unavailable"*) ok "UAT-5: the kernel's family refusal is a confirmed-unavailable PASS" ;;
-  ok*) bad "UAT-5 RED: the refusal PASSED without the confirmed reason ('$first')" ;;
-  FAIL*) bad "UAT-5: the kernel's family refusal was wrongly failed: $first" ;;
-  *) bad "UAT-5: an unexpected verdict for the family refusal: $first" ;;
-esac
+# U5.2 (the kernel's family refusal -> a confirmed-unavailable PASS) is now
+# owned by UAT-6.2, which requires the double signal (exit 1 + marker).
 
 # U5.3 an unexpected socket API error is a FAIL (inconclusive, never a PASS)
 shim="$(uat5_pyshim 3)"
@@ -429,6 +422,72 @@ if [ "$v6_capable" = 1 ]; then
 else
   skip "UAT-5: the working-transport case (::1 unavailable on this host)"
 fi
+
+# --- UAT-6. the refusal verdict needs BOTH signals from one Python run --------
+# Blocker: exit code 1 was accepted as a confirmed kernel refusal of
+# AF_INET6, but the Python interpreter itself exits 1 on any crash
+# (traceback, import error, execution error). A refusal verdict is only
+# valid when the controlled exit code 1 AND the exact diagnostic marker on
+# stdout arrive from the SAME Python run; any other combination — a bare
+# exit 1, stderr traceback noise, unrelated stdout — is inconclusive and
+# must FAIL. A working AF_INET6 transport still FAILs the IPv4-only claim,
+# and python3 missing still FAILs.
+uat6_pyshim() { # NAME BODY -> a python3 shim dir executing that body
+  local d="$WORK/uat6-shim-$1"
+  mkdir -p "$d"
+  printf '#!/bin/sh\n%s\n' "$2" > "$d/python3"
+  chmod +x "$d/python3"
+  printf '%s' "$d"
+}
+uat6_expect_fail() { # DESCRIPTION OUTPUT -> FAIL unless the verdict is a FAIL
+  local desc="$1" first
+  first="$(printf '%s\n' "$2" | grep -E '^(ok|FAIL)' | head -1)"
+  case "$first" in
+    FAIL*"cannot verify"*) ok "UAT-6: $desc -> mandatory FAIL" ;;
+    ok*) bad "UAT-6 RED: $desc produced a PASS ('$first')" ;;
+    *) bad "UAT-6: an unexpected verdict for $desc: $first" ;;
+  esac
+}
+
+# U6.1 RED: a fake python3 that merely exits 1, with no marker, must FAIL —
+# the interpreter's own exit-1-on-crash must never read as a kernel refusal
+shim="$(uat6_pyshim bare-exit1 'exit 1')"
+out="$(uat5_verdict "$shim")"
+uat6_expect_fail "a bare exit 1 without the refusal marker" "$out"
+
+# U6.2 the double signal (exit 1 AND the marker, one run) is the only PASS
+shim="$(uat6_pyshim marker-exit1 'printf "%s\n" AF_INET6_REFUSED; exit 1')"
+out="$(uat5_verdict "$shim")"
+first="$(printf '%s\n' "$out" | grep -E '^(ok|FAIL)' | head -1)"
+case "$first" in
+  ok*"demonstrably unavailable"*) ok "UAT-6: exit 1 + the marker from one run is the confirmed refusal PASS" ;;
+  FAIL*) bad "UAT-6: the double-confirmed refusal was wrongly failed: $first" ;;
+  *) bad "UAT-6: an unexpected verdict for the double signal: $first" ;;
+esac
+
+# U6.3 RED: a traceback (interpreter crash, stderr noise) with exit 1 must FAIL
+shim="$(uat6_pyshim traceback 'echo "Traceback (most recent call last):" >&2; echo "NameError: socket" >&2; exit 1')"
+out="$(uat5_verdict "$shim")"
+uat6_expect_fail "an interpreter traceback with exit 1" "$out"
+
+# U6.4 RED: unrelated stdout with exit 1 must FAIL (the marker must match exactly)
+shim="$(uat6_pyshim garbage-stdout 'echo "unrelated output"; exit 1')"
+out="$(uat5_verdict "$shim")"
+uat6_expect_fail "unrelated stdout with exit 1" "$out"
+
+# U6.5 regression locks: the other outcomes keep their Corrective-5 verdicts
+if [ "$v6_capable" = 1 ]; then
+  out="$(uat5_verdict "")"
+  first="$(printf '%s\n' "$out" | grep -E '^(ok|FAIL)' | head -1)"
+  case "$first" in
+    FAIL*"FUNCTIONING"*) ok "UAT-6: a working transport still FAILs the IPv4-only claim" ;;
+    *) bad "UAT-6: the working-transport verdict changed: $first" ;;
+  esac
+else
+  skip "UAT-6: the working-transport case (::1 unavailable on this host)"
+fi
+out="$(uat5_verdict none)"
+uat6_expect_fail "python3 absent (Corrective-5 behavior preserved)" "$out"
 
 # --- UAT-4/F4. the host listener lifecycle ------------------------------------
 probe_free_port() { # -> a port with NO listener

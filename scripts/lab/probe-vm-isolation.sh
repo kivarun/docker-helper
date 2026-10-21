@@ -94,17 +94,22 @@ probe_ipv6_disabled() { # [CMDLINE_FILE] [IF_INET6_FILE]
 #   2  FAILED       python3 is unavailable — the verification could not run
 #   3  FAILED       an unexpected socket API error — the verification is
 #                   inconclusive
-# A functioning transport contradicts an IPv4-only posture regardless of
-# route visibility; an unverifiable attempt must never be read as proof of
-# absence.
+# The refusal verdict requires BOTH signals from the SAME Python run: the
+# controlled exit code 1 AND the exact diagnostic marker AF_INET6_REFUSED on
+# stdout (the Python interpreter itself exits 1 on any crash — traceback,
+# import or execution error — so a bare exit 1 is inconclusive). A
+# functioning transport contradicts an IPv4-only posture regardless of route
+# visibility; an unverifiable attempt must never be read as proof of absence.
 ipv6_transport_usable() {
   command -v python3 >/dev/null 2>&1 || return 2
-  python3 - <<'PY' 2>/dev/null
+  local marker rc
+  marker="$(python3 - <<'PY' 2>/dev/null
 import errno, socket, sys
 try:
     s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
 except OSError as e:
     if e.errno in (errno.EAFNOSUPPORT, errno.EPROTONOSUPPORT, errno.ENOSYS):
+        print("AF_INET6_REFUSED")
         sys.exit(1)
     sys.exit(3)
 try:
@@ -114,6 +119,16 @@ except OSError:
 s.close()
 sys.exit(0)
 PY
+)"
+  rc=$?
+  # The shell-side literal must match the Python marker above exactly.
+  if [ "$rc" -eq 1 ] && [ "$marker" = "AF_INET6_REFUSED" ]; then
+    return 1
+  fi
+  case "$rc" in
+    0) return 0 ;;
+    *) return 3 ;;
+  esac
 }
 
 # ipv6_transport_check — the guest probe's transport verdict, emitted through
