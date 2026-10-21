@@ -205,22 +205,46 @@ decode_to() { # DEST MODE OWNER:GROUP b64var
   chown "$3" "$1"
 }
 
-# F1: authorization material is append-only. Existing content is never
+# F1/R1: authorization material is append-only. Existing content is never
 # truncated; updates run under an exclusive lock, publish atomically
 # (temp file + rename inside the target directory) and are verified for the
 # final owner/mode. Symlinked targets and symlinked directories are refused,
 # and the lock re-checks the target so a concurrent swap cannot slip through.
+#
+# R1: root never opens predictable paths (with O_TRUNC or otherwise) inside
+# an agent-writable directory. The lock lives in a PRIVATE ROOT-ONLY
+# directory keyed by a hash of the target path, and every staging file is a
+# mktemp() file in that same private directory — a pre-placed symlink or
+# hardlink under the agent's control can neither be followed nor truncated.
 # Deduplication: authorized_keys compares KEY TYPE + KEY DATA (fields 1 and
 # 2), so the same key with a different comment is never duplicated;
 # known_hosts compares whole lines, which preserves hashed entries verbatim.
+lab_lock_dir() {
+  local lockdir="/run/docker-helper-lab-locks"
+  [ -z "$LAB_GUEST_ROOT" ] || lockdir="$LAB_GUEST_ROOT/run/docker-helper-lab-locks"
+  if [ ! -d "$lockdir" ] || [ -L "$lockdir" ]; then
+    rm -rf -- "$lockdir" 2>/dev/null || true
+    install -d -m 0700 "$lockdir" || die "cannot create the private lock directory $lockdir"
+  fi
+  # the directory must be private to the invoking user (root in the VM) and
+  # a real directory: anything else is a tampered environment
+  [ "$(stat -c '%04a' -- "$lockdir")" = 0700 ] \
+    || die "the lock directory $lockdir is not private (mode $(stat -c '%04a' -- "$lockdir" 2>/dev/null || echo unknown))"
+  [ "$(stat -c '%U' -- "$lockdir")" = "$(id -un)" ] \
+    || die "the lock directory $lockdir is not owned by the invoking user"
+  printf '%s' "$lockdir"
+}
+
 merge_into() { # TARGET MODE OWNER:GROUP NEWFILE DEDUPE(auth|line)
   local target="$1" mode="$2" owner_group="$3" newfile="$4" dedupe="$5"
-  local dir lock exist rc
+  local lockdir lock exist rc tmp
+  local dir
   dir="$(dirname -- "$target")"
   [ -d "$dir" ] && [ ! -L "$dir" ] || die "refusing to update: $dir is not a real directory"
   [ ! -L "$target" ] || die "refusing to update through a symlink: $target"
   command -v flock >/dev/null 2>&1 || die "flock is not available in the guest"
-  lock="$dir/.provision.lock"
+  lockdir="$(lab_lock_dir)"
+  lock="$lockdir/auth-$(printf '%s' "$target" | sha256sum | awk '{print substr($1, 1, 16)}').lock"
   if [ -f "$target" ]; then exist="$target"; else exist="/dev/null"; fi
   rc=0
   (
@@ -246,6 +270,12 @@ merge_into() { # TARGET MODE OWNER:GROUP NEWFILE DEDUPE(auth|line)
     fi
     chmod "$mode" "$tmp" || { rm -f -- "$tmp"; exit 8; }
     chown "$owner_group" "$tmp" || { rm -f -- "$tmp"; exit 9; }
+    # R1: the staging file was created by mktemp (O_EXCL, unpredictable
+    # name, 0600); before publication verify it is still the file we
+    # created — a swapped path is a hostile environment.
+    [ ! -L "$tmp" ] || { rm -f -- "$tmp"; exit 11; }
+    [ "$(stat -c '%04a' -- "$tmp")" = "$mode" ] || { rm -f -- "$tmp"; exit 12; }
+    [ "$(stat -c '%h' -- "$tmp")" = 1 ] || { rm -f -- "$tmp"; exit 13; }
     mv -f -- "$tmp" "$target" || { rm -f -- "$tmp"; exit 10; }
     exit 0
   ) 9> "$lock" || rc=$?
@@ -260,8 +290,10 @@ if [ -n "${SSH_KEY_B64:-}" ]; then
   decode_to "$AGENT_HOME/.ssh/id_ed25519_opencode" 0600 "$AGENT_USER:$AGENT_USER" SSH_KEY_B64
   decode_to "$AGENT_HOME/.ssh/id_ed25519_opencode.pub" 0644 "$AGENT_USER:$AGENT_USER" SSH_PUB_B64
   # authorized_keys: the agent key is appended by KEY TYPE + KEY DATA, never
-  # duplicating and never removing existing entries.
-  new_auth="$AGENT_HOME/.ssh/.provision-new.$$"
+  # duplicating and never removing existing entries. R1: the staging file is
+  # a mktemp file inside the private lock directory, never a predictable
+  # path under the agent's control.
+  new_auth="$(mktemp "$(lab_lock_dir)/staging.XXXXXX")" || die "cannot stage the agent key"
   awk '{print $1, $2, "opencode-agent"}' "$AGENT_HOME/.ssh/id_ed25519_opencode.pub" > "$new_auth"
   merge_into "$AGENT_HOME/.ssh/authorized_keys" 0600 "$AGENT_USER:$AGENT_USER" "$new_auth" auth
   rm -f -- "$new_auth"
@@ -344,8 +376,9 @@ fi
 if [ -n "${KNOWN_HOSTS_B64:-}" ]; then
   install -d -m 0700 -o "$AGENT_USER" -g "$AGENT_USER" "$AGENT_HOME/.ssh"
   # Merge WITHOUT truncation into the agent's own known_hosts: existing
-  # entries (including hashed ones) survive every run.
-  new_kh="$AGENT_HOME/.ssh/.provision-new.$$"
+  # entries (including hashed ones) survive every run. R1: staging happens
+  # in the private lock directory via mktemp.
+  new_kh="$(mktemp "$(lab_lock_dir)/staging.XXXXXX")" || die "cannot stage the known_hosts update"
   printf '%s' "${KNOWN_HOSTS_B64}" | base64 -d > "$new_kh"
   merge_into "$AGENT_HOME/.ssh/known_hosts" 0644 "$AGENT_USER:$AGENT_USER" "$new_kh" line
   rm -f -- "$new_kh"

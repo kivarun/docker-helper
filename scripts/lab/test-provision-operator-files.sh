@@ -173,7 +173,7 @@ fi
 GUEST_USER="$(id -un)"
 GUEST_ROOT="$WORK/guestroot"
 GUEST_SHIM="$WORK/guestshim"; mkdir -p "$GUEST_SHIM"
-printf '#!/bin/sh\necho 0\n' > "$GUEST_SHIM/id"
+printf '#!/bin/sh\ncase "${1:-}" in -u) echo 0 ;; *) exec /usr/bin/id "$@" ;; esac\n' > "$GUEST_SHIM/id"
 printf '#!/bin/sh\necho "dh $*" >> "%s"\nexit 0\n' "$WORK/guestdh.rec" > "$GUEST_SHIM/docker-helper"
 printf '#!/bin/sh\nexit 0\n' > "$GUEST_SHIM/update-ca-certificates"
 chmod +x "$GUEST_SHIM"/*
@@ -183,12 +183,14 @@ KH="$GUEST_ROOT/home/$GUEST_USER/.ssh/known_hosts"
 # Capture the CURRENT generated guest body for the current env, then execute
 # it with a stubbed guard and a safe test root.
 execute_guest_body() {
-  STREAM_CAPTURE="$CAPTURE" \
+  # per-call capture/out files: concurrent invocations must not clobber
+  local gcap="$WORK/guest-captured.$$" gout="$WORK/out.$$" gbody="$WORK/guest-body.$$"
+  STREAM_CAPTURE="$gcap" \
   LAB_AGENT_SSH_KEY="$KEY_DIR/id_ed25519_opencode" \
   LAB_KNOWN_HOSTS_SOURCE="${GUEST_KH_SRC:-}" AGENT_USER="$GUEST_USER" \
-    bash "$REPO/lab/provision-operator-files.sh" >"$WORK/out" 2>&1 || return 1
-  awk 'f{print} /# --- guest-side installer/{f=1}' "$CAPTURE" > "$WORK/guest-body.sh"
-  { printf 'require_lab_vm() { :; }\n'; cat "$WORK/guest-body.sh"; } \
+    bash "$REPO/lab/provision-operator-files.sh" >"$gout" 2>&1 || { LAST_GUEST_ERR="$gout"; return 1; }
+  awk 'f{print} /# --- guest-side installer/{f=1}' "$gcap" > "$gbody"
+  { printf 'require_lab_vm() { :; }\n'; cat "$gbody"; } \
     | PATH="$GUEST_SHIM:$PATH" LAB_GUEST_ROOT="$GUEST_ROOT" AGENT_USER="$GUEST_USER" bash -s
 }
 
@@ -197,7 +199,7 @@ export GUEST_KH_SRC="$WORK/op-kh"
 
 # F1.1 first run creates authorized_keys/known_hosts correctly
 rm -rf "$GUEST_ROOT"; mkdir -p "$GUEST_ROOT/home/$GUEST_USER"
-if execute_guest_body; then ok "F1: guest installer runs on the test root"; else bad "F1: guest installer failed: $(cat "$WORK/out")"; fi
+if execute_guest_body; then ok "F1: guest installer runs on the test root"; else bad "F1: guest installer failed: $(cat "${LAST_GUEST_ERR:-$WORK/out}" 2>/dev/null | tail -1)"; fi
 [ "$(stat -c '%a' "$AK" 2>/dev/null)" = 600 ] && ok "F1: authorized_keys mode 0600" || bad "F1: authorized_keys mode wrong ($(stat -c '%a' "$AK" 2>/dev/null))"
 [ "$(stat -c '%U' "$AK" 2>/dev/null)" = "$GUEST_USER" ] || bad "F1: authorized_keys owner wrong"
 [ "$(stat -c '%a' "$KH" 2>/dev/null)" = 644 ] && ok "F1: known_hosts mode 0644" || bad "F1: known_hosts mode wrong"
@@ -256,6 +258,62 @@ if execute_guest_body 2>"$WORK/guest.err"; then bad "F1: injected update failure
 cmp -s "$AK" "$WORK/ak.before-failure" && ok "F1: original authorized_keys preserved on failure" || bad "F1: authorized_keys destroyed on failure"
 cmp -s "$KH" "$WORK/kh.before-failure" && ok "F1: original known_hosts preserved on failure" || bad "F1: known_hosts destroyed on failure"
 rm -f "$GUEST_SHIM/chown"
+
+# --- R1. root never opens predictable paths in agent-writable dirs -----------
+# The lock used to live at .ssh/.provision.lock (agent-writable): a
+# pre-placed symlink or hardlink made root open the FOREIGN inode with
+# O_TRUNC. The staging names .provision-new.<pid> were predictable too.
+# Behavioral: execute the guest installer against the test root.
+printf 'FOREIGN-LOCK-TARGET
+' > "$WORK/lock-target"
+
+# R1.1 a symlink at the old lock path must not be followed or truncated
+rm -rf "$GUEST_ROOT"; mkdir -p "$GUEST_ROOT/home/$GUEST_USER/.ssh"
+printf 'keep me\n' > "$GUEST_ROOT/home/$GUEST_USER/.ssh/authorized_keys"
+ln -s "$WORK/lock-target" "$GUEST_ROOT/home/$GUEST_USER/.ssh/.provision.lock"
+if execute_guest_body; then ok "R1: provisioning succeeds despite a pre-placed lock symlink"; else bad "R1: provisioning failed with a lock symlink present: $(tail -1 "$WORK/out")"; fi
+[ "$(cat "$WORK/lock-target")" = "FOREIGN-LOCK-TARGET" ] \
+  && ok "R1: the symlink target was not truncated by the lock open" \
+  || bad "R1: the symlink target was truncated (root opened a user-controlled path)"
+
+# R1.2 a pre-created staging name must have no effect
+rm -rf "$GUEST_ROOT"; mkdir -p "$GUEST_ROOT/home/$GUEST_USER/.ssh"
+printf 'FOREIGN-STAGING
+' > "$WORK/staging-target"
+ln -s "$WORK/staging-target" "$GUEST_ROOT/home/$GUEST_USER/.ssh/.provision-new.999999"
+if execute_guest_body; then ok "R1: provisioning succeeds with a pre-created staging name"; else bad "R1: provisioning failed with a staging name present"; fi
+[ "$(cat "$WORK/staging-target")" = "FOREIGN-STAGING" ] \
+  && ok "R1: the pre-created staging path was not written through" \
+  || bad "R1: the pre-created staging path was written through"
+
+# R1.3 a hardlink trap at the old lock path must not modify the foreign inode
+rm -rf "$GUEST_ROOT"; mkdir -p "$GUEST_ROOT/home/$GUEST_USER/.ssh"
+printf 'keep me\n' > "$GUEST_ROOT/home/$GUEST_USER/.ssh/authorized_keys"
+printf 'FOREIGN-HARDLINK
+' > "$WORK/hardlink-target"
+ln "$WORK/hardlink-target" "$GUEST_ROOT/home/$GUEST_USER/.ssh/.provision.lock"
+if execute_guest_body; then ok "R1: provisioning succeeds despite a lock hardlink"; else bad "R1: provisioning failed with a lock hardlink present"; fi
+[ "$(cat "$WORK/hardlink-target")" = "FOREIGN-HARDLINK" ] \
+  && ok "R1: the hardlinked foreign inode was not modified" \
+  || bad "R1: the hardlinked foreign inode was modified"
+
+# R1.4 the lock directory is private to root
+lockdir="$GUEST_ROOT/run/docker-helper-lab-locks"
+[ -d "$lockdir" ] && [ "$(stat -c '%04a' "$lockdir")" = 0700 ] \
+  && ok "R1: the lock directory is private (0700)" \
+  || bad "R1: the lock directory is missing or not private"
+
+# R1.5 concurrent runs do not lose entries
+rm -rf "$GUEST_ROOT"; mkdir -p "$GUEST_ROOT/home/$GUEST_USER/.ssh"
+printf 'ssh-ed25519 AAAACONCURRENT1 first-runner\n' > "$GUEST_ROOT/home/$GUEST_USER/.ssh/authorized_keys"
+execute_guest_body & g1=$!
+execute_guest_body & g2=$!
+wait "$g1" || true; wait "$g2" || true
+if grep -q AAAACONCURRENT1 "$AK" && grep -q opencode-agent "$AK"; then
+  ok "R1: concurrent runs keep both entries"
+else
+  bad "R1: concurrent runs lost entries ($(cat "$AK" 2>/dev/null | tr '\n' '|'))"
+fi
 
 echo
 printf 'provision-operator-files tests: %d passed, %d failed\n' "$PASS" "$FAIL"
