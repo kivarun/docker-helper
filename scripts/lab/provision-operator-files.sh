@@ -214,9 +214,35 @@ AGENT_OCODE="$AGENT_HOME/.opencode-docker"
 
 decode_to() { # DEST MODE OWNER:GROUP b64var
   [ ! -L "$1" ] || die "refusing to write through a symlink: $1"
-  printf '%s' "${!4}" | base64 -d > "$1"
-  chmod "$2" "$1"
-  chown "$3" "$1"
+  local decoded
+  decoded="$(printf '%s' "${!4}" | base64 -d)" || die "cannot decode $1"
+  write_pinned "$1" "$2" "$3" "$decoded"
+}
+
+# C7/F5-class hardening for every root write into an agent-writable parent:
+# a planted symlink or hardlink at DEST must never redirect root's write,
+# chmod or chown onto a foreign inode.
+#   1. an existing name is unlinked first (rm removes the NAME only; a
+#      hardlink target keeps its other links and its content);
+#   2. the content file is created O_EXCL (noclobber) at DEST, so any name
+#      planted between the unlink and the creation makes the creation fail
+#      closed instead of truncating a foreign inode;
+#   3. the fresh inode is pinned by a dedicated fd; chmod and chown go
+#      through its /proc/self/fd path, so a post-creation pathname swap
+#      cannot redirect privileged metadata changes.
+write_pinned() { # DEST MODE OWNER:GROUP CONTENT
+  local dest="$1" mode="$2" owner="$3"
+  rm -f -- "$dest"
+  set -o noclobber
+  if ! exec 8>"$dest" 2>/dev/null; then
+    set +o noclobber
+    die "cannot create $dest safely (a planted name is present)"
+  fi
+  set +o noclobber
+  printf '%s' "$4" >&8 || { rm -f -- "$dest"; exec 8>&-; die "cannot write $dest"; }
+  chmod "$mode" /proc/self/fd/8 || { rm -f -- "$dest"; exec 8>&-; die "chmod failed for $dest"; }
+  chown "$owner" /proc/self/fd/8 || { rm -f -- "$dest"; exec 8>&-; die "chown failed for $dest"; }
+  exec 8>&-
 }
 
 # F1/R1: authorization material is append-only. Existing content is never
@@ -357,6 +383,7 @@ if [ -n "${CA_B64:-}" ]; then
     base_image="${BASE_IMAGE:-}"
     corp_ca="$ETC/docker-helper/$CA_NAME.crt"
     combined="$AGENT_OCODE/ca/combined-ca-bundle.crt"
+    combined_content=""
     built=0
     if [ -n "$base_image" ] && command -v docker >/dev/null 2>&1; then
       img_bundle=""
@@ -368,10 +395,10 @@ if [ -n "${CA_B64:-}" ]; then
         fi
       done
       if [ -n "$img_bundle" ]; then
-        { printf '%s\n' "$img_bundle"; cat -- "$corp_ca"; } > "$combined" \
+        combined_content="$( { printf '%s\n' "$img_bundle"; cat -- "$corp_ca"; } )" \
           || die "cannot build the combined CA bundle"
-        chmod 0644 "$combined"
-        chown "$AGENT_USER:$AGENT_USER" "$combined"
+        write_pinned "$combined" 0644 "$AGENT_USER:$AGENT_USER" "$combined_content"
+        combined_content=""
         n_certs="$(grep -c -- 'BEGIN CERTIFICATE' "$combined" || true)"
         [ "$n_certs" -gt 1 ] || die "the combined CA bundle does not contain the public CA set"
         openssl verify -CAfile "$combined" "$corp_ca" >/dev/null \

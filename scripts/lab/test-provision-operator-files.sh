@@ -453,6 +453,19 @@ if execute_guest_body 2>"$WORK/guest.err"; then bad "F5/b: a rename-time substit
   || bad "F5/b: the foreign inode was modified by the publication path"
 rm -f "$GUEST_SHIM/mv"
 
+# F5/d: a planted hardlink at a decode destination must never be truncated by
+# root's write. The write removes the NAME and creates a fresh O_EXCL file;
+# the foreign inode keeps its content and its other link.
+f5_reset
+ln "$WORK/f5-foreign" "$GUEST_ROOT/home/$GUEST_USER/.ssh/id_ed25519_opencode"
+if execute_guest_body 2>"$WORK/guest.err"; then ok "F5/d: the run succeeds with a planted hardlink name"; else bad "F5/d: the run failed with a planted hardlink name: $(tail -1 "$WORK/guest.err" 2>/dev/null)"; fi
+[ "$(cat "$WORK/f5-foreign")" = "F5-FOREIGN-MARKER" ] \
+  && ok "F5/d: the hardlink target's content was never truncated" \
+  || bad "F5/d: root truncated a foreign inode through a planted hardlink"
+[ "$(stat -c '%h' "$WORK/f5-foreign")" = 1 ] \
+  && ok "F5/d: only the planted NAME was removed; the foreign inode keeps its own link" \
+  || bad "F5/d: the foreign inode's link count changed unexpectedly"
+
 # F5/c: without any substitution the merged publication still works and stays
 # idempotent (the fd-pinned path preserves the accepted contract).
 f5_reset
