@@ -105,7 +105,7 @@ case "\${1:-}" in
         # the source and must fail. The stub models that: only the
         # sudo-as-agent + cd-home invocation succeeds.
         case "\$1" in
-          *'sudo -u agent -H'*'cd /home/agent'*'/opt/lab/lab-mount-gate.sh'*)
+          *'sudo -u agent -H bash -c'*'cd /home/agent'*'source /opt/lab/lab-mount-gate.sh'*)
             [ "\${FAIL_ON:-}" = gate ] && { echo "stub: mount gate refused" >&2; exit 1; }
             exit 0 ;;
           *)
@@ -563,6 +563,76 @@ if [ "$RC" = 0 ]; then
 else
   bad "UAT-3/F1: the diagnostics failed although the gate ran as agent"
 fi
+
+# --- UAT-3b. the gate command is a SINGLE bash process (really executed) -----
+# The reviewer's blocker: `sudo -u agent -H sh -c "cd ... && bash lib && func"`
+# defines the function in a CHILD bash that exits; the parent sh then calls a
+# function it never had. This test extracts the ACTUAL remote command from the
+# production driver, executes its shell semantics for real (the VM's
+# `sudo -u agent -H` user switch is the only part replaced) against the REAL
+# gate library and a private temp tree, and proves positive and negative
+# outcomes.
+uat3b_home="$(mktemp -d "$WORK/uat3b-home.XXXXXX")"
+chmod 0700 "$uat3b_home"
+mkdir -p "$uat3b_home/.opencode-docker/ca"
+printf 'SAFE-CA\n' > "$uat3b_home/.opencode-docker/ca/anchor.crt"
+uat3b_lib="$uat3b_home/lib/lab-mount-gate.sh"
+mkdir -p "$uat3b_home/lib"
+cp "$SRC_DIR/lab/lab-mount-gate.sh" "$uat3b_lib"
+
+uat3b_raw="$(grep -F 'oc_lab_mount_source_ok dir /home/agent' "$SRC_DIR/lab/provision-lab-vm.sh" | head -1)"
+uat3b_cmd="$(printf '%s' "$uat3b_raw" | sed -n "s/^.*ssh '\(.*\)'.*$/\1/p")"
+if [ -n "$uat3b_cmd" ]; then
+  ok "UAT-3b: the remote gate command is extracted from the production driver"
+else
+  bad "UAT-3b: the remote gate command could not be extracted: $uat3b_raw"
+fi
+case "$uat3b_cmd" in
+  'sudo -u agent -H bash -c '*)
+    ok "UAT-3b: the gate runs as agent inside ONE bash -c process"
+    ;;
+  *)
+    bad "UAT-3b: the gate command lost the sudo-as-agent single-bash structure: $uat3b_cmd"
+    ;;
+esac
+uat3b_exec="${uat3b_cmd#sudo -u agent -H }"
+uat3b_exec="${uat3b_exec//\/home\/agent/$uat3b_home}"
+uat3b_exec="${uat3b_exec//\/opt\/lab\/lab-mount-gate.sh/$uat3b_lib}"
+
+# positive: a safe agent-owned tree passes through the real gate invocation
+if bash -c "$uat3b_exec" >/dev/null 2>&1; then
+  ok "UAT-3b: the real command execution passes a safe source (cd + source + call in one bash)"
+else
+  bad "UAT-3b: the real command execution failed on a safe source: $(bash -c "$uat3b_exec" 2>&1 | tail -1)"
+fi
+
+# negative: a missing gate library fails closed
+uat3b_missing="${uat3b_exec//$uat3b_lib/$uat3b_home/lib/missing.sh}"
+if bash -c "$uat3b_missing" >/dev/null 2>&1; then
+  bad "UAT-3b: a missing gate library was tolerated"
+else
+  ok "UAT-3b: a missing gate library fails closed"
+fi
+
+# negative: an unsafe source (a symlinked entry) is refused by the real gate
+ln -s /etc/passwd "$uat3b_home/.opencode-docker/ca/evil.crt"
+if bash -c "$uat3b_exec" >/dev/null 2>&1; then
+  bad "UAT-3b: a symlinked source entry was accepted by the real gate invocation"
+else
+  ok "UAT-3b: an unsafe source is refused by the real gate invocation"
+fi
+rm -f "$uat3b_home/.opencode-docker/ca/evil.crt"
+
+# negative: an unreadable nested directory makes the gate refuse (fail closed)
+mkdir -p "$uat3b_home/.opencode-docker/ca/locked"
+printf 'X\n' > "$uat3b_home/.opencode-docker/ca/locked/f.crt"
+chmod 000 "$uat3b_home/.opencode-docker/ca/locked"
+if bash -c "$uat3b_exec" >/dev/null 2>&1; then
+  bad "UAT-3b: an unreadable nested directory was accepted"
+else
+  ok "UAT-3b: a refusing check fails the invocation closed"
+fi
+chmod 0755 "$uat3b_home/.opencode-docker/ca/locked"
 
 echo
 printf 'provision-lab-vm tests: %d passed, %d failed\n' "$PASS" "$FAIL"

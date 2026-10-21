@@ -221,16 +221,16 @@ verify_online_tls() {
   # root-owned repository artifact copied by the controlled provisioning
   # stage — never a user-writable file.
   guest_ca_source_ok() { # -> 0 when the guest CA source passes the gate
-    # UAT-3/F1: the gate runs INSIDE the agent's context. The mount source is
-    # agent-owned and the agent home is 0700, so a run as opc — or as agent
-    # from an inaccessible working directory (find cannot restore an
-    # unreachable cwd) — cannot traverse the source and fails. The check is
-    # therefore executed as agent with HOME set (-H) and the working
-    # directory moved to the agent home first, loading the trusted
-    # root-owned /opt/lab copy of the single canonical gate library. The
-    # fail-closed semantics are unchanged: any gate failure refuses the
-    # diagnostic docker run.
-    "$DEVVM" ssh 'sudo -u agent -H sh -c "cd /home/agent && bash /opt/lab/lab-mount-gate.sh && oc_lab_mount_source_ok dir /home/agent/.opencode-docker/ca /home/agent/.opencode-docker"' < /dev/null
+    # UAT-3/F1 + UAT-3b: the gate runs INSIDE the agent's context, and cd,
+    # the trusted library load and the check happen in ONE bash process —
+    # `sh -c "... bash lib && func"` would define the function in a child
+    # bash that exits and then call a function the parent sh never had.
+    # The agent home is 0700 agent-owned, so the run as agent (-H sets the
+    # home) from /home/agent is the only context that can traverse the
+    # source. The library is loaded from the trusted root-owned /opt/lab
+    # copy of the single canonical gate library. Fail-closed semantics are
+    # unchanged: any gate failure refuses the diagnostic docker run.
+    "$DEVVM" ssh 'sudo -u agent -H bash -c "cd /home/agent && source /opt/lab/lab-mount-gate.sh && oc_lab_mount_source_ok dir /home/agent/.opencode-docker/ca /home/agent/.opencode-docker"' < /dev/null
   }
   # (1) guest-level corporate positive
   if [ -n "${LAB_CA_SOURCE:-}" ] && [ -n "${LAB_CA_TEST_URL:-}" ]; then
