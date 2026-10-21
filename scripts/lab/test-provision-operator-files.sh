@@ -617,10 +617,17 @@ if [ "$empty_rc" = 0 ] && [ "$empty_out" = "NO-MATCH" ]; then
 else
   bad "UAT-3/F2: the empty-input case is wrong (rc $empty_rc, out $empty_out)"
 fi
-case "garbage without markers" in
-  *"-----BEGIN CERTIFICATE-----"*) bad "UAT-3/F2: non-certificate output would be accepted" ;;
-  *) ok "UAT-3/F2: certificate-less docker output is never accepted" ;;
-esac
+garbage_out="$(bash -c 'set -euo pipefail
+  img_out="garbage without markers"
+  case "$img_out" in
+    *"-----BEGIN CERTIFICATE-----"*) echo MATCH; exit 0 ;;
+  esac
+  echo NO-MATCH')"; garbage_rc=$?
+if [ "$garbage_rc" = 0 ] && [ "$garbage_out" = "NO-MATCH" ]; then
+  ok "UAT-3/F2: certificate-less docker output is never accepted"
+else
+  bad "UAT-3/F2: the certificate-less case is wrong (rc $garbage_rc, out $garbage_out)"
+fi
 if grep -v '^[[:space:]]*#' "$SRC_DIR/lab/provision-operator-files.sh" | grep -q 'printf.*img_out.*| grep -q'; then
   bad "UAT-3/F2: the SIGPIPE-prone pipeline is still in the production source"
 else

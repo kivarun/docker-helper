@@ -98,8 +98,20 @@ case "\${1:-}" in
         if [ -f "$WORK/node-present" ]; then echo CONTAINER_CA_NODE_OK; else echo "stub: node absent in image" >&2; exit 1; fi ;;
       *CONTAINER_CA_OK*) echo CONTAINER_CA_OK ;;
       *CONTAINER_PUBLIC_OK*) echo CONTAINER_PUBLIC_OK ;;
-      *lab-mount-gate*) [ "\${FAIL_ON:-}" = gate ] && { echo "stub: mount gate refused" >&2; exit 1; }
-        exit 0 ;;
+      *oc_lab_mount_source_ok*)
+        # UAT-3/F1: the guest mount gate runs INSIDE the agent's context. The
+        # real guest semantics: the agent home is 0700 agent:agent, so a gate
+        # run as opc (or as agent from an inaccessible cwd) cannot traverse
+        # the source and must fail. The stub models that: only the
+        # sudo-as-agent + cd-home invocation succeeds.
+        case "\$1" in
+          *'sudo -u agent -H'*'cd /home/agent'*'/opt/lab/lab-mount-gate.sh'*)
+            [ "\${FAIL_ON:-}" = gate ] && { echo "stub: mount gate refused" >&2; exit 1; }
+            exit 0 ;;
+          *)
+            echo "stub: gate run without the agent context (opc cannot traverse /home/agent)" >&2
+            exit 1 ;;
+        esac ;;
       *combined-ca-bundle.crt*)
         if [ -f "$WORK/combined-present" ]; then exit 0; else exit 1; fi ;;
       *docker\ pull*) [ "\${FAIL_ON:-}" = pull ] && { echo "stub: pull failed" >&2; exit 1; } ;;
@@ -290,9 +302,11 @@ fi
 # --- R5. online diagnostics pass the SAME mount-source gate ------------------
 # The one-off diagnostic container must consult the shared mount gate (the
 # same library the launcher uses) BEFORE any docker run, and must refuse an
-# unsafe source without running docker at all.
+# unsafe source without running docker at all. UAT-3/F1: the gate refusal is
+# exercised at the REAL gate invocation (a CA is configured so the driver
+# actually consults the gate inside the agent's context).
 : > "$REC"; echo stopped > "$STATE"; rm -f "$SNAPMARK"
-FAIL_ON=gate run_driver online
+LAB_CA_SOURCE="$WORK/ca-src" LAB_CA_TEST_URL="https://corp.example.test/" FAIL_ON=gate run_driver online
 if [ "$RC" != 0 ]; then ok "R5: diagnostics refuse when the mount gate fails"; else bad "R5: diagnostics ran despite a gate failure"; fi
 if printf '%s' "$(cat "$REC")" | grep -q 'docker run'; then
   bad "R5: a diagnostic docker run happened after the gate refused"
@@ -515,6 +529,39 @@ if [ "$(cat "$STATE")" = stopped ]; then
   ok "F6/d: the online window is closed on the failed diagnostic"
 else
   bad "F6/d: the online window stayed open after the failed diagnostic"
+fi
+
+# --- UAT-3/F1. the guest mount gate runs inside the agent's context ----------
+# Real UAT: 'ERROR: the diagnostic CA mount source failed the shared mount
+# gate' although the source was fine — the gate ran as opc, and the agent
+# home (0700 agent:agent) cannot be traversed by opc; find also cannot
+# restore an unreachable working directory. The gate invocation must run as
+# agent (sudo -u agent -H), from /home/agent, loading the trusted
+# /opt/lab/lab-mount-gate.sh. The stub models the real guest semantics: only
+# that invocation shape succeeds.
+: > "$WORK/combined-present"; : > "$WORK/node-present"
+: > "$REC"; echo stopped > "$STATE"; rm -f "$SNAPMARK"
+LAB_CA_SOURCE="$WORK/ca-src" LAB_CA_TEST_URL="https://corp.example.test/" run_driver online
+gate_line="$(printf '%s' "$(cat "$REC")" | grep 'oc_lab_mount_source_ok' | head -1)"
+if printf '%s' "$gate_line" | grep -q 'sudo -u agent -H'; then
+  ok "UAT-3/F1: the gate is executed as the agent (sudo -u agent -H)"
+else
+  bad "UAT-3/F1: the gate is not executed as the agent: $gate_line"
+fi
+if printf '%s' "$gate_line" | grep -q 'cd /home/agent'; then
+  ok "UAT-3/F1: the gate runs from the agent's home (an inaccessible cwd cannot break find)"
+else
+  bad "UAT-3/F1: the gate does not start from the agent home"
+fi
+if printf '%s' "$gate_line" | grep -q '/opt/lab/lab-mount-gate.sh'; then
+  ok "UAT-3/F1: the gate library is loaded from the trusted /opt/lab copy"
+else
+  bad "UAT-3/F1: the gate library is not loaded from /opt/lab"
+fi
+if [ "$RC" = 0 ]; then
+  ok "UAT-3/F1: the diagnostics complete when the gate runs in the agent's context"
+else
+  bad "UAT-3/F1: the diagnostics failed although the gate ran as agent"
 fi
 
 echo
