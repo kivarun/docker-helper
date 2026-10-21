@@ -87,18 +87,24 @@ online_window_stop_failure() { # REASON
 }
 
 online_cleanup() { # ORIGINAL_RC
-  local rc="$1"
+  local rc="$1" state
   trap - EXIT INT TERM
   if [ "$ONLINE_VM_STARTED" = 1 ]; then
-    log "the online window is closing: stopping the VM"
-    if ! "$DEVVM" stop; then
-      ONLINE_VM_STARTED=0
-      online_window_stop_failure "the VM stop command failed"
-      exit 1
-    fi
     ONLINE_VM_STARTED=0
-    if [ "$(vm_state)" = running ]; then
-      online_window_stop_failure "the VM is still running after the stop command"
+    # R2: the window opened with the start ATTEMPT. Whatever the state is
+    # now, the only acceptable outcome is a PROVEN stopped VM. 'unknown',
+    # an empty status or a failing status query are NOT proof of a stop.
+    state="$(vm_state 2>/dev/null || true)"
+    if [ "$state" != stopped ]; then
+      log "the online window is closing: VM state '${state:-unknown}': stopping the VM"
+      if ! "$DEVVM" stop; then
+        online_window_stop_failure "the VM stop command failed"
+        exit 1
+      fi
+    fi
+    state="$(vm_state 2>/dev/null || true)"
+    if [ "$state" != stopped ]; then
+      online_window_stop_failure "the VM is not proven stopped (state: ${state:-unknown})"
       exit 1
     fi
     log "VM stopped; the online window is closed"
@@ -116,8 +122,10 @@ close_online_window() {
     online_window_stop_failure "the VM stop command failed"
     exit 1
   fi
-  if [ "$(vm_state)" = running ]; then
-    online_window_stop_failure "the VM is still running after the stop command"
+  local state
+  state="$(vm_state 2>/dev/null || true)"
+  if [ "$state" != stopped ]; then
+    online_window_stop_failure "the VM is not proven stopped (state: ${state:-unknown})"
     exit 1
   fi
 }
@@ -246,12 +254,16 @@ verify_online_tls() {
 stage_online() {
   stop_vm_if_running
   log "preflight: any leftover online VM from a killed previous run is closed before this window opens"
-  log "booting with the network OPEN (temporary provisioning window)"
-  DEV_VM_NET_ISOLATED=0 "$DEVVM" start || die "VM start (network open) failed"
+  # R2: the lifecycle owns the start ATTEMPT. The traps are installed BEFORE
+  # the VM boots with the network open, so a failed start with a booted QEMU
+  # (readiness or cloud-init timeout) still closes the window. Double cleanup
+  # is impossible: the flags and traps are managed only here.
   ONLINE_VM_STARTED=1
   trap 'online_cleanup "$?"' EXIT
   trap 'online_cleanup 130' INT
   trap 'online_cleanup 143' TERM
+  log "booting with the network OPEN (temporary provisioning window)"
+  DEV_VM_NET_ISOLATED=0 "$DEVVM" start || die "VM start (network open) failed"
 
   copy_lab_scripts
 

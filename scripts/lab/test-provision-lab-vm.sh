@@ -61,10 +61,26 @@ case "\${1:-}" in
     printf 'ssh:      127.0.0.1:2222 (user opc)\n' ;;
   stop)
     echo stop >> "$REC"
-    if [ "\${FAIL_ON:-}" = stop ]; then echo "stub: stop failed" >&2; exit 1; fi
+    case "\${STOP_FAIL:-}" in
+      stop) echo "stub: stop failed" >&2; exit 1 ;;
+      stop-lying) echo "stub: stop claimed success" >&2; exit 0 ;;
+      stop-unknown) echo unknown > "$STATE"; echo "stub: stop claimed success" >&2; exit 0 ;;
+    esac
+    [ "\${FAIL_ON:-}" = stop ] && { echo "stub: stop failed" >&2; exit 1; }
     echo stopped > "$STATE" ;;
   start)
-    echo "start isolated=\${DEV_VM_NET_ISOLATED:-unset}" >> "$REC"; echo running > "$STATE" ;;
+    echo "start isolated=\${DEV_VM_NET_ISOLATED:-unset}" >> "$REC"
+    case "\${FAIL_ON:-}" in
+      start-open)
+        echo running > "$STATE"
+        echo started > "$WORK/start.marker"
+        [ -p "$WORK/ctrl.fifo" ] && { read -t 15 _ < "$WORK/ctrl.fifo" || true; }
+        echo "stub: start failed after boot (readiness)" >&2; exit 1 ;;
+      start-stopped)
+        echo stopped > "$STATE"
+        echo "stub: start failed (VM never came up)" >&2; exit 1 ;;
+    esac
+    echo running > "$STATE" ;;
   ssh)
     shift; echo "ssh \$1" >> "$REC"
     cat > /dev/null 2>/dev/null || true
@@ -209,7 +225,7 @@ run_f2 tls
 unset LAB_CA_SOURCE LAB_CA_TEST_URL
 f2_case tls
 
-run_f2 stop
+STOP_FAIL=stop run_f2 stop
 if [ "$RC" != 0 ]; then ok "F2/stop: the stop failure propagates"; else bad "F2/stop: tolerated"; fi
 contains "F2/stop: CRITICAL is reported" "CRITICAL" "$OUT"
 contains "F2/stop: the recovery command is given" "dev-vm-local.sh stop" "$OUT"
@@ -288,6 +304,70 @@ if [ -n "$gate_line" ] && [ -n "$docker_line" ] && [ "$gate_line" -lt "$docker_l
   ok "R5: the gate is consulted before the diagnostic docker run"
 else
   bad "R5: the diagnostic docker run is not gated (gate=$gate_line docker=$docker_line)"
+fi
+
+# --- R2. the lifecycle owns the online start ATTEMPT itself ------------------
+# The window opens with the start attempt: a failed start with a booted QEMU
+# must still close the window; a failed stop or an unverifiable state must
+# produce CRITICAL, never success.
+r2_run() { # extra env via caller exports; runs the online stage
+  echo stopped > "$STATE"; : > "$REC"; rm -f "$SNAPMARK"; rm -f "$WORK/setupcount"
+  run_driver online
+}
+
+# R2.1 start fails, QEMU is up (state running) -> the cleanup stops the VM
+FAIL_ON=start-open r2_run
+if [ "$RC" != 0 ]; then ok "R2: a failed online start is a failure"; else bad "R2: a failed start looked successful"; fi
+stop_line="$(printf '%s' "$(cat "$REC")" | grep -n '^stop$' | head -1 | cut -d: -f1)"
+start_line="$(printf '%s' "$(cat "$REC")" | grep -n '^start isolated=0$' | head -1 | cut -d: -f1)"
+if [ -n "$stop_line" ] && [ -n "$start_line" ] && [ "$stop_line" -gt "$start_line" ]; then
+  ok "R2: the failed start still stopped the VM"
+else
+  bad "R2: the VM stayed network-open after a failed start"
+fi
+check "R2: final state after a failed start" "stopped" "$(cat "$STATE")"
+
+# R2.2 start fails, the VM never came up -> clean error, no stop attempt
+: > "$REC"
+FAIL_ON=start-stopped r2_run
+if [ "$RC" != 0 ]; then ok "R2: a failed start without a VM is an error"; else bad "R2: tolerated a dead start"; fi
+if printf '%s' "$(cat "$REC")" | grep -q '^stop$'; then bad "R2: a needless stop was attempted"; else ok "R2: no stop attempt when the VM never started"; fi
+if printf '%s' "$OUT" | grep -q CRITICAL; then bad "R2: CRITICAL noise on a clean failure"; else ok "R2: no CRITICAL when the VM was never up"; fi
+
+# R2.3 stop returns 0 but the VM is still running -> CRITICAL
+STOP_FAIL=stop-lying FAIL_ON=docker r2_run
+if [ "$RC" != 0 ]; then ok "R2: a lying stop is a failure"; else bad "R2: a lying stop looked successful"; fi
+contains "R2: a lying stop produces CRITICAL" "CRITICAL" "$OUT"
+contains "R2: the CRITICAL names the actual state" "running" "$OUT"
+
+# R2.4 stop returns 0 but the status is unknown -> CRITICAL
+STOP_FAIL=stop-unknown FAIL_ON=docker r2_run
+if [ "$RC" != 0 ]; then ok "R2: an unknown post-stop state is a failure"; else bad "R2: an unknown state looked successful"; fi
+contains "R2: an unknown state produces CRITICAL" "CRITICAL" "$OUT"
+
+# R2.6 SIGINT during the online start -> the window is closed
+mkfifo "$WORK/ctrl.fifo" 2>/dev/null || true
+echo stopped > "$STATE"; : > "$REC"; rm -f "$SNAPMARK"
+( FAIL_ON=start-open PATH="$WORK:$PATH" bash "$REPO/lab/provision-lab-vm.sh" online ) >"$WORK/out" 2>&1 &
+r2_sig_pid=$!
+for _ in $(seq 1 50); do [ -e "$WORK/start.marker" ] && break; sleep 0.1; done
+kill -INT "$r2_sig_pid" 2>/dev/null || true
+printf '\n' > "$WORK/ctrl.fifo"
+wait "$r2_sig_pid" 2>/dev/null
+r2_sig_rc=$?
+rm -f "$WORK/ctrl.fifo" "$WORK/start.marker"
+if [ "$r2_sig_rc" != 0 ]; then ok "R2: an interrupted start is a failure"; else bad "R2: an interrupted start looked successful"; fi
+stop_line="$(printf '%s' "$(cat "$REC")" | grep -n '^stop$' | head -1 | cut -d: -f1)"
+if [ -n "$stop_line" ]; then ok "R2: the interrupted start closed the window"; else bad "R2: the interrupted start left the window open"; fi
+
+# R2.7 all does not reach isolate when the online window cannot be closed
+echo stopped > "$STATE"; : > "$REC"; rm -f "$SNAPMARK"
+STOP_FAIL=stop-lying FAIL_ON=docker run_driver all
+if [ "$RC" != 0 ]; then ok "R2: a failed close fails the whole run"; else bad "R2: the run continued past a failed close"; fi
+if printf '%s' "$(cat "$REC")" | grep -q '^start isolated=1$'; then
+  bad "R2: all proceeded to isolate after a failed close"
+else
+  ok "R2: all never reaches isolate after a failed close"
 fi
 
 echo
