@@ -197,6 +197,23 @@ while [ $# -gt 0 ]; do
 done
 exec bash -c "$cmd"
 SH
+real_jq="$(command -v jq)"
+write_jq_shim() { printf '#!/bin/sh\nexec %s "$@"\n' "$real_jq" > "$SHIM/jq"; chmod +x "$SHIM/jq"; }
+if [ -n "$real_jq" ]; then write_jq_shim; fi
+hide_jq() { rm -f "$SHIM/jq"; ln -s /nonexistent-jq "$SHIM/jq"; }
+cat > "$SHIM/zypper" <<SH
+#!/bin/sh
+echo "zypper \$*" >> "\$REC"
+[ -n "\${ZYPPER_FAIL:-}" ] && exit 1
+case "\$*" in
+  *install\ jq*)
+    case "\$*" in *--no-gpg-checks*) echo "unexpected --no-gpg-checks" >&2; exit 1 ;; esac
+    printf '#!/bin/sh\nexec %s "\$@"\n' "$real_jq" > "$SHIM/jq"
+    chmod +x "$SHIM/jq"
+    : > "$WORK/jq-installed" ;;
+esac
+exit 0
+SH
 cat > "$SHIM/docker-helper" <<'SH'
 #!/bin/sh
 echo "dh $*" >> "$REC"
@@ -234,10 +251,22 @@ chmod +x "$SHIM"/*
 export PATH="$SHIM:$PATH"
 export REC AGENT_HOME ALLOWED="$WORK/allowed" PRINCIPAL="$WORK/principal"
 export USERMARK="$WORK/usermark" UIDMARK="$WORK/uidmark" GROUPMARK="$WORK/groupmark" SELFOK="$WORK/selfok"
+export JQ_MISSING_ENV="$WORK/jq-missing-env"
 MARKER="$WORK/marker"
 export LAB_VM_TEST_MARKER="$MARKER"
 CRED="$AGENT_HOME/.config/docker-helper/credential.token"
 
+# UAT-2/F1 harness seam: JQ_MISSING=1 models a VM without jq. The system jq
+# on the test host cannot be hidden from PATH, so absence is simulated at the
+# exact boundary the body checks: a `command` function override (delivered
+# through BASH_ENV, which non-interactive bash sources) makes
+# `command -v jq` fail UNTIL the zypper shim marks the package as installed.
+enable_jq_missing_seam() {
+  cat > "$JQ_MISSING_ENV" <<ENV
+command() { if [ "\$1 \$2" = "-v jq" ] && [ ! -e "$WORK/jq-installed" ]; then return 1; fi; builtin command "\$@"; }
+ENV
+  export BASH_ENV="$JQ_MISSING_ENV"
+}
 run_setup() { # [setup-args...] -> stdout+stderr
   bash "$SETUP" "$@" 2>&1
 }
@@ -462,6 +491,56 @@ else
 fi
 
 echo
+# --- UAT-2/F1. the jq dependency is owned by its consumer --------------------
+# The dangling-symlink jq makes `command -v jq` genuinely fail (it is not an
+# executable), modeling a VM without jq; the zypper shim "installs" a working
+# jq shim over it, exactly like the package install would.
+
+# F1.1 missing jq -> installed through zypper BEFORE its first use
+reset_state
+: > "$SELFOK"
+hide_jq
+rm -f "$WORK/jq-installed"
+enable_jq_missing_seam
+: > "$REC"
+if run_setup >/dev/null 2>&1; then ok "F1.1: setup completes after installing jq"; else bad "F1.1: setup failed after the jq install: $(run_setup 2>&1 | tail -1)"; fi
+unset JQ_MISSING BASH_ENV
+zypper_lines="$(grep '^zypper ' "$REC" || true)"
+contains "F1.1: jq is installed through zypper" "zypper --non-interactive install jq" "$zypper_lines"
+if printf '%s' "$zypper_lines" | grep -q -- '--no-gpg-checks'; then
+  bad "F1.1: jq was installed without signature verification"
+else
+  ok "F1.1: the jq install keeps signature verification"
+fi
+first_dh="$(grep -n '^dh principal' "$REC" | head -1 | cut -d: -f1)"
+first_zy="$(grep -n '^zypper ' "$REC" | head -1 | cut -d: -f1)"
+if [ -n "$first_dh" ] && [ -n "$first_zy" ] && [ "$first_zy" -lt "$first_dh" ]; then
+  ok "F1.1: the jq install happens before the first jq-consuming helper call"
+else
+  bad "F1.1: the jq install order is wrong (zypper=$first_zy dh=$first_dh)"
+fi
+
+# F1.2 already installed -> no reinstall
+reset_state
+: > "$SELFOK"
+: > "$REC"
+if run_setup >/dev/null 2>&1; then ok "F1.2: setup succeeds with jq present"; else bad "F1.2: setup failed with jq present"; fi
+if grep -q '^zypper ' "$REC"; then bad "F1.2: jq was reinstalled although present"; else ok "F1.2: an installed jq is not reinstalled"; fi
+
+# F1.3 zypper failure -> fail closed
+reset_state
+: > "$SELFOK"
+hide_jq
+rm -f "$WORK/jq-installed"
+enable_jq_missing_seam
+export ZYPPER_FAIL=1
+: > "$REC"
+out="$(run_setup)"; rc=$?
+unset ZYPPER_FAIL BASH_ENV
+if [ "$rc" != 0 ]; then ok "F1.3: a jq install failure fails the setup closed"; else bad "F1.3: a jq install failure was tolerated"; fi
+case "$out" in *"could not install jq"*) ok "F1.3: the failure names the jq install" ;; *) bad "F1.3: the failure reason is missing: $out" ;; esac
+if [ -f "$PRINCIPAL" ]; then bad "F1.3: the principal was created despite the failed dependency install"; else ok "F1.3: no credential work happened after the failed install"; fi
+
 printf 'setup-agent-user tests: %d passed, %d failed\n' "$PASS" "$FAIL"
 
 [ "$FAIL" = 0 ]

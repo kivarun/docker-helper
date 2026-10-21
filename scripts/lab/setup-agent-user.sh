@@ -206,7 +206,20 @@ if ! command -v docker-helper >/dev/null 2>&1; then
   exit 0
 fi
 DH="$(command -v docker-helper)" || die "docker-helper not found in PATH"
-command -v jq >/dev/null 2>&1 || die "jq not found in PATH"
+# UAT-2/F1: jq is a hard dependency of the principal/credential phase. The
+# consumer owns its dependency (the same pattern the helper installer applies
+# to bindfs): install it once through the standard zypper path with package
+# signature verification; an installed jq is never reinstalled, and a failed
+# install or a missing/unusable jq afterwards fails closed. Package
+# installation stays inside the guest (the lab-VM guard above has already
+# refused the physical host).
+if ! command -v jq >/dev/null 2>&1; then
+  log "installing missing dependency: jq"
+  command -v zypper >/dev/null 2>&1 || die "zypper not found (cannot install jq)"
+  zypper --non-interactive install jq || die "could not install jq (network open?)"
+  command -v jq >/dev/null 2>&1 || die "jq not found in PATH after the install attempt"
+fi
+[ -x "$(command -v jq)" ] || die "jq is not executable at $(command -v jq)"
 CRED_FILE="$AGENT_HOME/.config/docker-helper/credential.token"
 
 # --- 4. principal record consistency (fail-closed; never DB-edited) ---------
