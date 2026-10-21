@@ -58,10 +58,14 @@ oc_lab_mount_source_ok() { # KIND(dir|file) PATH LAB_ROOT
                 "regular file"|"directory") ;;
                 *) rm -f -- "$walk_file"; return 1 ;;
             esac
+            # C7/F4: the device identity is verified for EVERY visited entry,
+            # directories included — an empty nested mountpoint of another
+            # filesystem contains no files, so the previous file-level check
+            # alone could not catch it.
+            [ "$(stat -c '%d' -- "$entry")" = "$root_dev" ] \
+                || { rm -f -- "$walk_file"; return 1; }
             if [ "$obj_type" != "directory" ]; then
                 [ "$(stat -c '%h' -- "$entry")" = 1 ] \
-                    || { rm -f -- "$walk_file"; return 1; }
-                [ "$(stat -c '%d' -- "$entry")" = "$root_dev" ] \
                     || { rm -f -- "$walk_file"; return 1; }
             fi
         done < "$walk_file"

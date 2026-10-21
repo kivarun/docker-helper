@@ -585,11 +585,12 @@ rm -f "$r4_tree/sub/pipe"
 # st_dev comparison exercised here)
 mkdir -p "$WORK/statshim" "$r4_tree/sub/mnt"
 printf 'X\n' > "$r4_tree/sub/mnt/foreign.crt"
+real_stat="$(command -v stat)"
 cat > "$WORK/statshim/stat" <<SH
 #!/bin/sh
 case "\$*" in
   *"/sub/mnt/"*) echo "999999" ;;
-  *) exec /usr/bin/stat "\$@" ;;
+  *) exec "$real_stat" "\$@" ;;
 esac
 SH
 chmod +x "$WORK/statshim/stat"
@@ -598,6 +599,29 @@ if PATH="$WORK/statshim:$PATH" oc_lab_mount_source_ok dir "$r4_tree" "$OPENCODE_
 else
   ok "R4: a foreign-filesystem entry fails the gate"
 fi
+
+# F4: a nested EMPTY mountpoint (no files for the previous file-level check to
+# catch) must be refused through the directory's own st_dev. A fresh tree is
+# used so the earlier non-empty mountpoint cannot explain the refusal.
+rm -rf "$r4_tree"
+mkdir -p "$r4_tree/sub/mnt-empty"
+real_stat="$(command -v stat)"
+cat > "$WORK/statshim/stat" <<SH
+#!/bin/sh
+case "\$*" in
+  *%F*"/sub/mnt"*) echo "directory" ;;
+  *%F*) exec "$real_stat" "\$@" ;;
+  *"/sub/mnt"*) echo "999999" ;;
+  *) exec "$real_stat" "\$@" ;;
+esac
+SH
+chmod +x "$WORK/statshim/stat"
+if PATH="$WORK/statshim:$PATH" oc_lab_mount_source_ok dir "$r4_tree" "$OPENCODE_DOCKER_HOME" 2>/dev/null; then
+  bad "F4: an empty nested foreign-filesystem mountpoint was accepted"
+else
+  ok "F4: an empty nested foreign-filesystem mountpoint fails the gate"
+fi
+rm -rf "$r4_tree/sub/mnt-empty"
 
 # launcher-level: the unreadable directory refuses the launch before docker
 f4_reset
