@@ -390,7 +390,6 @@ trip_home_listing() { ls /home 2>/dev/null | sort | tr '\n' ' '; }
 trip_home_before="$(trip_home_listing)"
 trip_ssh_state() { [ -e "$HOME/.ssh" ] && printf present || printf absent; }
 trip_ssh_before="$(trip_ssh_state)"
-trip_etc_ssh_before="$(trip_ssh_state)"
 
 # --- F5. the publication staging pathname is not a privileged write surface --
 # The publication tmp used to live in the agent-owned .ssh directory and every

@@ -71,6 +71,33 @@ expect_unreachable() { # LABEL HOST PORT
   fi
 }
 
+# --- IPv4-only posture helpers (UAT-4/F3) -------------------------------------
+# probe_ipv6_disabled [CMDLINE_FILE] [IF_INET6_FILE] — returns 0 when IPv6 is
+# disabled at the GUEST OS LEVEL: the kernel command line carries
+# ipv6.disable=1 and the IPv6 procfs interface (/proc/net/if_inet6) is absent.
+# Merely unrouted IPv6 is NOT a disabled stack, so both conditions are
+# required. The file arguments are the production defaults; the tests pass
+# private temp files and execute the same code.
+probe_ipv6_disabled() { # [CMDLINE_FILE] [IF_INET6_FILE]
+  local cmdline="${1:-/proc/cmdline}" ifinet6="${2:-/proc/net/if_inet6}"
+  grep -qw 'ipv6.disable=1' "$cmdline" 2>/dev/null || return 1
+  [ ! -e "$ifinet6" ] || return 1
+  return 0
+}
+
+# ipv6_transport_usable — returns 0 when an AF_INET6 socket can be created and
+# bound, i.e. IPv6 transport is actually functioning. A functioning transport
+# contradicts an IPv4-only posture regardless of route visibility.
+ipv6_transport_usable() {
+  command -v python3 >/dev/null 2>&1 || return 2
+  python3 - <<'PY' 2>/dev/null
+import socket
+s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+s.bind(("::1", 0))
+s.close()
+PY
+}
+
 # --- guest role --------------------------------------------------------------
 probe_guest() { # GW_HOST GW_PORT LAN4_HOST LAN4_PORT [LAN6_HOST LAN6_PORT]
   [ "$#" -ge 4 ] || { echo "usage: $0 guest GW_HOST GW_PORT LAN4_HOST LAN4_PORT [LAN6_HOST LAN6_PORT]" >&2; return 2; }
@@ -106,6 +133,26 @@ probe_guest() { # GW_HOST GW_PORT LAN4_HOST LAN4_PORT [LAN6_HOST LAN6_PORT]
   else
     ok "no IPv6 default route"
   fi
+
+  # 2b. UAT-4/F3: the lab VM is IPv4-only — IPv6 must be DISABLED at the
+  # guest OS level (ipv6.disable=1 on the kernel command line and no IPv6
+  # procfs interface). An unrouted-but-alive stack is not a disabled stack.
+  # These checks are critical and never SKIP.
+  if probe_ipv6_disabled; then
+    ok "IPv6 is disabled at the guest OS level (ipv6.disable=1, no /proc/net/if_inet6)"
+  else
+    bad "IPv6 is NOT disabled at the guest OS level (cmdline ipv6.disable=1 and /proc/net/if_inet6 required)"
+  fi
+  if ip -6 addr show scope global 2>/dev/null | grep -q 'inet6'; then
+    bad "active IPv6 addresses are present (not an IPv4-only VM)"
+  else
+    ok "no active IPv6 addresses"
+  fi
+  case "$(ipv6_transport_usable && echo usable || echo unusable)" in
+    unusable) ok "IPv6 transport is not usable (an AF_INET6 socket cannot be created and bound)" ;;
+    usable)   bad "IPv6 transport is FUNCTIONING (a working AF_INET6 socket contradicts an IPv4-only VM)" ;;
+    *)        bad "cannot verify the IPv6 transport (python3 unavailable)" ;;
+  esac
 
   # 3. prepared endpoints unreachable (each was verified accepting host-side)
   expect_unreachable "slirp gateway" "$gw_host" "$gw_port"
@@ -163,6 +210,32 @@ probe_host_fail() {
   exit 1
 }
 
+# UAT-4/F4: the diagnostic listeners' lifetime is owned by a GLOBAL registry.
+# The previous design kept the PIDs in probe_host() locals while installing an
+# EXIT trap: after probe_host returned, the trap referenced dead locals
+# ('pid4: unbound variable') and the listener processes leaked (the real UAT
+# left a Python listener on port 47812). The registry is global, the traps are
+# installed before the first listener starts, and cleanup only ever kills the
+# PIDs this probe itself recorded — never a foreign process on the port.
+LISTENER_PIDS=""
+LISTENER_WORK=""
+
+cleanup_listeners() {
+  local p
+  for p in $LISTENER_PIDS; do
+    kill "$p" 2>/dev/null || true
+  done
+  wait 2>/dev/null || true
+  if [ -n "$LISTENER_WORK" ]; then
+    rm -rf "$LISTENER_WORK"
+  fi
+  LISTENER_PIDS=""
+  LISTENER_WORK=""
+}
+trap cleanup_listeners EXIT
+trap 'cleanup_listeners; exit 130' INT
+trap 'cleanup_listeners; exit 143' TERM
+
 probe_host() { # [PORT]
   local port="${1:-47812}"
 
@@ -177,6 +250,7 @@ probe_host() { # [PORT]
   lan6="$(ip -6 route get 2606:4700::1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src") print $(i+1)}' | head -1)"
 
   work="$(mktemp -d)" || probe_host_fail "mktemp failed"
+  LISTENER_WORK="$work"
   cnt4="$work/accepts4" cnt6="$work/accepts6" stream="$work/probe-stream.sh"
   : > "$cnt4"; : > "$cnt6"
 
@@ -201,6 +275,7 @@ while True:
         f.write(str(n))
     c.close()
 PY
+  LISTENER_PIDS="$LISTENER_PIDS $pid4"
   if [ -n "$lan6" ]; then
     python3 - "$port" "$cnt6" <<'PY' & pid6=$!
 import socket, sys
@@ -221,6 +296,7 @@ while True:
         f.write(str(n))
     c.close()
 PY
+  LISTENER_PIDS="$LISTENER_PIDS $pid6"
   else
     pid6=""
   fi
@@ -231,22 +307,21 @@ PY
     [ -z "$pid6" ] || kill -0 "$pid6" 2>/dev/null
   }
 
-  cleanup_listeners() {
-    [ -n "$pid4" ] && kill "$pid4" 2>/dev/null
-    [ -n "$pid6" ] && kill "$pid6" 2>/dev/null
-    wait 2>/dev/null
-    rm -rf "$work"
-  }
-  trap cleanup_listeners EXIT
+  # (the listeners are owned by the global registry and the traps installed
+  # before the first start; the PREPARE phase additionally requires the
+  # recorded PIDs to be alive, so a foreign process occupying the port can
+  # never stand in for a listener this probe started)
 
   # --- PREPARE phase: every listener must accept from the host side, on the
   # exact endpoints the guest will later probe. A listener that did not start
   # is a FAIL, never a PASS.
   local ready=0
   for _ in $(seq 1 20); do
-    if tcp_reachable 127.0.0.1 "$port"; then ready=1; break; fi
+    if kill -0 "$pid4" 2>/dev/null && tcp_reachable 127.0.0.1 "$port"; then ready=1; break; fi
     sleep 0.1
   done
+  kill -0 "$pid4" 2>/dev/null \
+    || probe_host_fail "IPv4 listener not running on port $port (a foreign process may hold it; it was not touched)"
   [ "$ready" = 1 ] || probe_host_fail "IPv4 listener not accepting on port $port"
   tcp_reachable "$lan4" "$port" || probe_host_fail "LAN IPv4 endpoint not accepting: $lan4:$port"
   if [ -n "$lan6" ]; then
@@ -307,6 +382,11 @@ PY
       ok "no guest connection reached any controlled listener"
     fi
   fi
+
+  # UAT-4/F4: the minimal listener lifetime ends here — the verification is
+  # complete, so the listeners are stopped and the temp state removed
+  # immediately (the global trap remains as a safety net and is idempotent).
+  cleanup_listeners
 
   summary
 }

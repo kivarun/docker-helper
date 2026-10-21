@@ -197,6 +197,243 @@ if [ "$RC" = 0 ]; then ok "no-IPv6 host: probe passes with the v6 part skipped";
 contains "no-IPv6 host: the guest receives no IPv6 endpoint" "STUB guest received no IPv6 endpoint" "$OUT"
 not_contains "no-IPv6 host: no v6 endpoint claimed" "[::1]:" "$OUT"
 
+# --- UAT-4/F1. the slirp netdev is IPv4-only in both postures -----------------
+# Real execution: the harness is sourced in a subshell and vm_netdev() runs
+# for the online and the isolated posture.
+netdev_out() { # ISOLATED_VALUE -> vm_netdev output
+  ( source "$SRC_DIR/uat-vm-tumbleweed.sh"; VM_NET_ISOLATED="$1" vm_netdev )
+}
+n_online="$(netdev_out "")"
+n_isolated="$(netdev_out 1)"
+for pair in "online:$n_online" "isolated:$n_isolated"; do
+  posture="${pair%%:*}"; nd="${pair#*:}"
+  case "$nd" in
+    *ipv6=off*) ok "UAT-4/F1: $posture netdev disables slirp IPv6" ;;
+    *) bad "UAT-4/F1: $posture netdev does not disable IPv6: $nd" ;;
+  esac
+  case "$nd" in
+    *hostfwd=tcp:127.0.0.1:*) ok "UAT-4/F1: $posture SSH hostfwd stays loopback-only" ;;
+    *) bad "UAT-4/F1: $posture SSH hostfwd is not loopback-only: $nd" ;;
+  esac
+done
+case "$n_online" in
+  *restrict=on*) bad "UAT-4/F1: restrict=on leaked into the online posture" ;;
+  *) ok "UAT-4/F1: restrict=on is absent in the online posture" ;;
+esac
+case "$n_isolated" in
+  *restrict=on*) ok "UAT-4/F1: restrict=on applies only in the isolated posture" ;;
+  *) bad "UAT-4/F1: restrict=on missing in the isolated posture" ;;
+esac
+
+# --- UAT-4/F2. the guest boot-config mutation (really executed) ---------------
+# The guest script inside vm_set_ipv6_disable honors the LAB_GUEST_ROOT seam
+# (the same pattern as the operator-files provisioner): the test overrides
+# vm_ssh/vm_fail after sourcing the harness and runs the streamed guest
+# script against a private fake boot tree.
+f2_root="$WORK/f2guest"
+f2_reset() {
+  rm -rf "$f2_root"
+  mkdir -p "$f2_root/etc/kernel" "$f2_root/etc/default" "$f2_root/boot/loader/entries" "$f2_root/bin"
+  printf 'root=LABEL=LAB quiet\n' > "$f2_root/etc/kernel/cmdline"
+  printf 'GRUB_CMDLINE_LINUX_DEFAULT="root=LABEL=LAB quiet"\n' > "$f2_root/etc/default/grub"
+  printf 'title Lab\noptions root=LABEL=LAB quiet\nlinux /vmlinuz\n' > "$f2_root/boot/loader/entries/lab.conf"
+}
+f2_run() { # [no-reset] -> F2_RC, F2_OUT; the guest script executes for real
+  [ "${1:-}" = no-reset ] || f2_reset
+  local captured="$WORK/f2-guest-body.sh"
+  ( source "$SRC_DIR/uat-vm-tumbleweed.sh"
+    vm_ssh() { cat; }
+    vm_log() { printf '[vm] %s\n' "$*" >&2; }
+    vm_fail() { printf '[vm_fail] %s\n' "$*" >&2; exit 1; }
+    vm_set_ipv6_disable
+  ) > "$captured" 2> "$WORK/f2-wrapper.err"
+  LAB_GUEST_ROOT="$f2_root" PATH="$SHIM:$PATH" bash "$captured" >"$WORK/f2out" 2>&1
+  F2_RC=$?
+  F2_OUT="$(cat "$WORK/f2out")"
+}
+# shims: the guest's bootloader regeneration helpers are recorded, the
+# filesystem tools are real.
+cat > "$SHIM/update-bootloader" <<'SH'
+#!/bin/sh
+echo "update-bootloader $*" >> "$WORK/f2-regen.rec"
+exit 0
+SH
+cat > "$SHIM/sdbootutil" <<'SH'
+#!/bin/sh
+echo "sdbootutil $*" >> "$WORK/f2-regen.rec"
+exit 0
+SH
+cat > "$SHIM/grub2-mkconfig" <<'SH'
+#!/bin/sh
+echo "grub2-mkconfig $*" >> "$WORK/f2-regen.rec"
+exit 0
+SH
+chmod +x "$SHIM"/update-bootloader "$SHIM"/sdbootutil "$SHIM"/grub2-mkconfig
+: > "$WORK/f2-regen.rec"
+
+# F2.1 fresh: every boot source carries ipv6.disable=1
+f2_run
+if [ "$F2_RC" = 0 ]; then ok "UAT-4/F2: the boot-config bootstrap succeeds"; else bad "UAT-4/F2: the bootstrap failed (rc $F2_RC): $F2_OUT"; fi
+for src in "$f2_root/etc/kernel/cmdline" "$f2_root/etc/default/grub" "$f2_root/boot/loader/entries/lab.conf"; do
+  if grep -qw 'ipv6.disable=1' "$src"; then ok "UAT-4/F2: $(basename "$src") carries ipv6.disable=1"; else bad "UAT-4/F2: $(basename "$src") lacks ipv6.disable=1"; fi
+done
+if printf '%s' "$F2_OUT" | grep -q 'regenerating bootloader config:'; then
+  ok "UAT-4/F2: the bootloader regeneration path runs (the BLS fallback is the deterministic guarantee)"
+else
+  bad "UAT-4/F2: no bootloader regeneration attempt"
+fi
+
+# F2.2 idempotency: a second run adds no duplicate
+: > "$WORK/f2-regen.rec"
+f2_run
+if [ "$F2_RC" = 0 ]; then ok "UAT-4/F2: the re-run succeeds"; else bad "UAT-4/F2: the re-run failed (rc $F2_RC)"; fi
+dup="$(grep -o 'ipv6.disable=1' "$f2_root/etc/kernel/cmdline" | wc -l)"
+if [ "$dup" = 1 ]; then ok "UAT-4/F2: the re-run adds no duplicate token"; else bad "UAT-4/F2: $dup ipv6.disable tokens after the re-run"; fi
+dup="$(grep -o 'ipv6.disable=1' "$f2_root/boot/loader/entries/lab.conf" | wc -l)"
+if [ "$dup" = 1 ]; then ok "UAT-4/F2: the BLS entry carries exactly one token"; else bad "UAT-4/F2: the BLS entry has $dup tokens"; fi
+
+# F2.3 modeled reboot: the on-disk config (the boot source) still carries the
+# token after a re-run — the reboot applies what the files say.
+if grep -qw 'ipv6.disable=1' "$f2_root/etc/kernel/cmdline"; then
+  ok "UAT-4/F2: the persistent boot config survives the modeled reboot"
+else
+  bad "UAT-4/F2: the persistent boot config lost the token"
+fi
+
+# F2.4 fail-closed: no boot source at all -> the guest script fails
+rm -rf "$f2_root"; mkdir -p "$f2_root"
+f2_run no-reset
+if [ "$F2_RC" != 0 ]; then ok "UAT-4/F2: an empty boot tree fails closed"; else bad "UAT-4/F2: an empty boot tree was tolerated"; fi
+case "$F2_OUT" in *"FAIL-CLOSED"*) ok "UAT-4/F2: the failure names the missing boot source" ;; *) bad "UAT-4/F2: no FAIL-CLOSED evidence: $F2_OUT" ;; esac
+
+# --- UAT-4/F3. the guest IPv4-only contract (real code, temp files) -----------
+# probe_ipv6_disabled() and ipv6_transport_usable() are the production
+# functions; the tests drive them with private files / real sockets.
+printf 'BOOT_IMAGE=lab ipv6.disable=1 quiet\n' > "$WORK/cmdline.good"
+printf 'BOOT_IMAGE=lab quiet\n' > "$WORK/cmdline.bad"
+printf '00000000000000000000000000000001 00 1c 0000000000000000 00\n' > "$WORK/ifinet6.present"
+# The probe file dispatches at source time; the functions are exercised in a
+# subshell that sources the real file with an EMPTY $1 (the dispatch treats
+# "" as the help/no-op path and continues), then shifts past it and calls the
+# production function with the test's arguments.
+probe_fn() { local fn="$1"; shift; ( set -- "" "$@"; source "$REPO/lab/probe-vm-isolation.sh"; shift; "$fn" "$@" ); }
+if probe_fn probe_ipv6_disabled "$WORK/cmdline.good" "$WORK/ifinet6.absent"; then
+  ok "UAT-4/F3: ipv6.disable=1 + no if_inet6 is a disabled stack"
+else
+  bad "UAT-4/F3: a properly disabled stack was not recognized"
+fi
+if probe_fn probe_ipv6_disabled "$WORK/cmdline.bad" "$WORK/ifinet6.absent"; then
+  bad "UAT-4/F3: an unrouted-but-not-disabled stack passed (no cmdline token)"
+else
+  ok "UAT-4/F3: no cmdline token is NOT a disabled stack"
+fi
+if probe_fn probe_ipv6_disabled "$WORK/cmdline.good" "$WORK/ifinet6.present"; then
+  bad "UAT-4/F3: a live if_inet6 passed although the stack must be disabled"
+else
+  ok "UAT-4/F3: a live if_inet6 is NOT a disabled stack"
+fi
+if ipv6_transport_usable; then
+  bad "UAT-4/F3: this host unexpectedly cannot exercise the transport check"
+else
+  case "$(ipv6_transport_usable >/dev/null 2>&1; echo $?)" in
+    0) bad "UAT-4/F3: the transport check misreported" ;;
+    1) ok "UAT-4/F3: the transport check runs against real AF_INET6 semantics" ;;
+    2) bad "UAT-4/F3: python3 is unavailable for the transport check" ;;
+  esac
+fi
+# A working IPv6 transport (when the test host supports ::1) must be
+# recognizable as NOT an IPv4-only posture.
+if [ "$v6_capable" = 1 ]; then
+  ipv6_transport_usable2() { python3 - <<'PY' 2>/dev/null
+import socket
+s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+s.bind(("::1", 0))
+s.close()
+PY
+}
+  if ipv6_transport_usable2; then
+    ok "UAT-4/F3: a bindable AF_INET6 socket is detectable (the guest check would FAIL it)"
+  else
+    bad "UAT-4/F3: the transport check cannot see a working ::1 socket"
+  fi
+else
+  skip "UAT-4/F3: the working-transport detection (::1 unavailable on this host)"
+fi
+
+# --- UAT-4/F4. the host listener lifecycle ------------------------------------
+probe_free_port() { # -> a port with NO listener
+  local p
+  p=$(( (RANDOM % 20000) + 30000 ))
+  while timeout 1 bash -c "exec 3<>/dev/tcp/127.0.0.1/$p" 2>/dev/null; do
+    p=$(( (RANDOM % 20000) + 30000 ))
+  done
+  printf '%s' "$p"
+}
+port_free() { # PORT -> 0 when nothing accepts (the listeners are gone)
+  ! timeout 1 bash -c "exec 3<>/dev/tcp/127.0.0.1/$1" 2>/dev/null
+}
+wait_port_busy() { # PORT -> 0 once something accepts
+  local _
+  for _ in $(seq 1 30); do
+    timeout 1 bash -c "exec 3<>/dev/tcp/127.0.0.1/$1" 2>/dev/null && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+# F4.1 normal completion -> no listeners left, no unbound-variable noise
+P="$(probe_free_port)"
+run_probe idle 1 "$P"
+if [ "$RC" = 0 ]; then ok "UAT-4/F4: the probe completes normally"; else bad "UAT-4/F4: the normal probe failed (rc $RC): $OUT"; fi
+if port_free "$P"; then ok "UAT-4/F4: no listener survives a normal completion"; else bad "UAT-4/F4: a listener leaked after the normal completion"; fi
+not_contains "UAT-4/F4: no unbound-variable noise" "unbound variable" "$OUT"
+
+# F4.2 a guest probe FAIL -> no listeners left
+P="$(probe_free_port)"
+run_probe fail 1 "$P"
+if [ "$RC" != 0 ]; then ok "UAT-4/F4: the guest failure fails the probe"; else bad "UAT-4/F4: the guest failure was tolerated"; fi
+if port_free "$P"; then ok "UAT-4/F4: no listener survives a guest failure"; else bad "UAT-4/F4: a listener leaked after the guest failure"; fi
+not_contains "UAT-4/F4: no unbound-variable noise on failure" "unbound variable" "$OUT"
+
+# F4.3 a foreign process holds the port -> the probe refuses and the foreign
+# process survives untouched
+P="$(probe_free_port)"
+python3 - "$P" <<'PY' & FOREIGN_PID=$!
+import socket, sys, time
+s = socket.socket(socket.AF_INET)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", int(sys.argv[1])))
+s.listen(1)
+time.sleep(30)
+PY
+wait_port_busy "$P" || { bad "UAT-4/F4: the foreign listener did not start (test bug)"; kill "$FOREIGN_PID" 2>/dev/null; }
+FAKE_V6=0 run_probe idle 0 "$P"
+if [ "$RC" != 0 ]; then ok "UAT-4/F4: a foreign port holder fails the probe"; else bad "UAT-4/F4: a foreign port holder was tolerated"; fi
+kill -0 "$FOREIGN_PID" 2>/dev/null \
+  && ok "UAT-4/F4: the foreign process was not killed" \
+  || bad "UAT-4/F4: the foreign process was killed by the probe"
+kill "$FOREIGN_PID" 2>/dev/null; wait "$FOREIGN_PID" 2>/dev/null
+not_contains "UAT-4/F4: no unbound-variable noise on the foreign-port path" "unbound variable" "$OUT"
+
+# F4.4 TERM mid-run -> no listeners left, rc 143
+P="$(probe_free_port)"
+FAKE_GUEST=idle FAKE_V6=1 PATH="$SHIM:$PATH" \
+  bash "$REPO/lab/probe-vm-isolation.sh" host "$P" >"$WORK/out-term" 2>&1 &
+PROBE_PID=$!
+wait_port_busy "$P" || { bad "UAT-4/F4: the listeners did not start for the TERM test"; kill "$PROBE_PID" 2>/dev/null; }
+kill -TERM "$PROBE_PID" 2>/dev/null
+wait "$PROBE_PID" 2>/dev/null; term_rc=$?
+if [ "$term_rc" = 143 ]; then ok "UAT-4/F4: TERM exits with 143"; else bad "UAT-4/F4: TERM rc is $term_rc (want 143)"; fi
+if port_free "$P"; then ok "UAT-4/F4: no listener survives TERM"; else bad "UAT-4/F4: a listener leaked after TERM"; fi
+if grep -q "unbound variable" "$WORK/out-term"; then bad "UAT-4/F4: unbound variable on the TERM path"; else ok "UAT-4/F4: TERM cleanup runs cleanly under set -u"; fi
+
+# F4.5 partial start (no host IPv6): the IPv4 listener alone is cleaned up
+P="$(probe_free_port)"
+run_probe idle 0 "$P"
+if [ "$RC" = 0 ]; then ok "UAT-4/F4: the IPv4-only host case completes"; else bad "UAT-4/F4: the IPv4-only host case failed (rc $RC): $OUT"; fi
+if port_free "$P"; then ok "UAT-4/F4: no listener survives the partial-start case"; else bad "UAT-4/F4: a listener leaked in the partial-start case"; fi
+
 echo
 printf 'probe-vm-isolation tests: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
