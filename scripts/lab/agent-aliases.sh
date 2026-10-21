@@ -74,49 +74,28 @@ _dh_session_delete() {
     command docker-helper session delete "$DOCKER_HELPER_SESSION_ID" >/dev/null
 }
 
-# --- lab-managed mount-source safety gate (F4) ------------------------------
-# ONE owner of path-safety for every lab-managed bind-mount source that
-# Docker may relabel (:z/:Z). Checks, in order:
-#   1. canonical containment: the fully resolved source stays strictly inside
-#      the allowed lab root (no parent-component symlink escape);
-#   2. the final path component itself is not a symlink;
-#   3. for a directory source: EVERY entry Docker could recursively relabel
-#      is a plain, single-link, same-filesystem entry — symlink entries and
-#      hardlink aliases to foreign inodes are refused, and a different
-#      device would let a relabel escape onto another filesystem;
-#   4. for a file source: a real regular file with exactly one link (no
-#      hardlink alias to a system or foreign inode).
-# Residual TOCTOU (documented): these checks are not atomic with the docker
-# invocation; the paths live in the trusted launcher account's own tree,
-# which no container mounts writable, so the untrusted model cannot race
-# them. readlink -f alone proves nothing — the explicit checks do the work.
-oc_lab_mount_source_ok() { # KIND(dir|file) PATH LAB_ROOT
-    local kind="$1" path="$2" root="$3"
-    local root_real path_real entry root_dev
-    root_real="$(readlink -f -- "$root" 2>/dev/null)" || return 1
-    path_real="$(readlink -f -- "$path" 2>/dev/null)" || return 1
-    case "$path_real" in
-        "$root_real"/*) ;; * ) return 1 ;;
-    esac
-    [ "$path_real" != "$root_real" ] || return 1
-    [ ! -L "$path" ] || return 1
-    if [ "$kind" = dir ]; then
-        [ -d "$path" ] || return 1
-        root_dev="$(stat -c '%d' -- "$path_real")" || return 1
-        while IFS= read -r -d '' entry; do
-            [ ! -L "$entry" ] || return 1
-            if [ ! -d "$entry" ]; then
-                [ "$(stat -c '%h' -- "$entry")" = 1 ] || return 1
-                [ "$(stat -c '%d' -- "$entry")" = "$root_dev" ] || return 1
-            fi
-        done < <(find "$path_real" -mindepth 1 -print0 2>/dev/null)
-        return 0
-    fi
-    [ "$kind" = file ] || return 1
-    [ -f "$path" ] || return 1
-    [ "$(stat -c '%h' -- "$path")" = 1 ] || return 1
-    return 0
-}
+# --- lab-managed mount-source safety gate ------------------------------------
+# R5: loads the shared gate library (single canonical implementation).
+# The SINGLE canonical implementation lives in scripts/lab/lab-mount-gate.sh;
+# this file only loads it. Resolution order: an explicit override, the
+# agent-owned lib copy installed by provisioning (the VM), then the
+# repository location (development and test environments). Without the gate
+# the launcher refuses to work at all — no unguarded relabel mounts.
+_lab_gate_lib="${OPENCODE_LAB_GATE_LIB:-}"
+if [ -z "$_lab_gate_lib" ]; then
+    for _lab_gate_cand in \
+        "${HOME:-}/.opencode-docker/lib/lab-mount-gate.sh" \
+        "$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)/lab-mount-gate.sh"; do
+        [ -n "$_lab_gate_cand" ] && [ -f "$_lab_gate_cand" ] && { _lab_gate_lib="$_lab_gate_cand"; break; }
+    done
+fi
+if [ -n "$_lab_gate_lib" ] && [ -f "$_lab_gate_lib" ]; then
+    # shellcheck source=/dev/null
+    . "$_lab_gate_lib"
+else
+    echo "the lab mount gate library is missing: refusing to define launchers" >&2
+    return 1 2>/dev/null || exit 1
+fi
 
 # --- per-launch ssh-agent lifecycle (F5) ------------------------------------
 # Each launch owns a private run directory (mktemp -d, 0700) holding its own

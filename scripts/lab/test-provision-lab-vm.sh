@@ -79,6 +79,8 @@ case "\${1:-}" in
         echo CA_TLS_OK ;;
       *CONTAINER_CA_OK*) echo CONTAINER_CA_OK ;;
       *CONTAINER_PUBLIC_OK*) echo CONTAINER_PUBLIC_OK ;;
+      *lab-mount-gate*) [ "\${FAIL_ON:-}" = gate ] && { echo "stub: mount gate refused" >&2; exit 1; }
+        exit 0 ;;
       *docker\ pull*) [ "\${FAIL_ON:-}" = pull ] && { echo "stub: pull failed" >&2; exit 1; } ;;
     esac
     exit 0 ;;
@@ -262,6 +264,30 @@ if run_verify; then
   contains "F3: the integration ran after the probe" "sudo bash /opt/lab/integration-agent-vm.sh" "$(cat "$REC")"
 else
   bad "F3: the isolated case failed: $OUT"
+fi
+
+# --- R5. online diagnostics pass the SAME mount-source gate ------------------
+# The one-off diagnostic container must consult the shared mount gate (the
+# same library the launcher uses) BEFORE any docker run, and must refuse an
+# unsafe source without running docker at all.
+: > "$REC"; echo stopped > "$STATE"; rm -f "$SNAPMARK"
+FAIL_ON=gate run_driver online
+if [ "$RC" != 0 ]; then ok "R5: diagnostics refuse when the mount gate fails"; else bad "R5: diagnostics ran despite a gate failure"; fi
+if printf '%s' "$(cat "$REC")" | grep -q 'docker run'; then
+  bad "R5: a diagnostic docker run happened after the gate refused"
+else
+  ok "R5: no diagnostic docker run after the gate refusal"
+fi
+
+: > "$REC"; echo stopped > "$STATE"; rm -f "$SNAPMARK"
+run_driver online
+rec="$(cat "$REC")"
+gate_line="$(printf '%s' "$rec" | grep -n 'lab-mount-gate' | head -1 | cut -d: -f1)"
+docker_line="$(printf '%s' "$rec" | grep -n 'docker run' | head -1 | cut -d: -f1)"
+if [ -n "$gate_line" ] && [ -n "$docker_line" ] && [ "$gate_line" -lt "$docker_line" ]; then
+  ok "R5: the gate is consulted before the diagnostic docker run"
+else
+  bad "R5: the diagnostic docker run is not gated (gate=$gate_line docker=$docker_line)"
 fi
 
 echo

@@ -177,6 +177,13 @@ chown -R "$AGENT_USER:$AGENT_USER" "$AGENT_HOME/.opencode-docker"
 
 install -m 0644 -o "$AGENT_USER" -g "$AGENT_USER" \
   "$ALIASES_SRC" "$AGENT_HOME/.bash_aliases"
+# The mount gate library is part of the launcher's trusted loading path: the
+# installed aliases resolve it from this agent-owned lib copy in the VM.
+GATE_LIB_SRC="$(dirname -- "$ALIASES_SRC")/lab-mount-gate.sh"
+[ -f "$GATE_LIB_SRC" ] || die "missing $GATE_LIB_SRC"
+install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" "$AGENT_HOME/.opencode-docker/lib"
+install -m 0644 -o "$AGENT_USER" -g "$AGENT_USER" \
+  "$GATE_LIB_SRC" "$AGENT_HOME/.opencode-docker/lib/lab-mount-gate.sh"
 if grep -qF '.bash_aliases' "$AGENT_HOME/.bashrc" 2>/dev/null; then
   log "$AGENT_HOME/.bashrc already sources .bash_aliases"
 else

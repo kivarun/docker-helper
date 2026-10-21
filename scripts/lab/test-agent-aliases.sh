@@ -527,6 +527,12 @@ f4_expect_refusal "final-content-check"
   && ok "F4: the foreign file content is unchanged after refusals" \
   || bad "F4: the foreign file content changed"
 
+# R5: the gate has exactly ONE canonical implementation in the repository
+check "R5: the mount gate is defined exactly once in the lab scripts" "1" \
+  "$(grep -rc 'oc_lab_mount_source_ok() {' "$SRC_DIR/lab/" 2>/dev/null | awk -F: '$1 !~ /test-/ && $2 > 0' | wc -l)"
+check "R5: the launcher loads the shared gate library" "1" \
+  "$(grep -c 'loads the shared gate library' "$ALIASES")"
+
 # F4.9 the unit-level gate refuses a symlinked file source directly
 ln -sf "$OUTSIDE/system-like-file" "$OPENCODE_DOCKER_HOME/git/gitconfig"
 if oc_lab_mount_source_ok file "$OPENCODE_DOCKER_HOME/git/gitconfig" "$OPENCODE_DOCKER_HOME" 2>/dev/null; then

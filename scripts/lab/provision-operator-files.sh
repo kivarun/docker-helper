@@ -184,6 +184,16 @@ fi
 [ -n "$GITCONFIG_SRC" ] && append_payload GITCONFIG_B64 "$GITCONFIG_SRC"
 [ -n "$KNOWN_HOSTS_SRC" ] && append_payload KNOWN_HOSTS_B64 "$KNOWN_HOSTS_SRC"
 
+# R5: the pinned base image reference is resolved on the HOST from the
+# trusted repository copy and embedded as a payload — a root guest process
+# never sources an agent-controlled launcher file.
+host_base_image="$(SCRIPT_DIR="$SCRIPT_DIR" bash -c '
+  # shellcheck source=/dev/null
+  source "$SCRIPT_DIR/agent-aliases.sh" 2>/dev/null
+  printf "%s" "$_OC_BASE"
+' 2>/dev/null || true)"
+[ -n "$host_base_image" ] && printf 'BASE_IMAGE=%q\n' "$host_base_image" >> "$GUEST"
+
 cat >> "$GUEST" <<'BODY'
 
 AGENT_OCODE="$AGENT_HOME/.opencode-docker"
@@ -290,10 +300,7 @@ if [ -n "${CA_B64:-}" ]; then
   # back to NODE_EXTRA_CA_CERTS only: public trust stays intact, corporate
   # trust for non-Node clients stays unavailable (logged explicitly).
   if [ -z "$LAB_GUEST_ROOT" ]; then
-    base_image=""
-    if [ -f /opt/lab/agent-aliases.sh ]; then
-      base_image="$(bash -c 'source /opt/lab/agent-aliases.sh 2>/dev/null; printf "%s" "$_OC_BASE"' 2>/dev/null || true)"
-    fi
+    base_image="${BASE_IMAGE:-}"
     corp_ca="$ETC/docker-helper/$CA_NAME.crt"
     combined="$AGENT_OCODE/ca/combined-ca-bundle.crt"
     built=0

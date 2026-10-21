@@ -187,6 +187,14 @@ base_image_ref() {
 #   3. public TLS positive — the same container setup still trusts a public
 #      CA chain, proving the corporate CA did not replace public trust.
 verify_online_tls() {
+  # R5: every diagnostic docker run is gated by the SAME mount-source library
+  # the launcher uses. The gate runs INSIDE the guest (it must inspect the
+  # guest filesystem) against /opt/lab/lab-mount-gate.sh, which is a
+  # root-owned repository artifact copied by the controlled provisioning
+  # stage — never a user-writable file.
+  guest_ca_source_ok() { # -> 0 when the guest CA source passes the gate
+    "$DEVVM" ssh 'bash -c "source /opt/lab/lab-mount-gate.sh && oc_lab_mount_source_ok dir /home/agent/.opencode-docker/ca /home/agent/.opencode-docker"' < /dev/null
+  }
   # (1) guest-level corporate positive
   if [ -n "${LAB_CA_SOURCE:-}" ] && [ -n "${LAB_CA_TEST_URL:-}" ]; then
     local ca_name
@@ -199,6 +207,9 @@ verify_online_tls() {
     local base_image container_env=""
     base_image="$(base_image_ref)" || base_image=""
     if [ -n "$base_image" ]; then
+      if ! guest_ca_source_ok; then
+        die "the diagnostic CA mount source failed the shared mount gate: refusing to run docker"
+      fi
       if "$DEVVM" ssh "test -f '/home/agent/.opencode-docker/ca/combined-ca-bundle.crt'" < /dev/null; then
         container_env="-e NODE_EXTRA_CA_CERTS=/etc/opencode-ca/$ca_name -e SSL_CERT_FILE=/etc/opencode-ca/combined-ca-bundle.crt -e CURL_CA_BUNDLE=/etc/opencode-ca/combined-ca-bundle.crt -e GIT_SSL_CAINFO=/etc/opencode-ca/combined-ca-bundle.crt"
         log "positive TLS check (container, corporate) against $LAB_CA_TEST_URL"
@@ -218,8 +229,10 @@ verify_online_tls() {
   local base_image container_env=""
   base_image="$(base_image_ref)" || base_image=""
   if [ -n "$base_image" ]; then
-    if [ -n "${LAB_CA_SOURCE:-}" ] \
-       && "$DEVVM" ssh "test -f '/home/agent/.opencode-docker/ca/combined-ca-bundle.crt'" < /dev/null; then
+    if [ -n "${LAB_CA_SOURCE:-}" ]; then
+      if ! guest_ca_source_ok; then
+        die "the diagnostic CA mount source failed the shared mount gate: refusing to run docker"
+      fi
       container_env="-e NODE_EXTRA_CA_CERTS=/etc/opencode-ca/$(basename -- "$LAB_CA_SOURCE") -e SSL_CERT_FILE=/etc/opencode-ca/combined-ca-bundle.crt -e CURL_CA_BUNDLE=/etc/opencode-ca/combined-ca-bundle.crt -e GIT_SSL_CAINFO=/etc/opencode-ca/combined-ca-bundle.crt"
     fi
     log "positive TLS check (container, public) against $public_url"
