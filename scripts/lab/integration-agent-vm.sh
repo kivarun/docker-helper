@@ -224,6 +224,19 @@ cd "$1"
 docker() { printf '%s\n' "$*" >> "$ARGV_REC"; command docker "$@"; }
 # shellcheck source=/dev/null
 source "$HOME/.bash_aliases"
+# C7/F3: `oc` is a Bash function — GNU timeout cannot exec it directly. Every
+# time-bounded launch therefore runs inside a fresh, correctly initialized
+# Bash (aliases sourced, docker recorder present). timeout bounds the WHOLE
+# launch; the launcher's own traps clean up the Session and the ssh-agent when
+# the timeout kills the shell; the exit status propagates through timeout.
+oc_t() {
+  timeout 60 bash -c '
+    docker() { printf "%s\n" "$*" >> "$ARGV_REC"; command docker "$@"; }
+    # shellcheck source=/dev/null
+    source "$HOME/.bash_aliases"
+    oc "$@"
+  ' _ "$@"
+}
 oc --version
 # The model's access path: docker-helper self inside the real container with
 # the Session bearer. Two argv channels are attempted (direct image args and
@@ -232,12 +245,12 @@ oc --version
 # probe. The check fails only when NEITHER channel reaches the helper.
 channel=none
 self_out=""
-if out="$(timeout 60 oc docker-helper self --json 2>&1)" && printf '%s' "$out" | grep -q '"type"'; then
+if out="$(oc_t docker-helper self --json 2>&1)" && printf '%s' "$out" | grep -q '"type"'; then
   channel=args; self_out="$out"
-elif out="$(timeout 60 oc sh -c 'docker-helper self --json' 2>&1)" && printf '%s' "$out" | grep -q '"type"'; then
+elif out="$(oc_t sh -c 'docker-helper self --json' 2>&1)" && printf '%s' "$out" | grep -q '"type"'; then
   channel=sh; self_out="$out"
 else
-  out="$(timeout 60 oc sh -c 'docker-helper self --json' 2>&1)" || true
+  out="$(oc_t sh -c 'docker-helper self --json' 2>&1)" || true
   self_out="$out"
 fi
 printf 'SELF_CHANNEL=%s\n' "$channel" >> "$ARGV_REC"
@@ -245,9 +258,9 @@ printf '%s\n' "$self_out" > "$OC_SELF_OUT"
 nb_rc=""
 nb_out=""
 if [ "$channel" = args ]; then
-  if out="$(timeout 60 oc env -u DOCKER_HELPER_SESSION_TOKEN docker-helper self --json 2>&1)"; then nb_rc=0; nb_out="$out"; else nb_rc=$?; nb_out="$out"; fi
+  if out="$(oc_t env -u DOCKER_HELPER_SESSION_TOKEN docker-helper self --json 2>&1)"; then nb_rc=0; nb_out="$out"; else nb_rc=$?; nb_out="$out"; fi
 elif [ "$channel" = sh ]; then
-  if out="$(timeout 60 oc sh -c 'unset DOCKER_HELPER_SESSION_TOKEN; docker-helper self --json' 2>&1)"; then nb_rc=0; nb_out="$out"; else nb_rc=$?; nb_out="$out"; fi
+  if out="$(oc_t sh -c 'unset DOCKER_HELPER_SESSION_TOKEN; docker-helper self --json' 2>&1)"; then nb_rc=0; nb_out="$out"; else nb_rc=$?; nb_out="$out"; fi
 fi
 printf 'NO_BEARER_RC=%s\n' "${nb_rc:-none}" >> "$ARGV_REC"
 printf '%s\n' "$nb_out" > "$OC_NOBEARER_OUT"
@@ -291,8 +304,17 @@ not_contains "the private ssh key is never a mount source" "$AGENT_HOME/.ssh/id_
 
 # SSH agent forwarding (optional; only when the operator provisioned a key).
 if [ -f "$AGENT_HOME/.ssh/id_ed25519_opencode" ]; then
-  contains "the ssh-agent socket dir is mounted for the model" \
-    "$AGENT_HOME/.opencode-docker/agent-ssh:/ssh-agent:ro" "$argv"
+  # C7/F3: since the per-launch private run directories, the mount source is
+  # agent-ssh/run.XXXXXX — the assertion checks the structure (private run
+  # directory under agent-ssh, read-only, unique name), not a fixed name.
+  ssh_mount="$(printf '%s' "$argv" | grep -oE -- "-v $AGENT_HOME/\.opencode-docker/agent-ssh/run\.[A-Za-z0-9]{6}:/ssh-agent:ro" | head -1)"
+  if [ -n "$ssh_mount" ]; then
+    ok "the per-launch ssh-agent run dir is mounted read-only for the model"
+  else
+    bad "no agent-ssh run.<suffix> mount for the model: $(printf '%s' "$argv" | grep -o -- '-v [^ ]*agent-ssh[^ ]*' | head -2)"
+  fi
+  ssh_mounts="$(printf '%s' "$argv" | grep -oE -- "-v $AGENT_HOME/\.opencode-docker/agent-ssh/run\.[A-Za-z0-9]{6}:" | sort -u | wc -l)"
+  check "exactly one ssh-agent run dir is mounted" "1" "$ssh_mounts"
   contains "SSH_AUTH_SOCK points at the forwarded socket" \
     "-e SSH_AUTH_SOCK=/ssh-agent/agent.sock" "$argv"
 else
@@ -359,6 +381,7 @@ if command -v openssl >/dev/null 2>&1 && [ -n "$(ip -4 -o addr show docker0 2>/d
     ARGV_TLS="$RUN_DIR/argv-tls"
     install -m 0600 -o "$AGENT_USER" -g "$AGENT_USER" /dev/null "$ARGV_TLS"
     RUNNER_TLS="$ITEST_DIR/run-tls.sh"
+    probe_cmd="printenv NODE_EXTRA_CA_CERTS || true; if command -v curl >/dev/null 2>&1; then curl -sS --max-time 6 https://$bridge_ip:9443/ 2>&1; echo TLS_RC=\$?; else echo NO_CURL_IN_CONTAINER; fi"
     cat > "$RUNNER_TLS" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -368,18 +391,22 @@ docker() { printf '%s\n' "$*" >> "$ARGV_REC"; command docker "$@"; }
 # shellcheck source=/dev/null
 source "$HOME/.bash_aliases"
 # F6: the curl availability check runs INSIDE the container (the probe
-# executes there), not in the guest. The probe first reports the
-# NODE_EXTRA_CA_CERTS the container actually sees (CA_ENV_OUT), then emits:
-#   NO_CURL_IN_CONTAINER          curl absent in the image (incomplete)
-#   TLS_RC=<curl rc> + stderr     the probe outcome to classify
-probe_cmd="printenv NODE_EXTRA_CA_CERTS || true; if command -v curl >/dev/null 2>&1; then curl -sS --max-time 6 https://$TLS_TARGET_IP:9443/ 2>&1; echo TLS_RC=\$?; else echo NO_CURL_IN_CONTAINER; fi"
-raw="$(oc sh -c "$probe_cmd" 2>&1 || true)"
+# executes there), not in the guest; the probe command arrives through
+# TLS_PROBE_CMD from the outer script. C7/F3: the same time-bounded,
+# correctly initialized Bash wrapper as the runner's oc_t — `oc` is a
+# function and cannot be exec'd by timeout directly.
+raw="$(timeout 90 bash -c '
+  docker() { printf "%s\n" "$*" >> "$ARGV_REC"; command docker "$@"; }
+  # shellcheck source=/dev/null
+  source "$HOME/.bash_aliases"
+  oc sh -c "$TLS_PROBE_CMD"
+' 2>&1 || true)"
 printf '%s\n' "$(printf '%s\n' "$raw" | head -1)" > "$CA_ENV_OUT"
 printf '%s\n' "$(printf '%s\n' "$raw" | tail -n +2)" > "$TLS_OUT"
 SH
     chmod 0755 "$RUNNER_TLS"
     sudo -u "$AGENT_USER" env ARGV_REC="$ARGV_TLS" SHIM_DIR="$SHIM" \
-      TLS_TARGET_IP="$bridge_ip" \
+      TLS_TARGET_IP="$bridge_ip" TLS_PROBE_CMD="$probe_cmd" \
       CA_ENV_OUT="$RUN_DIR/ca-env.out" TLS_OUT="$RUN_DIR/tls.out" \
       script -qec "bash $RUNNER_TLS $ws" /dev/null >"$ITEST_DIR/oc-tls.out" 2>&1
     kill "$tls_srv_pid" 2>/dev/null || true
@@ -412,7 +439,7 @@ SH
     fi
     if [ -n "$ca_anchor" ]; then
       check "NODE_EXTRA_CA_CERTS reaches the container" \
-        "/etc/opencode-ca/$ca_name" \
+        "/etc/opencode-ca/$ca_name.crt" \
         "$(cat "$RUN_DIR/ca-env.out" 2>/dev/null | head -1)"
     fi
   else

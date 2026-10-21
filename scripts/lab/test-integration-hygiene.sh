@@ -61,6 +61,25 @@ has "runner stays agent-readable (0755)" 'chmod 0755 "\$RUNNER"'
 lacks "no shell tracing" 'set -x'
 has "moved default credential is restored" 'mv -f "\$CRED_MOVED" "\$CRED"'
 
+# --- C7/F3. the integration suite tracks the current launcher contract -------
+# 3.1: `oc` is a Bash function; GNU timeout cannot exec it. Every time-bounded
+# launch must run inside a fresh initialized Bash (aliases + docker recorder).
+oc_calls="$(grep -cE 'timeout [0-9]+ +oc ' "$INTEG" || true)"
+check "no direct 'timeout oc' invocation (oc is a function)" "0" "$oc_calls"
+has "time-bounded oc launches run in an initialized Bash"   'timeout 60 bash -c'
+has "the wrapper sources the launcher aliases"              'source "\$HOME/.bash_aliases"'
+has "the initialized Bash keeps the docker recorder" \
+  'docker\(\) \{ printf "%s.n" "\$\*" >> "\$ARGV_REC"; command docker "\$@"; \}'
+# 3.2: the ssh-agent mount assertion follows the per-launch run directory.
+has "ssh-agent mount assertion checks the run.<suffix> structure" \
+  'agent-ssh/run\\\.\[A-Za-z0-9]\{6\}:/ssh-agent:ro'
+has "exactly one ssh-agent run dir may be mounted" \
+  'exactly one ssh-agent run dir is mounted'
+# F6: the NODE_EXTRA_CA_CERTS assertion carries the .crt naming contract.
+has "NODE_EXTRA_CA_CERTS assertion uses the .crt contract" \
+  '"/etc/opencode-ca/\$ca_name.crt"'
+lacks "no suffix-less NODE_EXTRA_CA_CERTS assertion" '"/etc/opencode-ca/\$ca_name" \'
+
 echo
 printf 'integration hygiene tests: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
