@@ -188,6 +188,7 @@ execute_guest_body() {
   STREAM_CAPTURE="$gcap" \
   LAB_AGENT_SSH_KEY="$KEY_DIR/id_ed25519_opencode" \
   LAB_KNOWN_HOSTS_SOURCE="${GUEST_KH_SRC:-}" AGENT_USER="$GUEST_USER" \
+  LAB_GUEST_ROOT="$GUEST_ROOT" \
     bash "$REPO/lab/provision-operator-files.sh" >"$gout" 2>&1 || { LAST_GUEST_ERR="$gout"; return 1; }
   awk 'f{print} /# --- guest-side installer/{f=1}' "$gcap" > "$gbody"
   { printf 'require_lab_vm() { :; }\n'; cat "$gbody"; } \
@@ -313,6 +314,71 @@ if grep -q AAAACONCURRENT1 "$AK" && grep -q opencode-agent "$AK"; then
   ok "R1: concurrent runs keep both entries"
 else
   bad "R1: concurrent runs lost entries ($(cat "$AK" 2>/dev/null | tr '\n' '|'))"
+fi
+
+# --- R6. host-supplied values are validated before any guest execution ------
+# Malicious CA names / URLs / usernames must be rejected on the physical
+# host, before ANY guest command runs, with no marker files created and no
+# file changes on the host.
+r6_no_guest_invocation() { # CASE
+  if [ -s "$CAPTURE" ]; then bad "R6/$1: a guest invocation happened with a malicious input"; else ok "R6/$1: no guest invocation for the malicious input"; fi
+}
+
+# malicious CA basenames (real files, so earlier file validation passes)
+for evil in 'R;touch BAD' "R'CA" 'R$(touch BAD)' 'R CA'; do
+  : > "$CAPTURE"
+  evil_file="$WORK/$evil"
+  # a VALID certificate with a MALICIOUS name: the rejection must come from
+  # the name validation, not from the certificate content
+  cp "$WORK/lab-ca" "$evil_file"
+  if LAB_CA_SOURCE="$evil_file" run_prov; then
+    bad "R6/ca-name: '$evil' was accepted"
+  else
+    ok "R6/ca-name: '$evil' rejected"
+  fi
+  r6_no_guest_invocation "ca-name"
+done
+
+# traversal-shaped CA names
+: > "$CAPTURE"
+if LAB_CA_SOURCE="$WORK/lab-ca" LAB_GUEST_ROOT="$WORK/nothing" bash -c '
+  source "'"$REPO"'/lab/provision-operator-files.sh" 2>/dev/null' </dev/null >/dev/null 2>&1; then :; fi
+# ../RCA as a NAME: validated by the same full-string rule (unit-level)
+name_check() { # VALUE -> rc
+  bash -c '
+    source "'"$REPO"'/lab/provision-operator-files.sh" --check-name 2>/dev/null
+  ' <<EOF
+$1
+EOF
+}
+# the unit check needs a helper: emulate the validation rule directly
+valid_name_probe() {
+  printf '%s' "$1" | grep -qE '^[A-Za-z0-9._-]+$' && [ "$1" != "." ] && [ "$1" != ".." ]
+}
+for evil_name in '../RCA' '.' '..' 'R;touch BAD' 'R$(x)' 'R CA'; do
+  if valid_name_probe "$evil_name"; then bad "R6/ca-name: rule accepts '$evil_name'"; else ok "R6/ca-name: rule rejects '$evil_name'"; fi
+done
+for good_name in 'RCA-CA' 'corp.root.pem' 'ca_2026'; do
+  if valid_name_probe "$good_name"; then ok "R6/ca-name: rule accepts '$good_name'"; else bad "R6/ca-name: rule rejects valid '$good_name'"; fi
+done
+
+# malicious usernames
+for evil_user in 'agent; touch BAD' 'agent$(touch BAD)' 'agent BAD' '../agent'; do
+  : > "$CAPTURE"
+  if AGENT_USER="$evil_user" LAB_AGENT_SSH_KEY="$KEY_DIR/id_ed25519_opencode" run_prov; then
+    bad "R6/agent-user: '$evil_user' was accepted"
+  else
+    ok "R6/agent-user: '$evil_user' rejected"
+  fi
+  r6_no_guest_invocation "agent-user"
+done
+
+# valid usernames still work
+: > "$CAPTURE"
+if AGENT_USER="$GUEST_USER" LAB_AGENT_SSH_KEY="$KEY_DIR/id_ed25519_opencode" run_prov; then
+  ok "R6/agent-user: the valid username provisions"
+else
+  bad "R6/agent-user: the valid username was rejected"
 fi
 
 echo

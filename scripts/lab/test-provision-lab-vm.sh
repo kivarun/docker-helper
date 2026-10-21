@@ -370,6 +370,27 @@ else
   ok "R2: all never reaches isolate after a failed close"
 fi
 
+# --- R6. driver-supplied URLs are validated before any guest command ---------
+r6_url_case() { # LABEL VALUE EXPECT(accept|reject)
+  : > "$REC"; echo stopped > "$STATE"; rm -f "$SNAPMARK"; rm -f "$WORK/setupcount"
+  LAB_CA_SOURCE="$WORK/ca-src" LAB_CA_TEST_URL="$2" run_driver online
+  if [ "$3" = reject ]; then
+    if [ "$RC" != 0 ]; then ok "R6/driver-url/$1: rejected"; else bad "R6/driver-url/$1: accepted"; fi
+  else
+    if [ "$RC" = 0 ]; then ok "R6/driver-url/$1: accepted"; else bad "R6/driver-url/$1: rejected: $(tail -1 "$WORK/out")"; fi
+  fi
+  if printf '%s' "$(cat "$REC")" | grep -qF 'touch BAD'; then
+    bad "R6/driver-url/$1: the payload reached a guest command"
+  else
+    ok "R6/driver-url/$1: the payload never reached the guest"
+  fi
+}
+for evil in 'https://h/;touch BAD' 'https://h/$(touch BAD)' 'https://h/`touch BAD`' 'https://h/ R' 'http://h/ok'; do
+  r6_url_case "evil-$evil" "$evil" reject
+done
+r6_url_case "valid-path" "https://corporate.example/health" accept
+r6_url_case "valid-port" "https://ca.corp.example:8443/pkix" accept
+
 echo
 printf 'provision-lab-vm tests: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

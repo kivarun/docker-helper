@@ -58,6 +58,7 @@ CA_SRC="${LAB_CA_SOURCE:-}"
 GITCONFIG_SRC="${LAB_GITCONFIG_SOURCE:-}"
 KNOWN_HOSTS_SRC="${LAB_KNOWN_HOSTS_SOURCE:-}"
 AGENT_USER="${AGENT_USER:-agent}"
+LAB_GUEST_ROOT="${LAB_GUEST_ROOT:-}"
 
 [ -f "$DEVVM" ] || die "cannot find scripts/dev-vm-local.sh next to this script"
 [ -f "$GUARD" ] || die "cannot find scripts/lab/lab-vm-guard.sh next to this script"
@@ -68,6 +69,16 @@ require_regular_file() { # PATH LABEL
   [ ! -L "$1" ] || die "$2: symlinks are refused: $1"
   [ -r "$1" ] || die "$2: not readable: $1"
 }
+
+# R6: host-supplied values are validated as WHOLE strings before anything
+# crosses the SSH boundary. The former glob ([A-Za-z0-9._-]*) was a PREFIX
+# match and accepted 'R;touch BAD'.
+valid_object_name() { # VALUE — a filename/username component
+  printf '%s' "$1" | grep -qE '^[A-Za-z0-9._-]+$' \
+    && [ "$1" != "." ] && [ "$1" != ".." ]
+}
+valid_object_name "$AGENT_USER" \
+  || die "AGENT_USER must match ^[A-Za-z0-9._-]+\$ (and not . or ..): '$AGENT_USER'"
 
 # --- SSH key validation ------------------------------------------------------
 ssh_pub_line=""
@@ -113,10 +124,8 @@ if [ -n "$CA_SRC" ]; then
   openssl x509 -in "$CA_SRC" -noout -text | grep -q "CA:TRUE" \
     || die "LAB_CA_SOURCE is not a CA certificate (basicConstraints CA:TRUE missing)"
   ca_name="$(basename -- "$CA_SRC")"
-  case "$ca_name" in
-    [A-Za-z0-9._-]*) ;; # safe anchor name
-    *) die "LAB_CA_SOURCE base name contains unsafe characters: $ca_name" ;;
-  esac
+  valid_object_name "$ca_name" \
+    || die "LAB_CA_SOURCE base name must match ^[A-Za-z0-9._-]+\$ (and not . or ..): '$ca_name'"
   log "CA validated (single X.509 CA certificate: $ca_name)"
 fi
 
@@ -164,7 +173,6 @@ die() { printf '[operator-files] ERROR: %s\n' "$*" >&2; exit 1; }
 command -v openssl >/dev/null 2>&1 || die "openssl not found in the guest"
 command -v update-ca-certificates >/dev/null 2>&1 || die "update-ca-certificates not found in the guest"
 LAB_GUEST_ROOT="${LAB_GUEST_ROOT:-}"
-AGENT_HOME="$LAB_GUEST_ROOT/home/$AGENT_USER"
 ETC="$LAB_GUEST_ROOT/etc"
 HDR
 
@@ -183,6 +191,12 @@ if [ -n "$CA_SRC" ]; then
 fi
 [ -n "$GITCONFIG_SRC" ] && append_payload GITCONFIG_B64 "$GITCONFIG_SRC"
 [ -n "$KNOWN_HOSTS_SRC" ] && append_payload KNOWN_HOSTS_B64 "$KNOWN_HOSTS_SRC"
+
+# R6: the account name travels INSIDE the payload (printf %q), never as an
+# inline environment assignment in the remote command line.
+printf 'AGENT_USER=%q\n' "$AGENT_USER" >> "$GUEST"
+printf 'LAB_GUEST_ROOT=%q\n' "$LAB_GUEST_ROOT" >> "$GUEST"
+printf 'AGENT_HOME=%q\n' "$LAB_GUEST_ROOT/home/$AGENT_USER" >> "$GUEST"
 
 # R5: the pinned base image reference is resolved on the HOST from the
 # trusted repository copy and embedded as a payload — a root guest process
@@ -397,7 +411,8 @@ BODY
 [ -s "$GUEST" ] || die "guest installer generation failed"
 
 # Stream guard + installer to the guest (root, passwordless sudo for opc).
-if { cat "$GUARD"; printf '\n'; cat "$GUEST"; } | "$DEVVM" ssh "sudo AGENT_USER=$AGENT_USER bash -s"; then
+# R6: no host-supplied value is interpolated into the remote command line.
+if { cat "$GUARD"; printf '\n'; cat "$GUEST"; } | "$DEVVM" ssh 'sudo bash -s'; then
   log "provisioned operator files in the lab VM"
 else
   die "guest-side installation failed"

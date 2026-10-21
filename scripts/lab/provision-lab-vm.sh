@@ -172,9 +172,19 @@ pull_pinned_images() {
   while IFS= read -r ref; do
     [ -n "$ref" ] || continue
     log "pulling $ref"
-    "$DEVVM" ssh "sudo -u agent -H docker pull '$ref'" < /dev/null \
+    "$DEVVM" ssh "sudo -u agent -H docker pull $(ssh_sq "$ref")" < /dev/null \
       || die "image pull failed: $ref"
   done <<< "$refs"
+}
+
+# R6: host-supplied values are validated as WHOLE strings before anything
+# crosses the SSH boundary, and every value interpolated into a remote
+# command line is single-quote escaped by ssh_sq() (no re-interpretation).
+valid_https_url() { # VALUE — scheme, host, optional port, safe path only
+  printf '%s' "$1" | grep -qE '^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~/:@?=%+!,-]*)?$'
+}
+ssh_sq() { # VALUE -> a single-quoted remote-shell-safe token
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
 base_image_ref() {
@@ -195,6 +205,16 @@ base_image_ref() {
 #   3. public TLS positive — the same container setup still trusts a public
 #      CA chain, proving the corporate CA did not replace public trust.
 verify_online_tls() {
+  # R6: URLs are validated as whole strings on the physical host BEFORE any
+  # guest command is built; a malicious value never reaches the guest.
+  if [ -n "${LAB_CA_TEST_URL:-}" ]; then
+    valid_https_url "$LAB_CA_TEST_URL" \
+      || die "LAB_CA_TEST_URL must be an https:// URL with a plain host, optional port and a safe path: refusing"
+  fi
+  if [ -n "${LAB_PUBLIC_TLS_URL:-}" ]; then
+    valid_https_url "$LAB_PUBLIC_TLS_URL" \
+      || die "LAB_PUBLIC_TLS_URL must be an https:// URL with a plain host, optional port and a safe path: refusing"
+  fi
   # R5: every diagnostic docker run is gated by the SAME mount-source library
   # the launcher uses. The gate runs INSIDE the guest (it must inspect the
   # guest filesystem) against /opt/lab/lab-mount-gate.sh, which is a
@@ -208,7 +228,7 @@ verify_online_tls() {
     local ca_name
     ca_name="$(basename -- "$LAB_CA_SOURCE")"
     log "positive TLS check (guest) against $LAB_CA_TEST_URL with the provisioned CA"
-    "$DEVVM" ssh "curl --cacert '/etc/docker-helper/$ca_name.crt' -fsS --max-time 20 '$LAB_CA_TEST_URL' >/dev/null && echo CA_TLS_OK" < /dev/null \
+    "$DEVVM" ssh "curl --cacert $(ssh_sq "/etc/docker-helper/$ca_name.crt") -fsS --max-time 20 $(ssh_sq "$LAB_CA_TEST_URL") >/dev/null && echo CA_TLS_OK" < /dev/null \
       | grep -q CA_TLS_OK || die "the corporate CA did not validate $LAB_CA_TEST_URL"
     log "positive TLS evidence recorded (guest)"
     # (2)/(3) container-level evidence through a one-off diagnostic container
@@ -221,7 +241,7 @@ verify_online_tls() {
       if "$DEVVM" ssh "test -f '/home/agent/.opencode-docker/ca/combined-ca-bundle.crt'" < /dev/null; then
         container_env="-e NODE_EXTRA_CA_CERTS=/etc/opencode-ca/$ca_name -e SSL_CERT_FILE=/etc/opencode-ca/combined-ca-bundle.crt -e CURL_CA_BUNDLE=/etc/opencode-ca/combined-ca-bundle.crt -e GIT_SSL_CAINFO=/etc/opencode-ca/combined-ca-bundle.crt"
         log "positive TLS check (container, corporate) against $LAB_CA_TEST_URL"
-        "$DEVVM" ssh "docker run --rm -v '/home/agent/.opencode-docker/ca:/etc/opencode-ca:ro,z' $container_env --entrypoint /bin/sh '$base_image' -c 'curl -fsS --max-time 20 \"$LAB_CA_TEST_URL\" >/dev/null && echo CONTAINER_CA_OK'" < /dev/null \
+        "$DEVVM" ssh "docker run --rm -v $(ssh_sq '/home/agent/.opencode-docker/ca:/etc/opencode-ca:ro,z') $container_env --entrypoint /bin/sh $(ssh_sq "$base_image") -c $(ssh_sq "curl -fsS --max-time 20 '$LAB_CA_TEST_URL' >/dev/null && echo CONTAINER_CA_OK")" < /dev/null \
           | grep -q CONTAINER_CA_OK \
           || die "the container did not validate the corporate endpoint with the combined bundle"
         log "positive TLS evidence recorded (container, corporate)"
@@ -244,7 +264,7 @@ verify_online_tls() {
       container_env="-e NODE_EXTRA_CA_CERTS=/etc/opencode-ca/$(basename -- "$LAB_CA_SOURCE") -e SSL_CERT_FILE=/etc/opencode-ca/combined-ca-bundle.crt -e CURL_CA_BUNDLE=/etc/opencode-ca/combined-ca-bundle.crt -e GIT_SSL_CAINFO=/etc/opencode-ca/combined-ca-bundle.crt"
     fi
     log "positive TLS check (container, public) against $public_url"
-    "$DEVVM" ssh "docker run --rm ${container_env:+-v '/home/agent/.opencode-docker/ca:/etc/opencode-ca:ro,z' }$container_env --entrypoint /bin/sh '$base_image' -c 'curl -fsS --max-time 20 \"$public_url\" >/dev/null && echo CONTAINER_PUBLIC_OK'" < /dev/null \
+    "$DEVVM" ssh "docker run --rm ${container_env:+-v $(ssh_sq '/home/agent/.opencode-docker/ca:/etc/opencode-ca:ro,z')} $container_env --entrypoint /bin/sh $(ssh_sq "$base_image") -c $(ssh_sq "curl -fsS --max-time 20 '$public_url' >/dev/null && echo CONTAINER_PUBLIC_OK")" < /dev/null \
       | grep -q CONTAINER_PUBLIC_OK \
       || die "the container lost trust in the public CA chain (TLS trust was replaced, not extended)"
     log "positive TLS evidence recorded (container, public)"
