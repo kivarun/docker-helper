@@ -44,9 +44,11 @@ oc_lab_mount_source_ok() { # KIND(dir|file) PATH LAB_ROOT
         root_dev="$(stat -c '%d' -- "$path_real")" || return 1
         # R4: the traversal status is checked — a partial walk must fail.
         # find -print0 cannot pass through command substitution (NULs are
-        # stripped), so the walk goes through a private temp file.
+        # stripped), so the walk goes through a private temp file. Traversal
+        # diagnostics are not suppressed: the caller's refusal message plus
+        # find's own error explain the failure.
         walk_file="$(mktemp "${TMPDIR:-/tmp}/lab-walk.XXXXXX")" || return 1
-        find "$path_real" -mindepth 1 -print0 > "$walk_file" 2>/dev/null
+        find "$path_real" -mindepth 1 -print0 > "$walk_file"
         walk_rc=$?
         while IFS= read -r -d '' entry; do
             [ ! -L "$entry" ] || { rm -f -- "$walk_file"; return 1; }

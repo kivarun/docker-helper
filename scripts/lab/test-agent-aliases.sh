@@ -541,6 +541,74 @@ else
   ok "F4/unit: the gate refuses a symlinked file source"
 fi
 
+# --- R4. an incomplete filesystem walk is never accepted as safe -------------
+# A traversal error (previously swallowed by 2>/dev/null into a process
+# substitution) must fail the whole gate.
+r4_tree="$OPENCODE_DOCKER_HOME/ca"
+f4_reset
+mkdir -p "$r4_tree/sub/deeper"
+printf 'CA\n' > "$r4_tree/sub/deeper/deep.crt"
+if oc_lab_mount_source_ok dir "$r4_tree" "$OPENCODE_DOCKER_HOME" 2>/dev/null; then
+  ok "R4: a fully accessible safe tree passes"
+else
+  bad "R4: a fully accessible safe tree was refused"
+fi
+
+mkdir -p "$r4_tree/locked"
+printf 'X\n' > "$r4_tree/locked/f.crt"
+chmod 000 "$r4_tree/locked"
+if oc_lab_mount_source_ok dir "$r4_tree" "$OPENCODE_DOCKER_HOME" 2>/dev/null; then
+  bad "R4: an unreadable nested directory was accepted as safe"
+else
+  ok "R4: an unreadable nested directory fails the gate"
+fi
+chmod 755 "$r4_tree/locked"
+
+ln -sf "$OUTSIDE/system-like-file" "$r4_tree/sub/deeper/evil2.crt"
+if oc_lab_mount_source_ok dir "$r4_tree" "$OPENCODE_DOCKER_HOME" 2>/dev/null; then
+  bad "R4: a deep symlink entry was accepted"
+else
+  ok "R4: a deep symlink entry fails the gate"
+fi
+rm -f "$r4_tree/sub/deeper/evil2.crt"
+
+mkfifo "$r4_tree/sub/pipe"
+if oc_lab_mount_source_ok dir "$r4_tree" "$OPENCODE_DOCKER_HOME" 2>/dev/null; then
+  bad "R4: an unsupported object type (fifo) was accepted"
+else
+  ok "R4: an unsupported object type fails the gate"
+fi
+rm -f "$r4_tree/sub/pipe"
+
+# foreign-filesystem entry: verified through a controlled stat mock (a real
+# cross-device bind mount needs privileges; the check itself is the same
+# st_dev comparison exercised here)
+mkdir -p "$WORK/statshim" "$r4_tree/sub/mnt"
+printf 'X\n' > "$r4_tree/sub/mnt/foreign.crt"
+cat > "$WORK/statshim/stat" <<SH
+#!/bin/sh
+case "\$*" in
+  *"/sub/mnt/"*) echo "999999" ;;
+  *) exec /usr/bin/stat "\$@" ;;
+esac
+SH
+chmod +x "$WORK/statshim/stat"
+if PATH="$WORK/statshim:$PATH" oc_lab_mount_source_ok dir "$r4_tree" "$OPENCODE_DOCKER_HOME" 2>/dev/null; then
+  bad "R4: a foreign-filesystem entry was accepted"
+else
+  ok "R4: a foreign-filesystem entry fails the gate"
+fi
+
+# launcher-level: the unreadable directory refuses the launch before docker
+f4_reset
+mkdir -p "$OPENCODE_DOCKER_HOME/ca/locked"
+printf 'X\n' > "$OPENCODE_DOCKER_HOME/ca/locked/f.crt"
+chmod 000 "$OPENCODE_DOCKER_HOME/ca/locked"
+: > "$DH_REC"; : > "$DOCKER_REC"
+( cd "$WS" && oc echo hi ) >/dev/null 2>&1
+chmod 755 "$OPENCODE_DOCKER_HOME/ca/locked"
+if [ -s "$DOCKER_REC" ]; then bad "R4: docker ran despite an incomplete walk"; else ok "R4: docker is not called when the walk is incomplete"; fi
+
 # --- F5. concurrent launches own private ssh-agent sockets -------------------
 # The previous design used one shared socket path: the next launch's rm -f
 # broke the running launch's agent. Each launch must own a private run dir.
