@@ -90,6 +90,8 @@ case "\${1:-}" in
     shift; echo "ssh \$1" >> "$REC"
     cat > /dev/null 2>/dev/null || true
     case "\$1" in
+      *INTEGRATION_NETWORKED=1*integration-agent-vm*)
+        [ "\${FAIL_ON:-}" = integration ] && { echo "stub: networked integration failed" >&2; exit 1; } ;;
       *setup-agent-user.sh*)
         n=\$(( \$(cat "$WORK/setupcount" 2>/dev/null || echo 0) + 1 ))
         echo "\$n" > "$WORK/setupcount"
@@ -741,6 +743,46 @@ else
   ok "UAT-3b: a refusing check fails the invocation closed"
 fi
 chmod 0755 "$uat3b_home/.opencode-docker/ca/locked"
+
+# --- UAT-8. the explicit networked integration UAT stage ---------------------
+# A networked UAT window is an EXPLICIT stage: it boots with the network
+# open, runs the integration suite with INTEGRATION_NETWORKED=1, then closes
+# the window and confirms the VM is stopped. It never runs the isolation
+# probe and never claims isolation; the isolation evidence stays with the
+# isolate/verify stages.
+: > "$REC"; echo stopped > "$STATE"; rm -f "$SNAPMARK"
+if run_driver uat-networked; then
+  ok "UAT-8: the networked UAT stage succeeds"
+else
+  bad "UAT-8: the networked UAT stage failed (rc $RC): $OUT"
+fi
+seq="$(cat "$REC")"
+contains "UAT-8: the networked window boots with the network open" "start isolated=0" "$seq"
+contains "UAT-8: the integration runs in the networked mode" \
+  "sudo env INTEGRATION_NETWORKED=1 bash /opt/lab/integration-agent-vm.sh" "$seq"
+if case "$OUT" in *"proving the isolated network posture"*) true ;; *) false ;; esac; then
+  bad "UAT-8: the networked stage ran the isolation posture proof"
+else
+  ok "UAT-8: the networked stage makes no isolation claim"
+fi
+state_line="$(cat "$STATE" 2>/dev/null)"
+check "UAT-8: the window closes with a confirmed stopped VM" "stopped" "$state_line"
+contains "UAT-8: the stage confirms the closed window" \
+  "networked UAT stage done (the network window is closed and the VM is confirmed stopped)" "$OUT"
+
+# a failed networked integration must close the window and fail the stage
+: > "$REC"; echo stopped > "$STATE"; rm -f "$SNAPMARK"
+if FAIL_ON=integration run_driver uat-networked; then
+  bad "UAT-8: a failed networked integration was accepted"
+else
+  ok "UAT-8: a failed networked integration fails the stage"
+fi
+state_line="$(cat "$STATE" 2>/dev/null)"
+check "UAT-8: the window is still closed after the failed integration" "stopped" "$state_line"
+contains "UAT-8: the stop happens despite the failure" "stop" "$(cat "$REC")"
+
+# the isolated path is untouched: verify still requires the isolation evidence
+if FAIL_ON=probe-vm-isolation run_verify; then bad "UAT-8: verify regressed"; else ok "UAT-8: verify still refuses without a passing isolation probe"; fi
 
 echo
 printf 'provision-lab-vm tests: %d passed, %d failed\n' "$PASS" "$FAIL"

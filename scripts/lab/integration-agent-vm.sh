@@ -67,6 +67,22 @@ check() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (want '$2' got '$3')"; 
 contains() { case "$3" in *"$2"*) ok "$1" ;; *) bad "$1 (missing '$2' in '$3')" ;; esac; }
 not_contains() { case "$3" in *"$2"*) bad "$1 (unexpected '$2')" ;; *) ok "$1" ;; esac; }
 
+# --- UAT-8: explicit integration mode ---------------------------------------
+# ISOLATED (default): the run happens against a VM booted with restrict=on;
+#   the isolation EVIDENCE itself belongs to the isolate/verify stages and
+#   the standalone network probe — never to this script.
+# NETWORKED (INTEGRATION_NETWORKED=1, selected explicitly by the
+#   uat-networked driver stage): the guest network is ON for real
+#   integration work. This run makes NO isolation claims, and a networked
+#   VM can never pass the isolation verification (the QEMU argv evidence
+#   gate refuses anything without restrict=on).
+INTEGRATION_NETWORKED="${INTEGRATION_NETWORKED:-0}"
+case "$INTEGRATION_NETWORKED" in
+  0) printf 'integration mode: ISOLATED\n' ;;
+  1) printf 'integration mode: NETWORKED (guest network ON) — this run makes no VM isolation claims\n' ;;
+  *) echo "INTEGRATION_NETWORKED must be 0 or 1" >&2; exit 2 ;;
+esac
+
 # --- per-run private workspace ----------------------------------------------
 # root-owned 0711 traversal root; secrets stay in a 0700 subdirectory; the
 # agent-writable recorder area is a separate 0750 directory owned by agent.
@@ -239,33 +255,79 @@ oc_t() {
 }
 # R3: even the version probe is time-bounded through the same wrapper — a
 # TTY-hungry entrypoint interpretation cannot hang the suite here either.
-oc_t --version
-# The model's access path: docker-helper self inside the real container with
-# the Session bearer. Two argv channels are attempted (direct image args and
-# sh -c) because the image entrypoint contract is not pinned here; each
-# attempt is time-bounded so a TTY-hungry argv interpretation cannot hang the
-# probe. The check fails only when NEITHER channel reaches the helper.
-channel=none
-self_out=""
-if out="$(oc_t docker-helper self --json 2>&1)" && printf '%s' "$out" | grep -q '"type"'; then
-  channel=args; self_out="$out"
-elif out="$(oc_t sh -c 'docker-helper self --json' 2>&1)" && printf '%s' "$out" | grep -q '"type"'; then
-  channel=sh; self_out="$out"
+if oc_t --version; then version_rc=0; else version_rc=$?; fi
+# UAT-8: the image ENTRYPOINT is `opencode`, so `oc docker-helper self ...`
+# and `oc sh -c ...` hand their words to the OpenCode CLI as ITS arguments —
+# neither docker-helper nor sh ever ran (the real-VM finding). The model's
+# access path is exercised through oc-probe: the SAME canonical launch
+# composition with the payload exec'd through `--entrypoint /bin/sh -c`.
+# Every probe is time-bounded; its stdout is framed with PROBE_BEGIN /
+# PROBE_END markers so the launcher's own service output can never be
+# mistaken for the container's result, and the marker scan never relies on
+# the first output line.
+probe_run() { # NAME BODY [TIMEOUT] -> one bounded probe, framed, recorded
+  local name="$1" body="$2" bound="${3:-60}" raw lrc
+  if raw="$(OC_PROBE_PAYLOAD="printf 'PROBE_BEGIN\n'; { $body; } 2>&1; printf 'PROBE_RC=%s\n' \"\$?\"; printf '%s\n' PROBE_END" \
+      timeout "$bound" bash -c '
+        docker() { printf "%s\n" "$*" >> "$ARGV_PROBE_REC"; command docker "$@"; }
+        # shellcheck source=/dev/null
+        source "$HOME/.bash_aliases"
+        oc-probe "$OC_PROBE_PAYLOAD"
+      ' 2>/dev/null)"; then lrc=0; else lrc=$?; fi
+  printf '%s\n' "$lrc" > "$PROBE_DIR/$name.launchrc"
+  printf '%s\n' "$raw" > "$PROBE_DIR/$name.raw"
+}
+probe_parse() { # NAME -> P_RC (in-container rc) and P_OUT (the framed body)
+  P_RC="$(sed -n 's/^PROBE_RC=//p' "$PROBE_DIR/$1.raw" 2>/dev/null | head -1)"
+  P_OUT="$(sed -n '/^PROBE_BEGIN$/,/^PROBE_END$/p' "$PROBE_DIR/$1.raw" 2>/dev/null | sed '1d;$d' | grep -v '^PROBE_RC=' || true)"
+}
+# UAT-8 timeout diagnostics: when the model launch failed (e.g. rc 124), do
+# NOT just report a timeout — run a bounded ladder that separates the factors
+# of the canonical launch contract and records which one is implicated:
+#   L1  the exec-path container itself (echo through oc-probe)
+#   L2  opencode --version under the mounted HOME (the canonical env)
+#   L3  opencode --version with HOME=/tmp (the operator's real experiment)
+# Each step is bounded; every step's rc and output are recorded as evidence.
+if [ "$version_rc" != 0 ]; then
+  {
+    printf 'DIAG_BEGIN (the model launch failed with rc %s)\n' "$version_rc"
+    probe_run diag_l1 'echo DIAG_L1_CONTAINER_OK'
+    probe_parse diag_l1
+    printf 'DIAG_L1_RC=%s\n' "${P_RC:-launch-failed}"
+    probe_run diag_l2 'opencode --version'
+    probe_parse diag_l2
+    printf 'DIAG_L2_RC=%s\n' "${P_RC:-launch-failed}"
+    probe_run diag_l3 'HOME=/tmp opencode --version'
+    probe_parse diag_l3
+    printf 'DIAG_L3_RC=%s\n' "${P_RC:-launch-failed}"
+    printf 'DIAG_END\n'
+  } >> "$ARGV_REC"
+fi
+# The mandatory access-path evidence: a valid Session bearer reports a
+# session; the bearer's absence is refused BY DOCKER HELPER itself; a wrong
+# bearer is refused by the daemon; the principal credential never
+# substitutes the Session bearer; docker.sock and any ADMIN* env are absent
+# inside the container (counted, never printed).
+probe_run self 'docker-helper self --json; printf "PROBE_SOCK=%s\n" "$(test -S /var/run/docker.sock && echo present || echo absent)"; printf "PROBE_ADMIN_ENV=%s\n" "$(printenv | grep -c "^ADMIN" || true)"'
+probe_run nobearer 'env -u DOCKER_HELPER_SESSION_TOKEN docker-helper self --json'
+probe_run wrongbearer 'DOCKER_HELPER_SESSION_TOKEN=dht_invalid_probe_value docker-helper self --json'
+probe_run princred 'env -u DOCKER_HELPER_SESSION_TOKEN docker-helper self --json; if [ ! -e "$HOME/.config/docker-helper/credential.token" ]; then echo PRINCIPAL_CRED_ABSENT; fi'
+# UAT-8 networked mode: the provider gate runs INSIDE the container (its env
+# is the launch's env); the decision evidence is recorded for the outer
+# script, which owns the pass/fail/skip verdicts. A missing provider is
+# never a masked pass.
+if [ "$INTEGRATION_NETWORKED" = 1 ]; then
+  probe_run llmping 'if [ -n "${LLM_SERVER:-}" ] && [ -n "${LLM_KEY:-}" ]; then echo PROVIDER_CONFIGURED; else echo NO_PROVIDER; fi'
+  probe_parse llmping
+  # a configured provider gets one bounded real-model interaction, recorded
+  # for the outer script's verdicts; a missing provider records no llmrun at
+  # all (absence of llmrun evidence is itself the decision)
+  case "$P_OUT" in
+    *PROVIDER_CONFIGURED*) probe_run llmrun 'opencode run "Reply with the single word OK"' 120 ;;
+  esac
 else
-  out="$(oc_t sh -c 'docker-helper self --json' 2>&1)" || true
-  self_out="$out"
+  printf 'ISOLATED_MODE\n' > "$PROBE_DIR/llmping.decision"
 fi
-printf 'SELF_CHANNEL=%s\n' "$channel" >> "$ARGV_REC"
-printf '%s\n' "$self_out" > "$OC_SELF_OUT"
-nb_rc=""
-nb_out=""
-if [ "$channel" = args ]; then
-  if out="$(oc_t env -u DOCKER_HELPER_SESSION_TOKEN docker-helper self --json 2>&1)"; then nb_rc=0; nb_out="$out"; else nb_rc=$?; nb_out="$out"; fi
-elif [ "$channel" = sh ]; then
-  if out="$(oc_t sh -c 'unset DOCKER_HELPER_SESSION_TOKEN; docker-helper self --json' 2>&1)"; then nb_rc=0; nb_out="$out"; else nb_rc=$?; nb_out="$out"; fi
-fi
-printf 'NO_BEARER_RC=%s\n' "${nb_rc:-none}" >> "$ARGV_REC"
-printf '%s\n' "$nb_out" > "$OC_NOBEARER_OUT"
 SH
 chmod 0755 "$RUNNER"
 # Recorder files are pre-created agent-owned (0600) in the agent-owned 0750
@@ -274,18 +336,32 @@ ARGV="$RUN_DIR/argv"
 install -m 0600 -o "$AGENT_USER" -g "$AGENT_USER" /dev/null "$ARGV"
 ARGV_FAIL="$RUN_DIR/argv-fail"
 install -m 0600 -o "$AGENT_USER" -g "$AGENT_USER" /dev/null "$ARGV_FAIL"
+ARGV_PROBE="$RUN_DIR/argv-probe"
+install -m 0600 -o "$AGENT_USER" -g "$AGENT_USER" /dev/null "$ARGV_PROBE"
+PROBE_DIR="$RUN_DIR/probes"
+install -d -m 0750 -o "$AGENT_USER" -g "$AGENT_USER" "$PROBE_DIR"
 
 # System docker-init state BEFORE the launch (label, ownership, mode, inode).
 init_sys="$(readlink -f "$(command -v docker-init 2>/dev/null || echo /usr/bin/docker-init)")"
 init_before="$(stat -c '%n %C %u:%g %a' "$init_sys")"
 init_inode_before="$(stat -c '%i' "$init_sys")"
 
-sudo -u "$AGENT_USER" env ARGV_REC="$ARGV" SHIM_DIR="$SHIM" \
-  OC_SELF_OUT="$RUN_DIR/oc-self.out" OC_NOBEARER_OUT="$RUN_DIR/oc-nobearer.out" \
+sudo -u "$AGENT_USER" env ARGV_REC="$ARGV" ARGV_PROBE_REC="$ARGV_PROBE" SHIM_DIR="$SHIM" \
+  PROBE_DIR="$PROBE_DIR" INTEGRATION_NETWORKED="$INTEGRATION_NETWORKED" \
   script -qec "bash $RUNNER $ws" /dev/null >"$ITEST_DIR/oc.out" 2>&1
 oc_rc=$?
 if [ "$oc_rc" = 0 ]; then ok "launcher exited 0"; else bad "launcher exited $oc_rc"; fi
 grep -Eq '[0-9]+\.[0-9]+\.[0-9]+' "$ITEST_DIR/oc.out" && ok "container ran opencode (version printed)" || bad "no opencode version in output"
+# UAT-8 timeout diagnostics: a failed launch must produce factor-separated
+# evidence (the bounded ladder inside the runner), never a bare timeout.
+if [ "$oc_rc" != 0 ]; then
+  if grep -q 'DIAG_BEGIN' "$ARGV" && grep -q 'DIAG_L1_RC=' "$ARGV"; then
+    ok "the failed launch produced bounded factor diagnostics"
+    contains "the diagnostics separate the container-exec factor" "DIAG_L1_RC=" "$(grep -o 'DIAG_L1_RC=[a-z0-9-]*' "$ARGV" | head -1)"
+  else
+    bad "the launch failed but the diagnostics produced no factor evidence"
+  fi
+fi
 
 argv="$(cat "$ARGV")"
 contains "launcher created a Session" "DH session create" "$argv"
@@ -333,23 +409,72 @@ else
   bad "lab init copy missing or differs from the system binary"
 fi
 
-# in-container model access: bearer works, absence is denied.
-self_channel="$(printf '%s' "$argv" | sed -n 's/^SELF_CHANNEL=//p')"
-if [ "$self_channel" != "none" ]; then
-  ok "docker-helper is reachable inside the container ($self_channel channel)"
+# in-container model access — every outcome is explicitly confirmed from one
+# bounded probe run; an empty or missing result is a failure, never a pass
+# (the old `!= "none"` check accepted an empty channel string as success).
+probe_rc() { cat "$PROBE_DIR/$1.launchrc" 2>/dev/null || echo missing; }
+probe_raw() { cat "$PROBE_DIR/$1.raw" 2>/dev/null || true; }
+probe_parse() { # NAME -> P_RC (in-container rc) and P_OUT (the framed body)
+  P_RC="$(sed -n 's/^PROBE_RC=//p' "$PROBE_DIR/$1.raw" 2>/dev/null | head -1)"
+  P_OUT="$(sed -n '/^PROBE_BEGIN$/,/^PROBE_END$/p' "$PROBE_DIR/$1.raw" 2>/dev/null | sed '1d;$d' | grep -v '^PROBE_RC=' || true)"
+}
+launch_rc="$(probe_rc self)"
+case "$launch_rc" in
+  0) ok "the access-path probe launcher exited 0" ;;
+  *) bad "the access-path probe launcher failed (launch rc $launch_rc)" ;;
+esac
+P_RC=""; P_OUT=""
+probe_parse self
+case "$P_RC" in
+  0) ok "docker-helper self executed inside the container (rc 0)" ;;
+  *) bad "docker-helper self did not execute cleanly inside the container (rc ${P_RC:-absent})" ;;
+esac
+contains "model self via the Session bearer reports a session" '"type": "session"' "$P_OUT"
+contains "docker.sock is absent inside the container" "PROBE_SOCK=absent" "$P_OUT"
+contains "no ADMIN* environment reaches the container" "PROBE_ADMIN_ENV=0" "$P_OUT"
+probe_parse nobearer
+nb_launch="$(probe_rc nobearer)"
+if [ "$nb_launch" = 0 ] && [ -n "$P_RC" ] && [ "$P_RC" != 0 ]; then
+  ok "self without the bearer is denied (in-container rc $P_RC)"
 else
-  bad "docker-helper was NOT reachable inside the container: $(tail -c 300 "$RUN_DIR/oc-self.out" 2>/dev/null)"
+  bad "self without the bearer was not denied (launch rc $nb_launch, rc ${P_RC:-absent})"
 fi
-contains "model self via the Session bearer reports a session" '"type": "session"' "$(cat "$RUN_DIR/oc-self.out" 2>/dev/null || true)"
-nb_line="$(printf '%s' "$argv" | sed -n 's/^NO_BEARER_RC=//p')"
-if [ -n "$nb_line" ] && [ "$nb_line" != "none" ] && [ "$nb_line" != "0" ]; then
-  ok "self without the bearer is denied (rc $nb_line)"
+case "$P_OUT" in
+  *"DOCKER_HELPER_SESSION_TOKEN is not set"*) ok "the refusal without the bearer comes from Docker Helper itself" ;;
+  *) bad "the denial without the bearer is not the Docker Helper refusal: $(printf '%s' "$P_OUT" | tail -c 200)" ;;
+esac
+probe_parse wrongbearer
+wb_launch="$(probe_rc wrongbearer)"
+if [ "$wb_launch" = 0 ] && [ -n "$P_RC" ] && [ "$P_RC" != 0 ]; then
+  ok "self with a wrong bearer is denied (in-container rc $P_RC)"
 else
-  bad "self without the bearer was not denied (NO_BEARER_RC=$nb_line)"
+  bad "self with a wrong bearer was not denied (launch rc $wb_launch, rc ${P_RC:-absent})"
 fi
-grep -Eiq '401|unauthorized' "$RUN_DIR/oc-nobearer.out" 2>/dev/null \
-  && ok "denial without the bearer comes from the daemon (unauthorized)" \
-  || bad "no daemon denial evidence without the bearer"
+grep -Eiq '401|unauthorized' "$PROBE_DIR/wrongbearer.raw" 2>/dev/null \
+  && ok "the wrong-bearer denial comes from the daemon (unauthorized)" \
+  || bad "no daemon denial evidence for a wrong bearer"
+probe_parse princred
+pi_launch="$(probe_rc princred)"
+if [ "$pi_launch" = 0 ] && [ -n "$P_RC" ] && [ "$P_RC" != 0 ] \
+   && printf '%s' "$P_OUT" | grep -q 'DOCKER_HELPER_SESSION_TOKEN is not set' \
+   && printf '%s' "$P_OUT" | grep -q 'PRINCIPAL_CRED_ABSENT'; then
+  ok "the principal credential cannot substitute the Session bearer (refused, credential absent)"
+else
+  bad "the principal-credential substitution was not refused (launch rc $pi_launch, rc ${P_RC:-absent})"
+fi
+# the probe launches reuse the canonical posture: the same isolation flags
+# and the same boundary, recorded from the probe launches themselves
+pargv="$(cat "$ARGV_PROBE")"
+contains "the probe container runs as the agent uid" "--user $(id -u "$AGENT_USER"):$(id -g "$AGENT_USER")" "$pargv"
+contains "the probe container drops caps" "--cap-drop ALL" "$pargv"
+contains "the probe container sets no-new-privileges" "no-new-privileges=true" "$pargv"
+contains "the probe container runs in docker_helper_container_t" "label=type:docker_helper_container_t" "$pargv"
+contains "the probe workspace is a private relabel" ":/workspace:Z" "$pargv"
+contains "the probe helper runtime dir is read-only" "/run/docker-helper:ro" "$pargv"
+contains "the probe container gets the session bearer env" "-e DOCKER_HELPER_SESSION_TOKEN" "$pargv"
+not_contains "the probe container has no docker.sock" "docker.sock" "$pargv"
+not_contains "the probe container has no admin token" "ADMIN" "$pargv"
+not_contains "the probe container has no principal credential" "/.config/docker-helper" "$pargv"
 
 # --- 11. a failing launcher propagates a nonzero exit status ----------------
 sudo -u "$AGENT_USER" env ARGV_REC="$ARGV_FAIL" SHIM_DIR="$SHIM" FAIL_SESSION_CREATE=1 \
@@ -383,7 +508,13 @@ if command -v openssl >/dev/null 2>&1 && [ -n "$(ip -4 -o addr show docker0 2>/d
     ARGV_TLS="$RUN_DIR/argv-tls"
     install -m 0600 -o "$AGENT_USER" -g "$AGENT_USER" /dev/null "$ARGV_TLS"
     RUNNER_TLS="$ITEST_DIR/run-tls.sh"
-    probe_cmd="printenv NODE_EXTRA_CA_CERTS || true; if command -v curl >/dev/null 2>&1; then curl -sS --max-time 6 https://$bridge_ip:9443/ 2>&1; echo TLS_RC=\$?; else echo NO_CURL_IN_CONTAINER; fi"
+    # UAT-8: the probe payload is framed (TLS_BEGIN / CA_ENV_BEGIN..END /
+    # TLS_RC / TLS_END) so the launcher's service output can never be
+    # mistaken for the container's result, and the NODE_EXTRA_CA_CERTS value
+    # is parsed from its own markers, never from the first stdout line. The
+    # probe runs through oc-probe (the exec path — `oc sh -c ...` would hand
+    # the payload to the OpenCode CLI, not to sh).
+    probe_cmd="printf '%s\n' TLS_BEGIN; printf '%s\n' CA_ENV_BEGIN; if [ -n \"\${NODE_EXTRA_CA_CERTS:-}\" ]; then printf 'NODE_EXTRA_CA_CERTS=%s\n' \"\$NODE_EXTRA_CA_CERTS\"; fi; printf '%s\n' CA_ENV_END; if command -v curl >/dev/null 2>&1; then curl -sS --max-time 6 https://$bridge_ip:9443/ 2>&1; echo TLS_RC=\$?; else echo NO_CURL_IN_CONTAINER; fi; printf '%s\n' TLS_END"
     cat > "$RUNNER_TLS" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -395,54 +526,74 @@ source "$HOME/.bash_aliases"
 # F6: the curl availability check runs INSIDE the container (the probe
 # executes there), not in the guest; the probe command arrives through
 # TLS_PROBE_CMD from the outer script. C7/F3: the same time-bounded,
-# correctly initialized Bash wrapper as the runner's oc_t — `oc` is a
-# function and cannot be exec'd by timeout directly.
-raw="$(timeout 90 bash -c '
+# correctly initialized Bash wrapper — `oc-probe` is a function and cannot
+# be exec'd by timeout directly. UAT-8: the launcher's exit status is
+# recorded separately (never masked with || true) — a failed or timed-out
+# launcher is missing mandatory evidence, not an inconclusive probe.
+if raw="$(timeout 90 bash -c '
   docker() { printf "%s\n" "$*" >> "$ARGV_REC"; command docker "$@"; }
   # shellcheck source=/dev/null
   source "$HOME/.bash_aliases"
-  oc sh -c "$TLS_PROBE_CMD"
-' 2>&1 || true)"
-printf '%s\n' "$(printf '%s\n' "$raw" | head -1)" > "$CA_ENV_OUT"
-printf '%s\n' "$(printf '%s\n' "$raw" | tail -n +2)" > "$TLS_OUT"
+  oc-probe "$TLS_PROBE_CMD"
+')"; then tlrc=0; else tlrc=$?; fi
+printf '%s\n' "$tlrc" > "$TLS_LAUNCH_RC"
+printf '%s\n' "$raw" > "$TLS_OUT"
 SH
     chmod 0755 "$RUNNER_TLS"
     sudo -u "$AGENT_USER" env ARGV_REC="$ARGV_TLS" SHIM_DIR="$SHIM" \
-      TLS_TARGET_IP="$bridge_ip" TLS_PROBE_CMD="$probe_cmd" \
-      CA_ENV_OUT="$RUN_DIR/ca-env.out" TLS_OUT="$RUN_DIR/tls.out" \
+      TLS_PROBE_CMD="$probe_cmd" \
+      TLS_LAUNCH_RC="$RUN_DIR/tls-launch.rc" TLS_OUT="$RUN_DIR/tls.out" \
       script -qec "bash $RUNNER_TLS $ws" /dev/null >"$ITEST_DIR/oc-tls.out" 2>&1
     kill "$tls_srv_pid" 2>/dev/null || true
     tls_srv_pid=""
-    if grep -q 'NO_CURL_IN_CONTAINER' "$RUN_DIR/tls.out"; then
+    tls_launch="$(cat "$RUN_DIR/tls-launch.rc" 2>/dev/null || echo missing)"
+    tls_out="$(cat "$RUN_DIR/tls.out" 2>/dev/null || true)"
+    if [ "$tls_launch" != 0 ]; then
+      bad "the TLS probe launcher failed (rc $tls_launch) — mandatory evidence is missing"
+    elif ! printf '%s' "$tls_out" | grep -q '^TLS_BEGIN$' \
+         || ! printf '%s' "$tls_out" | grep -q '^TLS_END$'; then
+      bad "the TLS probe output is not framed (no TLS_BEGIN/TLS_END) — no verdict without the marker evidence"
+    elif grep -q 'NO_CURL_IN_CONTAINER' "$RUN_DIR/tls.out"; then
       skip "in-container TLS check (curl is not available inside the image)"
     else
-      tls_rc="$(sed -n 's/^TLS_RC=//p' "$RUN_DIR/tls.out")"
-      tls_text="$(grep -v '^TLS_RC=' "$RUN_DIR/tls.out" || true)"
-      verdict="$("$SCRIPT_DIR/tls-verdict.sh" "${tls_rc:-999}" "$tls_text" | head -1)"
-      case "$verdict" in
-        VERIFICATION_FAILURE)
-          ok "the container rejected the untrusted TLS endpoint (rc $tls_rc)"
-          if printf '%s' "$tls_text" | grep -qi 'certificate'; then
-            ok "the refusal is a certificate-validation failure, not a connection error"
-          else
-            bad "the TLS refusal could not be attributed to certificate validation: $(tail -c 200 "$RUN_DIR/tls.out" 2>/dev/null)"
-          fi
-          ;;
-        ACCEPTED)
-          bad "the container ACCEPTED the untrusted TLS endpoint"
-          ;;
-        CONNECTION_FAILURE)
-          skip "the TLS probe is inconclusive (connection failure despite a ready server)"
-          ;;
-        *)
-          skip "the TLS probe is inconclusive (unexpected outcome, rc=${tls_rc:-unset})"
-          ;;
-      esac
+      tls_rc="$(sed -n 's/^TLS_RC=//p' "$RUN_DIR/tls.out" | head -1)"
+      tls_text="$(sed -n '/^TLS_BEGIN$/,/^TLS_END$/p' "$RUN_DIR/tls.out" | sed '1d;$d' | grep -v '^TLS_RC=')"
+      # UAT-8: the verdict helper is a 0644 library file in /opt/lab — it is
+      # invoked through bash, and ITS OWN failure is a failed check, never a
+      # skip.
+      verdict="$(bash "$SCRIPT_DIR/tls-verdict.sh" "${tls_rc:-999}" "$tls_text")"
+      verdict_rc=$?
+      if [ "$verdict_rc" != 0 ] || [ -z "$verdict" ]; then
+        bad "the TLS verdict helper failed (rc $verdict_rc) — refusing to treat the refusal as a skip"
+      else
+        case "$verdict" in
+          VERIFICATION_FAILURE*)
+            ok "the container rejected the untrusted TLS endpoint (rc $tls_rc)"
+            if printf '%s' "$tls_text" | grep -qi 'certificate'; then
+              ok "the refusal is a certificate-validation failure, not a connection error"
+            else
+              bad "the TLS refusal could not be attributed to certificate validation: $(tail -c 200 "$RUN_DIR/tls.out" 2>/dev/null)"
+            fi
+            ;;
+          ACCEPTED*)
+            bad "the container ACCEPTED the untrusted TLS endpoint"
+            ;;
+          # UAT-8: a connection failure, a timeout or any other unexpected
+          # outcome is NOT a pass — the negative TLS evidence is mandatory.
+          CONNECTION_FAILURE*)
+            bad "the TLS probe ended in a connection failure despite a ready server (no verification evidence)"
+            ;;
+          *)
+            bad "the TLS probe ended in an unexpected outcome (rc ${tls_rc:-unset}) — no verification evidence"
+            ;;
+        esac
+      fi
     fi
     if [ -n "$ca_anchor" ]; then
+      ca_env="$(sed -n '/^CA_ENV_BEGIN$/,/^CA_ENV_END$/p' "$RUN_DIR/tls.out" 2>/dev/null | sed '1d;$d')"
       check "NODE_EXTRA_CA_CERTS reaches the container" \
         "/etc/opencode-ca/$ca_name.crt" \
-        "$(cat "$RUN_DIR/ca-env.out" 2>/dev/null | head -1)"
+        "$(printf '%s' "$ca_env" | sed -n 's/^NODE_EXTRA_CA_CERTS=//p')"
     fi
   else
     skip "in-container TLS check (the throwaway server did not become reachable)"
@@ -451,6 +602,41 @@ SH
   tls_srv_pid=""
 else
   skip "in-container TLS check (openssl or the docker bridge is unavailable)"
+fi
+
+# --- 11c. the real model interaction (networked mode, provider-gated) --------
+# The gate decision comes from the container env (recorded by the runner); a
+# missing provider is an explicit SKIP, never a masked pass; a configured
+# provider that does not answer within the bound is a FAIL.
+if [ "$INTEGRATION_NETWORKED" = 1 ]; then
+  llmping_launch="$(probe_rc llmping)"
+  if [ "$llmping_launch" != 0 ]; then
+    bad "the provider-gate probe launcher failed (rc $llmping_launch)"
+  else
+    P_RC=""; P_OUT=""
+    probe_parse llmping
+    case "$P_OUT" in
+      *NO_PROVIDER*)
+        skip "the real LLM interaction check (no provider configured in the launch env)"
+        ;;
+      *PROVIDER_CONFIGURED*)
+        llm_launch="$(probe_rc llmrun)"
+        P_RC=""; P_OUT=""
+        probe_parse llmrun
+        if [ "$llm_launch" = 0 ] && [ "$P_RC" = 0 ] \
+           && [ -n "$(printf '%s' "$P_OUT" | tr -d '[:space:]')" ]; then
+          ok "the configured provider answered the bounded real-model interaction"
+        else
+          bad "the configured provider did not answer (launch rc $llm_launch, in-container rc ${P_RC:-absent})"
+        fi
+        ;;
+      *)
+        bad "the provider gate produced no decision (unframed probe output)"
+        ;;
+    esac
+  fi
+else
+  skip "the real LLM interaction check (isolated mode: no provider network path)"
 fi
 
 # --- 12. system docker-init unchanged ---------------------------------------

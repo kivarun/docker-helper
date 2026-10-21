@@ -114,7 +114,7 @@ pid=$!
 echo "$pid" > "$SSH_AGENT_PIDFILE"
 echo "SSH_AUTH_SOCK=$sock; export SSH_AUTH_SOCK;"
 echo "SSH_AGENT_PID=$pid; export SSH_AGENT_PID;"
-echo "Agent pid $pid"
+echo "echo Agent pid $pid;"
 SH
 cat > "$SHIM/ssh-add" <<'SH'
 #!/bin/sh
@@ -143,6 +143,58 @@ WS="$WORK/ws"; mkdir -p "$WS"
 
 # shellcheck source=/dev/null
 source "$ALIASES"
+
+# --- UAT-8. the ssh-agent's "Agent pid" echo never reaches launch stdout ----
+# The real ssh-agent env script ends with `echo Agent pid N;`; eval executes
+# it and the message used to land on the launcher's stdout, where diagnostic
+# consumers could mistake it for container output. The launcher suppresses
+# only that echo; the exported env still takes effect (the launch still
+# works and the agent socket is still created).
+export DH_HELP_WORKSPACE=1
+# the ssh-agent branch must really run for this check: provision the key
+# for the duration of the block (the suite creates it later for its own
+# ssh sections; the state is restored here)
+mkdir -p "$(dirname "$OPENCODE_AGENT_SSH_KEY")"
+printf 'PRIVATE-KEY\n' > "$OPENCODE_AGENT_SSH_KEY"
+chmod 0600 "$OPENCODE_AGENT_SSH_KEY"
+: > "$DH_REC"; : > "$DOCKER_REC"
+oc_stdout="$( cd "$WS" && oc echo hi )"
+case "$oc_stdout" in
+  *"Agent pid"*) bad "UAT-8 RED: the ssh-agent 'Agent pid' echo polluted the launch stdout" ;;
+  *) ok "UAT-8: no ssh-agent 'Agent pid' echo on the launch stdout" ;;
+esac
+
+# --- UAT-8. oc-probe execs the payload through /bin/sh -c -------------------
+# The image ENTRYPOINT is `opencode`, so `oc docker-helper self --json` and
+# `oc sh -c ...` hand their words to the OpenCode CLI as ITS arguments and
+# never run docker-helper or sh (the UAT-8 real-VM finding). oc-probe is the
+# diagnostic access path: the SAME canonical launch composition, with
+# --entrypoint /bin/sh and the payload as `-c`.
+mkdir -p "$(dirname "$OPENCODE_AGENT_SSH_KEY")"
+printf 'PRIVATE-KEY\n' > "$OPENCODE_AGENT_SSH_KEY"
+chmod 0600 "$OPENCODE_AGENT_SSH_KEY"
+: > "$DH_REC"; : > "$DOCKER_REC"
+probe_stdout="$( cd "$WS" && oc-probe 'docker-helper self --json' )"
+pargv="$(cat "$DOCKER_REC")"
+contains "oc-probe overrides the entrypoint to /bin/sh" "--entrypoint /bin/sh" "$pargv"
+not_contains "oc-probe does not hand the payload to the image entrypoint bare" "--entrypoint /bin/sh $WS" "$(printf '%s' "$pargv" | sed 's/-c /-c PLACEHOLDER /')"
+contains "oc-probe runs the payload through -c" "-c docker-helper self --json" "$pargv"
+contains "oc-probe keeps the canonical session bearer" "-e DOCKER_HELPER_SESSION_TOKEN" "$pargv"
+contains "oc-probe keeps the canonical user" "--user $(id -u):$(id -g)" "$pargv"
+contains "oc-probe keeps cap-drop ALL" "--cap-drop ALL" "$pargv"
+contains "oc-probe keeps no-new-privileges" "no-new-privileges=true" "$pargv"
+contains "oc-probe keeps the helper workload SELinux domain" "label=type:docker_helper_container_t" "$pargv"
+contains "oc-probe keeps the workspace relabel" "$WS:/workspace:Z" "$pargv"
+contains "oc-probe keeps the read-only helper runtime dir" "$WORK/run:/run/docker-helper:ro" "$pargv"
+dh="$(cat "$DH_REC")"
+contains "oc-probe creates its own Session" "create session create --workspace $WS" "$dh"
+contains "oc-probe deletes its Session on exit" "delete session delete dhs_TEST" "$dh"
+case "$probe_stdout" in
+  *"Agent pid"*) bad "UAT-8: oc-probe stdout carries the ssh-agent echo" ;;
+  *) ok "UAT-8: oc-probe stdout carries only the container payload output" ;;
+esac
+
+rm -f "$OPENCODE_AGENT_SSH_KEY"
 
 # --- 1/2/3. normal launch: session lifecycle + container argv --------------
 export DH_HELP_WORKSPACE=1

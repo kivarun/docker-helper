@@ -387,6 +387,36 @@ stage_isolate() {
   log "isolate stage done"
 }
 
+# --- UAT-8: the networked integration UAT stage ------------------------------
+# An EXPLICIT networked mode for the real integration work. This is a
+# different threat model from the isolate stage: the guest network is ON.
+#   * the mode is selected only by running this stage — no implicit removal
+#     of restrict=on happens anywhere;
+#   * this run never claims isolation: the isolation evidence stays with the
+#     isolate stage and the standalone network probe, and verify refuses any
+#     VM whose QEMU argv does not carry restrict=on;
+#   * the network window is closed on EVERY exit path by the same lifecycle
+#     owner as the online window (ONLINE_VM_STARTED + traps), and the stop
+#     is confirmed before the stage reports success;
+#   * nothing in the integration contract is weakened: the same SELinux
+#     domain, DAC, mount gate, bearer boundary and Docker security options.
+stage_uat_networked() {
+  stop_vm_if_running
+  log "preflight: any leftover VM from a killed previous run is closed before this window opens"
+  ONLINE_VM_STARTED=1
+  trap 'online_cleanup "$?"' EXIT
+  trap 'online_cleanup 130' INT
+  trap 'online_cleanup 143' TERM
+  log "booting with the network OPEN (explicit networked UAT window)"
+  DEV_VM_NET_ISOLATED=0 "$DEVVM" start || die "VM start (network open) failed"
+  copy_lab_scripts
+  log "running the networked integration UAT (INTEGRATION_NETWORKED=1)"
+  "$DEVVM" ssh 'sudo env INTEGRATION_NETWORKED=1 bash /opt/lab/integration-agent-vm.sh' < /dev/null \
+    || die "networked integration UAT failed"
+  close_online_window
+  log "networked UAT stage done (the network window is closed and the VM is confirmed stopped)"
+}
+
 # --- F3: verify proves isolation, it never assumes it ------------------------
 # A running VM may have been booted with the network open, so the actual
 # QEMU command line of THIS VM's disk is inspected on the host: exactly one
@@ -444,21 +474,25 @@ case "$stage" in
   online)   stage_online ;;
   isolate)  stage_isolate ;;
   verify)   stage_verify ;;
+  uat-networked) stage_uat_networked ;;
   all)      stage_snapshot; stage_online; stage_isolate; stage_verify ;;
   ""|-h|--help|help)
     cat <<'EOF'
-usage: provision-lab-vm.sh snapshot|online|isolate|verify|all
+usage: provision-lab-vm.sh snapshot|online|isolate|verify|uat-networked|all
 
   snapshot  stop the VM and take the pre-provisioning qcow2 snapshot
   online    temporary network-open window: Docker, Docker Helper v2.3.0,
             agent provisioning, operator files, pinned image pre-pull
   isolate   boot isolated (DEV_VM_NET_ISOLATED=1) and prove the posture
   verify    run the offline integration suite inside the VM
+  uat-networked  EXPLICIT networked UAT window: run the networked
+            integration suite (INTEGRATION_NETWORKED=1), then close the
+            window and confirm the VM is stopped. Never an isolation claim.
   all       snapshot -> online -> isolate -> verify
 
 Optional operator env: LAB_AGENT_SSH_KEY, LAB_CA_SOURCE,
 LAB_GITCONFIG_SOURCE, LAB_KNOWN_HOSTS_SOURCE, LAB_CA_TEST_URL, LAB_PUBLIC_TLS_URL (online).
 EOF
     ;;
-  *) die "unknown stage '$stage' (snapshot|online|isolate|verify|all)" ;;
+  *) die "unknown stage '$stage' (snapshot|online|isolate|verify|uat-networked|all)" ;;
 esac

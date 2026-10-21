@@ -82,6 +82,78 @@ has "NODE_EXTRA_CA_CERTS assertion uses the .crt contract" \
   '"/etc/opencode-ca/\$ca_name.crt"'
 lacks "no suffix-less NODE_EXTRA_CA_CERTS assertion" '"/etc/opencode-ca/\$ca_name" \'
 
+# --- UAT-8. the TLS probe: framed output, bash-invoked verdict, no masking ---
+# The real-VM findings: tls-verdict.sh was invoked directly although it is
+# installed at /opt/lab with mode 0644 (the refusal then surfaced as an
+# empty verdict and became a SKIP); the launcher's `Agent pid` line landed
+# on stdout and was read as NODE_EXTRA_CA_CERTS from the first line; and
+# `|| true` masked a failed launcher as an inconclusive probe.
+has "tls-verdict.sh is invoked through bash (0644-safe)" \
+  'bash "\$SCRIPT_DIR/tls-verdict\.sh"'
+has "the verdict helper's own failure is a FAIL, not a skip" \
+  'the TLS verdict helper failed'
+has "the TLS probe output is framed (TLS_BEGIN)" "printf '%s.n' TLS_BEGIN"
+has "NODE_EXTRA_CA_CERTS is framed behind its own markers" "CA_ENV_BEGIN"
+has "NODE_EXTRA_CA_CERTS is parsed from its markers, not the first line" \
+  'sed -n ./\^CA_ENV_BEGIN\$/,'
+lacks "no first-line split of the launcher output" 'head -1)" > "\$CA_ENV_OUT"'
+lacks "no masked TLS launcher exit status" '2>&1 || true)"'
+has "the TLS launcher exit status is recorded separately" 'tls-launch.rc'
+has "a TLS connection failure is a FAIL (mandatory negative evidence)" \
+  'bad "the TLS probe ended in a connection failure'
+has "an unexpected TLS outcome is a FAIL, not a skip" \
+  'bad "the TLS probe ended in an unexpected outcome'
+has "an unframed TLS output is a FAIL" 'no TLS_BEGIN/TLS_END'
+has "the negative TLS check runs through the exec path" "oc-probe \"\\\$TLS_PROBE_CMD\""
+
+# --- UAT-8. the Session bearer probes: the exec path, explicit outcomes ------
+# The image ENTRYPOINT is `opencode`: `oc docker-helper self --json` and
+# `oc sh -c ...` handed their words to the OpenCode CLI and never ran
+# docker-helper or sh. The empty `self_channel` string also passed the old
+# `!= "none"` check.
+has "the access path runs through oc-probe (exec)" "oc-probe \"\\\$OC_PROBE_PAYLOAD\""
+lacks "no bare-argv self channel remains" 'oc_t docker-helper self'
+lacks "no sh -c self channel remains" "oc_t sh -c 'docker-helper"
+lacks "no empty-accepting channel check" 'self_channel'
+has "the probe result is framed (PROBE_BEGIN)" "printf 'PROBE_BEGIN.n'"
+has "the in-container rc is recorded per probe" 'PROBE_RC=%s'
+lacks "no masked probe record" '"\$out" > "\$OC_SELF_OUT"'
+has "a valid Session bearer is confirmed from one probe run" 'docker-helper self executed inside the container'
+has "the missing-bearer refusal is attributed to Docker Helper" \
+  'DOCKER_HELPER_SESSION_TOKEN is not set'
+has "a wrong bearer is refused" 'self with a wrong bearer is denied'
+has "the principal credential cannot substitute the Session bearer" \
+  'the principal credential cannot substitute the Session bearer'
+has "docker.sock absence is asserted inside the container" 'PROBE_SOCK=absent'
+has "ADMIN* env absence is asserted inside the container" 'PROBE_ADMIN_ENV=0'
+has "the probe launches are recorded for posture assertions" 'ARGV_PROBE='
+has "the probe posture is asserted from the probe record" \
+  'the probe container runs as the agent uid'
+
+# --- UAT-8. the launch-failure diagnostics -----------------------------------
+# A failed (e.g. timeout 124) launch must produce factor-separated bounded
+# diagnostic evidence — not just a longer timeout or a bare failure.
+has "a failed launch runs the bounded diagnostic ladder" \
+  'the model launch failed with rc'
+has "the ladder separates the container-exec factor" 'DIAG_L1_RC='
+has "the ladder separates the mounted-HOME factor" 'DIAG_L2_RC='
+has "the ladder separates the HOME=/tmp factor (the operator experiment)" 'DIAG_L3_RC='
+has "missing diagnostic evidence is a FAIL" \
+  'the launch failed but the diagnostics produced no factor evidence'
+has "every ladder step is time-bounded" 'probe_run diag_l1'
+
+# --- UAT-8. the explicit integration mode ------------------------------------
+has "the integration mode is explicit" 'INTEGRATION_NETWORKED'
+has "the networked mode claims no isolation" \
+  'this run makes no VM isolation claims'
+has "an invalid mode value fails closed" 'INTEGRATION_NETWORKED must be 0 or 1'
+has "the LLM check is provider-gated inside the container" 'PROVIDER_CONFIGURED'
+has "a missing provider is a skip, never a pass" \
+  'no provider configured in the launch env'
+has "a configured provider that does not answer is a FAIL" \
+  'the configured provider did not answer'
+has "the isolated mode records the explicit no-provider decision" 'ISOLATED_MODE'
+
 echo
 printf 'integration hygiene tests: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

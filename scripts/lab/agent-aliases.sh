@@ -160,9 +160,22 @@ _oc_ssh_stale_cleanup() {
 #     mounted. TRUST BOUNDARY: the model holding the ssh-agent socket can
 #     authenticate via SSH as the key's owner — that is this lab agent's
 #     intended capability, not an accident.
-_oc_run() (
+# _oc_launch IMAGE MODE PAYLOAD... — the SINGLE canonical launch composition.
+# Every launch (the model's `oc`, and the diagnostic probes) goes through this
+# one construction: session lifecycle, mounts, security options, env, init
+# copy, workspace — one owner, no parallel implementations.
+#
+# MODE=opencode — the image's own entrypoint runs the payload (the real model
+#   launch; for the pinned image that entrypoint is `opencode`).
+# MODE=exec — the payload is exec'd through `--entrypoint /bin/sh -c`, for
+#   probes that must reach container binaries directly. The image ENTRYPOINT
+#   is `opencode`, so bare payload words would be handed to the OpenCode CLI
+#   as ITS arguments (the UAT-8 real-VM finding: `oc docker-helper self` and
+#   `oc sh -c ...` never ran docker-helper or sh at all).
+_oc_launch() (
     local image="$1"
-    shift
+    local mode="$2"
+    shift 2
 
     local helper_runtime_dir="${DOCKER_HELPER_RUNTIME_DIR:-/run/docker-helper}"
     local opencode_home="${OPENCODE_DOCKER_HOME:-$HOME/.opencode-docker}"
@@ -322,7 +335,12 @@ _oc_run() (
             echo "cannot start the per-launch ssh-agent" >&2
             return 1
         fi
-        eval "$agent_env"
+        # UAT-8: ssh-agent's env script ends with `echo Agent pid N;` — eval
+        # executes that echo and the message lands on the launcher's stdout,
+        # where diagnostic consumers could mistake it for container output.
+        # The exports still take effect; only the informational echo is
+        # silenced.
+        eval "$agent_env" >/dev/null
         ssh_agent_pid="$SSH_AGENT_PID"
         printf '%s\n' "$ssh_agent_pid" > "$run_dir/agent.pid"
         if ! SSH_ASKPASS_REQUIRE=never ssh-add -- "$agent_ssh_key" </dev/null; then
@@ -440,28 +458,42 @@ _oc_run() (
         init_mount=(-v "$init_copy:/sbin/docker-init:ro,z")
     fi
 
-    docker run --rm -it \
-        --init \
-        "${user_opt[@]}" \
-        --cap-drop ALL \
-        --security-opt no-new-privileges=true \
-        "${selinux_opts[@]}" \
-        "${init_mount[@]}" \
-        "${docker_env[@]}" \
-        -e LLM_SERVER \
-        -e LLM_KEY \
-        -e DOCKER_HELPER_SESSION_TOKEN \
-        -v "$PWD:/workspace:Z" \
-        "${home_mounts[@]}" \
-        -v "$helper_runtime_dir:/run/docker-helper:ro" \
-        "${extra_mounts[@]}" \
-        -w /workspace \
-        "$image" "$@"
+    local -a run_args=(
+        docker run --rm -it
+        --init
+        "${user_opt[@]}"
+        --cap-drop ALL
+        --security-opt no-new-privileges=true
+        "${selinux_opts[@]}"
+        "${init_mount[@]}"
+        "${docker_env[@]}"
+        -e LLM_SERVER
+        -e LLM_KEY
+        -e DOCKER_HELPER_SESSION_TOKEN
+        -v "$PWD:/workspace:Z"
+        "${home_mounts[@]}"
+        -v "$helper_runtime_dir:/run/docker-helper:ro"
+        "${extra_mounts[@]}"
+        -w /workspace
+    )
+    if [[ "$mode" == exec ]]; then
+        run_args+=(--entrypoint /bin/sh "$image" -c "$*")
+    else
+        run_args+=("$image" "$@")
+    fi
+    docker "${run_args[@]}"
 )
 
 # --- images (pinned by OCI digest for reproducibility) ----------------------
 _OC_BASE='ghcr.io/kivarun/opencode-docker/base@sha256:f6c6dd302f447ec05d93f9f6ffba92dd726dcf1a82c6181733bae10e0012b970'
 _OC_GO26='ghcr.io/kivarun/opencode-docker/go26@sha256:076273633dd33218b0a0f0d783cb80539a4066c1e59dee1b069a96db971830b7'
 
-oc()      { _oc_run "$_OC_BASE" "$@"; }
-oc-go26() { _oc_run "$_OC_GO26" "$@"; }
+oc()      { _oc_launch "$_OC_BASE" opencode "$@"; }
+oc-go26() { _oc_launch "$_OC_GO26" opencode "$@"; }
+
+# oc-probe PAYLOAD — the diagnostic access path: the SAME canonical launch
+# composition, with the payload exec'd through /bin/sh -c inside the
+# container. Used by the VM integration suite to run `docker-helper self`
+# and the TLS probe with the real Session bearer and the real launcher
+# constraints; never a second model-launch implementation.
+oc-probe() { _oc_launch "$_OC_BASE" exec "$@"; }
