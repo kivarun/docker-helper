@@ -30,7 +30,8 @@
 # and installs a daemon, so it must never run on the physical host.
 #
 # Env overrides: DH_V230_URL, DH_V230_SHA256, DH_V230_VERSION, DH_V230_COMMIT,
-#                LAB_HELPER_ALLOWED_ROOT.
+#                LAB_HELPER_ALLOWED_ROOT, LAB_GUEST_ROOT (test seam: prefixes
+#                the guest-absolute system paths in behavioral tests).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,6 +44,38 @@ LAB_HELPER_ALLOWED_ROOT="${LAB_HELPER_ALLOWED_ROOT:-/home/agent}"
 
 log() { printf '[install-dh-v%s] %s\n' "$DH_V230_VERSION" "$*"; }
 die() { printf '[install-dh-v%s] ERROR: %s\n' "$DH_V230_VERSION" "$*" >&2; exit 1; }
+
+# UAT-2/F2: the canonical installer prints the freshly generated admin token
+# to stdout on first initialization ("Admin token:" followed by the value).
+# The token must never reach the operator terminal, stderr, error logs or
+# diagnostics. This is a generic OUTPUT BOUNDARY, not a replacement of one
+# known value: the sanitizer (a) redacts the line that follows an
+# 'Admin token:' label by structure, and (b) redacts every token-shaped
+# opaque value of the helper's token encoding ('dht_' + 64 hex characters)
+# wherever it appears. Diagnostics (stages, errors, paths) pass through so
+# the operator keeps seeing the installation stage and the failure reason,
+# and a failed canonical install keeps its original exit status without
+# leaking secrets even on that path. No shell tracing is used anywhere near
+# secret handling.
+sanitize_helper_output() { # FILE -> sanitized output on stdout
+  awk '
+    $0 == "Admin token:" {
+      print "[redacted by the lab installer wrapper: admin token]"
+      skip = 1
+      next
+    }
+    skip == 1 {
+      skip = 0
+      if ($0 == "") { print; next }
+      print "[redacted by the lab installer wrapper: admin token]"
+      next
+    }
+    {
+      gsub(/dht_[0-9a-fA-F]{64}/, "[redacted opaque token value]")
+      print
+    }
+  ' "$1"
+}
 
 [ "$(id -u)" = 0 ] || die "must run as root in the guest"
 
@@ -71,6 +104,9 @@ fi
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
+# LAB_GUEST_ROOT test seam (see the env overrides above).
+gp() { printf '%s%s' "${LAB_GUEST_ROOT:-}" "$1"; }
+
 log "downloading $DH_V230_URL"
 curl -fsSL --retry 3 -o "$work/bundle.tgz" "$DH_V230_URL"
 echo "${DH_V230_SHA256}  ${work}/bundle.tgz" | sha256sum -c - >/dev/null \
@@ -87,10 +123,18 @@ root="$work/docker-helper-${DH_V230_VERSION}-linux-amd64"
 pkill -x docker-helper 2>/dev/null || true
 systemctl stop docker-helper 2>/dev/null || true
 sleep 1
-rm -f /usr/local/bin/docker-helper
+rm -f "$(gp /usr/local/bin/docker-helper)"
 
 log "running the tarball's canonical install-system.sh --yes --allowed-root $LAB_HELPER_ALLOWED_ROOT"
-( cd "$root" && ./install-system.sh --yes --allowed-root "$LAB_HELPER_ALLOWED_ROOT" )
+install_log="$work/install-system.output"
+install_rc=0
+( cd "$root" && ./install-system.sh --yes --allowed-root "$LAB_HELPER_ALLOWED_ROOT" ) \
+  >"$install_log" 2>&1 || install_rc=$?
+sanitize_helper_output "$install_log"
+if [ "$install_rc" != 0 ]; then
+  printf '[install-dh-v%s] ERROR: the canonical installer failed with exit status %s; its sanitized output is printed above\n' "$DH_V230_VERSION" "$install_rc" >&2
+  exit "$install_rc"
+fi
 
 # The unit's StateDirectory=docker-helper makes systemd chmod/chown
 # /var/lib/docker-helper to StateDirectoryMode (0700) on start. When the dir
@@ -98,16 +142,16 @@ log "running the tarball's canonical install-system.sh --yes --allowed-root $LAB
 # 0755), systemd's setattr under SELinux fails: the shipped policy grants
 # init_t create/write/remove on docker_helper_state_t but not setattr, so the
 # unit exits 238/STATE_DIRECTORY. Normalize the mode first, then restart.
-install -d -m 0700 -o root -g root /var/lib/docker-helper
+install -d -m 0700 -o root -g root "$(gp /var/lib/docker-helper)"
 systemctl reset-failed docker-helper 2>/dev/null || true
 systemctl restart docker-helper
 
 # Evidence: the installed binary must be exactly the pinned version.
-installed_sha="$(sha256sum /usr/bin/docker-helper | awk '{print $1}')"
-installed_ver="$(/usr/bin/docker-helper version)"
+installed_sha="$(sha256sum "$(gp /usr/bin/docker-helper)" | awk '{print $1}')"
+installed_ver="$("$(gp /usr/bin/docker-helper)" version)"
 [ "$installed_ver" = "$DH_V230_VERSION" ] || die "installed version '$installed_ver' != $DH_V230_VERSION"
-[ -x /usr/bin/docker-helper ] || die "binary not installed at /usr/bin/docker-helper"
-[ ! -e /usr/local/bin/docker-helper ] || die "/usr/local/bin/docker-helper still shadows /usr/bin"
+[ -x "$(gp /usr/bin/docker-helper)" ] || die "binary not installed at /usr/bin/docker-helper"
+[ ! -e "$(gp /usr/local/bin/docker-helper)" ] || die "/usr/local/bin/docker-helper still shadows /usr/bin"
 
 systemctl is-active --quiet docker-helper || die "docker-helper service is not active"
 
@@ -115,5 +159,5 @@ log "installed version: $installed_ver (source commit $DH_V230_COMMIT)"
 log "installed binary sha256: $installed_sha"
 log "installed SELinux module: $(semodule -l | awk '/^docker_helper/ {print $1, $2}')"
 log "daemon SELinux context: $(ps -o label= -C docker-helper | head -1)"
-log "binary SELinux type: $(ls -Z /usr/bin/docker-helper | awk '{print $1}')"
+log "binary SELinux type: $(ls -Z "$(gp /usr/bin/docker-helper)" | awk '{print $1}')"
 log "done"

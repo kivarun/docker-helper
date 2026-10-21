@@ -80,6 +80,7 @@ jobs:
           bash scripts/lab/test-probe-vm-isolation.sh
           bash scripts/lab/test-integration-hygiene.sh
           bash scripts/lab/test-install-docker-vm.sh
+          bash scripts/lab/test-install-docker-helper.sh
           bash scripts/lab/test-provision-operator-files.sh
           bash scripts/lab/test-provision-lab-vm.sh
 
