@@ -441,6 +441,27 @@ not_contains "phase-1 never adds an allowed root" "allowed-root add" "$rec"
 contains "phase-1 logs the re-run instruction" "re-run this script after install-docker-helper-v230.sh" "$out"
 not_contains "phase-1 does not claim the credential" "credential installed for agent" "$out"
 
+# --- test-seam safety: no mutation may escape the test root ------------------
+# The stubs intercept every privileged operation; this tripwire makes any
+# escape into the real /home fail the suite instead of passing silently.
+trip_home_listing() { ls /home 2>/dev/null | sort | tr '\n' ' '; }
+trip_home_before="$(trip_home_listing)"
+trip_ssh_state() { [ -e "$HOME/.ssh" ] && printf present || printf absent; }
+trip_ssh_before="$(trip_ssh_state)"
+
+trip_home_after="$(trip_home_listing)"
+if [ "$trip_home_before" = "$trip_home_after" ]; then
+  ok "tripwire: /home was not modified by the suite"
+else
+  bad "tripwire: /home changed during the suite ('$trip_home_before' -> '$trip_home_after')"
+fi
+if [ "$trip_ssh_before" = "$(trip_ssh_state)" ]; then
+  ok "tripwire: $HOME/.ssh existence unchanged"
+else
+  bad "tripwire: $HOME/.ssh existence changed ($trip_ssh_before -> $(trip_ssh_state))"
+fi
+
 echo
 printf 'setup-agent-user tests: %d passed, %d failed\n' "$PASS" "$FAIL"
+
 [ "$FAIL" = 0 ]

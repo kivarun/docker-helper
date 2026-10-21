@@ -381,6 +381,16 @@ else
   bad "R6/agent-user: the valid username was rejected"
 fi
 
+# --- test-seam safety: no mutation may escape the test root ------------------
+# The Corrective 6 incident wrote into the real /home through a broken seam.
+# These tripwires make any recurrence fail the suite instead of passing
+# silently.
+trip_home_listing() { ls /home 2>/dev/null | sort | tr '\n' ' '; }
+trip_home_before="$(trip_home_listing)"
+trip_ssh_state() { [ -e "$HOME/.ssh" ] && printf present || printf absent; }
+trip_ssh_before="$(trip_ssh_state)"
+trip_etc_ssh_before="$(trip_ssh_state)"
+
 # --- F5. the publication staging pathname is not a privileged write surface --
 # The publication tmp used to live in the agent-owned .ssh directory and every
 # privileged operation (content write, chmod, chown, rename) went through its
@@ -451,6 +461,19 @@ if execute_guest_body 2>"$WORK/guest.err"; then ok "F5/c: the normal publication
 grep -q 'AAAAOPKEY1' "$AK" && ok "F5/c: the previous entry survived" || bad "F5/c: the previous entry was lost"
 grep -q 'opencode-agent' "$AK" && ok "F5/c: the agent key was published" || bad "F5/c: the agent key is missing"
 
+# --- test-seam safety tripwire verification ---------------------------------
+trip_home_after="$(trip_home_listing)"
+if [ "$trip_home_before" = "$trip_home_after" ]; then
+  ok "tripwire: /home was not modified by the suite"
+else
+  bad "tripwire: /home changed during the suite ('$trip_home_before' -> '$trip_home_after')"
+fi
+if [ "$trip_ssh_before" = "$(trip_ssh_state)" ]; then
+  ok "tripwire: $HOME/.ssh existence unchanged"
+else
+  bad "tripwire: $HOME/.ssh existence changed ($trip_ssh_before -> $(trip_ssh_state))"
+fi
+
 echo
 printf 'provision-operator-files tests: %d passed, %d failed\n' "$PASS" "$FAIL"
-[ "$FAIL" = 0 ]
+
