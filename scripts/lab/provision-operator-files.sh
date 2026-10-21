@@ -442,10 +442,18 @@ if [ -n "${CA_B64:-}" ]; then
       img_bundle=""
       for cand in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/ca-bundle.pem; do
         img_out="$(docker run --rm --entrypoint /bin/sh "$base_image" -c "cat '$cand' 2>/dev/null || true")" || img_out=""
-        if printf '%s' "$img_out" | grep -q -- '-----BEGIN CERTIFICATE-----'; then
-          img_bundle="$img_out"
-          break
-        fi
+        # UAT-3/F2: the previous `printf '%s' "$img_out" | grep -q -- '...'`
+        # detection failed under set -o pipefail — grep -q exits after the
+        # first match, printf receives SIGPIPE (rc 141), and a VALID large
+        # bundle (the real UAT saw 181724 bytes) was misread as "could not
+        # be extracted". Bash pattern matching on the already loaded variable
+        # has no pipeline and no early-exiting consumer; an empty or
+        # certificate-less result still never counts as an extraction.
+        case "$img_out" in
+          *"-----BEGIN CERTIFICATE-----"*)
+            img_bundle="$img_out"
+            break ;;
+        esac
       done
       if [ -n "$img_bundle" ]; then
         combined_content="$( { printf '%s\n' "$img_bundle"; cat -- "$corp_ca"; } )" \

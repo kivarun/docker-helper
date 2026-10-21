@@ -550,5 +550,87 @@ else
 fi
 
 echo
+# --- UAT-3/F2. a large image CA bundle must not produce a false extraction ---
+# The old detection ran `printf '%s' "$img_out" | grep -q -- '...'` under
+# set -o pipefail: grep -q exits after the first match, printf receives
+# SIGPIPE (rc 141), and a VALID bundle was misread as "could not be
+# extracted". Real UAT: an 181724-byte bundle produced pipeline rc=141 and a
+# false refusal. The replacement uses Bash pattern matching on the already
+# loaded variable — no pipeline, no early-exiting consumer.
+uat3_bundle="$WORK/uat3-image-bundle"
+{
+  python3 - <<'PY'
+import sys
+line = "-----BEGIN CERTIFICATE-----\n" + "QQ==\n" * 2000 + "-----END CERTIFICATE-----\n"
+sys.stdout.write(line * 20)
+PY
+} > "$uat3_bundle"
+[ "$(stat -c %s "$uat3_bundle")" -ge 180000 ] \
+  && ok "UAT-3/F2: the modeled image bundle is at least 180 KiB ($(stat -c %s "$uat3_bundle") bytes)" \
+  || bad "UAT-3/F2: the modeled image bundle is too small"
+
+# The UAT experiment, reproduced: under set -euo pipefail the bare pipeline's
+# rc is observed directly (the production `if` turns the same 141 into a
+# silent false negative).
+old_pipeline_outcome() { # FILE -> sets OLD_OUT/OLD_RC
+  OLD_OUT="$(bash -c 'set -euo pipefail
+    img_out="$(cat "$1")"
+    printf "%s" "$img_out" | grep -q -- "-----BEGIN CERTIFICATE-----"
+    echo PIPELINE-OK' _ "$1" 2>/dev/null)"
+  OLD_RC=$?
+  return 0
+}
+old_pipeline_outcome "$uat3_bundle"
+if [ "$OLD_RC" = 141 ] && [ -z "$OLD_OUT" ]; then
+  ok "UAT-3/F2 RED: the old pipeline yields SIGPIPE rc=141 on the large bundle"
+else
+  bad "UAT-3/F2: the old pipeline did not reproduce 141 (rc=$OLD_RC out=$OLD_OUT)"
+fi
+
+new_pattern_outcome() { # FILE -> runs the production idiom; sets NEW_OUT/NEW_RC
+  NEW_OUT="$(bash -c 'set -euo pipefail
+    img_out="$(cat "$1")"
+    case "$img_out" in
+      *"-----BEGIN CERTIFICATE-----"*) echo MATCH; exit 0 ;;
+    esac
+    echo NO-MATCH' _ "$1")"
+  NEW_RC=$?
+  return 0
+}
+new_pattern_outcome "$uat3_bundle"
+if [ "$NEW_RC" = 0 ] && [ "$NEW_OUT" = "MATCH" ]; then
+  ok "UAT-3/F2 GREEN: the pattern-matching detection accepts the large bundle"
+else
+  bad "UAT-3/F2: the new detection failed on the large bundle (rc $NEW_RC, out $NEW_OUT)"
+fi
+
+# UAT-3/F2: no false PASS on empty or certificate-less docker output, and the
+# production source uses the pattern idiom (the pipeline form is banned).
+empty_out="$(bash -c 'set -euo pipefail
+  img_out=""
+  case "$img_out" in
+    *"-----BEGIN CERTIFICATE-----"*) echo MATCH; exit 0 ;;
+  esac
+  echo NO-MATCH')"; empty_rc=$?
+if [ "$empty_rc" = 0 ] && [ "$empty_out" = "NO-MATCH" ]; then
+  ok "UAT-3/F2: an empty docker run result is never accepted as an extraction"
+else
+  bad "UAT-3/F2: the empty-input case is wrong (rc $empty_rc, out $empty_out)"
+fi
+case "garbage without markers" in
+  *"-----BEGIN CERTIFICATE-----"*) bad "UAT-3/F2: non-certificate output would be accepted" ;;
+  *) ok "UAT-3/F2: certificate-less docker output is never accepted" ;;
+esac
+if grep -v '^[[:space:]]*#' "$SRC_DIR/lab/provision-operator-files.sh" | grep -q 'printf.*img_out.*| grep -q'; then
+  bad "UAT-3/F2: the SIGPIPE-prone pipeline is still in the production source"
+else
+  ok "UAT-3/F2: the production source no longer pipes the bundle through grep -q"
+fi
+if grep -q 'case "$img_out" in' "$SRC_DIR/lab/provision-operator-files.sh"; then
+  ok "UAT-3/F2: the production detection uses Bash pattern matching"
+else
+  bad "UAT-3/F2: the production detection does not use the pattern idiom"
+fi
+
 printf 'provision-operator-files tests: %d passed, %d failed\n' "$PASS" "$FAIL"
 
