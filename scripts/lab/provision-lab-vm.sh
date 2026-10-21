@@ -177,25 +177,6 @@ base_image_ref() {
   '
 }
 
-pull_pinned_images() {
-  log "pre-pulling the pinned OCI images as the agent account"
-  local refs
-  refs="$(
-    SCRIPT_DIR="$SCRIPT_DIR" bash -c '
-      # shellcheck source=/dev/null
-      source "$SCRIPT_DIR/agent-aliases.sh"
-      printf "%s\n%s\n" "$_OC_BASE" "$_OC_GO26"
-    '
-  )" || die "cannot resolve the pinned image digests"
-  local ref
-  while IFS= read -r ref; do
-    [ -n "$ref" ] || continue
-    log "pulling $ref"
-    "$DEVVM" ssh "sudo -u agent -H docker pull '$ref'" < /dev/null \
-      || die "image pull failed: $ref"
-  done <<< "$refs"
-}
-
 # F6 runtime evidence, gathered in the online window with REAL controlled
 # endpoints (the model is never launched here; these are one-off diagnostic
 # containers without any session):
