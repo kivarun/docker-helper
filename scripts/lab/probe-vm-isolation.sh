@@ -85,17 +85,52 @@ probe_ipv6_disabled() { # [CMDLINE_FILE] [IF_INET6_FILE]
   return 0
 }
 
-# ipv6_transport_usable — returns 0 when an AF_INET6 socket can be created and
-# bound, i.e. IPv6 transport is actually functioning. A functioning transport
-# contradicts an IPv4-only posture regardless of route visibility.
+# ipv6_transport_usable — classifies the AF_INET6 transport attempt:
+#   0  USABLE       an AF_INET6 socket was created (and bound when ::1
+#                   exists) — IPv6 transport is actually functioning
+#   1  UNAVAILABLE  the kernel refused the address family (EAFNOSUPPORT,
+#                   EPROTONOSUPPORT, ENOSYS) — IPv6 is demonstrably disabled,
+#                   with the refusal reason positively confirmed
+#   2  FAILED       python3 is unavailable — the verification could not run
+#   3  FAILED       an unexpected socket API error — the verification is
+#                   inconclusive
+# A functioning transport contradicts an IPv4-only posture regardless of
+# route visibility; an unverifiable attempt must never be read as proof of
+# absence.
 ipv6_transport_usable() {
   command -v python3 >/dev/null 2>&1 || return 2
   python3 - <<'PY' 2>/dev/null
-import socket
-s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-s.bind(("::1", 0))
+import errno, socket, sys
+try:
+    s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+except OSError as e:
+    if e.errno in (errno.EAFNOSUPPORT, errno.EPROTONOSUPPORT, errno.ENOSYS):
+        sys.exit(1)
+    sys.exit(3)
+try:
+    s.bind(("::1", 0))
+except OSError:
+    pass
 s.close()
+sys.exit(0)
 PY
+}
+
+# ipv6_transport_check — the guest probe's transport verdict, emitted through
+# the shared ok/bad helpers so the classification is testable in isolation.
+# Only a POSITIVELY CONFIRMED refusal of the address family counts as
+# "unavailable"; python3 missing and unexpected socket errors are mandatory
+# FAILs — an unverifiable attempt is never proof of absence.
+ipv6_transport_check() {
+  local rc
+  ipv6_transport_usable
+  rc=$?
+  case "$rc" in
+    0) bad "IPv6 transport is FUNCTIONING (a working AF_INET6 socket contradicts an IPv4-only VM)" ;;
+    1) ok "IPv6 transport is demonstrably unavailable (the kernel refuses AF_INET6: address family not supported by the OS)" ;;
+    2) bad "cannot verify the IPv6 transport: python3 is unavailable (a FAIL, never a skip)" ;;
+    *) bad "cannot verify the IPv6 transport: an unexpected socket API error (rc $rc)" ;;
+  esac
 }
 
 # --- guest role --------------------------------------------------------------
@@ -148,11 +183,7 @@ probe_guest() { # GW_HOST GW_PORT LAN4_HOST LAN4_PORT [LAN6_HOST LAN6_PORT]
   else
     ok "no active IPv6 addresses"
   fi
-  case "$(ipv6_transport_usable && echo usable || echo unusable)" in
-    unusable) ok "IPv6 transport is not usable (an AF_INET6 socket cannot be created and bound)" ;;
-    usable)   bad "IPv6 transport is FUNCTIONING (a working AF_INET6 socket contradicts an IPv4-only VM)" ;;
-    *)        bad "cannot verify the IPv6 transport (python3 unavailable)" ;;
-  esac
+  ipv6_transport_check
 
   # 3. prepared endpoints unreachable (each was verified accepting host-side)
   expect_unreachable "slirp gateway" "$gw_host" "$gw_port"

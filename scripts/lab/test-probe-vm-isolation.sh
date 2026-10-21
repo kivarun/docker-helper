@@ -332,15 +332,12 @@ if probe_fn probe_ipv6_disabled "$WORK/cmdline.good" "$WORK/ifinet6.present"; th
 else
   ok "UAT-4/F3: a live if_inet6 is NOT a disabled stack"
 fi
-if ipv6_transport_usable; then
-  bad "UAT-4/F3: this host unexpectedly cannot exercise the transport check"
-else
-  case "$(ipv6_transport_usable >/dev/null 2>&1; echo $?)" in
-    0) bad "UAT-4/F3: the transport check misreported" ;;
-    1) ok "UAT-4/F3: the transport check runs against real AF_INET6 semantics" ;;
-    2) bad "UAT-4/F3: python3 is unavailable for the transport check" ;;
-  esac
-fi
+case "$(probe_fn ipv6_transport_usable >/dev/null 2>&1; echo $?)" in
+  0) ok "UAT-4/F3: the transport check executes real AF_INET6 semantics on this host" ;;
+  1) bad "UAT-4/F3: the transport check misreported" ;;
+  2) bad "UAT-4/F3: python3 is unavailable for the transport check" ;;
+  *) bad "UAT-4/F3: the transport check returned an unexpected status" ;;
+esac
 # A working IPv6 transport (when the test host supports ::1) must be
 # recognizable as NOT an IPv4-only posture.
 if [ "$v6_capable" = 1 ]; then
@@ -359,6 +356,78 @@ PY
   fi
 else
   skip "UAT-4/F3: the working-transport detection (::1 unavailable on this host)"
+fi
+
+# --- UAT-5. the transport verdict distinguishes all three outcomes ------------
+# Blocker: the previous mapping turned ANY nonzero ipv6_transport_usable rc
+# (python3 missing = 2, unexpected socket errors, even the kernel's
+# EAFNOSUPPORT refusal) into "unusable" and emitted a PASS. The verdict must
+# separate: USABLE (a working AF_INET6 socket -> FAIL the IPv4-only claim),
+# DEMONSTRABLY UNAVAILABLE (the kernel refuses the address family -> PASS,
+# with the reason positively confirmed), and FAILED/INCONCLUSIVE (python3
+# missing or an unexpected socket API error -> mandatory FAIL, never a skip).
+# The python3 shim models kernel/socket outcomes at the same boundary the
+# production code observes (the exit status of the socket attempt).
+uat5_pyshim() { # EXIT_CODE -> a python3 shim that exits with that code
+  local d="$WORK/uat5-shim-$1"
+  mkdir -p "$d"
+  printf '#!/bin/sh\nexit %s\n' "$1" > "$d/python3"
+  chmod +x "$d/python3"
+  printf '%s' "$d"
+}
+uat5_verdict() { # [SHIM_DIR|none] -> the verdict line ipv6_transport_check emits
+  local shim="$1"
+  (
+    set -- ""
+    if [ "$shim" = none ]; then
+      command() { if [ "$1 $2" = "-v python3" ]; then return 1; fi; builtin command "$@"; }
+    else
+      PATH="$shim:$PATH"
+    fi
+    source "$REPO/lab/probe-vm-isolation.sh"
+    shift
+    ipv6_transport_check
+  )
+}
+uat5_first_line() { printf '%s' "$(printf '%s\n' "$1" | grep -E '^(ok|FAIL)' | head -1)"; }
+
+# U5.1 RED: python3 absent is a FAIL, not a false PASS
+out="$(uat5_verdict none)"; first="$(uat5_first_line "$out")"
+case "$first" in
+  FAIL*"python3 is unavailable"*) ok "UAT-5: python3 absent -> mandatory FAIL with the reason" ;;
+  ok*) bad "UAT-5 RED: python3 absent produced a PASS ('$first')" ;;
+  *) bad "UAT-5: an unexpected verdict for python3 absent: $first" ;;
+esac
+
+# U5.2 the kernel refuses AF_INET6 -> PASS with the positively confirmed reason
+shim="$(uat5_pyshim 1)"
+out="$(uat5_verdict "$shim")"; first="$(uat5_first_line "$out")"
+case "$first" in
+  ok*"demonstrably unavailable"*) ok "UAT-5: the kernel's family refusal is a confirmed-unavailable PASS" ;;
+  ok*) bad "UAT-5 RED: the refusal PASSED without the confirmed reason ('$first')" ;;
+  FAIL*) bad "UAT-5: the kernel's family refusal was wrongly failed: $first" ;;
+  *) bad "UAT-5: an unexpected verdict for the family refusal: $first" ;;
+esac
+
+# U5.3 an unexpected socket API error is a FAIL (inconclusive, never a PASS)
+shim="$(uat5_pyshim 3)"
+out="$(uat5_verdict "$shim")"; first="$(uat5_first_line "$out")"
+case "$first" in
+  FAIL*"unexpected socket API error"*) ok "UAT-5: an unexpected socket error is a mandatory FAIL" ;;
+  ok*) bad "UAT-5 RED: an unexpected socket error produced a PASS ('$first')" ;;
+  *) bad "UAT-5: an unexpected verdict for the socket error: $first" ;;
+esac
+
+# U5.4 a working AF_INET6 socket contradicts an IPv4-only VM (when the test
+# host can bind ::1)
+if [ "$v6_capable" = 1 ]; then
+  out="$(uat5_verdict "")"; first="$(uat5_first_line "$out")"
+  case "$first" in
+    FAIL*"FUNCTIONING"*) ok "UAT-5: a working transport FAILs the IPv4-only claim" ;;
+    *) bad "UAT-5: the working-transport verdict is wrong: $first" ;;
+  esac
+else
+  skip "UAT-5: the working-transport case (::1 unavailable on this host)"
 fi
 
 # --- UAT-4/F4. the host listener lifecycle ------------------------------------
