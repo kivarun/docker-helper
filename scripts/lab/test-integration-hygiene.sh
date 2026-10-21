@@ -67,6 +67,8 @@ has "moved default credential is restored" 'mv -f "\$CRED_MOVED" "\$CRED"'
 oc_calls="$(grep -cE 'timeout [0-9]+ +oc ' "$INTEG" || true)"
 check "no direct 'timeout oc' invocation (oc is a function)" "0" "$oc_calls"
 has "time-bounded oc launches run in an initialized Bash"   'timeout 60 bash -c'
+has "the version probe is also time-bounded (oc_t)"          'oc_t --version'
+lacks "no un-timed direct oc invocation in the runner"       '^oc '
 has "the wrapper sources the launcher aliases"              'source "\$HOME/.bash_aliases"'
 has "the initialized Bash keeps the docker recorder" \
   'docker\(\) \{ printf "%s.n" "\$\*" >> "\$ARGV_REC"; command docker "\$@"; \}'

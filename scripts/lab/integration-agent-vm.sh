@@ -237,7 +237,9 @@ oc_t() {
     oc "$@"
   ' _ "$@"
 }
-oc --version
+# R3: even the version probe is time-bounded through the same wrapper — a
+# TTY-hungry entrypoint interpretation cannot hang the suite here either.
+oc_t --version
 # The model's access path: docker-helper self inside the real container with
 # the Session bearer. Two argv channels are attempted (direct image args and
 # sh -c) because the image entrypoint contract is not pinned here; each
