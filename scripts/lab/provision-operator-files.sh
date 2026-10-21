@@ -266,8 +266,13 @@ merge_into() { # TARGET MODE OWNER:GROUP NEWFILE DEDUPE(auth|line)
     # re-check under the lock: another writer may have replaced the target
     [ ! -L "$target" ] || exit 3
     tmp="$(mktemp -- "$dir/.provision.XXXXXX")" || exit 5
+    # C7/F5: the directory owner can rename or replace the staging pathname at
+    # any moment. Every privileged operation therefore targets the inode
+    # pinned by our own file descriptor — content writes, chmod and chown go
+    # through the fd (its /proc/self/fd path), never through the pathname.
+    exec 8>"$tmp" || { rm -f -- "$tmp"; exit 6; }
     if [ -f "$target" ]; then
-      cat -- "$target" > "$tmp" || { rm -f -- "$tmp"; exit 6; }
+      cat -- "$target" >&8 || { rm -f -- "$tmp"; exec 8>&-; exit 6; }
     fi
     if [ -s "$newfile" ]; then
       # FILENAME==ARGV[1] (not NR==FNR): with an empty or absent existing
@@ -277,23 +282,26 @@ merge_into() { # TARGET MODE OWNER:GROUP NEWFILE DEDUPE(auth|line)
           FILENAME==ARGV[1] { if (dedupe=="auth") seen[$1" "$2]=1; else seen[$0]=1; next }
           { if (dedupe=="auth") { k=$1" "$2; if (!(k in seen)) { seen[k]=1; print } }
             else if (!($0 in seen)) print }' \
-        "$exist" "$newfile" >> "$tmp"; then
-        rm -f -- "$tmp"
-        exit 7
+        "$exist" "$newfile" >&8; then
+        rm -f -- "$tmp"; exec 8>&-; exit 7
       fi
     fi
-    chmod "$mode" "$tmp" || { rm -f -- "$tmp"; exit 8; }
-    chown "$owner_group" "$tmp" || { rm -f -- "$tmp"; exit 9; }
-    # R1: the staging file was created by mktemp (O_EXCL, unpredictable
-    # name, 0600); before publication verify it is still the file we
-    # created — a swapped path is a hostile environment.
-    [ ! -L "$tmp" ] || { rm -f -- "$tmp"; exit 11; }
-    [ "$(stat -c '%04a' -- "$tmp")" = "$mode" ] || { rm -f -- "$tmp"; exit 12; }
-    [ "$(stat -c '%h' -- "$tmp")" = 1 ] || { rm -f -- "$tmp"; exit 13; }
-    mv -f -- "$tmp" "$target" || { rm -f -- "$tmp"; exit 10; }
+    chmod "$mode" /proc/self/fd/8 || { rm -f -- "$tmp"; exec 8>&-; exit 8; }
+    chown "$owner_group" /proc/self/fd/8 || { rm -f -- "$tmp"; exec 8>&-; exit 9; }
+    # Publication is a rename: the staging pathname must still be the pinned
+    # inode at rename time, and the target must be the pinned inode
+    # afterwards. A substitution between the check and the rename is detected
+    # after the fact and fails the run loudly — it is never reported as
+    # success.
+    [ "$(stat -c '%d:%i' -- "$tmp")" = "$(stat -L -c '%d:%i' -- /proc/self/fd/8)" ] \
+        || { rm -f -- "$tmp"; exec 8>&-; exit 11; }
+    mv -f -- "$tmp" "$target" || { rm -f -- "$tmp"; exec 8>&-; exit 10; }
+    [ "$(stat -c '%d:%i' -- "$target")" = "$(stat -L -c '%d:%i' -- /proc/self/fd/8)" ] \
+        || { exec 8>&-; exit 12; }
+    exec 8>&-
     exit 0
   ) 9> "$lock" || rc=$?
-  [ "$rc" = 0 ] || die "update of $target failed (step $rc); previous content preserved"
+  [ "$rc" = 0 ] || die "update of $target failed (step $rc)"
   [ "$(stat -c '%04a' -- "$target")" = "$mode" ] || die "mode verification failed for $target"
   [ "$(stat -c '%U:%G' -- "$target")" = "$owner_group" ] || die "owner verification failed for $target"
 }

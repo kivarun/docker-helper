@@ -248,7 +248,7 @@ rm -f "$AK"; mv "$WORK/ak.real" "$AK"
 cat > "$GUEST_SHIM/chown" <<SH
 #!/bin/sh
 case "\$*" in
-  *.provision.*) exit 1 ;;
+  *"/proc/self/fd/"*) exit 1 ;;
   *) exec /bin/chown "\$@" ;;
 esac
 SH
@@ -380,6 +380,76 @@ if AGENT_USER="$GUEST_USER" LAB_AGENT_SSH_KEY="$KEY_DIR/id_ed25519_opencode" run
 else
   bad "R6/agent-user: the valid username was rejected"
 fi
+
+# --- F5. the publication staging pathname is not a privileged write surface --
+# The publication tmp used to live in the agent-owned .ssh directory and every
+# privileged operation (content write, chmod, chown, rename) went through its
+# PATHNAME. The directory owner can replace that pathname at any moment. A
+# controlled substitution between mktemp and the metadata steps must never
+# redirect root's chmod/chown onto a foreign inode.
+AK_DIR="$(dirname "$AK")"
+f5_reset() {
+  rm -rf "$GUEST_ROOT"; mkdir -p "$GUEST_ROOT/home/$GUEST_USER/.ssh"
+  printf 'op-ssh-entry ssh-ed25519 AAAAOPKEY1 op@host\n' > "$AK"
+  printf 'F5-FOREIGN-MARKER\n' > "$WORK/f5-foreign"
+  chmod 0644 "$WORK/f5-foreign"
+}
+
+# F5/a: a substitution during the merge step must not redirect chmod/chown to
+# the foreign inode. The awk shim swaps the staging pathname to a hardlink of
+# the foreign file the moment the merge awk runs.
+f5_reset
+real_awk="$(command -v awk)"
+cat > "$GUEST_SHIM/awk" <<SH
+#!/bin/sh
+case "\$*" in
+  *dedupe*)
+    for f in "$AK_DIR"/.provision.*; do
+      [ -e "\$f" ] || continue
+      rm -f -- "\$f"
+      ln "$WORK/f5-foreign" "\$f"
+    done
+    exit 0 ;;
+  *) exec "$real_awk" "\$@" ;;
+esac
+SH
+chmod +x "$GUEST_SHIM/awk"
+if execute_guest_body 2>"$WORK/guest.err"; then bad "F5/a: the swapped staging path was tolerated"; else ok "F5/a: a substituted staging pathname fails the update"; fi
+[ "$(stat -c '%04a' "$WORK/f5-foreign")" = "0644" ] \
+  && ok "F5/a: the foreign inode's mode was never touched by root" \
+  || bad "F5/a: root's chmod landed on a substituted foreign inode"
+rm -f "$GUEST_SHIM/awk"
+
+# F5/b: a substitution during the rename step is detected after publication —
+# the run must fail loudly instead of reporting success.
+f5_reset
+real_mv="$(command -v mv)"
+cat > "$GUEST_SHIM/mv" <<SH
+#!/bin/sh
+case "\$*" in
+  *.provision.*)
+    src="\$3"
+    rm -f -- "\$src"
+    ln "$WORK/f5-foreign" "\$src"
+    exit 1 ;;
+  *) exec "$real_mv" "\$@" ;;
+esac
+SH
+chmod +x "$GUEST_SHIM/mv"
+cp "$AK" "$WORK/f5-ak-before"
+if execute_guest_body 2>"$WORK/guest.err"; then bad "F5/b: a rename-time substitution was tolerated"; else ok "F5/b: a rename-time substitution fails the update"; fi
+[ "$(stat -c '%04a' "$WORK/f5-foreign")" = "0644" ] \
+  && ok "F5/b: the foreign inode survived the rename-time substitution untouched" \
+  || bad "F5/b: the foreign inode was modified by the publication path"
+rm -f "$GUEST_SHIM/mv"
+
+# F5/c: without any substitution the merged publication still works and stays
+# idempotent (the fd-pinned path preserves the accepted contract).
+f5_reset
+rm -f "$GUEST_SHIM/awk" "$GUEST_SHIM/mv"
+if execute_guest_body 2>"$WORK/guest.err"; then ok "F5/c: the normal publication path works"; else bad "F5/c: the normal publication path broke: $(tail -1 "$WORK/guest.err" 2>/dev/null || cat "$WORK/out")"; fi
+grep -q 'AAAAOPKEY1' "$AK" && ok "F5/c: the previous entry survived" || bad "F5/c: the previous entry was lost"
+grep -q 'opencode-agent' "$AK" && ok "F5/c: the agent key was published" || bad "F5/c: the agent key is missing"
 
 echo
 printf 'provision-operator-files tests: %d passed, %d failed\n' "$PASS" "$FAIL"
