@@ -186,7 +186,8 @@ execute_guest_body() {
   # per-call capture/out files: concurrent invocations must not clobber
   local gcap="$WORK/guest-captured.$$" gout="$WORK/out.$$" gbody="$WORK/guest-body.$$"
   STREAM_CAPTURE="$gcap" \
-  LAB_AGENT_SSH_KEY="$KEY_DIR/id_ed25519_opencode" \
+  LAB_AGENT_SSH_KEY="${GUEST_SSH_KEY:-$KEY_DIR/id_ed25519_opencode}" \
+  LAB_CA_SOURCE="${GUEST_CA_SRC:-}" \
   LAB_KNOWN_HOSTS_SOURCE="${GUEST_KH_SRC:-}" AGENT_USER="$GUEST_USER" \
   LAB_GUEST_ROOT="$GUEST_ROOT" \
     bash "$REPO/lab/provision-operator-files.sh" >"$gout" 2>&1 || { LAST_GUEST_ERR="$gout"; return 1; }
@@ -399,7 +400,8 @@ trip_etc_ssh_before="$(trip_ssh_state)"
 # redirect root's chmod/chown onto a foreign inode.
 AK_DIR="$(dirname "$AK")"
 f5_reset() {
-  rm -rf "$GUEST_ROOT"; mkdir -p "$GUEST_ROOT/home/$GUEST_USER/.ssh"
+  rm -rf "$GUEST_ROOT"
+  mkdir -p "$GUEST_ROOT/home/$GUEST_USER/.ssh" "$GUEST_ROOT/etc/pki/trust/anchors"
   printf 'op-ssh-entry ssh-ed25519 AAAAOPKEY1 op@host\n' > "$AK"
   printf 'F5-FOREIGN-MARKER\n' > "$WORK/f5-foreign"
   chmod 0644 "$WORK/f5-foreign"
@@ -465,6 +467,66 @@ if execute_guest_body 2>"$WORK/guest.err"; then ok "F5/d: the run succeeds with 
 [ "$(stat -c '%h' "$WORK/f5-foreign")" = 1 ] \
   && ok "F5/d: only the planted NAME was removed; the foreign inode keeps its own link" \
   || bad "F5/d: the foreign inode's link count changed unexpectedly"
+
+# R2: a substitution strictly between staging-file creation and opening must
+# never truncate a foreign inode. The mktemp shim creates the staging file and
+# replaces it with a symlink BEFORE returning — exactly the creation→open gap
+# the old code exposed (exec 8>"$tmp" followed the planted symlink and
+# O_TRUNC'ed its target).
+f5_reset
+real_mktemp="$(command -v mktemp)"
+cat > "$GUEST_SHIM/mktemp" <<SH
+#!/bin/sh
+out="\$("$real_mktemp" "\$@")" || exit 1
+rm -f -- "\$out"
+ln -s "$WORK/f5-foreign" "\$out"
+printf '%s\n' "\$out"
+SH
+chmod +x "$GUEST_SHIM/mktemp"
+if execute_guest_body 2>"$WORK/guest.err"; then ok "R2: the update completes with the substitution shim in place"; else bad "R2: the update failed with the substitution shim in place: $(tail -1 "$WORK/guest.err" 2>/dev/null)"; fi
+[ "$(cat "$WORK/f5-foreign")" = "F5-FOREIGN-MARKER" ] \
+  && ok "R2: the foreign inode was never truncated through the planted symlink" \
+  || bad "R2: root truncated a foreign inode in the creation→open gap"
+[ "$(stat -c '%04a' "$AK")" = "0600" ] \
+  && ok "R2: the published file still carries the exact mode" \
+  || bad "R2: the published file's mode is wrong"
+rm -f "$GUEST_SHIM/mktemp"
+
+# R1: byte-exact transfer — the base64 payload is decoded straight into the
+# pinned fd; command substitution must never strip trailing newlines. Proven
+# with a REAL OpenSSH private key and a real PEM certificate: cmp(source,
+# installed) plus ssh-keygen -y over the installed key.
+r1_key="$WORK/r1-key"
+ssh-keygen -q -t ed25519 -N '' -f "$r1_key" -C 'r1-byte-exact' </dev/null 2>/dev/null \
+  || { printf 'synthetic-key\n' > "$r1_key"; }
+chmod 0600 "$r1_key"
+
+f5_reset
+GUEST_SSH_KEY="$r1_key" execute_guest_body 2>"$WORK/guest.err" \
+  && ok "R1: the guest installer runs with a real OpenSSH key" \
+  || bad "R1: the guest installer failed with a real OpenSSH key: $(tail -1 "$WORK/guest.err" 2>/dev/null)"
+printf 'R1DEBUG src=%s dst=%s\n' "$(stat -c %s "$r1_key")" "$(stat -c %s "$GUEST_ROOT/home/$GUEST_USER/.ssh/id_ed25519_opencode" 2>/dev/null || echo missing)" >&2
+if cmp -s "$r1_key" "$GUEST_ROOT/home/$GUEST_USER/.ssh/id_ed25519_opencode"; then
+  ok "R1: the installed private key is byte-identical to the source"
+else
+  bad "R1: the installed private key differs from the source (trailing newlines lost)"
+fi
+if ssh-keygen -y -f "$GUEST_ROOT/home/$GUEST_USER/.ssh/id_ed25519_opencode" >/dev/null 2>&1; then
+  ok "R1: ssh-keygen parses the installed private key"
+else
+  bad "R1: ssh-keygen cannot parse the installed private key"
+fi
+
+# R1 (CA): the PEM anchor copy is byte-identical to the provisioned source.
+f5_reset
+GUEST_CA_SRC="$WORK/lab-ca" execute_guest_body 2>"$WORK/guest.err" \
+  && ok "R1: the guest installer runs with a real PEM CA" \
+  || bad "R1: the guest installer failed with a real PEM CA: $(tail -3 "$WORK/guest.err" 2>/dev/null | tr '\n' '|')"
+if cmp -s "$WORK/lab-ca" "$GUEST_ROOT/home/$GUEST_USER/.opencode-docker/ca/lab-ca.crt"; then
+  ok "R1: the installed CA copy is byte-identical to the source"
+else
+  bad "R1: the installed CA copy differs from the source (trailing newlines lost)"
+fi
 
 # F5/c: without any substitution the merged publication still works and stays
 # idempotent (the fd-pinned path preserves the accepted contract).

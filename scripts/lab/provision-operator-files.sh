@@ -212,11 +212,60 @@ cat >> "$GUEST" <<'BODY'
 
 AGENT_OCODE="$AGENT_HOME/.opencode-docker"
 
+# R2: creation and opening are ONE atomic O_EXCL step (noclobber + an
+# unpredictable name, or noclobber on a fixed name after an explicit unlink).
+# mktemp-based staging leaves a creation→open gap in which the directory owner
+# can replace the pathname with a symlink, making a subsequent `>` follow it
+# and O_TRUNC a foreign inode. Every open below closes that gap: a planted
+# name of any kind makes the open fail closed instead of following it.
+# Both helpers restore the caller's noclobber state.
+open_fixed_excl() { # PATH FD -> 0 when FD is open on PATH
+  local had=0
+  [ -o noclobber ] && had=1
+  set -o noclobber
+  case "$2" in
+    7) { exec 7>"$1"; } 2>/dev/null ;;
+    8) { exec 8>"$1"; } 2>/dev/null ;;
+    *) return 1 ;;
+  esac
+  local rc=$?
+  [ "$had" = 1 ] || set +o noclobber
+  return "$rc"
+}
+# create+open a NEW unpredictable file under DIR on FD; sets OPEN_EXCL_PATH.
+open_unnamed_excl() { # DIR PREFIX FD -> 0 when FD is open
+  local dir="$1" prefix="$2" fd="$3" attempt cand had=0
+  [ -o noclobber ] && had=1
+  set -o noclobber
+  for attempt in 1 2 3 4 5 6 7 8; do
+    printf -v cand '%s/%s%08x%08x%08x' "$dir" "$prefix" "$RANDOM" "$RANDOM" "$RANDOM"
+    case "$fd" in
+      7) { exec 7>"$cand"; } 2>/dev/null && { OPEN_EXCL_PATH="$cand"; break; } ;;
+      8) { exec 8>"$cand"; } 2>/dev/null && { OPEN_EXCL_PATH="$cand"; break; } ;;
+    esac
+    if [ -L "$cand" ]; then
+      rm -f -- "$cand"
+      [ "$had" = 1 ] || set +o noclobber
+      return 1
+    fi
+  done
+  [ "$had" = 1 ] || set +o noclobber
+  [ -n "${OPEN_EXCL_PATH:-}" ] && [ -n "$cand" ] && [ "${OPEN_EXCL_PATH:-}" = "$cand" ] && return 0
+  return 1
+}
+
 decode_to() { # DEST MODE OWNER:GROUP b64var
   [ ! -L "$1" ] || die "refusing to write through a symlink: $1"
-  local decoded
-  decoded="$(printf '%s' "${!4}" | base64 -d)" || die "cannot decode $1"
-  write_pinned "$1" "$2" "$3" "$decoded"
+  # R1: the decoded stream goes straight into the pinned fd — no command
+  # substitution, so trailing newlines survive byte-exactly.
+  rm -f -- "$1"
+  open_fixed_excl "$1" 8 || die "cannot create $1 safely (a planted name is present)"
+  if ! printf '%s' "${!4}" | base64 -d >&8; then
+    rm -f -- "$1"; exec 8>&-; die "cannot decode to $1"
+  fi
+  chmod "$2" /proc/self/fd/8 || { rm -f -- "$1"; exec 8>&-; die "chmod failed for $1"; }
+  chown "$3" /proc/self/fd/8 || { rm -f -- "$1"; exec 8>&-; die "chown failed for $1"; }
+  exec 8>&-
 }
 
 # C7/F5-class hardening for every root write into an agent-writable parent:
@@ -233,12 +282,7 @@ decode_to() { # DEST MODE OWNER:GROUP b64var
 write_pinned() { # DEST MODE OWNER:GROUP CONTENT
   local dest="$1" mode="$2" owner="$3"
   rm -f -- "$dest"
-  set -o noclobber
-  if ! exec 8>"$dest" 2>/dev/null; then
-    set +o noclobber
-    die "cannot create $dest safely (a planted name is present)"
-  fi
-  set +o noclobber
+  open_fixed_excl "$dest" 8 || die "cannot create $dest safely (a planted name is present)"
   printf '%s' "$4" >&8 || { rm -f -- "$dest"; exec 8>&-; die "cannot write $dest"; }
   chmod "$mode" /proc/self/fd/8 || { rm -f -- "$dest"; exec 8>&-; die "chmod failed for $dest"; }
   chown "$owner" /proc/self/fd/8 || { rm -f -- "$dest"; exec 8>&-; die "chown failed for $dest"; }
@@ -291,12 +335,14 @@ merge_into() { # TARGET MODE OWNER:GROUP NEWFILE DEDUPE(auth|line)
     flock -x 9 || exit 4
     # re-check under the lock: another writer may have replaced the target
     [ ! -L "$target" ] || exit 3
-    tmp="$(mktemp -- "$dir/.provision.XXXXXX")" || exit 5
+    # R2: creation and opening are one atomic O_EXCL step — see open_unnamed_excl.
+    OPEN_EXCL_PATH=""
+    open_unnamed_excl "$dir" ".provision." 8 || exit 5
+    tmp="$OPEN_EXCL_PATH"
     # C7/F5: the directory owner can rename or replace the staging pathname at
     # any moment. Every privileged operation therefore targets the inode
     # pinned by our own file descriptor — content writes, chmod and chown go
     # through the fd (its /proc/self/fd path), never through the pathname.
-    exec 8>"$tmp" || { rm -f -- "$tmp"; exit 6; }
     if [ -f "$target" ]; then
       cat -- "$target" >&8 || { rm -f -- "$tmp"; exec 8>&-; exit 6; }
     fi
@@ -341,16 +387,23 @@ if [ -n "${SSH_KEY_B64:-}" ]; then
   # duplicating and never removing existing entries. R1: the staging file is
   # a mktemp file inside the private lock directory, never a predictable
   # path under the agent's control.
-  new_auth="$(mktemp "$(lab_lock_dir)/staging.XXXXXX")" || die "cannot stage the agent key"
-  awk '{print $1, $2, "opencode-agent"}' "$AGENT_HOME/.ssh/id_ed25519_opencode.pub" > "$new_auth"
+  OPEN_EXCL_PATH=""
+  open_unnamed_excl "$(lab_lock_dir)" "staging." 7 || die "cannot stage the agent key"
+  new_auth="$OPEN_EXCL_PATH"
+  awk '{print $1, $2, "opencode-agent"}' "$AGENT_HOME/.ssh/id_ed25519_opencode.pub" >&7
   merge_into "$AGENT_HOME/.ssh/authorized_keys" 0600 "$AGENT_USER:$AGENT_USER" "$new_auth" auth
+  exec 7>&-
   rm -f -- "$new_auth"
   log "agent ssh key installed (0600) and authorized_keys updated"
 fi
 
 # --- corporate CA ------------------------------------------------------------
 if [ -n "${CA_B64:-}" ]; then
-  decode_to "$ETC/pki/trust/anchors/$CA_NAME" 0644 "root:root" CA_B64
+  # LAB_GUEST_ROOT test runs execute as the test user, which owns the whole
+  # simulated root tree; real guest runs execute as root.
+  anchor_owner="root:root"
+  [ -z "$LAB_GUEST_ROOT" ] || anchor_owner="$(id -un):$(id -gn)"
+  decode_to "$ETC/pki/trust/anchors/$CA_NAME" 0644 "$anchor_owner" CA_B64
   if [ -z "$LAB_GUEST_ROOT" ]; then
     update-ca-certificates >/dev/null 2>&1 || die "update-ca-certificates failed"
     # A real positive check: the anchor must be accepted as a trusted root out
@@ -360,7 +413,7 @@ if [ -n "${CA_B64:-}" ]; then
   fi
   # Helper-owned copy for Docker Helper CA injection (lab-managed file).
   install -d -m 0755 "$ETC/docker-helper"
-  decode_to "$ETC/docker-helper/$CA_NAME.crt" 0644 "root:root" CA_B64
+  decode_to "$ETC/docker-helper/$CA_NAME.crt" 0644 "$anchor_owner" CA_B64
   command -v restorecon >/dev/null 2>&1 && restorecon "$ETC/docker-helper/$CA_NAME.crt"
   # Container-facing lab copy (agent-owned; the relabel touches only this copy).
   install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" "$AGENT_OCODE/ca"
@@ -427,9 +480,12 @@ if [ -n "${KNOWN_HOSTS_B64:-}" ]; then
   # Merge WITHOUT truncation into the agent's own known_hosts: existing
   # entries (including hashed ones) survive every run. R1: staging happens
   # in the private lock directory via mktemp.
-  new_kh="$(mktemp "$(lab_lock_dir)/staging.XXXXXX")" || die "cannot stage the known_hosts update"
-  printf '%s' "${KNOWN_HOSTS_B64}" | base64 -d > "$new_kh"
+  OPEN_EXCL_PATH=""
+  open_unnamed_excl "$(lab_lock_dir)" "staging." 7 || die "cannot stage the known_hosts update"
+  new_kh="$OPEN_EXCL_PATH"
+  printf '%s' "${KNOWN_HOSTS_B64}" | base64 -d >&7
   merge_into "$AGENT_HOME/.ssh/known_hosts" 0644 "$AGENT_USER:$AGENT_USER" "$new_kh" line
+  exec 7>&-
   rm -f -- "$new_kh"
   # Container-facing copy (public material only; mounted read-only). This is
   # a provisioner-owned derived copy: the operator source is its single
