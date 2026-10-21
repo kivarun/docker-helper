@@ -258,6 +258,18 @@ cmd_status() {
   fi
 }
 
+# UAT-4/F2: the lab VM is IPv4-only at the guest OS level. This operation
+# sets ipv6.disable=1 into the guest's boot configuration through the same
+# supported sources as the MAC selector bootstrap (see vm_set_ipv6_disable in
+# the harness) and fails closed unless an on-disk boot source verifiably
+# carries the token. Idempotent; guest-only; safe to re-run on a partially
+# provisioned VM.
+cmd_set_ipv6_disable() {
+  vm_attach
+  vm_running || fail "VM is not running (run 'start'; the boot config is set while the guest is up)"
+  vm_set_ipv6_disable
+}
+
 cmd_ssh() {
   vm_attach
   vm_running || fail "VM is not running (run 'start')"
@@ -306,6 +318,7 @@ $PREFIX <operation>
   stop              gracefully power off the guest
   status            report lifecycle state
   ssh [cmd...]      interactive SSH, or run a remote command
+  set-ipv6-disable  set ipv6.disable=1 in the guest boot config (fail-closed)
   destroy [-y]      remove the VM workdir (explicit confirmation)
 
 Env: DEV_VM_DIR, DEV_VM_SSH_PORT, DEV_VM_ACCEL, DEV_VM_NET_ISOLATED
@@ -320,7 +333,8 @@ case "$op" in
   stop)    cmd_stop ;;
   status)  cmd_status ;;
   ssh)     cmd_ssh "$@" ;;
+  set-ipv6-disable) cmd_set_ipv6_disable ;;
   destroy) cmd_destroy "$@" ;;
   ""|-h|--help|help) usage ;;
-  *) fail "unknown operation '$op' (create|start|stop|status|ssh|destroy)" ;;
+  *) fail "unknown operation '$op' (create|start|stop|status|ssh|set-ipv6-disable|destroy)" ;;
 esac

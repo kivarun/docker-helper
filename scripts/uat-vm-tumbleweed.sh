@@ -268,7 +268,12 @@ vm_write_seed_iso() {
 # other value enables it (so DEV_VM_NET_ISOLATED=0 in the local driver actually
 # opens the network instead of being treated as a non-empty "on").
 vm_netdev() {
-  local netdev="user,id=net0,hostfwd=tcp:127.0.0.1:$VM_SSH_PORT-:22"
+  # UAT-4/F1: the lab VM is IPv4-only in BOTH postures. The slirp user netdev
+  # carries ipv6=off (a documented QEMU user-networking option, supported
+  # since QEMU 2.6; an unsupported build fails the boot fail-closed at the
+  # netdev parse). restrict=on applies ONLY to the isolated posture, and the
+  # SSH hostfwd stays loopback-only. No bridge, no TAP, no second NIC.
+  local netdev="user,id=net0,ipv6=off,hostfwd=tcp:127.0.0.1:$VM_SSH_PORT-:22"
   case "${VM_NET_ISOLATED:-}" in
     ""|0|no|off|false) ;;
     *) netdev="$netdev,restrict=on" ;;
@@ -525,4 +530,113 @@ RMT
   if ! printf '%s\n' "$out" | grep -q "MAC_TOKENS-DONE"; then
     vm_fail "MAC token bootstrap script did not complete"
   fi
+}
+
+# UAT-4/F2: the lab VM is IPv4-only at the GUEST OS level, not merely
+# unrouted by QEMU. ipv6.disable=1 is set into the kernel command line
+# through the same supported boot-config sources as the MAC selector tokens
+# (/etc/kernel/cmdline, GRUB_CMDLINE_LINUX_DEFAULT, on-disk BLS entries),
+# removing any prior ipv6.disable tokens first (idempotent), regenerating the
+# bootloader config, and FAILING CLOSED unless at least one on-disk boot
+# source verifiably carries ipv6.disable=1 afterwards. Guest-only: nothing
+# outside the VM is touched, SELinux policy is untouched, the existing disk
+# is reused, and the setting survives the reboot because it lives in the
+# bootloader configuration.
+vm_set_ipv6_disable() {
+  vm_log "disabling IPv6 at the guest OS level (ipv6.disable=1 in the boot config)"
+  local out
+  out="$(vm_ssh 'sudo bash -s' <<'RMT'
+set -euo pipefail
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+log(){ echo "[vm] $*"; }
+# LAB_GUEST_ROOT test seam (behavioral tests execute this guest script
+# against a private tree; the real VM leaves it unset and uses real paths).
+ROOT_PREFIX="${LAB_GUEST_ROOT:-}"
+
+# set_cmdline6 removes any prior ipv6.disable tokens and appends
+# ipv6.disable=1. Works for /etc/kernel/cmdline, GRUB_CMDLINE_LINUX_DEFAULT
+# and BLS options lines alike.
+set_cmdline6() {
+  local old="$1" out=""
+  local t
+  for t in $old; do
+    case "$t" in
+      ipv6.disable=*) ;;
+      *) out="$out $t" ;;
+    esac
+  done
+  printf '%s ipv6.disable=1' "$out"
+}
+
+updated=0
+if [ -f "${ROOT_PREFIX}/etc/kernel/cmdline" ]; then
+  cp "${ROOT_PREFIX}/etc/kernel/cmdline" "${ROOT_PREFIX}/etc/kernel/cmdline.orig" || true
+  printf '%s' "$(set_cmdline6 "$(cat "${ROOT_PREFIX}/etc/kernel/cmdline")")" > "${ROOT_PREFIX}/etc/kernel/cmdline"
+  log "/etc/kernel/cmdline now: $(cat "${ROOT_PREFIX}/etc/kernel/cmdline")"
+  updated=$((updated + 1))
+fi
+
+if [ -f "${ROOT_PREFIX}/etc/default/grub" ]; then
+  cp "${ROOT_PREFIX}/etc/default/grub" "${ROOT_PREFIX}/etc/default/grub.orig" || true
+  inner="$(sed -n 's/^GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"$/\1/p' "${ROOT_PREFIX}/etc/default/grub" | tail -1)"
+  [ -n "$inner" ] || inner="$(sed -n 's/^GRUB_CMDLINE_LINUX_DEFAULT=\(.*\)$/\1/p' "${ROOT_PREFIX}/etc/default/grub" | tail -1 | tr -d '"')"
+  inner="$(set_cmdline6 "$inner")"
+  sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"$inner\"|" "${ROOT_PREFIX}/etc/default/grub"
+  log "GRUB_CMDLINE_LINUX_DEFAULT now: $(sed -n 's/^GRUB_CMDLINE_LINUX_DEFAULT=//p' "${ROOT_PREFIX}/etc/default/grub")"
+  updated=$((updated + 1))
+fi
+
+log "regenerating bootloader config:"
+if command -v update-bootloader >/dev/null; then
+  update-bootloader --config >/tmp/ub6.log 2>&1 && log "update-bootloader --config OK" || { log "update-bootloader returned nonzero:"; tail -20 /tmp/ub6.log; }
+fi
+if command -v sdbootutil >/dev/null; then
+  sdbootutil update-all-entries >/tmp/sdb6.log 2>&1 && log "sdbootutil update-all-entries OK" || { log "sdbootutil returned nonzero:"; tail -20 /tmp/sdb6.log; }
+fi
+if [ -d "${ROOT_PREFIX}/boot/grub2" ] && command -v grub2-mkconfig >/dev/null; then
+  grub2-mkconfig -o "${ROOT_PREFIX}/boot/grub2/grub.cfg" >/tmp/gmk6.log 2>&1 && log "grub2-mkconfig OK" || { log "grub2-mkconfig returned nonzero:"; tail -20 /tmp/gmk6.log; }
+fi
+
+# Deterministic fallback: every on-disk BLS entry carries the token
+# (GRUB2-BLS accepts direct edits to the Type #1 .conf files).
+BLS_FILES="$(find "${ROOT_PREFIX}/boot" -path '*/loader/entries/*.conf' 2>/dev/null || true)"
+if [ -z "$BLS_FILES" ]; then
+  log "no BLS .conf entries found under /boot (bootloader may be classic grub2)"
+else
+  for f in $BLS_FILES; do
+    opts="$(sed -n 's/^options[[:space:]]*//p' "$f" | head -1)"
+    newopts="$(set_cmdline6 "$opts")"
+    sed -i -E "s|^(options[[:space:]]+).*|\1$newopts|" "$f"
+    log "BLS entry updated: $f"
+    updated=$((updated + 1))
+  done
+fi
+
+# Fail-closed verification: at least one on-disk boot source must verifiably
+# carry ipv6.disable=1 after the update; a pre-existing source that did not
+# receive the token is also a failure. The setting must survive the reboot
+# because it lives in these files.
+carriers=0
+if [ -f "${ROOT_PREFIX}/etc/kernel/cmdline" ] && grep -qw 'ipv6.disable=1' "${ROOT_PREFIX}/etc/kernel/cmdline"; then
+  carriers=$((carriers + 1))
+fi
+if [ -f "${ROOT_PREFIX}/etc/default/grub" ] && grep -Fq 'GRUB_CMDLINE_LINUX_DEFAULT=' "${ROOT_PREFIX}/etc/default/grub" && grep -Fq 'ipv6.disable=1' "${ROOT_PREFIX}/etc/default/grub"; then
+  carriers=$((carriers + 1))
+fi
+for f in $BLS_FILES; do
+  grep -qw 'ipv6.disable=1' "$f" && carriers=$((carriers + 1))
+done
+if [ "$carriers" = 0 ]; then
+  log "FAIL-CLOSED: no on-disk boot source carries ipv6.disable=1"
+  exit 1
+fi
+log "ipv6.disable=1 verified in $carriers on-disk boot source(s)"
+echo "IPV6-DISABLE-DONE"
+RMT
+)"
+  printf '%s\n' "$out"
+  if ! printf '%s\n' "$out" | grep -q "IPV6-DISABLE-DONE"; then
+    vm_fail "the guest ipv6.disable bootstrap did not complete (no boot source carries ipv6.disable=1)"
+  fi
+  return 0
 }

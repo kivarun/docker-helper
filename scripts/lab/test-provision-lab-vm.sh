@@ -55,6 +55,10 @@ REC="$WORK/rec"; : > "$REC"
 cat > "$REPO/dev-vm-local.sh" <<SH
 #!/usr/bin/env bash
 case "\${1:-}" in
+  set-ipv6-disable)
+    echo "set-ipv6-disable" >> "$REC"
+    [ "\${FAIL_ON:-}" = ipv6 ] && { echo "stub: ipv6.disable bootstrap failed" >&2; exit 1; }
+    exit 0 ;;
   status)
     printf 'state:    %s\n' "\$(cat "$STATE")"
     printf 'workdir:  %s\n' "$WORK/vmstate"
@@ -562,6 +566,29 @@ if [ "$RC" = 0 ]; then
   ok "UAT-3/F1: the diagnostics complete when the gate runs in the agent's context"
 else
   bad "UAT-3/F1: the diagnostics failed although the gate ran as agent"
+fi
+
+# --- UAT-4/F2. the guest boot config is set while the VM is up, fail-closed --
+: > "$REC"; echo stopped > "$STATE"; rm -f "$SNAPMARK"
+run_driver online >/dev/null 2>&1
+ipv6_ln="$(printf '%s' "$(cat "$REC")" | grep -n '^set-ipv6-disable' | head -1 | cut -d: -f1)"
+stop_ln="$(printf '%s' "$(cat "$REC")" | grep -n '^stop' | head -1 | cut -d: -f1)"
+if [ -n "$ipv6_ln" ] && [ -n "$stop_ln" ] && [ "$ipv6_ln" -lt "$stop_ln" ]; then
+  ok "UAT-4/F2: the ipv6.disable bootstrap runs while the VM is up (before the window closes)"
+else
+  bad "UAT-4/F2: the ipv6.disable bootstrap ordering is wrong (ipv6=$ipv6_ln stop=$stop_ln)"
+fi
+echo stopped > "$STATE"; rm -f "$SNAPMARK"
+FAIL_ON=ipv6 run_driver online >/dev/null 2>&1
+if [ "$RC" != 0 ]; then
+  ok "UAT-4/F2: a failed ipv6.disable bootstrap fails the online stage"
+else
+  bad "UAT-4/F2: a failed ipv6.disable bootstrap was tolerated"
+fi
+if printf '%s' "$OUT" | grep -q "setting ipv6.disable=1 in the guest boot config failed"; then
+  ok "UAT-4/F2: the failure names the ipv6.disable step"
+else
+  bad "UAT-4/F2: the ipv6.disable failure reason is missing"
 fi
 
 # --- UAT-3b. the gate command is a SINGLE bash process (really executed) -----

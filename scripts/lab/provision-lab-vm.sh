@@ -342,6 +342,13 @@ stage_online() {
 
   pull_pinned_images
 
+  # UAT-4/F2: the lab VM is IPv4-only — ipv6.disable=1 goes into the guest
+  # boot config while the VM is up; the reboot into the isolated posture
+  # applies it and the probe verifies it. Fail-closed: a boot config that
+  # does not verifiably carry the token fails the online stage.
+  log "disabling IPv6 at the guest OS level (persistent boot config)"
+  "$DEVVM" set-ipv6-disable || die "setting ipv6.disable=1 in the guest boot config failed"
+
   close_online_window
   log "online stage done (VM stopped; the isolated posture is restored on the next boot)"
 }
