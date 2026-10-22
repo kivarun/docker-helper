@@ -36,6 +36,15 @@ PASS=0
 FAIL=0
 ok()  { PASS=$((PASS+1)); printf 'ok   - %s\n' "$1"; }
 bad() { FAIL=$((FAIL+1)); printf 'FAIL - %s\n' "$1"; }
+check() { # description expected actual
+  if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (want '$2', got '$3')"; fi
+}
+# A misspelled or missing helper must count as a test failure even though
+# this suite intentionally accumulates assertion errors without set -e.
+command_not_found_handle() {
+  bad "unknown test command or helper: $1"
+  return 127
+}
 
 has() { # desc pattern (extended regex)
   if grep -Eq -- "$2" "$INTEG"; then ok "$1"; else bad "$1 (pattern absent: $2)"; fi
