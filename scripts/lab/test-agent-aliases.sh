@@ -92,6 +92,10 @@ SH
 cat > "$SHIM/docker" <<'SH'
 #!/bin/sh
 printf '%s\n' "$*" >> "$DOCKER_REC"
+# A real Docker CLI accepts "run" as the subcommand. The UAT-8 regression
+# wrongly built argv=("docker" "run" ...) and called docker "${argv[@]}",
+# which executes "docker docker run" and fails with Docker rc=125.
+[ "${1:-}" = run ] || { echo "DOCKER_STUB_INVALID_SUBCOMMAND" >&2; exit 125; }
 [ -n "${STUB_SLEEP:-}" ] && sleep "${STUB_SLEEP_SECONDS:-30}"
 exit 0
 SH
@@ -176,6 +180,10 @@ chmod 0600 "$OPENCODE_AGENT_SSH_KEY"
 : > "$DH_REC"; : > "$DOCKER_REC"
 probe_stdout="$( cd "$WS" && oc-probe 'docker-helper self --json' )"
 pargv="$(cat "$DOCKER_REC")"
+case "$pargv" in
+  'run --rm -it '*) ok "oc-probe calls Docker with exactly one run subcommand" ;;
+  *) bad "oc-probe passed a wrong first Docker argument (want run, not docker)" ;;
+esac
 contains "oc-probe overrides the entrypoint to /bin/sh" "--entrypoint /bin/sh" "$pargv"
 not_contains "oc-probe does not hand the payload to the image entrypoint bare" "--entrypoint /bin/sh $WS" "$(printf '%s' "$pargv" | sed 's/-c /-c PLACEHOLDER /')"
 contains "oc-probe runs the payload through -c" "-c docker-helper self --json" "$pargv"
@@ -203,6 +211,10 @@ export DH_HELP_WORKSPACE=1
 
 dh="$(cat "$DH_REC" 2>/dev/null || true)"
 dargv="$(cat "$DOCKER_REC" 2>/dev/null || true)"
+case "$dargv" in
+  'run --rm -it '*) ok "oc calls Docker with exactly one run subcommand" ;;
+  *) bad "oc passed a wrong first Docker argument (want run, not docker)" ;;
+esac
 
 contains "launch creates a session for \$PWD (--workspace CLI)" "create session create --workspace $WS" "$dh"
 contains "launch deletes the session (positional SESSION_ID)" "delete session delete dhs_TEST" "$dh"
