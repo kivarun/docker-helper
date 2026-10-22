@@ -189,6 +189,21 @@ lacks "the self result cannot be masked by trailing boundary printfs" \
 lacks "mandatory negative TLS evidence cannot be skipped for missing curl" \
   'skip "in-container TLS check (curl is not available inside the image)"'
 
+# --- UAT-8b: the real VM exposed a Docker argv and verdict false-positive -----
+has "the model launch status is recorded independently of probe results" \
+  'VERSION_RC=%s'
+has "runner propagates the version launch rc after all probes" \
+  'exit "\$version_rc"'
+has "probe posture checks stop before the shell payload" \
+  'pargv_opts='
+has "probe mount absence checks examine options, not probe source code" \
+  '^not_contains "the probe container has no docker.sock".*"\$pargv_opts"'
+has "probe admin-token absence checks examine options" \
+  '^not_contains "the probe container has no admin token".*"\$pargv_opts"'
+has "probe principal credential absence checks examine options" \
+  '^not_contains "the probe container has no principal credential".*"\$pargv_opts"'
+
+
 echo
 printf 'integration hygiene tests: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
