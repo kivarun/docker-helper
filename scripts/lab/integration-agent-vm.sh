@@ -274,6 +274,9 @@ probe_run() { # NAME BODY [TIMEOUT] -> one bounded probe, framed, recorded
         source "$HOME/.bash_aliases"
         oc-probe "$OC_PROBE_PAYLOAD"
       ' 2>/dev/null)"; then lrc=0; else lrc=$?; fi
+  # Docker -it under script(1) emits CRLF; normalize before line-anchored
+  # PROBE_BEGIN / PROBE_END and numeric PROBE_RC parsing.
+  raw="${raw//$'\r'/}"
   printf '%s\n' "$lrc" > "$PROBE_DIR/$name.launchrc"
   printf '%s\n' "$raw" > "$PROBE_DIR/$name.raw"
 }
@@ -308,10 +311,14 @@ fi
 # bearer is refused by the daemon; the principal credential never
 # substitutes the Session bearer; docker.sock and any ADMIN* env are absent
 # inside the container (counted, never printed).
-probe_run self 'docker-helper self --json; printf "PROBE_SOCK=%s\n" "$(test -S /var/run/docker.sock && echo present || echo absent)"; printf "PROBE_ADMIN_ENV=%s\n" "$(printenv | grep -c "^ADMIN" || true)"'
+# Keep authentication rc authoritative: later boundary printfs must not
+# overwrite the result of docker-helper self.
+probe_run self 'docker-helper self --json'
+probe_run boundary 'printf "PROBE_SOCK=%s\n" "$(test -S /var/run/docker.sock && echo present || echo absent)"; printf "PROBE_ADMIN_ENV=%s\n" "$(printenv | grep -c "^ADMIN" || true)"'
 probe_run nobearer 'env -u DOCKER_HELPER_SESSION_TOKEN docker-helper self --json'
 probe_run wrongbearer 'DOCKER_HELPER_SESSION_TOKEN=dht_invalid_probe_value docker-helper self --json'
-probe_run princred 'env -u DOCKER_HELPER_SESSION_TOKEN docker-helper self --json; if [ ! -e "$HOME/.config/docker-helper/credential.token" ]; then echo PRINCIPAL_CRED_ABSENT; fi'
+# Preserve the denial rc even after emitting the credential-absence marker.
+probe_run princred 'rc=0; env -u DOCKER_HELPER_SESSION_TOKEN docker-helper self --json || rc=$?; if [ ! -e "$HOME/.config/docker-helper/credential.token" ]; then echo PRINCIPAL_CRED_ABSENT; fi; (exit "$rc")'
 # UAT-8 networked mode: the provider gate runs INSIDE the container (its env
 # is the launch's env); the decision evidence is recorded for the outer
 # script, which owns the pass/fail/skip verdicts. A missing provider is
@@ -430,6 +437,15 @@ case "$P_RC" in
   *) bad "docker-helper self did not execute cleanly inside the container (rc ${P_RC:-absent})" ;;
 esac
 contains "model self via the Session bearer reports a session" '"type": "session"' "$P_OUT"
+# The boundary probe is a distinct, bounded container launch with its own
+# exit-status evidence (rather than masking self's exit with printf).
+boundary_launch="$(probe_rc boundary)"
+probe_parse boundary
+if [ "$boundary_launch" = 0 ] && [ "$P_RC" = 0 ]; then
+  ok "the boundary probe executed inside the container"
+else
+  bad "the boundary probe failed (launch rc $boundary_launch, in-container rc ${P_RC:-absent})"
+fi
 contains "docker.sock is absent inside the container" "PROBE_SOCK=absent" "$P_OUT"
 contains "no ADMIN* environment reaches the container" "PROBE_ADMIN_ENV=0" "$P_OUT"
 probe_parse nobearer
@@ -536,6 +552,8 @@ if raw="$(timeout 90 bash -c '
   source "$HOME/.bash_aliases"
   oc-probe "$TLS_PROBE_CMD"
 ')"; then tlrc=0; else tlrc=$?; fi
+# TLS marker lines also arrive through Docker's PTY as CRLF.
+raw="${raw//$'\r'/}"
 printf '%s\n' "$tlrc" > "$TLS_LAUNCH_RC"
 printf '%s\n' "$raw" > "$TLS_OUT"
 SH
@@ -554,7 +572,7 @@ SH
          || ! printf '%s' "$tls_out" | grep -q '^TLS_END$'; then
       bad "the TLS probe output is not framed (no TLS_BEGIN/TLS_END) — no verdict without the marker evidence"
     elif grep -q 'NO_CURL_IN_CONTAINER' "$RUN_DIR/tls.out"; then
-      skip "in-container TLS check (curl is not available inside the image)"
+      bad "in-container TLS check unavailable: curl is missing (mandatory evidence)"
     else
       tls_rc="$(sed -n 's/^TLS_RC=//p' "$RUN_DIR/tls.out" | head -1)"
       tls_text="$(sed -n '/^TLS_BEGIN$/,/^TLS_END$/p' "$RUN_DIR/tls.out" | sed '1d;$d' | grep -v '^TLS_RC=')"
