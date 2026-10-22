@@ -335,6 +335,10 @@ if [ "$INTEGRATION_NETWORKED" = 1 ]; then
 else
   printf 'ISOLATED_MODE\n' > "$PROBE_DIR/llmping.decision"
 fi
+# Preserve the model launch result across subsequent probe launches. The
+# final probe's success must never turn an OpenCode failure into runner rc=0.
+printf 'VERSION_RC=%s\n' "$version_rc" >> "$ARGV_REC"
+exit "$version_rc"
 SH
 chmod 0755 "$RUNNER"
 # Recorder files are pre-created agent-owned (0600) in the agent-owned 0750
@@ -481,6 +485,11 @@ fi
 # the probe launches reuse the canonical posture: the same isolation flags
 # and the same boundary, recorded from the probe launches themselves
 pargv="$(cat "$ARGV_PROBE")"
+# Recorder lines include the probe's /bin/sh -c PAYLOAD after the image.
+# The code being tested intentionally mentions docker.sock, ADMIN and the
+# principal credential; these strings are not Docker mount/env OPTIONS.
+# Check options only, stopping at the payload delimiter on EACH launch.
+pargv_opts="$(printf '%s\n' "$pargv" | sed 's/ -c .*//')"
 contains "the probe container runs as the agent uid" "--user $(id -u "$AGENT_USER"):$(id -g "$AGENT_USER")" "$pargv"
 contains "the probe container drops caps" "--cap-drop ALL" "$pargv"
 contains "the probe container sets no-new-privileges" "no-new-privileges=true" "$pargv"
@@ -488,9 +497,9 @@ contains "the probe container runs in docker_helper_container_t" "label=type:doc
 contains "the probe workspace is a private relabel" ":/workspace:Z" "$pargv"
 contains "the probe helper runtime dir is read-only" "/run/docker-helper:ro" "$pargv"
 contains "the probe container gets the session bearer env" "-e DOCKER_HELPER_SESSION_TOKEN" "$pargv"
-not_contains "the probe container has no docker.sock" "docker.sock" "$pargv"
-not_contains "the probe container has no admin token" "ADMIN" "$pargv"
-not_contains "the probe container has no principal credential" "/.config/docker-helper" "$pargv"
+not_contains "the probe container has no docker.sock" "docker.sock" "$pargv_opts"
+not_contains "the probe container has no admin token" "ADMIN" "$pargv_opts"
+not_contains "the probe container has no principal credential" "/.config/docker-helper" "$pargv_opts"
 
 # --- 11. a failing launcher propagates a nonzero exit status ----------------
 sudo -u "$AGENT_USER" env ARGV_REC="$ARGV_FAIL" SHIM_DIR="$SHIM" FAIL_SESSION_CREATE=1 \
