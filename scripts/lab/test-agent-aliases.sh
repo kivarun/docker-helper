@@ -366,13 +366,14 @@ $agent_ssh_mount" \
   "$(printf '%s' "$mounted_srcs" | sed '/^$/d')"
 
 # --- 7a. GH_AGENT_TOKEN is opt-in -------------------------------------------
+# The operator's shell may legitimately export GH_AGENT_TOKEN. Test both
+# branches in isolated subshells instead of assuming an empty host environment
+# or clearing the operator's value as a side effect of the test.
 : > "$DOCKER_REC"
-( cd "$WS" && oc echo hi )
+( unset GH_AGENT_TOKEN; cd "$WS" && oc echo hi )
 not_contains "GH_AGENT_TOKEN is not passed by default" "-e GH_AGENT_TOKEN" "$(cat "$DOCKER_REC")"
-export GH_AGENT_TOKEN=gh-agent-token-marker
 : > "$DOCKER_REC"
-( cd "$WS" && oc echo hi )
-unset GH_AGENT_TOKEN
+( export GH_AGENT_TOKEN=gh-agent-token-marker; cd "$WS" && oc echo hi )
 contains "GH_AGENT_TOKEN passed only when explicitly exported" "-e GH_AGENT_TOKEN" "$(cat "$DOCKER_REC")"
 
 # --- 7b. ambiguous CA provisioning fails the launch -------------------------
