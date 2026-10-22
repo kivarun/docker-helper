@@ -458,8 +458,10 @@ _oc_launch() (
         init_mount=(-v "$init_copy:/sbin/docker-init:ro,z")
     fi
 
+    # This array contains argv FOR docker(), not the docker executable itself.
+    # Including "docker" here made every launch "docker docker run" (rc 125).
     local -a run_args=(
-        docker run --rm -it
+        run --rm -it
         --init
         "${user_opt[@]}"
         --cap-drop ALL
