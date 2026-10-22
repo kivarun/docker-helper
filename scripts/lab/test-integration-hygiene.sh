@@ -224,6 +224,44 @@ has "the probe's exit status is read back from diag_exec evidence" \
 has "the TLS probe executes through diag_exec" 'diag_exec tls-probe 90'
 has "the TLS evidence directory is private" 'install -d -m 0750 -o "\$AGENT_USER"'
 
+# --- UAT-8d. provable ownership and fail-closed diagnostics ------------------
+# Ownership evidence, never global diffs: the diagnostic containers carry a
+# unique run identity plus labels, the forced removal verifies them first,
+# the Sessions are registered by the daemon's own workspace attribution, and
+# a failed session list refuses the cleanup instead of proceeding empty.
+LAB_LIB="$SRC_DIR/lab"
+fhas() { # desc pattern file (extended regex against one file)
+  if grep -Eq -- "$2" "$3"; then ok "$1"; else bad "$1 (pattern absent: $2)"; fi
+}
+flacks() { # desc pattern file (fixed string forbidden in one file)
+  if grep -qF -- "$2" "$3"; then bad "$1 (forbidden pattern present: $2)"; else ok "$1"; fi
+}
+
+fhas "the diagnostic containers carry a run-identity label" \
+  'lab\.diagnostic\.runid=\$DIAG_RUNID' "$LAB_LIB/lab-diag-lib.sh"
+fhas "the owned-removal verification reads the runid label" \
+  'index \.Config\.Labels "lab\.diagnostic\.runid"' "$LAB_LIB/lab-diag-lib.sh"
+fhas "the forced removal happens only after verification" \
+  'docker rm -f "\$name"' "$LAB_LIB/lab-diag-lib.sh"
+flacks "no image-ancestor diff cleanup remains" 'ancestor=' "$LAB_LIB/lab-diag-lib.sh"
+fhas "sessions are registered through the daemon's own list" \
+  'docker-helper session list --json' "$LAB_LIB/lab-diag-lib.sh"
+fhas "the registration filters by the run's own workspace" \
+  'select\(\.workspace == \$ws\)' "$LAB_LIB/lab-diag-lib.sh"
+fhas "a failed session list refuses the cleanup" 'refused-list-error' \
+  "$LAB_LIB/lab-diag-lib.sh"
+flacks "the session registration never hides list errors" \
+  'session list --json 2>/dev/null) || true' "$LAB_LIB/lab-diag-lib.sh"
+fhas "the canonical argv carries the LLM provider flags" \
+  'out\+=\(-e LLM_SERVER -e LLM_KEY\)' "$LAB_LIB/agent-aliases.sh"
+fhas "the evidence print path is sanitized" \
+  'diag_sanitize "\$state_line"' "$LAB_LIB/diagnose-launch.sh"
+fhas "the process-list print path is sanitized" \
+  'diag_sanitize "\$procs_line"' "$LAB_LIB/diagnose-launch.sh"
+fhas "observability failures are recorded explicitly" \
+  'UNAVAILABLE \(the docker inspect/ps evidence could not be collected\)' \
+  "$LAB_LIB/diagnose-launch.sh"
+
 echo
 printf 'integration hygiene tests: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

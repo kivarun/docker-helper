@@ -225,8 +225,13 @@ _oc_compose_mounts_env() {
         -v "$helper_runtime_dir:/run/docker-helper:ro"
     )
 
-    # Model capability flags carried by the operator launcher.
+    # Model capability flags carried by the operator launcher, and the model
+    # provider environment: docker resolves `-e NAME` from the launcher's own
+    # environment at run time, so the values never appear in the docker argv,
+    # any log, or any report (UAT-8d: these two flags were lost in the UAT-8c
+    # refactor and are restored here to the exact eeeceacc contract).
     out+=(-e OPENCODE_EXPERIMENTAL_LSP_TOOL=true -e OPENCODE_ENABLE_EXA=1)
+    out+=(-e LLM_SERVER -e LLM_KEY)
     [[ -n "${GH_AGENT_TOKEN:-}" ]] && out+=(-e GH_AGENT_TOKEN)
 
     # --- corporate CA (lab-owned copy; never a system CA file) ---------------
@@ -301,8 +306,16 @@ _oc_compose_mounts_env() {
 _oc_verify_init_copy() {
     local opencode_home="${OPENCODE_DOCKER_HOME:-$HOME/.opencode-docker}"
     local docker_init="" cand
-    for cand in "$(command -v docker-init 2>/dev/null || true)" \
-                /usr/bin/docker-init /usr/libexec/docker/docker-init /sbin/docker-init; do
+    local -a candidates=()
+    if [[ ${LAB_DOCKER_INIT_CANDIDATES+x} == x ]]; then
+        # test-scoped seam (documented in lab-diag-lib.sh): the candidate
+        # list is replaced wholesale; production never sets this variable
+        read -ra candidates <<< "$LAB_DOCKER_INIT_CANDIDATES"
+    else
+        candidates=("$(command -v docker-init 2>/dev/null || true)"
+            /usr/bin/docker-init /usr/libexec/docker/docker-init /sbin/docker-init)
+    fi
+    for cand in "${candidates[@]}"; do
         [[ -n "$cand" && -x "$cand" ]] || continue
         docker_init="$(readlink -f "$cand")"
         break
@@ -380,6 +393,60 @@ _oc_verify_init_copy() {
     printf '%s\n' "$init_copy"
 }
 
+# _oc_prepare_ssh_agent ARRAY — the per-launch ssh-agent owner: a private
+# run directory per launch (F5) with its own socket and its own cleanup.
+# On success it appends the read-only run-dir mount and SSH_AUTH_SOCK env to
+# the caller's docker argv array and sets _OC_SSH_AGENT_PID /
+# _OC_SSH_RUN_DIR for the caller's cleanup. A stale sweep first removes run
+# dirs whose recorded agent is gone (crash leftovers); live launches are
+# never touched. The launcher pid is recorded BEFORE the agent starts so a
+# concurrent sweep cannot mistake a starting launch for stale. A
+# passphrase-protected key cannot be loaded non-interactively: that is a
+# fail-closed launch error, not a silent degradation.
+_oc_prepare_ssh_agent() {
+    # shellcheck disable=SC2178  # a bash nameref to the caller's array
+    local -n out="$1"
+    local agent_ssh_key="${OPENCODE_AGENT_SSH_KEY:-$HOME/.ssh/id_ed25519_opencode}"
+    local opencode_home="${OPENCODE_DOCKER_HOME:-$HOME/.opencode-docker}"
+    _OC_SSH_AGENT_PID=""
+    _OC_SSH_RUN_DIR=""
+    [[ -f "$agent_ssh_key" ]] || return 0
+    _oc_ssh_stale_cleanup
+    local run_dir
+    mkdir -p "$opencode_home/agent-ssh" 2>/dev/null \
+        || { echo "cannot prepare the ssh-agent base directory" >&2; return 1; }
+    run_dir="$(mktemp -d "$opencode_home/agent-ssh/run.XXXXXX")" \
+        || { echo "cannot allocate the ssh-agent run directory" >&2; return 1; }
+    _OC_SSH_RUN_DIR="$run_dir"
+    printf '%s\n' "$BASHPID" > "$run_dir/launcher.pid"
+    local agent_env
+    if ! agent_env="$(ssh-agent -a "$run_dir/agent.sock")"; then
+        rm -rf -- "$run_dir"
+        _OC_SSH_RUN_DIR=""
+        echo "cannot start the per-launch ssh-agent" >&2
+        return 1
+    fi
+    # UAT-8: ssh-agent's env script ends with `echo Agent pid N;` — eval
+    # executes that echo and the message lands on the launcher's stdout,
+    # where diagnostic consumers could mistake it for container output.
+    # The exports still take effect; only the informational echo is
+    # silenced.
+    eval "$agent_env" >/dev/null
+    _OC_SSH_AGENT_PID="$SSH_AGENT_PID"
+    printf '%s\n' "$_OC_SSH_AGENT_PID" > "$run_dir/agent.pid"
+    if ! SSH_ASKPASS_REQUIRE=never ssh-add -- "$agent_ssh_key" </dev/null; then
+        kill "$_OC_SSH_AGENT_PID" 2>/dev/null || true
+        _OC_SSH_AGENT_PID=""
+        rm -rf -- "$run_dir"
+        _OC_SSH_RUN_DIR=""
+        echo "cannot load $agent_ssh_key into the ssh-agent (passphrase-protected keys are not supported by the non-interactive launcher)" >&2
+        return 1
+    fi
+    out+=(-v "$run_dir:/ssh-agent:ro")
+    out+=(-e SSH_AUTH_SOCK=/ssh-agent/agent.sock)
+    return 0
+}
+
 _oc_launch() (
     local image="$1"
     local mode="$2"
@@ -424,48 +491,11 @@ _oc_launch() (
     _oc_security_opts run_args || return 1
     _oc_compose_mounts_env run_args || return 1
 
-    # --- SSH agent forwarding (dedicated per-launch agent) -------------------
-    # A private run directory per launch (F5): its own socket, its own agent,
-    # its own cleanup. A stale sweep first removes run dirs whose recorded
-    # agent is gone (crash leftovers); live launches are never touched. The
-    # launcher pid is recorded BEFORE the agent starts so a concurrent sweep
-    # cannot mistake a starting launch for stale. A passphrase-protected key
-    # cannot be loaded non-interactively: that is a fail-closed launch error,
-    # not a silent degradation.
+    # --- SSH agent forwarding (the shared owner) ------------------------------
     if [[ -f "$agent_ssh_key" ]]; then
-        _oc_ssh_stale_cleanup
-        local run_dir
-        mkdir -p "${OPENCODE_DOCKER_HOME:-$HOME/.opencode-docker}/agent-ssh" 2>/dev/null \
-            || { echo "cannot prepare the ssh-agent base directory" >&2; return 1; }
-        run_dir="$(mktemp -d "${OPENCODE_DOCKER_HOME:-$HOME/.opencode-docker}/agent-ssh/run.XXXXXX")" \
-            || { echo "cannot allocate the ssh-agent run directory" >&2; return 1; }
-        ssh_run_dir="$run_dir"
-        printf '%s\n' "$BASHPID" > "$run_dir/launcher.pid"
-        local agent_env
-        if ! agent_env="$(ssh-agent -a "$run_dir/agent.sock")"; then
-            rm -rf -- "$run_dir"
-            ssh_run_dir=""
-            echo "cannot start the per-launch ssh-agent" >&2
-            return 1
-        fi
-        # UAT-8: ssh-agent's env script ends with `echo Agent pid N;` — eval
-        # executes that echo and the message lands on the launcher's stdout,
-        # where diagnostic consumers could mistake it for container output.
-        # The exports still take effect; only the informational echo is
-        # silenced.
-        eval "$agent_env" >/dev/null
-        ssh_agent_pid="$SSH_AGENT_PID"
-        printf '%s\n' "$ssh_agent_pid" > "$run_dir/agent.pid"
-        if ! SSH_ASKPASS_REQUIRE=never ssh-add -- "$agent_ssh_key" </dev/null; then
-            kill "$ssh_agent_pid" 2>/dev/null || true
-            ssh_agent_pid=""
-            rm -rf -- "$run_dir"
-            ssh_run_dir=""
-            echo "cannot load $agent_ssh_key into the ssh-agent (passphrase-protected keys are not supported by the non-interactive launcher)" >&2
-            return 1
-        fi
-        run_args+=(-v "$run_dir:/ssh-agent:ro")
-        run_args+=(-e SSH_AUTH_SOCK=/ssh-agent/agent.sock)
+        _oc_prepare_ssh_agent run_args || return 1
+        ssh_agent_pid="$_OC_SSH_AGENT_PID"
+        ssh_run_dir="$_OC_SSH_RUN_DIR"
     fi
 
     # Only the Session bearer enters the container. LLM_SERVER/LLM_KEY carry

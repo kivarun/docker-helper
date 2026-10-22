@@ -66,16 +66,39 @@ SHIM="$WORK/shim"; mkdir -p "$SHIM" "$WORK/run"
 
 cat > "$SHIM/docker" <<'SH'
 #!/usr/bin/env bash
+# A STRICT docker stand-in: it models a real daemon boundary — it executes
+# the payload it is handed, it refuses unknown subcommands, and it refuses
+# to remove a container it did not start itself. Foreign containers are
+# tracked separately (FOREIGN_CIDS) and never removable. CIDS is inherited
+# from the harness environment.
+: "${CIDS:?CIDS must be exported by the harness}"
 case "$1" in
   run)
     payload=""
+    cname=""
     prev=""
     for a in "$@"; do
       [ "$prev" = "-c" ] && payload="$a"
+      [ "$prev" = "--name" ] && cname="$a"
       prev="$a"
     done
     printf '%s\n' "$*" >> "$DOCKER_REC"
+    [ -n "$cname" ] && printf '%s\n' "$cname" >> "$CIDS"
     if [ -n "${STUB_HANG_PAYLOAD:-}" ] && printf '%s' "$payload" | grep -q "$STUB_HANG_PAYLOAD"; then
+      trap '' TERM
+      sleep "${STUB_HANG_SECONDS:-300}"
+      echo "$payload"
+      exit 0
+    fi
+    if [ -n "${STUB_HANG_WHEN_TTY:-}" ] && printf '%s\n' "$*" | grep -qE '(^| )-it( |$)' \
+       && printf '%s' "$payload" | grep -q "D3_OK"; then
+      trap '' TERM
+      sleep "${STUB_HANG_SECONDS:-300}"
+      echo "$payload"
+      exit 0
+    fi
+    if [ -n "${STUB_HANG_WHEN_AGENT:-}" ] && printf '%s\n' "$*" | grep -q '/ssh-agent' \
+       && printf '%s' "$payload" | grep -q "D3_OK"; then
       trap '' TERM
       sleep "${STUB_HANG_SECONDS:-300}"
       echo "$payload"
@@ -97,14 +120,65 @@ case "$1" in
     fi
     ;;
   rm)
-    printf '%s\n' "rm $*" >> "$DOCKER_REC"
+    shift
+    [ "${1:-}" = "-f" ] && shift
+    for name in "$@"; do
+      if [ -n "${STUB_RM_FAIL:-}" ] && printf '%s' "$name" | grep -q "^dhl-"; then
+        echo "stub: simulated rm failure for $name" >&2
+        exit 1
+      fi
+      if grep -qxF "$name" "$CIDS" 2>/dev/null; then
+        printf '%s\n' "rm $name" >> "$DOCKER_REC"
+        grep -vxF "$name" "$CIDS" > "$CIDS.next" 2>/dev/null; mv "$CIDS.next" "$CIDS"
+      else
+        echo "stub: refusing to remove a container this daemon did not start: $name" >&2
+        exit 1
+      fi
+    done
     exit 0 ;;
   ps)
+    # the foreign containers appear only through the label filters the
+    # ownership model actually uses; a query by image ancestor is modeled
+    # as returning the foreign ids (the old delta-based cleanup would have
+    # removed them)
+    if printf '%s\n' "$*" | grep -q 'ancestor='; then
+      [ -n "${STUB_FOREIGN_CIDS:-}" ] && printf '%s\n' $STUB_FOREIGN_CIDS
+      exit 0
+    fi
+    if printf '%s\n' "$*" | grep -q 'label=com.dockerhelper.session.id='; then
+      # only containers whose session label matches a registered session are
+      # visible here; the stub models that faithfully: the diagnostic's own
+      # leaked containers exist only when the stub was told a launch leaked
+      [ -n "${STUB_OWN_SESSION_CID:-}" ] && printf '%s\n' "$STUB_OWN_SESSION_CID"
+      exit 0
+    fi
     exit 0 ;;
-  inspect|top)
+  inspect)
+    # the inspected object is the last argument (the container name)
+    target="${*: -1}"
+    case "$target" in
+      dhl-*)
+        if [ -n "${STUB_INSPECT_FOREIGN_LABEL:-}" ]; then
+          # the ownership verification sees a container that does not belong
+          # to this run (a mismatched runid label)
+          printf '%s|%s\n' "$STUB_INSPECT_FOREIGN_LABEL" "${DIAG_IMAGE:-}"
+          exit 0
+        fi
+        # an owned diagnostic container carries this run's runid label and
+        # the pinned image (the stub models the real label set)
+        printf '%s|%s\n' "${DIAG_RUNID:-}" "${DIAG_IMAGE:-}"
+        exit 0 ;;
+    esac
     exit 0 ;;
+  top)
+    [ -n "${STUB_TOP_FAIL:-}" ] && exit 1
+    printf 'UID   PID  PPID CMD\n1001 101 100 /bin/sh -c echo OK\n'
+    exit 0 ;;
+  version)
+    echo "24.0" ;;
   *)
-    exit 0 ;;
+    echo "stub: unsupported docker invocation: $*" >&2
+    exit 2 ;;
 esac
 SH
 
@@ -122,7 +196,18 @@ case "$1 $2" in
     printf '%s\n' "delete $*" >> "$DH_REC"
     ;;
   "session list")
-    printf '{"sessions":[%s]}\n' "${DH_SESSIONS_JSON:-}" ;;
+    if [ -n "${STUB_SESSION_LIST_FAIL:-}" ]; then
+      echo "stub: the daemon is unreachable" >&2
+      exit 1
+    fi
+    n=$(cat "$DH_LIST_COUNT" 2>/dev/null || echo 0)
+    echo $((n + 1)) > "$DH_LIST_COUNT"
+    parts=""
+    [ -n "${DH_SESSIONS_JSON:-}" ] && parts="$DH_SESSIONS_JSON"
+    if [ -n "${STUB_FOREIGN_DURING:-}" ] && [ "$n" -ge 1 ]; then
+      parts="$parts${parts:+,}{\"id\":\"dhs_FOREIGN_DURING\",\"workspace\":\"/home/agent/work/real\"}"
+    fi
+    printf '{"sessions":[%s]}\n' "$parts" ;;
   *)
     printf '%s\n' "other $*" >> "$DH_REC"
     ;;
@@ -169,6 +254,8 @@ for _ in $(seq 1 20); do [ -S "$WORK/run/docker-helper.sock" ] && break; sleep 0
 
 export PATH="$SHIM:$PATH"
 export DH_REC="$WORK/dh.rec" DOCKER_REC="$WORK/docker.rec" SCRIPT_REC="$WORK/script.rec"
+export DH_LIST_COUNT="$WORK/dh-list.count" CIDS="$WORK/containers.started"
+: > "$DH_LIST_COUNT"; : > "$CIDS"
 export DOCKER_HELPER_RUNTIME_DIR="$WORK/run"
 export OPENCODE_DOCKER_HOME="$WORK/ochome"
 export OPENCODE_EXCHANGE_DIR="$WORK/absent-exchange"
@@ -190,11 +277,15 @@ DIAG_CANON_BOUND=3
 DIAG_FACTOR_BOUND=3
 export DIAG_STEP_BOUND DIAG_CANON_BOUND DIAG_FACTOR_BOUND
 
+DIAGRUN=0
 run_ladder() { # -> REPORT (stdout), LRC (the ladder rc)
+  DIAGRUN=$((DIAGRUN + 1))
   DIAG_DIR="$WORK/evid"
   rm -rf "$DIAG_DIR"; mkdir -p "$DIAG_DIR"
   : > "$DH_REC"; : > "$DOCKER_REC"; : > "$SCRIPT_REC"
-  REPORT="$(diag_run_ladder "$_OC_BASE" "$WS" 2>&1)"
+  : > "$DH_LIST_COUNT"; : > "$CIDS"
+  export DIAG_RUNID="diagrun-$DIAGRUN" DIAG_IMAGE="$_OC_BASE"
+  REPORT="$(diag_run_ladder "$_OC_BASE" "$WS" "diagrun-$DIAGRUN" 2>&1)"
   LRC=$?
 }
 
@@ -221,7 +312,7 @@ check "the failing ladder exits nonzero" "1" "$LRC"
 contains "the transition names the D1->D2 configuration delta" \
   "TRANSITION D1->D2" "$REPORT"
 contains "the transition names the canonical mounts" "canonical mounts" "$REPORT"
-grep -q "rm -f dhl-D2" "$DOCKER_REC" \
+grep -qE "rm(- -f)? dhl-D2" "$DOCKER_REC" \
   && ok "the owned hung container is reaped (docker rm -f by name)" \
   || bad "the owned hung container was not reaped"
 contains "the timeout is never a pass or a skip" "detail=timeout" "$REPORT"
@@ -271,7 +362,7 @@ contains "the canonical probe step ran (D3 evidence)" "D3 PASS" "$REPORT"
 grep -qE "delete(-failed)? dhs_TEST" "$DH_REC" \
   && ok "the leaked Session is reaped by the diagnostic (delete attempted)" \
   || bad "the diagnostic did not reap the leaked Session"
-contains "the Session cleanup outcome is recorded" "CLEANUP D3" "$REPORT"
+contains "the Session cleanup outcome is recorded" "CLEANUP D3 session=" "$REPORT"
 
 # --- 8. no secret material in the report -------------------------------------
 run_ladder
@@ -281,15 +372,20 @@ LLM_KEY="llm-secret-marker" ADMIN_TOKEN="admin-secret-marker" run_ladder
 not_contains "the LLM key never reaches the report" "llm-secret-marker" "$REPORT"
 not_contains "the admin token never reaches the report" "admin-secret-marker" "$REPORT"
 
-# --- 9. the canonical-path failure runs no TTY factor probe ------------------
+# --- 9. the canonical-path failure gets its own bounded factor probes --------
+# UAT-8d: the canonical D3 baseline changes three factors at once (the
+# Session lifecycle, the ssh-agent, the TTY); a hanging D3 now runs the
+# notty/nosession/noagent probes, each removing exactly one factor.
 STUB_HANG_PAYLOAD="D3_OK" STUB_HANG_SECONDS=60 DIAG_CANON_BOUND=3 run_ladder
 unset STUB_HANG_PAYLOAD STUB_HANG_SECONDS
 grep -qE '^D3 FAIL rc=1(24|37) elapsed=' <<<"$REPORT" \
   && ok "a hanging canonical probe is a timeout" \
   || bad "a hanging canonical probe was not a timeout"
-not_contains "the canonical path runs no -it factor probe" "F-D3" "$REPORT"
-not_contains "the canonical path runs no stdin factor probe" "F-D3-notty" "$REPORT"
-contains "the D2->D3 transition is recorded" "TRANSITION D2->D3" "$REPORT"
+contains "the D2->D3 transition names all three added factors" \
+  "TRANSITION D2->D3: + the Session lifecycle and bearer, + the per-launch ssh-agent (when a key is provisioned), + the -it TTY" "$REPORT"
+for probe in F-D3-notty F-D3-nosession F-D3-noagent; do
+  contains "the $probe probe ran for the hanging canonical step" "$probe " "$REPORT"
+done
 
 # --- 10. the factor probes isolate the TTY/stdin/script dimensions -----------
 # D2 hangs only when -it is present (the stub hangs on the D2 marker in the
@@ -309,6 +405,152 @@ grep -q "F-D2-script" <<<"$REPORT" \
 grep -q "script-wrapped" "$SCRIPT_REC" \
   && ok "the script factor really went through script(1)" \
   || bad "the script factor did not use script(1)"
+
+# --- UAT-8d. provable resource ownership --------------------------------------
+# The stub docker is a strict daemon boundary: it refuses to remove a
+# container it did not start, and it answers ownership queries faithfully.
+
+# T1/T2: foreign containers on the SAME pinned image (and ones started
+# concurrently by another process) are never removed — the old delta-based
+# cleanup would have removed them.
+STUB_FOREIGN_CIDS="foreign-abc foreign-def" STUB_HANG_PAYLOAD="D2_OK" STUB_HANG_SECONDS=60 run_ladder
+unset STUB_FOREIGN_CIDS STUB_HANG_PAYLOAD STUB_HANG_SECONDS
+if grep -qE "rm(- -f)? foreign-(abc|def)" "$DOCKER_REC"; then
+  bad "UAT-8d RED: a foreign container was removed by image/delta cleanup"
+else
+  ok "UAT-8d: foreign containers on the same image are never removed"
+fi
+grep -qE "rm(- -f)? dhl-D2-" "$DOCKER_REC" \
+  && ok "UAT-8d: the owned hung container is still reaped by verified identity" \
+  || bad "UAT-8d: the owned hung container was not reaped"
+
+# T3: an ownership verification failure refuses the removal and records it
+STUB_INSPECT_FOREIGN_LABEL="otherrun-9" STUB_HANG_PAYLOAD="D2_OK" STUB_HANG_SECONDS=60 run_ladder
+unset STUB_INSPECT_FOREIGN_LABEL STUB_HANG_PAYLOAD STUB_HANG_SECONDS
+check "UAT-8d: an unverified container is never removed (refused)" "refused-unowned" "$(cat "$WORK/evid/D2.reap")"
+if grep -qE "rm(- -f)? dhl-D2-" "$DOCKER_REC"; then
+  bad "UAT-8d RED: a container with a foreign runid label was removed"
+else
+  ok "UAT-8d: a container whose runid label does not match is never removed"
+fi
+
+# T4: a failed session list refuses the cleanup (never proceeds empty)
+STUB_SESSION_LIST_FAIL=1 run_ladder
+unset STUB_SESSION_LIST_FAIL
+contains "UAT-8d: a failed session list refuses the cleanup" \
+  "CLEANUP D3 session=refused-list-error" "$REPORT"
+# the canonical launches own TWO deletes (D3's and D4's own traps); the
+# diagnostic's reaping would add more
+if [ "$(grep -c "delete dhs_TEST" "$DH_REC")" -gt 2 ]; then
+  bad "UAT-8d RED: the diagnostic deleted sessions despite a failed registration list"
+else
+  ok "UAT-8d: only the launcher's own cleanup ran; the diagnostic deleted nothing"
+fi
+
+# T5: a foreign session that existed before is never touched
+DH_SESSIONS_JSON='{"id":"dhs_FOREIGN_BEFORE","workspace":"/home/agent/work/real"}' run_ladder
+unset DH_SESSIONS_JSON
+if grep -q "delete dhs_FOREIGN_BEFORE" "$DH_REC"; then
+  bad "UAT-8d: a pre-existing foreign session was deleted"
+else
+  ok "UAT-8d: a pre-existing foreign session is never deleted"
+fi
+
+# T6: a foreign session created WHILE the diagnostic runs is never deleted
+# (the old global before/after delta would have deleted it)
+STUB_FOREIGN_DURING=1 run_ladder
+unset STUB_FOREIGN_DURING
+if grep -q "delete dhs_FOREIGN_DURING" "$DH_REC"; then
+  bad "UAT-8d RED: a concurrent foreign session was deleted by the delta cleanup"
+else
+  ok "UAT-8d: a concurrent foreign session is never deleted"
+fi
+contains "UAT-8d: the own session cleanup outcome is recorded" \
+  "CLEANUP D3 session=clean" "$REPORT"
+
+# T8: a forced removal of an OWN resource that fails is recorded, not hidden
+STUB_RM_FAIL=1 STUB_HANG_PAYLOAD="D2_OK" STUB_HANG_SECONDS=60 run_ladder
+unset STUB_RM_FAIL STUB_HANG_PAYLOAD STUB_HANG_SECONDS
+check "UAT-8d: a failed owned-removal is recorded" "failed" "$(cat "$WORK/evid/D2.reap")"
+
+# T9: the canonical argv carries the LLM provider env flags, with and without
+# the values present in the launcher environment; the values never appear in
+# the argv
+: > "$DOCKER_REC"
+( cd "$WS" && oc-probe 'echo T9' ) >/dev/null 2>&1
+contains "UAT-8d: LLM_SERVER is in the canonical argv" "-e LLM_SERVER" "$(cat "$DOCKER_REC")"
+contains "UAT-8d: LLM_KEY is in the canonical argv" "-e LLM_KEY" "$(cat "$DOCKER_REC")"
+not_contains "UAT-8d: no LLM value in the argv when the env is unset" "LLM_SERVER=" "$(cat "$DOCKER_REC")"
+: > "$DOCKER_REC"
+( cd "$WS" && LLM_SERVER=https://llm.example LLM_KEY=llm-secret-value oc-probe 'echo T9' ) >/dev/null 2>&1
+contains "UAT-8d: LLM_SERVER is in the canonical argv when set" "-e LLM_SERVER" "$(cat "$DOCKER_REC")"
+not_contains "UAT-8d: the LLM key value never enters the argv" "llm-secret-value" "$(cat "$DOCKER_REC")"
+
+# T10: a mount-gate refusal stops the step BEFORE docker (zero docker runs)
+ln -s /tmp "$OPENCODE_DOCKER_HOME/ca"
+run_ladder
+rm -f "$OPENCODE_DOCKER_HOME/ca"
+contains "UAT-8d: an unsafe mount source fails the composition" \
+  "D2 FAIL rc=refused elapsed=unknown detail=composition-refused" "$REPORT"
+if grep -q " run " "$DOCKER_REC"; then
+  bad "UAT-8d RED: docker ran despite a mount-gate refusal"
+else
+  ok "UAT-8d: a mount-gate refusal means zero docker runs"
+fi
+
+# T11a: an init copy verification refusal (the lab init dir escapes the lab
+# home) fails D1 BEFORE docker, and D2 with it
+mv "$OPENCODE_DOCKER_HOME/init" "$OPENCODE_DOCKER_HOME/init.real" 2>/dev/null
+ln -s /tmp "$OPENCODE_DOCKER_HOME/init"
+run_ladder
+rm -f "$OPENCODE_DOCKER_HOME/init"
+mv "$OPENCODE_DOCKER_HOME/init.real" "$OPENCODE_DOCKER_HOME/init" 2>/dev/null
+contains "UAT-8d: a broken init copy refuses D1" \
+  "D1 FAIL rc=refused elapsed=unknown detail=init-verify-refused" "$REPORT"
+if grep -qE "^run .*dhl-D1-" "$DOCKER_REC"; then
+  bad "UAT-8d RED: docker ran with an unverifiable init copy"
+else
+  ok "UAT-8d: an init verification refusal means zero docker runs for D1"
+fi
+contains "UAT-8d: D2 depends on the verified init (the ladder stops)" \
+  "D2 NOT_RUN" "$REPORT"
+
+# T11b: no system docker-init at all — D1 is a FAIL, never a successful
+# --init run. The candidate search is replaced wholesale by the documented
+# test seam so the case is hermetic regardless of the host's real
+# docker-init locations.
+mv "$SHIM/docker-init" "$SHIM/docker-init.hidden"
+LAB_DOCKER_INIT_CANDIDATES="" run_ladder
+mv "$SHIM/docker-init.hidden" "$SHIM/docker-init"
+contains "UAT-8d: a missing system docker-init is a FAIL, not a pass" \
+  "D1 FAIL rc=refused elapsed=unknown detail=no-init-copy" "$REPORT"
+if grep -qE "^run .*dhl-D1-" "$DOCKER_REC"; then
+  bad "UAT-8d RED: docker ran without any verified init copy"
+else
+  ok "UAT-8d: no verified init copy means zero docker runs for D1"
+fi
+
+# T12: a D3 hang caused ONLY by the TTY — the no-TTY probe passes and the
+# diagnosis names the factor
+STUB_HANG_WHEN_TTY=1 STUB_HANG_SECONDS=60 DIAG_CANON_BOUND=3 run_ladder
+unset STUB_HANG_WHEN_TTY STUB_HANG_SECONDS
+contains "UAT-8d: the TTY-implicated diagnosis is named" \
+  "DIAGNOSIS: the D3-notty factor is implicated" "$REPORT"
+
+# T13: a D3 hang caused ONLY by the ssh-agent — the no-agent probe passes
+mkdir -p "$(dirname "$OPENCODE_AGENT_SSH_KEY")"
+printf 'PRIVATE-KEY\n' > "$OPENCODE_AGENT_SSH_KEY"
+chmod 0600 "$OPENCODE_AGENT_SSH_KEY"
+STUB_HANG_WHEN_AGENT=1 STUB_HANG_SECONDS=60 DIAG_CANON_BOUND=3 run_ladder
+unset STUB_HANG_WHEN_AGENT STUB_HANG_SECONDS
+rm -f "$OPENCODE_AGENT_SSH_KEY"
+contains "UAT-8d: the ssh-agent-implicated diagnosis is named" \
+  "DIAGNOSIS: the D3-noagent factor is implicated" "$REPORT"
+
+# T14: the report carries no secret material in any scenario
+run_ladder
+not_contains "UAT-8d: no bearer token in the report" "dht_SECRETSTUBTOKENVALUE" "$REPORT"
+not_contains "UAT-8d: no session id quoted as evidence" "dhs_TEST" "$REPORT"
 
 # --- 11. the source-level invariants (driver, lib, stage) --------------------
 drv_has() { if grep -Eq -- "$2" "$DRIVER"; then ok "$1"; else bad "$1 (pattern absent: $2)"; fi; }

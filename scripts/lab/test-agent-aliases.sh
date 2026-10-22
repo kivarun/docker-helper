@@ -376,6 +376,36 @@ not_contains "GH_AGENT_TOKEN is not passed by default" "-e GH_AGENT_TOKEN" "$(ca
 ( export GH_AGENT_TOKEN=gh-agent-token-marker; cd "$WS" && oc echo hi )
 contains "GH_AGENT_TOKEN passed only when explicitly exported" "-e GH_AGENT_TOKEN" "$(cat "$DOCKER_REC")"
 
+# --- 7a2. the LLM provider env rides the canonical composition (UAT-8d) ------
+# The eeeceacc contract: docker resolves `-e LLM_SERVER` / `-e LLM_KEY` from
+# the launcher's own environment, so the flags are unconditional while the
+# VALUES never enter the argv. Both branches are tested in isolated
+# subshells, for all three canonical entry modes.
+: > "$DOCKER_REC"
+( unset LLM_SERVER LLM_KEY; cd "$WS" && oc echo hi )
+dargv="$(cat "$DOCKER_REC" 2>/dev/null || true)"
+contains "LLM_SERVER flag is in the canonical oc argv" "-e LLM_SERVER" "$dargv"
+contains "LLM_KEY flag is in the canonical oc argv" "-e LLM_KEY" "$dargv"
+not_contains "no LLM value is interpolated when unset" "LLM_SERVER=" "$dargv"
+not_contains "no LLM key value is interpolated when unset" "LLM_KEY=" "$dargv"
+: > "$DOCKER_REC"
+( export LLM_SERVER=https://llm.example.internal LLM_KEY=llm-secret-marker; cd "$WS" && oc echo hi )
+dargv="$(cat "$DOCKER_REC" 2>/dev/null || true)"
+contains "LLM_SERVER flag survives an exported value" "-e LLM_SERVER" "$dargv"
+contains "LLM_KEY flag survives an exported value" "-e LLM_KEY" "$dargv"
+not_contains "the LLM key value never enters the argv" "llm-secret-marker" "$dargv"
+: > "$DOCKER_REC"
+( export LLM_SERVER=https://llm.example.internal LLM_KEY=llm-secret-marker; cd "$WS" && oc-go26 echo hi )
+dargv="$(cat "$DOCKER_REC" 2>/dev/null || true)"
+contains "LLM flags ride the oc-go26 composition" "-e LLM_SERVER" "$dargv"
+contains "LLM flags ride the oc-go26 composition (key)" "-e LLM_KEY" "$dargv"
+: > "$DOCKER_REC"
+( export LLM_SERVER=https://llm.example.internal LLM_KEY=llm-secret-marker; cd "$WS" && oc-probe 'echo probe' )
+dargv="$(cat "$DOCKER_REC" 2>/dev/null || true)"
+contains "LLM flags ride the oc-probe composition" "-e LLM_SERVER" "$dargv"
+contains "LLM flags ride the oc-probe composition (key)" "-e LLM_KEY" "$dargv"
+not_contains "the LLM key value never enters the oc-probe argv" "llm-secret-marker" "$(cat "$DOCKER_REC")"
+
 # --- 7b. ambiguous CA provisioning fails the launch -------------------------
 printf 'CA2\n' > "$OPENCODE_DOCKER_HOME/ca/second.crt"
 : > "$DH_REC"; : > "$DOCKER_REC"

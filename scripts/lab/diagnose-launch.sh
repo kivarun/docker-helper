@@ -67,8 +67,9 @@ source "$HOME/.bash_aliases"
 # shellcheck source=/dev/null
 source /opt/lab/lab-diag-lib.sh
 DIAG_DIR="$EVID"
-export DIAG_DIR
-diag_run_ladder "$_OC_BASE" "$PWD"
+DIAG_RUNID="diag-$(cat /proc/sys/kernel/random/boot_id 2>/dev/null | cut -c1-8)-$$"
+export DIAG_DIR DIAG_RUNID
+diag_run_ladder "$_OC_BASE" "$PWD" "$DIAG_RUNID"
 SH
 chmod 0755 "$RUNNER"
 
@@ -82,17 +83,28 @@ sudo -u "$AGENT_USER" -H env EVID="$EVID" \
 diag_rc=$?
 
 # The compact report (the ladder's stdout) plus safe allowlisted evidence.
-# Nothing here carries secrets: the ladder's report is compact by design and
-# every quoted excerpt is sanitized by the lib.
+# EVERY quoted line is sanitized AT PRINT TIME (UAT-8d: sanitization is not
+# only a file-write concern); only allowlisted fields are printed, and an
+# observability failure is recorded explicitly instead of silently omitted.
 printf '%s\n' "=== lab launch diagnostics (evidence summary) ==="
 for id in D0 D1 D2 D3 D4; do
   if [ -s "$EVID/$id.docker-state" ]; then
-    printf '%s docker-state: %s\n' "$id" "$(head -2 "$EVID/$id.docker-state")"
+    state_line="$(head -2 "$EVID/$id.docker-state")"
+    if [ "$state_line" = unavailable ]; then
+      printf '%s docker-state: UNAVAILABLE (the docker inspect/ps evidence could not be collected)\n' "$id"
+    else
+      printf '%s docker-state: %s\n' "$id" "$(diag_sanitize "$state_line")"
+    fi
   fi
 done
 for id in D3 D4; do
   if [ -s "$EVID/$id.procs" ]; then
-    printf '%s container processes: %s\n' "$id" "$(head -3 "$EVID/$id.procs")"
+    procs_line="$(head -3 "$EVID/$id.procs")"
+    if [ "$procs_line" = unavailable ]; then
+      printf '%s container processes: UNAVAILABLE (docker top could not be collected)\n' "$id"
+    else
+      printf '%s container processes: %s\n' "$id" "$(diag_sanitize "$procs_line")"
+    fi
   fi
 done
 rm -rf -- "$ws"
