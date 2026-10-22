@@ -213,6 +213,16 @@ has "probe admin-token absence checks examine options" \
 has "probe principal credential absence checks examine options" \
   '^not_contains "the probe container has no principal credential".*"\$pargv_opts"'
 
+# --- UAT-8c. the bounded execution owner -------------------------------------
+# Every probe's timeout, stderr capture, elapsed time and outcome
+# classification come from lab-diag-lib.sh (one implementation); the
+# launcher's stderr is diagnostic evidence and is never suppressed.
+has "the runner loads the bounded-execution owner" 'source /opt/lab/lab-diag-lib\.sh'
+has "probe_run executes through diag_exec" 'diag_exec "\$name" "\$bound"'
+has "the probe's exit status is read back from diag_exec evidence" \
+  'cat "\$PROBE_DIR/\$name.rc"'
+has "the TLS probe executes through diag_exec" 'diag_exec tls-probe 90'
+has "the TLS evidence directory is private" 'install -d -m 0750 -o "\$AGENT_USER"'
 
 echo
 printf 'integration hygiene tests: %d passed, %d failed\n' "$PASS" "$FAIL"

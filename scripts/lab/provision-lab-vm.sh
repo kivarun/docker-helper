@@ -417,6 +417,35 @@ stage_uat_networked() {
   log "networked UAT stage done (the network window is closed and the VM is confirmed stopped)"
 }
 
+# --- UAT-8c: the standalone launch-path diagnostic stage ---------------------
+# An EXPLICIT diagnostic stage for the real UAT's timeout-124 hang. It uses
+# the SAME network-window lifecycle owner as the online stage (the
+# ONLINE_VM_STARTED flag and its traps — no second lifecycle owner), runs
+# the bounded D0–D4 diagnostic ladder inside the networked VM, and ALWAYS
+# closes the window and confirms the VM is stopped, on every outcome. It
+# never runs the integration UAT and never touches an LLM. The stage's exit
+# status reflects the ladder's outcome, but only AFTER the window is
+# confirmed closed.
+stage_uat_diagnose() {
+  stop_vm_if_running
+  log "preflight: any leftover VM from a killed previous run is closed before this window opens"
+  ONLINE_VM_STARTED=1
+  trap 'online_cleanup "$?"' EXIT
+  trap 'online_cleanup 130' INT
+  trap 'online_cleanup 143' TERM
+  log "booting with the network OPEN (explicit diagnostic window)"
+  DEV_VM_NET_ISOLATED=0 "$DEVVM" start || die "VM start (network open) failed"
+  copy_lab_scripts
+  log "running the bounded launch-path diagnostics (no integration UAT, no LLM)"
+  DIAG_RC=0
+  "$DEVVM" ssh 'sudo bash /opt/lab/diagnose-launch.sh' < /dev/null || DIAG_RC=$?
+  close_online_window
+  if [ "$DIAG_RC" != 0 ]; then
+    die "the launch diagnostics reported failures (rc $DIAG_RC) — the network window is closed"
+  fi
+  log "uat-diagnose stage done (the network window is closed and the VM is confirmed stopped)"
+}
+
 # --- F3: verify proves isolation, it never assumes it ------------------------
 # A running VM may have been booted with the network open, so the actual
 # QEMU command line of THIS VM's disk is inspected on the host: exactly one
@@ -475,10 +504,11 @@ case "$stage" in
   isolate)  stage_isolate ;;
   verify)   stage_verify ;;
   uat-networked) stage_uat_networked ;;
+  uat-diagnose) stage_uat_diagnose ;;
   all)      stage_snapshot; stage_online; stage_isolate; stage_verify ;;
   ""|-h|--help|help)
     cat <<'EOF'
-usage: provision-lab-vm.sh snapshot|online|isolate|verify|uat-networked|all
+usage: provision-lab-vm.sh snapshot|online|isolate|verify|uat-networked|uat-diagnose|all
 
   snapshot  stop the VM and take the pre-provisioning qcow2 snapshot
   online    temporary network-open window: Docker, Docker Helper v2.3.0,
@@ -488,11 +518,14 @@ usage: provision-lab-vm.sh snapshot|online|isolate|verify|uat-networked|all
   uat-networked  EXPLICIT networked UAT window: run the networked
             integration suite (INTEGRATION_NETWORKED=1), then close the
             window and confirm the VM is stopped. Never an isolation claim.
+  uat-diagnose   EXPLICIT diagnostic window: run the bounded D0-D4 launch
+            diagnostics (no integration UAT, no LLM), then close the
+            window and confirm the VM is stopped on every outcome.
   all       snapshot -> online -> isolate -> verify
 
 Optional operator env: LAB_AGENT_SSH_KEY, LAB_CA_SOURCE,
 LAB_GITCONFIG_SOURCE, LAB_KNOWN_HOSTS_SOURCE, LAB_CA_TEST_URL, LAB_PUBLIC_TLS_URL (online).
 EOF
     ;;
-  *) die "unknown stage '$stage' (snapshot|online|isolate|verify|uat-networked|all)" ;;
+  *) die "unknown stage '$stage' (snapshot|online|isolate|verify|uat-networked|uat-diagnose|all)" ;;
 esac

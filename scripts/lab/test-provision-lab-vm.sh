@@ -92,6 +92,10 @@ case "\${1:-}" in
     case "\$1" in
       *INTEGRATION_NETWORKED=1*integration-agent-vm*)
         [ "\${FAIL_ON:-}" = integration ] && { echo "stub: networked integration failed" >&2; exit 1; } ;;
+      *bash\ /opt/lab/diagnose-launch.sh*)
+        [ "\${FAIL_ON:-}" = diagnose ] && { echo "stub: launch diagnostics reported failures" >&2; exit 3; }
+        echo "D0 PASS rc=0 elapsed=1"
+        echo "D4 PASS rc=0 elapsed=2" ;;
       *setup-agent-user.sh*)
         n=\$(( \$(cat "$WORK/setupcount" 2>/dev/null || echo 0) + 1 ))
         echo "\$n" > "$WORK/setupcount"
@@ -783,6 +787,43 @@ contains "UAT-8: the stop happens despite the failure" "stop" "$(cat "$REC")"
 
 # the isolated path is untouched: verify still requires the isolation evidence
 if FAIL_ON=probe-vm-isolation run_verify; then bad "UAT-8: verify regressed"; else ok "UAT-8: verify still refuses without a passing isolation probe"; fi
+
+# --- UAT-8c. the explicit launch-diagnostic stage ----------------------------
+# The diagnostic window is its own stage: it boots with the network open,
+# runs the bounded D0-D4 ladder, and ALWAYS closes the window and confirms
+# the VM is stopped — on a passing ladder and on a failing one. It never
+# runs the integration UAT and never touches an LLM.
+: > "$REC"; echo stopped > "$STATE"; rm -f "$SNAPMARK"
+if run_driver uat-diagnose; then
+  ok "UAT-8c: the diagnostic stage succeeds on a passing ladder"
+else
+  bad "UAT-8c: the diagnostic stage failed on a passing ladder (rc $RC): $OUT"
+fi
+seq="$(cat "$REC")"
+contains "UAT-8c: the diagnostic window boots with the network open" "start isolated=0" "$seq"
+contains "UAT-8c: the diagnostics run inside the VM" "sudo bash /opt/lab/diagnose-launch.sh" "$seq"
+if printf '%s' "$seq" | grep -q 'sudo bash /opt/lab/integration-agent-vm.sh'; then
+  bad "UAT-8c: the diagnostic stage ran the integration UAT"
+else
+  ok "UAT-8c: the diagnostic stage is independent of the integration UAT (the script copy is provisioning, not a run)"
+fi
+contains "UAT-8c: the ladder evidence reaches the driver output" "D0 PASS rc=0" "$OUT"
+state_line="$(cat "$STATE" 2>/dev/null)"
+check "UAT-8c: the window closes with a confirmed stopped VM" "stopped" "$state_line"
+
+# a failing ladder still closes the window and fails the stage
+: > "$REC"; echo stopped > "$STATE"; rm -f "$SNAPMARK"
+if FAIL_ON=diagnose run_driver uat-diagnose; then
+  true
+  bad "UAT-8c: a failing ladder was accepted"
+else
+  ok "UAT-8c: a failing ladder fails the stage"
+fi
+state_line="$(cat "$STATE" 2>/dev/null)"
+check "UAT-8c: the window is closed after a failing ladder" "stopped" "$state_line"
+contains "UAT-8c: the failure is reported after the confirmed stop" \
+  "the launch diagnostics reported failures (rc 3) — the network window is closed" "$OUT"
+
 
 echo
 printf 'provision-lab-vm tests: %d passed, %d failed\n' "$PASS" "$FAIL"

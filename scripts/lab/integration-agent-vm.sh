@@ -240,6 +240,12 @@ cd "$1"
 docker() { printf '%s\n' "$*" >> "$ARGV_REC"; command docker "$@"; }
 # shellcheck source=/dev/null
 source "$HOME/.bash_aliases"
+# UAT-8c: the bounded execution owner (diag_exec) comes from the lab
+# diagnostic library; every probe's timeout, stderr capture, elapsed time
+# and classification share one implementation.
+# shellcheck source=/dev/null
+source /opt/lab/lab-diag-lib.sh
+DIAG_DIR="$PROBE_DIR"
 # C7/F3: `oc` is a Bash function — GNU timeout cannot exec it directly. Every
 # time-bounded launch therefore runs inside a fresh, correctly initialized
 # Bash (aliases sourced, docker recorder present). timeout bounds the WHOLE
@@ -267,13 +273,22 @@ if oc_t --version; then version_rc=0; else version_rc=$?; fi
 # the first output line.
 probe_run() { # NAME BODY [TIMEOUT] -> one bounded probe, framed, recorded
   local name="$1" body="$2" bound="${3:-60}" raw lrc
-  if raw="$(OC_PROBE_PAYLOAD="printf 'PROBE_BEGIN\n'; { $body; } 2>&1; printf 'PROBE_RC=%s\n' \"\$?\"; printf '%s\n' PROBE_END" \
-      timeout "$bound" bash -c '
-        docker() { printf "%s\n" "$*" >> "$ARGV_PROBE_REC"; command docker "$@"; }
-        # shellcheck source=/dev/null
-        source "$HOME/.bash_aliases"
-        oc-probe "$OC_PROBE_PAYLOAD"
-      ' 2>/dev/null)"; then lrc=0; else lrc=$?; fi
+  # UAT-8c: the bounded execution is owned by lab-diag-lib.sh — ONE
+  # implementation of timeouts (--kill-after), stderr capture (the launcher's
+  # stderr is diagnostic evidence, never suppressed), elapsed time and
+  # outcome classification. The `|| true` below only stops the runner's
+  # errexit; the exit status itself is recorded by diag_exec in .rc and is
+  # read back into .launchrc — a timeout kill is a recorded failure, never
+  # an empty result or a pass.
+  OC_PROBE_PAYLOAD="printf 'PROBE_BEGIN\n'; { $body; } 2>&1; printf 'PROBE_RC=%s\n' \"\$?\"; printf '%s\n' PROBE_END" \
+    diag_exec "$name" "$bound" bash -c '
+      docker() { printf "%s\n" "$*" >> "$ARGV_PROBE_REC"; command docker "$@"; }
+      # shellcheck source=/dev/null
+      source "$HOME/.bash_aliases"
+      oc-probe "$OC_PROBE_PAYLOAD"
+    ' || true
+  lrc="$(cat "$PROBE_DIR/$name.rc" 2>/dev/null || echo invalid)"
+  raw="$(cat "$PROBE_DIR/$name.out" 2>/dev/null)"
   # Docker -it under script(1) emits CRLF; normalize before line-anchored
   # PROBE_BEGIN / PROBE_END and numeric PROBE_RC parsing.
   raw="${raw//$'\r'/}"
@@ -552,25 +567,35 @@ source "$HOME/.bash_aliases"
 # executes there), not in the guest; the probe command arrives through
 # TLS_PROBE_CMD from the outer script. C7/F3: the same time-bounded,
 # correctly initialized Bash wrapper — `oc-probe` is a function and cannot
-# be exec'd by timeout directly. UAT-8: the launcher's exit status is
-# recorded separately (never masked with || true) — a failed or timed-out
-# launcher is missing mandatory evidence, not an inconclusive probe.
-if raw="$(timeout 90 bash -c '
+# be exec'd by timeout directly. UAT-8c: the bounded execution, the stderr
+# capture and the outcome classification come from lab-diag-lib.sh; the
+# recorded exit status is read back from diag_exec's own evidence — a
+# failed or timed-out launcher is missing mandatory evidence, never an
+# inconclusive probe.
+# shellcheck source=/dev/null
+source /opt/lab/lab-diag-lib.sh
+DIAG_DIR="$TLS_EVID"
+TLS_PROBE_CMD="$TLS_PROBE_CMD" diag_exec tls-probe 90 bash -c '
   docker() { printf "%s\n" "$*" >> "$ARGV_REC"; command docker "$@"; }
   # shellcheck source=/dev/null
   source "$HOME/.bash_aliases"
   oc-probe "$TLS_PROBE_CMD"
-')"; then tlrc=0; else tlrc=$?; fi
+' || true
+tlrc="$(cat "$DIAG_DIR/tls-probe.rc" 2>/dev/null || echo invalid)"
 # TLS marker lines also arrive through Docker's PTY as CRLF.
+raw="$(cat "$DIAG_DIR/tls-probe.out" 2>/dev/null)"
 raw="${raw//$'\r'/}"
 printf '%s\n' "$tlrc" > "$TLS_LAUNCH_RC"
 printf '%s\n' "$raw" > "$TLS_OUT"
 SH
     chmod 0755 "$RUNNER_TLS"
+    TLS_EVID="$RUN_DIR/tls-evid"
+    install -d -m 0750 -o "$AGENT_USER" -g "$AGENT_USER" "$TLS_EVID"
     sudo -u "$AGENT_USER" env ARGV_REC="$ARGV_TLS" SHIM_DIR="$SHIM" \
-      TLS_PROBE_CMD="$probe_cmd" \
+      TLS_PROBE_CMD="$probe_cmd" TLS_EVID="$TLS_EVID" \
       TLS_LAUNCH_RC="$RUN_DIR/tls-launch.rc" TLS_OUT="$RUN_DIR/tls.out" \
       script -qec "bash $RUNNER_TLS $ws" /dev/null >"$ITEST_DIR/oc-tls.out" 2>&1
+    rm -rf -- "$TLS_EVID"
     kill "$tls_srv_pid" 2>/dev/null || true
     tls_srv_pid=""
     tls_launch="$(cat "$RUN_DIR/tls-launch.rc" 2>/dev/null || echo missing)"

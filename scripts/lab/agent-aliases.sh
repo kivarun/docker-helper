@@ -172,83 +172,62 @@ _oc_ssh_stale_cleanup() {
 #   is `opencode`, so bare payload words would be handed to the OpenCode CLI
 #   as ITS arguments (the UAT-8 real-VM finding: `oc docker-helper self` and
 #   `oc sh -c ...` never ran docker-helper or sh at all).
-_oc_launch() (
-    local image="$1"
-    local mode="$2"
-    shift 2
+# --- UAT-8c: the shared canonical configuration owners -----------------------
+# The security posture and the mount/env composition each have ONE owner, so
+# the diagnostic ladder can replay the exact production configuration instead
+# of re-describing it (a re-described configuration drifts; a shared one
+# cannot). _oc_launch consumes both; lab-diag-lib.sh sources this file and
+# consumes them for the D0–D2 ladder steps.
 
+# _oc_security_opts ARR — the container security posture: the launcher uid,
+# dropped capabilities, no-new-privileges, and the helper workload SELinux
+# domain (inert on an AppArmor host).
+_oc_security_opts() {
+    # shellcheck disable=SC2178  # a bash nameref to the caller's array
+    local -n out="$1"
+    out+=(--user "$(id -u):$(id -g)")
+    out+=(--cap-drop ALL)
+    out+=(--security-opt no-new-privileges=true)
+    local selinux_type="${OPENCODE_DOCKER_SELINUX_TYPE-docker_helper_container_t}"
+    [[ -n "$selinux_type" ]] && out+=(--security-opt "label=type:$selinux_type")
+    return 0
+}
+
+# _oc_compose_mounts_env ARR — the canonical mounts and environment: the
+# workspace relabel, the agent-owned OpenCode state mounts, the model env
+# flags, the optional lab-managed CA/git/ssh/exchange artifacts (each behind
+# its mount-source gate), the read-only helper runtime dir, and the
+# workspace workdir. The Session bearer is NOT included: only a real launch
+# adds it, after creating its own Session.
+_oc_compose_mounts_env() {
+    # shellcheck disable=SC2178  # a bash nameref to the caller's array
+    local -n out="$1"
     local helper_runtime_dir="${DOCKER_HELPER_RUNTIME_DIR:-/run/docker-helper}"
     local opencode_home="${OPENCODE_DOCKER_HOME:-$HOME/.opencode-docker}"
     local exchange_dir="${OPENCODE_EXCHANGE_DIR:-$HOME/agent-exchange}"
-    local agent_ssh_key="${OPENCODE_AGENT_SSH_KEY:-$HOME/.ssh/id_ed25519_opencode}"
-    local session_id=""
-    local ssh_agent_pid=""
-    local ssh_run_dir=""
-    local -a extra_mounts=()
-    local -a docker_env=()
-
-    [[ -S "$helper_runtime_dir/docker-helper.sock" ]] || {
-        echo "docker-helper socket not found: $helper_runtime_dir/docker-helper.sock" >&2
-        return 1
-    }
-
-    # Delete the Session on every exit path, and stop the per-launch ssh-agent
-    # this launcher started. trap - first so a signal-driven run does not
-    # re-enter cleanup through the EXIT trap.
-    cleanup() {
-        local rc="$?"
-        trap - EXIT INT TERM
-        DOCKER_HELPER_SESSION_ID="$session_id" _dh_session_delete || \
-            echo "warning: failed to delete docker-helper session $session_id" >&2
-        [ -z "$ssh_agent_pid" ] || kill "$ssh_agent_pid" 2>/dev/null || true
-        [ -z "$ssh_run_dir" ] || rm -rf -- "$ssh_run_dir"
-        exit "$rc"
-    }
-    trap cleanup EXIT INT TERM
-
-    _dh_session_create || return 1
-    session_id="$DOCKER_HELPER_SESSION_ID"
 
     # Optional guest exchange directory (shared label, so several containers
     # may use it at once).
     if [[ -d "$exchange_dir" ]]; then
-        extra_mounts+=(-v "$exchange_dir:/exchange:z")
+        out+=(-v "$exchange_dir:/exchange:z")
     fi
-
-    # Only the Session bearer enters the container. LLM_SERVER/LLM_KEY carry
-    # the model provider auth; GH_AGENT_TOKEN is passed ONLY when the
-    # operator explicitly exports it for this launch. No docker.sock, no
-    # admin token, no principal credential. No private key either: SSH goes
-    # through a per-launch ssh-agent socket only.
-    #
-    # Under SELinux the container must run in the helper's workload domain
-    # (docker_helper_container_t) to reach the helper socket; the shipped
-    # policy grants socket access only to that domain. On an AppArmor host the
-    # SELinux label is inert (OPENCODE_DOCKER_SELINUX_TYPE may be emptied).
-    local selinux_type="${OPENCODE_DOCKER_SELINUX_TYPE-docker_helper_container_t}"
-    local -a selinux_opts=()
-    [[ -n "$selinux_type" ]] && selinux_opts=(--security-opt "label=type:$selinux_type")
-
-    # The container runs as the guest launcher's own uid/gid. The
-    # opencode-docker image's built-in user is uid 1000, which differs from the
-    # dedicated agent uid, so an explicit --user keeps the agent-owned bind
-    # mounts writable by owner without widening DAC or SELinux.
-    local -a user_opt=(--user "$(id -u):$(id -g)")
 
     # OpenCode writes under $HOME (.config, .local, .cache) and /tmp/opencode;
     # bind each from the agent-owned tree so the non-image uid can write.
     # No other directory is mounted implicitly: SSH credentials, agent
     # configuration, and host secrets must never ride along with a launch.
-    local -a home_mounts=(
+    out+=(
+        -v "$PWD:/workspace:Z"
         -v "$opencode_home/.config:/home/opencode/.config:Z"
         -v "$opencode_home/.local:/home/opencode/.local:Z"
         -v "$opencode_home/.cache:/home/opencode/.cache:Z"
         -v "$opencode_home/tmp:/tmp/opencode:Z"
+        -v "$helper_runtime_dir:/run/docker-helper:ro"
     )
 
     # Model capability flags carried by the operator launcher.
-    docker_env+=(-e OPENCODE_EXPERIMENTAL_LSP_TOOL=true -e OPENCODE_ENABLE_EXA=1)
-    [[ -n "${GH_AGENT_TOKEN:-}" ]] && docker_env+=(-e GH_AGENT_TOKEN)
+    out+=(-e OPENCODE_EXPERIMENTAL_LSP_TOOL=true -e OPENCODE_ENABLE_EXA=1)
+    [[ -n "${GH_AGENT_TOKEN:-}" ]] && out+=(-e GH_AGENT_TOKEN)
 
     # --- corporate CA (lab-owned copy; never a system CA file) ---------------
     # The container is created by plain `docker run`, so Docker Helper's own
@@ -275,10 +254,10 @@ _oc_launch() (
         if [[ -n "${ca_files[0]:-}" ]]; then
             local ca_name
             ca_name="$(basename -- "${ca_files[0]}")"
-            extra_mounts+=(-v "$ca_dir:/etc/opencode-ca:ro,z")
+            out+=(-v "$ca_dir:/etc/opencode-ca:ro,z")
             # NODE_EXTRA_CA_CERTS ADDS the corporate CA to Node's own trust;
             # it never replaces the image's public set (F6).
-            docker_env+=(-e "NODE_EXTRA_CA_CERTS=/etc/opencode-ca/$ca_name")
+            out+=(-e "NODE_EXTRA_CA_CERTS=/etc/opencode-ca/$ca_name")
             # SSL_CERT_FILE/CURL_CA_BUNDLE/GIT_SSL_CAINFO REPLACE the client
             # trust source, so they may only point at a combined bundle
             # (image public CAs + the corporate CA) built as a lab-owned
@@ -286,7 +265,7 @@ _oc_launch() (
             # single corporate certificate would disable trust in every
             # public CA for those clients.
             if [[ -f "$ca_dir/combined-ca-bundle.crt" ]]; then
-                docker_env+=(
+                out+=(
                     -e "SSL_CERT_FILE=/etc/opencode-ca/combined-ca-bundle.crt"
                     -e "CURL_CA_BUNDLE=/etc/opencode-ca/combined-ca-bundle.crt"
                     -e "GIT_SSL_CAINFO=/etc/opencode-ca/combined-ca-bundle.crt"
@@ -299,7 +278,7 @@ _oc_launch() (
     if [[ -f "$opencode_home/git/gitconfig" || -L "$opencode_home/git/gitconfig" ]]; then
         oc_lab_mount_source_ok file "$opencode_home/git/gitconfig" "$opencode_home" \
             || { echo "unsafe relabel mount source: $opencode_home/git/gitconfig" >&2; return 1; }
-        extra_mounts+=(-v "$opencode_home/git/gitconfig:/home/opencode/.gitconfig:ro,z")
+        out+=(-v "$opencode_home/git/gitconfig:/home/opencode/.gitconfig:ro,z")
     fi
 
     # --- public SSH host keys (lab-owned, read-only) --------------------------
@@ -308,8 +287,142 @@ _oc_launch() (
     if [[ -d "$opencode_home/ssh" || -L "$opencode_home/ssh" ]]; then
         oc_lab_mount_source_ok dir "$opencode_home/ssh" "$opencode_home" \
             || { echo "unsafe relabel mount source: $opencode_home/ssh" >&2; return 1; }
-        extra_mounts+=(-v "$opencode_home/ssh:/home/opencode/.ssh:ro,z")
+        out+=(-v "$opencode_home/ssh:/home/opencode/.ssh:ro,z")
     fi
+
+    out+=(-w /workspace)
+    return 0
+}
+
+# _oc_verify_init_copy — resolve the system docker-init and publish the
+# verified lab copy that the confined container domain can exec; prints the
+# copy path (empty when the host has no docker-init), fails closed on any
+# unverifiable state. See _oc_launch for the full boundary rationale.
+_oc_verify_init_copy() {
+    local opencode_home="${OPENCODE_DOCKER_HOME:-$HOME/.opencode-docker}"
+    local docker_init="" cand
+    for cand in "$(command -v docker-init 2>/dev/null || true)" \
+                /usr/bin/docker-init /usr/libexec/docker/docker-init /sbin/docker-init; do
+        [[ -n "$cand" && -x "$cand" ]] || continue
+        docker_init="$(readlink -f "$cand")"
+        break
+    done
+    [[ -n "$docker_init" ]] || return 0
+    [[ -r "$docker_init" && -f "$docker_init" ]] \
+        || { echo "resolved docker-init is not a readable regular file: $docker_init" >&2; return 1; }
+    local init_copy_dir="$opencode_home/init"
+    local init_copy="$init_copy_dir/docker-init"
+
+    # Every significant path component must stay inside the agent-owned
+    # lab root: a symlinked directory that resolves outside
+    # $opencode_home is refused (the relabel must never land outside the
+    # lab tree).
+    local home_real init_dir_real
+    home_real="$(readlink -f -- "$opencode_home")" \
+        || { echo "cannot resolve the lab home: $opencode_home" >&2; return 1; }
+    init_dir_real="$(readlink -f -- "$init_copy_dir")" \
+        || { echo "cannot resolve the lab init directory: $init_copy_dir" >&2; return 1; }
+    [[ "$init_dir_real" == "$home_real/"* && "$init_dir_real" != "$home_real" ]] \
+        || { echo "lab init directory escapes the lab home: $init_copy_dir" >&2; return 1; }
+
+    mkdir -p "$init_copy_dir" 2>/dev/null \
+        || { echo "cannot create the lab init directory: $init_copy_dir" >&2; return 1; }
+
+    # Refresh when the existing path is not a standalone, byte-identical
+    # regular file: missing, a symlink, a hardlink alias of the system
+    # binary, or drifted content. Publication is atomic (temp file +
+    # rename), so a relabeled copy from a previous run never needs to be
+    # written in place and a partial copy is never visible.
+    local src_sum copy_sum needs_refresh=0
+    src_sum="$(sha256sum -- "$docker_init" | awk '{print $1}')" \
+        || { echo "cannot hash the system docker-init" >&2; return 1; }
+    if [[ -L "$init_copy" ]]; then
+        needs_refresh=1
+    elif [[ ! -f "$init_copy" ]]; then
+        needs_refresh=1
+    else
+        copy_sum="$(sha256sum -- "$init_copy" | awk '{print $1}')" || copy_sum=""
+        if [[ "$(stat -c '%d:%i' -- "$init_copy")" == "$(stat -c '%d:%i' -- "$docker_init")" ]] \
+           || [[ "$copy_sum" != "$src_sum" ]]; then
+            needs_refresh=1
+        fi
+    fi
+    if [[ "$needs_refresh" = 1 ]]; then
+        local tmp=""
+        tmp="$(mktemp -- "$init_copy_dir/.docker-init.XXXXXX")" \
+            || { echo "cannot stage the lab docker-init copy" >&2; return 1; }
+        if ! cp -- "$docker_init" "$tmp" || ! chmod 0755 -- "$tmp"; then
+            rm -f -- "$tmp"
+            echo "cannot copy docker-init into the lab tree" >&2
+            return 1
+        fi
+        if ! mv -f -- "$tmp" "$init_copy"; then
+            rm -f -- "$tmp"
+            echo "cannot publish the lab docker-init copy" >&2
+            return 1
+        fi
+        tmp=""
+    fi
+
+    # FINAL verification of the exact file about to be mounted. Failure is
+    # fail-closed: the launch never falls back to the system binary.
+    [[ -f "$init_copy" && ! -L "$init_copy" ]] \
+        || { echo "lab docker-init copy is not a standalone regular file" >&2; return 1; }
+    [[ "$(stat -c '%d:%i' -- "$init_copy")" != "$(stat -c '%d:%i' -- "$docker_init")" ]] \
+        || { echo "lab docker-init copy aliases the system binary (hardlink)" >&2; return 1; }
+    copy_sum="$(sha256sum -- "$init_copy" | awk '{print $1}')"
+    [[ "$copy_sum" = "$src_sum" ]] \
+        || { echo "lab docker-init copy does not match the system binary" >&2; return 1; }
+
+    # Read-only shared relabel (ro,z): the container only execs the binary;
+    # the shared label stays stable across concurrent launches instead of
+    # being re-pinned to each container's single-use :Z categories.
+    printf '%s\n' "$init_copy"
+}
+
+_oc_launch() (
+    local image="$1"
+    local mode="$2"
+    shift 2
+
+    local helper_runtime_dir="${DOCKER_HELPER_RUNTIME_DIR:-/run/docker-helper}"
+    local agent_ssh_key="${OPENCODE_AGENT_SSH_KEY:-$HOME/.ssh/id_ed25519_opencode}"
+    local session_id=""
+    local ssh_agent_pid=""
+    local ssh_run_dir=""
+
+    [[ -S "$helper_runtime_dir/docker-helper.sock" ]] || {
+        echo "docker-helper socket not found: $helper_runtime_dir/docker-helper.sock" >&2
+        return 1
+    }
+
+    # Delete the Session on every exit path, and stop the per-launch ssh-agent
+    # this launcher started. trap - first so a signal-driven run does not
+    # re-enter cleanup through the EXIT trap.
+    cleanup() {
+        local rc="$?"
+        trap - EXIT INT TERM
+        DOCKER_HELPER_SESSION_ID="$session_id" _dh_session_delete || \
+            echo "warning: failed to delete docker-helper session $session_id" >&2
+        [ -z "$ssh_agent_pid" ] || kill "$ssh_agent_pid" 2>/dev/null || true
+        [ -z "$ssh_run_dir" ] || rm -rf -- "$ssh_run_dir"
+        exit "$rc"
+    }
+    trap cleanup EXIT INT TERM
+
+    _dh_session_create || return 1
+    session_id="$DOCKER_HELPER_SESSION_ID"
+
+    # The canonical container configuration comes from its single owners
+    # (UAT-8c): the security posture, then the mounts and environment. The
+    # per-launch ssh-agent forwarding below is launch-only state (processes),
+    # so it stays here and appends its own mount and env.
+    local -a run_args=(run --rm -it)
+    local init_copy
+    init_copy="$(_oc_verify_init_copy)" || return 1
+    [[ -n "$init_copy" ]] && run_args+=(--init -v "$init_copy:/sbin/docker-init:ro,z")
+    _oc_security_opts run_args || return 1
+    _oc_compose_mounts_env run_args || return 1
 
     # --- SSH agent forwarding (dedicated per-launch agent) -------------------
     # A private run directory per launch (F5): its own socket, its own agent,
@@ -322,9 +435,9 @@ _oc_launch() (
     if [[ -f "$agent_ssh_key" ]]; then
         _oc_ssh_stale_cleanup
         local run_dir
-        mkdir -p "$opencode_home/agent-ssh" 2>/dev/null \
+        mkdir -p "${OPENCODE_DOCKER_HOME:-$HOME/.opencode-docker}/agent-ssh" 2>/dev/null \
             || { echo "cannot prepare the ssh-agent base directory" >&2; return 1; }
-        run_dir="$(mktemp -d "$opencode_home/agent-ssh/run.XXXXXX")" \
+        run_dir="$(mktemp -d "${OPENCODE_DOCKER_HOME:-$HOME/.opencode-docker}/agent-ssh/run.XXXXXX")" \
             || { echo "cannot allocate the ssh-agent run directory" >&2; return 1; }
         ssh_run_dir="$run_dir"
         printf '%s\n' "$BASHPID" > "$run_dir/launcher.pid"
@@ -351,133 +464,17 @@ _oc_launch() (
             echo "cannot load $agent_ssh_key into the ssh-agent (passphrase-protected keys are not supported by the non-interactive launcher)" >&2
             return 1
         fi
-        extra_mounts+=(-v "$run_dir:/ssh-agent:ro")
-        docker_env+=(-e SSH_AUTH_SOCK=/ssh-agent/agent.sock)
+        run_args+=(-v "$run_dir:/ssh-agent:ro")
+        run_args+=(-e SSH_AUTH_SOCK=/ssh-agent/agent.sock)
     fi
 
-    # --init under the confined container domain. The runtime bind-mounts its
-    # own init binary from the host filesystem, whose system label the custom
-    # container domain cannot execute (live AVC: exec /sbin/docker-init:
-    # permission denied). Relabeling THAT system inode with :Z is forbidden:
-    # it would mutate a system executable of the guest. Instead a lab-owned
-    # COPY of the same binary is verified and bind-mounted; the relabel then
-    # touches only the copy inside the agent-owned lab tree.
-    #
-    # The published copy must be a STANDALONE regular file at an independent
-    # inode: a symlink (or a hardlink) to the system binary would make the
-    # ro,z relabel land on the system inode — exactly what must never happen.
-    # A SHA-256 match alone does NOT prove independence, so device/inode are
-    # compared explicitly, the copy is published atomically (temp file +
-    # rename) and re-verified immediately before it is handed to Docker.
-    #
-    # TOCTOU boundary (documented residual risk): between the final
-    # verification and the docker mount the copy could in principle be
-    # swapped by another process able to write the lab init directory. That
-    # directory is owned by the trusted launcher account; the untrusted model
-    # cannot reach it (it is not mounted into any container), and the guest
-    # root is the trusted provisioning domain. No policy change is made for
-    # this; the trust boundary is the launcher account itself.
-    local docker_init="" cand
-    for cand in "$(command -v docker-init 2>/dev/null || true)" \
-                /usr/bin/docker-init /usr/libexec/docker/docker-init /sbin/docker-init; do
-        [[ -n "$cand" && -x "$cand" ]] || continue
-        docker_init="$(readlink -f "$cand")"
-        break
-    done
-    local -a init_mount=()
-    if [[ -n "$docker_init" ]]; then
-        [[ -r "$docker_init" && -f "$docker_init" ]] \
-            || { echo "resolved docker-init is not a readable regular file: $docker_init" >&2; return 1; }
-        local init_copy_dir="$opencode_home/init"
-        local init_copy="$init_copy_dir/docker-init"
+    # Only the Session bearer enters the container. LLM_SERVER/LLM_KEY carry
+    # the model provider auth; GH_AGENT_TOKEN is passed ONLY when the
+    # operator explicitly exports it for this launch. No docker.sock, no
+    # admin token, no principal credential. No private key either: SSH goes
+    # through a per-launch ssh-agent socket only.
+    run_args+=(-e DOCKER_HELPER_SESSION_TOKEN)
 
-        # Every significant path component must stay inside the agent-owned
-        # lab root: a symlinked directory that resolves outside
-        # $opencode_home is refused (the relabel must never land outside the
-        # lab tree).
-        local home_real init_dir_real
-        home_real="$(readlink -f -- "$opencode_home")" \
-            || { echo "cannot resolve the lab home: $opencode_home" >&2; return 1; }
-        init_dir_real="$(readlink -f -- "$init_copy_dir")" \
-            || { echo "cannot resolve the lab init directory: $init_copy_dir" >&2; return 1; }
-        [[ "$init_dir_real" == "$home_real/"* && "$init_dir_real" != "$home_real" ]] \
-            || { echo "lab init directory escapes the lab home: $init_copy_dir" >&2; return 1; }
-
-        mkdir -p "$init_copy_dir" 2>/dev/null \
-            || { echo "cannot create the lab init directory: $init_copy_dir" >&2; return 1; }
-
-        # Refresh when the existing path is not a standalone, byte-identical
-        # regular file: missing, a symlink, a hardlink alias of the system
-        # binary, or drifted content. Publication is atomic (temp file +
-        # rename), so a relabeled copy from a previous run never needs to be
-        # written in place and a partial copy is never visible.
-        local src_sum copy_sum needs_refresh=0
-        src_sum="$(sha256sum -- "$docker_init" | awk '{print $1}')" \
-            || { echo "cannot hash the system docker-init" >&2; return 1; }
-        if [[ -L "$init_copy" ]]; then
-            needs_refresh=1
-        elif [[ ! -f "$init_copy" ]]; then
-            needs_refresh=1
-        else
-            copy_sum="$(sha256sum -- "$init_copy" | awk '{print $1}')" || copy_sum=""
-            if [[ "$(stat -c '%d:%i' -- "$init_copy")" == "$(stat -c '%d:%i' -- "$docker_init")" ]] \
-               || [[ "$copy_sum" != "$src_sum" ]]; then
-                needs_refresh=1
-            fi
-        fi
-        if [[ "$needs_refresh" = 1 ]]; then
-            local tmp=""
-            tmp="$(mktemp -- "$init_copy_dir/.docker-init.XXXXXX")" \
-                || { echo "cannot stage the lab docker-init copy" >&2; return 1; }
-            if ! cp -- "$docker_init" "$tmp" || ! chmod 0755 -- "$tmp"; then
-                rm -f -- "$tmp"
-                echo "cannot copy docker-init into the lab tree" >&2
-                return 1
-            fi
-            if ! mv -f -- "$tmp" "$init_copy"; then
-                rm -f -- "$tmp"
-                echo "cannot publish the lab docker-init copy" >&2
-                return 1
-            fi
-            tmp=""
-        fi
-
-        # FINAL verification of the exact file about to be mounted. Failure is
-        # fail-closed: the launch never falls back to the system binary.
-        [[ -f "$init_copy" && ! -L "$init_copy" ]] \
-            || { echo "lab docker-init copy is not a standalone regular file" >&2; return 1; }
-        [[ "$(stat -c '%d:%i' -- "$init_copy")" != "$(stat -c '%d:%i' -- "$docker_init")" ]] \
-            || { echo "lab docker-init copy aliases the system binary (hardlink)" >&2; return 1; }
-        copy_sum="$(sha256sum -- "$init_copy" | awk '{print $1}')"
-        [[ "$copy_sum" = "$src_sum" ]] \
-            || { echo "lab docker-init copy does not match the system binary" >&2; return 1; }
-
-        # Read-only shared relabel (ro,z): the container only execs the binary;
-        # the shared label stays stable across concurrent launches instead of
-        # being re-pinned to each container's single-use :Z categories.
-        init_mount=(-v "$init_copy:/sbin/docker-init:ro,z")
-    fi
-
-    # This array contains argv FOR docker(), not the docker executable itself.
-    # Including "docker" here made every launch "docker docker run" (rc 125).
-    local -a run_args=(
-        run --rm -it
-        --init
-        "${user_opt[@]}"
-        --cap-drop ALL
-        --security-opt no-new-privileges=true
-        "${selinux_opts[@]}"
-        "${init_mount[@]}"
-        "${docker_env[@]}"
-        -e LLM_SERVER
-        -e LLM_KEY
-        -e DOCKER_HELPER_SESSION_TOKEN
-        -v "$PWD:/workspace:Z"
-        "${home_mounts[@]}"
-        -v "$helper_runtime_dir:/run/docker-helper:ro"
-        "${extra_mounts[@]}"
-        -w /workspace
-    )
     if [[ "$mode" == exec ]]; then
         run_args+=(--entrypoint /bin/sh "$image" -c "$*")
     else
