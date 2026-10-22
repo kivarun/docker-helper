@@ -26,7 +26,8 @@
 #
 # Usage: scripts/lab/test-integration-hygiene.sh
 
-set -u
+# Assertion helpers accumulate failures; unhandled shell errors abort.
+set -eu
 
 SRC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 INTEG="$SRC_DIR/lab/integration-agent-vm.sh"
@@ -39,10 +40,10 @@ bad() { FAIL=$((FAIL+1)); printf 'FAIL - %s\n' "$1"; }
 check() { # description expected actual
   if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (want '$2', got '$3')"; fi
 }
-# A misspelled or missing helper must count as a test failure even though
-# this suite intentionally accumulates assertion errors without set -e.
+# Bash may invoke this handler in a subshell; changing FAIL inside it would
+# be lost. Return a hard error and let errexit refuse a green suite.
 command_not_found_handle() {
-  bad "unknown test command or helper: $1"
+  printf 'FATAL - unknown test command or helper: %s\n' "$1" >&2
   return 127
 }
 
