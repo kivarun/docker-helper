@@ -154,6 +154,44 @@ has "a configured provider that does not answer is a FAIL" \
   'the configured provider did not answer'
 has "the isolated mode records the explicit no-provider decision" 'ISOLATED_MODE'
 
+
+# --- UAT-8 follow-up. PTY framing and authoritative authentication rc -------
+# The actual integration runs inside script(1) and docker -it. PTY output
+# carries CRLF, so line-anchored markers and numerical rc need normalization.
+pty_normalizations="$(grep -Fc 'raw="${raw//' "$INTEG" || true)"
+if [ "$pty_normalizations" = 2 ]; then
+  ok "both probe and TLS PTY outputs normalize CRLF"
+else
+  bad "PTY CRLF normalization must occur in both paths (found $pty_normalizations)"
+fi
+if command -v script >/dev/null 2>&1; then
+  pty_fixture="$(script -qec "printf 'PROBE_BEGIN\\nPROBE_RC=0\\nPROBE_END\\n'" /dev/null </dev/null)"
+else
+  pty_fixture="$(printf 'PROBE_BEGIN\r\nPROBE_RC=0\r\nPROBE_END\r\n')"
+fi
+pty_fixture="${pty_fixture//[ "$FAIL" = 0 ]
+\r'/}"
+pty_rc="$(printf '%s\n' "$pty_fixture" | sed -n 's/^PROBE_RC=//p')"
+if [ "$pty_rc" = 0 ] \
+   && printf '%s\n' "$pty_fixture" | grep -q '^PROBE_BEGIN[ "$FAIL" = 0 ]
+ \
+   && printf '%s\n' "$pty_fixture" | grep -q '^PROBE_END[ "$FAIL" = 0 ]
+; then
+  ok "CRLF-framed probe markers and rc parse after normalization"
+else
+  bad "CRLF-framed probe markers or rc cannot be parsed"
+fi
+has "self checks only docker-helper self, without trailing success printf" \
+  "^probe_run self 'docker-helper self --json'$"
+has "boundary diagnostics do not mask the self exit" \
+  "^probe_run boundary "
+has "principal credential refusal retains the docker-helper exit code" \
+  '^probe_run princred .*[(]exit "\$rc"[)]'
+lacks "the self result cannot be masked by trailing boundary printfs" \
+  "probe_run self 'docker-helper self --json; printf"
+lacks "mandatory negative TLS evidence cannot be skipped for missing curl" \
+  'skip "in-container TLS check (curl is not available inside the image)"'
+
 echo
 printf 'integration hygiene tests: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
