@@ -309,7 +309,7 @@ fhas "the launcher installation is atomic (temporary file + rename)" \
 fhas "the launcher installation verifies byte equality" \
   'cmp -s -- "\$ALIASES_SRC"' "$LAB_LIB/setup-agent-user.sh"
 fhas "the launcher installation refuses symlinked targets" \
-  'refusing to install through it' "$LAB_LIB/setup-agent-user.sh"
+  'refusing to write through it' "$LAB_LIB/setup-agent-user.sh"
 fhas "the launcher installation refuses escapes from the agent home" \
   'escapes the agent home' "$LAB_LIB/setup-agent-user.sh"
 fhas "the diagnostic driver refreshes the launcher before the ladder" \
@@ -322,6 +322,23 @@ fhas "the preflight names its failure loader-drift" \
   'FAIL loader-drift' "$LAB_LIB/lab-diag-lib.sh"
 fhas "the runner pins one launcher source for itself and the children" \
   'DC_ALIASES="\$HOME/\.bash_aliases"' "$LAB_LIB/diagnose-launch.sh"
+
+# --- UAT-8h. the launcher refresh has exactly two file targets ---------------
+# .bashrc wiring is a separate full-provisioning responsibility: the refresh
+# mode must never read, append to or chown .bashrc (a symlinked .bashrc would
+# otherwise redirect those writes outside the agent home).
+fhas "the shell wiring has a single owner (wire_bashrc)" \
+  'wire_bashrc' "$LAB_LIB/setup-agent-user.sh"
+refresh_block="$(sed -n '/^if \[ "\$INSTALL_LAUNCHER_ONLY" = 1 \]; then/,/^fi$/p' "$LAB_LIB/setup-agent-user.sh")"
+case "$refresh_block" in
+  *"wire_bashrc"*) bad "UAT-8h: the launcher refresh wires .bashrc" ;;
+  *) ok "UAT-8h: the launcher refresh never touches .bashrc wiring" ;;
+esac
+install_fn_body="$(sed -n '/^install_launcher_aliases() {/,/^}/p' "$LAB_LIB/setup-agent-user.sh")"
+case "$install_fn_body" in
+  *".bashrc"*) bad "UAT-8h: the launcher installer still touches .bashrc" ;;
+  *) ok "UAT-8h: the launcher installer has no .bashrc responsibility" ;;
+esac
 
 echo
 printf 'integration hygiene tests: %d passed, %d failed\n' "$PASS" "$FAIL"

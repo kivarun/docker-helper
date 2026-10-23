@@ -35,10 +35,10 @@
 # --install-launcher-only (UAT-8g): refreshes ONLY the installed launcher
 # artifacts (~/.bash_aliases and ~/.opencode-docker/lib/lab-mount-gate.sh)
 # from the canonical lab sources, atomically, and verifies them (cmp, owner,
-# group, mode). It performs NO account, workspace, docker group, helper,
-# principal or credential changes; the diagnostic driver runs it before
-# every diagnostic ladder so the installed launcher can never drift from the
-# freshly copied /opt/lab scripts.
+# group, mode). It performs NO other change: no .bashrc wiring, no account,
+# workspace, docker group, helper, principal or credential changes. The
+# diagnostic driver runs it before every diagnostic ladder so the installed
+# launcher can never drift from the freshly copied /opt/lab scripts.
 #
 # It does NOT manage SSH keys: VM access stays with the dev-vm-local.sh SSH
 # identity, and the agent account gets no SSH of its own.
@@ -137,39 +137,47 @@ install_file_atomically() { # SRC TGT OWNER GROUP MODE -> 0 ok | 1 failure
   return 0
 }
 
-launcher_targets_ok() { # -> 0 ok; dies on any refused state
-  local home_real tgt dir base comp dir_real
+# target_inside_agent_home_ok TGT — the shared containment check for any
+# file this script writes INSIDE the agent home: the target must not be a
+# symlink (installing or appending through one would modify a file outside
+# the home) and its canonical location must stay inside the canonical agent
+# home. The check must work for a NOT-YET-EXISTING target: the deepest
+# EXISTING ancestor is resolved, and any existing component between it and
+# the target that is a symlink is refused. Dies on any refused state.
+target_inside_agent_home_ok() { # TGT
+  local tgt="$1" home_real dir base comp dir_real
   home_real="$(readlink -f -- "$AGENT_HOME")" \
     || die "cannot resolve the agent home $AGENT_HOME"
   [ -n "$home_real" ] && [ -d "$home_real" ] \
     || die "the agent home $AGENT_HOME is not a directory"
+  [ -L "$tgt" ] \
+    && die "$tgt is a symlink: refusing to write through it (fail closed)"
+  dir="$(dirname -- "$tgt")"
+  base="$dir"
+  while [ ! -d "$base" ]; do
+    base="$(dirname -- "$base")"
+    [ "$base" != "/" ] || die "cannot resolve an existing ancestor of $tgt"
+  done
+  dir_real="$(readlink -f -- "$base")" \
+    || die "cannot resolve the target directory of $tgt"
+  case "$dir_real" in
+    "$home_real"|"$home_real"/*) : ;;
+    *) die "$tgt escapes the agent home $AGENT_HOME (canonical $dir_real): refusing" ;;
+  esac
+  comp="$dir"
+  while [ "$comp" != "$base" ]; do
+    [ -L "$comp" ] \
+      && die "$tgt resolves through the symlink $comp: refusing (fail closed)"
+    comp="$(dirname -- "$comp")"
+  done
+  return 0
+}
+
+launcher_targets_ok() { # -> 0 ok; dies on any refused state
+  local tgt
   for tgt in "$AGENT_HOME/.bash_aliases" \
              "$AGENT_HOME/.opencode-docker/lib/lab-mount-gate.sh"; do
-    [ -L "$tgt" ] \
-      && die "$tgt is a symlink: refusing to install through it (fail closed)"
-    dir="$(dirname -- "$tgt")"
-    # the canonical location check must work for a NOT-YET-EXISTING target
-    # directory: resolve the deepest EXISTING ancestor and require it to
-    # stay inside the canonical agent home, then refuse any existing
-    # component between that ancestor and the target that is a symlink
-    # (a symlink there could place the file outside the agent home)
-    base="$dir"
-    while [ ! -d "$base" ]; do
-      base="$(dirname -- "$base")"
-      [ "$base" != "/" ] || die "cannot resolve an existing ancestor of $tgt"
-    done
-    dir_real="$(readlink -f -- "$base")" \
-      || die "cannot resolve the target directory of $tgt"
-    case "$dir_real" in
-      "$home_real"|"$home_real"/*) : ;;
-      *) die "$tgt escapes the agent home $AGENT_HOME (canonical $dir_real): refusing" ;;
-    esac
-    comp="$dir"
-    while [ "$comp" != "$base" ]; do
-      [ -L "$comp" ] \
-        && die "$tgt resolves through the symlink $comp: refusing (fail closed)"
-      comp="$(dirname -- "$comp")"
-    done
+    target_inside_agent_home_ok "$tgt"
   done
   return 0
 }
@@ -189,13 +197,26 @@ install_launcher_aliases() {
     "$AGENT_HOME/.opencode-docker/lib/lab-mount-gate.sh" \
     "$AGENT_USER" "$AGENT_USER" 0644 \
     || die "cannot atomically install $AGENT_HOME/.opencode-docker/lib/lab-mount-gate.sh"
-  if grep -qF '.bash_aliases' "$AGENT_HOME/.bashrc" 2>/dev/null; then
-    log "$AGENT_HOME/.bashrc already sources .bash_aliases"
+}
+
+# wire_bashrc — the SINGLE owner of the shell wiring (UAT-8h): connects the
+# installed launcher into the agent's .bashrc. It runs ONLY in the FULL
+# provisioning — never in the launcher refresh (--install-launcher-only has
+# exactly two file targets: ~/.bash_aliases and the mount-gate library copy;
+# .bashrc is neither). Before ANY write it refuses a symlinked .bashrc (the
+# append and the chown would otherwise modify an arbitrary file outside the
+# agent home) and verifies the canonical location stays inside the agent
+# home. An existing wiring is never duplicated.
+wire_bashrc() {
+  local bashrc="$AGENT_HOME/.bashrc"
+  target_inside_agent_home_ok "$bashrc"
+  if grep -qF '.bash_aliases' "$bashrc" 2>/dev/null; then
+    log "$bashrc already sources .bash_aliases"
   else
-    log "wiring $AGENT_HOME/.bash_aliases into $AGENT_HOME/.bashrc"
+    log "wiring $AGENT_HOME/.bash_aliases into $bashrc"
     printf '\n# docker-helper agent launchers\n[ -f "$HOME/.bash_aliases" ] && . "$HOME/.bash_aliases"\n' \
-      >> "$AGENT_HOME/.bashrc"
-    chown "$AGENT_USER:$AGENT_USER" "$AGENT_HOME/.bashrc"
+      >> "$bashrc"
+    chown "$AGENT_USER:$AGENT_USER" "$bashrc"
   fi
 }
 
@@ -314,6 +335,7 @@ chown -R "$AGENT_USER:$AGENT_USER" "$AGENT_HOME/.opencode-docker"
 
 install_launcher_aliases
 verify_launcher_aliases
+wire_bashrc
 
 # --- 3. docker-helper phase gate -------------------------------------------
 # The account, workspace and launcher aliases are OS-level state and are

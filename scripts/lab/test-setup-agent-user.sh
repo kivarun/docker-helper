@@ -588,9 +588,8 @@ not_contains "UAT-8g: the refresh creates no account (no useradd)" "useradd" "$r
 not_contains "UAT-8g: the refresh runs no helper/principal/credential work" "dh " "$rec"
 not_contains "UAT-8g: the refresh performs no usermod" "usermod" "$rec"
 contains "UAT-8g: the refresh reports its verified result" "launcher refresh done" "$out"
-grep -qF '.bash_aliases' "$AGENT_HOME/.bashrc" \
-  && ok "UAT-8g: the bashrc wiring is in place after the refresh" \
-  || bad "UAT-8g: the bashrc wiring is missing"
+# UAT-8h: the refresh does NOT touch .bashrc at all (the wiring is a full-
+# provisioning responsibility now); the behavioral proof lives in H1–H4.
 
 # R2: the refresh is idempotent (a second run keeps the verified state)
 out="$(run_setup --install-launcher-only)" \
@@ -610,7 +609,7 @@ if [ "$rc" != 0 ]; then ok "UAT-8g: a symlinked alias target is refused"; else b
   && ok "UAT-8g: the symlink target is intact (nothing written through it)" \
   || bad "UAT-8g: the symlink target was overwritten"
 case "$out" in
-  *"refusing to install through it"*) ok "UAT-8g: the refusal names the symlink rule" ;;
+  *"refusing to write through it"*) ok "UAT-8g: the refusal names the symlink rule" ;;
   *) bad "UAT-8g: the refusal reason is missing: $out" ;;
 esac
 rm -f "$AGENT_HOME/.bash_aliases"
@@ -648,6 +647,148 @@ cmp -s "$ALIASES" "$AGENT_HOME/.bash_aliases" \
 cmp -s "$GATE_LIB" "$AGENT_HOME/.opencode-docker/lib/lab-mount-gate.sh" \
   && ok "UAT-8g: the full provisioning installs the verified gate library" \
   || bad "UAT-8g: the full provisioning gate library diverged"
+
+# --- UAT-8h. .bashrc is NOT a launcher-refresh target ------------------------
+# The launcher refresh (--install-launcher-only) has EXACTLY two file targets:
+# ~/.bash_aliases and ~/.opencode-docker/lib/lab-mount-gate.sh. The .bashrc
+# wiring is a separate responsibility of the FULL provisioning only: in the
+# refresh mode a symlinked .bashrc would previously have been appended to and
+# chowned THROUGH the link, modifying an arbitrary file outside the agent
+# home. Every assertion below checks real file CONTENT and METADATA.
+refresh_probe() { # -> runs the refresh, returns rc, output in REFRESH_OUT
+  REFRESH_OUT="$(run_setup --install-launcher-only)"; return $?
+}
+
+# H1: an absent .bashrc is never created by the refresh
+reset_state
+mkdir -p "$AGENT_HOME/.opencode-docker/lib"
+if refresh_probe; then ok "UAT-8h: the refresh succeeds without a .bashrc"; else bad "UAT-8h: the refresh failed without a .bashrc: $REFRESH_OUT"; fi
+[ ! -e "$AGENT_HOME/.bashrc" ] \
+  && ok "UAT-8h: the refresh does not create .bashrc" \
+  || bad "UAT-8h RED: the refresh created .bashrc"
+
+# H2: an existing .bashrc WITHOUT the wiring is left byte- and metadata-identical
+reset_state
+mkdir -p "$AGENT_HOME/.opencode-docker/lib"
+printf 'original bashrc content\n' > "$AGENT_HOME/.bashrc"
+chmod 0600 "$AGENT_HOME/.bashrc"
+before_m="$("$real_stat" -c %a "$AGENT_HOME/.bashrc")"
+before_t="$("$real_stat" -c %Y "$AGENT_HOME/.bashrc")"
+if refresh_probe; then ok "UAT-8h: the refresh succeeds with an unwired .bashrc"; else bad "UAT-8h: the refresh failed with an unwired .bashrc: $REFRESH_OUT"; fi
+[ "$(cat "$AGENT_HOME/.bashrc")" = "original bashrc content" ] \
+  && ok "UAT-8h: the unwired .bashrc content is unchanged" \
+  || bad "UAT-8h RED: the refresh modified the unwired .bashrc content"
+[ "$("$real_stat" -c %a "$AGENT_HOME/.bashrc")" = "$before_m" ] \
+  && ok "UAT-8h: the unwired .bashrc mode is unchanged" \
+  || bad "UAT-8h RED: the refresh modified the unwired .bashrc mode"
+[ "$("$real_stat" -c %Y "$AGENT_HOME/.bashrc")" = "$before_t" ] \
+  && ok "UAT-8h: the unwired .bashrc mtime is unchanged" \
+  || bad "UAT-8h RED: the refresh modified the unwired .bashrc mtime"
+
+# H3: a symlinked .bashrc is never followed by the refresh
+reset_state
+mkdir -p "$AGENT_HOME/.opencode-docker/lib"
+printf 'external bashrc data\n' > "$WORK/external-bashrc"
+"$real_stat" -c %Y "$WORK/external-bashrc" > "$WORK/external-mtime"
+ln -s "$WORK/external-bashrc" "$AGENT_HOME/.bashrc"
+if refresh_probe; then ok "UAT-8h: the refresh succeeds with a symlinked .bashrc"; else bad "UAT-8h: the refresh failed with a symlinked .bashrc: $REFRESH_OUT"; fi
+[ "$(cat "$WORK/external-bashrc")" = "external bashrc data" ] \
+  && ok "UAT-8h: the symlinked .bashrc target content is untouched" \
+  || bad "UAT-8h RED: the refresh wrote through the .bashrc symlink"
+[ "$("$real_stat" -c %Y "$WORK/external-bashrc")" = "$(cat "$WORK/external-mtime")" ] \
+  && ok "UAT-8h: the symlinked .bashrc target mtime is untouched" \
+  || bad "UAT-8h RED: the refresh touched the .bashrc symlink target"
+
+# H4: an already-wired .bashrc is not modified by the refresh
+reset_state
+mkdir -p "$AGENT_HOME/.opencode-docker/lib"
+printf 'prev\n# docker-helper agent launchers\n[ -f "$HOME/.bash_aliases" ] && . "$HOME/.bash_aliases"\n' > "$AGENT_HOME/.bashrc"
+before_t="$("$real_stat" -c %Y "$AGENT_HOME/.bashrc")"
+if refresh_probe; then ok "UAT-8h: the refresh succeeds with a wired .bashrc"; else bad "UAT-8h: the refresh failed with a wired .bashrc: $REFRESH_OUT"; fi
+[ "$("$real_stat" -c %Y "$AGENT_HOME/.bashrc")" = "$before_t" ] \
+  && ok "UAT-8h: the wired .bashrc is untouched by the refresh" \
+  || bad "UAT-8h RED: the refresh touched an already-wired .bashrc"
+
+# H5: the refresh still updates and verifies a stale launcher and gate
+reset_state
+mkdir -p "$AGENT_HOME/.opencode-docker/lib"
+printf '# STALE LAUNCHER\n' > "$AGENT_HOME/.bash_aliases"
+printf '# STALE GATE\n' > "$AGENT_HOME/.opencode-docker/lib/lab-mount-gate.sh"
+if refresh_probe; then ok "UAT-8h: the refresh succeeds with a stale launcher"; else bad "UAT-8h: the refresh failed with a stale launcher: $REFRESH_OUT"; fi
+cmp -s "$ALIASES" "$AGENT_HOME/.bash_aliases" \
+  && ok "UAT-8h: the stale aliases are still refreshed byte-identically (cmp)" \
+  || bad "UAT-8h: the stale aliases were not refreshed"
+cmp -s "$GATE_LIB" "$AGENT_HOME/.opencode-docker/lib/lab-mount-gate.sh" \
+  && ok "UAT-8h: the stale gate library is still refreshed byte-identically (cmp)" \
+  || bad "UAT-8h: the stale gate library was not refreshed"
+
+# H6: the refresh is idempotent
+if refresh_probe; then ok "UAT-8h: a second refresh succeeds"; else bad "UAT-8h: a second refresh failed: $REFRESH_OUT"; fi
+cmp -s "$ALIASES" "$AGENT_HOME/.bash_aliases" \
+  && ok "UAT-8h: the second refresh keeps the byte-identical aliases" \
+  || bad "UAT-8h: the second refresh changed the aliases"
+
+# H7: the FULL provisioning installs a missing wiring
+reset_state
+: > "$SELFOK"
+out="$(run_setup)"; rc=$?
+if [ "$rc" = 0 ]; then ok "UAT-8h: the full provisioning succeeds (absent wiring)"; else bad "UAT-8h: the full provisioning failed (absent wiring): $out"; fi
+grep -qF '.bash_aliases' "$AGENT_HOME/.bashrc" \
+  && ok "UAT-8h: the full provisioning wires .bash_aliases into .bashrc" \
+  || bad "UAT-8h: the full provisioning did not wire .bashrc"
+if [ "$(grep -cF '.bash_aliases' "$AGENT_HOME/.bashrc")" = 1 ]; then
+  ok "UAT-8h: the wiring is written exactly once"
+else
+  bad "UAT-8h: the wiring line count is wrong ($(grep -cF '.bash_aliases' "$AGENT_HOME/.bashrc"))"
+fi
+
+# H8: an existing wiring is not duplicated by a second full run
+reset_state
+: > "$SELFOK"
+out="$(run_setup)" >/dev/null 2>&1
+if run_setup >/dev/null 2>&1; then ok "UAT-8h: the second full run succeeds"; else bad "UAT-8h: the second full run failed"; fi
+[ "$(grep -cF '.bash_aliases' "$AGENT_HOME/.bashrc")" = 1 ] \
+  && ok "UAT-8h: the second full run does not duplicate the wiring" \
+  || bad "UAT-8h: the second full run duplicated the wiring"
+
+# H9: a symlinked .bashrc FAILS the full provisioning closed, the external
+# file is never written through
+reset_state
+: > "$SELFOK"
+printf 'external full-provisioning data\n' > "$WORK/external-full-bashrc"
+"$real_stat" -c %Y "$WORK/external-full-bashrc" > "$WORK/external-full-mtime"
+ln -s "$WORK/external-full-bashrc" "$AGENT_HOME/.bashrc"
+out="$(run_setup)"; rc=$?
+if [ "$rc" != 0 ]; then
+  ok "UAT-8h: a symlinked .bashrc fails the full provisioning closed"
+else
+  bad "UAT-8h RED: the full provisioning wrote through a symlinked .bashrc"
+fi
+[ "$(cat "$WORK/external-full-bashrc")" = "external full-provisioning data" ] \
+  && ok "UAT-8h: the external .bashrc target is intact" \
+  || bad "UAT-8h: the external .bashrc target was modified"
+[ "$("$real_stat" -c %Y "$WORK/external-full-bashrc")" = "$(cat "$WORK/external-full-mtime")" ] \
+  && ok "UAT-8h: the external .bashrc target mtime is intact" \
+  || bad "UAT-8h: the external .bashrc target was touched"
+case "$out" in
+  *"refusing to write through it"*) ok "UAT-8h: the refusal names the symlink rule" ;;
+  *) bad "UAT-8h: the refusal reason is missing: $out" ;;
+esac
+
+# H10: the full provisioning still uses the single canonical installer
+reset_state
+: > "$SELFOK"
+: > "$REC"
+out="$(run_setup)" >/dev/null 2>&1
+rec="$(cat "$REC")"
+case "$rec" in
+  *".bash_aliases.new."*)
+    ok "UAT-8h: the launcher install still goes through the atomic installer" ;;
+  *) bad "UAT-8h: the launcher install did not use the atomic installer" ;;
+esac
+cmp -s "$ALIASES" "$AGENT_HOME/.bash_aliases" \
+  && ok "UAT-8h: the launcher install still verifies byte-identical aliases" \
+  || bad "UAT-8h: the launcher install verification broke"
 
 printf 'setup-agent-user tests: %d passed, %d failed\n' "$PASS" "$FAIL"
 
