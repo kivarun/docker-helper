@@ -406,6 +406,31 @@ contains "LLM flags ride the oc-probe composition" "-e LLM_SERVER" "$dargv"
 contains "LLM flags ride the oc-probe composition (key)" "-e LLM_KEY" "$dargv"
 not_contains "the LLM key value never enters the oc-probe argv" "llm-secret-marker" "$(cat "$DOCKER_REC")"
 
+# --- 7a3. the diagnostic provenance is strictly opt-in (UAT-8e) --------------
+# Normal oc / oc-go26 / oc-probe launches carry NO diagnostic name, label or
+# cidfile; a PARTIAL diagnostic configuration is refused instead of launching
+# an unattributed container.
+: > "$DOCKER_REC"
+( unset OPENCODE_DIAGNOSTIC_RUNID OPENCODE_DIAGNOSTIC_NAME OPENCODE_DIAGNOSTIC_CIDFILE
+  cd "$WS" && oc echo hi )
+dargv="$(cat "$DOCKER_REC" 2>/dev/null || true)"
+not_contains "a normal oc launch carries no diagnostic name" "--name dhl-" "$dargv"
+not_contains "a normal oc launch carries no diagnostic label" "lab.diagnostic.runid" "$dargv"
+not_contains "a normal oc launch carries no cidfile" "--cidfile" "$dargv"
+: > "$DOCKER_REC"
+( unset OPENCODE_DIAGNOSTIC_RUNID OPENCODE_DIAGNOSTIC_NAME OPENCODE_DIAGNOSTIC_CIDFILE
+  cd "$WS" && oc-probe 'echo probe' )
+dargv="$(cat "$DOCKER_REC" 2>/dev/null || true)"
+not_contains "a normal oc-probe launch carries no diagnostic options" "lab.diagnostic.runid" "$dargv"
+# a partial configuration refuses the launch before any docker call
+: > "$DOCKER_REC"; : > "$DH_REC"
+( export OPENCODE_DIAGNOSTIC_RUNID=r1
+  unset OPENCODE_DIAGNOSTIC_NAME OPENCODE_DIAGNOSTIC_CIDFILE
+  cd "$WS" && oc echo hi ) >/dev/null 2>&1
+[ "$(cat "$DOCKER_REC" 2>/dev/null | wc -l)" = 0 ] \
+  && ok "a partial diagnostic configuration launches nothing" \
+  || bad "RED: a partial diagnostic configuration still launched docker"
+
 # --- 7b. ambiguous CA provisioning fails the launch -------------------------
 printf 'CA2\n' > "$OPENCODE_DOCKER_HOME/ca/second.crt"
 : > "$DH_REC"; : > "$DOCKER_REC"

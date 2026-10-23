@@ -57,6 +57,9 @@ DIAG_KILL_AFTER="${DIAG_KILL_AFTER:-10}"
 DIAG_STEP_BOUND="${DIAG_STEP_BOUND:-30}"
 DIAG_CANON_BOUND="${DIAG_CANON_BOUND:-60}"
 DIAG_FACTOR_BOUND="${DIAG_FACTOR_BOUND:-30}"
+# the bound for every bounded recovery call (inspect/rm/ps/image inspect/
+# session list/delete): one owner, the same timeout mechanism as the steps
+DIAG_RECOVERY_BOUND="${DIAG_RECOVERY_BOUND:-10}"
 # the aliases source path for the child shells: $HOME/.bash_aliases in the
 # VM; a test harness may point it at the repository copy
 DC_ALIASES="${DC_ALIASES:-$HOME/.bash_aliases}"
@@ -66,21 +69,51 @@ DC_ALIASES="${DC_ALIASES:-$HOME/.bash_aliases}"
 # this library must not assign a default, because the seam's set/empty
 # distinction is what models the absence of docker-init.
 # LAB_DOCKER_INIT_CANDIDATES is consumed by agent-aliases.sh via ${VAR+x}.
-# the daemon's reserved container labels (one code owner: runtime_labels.go);
-# used ONLY as read-only ownership evidence for the canonical steps
-DIAG_SESSION_LABEL="com.dockerhelper.session.id"
-DIAG_SCHEMA_LABEL="com.dockerhelper.schema"
-DIAG_SCHEMA_VALUE="1"
 
-# diag_sanitize TEXT — defense in depth for anything the report quotes:
-# bearer-token shapes, admin-token shapes, Authorization values and private
-# key material are redacted before any evidence text reaches the report.
+# diag_sanitize TEXT — the single sanitization owner. Defense in depth for
+# anything any report path quotes: bearer-token shapes, admin-token shapes,
+# Authorization values and private key material are redacted, PLUS every
+# exact secret VALUE registered by this run (DIAG_SECRET_VALUES_LIST,
+# newline-separated): arbitrary values, not only dht_* shaped ones. The
+# canonical steps register the Session token value before any evidence is
+# produced.
+DIAG_SECRET_VALUES_LIST=""
 diag_sanitize() {
-  printf '%s' "$1" \
+  local text="$1"
+  local out
+  out="$(printf '%s' "$text" \
     | sed -E -e 's/dht_[0-9a-zA-Z]{16,}/dht_REDACTED/g' \
              -e 's/(Bearer[[:space:]]+)[^[:space:]]+/\1REDACTED/g' \
              -e 's/-----BEGIN[A-Z ]*PRIVATE KEY-----/REDACTED-KEY/g' \
-             -e 's/(ADMIN[A-Za-z0-9_]*[[:space:]]*[:=][[:space:]]*)[^[:space:]]+/\1REDACTED/g'
+             -e 's/(ADMIN[A-Za-z0-9_]*[[:space:]]*[:=][[:space:]]*)[^[:space:]]+/\1REDACTED/g')" || {
+    # a failed sanitization must never degrade into a PASS-shaped passthrough
+    printf '%s' "SANITIZE-FAILURE"
+    return 1
+  }
+  local v
+  while IFS= read -r v; do
+    [ -n "$v" ] || continue
+    out="$(printf '%s' "$out" | sed -e "s#${v//#/\\#}#REDACTED#g")" || {
+      printf '%s' "SANITIZE-FAILURE"
+      return 1
+    }
+  done <<<"$DIAG_SECRET_VALUES_LIST"
+  printf '%s' "$out"
+  return 0
+}
+
+# diag_register_secret_value VALUE — record one exact secret value this run
+# holds so every report path redacts it. Never logs the value.
+diag_register_secret_value() { # VALUE
+  [ -n "$1" ] || return 0
+  case "$DIAG_SECRET_VALUES_LIST" in
+    *"
+$1"*) : ;;
+    "") DIAG_SECRET_VALUES_LIST="$1" ;;
+    *) DIAG_SECRET_VALUES_LIST="$DIAG_SECRET_VALUES_LIST
+$1" ;;
+  esac
+  return 0
 }
 
 # diag_exec NAME BOUND CMD... -> runs one bounded command, records everything
@@ -102,33 +135,135 @@ diag_exec() { # NAME BOUND CMD...
     *) printf '%s\n' container > "$DIAG_DIR/$name.layer" ;;
   esac
   if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
-    reap="$(diag_reap_owned_container "${DIAG_CONTAINER_NAME:-}")"
+    reap="$(diag_reap_owned_container "${DIAG_CONTAINER_NAME:-}" "${DIAG_CONTAINER_CID:-}")"
   fi
   printf '%s\n' "$reap" > "$DIAG_DIR/$name.reap"
   return "$rc"
 }
 
-# diag_reap_owned_container NAME — remove a diagnostic-owned container ONLY
-# after its identity is verified: the name must exist, its
-# lab.diagnostic.runid label must equal THIS run's id, and its image must
-# equal the pinned reference. Anything else is never removed.
-diag_reap_owned_container() { # NAME -> ok | failed | refused-unowned | n/a
+# diag_bounded NAME CMD... — the shared bounded-recovery owner. Every
+# potentially blocking recovery operation (docker inspect/rm/ps, image
+# inspect, docker-helper session list/delete) runs through THIS mechanism —
+# the same timeout+kill-after implementation the steps use — never through
+# independent timeout wrappers. Evidence (.out/.err/.rc/.elapsed) is
+# recorded like any other bounded execution.
+diag_bounded() { # NAME CMD... -> the command's stdout; nonzero on failure
   local name="$1"
-  [ -n "$name" ] || { printf 'n/a'; return 0; }
-  [ -n "${DIAG_RUNID:-}" ] || { printf 'refused-unowned'; return 0; }
-  local observed
-  observed="$(docker inspect --format \
-    '{{index .Config.Labels "lab.diagnostic.runid"}}|{{.Image}}' "$name" 2>/dev/null)" \
-    || { printf 'refused-unowned'; return 0; }
-  case "$observed" in
-    "${DIAG_RUNID}|${DIAG_IMAGE}") ;;
-    *) printf 'refused-unowned'; return 0 ;;
-  esac
-  if docker rm -f "$name" >/dev/null 2>&1; then
+  shift
+  local t0=$SECONDS rc
+  if timeout --kill-after="$DIAG_KILL_AFTER" "$DIAG_RECOVERY_BOUND" "$@" \
+      >"$DIAG_DIR/$name.out" 2>"$DIAG_DIR/$name.err"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  printf '%s\n' "$((SECONDS - t0))" > "$DIAG_DIR/$name.elapsed"
+  printf '%s\n' "$rc" > "$DIAG_DIR/$name.rc"
+  return "$rc"
+}
+
+# diag_expected_image_id REF — resolve the pinned OCI reference to the LOCAL
+# Docker image ID. The container's `.Image` is an image ID, not a reference;
+# the ownership comparison must be ID to ID. A failed resolution is a
+# refusal, never a guess.
+diag_expected_image_id() { # REF -> the image ID on stdout, or empty
+  local ref="$1"
+  diag_bounded "image-id" docker image inspect --format '{{.Id}}' "$ref" \
+    >/dev/null 2>&1 || { printf ''; return 0; }
+  local id
+  id="$(cat "$DIAG_DIR/image-id.out" 2>/dev/null)"
+  if [[ "$id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    printf '%s' "$id"
+  else
+    printf ''
+  fi
+}
+
+# diag_container_identity NAME_OR_ID — one bounded inspect returning
+# "id|runid-label|image-id"; empty on any failure.
+diag_container_identity() { # NAME_OR_ID -> id|runid|image-id
+  diag_bounded "identity" docker inspect --format \
+    '{{.Id}}|{{index .Config.Labels "lab.diagnostic.runid"}}|{{.Image}}' "$1" \
+    >/dev/null 2>&1 || { printf ''; return 0; }
+  cat "$DIAG_DIR/identity.out" 2>/dev/null
+}
+
+# diag_container_absent NAME — bounded, decisive existence check: 0 = a
+# container with exactly this name does NOT exist (proven absence);
+# 1 = it exists or existence cannot be proven.
+diag_container_absent() { # NAME -> 0 absent | 1 present-or-unknown
+  diag_bounded "absence" docker ps -aq --filter "name=^/$1\$" \
+    >/dev/null 2>&1 || return 1
+  [ -s "$DIAG_DIR/absence.out" ] && return 1
+  return 0
+}
+
+# diag_reap_verified_container CID — remove a container by its IMMUTABLE
+# container ID after identity verification. Never removes by a name, which
+# could be reused.
+diag_reap_verified_container() { # CID -> ok | failed
+  if diag_bounded "rm" docker rm -f "$1" >/dev/null 2>&1; then
     printf 'ok'
   else
     printf 'failed'
   fi
+  return 0
+}
+
+# diag_reap_owned_container NAME CIDFILE — remove a diagnostic-owned
+# container ONLY after its identity is verified end to end:
+#   1. the run's cidfile records the immutable container ID (a run that
+#      died before docker wrote it grants no removal permission by
+#      assumption);
+#   2. the container is inspected BY ID (never by the reusable name): its
+#      .Id must equal the recorded ID, its lab.diagnostic.runid label must
+#      equal THIS run's id, and its .Image must equal the LOCAL image ID
+#      resolved from the pinned OCI reference (an image ID, not a
+#      reference);
+#   3. the removal targets the verified container ID.
+# Proven absence (no cidfile and no container with this name) is a normal
+# outcome (clean), not an error. Any ambiguity is refused-unowned.
+diag_reap_owned_container() { # NAME CIDFILE -> clean|ok|failed|refused-unowned|n/a
+  local name="$1" cidfile="$2" cid
+  [ -n "$name" ] || { printf 'n/a'; return 0; }
+  [ -n "${DIAG_RUNID:-}" ] || { printf 'refused-unowned'; return 0; }
+  if [ ! -s "$cidfile" ]; then
+    if diag_container_absent "$name"; then
+      printf 'clean'
+    else
+      printf 'refused-unowned'
+    fi
+    return 0
+  fi
+  cid="$(tr -d '[:space:]' < "$cidfile" 2>/dev/null)"
+  if [[ ! "$cid" =~ ^[0-9a-f]{64}$ && ! "$cid" =~ ^[0-9a-f]{12}$ ]]; then
+    printf 'refused-unowned'
+    return 0
+  fi
+  local expected identity
+  expected="$(diag_expected_image_id "${DIAG_IMAGE:-}")"
+  [ -n "$expected" ] || { printf 'refused-unowned'; return 0; }
+  identity="$(diag_container_identity "$cid")"
+  if [ -z "$identity" ]; then
+    # the recorded container no longer exists: proven absence is a normal
+    # outcome (an --rm run already removed it), never an error
+    if diag_container_absent "$name"; then
+      printf 'clean'
+    else
+      printf 'refused-unowned'
+    fi
+    return 0
+  fi
+  local iid lrid img
+  iid="${identity%%|*}"
+  local rest="${identity#*|}"
+  lrid="${rest%%|*}"
+  img="${rest#*|}"
+  case "$iid|$lrid|$img" in
+    "$cid|$DIAG_RUNID|$expected") ;;
+    *) printf 'refused-unowned'; return 0 ;;
+  esac
+  diag_reap_verified_container "$cid"
   return 0
 }
 
@@ -138,9 +273,10 @@ diag_reap_owned_container() { # NAME -> ok | failed | refused-unowned | n/a
 # a refusal, never an empty snapshot. The list carries no bearer tokens.
 diag_register_step_sessions() { # WORKSPACE FILE -> 0 ok | 1 list-failed
   local ws="$1" file="$2" raw
-  if ! raw="$(docker-helper session list --json 2>/dev/null)"; then
+  if ! raw="$(diag_bounded "session-list" docker-helper session list --json)"; then
     return 1
   fi
+  raw="$(cat "$DIAG_DIR/session-list.out" 2>/dev/null)"
   printf '%s' "$raw" | jq -r --arg ws "$ws" \
     '.sessions[] | select(.workspace == $ws) | .id' > "$file" 2>/dev/null \
     || { : > "$file"; return 1; }
@@ -154,7 +290,8 @@ diag_clean_registered_sessions() { # FILE -> clean | reaped | failed | refused
   [ -s "$file" ] || { printf 'clean'; return 0; }
   while IFS= read -r id; do
     [ -n "$id" ] || continue
-    if docker-helper session delete "$id" >/dev/null 2>&1; then
+    if diag_bounded "session-delete" docker-helper session delete "$id" \
+        >/dev/null 2>&1; then
       outcome=reaped
     else
       outcome=failed
@@ -165,47 +302,13 @@ diag_clean_registered_sessions() { # FILE -> clean | reaped | failed | refused
   return 0
 }
 
-# diag_reap_registered_containers SESSIONS_FILE — remove the containers the
-# daemon itself attributes to the registered (workspace-owned) Sessions, via
-# the daemon's reserved labels. The session IDs were verified against this
-# run's diagnostic workspace at registration time.
-diag_reap_registered_containers() { # SESSIONS_FILE -> n/a | ok | failed | refused-unowned
-  local file="$1" sid cid outcome="n/a"
-  [ -s "$file" ] || { printf 'n/a'; return 0; }
-  local ids=""
-  while IFS= read -r sid; do
-    [ -n "$sid" ] || continue
-    ids="$ids --filter label=$DIAG_SESSION_LABEL=$sid"
-  done < "$file"
-  [ -n "$ids" ] || { printf 'n/a'; return 0; }
-  # shellcheck disable=SC2086
-  local found
-  found="$(docker ps -aq --filter "label=$DIAG_SCHEMA_LABEL=$DIAG_SCHEMA_VALUE" $ids 2>/dev/null)" \
-    || { printf 'refused-unowned'; return 0; }
-  while IFS= read -r cid; do
-    [ -n "$cid" ] || continue
-    # double-check the label set before any forced removal
-    local labels
-    labels="$(docker inspect --format \
-      '{{index .Config.Labels "com.dockerhelper.schema"}}|{{index .Config.Labels "com.dockerhelper.session.id"}}' "$cid" 2>/dev/null)" \
-      || { outcome=refused-unowned; continue; }
-    local sid_ok=0
-    while IFS= read -r sid; do
-      [ -n "$sid" ] || continue
-      case "$labels" in
-        "$DIAG_SCHEMA_VALUE|$sid") sid_ok=1; break ;;
-      esac
-    done < "$file"
-    [ "$sid_ok" = 1 ] || { outcome=refused-unowned; continue; }
-    if docker rm -f "$cid" >/dev/null 2>&1; then
-      outcome=ok
-    else
-      outcome=failed
-    fi
-  done <<<"$found"
-  printf '%s' "$outcome"
-  return 0
-}
+# UAT-8e: the daemon's reserved com.dockerhelper.* labels identify
+# containers created BY docker-helper. D3/D4 containers are started with a
+# plain `docker run` through the canonical launcher, so they carry none of
+# them; they are attributed ONLY through the diagnostic provenance (the
+# unique name, the run-identity label and the immutable cidfile container
+# ID) the launcher applies when explicitly asked to. There is no
+# helper-label based cleanup path left in this library.
 
 # diag_classify ID MARKER -> DC_OK (1|0) and DC_DETAIL; records .detail.
 # A missing or non-numeric exit status can never classify as a PASS.
@@ -260,24 +363,47 @@ diag_step_delta() { # FROM TO
   esac
 }
 
-# _diag_record_canonical_cleanup ID WS — the error-checked, workspace-scoped
-# registration and recovery for one canonical step.
-_diag_record_canonical_cleanup() { # ID WS
-  local id="$1" ws="$2" outcome
+# diag_canonical_recover ID WS NAME CIDFILE — the error-checked, provenance-
+# scoped recovery for one canonical step. Verdict:
+#   clean              nothing of this run needed recovery, or the container
+#                      is provably absent (a normal outcome)
+#   reaped             every owned resource was recovered
+#   failed             an owned resource could not be removed
+#   refused-list-error the session list could not be verified
+#   refused-unowned    a container exists but its ownership could not be
+#                      proven (no cidfile / identity mismatch)
+diag_canonical_recover() { # ID WS NAME CIDFILE -> verdict on stdout
+  local id="$1" ws="$2" name="$3" cidfile="$4"
+  local session_verdict container_verdict
   if diag_register_step_sessions "$ws" "$DIAG_DIR/$id.sessions.registered"; then
-    outcome="$(diag_clean_registered_sessions "$DIAG_DIR/$id.sessions.registered")"
-    local reap
-    reap="$(diag_reap_registered_containers "$DIAG_DIR/$id.sessions.registered")"
-    printf '%s/%s' "$outcome" "$reap" > "$DIAG_DIR/$id.session"
+    session_verdict="$(diag_clean_registered_sessions "$DIAG_DIR/$id.sessions.registered")"
   else
-    printf 'refused-list-error/n-a' > "$DIAG_DIR/$id.session"
+    session_verdict="refused-list-error"
   fi
+  container_verdict="$(diag_reap_owned_container "$name" "$cidfile")"
+  case "$session_verdict/$container_verdict" in
+    refused-list-error/*) printf 'refused-list-error' ;;
+    */refused-unowned)    printf 'refused-unowned' ;;
+    */failed)             printf 'failed' ;;
+    */ok)                 printf 'reaped' ;;
+    */clean)              printf '%s' "$session_verdict" ;;
+  esac
+  return 0
+}
+
+# diag_cleanup_ok VERDICT — the cleanup is part of the step's PASS criterion:
+# only a successful or confirmed-unnecessary cleanup accepts.
+diag_cleanup_ok() { # VERDICT -> 0 ok | 1 mandatory-cleanup-failure
+  case "$1" in
+    clean|reaped) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # _diag_step_argv_compose ARRAYNAME LEVEL INIT_COPY WS — assemble the ladder's
 # docker argv from the SINGLE canonical owners. Fail-closed: any composition
 # or mount-gate refusal is propagated and the caller must NOT run docker.
-_diag_step_argv_compose() { # ARRAYNAME LEVEL INIT_COPY [CONTAINER_NAME]
+_diag_step_argv_compose() { # ARRAYNAME LEVEL INIT_COPY [CONTAINER_NAME [CIDFILE]]
   # shellcheck disable=SC2178  # a bash nameref to the caller's array
   local -n args="$1"
   local level="$2" init_copy="$3"
@@ -285,6 +411,7 @@ _diag_step_argv_compose() { # ARRAYNAME LEVEL INIT_COPY [CONTAINER_NAME]
   args+=(run --rm --name "$cname")
   args+=(--label "lab.diagnostic.runid=$DIAG_RUNID")
   args+=(--label "lab.diagnostic.step=$level")
+  args+=(--cidfile "${5:-$DIAG_DIR/$level.cid}")
   [ "$level" != D0 ] && [ -n "$init_copy" ] && \
     args+=(--init -v "$init_copy:/sbin/docker-init:ro,z")
   _oc_security_opts args || return 1
@@ -298,10 +425,15 @@ _diag_step_argv_compose() { # ARRAYNAME LEVEL INIT_COPY [CONTAINER_NAME]
 
 # _diag_run_docker_step ID LEVEL INIT_COPY PAYLOAD MARKER — fail-closed:
 # composition errors stop BEFORE docker; the partial argv is never executed.
+# The mandatory container cleanup is part of the step's PASS criterion: a
+# hung container that cannot be verified or removed fails the step even
+# when the workload itself succeeded.
 _diag_run_docker_step() { # ID LEVEL INIT_COPY PAYLOAD MARKER
   local id="$1" level="$2" init_copy="$3" payload="$4" marker="$5"
+  local cidfile="$DIAG_DIR/$id.cid"
   local -a argv=()
-  if ! _diag_step_argv_compose argv "$level" "$init_copy"; then
+  if ! _diag_step_argv_compose argv "$level" "$init_copy" \
+      "dhl-$level-$DIAG_RUNID" "$cidfile"; then
     printf 'refused\n' > "$DIAG_DIR/$id.rc"
     printf 'unknown\n' > "$DIAG_DIR/$id.elapsed"
     printf 'composition-refused\n' > "$DIAG_DIR/$id.detail"
@@ -311,35 +443,119 @@ _diag_run_docker_step() { # ID LEVEL INIT_COPY PAYLOAD MARKER
     return 1
   fi
   argv+=(--entrypoint /bin/sh "$DIAG_IMAGE" -c "$payload")
-  DIAG_CONTAINER_NAME="dhl-$level-$DIAG_RUNID" \
+  DIAG_CONTAINER_NAME="dhl-$level-$DIAG_RUNID" DIAG_CONTAINER_CID="$cidfile" \
     diag_exec "$id" "$DIAG_STEP_BOUND" docker "${argv[@]}" </dev/null || true
   diag_classify "$id" "$marker"
   printf 'n/a\n' > "$DIAG_DIR/$id.session"
-  [ "$DC_OK" = 1 ] && return 0 || return 1
+  if [ "$DC_OK" = 1 ]; then
+    # the workload passed: the mandatory cleanup still gates the verdict
+    local reap
+    reap="$(cat "$DIAG_DIR/$id.reap" 2>/dev/null || echo n/a)"
+    if diag_cleanup_ok_reap "$reap"; then
+      return 0
+    fi
+    DC_DETAIL="cleanup-$reap"
+    printf '%s\n' "$DC_DETAIL" > "$DIAG_DIR/$id.detail"
+    return 1
+  fi
+  return 1
+}
+
+# diag_cleanup_ok_reap REAP — the reap verdicts that accept a workload PASS:
+# n/a (no timeout: the --rm run exited by itself) and a verified ok/clean.
+diag_cleanup_ok_reap() {
+  case "$1" in
+    n/a|ok|clean) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # _diag_canonical_step ID BOUND PAYLOAD MODE WS — run the canonical aliases
 # path (oc-probe for exec, oc for the real entrypoint) under diag_exec, then
-# register and recover exactly this run's leaked resources.
-_diag_canonical_step() { # ID BOUND PAYLOAD MODE WS
+# recover exactly this run's leaked resources by diagnostic provenance.
+#
+# PTY contract (UAT-8e): the canonical launcher uses `docker run -it`, so
+# the child MUST hold a real terminal — every canonical and `-it` probe step
+# runs under a real script(1) pty, and the probe payload itself proves the
+# in-container TTY with `test -t 0`. The no-TTY probe deliberately uses
+# stdin /dev/null without -it. The canonical launcher configuration is never
+# altered to satisfy a test.
+#
+# The diagnostic provenance (name + run-identity label + cidfile) is
+# requested through the launcher's explicitly-enabled diagnostic knobs; the
+# cleanup verifies name, label, immutable container ID and image ID, and
+# removes by the verified container ID only.
+_diag_canonical_step() { # ID BOUND PAYLOAD MODE WS -> 0 pass|1 fail
   local id="$1" bound="$2" payload="$3" mode="$4" ws="$5"
+  local name="dhl-$id-$DIAG_RUNID"
+  local cidfile="$DIAG_DIR/$id.cid"
+  rm -f "$cidfile" 2>/dev/null
+  # the child runs through script(1) whose -c command is interpreted by
+  # sh; the aliases are bash, so the child is an explicit bash script file
+  # (private, inside the evidence directory) — no fragile nested quoting.
+  local childfile="$DIAG_DIR/$id.child"
   if [ "$mode" = exec ]; then
-    DC_PAYLOAD="$payload" diag_exec "$id" "$bound" bash -c '
-      # shellcheck source=/dev/null
-      source "$DC_ALIASES"
-      oc-probe "$DC_PAYLOAD"
-    ' </dev/null
+    printf '%s\n' 'source "$DC_ALIASES"' 'oc-probe "$DC_PAYLOAD"' > "$childfile"
   else
-    diag_exec "$id" "$bound" bash -c '
-      # shellcheck source=/dev/null
-      source "$DC_ALIASES"
-      oc --version
-    ' </dev/null
+    printf '%s\n' 'source "$DC_ALIASES"' 'oc --version' > "$childfile"
   fi
+  chmod 0600 "$childfile"
+  DC_PAYLOAD="$payload" \
+    OPENCODE_DIAGNOSTIC_RUNID="$DIAG_RUNID" \
+    OPENCODE_DIAGNOSTIC_NAME="$name" \
+    OPENCODE_DIAGNOSTIC_CIDFILE="$cidfile" \
+    diag_exec "$id" "$bound" script -qec "bash $childfile" /dev/null || true
   local rc
   rc="$(cat "$DIAG_DIR/$id.rc" 2>/dev/null || echo 1)"
-  _diag_record_canonical_cleanup "$id" "$ws"
-  return "$rc"
+  local verdict
+  verdict="$(diag_canonical_recover "$id" "$ws" "$name" "$cidfile")"
+  printf '%s\n' "$verdict" > "$DIAG_DIR/$id.session"
+  # the workload verdict: the exec probe must additionally prove the
+  # in-container TTY through its own marker
+  if [ "$mode" = exec ]; then
+    diag_classify "$id" 'D3_OK'
+  else
+    diag_classify "$id" '[0-9]+\.[0-9]+\.[0-9]+'
+  fi
+  [ "$DC_OK" = 1 ] || return 1
+  # the workload passed: the mandatory cleanup still gates the verdict
+  if diag_cleanup_ok "$verdict"; then
+    return 0
+  fi
+  return 1
+}
+
+# diag_print_evidence_summary EVID_DIR — the safe, allowlisted evidence
+# summary for the operator report. This is the ONLY evidence print path: it
+# runs in the root driver (which sources this library), sanitizes every
+# quoted line AT PRINT TIME through the single sanitization owner, prints
+# UNAVAILABLE explicitly when the evidence could not be collected, and never
+# prints a raw docker top/inspect/environment dump. A sanitization failure
+# fails the summary (it can never degrade into a PASS-shaped output).
+diag_print_evidence_summary() { # EVID_DIR
+  local evid="$1" id line
+  printf '%s\n' "=== lab launch diagnostics (evidence summary) ==="
+  for id in D0 D1 D2 D3 D4; do
+    [ -s "$evid/$id.docker-state" ] || continue
+    line="$(head -2 "$evid/$id.docker-state")"
+    if [ "$line" = unavailable ]; then
+      printf '%s docker-state: UNAVAILABLE (the docker inspect/ps evidence could not be collected)\n' "$id"
+    else
+      line="$(diag_sanitize "$line")" || return 1
+      printf '%s docker-state: %s\n' "$id" "$line"
+    fi
+  done
+  for id in D3 D4; do
+    [ -s "$evid/$id.procs" ] || continue
+    line="$(head -3 "$evid/$id.procs")"
+    if [ "$line" = unavailable ]; then
+      printf '%s container processes: UNAVAILABLE (docker top could not be collected)\n' "$id"
+    else
+      line="$(diag_sanitize "$line")" || return 1
+      printf '%s container processes: %s\n' "$id" "$line"
+    fi
+  done
+  return 0
 }
 
 # diag_report_lines IDS... — the compact per-step result lines. A step
@@ -385,6 +601,36 @@ _diag_report_factor() { # ID
   fi
 }
 
+# _diag_classify_step_failure ID ALLPASS_VAR FIRSTFAIL_VAR CLEANUPFAIL_VAR —
+# a nonzero step outcome is either a workload failure (the factor probes
+# apply) or a mandatory-cleanup failure on a passing workload (the verdict
+# is reported as a diagnostic failure of its own; the probes do not apply).
+_diag_classify_step_failure() { # ID ALLPASS_VAR FIRSTFAIL_VAR CLEANUPFAIL_VAR
+  local id="$1"
+  # namerefs to the caller's ladder locals (write-only assignment targets)
+  # shellcheck disable=SC2178,SC2034  # namerefs to the caller's locals
+  local -n allpass_ref="$2"
+  # shellcheck disable=SC2178,SC2034
+  local -n firstfail_ref="$3"
+  # shellcheck disable=SC2178
+  local -n cleanup_ref="$4"
+  local detail
+  detail="$(cat "$DIAG_DIR/$id.detail" 2>/dev/null || echo unknown)"
+  if [ "$detail" = ok ]; then
+    local verdict
+    verdict="$(cat "$DIAG_DIR/$id.session" 2>/dev/null || echo failed)"
+    # the first mandatory-cleanup failure names the reason; later ones are
+    # already visible in their per-step CLEANUP lines
+    [ -z "$cleanup_ref" ] && cleanup_ref="$id $verdict"
+  else
+    # shellcheck disable=SC2034  # write-only nameref targets
+    firstfail_ref="$id"
+    # shellcheck disable=SC2034
+    allpass_ref="0"
+  fi
+  return 0
+}
+
 # diag_run_ladder IMAGE WS RUNID -> the compact report on stdout; rc 0 = all
 # PASS. The ladder stops at the first FAIL (downstream steps NOT_RUN), runs
 # bounded factor probes on the failing step, and names the implicated factor
@@ -398,6 +644,7 @@ diag_run_ladder() { # IMAGE WS RUNID
   cd "$ws" || return 1
   rm -f "$DIAG_DIR"/F-*.detail 2>/dev/null
   local all_pass=1 first_fail=""
+  local cleanup_fail=""
   local DC_OK DC_DETAIL init_copy="" init_state=""
   DIAG_D3_INIT_COPY=""
   local -a argv=()
@@ -406,7 +653,7 @@ diag_run_ladder() { # IMAGE WS RUNID
   # No init, no mounts, no TTY, stdin closed, HOME=/tmp (the operator's real
   # experiment). Isolates: the Docker runtime and the SELinux domain.
   _diag_run_docker_step D0 D0 "" 'echo D0_OK' 'D0_OK' \
-    || { all_pass=0; first_fail="D0"; }
+    || _diag_classify_step_failure D0 all_pass first_fail cleanup_fail
 
   # --- D1: D0 + --init with the verified lab copy ---------------------------
   if [ "$all_pass" = 1 ]; then
@@ -415,7 +662,7 @@ diag_run_ladder() { # IMAGE WS RUNID
         init_state=verified
         DIAG_D3_INIT_COPY="$init_copy"
         _diag_run_docker_step D1 D1 "$init_copy" 'echo D1_OK' 'D1_OK' \
-          || { all_pass=0; first_fail="D1"; }
+          || _diag_classify_step_failure D1 all_pass first_fail cleanup_fail
       else
         init_state=absent
         printf 'refused\n' > "$DIAG_DIR/D1.rc"
@@ -450,21 +697,21 @@ diag_run_ladder() { # IMAGE WS RUNID
   # in that state.
   if [ "$all_pass" = 1 ]; then
     _diag_run_docker_step D2 D2 "$init_copy" 'echo D2_OK' 'D2_OK' \
-      || { all_pass=0; first_fail="D2"; }
+      || _diag_classify_step_failure D2 all_pass first_fail cleanup_fail
   fi
 
   # --- D3: the canonical oc-probe path (a real Session, the bearer) ---------
+  # The payload proves the in-container TTY (test -t 0) as part of the
+  # diagnostic evidence; the launcher configuration itself is unchanged.
   if [ "$all_pass" = 1 ]; then
-    _diag_canonical_step D3 "$DIAG_CANON_BOUND" 'echo D3_OK' exec "$ws" || true
-    diag_classify D3 'D3_OK'
-    [ "$DC_OK" = 1 ] || { all_pass=0; first_fail="D3"; }
+    _diag_canonical_step D3 "$DIAG_CANON_BOUND" 'test -t 0 && echo D3_OK' exec "$ws" \
+      || _diag_classify_step_failure D3 all_pass first_fail cleanup_fail
   fi
 
   # --- D4: the canonical OpenCode entrypoint --------------------------------
   if [ "$all_pass" = 1 ]; then
-    _diag_canonical_step D4 "$DIAG_CANON_BOUND" '' real "$ws" || true
-    diag_classify D4 '[0-9]+\.[0-9]+\.[0-9]+'
-    [ "$DC_OK" = 1 ] || { all_pass=0; first_fail="D4"; }
+    _diag_canonical_step D4 "$DIAG_CANON_BOUND" '' real "$ws" \
+      || _diag_classify_step_failure D4 all_pass first_fail cleanup_fail
   fi
 
   # --- the factor probes ----------------------------------------------------
@@ -489,10 +736,12 @@ diag_run_ladder() { # IMAGE WS RUNID
     local payload="echo ${level}_OK"
     # F-tty: the same step WITH -it and the inherited pty stdin
     local -a fargv=()
-    if _diag_step_argv_compose fargv "$level" "$init_copy" "dhl-F-$level-tty-$DIAG_RUNID"; then
+    if _diag_step_argv_compose fargv "$level" "$init_copy" \
+    "dhl-F-$level-tty-$DIAG_RUNID" "$DIAG_DIR/F-$level-tty.cid"; then
       local -a tty_argv=("${fargv[0]}" -it "${fargv[@]:1}")
       tty_argv+=(--entrypoint /bin/sh "$DIAG_IMAGE" -c "$payload")
       DIAG_CONTAINER_NAME="dhl-F-$level-tty-$DIAG_RUNID" \
+        DIAG_CONTAINER_CID="$DIAG_DIR/F-$level-tty.cid" \
         diag_exec "F-$level-tty" "$DIAG_FACTOR_BOUND" docker "${tty_argv[@]}" || true
       diag_classify "F-$level-tty" "$step_marker"
     else
@@ -502,9 +751,11 @@ diag_run_ladder() { # IMAGE WS RUNID
     fi
     # F-notty-stdin: no -it, but the pty stdin is inherited (no </dev/null)
     local -a sargv=()
-    if _diag_step_argv_compose sargv "$level" "$init_copy" "dhl-F-$level-notty-stdin-$DIAG_RUNID"; then
+    if _diag_step_argv_compose sargv "$level" "$init_copy" \
+    "dhl-F-$level-notty-stdin-$DIAG_RUNID" "$DIAG_DIR/F-$level-notty-stdin.cid"; then
       sargv+=(--entrypoint /bin/sh "$DIAG_IMAGE" -c "$payload")
       DIAG_CONTAINER_NAME="dhl-F-$level-notty-stdin-$DIAG_RUNID" \
+        DIAG_CONTAINER_CID="$DIAG_DIR/F-$level-notty-stdin.cid" \
         diag_exec "F-$level-notty-stdin" "$DIAG_FACTOR_BOUND" docker "${sargv[@]}" || true
       diag_classify "F-$level-notty-stdin" "$step_marker"
     else
@@ -514,9 +765,11 @@ diag_run_ladder() { # IMAGE WS RUNID
     fi
     # F-script: the same step wrapped in an explicit pty via script(1)
     local -a pargv=()
-    if _diag_step_argv_compose pargv "$level" "$init_copy" "dhl-F-$level-script-$DIAG_RUNID"; then
+    if _diag_step_argv_compose pargv "$level" "$init_copy" \
+    "dhl-F-$level-script-$DIAG_RUNID" "$DIAG_DIR/F-$level-script.cid"; then
       pargv+=(--entrypoint /bin/sh "$DIAG_IMAGE" -c "$payload")
       DIAG_CONTAINER_NAME="dhl-F-$level-script-$DIAG_RUNID" \
+        DIAG_CONTAINER_CID="$DIAG_DIR/F-$level-script.cid" \
         diag_exec "F-$level-script" "$DIAG_FACTOR_BOUND" \
         script -qec "docker $(printf '%q ' "${pargv[@]}")" /dev/null </dev/null || true
       diag_classify "F-$level-script" "$step_marker"
@@ -593,7 +846,15 @@ diag_run_ladder() { # IMAGE WS RUNID
         "$first_fail" "$(cat "$DIAG_DIR/$first_fail.detail" 2>/dev/null || echo unknown)"
     fi
   fi
-  [ "$all_pass" = 1 ] && return 0 || return 1
+  # a mandatory-cleanup failure is a diagnostic failure of its own: the
+  # workload verdicts above stay PASS, the cleanup verdict names the reason
+  if [ -n "$cleanup_fail" ]; then
+    printf 'DIAGNOSTIC FAIL reason=cleanup-%s\n' "$cleanup_fail"
+  fi
+  if [ "$all_pass" = 1 ] && [ -z "$cleanup_fail" ]; then
+    return 0
+  fi
+  return 1
 }
 
 # _diag_d3_probe NAME WS PAYLOAD EXCLUDED_FACTOR — one bounded D3 factor
@@ -649,21 +910,30 @@ _diag_d3_probe() { # NAME WS PAYLOAD EXCLUDED_FACTOR
   if [ "$excluded" != tty ]; then
     argv+=(-it)
   fi
+  if [ "$excluded" = tty ]; then
+    payload='echo D3_OK'
+  else
+    payload='test -t 0 && echo D3_OK'
+  fi
+  argv+=(--cidfile "$DIAG_DIR/$id.cid")
   argv+=(--entrypoint /bin/sh "$DIAG_IMAGE" -c "$payload")
   local -a run_argv=(docker "${argv[@]}")
-  if [ "$excluded" = tty ]; then
-    # no -it: the stdin/PTY variants close or inherit stdin
-    if [ "$name" = notty ]; then
+  case "$excluded" in
+    tty)
+      # no -it: the stdin is deliberately /dev/null
       DIAG_CONTAINER_NAME="dhl-$id-$DIAG_RUNID" \
+        DIAG_CONTAINER_CID="$DIAG_DIR/$id.cid" \
         diag_exec "$id" "$DIAG_FACTOR_BOUND" "${run_argv[@]}" </dev/null || true
-    else
+      ;;
+    *)
+      # -it probes run under a real script(1) pty: the client must hold a
+      # terminal, exactly like the canonical launcher
       DIAG_CONTAINER_NAME="dhl-$id-$DIAG_RUNID" \
-        diag_exec "$id" "$DIAG_FACTOR_BOUND" "${run_argv[@]}" || true
-    fi
-  else
-    DIAG_CONTAINER_NAME="dhl-$id-$DIAG_RUNID" \
-      diag_exec "$id" "$DIAG_FACTOR_BOUND" "${run_argv[@]}" </dev/null || true
-  fi
+        DIAG_CONTAINER_CID="$DIAG_DIR/$id.cid" \
+        diag_exec "$id" "$DIAG_FACTOR_BOUND" \
+        script -qec "$(printf '%q ' "${run_argv[@]}")" /dev/null || true
+      ;;
+  esac
   diag_classify "$id" 'D3_OK'
   _diag_d3_probe_cleanup "$ws" "$id"
   unset DOCKER_HELPER_SESSION_ID DOCKER_HELPER_SESSION_TOKEN
@@ -674,14 +944,10 @@ _diag_d3_probe() { # NAME WS PAYLOAD EXCLUDED_FACTOR
 # resources (the workspace-owned Session delta and the daemon-attributed
 # containers), then stop the probe's own ssh-agent.
 _diag_d3_probe_cleanup() { # WS ID
-  local ws="$1" id="$2" outcome reap
-  if diag_register_step_sessions "$ws" "$DIAG_DIR/$id.sessions.registered"; then
-    outcome="$(diag_clean_registered_sessions "$DIAG_DIR/$id.sessions.registered")"
-    reap="$(diag_reap_registered_containers "$DIAG_DIR/$id.sessions.registered")"
-    printf '%s/%s' "$outcome" "$reap" > "$DIAG_DIR/$id.session"
-  else
-    printf 'refused-list-error/n-a' > "$DIAG_DIR/$id.session"
-  fi
+  local ws="$1" id="$2"
+  local verdict
+  verdict="$(diag_canonical_recover "$id" "$ws" "dhl-$id-$DIAG_RUNID" "$DIAG_DIR/$id.cid")"
+  printf '%s\n' "$verdict" > "$DIAG_DIR/$id.session"
   if [ -n "${_OC_SSH_AGENT_PID:-}" ]; then
     kill "$_OC_SSH_AGENT_PID" 2>/dev/null || true
     [ -z "${_OC_SSH_RUN_DIR:-}" ] || rm -rf -- "$_OC_SSH_RUN_DIR"

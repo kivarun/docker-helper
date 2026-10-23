@@ -242,7 +242,7 @@ fhas "the diagnostic containers carry a run-identity label" \
 fhas "the owned-removal verification reads the runid label" \
   'index \.Config\.Labels "lab\.diagnostic\.runid"' "$LAB_LIB/lab-diag-lib.sh"
 fhas "the forced removal happens only after verification" \
-  'docker rm -f "\$name"' "$LAB_LIB/lab-diag-lib.sh"
+  'diag_bounded "rm" docker rm -f' "$LAB_LIB/lab-diag-lib.sh"
 flacks "no image-ancestor diff cleanup remains" 'ancestor=' "$LAB_LIB/lab-diag-lib.sh"
 fhas "sessions are registered through the daemon's own list" \
   'docker-helper session list --json' "$LAB_LIB/lab-diag-lib.sh"
@@ -255,12 +255,46 @@ flacks "the session registration never hides list errors" \
 fhas "the canonical argv carries the LLM provider flags" \
   'out\+=\(-e LLM_SERVER -e LLM_KEY\)' "$LAB_LIB/agent-aliases.sh"
 fhas "the evidence print path is sanitized" \
-  'diag_sanitize "\$state_line"' "$LAB_LIB/diagnose-launch.sh"
-fhas "the process-list print path is sanitized" \
-  'diag_sanitize "\$procs_line"' "$LAB_LIB/diagnose-launch.sh"
+  'diag_sanitize "\$line"' "$LAB_LIB/lab-diag-lib.sh"
 fhas "observability failures are recorded explicitly" \
   'UNAVAILABLE \(the docker inspect/ps evidence could not be collected\)' \
-  "$LAB_LIB/diagnose-launch.sh"
+  "$LAB_LIB/lab-diag-lib.sh"
+
+# --- UAT-8e. image-ID ownership, provenance, bounded recovery, deadlines -----
+# Ownership compares the LOCAL image ID resolved from the pinned reference
+# (never the reference itself), is anchored on the immutable container ID,
+# and the canonical steps request the provenance explicitly through the
+# launcher's diagnostic knobs.
+fhas "the pinned reference is resolved to the local image ID" \
+  'diag_expected_image_id' "$LAB_LIB/lab-diag-lib.sh"
+fhas "the removal decision is anchored on the immutable container ID" \
+  'diag_reap_verified_container "\$cid"' "$LAB_LIB/lab-diag-lib.sh"
+fhas "the proven absence of an --rm-removed container is a normal outcome" \
+  'printf .clean.' "$LAB_LIB/lab-diag-lib.sh"
+fhas "the launcher applies diagnostic provenance only when all knobs are set" \
+  'OPENCODE_DIAGNOSTIC_RUNID' "$LAB_LIB/agent-aliases.sh"
+fhas "a partial diagnostic configuration refuses the launch" \
+  'incomplete diagnostic provenance configuration' "$LAB_LIB/agent-aliases.sh"
+fhas "every bounded recovery goes through the shared bounded owner" \
+  'diag_bounded "rm" docker rm -f' "$LAB_LIB/lab-diag-lib.sh"
+fhas "the session list runs through the bounded owner" \
+  'diag_bounded "session-list" docker-helper session list' "$LAB_LIB/lab-diag-lib.sh"
+fhas "the canonical cleanup verdict is part of the step result" \
+  'diag_cleanup_ok' "$LAB_LIB/lab-diag-lib.sh"
+fhas "a mandatory-cleanup failure fails the diagnostic explicitly" \
+  'DIAGNOSTIC FAIL reason=cleanup-' "$LAB_LIB/lab-diag-lib.sh"
+fhas "the diagnostic stage carries an external deadline" \
+  'timeout "\$DIAG_DEADLINE"' "$LAB_LIB/provision-lab-vm.sh"
+fhas "the deadline path attempts no fallback cleanup" \
+  'no fallback cleanup was attempted' "$LAB_LIB/provision-lab-vm.sh"
+fhas "the root driver sources the single sanitization owner" \
+  'source /opt/lab/lab-diag-lib.sh' "$LAB_LIB/diagnose-launch.sh"
+fhas "the sanitizer redacts registered secret values" \
+  'diag_register_secret_value' "$LAB_LIB/lab-diag-lib.sh"
+fhas "the sanitizer refuses to degrade into a passthrough" \
+  'SANITIZE-FAILURE' "$LAB_LIB/lab-diag-lib.sh"
+fhas "the evidence summary is the single allowlisted print path" \
+  'diag_print_evidence_summary "\$EVID"' "$LAB_LIB/diagnose-launch.sh"
 
 echo
 printf 'integration hygiene tests: %d passed, %d failed\n' "$PASS" "$FAIL"

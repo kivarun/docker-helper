@@ -94,6 +94,7 @@ case "\${1:-}" in
         [ "\${FAIL_ON:-}" = integration ] && { echo "stub: networked integration failed" >&2; exit 1; } ;;
       *bash\ /opt/lab/diagnose-launch.sh*)
         [ "\${FAIL_ON:-}" = diagnose ] && { echo "stub: launch diagnostics reported failures" >&2; exit 3; }
+        if [ "\${FAIL_ON:-}" = "diagnose-hang" ]; then sleep 30; exit 0; fi
         echo "D0 PASS rc=0 elapsed=1"
         echo "D4 PASS rc=0 elapsed=2" ;;
       *setup-agent-user.sh*)
@@ -824,6 +825,23 @@ check "UAT-8c: the window is closed after a failing ladder" "stopped" "$state_li
 contains "UAT-8c: the failure is reported after the confirmed stop" \
   "the launch diagnostics reported failures (rc 3) — the network window is closed" "$OUT"
 
+
+# --- UAT-8e. the external deadline for the diagnostic window -----------------
+# A hung in-guest diagnostic (a stuck docker rm, session list or report)
+# must never keep the networked VM alive: the stage bounds the whole ssh run
+# with an external deadline, records the failure, attempts NO fallback
+# cleanup, and the window owner stops the VM and proves it stopped.
+: > "$REC"; echo stopped > "$STATE"; rm -f "$SNAPMARK"
+if DIAG_DEADLINE=2 FAIL_ON=diagnose-hang run_driver uat-diagnose; then
+  bad "UAT-8e: a hung diagnostic was accepted"
+else
+  ok "UAT-8e: a hung diagnostic fails the stage through the external deadline"
+fi
+contains "UAT-8e: the deadline failure names the deadline and the no-fallback rule" \
+  "exceeded its external deadline (2s); no fallback cleanup was attempted" "$OUT"
+state_line="$(cat "$STATE" 2>/dev/null)"
+check "UAT-8e: the window is closed after the deadline" "stopped" "$state_line"
+contains "UAT-8e: the VM stop happens after the deadline kill" "stop" "$(cat "$REC")"
 
 echo
 printf 'provision-lab-vm tests: %d passed, %d failed\n' "$PASS" "$FAIL"

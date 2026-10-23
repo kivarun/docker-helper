@@ -498,6 +498,22 @@ _oc_launch() (
         ssh_run_dir="$_OC_SSH_RUN_DIR"
     fi
 
+    # UAT-8e: narrow, explicitly enabled diagnostic provenance. A diagnostic
+    # replay of this launcher may require attribution of the container it
+    # starts; the knobs exist ONLY for that replay and are never set by the
+    # normal oc / oc-go26 / oc-probe entry points. All three must be set
+    # together (a partial diagnostic configuration is a diagnostic bug and
+    # fails the launch instead of launching an unattributed container).
+    if [[ -n "${OPENCODE_DIAGNOSTIC_RUNID:-}${OPENCODE_DIAGNOSTIC_NAME:-}${OPENCODE_DIAGNOSTIC_CIDFILE:-}" ]]; then
+        if [[ -z "${OPENCODE_DIAGNOSTIC_RUNID:-}" || -z "${OPENCODE_DIAGNOSTIC_NAME:-}" || -z "${OPENCODE_DIAGNOSTIC_CIDFILE:-}" ]]; then
+            echo "incomplete diagnostic provenance configuration (runid, name and cidfile must be set together)" >&2
+            return 1
+        fi
+        run_args+=(--name "$OPENCODE_DIAGNOSTIC_NAME")
+        run_args+=(--label "lab.diagnostic.runid=$OPENCODE_DIAGNOSTIC_RUNID")
+        run_args+=(--cidfile "$OPENCODE_DIAGNOSTIC_CIDFILE")
+    fi
+
     # Only the Session bearer enters the container. LLM_SERVER/LLM_KEY carry
     # the model provider auth; GH_AGENT_TOKEN is passed ONLY when the
     # operator explicitly exports it for this launch. No docker.sock, no

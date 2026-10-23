@@ -437,9 +437,19 @@ stage_uat_diagnose() {
   DEV_VM_NET_ISOLATED=0 "$DEVVM" start || die "VM start (network open) failed"
   copy_lab_scripts
   log "running the bounded launch-path diagnostics (no integration UAT, no LLM)"
+  # UAT-8e: an EXTERNAL deadline bounds the whole diagnostic ssh run. A hung
+  # in-guest recovery (a stuck docker rm, session list or report) must never
+  # keep the networked VM alive: the deadline kills the ssh session, the
+  # window owner stops the VM and proves it stopped, and no dangerous
+  # fallback cleanup runs on this path.
   DIAG_RC=0
-  "$DEVVM" ssh 'sudo bash /opt/lab/diagnose-launch.sh' < /dev/null || DIAG_RC=$?
+  DIAG_DEADLINE="${DIAG_DEADLINE:-1800}"
+  timeout "$DIAG_DEADLINE" \
+    "$DEVVM" ssh 'sudo bash /opt/lab/diagnose-launch.sh' < /dev/null || DIAG_RC=$?
   close_online_window
+  if [ "$DIAG_RC" = 124 ] || [ "$DIAG_RC" = 137 ]; then
+    die "the diagnostic run exceeded its external deadline (${DIAG_DEADLINE}s); no fallback cleanup was attempted — the network window is closed and the VM is confirmed stopped"
+  fi
   if [ "$DIAG_RC" != 0 ]; then
     die "the launch diagnostics reported failures (rc $DIAG_RC) — the network window is closed"
   fi
