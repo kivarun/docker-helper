@@ -32,6 +32,14 @@
 #   5. verifies the result: unique uid, agent-owned credential (when present)
 #      and OpenCode state.
 #
+# --install-launcher-only (UAT-8g): refreshes ONLY the installed launcher
+# artifacts (~/.bash_aliases and ~/.opencode-docker/lib/lab-mount-gate.sh)
+# from the canonical lab sources, atomically, and verifies them (cmp, owner,
+# group, mode). It performs NO account, workspace, docker group, helper,
+# principal or credential changes; the diagnostic driver runs it before
+# every diagnostic ladder so the installed launcher can never drift from the
+# freshly copied /opt/lab scripts.
+#
 # It does NOT manage SSH keys: VM access stays with the dev-vm-local.sh SSH
 # identity, and the agent account gets no SSH of its own.
 #
@@ -57,7 +65,7 @@
 #     through the supported CLI or re-provision the VM). Lab scripts never
 #     write the helper database directly.
 #
-# Usage: setup-agent-user.sh [--recover-credential]
+# Usage: setup-agent-user.sh [--recover-credential] [--install-launcher-only]
 #
 # Env overrides: AGENT_USER, AGENT_HOME, AGENT_WORKROOT, AGENT_DOCKER_GROUP,
 #                AGENT_UID.
@@ -72,15 +80,18 @@ AGENT_UID="${AGENT_UID:-1001}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ALIASES_SRC="$SCRIPT_DIR/agent-aliases.sh"
+GATE_LIB_SRC="$SCRIPT_DIR/lab-mount-gate.sh"
 
 log() { printf '[setup-agent-user] %s\n' "$*"; }
 die() { printf '[setup-agent-user] ERROR: %s\n' "$*" >&2; exit 1; }
 
 RECOVER_CREDENTIAL=0
+INSTALL_LAUNCHER_ONLY=0
 for arg in "$@"; do
   case "$arg" in
     --recover-credential) RECOVER_CREDENTIAL=1 ;;
-    *) die "unknown argument '$arg' (only --recover-credential)" ;;
+    --install-launcher-only) INSTALL_LAUNCHER_ONLY=1 ;;
+    *) die "unknown argument '$arg' (--recover-credential, --install-launcher-only)" ;;
   esac
 done
 
@@ -95,6 +106,132 @@ done
 require_lab_vm
 
 [ -f "$ALIASES_SRC" ] || die "missing $ALIASES_SRC"
+
+# --- the launcher installation (the SINGLE canonical installer) --------------
+# install_launcher_aliases installs the launcher aliases and the mount-gate
+# library copy into the agent home from the canonical lab sources
+# ($ALIASES_SRC -> ~/.bash_aliases, $GATE_LIB_SRC ->
+# ~/.opencode-docker/lib/lab-mount-gate.sh). UAT-8g invariants:
+#   * the SOURCES are standalone regular files (a symlinked source would
+#     make the verified copy track something outside the lab tree);
+#   * the TARGET paths are not symlinks — installing through a symlink
+#     would write through it, possibly outside the agent home — and their
+#     canonical directories stay inside the canonical agent home (no
+#     escape); an unexpected symlink target is a drifted or poisoned state
+#     and is refused, never overwritten;
+#   * the installation is ATOMIC (temporary file + rename), so a crashed
+#     run never leaves a half-written launcher behind;
+#   * verify_launcher_aliases then proves byte equality (cmp), owner, group
+#     and mode. Any failure is fatal (fail closed).
+install_file_atomically() { # SRC TGT OWNER GROUP MODE -> 0 ok | 1 failure
+  local src="$1" tgt="$2" owner="$3" grp="$4" mode="$5" tmp
+  tmp="$tgt.new.$$"
+  if ! install -m "$mode" -o "$owner" -g "$grp" -- "$src" "$tmp"; then
+    rm -f -- "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if ! mv -f -- "$tmp" "$tgt"; then
+    rm -f -- "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  return 0
+}
+
+launcher_targets_ok() { # -> 0 ok; dies on any refused state
+  local home_real tgt dir base comp dir_real
+  home_real="$(readlink -f -- "$AGENT_HOME")" \
+    || die "cannot resolve the agent home $AGENT_HOME"
+  [ -n "$home_real" ] && [ -d "$home_real" ] \
+    || die "the agent home $AGENT_HOME is not a directory"
+  for tgt in "$AGENT_HOME/.bash_aliases" \
+             "$AGENT_HOME/.opencode-docker/lib/lab-mount-gate.sh"; do
+    [ -L "$tgt" ] \
+      && die "$tgt is a symlink: refusing to install through it (fail closed)"
+    dir="$(dirname -- "$tgt")"
+    # the canonical location check must work for a NOT-YET-EXISTING target
+    # directory: resolve the deepest EXISTING ancestor and require it to
+    # stay inside the canonical agent home, then refuse any existing
+    # component between that ancestor and the target that is a symlink
+    # (a symlink there could place the file outside the agent home)
+    base="$dir"
+    while [ ! -d "$base" ]; do
+      base="$(dirname -- "$base")"
+      [ "$base" != "/" ] || die "cannot resolve an existing ancestor of $tgt"
+    done
+    dir_real="$(readlink -f -- "$base")" \
+      || die "cannot resolve the target directory of $tgt"
+    case "$dir_real" in
+      "$home_real"|"$home_real"/*) : ;;
+      *) die "$tgt escapes the agent home $AGENT_HOME (canonical $dir_real): refusing" ;;
+    esac
+    comp="$dir"
+    while [ "$comp" != "$base" ]; do
+      [ -L "$comp" ] \
+        && die "$tgt resolves through the symlink $comp: refusing (fail closed)"
+      comp="$(dirname -- "$comp")"
+    done
+  done
+  return 0
+}
+
+install_launcher_aliases() {
+  [ -f "$ALIASES_SRC" ] && [ ! -L "$ALIASES_SRC" ] \
+    || die "$ALIASES_SRC is missing or not a standalone regular file"
+  [ -f "$GATE_LIB_SRC" ] && [ ! -L "$GATE_LIB_SRC" ] \
+    || die "$GATE_LIB_SRC is missing or not a standalone regular file"
+  launcher_targets_ok
+  install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" \
+    "$AGENT_HOME/.opencode-docker/lib"
+  install_file_atomically "$ALIASES_SRC" "$AGENT_HOME/.bash_aliases" \
+    "$AGENT_USER" "$AGENT_USER" 0644 \
+    || die "cannot atomically install $AGENT_HOME/.bash_aliases"
+  install_file_atomically "$GATE_LIB_SRC" \
+    "$AGENT_HOME/.opencode-docker/lib/lab-mount-gate.sh" \
+    "$AGENT_USER" "$AGENT_USER" 0644 \
+    || die "cannot atomically install $AGENT_HOME/.opencode-docker/lib/lab-mount-gate.sh"
+  if grep -qF '.bash_aliases' "$AGENT_HOME/.bashrc" 2>/dev/null; then
+    log "$AGENT_HOME/.bashrc already sources .bash_aliases"
+  else
+    log "wiring $AGENT_HOME/.bash_aliases into $AGENT_HOME/.bashrc"
+    printf '\n# docker-helper agent launchers\n[ -f "$HOME/.bash_aliases" ] && . "$HOME/.bash_aliases"\n' \
+      >> "$AGENT_HOME/.bashrc"
+    chown "$AGENT_USER:$AGENT_USER" "$AGENT_HOME/.bashrc"
+  fi
+}
+
+verify_launcher_aliases() {
+  local tgt
+  cmp -s -- "$ALIASES_SRC" "$AGENT_HOME/.bash_aliases" \
+    || die "$AGENT_HOME/.bash_aliases does not match $ALIASES_SRC (cmp)"
+  cmp -s -- "$GATE_LIB_SRC" "$AGENT_HOME/.opencode-docker/lib/lab-mount-gate.sh" \
+    || die "$AGENT_HOME/.opencode-docker/lib/lab-mount-gate.sh does not match $GATE_LIB_SRC (cmp)"
+  for tgt in "$AGENT_HOME/.bash_aliases" \
+             "$AGENT_HOME/.opencode-docker/lib/lab-mount-gate.sh"; do
+    [ -f "$tgt" ] && [ ! -L "$tgt" ] \
+      || die "$tgt is missing or not a standalone regular file"
+    [ "$(stat -c '%U' "$tgt")" = "$AGENT_USER" ] \
+      || die "$tgt is not owned by $AGENT_USER"
+    [ "$(stat -c '%G' "$tgt")" = "$AGENT_USER" ] \
+      || die "$tgt is not group-owned by $AGENT_USER"
+    [ "$(stat -c '%a' "$tgt")" = 644 ] \
+      || die "$tgt does not have mode 0644"
+  done
+  return 0
+}
+
+# --- launcher refresh mode (UAT-8g) ------------------------------------------
+# Refreshes ONLY the installed launcher artifacts from the canonical lab
+# sources: no account, uid, workspace, docker group, helper, principal or
+# credential changes. The diagnostic driver runs this before every
+# diagnostic ladder so the installed launcher can never drift from the
+# freshly copied /opt/lab scripts (the real 8f finding). Fail-closed: any
+# install or verification failure exits nonzero BEFORE the ladder runs.
+if [ "$INSTALL_LAUNCHER_ONLY" = 1 ]; then
+  install_launcher_aliases
+  verify_launcher_aliases
+  log "launcher refresh done: aliases=$AGENT_HOME/.bash_aliases gate=$AGENT_HOME/.opencode-docker/lib/lab-mount-gate.sh (verified: cmp, owner, group, mode)"
+  exit 0
+fi
 
 # --- 1. account, workspace root, docker access ------------------------------
 # The 'agent' account is the trusted launcher, so it may hold docker access.
@@ -175,23 +312,8 @@ install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" \
 # the whole tree.
 chown -R "$AGENT_USER:$AGENT_USER" "$AGENT_HOME/.opencode-docker"
 
-install -m 0644 -o "$AGENT_USER" -g "$AGENT_USER" \
-  "$ALIASES_SRC" "$AGENT_HOME/.bash_aliases"
-# The mount gate library is part of the launcher's trusted loading path: the
-# installed aliases resolve it from this agent-owned lib copy in the VM.
-GATE_LIB_SRC="$(dirname -- "$ALIASES_SRC")/lab-mount-gate.sh"
-[ -f "$GATE_LIB_SRC" ] || die "missing $GATE_LIB_SRC"
-install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" "$AGENT_HOME/.opencode-docker/lib"
-install -m 0644 -o "$AGENT_USER" -g "$AGENT_USER" \
-  "$GATE_LIB_SRC" "$AGENT_HOME/.opencode-docker/lib/lab-mount-gate.sh"
-if grep -qF '.bash_aliases' "$AGENT_HOME/.bashrc" 2>/dev/null; then
-  log "$AGENT_HOME/.bashrc already sources .bash_aliases"
-else
-  log "wiring $AGENT_HOME/.bash_aliases into $AGENT_HOME/.bashrc"
-  printf '\n# docker-helper agent launchers\n[ -f "$HOME/.bash_aliases" ] && . "$HOME/.bash_aliases"\n' \
-    >> "$AGENT_HOME/.bashrc"
-  chown "$AGENT_USER:$AGENT_USER" "$AGENT_HOME/.bashrc"
-fi
+install_launcher_aliases
+verify_launcher_aliases
 
 # --- 3. docker-helper phase gate -------------------------------------------
 # The account, workspace and launcher aliases are OS-level state and are

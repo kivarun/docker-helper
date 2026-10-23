@@ -165,6 +165,7 @@ while [ $# -gt 0 ]; do
     -d) d=1; shift ;;
     -m) shift; mode="$1"; shift ;;
     -o|-g) shift 2 ;;
+    --) shift ;;
     *) break ;;
   esac
 done
@@ -174,14 +175,25 @@ elif [ "$#" = 2 ]; then
   cp "$1" "$2"; [ -n "$mode" ] && chmod "$mode" "$2"
 fi
 SH
-cat > "$SHIM/stat" <<'SH'
-#!/bin/sh
-# The post-provisioning ownership check must see the agent user.
-while [ $# -gt 0 ]; do
-  case "$1" in
-    -c) shift; [ "$1" = '%U' ] && { echo "${STATUSER:-agent}"; exit 0; }; shift ;;
-    *) shift ;;
+real_stat="$(command -v stat)"
+cat > "$SHIM/stat" <<SH
+#!/usr/bin/env bash
+# The post-provisioning ownership checks must see the agent user: %U and %G
+# are answered from the harness state; %a falls through to the REAL stat
+# (resolved at shim-generation time, before this shim shadows PATH).
+args=("\$@")
+i=0
+while [ "\$i" -lt "\${#args[@]}" ]; do
+  case "\${args[\$i]}" in
+    -c)
+      fmt="\${args[\$((i+1))]:-}"; file="\${args[\$((i+2))]:-}"
+      case "\$fmt" in
+        %U) echo "\${STATUSER:-agent}"; exit 0 ;;
+        %G) echo "\${STATGROUP:-agent}"; exit 0 ;;
+        %a) exec "$real_stat" -c %a -- "\$file" ;;
+      esac ;;
   esac
+  i=\$((i+1))
 done
 exit 1
 SH
@@ -540,6 +552,102 @@ unset ZYPPER_FAIL BASH_ENV
 if [ "$rc" != 0 ]; then ok "F1.3: a jq install failure fails the setup closed"; else bad "F1.3: a jq install failure was tolerated"; fi
 case "$out" in *"could not install jq"*) ok "F1.3: the failure names the jq install" ;; *) bad "F1.3: the failure reason is missing: $out" ;; esac
 if [ -f "$PRINCIPAL" ]; then bad "F1.3: the principal was created despite the failed dependency install"; else ok "F1.3: no credential work happened after the failed install"; fi
+
+# --- UAT-8g. the launcher refresh (--install-launcher-only) ------------------
+# The diagnostic driver refreshes the INSTALLED launcher from the canonical
+# lab sources before every diagnostic run (the real 8f finding: a stale
+# ~/.bash_aliases without the shared configuration owners made the ladder
+# fail with '_oc_security_opts: command not found'). The refresh mode must
+# touch ONLY the launcher artifacts, install atomically, and verify byte
+# equality, owner, group and mode.
+GATE_LIB="$LAB_COPY/lab-mount-gate.sh"
+
+# R1: a stale installed launcher is refreshed and verified
+reset_state
+mkdir -p "$AGENT_HOME/.opencode-docker/lib"
+printf '# STALE LAUNCHER\n_OC_BASE=stale\n' > "$AGENT_HOME/.bash_aliases"
+printf '# STALE GATE\n' > "$AGENT_HOME/.opencode-docker/lib/lab-mount-gate.sh"
+printf '# docker-helper agent launchers\n' > "$AGENT_HOME/.bashrc"
+: > "$REC"
+out="$(run_setup --install-launcher-only)"; rc=$?
+if [ "$rc" = 0 ]; then ok "UAT-8g: the launcher refresh succeeds"; else bad "UAT-8g: the launcher refresh failed (rc $rc): $out"; fi
+cmp -s "$ALIASES" "$AGENT_HOME/.bash_aliases" \
+  && ok "UAT-8g: the stale aliases are replaced byte-identically (cmp)" \
+  || bad "UAT-8g: the installed aliases do not match the source"
+cmp -s "$GATE_LIB" "$AGENT_HOME/.opencode-docker/lib/lab-mount-gate.sh" \
+  && ok "UAT-8g: the stale gate library is replaced byte-identically (cmp)" \
+  || bad "UAT-8g: the installed gate library does not match the source"
+[ "$(stat -c '%a' "$AGENT_HOME/.bash_aliases" 2>/dev/null)" = 644 ] \
+  && ok "UAT-8g: the installed aliases have mode 0644" \
+  || bad "UAT-8g: the installed aliases mode is not 0644"
+[ "$(stat -c '%a' "$AGENT_HOME/.opencode-docker/lib/lab-mount-gate.sh" 2>/dev/null)" = 644 ] \
+  && ok "UAT-8g: the installed gate library has mode 0644" \
+  || bad "UAT-8g: the installed gate library mode is not 0644"
+rec="$(cat "$REC")"
+not_contains "UAT-8g: the refresh creates no account (no useradd)" "useradd" "$rec"
+not_contains "UAT-8g: the refresh runs no helper/principal/credential work" "dh " "$rec"
+not_contains "UAT-8g: the refresh performs no usermod" "usermod" "$rec"
+contains "UAT-8g: the refresh reports its verified result" "launcher refresh done" "$out"
+grep -qF '.bash_aliases' "$AGENT_HOME/.bashrc" \
+  && ok "UAT-8g: the bashrc wiring is in place after the refresh" \
+  || bad "UAT-8g: the bashrc wiring is missing"
+
+# R2: the refresh is idempotent (a second run keeps the verified state)
+out="$(run_setup --install-launcher-only)" \
+  && ok "UAT-8g: a second refresh succeeds" \
+  || bad "UAT-8g: a second refresh failed"
+cmp -s "$ALIASES" "$AGENT_HOME/.bash_aliases" \
+  && ok "UAT-8g: the second refresh keeps the byte-identical aliases" \
+  || bad "UAT-8g: the second refresh changed the aliases"
+
+# R3: a symlinked target is refused, never written through
+rm -f "$AGENT_HOME/.bash_aliases"
+printf 'FOREIGN-DATA\n' > "$WORK/foreign-aliases"
+ln -s "$WORK/foreign-aliases" "$AGENT_HOME/.bash_aliases"
+out="$(run_setup --install-launcher-only)"; rc=$?
+if [ "$rc" != 0 ]; then ok "UAT-8g: a symlinked alias target is refused"; else bad "UAT-8g: a symlinked target was installed through"; fi
+[ "$(cat "$WORK/foreign-aliases")" = "FOREIGN-DATA" ] \
+  && ok "UAT-8g: the symlink target is intact (nothing written through it)" \
+  || bad "UAT-8g: the symlink target was overwritten"
+case "$out" in
+  *"refusing to install through it"*) ok "UAT-8g: the refusal names the symlink rule" ;;
+  *) bad "UAT-8g: the refusal reason is missing: $out" ;;
+esac
+rm -f "$AGENT_HOME/.bash_aliases"
+
+# R4: a target directory that escapes the agent home is refused
+rm -rf "$AGENT_HOME/.opencode-docker/lib"
+mkdir -p "$WORK/outside-lib"
+ln -s "$WORK/outside-lib" "$AGENT_HOME/.opencode-docker/lib"
+out="$(run_setup --install-launcher-only)"; rc=$?
+if [ "$rc" != 0 ]; then ok "UAT-8g: a gate lib directory escaping the agent home is refused"; else bad "UAT-8g: an escaping gate lib directory was accepted"; fi
+[ -z "$(ls -A "$WORK/outside-lib" 2>/dev/null)" ] \
+  && ok "UAT-8g: nothing was installed into the escaped directory" \
+  || bad "UAT-8g: the gate library landed outside the agent home"
+case "$out" in
+  *"escapes the agent home"*) ok "UAT-8g: the refusal names the escape rule" ;;
+  *) bad "UAT-8g: the escape refusal reason is missing: $out" ;;
+esac
+rm -f "$AGENT_HOME/.opencode-docker/lib"
+
+# R5: a missing canonical source fails closed before any target change
+mv "$LAB_COPY/agent-aliases.sh" "$LAB_COPY/agent-aliases.sh.hidden"
+out="$(run_setup --install-launcher-only)"; rc=$?
+mv "$LAB_COPY/agent-aliases.sh.hidden" "$LAB_COPY/agent-aliases.sh"
+if [ "$rc" != 0 ]; then ok "UAT-8g: a missing source fails the refresh closed"; else bad "UAT-8g: a missing source was tolerated"; fi
+
+# R6: the FULL provisioning path still installs and verifies the launcher
+reset_state
+: > "$SELFOK"
+out="$(run_setup)" \
+  && ok "UAT-8g: the full provisioning still succeeds with the shared installer" \
+  || bad "UAT-8g: the full provisioning broke: $out"
+cmp -s "$ALIASES" "$AGENT_HOME/.bash_aliases" \
+  && ok "UAT-8g: the full provisioning installs byte-identical aliases" \
+  || bad "UAT-8g: the full provisioning aliases diverged"
+cmp -s "$GATE_LIB" "$AGENT_HOME/.opencode-docker/lib/lab-mount-gate.sh" \
+  && ok "UAT-8g: the full provisioning installs the verified gate library" \
+  || bad "UAT-8g: the full provisioning gate library diverged"
 
 printf 'setup-agent-user tests: %d passed, %d failed\n' "$PASS" "$FAIL"
 

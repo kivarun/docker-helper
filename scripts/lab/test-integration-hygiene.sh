@@ -296,6 +296,33 @@ fhas "the sanitizer refuses to degrade into a passthrough" \
 fhas "the evidence summary is the single allowlisted print path" \
   'diag_print_evidence_summary "\$EVID"' "$LAB_LIB/diagnose-launch.sh"
 
+# --- UAT-8g. the installed launcher can never drift from the lab scripts -----
+# The diagnostic chain sources the INSTALLED launcher ($HOME/.bash_aliases);
+# a stale one made the real 8f ladder fail with '_oc_security_opts: command
+# not found' masked as composition-refused. The driver refreshes it through
+# the canonical installer, the runner preflights the loaded functions, and
+# the runner pins ONE launcher source for itself and every child process.
+fhas "the launcher installation has one canonical owner with a launcher-only mode" \
+  '--install-launcher-only' "$LAB_LIB/setup-agent-user.sh"
+fhas "the launcher installation is atomic (temporary file + rename)" \
+  'tgt\.new\.\$\$' "$LAB_LIB/setup-agent-user.sh"
+fhas "the launcher installation verifies byte equality" \
+  'cmp -s -- "\$ALIASES_SRC"' "$LAB_LIB/setup-agent-user.sh"
+fhas "the launcher installation refuses symlinked targets" \
+  'refusing to install through it' "$LAB_LIB/setup-agent-user.sh"
+fhas "the launcher installation refuses escapes from the agent home" \
+  'escapes the agent home' "$LAB_LIB/setup-agent-user.sh"
+fhas "the diagnostic driver refreshes the launcher before the ladder" \
+  'setup-agent-user\.sh --install-launcher-only' "$LAB_LIB/diagnose-launch.sh"
+fhas "a failed launcher synchronization fails the driver closed" \
+  'launcher synchronization failed' "$LAB_LIB/diagnose-launch.sh"
+fhas "the runner preflights the loaded launcher functions" \
+  'diag_verify_launcher_loaded' "$LAB_LIB/lab-diag-lib.sh"
+fhas "the preflight names its failure loader-drift" \
+  'FAIL loader-drift' "$LAB_LIB/lab-diag-lib.sh"
+fhas "the runner pins one launcher source for itself and the children" \
+  'DC_ALIASES="\$HOME/\.bash_aliases"' "$LAB_LIB/diagnose-launch.sh"
+
 echo
 printf 'integration hygiene tests: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

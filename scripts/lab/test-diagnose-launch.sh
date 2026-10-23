@@ -1120,6 +1120,239 @@ diag_driver_cleanup "$WORK/ws-absent-root" "$ws3" \
   && ok "UAT-8f: the foreign workspace still exists after all runs" \
   || bad "UAT-8f: the foreign workspace was removed by the diagnostic"
 
+# --- UAT-8g. the real runner chain (driver -> runner -> library -> launcher) -
+# The runner is executed as a REAL child bash with a PRIVATE HOME: the harness
+# never pre-loads the launcher into the test shell, so a stale installed
+# launcher reproduces the original 8f drift failure end to end
+# ('_oc_security_opts: command not found' -> D0 FAIL detail=composition-refused).
+# The launcher refresh runs through the SAME canonical command the driver
+# runs (setup-agent-user.sh --install-launcher-only), never a copy.
+RUNNER_BODY="$WORK/runner-body.sh"
+sed -n "/^cat > \"\$RUNNER\" <<'SH'\$/,/^SH\$/p" "$DRIVER" | sed '1d;$d' \
+  > "$RUNNER_BODY"
+[ -s "$RUNNER_BODY" ] \
+  && ok "UAT-8g: the runner body is extracted from the real driver" \
+  || bad "UAT-8g: the runner body extraction failed"
+
+# the canonical /opt/lab content the freshly copied lab scripts represent
+OPTLAB="$WORK/optlab"; mkdir -p "$OPTLAB"
+cp "$SRC_DIR/lab/lab-diag-lib.sh" "$OPTLAB/lab-diag-lib.sh"
+cp "$SRC_DIR/lab/agent-aliases.sh" "$OPTLAB/agent-aliases.sh"
+cp "$SRC_DIR/lab/lab-mount-gate.sh" "$OPTLAB/lab-mount-gate.sh"
+
+# the launcher refresh, through the canonical installer in launcher-only mode
+LABCOPY="$WORK/labcopy"; mkdir -p "$LABCOPY"
+for f in "$SRC_DIR"/lab/*.sh; do cp "$f" "$LABCOPY/"; done
+cat > "$LABCOPY/lab-vm-guard.sh" <<'SH'
+require_lab_vm() { [ -r "${LAB_VM_TEST_MARKER:?}" ] || exit 1; }
+SH
+: > "$WORK/syncmarker"
+SYNCSHIM="$WORK/syncshim"; mkdir -p "$SYNCSHIM"
+sync_real_stat="$(command -v stat)"
+cat > "$SYNCSHIM/id" <<'SH'
+#!/bin/sh
+[ "${1:-}" = "-u" ] && { echo 0; exit 0; }
+exit 0
+SH
+cat > "$SYNCSHIM/chown" <<'SH'
+#!/bin/sh
+exit 0
+SH
+cat > "$SYNCSHIM/install" <<'SH'
+#!/bin/sh
+d=0; mode=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -d) d=1; shift ;;
+    -m) shift; mode="$1"; shift ;;
+    -o|-g) shift 2 ;;
+    --) shift ;;
+    *) break ;;
+  esac
+done
+if [ "$d" = 1 ]; then
+  for p in "$@"; do mkdir -p "$p"; [ -n "$mode" ] && chmod "$mode" "$p"; done
+elif [ "$#" = 2 ]; then
+  cp "$1" "$2"; [ -n "$mode" ] && chmod "$mode" "$2"
+fi
+SH
+cat > "$SYNCSHIM/stat" <<SH
+#!/bin/sh
+case "\$1 \$2" in
+  "-c %U") echo agent; exit 0 ;;
+  "-c %G") echo agent; exit 0 ;;
+  "-c %a") exec "$sync_real_stat" -c %a -- "\$3" ;;
+esac
+exit 1
+SH
+chmod 0755 "$SYNCSHIM"/*
+SYNC_OUT=""
+sync_launcher() { # AGENT_HOME -> rc; the SAME canonical command the driver runs
+  SYNC_OUT="$(
+    export PATH="$SYNCSHIM:$PATH" AGENT_HOME="$1"
+    export LAB_VM_TEST_MARKER="$WORK/syncmarker"
+    bash "$LABCOPY/setup-agent-user.sh" --install-launcher-only 2>&1
+  )"
+  return $?
+}
+
+run_real_runner() { # AGENT_HOME EVID WS -> rc (output in RUNNER_OUT)
+  RUNNER_OUT="$(
+    export HOME="$1" DIAG_OPTLAB="$OPTLAB"
+    export OPENCODE_DOCKER_HOME="$1/.opencode-docker"
+    export LAB_DOCKER_INIT_CANDIDATES="$SHIM/docker-init"
+    mkdir -p "$OPENCODE_DOCKER_HOME/.config" "$OPENCODE_DOCKER_HOME/.local/share" \
+             "$OPENCODE_DOCKER_HOME/.local/state" "$OPENCODE_DOCKER_HOME/.cache" \
+             "$OPENCODE_DOCKER_HOME/tmp"
+    bash "$RUNNER_BODY" "$2" "$3" 2>&1
+  )"
+  return "$?"
+}
+reset_runner_state() {
+  mkdir -p "$2" 2>/dev/null
+  : > "$DH_REC"; : > "$DOCKER_REC"; : > "$SCRIPT_REC"
+  : > "$DH_LIST_COUNT"; : > "$CIDS"; : > "$CIDMAP"; : > "$DH_SESSIONS"
+}
+
+# the stale installed launcher: the pinned reference is present, the shared
+# configuration owners the current diagnostic library expects are NOT
+stale_home="$WORK/stale-home"; mkdir -p "$stale_home"
+cat > "$stale_home/.bash_aliases" <<EOF
+_OC_BASE='$_OC_BASE'
+oc()      { docker run --rm -it "\$_OC_BASE" "\$@"; }
+oc-go26() { docker run --rm -it "\$_OC_BASE" "\$@"; }
+oc-probe() { docker run --rm "\$_OC_BASE" "\$@"; }
+EOF
+
+# (RED 1-3) the PRE-FIX runner semantics (source without status checks, no
+# preflight) against the stale launcher reproduce the real 8f failure exactly
+stale_evid="$WORK/prefix-evid"; reset_runner_state x "$stale_evid"
+prefix_out="$(
+  export HOME="$stale_home" DIAG_OPTLAB="$OPTLAB" DIAG_RUNID=diagrun-prefix
+  export DIAG_DIR="$stale_evid" OPENCODE_DOCKER_HOME="$stale_home/.opencode-docker"
+  export LAB_DOCKER_INIT_CANDIDATES="$SHIM/docker-init"
+  cd "$WS" || exit 9
+  bash -c 'set -u
+    source "$HOME/.bash_aliases"
+    source "$DIAG_OPTLAB/lab-diag-lib.sh"
+    diag_run_ladder "$_OC_BASE" "$PWD" "$DIAG_RUNID"' 2>&1
+)"
+prefix_rc=$?
+contains "UAT-8g RED: the pre-fix runner reproduces the original '_oc_security_opts: command not found'" \
+  "_oc_security_opts: command not found" "$prefix_out"
+contains "UAT-8g RED: the drift was masked as composition-refused" \
+  "D0 FAIL rc=refused elapsed=unknown detail=composition-refused" "$prefix_out"
+contains "UAT-8g RED: the drifted run reported UNRESOLVED" \
+  "DIAGNOSIS UNRESOLVED" "$prefix_out"
+[ "$prefix_rc" != 0 ] \
+  && ok "UAT-8g RED: the drifted runner exits nonzero" \
+  || bad "UAT-8g: the drifted runner reported success"
+
+# the CURRENT runner against the SAME stale launcher: fail-closed loader-drift
+# with ZERO docker runs, never a masked composition refusal
+stale_evid="$WORK/stale-evid"; reset_runner_state x "$stale_evid"
+run_real_runner "$stale_home" "$stale_evid" "$WS"; rr_rc=$?
+[ "$rr_rc" != 0 ] \
+  && ok "UAT-8g: the current runner fails closed on the stale launcher" \
+  || bad "UAT-8g RED: the current runner tolerated the stale launcher"
+contains "UAT-8g: the drift is named loader-drift (cmp with the canonical source)" \
+  "FAIL loader-drift:" "$RUNNER_OUT"
+not_contains "UAT-8g: the drift is never masked as composition-refused" \
+  "composition-refused" "$RUNNER_OUT"
+not_contains "UAT-8g: the drift is never masked as UNRESOLVED" \
+  "UNRESOLVED" "$RUNNER_OUT"
+if grep -q " run " "$DOCKER_REC" 2>/dev/null; then
+  bad "UAT-8g RED: docker ran although the launcher preflight failed"
+else
+  ok "UAT-8g: zero docker runs on a failed launcher preflight"
+fi
+
+# the preflight's function-level check itself: the stale launcher in a shell
+# that bypasses the cmp (functions loaded) reports the exact missing owner
+fn_out="$(bash -c 'source "$1"; source "$2"; diag_verify_launcher_loaded' \
+  _ "$stale_home/.bash_aliases" "$OPTLAB/lab-diag-lib.sh" 2>&1)"
+fn_rc=$?
+[ "$fn_rc" != 0 ] \
+  && ok "UAT-8g: the preflight rejects a shell with the stale launcher" \
+  || bad "UAT-8g: the preflight accepted the stale launcher"
+contains "UAT-8g: the preflight names the missing shared owner" \
+  "FAIL loader-drift: _oc_security_opts is not loaded" "$fn_out"
+
+# (GREEN 4) the canonical launcher refresh installs the CURRENT launcher; the
+# runner preflight then passes and the ladder runs to D4
+fresh_home="$WORK/fresh-home"; mkdir -p "$fresh_home"
+sync_launcher "$fresh_home" \
+  && ok "UAT-8g: the canonical launcher refresh succeeds in the runner harness" \
+  || bad "UAT-8g: the canonical launcher refresh failed: $SYNC_OUT"
+cmp -s "$fresh_home/.bash_aliases" "$OPTLAB/agent-aliases.sh" \
+  && ok "UAT-8g: the refreshed aliases are byte-identical to the canonical source" \
+  || bad "UAT-8g: the refreshed aliases diverge from the canonical source"
+cmp -s "$fresh_home/.opencode-docker/lib/lab-mount-gate.sh" "$SRC_DIR/lab/lab-mount-gate.sh" \
+  && ok "UAT-8g: the refreshed gate library is byte-identical to the canonical source" \
+  || bad "UAT-8g: the refreshed gate library diverges from the canonical source"
+fresh_evid="$WORK/fresh-evid"; reset_runner_state x "$fresh_evid"
+run_real_runner "$fresh_home" "$fresh_evid" "$WS"; rr_rc=$?
+[ "$rr_rc" = 0 ] \
+  && ok "UAT-8g: the runner passes the preflight and the ladder after the refresh" \
+  || bad "UAT-8g RED: the refreshed runner failed (rc $rr_rc): $RUNNER_OUT"
+contains "UAT-8g: D0 runs after the verified preflight" "D0 PASS rc=0" "$RUNNER_OUT"
+contains "UAT-8g: D3 runs on the canonical launcher" "D3 PASS rc=0" "$RUNNER_OUT"
+contains "UAT-8g: D4 runs on the canonical launcher" "D4 PASS rc=0" "$RUNNER_OUT"
+
+# (9) ONE launcher version for D0-D2 and D3/D4: the runner pins DC_ALIASES to
+# the file it loaded, so even a hijacked DC_ALIASES in the environment cannot
+# give the child processes a different launcher; the D3 child proves the
+# canonical configuration owners ran (their argv signature)
+stale_evid="$WORK/hijack-evid"; reset_runner_state x "$stale_evid"
+RUNNER_OUT="$(
+  export HOME="$fresh_home" DIAG_OPTLAB="$OPTLAB" DC_ALIASES="$stale_home/.bash_aliases"
+  export OPENCODE_DOCKER_HOME="$fresh_home/.opencode-docker"
+  export LAB_DOCKER_INIT_CANDIDATES="$SHIM/docker-init"
+  bash "$RUNNER_BODY" "$stale_evid" "$WS" 2>&1
+)"
+hijack_rc=$?
+[ "$hijack_rc" = 0 ] \
+  && ok "UAT-8g: a hijacked DC_ALIASES cannot drift the child launcher" \
+  || bad "UAT-8g: the pinned launcher source did not survive the hijack (rc $hijack_rc): $RUNNER_OUT"
+if grep -E "^run .*--cap-drop ALL" "$DOCKER_REC" >/dev/null 2>&1 \
+   && grep "dhl-D3-" "$DOCKER_REC" | grep -q -- "--cap-drop ALL"; then
+  ok "UAT-8g: the D3 child process ran the canonical launcher owners (--cap-drop ALL)"
+else
+  bad "UAT-8g: the D3 child did not run the canonical launcher owners"
+fi
+
+# (8) a failed mandatory source is a loader-drift failure with zero runs
+broken_evid="$WORK/broken-evid"; reset_runner_state x "$broken_evid"
+mv "$OPTLAB/lab-diag-lib.sh" "$OPTLAB/lab-diag-lib.sh.hidden"
+run_real_runner "$fresh_home" "$broken_evid" "$WS"; rr_rc=$?
+mv "$OPTLAB/lab-diag-lib.sh.hidden" "$OPTLAB/lab-diag-lib.sh"
+[ "$rr_rc" != 0 ] \
+  && ok "UAT-8g: a failed library source fails the runner closed" \
+  || bad "UAT-8g: a failed library source was tolerated"
+contains "UAT-8g: the failed source is named loader-drift" \
+  "FAIL loader-drift: sourcing" "$RUNNER_OUT"
+if grep -q " run " "$DOCKER_REC" 2>/dev/null; then
+  bad "UAT-8g RED: docker ran although the library source failed"
+else
+  ok "UAT-8g: zero docker runs after a failed source"
+fi
+
+# a launcher that does NOT match the canonical source is refused even when it
+# would load (the runner runs without the driver's refresh): only the aliases
+# content drifts, the rest of the installed state is intact
+drift_home="$WORK/drift-home"; mkdir -p "$drift_home/.opencode-docker/lib"
+cp "$fresh_home/.bash_aliases" "$drift_home/.bash_aliases"
+printf '# drifted\n' >> "$drift_home/.bash_aliases"
+cp "$fresh_home/.opencode-docker/lib/lab-mount-gate.sh" \
+   "$drift_home/.opencode-docker/lib/lab-mount-gate.sh"
+drift_evid="$WORK/drift-evid"; reset_runner_state x "$drift_evid"
+run_real_runner "$drift_home" "$drift_evid" "$WS"; rr_rc=$?
+[ "$rr_rc" != 0 ] \
+  && ok "UAT-8g: a drifted-but-loadable launcher is refused" \
+  || bad "UAT-8g: a drifted launcher was tolerated"
+contains "UAT-8g: the drifted launcher refusal names the canonical source" \
+  "does not match the canonical" "$RUNNER_OUT"
+
 # --- 11. the source-level invariants (driver, lib, stage) --------------------
 drv_has() { if grep -Eq -- "$2" "$DRIVER"; then ok "$1"; else bad "$1 (pattern absent: $2)"; fi; }
 drv_lacks() { if grep -qF -- "$2" "$DRIVER"; then bad "$1 (forbidden pattern present: $2)"; else ok "$1"; fi; }
@@ -1143,6 +1376,21 @@ drv_has "a failed own-resource cleanup fails closed" \
 drv_has "the driver never runs the integration UAT" 'never runs the integration UAT'
 drv_has "the driver never starts the model workload" 'model.s real workload'
 drv_lacks "no LLM interaction in the driver" 'opencode run'
+drv_has "the driver refreshes the installed launcher through the canonical installer" \
+  'setup-agent-user.sh --install-launcher-only'
+drv_has "a failed launcher synchronization fails the driver before the ladder" \
+  'launcher synchronization failed; refusing to run the diagnostics'
+drv_has "the runner checks the status of every mandatory source" \
+  'FAIL loader-drift: sourcing'
+drv_has "the runner pins the single launcher source for the child processes" \
+  'DC_ALIASES="\$HOME/\.bash_aliases"'
+drv_has "the runner verifies the launcher source integrity" \
+  'is not a standalone regular file'
+drv_has "the runner verifies the launcher against the canonical copy" \
+  'does not match the canonical'
+
+lib_has "the lib owns the runner preflight" 'diag_verify_launcher_loaded'
+lib_has "the preflight checks the shared configuration owners" '_oc_security_opts _oc_compose_mounts_env'
 
 lib_has "the lib kills with --kill-after" 'kill-after'
 lib_has "the lib classifies a timeout kill" '124\\|137'

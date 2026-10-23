@@ -124,6 +124,32 @@ diag_register_secret_value() { # VALUE
   return 0
 }
 
+# diag_verify_launcher_loaded — the runner's preflight (UAT-8g): proves that
+# the launcher and THIS diagnostic library were FULLY loaded in the current
+# shell BEFORE any ladder step runs. The real 8f failure was a stale
+# installed launcher (the pinned reference present, the shared configuration
+# owners absent) that blew up mid-ladder as
+# '_oc_security_opts: command not found' and was masked as
+# composition-refused. A missing shared owner or an empty pinned reference
+# is a loader-drift failure with ZERO docker runs — never a composition
+# refusal, never an UNRESOLVED diagnosis, never a skip.
+diag_verify_launcher_loaded() { # -> 0 ok | 1 loader-drift (reason on stderr)
+  local fn
+  for fn in _oc_security_opts _oc_compose_mounts_env _oc_verify_init_copy \
+            _oc_launch oc oc-probe oc_lab_mount_source_ok \
+            diag_run_ladder diag_sanitize; do
+    declare -F "$fn" >/dev/null 2>&1 || {
+      printf 'FAIL loader-drift: %s is not loaded in the diagnostic shell\n' "$fn" >&2
+      return 1
+    }
+  done
+  if [ -z "${_OC_BASE:-}" ]; then
+    printf 'FAIL loader-drift: _OC_BASE is not set in the diagnostic shell\n' >&2
+    return 1
+  fi
+  return 0
+}
+
 # diag_exec NAME BOUND CMD... -> runs one bounded command, records everything
 diag_exec() { # NAME BOUND CMD...
   local name="$1" bound="$2"

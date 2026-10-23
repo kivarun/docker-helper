@@ -53,6 +53,24 @@ else
   exit 1
 fi
 
+# UAT-8g: the diagnostic ladder and its child processes source the INSTALLED
+# launcher ($HOME/.bash_aliases), while /opt/lab carries the freshly copied
+# lab scripts. A stale installed launcher (the real 8f finding) blew up
+# mid-ladder with '_oc_security_opts: command not found' and masked the
+# refusal as composition-refused. The refresh uses the CANONICAL installer
+# in launcher-only mode (no account, helper, principal or credential
+# changes), installs atomically and verifies byte equality — any failure
+# exits here, BEFORE the diagnostic ladder and before any docker call.
+if [ -f /opt/lab/setup-agent-user.sh ]; then
+  bash /opt/lab/setup-agent-user.sh --install-launcher-only || {
+    echo "launcher synchronization failed; refusing to run the diagnostics" >&2
+    exit 1
+  }
+else
+  echo "the launcher installer is unavailable (/opt/lab/setup-agent-user.sh missing); refusing to run" >&2
+  exit 1
+fi
+
 DIAG_ROOT="$(mktemp -d)" || { echo "mktemp failed" >&2; exit 1; }
 chmod 0711 "$DIAG_ROOT"
 EVID="$DIAG_ROOT/evidence"
@@ -92,10 +110,34 @@ set -u
 umask 077
 EVID="$1"
 cd "$2" || exit 1
-# shellcheck source=/dev/null
-source "$HOME/.bash_aliases"
-# shellcheck source=/dev/null
-source /opt/lab/lab-diag-lib.sh
+# UAT-8g: every mandatory source is exit-status-checked. A PARTIALLY loaded
+# launcher must never reach the ladder: the real 8f failure sourced a stale
+# installed launcher without status checks and the missing shared owner
+# surfaced mid-ladder as '_oc_security_opts: command not found', masked as
+# composition-refused. DIAG_OPTLAB is a test-scoped seam (like DC_ALIASES):
+# production resolves /opt/lab, a harness may point it at a private tree.
+DIAG_OPTLAB="${DIAG_OPTLAB:-/opt/lab}"
+source "$HOME/.bash_aliases" \
+  || { printf 'FAIL loader-drift: sourcing %s failed\n' "$HOME/.bash_aliases" >&2; exit 1; }
+source "$DIAG_OPTLAB/lab-diag-lib.sh" \
+  || { printf 'FAIL loader-drift: sourcing %s failed\n' "$DIAG_OPTLAB/lab-diag-lib.sh" >&2; exit 1; }
+# The SINGLE launcher source for the runner and every child process (the
+# D3/D4 children source $DC_ALIASES through the canonical child script): the
+# runner pins it to the EXACT file it just loaded and verifies its integrity
+# (standalone regular file, byte-equal to the canonical /opt/lab copy)
+# BEFORE any step runs — D0–D2 and D3/D4 can never load different versions.
+DC_ALIASES="$HOME/.bash_aliases"
+export DC_ALIASES
+if [ ! -f "$DC_ALIASES" ] || [ -L "$DC_ALIASES" ]; then
+  printf 'FAIL loader-drift: the launcher source %s is not a standalone regular file\n' "$DC_ALIASES" >&2
+  exit 1
+fi
+if ! cmp -s -- "$DC_ALIASES" "$DIAG_OPTLAB/agent-aliases.sh"; then
+  printf 'FAIL loader-drift: %s does not match the canonical %s/agent-aliases.sh\n' \
+    "$DC_ALIASES" "$DIAG_OPTLAB" >&2
+  exit 1
+fi
+diag_verify_launcher_loaded || exit 1
 DIAG_DIR="$EVID"
 DIAG_RUNID="diag-$(cat /proc/sys/kernel/random/boot_id 2>/dev/null | cut -c1-8)-$$"
 export DIAG_DIR DIAG_RUNID
