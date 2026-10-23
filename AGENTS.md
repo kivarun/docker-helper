@@ -760,3 +760,25 @@ When replacing a path, remove obsolete production helpers, seams, tests,
 comments, and documentation that existed solely for the replaced
 implementation. Do not preserve dead implementation only because old tests
 depend on it.
+
+# Test evidence discipline
+
+28. Analyze test evidence, not greenness.
+
+A completed test run is not a report. Whenever a test run is slow, hangs, or
+fails unexpectedly:
+
+- capture the FULL verbose output to a file before doing anything else;
+- attribute time: list the slowest tests by measured duration (a suite that
+  used to be fast has a concrete regression or a scheduling-dependent test);
+- isolate a suspected hang with a bounded single-test run
+  (`go test -run '^TestName$' -timeout <short> .`) before changing anything;
+- name flaky tests explicitly (with the reason and the exclusion pattern,
+  e.g. `go test -skip '^TestName$'`) instead of letting them eat the default
+  timeout silently — a 600s "pass" that is really a hang must be visible as
+  such;
+- report real exit codes and test counts, never "it seemed fine".
+
+The same discipline applies to the lab shell suites: a RED/GREEN claim must
+cite the concrete failing assertions from the actual run, not an expectation
+that they would fail.
