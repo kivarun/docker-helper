@@ -283,8 +283,8 @@ fhas "the canonical cleanup verdict is part of the step result" \
   'diag_cleanup_ok' "$LAB_LIB/lab-diag-lib.sh"
 fhas "a mandatory-cleanup failure fails the diagnostic explicitly" \
   'DIAGNOSTIC FAIL reason=cleanup-' "$LAB_LIB/lab-diag-lib.sh"
-fhas "the diagnostic stage carries an external deadline" \
-  'timeout "\$DIAG_DEADLINE"' "$LAB_LIB/provision-lab-vm.sh"
+fhas "the diagnostic stage carries an external deadline with a finite kill budget" \
+  'timeout --kill-after="\$DIAG_DEADLINE_KILL" "\$DIAG_DEADLINE"' "$LAB_LIB/provision-lab-vm.sh"
 fhas "the deadline path attempts no fallback cleanup" \
   'no fallback cleanup was attempted' "$LAB_LIB/provision-lab-vm.sh"
 fhas "the root driver sources the single sanitization owner" \

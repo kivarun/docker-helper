@@ -44,10 +44,14 @@
 #   $DIAG_DIR/<name>.reap     ok | failed | refused-unowned | n/a
 #   $DIAG_DIR/<name>.session  clean | reaped | refused-list-error | n/a
 #
-# Secrets: the report is an allowlist of compact result lines; environment
-# values, bearer tokens, credentials and raw docker inspect output never
-# enter any diagnostic output, and every excerpt is sanitized at BOTH the
-# file-write and the print boundaries.
+# Secrets: the PUBLIC report is a strict allowlist of compact result lines
+# and predefined safe fields/categories (UAT-8f): raw stdout/stderr, docker
+# top argv, docker error strings, environment values, bearer tokens and
+# credentials live ONLY in the private evidence directory, which is wiped
+# after the run. Every allowlisted line is still sanitized at print time by
+# the single sanitization owner as defense in depth; registration of exact
+# secret values is process-local and is never relied on across the
+# root-driver/runner boundary.
 
 set -u
 
@@ -73,11 +77,20 @@ DC_ALIASES="${DC_ALIASES:-$HOME/.bash_aliases}"
 # diag_sanitize TEXT — the single sanitization owner. Defense in depth for
 # anything any report path quotes: bearer-token shapes, admin-token shapes,
 # Authorization values and private key material are redacted, PLUS every
-# exact secret VALUE registered by this run (DIAG_SECRET_VALUES_LIST,
-# newline-separated): arbitrary values, not only dht_* shaped ones. The
-# canonical steps register the Session token value before any evidence is
-# produced.
-DIAG_SECRET_VALUES_LIST=""
+# exact secret VALUE registered by this run (DIAG_SECRET_VALUES, an array so
+# a value may contain newlines): arbitrary values, not only dht_* shaped
+# ones. Registered values are matched LITERALLY (bash pattern substitution
+# with a quoted pattern), never as a regular expression — a value carrying
+# `[ ] . * / \ &` or newlines is redacted exactly, and a near-miss that only
+# a regex would match stays intact.
+#
+# Registration is process-local state: the root driver and the agent runner
+# are different processes with different registries. It is defense in depth
+# ONLY — the public report paths are strict allowlists (fixed fields and
+# categories) that never quote arbitrary Docker output, process argv,
+# environment or shell payload, so an unregistered secret value cannot reach
+# the report by construction (UAT-8f).
+DIAG_SECRET_VALUES=()
 diag_sanitize() {
   local text="$1"
   local out
@@ -91,28 +104,23 @@ diag_sanitize() {
     return 1
   }
   local v
-  while IFS= read -r v; do
+  for v in "${DIAG_SECRET_VALUES[@]}"; do
     [ -n "$v" ] || continue
-    out="$(printf '%s' "$out" | sed -e "s#${v//#/\\#}#REDACTED#g")" || {
-      printf '%s' "SANITIZE-FAILURE"
-      return 1
-    }
-  done <<<"$DIAG_SECRET_VALUES_LIST"
+    out="${out//"$v"/REDACTED}"
+  done
   printf '%s' "$out"
   return 0
 }
 
 # diag_register_secret_value VALUE — record one exact secret value this run
-# holds so every report path redacts it. Never logs the value.
+# holds so every report path redacts it literally. Never logs the value.
 diag_register_secret_value() { # VALUE
   [ -n "$1" ] || return 0
-  case "$DIAG_SECRET_VALUES_LIST" in
-    *"
-$1"*) : ;;
-    "") DIAG_SECRET_VALUES_LIST="$1" ;;
-    *) DIAG_SECRET_VALUES_LIST="$DIAG_SECRET_VALUES_LIST
-$1" ;;
-  esac
+  local v
+  for v in "${DIAG_SECRET_VALUES[@]}"; do
+    [ "$v" = "$1" ] && return 0
+  done
+  DIAG_SECRET_VALUES+=("$1")
   return 0
 }
 
@@ -198,6 +206,19 @@ diag_container_absent() { # NAME -> 0 absent | 1 present-or-unknown
   return 0
 }
 
+# diag_cid_absent CID — the decisive existence check by the FULL immutable
+# container ID: 0 = docker itself proved that no container with this ID
+# exists (proven absence); 1 = it exists or existence cannot be proven. A
+# name-based search can never substitute for this: a container may have been
+# renamed, so an empty name search does not prove the absence of a container
+# with a known ID.
+diag_cid_absent() { # CID -> 0 absent | 1 present-or-unknown
+  diag_bounded "cid-absence" docker ps -aq --filter "id=$1" \
+    >/dev/null 2>&1 || return 1
+  [ -s "$DIAG_DIR/cid-absence.out" ] && return 1
+  return 0
+}
+
 # diag_reap_verified_container CID — remove a container by its IMMUTABLE
 # container ID after identity verification. Never removes by a name, which
 # could be reused.
@@ -216,18 +237,27 @@ diag_reap_verified_container() { # CID -> ok | failed
 #      died before docker wrote it grants no removal permission by
 #      assumption);
 #   2. the container is inspected BY ID (never by the reusable name): its
-#      .Id must equal the recorded ID, its lab.diagnostic.runid label must
-#      equal THIS run's id, and its .Image must equal the LOCAL image ID
-#      resolved from the pinned OCI reference (an image ID, not a
-#      reference);
+#      .Id must equal the recorded FULL ID, its lab.diagnostic.runid label
+#      must equal THIS run's id, and its .Image must equal the LOCAL image
+#      ID resolved from the pinned OCI reference (an image ID, not a
+#      reference). A short (12-hex) ID is not accepted: it is not immutable
+#      identity evidence;
 #   3. the removal targets the verified container ID.
-# Proven absence (no cidfile and no container with this name) is a normal
-# outcome (clean), not an error. Any ambiguity is refused-unowned.
+# Proven absence is a normal outcome (clean), but ONLY when docker itself
+# proves it: a FAILED inspect by CID does not prove the container is gone,
+# and an empty search by the reusable NAME does not prove the absence of a
+# container with a known CID that may have been renamed — absence is proven
+# only by a successful, empty search on the FULL container ID. Any
+# ambiguity is refused-unowned, and no removal is ever attempted on an
+# unproven identity.
 diag_reap_owned_container() { # NAME CIDFILE -> clean|ok|failed|refused-unowned|n/a
   local name="$1" cidfile="$2" cid
   [ -n "$name" ] || { printf 'n/a'; return 0; }
   [ -n "${DIAG_RUNID:-}" ] || { printf 'refused-unowned'; return 0; }
   if [ ! -s "$cidfile" ]; then
+    # no container ID was ever recorded: the name-based check is the only
+    # available evidence, and a container under THIS run's unique name is
+    # the only thing it can speak about
     if diag_container_absent "$name"; then
       printf 'clean'
     else
@@ -236,7 +266,9 @@ diag_reap_owned_container() { # NAME CIDFILE -> clean|ok|failed|refused-unowned|
     return 0
   fi
   cid="$(tr -d '[:space:]' < "$cidfile" 2>/dev/null)"
-  if [[ ! "$cid" =~ ^[0-9a-f]{64}$ && ! "$cid" =~ ^[0-9a-f]{12}$ ]]; then
+  if [[ ! "$cid" =~ ^[0-9a-f]{64}$ ]]; then
+    # a 12-hex short ID is not immutable-identity evidence; nothing is
+    # inspected, searched or removed on its authority
     printf 'refused-unowned'
     return 0
   fi
@@ -245,9 +277,11 @@ diag_reap_owned_container() { # NAME CIDFILE -> clean|ok|failed|refused-unowned|
   [ -n "$expected" ] || { printf 'refused-unowned'; return 0; }
   identity="$(diag_container_identity "$cid")"
   if [ -z "$identity" ]; then
-    # the recorded container no longer exists: proven absence is a normal
-    # outcome (an --rm run already removed it), never an error
-    if diag_container_absent "$name"; then
+    # a failed inspect does NOT prove absence: absence is decided by a
+    # successful, empty search on the FULL container ID — never by a name
+    # search (the container may have been renamed) and never by the inspect
+    # failure itself
+    if diag_cid_absent "$cid"; then
       printf 'clean'
     else
       printf 'refused-unowned'
@@ -285,7 +319,7 @@ diag_register_step_sessions() { # WORKSPACE FILE -> 0 ok | 1 list-failed
 
 # diag_clean_registered_sessions FILE — delete exactly the registered Session
 # IDs; anything not registered is never touched.
-diag_clean_registered_sessions() { # FILE -> clean | reaped | failed | refused
+diag_clean_registered_sessions() { # FILE -> clean | reaped | failed
   local file="$1" id outcome="clean"
   [ -s "$file" ] || { printf 'clean'; return 0; }
   while IFS= read -r id; do
@@ -331,24 +365,53 @@ diag_classify() { # ID MARKER
   printf '%s\n' "$DC_DETAIL" > "$DIAG_DIR/$id.detail"
 }
 
-# diag_collect_failure ID — the safe failure diagnostics: allowlisted docker
-# inspect fields, the container process list (argv only, never env), and a
-# capped AVC tail. Observability failures are recorded explicitly. The
-# report quotes only sanitized excerpts.
+# diag_collect_failure ID — the failure diagnostics. EVERY collection call
+# (docker inspect, docker ps, docker top, dmesg, ausearch) runs through the
+# shared bounded owner: a hung collector records UNAVAILABLE and never
+# blocks the report. The collected material is PRIVATE evidence (wiped after
+# the run): the public report never quotes docker top argv, Docker error
+# strings, environment or shell payload — only the allowlisted state fields
+# and fixed categories (see diag_print_evidence_summary and the ladder
+# report). The inspect format carries ONLY predefined safe fields;
+# .State.Error is an arbitrary Docker error string and is never collected.
 diag_collect_failure() { # ID
   local id="$1"
   local cname="dhl-$id-$DIAG_RUNID"
-  {
-    docker inspect --format '{{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} err={{.State.Error}}' "$cname" 2>/dev/null || true
-    docker ps -a --filter "name=$cname" --format '{{.Names}} {{.State}} {{.Status}}' 2>/dev/null || true
-  } > "$DIAG_DIR/$id.docker-state" 2>/dev/null
-  [ -s "$DIAG_DIR/$id.docker-state" ] || printf 'unavailable\n' > "$DIAG_DIR/$id.docker-state"
-  if ! docker top "$cname" 2>/dev/null > "$DIAG_DIR/$id.procs"; then
+  local collected=0
+  if diag_bounded "$id.inspect" docker inspect --format \
+      '{{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}}' \
+      "$cname" >/dev/null 2>&1 && [ -s "$DIAG_DIR/$id.inspect.out" ]; then
+    cp "$DIAG_DIR/$id.inspect.out" "$DIAG_DIR/$id.docker-state"
+    collected=1
+  fi
+  if diag_bounded "$id.pslist" docker ps -a --filter "name=$cname" \
+      --format '{{.Names}} {{.State}} {{.Status}}' >/dev/null 2>&1 \
+      && [ -s "$DIAG_DIR/$id.pslist.out" ]; then
+    printf '%s\n' "$(cat "$DIAG_DIR/$id.pslist.out")" >> "$DIAG_DIR/$id.docker-state"
+    collected=1
+  fi
+  [ "$collected" = 1 ] || printf 'unavailable\n' > "$DIAG_DIR/$id.docker-state"
+  # docker top stays an INTERNAL diagnostic: its process argv can carry
+  # arbitrary values, so it is stored for private review and never printed
+  if diag_bounded "$id.top" docker top "$cname" >/dev/null 2>&1 \
+      && [ -s "$DIAG_DIR/$id.top.out" ]; then
+    cp "$DIAG_DIR/$id.top.out" "$DIAG_DIR/$id.procs"
+  else
     printf 'unavailable\n' > "$DIAG_DIR/$id.procs"
   fi
-  dmesg 2>/dev/null | grep -i 'avc:' | tail -20 > "$DIAG_DIR/$id.avc" || true
-  ausearch -m AVC -ts recent 2>/dev/null | tail -40 >> "$DIAG_DIR/$id.avc" || true
-  diag_sanitize "$(tail -c 2000 "$DIAG_DIR/$id.err" 2>/dev/null || true)" > "$DIAG_DIR/$id.err.excerpt"
+  # the SELinux evidence: collected bounded, reduced to a private capped
+  # tail; the public report names only the category
+  local avc_ok=0
+  if diag_bounded "$id.dmesg" dmesg >/dev/null 2>&1; then
+    grep -i 'avc:' "$DIAG_DIR/$id.dmesg.out" 2>/dev/null | tail -20 \
+      >> "$DIAG_DIR/$id.avc" || true
+    avc_ok=1
+  fi
+  if diag_bounded "$id.ausearch" ausearch -m AVC -ts recent >/dev/null 2>&1; then
+    tail -40 "$DIAG_DIR/$id.ausearch.out" >> "$DIAG_DIR/$id.avc" 2>/dev/null || true
+    avc_ok=1
+  fi
+  [ "$avc_ok" = 1 ] || printf 'unavailable\n' > "$DIAG_DIR/$id.avc"
 }
 
 # diag_step_delta FROM TO — the specific configuration difference between two
@@ -381,12 +444,19 @@ diag_canonical_recover() { # ID WS NAME CIDFILE -> verdict on stdout
     session_verdict="refused-list-error"
   fi
   container_verdict="$(diag_reap_owned_container "$name" "$cidfile")"
+  # UAT-8f: ANY mandatory failure dominates ANY success — a successful
+  # container removal must never mask a failed Session deletion and vice
+  # versa. The refused verdicts can never become a PASS, unknown verdict
+  # values fail closed, and only clean/reaped without any other failure is
+  # accepted by diag_cleanup_ok.
   case "$session_verdict/$container_verdict" in
     refused-list-error/*) printf 'refused-list-error' ;;
     */refused-unowned)    printf 'refused-unowned' ;;
     */failed)             printf 'failed' ;;
+    failed/*)             printf 'failed' ;;
     */ok)                 printf 'reaped' ;;
     */clean)              printf '%s' "$session_verdict" ;;
+    *)                    printf 'refused-unowned' ;;
   esac
   return 0
 }
@@ -398,6 +468,76 @@ diag_cleanup_ok() { # VERDICT -> 0 ok | 1 mandatory-cleanup-failure
     clean|reaped) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# --- root-driver-side workspace ownership (UAT-8f) ---------------------------
+# The root driver (diagnose-launch.sh) allocates the diagnostic workspace and
+# owns its removal. These helpers are INERT in the agent context — the runner
+# never calls them — and exist so the allocation and removal semantics have
+# ONE implementation shared by the driver and the behavioral tests.
+#
+# The workspace is the Session-ownership anchor: the diagnostic deletes only
+# Sessions whose workspace equals THIS run's workspace. A unique,
+# unpredictably named workspace keeps that scoping exact: no other run (or a
+# leftover directory of a dead one) can share the attribution, and no cleanup
+# can ever delete a directory this run did not create.
+
+# diag_alloc_workspace HOME USER — allocate the run's diagnostic workspace
+# ATOMICALLY under the agent's allowed root:
+#   * mktemp -d: an unpredictable name, created exclusively — an existing
+#     directory (e.g. a stale PID-named one holding someone else's data) is
+#     never reused and never touched;
+#   * mode 0700, owned by the agent user (the runner runs as that user);
+#   * the CANONICAL path of the workspace must stay strictly inside the
+#     canonical agent home — a symlinked workroot cannot smuggle the
+#     workspace (and the Session attribution) outside the allowed root;
+#   * the created path is printed for the caller to register for cleanup;
+#     any ambiguity removes the just-created directory and fails.
+diag_alloc_workspace() { # HOME USER -> the workspace path on stdout
+  local home="$1" user="$2" home_canon ws ws_canon uid
+  home_canon="$(readlink -f -- "$home" 2>/dev/null)" || return 1
+  [ -n "$home_canon" ] && [ -d "$home_canon" ] || return 1
+  if [ ! -d "$home/work" ]; then
+    mkdir -m 0755 -- "$home/work" 2>/dev/null || return 1
+    chown -- "$user" "$home/work" 2>/dev/null || return 1
+  fi
+  ws="$(mktemp -d "$home/work/diag-XXXXXX")" 2>/dev/null || return 1
+  if ! chmod 0700 -- "$ws" 2>/dev/null \
+      || ! chown -- "$user" "$ws" 2>/dev/null \
+      || ! ws_canon="$(readlink -f -- "$ws" 2>/dev/null)" \
+      || [ -z "$ws_canon" ]; then
+    rm -rf -- "$ws" 2>/dev/null
+    return 1
+  fi
+  case "$ws_canon" in
+    "$home_canon"/work/diag-*) : ;;
+    *) rm -rf -- "$ws" 2>/dev/null; return 1 ;;
+  esac
+  uid="$(id -u -- "$user" 2>/dev/null)" || { rm -rf -- "$ws" 2>/dev/null; return 1; }
+  [ "$(stat -c %u -- "$ws" 2>/dev/null)" = "$uid" ] \
+    || { rm -rf -- "$ws" 2>/dev/null; return 1; }
+  printf '%s\n' "$ws"
+}
+
+# diag_discard_tree PATH — remove a tree this run provably created and
+# VERIFY the removal. A surviving path is a failure, never a silent success.
+diag_discard_tree() { # PATH -> 0 removed-or-absent | 1 survived
+  [ -n "$1" ] || return 0
+  [ -e "$1" ] || return 0
+  rm -rf -- "$1" 2>/dev/null || true
+  [ -e "$1" ] && return 1
+  return 0
+}
+
+# diag_driver_cleanup ROOT WS — the SINGLE cleanup owner of the root driver,
+# wired to the driver's EXIT/INT/TERM traps: the workspace (the Session
+# ownership anchor) first, then the private evidence root. Any survivor is
+# reported to the caller, which must fail closed.
+diag_driver_cleanup() { # ROOT WS -> 0 clean | 1 something survived
+  local rc=0
+  diag_discard_tree "$2" || rc=1
+  diag_discard_tree "$1" || rc=1
+  return "$rc"
 }
 
 # _diag_step_argv_compose ARRAYNAME LEVEL INIT_COPY WS — assemble the ladder's
@@ -527,11 +667,14 @@ _diag_canonical_step() { # ID BOUND PAYLOAD MODE WS -> 0 pass|1 fail
 
 # diag_print_evidence_summary EVID_DIR — the safe, allowlisted evidence
 # summary for the operator report. This is the ONLY evidence print path: it
-# runs in the root driver (which sources this library), sanitizes every
-# quoted line AT PRINT TIME through the single sanitization owner, prints
-# UNAVAILABLE explicitly when the evidence could not be collected, and never
-# prints a raw docker top/inspect/environment dump. A sanitization failure
-# fails the summary (it can never degrade into a PASS-shaped output).
+# runs in the root driver (which sources this library), quotes ONLY the
+# predefined safe docker-state fields, sanitizes every quoted line AT PRINT
+# TIME through the single sanitization owner, prints UNAVAILABLE explicitly
+# when the evidence could not be collected, and never prints raw docker top
+# output (process argv), docker error strings, environment or shell payload —
+# those stay in the private evidence wiped after the run (UAT-8f). A
+# sanitization failure fails the summary (it can never degrade into a
+# PASS-shaped output).
 diag_print_evidence_summary() { # EVID_DIR
   local evid="$1" id line
   printf '%s\n' "=== lab launch diagnostics (evidence summary) ==="
@@ -543,16 +686,6 @@ diag_print_evidence_summary() { # EVID_DIR
     else
       line="$(diag_sanitize "$line")" || return 1
       printf '%s docker-state: %s\n' "$id" "$line"
-    fi
-  done
-  for id in D3 D4; do
-    [ -s "$evid/$id.procs" ] || continue
-    line="$(head -3 "$evid/$id.procs")"
-    if [ "$line" = unavailable ]; then
-      printf '%s container processes: UNAVAILABLE (docker top could not be collected)\n' "$id"
-    else
-      line="$(diag_sanitize "$line")" || return 1
-      printf '%s container processes: %s\n' "$id" "$line"
     fi
   done
   return 0
@@ -818,15 +951,18 @@ diag_run_ladder() { # IMAGE WS RUNID
       D3) printf 'TRANSITION D2->D3: %s\n' "$(diag_step_delta D2 D3)" ;;
       D4) printf 'TRANSITION D3->D4: %s\n' "$(diag_step_delta D3 D4)" ;;
     esac
-    if [ -s "$DIAG_DIR/$first_fail.err.excerpt" ] 2>/dev/null; then
-      printf 'DIAG stderr (%s, sanitized excerpt):\n' "$first_fail"
-      diag_sanitize "$(cat "$DIAG_DIR/$first_fail.err.excerpt")"
-      printf '\n'
+    # the raw stderr and the SELinux denial text stay in the PRIVATE
+    # evidence (wiped after the run); the public report carries only fixed
+    # categories — never docker error strings, argv, environment or payload
+    if [ -s "$DIAG_DIR/$first_fail.err" ] 2>/dev/null; then
+      printf 'DIAG stderr: captured in the private evidence (not printed)\n'
     fi
-    if [ -s "$DIAG_DIR/$first_fail.avc" ] 2>/dev/null; then
-      printf 'DIAG avc (capped tail):\n'
-      diag_sanitize "$(cat "$DIAG_DIR/$first_fail.avc")"
-      printf '\n'
+    if [ -f "$DIAG_DIR/$first_fail.avc" ] && \
+       [ "$(head -1 "$DIAG_DIR/$first_fail.avc" 2>/dev/null)" != unavailable ]; then
+      printf 'DIAG avc: %s denial lines recorded in the private evidence\n' \
+        "$(grep -c . "$DIAG_DIR/$first_fail.avc" 2>/dev/null || echo 0)"
+    else
+      printf 'DIAG avc: UNAVAILABLE (the kernel audit evidence could not be collected)\n'
     fi
     # The cause is named ONLY when exactly one factor probe succeeded where
     # the step failed; otherwise the outcome is explicitly UNRESOLVED.

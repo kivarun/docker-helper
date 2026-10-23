@@ -95,6 +95,12 @@ case "\${1:-}" in
       *bash\ /opt/lab/diagnose-launch.sh*)
         [ "\${FAIL_ON:-}" = diagnose ] && { echo "stub: launch diagnostics reported failures" >&2; exit 3; }
         if [ "\${FAIL_ON:-}" = "diagnose-hang" ]; then sleep 30; exit 0; fi
+        if [ "\${FAIL_ON:-}" = "diagnose-hang-unkillable" ]; then
+          # a diagnostic ssh process that IGNORES SIGTERM: only the finite
+          # kill budget (--kill-after -> SIGKILL) can end it
+          trap '' TERM
+          while :; do sleep 1 & wait \$!; done
+        fi
         echo "D0 PASS rc=0 elapsed=1"
         echo "D4 PASS rc=0 elapsed=2" ;;
       *setup-agent-user.sh*)
@@ -842,6 +848,28 @@ contains "UAT-8e: the deadline failure names the deadline and the no-fallback ru
 state_line="$(cat "$STATE" 2>/dev/null)"
 check "UAT-8e: the window is closed after the deadline" "stopped" "$state_line"
 contains "UAT-8e: the VM stop happens after the deadline kill" "stop" "$(cat "$REC")"
+
+# --- UAT-8f. the final deadline survives a SIGTERM-ignoring diagnostic ------
+# SIGTERM at the deadline is not a guarantee: the ssh process may ignore it.
+# The external deadline therefore carries a FINITE kill budget: after the
+# SIGKILL the stage performs NO fallback cleanup and hands over to the
+# network-window owner, which stops the VM and proves state=stopped.
+: > "$REC"; echo stopped > "$STATE"; rm -f "$SNAPMARK"
+if DIAG_DEADLINE=2 DIAG_DEADLINE_KILL=2 FAIL_ON=diagnose-hang-unkillable run_driver uat-diagnose; then
+  bad "UAT-8f: a SIGTERM-ignoring diagnostic was accepted"
+else
+  ok "UAT-8f: a SIGTERM-ignoring diagnostic is force-killed by the final deadline"
+fi
+contains "UAT-8f: the hard-kill path names the forced kill" \
+  "ignored the deadline SIGTERM and was force-killed" "$OUT"
+contains "UAT-8f: the hard-kill path attempts no fallback cleanup" \
+  "no fallback cleanup was attempted" "$OUT"
+check "UAT-8f: the VM is stopped after the hard kill" "stopped" "$(cat "$STATE")"
+contains "UAT-8f: the VM stop happens after the hard kill" "stop" "$(cat "$REC")"
+case "$OUT" in
+  *"uat-diagnose stage done"*) bad "UAT-8f: no success message after the hard kill" ;;
+  *) ok "UAT-8f: no success message after the hard kill" ;;
+esac
 
 echo
 printf 'provision-lab-vm tests: %d passed, %d failed\n' "$PASS" "$FAIL"

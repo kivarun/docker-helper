@@ -13,9 +13,12 @@
 # guessed.
 #
 # Secrets: no Session bearer, principal credential, LLM key, SSH private
-# key or full environment is ever printed; no shell tracing is enabled; no
-# raw docker inspect (an allowlist of state fields only); all artifacts
-# live in a private mktemp directory removed by the EXIT/INT/TERM traps.
+# key or full environment is ever printed; no shell tracing is enabled; the
+# public output is a strict allowlist (the compact ladder report plus the
+# predefined safe evidence fields — no raw docker top argv, no Docker error
+# strings, no environment or shell payload); all raw artifacts live in a
+# private mktemp directory and the unique workspace, both removed by the
+# EXIT/INT/TERM traps.
 #
 # Cleanup contract: only resources this diagnostic created (its evidence
 # directory, its named containers, its Session delta, its workspace and the
@@ -55,17 +58,32 @@ chmod 0711 "$DIAG_ROOT"
 EVID="$DIAG_ROOT/evidence"
 install -d -m 0700 -o "$AGENT_USER" -g "$AGENT_USER" "$EVID"
 
+# The single cleanup owner (EXIT/INT/TERM): the unique diagnostic workspace
+# and the private evidence root. A surviving path is a hard failure — the
+# driver never reports success after failing to remove its own resources.
+DIAG_WS=""
 cleanup() {
-  rm -rf -- "$DIAG_ROOT"
+  if ! diag_driver_cleanup "$DIAG_ROOT" "$DIAG_WS"; then
+    printf 'CRITICAL: the diagnostic could not remove its own workspace or evidence; failing closed\n' >&2
+    exit 1
+  fi
 }
 trap cleanup EXIT
-trap 'cleanup; exit 130' INT
-trap 'cleanup; exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-# the diagnostic workspace must live under the agent's allowed root so the
-# canonical mount composition accepts it
-ws="$AGENT_HOME/work/diag-$$"
-install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" "$ws"
+# The unique diagnostic workspace: allocated ATOMICALLY under the agent's
+# allowed root with an unpredictable name (mktemp -d, 0700, agent-owned,
+# canonical-path verified). A pre-existing directory is never reused — a
+# stale PID-named workspace holding other data is never touched and never
+# removed. Uniqueness also keeps the Session ownership attribution exact:
+# the diagnostic deletes only Sessions whose workspace equals THIS run's
+# workspace.
+DIAG_WS="$(diag_alloc_workspace "$AGENT_HOME" "$AGENT_USER")" || {
+  echo "cannot allocate a unique diagnostic workspace under $AGENT_HOME/work" >&2
+  exit 1
+}
+ws="$DIAG_WS"
 
 RUNNER="$DIAG_ROOT/runner.sh"
 cat > "$RUNNER" <<'SH'
@@ -98,8 +116,6 @@ diag_rc=$?
 # evidence summary — one owner (the lib), sanitized at print time.
 diag_print_evidence_summary "$EVID" || {
   echo "the evidence summary could not be sanitized safely; failing closed" >&2
-  rm -rf -- "$ws"
   exit 1
 }
-rm -rf -- "$ws"
 exit "$diag_rc"

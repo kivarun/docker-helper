@@ -109,6 +109,11 @@ case "$1" in
     done
     [ -z "$image_arg" ] && image_arg="$_OC_BASE"
     printf '%s\n' "$*" >> "$DOCKER_REC"
+    if [ -n "${STUB_STDERR_SECRET:-}" ]; then
+      # an arbitrary value that reached Docker's stderr (a daemon error
+      # string is operator-uncontrolled text)
+      echo "docker: mock daemon error: $STUB_STDERR_SECRET" >&2
+    fi
     # real docker refuses an interactive request without a terminal
     if [ -n "$tty" ] && ! [ -t 0 ]; then
       echo "the input device is not a TTY" >&2
@@ -184,8 +189,15 @@ case "$1" in
     done
     exit 0 ;;
   ps)
+    printf '%s\n' "ps $*" >> "$DOCKER_REC"
     if printf '%s\n' "$*" | grep -q 'ancestor='; then
       [ -n "${STUB_FOREIGN_CIDS:-}" ] && printf '%s\n' $STUB_FOREIGN_CIDS
+      exit 0
+    fi
+    if printf '%s\n' "$*" | grep -q -- '--filter id='; then
+      # the decisive existence check for one exact FULL container ID
+      c="$(printf '%s\n' "$*" | sed -n 's/.*--filter id=//p')"
+      grep -qxF "$c" "$CIDS" 2>/dev/null && printf '%s\n' "$c"
       exit 0
     fi
     if printf '%s\n' "$*" | grep -q 'name=^/'; then
@@ -217,6 +229,12 @@ case "$1" in
       sleep "${STUB_HANG_SECONDS:-300}"
       exit 0
     fi
+    if [ -n "${STUB_INSPECT_ERROR:-}" ]; then
+      # a daemon-side inspect error: the query itself failed, which proves
+      # nothing about the container's existence
+      echo "stub: simulated docker inspect error" >&2
+      exit 1
+    fi
     target="${*: -1}"
     # real docker fails the inspect for a container that does not exist
     cid="$(lookup_cid "$target")"
@@ -246,7 +264,17 @@ case "$1" in
     exit 0 ;;
   top)
     [ -n "${STUB_TOP_FAIL:-}" ] && exit 1
-    printf 'UID   PID  PPID CMD\n1001 101 100 /bin/sh -c echo OK\n'
+    if [ -n "${STUB_HANG_TOP:-}" ]; then
+      trap '' TERM
+      sleep "${STUB_HANG_SECONDS:-300}"
+      exit 0
+    fi
+    if [ -n "${STUB_TOP_SECRET:-}" ]; then
+      # an arbitrary value in a process argv (what docker top reports)
+      printf 'UID   PID  PPID CMD\n1001 101 100 /bin/sh -c --token=%s\n' "$STUB_TOP_SECRET"
+    else
+      printf 'UID   PID  PPID CMD\n1001 101 100 /bin/sh -c echo OK\n'
+    fi
     exit 0 ;;
   version)
     echo "24.0" ;;
@@ -441,7 +469,11 @@ unset STUB_FAIL_PAYLOAD
 contains "a docker CLI failure is docker-cli" "D0 FAIL rc=125" "$REPORT"
 contains "the docker-cli detail is explicit" "detail=docker-cli" "$REPORT"
 contains "downstream steps are NOT_RUN after a CLI failure" "D1 NOT_RUN" "$REPORT"
-contains "the CLI failure stderr is captured" "simulated docker CLI failure" "$REPORT"
+not_contains "UAT-8f: raw docker error strings never reach the report" \
+  "simulated docker CLI failure" "$REPORT"
+[ "$(cat "$WORK/evid/D0.err" 2>/dev/null)" = "stub: simulated docker CLI failure for echo D0_OK" ] \
+  && ok "the CLI failure stderr is captured in the private evidence" \
+  || bad "the CLI failure stderr was lost or altered"
 
 # --- 4. an exit 0 without the marker is a FAIL -------------------------------
 STUB_SILENT_PAYLOAD="D1_OK" run_ladder
@@ -462,14 +494,16 @@ diag_report_lines D1 > "$WORK/badrc.report"
 contains "a non-numeric rc is reported as an evidence failure" \
   "D1 FAIL rc=invalid" "$(cat "$WORK/badrc.report")"
 
-# --- 6. the command's stderr is captured, never suppressed -------------------
+# --- 6. the command's stderr is captured privately, never printed ------------
 STUB_FAIL_PAYLOAD="D2_OK" run_ladder
 unset STUB_FAIL_PAYLOAD
 [ -s "$WORK/evid/D2.err" ] \
-  && ok "the failing step's stderr is captured in the evidence" \
+  && ok "the failing step's stderr is captured in the private evidence" \
   || bad "the failing step's stderr was lost"
-contains "the sanitized stderr excerpt reaches the report" \
+not_contains "UAT-8f: the raw stderr never reaches the report" \
   "simulated docker CLI failure" "$REPORT"
+contains "the report names the private-stderr category" \
+  "DIAG stderr: captured in the private evidence (not printed)" "$REPORT"
 
 # --- 7. the owned Session delta is reaped after the canonical steps ----------
 STUB_DELETE_FAIL=1 run_ladder
@@ -794,12 +828,13 @@ not_contains "UAT-8e: a normal oc launch carries no diagnostic name" "--name dhl
 not_contains "UAT-8e: a normal oc launch carries no diagnostic label" "lab.diagnostic.runid" "$dargv"
 not_contains "UAT-8e: a normal oc launch carries no cidfile" "--cidfile" "$dargv"
 
-# T14/T15: the evidence summary is a real executable path with real
-# sanitization: a secret VALUE injected into the evidence never reaches the
-# output, the allowlisted fields only, and a sanitization failure fails
-# closed. (The root driver sources this same library, so the summary runs
-# with the single sanitization owner — the old driver died with
-# "diag_sanitize: command not found" on every run with evidence.)
+# T14/T15: the evidence summary is a real executable path with REAL
+# allowlisting: a secret VALUE injected into the evidence never reaches the
+# output, only the predefined safe docker-state fields are printed, and raw
+# docker top process argv never enters the report at all (UAT-8f: the argv
+# may carry arbitrary operator-uncontrolled values). A sanitization failure
+# fails closed. (The root driver sources this same library, so the summary
+# runs with the single sanitization owner.)
 evid_dir="$WORK/summary-evid"
 mkdir -p "$evid_dir"
 printf 'exited=0\n' > "$evid_dir/D2.docker-state"
@@ -811,12 +846,279 @@ rc_sum=$?
   || bad "UAT-8e RED: the evidence summary failed (rc $rc_sum)"
 not_contains "UAT-8e: the injected secret value is redacted from the summary" \
   "SECRET-VALUE-8d9f2c1b" "$out"
-contains "UAT-8e: the process list line is sanitized, not dropped" \
-  "D3 container processes:" "$out"
+contains "UAT-8e: the allowlisted docker-state line is printed" \
+  "D2 docker-state:" "$out"
+not_contains "UAT-8f RED: raw docker top process argv never reaches the summary" \
+  "container processes:" "$out"
+case "$out" in
+  *"--token="*) bad "UAT-8f RED: process argv text leaked into the summary" ;;
+  *) ok "UAT-8f: no process argv content in the summary" ;;
+esac
 printf 'unavailable\n' > "$evid_dir/D3.docker-state"
 out="$(diag_print_evidence_summary "$evid_dir" 2>&1)"
 contains "UAT-8e: an observability failure prints UNAVAILABLE explicitly" \
   "D3 docker-state: UNAVAILABLE" "$out"
+
+# --- UAT-8f BLOCKER 1. the cleanup verdict aggregation matrix ----------------
+# ANY mandatory failure dominates ANY success: a successful container reap
+# must never mask a failed Session deletion and vice versa. The refused
+# verdicts never become a PASS, and only clean/reaped without any other
+# failure is accepted by diag_cleanup_ok. The matrix drives the REAL
+# aggregation owner (diag_canonical_recover) through the stubbed
+# docker/docker-helper stateful boundaries.
+mx_home="$WORK/mx-home"; mkdir -p "$mx_home/work"
+mx_evid="$WORK/mx-evid"; mkdir -p "$mx_evid"
+mx_cid="deadbeef$(printf 'a%.0s' {1..56})"
+mx_run() { # SESSION_MODE CONTAINER_MODE -> verdict on stdout
+  local s="$1" c="$2"
+  local cidfile="$WORK/mx-$s-$c.cid"
+  : > "$DH_SESSIONS"; rm -f "$cidfile"
+  case "$s" in
+    reaped|failed) printf '%s\n' "dhs_MX $mx_home/work" >> "$DH_SESSIONS" ;;
+  esac
+  case "$c" in
+    ok|failed|refused-unowned)
+      printf '%s' "$mx_cid" > "$cidfile"
+      grep -qxF "$mx_cid" "$CIDS" 2>/dev/null || printf '%s\n' "$mx_cid" >> "$CIDS" ;;
+  esac
+  (
+    export DIAG_DIR="$mx_evid" DIAG_RUNID=diagrun-mx DIAG_IMAGE="$_OC_BASE"
+    case "$c" in
+      failed) export STUB_RM_FAIL=1 ;;
+      refused-unowned) export STUB_INSPECT_FOREIGN_LABEL=1 ;;
+    esac
+    case "$s" in
+      failed) export STUB_DELETE_FAIL=1 ;;
+      refused-list-error) export STUB_SESSION_LIST_FAIL=1 ;;
+    esac
+    diag_canonical_recover MX "$mx_home/work" "dhl-MX-diagrun-mx" "$cidfile"
+  )
+}
+mx_matrix_fail=0
+for s in clean reaped failed refused-list-error; do
+  for c in clean ok failed refused-unowned; do
+    case "$s/$c" in
+      refused-list-error/*) want=refused-list-error ;;
+      */refused-unowned)    want=refused-unowned ;;
+      */failed)             want=failed ;;
+      failed/*)             want=failed ;;
+      */ok)                 want=reaped ;;
+      */clean)              want="$s" ;;
+      *)                    want=refused-unowned ;;
+    esac
+    got="$(mx_run "$s" "$c")"
+    if [ "$got" = "$want" ]; then
+      ok "cleanup matrix: session=$s container=$c -> $want"
+    else
+      mx_matrix_fail=$((mx_matrix_fail + 1))
+      bad "cleanup matrix: session=$s container=$c -> want $want got $got"
+    fi
+  done
+done
+for v in clean reaped; do
+  diag_cleanup_ok "$v" && ok "diag_cleanup_ok accepts $v" || bad "diag_cleanup_ok rejects $v"
+done
+for v in failed refused-unowned refused-list-error "n/a" ""; do
+  diag_cleanup_ok "$v" && bad "diag_cleanup_ok accepted '$v'" || ok "diag_cleanup_ok rejects '$v'"
+done
+
+# --- UAT-8f BLOCKER 5. full-CID absence proof --------------------------------
+# A failed inspect by CID proves nothing; an empty name search proves nothing
+# about a container that may have been renamed; a 12-hex short ID is not
+# immutable identity. Absence is accepted only from a successful, empty
+# search on the FULL container ID.
+abs_evid="$WORK/abs-evid"; mkdir -p "$abs_evid"
+abs_cid="beef0000$(printf 'b%.0s' {1..56})"
+abs_run() { # NAME CID_HEX [STUB_VARS...] -> verdict (fresh stub state each call)
+  local name="$1" cid="$2"; shift 2
+  local cidfile="$WORK/abs-$name.cid"
+  printf '%s' "$cid" > "$cidfile"
+  (
+    export DIAG_DIR="$abs_evid" DIAG_RUNID=diagrun-abs DIAG_IMAGE="$_OC_BASE"
+    # shellcheck disable=SC2163  # "$@" is the caller's STUB_VAR=value list
+    if [ "$#" -gt 0 ]; then export "$@"; fi
+    diag_reap_owned_container "$name" "$cidfile"
+  )
+}
+# (16) a failed inspect + a successful empty FULL-CID search -> proven absent
+: > "$CIDS"
+out="$(abs_run "dhl-abs16-diagrun-abs" "$abs_cid" STUB_INSPECT_ERROR=1)"
+check "UAT-8f: an inspect error with a provably absent full CID is clean" \
+  "clean" "$out"
+grep -qF -- "--filter id=$abs_cid" "$DOCKER_REC" \
+  && ok "UAT-8f: the absence was proven by the FULL container ID search" \
+  || bad "UAT-8f RED: absence was decided without a full-CID search"
+# (14) a failed inspect while the container exists under a RENAMED identity:
+# the empty name search must NOT produce a clean verdict
+: > "$CIDS"; printf '%s\n' "$abs_cid" >> "$CIDS"
+out="$(abs_run "dhl-abs14-diagrun-abs" "$abs_cid" STUB_INSPECT_ERROR=1)"
+check "UAT-8f: a renamed container with a known CID is refused (never clean)" \
+  "refused-unowned" "$out"
+if grep -qE "rm(- -f)? $abs_cid" "$DOCKER_REC"; then
+  bad "UAT-8f RED: a container with an unproven identity was removed"
+else
+  ok "UAT-8f: no removal happened on an unprovable identity"
+fi
+# (15) an inspect error while the container exists under its own name: the
+# refusal is the same, and the identity is still never removed
+: > "$CIDS"; printf '%s\n' "$abs_cid" >> "$CIDS"
+printf '%s %s\n' "dhl-abs15-diagrun-abs" "$abs_cid" >> "$CIDMAP"
+out="$(abs_run "dhl-abs15-diagrun-abs" "$abs_cid" STUB_INSPECT_ERROR=1)"
+check "UAT-8f: an inspect error with a present container is refused" \
+  "refused-unowned" "$out"
+if grep -qE "rm(- -f)? $abs_cid" "$DOCKER_REC"; then
+  bad "UAT-8f: a container was removed although its identity could not be verified"
+else
+  ok "UAT-8f: the present container is intact after the refused reap"
+fi
+# a short (12-hex) container ID is never accepted as identity evidence
+: > "$CIDS"; : > "$CIDMAP"
+short_cid="deadbeefcafe"
+printf '%s\n' "$short_cid" >> "$CIDS"
+out="$(abs_run "dhl-short-diagrun-abs" "$short_cid")"
+check "UAT-8f: a 12-hex short CID is refused as identity evidence" \
+  "refused-unowned" "$out"
+if grep -qE "rm(- -f)? $short_cid" "$DOCKER_REC"; then
+  bad "UAT-8f RED: a removal was authorized by a 12-hex short ID"
+else
+  ok "UAT-8f: a short CID authorizes nothing (no docker call at all)"
+fi
+: > "$CIDS"; : > "$CIDMAP"
+
+# (13) hung docker inspect/top during failure evidence: bounded, UNAVAILABLE,
+# never blocking the report
+hang_evid="$WORK/hang-evid"; mkdir -p "$hang_evid"
+(
+  export DIAG_DIR="$hang_evid" DIAG_RUNID=diagrun-hang DIAG_IMAGE="$_OC_BASE"
+  export STUB_HANG_INSPECT=1 STUB_HANG_TOP=1 STUB_HANG_SECONDS=60
+  export DIAG_RECOVERY_BOUND=2 DIAG_KILL_AFTER=1
+  timeout --kill-after=3 20 bash -c '
+    source "$1"
+    diag_collect_failure D0
+  ' _ "$LIB"
+)
+hang_rc=$?
+[ "$hang_rc" = 0 ] \
+  && ok "UAT-8f: hung docker inspect/top did not block the failure evidence" \
+  || bad "UAT-8f RED: the failure-evidence collection blocked (rc $hang_rc)"
+check "UAT-8f: hung inspect evidence is recorded UNAVAILABLE" \
+  "unavailable" "$(cat "$hang_evid/D0.docker-state" 2>/dev/null)"
+check "UAT-8f: hung top evidence is recorded UNAVAILABLE" \
+  "unavailable" "$(cat "$hang_evid/D0.procs" 2>/dev/null)"
+unset STUB_HANG_INSPECT STUB_HANG_TOP STUB_HANG_SECONDS
+export DIAG_RECOVERY_BOUND=10
+
+# --- UAT-8f BLOCKER 2. arbitrary secrets never reach the public output -------
+# (5) an arbitrary value inside a Docker error string: the stderr excerpt is
+# no longer part of the report, so the value cannot leak even though nothing
+# registered it
+STUB_STDERR_SECRET="RUNSECRET-7f3a9b2c" STUB_FAIL_PAYLOAD="D1_OK" run_ladder
+unset STUB_STDERR_SECRET STUB_FAIL_PAYLOAD
+not_contains "UAT-8f RED: an arbitrary Docker-stderr secret never reaches the report" \
+  "RUNSECRET-7f3a9b2c" "$REPORT"
+grep -q "RUNSECRET-7f3a9b2c" "$WORK/evid/D1.err" 2>/dev/null \
+  && ok "UAT-8f: the stderr secret stayed in the private evidence only" \
+  || bad "UAT-8f: the stderr fixture did not reach the evidence (test setup broken)"
+# (6) a secret value with regex metacharacters and a newline is matched
+# LITERALLY: the exact value is redacted, a regex-only near-miss is not
+metaval="$(printf 'MV[x].*y&\\z\nsecond-line')"
+diag_register_secret_value "$metaval"
+san="$(diag_sanitize "prefix MV[x].*y&\\z
+second-line suffix")"
+check "UAT-8f RED: a metacharacter+newline secret is redacted exactly" \
+  "prefix REDACTED suffix" "$san"
+san2="$(diag_sanitize "MV[x]QQQQy&\\z
+second-line stays")"
+check "UAT-8f: a regex-only near-miss is NOT redacted (literal matching)" \
+  "MV[x]QQQQy&\\z
+second-line stays" "$san2"
+# (7) an arbitrary secret in docker top process argv: docker top is internal
+# evidence and is never printed — not by the ladder and not by the summary
+STUB_TOP_SECRET="TOPARGV-4d8e1f0a" STUB_FAIL_PAYLOAD="D3_OK" run_ladder
+unset STUB_TOP_SECRET STUB_FAIL_PAYLOAD
+not_contains "UAT-8f RED: a docker top argv secret never reaches the ladder report" \
+  "TOPARGV-4d8e1f0a" "$REPORT"
+out="$(diag_print_evidence_summary "$WORK/evid" 2>&1)"
+not_contains "UAT-8f RED: a docker top argv secret never reaches the summary" \
+  "TOPARGV-4d8e1f0a" "$out"
+grep -q "TOPARGV-4d8e1f0a" "$WORK/evid/D3.procs" 2>/dev/null \
+  && ok "UAT-8f: the argv secret stayed in the private evidence only" \
+  || bad "UAT-8f: the argv fixture did not reach the evidence (test setup broken)"
+# (8) a secret in child-runner state that the root driver does not know: a
+# FRESH process (the root driver's state) prints the summary without any
+# registration and still cannot leak the value
+fresh_out="$(bash -c 'source "$1"; diag_print_evidence_summary "$2"' _ "$LIB" "$WORK/evid" 2>&1)"
+fresh_rc=$?
+[ "$fresh_rc" = 0 ] \
+  && ok "UAT-8f: the root-driver-side summary runs in a fresh process" \
+  || bad "UAT-8f: the fresh-process summary failed (rc $fresh_rc)"
+not_contains "UAT-8f RED: an unknown child secret cannot leak from the root driver" \
+  "TOPARGV-4d8e1f0a" "$fresh_out"
+
+# --- UAT-8f BLOCKER 4. the unique diagnostic workspace -----------------------
+# Allocation is atomic (mktemp -d) under the agent's allowed root: an
+# existing directory is never reused, the name is unpredictable, the mode is
+# 0700 with the agent as owner, and the canonical path must stay inside the
+# canonical home. One cleanup owner removes the registered workspace and
+# PROVES the removal.
+ws_home="$WORK/ws-home"; mkdir -p "$ws_home/work"
+# (11) a pre-existing PID-shaped workspace holding foreign data survives
+foreign="$ws_home/work/diag-$$"
+mkdir -p "$foreign"; printf 'foreign-data\n' > "$foreign/precious.txt"
+ws1="$(diag_alloc_workspace "$ws_home" "$(id -un)")"
+[ -n "$ws1" ] \
+  && ok "UAT-8f: the workspace is allocated atomically" \
+  || bad "UAT-8f RED: the workspace allocation failed"
+[ "$ws1" != "$foreign" ] \
+  && ok "UAT-8f: a pre-existing PID-named directory is never reused" \
+  || bad "UAT-8f RED: the pre-existing PID-named directory was reused"
+[ "$(cat "$foreign/precious.txt" 2>/dev/null)" = "foreign-data" ] \
+  && ok "UAT-8f RED: the foreign workspace data is untouched" \
+  || bad "UAT-8f: the foreign workspace data was damaged"
+ws2="$(diag_alloc_workspace "$ws_home" "$(id -un)")"
+[ -n "$ws2" ] && [ "$ws1" != "$ws2" ] \
+  && ok "UAT-8f: every run gets its own unique workspace" \
+  || bad "UAT-8f: workspace allocation is not unique"
+[ "$(stat -c %a "$ws1" 2>/dev/null)" = 700 ] \
+  && ok "UAT-8f: the workspace is private (0700)" \
+  || bad "UAT-8f: the workspace mode is not 0700 ($(stat -c %a "$ws1" 2>/dev/null))"
+[ "$(stat -c %U "$ws1" 2>/dev/null)" = "$(id -un)" ] \
+  && ok "UAT-8f: the workspace is owned by the agent user" \
+  || bad "UAT-8f: the workspace owner is wrong"
+# a symlinked workroot that escapes the canonical home is refused
+mv "$ws_home/work" "$ws_home/work.real"
+ln -s /tmp "$ws_home/work"
+if diag_alloc_workspace "$ws_home" "$(id -un)" >/dev/null 2>&1; then
+  bad "UAT-8f: a workroot escaping the canonical home was accepted"
+else
+  ok "UAT-8f: a workroot escaping the canonical home is refused"
+fi
+rm -f "$ws_home/work"; mv "$ws_home/work.real" "$ws_home/work"
+if diag_driver_cleanup "$WORK/ws-absent-root" "$ws1"; then
+  ok "UAT-8f: the single cleanup owner removes the registered workspace"
+else
+  bad "UAT-8f: the cleanup owner failed on an owned workspace"
+fi
+[ ! -e "$ws1" ] && ok "UAT-8f: the removal is verified (the tree is gone)" \
+  || bad "UAT-8f: the workspace survived the cleanup owner"
+# (12) a failed removal of the OWN workspace is a failure, never a success
+ws3="$(diag_alloc_workspace "$ws_home" "$(id -un)")"
+mkdir -p "$ws3/locked"; printf 'keep\n' > "$ws3/locked/f.txt"
+chmod 0555 "$ws3/locked"
+if diag_driver_cleanup "$WORK/ws-absent-root" "$ws3"; then
+  bad "UAT-8f RED: an unremovable own workspace was reported as clean"
+else
+  ok "UAT-8f: a failed own-workspace removal is reported as a failure"
+fi
+[ -e "$ws3/locked/f.txt" ] \
+  && ok "UAT-8f: the unremovable content is intact (nothing force-removed)" \
+  || bad "UAT-8f: the locked content vanished"
+chmod 0755 "$ws3/locked"
+diag_driver_cleanup "$WORK/ws-absent-root" "$ws3" \
+  || bad "UAT-8f: the workspace could not be cleaned after unlocking"
+[ -n "$(cat "$foreign/precious.txt" 2>/dev/null)" ] \
+  && ok "UAT-8f: the foreign workspace still exists after all runs" \
+  || bad "UAT-8f: the foreign workspace was removed by the diagnostic"
 
 # --- 11. the source-level invariants (driver, lib, stage) --------------------
 drv_has() { if grep -Eq -- "$2" "$DRIVER"; then ok "$1"; else bad "$1 (pattern absent: $2)"; fi; }
@@ -830,7 +1132,14 @@ drv_has "the evidence directory is private (0700)" 'install -d -m 0700 -o "\$AGE
 drv_has "the workspace is private to the run" 'umask 077'
 drv_lacks "no shell tracing in the diagnostic" 'set -x'
 drv_lacks "no raw docker inspect in the driver" 'docker inspect |'
-drv_has "the diagnostic workspace lives under the allowed root" 'work/diag-'
+drv_has "the workspace comes from the atomic allocation owner" \
+  'diag_alloc_workspace "\$AGENT_HOME" "\$AGENT_USER"'
+drv_lacks "no PID-derived predictable workspace name remains" 'diag-\$\$'
+drv_lacks "no second rm of the workspace outside the cleanup owner" 'rm -rf -- "\$ws"'
+drv_has "the allocated workspace is registered for cleanup" 'DIAG_WS='
+drv_has "the cleanup goes through the single owner" 'diag_driver_cleanup "\$DIAG_ROOT" "\$DIAG_WS"'
+drv_has "a failed own-resource cleanup fails closed" \
+  'could not remove its own workspace or evidence'
 drv_has "the driver never runs the integration UAT" 'never runs the integration UAT'
 drv_has "the driver never starts the model workload" 'model.s real workload'
 drv_lacks "no LLM interaction in the driver" 'opencode run'
@@ -845,6 +1154,35 @@ lib_has "the lib captures stderr separately" '\.err"'
 lib_lacks "no sudo inside the agent-level lib" 'sudo docker-helper'
 lib_has "docker inspect uses an allowlisted format" "inspect --format"
 lib_has "the failure evidence lands in the private directory" 'DIAG_DIR/\$id.docker-state'
+lib_has "every failure-evidence collection call is bounded" \
+  'diag_bounded "\$id\.inspect" docker inspect'
+lib_has "absence is provable by the full container ID" 'diag_cid_absent'
+lib_has "only the full 64-hex container ID authorizes a removal decision" \
+  '\^\[0-9a-f\]\{64\}\$'
+# UAT-8f: the PUBLIC print paths quote allowlisted material only — no raw
+# docker top argv and no raw stderr excerpts anywhere in the report.
+sum_body="$(sed -n '/^diag_print_evidence_summary()/,/^}/p' "$LIB")"
+case "$sum_body" in
+  *".procs"*) bad "UAT-8f: the summary still prints docker top output" ;;
+  *) ok "UAT-8f: the evidence summary prints no docker top output" ;;
+esac
+case "$sum_body" in
+  *"docker top"*) bad "UAT-8f: the summary references docker top" ;;
+  *) ok "UAT-8f: the summary carries no docker top reference" ;;
+esac
+ladder_body="$(sed -n '/^diag_run_ladder()/,/^}/p' "$LIB")"
+case "$ladder_body" in
+  *"err.excerpt"*) bad "UAT-8f: the ladder still prints raw stderr excerpts" ;;
+  *) ok "UAT-8f: the ladder report carries no raw stderr excerpt" ;;
+esac
+case "$ladder_body" in
+  *'DIAG stderr ('*) bad "UAT-8f: the ladder still prints a stderr excerpt block" ;;
+  *) ok "UAT-8f: no stderr excerpt block in the ladder report" ;;
+esac
+case "$ladder_body" in
+  *'DIAG avc (capped tail)'*) bad "UAT-8f: the ladder still prints raw AVC text" ;;
+  *) ok "UAT-8f: the ladder report carries only the AVC category" ;;
+esac
 
 # the driver stage: explicit, independent, window closed on every outcome
 p_has() { if grep -Eq -- "$2" "$PROV"; then ok "$1"; else bad "$1 (pattern absent: $2)"; fi; }
@@ -857,6 +1195,10 @@ stage_lacks() { local body; body="$(sed -n '/^stage_uat_diagnose()/,/^}/p' "$PRO
   case "$body" in *"$2"*) bad "$1 (forbidden pattern present in the stage)" ;; *) ok "$1" ;; esac; }
 stage_lacks "the diagnostic stage never runs the integration UAT" 'INTEGRATION_NETWORKED'
 p_has "the diagnostic stage runs the diagnose driver" 'sudo bash /opt/lab/diagnose-launch.sh'
+p_has "the external deadline carries a finite kill budget" \
+  'timeout --kill-after="\$DIAG_DEADLINE_KILL" "\$DIAG_DEADLINE"'
+p_has "the hard-kill deadline path is explicit" \
+  'ignored the deadline SIGTERM and was force-killed'
 
 echo
 printf 'diagnose-launch tests: %d passed, %d failed\n' "$PASS" "$FAIL"
