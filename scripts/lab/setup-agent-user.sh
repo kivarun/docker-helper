@@ -220,14 +220,22 @@ wire_bashrc() {
   fi
 }
 
-# ensure_cmp_dependency — the UAT-8i dependency preflight: the launcher
-# verification compares the installed artifacts with cmp, so a guest without
-# a working cmp must be repaired BEFORE any launcher change — never
-# misclassified as a file mismatch. If cmp already runs, NO package
-# operation happens; otherwise the guest package diffutils is installed
-# through the standard zypper path with signature checks (never
-# --no-gpg-checks). A failed install or an unusable cmp afterwards fails
-# closed with an explicit dependency diagnosis.
+# require_cmp_dependency — the launcher-refresh dependency check (UAT-8j):
+# the refresh installs NO packages (the 8h contract: exactly two file
+# targets), so a missing cmp is an explicit dependency FAILURE before the
+# first launcher write — never a zypper run and never a false file mismatch.
+require_cmp_dependency() {
+  command -v cmp >/dev/null 2>&1 && [ -x "$(command -v cmp)" ] && return 0
+  die "cmp is missing: dependency failure (the launcher refresh installs no packages; provision the guest with diffutils first)"
+}
+
+# ensure_cmp_dependency — the FULL-provisioning dependency repair (UAT-8i):
+# the launcher verification compares the installed artifacts with cmp, so a
+# guest without a working cmp is repaired BEFORE any launcher change. If cmp
+# already runs, NO package operation happens; otherwise the guest package
+# diffutils is installed through the standard zypper path with signature
+# checks (never --no-gpg-checks). A failed install or an unusable cmp
+# afterwards fails closed with an explicit dependency diagnosis.
 ensure_cmp_dependency() {
   command -v cmp >/dev/null 2>&1 && [ -x "$(command -v cmp)" ] && return 0
   log "installing missing dependency: diffutils (cmp)"
@@ -274,12 +282,16 @@ verify_launcher_aliases() {
   return 0
 }
 
-# --- dependency preflight (UAT-8i) -------------------------------------------
-# The launcher verification compares with cmp. A guest without a working cmp
-# is repaired HERE, before ANY launcher change and in BOTH modes (the
-# launcher refresh and the full provisioning) — the absence is never allowed
-# to surface later as a false file mismatch.
-ensure_cmp_dependency
+# --- dependency preflight (UAT-8i/UAT-8j) ------------------------------------
+# The launcher verification compares with cmp. The two modes differ by the
+# 8h boundary: the launcher refresh never changes system packages (a missing
+# cmp is an explicit dependency refusal), while the full provisioning
+# repairs the guest dependency through the standard zypper path. In BOTH
+# modes the check happens before ANY launcher change, so the absence can
+# never surface later as a false file mismatch.
+if [ "$INSTALL_LAUNCHER_ONLY" = 1 ]; then
+  require_cmp_dependency
+fi
 
 # --- launcher refresh mode (UAT-8g) ------------------------------------------
 # Refreshes ONLY the installed launcher artifacts from the canonical lab
@@ -294,6 +306,9 @@ if [ "$INSTALL_LAUNCHER_ONLY" = 1 ]; then
   log "launcher refresh done: aliases=$AGENT_HOME/.bash_aliases gate=$AGENT_HOME/.opencode-docker/lib/lab-mount-gate.sh (verified: cmp, owner, group, mode)"
   exit 0
 fi
+
+# the full provisioning repairs the guest dependency through zypper (UAT-8i)
+ensure_cmp_dependency
 
 # --- 1. account, workspace root, docker access ------------------------------
 # The 'agent' account is the trusted launcher, so it may hold docker access.

@@ -436,6 +436,30 @@ stage_uat_diagnose() {
   log "booting with the network OPEN (explicit diagnostic window)"
   DEV_VM_NET_ISOLATED=0 "$DEVVM" start || die "VM start (network open) failed"
   copy_lab_scripts
+  # UAT-8j: the guest dependency preflight — the launcher verification inside
+  # diagnose-launch.sh compares with cmp, and the launcher-only refresh
+  # installs NO packages (the 8h boundary). This stage therefore provides the
+  # guest dependency BEFORE the diagnostics: cmp present -> no package
+  # operation; cmp missing -> the guest package diffutils is installed
+  # through the standard zypper path with signature checks (never
+  # --no-gpg-checks) and re-verified. The preflight is bounded by an explicit
+  # timeout with the finite kill budget: a hung package manager must never
+  # keep the network window open. Any failure stops the diagnostics: the
+  # EXISTING window owner closes the network window and proves the VM
+  # stopped, and the stage fails — no fallback cleanup, no new lifecycle
+  # owner, no new stage.
+  log "guest dependency preflight: cmp (diffutils) before the diagnostics"
+  DIAG_DEP_RC=0
+  DIAG_DEP_TIMEOUT="${DIAG_DEP_TIMEOUT:-300}"
+  DIAG_DEADLINE_KILL="${DIAG_DEADLINE_KILL:-60}"
+  diag_dep_cmd='if command -v cmp >/dev/null 2>&1; then :; else sudo zypper --non-interactive install diffutils; fi && command -v cmp >/dev/null'
+  timeout --kill-after="$DIAG_DEADLINE_KILL" "$DIAG_DEP_TIMEOUT" \
+    "$DEVVM" ssh "$diag_dep_cmd" < /dev/null || DIAG_DEP_RC=$?
+  if [ "$DIAG_DEP_RC" != 0 ]; then
+    close_online_window
+    die "the guest cmp dependency preflight failed (rc $DIAG_DEP_RC); the diagnostic was not started — the network window is closed and the VM is confirmed stopped"
+  fi
+  log "guest dependency verified: cmp is available"
   log "running the bounded launch-path diagnostics (no integration UAT, no LLM)"
   # UAT-8e/UAT-8f: an EXTERNAL deadline bounds the whole diagnostic ssh run.
   # A hung in-guest recovery (a stuck docker rm, session list or report) must
@@ -448,7 +472,6 @@ stage_uat_diagnose() {
   # that path is CRITICAL (a failed close exits nonzero).
   DIAG_RC=0
   DIAG_DEADLINE="${DIAG_DEADLINE:-1800}"
-  DIAG_DEADLINE_KILL="${DIAG_DEADLINE_KILL:-60}"
   timeout --kill-after="$DIAG_DEADLINE_KILL" "$DIAG_DEADLINE" \
     "$DEVVM" ssh 'sudo bash /opt/lab/diagnose-launch.sh' < /dev/null || DIAG_RC=$?
   close_online_window
