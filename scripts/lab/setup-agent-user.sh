@@ -220,12 +220,46 @@ wire_bashrc() {
   fi
 }
 
+# ensure_cmp_dependency — the UAT-8i dependency preflight: the launcher
+# verification compares the installed artifacts with cmp, so a guest without
+# a working cmp must be repaired BEFORE any launcher change — never
+# misclassified as a file mismatch. If cmp already runs, NO package
+# operation happens; otherwise the guest package diffutils is installed
+# through the standard zypper path with signature checks (never
+# --no-gpg-checks). A failed install or an unusable cmp afterwards fails
+# closed with an explicit dependency diagnosis.
+ensure_cmp_dependency() {
+  command -v cmp >/dev/null 2>&1 && [ -x "$(command -v cmp)" ] && return 0
+  log "installing missing dependency: diffutils (cmp)"
+  command -v zypper >/dev/null 2>&1 \
+    || die "cmp is missing and zypper is unavailable (cannot install diffutils): dependency failure"
+  zypper --non-interactive install diffutils \
+    || die "could not install diffutils (cmp): dependency failure"
+  command -v cmp >/dev/null 2>&1 && [ -x "$(command -v cmp)" ] \
+    || die "cmp is not usable after the diffutils install: dependency failure"
+  log "dependency installed: cmp is available"
+}
+
+# verify_installed_copy SRC TGT — the three-outcome cmp classification
+# (UAT-8i): rc 0 = the files match; rc 1 = the files really differ (a
+# launcher drift, fail closed); rc >= 2 = the COMPARISON itself failed
+# (a missing or unreadable file, a missing cmp): a separate explicit
+# failure, never a false mismatch report.
+verify_installed_copy() { # SRC TGT
+  local src="$1" tgt="$2" rc=0
+  cmp -s -- "$src" "$tgt" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) die "$tgt does not match $src (cmp): the installed launcher drifted" ;;
+    *) die "cmp could not compare $tgt with $src (cmp rc $rc): comparison error, fail closed" ;;
+  esac
+}
+
 verify_launcher_aliases() {
+  verify_installed_copy "$ALIASES_SRC" "$AGENT_HOME/.bash_aliases"
+  verify_installed_copy "$GATE_LIB_SRC" \
+    "$AGENT_HOME/.opencode-docker/lib/lab-mount-gate.sh"
   local tgt
-  cmp -s -- "$ALIASES_SRC" "$AGENT_HOME/.bash_aliases" \
-    || die "$AGENT_HOME/.bash_aliases does not match $ALIASES_SRC (cmp)"
-  cmp -s -- "$GATE_LIB_SRC" "$AGENT_HOME/.opencode-docker/lib/lab-mount-gate.sh" \
-    || die "$AGENT_HOME/.opencode-docker/lib/lab-mount-gate.sh does not match $GATE_LIB_SRC (cmp)"
   for tgt in "$AGENT_HOME/.bash_aliases" \
              "$AGENT_HOME/.opencode-docker/lib/lab-mount-gate.sh"; do
     [ -f "$tgt" ] && [ ! -L "$tgt" ] \
@@ -239,6 +273,13 @@ verify_launcher_aliases() {
   done
   return 0
 }
+
+# --- dependency preflight (UAT-8i) -------------------------------------------
+# The launcher verification compares with cmp. A guest without a working cmp
+# is repaired HERE, before ANY launcher change and in BOTH modes (the
+# launcher refresh and the full provisioning) — the absence is never allowed
+# to surface later as a false file mismatch.
+ensure_cmp_dependency
 
 # --- launcher refresh mode (UAT-8g) ------------------------------------------
 # Refreshes ONLY the installed launcher artifacts from the canonical lab
