@@ -356,6 +356,45 @@ done
   || ok "the Session cleanup still ran despite the failed container removal"
 check "the gate marks the run for the stop" "1" "${DIAG_D3_CLEANUP_FAILED:-0}"
 
+# --- UAT-8n: streaming progress is safe, deterministic and immediate -------
+export DIAG_DIR="$WORK/ev-progress"; mkdir -p "$DIAG_DIR"
+export PROGRESS_SECRET="progress-secret-not-for-terminal"
+if DIAG_CONTAINER_NAME="" DIAG_CONTAINER_CID="" \
+    diag_exec F-D3-progress-ok "$DIAG_FACTOR_BOUND" \
+      sh -c 'printf "%s" "$PROGRESS_SECRET"' \
+      2>"$WORK/progress-ok.stderr"; then
+  ok "progress: an instant successful command exits 0"
+else
+  bad "progress: the successful command returned nonzero"
+fi
+grep -qF '[diag] START F-D3-progress-ok limit=2s' "$WORK/progress-ok.stderr" \
+  && ok "progress: START is emitted before the result" \
+  || bad "progress: START is missing"
+grep -qE '^\[diag\] END F-D3-progress-ok rc=0 elapsed=[0-9]+s reap=n/a$' \
+  "$WORK/progress-ok.stderr" \
+  && ok "progress: END contains bounded safe fields only" \
+  || bad "progress: END or result fields are missing"
+if grep -qF "$PROGRESS_SECRET" "$WORK/progress-ok.stderr"; then
+  bad "progress: secret leaked into the progress stream"
+else
+  ok "progress: private command output stays out of the progress stream"
+fi
+check "progress: private stdout stays in its evidence file" \
+  "$PROGRESS_SECRET" "$(cat "$DIAG_DIR/F-D3-progress-ok.out")"
+if DIAG_CONTAINER_NAME="" DIAG_CONTAINER_CID="" \
+    diag_exec F-D3-progress-fail "$DIAG_FACTOR_BOUND" \
+      sh -c 'exit 42' 2>"$WORK/progress-fail.stderr"; then
+  bad "progress: a failed command was treated as successful"
+else
+  rc=$?
+  check "progress: command exit code preserved" "42" "$rc"
+fi
+grep -qE '^\[diag\] END F-D3-progress-fail rc=42 elapsed=[0-9]+s reap=n/a$' \
+  "$WORK/progress-fail.stderr" \
+  && ok "progress: nonzero exit is emitted immediately and faithfully" \
+  || bad "progress: nonzero exit progress is missing"
+unset PROGRESS_SECRET
+
 # --- summary ----------------------------------------------------------------
 printf 'd3-pty-fast tests: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
