@@ -25,7 +25,13 @@
 #      the first PASS->FAIL boundary;
 #  10. the canonical-path failure (D3) runs no TTY factor probe (the
 #      launcher contract cannot vary -it) and reports UNRESOLVED, never a
-#      guessed cause.
+#      guessed cause;
+#  11. (UAT-8k) the strict D3 factor matrix isolates the docker flags, the
+#      nested pty wrapper and the stdin policy under ONE composition owner
+#      and ONE payload; a timeout carries the bounded hang-stage observation
+#      of the owned container; and only controlled single-variable
+#      comparisons may name a cause (the multi-variable notty probe stays
+#      preliminary OBSERVED evidence).
 #
 # Source-level invariants for the driver (diagnose-launch.sh): the lab-vm
 # guard, the private evidence directory, no set -x, no raw docker inspect,
@@ -92,14 +98,16 @@ is_known_container() { # id-or-name
 }
 case "$1" in
   run)
-    payload=""; cname=""; cidfile_arg=""; image_arg=""; tty=""; prev=""
+    payload=""; cname=""; cidfile_arg=""; image_arg=""; opt_i=""; opt_t=""; prev=""
     for a in "$@"; do
       [ "$prev" = "-c" ] && payload="$a"
       [ "$prev" = "--name" ] && cname="$a"
       [ "$prev" = "--cidfile" ] && cidfile_arg="$a"
       [ "$prev" = "--entrypoint" ] && image_seen=1
       case "$a" in
-        -it|--it) tty=1 ;;
+        -it|--it) opt_i=1; opt_t=1 ;;
+        -i) opt_i=1 ;;
+        -t) opt_t=1 ;;
       esac
       case "$prev" in
         --entrypoint) : ;;
@@ -108,16 +116,25 @@ case "$1" in
       prev="$a"
     done
     [ -z "$image_arg" ] && image_arg="$_OC_BASE"
-    printf '%s\n' "$*" >> "$DOCKER_REC"
+    si=notty; [ -t 0 ] && si=pty
+    printf '%s\n' "$* stdin=$si" >> "$DOCKER_REC"
     if [ -n "${STUB_STDERR_SECRET:-}" ]; then
       # an arbitrary value that reached Docker's stderr (a daemon error
       # string is operator-uncontrolled text)
       echo "docker: mock daemon error: $STUB_STDERR_SECRET" >&2
     fi
-    # real docker refuses an interactive request without a terminal
-    if [ -n "$tty" ] && ! [ -t 0 ]; then
+    # real docker refuses a TTY request without a terminal (-t needs the
+    # client's stdin to be a TTY, with or without -i)
+    if [ -n "$opt_t" ] && ! [ -t 0 ]; then
       echo "the input device is not a TTY" >&2
       exit 125
+    fi
+    if [ -n "${STUB_HANG_BEFORE_CREATE:-}" ]; then
+      # the CLI hung before it ever created the container: no cidfile, no
+      # registry entry — the hang-stage observation must say no-cidfile
+      trap '' TERM
+      sleep "${STUB_HANG_SECONDS:-300}"
+      exit 0
     fi
     if [ -n "$cidfile_arg" ] && [ -n "$cname" ]; then
       # a fixed-length 64-hex container id, unique per run invocation
@@ -133,12 +150,31 @@ case "$1" in
       echo "$payload"
       exit 0
     fi
-    if [ -n "${STUB_HANG_WHEN_TTY:-}" ] && [ -n "$tty" ] \
+    if [ -n "${STUB_HANG_WHEN_TTY:-}" ] && [ -n "$opt_t" ] \
        && printf '%s' "$payload" | grep -q "D3_OK"; then
       trap '' TERM
       sleep "${STUB_HANG_SECONDS:-300}"
       echo "$payload"
       exit 0
+    fi
+    if [ -n "${STUB_HANG_DFLAG:-}" ]; then
+      # hang exactly for the docker runs carrying one of THESE flag tokens
+      # (a space-separated list): the strict single-variable matrix driver
+      # for the UAT-8k tests
+      # shellcheck disable=SC2086  # the token list is word-split by design
+      matched=""
+      for want in $STUB_HANG_DFLAG; do
+        for a in "$@"; do
+          [ "$a" = "$want" ] && { matched=1; break; }
+        done
+        [ -n "$matched" ] && break
+      done
+      if [ -n "$matched" ]; then
+        trap '' TERM
+        sleep "${STUB_HANG_SECONDS:-300}"
+        echo "$payload"
+        exit 0
+      fi
     fi
     if [ -n "${STUB_HANG_WHEN_AGENT:-}" ] && printf '%s\n' "$*" | grep -q '/ssh-agent' \
        && printf '%s' "$payload" | grep -q "D3_OK"; then
@@ -189,6 +225,11 @@ case "$1" in
     done
     exit 0 ;;
   ps)
+    if [ -n "${STUB_HANG_PS:-}" ]; then
+      trap '' TERM
+      sleep "${STUB_HANG_SECONDS:-300}"
+      exit 0
+    fi
     printf '%s\n' "ps $*" >> "$DOCKER_REC"
     if printf '%s\n' "$*" | grep -q 'ancestor='; then
       [ -n "${STUB_FOREIGN_CIDS:-}" ] && printf '%s\n' $STUB_FOREIGN_CIDS
@@ -256,6 +297,13 @@ case "$1" in
     fi
     if [ -n "${STUB_INSPECT_WRONG_IMAGE:-}" ]; then
       printf '%s|%s|%s\n' "$cid" "${DIAG_RUNID:-}" "$FOREIGN_IMAGE_ID"
+      exit 0
+    fi
+    # the UAT-8k hang-state query: a State.Status-only format (no other
+    # fields) is answered with the container's lifecycle state
+    if printf '%s\n' "$*" | grep -q 'State.Status' \
+       && ! printf '%s\n' "$*" | grep -q 'State.ExitCode'; then
+      printf '%s\n' "${STUB_INSPECT_STATUS:-running}"
       exit 0
     fi
     # an owned container: its own ID, this run's runid label, and the LOCAL
@@ -407,11 +455,13 @@ source "$LIB"
 export DC_ALIASES="$ALIASES"
 
 # fast, bounded test bounds (assigned AFTER the source so they override the
-# lib's production defaults; the production defaults stay 30/60/30)
+# lib's production defaults; the production defaults stay 30/60/30 and the
+# kill-after 10 — the hangs below are rc 124 or 137 alike, only faster)
 DIAG_STEP_BOUND=3
 DIAG_CANON_BOUND=3
 DIAG_FACTOR_BOUND=3
-export DIAG_STEP_BOUND DIAG_CANON_BOUND DIAG_FACTOR_BOUND
+DIAG_KILL_AFTER=2
+export DIAG_STEP_BOUND DIAG_CANON_BOUND DIAG_FACTOR_BOUND DIAG_KILL_AFTER
 
 DIAGRUN=0
 run_ladder() { # -> REPORT (stdout), LRC (the ladder rc)
@@ -450,6 +500,9 @@ unset STUB_HANG_PAYLOAD STUB_HANG_SECONDS
 grep -qE '^D2 FAIL rc=1(24|37) elapsed=' <<<"$REPORT" \
   && ok "a hang is classified as a timeout (rc 124 or the kill-after 137)" \
   || bad "a hang was not classified as a timeout: $(grep '^D2 ' <<<"$REPORT")"
+grep -qE '^D2 FAIL rc=1(24|37) elapsed=.* detail=timeout hang=running' <<<"$REPORT" \
+  && ok "UAT-8k: the timeout carries the observed container state (hang=running)" \
+  || bad "UAT-8k: the timeout line lost the hang-stage observation: $(grep '^D2 ' <<<"$REPORT")"
 contains "the downstream canonical steps are NOT_RUN" "D3 NOT_RUN" "$REPORT"
 contains "the entrypoint step is NOT_RUN" "D4 NOT_RUN" "$REPORT"
 check "the failing ladder exits nonzero" "1" "$LRC"
@@ -578,6 +631,8 @@ grep -qE "rm(- -f)? $(cat "$WORK/evid/D2.cid" 2>/dev/null)" "$DOCKER_REC" \
 STUB_INSPECT_FOREIGN_LABEL="otherrun-9" STUB_HANG_PAYLOAD="D2_OK" STUB_HANG_SECONDS=60 run_ladder
 unset STUB_INSPECT_FOREIGN_LABEL STUB_HANG_PAYLOAD STUB_HANG_SECONDS
 check "UAT-8d: an unverified container is never removed (refused)" "refused-unowned" "$(cat "$WORK/evid/D2.reap")"
+check "UAT-8k: the unattributed container state is recorded, never guessed" \
+  "unattributed" "$(cat "$WORK/evid/D2.hangstate")"
 if grep -qE "rm(- -f)? dhl-D2-" "$DOCKER_REC"; then
   bad "UAT-8d RED: a container with a foreign runid label was removed"
 else
@@ -680,12 +735,15 @@ else
   ok "UAT-8d: no verified init copy means zero docker runs for D1"
 fi
 
-# T12: a D3 hang caused ONLY by the TTY — the no-TTY probe passes and the
-# diagnosis names the factor
+# T12: a D3 hang caused ONLY by the TTY — the strict matrix attributes it to
+# the docker -t flag (the multi-variable notty probe may no longer name a
+# cause: it changes the flags, the stdin and the payload together)
 STUB_HANG_WHEN_TTY=1 STUB_HANG_SECONDS=60 DIAG_CANON_BOUND=3 run_ladder
 unset STUB_HANG_WHEN_TTY STUB_HANG_SECONDS
-contains "UAT-8d: the TTY-implicated diagnosis is named" \
-  "DIAGNOSIS: the D3-notty factor is implicated" "$REPORT"
+contains "UAT-8d: the TTY-implicated diagnosis is named by the strict matrix" \
+  "DIAGNOSIS: the D3 docker -t flag is implicated" "$REPORT"
+not_contains "UAT-8d RED: the multi-variable notty probe never names the cause" \
+  "the D3-notty factor is implicated" "$REPORT"
 
 # T13: a D3 hang caused ONLY by the ssh-agent — the no-agent probe passes
 mkdir -p "$(dirname "$OPENCODE_AGENT_SSH_KEY")"
@@ -1119,6 +1177,244 @@ diag_driver_cleanup "$WORK/ws-absent-root" "$ws3" \
 [ -n "$(cat "$foreign/precious.txt" 2>/dev/null)" ] \
   && ok "UAT-8f: the foreign workspace still exists after all runs" \
   || bad "UAT-8f: the foreign workspace was removed by the diagnostic"
+
+# --- UAT-8k. the strict D3 factor matrix and the hang-stage evidence --------
+# The legacy F-D3-notty probe changed the docker flags, the stdin and the
+# payload TOGETHER, so its pass could never prove a single cause. The matrix
+# probes share ONE composition owner and ONE payload; only the explicit
+# parameters (docker flags, pty wrapper, stdin policy) vary, and the
+# diagnosis names a factor only through a controlled single-variable
+# comparison. (Kill-after is shortened for these runs: the hang outcomes
+# below are rc 124 or 137 alike, only faster.)
+
+mrec() { grep "dhl-$1-" "$DOCKER_REC" | head -1; }
+norm_rec() { # strip the deliberately-varied fields; the rest must be equal
+  mrec "$1" \
+    | sed -e "s/--name dhl-$1-$DIAG_RUNID//" \
+          -e "s/--label lab.diagnostic.step=$1//" \
+          -e 's|--cidfile [^ ]*||' \
+          -e 's/ -it//' -e 's/ -i//' -e 's/ -t//' \
+          -e 's/  */ /g'
+}
+
+# Run A: the TTY-allocating probes hang (-t and -it), everything else passes
+STUB_HANG_WHEN_TTY=1 STUB_HANG_SECONDS=60 run_ladder
+unset STUB_HANG_WHEN_TTY STUB_HANG_SECONDS
+for probe in F-D3-flag-none F-D3-flag-i F-D3-flag-t F-D3-flag-it \
+             F-D3-pty-direct F-D3-stdin-pty F-D3-stdin-null; do
+  contains "UAT-8k: the $probe matrix probe ran for the hanging D3" \
+    "$probe " "$REPORT"
+done
+for probe in F-D3-flag-none F-D3-flag-i F-D3-flag-t F-D3-flag-it; do
+  rec="$(mrec "$probe")"
+  case "$rec" in
+    *"--cap-drop ALL"*) ok "UAT-8k: $probe carries the canonical security posture" ;;
+    *) bad "UAT-8k: $probe lost the canonical security posture" ;;
+  esac
+  case "$rec" in
+    *"lab.diagnostic.runid=diagrun-"*) ok "UAT-8k: $probe carries the run-identity label" ;;
+    *) bad "UAT-8k: $probe lost the run-identity label" ;;
+  esac
+  case "$rec" in
+    *"-e DOCKER_HELPER_SESSION_TOKEN"*) ok "UAT-8k: $probe carries the canonical Session bearer" ;;
+    *) bad "UAT-8k: $probe lost the Session bearer env" ;;
+  esac
+  case "$rec" in
+    *"--init -v"*) ok "UAT-8k: $probe carries the verified init copy" ;;
+    *) bad "UAT-8k: $probe lost the verified init copy" ;;
+  esac
+  case "$rec" in
+    *"$WS:/workspace:Z"*) ok "UAT-8k: $probe carries the canonical workspace mount" ;;
+    *) bad "UAT-8k: $probe lost the canonical workspace mount" ;;
+  esac
+  case "$rec" in
+    *"-c echo D3_OK"*) ok "UAT-8k: $probe uses the identical safe payload" ;;
+    *) bad "UAT-8k: $probe does not use the identical safe payload: $rec" ;;
+  esac
+  case "$rec" in
+    *"test -t 0"*) bad "UAT-8k RED: $probe varied the payload" ;;
+    *) ok "UAT-8k: $probe does not vary the payload" ;;
+  esac
+done
+r_none="$(norm_rec F-D3-flag-none)"
+for probe in F-D3-flag-i F-D3-flag-t F-D3-flag-it; do
+  check "UAT-8k: $probe differs from the no-flag probe ONLY in its flag" \
+    "$r_none" "$(norm_rec "$probe")"
+done
+for probe in F-D3-flag-none F-D3-flag-i F-D3-flag-t F-D3-flag-it; do
+  grep -q "dhl-$probe-" "$SCRIPT_REC" \
+    && ok "UAT-8k: $probe runs under the canonical script(1) pty wrapper" \
+    || bad "UAT-8k: $probe did not run under the pty wrapper"
+done
+for probe in F-D3-pty-direct F-D3-stdin-pty F-D3-stdin-null; do
+  grep -q "dhl-$probe-" "$SCRIPT_REC" \
+    && bad "UAT-8k RED: $probe was confounded with the pty wrapper factor" \
+    || ok "UAT-8k: $probe runs WITHOUT the pty wrapper (isolated factor)"
+  grep -q "dhl-$probe-" "$DOCKER_REC" \
+    && ok "UAT-8k: $probe ran docker directly" \
+    || bad "UAT-8k: $probe never ran docker"
+done
+case "$(mrec F-D3-flag-none)" in
+  *" stdin=pty"*) ok "UAT-8k: the flag probes share one pty stdin policy" ;;
+  *) bad "UAT-8k: the flag probes did not run with a pty stdin" ;;
+esac
+case "$(mrec F-D3-stdin-null)" in
+  *" stdin=notty"*) ok "UAT-8k: the closed-stdin probe used /dev/null stdin" ;;
+  *) bad "UAT-8k RED: the closed-stdin probe did not close its stdin" ;;
+esac
+contains "UAT-8k: the -t diagnosis is named by the controlled comparison" \
+  "DIAGNOSIS: the D3 docker -t flag is implicated" "$REPORT"
+contains "UAT-8k: the hanging -t probe is a timeout, never a false pass" \
+  "F-D3-flag-t FAIL rc=1" "$REPORT"
+contains "UAT-8k: the -i probe passes under the identical probe" \
+  "F-D3-flag-i PASS rc=0" "$REPORT"
+contains "UAT-8k: the no-flag probe passes under the identical probe" \
+  "F-D3-flag-none PASS rc=0" "$REPORT"
+not_contains "UAT-8k RED: the incomparable notty probe never names the cause" \
+  "the D3-notty factor is implicated" "$REPORT"
+grep -qE '^D3 FAIL rc=1(24|37) elapsed=.* detail=timeout hang=running' <<<"$REPORT" \
+  && ok "UAT-8k: the canonical D3 timeout carries the observed container state" \
+  || bad "UAT-8k: the D3 timeout line lost the hang-stage observation"
+grep -qE '^F-D3-flag-t FAIL rc=1(24|37) elapsed=.* detail=timeout hang=running' <<<"$REPORT" \
+  && ok "UAT-8k: the matrix timeout carries the observed container state" \
+  || bad "UAT-8k: the matrix timeout line lost the hang-stage observation"
+if grep -E '^F-D3-flag-i PASS' <<<"$REPORT" | grep -q 'hang='; then
+  bad "UAT-8k: a passing probe carried hang-state text"
+else
+  ok "UAT-8k: no hang-state text on a passing probe"
+fi
+if grep -q "dhs_TEST $WS" "$DH_SESSIONS" 2>/dev/null; then
+  bad "UAT-8k RED: a matrix probe leaked its Session"
+else
+  ok "UAT-8k: every matrix probe recovered its own Session"
+fi
+
+# Run B: only the -it combination hangs (the old single-pass rule would
+# have misattributed this to the multi-variable notty probe)
+STUB_HANG_DFLAG='-it' STUB_HANG_SECONDS=60 run_ladder
+unset STUB_HANG_DFLAG STUB_HANG_SECONDS
+contains "UAT-8k: the -it combination is named when only the combination hangs" \
+  "DIAGNOSIS: the D3 docker -it flag combination is implicated" "$REPORT"
+not_contains "UAT-8k RED: the old single-pass rule no longer misattributes notty" \
+  "the D3-notty factor is implicated" "$REPORT"
+contains "UAT-8k: the -i probe passes when only the combination hangs" \
+  "F-D3-flag-i PASS rc=0" "$REPORT"
+contains "UAT-8k: the -t probe passes when only the combination hangs" \
+  "F-D3-flag-t PASS rc=0" "$REPORT"
+
+# Run C: contradictory/inconclusive evidence — the diagnosis stays
+# UNRESOLVED and the notty pass is stated as preliminary OBSERVED evidence
+STUB_HANG_WHEN_TTY=1 STUB_HANG_DFLAG='-i' STUB_HANG_SECONDS=60 run_ladder
+unset STUB_HANG_WHEN_TTY STUB_HANG_DFLAG STUB_HANG_SECONDS
+contains "UAT-8k: the preliminary notty evidence is stated as OBSERVED" \
+  "DIAG OBSERVED: F-D3-notty passed (preliminary evidence only" "$REPORT"
+contains "UAT-8k: inconclusive matrix evidence stays UNRESOLVED" \
+  "DIAGNOSIS UNRESOLVED: the failing step is D3" "$REPORT"
+not_contains "UAT-8k: nothing is implicated without a controlled comparison" \
+  "is implicated" "$REPORT"
+
+# Run D: only the -i flag hangs -> the -i diagnosis
+STUB_HANG_DFLAG='-i -it' STUB_HANG_SECONDS=60 run_ladder
+unset STUB_HANG_DFLAG STUB_HANG_SECONDS
+contains "UAT-8k: the -i diagnosis is named by the controlled comparison" \
+  "DIAGNOSIS: the D3 docker -i flag is implicated" "$REPORT"
+contains "UAT-8k: the -t probe passes when -i hangs" \
+  "F-D3-flag-t PASS rc=0" "$REPORT"
+
+# Run E: everything hangs -> nothing is implicated, no OBSERVED upgrade
+STUB_HANG_PAYLOAD="D3_OK" STUB_HANG_SECONDS=60 run_ladder
+unset STUB_HANG_PAYLOAD STUB_HANG_SECONDS
+contains "UAT-8k: an all-hung matrix stays UNRESOLVED" \
+  "DIAGNOSIS UNRESOLVED: the failing step is D3" "$REPORT"
+not_contains "UAT-8k: a hopeless matrix implicates nothing" \
+  "is implicated" "$REPORT"
+
+# Run F: the CLI hung before creating the container -> no-cidfile, and no
+# removal is authorized by an unproven identity
+STUB_HANG_BEFORE_CREATE=1 STUB_HANG_SECONDS=60 run_ladder
+unset STUB_HANG_BEFORE_CREATE STUB_HANG_SECONDS
+grep -qE '^D0 FAIL rc=1(24|37) elapsed=.* detail=timeout hang=no-cidfile' <<<"$REPORT" \
+  && ok "UAT-8k: a CLI hang before container creation is localized (no-cidfile)" \
+  || bad "UAT-8k: the no-cidfile hang stage was not reported: $(grep '^D0 ' <<<"$REPORT")"
+check "UAT-8k: nothing needed recovery on a no-cidfile hang" \
+  "clean" "$(cat "$WORK/evid/D0.reap")"
+if grep -qE '^rm ' "$DOCKER_REC"; then
+  bad "UAT-8k RED: a removal happened without any container identity"
+else
+  ok "UAT-8k: a no-cidfile hang authorizes no removal"
+fi
+
+# the bounded hang-state observation, exercised directly on the stubbed
+# daemon boundary: every class is produced by a real observation, never a
+# guess, and the state answer is accepted only from the fixed allowlist
+hs_evid="$WORK/hs-evid"; mkdir -p "$hs_evid"
+hs_cid="feed0000$(printf 'f%.0s' {1..56})"
+printf '%s\n' "$hs_cid" >> "$CIDS"
+( export DIAG_DIR="$hs_evid" DIAG_RUNID=diagrun-hs DIAG_IMAGE="$_OC_BASE"
+  printf '%s' "$hs_cid" > "$hs_evid/hs.cid"
+  diag_capture_hang_state HS "$hs_evid/hs.cid" )
+check "UAT-8k: a live owned container is observed as running" \
+  "running" "$(cat "$hs_evid/HS.hangstate")"
+( export DIAG_DIR="$hs_evid" DIAG_RUNID=diagrun-hs DIAG_IMAGE="$_OC_BASE" \
+    STUB_INSPECT_STATUS=exited
+  diag_capture_hang_state HE "$hs_evid/hs.cid" )
+check "UAT-8k: an exited container is observed as exited" \
+  "exited" "$(cat "$hs_evid/HE.hangstate")"
+( export DIAG_DIR="$hs_evid" DIAG_RUNID=diagrun-hs DIAG_IMAGE="$_OC_BASE" \
+    STUB_INSPECT_STATUS=definitely-not-a-state
+  diag_capture_hang_state HW "$hs_evid/hs.cid" )
+check "UAT-8k: a non-allowlisted state is unknown, never echoed" \
+  "unknown" "$(cat "$hs_evid/HW.hangstate")"
+( export DIAG_DIR="$hs_evid" DIAG_RUNID=diagrun-hs DIAG_IMAGE="$_OC_BASE" \
+    STUB_HANG_INSPECT=1 STUB_HANG_SECONDS=60 DIAG_RECOVERY_BOUND=2 DIAG_KILL_AFTER=1
+  printf '%s' "$hs_cid" > "$hs_evid/hu.cid"
+  diag_capture_hang_state HU "$hs_evid/hu.cid" )
+check "UAT-8k: an unattributable container is recorded unattributed" \
+  "unattributed" "$(cat "$hs_evid/HU.hangstate")"
+( export DIAG_DIR="$hs_evid" DIAG_RUNID=diagrun-hs DIAG_IMAGE="$_OC_BASE"
+  printf '%s' "cafe0000$(printf 'a%.0s' {1..56})" > "$hs_evid/ab.cid"
+  diag_capture_hang_state AB "$hs_evid/ab.cid" )
+check "UAT-8k: a proven-absent container is recorded absent" \
+  "absent" "$(cat "$hs_evid/AB.hangstate")"
+( export DIAG_DIR="$hs_evid" DIAG_RUNID=diagrun-hs DIAG_IMAGE="$_OC_BASE" \
+    STUB_HANG_PS=1 STUB_HANG_SECONDS=60 DIAG_RECOVERY_BOUND=2 DIAG_KILL_AFTER=1
+  printf '%s' "$hs_cid" > "$hs_evid/uk.cid"
+  diag_capture_hang_state UK "$hs_evid/uk.cid" )
+check "UAT-8k: a failed existence observation stays unknown" \
+  "unknown" "$(cat "$hs_evid/UK.hangstate")"
+( export DIAG_DIR="$hs_evid" DIAG_RUNID=diagrun-hs DIAG_IMAGE="$_OC_BASE"
+  : > "$hs_evid/nc.cid"
+  diag_capture_hang_state NC "$hs_evid/nc.cid" )
+check "UAT-8k: an empty cidfile means the CLI never created a container" \
+  "no-cidfile" "$(cat "$hs_evid/NC.hangstate")"
+
+# source-level invariants for the new owners
+lib_has "UAT-8k: the lib owns the hang-stage capture" 'diag_capture_hang_state'
+lib_has "UAT-8k: the report distinguishes OBSERVED from IMPLICATED" 'DIAG OBSERVED'
+lib_has "UAT-8k: the matrix probes use one composition owner" '_diag_d3_compose_argv'
+probe_body="$(sed -n '/^_diag_d3_probe()/,/^}/p' "$LIB")"
+case "$probe_body" in
+  *"run --rm"*) bad "UAT-8k RED: the legacy probe still assembles its own docker argv" ;;
+  *) ok "UAT-8k: the legacy probe assembles nothing outside the composition owner" ;;
+esac
+case "$probe_body" in
+  *"test -t 0"*) ok "UAT-8k: the legacy probes keep their declared payloads" ;;
+  *) bad "UAT-8k: the legacy probe lost its payload selection" ;;
+esac
+matrix_body="$(sed -n '/^_diag_d3_matrix_probe()/,/^}/p' "$LIB")"
+case "$matrix_body" in
+  *"test -t 0"*) bad "UAT-8k RED: the matrix probe varies the payload" ;;
+  *) ok "UAT-8k: the matrix payload is fixed (echo D3_OK)" ;;
+esac
+case "$matrix_body" in
+  *"_diag_d3_compose_argv"*) ok "UAT-8k: the matrix probe composes through the shared owner" ;;
+  *) bad "UAT-8k: the matrix probe bypassed the composition owner" ;;
+esac
+diag_body="$(sed -n '/^diag_exec()/,/^}/p' "$LIB")"
+case "$diag_body" in
+  *"diag_capture_hang_state"*) ok "UAT-8k: diag_exec captures the hang state on a timeout" ;;
+  *) bad "UAT-8k: diag_exec does not capture the hang state" ;;
+esac
 
 # --- UAT-8g. the real runner chain (driver -> runner -> library -> launcher) -
 # The runner is executed as a REAL child bash with a PRIVATE HOME: the harness

@@ -169,6 +169,10 @@ diag_exec() { # NAME BOUND CMD...
     *) printf '%s\n' container > "$DIAG_DIR/$name.layer" ;;
   esac
   if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
+    # the hang-stage observation (UAT-8k) is recorded BEFORE any cleanup
+    # touches the container: it is the bounded evidence that separates the
+    # Docker CLI outcome (the timeout) from the observed container state
+    diag_capture_hang_state "$name" "${DIAG_CONTAINER_CID:-}"
     reap="$(diag_reap_owned_container "${DIAG_CONTAINER_NAME:-}" "${DIAG_CONTAINER_CID:-}")"
   fi
   printf '%s\n' "$reap" > "$DIAG_DIR/$name.reap"
@@ -325,6 +329,83 @@ diag_reap_owned_container() { # NAME CIDFILE -> clean|ok|failed|refused-unowned|
   esac
   diag_reap_verified_container "$cid"
   return 0
+}
+
+# _diag_hang_container_status CID — one bounded inspect of the container's
+# lifecycle state; the answer is accepted ONLY from the fixed allowlist (a
+# real State.Status value). Anything else is unknown, never a guess.
+_diag_hang_container_status() { # CID -> status
+  diag_bounded "hang-status" docker inspect --format '{{.State.Status}}' "$1" \
+    >/dev/null 2>&1 || { printf 'unknown'; return 0; }
+  local st
+  st="$(cat "$DIAG_DIR/hang-status.out" 2>/dev/null)"
+  case "$st" in
+    created|running|restarting|paused|exited|dead) printf '%s' "$st" ;;
+    *) printf 'unknown' ;;
+  esac
+  return 0
+}
+
+# diag_capture_hang_state NAME CIDFILE — the bounded hang-stage observation
+# (UAT-8k), recorded BEFORE any cleanup touches the container. It separates
+# the Docker CLI outcome (the timeout) from the observed container state:
+#   no-cidfile    docker never recorded a container ID: the CLI did not get
+#                 as far as container creation (or died before writing it)
+#   absent        docker itself proved that no container with this full ID
+#                 exists (the decisive full-CID search)
+#   unattributed  a container exists but its identity could not be proven to
+#                 belong to THIS run; it is never inspected further here and
+#                 never removed on this observation's authority
+#   <status>      the container's State.Status from the fixed allowlist
+#                 (created|running|restarting|paused|exited|dead):
+#                 created = created but not started; running = started while
+#                 the CLI hung (attach/stdin/TTY); exited = finished but the
+#                 CLI did not return
+#   unknown       the observation itself could not be made
+diag_capture_hang_state() { # NAME CIDFILE
+  local name="$1" cidfile="$2" cid out=unknown
+  if [ ! -s "$cidfile" ]; then
+    out=no-cidfile
+  else
+    cid="$(tr -d '[:space:]' < "$cidfile" 2>/dev/null)"
+    if [[ "$cid" =~ ^[0-9a-f]{64}$ ]]; then
+      if diag_cid_absent "$cid"; then
+        out=absent
+      elif [ -s "$DIAG_DIR/cid-absence.out" ]; then
+        # the full-CID search succeeded and matched: the container exists;
+        # attribute it before trusting anything else about it
+        local identity expected iid lrid img rest
+        identity="$(diag_container_identity "$cid")"
+        expected="$(diag_expected_image_id "${DIAG_IMAGE:-}")"
+        if [ -n "$identity" ] && [ -n "$expected" ]; then
+          iid="${identity%%|*}"
+          rest="${identity#*|}"
+          lrid="${rest%%|*}"
+          img="${rest#*|}"
+          if [ "$iid|$lrid|$img" = "$cid|$DIAG_RUNID|$expected" ]; then
+            out="$(_diag_hang_container_status "$cid")"
+          else
+            out=unattributed
+          fi
+        else
+          out=unattributed
+        fi
+      fi
+    fi
+  fi
+  printf '%s\n' "$out" > "$DIAG_DIR/$name.hangstate"
+  return 0
+}
+
+# _diag_hang_suffix ID — the hang-stage class appended to a timeout FAIL
+# line. Only a RECORDED observation is appended; nothing is guessed.
+_diag_hang_suffix() { # ID -> " hang=<class>" | empty
+  local hs=""
+  if [ -f "$DIAG_DIR/$1.hangstate" ]; then
+    hs="$(cat "$DIAG_DIR/$1.hangstate" 2>/dev/null || true)"
+  fi
+  [ -n "$hs" ] || return 0
+  printf ' hang=%s' "$hs"
 }
 
 # diag_register_step_sessions WORKSPACE FILE — error-checked registration of
@@ -670,6 +751,7 @@ _diag_canonical_step() { # ID BOUND PAYLOAD MODE WS -> 0 pass|1 fail
     OPENCODE_DIAGNOSTIC_RUNID="$DIAG_RUNID" \
     OPENCODE_DIAGNOSTIC_NAME="$name" \
     OPENCODE_DIAGNOSTIC_CIDFILE="$cidfile" \
+    DIAG_CONTAINER_NAME="$name" DIAG_CONTAINER_CID="$cidfile" \
     diag_exec "$id" "$bound" script -qec "bash $childfile" /dev/null || true
   local rc
   rc="$(cat "$DIAG_DIR/$id.rc" 2>/dev/null || echo 1)"
@@ -735,7 +817,10 @@ diag_report_lines() {
       if [ "$detail" = ok ]; then
         printf '%s PASS rc=%s elapsed=%s\n' "$id" "$rc_line" "$elapsed_line"
       else
-        printf '%s FAIL rc=%s elapsed=%s detail=%s\n' "$id" "$rc_line" "$elapsed_line" "$detail"
+        local hang=""
+        [ "$detail" = timeout ] && hang="$(_diag_hang_suffix "$id")"
+        printf '%s FAIL rc=%s elapsed=%s detail=%s%s\n' \
+          "$id" "$rc_line" "$elapsed_line" "$detail" "$hang"
       fi
     else
       printf '%s NOT_RUN\n' "$id"
@@ -753,10 +838,12 @@ _diag_report_factor() { # ID
       "$(cat "$DIAG_DIR/$id.rc" 2>/dev/null || echo invalid)" \
       "$(cat "$DIAG_DIR/$id.elapsed" 2>/dev/null || echo unknown)"
   else
-    printf '%s FAIL rc=%s elapsed=%s detail=%s\n' "$id" \
+    local hang=""
+    [ "$detail" = timeout ] && hang="$(_diag_hang_suffix "$id")"
+    printf '%s FAIL rc=%s elapsed=%s detail=%s%s\n' "$id" \
       "$(cat "$DIAG_DIR/$id.rc" 2>/dev/null || echo invalid)" \
       "$(cat "$DIAG_DIR/$id.elapsed" 2>/dev/null || echo unknown)" \
-      "$detail"
+      "$detail" "$hang"
   fi
 }
 
@@ -806,6 +893,7 @@ diag_run_ladder() { # IMAGE WS RUNID
   local cleanup_fail=""
   local DC_OK DC_DETAIL init_copy="" init_state=""
   DIAG_D3_INIT_COPY=""
+  DIAG_D3_MATRIX_RAN=0
   local -a argv=()
 
   # --- D0: the minimal runtime + SELinux posture ---------------------------
@@ -949,6 +1037,10 @@ diag_run_ladder() { # IMAGE WS RUNID
     _diag_d3_probe notty    "$ws" 'echo D3_OK' tty
     _diag_d3_probe nosession "$ws" 'echo D3_OK' session
     _diag_d3_probe noagent  "$ws" 'echo D3_OK' agent
+    # the strict UAT-8k matrix: single-variable probes under IDENTICAL
+    # composition and payload, isolating the docker flags, the nested pty
+    # wrapper and the stdin policy
+    _diag_d3_matrix "$ws"
   fi
 
   # --- the failure diagnostics for the first failing step -------------------
@@ -965,7 +1057,9 @@ diag_run_ladder() { # IMAGE WS RUNID
   for id in F-D0-tty F-D0-notty-stdin F-D0-script \
             F-D1-tty F-D1-notty-stdin F-D1-script \
             F-D2-tty F-D2-notty-stdin F-D2-script \
-            F-D3-notty F-D3-nosession F-D3-noagent; do
+            F-D3-notty F-D3-nosession F-D3-noagent \
+            F-D3-flag-none F-D3-flag-i F-D3-flag-t F-D3-flag-it \
+            F-D3-pty-direct F-D3-stdin-pty F-D3-stdin-null; do
     _diag_report_factor "$id"
   done
   # the transition evidence: the exact configuration difference at the
@@ -990,22 +1084,26 @@ diag_run_ladder() { # IMAGE WS RUNID
     else
       printf 'DIAG avc: UNAVAILABLE (the kernel audit evidence could not be collected)\n'
     fi
-    # The cause is named ONLY when exactly one factor probe succeeded where
-    # the step failed; otherwise the outcome is explicitly UNRESOLVED.
-    local passed_factors=0 passed_name=""
-    for id in "$DIAG_DIR"/F-*.detail; do
-      [ -f "$id" ] || continue
-      if [ "$(cat "$id" 2>/dev/null)" = ok ]; then
-        passed_factors=$((passed_factors + 1))
-        passed_name="$(basename "$id" .detail)"
-      fi
-    done
-    if [ "$passed_factors" -eq 1 ] && [ -n "$passed_name" ]; then
-      printf 'DIAGNOSIS: the %s factor is implicated (%s passed where %s failed; all other factors were excluded)\n' \
-        "${passed_name#F-}" "$passed_name" "$first_fail"
+    # The cause is named ONLY by a controlled single-variable comparison
+    # (UAT-8k); otherwise the outcome is explicitly UNRESOLVED.
+    if [ "$first_fail" = D3 ]; then
+      _diag_d3_diagnose
     else
-      printf 'DIAGNOSIS UNRESOLVED: the failing step is %s (detail %s); the factor evidence did not prove a single cause\n' \
-        "$first_fail" "$(cat "$DIAG_DIR/$first_fail.detail" 2>/dev/null || echo unknown)"
+      local passed_factors=0 passed_name=""
+      for id in "$DIAG_DIR"/F-*.detail; do
+        [ -f "$id" ] || continue
+        if [ "$(cat "$id" 2>/dev/null)" = ok ]; then
+          passed_factors=$((passed_factors + 1))
+          passed_name="$(basename "$id" .detail)"
+        fi
+      done
+      if [ "$passed_factors" -eq 1 ] && [ -n "$passed_name" ]; then
+        printf 'DIAGNOSIS: the %s factor is implicated (%s passed where %s failed; all other factors were excluded)\n' \
+          "${passed_name#F-}" "$passed_name" "$first_fail"
+      else
+        printf 'DIAGNOSIS UNRESOLVED: the failing step is %s (detail %s); the factor evidence did not prove a single cause\n' \
+          "$first_fail" "$(cat "$DIAG_DIR/$first_fail.detail" 2>/dev/null || echo unknown)"
+      fi
     fi
   fi
   # a mandatory-cleanup failure is a diagnostic failure of its own: the
@@ -1019,65 +1117,89 @@ diag_run_ladder() { # IMAGE WS RUNID
   return 1
 }
 
+# _diag_d3_compose_argv ARRAYNAME ID EXCL_SESSION EXCL_AGENT — the SINGLE
+# canonical composition owner for every D3 probe (the legacy single-factor
+# probes and the strict UAT-8k matrix): the exec-path configuration
+# reassembled from the shared owners, with the Session lifecycle and the
+# ssh-agent included unless explicitly excluded. Session creation always
+# runs through the canonical _dh_session_create owner; the ssh-agent always
+# through the canonical _oc_prepare_ssh_agent owner. Fail-closed return
+# codes:
+#   1  a composition/mount-gate refusal (nothing was created; no cleanup due)
+#   2  the ssh-agent preparation refused (the caller must run the probe
+#      cleanup: the agent is this probe's own resource)
+#   3  the Session creation refused (same)
+# The caller alone adds the docker flags, the payload and the
+# image/entrypoint, so every probe variant differs ONLY in the factor it
+# isolates — never in the shared composition or the payload.
+_diag_d3_compose_argv() { # ARRAYNAME ID EXCL_SESSION EXCL_AGENT
+  # shellcheck disable=SC2178  # a bash nameref to the caller's array
+  local -n args="$1"
+  local id="$2" excl_session="$3" excl_agent="$4"
+  args=(run --rm --name "dhl-$id-$DIAG_RUNID")
+  args+=(--label "lab.diagnostic.runid=$DIAG_RUNID")
+  args+=(--label "lab.diagnostic.step=$id")
+  _oc_security_opts args || return 1
+  [ -n "$DIAG_D3_INIT_COPY" ] && \
+    args+=(--init -v "$DIAG_D3_INIT_COPY:/sbin/docker-init:ro,z")
+  _oc_compose_mounts_env args || return 1
+  if [ "$excl_agent" != agent ]; then
+    _oc_prepare_ssh_agent args || return 2
+  fi
+  if [ "$excl_session" != session ]; then
+    _dh_session_create || return 3
+    args+=(-e DOCKER_HELPER_SESSION_TOKEN)
+  fi
+  args+=(--cidfile "$DIAG_DIR/$id.cid")
+  return 0
+}
+
+# _diag_d3_refusal_records ID CRC — the fail-closed refusal records for a D3
+# probe whose composition did not complete: the detail names the refused
+# owner, and rc 2/3 mean a probe-owned resource (the agent, the Session) was
+# already created and must be recovered by the caller's cleanup.
+_diag_d3_refusal_records() { # ID CRC
+  local id="$1" crc="$2"
+  case "$crc" in
+    1) printf 'composition-refused\n' > "$DIAG_DIR/$id.detail" ;;
+    2) printf 'agent-prepare-refused\n' > "$DIAG_DIR/$id.detail" ;;
+    3) printf 'session-create-refused\n' > "$DIAG_DIR/$id.detail" ;;
+    *) printf 'composition-refused\n' > "$DIAG_DIR/$id.detail" ;;
+  esac
+  printf 'refused\n' > "$DIAG_DIR/$id.rc"
+  printf 'unknown\n' > "$DIAG_DIR/$id.elapsed"
+}
+
 # _diag_d3_probe NAME WS PAYLOAD EXCLUDED_FACTOR — one bounded D3 factor
-# probe: the canonical exec-path configuration reassembled from the shared
-# owners with EXACTLY ONE factor removed. The Session lifecycle, when
-# present, always runs through the canonical _dh_session_create/_delete
-# owners; the ssh-agent, when present, always through the canonical
-# _oc_prepare_ssh_agent owner. Declared differences per probe:
-#   notty     — the -it flag removed (stdin closed)
-#   (notty-stdin handled by the same assembly with the pty stdin inherited)
-#   nosession — the Session lifecycle and bearer removed
-#   noagent   — the ssh-agent factor removed (the key path hidden)
+# probe: the canonical exec-path configuration reassembled through the
+# shared composition owner with EXACTLY ONE factor removed. Declared
+# differences per probe:
+#   notty     — the -it flag removed AND the stdin closed AND the payload
+#               simplified (the TTY proof would fail without a TTY): a
+#               THREE-variable difference, recorded as evidence but never
+#               eligible to name a cause by itself (UAT-8k)
+#   nosession — the Session lifecycle and bearer removed (single variable)
+#   noagent   — the ssh-agent factor removed (single variable)
 _diag_d3_probe() { # NAME WS PAYLOAD EXCLUDED_FACTOR
   local name="$1" ws="$2" payload="$3" excluded="$4"
   local id="F-D3-$name"
-  local -a argv=(run --rm --name "dhl-$id-$DIAG_RUNID")
-  argv+=(--label "lab.diagnostic.runid=$DIAG_RUNID")
-  argv+=(--label "lab.diagnostic.step=F-D3-$name")
-  # the shared owners, in the canonical order; fail-closed on any refusal
-  if ! _oc_security_opts argv; then
-    printf 'composition-refused\n' > "$DIAG_DIR/$id.detail"
-    printf 'refused\n' > "$DIAG_DIR/$id.rc"
-    printf 'unknown\n' > "$DIAG_DIR/$id.elapsed"
+  local excl_session="" excl_agent=""
+  [ "$excluded" = session ] && excl_session=session
+  [ "$excluded" = agent ] && excl_agent=agent
+  local -a argv=()
+  local crc=0
+  _diag_d3_compose_argv argv "$id" "$excl_session" "$excl_agent" || crc=$?
+  if [ "$crc" != 0 ]; then
+    _diag_d3_refusal_records "$id" "$crc"
+    [ "$crc" = 1 ] || _diag_d3_probe_cleanup "$ws" "$id"
     return 0
-  fi
-  local init_copy="$DIAG_D3_INIT_COPY"
-  [ -n "$init_copy" ] && argv+=(--init -v "$init_copy:/sbin/docker-init:ro,z")
-  if ! _oc_compose_mounts_env argv; then
-    printf 'composition-refused\n' > "$DIAG_DIR/$id.detail"
-    printf 'refused\n' > "$DIAG_DIR/$id.rc"
-    printf 'unknown\n' > "$DIAG_DIR/$id.elapsed"
-    return 0
-  fi
-  if [ "$excluded" != agent ]; then
-    if ! _oc_prepare_ssh_agent argv; then
-      printf 'agent-prepare-refused\n' > "$DIAG_DIR/$id.detail"
-      printf 'refused\n' > "$DIAG_DIR/$id.rc"
-      printf 'unknown\n' > "$DIAG_DIR/$id.elapsed"
-      _diag_d3_probe_cleanup "$ws" "$id"
-      return 0
-    fi
-  fi
-  if [ "$excluded" != session ]; then
-    if ! _dh_session_create; then
-      printf 'session-create-refused\n' > "$DIAG_DIR/$id.detail"
-      printf 'refused\n' > "$DIAG_DIR/$id.rc"
-      printf 'unknown\n' > "$DIAG_DIR/$id.elapsed"
-      _diag_d3_probe_cleanup "$ws" "$id"
-      return 0
-    fi
-    argv+=(-e DOCKER_HELPER_SESSION_TOKEN)
-  fi
-  if [ "$excluded" != tty ]; then
-    argv+=(-it)
   fi
   if [ "$excluded" = tty ]; then
     payload='echo D3_OK'
   else
     payload='test -t 0 && echo D3_OK'
+    argv+=(-it)
   fi
-  argv+=(--cidfile "$DIAG_DIR/$id.cid")
   argv+=(--entrypoint /bin/sh "$DIAG_IMAGE" -c "$payload")
   local -a run_argv=(docker "${argv[@]}")
   case "$excluded" in
@@ -1099,6 +1221,192 @@ _diag_d3_probe() { # NAME WS PAYLOAD EXCLUDED_FACTOR
   diag_classify "$id" 'D3_OK'
   _diag_d3_probe_cleanup "$ws" "$id"
   unset DOCKER_HELPER_SESSION_ID DOCKER_HELPER_SESSION_TOKEN
+  return 0
+}
+
+# _diag_d3_matrix_probe ID WS FLAGS WRAPPER STDIN — one STRICT single-variable
+# matrix probe (UAT-8k). Every probe shares IDENTICAL composition (the same
+# canonical owners: security options, init, mounts/env, ssh-agent, Session
+# lifecycle and bearer) and the IDENTICAL safe payload `echo D3_OK`; the ONLY
+# varied dimensions are the explicit parameters:
+#   FLAGS   none | -i | -t | -it   (the docker TTY/stdin flags)
+#   WRAPPER script  (a real script(1) pty, exactly like the canonical
+#                   launcher) | direct (docker called without a pty wrapper)
+#   STDIN   inherit (the probe inherits the caller's stdin) | null (stdin
+#           is /dev/null)
+# A probe whose composition/agent/session creation refuses records the
+# refusal and never runs docker; any probe-owned resource is recovered
+# through the shared probe cleanup owner.
+_diag_d3_matrix_probe() { # ID WS FLAGS WRAPPER STDIN
+  local id="$1" ws="$2" flags="$3" wrapper="$4" stdin_mode="$5"
+  local -a argv=()
+  local crc=0
+  _diag_d3_compose_argv argv "$id" "" "" || crc=$?
+  if [ "$crc" != 0 ]; then
+    _diag_d3_refusal_records "$id" "$crc"
+    [ "$crc" = 1 ] || _diag_d3_probe_cleanup "$ws" "$id"
+    return 0
+  fi
+  case "$flags" in
+    none) : ;;
+    -i|-t|-it) argv+=("$flags") ;;
+    *)
+      # an unknown flag spec is a programming error, never a probe result
+      printf 'bad-flag-spec\n' > "$DIAG_DIR/$id.detail"
+      printf 'refused\n' > "$DIAG_DIR/$id.rc"
+      printf 'unknown\n' > "$DIAG_DIR/$id.elapsed"
+      return 0
+      ;;
+  esac
+  argv+=(--entrypoint /bin/sh "$DIAG_IMAGE" -c 'echo D3_OK')
+  case "$wrapper" in
+    script)
+      if [ "$stdin_mode" = null ]; then
+        DIAG_CONTAINER_NAME="dhl-$id-$DIAG_RUNID" \
+          DIAG_CONTAINER_CID="$DIAG_DIR/$id.cid" \
+          diag_exec "$id" "$DIAG_FACTOR_BOUND" \
+          script -qec "$(printf '%q ' docker "${argv[@]}")" /dev/null </dev/null || true
+      else
+        DIAG_CONTAINER_NAME="dhl-$id-$DIAG_RUNID" \
+          DIAG_CONTAINER_CID="$DIAG_DIR/$id.cid" \
+          diag_exec "$id" "$DIAG_FACTOR_BOUND" \
+          script -qec "$(printf '%q ' docker "${argv[@]}")" /dev/null || true
+      fi
+      ;;
+    direct)
+      if [ "$stdin_mode" = null ]; then
+        DIAG_CONTAINER_NAME="dhl-$id-$DIAG_RUNID" \
+          DIAG_CONTAINER_CID="$DIAG_DIR/$id.cid" \
+          diag_exec "$id" "$DIAG_FACTOR_BOUND" docker "${argv[@]}" </dev/null || true
+      else
+        DIAG_CONTAINER_NAME="dhl-$id-$DIAG_RUNID" \
+          DIAG_CONTAINER_CID="$DIAG_DIR/$id.cid" \
+          diag_exec "$id" "$DIAG_FACTOR_BOUND" docker "${argv[@]}" || true
+      fi
+      ;;
+    *)
+      printf 'bad-wrapper-spec\n' > "$DIAG_DIR/$id.detail"
+      printf 'refused\n' > "$DIAG_DIR/$id.rc"
+      printf 'unknown\n' > "$DIAG_DIR/$id.elapsed"
+      return 0
+      ;;
+  esac
+  diag_classify "$id" 'D3_OK'
+  _diag_d3_probe_cleanup "$ws" "$id"
+  unset DOCKER_HELPER_SESSION_ID DOCKER_HELPER_SESSION_TOKEN
+  return 0
+}
+
+# _diag_d3_matrix WS — the strict UAT-8k D3 factor matrix: seven probes that
+# isolate, under IDENTICAL composition and payload, the docker TTY/stdin
+# flags (none, -i, -t, -it under the same script(1) pty), the nested pty
+# wrapper and the stdin policy. Each probe holds its own Session, created
+# and deleted only through the canonical owners.
+_diag_d3_matrix() { # WS
+  local ws="$1"
+  DIAG_D3_MATRIX_RAN=1
+  _diag_d3_matrix_probe F-D3-flag-none  "$ws" none script   inherit
+  _diag_d3_matrix_probe F-D3-flag-i     "$ws" -i   script   inherit
+  _diag_d3_matrix_probe F-D3-flag-t     "$ws" -t   script   inherit
+  _diag_d3_matrix_probe F-D3-flag-it    "$ws" -it  script   inherit
+  _diag_d3_matrix_probe F-D3-pty-direct "$ws" -it  direct   inherit
+  _diag_d3_matrix_probe F-D3-stdin-pty  "$ws" -i   direct   inherit
+  _diag_d3_matrix_probe F-D3-stdin-null "$ws" -i   direct   null
+}
+
+# _diag_mstate ID — the verdict state of one probe from its recorded detail:
+# passed (ok), hung (timeout) or other (any refusal or different failure).
+_diag_mstate() { # ID -> passed|hung|other
+  local detail
+  detail="$(cat "$DIAG_DIR/$1.detail" 2>/dev/null || echo missing)"
+  case "$detail" in
+    ok) printf 'passed' ;;
+    timeout) printf 'hung' ;;
+    *) printf 'other' ;;
+  esac
+  return 0
+}
+
+# _diag_d3_matrix_diagnosis — the controlled-comparison verdict over the
+# strict matrix. A factor is named ONLY when a single-variable comparison
+# supports it; a probe that refused or failed for another reason proves
+# nothing and is never treated as a pass:
+#   1. the -it probe hung while the direct -it probe passed -> the nested
+#      pty wrapper is implicated
+#   2. the -i probe hung with the pty stdin while the closed-stdin -i probe
+#      passed -> the pty stdin is implicated
+#   3. the -t probe hung while the -i and no-flag probes passed -> the
+#      docker -t flag is implicated
+#   4. the -i probe hung while the -t and no-flag probes passed -> the
+#      docker -i flag is implicated
+#   5. the -it probe hung while the -i, -t and no-flag probes passed -> the
+#      -it flag combination is implicated
+# An empty result means the matrix did not prove a single cause.
+_diag_d3_matrix_diagnosis() { # -> verdict text on stdout; rc 1 = unresolved
+  local none i t it pd sp sn
+  none="$(_diag_mstate F-D3-flag-none)"
+  i="$(_diag_mstate F-D3-flag-i)"
+  t="$(_diag_mstate F-D3-flag-t)"
+  it="$(_diag_mstate F-D3-flag-it)"
+  pd="$(_diag_mstate F-D3-pty-direct)"
+  sp="$(_diag_mstate F-D3-stdin-pty)"
+  sn="$(_diag_mstate F-D3-stdin-null)"
+  if [ "$it" = hung ] && [ "$pd" = passed ]; then
+    printf 'the D3 nested pty wrapper is implicated (F-D3-flag-it hung where F-D3-pty-direct passed; single-variable comparison)'
+    return 0
+  fi
+  if [ "$i" = hung ] && [ "$sp" = hung ] && [ "$sn" = passed ]; then
+    printf 'the D3 pty stdin is implicated (F-D3-stdin-pty hung where F-D3-stdin-null passed; single-variable comparison)'
+    return 0
+  fi
+  if [ "$t" = hung ] && [ "$i" = passed ] && [ "$none" = passed ]; then
+    printf 'the D3 docker -t flag is implicated (F-D3-flag-t hung where F-D3-flag-i and F-D3-flag-none passed; single-variable comparison)'
+    return 0
+  fi
+  if [ "$i" = hung ] && [ "$t" = passed ] && [ "$none" = passed ]; then
+    printf 'the D3 docker -i flag is implicated (F-D3-flag-i hung where F-D3-flag-t and F-D3-flag-none passed; single-variable comparison)'
+    return 0
+  fi
+  if [ "$it" = hung ] && [ "$i" = passed ] && [ "$t" = passed ] \
+      && [ "$none" = passed ]; then
+    printf 'the D3 docker -it flag combination is implicated (F-D3-flag-it hung where the -i, -t and no-flag probes passed; single-variable comparison)'
+    return 0
+  fi
+  return 1
+}
+
+# _diag_d3_diagnose — the D3 diagnosis output (UAT-8k). A factor is
+# IMPLICATED only by a controlled single-variable comparison; everything
+# else is UNRESOLVED. The legacy F-D3-notty probe changes the docker flags,
+# the stdin and the payload TOGETHER, so its result is preliminary evidence
+# and can never name a cause by itself; the single-variable fallback names
+# only the probes that remove exactly one canonical factor (the Session
+# lifecycle, the ssh-agent).
+_diag_d3_diagnose() {
+  local verdict="" id passed="" count=0
+  if [ "${DIAG_D3_MATRIX_RAN:-0}" = 1 ]; then
+    verdict="$(_diag_d3_matrix_diagnosis)" || true
+  fi
+  if [ -n "$verdict" ]; then
+    printf 'DIAGNOSIS: %s\n' "$verdict"
+    return 0
+  fi
+  for id in F-D3-nosession F-D3-noagent; do
+    if [ "$(cat "$DIAG_DIR/$id.detail" 2>/dev/null || echo missing)" = ok ]; then
+      passed="$id"
+      count=$((count + 1))
+    fi
+  done
+  if [ "$count" = 1 ]; then
+    printf 'DIAGNOSIS: the %s factor is implicated (%s passed where D3 failed; single-variable probes only)\n' \
+      "${passed#F-}" "$passed"
+    return 0
+  fi
+  if [ "$(cat "$DIAG_DIR/F-D3-notty.detail" 2>/dev/null || echo missing)" = ok ]; then
+    printf 'DIAG OBSERVED: F-D3-notty passed (preliminary evidence only: that probe changes the docker flags, the stdin and the payload together)\n'
+  fi
+  printf 'DIAGNOSIS UNRESOLVED: the failing step is D3 (detail %s); the factor evidence did not prove a single cause\n' \
+    "$(cat "$DIAG_DIR/D3.detail" 2>/dev/null || echo unknown)"
   return 0
 }
 
