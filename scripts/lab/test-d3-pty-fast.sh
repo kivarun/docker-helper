@@ -27,7 +27,16 @@
 #      IDENTICAL composition, leave no Session/container leak, and record
 #      their own phase markers (the direct one: before-docker-exec only);
 #   7. a cleanup failure still fails the probe and stops the matrix while
-#      the Session cleanup still runs (the speedup hides no cleanup error).
+#      the Session cleanup still runs (the speedup hides no cleanup error);
+#   8. (UAT-8o) the canonical step adds NO nested script(1) wrapper: it
+#      hands over to the regular child bash, inherits the runner's outer
+#      pty, and fails closed with tty-required when no real client TTY
+#      exists (the -it is never dropped to make the step pass);
+#   9. (UAT-8o) a proven-unusable wrapper starts no further script-wrapped
+#      probes (one bounded smoke control only) and is OBSERVED evidence
+#      that can never be named as the D3 cause; the direct -it vs no-flag
+#      pair names the -it combination hanging without any wrapper;
+#  10. (UAT-8o) the direct-only matrix still cleans every Session/container.
 #
 # Usage: scripts/lab/test-d3-pty-fast.sh   (runs in seconds)
 
@@ -254,10 +263,31 @@ base_fixtures() { # every docker probe hung with confirmed cleanup; smoke ok
 diag_case() { # -> the _diag_d3_diagnose output on stdout
   DIAG_D3_MATRIX_RAN=1 _diag_d3_diagnose
 }
+# UAT-8o: the smoke timeout is OBSERVED evidence, never a D3 cause verdict
 rm -rf "$DIAG_DIR"; mkdir -p "$DIAG_DIR"; base_fixtures
 mf F-D3-script-smoke timeout
-contains "rule A: a hung no-docker smoke names the wrapper itself" \
-  "DIAGNOSIS: the D3 nested script(1) wrapper itself hangs" "$(diag_case)"
+out="$(diag_case)"
+contains "8o: a hanging wrapper smoke is reported as OBSERVED evidence" \
+  "DIAG OBSERVED: F-D3-script-smoke timed out" "$out"
+not_contains "8o RED: the wrapper smoke can no longer be named as the D3 cause" \
+  "DIAGNOSIS: the D3 nested script(1) wrapper itself hangs" "$out"
+contains "8o: with every probe hung the wrapper-free rule C still decides" \
+  "DIAGNOSIS: docker hangs even when invoked directly" "$out"
+
+# the UAT-8n shape: smoke hung, direct no-flag passed, direct -it hung —
+# the remaining real finding is named, the wrapper is not blamed for D3
+rm -rf "$DIAG_DIR"; mkdir -p "$DIAG_DIR"; base_fixtures
+mf F-D3-script-smoke timeout
+mf F-D3-direct-none ok clean
+mf F-D3-stdin-pty ok clean
+mf F-D3-stdin-null ok clean
+out="$(diag_case)"
+contains "8o: the direct -it hang is named without any wrapper claim" \
+  "DIAGNOSIS: the D3 docker -it combination hangs even when invoked directly" "$out"
+contains "8o: the unusable wrapper stays visible as OBSERVED evidence" \
+  "DIAG OBSERVED: F-D3-script-smoke timed out" "$out"
+not_contains "8o: no wrapper verdict replaces the measured -it evidence" \
+  "DIAGNOSIS: the D3 nested script(1) wrapper" "$out"
 
 rm -rf "$DIAG_DIR"; mkdir -p "$DIAG_DIR"; base_fixtures
 mf F-D3-direct-none ok clean
@@ -355,6 +385,120 @@ done
 [ -s "$DH_STATE" ] && bad "RED: the Session leaked although its cleanup could run" \
   || ok "the Session cleanup still ran despite the failed container removal"
 check "the gate marks the run for the stop" "1" "${DIAG_D3_CLEANUP_FAILED:-0}"
+
+# --- 7. UAT-8o: the canonical step without the nested script(1) wrapper -----
+lib_canon="$(sed -n '/^_diag_canonical_step()/,/^}/p' "$LIB")"
+case "$lib_canon" in
+  *'script -qec "bash'*)
+    bad "8o RED: the canonical step still nests a script(1) wrapper" ;;
+  *) ok "8o: the canonical step adds no nested script(1) wrapper" ;;
+esac
+case "$lib_canon" in
+  *'bash "$childfile"'*)
+    ok "8o: the canonical step hands over to the regular child bash" ;;
+  *) bad "8o: the canonical step does not run the child bash directly" ;;
+esac
+case "$lib_canon" in
+  *tty-required*) ok "8o: the canonical step carries an explicit no-TTY FAIL" ;;
+  *) bad "8o: no explicit no-TTY FAIL in the canonical step" ;;
+esac
+
+# fail-closed: no real client TTY -> an explicit tty-required FAIL before
+# anything runs (this shell's stdin is /dev/null)
+export DIAG_DIR="$WORK/ev-canon-neg"; mkdir -p "$DIAG_DIR"
+rec_before="$(wc -l < "$DOCKER_REC")"; dh_before="$(wc -l < "$DH_STATE")"
+if _diag_canonical_step D3 2 'test -t 0 && echo D3_OK' exec "$WS"; then
+  bad "8o RED: the canonical step passed without a real TTY"
+else
+  ok "8o: the canonical step fails closed without a real client TTY"
+fi
+check "8o: the no-TTY refusal is explicit (tty-required)" \
+  "tty-required" "$(cat "$DIAG_DIR/D3.detail")"
+check "8o: the no-TTY refusal is a refusal record (rc=refused)" \
+  "refused" "$(cat "$DIAG_DIR/D3.rc")"
+[ "$(wc -l < "$DOCKER_REC")" = "$rec_before" ] \
+  && ok "8o: the no-TTY refusal starts no docker run" \
+  || bad "8o RED: docker ran without a real TTY"
+[ "$(wc -l < "$DH_STATE")" = "$dh_before" ] \
+  && ok "8o: the no-TTY refusal leaks no Session" \
+  || bad "8o RED: a Session leaked on the no-TTY path"
+check "8o: the no-TTY step performs no reap" "n/a" "$(cat "$DIAG_DIR/D3.reap")"
+
+# the positive case runs under a REAL script(1) pty (the harness simulates
+# the runner's outer pty): the canonical step inherits it, adds no second
+# wrapper, and the in-container `test -t 0` proves the TTY reached docker
+mkdir -p "$WORK/run"
+python3 -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); time.sleep(30)' \
+  "$WORK/run/docker-helper.sock" 2>/dev/null & sock_pid=$!
+export DIAG_DIR="$WORK/ev-canon-pos"; mkdir -p "$DIAG_DIR"
+: > "$DOCKER_STATE"; : > "$DH_STATE"; : > "$DOCKER_REC"
+export FAST_ALIASES="$ALIASES" FAST_LIB="$LIB" FAST_WS="$WS"
+cat > "$WORK/canon-driver.sh" <<'DRV'
+#!/usr/bin/env bash
+set -u
+source "$FAST_ALIASES"
+source "$FAST_LIB"
+cd "$FAST_WS" || exit 1
+DIAG_D3_INIT_COPY=""
+DIAG_D3_CLEANUP_FAILED=0
+_diag_canonical_step D3 5 'test -t 0 && echo D3_OK' exec "$FAST_WS" || true
+printf 'detail=%s rc=%s session=%s\n' \
+  "$(cat "$DIAG_DIR/D3.detail")" "$(cat "$DIAG_DIR/D3.rc")" \
+  "$(cat "$DIAG_DIR/D3.session")"
+DRV
+canon_out="$(timeout 20 script -qec "bash $WORK/canon-driver.sh" /dev/null 2>&1 | tr -d '\r')"
+kill "$sock_pid" 2>/dev/null
+canon_line="$(printf '%s\n' "$canon_out" | grep '^detail=' | head -1)"
+printf '%s\n' "$canon_line" | grep -q '^detail=ok rc=0' \
+  && ok "8o: the canonical step passes under the real single runner pty" \
+  || bad "8o: the canonical step failed under the real pty: $canon_line"
+case "$canon_line" in
+  *session=clean*|*session=reaped*)
+    ok "8o: the real-pty canonical step's cleanup is confirmed" ;;
+  *) bad "8o: the real-pty canonical step's cleanup verdict: $canon_line" ;;
+esac
+grep -q ' -it ' "$DOCKER_REC" \
+  && ok "8o: the canonical launch keeps the unchanged -it configuration" \
+  || bad "8o: the canonical launch lost -it"
+grep -q -- '--name dhl-D3-' "$DOCKER_REC" \
+  && ok "8o: the canonical launch keeps its diagnostic provenance" \
+  || bad "8o: the canonical launch lost its provenance"
+[ -s "$DOCKER_STATE" ] && bad "8o RED: a container leaked on the real-pty path" \
+  || ok "8o: the real-pty canonical step leaves no container behind"
+[ -s "$DH_STATE" ] && bad "8o RED: a Session leaked on the real-pty path" \
+  || ok "8o: the real-pty canonical step leaves no Session behind"
+
+# the wrapper gate: one bounded smoke control, then no script-wrapped probes
+rm -rf "$DIAG_DIR"; mkdir -p "$DIAG_DIR"
+if _diag_d3_wrapper_unusable; then
+  bad "8o RED: a missing smoke evidence reads the wrapper as unusable"
+else
+  ok "8o: without smoke evidence the wrapper is unproven, not unusable"
+fi
+printf 'timeout\n' > "$DIAG_DIR/F-D3-script-smoke.detail"
+if _diag_d3_wrapper_unusable; then
+  ok "8o: a timed-out smoke marks the wrapper unusable"
+else
+  bad "8o: the timed-out smoke did not mark the wrapper unusable"
+fi
+: > "$DOCKER_STATE"; : > "$DH_STATE"; : > "$DOCKER_REC"
+DIAG_D3_CLEANUP_FAILED=0
+_diag_d3_matrix "$WS"
+for probe in F-D3-direct-none F-D3-pty-direct F-D3-stdin-pty F-D3-stdin-null; do
+  check "8o: the wrapper-free direct probe $probe still ran" \
+    "ok" "$(cat "$DIAG_DIR/$probe.detail" 2>/dev/null || echo missing)"
+done
+for probe in F-D3-flag-none F-D3-flag-i F-D3-flag-t F-D3-flag-it; do
+  if [ -f "$DIAG_DIR/$probe.detail" ]; then
+    bad "8o RED: a script-wrapped probe ran although the wrapper was proven unusable ($probe)"
+  else
+    ok "8o: no script-wrapped $probe ran with a proven-unusable wrapper"
+  fi
+done
+[ -s "$DH_STATE" ] && bad "8o RED: a Session leaked in the direct-only matrix" \
+  || ok "8o: the direct-only matrix leaks no Session"
+[ -s "$DOCKER_STATE" ] && bad "8o RED: a container leaked in the direct-only matrix" \
+  || ok "8o: the direct-only matrix leaks no container"
 
 # --- UAT-8n: streaming progress is safe, deterministic and immediate -------
 export DIAG_DIR="$WORK/ev-progress"; mkdir -p "$DIAG_DIR"

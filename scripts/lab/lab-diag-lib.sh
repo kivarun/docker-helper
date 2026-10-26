@@ -755,12 +755,16 @@ diag_cleanup_ok_reap() {
 # path (oc-probe for exec, oc for the real entrypoint) under diag_exec, then
 # recover exactly this run's leaked resources by diagnostic provenance.
 #
-# PTY contract (UAT-8e): the canonical launcher uses `docker run -it`, so
-# the child MUST hold a real terminal — every canonical and `-it` probe step
-# runs under a real script(1) pty, and the probe payload itself proves the
-# in-container TTY with `test -t 0`. The no-TTY probe deliberately uses
-# stdin /dev/null without -it. The canonical launcher configuration is never
-# altered to satisfy a test.
+# PTY contract (UAT-8e, revised UAT-8o): the canonical launcher uses
+# `docker run -it`, so the child MUST hold a real terminal. The runner
+# already executes the diagnostic inside its own script(1) pty, and the
+# canonical step inherits that pty — the step adds NO second nested
+# script(1) wrapper (the nested wrapper proved unusable in UAT-8n and is
+# kept only as the single bounded smoke probe). Without a real client TTY
+# the step is an explicit FAIL (tty-required): the -it is never dropped to
+# make the step pass, and the probe payload itself still proves the
+# in-container TTY with `test -t 0`. The canonical launcher configuration is
+# never altered to satisfy a test.
 #
 # The diagnostic provenance (name + run-identity label + cidfile) is
 # requested through the launcher's explicitly-enabled diagnostic knobs; the
@@ -771,9 +775,21 @@ _diag_canonical_step() { # ID BOUND PAYLOAD MODE WS -> 0 pass|1 fail
   local name="dhl-$id-$DIAG_RUNID"
   local cidfile="$DIAG_DIR/$id.cid"
   rm -f "$cidfile" 2>/dev/null
-  # the child runs through script(1) whose -c command is interpreted by
-  # sh; the aliases are bash, so the child is an explicit bash script file
-  # (private, inside the evidence directory) — no fragile nested quoting.
+  # UAT-8o: the canonical launcher runs `docker run -it`; without a real
+  # client TTY (the runner's outer pty in production) the step fails closed
+  # BEFORE anything runs — an explicit FAIL, never a -it-less retry
+  if ! [ -t 0 ]; then
+    printf 'refused\n' > "$DIAG_DIR/$id.rc"
+    printf 'unknown\n' > "$DIAG_DIR/$id.elapsed"
+    printf 'tty-required\n' > "$DIAG_DIR/$id.detail"
+    printf 'n/a\n' > "$DIAG_DIR/$id.reap"
+    printf 'n/a\n' > "$DIAG_DIR/$id.session"
+    DC_OK=0; DC_DETAIL=tty-required
+    return 1
+  fi
+  # the child is an explicit bash script file (private, inside the evidence
+  # directory) handed to the regular bash — no nested script(1) wrapper, no
+  # fragile nested quoting
   local childfile="$DIAG_DIR/$id.child"
   if [ "$mode" = exec ]; then
     printf '%s\n' 'source "$DC_ALIASES"' 'oc-probe "$DC_PAYLOAD"' > "$childfile"
@@ -786,7 +802,7 @@ _diag_canonical_step() { # ID BOUND PAYLOAD MODE WS -> 0 pass|1 fail
     OPENCODE_DIAGNOSTIC_NAME="$name" \
     OPENCODE_DIAGNOSTIC_CIDFILE="$cidfile" \
     DIAG_CONTAINER_NAME="$name" DIAG_CONTAINER_CID="$cidfile" \
-    diag_exec "$id" "$bound" script -qec "bash $childfile" /dev/null || true
+    diag_exec "$id" "$bound" bash "$childfile" || true
   local rc
   rc="$(cat "$DIAG_DIR/$id.rc" 2>/dev/null || echo 1)"
   local verdict
@@ -1070,11 +1086,18 @@ diag_run_ladder() { # IMAGE WS RUNID
     # parallel launcher). Session creation/deletion always goes through the
     # canonical _dh_session_create/_dh_session_delete owners.
     # UAT-8m: the no-docker wrapper smoke runs first — it isolates the
-    # nested script(1) wrapper itself from everything Docker does under it
+    # nested script(1) wrapper itself from everything Docker does under it.
+    # UAT-8o: when the smoke proves the wrapper unusable, the remaining
+    # script(1)-wrapped probes are NOT started (each would hang for the
+    # same proven reason); the direct probes and the legacy factors keep
+    # their evidence (the legacy nosession/noagent probes run under the
+    # wrapper too and are skipped with it)
     _diag_d3_script_smoke
     _diag_d3_probe notty    "$ws" 'echo D3_OK' tty
-    _diag_d3_probe nosession "$ws" 'echo D3_OK' session
-    _diag_d3_probe noagent  "$ws" 'echo D3_OK' agent
+    if ! _diag_d3_wrapper_unusable; then
+      _diag_d3_probe nosession "$ws" 'echo D3_OK' session
+      _diag_d3_probe noagent  "$ws" 'echo D3_OK' agent
+    fi
     # the strict UAT-8k matrix: single-variable probes under IDENTICAL
     # composition and payload, isolating the docker flags, the nested pty
     # wrapper and the stdin policy (UAT-8m adds the direct no-flag probe)
@@ -1239,6 +1262,16 @@ _diag_d3_script_smoke() {
     /dev/null || true
   diag_classify "$id" 'SCRIPT_SMOKE_OK'
   return 0
+}
+
+# _diag_d3_wrapper_unusable — 0 = the nested script(1) wrapper is usable or
+# unproven, 1 = the no-docker smoke probe TIMED OUT. UAT-8o: the wrapper is
+# kept as the single bounded control probe only; when it is proven unusable,
+# no further script(1)-wrapped probe is started (each would hang for the
+# same proven reason), and the diagnosis continues on the wrapper-free
+# direct evidence.
+_diag_d3_wrapper_unusable() {
+  [ "$(cat "$DIAG_DIR/F-D3-script-smoke.detail" 2>/dev/null || echo missing)" = timeout ]
 }
 
 # _diag_d3_cleanup_gate ID — the UAT-8l evidence gate for a D3 probe: its
@@ -1426,6 +1459,15 @@ _diag_d3_matrix() { # WS
   local ws="$1"
   DIAG_D3_MATRIX_RAN=1
   [ "${DIAG_D3_CLEANUP_FAILED:-0}" = 0 ] || return 0
+  if _diag_d3_wrapper_unusable; then
+    # UAT-8o: the smoke proved the nested wrapper unusable — only the
+    # wrapper-free direct probes still carry evidence
+    _diag_d3_matrix_probe F-D3-direct-none "$ws" none direct  inherit || return 0
+    _diag_d3_matrix_probe F-D3-pty-direct  "$ws" -it  direct  inherit || return 0
+    _diag_d3_matrix_probe F-D3-stdin-pty   "$ws" -i   direct  inherit || return 0
+    _diag_d3_matrix_probe F-D3-stdin-null  "$ws" -i   direct  null    || return 0
+    return 0
+  fi
   _diag_d3_matrix_probe F-D3-flag-none   "$ws" none script   inherit || return 0
   _diag_d3_matrix_probe F-D3-direct-none "$ws" none direct   inherit || return 0
   _diag_d3_matrix_probe F-D3-flag-i      "$ws" -i   script   inherit || return 0
@@ -1490,19 +1532,25 @@ _diag_d3_legacy_pass() { # -> "<count> <name>"
 #      docker -i flag is implicated
 #   5. the -it probe hung while the -i, -t and no-flag probes passed -> the
 #      -it flag combination is implicated
-# UAT-8m adds the wrapper-isolation evidence and three further verdicts.
-# ALL of them are gated on the legacy single-variable probes NOT having
-# passed (a more specific factor attribution always wins), and every
-# verdict requires consistency: contradictory observations name nothing.
-#   A. the no-docker smoke probe timed out AND no script-wrapped probe
-#      passed -> the nested script(1) wrapper itself hangs; it fires FIRST
-#      because a broken wrapper voids the script-wrapped docker evidence
+# UAT-8m adds the wrapper-isolation evidence; UAT-8o revises it. ALL
+# verdicts are gated on the legacy single-variable probes NOT having passed
+# (a more specific factor attribution always wins), and every verdict
+# requires consistency: contradictory observations name nothing.
+#   A. (UAT-8o, revised) the no-docker smoke probe timing out is NO LONGER a
+#      diagnosis verdict: the canonical steps no longer run under the
+#      nested wrapper, so a hanging wrapper cannot explain the D3 failure
+#      by itself. It only VOIDS the script-wrapped probe evidence (reported
+#      separately as OBSERVED); the diagnosis continues on the wrapper-free
+#      direct and legacy evidence
 #   B. the smoke passed, the script-wrapped no-flag probe hung while the
 #      IDENTICAL direct no-flag probe passed and no other script-wrapped
 #      probe passed -> docker hangs under the wrapper
 #   C. the direct no-flag probe hung (and the script-wrapped no-flag probe
 #      did not pass) -> docker hangs even without the wrapper; the wrapper
 #      is excluded as the cause
+#   D. (UAT-8o) the direct -it probe hung while the direct no-flag probe
+#      passed -> the docker -it combination hangs even without any pty
+#      wrapper (the UAT-8n observation; never pre-declared solved)
 # Contradictory observations name nothing: an empty result means the matrix
 # did not prove a single cause.
 _diag_d3_matrix_diagnosis() { # -> verdict text on stdout; rc 1 = unresolved
@@ -1525,11 +1573,11 @@ _diag_d3_matrix_diagnosis() { # -> verdict text on stdout; rc 1 = unresolved
     timeout) smoke=hung ;;
     *) smoke=other ;;
   esac
-  if [ "$smoke" = hung ] && [ "$lcount" = 0 ] \
-      && [ "$none" != passed ] && [ "$i" != passed ] \
-      && [ "$t" != passed ] && [ "$it" != passed ]; then
-    printf 'the D3 nested script(1) wrapper itself hangs (the no-docker smoke probe timed out; the script-wrapped docker evidence is void)'
-    return 0
+  # UAT-8o rule A: a proven-unusable wrapper voids the script-wrapped probe
+  # evidence (their timeouts say nothing about docker); it names no cause —
+  # the canonical steps do not run under it anymore
+  if [ "$smoke" = hung ]; then
+    none="other"; i="other"; t="other"; it="other"
   fi
   if [ "$it" = hung ] && [ "$pd" = passed ]; then
     printf 'the D3 nested pty wrapper is implicated (F-D3-flag-it hung where F-D3-pty-direct passed; single-variable comparison)'
@@ -1571,6 +1619,13 @@ _diag_d3_matrix_diagnosis() { # -> verdict text on stdout; rc 1 = unresolved
     printf 'docker hangs even when invoked directly without the nested script wrapper (F-D3-direct-none hung; the wrapper is excluded as the cause)'
     return 0
   fi
+  # UAT-8o rule D: the DIRECT -it probe hung where the DIRECT no-flag probe
+  # passed — the docker -it combination hangs without any pty wrapper; a
+  # passing legacy factor supersedes it
+  if [ "$lcount" = 0 ] && [ "$pd" = hung ] && [ "$dn" = passed ]; then
+    printf 'the D3 docker -it combination hangs even when invoked directly without any pty wrapper (F-D3-pty-direct hung where F-D3-direct-none passed; single-variable comparison)'
+    return 0
+  fi
   return 1
 }
 
@@ -1580,11 +1635,16 @@ _diag_d3_matrix_diagnosis() { # -> verdict text on stdout; rc 1 = unresolved
 # the stdin and the payload TOGETHER, so its result is preliminary evidence
 # and can never name a cause by itself; the single-variable fallback names
 # only the probes that remove exactly one canonical factor (the Session
-# lifecycle, the ssh-agent).
+# lifecycle, the ssh-agent). UAT-8o: a timed-out wrapper smoke is reported
+# as OBSERVED evidence only — the canonical steps no longer run under the
+# nested wrapper, so it can never explain the D3 failure by itself.
 _diag_d3_diagnose() {
   local verdict="" legacy lname lcount
   if [ "${DIAG_D3_MATRIX_RAN:-0}" = 1 ]; then
     verdict="$(_diag_d3_matrix_diagnosis)" || true
+  fi
+  if [ "$(cat "$DIAG_DIR/F-D3-script-smoke.detail" 2>/dev/null || echo missing)" = timeout ]; then
+    printf 'DIAG OBSERVED: F-D3-script-smoke timed out (the nested script(1) wrapper is unusable; the script-wrapped probe evidence is void and does not explain the canonical D3 failure)\n'
   fi
   if [ -n "$verdict" ]; then
     printf 'DIAGNOSIS: %s\n' "$verdict"
