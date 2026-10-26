@@ -43,6 +43,9 @@
 #   $DIAG_DIR/<name>.layer    docker-cli | timeout | container | script
 #   $DIAG_DIR/<name>.reap     ok | failed | refused-unowned | n/a
 #   $DIAG_DIR/<name>.session  clean | reaped | refused-list-error | n/a
+#   $DIAG_DIR/<name>.phases   fixed UAT-8m phase markers (wrapper-entered,
+#                             before-docker-exec) written by the probe's own
+#                             inner command; private evidence only
 #
 # Secrets: the PUBLIC report is a strict allowlist of compact result lines
 # and predefined safe fields/categories (UAT-8f): raw stdout/stderr, docker
@@ -349,8 +352,13 @@ _diag_hang_container_status() { # CID -> status
 # diag_capture_hang_state NAME CIDFILE — the bounded hang-stage observation
 # (UAT-8k), recorded BEFORE any cleanup touches the container. It separates
 # the Docker CLI outcome (the timeout) from the observed container state:
-#   no-cidfile    docker never recorded a container ID: the CLI did not get
-#                 as far as container creation (or died before writing it)
+#   no-cidfile    no container ID was recorded AND this probe's phase
+#                 evidence shows the Docker CLI was never invoked: the CLI
+#                 did not get as far as container creation
+#   unknown       no container ID was recorded but this probe's phase
+#                 evidence shows the Docker CLI WAS invoked (UAT-8m): a
+#                 missing cidfile is never proof that the create event did
+#                 not happen, so the container-creation state stays unknown
 #   absent        docker itself proved that no container with this full ID
 #                 exists (the decisive full-CID search)
 #   unattributed  a container exists but its identity could not be proven to
@@ -366,6 +374,11 @@ diag_capture_hang_state() { # NAME CIDFILE
   local name="$1" cidfile="$2" cid out=unknown
   if [ ! -s "$cidfile" ]; then
     out=no-cidfile
+    # UAT-8m: this probe's own fixed phase markers ($name.phases, private
+    # evidence) decide whether the Docker CLI was invoked at all
+    if grep -qF 'before-docker-exec' "$DIAG_DIR/$name.phases" 2>/dev/null; then
+      out=unknown
+    fi
   else
     cid="$(tr -d '[:space:]' < "$cidfile" 2>/dev/null)"
     if [[ "$cid" =~ ^[0-9a-f]{64}$ ]]; then
@@ -1035,12 +1048,15 @@ diag_run_ladder() { # IMAGE WS RUNID
     # configuration, reassembled from the SAME shared owners (never a
     # parallel launcher). Session creation/deletion always goes through the
     # canonical _dh_session_create/_dh_session_delete owners.
+    # UAT-8m: the no-docker wrapper smoke runs first — it isolates the
+    # nested script(1) wrapper itself from everything Docker does under it
+    _diag_d3_script_smoke
     _diag_d3_probe notty    "$ws" 'echo D3_OK' tty
     _diag_d3_probe nosession "$ws" 'echo D3_OK' session
     _diag_d3_probe noagent  "$ws" 'echo D3_OK' agent
     # the strict UAT-8k matrix: single-variable probes under IDENTICAL
     # composition and payload, isolating the docker flags, the nested pty
-    # wrapper and the stdin policy
+    # wrapper and the stdin policy (UAT-8m adds the direct no-flag probe)
     _diag_d3_matrix "$ws"
   fi
 
@@ -1058,8 +1074,10 @@ diag_run_ladder() { # IMAGE WS RUNID
   for id in F-D0-tty F-D0-notty-stdin F-D0-script \
             F-D1-tty F-D1-notty-stdin F-D1-script \
             F-D2-tty F-D2-notty-stdin F-D2-script \
+            F-D3-script-smoke \
             F-D3-notty F-D3-nosession F-D3-noagent \
-            F-D3-flag-none F-D3-flag-i F-D3-flag-t F-D3-flag-it \
+            F-D3-flag-none F-D3-direct-none F-D3-flag-i F-D3-flag-t \
+            F-D3-flag-it \
             F-D3-pty-direct F-D3-stdin-pty F-D3-stdin-null; do
     _diag_report_factor "$id"
   done
@@ -1171,6 +1189,37 @@ _diag_d3_refusal_records() { # ID CRC
   printf 'unknown\n' > "$DIAG_DIR/$id.elapsed"
 }
 
+# _diag_phase_prefix ID WITH_DOCKER — the fixed UAT-8m phase-marker prefix
+# for the INNER command of a script(1)-wrapped D3 probe. The inner shell
+# appends `wrapper-entered` when the wrapper actually executed its command
+# and — when WITH_DOCKER is docker — `before-docker-exec` in the moment
+# before the Docker CLI is invoked. Fixed strings only: no argv, no
+# environment, no secrets; the file lives in the private evidence directory.
+_diag_phase_prefix() { # ID WITH_DOCKER -> inner-shell snippet on stdout
+  local pf="$DIAG_DIR/$1.phases" out with_docker="${2:-}"
+  out="printf '%s\n' wrapper-entered >>$(printf '%q' "$pf"); "
+  if [ "$with_docker" = docker ]; then
+    out+="printf '%s\n' before-docker-exec >>$(printf '%q' "$pf"); "
+  fi
+  printf '%s' "$out"
+}
+
+# _diag_d3_script_smoke — the UAT-8m no-docker smoke probe: the nested
+# script(1) wrapper ALONE, running a safe fixed printf with a fixed marker.
+# It isolates the wrapper itself from everything Docker does under it: no
+# docker command, no Session, no ssh-agent, no mounts — nothing is created
+# and no cleanup is due. A timeout here means the wrapper itself hangs and
+# voids the script-wrapped docker evidence.
+_diag_d3_script_smoke() {
+  local id="F-D3-script-smoke"
+  DIAG_CONTAINER_NAME="" DIAG_CONTAINER_CID="" \
+    diag_exec "$id" "$DIAG_FACTOR_BOUND" \
+    script -qec "$(_diag_phase_prefix "$id")printf '%s\n' 'SCRIPT_SMOKE_OK'" \
+    /dev/null || true
+  diag_classify "$id" 'SCRIPT_SMOKE_OK'
+  return 0
+}
+
 # _diag_d3_cleanup_gate ID — the UAT-8l evidence gate for a D3 probe: its
 # docker result counts as PASS (and is usable for cause attribution) ONLY
 # when the mandatory cleanup is confirmed (clean/reaped). An unconfirmed
@@ -1231,18 +1280,21 @@ _diag_d3_probe() { # NAME WS PAYLOAD EXCLUDED_FACTOR
   local -a run_argv=(docker "${argv[@]}")
   case "$excluded" in
     tty)
-      # no -it: the stdin is deliberately /dev/null
+      # no -it: the stdin is deliberately /dev/null. UAT-8m: the probe
+      # records its own before-docker-exec phase marker first
+      printf '%s\n' before-docker-exec >> "$DIAG_DIR/$id.phases"
       DIAG_CONTAINER_NAME="dhl-$id-$DIAG_RUNID" \
         DIAG_CONTAINER_CID="$DIAG_DIR/$id.cid" \
         diag_exec "$id" "$DIAG_FACTOR_BOUND" "${run_argv[@]}" </dev/null || true
       ;;
     *)
       # -it probes run under a real script(1) pty: the client must hold a
-      # terminal, exactly like the canonical launcher
+      # terminal, exactly like the canonical launcher. UAT-8m: the inner
+      # command writes the fixed phase markers before docker runs
       DIAG_CONTAINER_NAME="dhl-$id-$DIAG_RUNID" \
         DIAG_CONTAINER_CID="$DIAG_DIR/$id.cid" \
         diag_exec "$id" "$DIAG_FACTOR_BOUND" \
-        script -qec "$(printf '%q ' "${run_argv[@]}")" /dev/null || true
+        script -qec "$(_diag_phase_prefix "$id" docker)$(printf '%q ' "${run_argv[@]}")" /dev/null || true
       ;;
   esac
   diag_classify "$id" 'D3_OK'
@@ -1297,19 +1349,25 @@ _diag_d3_matrix_probe() { # ID WS FLAGS WRAPPER STDIN
   argv+=(--entrypoint /bin/sh "$DIAG_IMAGE" -c 'echo D3_OK')
   case "$wrapper" in
     script)
+      # UAT-8m: the inner command writes the fixed phase markers before
+      # docker runs
+      local phases
+      phases="$(_diag_phase_prefix "$id" docker)"
       if [ "$stdin_mode" = null ]; then
         DIAG_CONTAINER_NAME="dhl-$id-$DIAG_RUNID" \
           DIAG_CONTAINER_CID="$DIAG_DIR/$id.cid" \
           diag_exec "$id" "$DIAG_FACTOR_BOUND" \
-          script -qec "$(printf '%q ' docker "${argv[@]}")" /dev/null </dev/null || true
+          script -qec "${phases}$(printf '%q ' docker "${argv[@]}")" /dev/null </dev/null || true
       else
         DIAG_CONTAINER_NAME="dhl-$id-$DIAG_RUNID" \
           DIAG_CONTAINER_CID="$DIAG_DIR/$id.cid" \
           diag_exec "$id" "$DIAG_FACTOR_BOUND" \
-          script -qec "$(printf '%q ' docker "${argv[@]}")" /dev/null || true
+          script -qec "${phases}$(printf '%q ' docker "${argv[@]}")" /dev/null || true
       fi
       ;;
     direct)
+      # UAT-8m: the probe records its own before-docker-exec phase marker
+      printf '%s\n' before-docker-exec >> "$DIAG_DIR/$id.phases"
       if [ "$stdin_mode" = null ]; then
         DIAG_CONTAINER_NAME="dhl-$id-$DIAG_RUNID" \
           DIAG_CONTAINER_CID="$DIAG_DIR/$id.cid" \
@@ -1333,24 +1391,28 @@ _diag_d3_matrix_probe() { # ID WS FLAGS WRAPPER STDIN
   _diag_d3_cleanup_gate "$id"
 }
 
-# _diag_d3_matrix WS — the strict UAT-8k D3 factor matrix: seven probes that
+# _diag_d3_matrix WS — the strict UAT-8k D3 factor matrix: the probes that
 # isolate, under IDENTICAL composition and payload, the docker TTY/stdin
 # flags (none, -i, -t, -it under the same script(1) pty), the nested pty
-# wrapper and the stdin policy. Each probe holds its own Session, created
-# and deleted only through the canonical owners. UAT-8l: an unconfirmed
-# cleanup anywhere (including a legacy factor probe) stops all further new
-# matrix probes; none of them ever skips its own cleanup.
+# wrapper and the stdin policy. UAT-8m adds F-D3-direct-none: the SAME
+# no-flag configuration as F-D3-flag-none with docker invoked DIRECTLY, so
+# the script(1) wrapper itself can be separated from the docker execution
+# under it. Each probe holds its own Session, created and deleted only
+# through the canonical owners. UAT-8l: an unconfirmed cleanup anywhere
+# (including a legacy factor probe) stops all further new matrix probes;
+# none of them ever skips its own cleanup.
 _diag_d3_matrix() { # WS
   local ws="$1"
   DIAG_D3_MATRIX_RAN=1
   [ "${DIAG_D3_CLEANUP_FAILED:-0}" = 0 ] || return 0
-  _diag_d3_matrix_probe F-D3-flag-none  "$ws" none script   inherit || return 0
-  _diag_d3_matrix_probe F-D3-flag-i     "$ws" -i   script   inherit || return 0
-  _diag_d3_matrix_probe F-D3-flag-t     "$ws" -t   script   inherit || return 0
-  _diag_d3_matrix_probe F-D3-flag-it    "$ws" -it  script   inherit || return 0
-  _diag_d3_matrix_probe F-D3-pty-direct "$ws" -it  direct   inherit || return 0
-  _diag_d3_matrix_probe F-D3-stdin-pty  "$ws" -i   direct   inherit || return 0
-  _diag_d3_matrix_probe F-D3-stdin-null "$ws" -i   direct   null    || return 0
+  _diag_d3_matrix_probe F-D3-flag-none   "$ws" none script   inherit || return 0
+  _diag_d3_matrix_probe F-D3-direct-none "$ws" none direct   inherit || return 0
+  _diag_d3_matrix_probe F-D3-flag-i      "$ws" -i   script   inherit || return 0
+  _diag_d3_matrix_probe F-D3-flag-t      "$ws" -t   script   inherit || return 0
+  _diag_d3_matrix_probe F-D3-flag-it     "$ws" -it  script   inherit || return 0
+  _diag_d3_matrix_probe F-D3-pty-direct  "$ws" -it  direct   inherit || return 0
+  _diag_d3_matrix_probe F-D3-stdin-pty   "$ws" -i   direct   inherit || return 0
+  _diag_d3_matrix_probe F-D3-stdin-null  "$ws" -i   direct   null    || return 0
 }
 
 # _diag_mstate ID — the verdict state of one matrix probe from its recorded
@@ -1374,6 +1436,22 @@ _diag_mstate() { # ID -> passed|hung|other
   return 0
 }
 
+# _diag_d3_legacy_pass — the legacy single-variable probes (the Session
+# lifecycle, the ssh-agent) that passed where D3 failed, as "<count> <name>".
+# Their factor attribution is MORE SPECIFIC than the UAT-8m wrapper/docker
+# verdicts: whenever one of them passed, the wrapper/docker question is not
+# the explanation of the D3 failure and must not overwrite it.
+_diag_d3_legacy_pass() { # -> "<count> <name>"
+  local id count=0 name=""
+  for id in F-D3-nosession F-D3-noagent; do
+    if [ "$(cat "$DIAG_DIR/$id.detail" 2>/dev/null || echo missing)" = ok ]; then
+      name="$id"
+      count=$((count + 1))
+    fi
+  done
+  printf '%s %s' "$count" "$name"
+}
+
 # _diag_d3_matrix_diagnosis — the controlled-comparison verdict over the
 # strict matrix. A factor is named ONLY when a single-variable comparison
 # supports it; a probe that refused or failed for another reason proves
@@ -1391,9 +1469,23 @@ _diag_mstate() { # ID -> passed|hung|other
 #      docker -i flag is implicated
 #   5. the -it probe hung while the -i, -t and no-flag probes passed -> the
 #      -it flag combination is implicated
-# An empty result means the matrix did not prove a single cause.
+# UAT-8m adds the wrapper-isolation evidence and three further verdicts.
+# ALL of them are gated on the legacy single-variable probes NOT having
+# passed (a more specific factor attribution always wins), and every
+# verdict requires consistency: contradictory observations name nothing.
+#   A. the no-docker smoke probe timed out AND no script-wrapped probe
+#      passed -> the nested script(1) wrapper itself hangs; it fires FIRST
+#      because a broken wrapper voids the script-wrapped docker evidence
+#   B. the smoke passed, the script-wrapped no-flag probe hung while the
+#      IDENTICAL direct no-flag probe passed and no other script-wrapped
+#      probe passed -> docker hangs under the wrapper
+#   C. the direct no-flag probe hung (and the script-wrapped no-flag probe
+#      did not pass) -> docker hangs even without the wrapper; the wrapper
+#      is excluded as the cause
+# Contradictory observations name nothing: an empty result means the matrix
+# did not prove a single cause.
 _diag_d3_matrix_diagnosis() { # -> verdict text on stdout; rc 1 = unresolved
-  local none i t it pd sp sn
+  local none i t it pd sp sn dn smoke detail legacy lcount
   none="$(_diag_mstate F-D3-flag-none)"
   i="$(_diag_mstate F-D3-flag-i)"
   t="$(_diag_mstate F-D3-flag-t)"
@@ -1401,6 +1493,23 @@ _diag_d3_matrix_diagnosis() { # -> verdict text on stdout; rc 1 = unresolved
   pd="$(_diag_mstate F-D3-pty-direct)"
   sp="$(_diag_mstate F-D3-stdin-pty)"
   sn="$(_diag_mstate F-D3-stdin-null)"
+  dn="$(_diag_mstate F-D3-direct-none)"
+  legacy="$(_diag_d3_legacy_pass)"
+  lcount="${legacy%% *}"
+  # the smoke probe creates nothing, so it has no cleanup verdict to gate
+  # its PASS: its own docker-free outcome is read directly
+  detail="$(cat "$DIAG_DIR/F-D3-script-smoke.detail" 2>/dev/null || echo missing)"
+  case "$detail" in
+    ok) smoke=passed ;;
+    timeout) smoke=hung ;;
+    *) smoke=other ;;
+  esac
+  if [ "$smoke" = hung ] && [ "$lcount" = 0 ] \
+      && [ "$none" != passed ] && [ "$i" != passed ] \
+      && [ "$t" != passed ] && [ "$it" != passed ]; then
+    printf 'the D3 nested script(1) wrapper itself hangs (the no-docker smoke probe timed out; the script-wrapped docker evidence is void)'
+    return 0
+  fi
   if [ "$it" = hung ] && [ "$pd" = passed ]; then
     printf 'the D3 nested pty wrapper is implicated (F-D3-flag-it hung where F-D3-pty-direct passed; single-variable comparison)'
     return 0
@@ -1424,6 +1533,23 @@ _diag_d3_matrix_diagnosis() { # -> verdict text on stdout; rc 1 = unresolved
     printf 'the D3 docker -it flag combination is implicated (F-D3-flag-it hung where the -i, -t and no-flag probes passed; single-variable comparison)'
     return 0
   fi
+  # UAT-8m rule B: the wrapper works (the smoke passed) and the IDENTICAL
+  # no-flag configuration hangs under it while passing when docker runs
+  # directly; a passing script-wrapped sibling or legacy factor would
+  # contradict or supersede a wrapper-only cause and names nothing
+  if [ "$lcount" = 0 ] && [ "$smoke" = passed ] && [ "$none" = hung ] \
+      && [ "$dn" = passed ] && [ "$i" != passed ] && [ "$t" != passed ] \
+      && [ "$it" != passed ]; then
+    printf 'docker hangs under the nested script(1) wrapper (F-D3-flag-none hung where the identical F-D3-direct-none passed; single-variable comparison)'
+    return 0
+  fi
+  # UAT-8m rule C: docker hangs even without the wrapper; a passing
+  # script-wrapped no-flag probe would contradict the direct observation
+  # and a passing legacy factor would supersede it
+  if [ "$lcount" = 0 ] && [ "$dn" = hung ] && [ "$none" != passed ]; then
+    printf 'docker hangs even when invoked directly without the nested script wrapper (F-D3-direct-none hung; the wrapper is excluded as the cause)'
+    return 0
+  fi
   return 1
 }
 
@@ -1435,7 +1561,7 @@ _diag_d3_matrix_diagnosis() { # -> verdict text on stdout; rc 1 = unresolved
 # only the probes that remove exactly one canonical factor (the Session
 # lifecycle, the ssh-agent).
 _diag_d3_diagnose() {
-  local verdict="" id passed="" count=0
+  local verdict="" legacy lname lcount
   if [ "${DIAG_D3_MATRIX_RAN:-0}" = 1 ]; then
     verdict="$(_diag_d3_matrix_diagnosis)" || true
   fi
@@ -1443,15 +1569,10 @@ _diag_d3_diagnose() {
     printf 'DIAGNOSIS: %s\n' "$verdict"
     return 0
   fi
-  for id in F-D3-nosession F-D3-noagent; do
-    if [ "$(cat "$DIAG_DIR/$id.detail" 2>/dev/null || echo missing)" = ok ]; then
-      passed="$id"
-      count=$((count + 1))
-    fi
-  done
-  if [ "$count" = 1 ]; then
+  read -r lcount lname <<< "$(_diag_d3_legacy_pass)"
+  if [ "$lcount" = 1 ]; then
     printf 'DIAGNOSIS: the %s factor is implicated (%s passed where D3 failed; single-variable probes only)\n' \
-      "${passed#F-}" "$passed"
+      "${lname#F-}" "$lname"
     return 0
   fi
   if [ "$(cat "$DIAG_DIR/F-D3-notty.detail" 2>/dev/null || echo missing)" = ok ]; then

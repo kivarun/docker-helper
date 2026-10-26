@@ -37,7 +37,13 @@
 #      is a separate FAIL that voids the probe as diagnosis evidence and
 #      stops all further new matrix probes, and a -t/-i attribution must be
 #      consistent with the combined -it probe (a contradiction stays
-#      UNRESOLVED).
+#      UNRESOLVED);
+#  13. (UAT-8m) the no-docker script(1) smoke probe and the direct no-flag
+#      probe isolate the wrapper from the docker execution under it (the
+#      wrapper hangs / docker hangs under it / docker hangs directly
+#      verdicts, contradictions stay UNRESOLVED); the fixed phase markers
+#      are secret-free private evidence; and a recorded docker invocation
+#      without a cidfile stays unknown, never "no create happened".
 #
 # Source-level invariants for the driver (diagnose-launch.sh): the lab-vm
 # guard, the private evidence directory, no set -x, no raw docker inspect,
@@ -56,6 +62,12 @@ PROV="$SRC_DIR/lab/provision-lab-vm.sh"
 for f in "$ALIASES" "$LIB" "$DRIVER" "$PROV"; do
   [ -f "$f" ] || { echo "missing $f" >&2; exit 1; }
 done
+
+# Deterministic stdin: the direct (unwrapped) probes inherit THIS shell's
+# stdin, and the UAT-8m hang hooks distinguish the script(1) pty (a tty)
+# from the direct probes. A terminal-attached invocation must not change
+# the outcomes, so the suite always runs with a non-tty stdin.
+exec </dev/null
 
 WORK="$(mktemp -d)"
 SOCK_PID=""
@@ -167,6 +179,26 @@ case "$1" in
        && printf '%s\n' "$*" | grep -qF -- '--name dhl-D3-'; then
       # hang exactly the CANONICAL D3 launch (its name is dhl-D3-<runid>),
       # never the F-D3-* factor or matrix probes (UAT-8l)
+      trap '' TERM
+      sleep "${STUB_HANG_SECONDS:-300}"
+      echo "$payload"
+      exit 0
+    fi
+    if [ -n "${STUB_HANG_WHEN_PTY_STDIN:-}" ] && [ -t 0 ] \
+       && printf '%s' "$payload" | grep -q "D3_OK"; then
+      # hang exactly the pty-stdin docker runs — the script(1)-wrapped
+      # probes, whose wrapper hands the client a tty (the direct probes in
+      # this suite inherit a non-tty stdin): the UAT-8m rule-B driver
+      trap '' TERM
+      sleep "${STUB_HANG_SECONDS:-300}"
+      echo "$payload"
+      exit 0
+    fi
+    if [ -n "${STUB_HANG_NOFLAGS_NOTTY:-}" ] && ! [ -t 0 ] \
+       && [ -z "$opt_i" ] && [ -z "$opt_t" ] \
+       && printf '%s' "$payload" | grep -q "D3_OK"; then
+      # hang exactly the no-flag, non-tty docker runs (the direct-none
+      # probe and the legacy notty probe): the UAT-8m rule-C driver
       trap '' TERM
       sleep "${STUB_HANG_SECONDS:-300}"
       echo "$payload"
@@ -427,6 +459,14 @@ for ((i=0; i<${#args[@]}; i++)); do
     *) payload="${args[$i]}"; break ;;
   esac
 done
+if [ -n "${SMOKE_HANG_SHIM:-}" ] && printf '%s\n' "$*" | grep -qF 'SCRIPT_SMOKE_OK'; then
+  # UAT-8m fault injection: hang exactly the no-docker wrapper smoke probe
+  # (its inner command carries the fixed marker), before script(1) runs
+  # anything at all
+  trap '' TERM
+  sleep "${STUB_HANG_SECONDS:-300}"
+  exit 0
+fi
 if [ -x /usr/bin/script ]; then
   exec /usr/bin/script "$@"
 fi
@@ -1223,12 +1263,15 @@ norm_rec() { # strip the deliberately-varied fields; the rest must be equal
 # Run A: the TTY-allocating probes hang (-t and -it), everything else passes
 STUB_HANG_WHEN_TTY=1 STUB_HANG_SECONDS=60 run_ladder
 unset STUB_HANG_WHEN_TTY STUB_HANG_SECONDS
-for probe in F-D3-flag-none F-D3-flag-i F-D3-flag-t F-D3-flag-it \
-             F-D3-pty-direct F-D3-stdin-pty F-D3-stdin-null; do
+for probe in F-D3-flag-none F-D3-direct-none F-D3-flag-i F-D3-flag-t \
+             F-D3-flag-it F-D3-pty-direct F-D3-stdin-pty F-D3-stdin-null; do
   contains "UAT-8k: the $probe matrix probe ran for the hanging D3" \
     "$probe " "$REPORT"
 done
-for probe in F-D3-flag-none F-D3-flag-i F-D3-flag-t F-D3-flag-it; do
+contains "UAT-8m: the no-docker wrapper smoke probe ran and passed" \
+  "F-D3-script-smoke PASS rc=0" "$REPORT"
+for probe in F-D3-flag-none F-D3-direct-none F-D3-flag-i F-D3-flag-t \
+             F-D3-flag-it; do
   rec="$(mrec "$probe")"
   case "$rec" in
     *"--cap-drop ALL"*) ok "UAT-8k: $probe carries the canonical security posture" ;;
@@ -1260,6 +1303,13 @@ for probe in F-D3-flag-none F-D3-flag-i F-D3-flag-t F-D3-flag-it; do
   esac
 done
 r_none="$(norm_rec F-D3-flag-none)"
+r_direct_none="$(norm_rec F-D3-direct-none)"
+# the pair differs ONLY in the wrapper; the observed stdin marker (pty under
+# the script wrapper, the inherited non-tty stdin when direct) is that
+# same wrapper difference, so it is normalized away here
+check "UAT-8k: F-D3-direct-none differs from the script no-flag probe ONLY in the wrapper" \
+  "$(printf '%s' "$r_none" | sed 's/ stdin=[a-z]*$//')" \
+  "$(printf '%s' "$r_direct_none" | sed 's/ stdin=[a-z]*$//')"
 for probe in F-D3-flag-i F-D3-flag-t F-D3-flag-it; do
   check "UAT-8k: $probe differs from the no-flag probe ONLY in its flag" \
     "$r_none" "$(norm_rec "$probe")"
@@ -1269,7 +1319,7 @@ for probe in F-D3-flag-none F-D3-flag-i F-D3-flag-t F-D3-flag-it; do
     && ok "UAT-8k: $probe runs under the canonical script(1) pty wrapper" \
     || bad "UAT-8k: $probe did not run under the pty wrapper"
 done
-for probe in F-D3-pty-direct F-D3-stdin-pty F-D3-stdin-null; do
+for probe in F-D3-direct-none F-D3-pty-direct F-D3-stdin-pty F-D3-stdin-null; do
   grep -q "dhl-$probe-" "$SCRIPT_REC" \
     && bad "UAT-8k RED: $probe was confounded with the pty wrapper factor" \
     || ok "UAT-8k: $probe runs WITHOUT the pty wrapper (isolated factor)"
@@ -1358,12 +1408,19 @@ contains "UAT-8k: the -i diagnosis is named by the controlled comparison" \
 contains "UAT-8k: the -t probe passes when -i hangs" \
   "F-D3-flag-t PASS rc=0" "$REPORT"
 
-# Run E: everything hangs -> nothing is implicated, no OBSERVED upgrade
+# Run E: everything hangs -> the new direct-none observation upgrades the
+# hopeless matrix: docker hangs even WITHOUT the wrapper (UAT-8m rule C),
+# so the run no longer reports UNRESOLVED and implicates no flag/wrapper
 STUB_HANG_PAYLOAD="D3_OK" STUB_HANG_SECONDS=60 run_ladder
 unset STUB_HANG_PAYLOAD STUB_HANG_SECONDS
-contains "UAT-8k: an all-hung matrix stays UNRESOLVED" \
-  "DIAGNOSIS UNRESOLVED: the failing step is D3" "$REPORT"
-not_contains "UAT-8k: a hopeless matrix implicates nothing" \
+grep -qE '^F-D3-direct-none FAIL rc=1(24|37) elapsed=.* detail=timeout' <<<"$REPORT" \
+  && ok "UAT-8m: the direct no-flag probe really hung in the all-hung run" \
+  || bad "UAT-8m: the direct-none probe did not hang"
+contains "UAT-8m: docker hanging directly is stated even when every probe hung" \
+  "DIAGNOSIS: docker hangs even when invoked directly without the nested script wrapper" "$REPORT"
+not_contains "UAT-8m: the direct observation replaces UNRESOLVED" \
+  "DIAGNOSIS UNRESOLVED" "$REPORT"
+not_contains "UAT-8k: a hopeless matrix implicates no flag or wrapper" \
   "is implicated" "$REPORT"
 
 # Run F: the CLI hung before creating the container -> no-cidfile, and no
@@ -1422,8 +1479,20 @@ check "UAT-8k: a failed existence observation stays unknown" \
 ( export DIAG_DIR="$hs_evid" DIAG_RUNID=diagrun-hs DIAG_IMAGE="$_OC_BASE"
   : > "$hs_evid/nc.cid"
   diag_capture_hang_state NC "$hs_evid/nc.cid" )
-check "UAT-8k: an empty cidfile means the CLI never created a container" \
+check "UAT-8m: an empty cidfile WITHOUT docker-invocation evidence is no-cidfile" \
   "no-cidfile" "$(cat "$hs_evid/NC.hangstate")"
+( export DIAG_DIR="$hs_evid" DIAG_RUNID=diagrun-hs DIAG_IMAGE="$_OC_BASE"
+  printf '%s\n' before-docker-exec > "$hs_evid/UD.phases"
+  : > "$hs_evid/UD.cid"
+  diag_capture_hang_state UD "$hs_evid/UD.cid" )
+check "UAT-8m: a recorded docker invocation without a cidfile stays UNKNOWN" \
+  "unknown" "$(cat "$hs_evid/UD.hangstate")"
+( export DIAG_DIR="$hs_evid" DIAG_RUNID=diagrun-hs DIAG_IMAGE="$_OC_BASE"
+  printf '%s\n' wrapper-entered > "$hs_evid/WE.phases"
+  : > "$hs_evid/WE.cid"
+  diag_capture_hang_state WE "$hs_evid/WE.cid" )
+check "UAT-8m: the wrapper entering its command without docker is still no-cidfile" \
+  "no-cidfile" "$(cat "$hs_evid/WE.hangstate")"
 
 # source-level invariants for the new owners
 lib_has "UAT-8k: the lib owns the hang-stage capture" 'diag_capture_hang_state'
@@ -1476,8 +1545,8 @@ check "UAT-8l: the cleanup verdict behind the demoted pass is recorded" \
 grep -qE '^F-D3-nosession FAIL rc=1(24|37) elapsed=.* detail=timeout' <<<"$REPORT" \
   && ok "UAT-8l: a hung probe keeps its measured timeout detail" \
   || bad "UAT-8l: the hung probe's timeout evidence was hidden: $(grep '^F-D3-nosession ' <<<"$REPORT")"
-for probe in F-D3-flag-none F-D3-flag-i F-D3-flag-t F-D3-flag-it \
-             F-D3-pty-direct F-D3-stdin-pty F-D3-stdin-null; do
+for probe in F-D3-direct-none F-D3-flag-none F-D3-flag-i F-D3-flag-t \
+             F-D3-flag-it F-D3-pty-direct F-D3-stdin-pty F-D3-stdin-null; do
   not_contains "UAT-8l: the unconfirmed cleanup stopped $probe" \
     "$probe " "$REPORT"
 done
@@ -1505,6 +1574,96 @@ contains "UAT-8l: the contradictory matrix states the notty evidence as OBSERVED
 contains "UAT-8l: a contradicted -t hypothesis stays UNRESOLVED" \
   "DIAGNOSIS UNRESOLVED: the failing step is D3" "$REPORT"
 not_contains "UAT-8l RED: -t is never implicated against a passing -it" \
+  "is implicated" "$REPORT"
+
+# --- UAT-8m. wrapper/docker isolation and phase evidence ---------------------
+# The missing D3 cause evidence: does the nested script(1) wrapper itself
+# hang, or does docker hang under it (or even without it)? Two minimal
+# probes answer this: the no-docker wrapper smoke (a fixed printf inside
+# script(1)) and F-D3-direct-none (the IDENTICAL no-flag composition with
+# docker invoked directly). Fixed phase markers (wrapper-entered /
+# before-docker-exec) are written into the private evidence only, and a
+# recorded docker invocation without a cidfile stays unknown, never
+# "no create happened".
+
+# Scenario M-B: every script(1)-wrapped docker probe hangs while the
+# IDENTICAL direct no-flag probe and the no-docker smoke pass -> docker
+# hangs under the wrapper (UAT-8m rule B)
+STUB_HANG_WHEN_PTY_STDIN=1 STUB_HANG_DFLAG='-it' STUB_HANG_SECONDS=60 run_ladder
+unset STUB_HANG_WHEN_PTY_STDIN STUB_HANG_DFLAG STUB_HANG_SECONDS
+grep -qE '^D3 FAIL rc=1(24|37) elapsed=.* detail=timeout' <<<"$REPORT" \
+  && ok "UAT-8m: the canonical D3 hang triggered the M-B probes" \
+  || bad "UAT-8m: the canonical D3 did not hang in M-B"
+contains "UAT-8m: the no-docker smoke passes while the script probes hang" \
+  "F-D3-script-smoke PASS rc=0" "$REPORT"
+contains "UAT-8m: the identical direct no-flag probe passed where the script probe hung" \
+  "F-D3-direct-none PASS rc=0" "$REPORT"
+grep -qE '^F-D3-flag-none FAIL rc=1(24|37) elapsed=.* detail=timeout' <<<"$REPORT" \
+  && ok "UAT-8m: the script-wrapped no-flag probe really hung in M-B" \
+  || bad "UAT-8m: the script no-flag probe did not hang in M-B"
+contains "UAT-8m: docker under the wrapper is named by the direct pair" \
+  "DIAGNOSIS: docker hangs under the nested script(1) wrapper (F-D3-flag-none hung where the identical F-D3-direct-none passed" \
+  "$REPORT"
+not_contains "UAT-8m: the M-B pair leaves nothing UNRESOLVED" \
+  "DIAGNOSIS UNRESOLVED" "$REPORT"
+check "UAT-8m: the phase markers carry exactly the two fixed markers, nothing else" \
+  "$(printf 'wrapper-entered\nbefore-docker-exec')" \
+  "$(cat "$WORK/evid/F-D3-flag-none.phases" 2>/dev/null || echo missing)"
+
+# Scenario M-C: the same setup, but the DIRECT no-flag probe hangs too ->
+# docker hangs even without the wrapper; the wrapper is excluded (rule C)
+STUB_HANG_WHEN_PTY_STDIN=1 STUB_HANG_DFLAG='-it' STUB_HANG_NOFLAGS_NOTTY=1 \
+  STUB_HANG_SECONDS=60 run_ladder
+unset STUB_HANG_WHEN_PTY_STDIN STUB_HANG_DFLAG STUB_HANG_NOFLAGS_NOTTY \
+  STUB_HANG_SECONDS
+grep -qE '^F-D3-direct-none FAIL rc=1(24|37) elapsed=.* detail=timeout' <<<"$REPORT" \
+  && ok "UAT-8m: the direct no-flag probe really hung in M-C" \
+  || bad "UAT-8m: the direct-none probe did not hang in M-C"
+contains "UAT-8m: docker hanging directly is named and the wrapper excluded" \
+  "DIAGNOSIS: docker hangs even when invoked directly without the nested script wrapper" "$REPORT"
+not_contains "UAT-8m: the M-C direct observation leaves nothing UNRESOLVED" \
+  "DIAGNOSIS UNRESOLVED" "$REPORT"
+not_contains "UAT-8m: the M-C wrapper exclusion implicates nothing else" \
+  "is implicated" "$REPORT"
+
+# Scenario M-A: the no-docker smoke probe itself times out (the script(1)
+# shim hangs exactly the smoke) while every script(1)-wrapped docker probe
+# hangs too and the direct probes pass -> the wrapper itself hangs, and the
+# script-wrapped docker evidence is void (the -t rule must NOT fire even
+# though the -t probe hung)
+SMOKE_HANG_SHIM=1 STUB_HANG_WHEN_PTY_STDIN=1 STUB_HANG_WHEN_TTY=1 \
+  STUB_HANG_SECONDS=60 run_ladder
+unset SMOKE_HANG_SHIM STUB_HANG_WHEN_PTY_STDIN STUB_HANG_WHEN_TTY \
+  STUB_HANG_SECONDS
+grep -qE '^F-D3-script-smoke FAIL rc=1(24|37) elapsed=.* detail=timeout' <<<"$REPORT" \
+  && ok "UAT-8m: the no-docker smoke probe really timed out" \
+  || bad "UAT-8m: the smoke probe did not time out"
+if [ -e "$WORK/evid/F-D3-script-smoke.phases" ]; then
+  bad "UAT-8m RED: phase markers exist although the wrapper never ran its command"
+else
+  ok "UAT-8m: a wrapper hang before its command leaves no phase evidence"
+fi
+contains "UAT-8m: a hanging no-docker wrapper is named by the smoke probe" \
+  "DIAGNOSIS: the D3 nested script(1) wrapper itself hangs" "$REPORT"
+not_contains "UAT-8m RED: a broken wrapper voids the script-wrapped flag evidence" \
+  "the D3 docker -t flag is implicated" "$REPORT"
+not_contains "UAT-8m: the smoke verdict implicates no docker factor" \
+  "is implicated" "$REPORT"
+check "UAT-8m: the smoke-hang ladder exits nonzero" "1" "$LRC"
+
+# Scenario M-D (contradiction): the script-wrapped no-flag probe PASSED
+# while the direct no-flag probe hung — the observations contradict each
+# other, so only UNRESOLVED may be reported
+STUB_HANG_CANON=1 STUB_HANG_NOFLAGS_NOTTY=1 STUB_HANG_SECONDS=60 run_ladder
+unset STUB_HANG_CANON STUB_HANG_NOFLAGS_NOTTY STUB_HANG_SECONDS
+contains "UAT-8m: the contradictory script no-flag PASS is observed" \
+  "F-D3-flag-none PASS rc=0" "$REPORT"
+grep -qE '^F-D3-direct-none FAIL rc=1(24|37) elapsed=.* detail=timeout' <<<"$REPORT" \
+  && ok "UAT-8m: the contradictory direct no-flag FAIL is observed" \
+  || bad "UAT-8m: the direct-none probe did not hang in M-D"
+contains "UAT-8m: contradictory wrapper observations stay UNRESOLVED" \
+  "DIAGNOSIS UNRESOLVED: the failing step is D3" "$REPORT"
+not_contains "UAT-8m: a contradiction implicates nothing" \
   "is implicated" "$REPORT"
 
 # --- UAT-8g. the real runner chain (driver -> runner -> library -> launcher) -
