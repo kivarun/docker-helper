@@ -894,6 +894,7 @@ diag_run_ladder() { # IMAGE WS RUNID
   local DC_OK DC_DETAIL init_copy="" init_state=""
   DIAG_D3_INIT_COPY=""
   DIAG_D3_MATRIX_RAN=0
+  DIAG_D3_CLEANUP_FAILED=0
   local -a argv=()
 
   # --- D0: the minimal runtime + SELinux posture ---------------------------
@@ -1170,6 +1171,27 @@ _diag_d3_refusal_records() { # ID CRC
   printf 'unknown\n' > "$DIAG_DIR/$id.elapsed"
 }
 
+# _diag_d3_cleanup_gate ID — the UAT-8l evidence gate for a D3 probe: its
+# docker result counts as PASS (and is usable for cause attribution) ONLY
+# when the mandatory cleanup is confirmed (clean/reaped). An unconfirmed
+# verdict is a separate diagnostic FAIL of its own: a docker pass is demoted
+# to a cleanup-<verdict> detail (a failed workload keeps its own detail, so
+# the measured timeout evidence is not hidden), the probe proves nothing for
+# the diagnosis, and no further new matrix probes may start. The cleanup
+# owners and their ownership checks are untouched.
+_diag_d3_cleanup_gate() { # ID -> 0 confirmed | 1 unconfirmed
+  local id="$1" verdict
+  verdict="$(cat "$DIAG_DIR/$id.session" 2>/dev/null || echo missing)"
+  diag_cleanup_ok "$verdict" || {
+    if [ "$(cat "$DIAG_DIR/$id.detail" 2>/dev/null || echo missing)" = ok ]; then
+      printf 'cleanup-%s\n' "$verdict" > "$DIAG_DIR/$id.detail"
+    fi
+    DIAG_D3_CLEANUP_FAILED=1
+    return 1
+  }
+  return 0
+}
+
 # _diag_d3_probe NAME WS PAYLOAD EXCLUDED_FACTOR — one bounded D3 factor
 # probe: the canonical exec-path configuration reassembled through the
 # shared composition owner with EXACTLY ONE factor removed. Declared
@@ -1191,7 +1213,12 @@ _diag_d3_probe() { # NAME WS PAYLOAD EXCLUDED_FACTOR
   _diag_d3_compose_argv argv "$id" "$excl_session" "$excl_agent" || crc=$?
   if [ "$crc" != 0 ]; then
     _diag_d3_refusal_records "$id" "$crc"
-    [ "$crc" = 1 ] || _diag_d3_probe_cleanup "$ws" "$id"
+    if [ "$crc" = 1 ]; then
+      return 0
+    fi
+    _diag_d3_probe_cleanup "$ws" "$id"
+    # UAT-8l: a refused probe's due cleanup feeds the same evidence gate
+    _diag_d3_cleanup_gate "$id" || true
     return 0
   fi
   if [ "$excluded" = tty ]; then
@@ -1221,6 +1248,9 @@ _diag_d3_probe() { # NAME WS PAYLOAD EXCLUDED_FACTOR
   diag_classify "$id" 'D3_OK'
   _diag_d3_probe_cleanup "$ws" "$id"
   unset DOCKER_HELPER_SESSION_ID DOCKER_HELPER_SESSION_TOKEN
+  # UAT-8l: an unconfirmed cleanup voids the probe's PASS and stops any
+  # further new matrix probes
+  _diag_d3_cleanup_gate "$id" || true
   return 0
 }
 
@@ -1236,7 +1266,9 @@ _diag_d3_probe() { # NAME WS PAYLOAD EXCLUDED_FACTOR
 #           is /dev/null)
 # A probe whose composition/agent/session creation refuses records the
 # refusal and never runs docker; any probe-owned resource is recovered
-# through the shared probe cleanup owner.
+# through the shared probe cleanup owner. UAT-8l: the probe's result is a
+# usable PASS only when its cleanup is confirmed; an unconfirmed cleanup is
+# a probe failure of its own (rc 1) that stops the remaining matrix probes.
 _diag_d3_matrix_probe() { # ID WS FLAGS WRAPPER STDIN
   local id="$1" ws="$2" flags="$3" wrapper="$4" stdin_mode="$5"
   local -a argv=()
@@ -1244,8 +1276,12 @@ _diag_d3_matrix_probe() { # ID WS FLAGS WRAPPER STDIN
   _diag_d3_compose_argv argv "$id" "" "" || crc=$?
   if [ "$crc" != 0 ]; then
     _diag_d3_refusal_records "$id" "$crc"
-    [ "$crc" = 1 ] || _diag_d3_probe_cleanup "$ws" "$id"
-    return 0
+    if [ "$crc" = 1 ]; then
+      return 0
+    fi
+    _diag_d3_probe_cleanup "$ws" "$id"
+    _diag_d3_cleanup_gate "$id"
+    return $?
   fi
   case "$flags" in
     none) : ;;
@@ -1294,31 +1330,42 @@ _diag_d3_matrix_probe() { # ID WS FLAGS WRAPPER STDIN
   diag_classify "$id" 'D3_OK'
   _diag_d3_probe_cleanup "$ws" "$id"
   unset DOCKER_HELPER_SESSION_ID DOCKER_HELPER_SESSION_TOKEN
-  return 0
+  _diag_d3_cleanup_gate "$id"
 }
 
 # _diag_d3_matrix WS — the strict UAT-8k D3 factor matrix: seven probes that
 # isolate, under IDENTICAL composition and payload, the docker TTY/stdin
 # flags (none, -i, -t, -it under the same script(1) pty), the nested pty
 # wrapper and the stdin policy. Each probe holds its own Session, created
-# and deleted only through the canonical owners.
+# and deleted only through the canonical owners. UAT-8l: an unconfirmed
+# cleanup anywhere (including a legacy factor probe) stops all further new
+# matrix probes; none of them ever skips its own cleanup.
 _diag_d3_matrix() { # WS
   local ws="$1"
   DIAG_D3_MATRIX_RAN=1
-  _diag_d3_matrix_probe F-D3-flag-none  "$ws" none script   inherit
-  _diag_d3_matrix_probe F-D3-flag-i     "$ws" -i   script   inherit
-  _diag_d3_matrix_probe F-D3-flag-t     "$ws" -t   script   inherit
-  _diag_d3_matrix_probe F-D3-flag-it    "$ws" -it  script   inherit
-  _diag_d3_matrix_probe F-D3-pty-direct "$ws" -it  direct   inherit
-  _diag_d3_matrix_probe F-D3-stdin-pty  "$ws" -i   direct   inherit
-  _diag_d3_matrix_probe F-D3-stdin-null "$ws" -i   direct   null
+  [ "${DIAG_D3_CLEANUP_FAILED:-0}" = 0 ] || return 0
+  _diag_d3_matrix_probe F-D3-flag-none  "$ws" none script   inherit || return 0
+  _diag_d3_matrix_probe F-D3-flag-i     "$ws" -i   script   inherit || return 0
+  _diag_d3_matrix_probe F-D3-flag-t     "$ws" -t   script   inherit || return 0
+  _diag_d3_matrix_probe F-D3-flag-it    "$ws" -it  script   inherit || return 0
+  _diag_d3_matrix_probe F-D3-pty-direct "$ws" -it  direct   inherit || return 0
+  _diag_d3_matrix_probe F-D3-stdin-pty  "$ws" -i   direct   inherit || return 0
+  _diag_d3_matrix_probe F-D3-stdin-null "$ws" -i   direct   null    || return 0
 }
 
-# _diag_mstate ID — the verdict state of one probe from its recorded detail:
-# passed (ok), hung (timeout) or other (any refusal or different failure).
+# _diag_mstate ID — the verdict state of one matrix probe from its recorded
+# detail: passed (ok), hung (timeout) or other (any refusal or different
+# failure). UAT-8l: a probe whose mandatory cleanup was not confirmed
+# (clean/reaped) proves nothing for the diagnosis and is never passed or
+# hung here, whatever its docker outcome was.
 _diag_mstate() { # ID -> passed|hung|other
-  local detail
+  local detail verdict
   detail="$(cat "$DIAG_DIR/$1.detail" 2>/dev/null || echo missing)"
+  verdict="$(cat "$DIAG_DIR/$1.session" 2>/dev/null || echo missing)"
+  if ! diag_cleanup_ok "$verdict"; then
+    printf 'other'
+    return 0
+  fi
   case "$detail" in
     ok) printf 'passed' ;;
     timeout) printf 'hung' ;;
@@ -1335,9 +1382,12 @@ _diag_mstate() { # ID -> passed|hung|other
 #      pty wrapper is implicated
 #   2. the -i probe hung with the pty stdin while the closed-stdin -i probe
 #      passed -> the pty stdin is implicated
-#   3. the -t probe hung while the -i and no-flag probes passed -> the
+#   3. the -t probe hung while the -i and no-flag probes passed AND the
+#      combined -it probe hung too (UAT-8l consistency: the -it probe
+#      carries -t, so a passing -it contradicts a -t-only cause) -> the
 #      docker -t flag is implicated
-#   4. the -i probe hung while the -t and no-flag probes passed -> the
+#   4. the -i probe hung while the -t and no-flag probes passed AND the
+#      combined -it probe hung too (the same consistency rule) -> the
 #      docker -i flag is implicated
 #   5. the -it probe hung while the -i, -t and no-flag probes passed -> the
 #      -it flag combination is implicated
@@ -1359,11 +1409,13 @@ _diag_d3_matrix_diagnosis() { # -> verdict text on stdout; rc 1 = unresolved
     printf 'the D3 pty stdin is implicated (F-D3-stdin-pty hung where F-D3-stdin-null passed; single-variable comparison)'
     return 0
   fi
-  if [ "$t" = hung ] && [ "$i" = passed ] && [ "$none" = passed ]; then
+  if [ "$t" = hung ] && [ "$i" = passed ] && [ "$none" = passed ] \
+      && [ "$it" = hung ]; then
     printf 'the D3 docker -t flag is implicated (F-D3-flag-t hung where F-D3-flag-i and F-D3-flag-none passed; single-variable comparison)'
     return 0
   fi
-  if [ "$i" = hung ] && [ "$t" = passed ] && [ "$none" = passed ]; then
+  if [ "$i" = hung ] && [ "$t" = passed ] && [ "$none" = passed ] \
+      && [ "$it" = hung ]; then
     printf 'the D3 docker -i flag is implicated (F-D3-flag-i hung where F-D3-flag-t and F-D3-flag-none passed; single-variable comparison)'
     return 0
   fi

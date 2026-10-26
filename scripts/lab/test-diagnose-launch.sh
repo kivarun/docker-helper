@@ -31,7 +31,13 @@
 #      and ONE payload; a timeout carries the bounded hang-stage observation
 #      of the owned container; and only controlled single-variable
 #      comparisons may name a cause (the multi-variable notty probe stays
-#      preliminary OBSERVED evidence).
+#      preliminary OBSERVED evidence);
+#  12. (UAT-8l) a D3 probe's docker result is a usable PASS only when its
+#      mandatory cleanup is confirmed (clean/reaped): an unconfirmed cleanup
+#      is a separate FAIL that voids the probe as diagnosis evidence and
+#      stops all further new matrix probes, and a -t/-i attribution must be
+#      consistent with the combined -it probe (a contradiction stays
+#      UNRESOLVED).
 #
 # Source-level invariants for the driver (diagnose-launch.sh): the lab-vm
 # guard, the private evidence directory, no set -x, no raw docker inspect,
@@ -157,6 +163,15 @@ case "$1" in
       echo "$payload"
       exit 0
     fi
+    if [ -n "${STUB_HANG_CANON:-}" ] \
+       && printf '%s\n' "$*" | grep -qF -- '--name dhl-D3-'; then
+      # hang exactly the CANONICAL D3 launch (its name is dhl-D3-<runid>),
+      # never the F-D3-* factor or matrix probes (UAT-8l)
+      trap '' TERM
+      sleep "${STUB_HANG_SECONDS:-300}"
+      echo "$payload"
+      exit 0
+    fi
     if [ -n "${STUB_HANG_DFLAG:-}" ]; then
       # hang exactly for the docker runs carrying one of THESE flag tokens
       # (a space-separated list): the strict single-variable matrix driver
@@ -198,11 +213,19 @@ case "$1" in
       echo "opencode 1.19.3"
     fi
     # --rm: the container exited and was auto-removed; the registry forgets
-    # it (its cidfile keeps the ID, which real docker also leaves behind)
-    grep -vxF "$cname" "$CIDS" > "$CIDS.next" 2>/dev/null; mv "$CIDS.next" "$CIDS"
-    grep -vE "(^| )$cname( |$)" "$CIDMAP" > "$CIDMAP.next" 2>/dev/null; mv "$CIDMAP.next" "$CIDMAP"
-    grep -vxF "$cid" "$CIDS" > "$CIDS.next" 2>/dev/null; mv "$CIDS.next" "$CIDS"
-    grep -vE "(^| )$cid( |$)" "$CIDMAP" > "$CIDMAP.next" 2>/dev/null; mv "$CIDMAP.next" "$CIDMAP"
+    # it (its cidfile keeps the ID, which real docker also leaves behind).
+    # STUB_KEEP_NAME_PREFIX keeps a matching container in the registry, so
+    # the diagnostic's own cleanup must remove it (UAT-8l)
+    keep=0
+    if [ -n "${STUB_KEEP_NAME_PREFIX:-}" ]; then
+      case "$cname" in "$STUB_KEEP_NAME_PREFIX"*) keep=1 ;; esac
+    fi
+    if [ "$keep" = 0 ]; then
+      grep -vxF "$cname" "$CIDS" > "$CIDS.next" 2>/dev/null; mv "$CIDS.next" "$CIDS"
+      grep -vE "(^| )$cname( |$)" "$CIDMAP" > "$CIDMAP.next" 2>/dev/null; mv "$CIDMAP.next" "$CIDMAP"
+      grep -vxF "$cid" "$CIDS" > "$CIDS.next" 2>/dev/null; mv "$CIDS.next" "$CIDS"
+      grep -vE "(^| )$cid( |$)" "$CIDMAP" > "$CIDMAP.next" 2>/dev/null; mv "$CIDMAP.next" "$CIDMAP"
+    fi
     ;;
   rm)
     shift
@@ -1288,6 +1311,20 @@ if grep -q "dhs_TEST $WS" "$DH_SESSIONS" 2>/dev/null; then
 else
   ok "UAT-8k: every matrix probe recovered its own Session"
 fi
+# UAT-8l scenarios 2 and 4: the passing probes and the hung -t probe all
+# carry a CONFIRMED cleanup verdict, so their results are valid evidence
+case "$(cat "$WORK/evid/F-D3-flag-i.session" 2>/dev/null)" in
+  clean|reaped)
+    ok "UAT-8l: the passing -i probe's cleanup is confirmed (a validated PASS)" ;;
+  *)
+    bad "UAT-8l: the passing -i probe's cleanup verdict is unconfirmed: $(cat "$WORK/evid/F-D3-flag-i.session" 2>/dev/null || echo missing)" ;;
+esac
+case "$(cat "$WORK/evid/F-D3-flag-t.session" 2>/dev/null)" in
+  clean|reaped)
+    ok "UAT-8l: the hung -t probe's cleanup is confirmed (attribution evidence is valid)" ;;
+  *)
+    bad "UAT-8l: the hung -t probe's cleanup verdict is unconfirmed: $(cat "$WORK/evid/F-D3-flag-t.session" 2>/dev/null || echo missing)" ;;
+esac
 
 # Run B: only the -it combination hangs (the old single-pass rule would
 # have misattributed this to the multi-variable notty probe)
@@ -1415,6 +1452,60 @@ case "$diag_body" in
   *"diag_capture_hang_state"*) ok "UAT-8k: diag_exec captures the hang state on a timeout" ;;
   *) bad "UAT-8k: diag_exec does not capture the hang state" ;;
 esac
+
+# --- UAT-8l. cleanup-gated evidence and consistent D3 inference --------------
+# A D3 probe's docker result is a usable PASS only when its mandatory
+# cleanup is CONFIRMED (clean/reaped); an unconfirmed cleanup is a separate
+# diagnostic FAIL that voids the evidence and stops further new matrix
+# probes. A -t/-i attribution must additionally be consistent with the
+# combined -it probe, otherwise the diagnosis stays UNRESOLVED.
+
+# Scenario 1: a PASSING probe whose cleanup FAILS is not a PASS and is no
+# diagnosis basis; the measured timeout evidence of the hung probes stays
+# visible, and the unconfirmed cleanup stops all further new matrix probes
+STUB_HANG_WHEN_TTY=1 STUB_KEEP_NAME_PREFIX='dhl-F-D3-' STUB_RM_FAIL=1 \
+  STUB_HANG_SECONDS=60 run_ladder
+unset STUB_HANG_WHEN_TTY STUB_KEEP_NAME_PREFIX STUB_RM_FAIL STUB_HANG_SECONDS
+grep -qE '^F-D3-notty FAIL rc=0 elapsed=.* detail=cleanup-failed$' <<<"$REPORT" \
+  && ok "UAT-8l: a docker pass with a failed cleanup is a FAIL naming the cleanup" \
+  || bad "UAT-8l RED: a cleanup-failed probe stayed a PASS: $(grep '^F-D3-notty ' <<<"$REPORT")"
+not_contains "UAT-8l: a cleanup-failed probe is never reported as PASS" \
+  "F-D3-notty PASS" "$REPORT"
+check "UAT-8l: the cleanup verdict behind the demoted pass is recorded" \
+  "failed" "$(cat "$WORK/evid/F-D3-notty.session" 2>/dev/null || echo missing)"
+grep -qE '^F-D3-nosession FAIL rc=1(24|37) elapsed=.* detail=timeout' <<<"$REPORT" \
+  && ok "UAT-8l: a hung probe keeps its measured timeout detail" \
+  || bad "UAT-8l: the hung probe's timeout evidence was hidden: $(grep '^F-D3-nosession ' <<<"$REPORT")"
+for probe in F-D3-flag-none F-D3-flag-i F-D3-flag-t F-D3-flag-it \
+             F-D3-pty-direct F-D3-stdin-pty F-D3-stdin-null; do
+  not_contains "UAT-8l: the unconfirmed cleanup stopped $probe" \
+    "$probe " "$REPORT"
+done
+contains "UAT-8l: the cleanup-gated matrix stays UNRESOLVED" \
+  "DIAGNOSIS UNRESOLVED: the failing step is D3" "$REPORT"
+not_contains "UAT-8l: cleanup-failed evidence implicates nothing" \
+  "is implicated" "$REPORT"
+check "UAT-8l: the cleanup-gated ladder exits nonzero" "1" "$LRC"
+
+# Scenario 3: the -t probe hangs while the combined -it probe PASSES — the
+# -t hypothesis is contradicted by its own combination, so nothing may be
+# implicated (on the pre-8l code the -t rule fired on this contradiction)
+STUB_HANG_CANON=1 STUB_HANG_DFLAG='-t' STUB_HANG_SECONDS=60 run_ladder
+unset STUB_HANG_CANON STUB_HANG_DFLAG STUB_HANG_SECONDS
+grep -qE '^D3 FAIL rc=1(24|37) elapsed=.* detail=timeout hang=running' <<<"$REPORT" \
+  && ok "UAT-8l: the canonical D3 hang is observed at its container stage" \
+  || bad "UAT-8l: the canonical hang was not localized: $(grep '^D3 ' <<<"$REPORT")"
+grep -qE '^F-D3-flag-t FAIL rc=1(24|37) elapsed=.* detail=timeout' <<<"$REPORT" \
+  && ok "UAT-8l: the -t probe really hung in the contradiction scenario" \
+  || bad "UAT-8l: the -t probe did not hang"
+contains "UAT-8l: the combined -it probe passed while -t hung" \
+  "F-D3-flag-it PASS rc=0" "$REPORT"
+contains "UAT-8l: the contradictory matrix states the notty evidence as OBSERVED" \
+  "DIAG OBSERVED: F-D3-notty passed (preliminary evidence only" "$REPORT"
+contains "UAT-8l: a contradicted -t hypothesis stays UNRESOLVED" \
+  "DIAGNOSIS UNRESOLVED: the failing step is D3" "$REPORT"
+not_contains "UAT-8l RED: -t is never implicated against a passing -it" \
+  "is implicated" "$REPORT"
 
 # --- UAT-8g. the real runner chain (driver -> runner -> library -> launcher) -
 # The runner is executed as a REAL child bash with a PRIVATE HOME: the harness
