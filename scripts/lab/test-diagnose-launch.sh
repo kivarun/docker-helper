@@ -149,7 +149,8 @@ case "$1" in
     fi
     if [ -n "${STUB_HANG_BEFORE_CREATE:-}" ]; then
       # the CLI hung before it ever created the container: no cidfile, no
-      # registry entry — the hang-stage observation must say no-cidfile
+      # registry entry — the hang-stage observation stays unknown (the
+      # absence of a cidfile proves nothing about the create event)
       trap '' TERM
       sleep "${STUB_HANG_SECONDS:-300}"
       exit 0
@@ -1423,14 +1424,16 @@ not_contains "UAT-8m: the direct observation replaces UNRESOLVED" \
 not_contains "UAT-8k: a hopeless matrix implicates no flag or wrapper" \
   "is implicated" "$REPORT"
 
-# Run F: the CLI hung before creating the container -> no-cidfile, and no
-# removal is authorized by an unproven identity
+# Run F: the CLI hung before creating the container -> without any phase
+# evidence the container-creation state stays UNKNOWN (a missing cidfile is
+# never proof that no create happened), and no removal is authorized by an
+# unproven identity
 STUB_HANG_BEFORE_CREATE=1 STUB_HANG_SECONDS=60 run_ladder
 unset STUB_HANG_BEFORE_CREATE STUB_HANG_SECONDS
-grep -qE '^D0 FAIL rc=1(24|37) elapsed=.* detail=timeout hang=no-cidfile' <<<"$REPORT" \
-  && ok "UAT-8k: a CLI hang before container creation is localized (no-cidfile)" \
-  || bad "UAT-8k: the no-cidfile hang stage was not reported: $(grep '^D0 ' <<<"$REPORT")"
-check "UAT-8k: nothing needed recovery on a no-cidfile hang" \
+grep -qE '^D0 FAIL rc=1(24|37) elapsed=.* detail=timeout hang=unknown' <<<"$REPORT" \
+  && ok "UAT-8m: a canonical-step hang without a cidfile stays UNKNOWN" \
+  || bad "UAT-8m: the no-cidfile hang was not reported as unknown: $(grep '^D0 ' <<<"$REPORT")"
+check "UAT-8k: nothing needed recovery on a hang without a recorded container ID" \
   "clean" "$(cat "$WORK/evid/D0.reap")"
 if grep -qE '^rm ' "$DOCKER_REC"; then
   bad "UAT-8k RED: a removal happened without any container identity"
@@ -1479,8 +1482,8 @@ check "UAT-8k: a failed existence observation stays unknown" \
 ( export DIAG_DIR="$hs_evid" DIAG_RUNID=diagrun-hs DIAG_IMAGE="$_OC_BASE"
   : > "$hs_evid/nc.cid"
   diag_capture_hang_state NC "$hs_evid/nc.cid" )
-check "UAT-8m: an empty cidfile WITHOUT docker-invocation evidence is no-cidfile" \
-  "no-cidfile" "$(cat "$hs_evid/NC.hangstate")"
+check "UAT-8m: an empty cidfile WITHOUT phase evidence stays UNKNOWN" \
+  "unknown" "$(cat "$hs_evid/NC.hangstate")"
 ( export DIAG_DIR="$hs_evid" DIAG_RUNID=diagrun-hs DIAG_IMAGE="$_OC_BASE"
   printf '%s\n' before-docker-exec > "$hs_evid/UD.phases"
   : > "$hs_evid/UD.cid"

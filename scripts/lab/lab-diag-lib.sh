@@ -352,13 +352,15 @@ _diag_hang_container_status() { # CID -> status
 # diag_capture_hang_state NAME CIDFILE — the bounded hang-stage observation
 # (UAT-8k), recorded BEFORE any cleanup touches the container. It separates
 # the Docker CLI outcome (the timeout) from the observed container state:
-#   no-cidfile    no container ID was recorded AND this probe's phase
-#                 evidence shows the Docker CLI was never invoked: the CLI
-#                 did not get as far as container creation
-#   unknown       no container ID was recorded but this probe's phase
-#                 evidence shows the Docker CLI WAS invoked (UAT-8m): a
-#                 missing cidfile is never proof that the create event did
-#                 not happen, so the container-creation state stays unknown
+#   no-cidfile    no container ID was recorded AND the phase evidence
+#                 POSITIVELY proves the Docker CLI was never invoked (the
+#                 wrapper entered its command but never reached the docker
+#                 call)
+#   unknown       no container ID was recorded and the container-creation
+#                 state cannot be decided: either the phase evidence shows
+#                 the Docker CLI WAS invoked, or there is no phase evidence
+#                 at all (the canonical steps record no markers). A missing
+#                 cidfile is never proof that no create happened.
 #   absent        docker itself proved that no container with this full ID
 #                 exists (the decisive full-CID search)
 #   unattributed  a container exists but its identity could not be proven to
@@ -373,11 +375,15 @@ _diag_hang_container_status() { # CID -> status
 diag_capture_hang_state() { # NAME CIDFILE
   local name="$1" cidfile="$2" cid out=unknown
   if [ ! -s "$cidfile" ]; then
-    out=no-cidfile
-    # UAT-8m: this probe's own fixed phase markers ($name.phases, private
-    # evidence) decide whether the Docker CLI was invoked at all
-    if grep -qF 'before-docker-exec' "$DIAG_DIR/$name.phases" 2>/dev/null; then
-      out=unknown
+    # UAT-8m: a missing cidfile is never proof that the Docker create event
+    # did not happen. Only POSITIVE phase evidence — the wrapper entered
+    # its command and never reached the recorded docker call — proves the
+    # CLI was not invoked. Absent or empty markers (the canonical steps
+    # record none) and a recorded docker invocation stay unknown.
+    out=unknown
+    if grep -qF 'wrapper-entered' "$DIAG_DIR/$name.phases" 2>/dev/null \
+        && ! grep -qF 'before-docker-exec' "$DIAG_DIR/$name.phases" 2>/dev/null; then
+      out=no-cidfile
     fi
   else
     cid="$(tr -d '[:space:]' < "$cidfile" 2>/dev/null)"

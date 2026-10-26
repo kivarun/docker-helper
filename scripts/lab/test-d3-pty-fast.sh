@@ -12,8 +12,10 @@
 #      probe, the direct no-flag matrix probe and the unknown hang class;
 #   2. _diag_phase_prefix emits exactly the fixed markers (and quotes the
 #      private-evidence path safely);
-#   3. a recorded docker invocation without a cidfile stays UNKNOWN, while
-#      wrapper-entry alone (or no phase evidence) stays no-cidfile;
+#   3. a recorded docker invocation without a cidfile stays UNKNOWN, and so
+#      does missing/empty phase evidence (the canonical steps record no
+#      markers) — only wrapper-entry WITHOUT the docker marker positively
+#      proves the CLI was never invoked (no-cidfile);
 #   4. the no-docker smoke probe passes through the real script(1) wrapper,
 #      writes only its own marker and creates nothing (no leak);
 #   5. the diagnosis separates: the wrapper itself hangs (rule A), docker
@@ -202,8 +204,10 @@ check "a recorded docker invocation without a cidfile stays UNKNOWN" \
   "unknown" "$(hang_case UD 'before-docker-exec')"
 check "wrapper entry alone (docker never invoked) stays no-cidfile" \
   "no-cidfile" "$(hang_case WE 'wrapper-entered')"
-check "no phase evidence at all stays no-cidfile" \
-  "no-cidfile" "$(hang_case NP '')"
+check "no phase evidence at all stays UNKNOWN (absence proves nothing)" \
+  "unknown" "$(hang_case NP '')"
+check "a canonical-like step (no markers ever) with no cidfile stays UNKNOWN" \
+  "unknown" "$(hang_case D3 '')"
 
 # --- 4. the no-docker smoke probe through the REAL script(1) wrapper --------
 export DIAG_DIR="$WORK/ev-smoke"; mkdir -p "$DIAG_DIR"
@@ -292,7 +296,7 @@ WS="$WORK/ws"; mkdir -p "$WS"; export WS
 cd "$WS" || exit 1
 export DIAG_DIR="$WORK/ev-probe"; mkdir -p "$DIAG_DIR"
 # the ladder owns these resets; the direct probe calls need them too
-DIAG_D3_INIT_COPY=""
+export DIAG_D3_INIT_COPY=""
 DIAG_D3_CLEANUP_FAILED=0
 
 _diag_d3_matrix_probe F-D3-flag-none "$WS" none script inherit
