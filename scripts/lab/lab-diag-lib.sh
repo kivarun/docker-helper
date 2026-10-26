@@ -157,14 +157,23 @@ diag_verify_launcher_loaded() { # -> 0 ok | 1 loader-drift (reason on stderr)
 diag_exec() { # NAME BOUND CMD...
   local name="$1" bound="$2"
   shift 2
-  local t0=$SECONDS rc reap="n/a"
+  local t0=$SECONDS rc reap="n/a" elapsed
+  # UAT-8n: streaming, safe progress. IDs are internal fixed labels only:
+  # never emit argv, environment, file paths, stderr or a caller-supplied
+  # arbitrary name. This is execution progress, NOT a final PASS verdict;
+  # marker checks and mandatory Session cleanup happen after diag_exec.
+  local progress_id="$name" progress_limit="bounded"
+  [[ "$progress_id" =~ ^(D[0-4]|F-D[0-4]-[a-z0-9-]+)$ ]] || progress_id="unknown"
+  [[ "$bound" =~ ^[0-9]+$ ]] && progress_limit="${bound}s"
+  printf '[diag] START %s limit=%s\n' "$progress_id" "$progress_limit" >&2
   if timeout --kill-after="$DIAG_KILL_AFTER" "$bound" "$@" \
       >"$DIAG_DIR/$name.out" 2>"$DIAG_DIR/$name.err"; then
     rc=0
   else
     rc=$?
   fi
-  printf '%s\n' "$((SECONDS - t0))" > "$DIAG_DIR/$name.elapsed"
+  elapsed="$((SECONDS - t0))"
+  printf '%s\n' "$elapsed" > "$DIAG_DIR/$name.elapsed"
   printf '%s\n' "$rc" > "$DIAG_DIR/$name.rc"
   case "$rc" in
     124|137) printf '%s\n' timeout > "$DIAG_DIR/$name.layer" ;;
@@ -172,6 +181,8 @@ diag_exec() { # NAME BOUND CMD...
     *) printf '%s\n' container > "$DIAG_DIR/$name.layer" ;;
   esac
   if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
+    printf '[diag] RECOVER %s rc=%s elapsed=%ss\n' \
+      "$progress_id" "$rc" "$elapsed" >&2
     # the hang-stage observation (UAT-8k) is recorded BEFORE any cleanup
     # touches the container: it is the bounded evidence that separates the
     # Docker CLI outcome (the timeout) from the observed container state
@@ -179,6 +190,10 @@ diag_exec() { # NAME BOUND CMD...
     reap="$(diag_reap_owned_container "${DIAG_CONTAINER_NAME:-}" "${DIAG_CONTAINER_CID:-}")"
   fi
   printf '%s\n' "$reap" > "$DIAG_DIR/$name.reap"
+  # The reap value is a fixed category; sanitize anyway before logging it.
+  case "$reap" in n/a|clean|ok|failed|refused-unowned) : ;; *) reap=unknown ;; esac
+  printf '[diag] END %s rc=%s elapsed=%ss reap=%s\n' \
+    "$progress_id" "$rc" "$elapsed" "$reap" >&2
   return "$rc"
 }
 
