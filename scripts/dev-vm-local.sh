@@ -373,6 +373,8 @@ _agent_shell_cleanup() {
 # variable is an explicit host-side error; control characters are refused
 # because the pty line discipline would mangle them in transit.
 cmd_agent_shell() {
+  # The host may invoke this script under bash -x: do not trace credentials.
+  { set +x; } 2>/dev/null
   [ -n "${LLM_SERVER:-}" ] \
     || fail "LLM_SERVER is not exported on the host: export it before agent-shell (it is forwarded through the SSH session only and never stored in the VM)"
   [ -n "${LLM_KEY:-}" ] \
@@ -389,6 +391,9 @@ cmd_agent_shell() {
   local _prev_exit_trap
   _prev_exit_trap="$(trap -p EXIT)"
   trap '_agent_shell_cleanup; eval "${_AGENT_PREV_EXIT_TRAP:-}"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
   _AGENT_PREV_EXIT_TRAP="$_prev_exit_trap"
   mkfifo "${_AGENT_SHELL_DIR}/sig" "${_AGENT_SHELL_DIR}/ready" \
     || fail "agent-shell: cannot create the synchronization fifos"
@@ -410,6 +415,108 @@ cmd_agent_shell() {
       _tries=$((_tries + 1))
     done
     while IFS= read -r _sig; do
+      # ssh -tt emits CRLF: Bash read removes LF but keeps the trailing CR.
+      _sig="${_sig%
+        READY) printf 'go\n' >&5 ;;
+        QUIT) break ;;
+      esac
+    done <"${_AGENT_SHELL_DIR}/sig"
+    local _left_pid
+    _left_pid="$(cat "${_AGENT_SHELL_DIR}/left.pid" 2>/dev/null)" || _left_pid=""
+    [ -n "${_left_pid}" ] && kill "${_left_pid}" 2>/dev/null
+    exit 0
+  ) &
+  _AGENT_WATCH_PID=$!
+  # -tt must reach ssh as an OPTION (anything after the host is the remote
+  # command), so it is appended to VM_SSH_OPTS for this session only.
+  VM_SSH_OPTS+=("-tt")
+  # pipefail is relaxed for this pipeline only: at QUIT the watcher SIGTERMs
+  # the left member (its cat would otherwise never see EOF), and that
+  # expected death must not shadow the session's own exit status.
+  set +o pipefail
+  {
+    printf '%s\n' "$BASHPID" >"${_AGENT_SHELL_DIR}/left.pid"
+    exec 4<>"${_AGENT_SHELL_DIR}/ready"
+    IFS= read -r _agent_go <&4
+    printf 'LLM_SERVER=%s\n' "$LLM_SERVER"
+    printf 'LLM_KEY=%s\n' "$LLM_KEY"
+    exec 4<&-
+    cat
+  } | vm_ssh "exec sudo -iu agent bash -c $(printf '%q' "$(_agent_shell_bootstrap 'bash -l')")" \
+    > >(tee "${_AGENT_SHELL_DIR}/sig") || rc=$?
+  set -o pipefail
+  VM_SSH_OPTS=("${_saved_opts[@]}")
+  _agent_shell_cleanup
+  eval "${_AGENT_PREV_EXIT_TRAP:-}" 2>/dev/null || true
+  _AGENT_PREV_EXIT_TRAP=""
+  _AGENT_STTY_SAVE=""
+  return "$rc"
+}
+
+cmd_destroy() {
+  local assume_yes=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -y|--yes) assume_yes=1; shift ;;
+      *) fail "destroy: unknown argument '$1' (use -y/--yes)" ;;
+    esac
+  done
+  vm_attach
+  acquire_lock
+  if [ ! -f "$VM_WORKDIR/disk.qcow2" ] && [ ! -f "$VM_WORKDIR/qemu.pid" ]; then
+    log "no VM at $VM_WORKDIR (nothing to destroy)"
+    return 0
+  fi
+  if [ "$assume_yes" != 1 ]; then
+    printf '%s destroy VM at %s (disk, base image, keys)? [y/N] ' "$PREFIX" "$VM_WORKDIR"
+    local ans=""
+    read -r ans || true
+    case "$ans" in y|Y|yes|YES) ;; *) log "aborted"; return 0 ;; esac
+  fi
+  if vm_running; then
+    log "stopping running VM before destroy"
+    stop_vm
+  fi
+  rm -rf "$VM_WORKDIR"
+  log "VM destroyed ($VM_WORKDIR removed)"
+}
+
+usage() {
+  cat <<EOF
+$PREFIX <operation>
+
+  create            build a fresh persistent VM, prove enforcing SELinux,
+                    then adopt the isolated network posture and self-check it
+  start             boot the existing VM disk (no rebuild)
+  stop              gracefully power off the guest
+  status            report lifecycle state
+  ssh [cmd...]      interactive SSH, or run a remote command
+  agent-shell       interactive shell as the agent account with LLM_SERVER
+                    and LLM_KEY forwarded from the host environment (they
+                    travel only through the SSH session; nothing is stored
+                    in the VM; both must be exported on the host)
+  set-ipv6-disable  set ipv6.disable=1 in the guest boot config (fail-closed)
+  destroy [-y]      remove the VM workdir (explicit confirmation)
+
+Env: DEV_VM_DIR, DEV_VM_SSH_PORT, DEV_VM_ACCEL, DEV_VM_NET_ISOLATED
+EOF
+}
+
+op="${1:-}"
+[ "$#" -gt 0 ] && shift || true
+case "$op" in
+  create)  cmd_create ;;
+  start)   cmd_start ;;
+  stop)    cmd_stop ;;
+  status)  cmd_status ;;
+  ssh)     cmd_ssh "$@" ;;
+  agent-shell) cmd_agent_shell ;;
+  set-ipv6-disable) cmd_set_ipv6_disable ;;
+  destroy) cmd_destroy "$@" ;;
+  ""|-h|--help|help) usage ;;
+  *) fail "unknown operation '$op' (create|start|stop|status|ssh|set-ipv6-disable|destroy)" ;;
+esac
+\r'}"
       case "$_sig" in
         READY) printf 'go\n' >&5 ;;
         QUIT) break ;;
