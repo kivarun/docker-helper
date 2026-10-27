@@ -373,6 +373,8 @@ _agent_shell_cleanup() {
 # variable is an explicit host-side error; control characters are refused
 # because the pty line discipline would mangle them in transit.
 cmd_agent_shell() {
+  # Avoid tracing the forwarded key even when called via bash -x.
+  { set +x; } 2>/dev/null
   [ -n "${LLM_SERVER:-}" ] \
     || fail "LLM_SERVER is not exported on the host: export it before agent-shell (it is forwarded through the SSH session only and never stored in the VM)"
   [ -n "${LLM_KEY:-}" ] \
@@ -389,6 +391,9 @@ cmd_agent_shell() {
   local _prev_exit_trap
   _prev_exit_trap="$(trap -p EXIT)"
   trap '_agent_shell_cleanup; eval "${_AGENT_PREV_EXIT_TRAP:-}"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
   _AGENT_PREV_EXIT_TRAP="$_prev_exit_trap"
   mkfifo "${_AGENT_SHELL_DIR}/sig" "${_AGENT_SHELL_DIR}/ready" \
     || fail "agent-shell: cannot create the synchronization fifos"
