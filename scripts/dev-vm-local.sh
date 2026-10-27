@@ -410,6 +410,8 @@ cmd_agent_shell() {
       _tries=$((_tries + 1))
     done
     while IFS= read -r _sig; do
+      # SSH PTY emits CRLF; normalize the trailing control character.
+      _sig="${_sig%[[:cntrl:]]}"
       case "$_sig" in
         READY) printf 'go\n' >&5 ;;
         QUIT) break ;;
