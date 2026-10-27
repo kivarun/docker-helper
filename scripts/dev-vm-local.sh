@@ -138,14 +138,14 @@ stop_vm() {
   log "requesting guest poweroff (qemu pid $pid)"
   vm_ssh "sudo systemctl poweroff" >/dev/null 2>&1 || true
   local i
-  for i in $(seq 1 60); do
+  for ((i=1; i<=60; i++)); do
     kill -0 "$pid" 2>/dev/null || break
     sleep 2
   done
   if kill -0 "$pid" 2>/dev/null; then
     log "guest did not power off in time; terminating qemu"
     kill "$pid" 2>/dev/null || true
-    for i in $(seq 1 15); do
+    for ((i=1; i<=15; i++)); do
       kill -0 "$pid" 2>/dev/null || break
       sleep 1
     done
