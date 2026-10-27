@@ -301,6 +301,18 @@ stty -echo 2>/dev/null || { printf 'cannot disable the pty echo\n' >&2; exit 9; 
 printf 'READY\n'
 IFS= read -r _llm_line1 || { printf 'the forwarded LLM variable stream ended before LLM_SERVER\n' >&2; exit 9; }
 IFS= read -r _llm_line2 || { printf 'the forwarded LLM variable stream ended before LLM_KEY\n' >&2; exit 9; }
+IFS= read -r _ws_line || { printf 'the forwarded terminal size is missing\n' >&2; exit 9; }
+case "$_ws_line" in
+  WINSIZE=*) _ws="${_ws_line#WINSIZE=}" ;;
+  *) printf 'invalid terminal size record\n' >&2; exit 9 ;;
+esac
+IFS=' ' read -r _ws_rows _ws_cols _ws_extra <<< "$_ws"
+if ! [[ "$_ws_rows" =~ ^[0-9]{1,4}$ && "$_ws_cols" =~ ^[0-9]{1,4}$ ]] \
+    || [ "${_ws_extra:-}" != '' ] || [ "$_ws_rows" -eq 0 ] || [ "$_ws_cols" -eq 0 ]; then
+  printf 'invalid forwarded terminal dimensions\n' >&2
+  exit 9
+fi
+stty rows "$_ws_rows" cols "$_ws_cols" 2>/dev/null || { printf 'cannot set guest terminal size\n' >&2; exit 9; }
 stty echo 2>/dev/null || { printf 'cannot restore the pty echo\n' >&2; exit 9; }
 case "$_llm_line1" in
   LLM_SERVER=*) LLM_SERVER="${_llm_line1#LLM_SERVER=}" ;;
@@ -315,7 +327,7 @@ case "${LLM_SERVER}${LLM_KEY}" in
 esac
 [ -n "$LLM_SERVER" ] && [ -n "$LLM_KEY" ] \
   || { printf 'empty LLM_SERVER/LLM_KEY refused\n' >&2; exit 9; }
-unset _llm_line1 _llm_line2
+unset _llm_line1 _llm_line2 _ws_line _ws _ws_rows _ws_cols _ws_extra
 export LLM_SERVER LLM_KEY
 cd "$HOME" || { printf 'cannot enter agent home\n' >&2; exit 9; }
 BOOT
@@ -385,6 +397,15 @@ cmd_agent_shell() {
   fi
   vm_attach
   vm_running || fail "VM is not running (run 'start')"
+  # SSH reads terminal dimensions from stdin, but this session uses a pipe
+  # for secret delivery. Obtain the real size before switching to raw mode.
+  [ -t 0 ] || fail "agent-shell requires an interactive terminal"
+  local _agent_rows _agent_cols
+  read -r _agent_rows _agent_cols <<< "$(stty size </dev/tty)"
+  if ! [[ "$_agent_rows" =~ ^[0-9]{1,4}$ && "$_agent_cols" =~ ^[0-9]{1,4}$ ]] \
+      || [ "$_agent_rows" -eq 0 ] || [ "$_agent_cols" -eq 0 ]; then
+    fail "agent-shell: could not read valid host terminal dimensions"
+  fi
   _AGENT_SHELL_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agent-shell.XXXXXX")" \
     || fail "agent-shell: cannot create the temporary synchronization directory"
   _AGENT_WATCH_PID=""
@@ -448,6 +469,7 @@ cmd_agent_shell() {
     IFS= read -r _agent_go <&4
     printf 'LLM_SERVER=%s\n' "$LLM_SERVER"
     printf 'LLM_KEY=%s\n' "$LLM_KEY"
+    printf 'WINSIZE=%s %s\n' "$_agent_rows" "$_agent_cols"
     exec 4<&-
     cat
   } | vm_ssh "exec sudo -u agent -H bash -c \"\$(printf %s '$_agent_bootstrap_b64' | base64 -d)\"" \
