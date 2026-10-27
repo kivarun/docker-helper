@@ -49,7 +49,14 @@
 #      -it control (F-D3-pty-full: same docker argv/payload/composition as
 #      F-D3-pty-direct, but the container sees a real pty on fd 0, 1 AND 2)
 #      always runs as the decisive stdio comparison; no diagnosis rule
-#      blames docker/-it from the control alone.
+#      blames docker/-it from the control alone;
+#  13. (UAT-8r) the canonical step wraps the child bash in the control-
+#      verified full-PTY construct (script(1) with its own stdin closed —
+#      the transcript stays in the private evidence); the classifier names
+#      the terminal-plumbing dependence when the control passed and keeps
+#      the -it-combination verdict only when the control hung or its
+#      cleanup is unconfirmed; the stdio category check never assumes the
+#      caller's stderr mode and tests explicit redirections.
 #
 # Usage: scripts/lab/test-d3-pty-fast.sh   (runs in seconds)
 
@@ -271,6 +278,7 @@ base_fixtures() { # every docker probe hung with confirmed cleanup; smoke ok
   mf F-D3-flag-t timeout clean
   mf F-D3-flag-it timeout clean
   mf F-D3-pty-direct timeout clean
+  mf F-D3-pty-full timeout clean
   mf F-D3-stdin-pty timeout clean
   mf F-D3-stdin-null timeout clean
 }
@@ -303,6 +311,44 @@ contains "8o: the unusable wrapper stays visible as OBSERVED evidence" \
   "DIAG OBSERVED: F-D3-script-smoke timed out" "$out"
 not_contains "8o: no wrapper verdict replaces the measured direct evidence" \
   "DIAGNOSIS: the D3 nested script(1) wrapper" "$out"
+
+# UAT-8r rule E: the full-PTY control PASSED while the identical
+# redirected-stream -it probe hung -> the terminal plumbing is named, the
+# docker -it combination is NOT declared broken
+rm -rf "$DIAG_DIR"; mkdir -p "$DIAG_DIR"; base_fixtures
+mf F-D3-pty-full ok clean
+mf F-D3-direct-none ok clean
+mf F-D3-flag-none ok clean
+out="$(diag_case)"
+contains "8r: a passed full-PTY control names the terminal plumbing" \
+  "DIAGNOSIS: the D3 docker -it failure follows the terminal plumbing, not the -it combination itself" "$out"
+contains "8r: the plumbing verdict cites the control comparison" \
+  "F-D3-pty-full passed where F-D3-pty-direct hung; controlled comparison" "$out"
+not_contains "8r RED: no unconditional -it-broken verdict while the control passed" \
+  "DIAGNOSIS: the D3 docker -it flag combination is implicated" "$out"
+
+# UAT-8r model check: the control FAILED (timeout) -> the -it combination
+# IS implicated even under a full pty (D2 unchanged)
+rm -rf "$DIAG_DIR"; mkdir -p "$DIAG_DIR"; base_fixtures
+mf F-D3-flag-none ok clean
+mf F-D3-direct-none ok clean
+mf F-D3-direct-t ok clean
+mf F-D3-stdin-pty ok clean
+out="$(diag_case)"
+contains "8r: with a hung full-PTY control the -it combination stays implicated" \
+  "DIAGNOSIS: the D3 docker -it flag combination is implicated (F-D3-pty-direct hung where the direct -t, -i and no-flag probes passed; controlled comparison)" "$out"
+
+# UAT-8r model check: the control's cleanup UNCONFIRMED -> its evidence is
+# void; the unchanged D2 path decides on the direct trio
+rm -rf "$DIAG_DIR"; mkdir -p "$DIAG_DIR"; base_fixtures
+mf F-D3-flag-none ok clean
+mf F-D3-direct-none ok clean
+mf F-D3-direct-t ok clean
+mf F-D3-stdin-pty ok clean
+mf F-D3-pty-full ok failed
+out="$(diag_case)"
+contains "8r: an unconfirmed-control run falls back to the unchanged D2 path" \
+  "DIAGNOSIS: the D3 docker -it flag combination is implicated (F-D3-pty-direct hung where the direct -t, -i and no-flag probes passed; controlled comparison)" "$out"
 
 # UAT-8p rule D2: direct -t, -i and no-flag all pass while direct -it hangs
 # -> the -it COMBINATION is implicated, never called single-variable. The
@@ -489,14 +535,19 @@ check "the gate marks the run for the stop" "1" "${DIAG_D3_CLEANUP_FAILED:-0}"
 # --- 7. UAT-8o: the canonical step without the nested script(1) wrapper -----
 lib_canon="$(sed -n '/^_diag_canonical_step()/,/^}/p' "$LIB")"
 case "$lib_canon" in
-  *'script -qec "bash'*)
-    bad "8o RED: the canonical step still nests a script(1) wrapper" ;;
-  *) ok "8o: the canonical step adds no nested script(1) wrapper" ;;
+  *'script -qec "bash $childfile" /dev/null </dev/null'*)
+    ok "8r: the canonical step uses the control-verified full-PTY wrapper (its own stdin closed)" ;;
+  *) bad "8r: the canonical step lacks the closed-stdin full-PTY wrapper" ;;
 esac
 case "$lib_canon" in
-  *'bash "$childfile"'*)
-    ok "8o: the canonical step hands over to the regular child bash" ;;
-  *) bad "8o: the canonical step does not run the child bash directly" ;;
+  *'"bash $childfile" /dev/null || true'*)
+    bad "8o RED: the canonical wrapper inherited the never-EOF stdin (the UAT-8n hang)" ;;
+  *) ok "8o: the canonical wrapper's own stdin stays closed (no drain hang)" ;;
+esac
+case "$lib_canon" in
+  *'bash $childfile'*)
+    ok "8o: the canonical step still hands over to the regular child bash (as the wrapper's command)" ;;
+  *) bad "8o: the canonical step lost the child bash handover" ;;
 esac
 case "$lib_canon" in
   *tty-required*) ok "8o: the canonical step carries an explicit no-TTY FAIL" ;;
@@ -620,8 +671,10 @@ done
 # --- 8. UAT-8q: the runner's stdio mode and the full-PTY -it control --------
 check "8q: fd 0 (stdin /dev/null here) is recorded as not-a-tty" \
   "not-a-tty" "$(_diag_stdio_category 0)"
-check "8q: the category helper only knows fixed categories" \
-  "not-a-tty not-a-tty" "$(_diag_stdio_category 0) $(_diag_stdio_category 2)"
+check "8r: fd 2 under an EXPLICIT non-tty redirection is not-a-tty (never assumed)" \
+  "not-a-tty" "$(_diag_stdio_category 2 2>/dev/null)"
+check "8r: fd 2 under an EXPLICIT pipe redirection is not-a-tty" \
+  "not-a-tty" "$(_diag_stdio_category 2 2>&1 | cat)"
 pty_smoke="$(timeout 10 script -qec 'test -t 0 && test -t 1 && test -t 2 && echo PTYFULL' /dev/null </dev/null 2>/dev/null | tr -d '\r')"
 check "8q: PTY smoke — under script(1) with its own stdin closed, fd 0, 1 AND 2 of the child are a real tty" \
   "PTYFULL" "$pty_smoke"
@@ -650,10 +703,12 @@ else
   bad "8q RED: the full-PTY control is gated behind the wrapper verdict"
 fi
 diag_body="$(sed -n '/^_diag_d3_matrix_diagnosis()/,/^}/p' "$LIB")"
-case "$diag_body" in
-  *'pty-full'*) bad "8q RED: a diagnosis rule blames docker/-it from the control alone" ;;
-  *) ok "8q: no diagnosis rule names the control probe; no premature blame" ;;
-esac
+printf '%s\n' "$diag_body" | grep -qF 'F-D3-pty-full passed where F-D3-pty-direct hung' \
+  && ok "8r: the diagnosis owns the control comparison (rule E)" \
+  || bad "8r: the control comparison is missing from the diagnosis"
+printf '%s\n' "$diag_body" | grep -qF '"$pf" != passed' \
+  && ok "8r: the -it-combination verdict is suppressed while the control passed" \
+  || bad "8r RED: the -it verdict ignores the passed control"
 
 # the real control probe on the stubs: identical docker argv to pty-direct,
 # a full pty for the container, phases, cleanup, no leaks

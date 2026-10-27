@@ -755,16 +755,19 @@ diag_cleanup_ok_reap() {
 # path (oc-probe for exec, oc for the real entrypoint) under diag_exec, then
 # recover exactly this run's leaked resources by diagnostic provenance.
 #
-# PTY contract (UAT-8e, revised UAT-8o): the canonical launcher uses
-# `docker run -it`, so the child MUST hold a real terminal. The runner
-# already executes the diagnostic inside its own script(1) pty, and the
-# canonical step inherits that pty — the step adds NO second nested
-# script(1) wrapper (the nested wrapper proved unusable in UAT-8n and is
-# kept only as the single bounded smoke probe). Without a real client TTY
-# the step is an explicit FAIL (tty-required): the -it is never dropped to
-# make the step pass, and the probe payload itself still proves the
-# in-container TTY with `test -t 0`. The canonical launcher configuration is
-# never altered to satisfy a test.
+# PTY contract (UAT-8e, revised UAT-8o, UAT-8r): the canonical launcher uses
+# `docker run -it`, so the child MUST hold a real terminal on ALL standard
+# streams. UAT-8q proved the construct: `script(1)` with its OWN stdin
+# closed (`</dev/null`) gives the child a full pty (fd 0, 1 and 2) and
+# cannot hang draining an inherited never-EOF pty — F-D3-pty-full passed
+# under it in the real VM while the redirected-stream -it probe hung. The
+# canonical step therefore wraps the child bash in exactly that verified
+# construct; the wrapper's transcript stays in the private evidence files
+# (diag_exec redirection), never in the public progress stream. Without a
+# real client TTY in the diagnostic shell itself the step still fails closed
+# (tty-required): the -it is never dropped to make the step pass, and the
+# probe payload still proves the in-container TTY with `test -t 0`. The
+# canonical launcher configuration is never altered to satisfy a test.
 #
 # The diagnostic provenance (name + run-identity label + cidfile) is
 # requested through the launcher's explicitly-enabled diagnostic knobs; the
@@ -802,7 +805,8 @@ _diag_canonical_step() { # ID BOUND PAYLOAD MODE WS -> 0 pass|1 fail
     OPENCODE_DIAGNOSTIC_NAME="$name" \
     OPENCODE_DIAGNOSTIC_CIDFILE="$cidfile" \
     DIAG_CONTAINER_NAME="$name" DIAG_CONTAINER_CID="$cidfile" \
-    diag_exec "$id" "$bound" bash "$childfile" || true
+    diag_exec "$id" "$bound" \
+    script -qec "bash $childfile" /dev/null </dev/null || true
   local rc
   rc="$(cat "$DIAG_DIR/$id.rc" 2>/dev/null || echo 1)"
   local verdict
@@ -1590,11 +1594,17 @@ _diag_d3_legacy_pass() { # -> "<count> <name>"
 #       no-flag probes passed -> the -it flag COMBINATION is implicated.
 #       The no-flag/-it difference is a TWO-flag difference and is never
 #       called a single-variable comparison; a missing, refused or
-#       cleanup-unconfirmed -t evidence names nothing
+#       cleanup-unconfirmed -t evidence names nothing. (UAT-8r) when the
+#       full-PTY control PASSED, this verdict is suppressed: the failure
+#       follows the terminal plumbing, not the -it combination
+#   E.  (UAT-8r) the full-PTY -it control PASSED (confirmed cleanup) while
+#       the identical redirected-stream -it probe hung -> the -it failure
+#       follows the TERMINAL PLUMBING of the diagnostic runner, not the
+#       docker -it combination itself and not solely one redirected stream
 # Contradictory observations name nothing: an empty result means the matrix
 # did not prove a single cause.
 _diag_d3_matrix_diagnosis() { # -> verdict text on stdout; rc 1 = unresolved
-  local none i t it pd sp sn dn dt smoke detail legacy lcount
+  local none i t it pd sp sn dn dt pf smoke detail legacy lcount
   none="$(_diag_mstate F-D3-flag-none)"
   i="$(_diag_mstate F-D3-flag-i)"
   t="$(_diag_mstate F-D3-flag-t)"
@@ -1604,6 +1614,7 @@ _diag_d3_matrix_diagnosis() { # -> verdict text on stdout; rc 1 = unresolved
   sn="$(_diag_mstate F-D3-stdin-null)"
   dn="$(_diag_mstate F-D3-direct-none)"
   dt="$(_diag_mstate F-D3-direct-t)"
+  pf="$(_diag_mstate F-D3-pty-full)"
   legacy="$(_diag_d3_legacy_pass)"
   lcount="${legacy%% *}"
   # the smoke probe creates nothing, so it has no cleanup verdict to gate
@@ -1660,6 +1671,13 @@ _diag_d3_matrix_diagnosis() { # -> verdict text on stdout; rc 1 = unresolved
     printf 'docker hangs even when invoked directly without the nested script wrapper (F-D3-direct-none hung; the wrapper is excluded as the cause)'
     return 0
   fi
+  # UAT-8r rule E: with the control comparison available and PASSED, the
+  # -it failure is a terminal-plumbing dependence of the diagnostic runner,
+  # never an unconditional "docker -it is broken" verdict
+  if [ "$lcount" = 0 ] && [ "$pf" = passed ] && [ "$pd" = hung ]; then
+    printf 'the D3 docker -it failure follows the terminal plumbing, not the -it combination itself: the identical launch passes with a full pty on all standard streams and hangs when the diagnostic runs it with redirected standard streams (F-D3-pty-full passed where F-D3-pty-direct hung; controlled comparison)'
+    return 0
+  fi
   # UAT-8p rule D1 (tightened 8p1): the single-variable -t comparison among
   # the DIRECT (wrapper-free) probes. The direct -it probe must be HUNG
   # with confirmed cleanup: a missing, refused or cleanup-unconfirmed -it
@@ -1674,9 +1692,10 @@ _diag_d3_matrix_diagnosis() { # -> verdict text on stdout; rc 1 = unresolved
   # UAT-8p rule D2: the -it combination named among the DIRECT probes; the
   # no-flag/-it difference is a TWO-flag difference, so this is a controlled
   # combination comparison, never a single-variable one; without measured
-  # (and cleanup-confirmed) direct -t evidence it names nothing
+  # (and cleanup-confirmed) direct -t evidence it names nothing. UAT-8r:
+  # suppressed when the full-PTY control passed (rule E decides instead)
   if [ "$lcount" = 0 ] && [ "$pd" = hung ] && [ "$dn" = passed ] \
-      && [ "$dt" = passed ] && [ "$sp" = passed ]; then
+      && [ "$dt" = passed ] && [ "$sp" = passed ] && [ "$pf" != passed ]; then
     printf 'the D3 docker -it flag combination is implicated (F-D3-pty-direct hung where the direct -t, -i and no-flag probes passed; controlled comparison)'
     return 0
   fi
