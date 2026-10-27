@@ -927,6 +927,17 @@ _diag_classify_step_failure() { # ID ALLPASS_VAR FIRSTFAIL_VAR CLEANUPFAIL_VAR
   return 0
 }
 
+# _diag_stdio_category FD — the fixed isatty category of one standard
+# stream (UAT-8q): tty | not-a-tty. Never paths, never raw fd data.
+_diag_stdio_category() { # FD -> tty | not-a-tty
+  if [ -t "$1" ]; then
+    printf 'tty'
+  else
+    printf 'not-a-tty'
+  fi
+  return 0
+}
+
 # diag_run_ladder IMAGE WS RUNID -> the compact report on stdout; rc 0 = all
 # PASS. The ladder stops at the first FAIL (downstream steps NOT_RUN), runs
 # bounded factor probes on the failing step, and names the implicated factor
@@ -945,6 +956,14 @@ diag_run_ladder() { # IMAGE WS RUNID
   DIAG_D3_INIT_COPY=""
   DIAG_D3_MATRIX_RAN=0
   DIAG_D3_CLEANUP_FAILED=0
+  # UAT-8q: the runner's standard-stream mode is diagnostic evidence — the
+  # canonical -it launches depend on which of fd 0/1/2 are real TTYs. The
+  # record holds fixed categories only (never paths or raw fd data) and is
+  # reported once per run.
+  printf 'in=%s out=%s err=%s\n' \
+    "$(_diag_stdio_category 0)" \
+    "$(_diag_stdio_category 1)" \
+    "$(_diag_stdio_category 2)" > "$DIAG_DIR/stdio"
   local -a argv=()
 
   # --- D0: the minimal runtime + SELinux posture ---------------------------
@@ -1109,6 +1128,9 @@ diag_run_ladder() { # IMAGE WS RUNID
 
   # --- the compact report ---------------------------------------------------
   diag_report_lines D0 D1 D2 D3 D4
+  # the runner's standard-stream mode (UAT-8q): fixed isatty categories
+  printf 'STDIO %s\n' \
+    "$(cat "$DIAG_DIR/stdio" 2>/dev/null || echo 'in=unknown out=unknown err=unknown')"
   # the cleanup status of the owned diagnostic resources (always evidence)
   for id in D3 D4; do
     [ -f "$DIAG_DIR/$id.session" ] || continue
@@ -1123,6 +1145,7 @@ diag_run_ladder() { # IMAGE WS RUNID
             F-D3-flag-none F-D3-direct-none F-D3-direct-t F-D3-flag-i \
             F-D3-flag-t \
             F-D3-flag-it \
+            F-D3-pty-full \
             F-D3-pty-direct F-D3-stdin-pty F-D3-stdin-null; do
     _diag_report_factor "$id"
   done
@@ -1460,6 +1483,13 @@ _diag_d3_matrix() { # WS
   local ws="$1"
   DIAG_D3_MATRIX_RAN=1
   [ "${DIAG_D3_CLEANUP_FAILED:-0}" = 0 ] || return 0
+  # UAT-8q: the full-PTY -it control runs ALWAYS, whatever the smoke said.
+  # Its script(1) wrapper closes the WRAPPER's own stdin (/dev/null), so the
+  # child container sees a real pty on fd 0, 1 AND 2 while the wrapper
+  # cannot hang draining an inherited never-EOF pty. It is the decisive
+  # comparison against F-D3-pty-direct (identical docker argv, payload,
+  # composition and cleanup; only the standard-stream mode differs).
+  _diag_d3_matrix_probe F-D3-pty-full "$ws" -it script null || return 0
   if _diag_d3_wrapper_unusable; then
     # UAT-8o: the smoke proved the nested wrapper unusable — only the
     # wrapper-free direct probes still carry evidence

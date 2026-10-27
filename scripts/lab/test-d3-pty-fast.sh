@@ -43,7 +43,13 @@
 #      the -it combination (single-variable -t attribution, combination
 #      attribution for -it, UNRESOLVED on missing/unconfirmed/contradictory
 #      evidence), and the two-flag no-flag/-it difference is never called a
-#      single-variable comparison.
+#      single-variable comparison;
+#  12. (UAT-8q) the diagnostic records its standard-stream mode as fixed
+#      isatty categories (in/out/err, no paths), and one bounded full-PTY
+#      -it control (F-D3-pty-full: same docker argv/payload/composition as
+#      F-D3-pty-direct, but the container sees a real pty on fd 0, 1 AND 2)
+#      always runs as the decisive stdio comparison; no diagnosis rule
+#      blames docker/-it from the control alone.
 #
 # Usage: scripts/lab/test-d3-pty-fast.sh   (runs in seconds)
 
@@ -466,9 +472,10 @@ rm -rf "$DIAG_DIR"; mkdir -p "$DIAG_DIR"
 DIAG_D3_CLEANUP_FAILED=0
 DOCKER_RM_FAIL=1 _diag_d3_matrix "$WS"
 check "a failed container cleanup demotes the docker pass (cleanup-failed)" \
-  "cleanup-failed" "$(cat "$DIAG_DIR/F-D3-flag-none.detail")"
-for probe in F-D3-direct-none F-D3-flag-i F-D3-flag-t F-D3-flag-it \
-             F-D3-pty-direct F-D3-stdin-pty F-D3-stdin-null; do
+  "cleanup-failed" "$(cat "$DIAG_DIR/F-D3-pty-full.detail" 2>/dev/null || echo missing)"
+for probe in F-D3-flag-none F-D3-direct-none F-D3-direct-t F-D3-flag-i \
+             F-D3-flag-t F-D3-flag-it F-D3-pty-direct F-D3-stdin-pty \
+             F-D3-stdin-null; do
   if [ -f "$DIAG_DIR/$probe.detail" ]; then
     bad "RED: the matrix continued after the unconfirmed cleanup ($probe)"
   else
@@ -609,6 +616,90 @@ done
   || ok "8o: the direct-only matrix leaks no Session"
 [ -s "$DOCKER_STATE" ] && bad "8o RED: a container leaked in the direct-only matrix" \
   || ok "8o: the direct-only matrix leaks no container"
+
+# --- 8. UAT-8q: the runner's stdio mode and the full-PTY -it control --------
+check "8q: fd 0 (stdin /dev/null here) is recorded as not-a-tty" \
+  "not-a-tty" "$(_diag_stdio_category 0)"
+check "8q: the category helper only knows fixed categories" \
+  "not-a-tty not-a-tty" "$(_diag_stdio_category 0) $(_diag_stdio_category 2)"
+pty_smoke="$(timeout 10 script -qec 'test -t 0 && test -t 1 && test -t 2 && echo PTYFULL' /dev/null </dev/null 2>/dev/null | tr -d '\r')"
+check "8q: PTY smoke — under script(1) with its own stdin closed, fd 0, 1 AND 2 of the child are a real tty" \
+  "PTYFULL" "$pty_smoke"
+ladder_body="$(sed -n '/^diag_run_ladder()/,/^}/p' "$LIB")"
+case "$ladder_body" in
+  *'"$DIAG_DIR/stdio"'*) ok "8q: the ladder records the runner's stdio categories" ;;
+  *) bad "8q: the ladder does not record the stdio state" ;;
+esac
+case "$ladder_body" in
+  *"printf 'STDIO"*) ok "8q: the report carries the fixed STDIO category line" ;;
+  *) bad "8q: the report does not carry the STDIO line" ;;
+esac
+case "$ladder_body" in
+  *'/dev/fd'*|*'/proc/self/fd'*) bad "8q RED: the stdio evidence leaks fd paths" ;;
+  *) ok "8q: the stdio evidence carries categories only, no fd paths" ;;
+esac
+matrix_body="$(sed -n '/^_diag_d3_matrix()/,/^}/p' "$LIB")"
+printf '%s\n' "$matrix_body" | grep -qF 'F-D3-pty-full "$ws" -it script null' \
+  && ok "8q: the matrix owns the full-PTY -it control" \
+  || bad "8q: the full-PTY -it control is missing from the matrix"
+pf_prefix="${matrix_body%%F-D3-pty-full*}"
+gate_prefix="${matrix_body%%_diag_d3_wrapper_unusable*}"
+if [ -n "$pf_prefix" ] && [ "${#pf_prefix}" -lt "${#gate_prefix}" ]; then
+  ok "8q: the full-PTY control runs BEFORE the wrapper gate (unconditionally)"
+else
+  bad "8q RED: the full-PTY control is gated behind the wrapper verdict"
+fi
+diag_body="$(sed -n '/^_diag_d3_matrix_diagnosis()/,/^}/p' "$LIB")"
+case "$diag_body" in
+  *'pty-full'*) bad "8q RED: a diagnosis rule blames docker/-it from the control alone" ;;
+  *) ok "8q: no diagnosis rule names the control probe; no premature blame" ;;
+esac
+
+# the real control probe on the stubs: identical docker argv to pty-direct,
+# a full pty for the container, phases, cleanup, no leaks
+export DIAG_DIR="$WORK/ev-ptyfull"; mkdir -p "$DIAG_DIR"
+: > "$DOCKER_STATE"; : > "$DH_STATE"; : > "$DOCKER_REC"
+DIAG_D3_CLEANUP_FAILED=0
+_diag_d3_matrix_probe F-D3-pty-full "$WS" -it script null
+check "8q: the full-PTY -it control passes on the stub" \
+  "ok" "$(cat "$DIAG_DIR/F-D3-pty-full.detail" 2>/dev/null || echo missing)"
+check "8q: the control records exactly the two phase markers" \
+  "$(printf 'wrapper-entered\nbefore-docker-exec')" \
+  "$(cat "$DIAG_DIR/F-D3-pty-full.phases" 2>/dev/null || echo missing)"
+case "$(cat "$DIAG_DIR/F-D3-pty-full.session")" in
+  clean|reaped) ok "8q: the control's cleanup is confirmed" ;;
+  *) bad "8q: the control's cleanup verdict: $(cat "$DIAG_DIR/F-D3-pty-full.session")" ;;
+esac
+_diag_d3_matrix_probe F-D3-pty-direct "$WS" -it direct inherit
+check "8q: the partial-PTY reference probe still passes on the stub" \
+  "ok" "$(cat "$DIAG_DIR/F-D3-pty-direct.detail" 2>/dev/null || echo missing)"
+check "8q: the control shares the IDENTICAL docker argv with F-D3-pty-direct" \
+  "$(norm_argv F-D3-pty-full)" "$(norm_argv F-D3-pty-direct)"
+[ -s "$DOCKER_STATE" ] && bad "8q RED: a container leaked on the control path" \
+  || ok "8q: the control path leaves no container behind"
+[ -s "$DH_STATE" ] && bad "8q RED: a Session leaked on the control path" \
+  || ok "8q: the control path leaves no Session behind"
+
+# the control still runs when the smoke proved the (inherit-stdin) wrapper
+# unusable: it uses a different stdin policy and is the decisive comparison
+rm -rf "$DIAG_DIR"; mkdir -p "$DIAG_DIR"
+printf 'timeout\n' > "$DIAG_DIR/F-D3-script-smoke.detail"
+: > "$DOCKER_STATE"; : > "$DH_STATE"; : > "$DOCKER_REC"
+DIAG_D3_CLEANUP_FAILED=0
+_diag_d3_matrix "$WS"
+check "8q: the full-PTY control still runs with an unusable inherit-stdin wrapper" \
+  "ok" "$(cat "$DIAG_DIR/F-D3-pty-full.detail" 2>/dev/null || echo missing)"
+for probe in F-D3-flag-none F-D3-flag-i F-D3-flag-t F-D3-flag-it; do
+  if [ -f "$DIAG_DIR/$probe.detail" ]; then
+    bad "8q RED: an inherit-stdin script probe ran with an unusable wrapper ($probe)"
+  else
+    ok "8q: the inherit-stdin script probe $probe stays skipped"
+  fi
+done
+[ -s "$DH_STATE" ] && bad "8q RED: a Session leaked in the control run" \
+  || ok "8q: the control run leaks no Session"
+[ -s "$DOCKER_STATE" ] && bad "8q RED: a container leaked in the control run" \
+  || ok "8q: the control run leaks no container"
 
 # --- UAT-8n: streaming progress is safe, deterministic and immediate -------
 export DIAG_DIR="$WORK/ev-progress"; mkdir -p "$DIAG_DIR"
