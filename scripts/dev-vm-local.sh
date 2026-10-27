@@ -280,6 +280,98 @@ cmd_ssh() {
   fi
 }
 
+# _agent_shell_bootstrap — the agent-side bootstrap for `agent-shell`,
+# printed on stdout with CHILD_CMD as the exec target. The host streams two
+# base64-encoded `NAME=value` lines (LLM_SERVER, LLM_KEY) over the encrypted
+# SSH channel; this bootstrap reads them from its stdin, decodes and exports
+# them as the agent account, then execs CHILD_CMD (an interactive login
+# shell). Invariants: the values are never in argv, shell history, logs or
+# files inside the VM (they live only in the process environment the
+# launcher forwards via its existing `docker run -e`); the pty echo is
+# disabled while the two lines are consumed (the SSH pty may start echoing
+# before the first read — the base64 encoding keeps any such transient echo
+# free of secret material); wrong, missing, empty or line-break-carrying
+# values fail closed with an explicit message.
+_agent_shell_bootstrap() { # CHILD_CMD -> bootstrap script on stdout
+  cat <<'BOOT'
+stty -echo 2>/dev/null || true
+IFS= read -r _llm_line1 || { printf 'the forwarded LLM variable stream ended before LLM_SERVER\n' >&2; exit 9; }
+IFS= read -r _llm_line2 || { printf 'the forwarded LLM variable stream ended before LLM_KEY\n' >&2; exit 9; }
+stty echo 2>/dev/null || true
+case "$_llm_line1" in
+  LLM_SERVER=*) _llm_srv="${_llm_line1#LLM_SERVER=}" ;;
+  *) printf 'the first forwarded line was not LLM_SERVER=<value>\n' >&2; exit 9 ;;
+esac
+case "$_llm_line2" in
+  LLM_KEY=*) _llm_key="${_llm_line2#LLM_KEY=}" ;;
+  *) printf 'the second forwarded line was not LLM_KEY=<value>\n' >&2; exit 9 ;;
+esac
+LLM_SERVER="$(printf '%s' "$_llm_srv" | base64 -d)" \
+  || { printf 'LLM_SERVER did not decode\n' >&2; exit 9; }
+LLM_KEY="$(printf '%s' "$_llm_key" | base64 -d)" \
+  || { printf 'LLM_KEY did not decode\n' >&2; exit 9; }
+case "${LLM_SERVER}${LLM_KEY}" in
+  *$'\n'*|*$'\r'*) printf 'LLM_SERVER/LLM_KEY must not contain line breaks\n' >&2; exit 9 ;;
+esac
+[ -n "$LLM_SERVER" ] && [ -n "$LLM_KEY" ] \
+  || { printf 'empty LLM_SERVER/LLM_KEY refused\n' >&2; exit 9; }
+unset _llm_line1 _llm_line2 _llm_srv _llm_key
+export LLM_SERVER LLM_KEY
+BOOT
+  printf 'exec %s\n' "$1"
+}
+
+# _restore_agent_tty — restore the local terminal saved before the agent
+# shell pipeline put it into raw mode (the same local discipline ssh applies
+# when it owns the tty; here ssh's stdin is a pipe, so the pipeline owns it).
+_restore_agent_tty() {
+  if [ -n "${_AGENT_STTY_SAVE:-}" ]; then
+    stty "${_AGENT_STTY_SAVE}" </dev/tty 2>/dev/null || true
+    _AGENT_STTY_SAVE=""
+  fi
+}
+
+# cmd_agent_shell — open an interactive shell as the agent account inside the
+# VM with LLM_SERVER/LLM_KEY forwarded from the HOST environment (no
+# re-entering). Uses the single existing vm_ssh transport; no second VM
+# management mechanism, no launcher/helper/lifecycle changes. The values are
+# base64-encoded on the host, streamed as two `NAME=value` lines through the
+# encrypted SSH channel, and consumed by the agent-owned bootstrap
+# (_agent_shell_bootstrap) on the SSH pty — never in argv, shell history,
+# logs or files inside the VM. The local terminal is put into raw mode for
+# the duration (ssh cannot do it: its stdin is our pipe), so Ctrl-C and the
+# line editing reach the remote shell and the typing is echoed once, by the
+# remote pty. A missing or empty variable is an explicit host-side error.
+cmd_agent_shell() {
+  [ -n "${LLM_SERVER:-}" ] \
+    || fail "LLM_SERVER is not exported on the host: export it before agent-shell (it is forwarded through the SSH session only and never stored in the VM)"
+  [ -n "${LLM_KEY:-}" ] \
+    || fail "LLM_KEY is not exported on the host: export it before agent-shell (it is forwarded through the SSH session only and never stored in the VM)"
+  case "${LLM_SERVER}${LLM_KEY}" in
+    *$'\n'*|*$'\r'*) fail "LLM_SERVER/LLM_KEY must not contain line breaks" ;;
+  esac
+  vm_attach
+  vm_running || fail "VM is not running (run 'start')"
+  _AGENT_STTY_SAVE=""
+  local _prev_exit_trap=""
+  if [ -t 0 ]; then
+    _AGENT_STTY_SAVE="$(stty -g </dev/tty)" || _AGENT_STTY_SAVE=""
+    stty raw -echo </dev/tty
+    _prev_exit_trap="$(trap -p EXIT)"
+    trap '_restore_agent_tty; eval "${_AGENT_PREV_EXIT_TRAP:-}"' EXIT
+    _AGENT_PREV_EXIT_TRAP="$_prev_exit_trap"
+  fi
+  local rc=0
+  { printf 'LLM_SERVER=%s\n' "$(printf '%s' "$LLM_SERVER" | base64 -w0)"
+    printf 'LLM_KEY=%s\n' "$(printf '%s' "$LLM_KEY" | base64 -w0)"
+    cat; } | vm_ssh "exec sudo -iu agent bash -c $(printf '%q' "$(_agent_shell_bootstrap 'bash -l')")" || rc=$?
+  _restore_agent_tty
+  eval "${_AGENT_PREV_EXIT_TRAP:-}" 2>/dev/null || true
+  _AGENT_PREV_EXIT_TRAP=""
+  _AGENT_STTY_SAVE=""
+  return "$rc"
+}
+
 cmd_destroy() {
   local assume_yes=0
   while [ "$#" -gt 0 ]; do
@@ -318,6 +410,10 @@ $PREFIX <operation>
   stop              gracefully power off the guest
   status            report lifecycle state
   ssh [cmd...]      interactive SSH, or run a remote command
+  agent-shell       interactive shell as the agent account with LLM_SERVER
+                    and LLM_KEY forwarded from the host environment (they
+                    travel only through the SSH session; nothing is stored
+                    in the VM; both must be exported on the host)
   set-ipv6-disable  set ipv6.disable=1 in the guest boot config (fail-closed)
   destroy [-y]      remove the VM workdir (explicit confirmation)
 
@@ -333,6 +429,7 @@ case "$op" in
   stop)    cmd_stop ;;
   status)  cmd_status ;;
   ssh)     cmd_ssh "$@" ;;
+  agent-shell) cmd_agent_shell ;;
   set-ipv6-disable) cmd_set_ipv6_disable ;;
   destroy) cmd_destroy "$@" ;;
   ""|-h|--help|help) usage ;;

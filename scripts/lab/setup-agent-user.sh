@@ -247,9 +247,12 @@ install_opencode_config() {
   local tgt="$AGENT_HOME/.opencode-docker/.config/opencode/opencode.json"
   local tmp
   target_inside_agent_home_ok "$tgt"
-  if [ -f "$tgt" ]; then
+  if [ -f "$tgt" ] && [ ! -L "$tgt" ]; then
     log "$tgt already exists: keeping the existing configuration (re-provisioning never overwrites the user's config)"
     return 0
+  fi
+  if [ -e "$tgt" ] || [ -L "$tgt" ]; then
+    die "$tgt already exists and is not a standalone regular file (a directory or another object): refusing to write, fail closed"
   fi
   tmp="$tgt.provision.$$"
   cat > "$tmp" <<'JSON'
