@@ -16,7 +16,8 @@
 #       boot the VM with the network OPEN (DEV_VM_NET_ISOLATED=0 — the
 #       supported per-invocation knob of the existing VM driver; no driver
 #       modification), copy the lab scripts into /opt/lab, then inside the
-#       guest: install Docker (signature-checked zypper), provision the agent
+#       guest: install Docker and baseline CLI tools (signature-checked zypper),
+#       provision the agent
 #       account (phase 1 of setup-agent-user.sh), install Docker Helper
 #       v2.3.0 with the minimal --allowed-root, complete the agent setup
 #       (phase 2), transfer operator files (SSH key / CA / gitconfig /
@@ -350,6 +351,13 @@ stage_online() {
 
   log "installing Docker (inside the VM)"
   "$DEVVM" ssh 'sudo bash /opt/lab/install-docker-vm.sh' < /dev/null || die "docker install failed"
+
+  # Host tooling stays in the guest; language SDKs belong in pinned containers.
+  # zypper retains its normal package signature verification and skips already
+  # installed packages on subsequent online provisioning runs.
+  log "installing baseline Git and terminal utilities (inside the VM)"
+  "$DEVVM" ssh 'sudo zypper --non-interactive install git ripgrep vim less tmux rsync unzip' < /dev/null \
+    || die "baseline tool installation failed"
 
   log "provisioning the agent account (phase 1)"
   "$DEVVM" ssh 'sudo bash /opt/lab/setup-agent-user.sh' < /dev/null || die "agent provisioning (phase 1) failed"
