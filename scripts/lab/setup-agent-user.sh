@@ -18,7 +18,14 @@
 #   1. creates the 'agent' account with a unique uid and its workspace root,
 #      and adds it to the 'docker' group (the trusted launcher drives
 #      `docker run`);
-#   2. installs the launcher aliases and prepares the OpenCode state tree;
+#   2. installs the launcher aliases and prepares the OpenCode state tree,
+#      installs the DEFAULT OpenCode configuration
+#      (~agent/.opencode-docker/.config/opencode/opencode.json — only when
+#      absent: an existing user configuration is never overwritten, a
+#      symlinked target is refused; the file carries no secrets: the LLM
+#      endpoint and key are resolved from the environment at launch time),
+#      and creates the agent exchange directory (~agent/agent-exchange,
+#      0700, agent:agent, existing contents preserved);
 #   3. WITHOUT docker-helper: stops here with an explicit log (the helper
 #      install needs the agent home as its minimal --allowed-root); re-run
 #      after install-docker-helper-v230.sh;
@@ -35,10 +42,11 @@
 # --install-launcher-only (UAT-8g): refreshes ONLY the installed launcher
 # artifacts (~/.bash_aliases and ~/.opencode-docker/lib/lab-mount-gate.sh)
 # from the canonical lab sources, atomically, and verifies them (cmp, owner,
-# group, mode). It performs NO other change: no .bashrc wiring, no account,
-# workspace, docker group, helper, principal or credential changes. The
-# diagnostic driver runs it before every diagnostic ladder so the installed
-# launcher can never drift from the freshly copied /opt/lab scripts.
+# group, mode). It performs NO other change: no .bashrc wiring, no OpenCode
+# configuration install, no exchange directory, no account, workspace,
+# docker group, helper, principal or credential changes. The diagnostic
+# driver runs it before every diagnostic ladder so the installed launcher
+# can never drift from the freshly copied /opt/lab scripts.
 #
 # It does NOT manage SSH keys: VM access stays with the dev-vm-local.sh SSH
 # identity, and the agent account gets no SSH of its own.
@@ -220,6 +228,106 @@ wire_bashrc() {
   fi
 }
 
+# install_opencode_config — provision the DEFAULT OpenCode configuration for
+# the agent account (full provisioning only; the launcher refresh never
+# touches it). The configuration names exactly one provider ('local', the
+# lab LiteLLM endpoint) and one model; the endpoint and key are resolved
+# from the environment at launch time ({env:LLM_SERVER}, {env:LLM_KEY}) —
+# no secret material is ever written into the file. Invariants:
+#   * the target path is checked by the shared containment owner (a
+#     symlinked target is refused, fail closed);
+#   * an EXISTING configuration is never overwritten: re-provisioning keeps
+#     the user's file as it is;
+#   * a fresh install is staged, validated with jq (well-formed JSON and a
+#     fixed content self-check: the default model exists in
+#     provider.local.models, exactly one provider/model, no subagent or
+#     notifier leftovers) and published atomically (temp file + rename);
+#   * owner agent:agent, mode 0644.
+install_opencode_config() {
+  local tgt="$AGENT_HOME/.opencode-docker/.config/opencode/opencode.json"
+  local tmp
+  target_inside_agent_home_ok "$tgt"
+  if [ -f "$tgt" ]; then
+    log "$tgt already exists: keeping the existing configuration (re-provisioning never overwrites the user's config)"
+    return 0
+  fi
+  tmp="$tgt.provision.$$"
+  cat > "$tmp" <<'JSON'
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "local/ds41-flash-uncensored",
+  "lsp": true,
+  "permission": {
+    "lsp": "allow",
+    "external_directory": {
+      "*": "deny",
+      "/exchange/**": "allow",
+      "/tmp/**": "allow",
+      "/home/opencode/.ssh/*": "allow",
+      "/home/opencode/.cache/**": "allow"
+    },
+    "websearch": "allow",
+    "webfetch": "allow"
+  },
+  "provider": {
+    "local": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Local LiteLLM",
+      "options": {
+        "baseURL": "{env:LLM_SERVER}/v1",
+        "apiKey": "{env:LLM_KEY}"
+      },
+      "models": {
+        "ds41-flash-uncensored": {
+          "name": "ds41-flash-heretic"
+        }
+      }
+    }
+  }
+}
+JSON
+  if ! jq -e . "$tmp" >/dev/null 2>&1; then
+    rm -f -- "$tmp" 2>/dev/null || true
+    die "the staged OpenCode configuration is not valid JSON: fail closed"
+  fi
+  if ! jq -e \
+      '.model == "local/ds41-flash-uncensored"
+       and .provider.local.models["ds41-flash-uncensored"].name == "ds41-flash-heretic"
+       and ((.provider | length) == 1)
+       and ((.provider.local.models | length) == 1)
+       and .subagents == null and .subagent_depth == null and .plugin == null' \
+      "$tmp" >/dev/null 2>&1; then
+    rm -f -- "$tmp" 2>/dev/null || true
+    die "the staged OpenCode configuration failed its content self-check: fail closed"
+  fi
+  if ! install_file_atomically "$tmp" "$tgt" "$AGENT_USER" "$AGENT_USER" 0644; then
+    rm -f -- "$tmp" 2>/dev/null || true
+    die "cannot atomically install $tgt"
+  fi
+  rm -f -- "$tmp" 2>/dev/null || true
+  log "installed $tgt (owner $AGENT_USER:$AGENT_USER, mode 0644; secrets resolve from the environment at launch time)"
+}
+
+# ensure_exchange_dir — create the agent exchange directory the launcher
+# mounts as /exchange (OPENCODE_EXCHANGE_DIR defaults to $HOME/agent-exchange;
+# the launcher logic is not changed here). Full provisioning only.
+# Invariants: agent:agent, mode 0700, idempotent (an existing directory is
+# reused and normalized, its CONTENTS are never removed), a symlink at the
+# path is refused fail closed, an unexpected non-directory fails explicitly.
+ensure_exchange_dir() {
+  local dir="$AGENT_HOME/agent-exchange"
+  target_inside_agent_home_ok "$dir"
+  if [ -d "$dir" ]; then
+    log "$dir already exists: existing contents are preserved"
+  else
+    mkdir -p -- "$dir" || die "cannot create the exchange directory $dir"
+    log "created the exchange directory $dir"
+  fi
+  chown "$AGENT_USER:$AGENT_USER" "$dir" \
+    || die "cannot set the owner of $dir"
+  chmod 0700 "$dir" || die "cannot set the mode of $dir"
+}
+
 # require_cmp_dependency — the launcher-refresh dependency check (UAT-8j):
 # the refresh installs NO packages (the 8h contract: exactly two file
 # targets), so a missing cmp is an explicit dependency FAILURE before the
@@ -246,6 +354,25 @@ ensure_cmp_dependency() {
   command -v cmp >/dev/null 2>&1 && [ -x "$(command -v cmp)" ] \
     || die "cmp is not usable after the diffutils install: dependency failure"
   log "dependency installed: cmp is available"
+}
+
+# ensure_jq_dependency — the SINGLE owner of the guest jq dependency
+# (UAT-2/F1). The consumer owns its dependency (the same pattern the helper
+# installer applies to bindfs): install it once through the standard zypper
+# path with package signature verification; an installed jq is never
+# reinstalled, and a failed install or a missing/unusable jq afterwards
+# fails closed. Package installation stays inside the guest (the lab-VM
+# guard has already refused the physical host). It runs in the FULL
+# provisioning BEFORE the OpenCode configuration install (which validates
+# the staged JSON with jq) and again before the principal/credential phase.
+ensure_jq_dependency() {
+  command -v jq >/dev/null 2>&1 && [ -x "$(command -v jq)" ] && return 0
+  log "installing missing dependency: jq"
+  command -v zypper >/dev/null 2>&1 || die "zypper not found (cannot install jq)"
+  zypper --non-interactive install jq || die "could not install jq (network open?)"
+  command -v jq >/dev/null 2>&1 && [ -x "$(command -v jq)" ] \
+    || die "jq is missing or unusable after the install attempt: dependency failure"
+  log "dependency installed: jq is available"
 }
 
 # verify_installed_copy SRC TGT — the three-outcome cmp classification
@@ -389,6 +516,14 @@ install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" \
 # the whole tree.
 chown -R "$AGENT_USER:$AGENT_USER" "$AGENT_HOME/.opencode-docker"
 
+# --- 2a. the default OpenCode configuration + the exchange directory --------
+# Full provisioning only (the launcher refresh exited above with exactly its
+# two file targets). jq is ensured first: the configuration install validates
+# its staged JSON with it, fail closed.
+ensure_jq_dependency
+install_opencode_config
+ensure_exchange_dir
+
 install_launcher_aliases
 verify_launcher_aliases
 wire_bashrc
@@ -406,19 +541,8 @@ if ! command -v docker-helper >/dev/null 2>&1; then
   exit 0
 fi
 DH="$(command -v docker-helper)" || die "docker-helper not found in PATH"
-# UAT-2/F1: jq is a hard dependency of the principal/credential phase. The
-# consumer owns its dependency (the same pattern the helper installer applies
-# to bindfs): install it once through the standard zypper path with package
-# signature verification; an installed jq is never reinstalled, and a failed
-# install or a missing/unusable jq afterwards fails closed. Package
-# installation stays inside the guest (the lab-VM guard above has already
-# refused the physical host).
-if ! command -v jq >/dev/null 2>&1; then
-  log "installing missing dependency: jq"
-  command -v zypper >/dev/null 2>&1 || die "zypper not found (cannot install jq)"
-  zypper --non-interactive install jq || die "could not install jq (network open?)"
-  command -v jq >/dev/null 2>&1 || die "jq not found in PATH after the install attempt"
-fi
+# jq is also a hard dependency of the principal/credential phase; the single
+# dependency owner below has already ensured it in the FULL provisioning.
 [ -x "$(command -v jq)" ] || die "jq is not executable at $(command -v jq)"
 CRED_FILE="$AGENT_HOME/.config/docker-helper/credential.token"
 
