@@ -1551,9 +1551,11 @@ _diag_d3_legacy_pass() { # -> "<count> <name>"
 #   C. the direct no-flag probe hung (and the script-wrapped no-flag probe
 #      did not pass) -> docker hangs even without the wrapper; the wrapper
 #      is excluded as the cause
-#   D1. (UAT-8p) the DIRECT -t probe hung while the direct -i and no-flag
-#       probes passed AND neither -it probe passed (consistency: -it
-#       carries -t) -> the docker -t flag is implicated
+#   D1. (UAT-8p, tightened 8p1) the DIRECT -t probe hung while the direct
+#       -i and no-flag probes passed AND the direct -it probe HUNG with
+#       confirmed cleanup (consistency: -it carries -t; a missing, refused
+#       or cleanup-unconfirmed -it probe proves nothing and names nothing)
+#       -> the docker -t flag is implicated
 #   D2. (UAT-8p) the DIRECT -it probe hung while the direct -t, -i and
 #       no-flag probes passed -> the -it flag COMBINATION is implicated.
 #       The no-flag/-it difference is a TWO-flag difference and is never
@@ -1628,11 +1630,14 @@ _diag_d3_matrix_diagnosis() { # -> verdict text on stdout; rc 1 = unresolved
     printf 'docker hangs even when invoked directly without the nested script wrapper (F-D3-direct-none hung; the wrapper is excluded as the cause)'
     return 0
   fi
-  # UAT-8p rule D1: the single-variable -t comparison among the DIRECT
-  # (wrapper-free) probes; a passing -it probe would contradict a -t-only
-  # cause and a passing legacy factor supersedes it
+  # UAT-8p rule D1 (tightened 8p1): the single-variable -t comparison among
+  # the DIRECT (wrapper-free) probes. The direct -it probe must be HUNG
+  # with confirmed cleanup: a missing, refused or cleanup-unconfirmed -it
+  # probe (pd=other) proves nothing and must never leave -t attributed.
+  # The script-wrapped -it probe stays a !=passed guard only: when the
+  # wrapper is proven unusable its evidence is voided, not hung.
   if [ "$lcount" = 0 ] && [ "$dt" = hung ] && [ "$dn" = passed ] \
-      && [ "$sp" = passed ] && [ "$pd" != passed ] && [ "$it" != passed ]; then
+      && [ "$sp" = passed ] && [ "$pd" = hung ] && [ "$it" != passed ]; then
     printf 'the D3 docker -t flag is implicated (F-D3-direct-t hung where the direct -i and no-flag probes passed; single-variable comparison)'
     return 0
   fi

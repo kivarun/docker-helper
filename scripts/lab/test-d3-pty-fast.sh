@@ -326,6 +326,34 @@ contains "8p: a missing direct -t measurement stays UNRESOLVED" \
 not_contains "8p: nothing is implicated without the -t evidence" \
   "is implicated" "$out"
 
+# UAT-8p1: D1 requires the direct -it probe HUNG with confirmed cleanup —
+# a MISSING direct -it probe leaves -t unattributed (UNRESOLVED)
+rm -rf "$DIAG_DIR"; mkdir -p "$DIAG_DIR"; base_fixtures
+mf F-D3-script-smoke ok
+mf F-D3-flag-none ok clean
+mf F-D3-direct-none ok clean
+mf F-D3-stdin-pty ok clean
+rm -f "$DIAG_DIR/F-D3-pty-direct.detail"
+out="$(diag_case)"
+contains "8p1: a missing direct -it probe leaves -t unattributed (UNRESOLVED)" \
+  "DIAGNOSIS UNRESOLVED: the failing step is D3" "$out"
+not_contains "8p1: missing -it evidence never attributes -t" \
+  "is implicated" "$out"
+
+# UAT-8p1: a cleanup-UNCONFIRMED direct -it probe (docker passed, cleanup
+# failed) equally proves nothing and leaves -t unattributed
+rm -rf "$DIAG_DIR"; mkdir -p "$DIAG_DIR"; base_fixtures
+mf F-D3-script-smoke ok
+mf F-D3-flag-none ok clean
+mf F-D3-direct-none ok clean
+mf F-D3-stdin-pty ok clean
+mf F-D3-pty-direct ok failed
+out="$(diag_case)"
+contains "8p1: a cleanup-unconfirmed direct -it probe leaves -t unattributed" \
+  "DIAGNOSIS UNRESOLVED: the failing step is D3" "$out"
+not_contains "8p1: unconfirmed -it evidence never attributes -t" \
+  "is implicated" "$out"
+
 # UAT-8p: cleanup-UNCONFIRMED direct -t evidence names nothing
 rm -rf "$DIAG_DIR"; mkdir -p "$DIAG_DIR"; base_fixtures
 mf F-D3-script-smoke ok
