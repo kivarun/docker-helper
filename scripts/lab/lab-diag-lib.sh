@@ -1120,7 +1120,8 @@ diag_run_ladder() { # IMAGE WS RUNID
             F-D2-tty F-D2-notty-stdin F-D2-script \
             F-D3-script-smoke \
             F-D3-notty F-D3-nosession F-D3-noagent \
-            F-D3-flag-none F-D3-direct-none F-D3-flag-i F-D3-flag-t \
+            F-D3-flag-none F-D3-direct-none F-D3-direct-t F-D3-flag-i \
+            F-D3-flag-t \
             F-D3-flag-it \
             F-D3-pty-direct F-D3-stdin-pty F-D3-stdin-null; do
     _diag_report_factor "$id"
@@ -1463,6 +1464,7 @@ _diag_d3_matrix() { # WS
     # UAT-8o: the smoke proved the nested wrapper unusable — only the
     # wrapper-free direct probes still carry evidence
     _diag_d3_matrix_probe F-D3-direct-none "$ws" none direct  inherit || return 0
+    _diag_d3_matrix_probe F-D3-direct-t    "$ws" -t   direct  inherit || return 0
     _diag_d3_matrix_probe F-D3-pty-direct  "$ws" -it  direct  inherit || return 0
     _diag_d3_matrix_probe F-D3-stdin-pty   "$ws" -i   direct  inherit || return 0
     _diag_d3_matrix_probe F-D3-stdin-null  "$ws" -i   direct  null    || return 0
@@ -1470,6 +1472,7 @@ _diag_d3_matrix() { # WS
   fi
   _diag_d3_matrix_probe F-D3-flag-none   "$ws" none script   inherit || return 0
   _diag_d3_matrix_probe F-D3-direct-none "$ws" none direct   inherit || return 0
+  _diag_d3_matrix_probe F-D3-direct-t    "$ws" -t   direct   inherit || return 0
   _diag_d3_matrix_probe F-D3-flag-i      "$ws" -i   script   inherit || return 0
   _diag_d3_matrix_probe F-D3-flag-t      "$ws" -t   script   inherit || return 0
   _diag_d3_matrix_probe F-D3-flag-it     "$ws" -it  script   inherit || return 0
@@ -1548,13 +1551,18 @@ _diag_d3_legacy_pass() { # -> "<count> <name>"
 #   C. the direct no-flag probe hung (and the script-wrapped no-flag probe
 #      did not pass) -> docker hangs even without the wrapper; the wrapper
 #      is excluded as the cause
-#   D. (UAT-8o) the direct -it probe hung while the direct no-flag probe
-#      passed -> the docker -it combination hangs even without any pty
-#      wrapper (the UAT-8n observation; never pre-declared solved)
+#   D1. (UAT-8p) the DIRECT -t probe hung while the direct -i and no-flag
+#       probes passed AND neither -it probe passed (consistency: -it
+#       carries -t) -> the docker -t flag is implicated
+#   D2. (UAT-8p) the DIRECT -it probe hung while the direct -t, -i and
+#       no-flag probes passed -> the -it flag COMBINATION is implicated.
+#       The no-flag/-it difference is a TWO-flag difference and is never
+#       called a single-variable comparison; a missing, refused or
+#       cleanup-unconfirmed -t evidence names nothing
 # Contradictory observations name nothing: an empty result means the matrix
 # did not prove a single cause.
 _diag_d3_matrix_diagnosis() { # -> verdict text on stdout; rc 1 = unresolved
-  local none i t it pd sp sn dn smoke detail legacy lcount
+  local none i t it pd sp sn dn dt smoke detail legacy lcount
   none="$(_diag_mstate F-D3-flag-none)"
   i="$(_diag_mstate F-D3-flag-i)"
   t="$(_diag_mstate F-D3-flag-t)"
@@ -1563,6 +1571,7 @@ _diag_d3_matrix_diagnosis() { # -> verdict text on stdout; rc 1 = unresolved
   sp="$(_diag_mstate F-D3-stdin-pty)"
   sn="$(_diag_mstate F-D3-stdin-null)"
   dn="$(_diag_mstate F-D3-direct-none)"
+  dt="$(_diag_mstate F-D3-direct-t)"
   legacy="$(_diag_d3_legacy_pass)"
   lcount="${legacy%% *}"
   # the smoke probe creates nothing, so it has no cleanup verdict to gate
@@ -1619,11 +1628,21 @@ _diag_d3_matrix_diagnosis() { # -> verdict text on stdout; rc 1 = unresolved
     printf 'docker hangs even when invoked directly without the nested script wrapper (F-D3-direct-none hung; the wrapper is excluded as the cause)'
     return 0
   fi
-  # UAT-8o rule D: the DIRECT -it probe hung where the DIRECT no-flag probe
-  # passed — the docker -it combination hangs without any pty wrapper; a
-  # passing legacy factor supersedes it
-  if [ "$lcount" = 0 ] && [ "$pd" = hung ] && [ "$dn" = passed ]; then
-    printf 'the D3 docker -it combination hangs even when invoked directly without any pty wrapper (F-D3-pty-direct hung where F-D3-direct-none passed; single-variable comparison)'
+  # UAT-8p rule D1: the single-variable -t comparison among the DIRECT
+  # (wrapper-free) probes; a passing -it probe would contradict a -t-only
+  # cause and a passing legacy factor supersedes it
+  if [ "$lcount" = 0 ] && [ "$dt" = hung ] && [ "$dn" = passed ] \
+      && [ "$sp" = passed ] && [ "$pd" != passed ] && [ "$it" != passed ]; then
+    printf 'the D3 docker -t flag is implicated (F-D3-direct-t hung where the direct -i and no-flag probes passed; single-variable comparison)'
+    return 0
+  fi
+  # UAT-8p rule D2: the -it combination named among the DIRECT probes; the
+  # no-flag/-it difference is a TWO-flag difference, so this is a controlled
+  # combination comparison, never a single-variable one; without measured
+  # (and cleanup-confirmed) direct -t evidence it names nothing
+  if [ "$lcount" = 0 ] && [ "$pd" = hung ] && [ "$dn" = passed ] \
+      && [ "$dt" = passed ] && [ "$sp" = passed ]; then
+    printf 'the D3 docker -it flag combination is implicated (F-D3-pty-direct hung where the direct -t, -i and no-flag probes passed; controlled comparison)'
     return 0
   fi
   return 1
