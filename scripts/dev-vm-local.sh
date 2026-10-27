@@ -317,6 +317,7 @@ esac
   || { printf 'empty LLM_SERVER/LLM_KEY refused\n' >&2; exit 9; }
 unset _llm_line1 _llm_line2
 export LLM_SERVER LLM_KEY
+cd "$HOME" || { printf 'cannot enter agent home\n' >&2; exit 9; }
 BOOT
   cat <<BOOT
 $1
@@ -402,6 +403,12 @@ cmd_agent_shell() {
     stty raw -echo </dev/tty
   fi
   local rc=0
+  # Only public bootstrap CODE is encoded, never the LLM variables.
+  # This avoids the extra shell parsing caused by sudo -i and preserves
+  # newlines, quoted cases and variable references in bash -c.
+  local _agent_bootstrap_b64
+  _agent_bootstrap_b64="$(_agent_shell_bootstrap 'bash -l' | base64 -w0)" \
+    || fail "agent-shell: cannot encode the static bootstrap"
   local _saved_opts=("${VM_SSH_OPTS[@]}")
   # Signal watcher: the session output is tee'd into the sig fifo. READY
   # releases the value injection; QUIT — or the session output's EOF, which
@@ -443,7 +450,7 @@ cmd_agent_shell() {
     printf 'LLM_KEY=%s\n' "$LLM_KEY"
     exec 4<&-
     cat
-  } | vm_ssh "exec sudo -iu agent bash -c $(printf '%q' "$(_agent_shell_bootstrap 'bash -l')")" \
+  } | vm_ssh "exec sudo -u agent -H bash -c \"\$(printf %s '$_agent_bootstrap_b64' | base64 -d)\"" \
     > >(tee "${_AGENT_SHELL_DIR}/sig") || rc=$?
   set -o pipefail
   VM_SSH_OPTS=("${_saved_opts[@]}")
