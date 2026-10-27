@@ -281,44 +281,49 @@ cmd_ssh() {
 }
 
 # _agent_shell_bootstrap — the agent-side bootstrap for `agent-shell`,
-# printed on stdout with CHILD_CMD as the exec target. The host streams two
-# base64-encoded `NAME=value` lines (LLM_SERVER, LLM_KEY) over the encrypted
-# SSH channel; this bootstrap reads them from its stdin, decodes and exports
-# them as the agent account, then execs CHILD_CMD (an interactive login
-# shell). Invariants: the values are never in argv, shell history, logs or
+# printed on stdout with CHILD_CMD as the interactive child. The host first
+# waits for the READY marker and only then streams two plain `NAME=value`
+# lines (LLM_SERVER, LLM_KEY) over the encrypted SSH channel. Echo
+# protection is structural, not encoded: the pty echo is disabled BEFORE
+# READY is emitted and re-enabled only after both lines have been consumed,
+# and the host writes the values only after observing READY — so no
+# character of either value can ever be echoed. There is no encoded form
+# and no race window. The values are never in argv, shell history, logs or
 # files inside the VM (they live only in the process environment the
-# launcher forwards via its existing `docker run -e`); the pty echo is
-# disabled while the two lines are consumed (the SSH pty may start echoing
-# before the first read — the base64 encoding keeps any such transient echo
-# free of secret material); wrong, missing, empty or line-break-carrying
-# values fail closed with an explicit message.
+# launcher forwards via its existing `docker run -e`). If stty cannot
+# control the pty echo, the bootstrap fails closed instead of risking an
+# echo window. Wrong, missing, empty or line-break-carrying values fail
+# closed with an explicit message. CHILD_CMD runs as a child (not exec) so
+# QUIT is emitted after it exits; its exit status is propagated.
 _agent_shell_bootstrap() { # CHILD_CMD -> bootstrap script on stdout
   cat <<'BOOT'
-stty -echo 2>/dev/null || true
+stty -echo 2>/dev/null || { printf 'cannot disable the pty echo\n' >&2; exit 9; }
+printf 'READY\n'
 IFS= read -r _llm_line1 || { printf 'the forwarded LLM variable stream ended before LLM_SERVER\n' >&2; exit 9; }
 IFS= read -r _llm_line2 || { printf 'the forwarded LLM variable stream ended before LLM_KEY\n' >&2; exit 9; }
-stty echo 2>/dev/null || true
+stty echo 2>/dev/null || { printf 'cannot restore the pty echo\n' >&2; exit 9; }
 case "$_llm_line1" in
-  LLM_SERVER=*) _llm_srv="${_llm_line1#LLM_SERVER=}" ;;
+  LLM_SERVER=*) LLM_SERVER="${_llm_line1#LLM_SERVER=}" ;;
   *) printf 'the first forwarded line was not LLM_SERVER=<value>\n' >&2; exit 9 ;;
 esac
 case "$_llm_line2" in
-  LLM_KEY=*) _llm_key="${_llm_line2#LLM_KEY=}" ;;
+  LLM_KEY=*) LLM_KEY="${_llm_line2#LLM_KEY=}" ;;
   *) printf 'the second forwarded line was not LLM_KEY=<value>\n' >&2; exit 9 ;;
 esac
-LLM_SERVER="$(printf '%s' "$_llm_srv" | base64 -d)" \
-  || { printf 'LLM_SERVER did not decode\n' >&2; exit 9; }
-LLM_KEY="$(printf '%s' "$_llm_key" | base64 -d)" \
-  || { printf 'LLM_KEY did not decode\n' >&2; exit 9; }
 case "${LLM_SERVER}${LLM_KEY}" in
   *$'\n'*|*$'\r'*) printf 'LLM_SERVER/LLM_KEY must not contain line breaks\n' >&2; exit 9 ;;
 esac
 [ -n "$LLM_SERVER" ] && [ -n "$LLM_KEY" ] \
   || { printf 'empty LLM_SERVER/LLM_KEY refused\n' >&2; exit 9; }
-unset _llm_line1 _llm_line2 _llm_srv _llm_key
+unset _llm_line1 _llm_line2
 export LLM_SERVER LLM_KEY
 BOOT
-  printf 'exec %s\n' "$1"
+  cat <<BOOT
+$1
+_rc=\$?
+printf 'QUIT\n'
+exit "\$_rc"
+BOOT
 }
 
 # _restore_agent_tty — restore the local terminal saved before the agent
@@ -331,41 +336,111 @@ _restore_agent_tty() {
   fi
 }
 
-# cmd_agent_shell — open an interactive shell as the agent account inside the
-# VM with LLM_SERVER/LLM_KEY forwarded from the HOST environment (no
-# re-entering). Uses the single existing vm_ssh transport; no second VM
-# management mechanism, no launcher/helper/lifecycle changes. The values are
-# base64-encoded on the host, streamed as two `NAME=value` lines through the
-# encrypted SSH channel, and consumed by the agent-owned bootstrap
-# (_agent_shell_bootstrap) on the SSH pty — never in argv, shell history,
-# logs or files inside the VM. The local terminal is put into raw mode for
-# the duration (ssh cannot do it: its stdin is our pipe), so Ctrl-C and the
-# line editing reach the remote shell and the typing is echoed once, by the
-# remote pty. A missing or empty variable is an explicit host-side error.
+# _agent_shell_cleanup — release everything an agent-shell session holds:
+# restore the local terminal, stop the signal watcher and the left pipeline
+# member if they are still alive, and remove the temporary fifo directory.
+# Safe to call twice (the normal path and the EXIT trap both call it); it
+# resets its state markers so a later invocation is a no-op.
+_agent_shell_cleanup() {
+  _restore_agent_tty
+  [ -n "${_AGENT_SHELL_DIR:-}" ] || return 0
+  [ -n "${_AGENT_WATCH_PID:-}" ] && kill "${_AGENT_WATCH_PID}" 2>/dev/null
+  if [ -f "${_AGENT_SHELL_DIR}/left.pid" ]; then
+    local _left_pid
+    _left_pid="$(cat "${_AGENT_SHELL_DIR}/left.pid" 2>/dev/null)" || _left_pid=""
+    [ -n "${_left_pid}" ] && kill "${_left_pid}" 2>/dev/null
+  fi
+  rm -rf "${_AGENT_SHELL_DIR}"
+  _AGENT_SHELL_DIR=""
+  _AGENT_WATCH_PID=""
+}
+
+# cmd_agent_shell — open a fully interactive terminal as the agent account
+# inside the VM (ssh -tt: fd 0/1/2 of the agent login shell are one pty, so
+# interactive tools such as `oc` with Docker -it work), with LLM_SERVER and
+# LLM_KEY forwarded from the HOST environment before the interactive shell
+# starts. Uses the single existing vm_ssh transport; no second VM management
+# mechanism, no launcher/helper/lifecycle changes. The delivery is echo-free
+# by construction, without any encoding: the agent-side bootstrap disables
+# the pty echo before announcing READY, and the host writes the two plain
+# `NAME=value` lines only after that READY has travelled back through the
+# session — so no value byte can ever be echoed, logged or stored in the
+# VM. The values never appear in argv, shell history, logs or files on
+# either side. The READY/QUIT markers stay visible on the operator's screen
+# (cosmetic). The local terminal is put into raw mode for the duration
+# (ssh's stdin is our pipe), so Ctrl-C and the line editing reach the remote
+# pty and the typing is echoed once, by the remote pty. A missing or empty
+# variable is an explicit host-side error; control characters are refused
+# because the pty line discipline would mangle them in transit.
 cmd_agent_shell() {
   [ -n "${LLM_SERVER:-}" ] \
     || fail "LLM_SERVER is not exported on the host: export it before agent-shell (it is forwarded through the SSH session only and never stored in the VM)"
   [ -n "${LLM_KEY:-}" ] \
     || fail "LLM_KEY is not exported on the host: export it before agent-shell (it is forwarded through the SSH session only and never stored in the VM)"
-  case "${LLM_SERVER}${LLM_KEY}" in
-    *$'\n'*|*$'\r'*) fail "LLM_SERVER/LLM_KEY must not contain line breaks" ;;
-  esac
+  if [[ "${LLM_SERVER}${LLM_KEY}" =~ [[:cntrl:]] ]]; then
+    fail "LLM_SERVER/LLM_KEY must not contain control characters (the pty line discipline would mangle them in transit)"
+  fi
   vm_attach
   vm_running || fail "VM is not running (run 'start')"
+  _AGENT_SHELL_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agent-shell.XXXXXX")" \
+    || fail "agent-shell: cannot create the temporary synchronization directory"
+  _AGENT_WATCH_PID=""
   _AGENT_STTY_SAVE=""
-  local _prev_exit_trap=""
+  local _prev_exit_trap
+  _prev_exit_trap="$(trap -p EXIT)"
+  trap '_agent_shell_cleanup; eval "${_AGENT_PREV_EXIT_TRAP:-}"' EXIT
+  _AGENT_PREV_EXIT_TRAP="$_prev_exit_trap"
+  mkfifo "${_AGENT_SHELL_DIR}/sig" "${_AGENT_SHELL_DIR}/ready" \
+    || fail "agent-shell: cannot create the synchronization fifos"
   if [ -t 0 ]; then
     _AGENT_STTY_SAVE="$(stty -g </dev/tty)" || _AGENT_STTY_SAVE=""
     stty raw -echo </dev/tty
-    _prev_exit_trap="$(trap -p EXIT)"
-    trap '_restore_agent_tty; eval "${_AGENT_PREV_EXIT_TRAP:-}"' EXIT
-    _AGENT_PREV_EXIT_TRAP="$_prev_exit_trap"
   fi
   local rc=0
-  { printf 'LLM_SERVER=%s\n' "$(printf '%s' "$LLM_SERVER" | base64 -w0)"
-    printf 'LLM_KEY=%s\n' "$(printf '%s' "$LLM_KEY" | base64 -w0)"
-    cat; } | vm_ssh "exec sudo -iu agent bash -c $(printf '%q' "$(_agent_shell_bootstrap 'bash -l')")" || rc=$?
-  _restore_agent_tty
+  local _saved_opts=("${VM_SSH_OPTS[@]}")
+  # Signal watcher: the session output is tee'd into the sig fifo. READY
+  # releases the value injection; QUIT — or the session output's EOF, which
+  # means the remote side is gone without QUIT — tears the left pipeline
+  # member down so the session always terminates.
+  (
+    exec 5<>"${_AGENT_SHELL_DIR}/ready"
+    local _tries=0
+    until [ -s "${_AGENT_SHELL_DIR}/left.pid" ] || [ "${_tries}" -ge 100 ]; do
+      sleep 0.05
+      _tries=$((_tries + 1))
+    done
+    while IFS= read -r _sig; do
+      case "$_sig" in
+        READY) printf 'go\n' >&5 ;;
+        QUIT) break ;;
+      esac
+    done <"${_AGENT_SHELL_DIR}/sig"
+    local _left_pid
+    _left_pid="$(cat "${_AGENT_SHELL_DIR}/left.pid" 2>/dev/null)" || _left_pid=""
+    [ -n "${_left_pid}" ] && kill "${_left_pid}" 2>/dev/null
+    exit 0
+  ) &
+  _AGENT_WATCH_PID=$!
+  # -tt must reach ssh as an OPTION (anything after the host is the remote
+  # command), so it is appended to VM_SSH_OPTS for this session only.
+  VM_SSH_OPTS+=("-tt")
+  # pipefail is relaxed for this pipeline only: at QUIT the watcher SIGTERMs
+  # the left member (its cat would otherwise never see EOF), and that
+  # expected death must not shadow the session's own exit status.
+  set +o pipefail
+  {
+    printf '%s\n' "$BASHPID" >"${_AGENT_SHELL_DIR}/left.pid"
+    exec 4<>"${_AGENT_SHELL_DIR}/ready"
+    IFS= read -r _agent_go <&4
+    printf 'LLM_SERVER=%s\n' "$LLM_SERVER"
+    printf 'LLM_KEY=%s\n' "$LLM_KEY"
+    exec 4<&-
+    cat
+  } | vm_ssh "exec sudo -iu agent bash -c $(printf '%q' "$(_agent_shell_bootstrap 'bash -l')")" \
+    > >(tee "${_AGENT_SHELL_DIR}/sig") || rc=$?
+  set -o pipefail
+  VM_SSH_OPTS=("${_saved_opts[@]}")
+  _agent_shell_cleanup
   eval "${_AGENT_PREV_EXIT_TRAP:-}" 2>/dev/null || true
   _AGENT_PREV_EXIT_TRAP=""
   _AGENT_STTY_SAVE=""
