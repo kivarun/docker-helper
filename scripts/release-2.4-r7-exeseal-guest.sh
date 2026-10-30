@@ -178,6 +178,14 @@ cap constraints-file 40 seinfo --constrain file
 cap constraints-dir 40 seinfo --constrain dir
 cap constraints-fifo 40 seinfo --constrain fifo_file
 cap constraints-fs 40 seinfo --constrain filesystem
+# P1 pre-grant FD-reachability gates (loaded policy): the process-class
+# constraints (the /proc/<pid>/fd open path requires PTRACE_MODE_ATTACH,
+# which SELinux maps to process:ptrace and gates with the loaded process
+# constraints), the full ptrace-family allow inventory, and the memfd
+# type's own loaded shape (attributes, allows, transition).
+cap constraints-process 40 seinfo --constrain process
+cap process-ptrace-allows 40 bash -c 'sesearch -A -c process | grep -E "ptrace|getsched|setpgid|getpgid|share|siginh|dyntransition| transition" ; echo "(ptrace-family process-class allow inventory above)"'
+cap memfd-policy 20 bash -c 'seinfo -x -t docker_helper_runc_memfd_t 2>&1; echo ---ALLOWS-TARGET---; sesearch -A -t docker_helper_runc_memfd_t 2>&1; echo ---ALLOWS-SOURCE---; sesearch -A -s docker_helper_runc_memfd_t 2>&1; echo ---TRANSITION---; sesearch -T -s docker_helper_buildkitd_t 2>&1'
 # The guest tmpfs mount/label surface (what a generic tmpfs_t authority covers).
 cap tmpfs-surface 40 bash -c 'findmnt -t tmpfs -o TARGET,SOURCE,FSTYPE,OPTIONS 2>&1; echo ---; ls -Zd /run /dev/shm /tmp 2>&1'
 cap tmpfs-typed-files 30 bash -c 'find /run /dev/shm -maxdepth 2 -context "*tmpfs_t*" 2>/dev/null | head -20 || true; echo "(tmpfs_t-labeled live objects above, if any)"'
@@ -535,6 +543,219 @@ touch "$STATE_DIR/sec5"
 fi
 
 # ============================================================================
+# Section 5f: P1 pre-grant FD-reachability evidence (read-only; NO policy
+# change, NO grant). Decomposition of the runc-memfd write authority:
+#   (a) FD OWNERSHIP (source: runc v1.4.3 libcontainer/exeseal/
+#       cloned_binary_linux.go + container_linux.go): the memfd is created
+#       by the runc process itself (MFD_CLOEXEC|MFD_ALLOW_SEALING|MFD_EXEC),
+#       written ONLY by that same process (sendfile(2) then write(2)
+#       fallback via system.Copy), sealed with F_SEAL_EXEC +
+#       F_SEAL_SEAL|SHRINK|GROW|WRITE, inherited by the "runc init" child
+#       solely as the execve target (cmd.ExtraFiles + cmd.Path=
+#       /proc/self/fd/N), and dropped by the parent immediately after the
+#       spawn (defer closeClonedExes). runc init marks every fd beyond the
+#       passed set CLOEXEC (init_linux.go CloseExecFrom). The fd is NEVER
+#       sent over any socket: runc v1.4.3 SCM_RIGHTS senders are the PTY
+#       master (init_linux.go:409), the init-child pidfd
+#       (init_linux.go:731), and the seccomp-notify fd
+#       (process_linux.go:1136); pidfd_getfd is used ONLY to fetch the
+#       seccomp fd from the init child (process_linux.go:1111). BuildKit
+#       never sees the fd (it execs buildkit-runc with argv/stdio only).
+#   (b) CROSS-OPERATION REACHABILITY: the only generic cross-process fd
+#       surface left is /proc/<pid>/fd/N, which the kernel gates with
+#       ptrace_may_access(PTRACE_MODE_ATTACH) — SELinux maps that to
+#       process:ptrace, evaluated against the loaded process constraints.
+#       This section captures the loaded policy's process constraints and
+#       ptrace inventory, kernel-decision matrices for the real domain
+#       pairs, and LIVE open()/write() attempts across MCS categories
+#       (worst case: an UNSEALED memfd held by the sleeper).
+#   (c) SEAL IMMUTABILITY: after F_ADD_SEALS(F_SEAL_WRITE) no handle can
+#       write, independent of SELinux — proven live below by a same-uid
+#       root O_RDWR open that still fails its write with EPERM.
+# A SUCCESSFUL cross-context write on the unsealed sleeper memfd is the
+# STOP signal for the P1 grant.
+# ============================================================================
+if [ -f "$STATE_DIR/sec5f" ]; then log "phase marker: section 5f done; skipping"; else
+log "=== section 5f: FD-reachability probe ==="
+if ! command -v gcc >/dev/null 2>&1; then
+  cap toolchain-install-5f 6 timeout 300 zypper --non-interactive install -y gcc libselinux-devel
+fi
+cat > "$EVIDENCE_DIR/fdreach_probe.c" <<'CEOF'
+/* fdreach_probe.c — R7 P1 pre-grant FD-reachability probe (forensic only).
+ * security_compute_av_raw applies the loaded policy's constraints as part
+ * of the access-vector computation, so the matrix records the real
+ * kernel decision (TE + constraint), same instrument as the B' AV matrix. */
+#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
+#include <selinux/selinux.h>
+
+#ifndef MFD_EXEC
+#define MFD_EXEC 0x0010U
+#endif
+#ifndef F_ADD_SEALS
+#define F_ADD_SEALS 1033
+#endif
+#ifndef F_GET_SEALS
+#define F_GET_SEALS 1034
+#endif
+#define F_SEAL_SEAL 0x1
+#define F_SEAL_SHRINK 0x2
+#define F_SEAL_GROW 0x4
+#define F_SEAL_WRITE 0x8
+#define F_SEAL_EXEC 0x20
+
+static const char *perms[] = { "ptrace", "getattr", "getsched", "setpgid",
+                               "getpgid", "share", "siginh", "transition",
+                               "dyntransition", NULL };
+
+static int cmd_matrix(char **argv)
+{
+	security_class_t cl = string_to_security_class("process");
+	for (int i = 0; argv[i] && argv[i + 1]; i += 2) {
+		struct av_decision avd;
+		printf("== %s -> %s (class process)\n", argv[i], argv[i + 1]);
+		for (int p = 0; perms[p]; p++) {
+			access_vector_t bit = string_to_av_perm(cl, perms[p]);
+			if (!bit) { printf("  %-14s UNKNOWN-PERM\n", perms[p]); continue; }
+			if (security_compute_av_raw(argv[i], argv[i + 1], cl, bit, &avd))
+				printf("  %-14s ERR errno=%d\n", perms[p], errno);
+			else
+				printf("  %-14s %s (allowed=0x%x)\n", perms[p],
+				       (avd.allowed & bit) ? "ALLOW" : "DENY",
+				       (unsigned)avd.allowed);
+		}
+	}
+	return 0;
+}
+
+static int cmd_sleeper(char **argv)
+{
+	int secs = atoi(argv[0]);
+	int seal = (argc > 2 && !strcmp(argv[1], "seal"));
+	char *ctx = NULL;
+	long rc = syscall(__NR_memfd_create, "fdreach_probe",
+			  MFD_ALLOW_SEALING | MFD_CLOEXEC | MFD_EXEC);
+	if (rc < 0) { printf("STEP memfd_create FAIL errno=%d\n", errno); return 1; }
+	int fd = (int)rc;
+	if (fgetfilecon(fd, &ctx) == 0)
+		printf("MEMFD-LABEL %s\n", ctx);
+	else
+		printf("MEMFD-LABEL errno=%d\n", errno);
+	if (seal) {
+		fcntl(fd, F_ADD_SEALS, F_SEAL_EXEC);
+		fcntl(fd, F_ADD_SEALS, F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE);
+	}
+	printf("MEMFD-READY pid=%d fd=%d sealed=%d\n", getpid(), fd, seal);
+	fflush(stdout);
+	sleep(secs);
+	printf("SLEEPER-EXIT\n");
+	return 0;
+}
+
+static int cmd_reach(char **argv)
+{
+	pid_t pid = (pid_t)atoi(argv[0]);
+	int fd = atoi(argv[1]);
+	char path[128];
+	snprintf(path, sizeof(path), "/proc/%d/fd/%d", pid, fd);
+
+	int r = open(path, O_RDONLY);
+	printf("REACH %-44s %s (errno=%d)\n", "open(O_RDONLY)",
+	       r < 0 ? "FAIL" : "OK", errno);
+	if (r >= 0) {
+		char lbuf[256];
+		ssize_t n = readlink(path, lbuf, sizeof(lbuf) - 1);
+		if (n > 0) { lbuf[n] = 0; printf("FDLINK %s\n", lbuf); }
+		char *ctx = NULL;
+		if (fgetfilecon(r, &ctx) == 0)
+			printf("REACH-LABEL %s\n", ctx);
+		close(r);
+	}
+
+	r = open(path, O_RDWR);
+	printf("REACH %-44s %s (errno=%d)\n", "open(O_RDWR)",
+	       r < 0 ? "FAIL" : "OK", errno);
+	if (r >= 0) {
+		char c = 'p';
+		ssize_t w = write(r, &c, 1);
+		printf("REACH %-44s %s (errno=%d)\n", "write(opened fd, 1 byte)",
+		       w < 0 ? "FAIL" : "OK", errno);
+		close(r);
+	}
+	return 0;
+}
+
+int main(int argc, char **argv)
+{
+	char *ctx = NULL;
+	if (getcon(&ctx) == 0)
+		printf("PROBE-CONTEXT %s\n", ctx);
+	if (argc < 2) return 2;
+	if (!strcmp(argv[1], "matrix")) return cmd_matrix(argv + 2);
+	if (!strcmp(argv[1], "sleeper")) { if (argc < 3) return 2; return cmd_sleeper(argv + 2); }
+	if (!strcmp(argv[1], "reach")) { if (argc < 4) return 2; return cmd_reach(argv + 2); }
+	return 2;
+}
+CEOF
+gcc -O2 -o "$EVIDENCE_DIR/fdreach_probe" "$EVIDENCE_DIR/fdreach_probe.c" -lselinux \
+  || fail "fdreach_probe build failed"
+FDREACH_BIN=/usr/local/bin/r7-fdreach-probe
+install -m 755 "$EVIDENCE_DIR/fdreach_probe" "$FDREACH_BIN"
+restorecon "$FDREACH_BIN" >/dev/null 2>&1 || true
+
+# (matrix) kernel decisions for the real domain pairs; the decisive one is
+# buildkitd_t:s0:c2 -> buildkitd_t:s0:c1 (op B reaching op A's process fds).
+cap fdreach-matrix 60 "$EVIDENCE_DIR/fdreach_probe" matrix \
+  system_u:system_r:docker_helper_buildkitd_t:s0:c2 system_u:system_r:docker_helper_buildkitd_t:s0:c1 \
+  system_u:system_r:docker_helper_t:s0 system_u:system_r:docker_helper_buildkitd_t:s0:c1 \
+  system_u:system_r:docker_helper_container_t:s0:c1 system_u:system_r:docker_helper_buildkitd_t:s0:c1 \
+  system_u:unconfined_r:unconfined_t:s0-s0:c0.c1023 system_u:system_r:docker_helper_buildkitd_t:s0:c1
+
+# (live worst case) an UNSEALED memfd held by a c1-level sleeper; the reach
+# attempts run from a c2-level subject (level-only runcon, no domain
+# transition — the same working pattern as section 5d).
+"$FDREACH_BIN" sleeper 10 seal >"$EVIDENCE_DIR/fdreach-sleeper-c1.log" 2>&1 &
+SP=$!
+for _ in $(seq 1 100); do grep -q MEMFD-READY "$EVIDENCE_DIR/fdreach-sleeper-c1.log" 2>/dev/null && break; sleep 0.05; done
+SPID="$(grep -oE 'pid=[0-9]+' "$EVIDENCE_DIR/fdreach-sleeper-c1.log" | head -1 | cut -d= -f2)"
+SFD="$(grep -oE 'fd=[0-9]+' "$EVIDENCE_DIR/fdreach-sleeper-c1.log" | head -1 | cut -d= -f2)"
+if [ -n "$SPID" ] && [ -n "$SFD" ]; then
+  cap fdreach-cross-level 20 runcon -l s0:c2 "$FDREACH_BIN" reach "$SPID" "$SFD"
+  cap fdreach-same-context 20 "$FDREACH_BIN" reach "$SPID" "$SFD"
+else
+  log "sleeper pid/fd not observed; live reach probes skipped"
+  printf 'sleeper not observed\n' >"$EVIDENCE_DIR/fdreach-cross-level.log"
+  printf 'sleeper not observed\n' >"$EVIDENCE_DIR/fdreach-same-context.log"
+fi
+wait $SP 2>/dev/null || true
+
+# (seal immutability) SEALED memfd: a same-uid root O_RDWR open that still
+# cannot write (EPERM) proves kernel-enforced immutability independent of
+# SELinux — layer (c) of the authority boundary.
+"$FDREACH_BIN" sleeper 10 seal >"$EVIDENCE_DIR/fdreach-sleeper-sealed.log" 2>&1 &
+SP=$!
+for _ in $(seq 1 100); do grep -q MEMFD-READY "$EVIDENCE_DIR/fdreach-sleeper-sealed.log" 2>/dev/null && break; sleep 0.05; done
+SPID="$(grep -oE 'pid=[0-9]+' "$EVIDENCE_DIR/fdreach-sleeper-sealed.log" | head -1 | cut -d= -f2)"
+SFD="$(grep -oE 'fd=[0-9]+' "$EVIDENCE_DIR/fdreach-sleeper-sealed.log" | head -1 | cut -d= -f2)"
+if [ -n "$SPID" ] && [ -n "$SFD" ]; then
+  cap fdreach-sealed-unconfined 20 "$FDREACH_BIN" reach "$SPID" "$SFD"
+else
+  printf 'sealed sleeper not observed\n' >"$EVIDENCE_DIR/fdreach-sealed-unconfined.log"
+fi
+wait $SP 2>/dev/null || true
+rm -f "$FDREACH_BIN"
+avc_tail fdreach-avc-window
+touch "$STATE_DIR/sec5f"
+fi
+
+# ============================================================================
 # Section 6: the LIVE real-path reproduction with strace
 # ============================================================================
 log "=== section 6: live real-path strace reproduction ==="
@@ -583,7 +804,7 @@ EOF
       BKD_PID="$(pgrep -x buildkitd | head -1 || true)"
       if [ -n "$BKD_PID" ]; then
         strace -f -qq -tt -s 120 -y \
-          -e trace=fsopen,fsconfig,fsmount,move_mount,open_tree,mount,umount2,memfd_create,sendfile,pwrite64,write,fchmod,fchmodat,fchmodat2,fchown,fchownat,execve,execveat,openat,readlink,readlinkat,statfs,fstatfs,fcntl,unshare,setns,faccessat,faccessat2,mknod,mknodat,mount_setattr \
+          -e trace=fsopen,fsconfig,fsmount,move_mount,open_tree,mount,umount2,memfd_create,sendfile,pwrite64,write,fchmod,fchmodat,fchmodat2,fchown,fchownat,execve,execveat,openat,readlink,readlinkat,statfs,fstatfs,fcntl,unshare,setns,faccessat,faccessat2,mknod,mknodat,mount_setattr,sendmsg,recvmsg,sendmmsg,pidfd_open,pidfd_getfd,pidfd_send_signal,close_range,dup,dup2,dup3,socketpair,socket,connect,bind,listen,accept4,accept,getsockname,getpeername \
           -p "$BKD_PID" -o "$STRACE_LOG" \
           2>"$EVIDENCE_DIR/runc-exeseal-strace.err" &
         STRACE_PID=$!
