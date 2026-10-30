@@ -2850,11 +2850,30 @@ type_transition docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:proce
 # type_transition or entrypoint exists on this type), that is its own
 # observed terminal under the proof-first protocol. read/open/map/
 # append/getattr/ioctl/create/unlink/entrypoint stay ungranted.
+# The P4 read-open corrective (ONE atomic two-permission grant, exact-SHA
+# UAT run 41100913026): the P3 enforcing UAT observed the exec passing its
+# inode MAY_EXEC check and stopping at the exec-target open — avc denied
+# { read open } comm="buildkit-runc" path "/memfd:runc_cloned:/proc/self/exe
+# (deleted)" (serials 1326, 10330). hooks.c pins this as ONE SELinux check
+# inside the SAME execve: selinux_file_open -> open_file_to_av = file_to_av
+# (FMODE_READ -> FILE__READ) + FILE__OPEN, with no FMODE_EXEC -> EXECUTE
+# mapping; a single-permission grant cannot advance past it (the remaining
+# vector re-denies in the same check). This is the ONLY sanctioned
+# multi-permission rule on the type — an exception to the single-permission
+# cadence justified by the observed single check, not a general widening.
+# The grant stays pointed at the memfd object type (reachable only through
+# the single pointed tmpfs_t:file transition): the only readable object of
+# this type is the sealed, kernel-write-immutable clone of buildkitd's own
+# binary. The exec path itself is the only observed consumer. append/map/
+# execute_no_trans/getattr/ioctl/create/unlink/entrypoint stay ungranted;
+# execute_no_trans (the bprm same-domain check, file-class in current
+# kernels) is the predicted next terminal and is left to be observed.
 type docker_helper_runc_memfd_t;
 type_transition docker_helper_buildkitd_t tmpfs_t:file docker_helper_runc_memfd_t;
 allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file write;
 allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file setattr;
 allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file execute;
+allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file { read open };
 
 # --- R7-A: the daemon's buildctl executable identity (full artifact-gate
 # --- evidence, failed release run 38944346311) ---
