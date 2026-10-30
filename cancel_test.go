@@ -644,6 +644,15 @@ func TestTerminationReasonOwnershipCancelFirst(t *testing.T) {
 	app.OperationSupervisor.ops[op.ID] = op
 	app.OperationSupervisor.mu.Unlock()
 
+	origTerminationTimeout := defaultTerminationTimeout
+	origForceCleanupTimeout := defaultForceCleanupTimeout
+	defaultTerminationTimeout = 100 * time.Millisecond
+	defaultForceCleanupTimeout = 50 * time.Millisecond
+	defer func() {
+		defaultTerminationTimeout = origTerminationTimeout
+		defaultForceCleanupTimeout = origForceCleanupTimeout
+	}()
+
 	// Barrier: terminateForShutdown waits until cancel has completed.
 	cancelDone := make(chan struct{})
 
@@ -661,7 +670,7 @@ func TestTerminationReasonOwnershipCancelFirst(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		<-cancelDone
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 		defer cancel()
 		app.OperationSupervisor.terminateForShutdown(ctx, app.killContainerBestEffort)
 	}()
@@ -697,6 +706,15 @@ func TestTerminationReasonOwnershipShutdownFirst(t *testing.T) {
 	app.OperationSupervisor.ops[op.ID] = op
 	app.OperationSupervisor.mu.Unlock()
 
+	origTerminationTimeout := defaultTerminationTimeout
+	origForceCleanupTimeout := defaultForceCleanupTimeout
+	defaultTerminationTimeout = 100 * time.Millisecond
+	defaultForceCleanupTimeout = 50 * time.Millisecond
+	defer func() {
+		defaultTerminationTimeout = origTerminationTimeout
+		defaultForceCleanupTimeout = origForceCleanupTimeout
+	}()
+
 	// Barrier: cancel waits until terminateForShutdown has completed.
 	shutdownDone := make(chan struct{})
 
@@ -706,7 +724,7 @@ func TestTerminationReasonOwnershipShutdownFirst(t *testing.T) {
 	// Goroutine 1: shutdown (runs first).
 	go func() {
 		defer wg.Done()
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 		defer cancel()
 		app.OperationSupervisor.terminateForShutdown(ctx, app.killContainerBestEffort)
 		close(shutdownDone)

@@ -66,12 +66,12 @@ const (
 // defaultTerminationTimeout is the graceful termination budget applied
 // when the caller does not supply a context deadline. Used by both
 // explicit cancel (cancel) and daemon shutdown (terminateForShutdown).
-const defaultTerminationTimeout = 5 * time.Second
+var defaultTerminationTimeout = 5 * time.Second
 
 // defaultForceCleanupTimeout is the shared force-cleanup budget for
 // daemon-side container cleanup and CLI process kill after the graceful
 // phase expires. Both owner and followers share this budget.
-const defaultForceCleanupTimeout = 3 * time.Second
+var defaultForceCleanupTimeout = 3 * time.Second
 
 type terminationReason uint8
 
