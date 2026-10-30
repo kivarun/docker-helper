@@ -12702,6 +12702,151 @@ func TestUATWorkloadSELinuxRuncLogObservationClassifier(t *testing.T) {
 	})
 }
 
+// TestUATWorkloadSELinuxRuncDirObservationClassifier runs the shipped
+// rt_priv_runc_verdict classifier over survey fixtures and proves the R7
+// privacy runc-dir observation contract end-to-end:
+//   - the P2 UAT regression shape (a complete correct observation shadowed
+//     by a degenerate LAST survey record — the dir existed at test time
+//     and vanished before the stat — plus the delete event) stays GREEN:
+//     the verdict is set-based, incomplete records are counted and never
+//     decisive, and confirmed privacy is distinct from absence of
+//     observation;
+//   - every COMPLETE observation is decisive: a foreign context fails even
+//     among correct ones, a non-owner-only mode fails, and an owner drift
+//     from the op tree's flow identity fails;
+//   - a creation event alone never validates anything: an runc-obs record
+//     whose stat failed is incomplete (delete-before-stat can never
+//     become a PASS), and zero complete observations fail as
+//     created-but-unreadable — distinguishable from never-created, which
+//     is the zero-record shape;
+//   - the journal survives the removal: the verdict is computed from the
+//     recorded evidence after the dir is gone (runc-gone counted, the
+//     complete tuple still decisive);
+//   - two concurrent operations with independent dirs classify
+//     independently (one op's evidence never poisons the other's).
+func TestUATWorkloadSELinuxRuncDirObservationClassifier(t *testing.T) {
+	const ctxC1 = "system_u:object_r:docker_helper_builder_runtime_t:s0:c1"
+	const ctxC2 = "system_u:object_r:docker_helper_builder_runtime_t:s0:c2"
+	const dirC1 = "700|docker-helper-builder|docker-helper-builder|" + ctxC1
+	const dirC2 = "700|docker-helper-builder|docker-helper-builder|" + ctxC2
+	classifier := extractShellFunction(t, "scripts/uat-workload-selinux.sh", "rt_priv_runc_verdict") +
+		"\n" + extractShellFunction(t, "scripts/uat-workload-selinux.sh", "rt_priv_owner_only")
+
+	dir := t.TempDir()
+	survey := filepath.Join(dir, "survey.txt")
+	write := func(records ...string) {
+		t.Helper()
+		if err := os.WriteFile(survey, []byte(strings.Join(records, "\n")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := func(op, own string) string {
+		t.Helper()
+		script := classifier + "\nrt_priv_runc_verdict " + strconv.Quote(survey) + " " + op + " " + strconv.Quote(own) + "\n"
+		out, err := runBashIn(t, dir, script)
+		if err != nil {
+			t.Fatalf("classifier run failed: %v\n%s", err, out)
+		}
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(line, "VERDICT=") {
+				return line
+			}
+		}
+		t.Fatalf("classifier printed no VERDICT line, output:\n%s", out)
+		return ""
+	}
+
+	t.Run("P2 regression shape stays green (degenerate LAST record counted, never decisive)", func(t *testing.T) {
+		write(
+			"op opB "+dirC1,
+			"runc opB st_rc=0 st_err=none cx_rc=0 cx_err=none 1700|docker-helper-builder|docker-helper-builder|"+ctxC1,
+			"runc opB st_rc=1 st_err=stat:_cannot_stat..._No_such_file_or_directory cx_rc=1 cx_err=stat:_cannot_stat..._No_such_file_or_directory ||?",
+			"runc-gone opB ev=DELETE,ISDIR path=/run/docker-helper-builder/ops/opB/runc",
+		)
+		if got := run("opB", dirC1); !strings.HasPrefix(got, "VERDICT=OK ctx=OK mode=OK valid=1 incomplete=1 gone=1") {
+			t.Errorf("the complete correct observation must decide the verdict with the degenerate LAST record and the delete event counted, got: %s", got)
+		}
+	})
+
+	t.Run("complete foreign-context observation fails", func(t *testing.T) {
+		write("runc opC st_rc=0 st_err=none cx_rc=0 cx_err=none 1700|docker-helper-builder|docker-helper-builder|" + ctxC2)
+		if got := run("opC", dirC1); !strings.HasPrefix(got, "VERDICT=FAIL ctx=FAIL(seen="+ctxC2+")") {
+			t.Errorf("a complete foreign-context observation must fail, got: %s", got)
+		}
+	})
+
+	t.Run("foreign observation fails even when others are correct", func(t *testing.T) {
+		write(
+			"runc opD st_rc=0 st_err=none cx_rc=0 cx_err=none 1700|docker-helper-builder|docker-helper-builder|"+ctxC1,
+			"runc-obs opD ev=ATTRIB,ISDIR st_rc=0 st_err=none cx_rc=0 cx_err=none 1700|docker-helper-builder|docker-helper-builder|"+ctxC2,
+		)
+		if got := run("opD", dirC1); !strings.HasPrefix(got, "VERDICT=FAIL ctx=FAIL(seen="+ctxC2+")") {
+			t.Errorf("one foreign complete observation among correct ones must fail (set-based, not FIRST/LAST), got: %s", got)
+		}
+	})
+
+	t.Run("complete non-owner-only mode fails", func(t *testing.T) {
+		write("runc opE st_rc=0 st_err=none cx_rc=0 cx_err=none 0755|docker-helper-builder|docker-helper-builder|" + ctxC1)
+		if got := run("opE", dirC1); !strings.HasPrefix(got, "VERDICT=FAIL ctx=OK mode=FAIL(mode=0755-not-owner-only)") {
+			t.Errorf("a complete non-owner-only observation must fail, got: %s", got)
+		}
+	})
+
+	t.Run("complete owner-drift observation fails", func(t *testing.T) {
+		write("runc-obs opF ev=CREATE,ISDIR st_rc=0 st_err=none cx_rc=0 cx_err=none 1700|root|root|" + ctxC1)
+		if got := run("opF", dirC1); !strings.HasPrefix(got, "VERDICT=FAIL ctx=OK mode=FAIL(owner=root|root-drifted-from-docker-helper-builder|docker-helper-builder)") {
+			t.Errorf("a complete observation with a drifted owner must fail, got: %s", got)
+		}
+	})
+
+	t.Run("never-created fails (zero records of any kind)", func(t *testing.T) {
+		write("op opH " + dirC1)
+		if got := run("opH", dirC1); !strings.HasPrefix(got, "VERDICT=FAIL reason=never-created") {
+			t.Errorf("absence of observation must fail, never pass, got: %s", got)
+		}
+	})
+
+	t.Run("created-and-removed without a readable tuple fails as created-but-unreadable", func(t *testing.T) {
+		write("runc-gone opI ev=DELETE,ISDIR path=/run/docker-helper-builder/ops/opI/runc")
+		if got := run("opI", dirC1); !strings.HasPrefix(got, "VERDICT=FAIL reason=created-but-unreadable ctx=FAIL mode=FAIL valid=0 incomplete=0 gone=1") {
+			t.Errorf("a proven created-and-removed lifetime without attributes must fail and be distinct from never-created, got: %s", got)
+		}
+	})
+
+	t.Run("creation event with a failed stat never validates", func(t *testing.T) {
+		write("runc-obs opJ ev=CREATE,ISDIR st_rc=1 st_err=No_such_file_or_directory cx_rc=1 cx_err=No_such_file_or_directory ||?")
+		if got := run("opJ", dirC1); !strings.HasPrefix(got, "VERDICT=FAIL reason=created-but-unreadable ctx=FAIL mode=FAIL valid=0 incomplete=1") {
+			t.Errorf("a create event whose stat failed is incomplete evidence and must fail, got: %s", got)
+		}
+	})
+
+	t.Run("an incomplete runc-obs record cannot shadow a complete one", func(t *testing.T) {
+		write(
+			"runc-obs opK ev=CREATE,ISDIR st_rc=1 st_err=No_such_file_or_directory cx_rc=1 cx_err=No_such_file_or_directory ||?",
+			"runc-obs opK ev=ATTRIB,ISDIR st_rc=0 st_err=none cx_rc=0 cx_err=none 1700|docker-helper-builder|docker-helper-builder|"+ctxC1,
+		)
+		if got := run("opK", dirC1); !strings.HasPrefix(got, "VERDICT=OK ctx=OK mode=OK valid=1 incomplete=1") {
+			t.Errorf("the complete tuple must decide with the failed-stat capture counted, got: %s", got)
+		}
+	})
+
+	t.Run("two concurrent operations classify independently", func(t *testing.T) {
+		write(
+			"runc opA st_rc=0 st_err=none cx_rc=0 cx_err=none 1700|docker-helper-builder|docker-helper-builder|"+ctxC1,
+			"runc opB st_rc=0 st_err=none cx_rc=0 cx_err=none 1700|docker-helper-builder|docker-helper-builder|"+ctxC2,
+		)
+		if got := run("opA", dirC1); !strings.HasPrefix(got, "VERDICT=OK ctx=OK mode=OK valid=1") {
+			t.Errorf("op A must classify on its own evidence, got: %s", got)
+		}
+		if got := run("opB", dirC2); !strings.HasPrefix(got, "VERDICT=OK ctx=OK mode=OK valid=1") {
+			t.Errorf("op B must classify on its own evidence, got: %s", got)
+		}
+		if got := run("opA", dirC2); !strings.HasPrefix(got, "VERDICT=FAIL ctx=FAIL") {
+			t.Errorf("op A judged against op B's own tree must fail (per-op binding), got: %s", got)
+		}
+	})
+}
+
 // TestUATHarnessRichListCLIGrammar runs the rich allowed-root list forms the
 // Release-2 UAT harness uses through the REAL production CLI parser (the same
 // in-process dispatch as the binary) and proves the grammar contract directly:

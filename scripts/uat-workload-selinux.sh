@@ -190,6 +190,118 @@ rt_priv_log_verdict() {
     printf 'VERDICT=OK valid=%d incomplete=%d foreign=none\n' "$valid" "$incomplete"
   fi
 }
+# Two DISTINCT mode invariants, classified on the LAST THREE octal
+# digits (any special-bit prefix is ignored — 1700 is sticky+0700):
+#   rt_priv_owner_only MODE -> 1 iff group digit == 0 AND other
+#   digit == 0 (the owner-only invariant: ANY group/other access,
+#   read r-4 / write w-2 / execute x-1, violates);
+#   rt_priv_no_write MODE   -> 1 iff neither digit carries the write
+#   bit (2,3=w/wx, 6,7=rw/rwx violate; read-only 4,5 does NOT).
+# The runc dirs are judged by owner-only; the shared tree path (the
+# runtime root, ops/, the op dirs) by no-write only (the flow
+# identity must be able to traverse the shared path).
+rt_priv_owner_only() {
+  local m g o
+  m="$(printf '%s' "$1" | awk '{ print substr($0, length($0)-2) }')"
+  case "$m" in ???) : ;; *) return 1 ;; esac
+  g="$(printf '%s' "$m" | awk '{ print substr($0, 2, 1) }')"
+  o="$(printf '%s' "$m" | awk '{ print substr($0, 3, 1) }')"
+  [ "$g" = "0" ] && [ "$o" = "0" ]
+}
+rt_priv_no_write() {
+  local m g o
+  m="$(printf '%s' "$1" | awk '{ print substr($0, length($0)-2) }')"
+  case "$m" in ???) : ;; *) return 1 ;; esac
+  g="$(printf '%s' "$m" | awk '{ print substr($0, 2, 1) }')"
+  o="$(printf '%s' "$m" | awk '{ print substr($0, 3, 1) }')"
+  case "$g" in 2|3|6|7) return 1 ;; esac
+  case "$o" in 2|3|6|7) return 1 ;; esac
+  return 0
+}
+
+# rt_priv_runc_verdict SURVEY OP OWN_TUPLE — the R7 privacy runc-dir
+# observation classifier. Survey records have the shapes
+#
+#   runc <op> st_rc=<n> st_err=<t> cx_rc=<n> cx_err=<t> <a|U|G>|<ctx>
+#   runc-obs <op> ev=<E> st_rc=<n> st_err=<t> cx_rc=<n> cx_err=<t> <a|U|G>|<ctx>
+#   runc-gone <op> ev=<E> path=<p>
+#
+# where the runc lines come from the periodic survey sweep and the
+# runc-obs lines from the immediate per-event capture (each stat read
+# carries its own exit status and stderr). OWN_TUPLE is the op's own
+# runtime-tree stat tuple (mode|uid|gid|ctx) — it supplies both the
+# expected context and the expected flow identity (owner). Classification
+# (set-based, never FIRST-only or LAST-only):
+#   - COMPLETE observation: st_rc=0 AND cx_rc=0 AND a non-empty tuple
+#     whose context is readable (not "?"). Decisive: its context MUST
+#     equal the op tree's own context, its mode MUST be owner-only, and
+#     its owner MUST equal the op tree's flow identity. EVERY complete
+#     observation is checked.
+#   - incomplete observation (either read failed — the dir existed at
+#     test time and vanished before the stat): counted, never decisive.
+#   - runc-gone: a kernel delete/moved_from event for the dir; counted.
+# Verdict: FAIL reason=never-created when no record of any kind exists;
+# FAIL reason=created-but-unreadable when records exist but zero are
+# complete (gone events prove a created-and-removed lifetime); FAIL with
+# ctx=/mode= details when any complete observation violates a property;
+# otherwise OK. A creation event alone never validates anything: only a
+# complete stat tuple can, so a delete-before-stat observation stays
+# incomplete and can never become a PASS.
+rt_priv_runc_verdict() {
+  survey="$1"; op="$2"; own="$3"
+  own_ctx="$(printf '%s' "$own" | awk -F'|' '{ print $4 }')"
+  own_owner="$(printf '%s' "$own" | awk -F'|' '{ print $2 "|" $3 }')"
+  valid=0; incomplete=0; gone=0; ctx_bad=""; mode_bad=""; first=""
+  while IFS= read -r rec; do
+    [ -n "$rec" ] || continue
+    case "$rec" in
+      "runc $op "*|"runc-obs $op "*) ;;
+      "runc-gone $op "*) gone=$((gone + 1)); continue ;;
+      *) continue ;;
+    esac
+    tuple="$(printf '%s' "$rec" | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[^ ]*\|/) { print $i; exit } }')"
+    st_rc="$(printf '%s' "$rec" | sed -n 's/.* st_rc=\([0-9][0-9]*\).*/\1/p')"
+    cx_rc="$(printf '%s' "$rec" | sed -n 's/.* cx_rc=\([0-9][0-9]*\).*/\1/p')"
+    if [ "$st_rc" = "0" ] && [ "$cx_rc" = "0" ] && [ -n "$tuple" ]; then
+      mode="${tuple%%|*}"
+      owner="$(printf '%s' "${tuple#*|}" | awk -F'|' '{ print $1 "|" $2 }')"
+      ctx="$(printf '%s' "$tuple" | awk -F'|' '{ print $4 }')"
+      if [ -n "$ctx" ] && [ "$ctx" != "?" ]; then
+        valid=$((valid + 1))
+        [ -z "$first" ] && first="$tuple"
+        if [ "$ctx" != "$own_ctx" ]; then
+          ctx_bad="$ctx"
+        fi
+        if ! rt_priv_owner_only "$mode"; then
+          mode_bad="$mode_bad mode=$mode-not-owner-only"
+        fi
+        if [ "$owner" != "$own_owner" ]; then
+          mode_bad="$mode_bad owner=$owner-drifted-from-$own_owner"
+        fi
+      else
+        incomplete=$((incomplete + 1))
+      fi
+    else
+      incomplete=$((incomplete + 1))
+    fi
+  done < "$survey"
+  if [ "$valid" -eq 0 ]; then
+    if [ $((incomplete + gone)) -eq 0 ]; then
+      printf 'VERDICT=FAIL reason=never-created ctx=FAIL mode=FAIL valid=0 incomplete=0 gone=0\n'
+    else
+      printf 'VERDICT=FAIL reason=created-but-unreadable ctx=FAIL mode=FAIL valid=0 incomplete=%d gone=%d\n' "$incomplete" "$gone"
+    fi
+    return 0
+  fi
+  ctx_v=OK; [ -n "$ctx_bad" ] && ctx_v="FAIL(seen=$ctx_bad)"
+  mode_v=OK; [ -n "$mode_bad" ] && mode_v="FAIL(${mode_bad# })"
+  overall=OK
+  if [ -n "$ctx_bad" ] || [ -n "$mode_bad" ]; then
+    overall=FAIL
+  fi
+  printf 'VERDICT=%s ctx=%s mode=%s valid=%d incomplete=%d gone=%d first=%s\n' \
+    "$overall" "$ctx_v" "$mode_v" "$valid" "$incomplete" "$gone" "$first"
+}
 scenario() { say "scenario $1"; }
 
 dh() { /usr/bin/docker-helper "$@"; }
@@ -1893,10 +2005,11 @@ say "R7 runtime privacy: buildkit-runc's per-op runtime-dir fixup (setattr rung)
 #     categories (the lowest-free per-operation pool, G32 r3 §4.1);
 #   - each observed ops/<id>/runc dir carries the SAME SELinux context
 #     as its own op's runtime tree (live stat, both sides);
-#   - the fixup's effect is a TIGHTENING: the settled runc dir mode is
-#     exactly owner-rwx (no group/other access) and its owner matches
-#     the op tree's own flow identity; the first-seen (pre-fixup race
-#     window) and settled (post-fixup) stats are both recorded;
+#   - the fixup's effect is a TIGHTENING: every complete observation of
+#     the runc dir mode is exactly owner-rwx (no group/other access)
+#     and its owner matches the op tree's own flow identity; incomplete
+#     (vanished-before-stat) and runc-gone (delete event) observations
+#     are counted and never decisive;
 #   - no group/other write appears anywhere on the observed tree path
 #     (the runtime root, ops/, the op dir) — no widening for any other
 #     local identity, no writable path toward another operation or the
@@ -1926,21 +2039,42 @@ else
   # The short-lived runc dir and runc-log.json died inside the fixed
   # 0.3s poll window in earlier runs (never-seen). The capture is now
   # EVENT-DRIVEN: a recursive inotify watcher over both op-tree roots
-  # feeds a FIFO, and every create/attrib/moved_to event triggers an
-  # immediate stat survey (the fixup chmod fires attrib; the runc dir
-  # creation and the runc-log.json creation fire create) — the survey
-  # samples within microseconds of each lifecycle event instead of
-  # racing a fixed interval. A 1s read timeout keeps a heartbeat sweep
-  # for missed events. When the tool is unavailable the fixed poller
-  # stays the fallback and never-seen keeps meaning FAIL (the gate is
-  # never weakened by the absence of the observation tool).
+  # feeds a FIFO, and every create/attrib/moved_to/delete/moved_from
+  # event is journaled: lifecycle events on an ops/<op>/runc dir fire an
+  # IMMEDIATE per-event stat capture (microseconds after the kernel
+  # event — the fixup chmod fires attrib, the runc dir creation fires
+  # create) and delete/moved_from events journal the removal itself, so
+  # a created-and-removed lifetime is provable instead of silent. The
+  # survey sweep stays as the heartbeat sampler. The verdicts are
+  # set-based over every captured record: the P2 UAT's B=never-seen
+  # regression was a degenerate LAST record (dir vanished between the
+  # survey's test and stat) shadowing a complete correct observation —
+  # incomplete records are now counted, never decisive. Overflow,
+  # watcher death, zero observed events, or the interval-blind fallback
+  # poller mark the capture degraded and fail the privacy legs
+  # explicitly (never an OK on an unprovable observation window).
   rt_priv_survey_once() {
     for RT_OPDIR in /run/docker-helper-builder/ops/*; do
       [ -d "$RT_OPDIR" ] || continue
       RT_OP="$(basename "$RT_OPDIR")"
       printf 'op %s %s\n' "$RT_OP" "$(stat -c '%a|%U|%G|%C' "$RT_OPDIR" 2>/dev/null)" >> "$RT_SURVEY"
       if [ -d "$RT_OPDIR/runc" ]; then
-        printf 'runc %s %s\n' "$RT_OP" "$(stat -c '%a|%U|%G|%C' "$RT_OPDIR/runc" 2>/dev/null)" >> "$RT_SURVEY"
+        # Two separate reads with their own exit status and stderr (the
+        # same contract as the runc-log lines): the dir existed at test
+        # time but may vanish before the stat — that degenerate record
+        # is an incomplete observation the classifier counts, never the
+        # authoritative one.
+        RT_RUNC_MODE="$(stat -c '%a|%U|%G' "$RT_OPDIR/runc" 2>"$RT_SURVEY.sterr")"
+        RT_RUNC_ST_RC=$?
+        RT_RUNC_ST_ERR="$(tr '\n' ' ' <"$RT_SURVEY.sterr" 2>/dev/null | tr ' ' '_')"
+        RT_RUNC_CTX="$(stat -c '%C' "$RT_OPDIR/runc" 2>"$RT_SURVEY.cxerr")"
+        RT_RUNC_CX_RC=$?
+        RT_RUNC_CX_ERR="$(tr '\n' ' ' <"$RT_SURVEY.cxerr" 2>/dev/null | tr ' ' '_')"
+        printf 'runc %s st_rc=%d st_err=%s cx_rc=%d cx_err=%s %s|%s\n' \
+          "$RT_OP" \
+          "$RT_RUNC_ST_RC" "${RT_RUNC_ST_ERR:-none}" \
+          "$RT_RUNC_CX_RC" "${RT_RUNC_CX_ERR:-none}" \
+          "${RT_RUNC_MODE:-}" "${RT_RUNC_CTX:-?}" >> "$RT_SURVEY"
       fi
     done
     for RT_STDIR in /var/lib/docker-helper-builder/ops/*; do
@@ -1968,6 +2102,28 @@ else
       fi
     done
   }
+  # rt_priv_capture_runc PATH EVENT — the immediate per-event capture:
+  # fired by the reader loop the moment inotify reports a lifecycle event
+  # (create/attrib/moved_to) on an ops/<op>/runc dir, microseconds after
+  # the kernel event instead of at the next survey sweep. Same two-read
+  # contract as the survey line: the journal records the attempt with its
+  # own exit statuses, so a delete-before-stat race produces an explicit
+  # incomplete runc-obs record — evidence, never a silent gap and never
+  # a validation.
+  rt_priv_capture_runc() {
+    RT_CAP_OP="$(basename "$(dirname "$1")")"
+    RT_CAP_MODE="$(stat -c '%a|%U|%G' "$1" 2>"$RT_SURVEY.sterr")"
+    RT_CAP_ST_RC=$?
+    RT_CAP_ST_ERR="$(tr '\n' ' ' <"$RT_SURVEY.sterr" 2>/dev/null | tr ' ' '_')"
+    RT_CAP_CTX="$(stat -c '%C' "$1" 2>"$RT_SURVEY.cxerr")"
+    RT_CAP_CX_RC=$?
+    RT_CAP_CX_ERR="$(tr '\n' ' ' <"$RT_SURVEY.cxerr" 2>/dev/null | tr ' ' '_')"
+    printf 'runc-obs %s ev=%s st_rc=%d st_err=%s cx_rc=%d cx_err=%s %s|%s\n' \
+      "$RT_CAP_OP" "$2" \
+      "$RT_CAP_ST_RC" "${RT_CAP_ST_ERR:-none}" \
+      "$RT_CAP_CX_RC" "${RT_CAP_CX_ERR:-none}" \
+      "${RT_CAP_MODE:-}" "${RT_CAP_CTX:-?}" >> "$RT_SURVEY"
+  }
   RT_EVENT_CAPTURE=unavailable
   RT_INO_PID=""
   if ! command -v inotifywait >/dev/null 2>&1; then
@@ -1987,7 +2143,7 @@ else
       RT_SELF_DIR=/tmp/uat-wls-privacy-selftest-dir
       rm -rf "$RT_SELF_DIR"; mkdir -p "$RT_SELF_DIR"
       if mkfifo "$RT_SELF_FIFO" 2>/dev/null; then
-        inotifywait -m -q -e create,attrib --format '%e' "$RT_SELF_DIR" \
+        inotifywait -m -q -e create,attrib --format '%e|%w%f' "$RT_SELF_DIR" \
           > "$RT_SELF_FIFO" 2>/dev/null &
         RT_SELF_PID=$!
         exec 4<"$RT_SELF_FIFO"
@@ -2006,12 +2162,19 @@ else
       fi
       if [ "${RT_SELF_EVENTS:-0}" -ge 1 ]; then
         RT_EVENT_CAPTURE=active
+        RT_CAPTURE_DEGRADED=0
         # Watch the PARENT roots: the ops roots themselves are created
         # (and pruned) by the builder flow, so a watcher armed on them
         # before the builds dies with "No such file or directory" (the
         # 39166421342 dispatch); the parents exist from service start
         # and inotifywait -r adopts newly created subtrees dynamically.
-        inotifywait -m -r -q -e create,attrib,moved_to --format '%e' \
+        # The event line carries the event name AND the path (%e|%w%f):
+        # the reader loop needs the path to fire the immediate per-event
+        # runc-dir capture and to journal delete/moved_from (a created-
+        # and-removed lifetime must be provable, not silent). inotify
+        # queue overflow is never filterable away — any OVERFLOW event
+        # marks the capture degraded (fail-closed, never an OK).
+        inotifywait -m -r -q -e create,attrib,moved_to,delete,moved_from --format '%e|%w%f' \
           /run/docker-helper-builder /var/lib/docker-helper-builder \
           > "$RT_FIFO" 2>/tmp/uat-wls-privacy-inotify.err &
         RT_INO_PID=$!
@@ -2036,9 +2199,38 @@ else
     if [ "$RT_EVENT_CAPTURE" = "active" ]; then
       if read -t 1 -r -u 3 RT_EVT; then
         RT_EVENT_EVENTS=$((RT_EVENT_EVENTS + 1))
+        case "$RT_EVT" in
+          *OVERFLOW*)
+            RT_CAPTURE_DEGRADED=1
+            printf 'capture-overflow\n' >> "$RT_SURVEY"
+            ;;
+          *)
+            RT_EVT_NAME="${RT_EVT%%|*}"
+            RT_EVT_PATH="${RT_EVT#*|}"
+            case "$RT_EVT_PATH" in
+              */runc)
+                case "$RT_EVT_NAME" in
+                  *CREATE*|*ATTRIB*|*MOVED_TO*)
+                    rt_priv_capture_runc "$RT_EVT_PATH" "$RT_EVT_NAME"
+                    ;;
+                  *DELETE*|*MOVED_FROM*)
+                    printf 'runc-gone %s ev=%s path=%s\n' \
+                      "$(basename "$(dirname "$RT_EVT_PATH")")" \
+                      "$RT_EVT_NAME" "$RT_EVT_PATH" >> "$RT_SURVEY"
+                    ;;
+                esac
+                ;;
+            esac
+            ;;
+        esac
       fi
       rt_priv_survey_once
     else
+      # Fallback poller: the capture is interval-blind (a short-lived dir
+      # can live and die between the 0.3s sweeps), so the capture is
+      # degraded by construction and the privacy legs must not report OK
+      # on it.
+      RT_CAPTURE_DEGRADED=1
       rt_priv_survey_once
       sleep 0.3
     fi
@@ -2046,29 +2238,31 @@ else
   if [ "$RT_EVENT_CAPTURE" = "active" ]; then
     RT_INO_ALIVE=no
     kill -0 "$RT_INO_PID" 2>/dev/null && RT_INO_ALIVE=yes
+    [ "$RT_INO_ALIVE" = "no" ] && RT_CAPTURE_DEGRADED=1
     exec 3<&-
     kill "$RT_INO_PID" 2>/dev/null || true
     wait "$RT_INO_PID" 2>/dev/null || true
+    [ "${RT_EVENT_EVENTS:-0}" -eq 0 ] && RT_CAPTURE_DEGRADED=1
   fi
-  info "R7-privacy capture: event-driven=$RT_EVENT_CAPTURE (events observed: ${RT_EVENT_EVENTS:-0}; watcher survived: ${RT_INO_ALIVE:-n/a}; watcher stderr: $(head -2 /tmp/uat-wls-privacy-inotify.err 2>/dev/null || echo none))"
+  info "R7-privacy capture: event-driven=$RT_EVENT_CAPTURE (events observed: ${RT_EVENT_EVENTS:-0}; watcher survived: ${RT_INO_ALIVE:-n/a}; capture-degraded=${RT_CAPTURE_DEGRADED:-n/a}; watcher stderr: $(head -2 /tmp/uat-wls-privacy-inotify.err 2>/dev/null || echo none))"
   wait "$RT_PID_A"; RT_RC_A=$?
   wait "$RT_PID_B"; RT_RC_B=$?
   RT_OPS="$(grep '^op ' "$RT_SURVEY" | awk '{ print $2 }' | awk '!seen[$0]++')"
   RT_OP_COUNT=0
   RT_STAT_A=""; RT_STAT_B=""
+  RT_RUNC_VERDICT_A=""; RT_RUNC_VERDICT_B=""
   RT_RUNC_FIRST_A=""; RT_RUNC_FIRST_B=""
-  RT_RUNC_LAST_A=""; RT_RUNC_LAST_B=""
   for RT_OP in $RT_OPS; do
     RT_OP_COUNT=$((RT_OP_COUNT + 1))
-    RT_STAT="$(grep "^op $RT_OP " "$RT_SURVEY" | head -1 | awk '{ print $3 }')"
-    RT_RUNC_FIRST="$(grep "^runc $RT_OP " "$RT_SURVEY" | head -1 | awk '{ print $3 }')"
-    RT_RUNC_LAST="$(grep "^runc $RT_OP " "$RT_SURVEY" | tail -1 | awk '{ print $3 }')"
+    RT_STAT="$(grep "^op $RT_OP " "$RT_SURVEY" | awk '$3 != ""' | head -1 | awk '{ print $3 }')"
+    RT_VERDICT="$(rt_priv_runc_verdict "$RT_SURVEY" "$RT_OP" "$RT_STAT")"
+    RT_RUNC_FIRST="$(grep -h "^runc $RT_OP \|^runc-obs $RT_OP " "$RT_SURVEY" | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[^ ]*\|/) { print $i; exit } }' | head -1)"
     if [ "$RT_OP_COUNT" -eq 1 ]; then
-      RT_STAT_A="$RT_STAT"; RT_RUNC_FIRST_A="$RT_RUNC_FIRST"; RT_RUNC_LAST_A="$RT_RUNC_LAST"
+      RT_STAT_A="$RT_STAT"; RT_RUNC_VERDICT_A="$RT_VERDICT"; RT_RUNC_FIRST_A="$RT_RUNC_FIRST"
     elif [ "$RT_OP_COUNT" -eq 2 ]; then
-      RT_STAT_B="$RT_STAT"; RT_RUNC_FIRST_B="$RT_RUNC_FIRST"; RT_RUNC_LAST_B="$RT_RUNC_LAST"
+      RT_STAT_B="$RT_STAT"; RT_RUNC_VERDICT_B="$RT_VERDICT"; RT_RUNC_FIRST_B="$RT_RUNC_FIRST"
     fi
-    info "R7-privacy op=$RT_OP dir=${RT_STAT:-unobserved} runc_first=${RT_RUNC_FIRST:-never-seen} runc_last=${RT_RUNC_LAST:-never-seen}"
+    info "R7-privacy op=$RT_OP dir=${RT_STAT:-unobserved} runc_first=${RT_RUNC_FIRST:-never-seen} runc_verdict=${RT_VERDICT:-unavailable}"
   done
   # stat tuples are mode|uid|gid|context
   RT_CTX_A="$(printf '%s' "$RT_STAT_A" | awk -F'|' '{ print $4 }')"
@@ -2079,48 +2273,28 @@ else
   else
     acc_fail "R7 runtime privacy: the per-operation category allocation did not show two distinct concurrent categories (ops seen: $RT_OP_COUNT)"
   fi
-  RT_RUNC_CTX_A="$(printf '%s' "$RT_RUNC_LAST_A" | awk -F'|' '{ print $4 }')"
-  RT_RUNC_CTX_B="$(printf '%s' "$RT_RUNC_LAST_B" | awk -F'|' '{ print $4 }')"
-  if [ -n "$RT_RUNC_CTX_A" ] && [ -n "$RT_RUNC_CTX_B" ] \
-      && [ "$RT_RUNC_CTX_A" = "$RT_CTX_A" ] && [ "$RT_RUNC_CTX_B" = "$RT_CTX_B" ]; then
-    acc_ok "R7 runtime privacy: each observed runc dir's SELinux context equals its own operation's runtime-tree context (the match is per-op, on top of the distinct categories proven above — never one bare s0:c1 match)"
-  else
-    acc_fail "R7 runtime privacy: the runc dir's context did not match its own operation's tree (runc A=${RT_RUNC_CTX_A:-never-seen} B=${RT_RUNC_CTX_B:-never-seen})"
+  # The runc-dir verdicts are set-based (the classifier above): EVERY
+  # complete observation (survey sweep or immediate per-event capture)
+  # must carry the op's own context, owner-only mode, and the op tree's
+  # flow identity. Incomplete records (dir existed at test time, vanished
+  # before the stat) and runc-gone delete events are counted, never
+  # decisive — the P2 UAT's B=never-seen regression shape was exactly a
+  # degenerate LAST record (test-then-stat race) shadowing a complete
+  # correct observation. A degraded capture (overflow, watcher death,
+  # zero events, or the interval-blind fallback poller) fails the legs
+  # explicitly: an unprovable observation window is never an OK.
+  RT_CTX_LEG=1
+  for RT_V in "$RT_RUNC_VERDICT_A" "$RT_RUNC_VERDICT_B"; do
+    case "$RT_V" in *"ctx=OK"*) : ;; *) RT_CTX_LEG=0 ;; esac
+  done
+  if [ "$RT_CAPTURE_DEGRADED" = "1" ]; then
+    RT_CTX_LEG=0
   fi
-  RT_MODE_A="$(printf '%s' "$RT_RUNC_LAST_A" | awk -F'|' '{ print $1 }')"
-  RT_MODE_B="$(printf '%s' "$RT_RUNC_LAST_B" | awk -F'|' '{ print $1 }')"
-  RT_OWNER_A="$(printf '%s' "$RT_RUNC_LAST_A" | awk -F'|' '{ print $2 "|" $3 }')"
-  RT_OWNER_B="$(printf '%s' "$RT_RUNC_LAST_B" | awk -F'|' '{ print $2 "|" $3 }')"
-  RT_OPDIR_OWNER_A="$(printf '%s' "$RT_STAT_A" | awk -F'|' '{ print $2 "|" $3 }')"
-  RT_OPDIR_OWNER_B="$(printf '%s' "$RT_STAT_B" | awk -F'|' '{ print $2 "|" $3 }')"
-  # Two DISTINCT mode invariants, classified on the LAST THREE octal
-  # digits (any special-bit prefix is ignored — 1700 is sticky+0700):
-  #   rt_priv_owner_only MODE -> 1 iff group digit == 0 AND other
-  #   digit == 0 (the owner-only invariant: ANY group/other access,
-  #   read r-4 / write w-2 / execute x-1, violates);
-  #   rt_priv_no_write MODE   -> 1 iff neither digit carries the write
-  #   bit (2,3=w/wx, 6,7=rw/rwx violate; read-only 4,5 does NOT).
-  # The runc dirs are judged by owner-only; the shared tree path (the
-  # runtime root, ops/, the op dirs) by no-write only (the flow
-  # identity must be able to traverse the shared path).
-  rt_priv_owner_only() {
-    local m g o
-    m="$(printf '%s' "$1" | awk '{ print substr($0, length($0)-2) }')"
-    case "$m" in ???) : ;; *) return 1 ;; esac
-    g="$(printf '%s' "$m" | awk '{ print substr($0, 2, 1) }')"
-    o="$(printf '%s' "$m" | awk '{ print substr($0, 3, 1) }')"
-    [ "$g" = "0" ] && [ "$o" = "0" ]
-  }
-  rt_priv_no_write() {
-    local m g o
-    m="$(printf '%s' "$1" | awk '{ print substr($0, length($0)-2) }')"
-    case "$m" in ???) : ;; *) return 1 ;; esac
-    g="$(printf '%s' "$m" | awk '{ print substr($0, 2, 1) }')"
-    o="$(printf '%s' "$m" | awk '{ print substr($0, 3, 1) }')"
-    case "$g" in 2|3|6|7) return 1 ;; esac
-    case "$o" in 2|3|6|7) return 1 ;; esac
-    return 0
-  }
+  if [ "$RT_OP_COUNT" -ge 2 ] && [ "$RT_CTX_LEG" -eq 1 ]; then
+    acc_ok "R7 runtime privacy: each observed runc dir's SELinux context equals its own operation's runtime-tree context (the match is per-op, on top of the distinct categories proven above — never one bare s0:c1 match; A=${RT_RUNC_VERDICT_A} B=${RT_RUNC_VERDICT_B})"
+  else
+    acc_fail "R7 runtime privacy: the runc dir's context leg failed (A=${RT_RUNC_VERDICT_A:-unavailable} B=${RT_RUNC_VERDICT_B:-unavailable}; capture=${RT_EVENT_CAPTURE}${RT_CAPTURE_DEGRADED:+-DEGRADED})"
+  fi
   # The classifier's own regression table (fail-closed: a classifier
   # that disagrees with this table fails the section, never the UAT
   # silently passing a mis-classified mode). Encoded in shell exit
@@ -2144,22 +2318,25 @@ else
   if [ "$RT_SELFTEST_RC" -ne 0 ]; then
     acc_fail "R7 runtime privacy: the mode classifier disagrees with its own regression table (owner-only/no-write invariant split)"
   fi
-  RT_PRIV_TIGHTENED=1
   # The fixup's settled mode is owner-only with no group/other access
   # (observed live: the runtime sets sticky+0700 = 1700); the privacy
   # property is the ABSENCE of group/other access, classified by the
-  # owner-only invariant above — group/other read or execute is NOT
-  # absence of access.
-  for RT_MODE in "$RT_MODE_A" "$RT_MODE_B"; do
-    [ -n "$RT_MODE" ] || { RT_PRIV_TIGHTENED=0; continue; }
-    rt_priv_owner_only "$RT_MODE" || RT_PRIV_TIGHTENED=0
+  # owner-only invariant — group/other read or execute is NOT absence
+  # of access. The leg is decided by the same set-based verdicts as the
+  # context leg: every complete observation must be owner-only with the
+  # op tree's flow identity, incomplete and runc-gone observations are
+  # counted and never decisive, and a degraded capture fails explicitly.
+  RT_MODE_LEG=1
+  for RT_V in "$RT_RUNC_VERDICT_A" "$RT_RUNC_VERDICT_B"; do
+    case "$RT_V" in *"mode=OK"*) : ;; *) RT_MODE_LEG=0 ;; esac
   done
-  [ -n "$RT_OWNER_A" ] && [ "$RT_OWNER_A" = "$RT_OPDIR_OWNER_A" ] || RT_PRIV_TIGHTENED=0
-  [ -n "$RT_OWNER_B" ] && [ "$RT_OWNER_B" = "$RT_OPDIR_OWNER_B" ] || RT_PRIV_TIGHTENED=0
-  if [ "$RT_PRIV_TIGHTENED" -eq 1 ]; then
-    acc_ok "R7 runtime privacy: the fixup TIGHTENED the ops' own runc dirs (settled modes A=$RT_MODE_A B=$RT_MODE_B owner-only, owners ${RT_OWNER_A%%|*}/${RT_OWNER_B%%|*} match the op trees' flow identity; first-seen pre-fixup stats recorded: A=${RT_RUNC_FIRST_A:-never-seen} B=${RT_RUNC_FIRST_B:-never-seen})"
+  if [ "$RT_CAPTURE_DEGRADED" = "1" ]; then
+    RT_MODE_LEG=0
+  fi
+  if [ "$RT_OP_COUNT" -ge 2 ] && [ "$RT_MODE_LEG" -eq 1 ]; then
+    acc_ok "R7 runtime privacy: the fixup TIGHTENED the ops' own runc dirs (every complete observation owner-only with the op tree's flow identity; incomplete and runc-gone observations counted, never decisive; A=${RT_RUNC_VERDICT_A} B=${RT_RUNC_VERDICT_B})"
   else
-    acc_fail "R7 runtime privacy: the settled runc dir is not owner-only (A=$RT_MODE_A B=$RT_MODE_B) or an owner drifted from the op tree's flow identity"
+    acc_fail "R7 runtime privacy: the settled runc dir leg failed (A=${RT_RUNC_VERDICT_A:-unavailable} B=${RT_RUNC_VERDICT_B:-unavailable}; capture=${RT_EVENT_CAPTURE}${RT_CAPTURE_DEGRADED:+-DEGRADED})"
   fi
   RT_WIDENED=0
   for RT_PATH in /run/docker-helper-builder /run/docker-helper-builder/ops; do
@@ -2167,7 +2344,7 @@ else
     rt_priv_no_write "$RT_M" || RT_WIDENED=1
   done
   for RT_OP in $RT_OPS; do
-    RT_M="$(grep "^op $RT_OP " "$RT_SURVEY" | head -1 | awk '{ print $3 }' | awk -F'|' '{ print $1 }')"
+    RT_M="$(grep "^op $RT_OP " "$RT_SURVEY" | awk '$3 != ""' | head -1 | awk '{ print $3 }' | awk -F'|' '{ print $1 }')"
     rt_priv_no_write "$RT_M" || RT_WIDENED=1
   done
   if [ "$RT_WIDENED" -eq 0 ] && [ -n "$RT_OPS" ]; then
@@ -2245,7 +2422,7 @@ else
   RT_LOG_VERDICT_A=""; RT_LOG_VERDICT_B=""
   RT_LOG_FIRST_A=""; RT_LOG_FIRST_B=""
   for RT_OP in $RT_OPS; do
-    RT_ST="$(grep "^state-op $RT_OP " "$RT_SURVEY" | head -1 | awk '{ print $3 }')"
+    RT_ST="$(grep "^state-op $RT_OP " "$RT_SURVEY" | awk '$3 != ""' | head -1 | awk '{ print $3 }')"
     RT_LOG_FIRST="$(grep "^runc-log $RT_OP " "$RT_SURVEY" | head -1 | awk '{ v = $7; for (i = 8; i <= NF; i++) v = v "|" $i; print v }')"
     RT_LOG_LAST="$(grep "^runc-log $RT_OP " "$RT_SURVEY" | tail -1 | awk '{ v = $7; for (i = 8; i <= NF; i++) v = v "|" $i; print v }')"
     RT_LOG_CTX="$(rt_priv_log_verdict "$RT_SURVEY" "$RT_OP" "${RT_ST##*|}")"
