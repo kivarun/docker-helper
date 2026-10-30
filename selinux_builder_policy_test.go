@@ -12,6 +12,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -8687,5 +8688,203 @@ func TestPhase4BVerdictBoundaryDecodeKernelSourced(t *testing.T) {
 		if strings.Contains(script, gone) {
 			t.Errorf("the harness must not decode AVC masks from a listing order or from the policy's perms-file numbering (the 4C-38 misread and its perms-file twin): %q", gone)
 		}
+	}
+}
+
+// runcMemfdPolicyViolations scans the module text against the R7 B′ P0
+// memfd-type invariants (the BPRIME-VIABLE diag run 41035273700 evidence)
+// and returns one human-readable violation per broken rule, empty when none:
+//   - the type docker_helper_runc_memfd_t is declared EXACTLY once, in the
+//     bare attribute-free form "type docker_helper_runc_memfd_t;" (no
+//     file_type/exec_type/domain/mcs membership: the memfd object type
+//     begins its life deny-all and gains authority only through an
+//     explicitly reviewed allow, never through attribute inheritance);
+//   - no typeattribute statement names the type;
+//   - EXACTLY ONE type_transition names the type, and its fields are the
+//     canonical pointed triple (source docker_helper_buildkitd_t, entry
+//     tmpfs_t, class file) — no alternate source/entry/class route to the
+//     same destination, no duplicate;
+//   - ZERO allow rules name the type (as source or as target): the P0
+//     change deliberately grants no file authority — access stays governed
+//     by TE absence, FD lifetime/reachability, and kernel memfd seals.
+//
+// The buildkitd allow-inventory pin (exactly 29 buildkitd-named allow rules)
+// is owned by s15LauncherCgroupViolations and stays there; this P0 change
+// adds no allow rule, so that pin is the tripwire for the inventory half.
+func runcMemfdPolicyViolations(policy string) []string {
+	const (
+		memfdType        = "docker_helper_runc_memfd_t"
+		bareDeclaration  = "type " + memfdType + ";"
+		transitionPrefix = "type_transition docker_helper_buildkitd_t tmpfs_t:file " + memfdType + ";"
+	)
+	var violations []string
+	declarations := 0
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if trimmed == bareDeclaration {
+			declarations++
+			continue
+		}
+		if strings.HasPrefix(trimmed, "type "+memfdType+",") || strings.HasPrefix(trimmed, "typeattribute "+memfdType) {
+			violations = append(violations, fmt.Sprintf("the memfd object type must stay attribute-free (deny-all by construction): %s", trimmed))
+		}
+		if strings.Contains(trimmed, " "+memfdType+",") || strings.Contains(trimmed, ", "+memfdType+",") || strings.Contains(trimmed, ", "+memfdType+";") {
+			violations = append(violations, fmt.Sprintf("no attribute list may admit the memfd object type: %s", trimmed))
+		}
+	}
+	if declarations != 1 {
+		violations = append(violations, fmt.Sprintf("the memfd object type must be declared EXACTLY once in the bare form %q, found %d", bareDeclaration, declarations))
+	}
+	_, transitions := parseSELinuxRules(policy)
+	memfdTransitions := 0
+	for _, tr := range transitions {
+		if tr.dest != memfdType {
+			continue
+		}
+		memfdTransitions++
+		if tr.source != "docker_helper_buildkitd_t" || tr.entry != "tmpfs_t" || tr.class != "file" {
+			violations = append(violations, fmt.Sprintf("the only transition into the memfd type is the canonical pointed triple (buildkitd_t -> tmpfs_t:file), got: type_transition %s %s:%s %s", tr.source, tr.entry, tr.class, tr.dest))
+		}
+	}
+	if memfdTransitions != 1 {
+		violations = append(violations, fmt.Sprintf("exactly ONE type_transition may name the memfd object type, found %d", memfdTransitions))
+	}
+	allows, _ := parseSELinuxRules(policy)
+	for _, rule := range allows {
+		if rule.source == memfdType || rule.target == memfdType {
+			violations = append(violations, fmt.Sprintf("the P0 memfd type carries NO allow authority (no source, no target): allow %s %s:%s", rule.source, rule.target, rule.class))
+		}
+	}
+	// The canonical transition must exist in its exact textual form too
+	// (parseSELinuxRules tolerates reformatted field layouts; the shipped
+	// module pins the canonical spelling).
+	if !strings.Contains(policy, transitionPrefix) {
+		violations = append(violations, fmt.Sprintf("the canonical transition spelling must exist verbatim: %s", transitionPrefix))
+	}
+	return violations
+}
+
+// TestSELinuxPolicyRuncMemfdTypeAuthority pins the R7 B′ P0 policy shape:
+// the new memfd object type exists exactly once without attributes, the
+// single pointed type_transition routes buildkitd_t-created tmpfs file
+// objects to it, and NO allow rule names the type in either direction
+// (write/read/map/execute/open/setattr stay denied — the P0 outcome is the
+// changed denial target, not a granted authority). Negative mutations prove
+// every tripwire: a missing transition (the pre-P0 regression), a duplicate,
+// a wrong source, a wrong entry type, a wrong class, an attribute-carrying
+// declaration, a typeattribute statement, a direct allow in either
+// direction for each forbidden permission, and an attribute-targeted allow
+// paired with the attribute membership it would exploit.
+func TestSELinuxPolicyRuncMemfdTypeAuthority(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	if violations := runcMemfdPolicyViolations(policy); len(violations) > 0 {
+		for _, v := range violations {
+			t.Errorf("R7 B′ P0 memfd-type invariant violated: %s", v)
+		}
+	}
+	const (
+		memfdType            = "docker_helper_runc_memfd_t"
+		canonicalDeclaration = "type " + memfdType + ";"
+		canonicalTransition  = "type_transition docker_helper_buildkitd_t tmpfs_t:file " + memfdType + ";"
+	)
+	mutations := []struct {
+		name   string
+		mutate func(string) string
+	}{
+		{"transition removed (the pre-P0 tmpfs_t:file write regression)", func(p string) string {
+			return strings.Replace(p, canonicalTransition+"\n", "", 1)
+		}},
+		{"transition duplicated", func(p string) string {
+			return p + "\n" + canonicalTransition
+		}},
+		{"wrong source (rootlesskit child instead of the buildkitd)", func(p string) string {
+			return strings.Replace(p, canonicalTransition, "type_transition docker_helper_rootlesskit_t tmpfs_t:file "+memfdType+";", 1)
+		}},
+		{"wrong entry type (builder state tree instead of tmpfs)", func(p string) string {
+			return strings.Replace(p, canonicalTransition, "type_transition docker_helper_buildkitd_t docker_helper_builder_state_t:file "+memfdType+";", 1)
+		}},
+		{"wrong class (dir instead of file)", func(p string) string {
+			return strings.Replace(p, canonicalTransition, "type_transition docker_helper_buildkitd_t tmpfs_t:dir "+memfdType+";", 1)
+		}},
+		{"attribute membership added to the declaration (file_type)", func(p string) string {
+			return strings.Replace(p, canonicalDeclaration, "type "+memfdType+", file_type;", 1)
+		}},
+		{"attribute membership added to the declaration (domain)", func(p string) string {
+			return strings.Replace(p, canonicalDeclaration, "type "+memfdType+", domain;", 1)
+		}},
+		{"standalone typeattribute statement", func(p string) string {
+			return p + "\ntypeattribute " + memfdType + " file_type;"
+		}},
+		{"attribute-targeted allow paired with the membership it exploits", func(p string) string {
+			return strings.Replace(p, canonicalDeclaration, "type "+memfdType+", file_type;", 1) + "\nallow docker_helper_buildkitd_t file_type:file { write };"
+		}},
+	}
+	for _, perm := range []string{"write", "read", "map", "execute", "open", "setattr"} {
+		permName := perm
+		mutations = append(mutations,
+			struct {
+				name   string
+				mutate func(string) string
+			}{"direct source allow " + permName, func(p string) string {
+				return p + "\nallow docker_helper_buildkitd_t " + memfdType + ":file { " + permName + " };"
+			}},
+			struct {
+				name   string
+				mutate func(string) string
+			}{"direct target allow " + permName, func(p string) string {
+				return p + "\nallow docker_helper_t " + memfdType + ":file { " + permName + " };"
+			}},
+		)
+	}
+	for _, mut := range mutations {
+		if len(runcMemfdPolicyViolations(mut.mutate(policy))) == 0 {
+			t.Errorf("mutation %q must trip the R7 B′ P0 memfd-type invariant", mut.name)
+		}
+	}
+}
+
+// TestSELinuxPolicyRuncMemfdCompiledParity compiles the shipped module with
+// checkmodule and proves the COMPILED policy — the artifact the kernel
+// actually loads — carries exactly the R7 B′ P0 memfd shape: the bare type
+// declaration, the single pointed typetransition, and NOTHING else that
+// names the type (every allow rule, direct or attribute-expanded, would
+// surface in the compiled CIL, so a source sweep alone cannot hide an
+// effective grant). Skipped when checkmodule is unavailable (the plain go
+// test run stays independent of the SELinux toolchain).
+func TestSELinuxPolicyRuncMemfdCompiledParity(t *testing.T) {
+	requirePackagingTool(t, "checkmodule")
+
+	outDir := t.TempDir()
+	cil := filepath.Join(outDir, "docker_helper.cil")
+	cmd := exec.Command("checkmodule", "-M", "-m", "-C", "-o", cil, "packaging/selinux/docker-helper.te")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("checkmodule -C failed: %v\n%s", err, out)
+	}
+	compiled, err := os.ReadFile(cil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(compiled)
+	// The three compiled occurrences are the mandatory structural triple:
+	// the bare type, its implicit object_r roletype binding, and the single
+	// typetransition. Anything more (a second transition, an allow rule in
+	// either direction, an expanded attribute set) names the type again.
+	if n := strings.Count(text, "docker_helper_runc_memfd_t"); n != 3 {
+		t.Fatalf("compiled policy must name the memfd type exactly three times (the type, its object_r roletype binding, and the single typetransition), got %d occurrences", n)
+	}
+	for _, want := range []string{
+		"(type docker_helper_runc_memfd_t)",
+		"(roletype object_r docker_helper_runc_memfd_t)",
+		"(typetransition docker_helper_buildkitd_t tmpfs_t file docker_helper_runc_memfd_t)",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("compiled policy must contain: %s", want)
+		}
+	}
+	if strings.Contains(text, "(typeattributeset docker_helper_runc_memfd_t") {
+		t.Errorf("compiled policy must carry NO attribute set for the memfd type (deny-all by construction, no implicit attribute authority)")
 	}
 }

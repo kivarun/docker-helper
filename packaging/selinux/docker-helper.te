@@ -2772,6 +2772,43 @@ role system_r types docker_helper_buildkitd_t;
 # is NOT copied here.
 type_transition docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:process docker_helper_buildkitd_t;
 
+# --- R7 B′ P0: the runc memfd object type (BPRIME-VIABLE live evidence,
+# --- diag run 41035273700) ---
+#
+# The buildkitd domain memfd-creates the runc clone payload
+# (memfd_create("runc_cloned:/proc/self/exe", MFD_CLOEXEC|MFD_ALLOW_SEALING|
+# MFD_EXEC)). Without a type_transition the anonymous tmpfs object lands as
+# tmpfs_t and every buildkitd_t write against it is denied under enforcing
+# (the R7 terminal). The B′ diagnostic proved on the enforcing Tumbleweed VM
+# that an experimental type_transition
+# (docker_helper_buildkitd_t tmpfs_t:file docker_helper_runc_memfd_t)
+# retypes exactly the memfd object (live label docker_helper_runc_memfd_t:s0,
+# OTHER-RELABEL=none, UNMATCHED=0) while the original tmpfs_t:file write
+# terminal returns after rollback.
+#
+# Scope of the type: it is the type of the memfd OBJECT the buildkitd domain
+# creates, and it therefore applies to every memfd created by ANY process
+# running in docker_helper_buildkitd_t, not exclusively the runc clone child.
+# Both live operation contexts (the c1 and c2 per-operation categories) create
+# the object at category s0 — the create-decision matrix shows
+# buildkitd_t:s0:c1 and buildkitd_t:s0:c2 both transitioning
+# tmpfs_t:file to docker_helper_runc_memfd_t:s0 — so the memfd carries NO
+# per-operation MCS isolation; it is operation-neutral by construction.
+# Access to the object stays governed by type enforcement (the type begins
+# with zero allow rules: deny-all), by the FD lifetime/reachability of the
+# anonymous memfd, and by the kernel memfd seals; no file authority is
+# granted here and none is implied.
+#
+# NOTE on the transition surface: the pointed tmpfs_t:file transition below
+# applies to file-class objects created by the buildkitd domain wherever the
+# kernel names tmpfs_t as the default type. If a future change ever makes the
+# buildkitd create non-memfd regular files inside tmpfs_t-typed directories,
+# those objects would receive THIS type too — that would be a separate
+# application scope requiring its own live evidence and review, not an
+# automatic extension of this rule.
+type docker_helper_runc_memfd_t;
+type_transition docker_helper_buildkitd_t tmpfs_t:file docker_helper_runc_memfd_t;
+
 # --- R7-A: the daemon's buildctl executable identity (full artifact-gate
 # --- evidence, failed release run 38944346311) ---
 #
