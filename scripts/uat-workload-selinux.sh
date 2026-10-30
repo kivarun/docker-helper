@@ -139,6 +139,57 @@ BLOCKED_COUNT=0
 acc_ok() { printf '  ok:      %s\n' "$*"; }
 acc_fail() { printf '  FAIL:    %s\n' "$*" >&2; FAIL_COUNT=$((FAIL_COUNT + 1)); }
 acc_blocked() { printf '  BLOCKED: %s\n' "$*" >&2; BLOCKED_COUNT=$((BLOCKED_COUNT + 1)); }
+
+# rt_priv_log_verdict SURVEY OP OWN_CTX — the R7 privacy runc-log.json
+# observation classifier. Survey records have the shape
+#
+#   runc-log <op> st_rc=<n> st_err=<t> cx_rc=<n> cx_err=<t> <a|U|G>|<ctx>
+#
+# where st_* covers the stat(-c '%a|%U|%G') read and cx_* the separate
+# stat(-c '%C') context read, each with its own exit status and
+# newline-flattened stderr. Classification:
+#   - COMPLETE observation: st_rc=0 AND cx_rc=0 AND the context field is
+#     non-empty and not "?". Decisive: its context MUST equal OWN_CTX.
+#   - mode-read failure (st_rc!=0, e.g. ENOENT teardown): incomplete, NOT
+#     decisive, counted.
+#   - context-read failure (cx_rc!=0 or "?" with the file still present):
+#     incomplete, NOT decisive, counted — distinguished from the ENOENT
+#     teardown case by cx_rc/cx_err instead of being folded into it.
+# Verdict: FAIL foreign-category when any complete observation carries a
+# different context; FAIL no-valid-observation when zero complete
+# observations exist; otherwise OK. Never decisive from FIRST or LAST
+# alone: every complete observation is checked, and incomplete ones are
+# surfaced in the verdict so a teardown race cannot silently flip the
+# evidence either way.
+rt_priv_log_verdict() {
+  survey="$1"; op="$2"; own_ctx="$3"
+  valid=0; incomplete=0; foreign=""
+  while IFS= read -r rec; do
+    [ -n "$rec" ] || continue
+    case "$rec" in
+      "runc-log $op "*) ;;
+      *) continue ;;
+    esac
+    st_rc="$(printf '%s' "$rec" | sed -n 's/.* st_rc=\([0-9][0-9]*\).*/\1/p')"
+    cx_rc="$(printf '%s' "$rec" | sed -n 's/.* cx_rc=\([0-9][0-9]*\).*/\1/p')"
+    ctx="$(printf '%s' "$rec" | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[^ ]*\|/) { n = split($i, a, "|"); print a[n] } }')"
+    if [ "$st_rc" = "0" ] && [ "$cx_rc" = "0" ] && [ -n "$ctx" ] && [ "$ctx" != "?" ]; then
+      valid=$((valid + 1))
+      if [ "$ctx" != "$own_ctx" ]; then
+        foreign="$ctx"
+      fi
+    else
+      incomplete=$((incomplete + 1))
+    fi
+  done < "$survey"
+  if [ -n "$foreign" ]; then
+    printf 'VERDICT=FAIL reason=foreign-category valid=%d incomplete=%d foreign=%s\n' "$valid" "$incomplete" "$foreign"
+  elif [ "$valid" -eq 0 ]; then
+    printf 'VERDICT=FAIL reason=no-valid-observation valid=0 incomplete=%d foreign=none\n' "$incomplete"
+  else
+    printf 'VERDICT=OK valid=%d incomplete=%d foreign=none\n' "$valid" "$incomplete"
+  fi
+}
 scenario() { say "scenario $1"; }
 
 dh() { /usr/bin/docker-helper "$@"; }
@@ -1896,8 +1947,24 @@ else
       [ -d "$RT_STDIR" ] || continue
       RT_OP="$(basename "$RT_STDIR")"
       printf 'state-op %s %s\n' "$RT_OP" "$(stat -c '%a|%U|%G|%C' "$RT_STDIR" 2>/dev/null)" >> "$RT_SURVEY"
-      if [ -f "$RT_STDIR/root/runc-native/executor/runc-log.json" ]; then
-        printf 'runc-log %s %s\n' "$RT_OP" "$(stat -c '%a|%U|%G|%C' "$RT_STDIR/root/runc-native/executor/runc-log.json" 2>/dev/null)" >> "$RT_SURVEY"
+      RT_LOG_PATH="$RT_STDIR/root/runc-native/executor/runc-log.json"
+      if [ -f "$RT_LOG_PATH" ]; then
+        # Two separate reads with their own exit status and stderr, so the
+        # analysis can distinguish a teardown ENOENT (mode read failed,
+        # file already gone) from a genuine context-read failure (file
+        # present, %C unresolvable). Every observation is recorded, not
+        # only the surviving ones.
+        RT_LOG_MODE="$(stat -c '%a|%U|%G' "$RT_LOG_PATH" 2>"$RT_SURVEY.sterr")"
+        RT_LOG_ST_RC=$?
+        RT_LOG_ST_ERR="$(tr '\n' ' ' <"$RT_SURVEY.sterr" 2>/dev/null | tr ' ' '_')"
+        RT_LOG_CTX="$(stat -c '%C' "$RT_LOG_PATH" 2>"$RT_SURVEY.cxerr")"
+        RT_LOG_CX_RC=$?
+        RT_LOG_CX_ERR="$(tr '\n' ' ' <"$RT_SURVEY.cxerr" 2>/dev/null | tr ' ' '_')"
+        printf 'runc-log %s st_rc=%d st_err=%s cx_rc=%d cx_err=%s %s|%s\n' \
+          "$RT_OP" \
+          "$RT_LOG_ST_RC" "${RT_LOG_ST_ERR:-none}" \
+          "$RT_LOG_CX_RC" "${RT_LOG_CX_ERR:-none}" \
+          "${RT_LOG_MODE:-}" "${RT_LOG_CTX:-?}" >> "$RT_SURVEY"
       fi
     done
   }
@@ -2175,17 +2242,22 @@ else
   RT_LOG_FIRST_A=""; RT_LOG_FIRST_B=""
   RT_LOG_LAST_A=""; RT_LOG_LAST_B=""
   RT_ST_COUNT=0
+  RT_LOG_VERDICT_A=""; RT_LOG_VERDICT_B=""
+  RT_LOG_FIRST_A=""; RT_LOG_FIRST_B=""
   for RT_OP in $RT_OPS; do
     RT_ST="$(grep "^state-op $RT_OP " "$RT_SURVEY" | head -1 | awk '{ print $3 }')"
-    RT_LOG_FIRST="$(grep "^runc-log $RT_OP " "$RT_SURVEY" | head -1 | awk '{ print $3 }')"
-    RT_LOG_LAST="$(grep "^runc-log $RT_OP " "$RT_SURVEY" | tail -1 | awk '{ print $3 }')"
+    RT_LOG_FIRST="$(grep "^runc-log $RT_OP " "$RT_SURVEY" | head -1 | awk '{ v = $7; for (i = 8; i <= NF; i++) v = v "|" $i; print v }')"
+    RT_LOG_LAST="$(grep "^runc-log $RT_OP " "$RT_SURVEY" | tail -1 | awk '{ v = $7; for (i = 8; i <= NF; i++) v = v "|" $i; print v }')"
+    RT_LOG_CTX="$(rt_priv_log_verdict "$RT_SURVEY" "$RT_OP" "${RT_ST##*|}")"
     RT_ST_COUNT=$((RT_ST_COUNT + 1))
     if [ "$RT_ST_COUNT" -eq 1 ]; then
       RT_ST_A="$RT_ST"; RT_LOG_FIRST_A="$RT_LOG_FIRST"; RT_LOG_LAST_A="$RT_LOG_LAST"
+      RT_LOG_VERDICT_A="$RT_LOG_CTX"
     elif [ "$RT_ST_COUNT" -eq 2 ]; then
       RT_ST_B="$RT_ST"; RT_LOG_FIRST_B="$RT_LOG_FIRST"; RT_LOG_LAST_B="$RT_LOG_LAST"
+      RT_LOG_VERDICT_B="$RT_LOG_CTX"
     fi
-    info "R7-privacy state op=$RT_OP dir=${RT_ST:-unobserved} runc_log_first=${RT_LOG_FIRST:-never-seen} runc_log_last=${RT_LOG_LAST:-never-seen}"
+    info "R7-privacy state op=$RT_OP dir=${RT_ST:-unobserved} runc_log_first=${RT_LOG_FIRST:-never-seen} runc_log_last=${RT_LOG_LAST:-never-seen} runc_log_verdict=${RT_LOG_CTX:-unavailable}"
   done
   RT_ST_CTX_A="$(printf '%s' "$RT_ST_A" | awk -F'|' '{ print $4 }')"
   RT_ST_CTX_B="$(printf '%s' "$RT_ST_B" | awk -F'|' '{ print $4 }')"
@@ -2195,13 +2267,17 @@ else
   else
     acc_fail "R7 runtime privacy: the concurrent state trees did not show two distinct categories (state trees seen: $RT_ST_COUNT)"
   fi
-  RT_LOG_CTX_A="$(printf '%s' "$RT_LOG_LAST_A" | awk -F'|' '{ print $4 }')"
-  RT_LOG_CTX_B="$(printf '%s' "$RT_LOG_LAST_B" | awk -F'|' '{ print $4 }')"
-  if [ -n "$RT_LOG_CTX_A" ] && [ -n "$RT_LOG_CTX_B" ] \
-      && [ "$RT_LOG_CTX_A" = "$RT_ST_CTX_A" ] && [ "$RT_LOG_CTX_B" = "$RT_ST_CTX_B" ]; then
-    acc_ok "R7 runtime privacy: each observed executor runc-log.json carries ITS OWN operation's state-tree category (live: A=${RT_LOG_CTX_A##*:s0} B=${RT_LOG_CTX_B##*:s0}; the append grant's object is per-op labeled, first-seen A=${RT_LOG_FIRST_A:-never-seen} B=${RT_LOG_FIRST_B:-never-seen})"
+  # The runc-log.json verdict uses EVERY complete survey observation (the
+  # classifier above), not only FIRST or LAST: any complete observation
+  # with a foreign category fails, zero complete observations fail, and
+  # incomplete teardown-time observations are excluded from the mismatch
+  # decision but surfaced in the counts (never silently dropped).
+  RT_LOG_VA="$(printf '%s' "$RT_LOG_VERDICT_A" | sed -n 's/^VERDICT=//p')"
+  RT_LOG_VB="$(printf '%s' "$RT_LOG_VERDICT_B" | sed -n 's/^VERDICT=//p')"
+  if printf '%s\n%s' "$RT_LOG_VA" "$RT_LOG_VB" | grep -q '^FAIL'; then
+    acc_fail "R7 runtime privacy: the executor runc-log.json observation set failed (A=${RT_LOG_VA:-unavailable} B=${RT_LOG_VB:-unavailable}; own contexts A=${RT_ST_CTX_A:-never-seen} B=${RT_ST_CTX_B:-never-seen})"
   else
-    acc_fail "R7 runtime privacy: the executor runc-log.json context did not match its own operation's state tree (A=${RT_LOG_CTX_A:-never-seen} B=${RT_LOG_CTX_B:-never-seen})"
+    acc_ok "R7 runtime privacy: each observed executor runc-log.json carries ITS OWN operation's state-tree category (A=${RT_LOG_VA:-unavailable} B=${RT_LOG_VB:-unavailable}; every complete observation matched, incomplete teardown-time observations excluded and counted; first-seen A=${RT_LOG_FIRST_A:-never-seen} B=${RT_LOG_FIRST_B:-never-seen})"
   fi
   RT_ST_SESEARCH_OUT="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t \
     -t docker_helper_builder_state_t -c file /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"

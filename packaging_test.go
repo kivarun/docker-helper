@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -12585,6 +12586,120 @@ func TestUATWorkloadSELinuxInventoryAssertionsFailClosed(t *testing.T) {
 	if strings.Contains(out, "absent-ok") && strings.Contains(out, "UNAVAILABLE_FAILS:0") {
 		t.Error("an absence expectation must not be satisfied by an unavailable inventory (old false-green condition)")
 	}
+}
+
+// TestUATWorkloadSELinuxRuncLogObservationClassifier runs the shipped
+// rt_priv_log_verdict classifier over survey fixtures and proves the R7
+// privacy runc-log.json observation contract end-to-end:
+//   - every COMPLETE observation (both reads rc=0, readable context) must
+//     carry the operation's own state-tree category; a complete
+//     FOREIGN-CATEGORY observation fails even when later observations are
+//     correct (the pre-corrective LAST-only check would have hidden it);
+//   - a teardown-time ENOENT observation (mode read failed) is incomplete,
+//     never decisive, and never converts a correctly observed inode into a
+//     false mismatch (the P0 UAT's B=? shape with a correct complete
+//     observation stays green);
+//   - a genuine context-read failure ("?" context with the file present)
+//     is distinguished from the ENOENT teardown case: it is not decisive
+//     by itself, but zero complete observations fail;
+//   - an empty survey fails (no evidence is never green).
+func TestUATWorkloadSELinuxRuncLogObservationClassifier(t *testing.T) {
+	const ctxC1 = "system_u:object_r:docker_helper_builder_state_t:s0:c1"
+	const ctxC2 = "system_u:object_r:docker_helper_builder_state_t:s0:c2"
+	classifier := extractShellFunction(t, "scripts/uat-workload-selinux.sh", "rt_priv_log_verdict")
+
+	dir := t.TempDir()
+	survey := filepath.Join(dir, "survey.txt")
+	write := func(records ...string) {
+		t.Helper()
+		if err := os.WriteFile(survey, []byte(strings.Join(records, "\n")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := func(op, own string) string {
+		t.Helper()
+		script := classifier + "\nrt_priv_log_verdict " + strconv.Quote(survey) + " " + op + " " + strconv.Quote(own) + "\n"
+		out, err := runBashIn(t, dir, script)
+		if err != nil {
+			t.Fatalf("classifier run failed: %v\n%s", err, out)
+		}
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(line, "VERDICT=") {
+				return line
+			}
+		}
+		t.Fatalf("classifier printed no VERDICT line, output:\n%s", out)
+		return ""
+	}
+
+	t.Run("complete observations all correct stay green", func(t *testing.T) {
+		write(
+			"runc-log opA st_rc=0 st_err=none cx_rc=0 cx_err=none 644|b|b|"+ctxC1,
+			"runc-log opA st_rc=0 st_err=none cx_rc=0 cx_err=none 644|b|b|"+ctxC1,
+		)
+		if got := run("opA", ctxC1); !strings.HasPrefix(got, "VERDICT=OK valid=2 incomplete=0") {
+			t.Errorf("two correct complete observations must stay green, got: %s", got)
+		}
+	})
+
+	t.Run("complete foreign-category observation fails", func(t *testing.T) {
+		write(
+			"runc-log opB st_rc=0 st_err=none cx_rc=0 cx_err=none 644|b|b|"+ctxC2,
+			"runc-log opB st_rc=0 st_err=none cx_rc=0 cx_err=none 644|b|b|"+ctxC2,
+		)
+		got := run("opB", ctxC1)
+		if !strings.HasPrefix(got, "VERDICT=FAIL reason=foreign-category") {
+			t.Errorf("a complete foreign-category observation must fail, got: %s", got)
+		}
+		if !strings.Contains(got, "foreign="+ctxC2) {
+			t.Errorf("the foreign category must be named in the verdict, got: %s", got)
+		}
+	})
+
+	t.Run("foreign complete observation fails even when others are correct", func(t *testing.T) {
+		write(
+			"runc-log opC st_rc=0 st_err=none cx_rc=0 cx_err=none 644|b|b|"+ctxC1,
+			"runc-log opC st_rc=0 st_err=none cx_rc=0 cx_err=none 644|b|b|"+ctxC2,
+			"runc-log opC st_rc=0 st_err=none cx_rc=0 cx_err=none 644|b|b|"+ctxC1,
+		)
+		if got := run("opC", ctxC1); !strings.HasPrefix(got, "VERDICT=FAIL reason=foreign-category") {
+			t.Errorf("one foreign complete observation among correct ones must fail (the LAST-only shape hid it), got: %s", got)
+		}
+	})
+
+	t.Run("teardown ENOENT does not false-mismatch a correct inode", func(t *testing.T) {
+		write(
+			"runc-log opD st_rc=0 st_err=none cx_rc=0 cx_err=none 644|b|b|"+ctxC1,
+			"runc-log opD st_rc=1 st_err=stat:_cannot_stat...:_No_such_file_or_directory cx_rc=1 cx_err=stat:_cannot_stat...:_No_such_file_or_directory ||?",
+		)
+		if got := run("opD", ctxC1); !strings.HasPrefix(got, "VERDICT=OK valid=1 incomplete=1") {
+			t.Errorf("a correct complete observation plus a teardown ENOENT must stay green with the incomplete one counted, got: %s", got)
+		}
+	})
+
+	t.Run("genuine context-read failure alone fails", func(t *testing.T) {
+		write("runc-log opE st_rc=0 st_err=none cx_rc=0 cx_err=none 644|b|b|?")
+		if got := run("opE", ctxC1); !strings.HasPrefix(got, "VERDICT=FAIL reason=no-valid-observation") {
+			t.Errorf("a live file whose context is unreadable in every observation must fail, got: %s", got)
+		}
+	})
+
+	t.Run("all observations incomplete fails", func(t *testing.T) {
+		write(
+			"runc-log opF st_rc=1 st_err=ENOENT cx_rc=1 cx_err=ENOENT ||?",
+			"runc-log opF st_rc=1 st_err=ENOENT cx_rc=1 cx_err=ENOENT ||?",
+		)
+		if got := run("opF", ctxC1); !strings.HasPrefix(got, "VERDICT=FAIL reason=no-valid-observation valid=0 incomplete=2") {
+			t.Errorf("zero complete observations must fail, got: %s", got)
+		}
+	})
+
+	t.Run("empty survey fails", func(t *testing.T) {
+		write()
+		if got := run("opG", ctxC1); !strings.HasPrefix(got, "VERDICT=FAIL reason=no-valid-observation valid=0 incomplete=0") {
+			t.Errorf("an empty survey must fail, got: %s", got)
+		}
+	})
 }
 
 // TestUATHarnessRichListCLIGrammar runs the rich allowed-root list forms the
