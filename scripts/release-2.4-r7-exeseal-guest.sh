@@ -605,10 +605,18 @@ cat > "$EVIDENCE_DIR/fdreach_probe.c" <<'CEOF'
 #ifndef F_GET_SEALS
 #define F_GET_SEALS 1034
 #endif
+#ifndef F_SEAL_SEAL
 #define F_SEAL_SEAL 0x1
+#endif
+#ifndef F_SEAL_SHRINK
 #define F_SEAL_SHRINK 0x2
+#endif
+#ifndef F_SEAL_GROW
 #define F_SEAL_GROW 0x4
+#endif
+#ifndef F_SEAL_WRITE
 #define F_SEAL_WRITE 0x8
+#endif
 #define F_SEAL_EXEC 0x20
 
 static const char *perms[] = { "ptrace", "getattr", "getsched", "setpgid",
@@ -638,7 +646,7 @@ static int cmd_matrix(char **argv)
 static int cmd_sleeper(char **argv)
 {
 	int secs = atoi(argv[0]);
-	int seal = (argc > 2 && !strcmp(argv[1], "seal"));
+	int seal = (argv[1] != NULL && !strcmp(argv[1], "seal"));
 	char *ctx = NULL;
 	long rc = syscall(__NR_memfd_create, "fdreach_probe",
 			  MFD_ALLOW_SEALING | MFD_CLOEXEC | MFD_EXEC);
