@@ -2835,10 +2835,26 @@ type_transition docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:proce
 # those objects would receive THIS type too — that would be a separate
 # application scope requiring its own live evidence and review, not an
 # automatic extension of this rule.
+# The P3 execute corrective (single permission, exact-SHA UAT run
+# 41094837726): the P2 enforcing UAT observed the pre-seal window
+# completing (write OK, fchmod OK, F_ADD_SEALS OK) and the flow stopping
+# at the child exec of the sealed clone — avc denied { execute }
+# comm="buildkit-runc" target docker_helper_runc_memfd_t:s0 (serials
+# 1342, 10354), exactly runc v1.4.3's exeseal re-exec: newParentProcess
+# sets cmd.Path = /proc/self/fd/<safeExe>, so the init child execs the
+# sealed memfd. The grant stays pointed at the memfd object type
+# (reachable only through the single pointed tmpfs_t:file transition), so
+# the only executable object of this type is the sealed clone the
+# buildkitd domain itself created. execute_no_trans is NOT granted: if
+# the kernel demands it separately after execute passes (no
+# type_transition or entrypoint exists on this type), that is its own
+# observed terminal under the proof-first protocol. read/open/map/
+# append/getattr/ioctl/create/unlink/entrypoint stay ungranted.
 type docker_helper_runc_memfd_t;
 type_transition docker_helper_buildkitd_t tmpfs_t:file docker_helper_runc_memfd_t;
 allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file write;
 allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file setattr;
+allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file execute;
 
 # --- R7-A: the daemon's buildctl executable identity (full artifact-gate
 # --- evidence, failed release run 38944346311) ---
