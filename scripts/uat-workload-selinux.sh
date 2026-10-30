@@ -219,8 +219,35 @@ rt_priv_no_write() {
   return 0
 }
 
-# rt_priv_runc_verdict SURVEY OP OWN_TUPLE — the R7 privacy runc-dir
-# observation classifier. Survey records have the shapes
+rt_priv_watch_error_count() {
+  # FILE PREFIX — count watcher registration-error lines whose message
+  # carries PREFIX ("/run/docker-helper-builder" or
+  # "/var/lib/docker-helper-builder"); with an empty PREFIX count every
+  # non-empty error line. The per-tree split matters: an adoption
+  # failure in the STATE tree does not blind the RUNTIME-tree runc-dir
+  # observation (separate watch chains), and vice versa.
+  [ -f "$1" ] || { printf '0'; return 0; }
+  if [ -n "$2" ]; then
+    n="$(grep -c "Couldn't watch.*$2" "$1" 2>/dev/null)"
+  else
+    n="$(grep -c . "$1" 2>/dev/null)"
+  fi
+  [ -n "$n" ] || n=0
+  printf '%s' "$n"
+}
+
+# rt_priv_capture_desc CAPTURE_MODE DEGRADED_FLAG WATCH_ERRORS — the
+# capture-quality display used by the privacy leg messages. The DEGRADED
+# flag is printed as its literal value (0 or 1): the previous
+# ${var:+-DEGRADED} form was truthy for "0" and mislabeled healthy
+# captures in FAIL messages (display-only; the decision path compares
+# the flag to "1" and was never affected).
+rt_priv_capture_desc() {
+  printf 'capture=%s degraded=%s watch-errors=%s' "$1" "$2" "$3"
+}
+
+# rt_priv_runc_verdict SURVEY OP OWN_TUPLE CAPTURE_QUALITY — the R7
+# privacy runc-dir observation classifier. Survey records have the shapes
 #
 #   runc <op> st_rc=<n> st_err=<t> cx_rc=<n> cx_err=<t> <a|U|G>|<ctx>
 #   runc-obs <op> ev=<E> st_rc=<n> st_err=<t> cx_rc=<n> cx_err=<t> <a|U|G>|<ctx>
@@ -230,8 +257,11 @@ rt_priv_no_write() {
 # runc-obs lines from the immediate per-event capture (each stat read
 # carries its own exit status and stderr). OWN_TUPLE is the op's own
 # runtime-tree stat tuple (mode|uid|gid|ctx) — it supplies both the
-# expected context and the expected flow identity (owner). Classification
-# (set-based, never FIRST-only or LAST-only):
+# expected context and the expected flow identity (owner). CAPTURE_QUALITY
+# is "full" only when the event capture ran active, survived, observed
+# events, suffered no overflow, and the watcher reported NO registration
+# errors; anything else is "incomplete". Classification (set-based, never
+# FIRST-only or LAST-only):
 #   - COMPLETE observation: st_rc=0 AND cx_rc=0 AND a non-empty tuple
 #     whose context is readable (not "?"). Decisive: its context MUST
 #     equal the op tree's own context, its mode MUST be owner-only, and
@@ -240,15 +270,20 @@ rt_priv_no_write() {
 #   - incomplete observation (either read failed — the dir existed at
 #     test time and vanished before the stat): counted, never decisive.
 #   - runc-gone: a kernel delete/moved_from event for the dir; counted.
-# Verdict: FAIL reason=never-created when no record of any kind exists;
-# FAIL reason=created-but-unreadable when records exist but zero are
-# complete (gone events prove a created-and-removed lifetime); FAIL with
-# ctx=/mode= details when any complete observation violates a property;
-# otherwise OK. A creation event alone never validates anything: only a
-# complete stat tuple can, so a delete-before-stat observation stays
-# incomplete and can never become a PASS.
+# Verdict for an op with ZERO records of any kind: FAIL
+# reason=never-created ONLY under a proven-full observation (a silently
+# lost adoption race is not proof of absence); FAIL
+# reason=observation-incomplete when the capture quality is incomplete
+# (watcher registration errors, overflow, death, zero events, or the
+# interval-blind fallback poller). Records without a complete tuple are
+# FAIL reason=created-but-unreadable (gone events prove a
+# created-and-removed lifetime); any complete observation violating a
+# property is FAIL with ctx=/mode= details; otherwise OK. A creation
+# event alone never validates anything: only a complete stat tuple can,
+# so a delete-before-stat observation stays incomplete and can never
+# become a PASS.
 rt_priv_runc_verdict() {
-  survey="$1"; op="$2"; own="$3"
+  survey="$1"; op="$2"; own="$3"; quality="$4"
   own_ctx="$(printf '%s' "$own" | awk -F'|' '{ print $4 }')"
   own_owner="$(printf '%s' "$own" | awk -F'|' '{ print $2 "|" $3 }')"
   valid=0; incomplete=0; gone=0; ctx_bad=""; mode_bad=""; first=""
@@ -287,7 +322,11 @@ rt_priv_runc_verdict() {
   done < "$survey"
   if [ "$valid" -eq 0 ]; then
     if [ $((incomplete + gone)) -eq 0 ]; then
-      printf 'VERDICT=FAIL reason=never-created ctx=FAIL mode=FAIL valid=0 incomplete=0 gone=0\n'
+      if [ "$quality" = "full" ]; then
+        printf 'VERDICT=FAIL reason=never-created ctx=FAIL mode=FAIL valid=0 incomplete=0 gone=0\n'
+      else
+        printf 'VERDICT=FAIL reason=observation-incomplete ctx=FAIL mode=FAIL valid=0 incomplete=0 gone=0\n'
+      fi
     else
       printf 'VERDICT=FAIL reason=created-but-unreadable ctx=FAIL mode=FAIL valid=0 incomplete=%d gone=%d\n' "$incomplete" "$gone"
     fi
@@ -2197,7 +2236,9 @@ else
       break
     fi
     if [ "$RT_EVENT_CAPTURE" = "active" ]; then
-      if read -t 1 -r -u 3 RT_EVT; then
+      # A 150ms read timeout keeps the heartbeat survey tight when the
+      # event stream is quiet, without changing production behavior.
+      if read -t 0.15 -r -u 3 RT_EVT; then
         RT_EVENT_EVENTS=$((RT_EVENT_EVENTS + 1))
         case "$RT_EVT" in
           *OVERFLOW*)
@@ -2219,6 +2260,24 @@ else
                       "$RT_EVT_NAME" "$RT_EVT_PATH" >> "$RT_SURVEY"
                     ;;
                 esac
+                ;;
+              /run/docker-helper-builder/ops/*)
+                # ANY other lifecycle event inside a runtime op tree also
+                # fires an immediate runc capture for that op. The runc
+                # dir's own create event can be lost to the inotify
+                # recursive-adoption race (inotifywait registers the
+                # watch on ops/<op> only when it PROCESSES the create
+                # event, so children created inside that window are
+                # silent), and a failed registration prints the ENOENT
+                # adoption error seen in the P5 run — a sibling event
+                # while the dir lives is an independent second capture
+                # chance. The capture attempts the stat and journals the
+                # outcome with its own exit statuses; a vanished dir
+                # records an incomplete observation, never a validation.
+                RT_CAP_OPDIR="$(printf '%s' "$RT_EVT_PATH" | sed -n 's|^\(/run/docker-helper-builder/ops/[^/]*\).*|\1|p')"
+                if [ -n "$RT_CAP_OPDIR" ] && [ -d "$RT_CAP_OPDIR/runc" ]; then
+                  rt_priv_capture_runc "$RT_CAP_OPDIR/runc" "$RT_EVT_NAME"
+                fi
                 ;;
             esac
             ;;
@@ -2244,7 +2303,19 @@ else
     wait "$RT_INO_PID" 2>/dev/null || true
     [ "${RT_EVENT_EVENTS:-0}" -eq 0 ] && RT_CAPTURE_DEGRADED=1
   fi
-  info "R7-privacy capture: event-driven=$RT_EVENT_CAPTURE (events observed: ${RT_EVENT_EVENTS:-0}; watcher survived: ${RT_INO_ALIVE:-n/a}; capture-degraded=${RT_CAPTURE_DEGRADED:-n/a}; watcher stderr: $(head -2 /tmp/uat-wls-privacy-inotify.err 2>/dev/null || echo none))"
+  RT_WATCH_ERRORS_RUN="$(rt_priv_watch_error_count /tmp/uat-wls-privacy-inotify.err /run/docker-helper-builder)"
+  RT_WATCH_ERRORS_VAR="$(rt_priv_watch_error_count /tmp/uat-wls-privacy-inotify.err /var/lib/docker-helper-builder)"
+  # The capture quality is "full" only when the watcher survived, observed
+  # events, stayed overflow-free, AND registered every RUNTIME-tree
+  # directory without error: an adoption failure means the watcher
+  # silently missed part of the tree's lifetime, so absence of records
+  # for an op cannot be claimed as proven non-creation.
+  RT_CAPTURE_QUALITY=full
+  if [ "$RT_CAPTURE_DEGRADED" = "1" ] || [ "$RT_WATCH_ERRORS_RUN" -gt 0 ]; then
+    RT_CAPTURE_QUALITY=incomplete
+  fi
+  RT_CAP_DESC="$(rt_priv_capture_desc "$RT_EVENT_CAPTURE" "$RT_CAPTURE_DEGRADED" "run:$RT_WATCH_ERRORS_RUN/var:$RT_WATCH_ERRORS_VAR")"
+  info "R7-privacy capture: event-driven=$RT_EVENT_CAPTURE (events observed: ${RT_EVENT_EVENTS:-0}; watcher survived: ${RT_INO_ALIVE:-n/a}; capture-degraded=${RT_CAPTURE_DEGRADED:-n/a}; watch-errors=run:$RT_WATCH_ERRORS_RUN/var:$RT_WATCH_ERRORS_VAR; watcher stderr: $(head -2 /tmp/uat-wls-privacy-inotify.err 2>/dev/null || echo none))"
   wait "$RT_PID_A"; RT_RC_A=$?
   wait "$RT_PID_B"; RT_RC_B=$?
   RT_OPS="$(grep '^op ' "$RT_SURVEY" | awk '{ print $2 }' | awk '!seen[$0]++')"
@@ -2255,7 +2326,7 @@ else
   for RT_OP in $RT_OPS; do
     RT_OP_COUNT=$((RT_OP_COUNT + 1))
     RT_STAT="$(grep "^op $RT_OP " "$RT_SURVEY" | awk '$3 != ""' | head -1 | awk '{ print $3 }')"
-    RT_VERDICT="$(rt_priv_runc_verdict "$RT_SURVEY" "$RT_OP" "$RT_STAT")"
+    RT_VERDICT="$(rt_priv_runc_verdict "$RT_SURVEY" "$RT_OP" "$RT_STAT" "$RT_CAPTURE_QUALITY")"
     RT_RUNC_FIRST="$(grep -h "^runc $RT_OP \|^runc-obs $RT_OP " "$RT_SURVEY" | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[^ ]*\|/) { print $i; exit } }' | head -1)"
     if [ "$RT_OP_COUNT" -eq 1 ]; then
       RT_STAT_A="$RT_STAT"; RT_RUNC_VERDICT_A="$RT_VERDICT"; RT_RUNC_FIRST_A="$RT_RUNC_FIRST"
@@ -2293,7 +2364,7 @@ else
   if [ "$RT_OP_COUNT" -ge 2 ] && [ "$RT_CTX_LEG" -eq 1 ]; then
     acc_ok "R7 runtime privacy: each observed runc dir's SELinux context equals its own operation's runtime-tree context (the match is per-op, on top of the distinct categories proven above — never one bare s0:c1 match; A=${RT_RUNC_VERDICT_A} B=${RT_RUNC_VERDICT_B})"
   else
-    acc_fail "R7 runtime privacy: the runc dir's context leg failed (A=${RT_RUNC_VERDICT_A:-unavailable} B=${RT_RUNC_VERDICT_B:-unavailable}; capture=${RT_EVENT_CAPTURE}${RT_CAPTURE_DEGRADED:+-DEGRADED})"
+    acc_fail "R7 runtime privacy: the runc dir's context leg failed (A=${RT_RUNC_VERDICT_A:-unavailable} B=${RT_RUNC_VERDICT_B:-unavailable}; $RT_CAP_DESC)"
   fi
   # The classifier's own regression table (fail-closed: a classifier
   # that disagrees with this table fails the section, never the UAT
@@ -2336,7 +2407,7 @@ else
   if [ "$RT_OP_COUNT" -ge 2 ] && [ "$RT_MODE_LEG" -eq 1 ]; then
     acc_ok "R7 runtime privacy: the fixup TIGHTENED the ops' own runc dirs (every complete observation owner-only with the op tree's flow identity; incomplete and runc-gone observations counted, never decisive; A=${RT_RUNC_VERDICT_A} B=${RT_RUNC_VERDICT_B})"
   else
-    acc_fail "R7 runtime privacy: the settled runc dir leg failed (A=${RT_RUNC_VERDICT_A:-unavailable} B=${RT_RUNC_VERDICT_B:-unavailable}; capture=${RT_EVENT_CAPTURE}${RT_CAPTURE_DEGRADED:+-DEGRADED})"
+    acc_fail "R7 runtime privacy: the settled runc dir leg failed (A=${RT_RUNC_VERDICT_A:-unavailable} B=${RT_RUNC_VERDICT_B:-unavailable}; $RT_CAP_DESC)"
   fi
   RT_WIDENED=0
   for RT_PATH in /run/docker-helper-builder /run/docker-helper-builder/ops; do

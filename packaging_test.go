@@ -12718,7 +12718,12 @@ func TestUATWorkloadSELinuxRuncLogObservationClassifier(t *testing.T) {
 //     whose stat failed is incomplete (delete-before-stat can never
 //     become a PASS), and zero complete observations fail as
 //     created-but-unreadable — distinguishable from never-created, which
-//     is the zero-record shape;
+//     is the zero-record shape under a PROVEN-FULL observation only;
+//   - a zero-record verdict under an INCOMPLETE capture (the P5 watcher
+//     adoption-failure shape: registration errors, overflow, watcher
+//     death, zero events, or the fallback poller) fails as
+//     observation-incomplete — a lost observation window is never
+//     classified as a proven absence;
 //   - the journal survives the removal: the verdict is computed from the
 //     recorded evidence after the dir is gone (runc-gone counted, the
 //     complete tuple still decisive);
@@ -12730,7 +12735,9 @@ func TestUATWorkloadSELinuxRuncDirObservationClassifier(t *testing.T) {
 	const dirC1 = "700|docker-helper-builder|docker-helper-builder|" + ctxC1
 	const dirC2 = "700|docker-helper-builder|docker-helper-builder|" + ctxC2
 	classifier := extractShellFunction(t, "scripts/uat-workload-selinux.sh", "rt_priv_runc_verdict") +
-		"\n" + extractShellFunction(t, "scripts/uat-workload-selinux.sh", "rt_priv_owner_only")
+		"\n" + extractShellFunction(t, "scripts/uat-workload-selinux.sh", "rt_priv_owner_only") +
+		"\n" + extractShellFunction(t, "scripts/uat-workload-selinux.sh", "rt_priv_watch_error_count") +
+		"\n" + extractShellFunction(t, "scripts/uat-workload-selinux.sh", "rt_priv_capture_desc")
 
 	dir := t.TempDir()
 	survey := filepath.Join(dir, "survey.txt")
@@ -12740,9 +12747,9 @@ func TestUATWorkloadSELinuxRuncDirObservationClassifier(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	run := func(op, own string) string {
+	run := func(op, own, quality string) string {
 		t.Helper()
-		script := classifier + "\nrt_priv_runc_verdict " + strconv.Quote(survey) + " " + op + " " + strconv.Quote(own) + "\n"
+		script := classifier + "\nrt_priv_runc_verdict " + strconv.Quote(survey) + " " + op + " " + strconv.Quote(own) + " " + strconv.Quote(quality) + "\n"
 		out, err := runBashIn(t, dir, script)
 		if err != nil {
 			t.Fatalf("classifier run failed: %v\n%s", err, out)
@@ -12763,14 +12770,14 @@ func TestUATWorkloadSELinuxRuncDirObservationClassifier(t *testing.T) {
 			"runc opB st_rc=1 st_err=stat:_cannot_stat..._No_such_file_or_directory cx_rc=1 cx_err=stat:_cannot_stat..._No_such_file_or_directory ||?",
 			"runc-gone opB ev=DELETE,ISDIR path=/run/docker-helper-builder/ops/opB/runc",
 		)
-		if got := run("opB", dirC1); !strings.HasPrefix(got, "VERDICT=OK ctx=OK mode=OK valid=1 incomplete=1 gone=1") {
+		if got := run("opB", dirC1, "full"); !strings.HasPrefix(got, "VERDICT=OK ctx=OK mode=OK valid=1 incomplete=1 gone=1") {
 			t.Errorf("the complete correct observation must decide the verdict with the degenerate LAST record and the delete event counted, got: %s", got)
 		}
 	})
 
 	t.Run("complete foreign-context observation fails", func(t *testing.T) {
 		write("runc opC st_rc=0 st_err=none cx_rc=0 cx_err=none 1700|docker-helper-builder|docker-helper-builder|" + ctxC2)
-		if got := run("opC", dirC1); !strings.HasPrefix(got, "VERDICT=FAIL ctx=FAIL(seen="+ctxC2+")") {
+		if got := run("opC", dirC1, "full"); !strings.HasPrefix(got, "VERDICT=FAIL ctx=FAIL(seen="+ctxC2+")") {
 			t.Errorf("a complete foreign-context observation must fail, got: %s", got)
 		}
 	})
@@ -12780,42 +12787,42 @@ func TestUATWorkloadSELinuxRuncDirObservationClassifier(t *testing.T) {
 			"runc opD st_rc=0 st_err=none cx_rc=0 cx_err=none 1700|docker-helper-builder|docker-helper-builder|"+ctxC1,
 			"runc-obs opD ev=ATTRIB,ISDIR st_rc=0 st_err=none cx_rc=0 cx_err=none 1700|docker-helper-builder|docker-helper-builder|"+ctxC2,
 		)
-		if got := run("opD", dirC1); !strings.HasPrefix(got, "VERDICT=FAIL ctx=FAIL(seen="+ctxC2+")") {
+		if got := run("opD", dirC1, "full"); !strings.HasPrefix(got, "VERDICT=FAIL ctx=FAIL(seen="+ctxC2+")") {
 			t.Errorf("one foreign complete observation among correct ones must fail (set-based, not FIRST/LAST), got: %s", got)
 		}
 	})
 
 	t.Run("complete non-owner-only mode fails", func(t *testing.T) {
 		write("runc opE st_rc=0 st_err=none cx_rc=0 cx_err=none 0755|docker-helper-builder|docker-helper-builder|" + ctxC1)
-		if got := run("opE", dirC1); !strings.HasPrefix(got, "VERDICT=FAIL ctx=OK mode=FAIL(mode=0755-not-owner-only)") {
+		if got := run("opE", dirC1, "full"); !strings.HasPrefix(got, "VERDICT=FAIL ctx=OK mode=FAIL(mode=0755-not-owner-only)") {
 			t.Errorf("a complete non-owner-only observation must fail, got: %s", got)
 		}
 	})
 
 	t.Run("complete owner-drift observation fails", func(t *testing.T) {
 		write("runc-obs opF ev=CREATE,ISDIR st_rc=0 st_err=none cx_rc=0 cx_err=none 1700|root|root|" + ctxC1)
-		if got := run("opF", dirC1); !strings.HasPrefix(got, "VERDICT=FAIL ctx=OK mode=FAIL(owner=root|root-drifted-from-docker-helper-builder|docker-helper-builder)") {
+		if got := run("opF", dirC1, "full"); !strings.HasPrefix(got, "VERDICT=FAIL ctx=OK mode=FAIL(owner=root|root-drifted-from-docker-helper-builder|docker-helper-builder)") {
 			t.Errorf("a complete observation with a drifted owner must fail, got: %s", got)
 		}
 	})
 
 	t.Run("never-created fails (zero records of any kind)", func(t *testing.T) {
 		write("op opH " + dirC1)
-		if got := run("opH", dirC1); !strings.HasPrefix(got, "VERDICT=FAIL reason=never-created") {
+		if got := run("opH", dirC1, "full"); !strings.HasPrefix(got, "VERDICT=FAIL reason=never-created") {
 			t.Errorf("absence of observation must fail, never pass, got: %s", got)
 		}
 	})
 
 	t.Run("created-and-removed without a readable tuple fails as created-but-unreadable", func(t *testing.T) {
 		write("runc-gone opI ev=DELETE,ISDIR path=/run/docker-helper-builder/ops/opI/runc")
-		if got := run("opI", dirC1); !strings.HasPrefix(got, "VERDICT=FAIL reason=created-but-unreadable ctx=FAIL mode=FAIL valid=0 incomplete=0 gone=1") {
+		if got := run("opI", dirC1, "full"); !strings.HasPrefix(got, "VERDICT=FAIL reason=created-but-unreadable ctx=FAIL mode=FAIL valid=0 incomplete=0 gone=1") {
 			t.Errorf("a proven created-and-removed lifetime without attributes must fail and be distinct from never-created, got: %s", got)
 		}
 	})
 
 	t.Run("creation event with a failed stat never validates", func(t *testing.T) {
 		write("runc-obs opJ ev=CREATE,ISDIR st_rc=1 st_err=No_such_file_or_directory cx_rc=1 cx_err=No_such_file_or_directory ||?")
-		if got := run("opJ", dirC1); !strings.HasPrefix(got, "VERDICT=FAIL reason=created-but-unreadable ctx=FAIL mode=FAIL valid=0 incomplete=1") {
+		if got := run("opJ", dirC1, "full"); !strings.HasPrefix(got, "VERDICT=FAIL reason=created-but-unreadable ctx=FAIL mode=FAIL valid=0 incomplete=1") {
 			t.Errorf("a create event whose stat failed is incomplete evidence and must fail, got: %s", got)
 		}
 	})
@@ -12825,7 +12832,7 @@ func TestUATWorkloadSELinuxRuncDirObservationClassifier(t *testing.T) {
 			"runc-obs opK ev=CREATE,ISDIR st_rc=1 st_err=No_such_file_or_directory cx_rc=1 cx_err=No_such_file_or_directory ||?",
 			"runc-obs opK ev=ATTRIB,ISDIR st_rc=0 st_err=none cx_rc=0 cx_err=none 1700|docker-helper-builder|docker-helper-builder|"+ctxC1,
 		)
-		if got := run("opK", dirC1); !strings.HasPrefix(got, "VERDICT=OK ctx=OK mode=OK valid=1 incomplete=1") {
+		if got := run("opK", dirC1, "full"); !strings.HasPrefix(got, "VERDICT=OK ctx=OK mode=OK valid=1 incomplete=1") {
 			t.Errorf("the complete tuple must decide with the failed-stat capture counted, got: %s", got)
 		}
 	})
@@ -12835,14 +12842,66 @@ func TestUATWorkloadSELinuxRuncDirObservationClassifier(t *testing.T) {
 			"runc opA st_rc=0 st_err=none cx_rc=0 cx_err=none 1700|docker-helper-builder|docker-helper-builder|"+ctxC1,
 			"runc opB st_rc=0 st_err=none cx_rc=0 cx_err=none 1700|docker-helper-builder|docker-helper-builder|"+ctxC2,
 		)
-		if got := run("opA", dirC1); !strings.HasPrefix(got, "VERDICT=OK ctx=OK mode=OK valid=1") {
+		if got := run("opA", dirC1, "full"); !strings.HasPrefix(got, "VERDICT=OK ctx=OK mode=OK valid=1") {
 			t.Errorf("op A must classify on its own evidence, got: %s", got)
 		}
-		if got := run("opB", dirC2); !strings.HasPrefix(got, "VERDICT=OK ctx=OK mode=OK valid=1") {
+		if got := run("opB", dirC2, "full"); !strings.HasPrefix(got, "VERDICT=OK ctx=OK mode=OK valid=1") {
 			t.Errorf("op B must classify on its own evidence, got: %s", got)
 		}
-		if got := run("opA", dirC2); !strings.HasPrefix(got, "VERDICT=FAIL ctx=FAIL") {
+		if got := run("opA", dirC2, "full"); !strings.HasPrefix(got, "VERDICT=FAIL ctx=FAIL") {
 			t.Errorf("op A judged against op B's own tree must fail (per-op binding), got: %s", got)
+		}
+	})
+
+	t.Run("zero records under an incomplete capture fail as observation-incomplete, never as never-created", func(t *testing.T) {
+		write("op opP " + dirC1)
+		if got := run("opP", dirC1, "incomplete"); !strings.HasPrefix(got, "VERDICT=FAIL reason=observation-incomplete ctx=FAIL mode=FAIL valid=0 incomplete=0 gone=0") {
+			t.Errorf("a lost observation window (watcher adoption failure, overflow, or fallback poller) must never be classified as proven non-creation, got: %s", got)
+		}
+	})
+
+	t.Run("a complete violation still fails under an incomplete capture", func(t *testing.T) {
+		write("runc opQ st_rc=0 st_err=none cx_rc=0 cx_err=none 1700|docker-helper-builder|docker-helper-builder|" + ctxC2)
+		if got := run("opQ", dirC1, "incomplete"); !strings.HasPrefix(got, "VERDICT=FAIL ctx=FAIL(seen="+ctxC2+")") {
+			t.Errorf("capture quality must not soften a complete foreign-context observation, got: %s", got)
+		}
+	})
+
+	t.Run("watch error counting is per tree and tolerates a missing file", func(t *testing.T) {
+		errFile := filepath.Join(dir, "inotify.err")
+		content := "Couldn't watch new directory /var/lib/docker-helper-builder/ops/opX/root/runc-native/snapshots/new-1/: No such file or directory\n" +
+			"Couldn't watch new directory /run/docker-helper-builder/ops/opY/runc: No such file or directory\n" +
+			"some other noise\n"
+		if err := os.WriteFile(errFile, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		script := classifier + "\n" +
+			"printf 'run=%s var=%s all=%s missing=%s\\n' " +
+			"\"$(rt_priv_watch_error_count " + strconv.Quote(errFile) + " /run/docker-helper-builder)\" " +
+			"\"$(rt_priv_watch_error_count " + strconv.Quote(errFile) + " /var/lib/docker-helper-builder)\" " +
+			"\"$(rt_priv_watch_error_count " + strconv.Quote(errFile) + " '')\" " +
+			"\"$(rt_priv_watch_error_count " + strconv.Quote(filepath.Join(dir, "missing.err")) + " /run/docker-helper-builder)\"\n"
+		out, err := runBashIn(t, dir, script)
+		if err != nil {
+			t.Fatalf("watch-error counter run failed: %v\n%s", err, out)
+		}
+		if got := strings.TrimSpace(out); got != "run=1 var=1 all=3 missing=0" {
+			t.Errorf("per-tree watch error counting drifted, got %q", got)
+		}
+	})
+
+	t.Run("capture quality display prints the literal degraded flag for 0 and 1", func(t *testing.T) {
+		script := classifier + "\n" +
+			"printf '%s|%s\\n' " +
+			"\"$(rt_priv_capture_desc active 0 run:0/var:1)\" " +
+			"\"$(rt_priv_capture_desc active 1 run:0/var:0)\"\n"
+		out, err := runBashIn(t, dir, script)
+		if err != nil {
+			t.Fatalf("capture display run failed: %v\n%s", err, out)
+		}
+		want := "capture=active degraded=0 watch-errors=run:0/var:1|capture=active degraded=1 watch-errors=run:0/var:0"
+		if got := strings.TrimSpace(out); got != want {
+			t.Errorf("the degraded display must print the literal flag value (the ${var:+-DEGRADED} truthiness bug must not return), got %q want %q", got, want)
 		}
 	})
 }
