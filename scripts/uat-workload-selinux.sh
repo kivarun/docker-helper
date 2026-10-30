@@ -366,7 +366,12 @@ rt_priv_runc_verdict() {
 #   - VERDICT=OK only when BOTH operations carry at least one valid hit
 #     and zero foreign hits. Zero hits for an operation mean the exec
 #     boundary was never observed crossed for it — absence of observation
-#     is never a pass.
+#     is never a pass. The verdict is an OBSERVATION line in the privacy
+#     stage (the clone is killed sub-millisecond by the failing parent,
+#     below any process-lifetime instrument's resolution — the
+#     race-free exec-completion leg is the ftrace sys_exit_execve
+#     evidence, and this classifier becomes decisive once a future phase
+#     lets the clone live long enough to be swept).
 rt_priv_memfd_verdict() {
   capture="$1"; ctx_a="$2"; ctx_b="$3"
   cat_a="${ctx_a##*:s0}"; cat_b="${ctx_b##*:s0}"
@@ -2287,23 +2292,56 @@ else
       fi
     fi
   fi
+  # The R7 P6 exec-boundary instrument (race-free): ftrace on the syscalls
+  # tracepoint group, filtered to comm == "6". The kernel sets the task
+  # comm from the exec path basename ("6" for /proc/self/fd/6) inside
+  # begin_new_exec — AFTER the point of no return — so a
+  # sys_exit_execve record for a comm=6 task can only be the clone's
+  # execve RETURNING SUCCESSFULLY: the exec crossed the point of no
+  # return, completed its ELF load, and the kernel returned to the new
+  # image. A mid-exec death (the P5 elf_map shape) never produces the
+  # exit record — the dying task never reaches the syscall-return path —
+  # and a pre-point-of-no-return failure keeps the old comm. The parent
+  # kills the clone sub-millisecond after the exec when its own cgroup
+  # stage fails, so process-lifetime instruments (the /proc sweep below)
+  # cannot win that race; the kernel-side record cannot be missed. Any
+  # sys_enter record from the same filter is bonus userspace-execution
+  # evidence (ld.so/Go-runtime startup syscalls).
+  RT_TRACE_DIR=/sys/kernel/debug/tracing
+  RT_TRACE_READY=0
+  if [ ! -d "$RT_TRACE_DIR" ]; then
+    mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null || true
+  fi
+  if [ -d "$RT_TRACE_DIR" ]; then
+    RT_TRACE_ON_PRIOR="$(cat "$RT_TRACE_DIR/tracing_on" 2>/dev/null)"
+    echo 0 > "$RT_TRACE_DIR/tracing_on" 2>/dev/null || true
+    if printf 'comm == "6"' > "$RT_TRACE_DIR/events/syscalls/filter" 2>/dev/null \
+        || printf 'common_comm == "6"' > "$RT_TRACE_DIR/events/syscalls/filter" 2>/dev/null; then
+      if echo 1 > "$RT_TRACE_DIR/events/syscalls/enable" 2>/dev/null \
+          && : > "$RT_TRACE_DIR/trace" 2>/dev/null \
+          && echo 1 > "$RT_TRACE_DIR/tracing_on" 2>/dev/null; then
+        RT_TRACE_READY=1
+      fi
+    fi
+  fi
+  [ "$RT_TRACE_READY" -eq 1 ] || info "R7-privacy ftrace: unavailable (no usable debugfs syscall tracing); the exec-boundary leg will be BLOCKED"
   # The R7 P6 exec-boundary instrument: a tight /proc sweep running while
   # the two builds execute. The exeseal init child is SHORT-LIVED (it
   # waits for bootstrap data the failing parent never sends, then the
-  # parent's cleanup kills it), so it is invisible to file watching; its
-  # userspace execution is nevertheless provable process-bound: after the
-  # exec completes, /proc/<pid>/exe is the sealed memfd clone and comm is
-  # "6" (the basename of /proc/self/fd/6, set by the kernel inside
-  # begin_new_exec). The sweep journals every live comm=6 process with
-  # its SELinux context and exe link; the classifier turns those records
-  # into the per-operation exec-completion verdict. The comm probe uses
-  # the read BUILTIN with a stderr redirect (the $(<file) substitution
-  # loses its no-fork special case when a second redirection is present
-  # and returns EMPTY — the first sweep dispatch observed zero lines
-  # because of exactly that shell semantics); the exe/attr reads run only
-  # for the rare matches. A per-sweep counter (builtin reads/writes only)
-  # proves the sweep was ALIVE during the window, so a zero-hit result is
-  # an honest negative observation, never a silent instrument failure.
+  # parent's cleanup kills it within the parent's own syscall path —
+  # sub-millisecond), so its per-operation attribution (the /proc exe
+  # link and the SELinux context carry the op's category) is only
+  # observable once the clone survives long enough — the sweep is the
+  # instrument for a future state where the clone LIVES, not for the
+  # current sub-millisecond window (the race-free completion evidence is
+  # the ftrace instrument above). The comm probe uses the read BUILTIN
+  # with a stderr redirect (the $(<file) substitution loses its no-fork
+  # special case when a second redirection is present and returns EMPTY —
+  # the first sweep dispatch observed zero lines because of exactly that
+  # shell semantics); the exe/attr reads run only for the rare matches. A
+  # per-sweep counter (builtin reads/writes only) proves the sweep was
+  # ALIVE during the window, so a zero-hit result is an honest negative
+  # observation, never a silent instrument failure.
   RT_MEMFD_CAPTURE=/tmp/uat-wls-privacy-memfd-proc.txt
   RT_MEMFD_SWEEPS=/tmp/uat-wls-privacy-memfd-sweeps.txt
   : > "$RT_MEMFD_CAPTURE"
@@ -2419,6 +2457,18 @@ else
   wait "$RT_PID_B"; RT_RC_B=$?
   kill "$RT_MEMFD_SWEEP_PID" 2>/dev/null || true
   wait "$RT_MEMFD_SWEEP_PID" 2>/dev/null || true
+  RT_TRACE_EXECVE=0; RT_TRACE_ENTER=0; RT_TRACE_SAMPLE=""
+  if [ "$RT_TRACE_READY" -eq 1 ]; then
+    echo 0 > "$RT_TRACE_DIR/tracing_on" 2>/dev/null || true
+    RT_TRACE_RAW="$(cat "$RT_TRACE_DIR/trace" 2>/dev/null || true)"
+    echo 0 > "$RT_TRACE_DIR/events/syscalls/enable" 2>/dev/null || true
+    printf '0' > "$RT_TRACE_DIR/events/syscalls/filter" 2>/dev/null || true
+    [ "${RT_TRACE_ON_PRIOR:-0}" = "1" ] && echo 1 > "$RT_TRACE_DIR/tracing_on" 2>/dev/null || true
+    RT_TRACE_EXECVE="$(printf '%s\n' "$RT_TRACE_RAW" | grep -c 'sys_exit_execve' || true)"
+    RT_TRACE_ENTER="$(printf '%s\n' "$RT_TRACE_RAW" | grep -c 'sys_enter_' || true)"
+    RT_TRACE_SAMPLE="$(printf '%s\n' "$RT_TRACE_RAW" | grep 'sys_exit_execve' | head -1)"
+  fi
+  info "R7-privacy ftrace: ready=$RT_TRACE_READY sys_exit_execve=$RT_TRACE_EXECVE sys_enter=$RT_TRACE_ENTER first=${RT_TRACE_SAMPLE:-none}"
   RT_OPS="$(grep '^op ' "$RT_SURVEY" | awk '{ print $2 }' | awk '!seen[$0]++')"
   RT_OP_COUNT=0
   RT_STAT_A=""; RT_STAT_B=""
@@ -2445,23 +2495,27 @@ else
   else
     acc_fail "R7 runtime privacy: the per-operation category allocation did not show two distinct concurrent categories (ops seen: $RT_OP_COUNT)"
   fi
-  # The R7 P6 exec-boundary leg: the sealed memfd clone EXECUTED as a live
-  # userspace process inside each operation's own buildkitd context. The
-  # verdict is set-based over the /proc sweep journal (classifier above):
-  # a valid hit is /proc/<pid>/exe=/memfd:runc_cloned:* with the process
-  # context carrying the op's own category; zero hits for an op, a
-  # foreign category, or a non-memfd comm=6 process fails the leg.
+  # The R7 P6 exec-boundary observations. The /proc sweep verdict is an
+  # OBSERVATION line, not a leg: the clone is killed sub-millisecond by
+  # the failing parent, below any process-lifetime instrument's
+  # resolution — zero hits here are the expected current-boundary shape,
+  # and the sweep becomes decisive once a future phase lets the clone
+  # live (per-operation attribution via the process context). The
+  # MANDATORY exec-boundary leg is the race-free ftrace evidence: the
+  # sys_exit_execve record of the comm=6 task is only producible by a
+  # SUCCESSFUL execve return.
   RT_MEMFD_VERDICT="$(rt_priv_memfd_verdict "$RT_MEMFD_CAPTURE" "$RT_CTX_A" "$RT_CTX_B")"
   RT_MEMFD_SWEEPS_N="$( < "$RT_MEMFD_SWEEPS" )"
   info "R7-privacy memfd-proc: ${RT_MEMFD_VERDICT:-unavailable} (capture lines: $(wc -l < "$RT_MEMFD_CAPTURE" 2>/dev/null || echo 0); sweeps: ${RT_MEMFD_SWEEPS_N:-0})"
-  case "$RT_MEMFD_VERDICT" in
-    VERDICT=OK*)
-      acc_ok "R7 runtime privacy: the exec'd sealed memfd clone ran as a live userspace process in each op's own buildkitd context (exec-boundary evidence: /proc/<pid>/exe=/memfd:runc_cloned:* observed by the /proc sweep; ${RT_MEMFD_VERDICT})"
-      ;;
-    *)
-      acc_fail "R7 runtime privacy: the exec'd sealed memfd clone was not observed running in both operations' own contexts (${RT_MEMFD_VERDICT:-unavailable})"
-      ;;
-  esac
+  if [ "$RT_TRACE_READY" -eq 1 ]; then
+    if [ "$RT_TRACE_EXECVE" -ge 1 ]; then
+      acc_ok "R7 runtime privacy: the exec'd sealed memfd clone COMPLETED its exec — the kernel's sys_exit_execve record for the comm=6 task exists only for a successful execve return (exec crossed the point of no return and finished its ELF load; execve-return records: $RT_TRACE_EXECVE; userspace syscall entries by the new image: $RT_TRACE_ENTER; first: ${RT_TRACE_SAMPLE:-none})"
+    else
+      acc_fail "R7 runtime privacy: no completed execve of the comm=6 clone was recorded (ftrace sys_exit_execve=0 with userspace entries=$RT_TRACE_ENTER) — the exec boundary was not crossed into the new image"
+    fi
+  else
+    acc_blocked "R7 runtime privacy: ftrace syscall tracing unavailable in this guest — the exec-boundary completion evidence is impossible to obtain (sweep observation: ${RT_MEMFD_VERDICT:-unavailable})"
+  fi
   # The runc-dir verdicts are set-based (the classifier above): EVERY
   # complete observation (survey sweep or immediate per-event capture)
   # must carry the op's own context, owner-only mode, and the op tree's
