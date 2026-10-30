@@ -619,27 +619,51 @@ cat > "$EVIDENCE_DIR/fdreach_probe.c" <<'CEOF'
 #endif
 #define F_SEAL_EXEC 0x20
 
-static const char *perms[] = { "ptrace", "getattr", "getsched", "setpgid",
-                               "getpgid", "share", "siginh", "transition",
-                               "dyntransition", NULL };
+static const char *proc_perms[] = { "ptrace", "getattr", "getsched", "setpgid",
+                                    "getpgid", "share", "siginh",
+                                    "transition", "dyntransition", NULL };
+static const char *file_perms[] = { "read", "write", "open", "append",
+                                    "getattr", NULL };
+
+static int run_matrix(const char *src, const char *dst)
+{
+	struct av_decision avd;
+	security_class_t cl = string_to_security_class("process");
+	printf("== %s -> %s (class process)\n", src, dst);
+	for (int p = 0; proc_perms[p]; p++) {
+		access_vector_t bit = string_to_av_perm(cl, proc_perms[p]);
+		if (!bit) { printf("  %-14s UNKNOWN-PERM\n", proc_perms[p]); continue; }
+		if (security_compute_av_raw(src, dst, cl, bit, &avd))
+			printf("  %-14s ERR errno=%d\n", proc_perms[p], errno);
+		else
+			printf("  %-14s %s (allowed=0x%x)\n", proc_perms[p],
+			       (avd.allowed & bit) ? "ALLOW" : "DENY",
+			       (unsigned)avd.allowed);
+	}
+	/* The /proc/<pid>/fd open gate: ptrace_may_access(PTRACE_MODE_READ)
+	 * maps to SELinux FILE class READ from the subject SID to the
+	 * TARGET PROCESS SID (security/selinux/hooks.c
+	 * selinux_ptrace_access_check). Its decision decides whether
+	 * another operation can even resolve the fd symlink. */
+	cl = string_to_security_class("file");
+	printf("== %s -> %s (class file; the /proc fd reach gate)\n", src, dst);
+	for (int p = 0; file_perms[p]; p++) {
+		access_vector_t bit = string_to_av_perm(cl, file_perms[p]);
+		if (!bit) { printf("  %-14s UNKNOWN-PERM\n", file_perms[p]); continue; }
+		if (security_compute_av_raw(src, dst, cl, bit, &avd))
+			printf("  %-14s ERR errno=%d\n", file_perms[p], errno);
+		else
+			printf("  %-14s %s (allowed=0x%x)\n", file_perms[p],
+			       (avd.allowed & bit) ? "ALLOW" : "DENY",
+			       (unsigned)avd.allowed);
+	}
+	return 0;
+}
 
 static int cmd_matrix(char **argv)
 {
-	security_class_t cl = string_to_security_class("process");
-	for (int i = 0; argv[i] && argv[i + 1]; i += 2) {
-		struct av_decision avd;
-		printf("== %s -> %s (class process)\n", argv[i], argv[i + 1]);
-		for (int p = 0; perms[p]; p++) {
-			access_vector_t bit = string_to_av_perm(cl, perms[p]);
-			if (!bit) { printf("  %-14s UNKNOWN-PERM\n", perms[p]); continue; }
-			if (security_compute_av_raw(argv[i], argv[i + 1], cl, bit, &avd))
-				printf("  %-14s ERR errno=%d\n", perms[p], errno);
-			else
-				printf("  %-14s %s (allowed=0x%x)\n", perms[p],
-				       (avd.allowed & bit) ? "ALLOW" : "DENY",
-				       (unsigned)avd.allowed);
-		}
-	}
+	for (int i = 0; argv[i] && argv[i + 1]; i += 2)
+		run_matrix(argv[i], argv[i + 1]);
 	return 0;
 }
 
@@ -672,11 +696,15 @@ static int cmd_reach(char **argv)
 	pid_t pid = (pid_t)atoi(argv[0]);
 	int fd = atoi(argv[1]);
 	char path[128];
+	int saved;
+
 	snprintf(path, sizeof(path), "/proc/%d/fd/%d", pid, fd);
 
+	errno = 0;
 	int r = open(path, O_RDONLY);
+	saved = errno;
 	printf("REACH %-44s %s (errno=%d)\n", "open(O_RDONLY)",
-	       r < 0 ? "FAIL" : "OK", errno);
+	       r < 0 ? "FAIL" : "OK", saved);
 	if (r >= 0) {
 		char lbuf[256];
 		ssize_t n = readlink(path, lbuf, sizeof(lbuf) - 1);
@@ -687,14 +715,17 @@ static int cmd_reach(char **argv)
 		close(r);
 	}
 
+	errno = 0;
 	r = open(path, O_RDWR);
+	saved = errno;
 	printf("REACH %-44s %s (errno=%d)\n", "open(O_RDWR)",
-	       r < 0 ? "FAIL" : "OK", errno);
+	       r < 0 ? "FAIL" : "OK", saved);
 	if (r >= 0) {
 		char c = 'p';
 		ssize_t w = write(r, &c, 1);
+		saved = errno;
 		printf("REACH %-44s %s (errno=%d)\n", "write(opened fd, 1 byte)",
-		       w < 0 ? "FAIL" : "OK", errno);
+		       w < 0 ? "FAIL" : "OK", saved);
 		close(r);
 	}
 	return 0;
@@ -726,22 +757,39 @@ cap fdreach-matrix 60 "$EVIDENCE_DIR/fdreach_probe" matrix \
   system_u:system_r:docker_helper_container_t:s0:c1 system_u:system_r:docker_helper_buildkitd_t:s0:c1 \
   system_u:unconfined_r:unconfined_t:s0-s0:c0.c1023 system_u:system_r:docker_helper_buildkitd_t:s0:c1
 
-# (live worst case) an UNSEALED memfd held by a c1-level sleeper; the reach
-# attempts run from a c2-level subject (level-only runcon, no domain
-# transition — the same working pattern as section 5d).
-"$FDREACH_BIN" sleeper 10 seal >"$EVIDENCE_DIR/fdreach-sleeper-c1.log" 2>&1 &
-SP=$!
-for _ in $(seq 1 100); do grep -q MEMFD-READY "$EVIDENCE_DIR/fdreach-sleeper-c1.log" 2>/dev/null && break; sleep 0.05; done
-SPID="$(grep -oE 'pid=[0-9]+' "$EVIDENCE_DIR/fdreach-sleeper-c1.log" | head -1 | cut -d= -f2)"
-SFD="$(grep -oE 'fd=[0-9]+' "$EVIDENCE_DIR/fdreach-sleeper-c1.log" | head -1 | cut -d= -f2)"
-if [ -n "$SPID" ] && [ -n "$SFD" ]; then
-  cap fdreach-cross-level 20 runcon -l s0:c2 "$FDREACH_BIN" reach "$SPID" "$SFD"
-  cap fdreach-same-context 20 "$FDREACH_BIN" reach "$SPID" "$SFD"
-else
-  log "sleeper pid/fd not observed; live reach probes skipped"
-  printf 'sleeper not observed\n' >"$EVIDENCE_DIR/fdreach-cross-level.log"
-  printf 'sleeper not observed\n' >"$EVIDENCE_DIR/fdreach-same-context.log"
+# (live worst case) an UNSEALED memfd held by a c1-level sleeper (level-only
+# runcon, no domain transition — the same working pattern as section 5d);
+# the reach attempts run from a c2-level subject. NOTE the interpretation
+# boundary: both subjects stay unconfined_t (the confined builder domain
+# is not enterable from any admin context — recorded R7 evidence), so this
+# pair is the unconfined-exempt baseline; the DECISIVE confined cross-op
+# decision is the matrix above (buildkitd_t:s0:c2 -> buildkitd_t:s0:c1,
+# process:ptrace and the file:read reach gate) plus the loaded-constraint
+# and allow-inventory captures in section 3.
+RUNCON_OK=0
+if command -v runcon >/dev/null 2>&1 && runcon -l s0:c1 true 2>/dev/null; then
+  RUNCON_OK=1
 fi
+if [ "$RUNCON_OK" = 1 ]; then
+  "$FDREACH_BIN" sleeper 10 >"$EVIDENCE_DIR/fdreach-sleeper-c1.log" 2>&1 &
+  SP=$!
+  for _ in $(seq 1 100); do grep -q MEMFD-READY "$EVIDENCE_DIR/fdreach-sleeper-c1.log" 2>/dev/null && break; sleep 0.05; done
+  SPID="$(grep -oE 'pid=[0-9]+' "$EVIDENCE_DIR/fdreach-sleeper-c1.log" | head -1 | cut -d= -f2)"
+  SFD="$(grep -oE 'fd=[0-9]+' "$EVIDENCE_DIR/fdreach-sleeper-c1.log" | head -1 | cut -d= -f2)"
+  if [ -n "$SPID" ] && [ -n "$SFD" ]; then
+    cap fdreach-cross-level 20 runcon -l s0:c2 "$FDREACH_BIN" reach "$SPID" "$SFD"
+    cap fdreach-same-context 20 "$FDREACH_BIN" reach "$SPID" "$SFD"
+  else
+    log "c1 sleeper pid/fd not observed; cross-level reach skipped"
+    printf 'c1 sleeper not observed\n' >"$EVIDENCE_DIR/fdreach-cross-level.log"
+    printf 'c1 sleeper not observed\n' >"$EVIDENCE_DIR/fdreach-same-context.log"
+  fi
+else
+  log "level-only runcon unavailable; cross-level reach skipped"
+  printf 'level-only runcon unavailable\n' >"$EVIDENCE_DIR/fdreach-cross-level.log"
+  printf 'level-only runcon unavailable\n' >"$EVIDENCE_DIR/fdreach-same-context.log"
+fi
+kill $SP 2>/dev/null || true
 wait $SP 2>/dev/null || true
 
 # (seal immutability) SEALED memfd: a same-uid root O_RDWR open that still
