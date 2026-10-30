@@ -352,6 +352,13 @@ func TestOperationStageCancelSimultaneousAdmissionRace(t *testing.T) {
 			<-begin
 			cmd2 := d.tryAdmitStage(1)
 			if cmd2 == nil {
+				// Mirror the production refusal owner (the run stage
+				// driver's result.Terminated path): the driver that
+				// observed the latch refusal completes the operation as
+				// cancelled. Without this convergence the racing cancel's
+				// graceful wait never sees op.done and burns its full
+				// termination budget on an operation nobody completes.
+				op.fail(resultCancelled, "cancelled", nil)
 				refused <- struct{}{}
 				return
 			}
