@@ -2795,8 +2795,7 @@ type_transition docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:proce
 # tmpfs_t:file to docker_helper_runc_memfd_t:s0 — so the memfd carries NO
 # per-operation MCS isolation; it is operation-neutral by construction.
 #
-# The P1 write corrective (single permission, exact SHA UAT): the ONLY allow
-# on this type is the buildkitd domain's file write. runc v1.4.3
+# The P1 write corrective (single permission, exact SHA UAT): runc v1.4.3
 # (libcontainer/exeseal/cloned_binary_linux.go + libcontainer/system Copy)
 # needs it exactly once per clone: between memfd_create and the immediate
 # sealMemfd sequence, the SAME process copies its own binary into the memfd
@@ -2804,18 +2803,30 @@ type_transition docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:proce
 # F_ADD_SEALS(F_SEAL_EXEC | F_SEAL_SEAL|F_SEAL_SHRINK|F_SEAL_GROW|F_SEAL_WRITE)
 # make the object permanently immutable — after the seal NO domain can write,
 # independent of SELinux (proven live: a same-uid root O_RDWR open of a sealed
-# memfd still fails its write with EPERM). No read/open/append/map/execute/
-# setattr/getattr/create/unlink authority is granted: the enforcing UAT keeps
-# denying those and records the first new fatal boundary if the flow reaches
-# one. Cross-operation FD reachability was proven closed before this grant:
-# the memfd fd is never sent over any socket (runc v1.4.3 SCM_RIGHTS senders
-# carry only the PTY master, the init-child pidfd, and the seccomp-notify fd;
-# pidfd_getfd fetches only the seccomp fd), and the /proc/<pid>/fd path is
-# gated by ptrace_may_access — on the loaded policy
-# mlsconstrain process ptrace (h1 dom h2 or t1 != mcs_constrained_type) plus
-# the file:read reach-gate decision deny buildkitd_t:s0:c2 -> buildkitd_t:s0:c1
-# (kernel-AV matrix, exeseal FD-reachability diag); only the unconfined admin
-# surface stays exempt by design.
+# memfd still fails its write with EPERM). Cross-operation FD reachability was
+# proven closed before the write grant: the memfd fd is never sent over any
+# socket (runc v1.4.3 SCM_RIGHTS senders carry only the PTY master, the
+# init-child pidfd, and the seccomp-notify fd; pidfd_getfd fetches only the
+# seccomp fd), and the /proc/<pid>/fd path is gated by ptrace_may_access — on
+# the loaded policy mlsconstrain process ptrace (h1 dom h2 or
+# t1 != mcs_constrained_type) plus the file:read reach-gate decision deny
+# buildkitd_t:s0:c2 -> buildkitd_t:s0:c1 (kernel-AV matrix, exeseal
+# FD-reachability diag); only the unconfined admin surface stays exempt by
+# design.
+#
+# The P2 setattr corrective (single permission, exact-SHA UAT run
+# 41069045907): the P1 enforcing UAT observed the copy window completing and
+# the flow stopping at fchmod — avc denied { setattr } comm="buildkit-runc"
+# name="memfd:runc_cloned:/proc/self/exe" (serials 1342, 10535), exactly the
+# runc v1.4.3 sealMemfd Chmod(0o511) before F_ADD_SEALS. The grant stays
+# pointed at the memfd object type: the type exists only through the single
+# pointed tmpfs_t:file transition above, so every setattr-eligible object of
+# this type is a memfd the buildkitd domain itself created — no foreign file
+# object can carry the type, and the pre-seal setattr window is the same
+# lifecycle window as the write grant. read/open/append/map/execute/getattr/
+# ioctl/create/unlink stay ungranted; execute is the source-implied next
+# candidate (the child execs the sealed clone) and is deliberately left to be
+# observed, not preemptively granted.
 #
 # NOTE on the transition surface: the pointed tmpfs_t:file transition below
 # applies to file-class objects created by the buildkitd domain wherever the
@@ -2827,6 +2838,7 @@ type_transition docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:proce
 type docker_helper_runc_memfd_t;
 type_transition docker_helper_buildkitd_t tmpfs_t:file docker_helper_runc_memfd_t;
 allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file write;
+allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file setattr;
 
 # --- R7-A: the daemon's buildctl executable identity (full artifact-gate
 # --- evidence, failed release run 38944346311) ---
