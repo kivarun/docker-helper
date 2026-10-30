@@ -771,7 +771,7 @@ if command -v runcon >/dev/null 2>&1 && runcon -l s0:c1 true 2>/dev/null; then
   RUNCON_OK=1
 fi
 if [ "$RUNCON_OK" = 1 ]; then
-  "$FDREACH_BIN" sleeper 10 >"$EVIDENCE_DIR/fdreach-sleeper-c1.log" 2>&1 &
+  runcon -l s0:c1 "$FDREACH_BIN" sleeper 10 >"$EVIDENCE_DIR/fdreach-sleeper-c1.log" 2>&1 &
   SP=$!
   for _ in $(seq 1 100); do grep -q MEMFD-READY "$EVIDENCE_DIR/fdreach-sleeper-c1.log" 2>/dev/null && break; sleep 0.05; done
   SPID="$(grep -oE 'pid=[0-9]+' "$EVIDENCE_DIR/fdreach-sleeper-c1.log" | head -1 | cut -d= -f2)"
