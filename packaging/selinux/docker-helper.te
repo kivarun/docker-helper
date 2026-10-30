@@ -2868,11 +2868,24 @@ type_transition docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:proce
 # execute_no_trans/getattr/ioctl/create/unlink/entrypoint stay ungranted;
 # execute_no_trans (the bprm same-domain check, file-class in current
 # kernels) is the predicted next terminal and is left to be observed.
+# The P5 execute_no_trans corrective (single permission, exact-SHA UAT run
+# 41107142732): the P4 enforcing UAT observed the exec passing its
+# exec-target open and stopping at the bprm same-domain gate — avc denied
+# { execute_no_trans } comm="buildkit-runc" tclass=file with the memfd
+# path (serials 1324, 10336), exactly hooks.c selinux_bprm_creds_for_exec:
+# no process type_transition exists on the memfd type, so the same-domain
+# branch demands FILE__EXECUTE_NO_TRANS on the executed file itself. The
+# grant completes the exeseal exec chain on the helper-owned sealed clone
+# (reachable only through the pointed transition; kernel-sealed immutable).
+# Every later exec of an object of this type — there is exactly one kind:
+# the buildkitd's own clone — is same-domain authority; no entrypoint
+# applies (no transition target exists).
 type docker_helper_runc_memfd_t;
 type_transition docker_helper_buildkitd_t tmpfs_t:file docker_helper_runc_memfd_t;
 allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file write;
 allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file setattr;
 allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file execute;
+allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file execute_no_trans;
 allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file { read open };
 
 # --- R7-A: the daemon's buildctl executable identity (full artifact-gate
