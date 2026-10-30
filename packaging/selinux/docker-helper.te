@@ -2794,10 +2794,28 @@ type_transition docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:proce
 # buildkitd_t:s0:c1 and buildkitd_t:s0:c2 both transitioning
 # tmpfs_t:file to docker_helper_runc_memfd_t:s0 — so the memfd carries NO
 # per-operation MCS isolation; it is operation-neutral by construction.
-# Access to the object stays governed by type enforcement (the type begins
-# with zero allow rules: deny-all), by the FD lifetime/reachability of the
-# anonymous memfd, and by the kernel memfd seals; no file authority is
-# granted here and none is implied.
+#
+# The P1 write corrective (single permission, exact SHA UAT): the ONLY allow
+# on this type is the buildkitd domain's file write. runc v1.4.3
+# (libcontainer/exeseal/cloned_binary_linux.go + libcontainer/system Copy)
+# needs it exactly once per clone: between memfd_create and the immediate
+# sealMemfd sequence, the SAME process copies its own binary into the memfd
+# (sendfile(2), write(2) fallback), then fchmod(0o511) and
+# F_ADD_SEALS(F_SEAL_EXEC | F_SEAL_SEAL|F_SEAL_SHRINK|F_SEAL_GROW|F_SEAL_WRITE)
+# make the object permanently immutable — after the seal NO domain can write,
+# independent of SELinux (proven live: a same-uid root O_RDWR open of a sealed
+# memfd still fails its write with EPERM). No read/open/append/map/execute/
+# setattr/getattr/create/unlink authority is granted: the enforcing UAT keeps
+# denying those and records the first new fatal boundary if the flow reaches
+# one. Cross-operation FD reachability was proven closed before this grant:
+# the memfd fd is never sent over any socket (runc v1.4.3 SCM_RIGHTS senders
+# carry only the PTY master, the init-child pidfd, and the seccomp-notify fd;
+# pidfd_getfd fetches only the seccomp fd), and the /proc/<pid>/fd path is
+# gated by ptrace_may_access — on the loaded policy
+# mlsconstrain process ptrace (h1 dom h2 or t1 != mcs_constrained_type) plus
+# the file:read reach-gate decision deny buildkitd_t:s0:c2 -> buildkitd_t:s0:c1
+# (kernel-AV matrix, exeseal FD-reachability diag); only the unconfined admin
+# surface stays exempt by design.
 #
 # NOTE on the transition surface: the pointed tmpfs_t:file transition below
 # applies to file-class objects created by the buildkitd domain wherever the
@@ -2808,6 +2826,7 @@ type_transition docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:proce
 # automatic extension of this rule.
 type docker_helper_runc_memfd_t;
 type_transition docker_helper_buildkitd_t tmpfs_t:file docker_helper_runc_memfd_t;
+allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file write;
 
 # --- R7-A: the daemon's buildctl executable identity (full artifact-gate
 # --- evidence, failed release run 38944346311) ---

@@ -514,8 +514,8 @@ func s15LauncherCgroupViolations(policy string) []string {
 			violations = append(violations, fmt.Sprintf("the standing cgroup owner drifted (must stay exactly its bare { search } dir singleton): %s", want))
 		}
 	}
-	if buildkitdNamedAllow != 29 {
-		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 29 (the S15 phase had exactly 9; R7 added the manager child-lifecycle rule, the per-op endpoint peer edge, the rootlesskit parent's buildkitd child-authority rule the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr, the unprivileged-mount-flags statfs getattr, the OCI-worker process-group setup rule, the cgroup2 root traversal singleton, the cgroup2 statfs detection filesystem getattr singleton and the runtime-tree exec.fifo fifo_file { create setattr } singleton (widened in place by the setattr rung); a NON-buildkitd S15 rule never trips it), found %d", buildkitdNamedAllow))
+	if buildkitdNamedAllow != 30 {
+		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 30 (the S15 phase had exactly 9; R7 added the manager child-lifecycle rule, the per-op endpoint peer edge, the rootlesskit parent's buildkitd child-authority rule the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr, the unprivileged-mount-flags statfs getattr, the OCI-worker process-group setup rule, the cgroup2 root traversal singleton, the cgroup2 statfs detection filesystem getattr singleton, the runtime-tree exec.fifo fifo_file { create setattr } singleton (widened in place by the setattr rung) and the P1 runc-memfd file write corrective (docker_helper_runc_memfd_t:file write); a NON-buildkitd S15 rule never trips it), found %d", buildkitdNamedAllow))
 	}
 	return violations
 }
@@ -5352,9 +5352,11 @@ func buildkitdIdentityViolations(policy string) []string {
 	// unprivileged-mount-flags statfs getattr, the OCI-worker
 	// process-group setup rule, the cgroup2 root traversal dir
 	// { search } singleton, the cgroup2 statfs detection filesystem
-	// getattr singleton and the runtime-tree exec.fifo fifo_file
+	// getattr singleton, the runtime-tree exec.fifo fifo_file
 	// { create setattr } singleton widened in place by the setattr
-	// rung) — never "at least".
+	// rung, and the P1 runc-memfd file write corrective
+	// (docker_helper_buildkitd_t -> docker_helper_runc_memfd_t:file
+	// write)) — never "at least".
 	buildkitdNamedAllow := 0
 	for _, line := range strings.Split(policy, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -5365,8 +5367,8 @@ func buildkitdIdentityViolations(policy string) []string {
 			buildkitdNamedAllow++
 		}
 	}
-	if buildkitdNamedAllow != 29 {
-		violations = append(violations, fmt.Sprintf("the module must carry exactly the twenty-nine buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr open execute_no_trans }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir setattr }, the categorized state-tree file { create read open lock write getattr rename setattr unlink append }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name create remove_name mounton setattr }, the categorized runtime-tree sock_file { create unlink setattr }, and the R7 manager child-lifecycle { signull signal sigkill } authority, the daemon's per-op BuildKit endpoint { connectto } peer edge, the rootlesskit parent's buildkitd child-authority rule, the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr, the unprivileged-mount-flags statfs getattr, the OCI-worker process-group setup rule, the cgroup2 root traversal dir { search } singleton, the cgroup2 statfs detection filesystem getattr singleton and the runtime-tree exec.fifo fifo_file { create setattr } singleton widened in place by the setattr rung), found %d", buildkitdNamedAllow))
+	if buildkitdNamedAllow != 30 {
+		violations = append(violations, fmt.Sprintf("the module must carry exactly the thirty buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr open execute_no_trans }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir setattr }, the categorized state-tree file { create read open lock write getattr rename setattr unlink append }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name create remove_name mounton setattr }, the categorized runtime-tree sock_file { create unlink setattr }, and the R7 manager child-lifecycle { signull signal sigkill } authority, the daemon's per-op BuildKit endpoint { connectto } peer edge, the rootlesskit parent's buildkitd child-authority rule, the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr, the unprivileged-mount-flags statfs getattr, the OCI-worker process-group setup rule, the cgroup2 root traversal dir { search } singleton, the cgroup2 statfs detection filesystem getattr singleton, the runtime-tree exec.fifo fifo_file { create setattr } singleton widened in place by the setattr rung, and the P1 runc-memfd file write corrective), found %d", buildkitdNamedAllow))
 	}
 	// The shared runtime-root dir surface has exactly the standing
 	// owners above; a NEW or reshaped rule on the pair (any source,
@@ -5484,7 +5486,7 @@ func buildkitdIdentityViolations(policy string) []string {
 			if strings.Contains(trimmed, "docker_helper_buildkitd_exec_t") && trimmed != canonicalExec && trimmed != canonicalEntry {
 				violations = append(violations, "the only allow rules naming the buildkitd exec type are the exact source-exec grant { execute read open } and the exact target-side { entrypoint read execute getattr open execute_no_trans } grant: "+trimmed)
 			}
-			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot && trimmed != canonicalRuntimeTree && trimmed != canonicalRuntimeSockFile && trimmed != canonicalManagerLifecycle && trimmed != "allow docker_helper_t docker_helper_buildkitd_t:unix_stream_socket { connectto };" && trimmed != "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { signal sigkill };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:dir { write add_name create mounton remove_name read };" && trimmed != "allow docker_helper_buildkitd_t self:cap_userns { sys_admin chown };" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem { remount unmount };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:file { create };" && trimmed != "allow docker_helper_buildkitd_t self:udp_socket { create setopt connect getattr read write };" && trimmed != "allow docker_helper_buildkitd_t self:tcp_socket { create setopt connect getattr read write getopt };" && trimmed != "allow docker_helper_buildkitd_t http_port_t:tcp_socket { name_connect };" && trimmed != "allow docker_helper_buildkitd_t cert_t:dir { search };" && trimmed != "allow docker_helper_buildkitd_t cert_t:file { read open getattr };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:lnk_file { create };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file { create setattr getattr read };" && trimmed != "allow docker_helper_buildkitd_t nsfs_t:file getattr;" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem getattr;" && trimmed != "allow docker_helper_buildkitd_t self:process setpgid;" && trimmed != "allow docker_helper_buildkitd_t cgroup_t:dir { search };" && trimmed != "allow docker_helper_buildkitd_t cgroup_t:filesystem getattr;" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:fifo_file { create setattr };" {
+			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot && trimmed != canonicalRuntimeTree && trimmed != canonicalRuntimeSockFile && trimmed != canonicalManagerLifecycle && trimmed != "allow docker_helper_t docker_helper_buildkitd_t:unix_stream_socket { connectto };" && trimmed != "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { signal sigkill };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:dir { write add_name create mounton remove_name read };" && trimmed != "allow docker_helper_buildkitd_t self:cap_userns { sys_admin chown };" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem { remount unmount };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:file { create };" && trimmed != "allow docker_helper_buildkitd_t self:udp_socket { create setopt connect getattr read write };" && trimmed != "allow docker_helper_buildkitd_t self:tcp_socket { create setopt connect getattr read write getopt };" && trimmed != "allow docker_helper_buildkitd_t http_port_t:tcp_socket { name_connect };" && trimmed != "allow docker_helper_buildkitd_t cert_t:dir { search };" && trimmed != "allow docker_helper_buildkitd_t cert_t:file { read open getattr };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:lnk_file { create };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file { create setattr getattr read };" && trimmed != "allow docker_helper_buildkitd_t nsfs_t:file getattr;" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem getattr;" && trimmed != "allow docker_helper_buildkitd_t self:process setpgid;" && trimmed != "allow docker_helper_buildkitd_t cgroup_t:dir { search };" && trimmed != "allow docker_helper_buildkitd_t cgroup_t:filesystem getattr;" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:fifo_file { create setattr };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file write;" {
 				violations = append(violations, "the only allow rules toward the buildkitd domain are the exact process transition grant, the exact target-entrypoint grant, and the exact state/runtime surfaces: "+trimmed)
 			}
 			fields := strings.Fields(trimmed)
@@ -8691,31 +8693,38 @@ func TestPhase4BVerdictBoundaryDecodeKernelSourced(t *testing.T) {
 	}
 }
 
-// runcMemfdPolicyViolations scans the module text against the R7 B′ P0
-// memfd-type invariants (the BPRIME-VIABLE diag run 41035273700 evidence)
-// and returns one human-readable violation per broken rule, empty when none:
+// runcMemfdPolicyViolations scans the module text against the R7 B′ P0 +
+// P1 memfd-type invariants (the BPRIME-VIABLE diag run 41035273700 and the
+// P1 enforcing UAT evidence) and returns one human-readable violation per
+// broken rule, empty when none:
 //   - the type docker_helper_runc_memfd_t is declared EXACTLY once, in the
 //     bare attribute-free form "type docker_helper_runc_memfd_t;" (no
 //     file_type/exec_type/domain/mcs membership: the memfd object type
-//     begins its life deny-all and gains authority only through an
-//     explicitly reviewed allow, never through attribute inheritance);
+//     gains authority only through explicitly reviewed allows, never
+//     through attribute inheritance);
 //   - no typeattribute statement names the type;
 //   - EXACTLY ONE type_transition names the type, and its fields are the
 //     canonical pointed triple (source docker_helper_buildkitd_t, entry
 //     tmpfs_t, class file) — no alternate source/entry/class route to the
 //     same destination, no duplicate;
-//   - ZERO allow rules name the type (as source or as target): the P0
-//     change deliberately grants no file authority — access stays governed
-//     by TE absence, FD lifetime/reachability, and kernel memfd seals.
+//   - EXACTLY ONE allow names the type: the P1 canonical
+//     buildkitd_t -> memfd_t:file write (the runc CloneBinary copy-window
+//     corrective), in its exact spelling, with ZERO other allow rules in
+//     either direction and no additional permission on the pair;
+//   - the canonical transition and allow spellings must exist verbatim
+//     (parseSELinuxRules tolerates reformatted field layouts; the shipped
+//     module pins the canonical spelling).
 //
-// The buildkitd allow-inventory pin (exactly 29 buildkitd-named allow rules)
-// is owned by s15LauncherCgroupViolations and stays there; this P0 change
-// adds no allow rule, so that pin is the tripwire for the inventory half.
+// The buildkitd allow-inventory pin (exactly 30 buildkitd-named allow
+// rules: the 29 pre-P1 authorities plus the one memfd write corrective)
+// is owned by s15LauncherCgroupViolations and stays there; the scan below
+// proves the memfd type itself gained nothing beyond the single write.
 func runcMemfdPolicyViolations(policy string) []string {
 	const (
 		memfdType        = "docker_helper_runc_memfd_t"
 		bareDeclaration  = "type " + memfdType + ";"
 		transitionPrefix = "type_transition docker_helper_buildkitd_t tmpfs_t:file " + memfdType + ";"
+		canonicalAllow   = "allow docker_helper_buildkitd_t " + memfdType + ":file write;"
 	)
 	var violations []string
 	declarations := 0
@@ -8729,7 +8738,7 @@ func runcMemfdPolicyViolations(policy string) []string {
 			continue
 		}
 		if strings.HasPrefix(trimmed, "type "+memfdType+",") || strings.HasPrefix(trimmed, "typeattribute "+memfdType) {
-			violations = append(violations, fmt.Sprintf("the memfd object type must stay attribute-free (deny-all by construction): %s", trimmed))
+			violations = append(violations, fmt.Sprintf("the memfd object type must stay attribute-free (authority only through reviewed allows): %s", trimmed))
 		}
 		if strings.Contains(trimmed, " "+memfdType+",") || strings.Contains(trimmed, ", "+memfdType+",") || strings.Contains(trimmed, ", "+memfdType+";") {
 			violations = append(violations, fmt.Sprintf("no attribute list may admit the memfd object type: %s", trimmed))
@@ -8753,42 +8762,54 @@ func runcMemfdPolicyViolations(policy string) []string {
 		violations = append(violations, fmt.Sprintf("exactly ONE type_transition may name the memfd object type, found %d", memfdTransitions))
 	}
 	allows, _ := parseSELinuxRules(policy)
+	memfdAllows := 0
 	for _, rule := range allows {
-		if rule.source == memfdType || rule.target == memfdType {
-			violations = append(violations, fmt.Sprintf("the P0 memfd type carries NO allow authority (no source, no target): allow %s %s:%s", rule.source, rule.target, rule.class))
+		if rule.source != memfdType && rule.target != memfdType {
+			continue
+		}
+		memfdAllows++
+		if rule.source != "docker_helper_buildkitd_t" || rule.target != memfdType || rule.class != "file" {
+			violations = append(violations, fmt.Sprintf("the P1 memfd write corrective is the ONLY allow shape on the type (buildkitd_t -> memfd_t:file), got: allow %s %s:%s", rule.source, rule.target, rule.class))
 		}
 	}
-	// The canonical transition must exist in its exact textual form too
-	// (parseSELinuxRules tolerates reformatted field layouts; the shipped
-	// module pins the canonical spelling).
-	if !strings.Contains(policy, transitionPrefix) {
-		violations = append(violations, fmt.Sprintf("the canonical transition spelling must exist verbatim: %s", transitionPrefix))
+	if memfdAllows != 1 {
+		violations = append(violations, fmt.Sprintf("exactly ONE allow rule may name the memfd object type (the P1 file write corrective), found %d", memfdAllows))
+	}
+	if n := strings.Count(policy, canonicalAllow); n != 1 {
+		violations = append(violations, fmt.Sprintf("the canonical P1 write spelling must exist EXACTLY once verbatim: %q, found %d", canonicalAllow, n))
+	}
+	if n := strings.Count(policy, transitionPrefix); n != 1 {
+		violations = append(violations, fmt.Sprintf("the canonical transition spelling must exist EXACTLY once verbatim: %q, found %d", transitionPrefix, n))
 	}
 	return violations
 }
 
-// TestSELinuxPolicyRuncMemfdTypeAuthority pins the R7 B′ P0 policy shape:
-// the new memfd object type exists exactly once without attributes, the
-// single pointed type_transition routes buildkitd_t-created tmpfs file
-// objects to it, and NO allow rule names the type in either direction
-// (write/read/map/execute/open/setattr stay denied — the P0 outcome is the
-// changed denial target, not a granted authority). Negative mutations prove
-// every tripwire: a missing transition (the pre-P0 regression), a duplicate,
-// a wrong source, a wrong entry type, a wrong class, an attribute-carrying
-// declaration, a typeattribute statement, a direct allow in either
-// direction for each forbidden permission, and an attribute-targeted allow
-// paired with the attribute membership it would exploit.
+// TestSELinuxPolicyRuncMemfdTypeAuthority pins the R7 B′ P0 + P1 policy
+// shape: the new memfd object type exists exactly once without attributes,
+// the single pointed type_transition routes buildkitd_t-created tmpfs file
+// objects to it, and the P1 write corrective is the ONLY allow authority on
+// the type — the canonical buildkitd_t -> memfd_t:file write (the runc
+// CloneBinary copy window), with every other permission staying denied.
+// Negative mutations prove every tripwire: a missing transition (the pre-P0
+// regression) or missing/extra write allow, a duplicate transition or
+// duplicate allow, a wrong source, a wrong entry type, a wrong class, an
+// attribute-carrying declaration, a typeattribute statement, a direct
+// non-write allow in either direction for every forbidden permission
+// (read open append map execute execute_no_trans setattr getattr ioctl
+// create unlink), and an attribute-targeted allow paired with the attribute
+// membership it would exploit.
 func TestSELinuxPolicyRuncMemfdTypeAuthority(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
 	if violations := runcMemfdPolicyViolations(policy); len(violations) > 0 {
 		for _, v := range violations {
-			t.Errorf("R7 B′ P0 memfd-type invariant violated: %s", v)
+			t.Errorf("R7 B′ P0/P1 memfd-type invariant violated: %s", v)
 		}
 	}
 	const (
 		memfdType            = "docker_helper_runc_memfd_t"
 		canonicalDeclaration = "type " + memfdType + ";"
 		canonicalTransition  = "type_transition docker_helper_buildkitd_t tmpfs_t:file " + memfdType + ";"
+		canonicalAllow       = "allow docker_helper_buildkitd_t " + memfdType + ":file write;"
 	)
 	mutations := []struct {
 		name   string
@@ -8809,6 +8830,18 @@ func TestSELinuxPolicyRuncMemfdTypeAuthority(t *testing.T) {
 		{"wrong class (dir instead of file)", func(p string) string {
 			return strings.Replace(p, canonicalTransition, "type_transition docker_helper_buildkitd_t tmpfs_t:dir "+memfdType+";", 1)
 		}},
+		{"write allow removed (the pre-P1 deny regression)", func(p string) string {
+			return strings.Replace(p, canonicalAllow+"\n", "", 1)
+		}},
+		{"write allow duplicated", func(p string) string {
+			return p + "\n" + canonicalAllow
+		}},
+		{"write allow on a wrong source domain", func(p string) string {
+			return strings.Replace(p, canonicalAllow, "allow docker_helper_t "+memfdType+":file write;", 1)
+		}},
+		{"write allow on a wrong class", func(p string) string {
+			return strings.Replace(p, canonicalAllow, "allow docker_helper_buildkitd_t "+memfdType+":dir write;", 1)
+		}},
 		{"attribute membership added to the declaration (file_type)", func(p string) string {
 			return strings.Replace(p, canonicalDeclaration, "type "+memfdType+", file_type;", 1)
 		}},
@@ -8822,9 +8855,15 @@ func TestSELinuxPolicyRuncMemfdTypeAuthority(t *testing.T) {
 			return strings.Replace(p, canonicalDeclaration, "type "+memfdType+", file_type;", 1) + "\nallow docker_helper_buildkitd_t file_type:file { write };"
 		}},
 	}
-	for _, perm := range []string{"write", "read", "map", "execute", "open", "setattr"} {
+	for _, perm := range []string{"read", "open", "append", "map", "execute", "execute_no_trans", "setattr", "getattr", "ioctl", "create", "unlink"} {
 		permName := perm
 		mutations = append(mutations,
+			struct {
+				name   string
+				mutate func(string) string
+			}{"forbidden rider on the write allow (" + permName + ")", func(p string) string {
+				return strings.Replace(p, canonicalAllow, "allow docker_helper_buildkitd_t "+memfdType+":file { write "+permName+" };", 1)
+			}},
 			struct {
 				name   string
 				mutate func(string) string
@@ -8841,7 +8880,7 @@ func TestSELinuxPolicyRuncMemfdTypeAuthority(t *testing.T) {
 	}
 	for _, mut := range mutations {
 		if len(runcMemfdPolicyViolations(mut.mutate(policy))) == 0 {
-			t.Errorf("mutation %q must trip the R7 B′ P0 memfd-type invariant", mut.name)
+			t.Errorf("mutation %q must trip the R7 B′ P0/P1 memfd-type invariant", mut.name)
 		}
 	}
 }
@@ -8868,23 +8907,28 @@ func TestSELinuxPolicyRuncMemfdCompiledParity(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(compiled)
-	// The three compiled occurrences are the mandatory structural triple:
-	// the bare type, its implicit object_r roletype binding, and the single
-	// typetransition. Anything more (a second transition, an allow rule in
-	// either direction, an expanded attribute set) names the type again.
-	if n := strings.Count(text, "docker_helper_runc_memfd_t"); n != 3 {
-		t.Fatalf("compiled policy must name the memfd type exactly three times (the type, its object_r roletype binding, and the single typetransition), got %d occurrences", n)
+	// The four compiled occurrences are the mandatory structural set: the
+	// bare type, its implicit object_r roletype binding, the single
+	// typetransition, and the single P1 write allow. Anything more (a
+	// second transition, a second allow, an expanded attribute set) names
+	// the type again.
+	if n := strings.Count(text, "docker_helper_runc_memfd_t"); n != 4 {
+		t.Fatalf("compiled policy must name the memfd type exactly four times (the type, its object_r roletype binding, the single typetransition, and the single write allow), got %d occurrences", n)
 	}
 	for _, want := range []string{
 		"(type docker_helper_runc_memfd_t)",
 		"(roletype object_r docker_helper_runc_memfd_t)",
 		"(typetransition docker_helper_buildkitd_t tmpfs_t file docker_helper_runc_memfd_t)",
+		"(allow docker_helper_buildkitd_t docker_helper_runc_memfd_t (file (write)))",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("compiled policy must contain: %s", want)
 		}
 	}
 	if strings.Contains(text, "(typeattributeset docker_helper_runc_memfd_t") {
-		t.Errorf("compiled policy must carry NO attribute set for the memfd type (deny-all by construction, no implicit attribute authority)")
+		t.Errorf("compiled policy must carry NO attribute set for the memfd type (authority only through the reviewed write allow)")
+	}
+	if n := strings.Count(text, "(allow docker_helper_runc_memfd_t "); n != 0 {
+		t.Errorf("compiled policy must carry NO allow rule with the memfd type as the subject, got %d", n)
 	}
 }
