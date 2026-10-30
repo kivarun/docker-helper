@@ -2296,21 +2296,31 @@ else
   # "6" (the basename of /proc/self/fd/6, set by the kernel inside
   # begin_new_exec). The sweep journals every live comm=6 process with
   # its SELinux context and exe link; the classifier turns those records
-  # into the per-operation exec-completion verdict. The comm read is the
-  # bash $(<file) builtin (no fork per probe) to keep the sweep period
-  # well inside the child's lifetime; the exe/attr reads run only for the
-  # rare matches.
+  # into the per-operation exec-completion verdict. The comm probe uses
+  # the read BUILTIN with a stderr redirect (the $(<file) substitution
+  # loses its no-fork special case when a second redirection is present
+  # and returns EMPTY — the first sweep dispatch observed zero lines
+  # because of exactly that shell semantics); the exe/attr reads run only
+  # for the rare matches. A per-sweep counter (builtin reads/writes only)
+  # proves the sweep was ALIVE during the window, so a zero-hit result is
+  # an honest negative observation, never a silent instrument failure.
   RT_MEMFD_CAPTURE=/tmp/uat-wls-privacy-memfd-proc.txt
+  RT_MEMFD_SWEEPS=/tmp/uat-wls-privacy-memfd-sweeps.txt
   : > "$RT_MEMFD_CAPTURE"
+  printf '0' > "$RT_MEMFD_SWEEPS"
   ( while :; do
       for RT_MP in /proc/[0-9]*; do
-        [ "$( < "$RT_MP/comm" 2>/dev/null )" = "6" ] || continue
+        RT_MCOMM=""
+        read -r RT_MCOMM < "$RT_MP/comm" 2>/dev/null || true
+        [ "$RT_MCOMM" = "6" ] || continue
         RT_MPID="${RT_MP#/proc/}"
         RT_MCTX="$(cat "$RT_MP/attr/current" 2>/dev/null)"
         RT_MEXE="$(readlink "$RT_MP/exe" 2>/dev/null)"
         printf 'memfd-proc pid=%s comm=6 ctx=%s exe=%s\n' \
           "$RT_MPID" "${RT_MCTX:-?}" "${RT_MEXE:-?}" >> "$RT_MEMFD_CAPTURE"
       done
+      RT_SWEEPS_N="$( < "$RT_MEMFD_SWEEPS" )"
+      printf '%s' "$(( ${RT_SWEEPS_N:-0} + 1 ))" > "$RT_MEMFD_SWEEPS"
     done ) &
   RT_MEMFD_SWEEP_PID=$!
   ( DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" dh build runtime-privacy \
@@ -2442,7 +2452,8 @@ else
   # context carrying the op's own category; zero hits for an op, a
   # foreign category, or a non-memfd comm=6 process fails the leg.
   RT_MEMFD_VERDICT="$(rt_priv_memfd_verdict "$RT_MEMFD_CAPTURE" "$RT_CTX_A" "$RT_CTX_B")"
-  info "R7-privacy memfd-proc: ${RT_MEMFD_VERDICT:-unavailable} (capture lines: $(wc -l < "$RT_MEMFD_CAPTURE" 2>/dev/null || echo 0))"
+  RT_MEMFD_SWEEPS_N="$( < "$RT_MEMFD_SWEEPS" )"
+  info "R7-privacy memfd-proc: ${RT_MEMFD_VERDICT:-unavailable} (capture lines: $(wc -l < "$RT_MEMFD_CAPTURE" 2>/dev/null || echo 0); sweeps: ${RT_MEMFD_SWEEPS_N:-0})"
   case "$RT_MEMFD_VERDICT" in
     VERDICT=OK*)
       acc_ok "R7 runtime privacy: the exec'd sealed memfd clone ran as a live userspace process in each op's own buildkitd context (exec-boundary evidence: /proc/<pid>/exe=/memfd:runc_cloned:* observed by the /proc sweep; ${RT_MEMFD_VERDICT})"
