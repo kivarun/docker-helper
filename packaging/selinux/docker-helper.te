@@ -2880,6 +2880,23 @@ type_transition docker_helper_rootlesskit_t docker_helper_buildkitd_exec_t:proce
 # Every later exec of an object of this type — there is exactly one kind:
 # the buildkitd's own clone — is same-domain authority; no entrypoint
 # applies (no transition target exists).
+# The P6 map corrective (single permission, exact-SHA UAT run
+# 41118649527): the P5 enforcing UAT observed the exec crossing the
+# kernel point of no return — begin_new_exec had already set the task
+# comm to the basename of the exec path ("6" for /proc/self/fd/6) — and
+# then stopping inside ELF loading: avc denied { map } comm="6" path
+# "/memfd:runc_cloned:/proc/self/exe (deleted)" (serials 1322, 10343),
+# exactly load_elf_binary elf_map -> security_mmap_file mapping the
+# executed file's PT_LOAD segments. The grant stays pointed at the memfd
+# object type (reachable only through the single pointed tmpfs_t:file
+# transition): the only mappable object of this type is the sealed,
+# kernel-write-immutable clone the buildkitd domain itself created, and
+# the observed mapper is the exec's own ELF loader mapping its own
+# sealed clone. map is a generic mmap capability on the object (any
+# mapping flags, not only ELF segments); no other consumer of this type
+# has been observed. read/open/append/getattr/ioctl/create/unlink/
+# entrypoint stay ungranted. Whether the exec then completes into a
+# running userspace runc is the next observation, not an assumption.
 type docker_helper_runc_memfd_t;
 type_transition docker_helper_buildkitd_t tmpfs_t:file docker_helper_runc_memfd_t;
 allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file write;
@@ -2887,6 +2904,7 @@ allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file setattr;
 allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file execute;
 allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file execute_no_trans;
 allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file { read open };
+allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file map;
 
 # --- R7-A: the daemon's buildctl executable identity (full artifact-gate
 # --- evidence, failed release run 38944346311) ---
