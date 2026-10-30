@@ -12906,6 +12906,119 @@ func TestUATWorkloadSELinuxRuncDirObservationClassifier(t *testing.T) {
 	})
 }
 
+// TestUATWorkloadSELinuxMemfdProcClassifier runs the shipped
+// rt_priv_memfd_verdict classifier over /proc sweep fixtures and proves the
+// R7 P6 exec-boundary contract end-to-end:
+//   - a valid hit is a comm=6 process whose /proc/<pid>/exe is the sealed
+//     memfd clone and whose SELinux context is the buildkitd domain with
+//     the op's own category suffix (execute_no_trans semantics) — the
+//     exec'd clone demonstrably ran as a live userspace process;
+//   - the verdict is set-based: duplicates of one pid count once, and
+//     BOTH operations need at least one hit (zero observation for an op
+//     fails — absence is never a pass);
+//   - everything else fails fail-closed: a foreign category, a
+//     non-buildkitd domain, a compound category that is not exactly the
+//     op's own, a comm=6 process whose exe is not the memfd clone, or an
+//     unobserved own context;
+//   - a missing capture file fails (the sweep never producing evidence is
+//     not an OK).
+func TestUATWorkloadSELinuxMemfdProcClassifier(t *testing.T) {
+	const ctxC1 = "system_u:object_r:docker_helper_builder_runtime_t:s0:c1"
+	const ctxC2 = "system_u:object_r:docker_helper_builder_runtime_t:s0:c2"
+	const bkC1 = "system_u:system_r:docker_helper_buildkitd_t:s0:c1"
+	const bkC2 = "system_u:system_r:docker_helper_buildkitd_t:s0:c2"
+	const memfdExe = "/memfd:runc_cloned:/proc/self/exe (deleted)"
+	classifier := extractShellFunction(t, "scripts/uat-workload-selinux.sh", "rt_priv_memfd_verdict")
+
+	dir := t.TempDir()
+	capture := filepath.Join(dir, "memfd-proc.txt")
+	write := func(records ...string) {
+		t.Helper()
+		if err := os.WriteFile(capture, []byte(strings.Join(records, "\n")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := func(ctxA, ctxB string) string {
+		t.Helper()
+		script := classifier + "\nrt_priv_memfd_verdict " + strconv.Quote(capture) + " " + strconv.Quote(ctxA) + " " + strconv.Quote(ctxB) + "\n"
+		out, err := runBashIn(t, dir, script)
+		if err != nil {
+			t.Fatalf("classifier run failed: %v\n%s", err, out)
+		}
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(line, "VERDICT=") {
+				return line
+			}
+		}
+		t.Fatalf("classifier printed no VERDICT line, output:\n%s", out)
+		return ""
+	}
+
+	t.Run("valid hits for both operations pass with duplicates counted once", func(t *testing.T) {
+		write(
+			"memfd-proc pid=401 comm=6 ctx="+bkC1+" exe="+memfdExe,
+			"memfd-proc pid=401 comm=6 ctx="+bkC1+" exe="+memfdExe,
+			"memfd-proc pid=402 comm=6 ctx="+bkC2+" exe="+memfdExe,
+		)
+		if got := run(ctxC1, ctxC2); !strings.HasPrefix(got, "VERDICT=OK A=1 B=1 foreign=0") {
+			t.Errorf("one deduplicated hit per operation with zero foreign records must pass, got: %s", got)
+		}
+	})
+
+	t.Run("only one operation observed fails", func(t *testing.T) {
+		write("memfd-proc pid=401 comm=6 ctx=" + bkC1 + " exe=" + memfdExe)
+		if got := run(ctxC1, ctxC2); !strings.HasPrefix(got, "VERDICT=FAIL A=1 B=0 foreign=0") {
+			t.Errorf("an operation without an observed exec must fail (absence of observation is never a pass), got: %s", got)
+		}
+	})
+
+	t.Run("foreign category fails", func(t *testing.T) {
+		write(
+			"memfd-proc pid=401 comm=6 ctx="+bkC1+" exe="+memfdExe,
+			"memfd-proc pid=403 comm=6 ctx=system_u:system_r:docker_helper_buildkitd_t:s0:c9 exe="+memfdExe,
+		)
+		if got := run(ctxC1, ctxC2); !strings.HasPrefix(got, "VERDICT=FAIL A=1 B=0 foreign=1") {
+			t.Errorf("a sealed-clone process in a foreign category must fail fail-closed, got: %s", got)
+		}
+	})
+
+	t.Run("non-buildkitd domain fails", func(t *testing.T) {
+		write("memfd-proc pid=404 comm=6 ctx=" + ctxC1 + " exe=" + memfdExe)
+		if got := run(ctxC1, ctxC2); !strings.HasPrefix(got, "VERDICT=FAIL A=0 B=0 foreign=1") {
+			t.Errorf("a comm=6 process outside the buildkitd domain must fail, got: %s", got)
+		}
+	})
+
+	t.Run("compound category that is not exactly the op's own fails", func(t *testing.T) {
+		write("memfd-proc pid=405 comm=6 ctx=system_u:system_r:docker_helper_buildkitd_t:s0:c1,c9 exe=" + memfdExe)
+		if got := run(ctxC1, ctxC2); !strings.HasPrefix(got, "VERDICT=FAIL A=0 B=0 foreign=1") {
+			t.Errorf("a compound category must not match the single-category op binding, got: %s", got)
+		}
+	})
+
+	t.Run("comm=6 process whose exe is not the memfd clone fails", func(t *testing.T) {
+		write("memfd-proc pid=406 comm=6 ctx=" + bkC1 + " exe=/usr/bin/sleep")
+		if got := run(ctxC1, ctxC2); !strings.HasPrefix(got, "VERDICT=FAIL A=0 B=0 foreign=1") {
+			t.Errorf("a comm=6 process executing something other than the sealed clone must fail fail-closed, got: %s", got)
+		}
+	})
+
+	t.Run("unobserved own context fails without classification", func(t *testing.T) {
+		if got := run("", ctxC2); !strings.HasPrefix(got, "VERDICT=FAIL reason=own-context-unobserved A=0 B=0 foreign=0") {
+			t.Errorf("an unobserved own context must fail up front (nothing can be attributed), got: %s", got)
+		}
+	})
+
+	t.Run("missing capture file fails", func(t *testing.T) {
+		if err := os.Remove(capture); err != nil {
+			t.Fatal(err)
+		}
+		if got := run(ctxC1, ctxC2); !strings.HasPrefix(got, "VERDICT=FAIL A=0 B=0 foreign=0") {
+			t.Errorf("a sweep that produced no evidence must fail, never pass, got: %s", got)
+		}
+	})
+}
+
 // TestUATHarnessRichListCLIGrammar runs the rich allowed-root list forms the
 // Release-2 UAT harness uses through the REAL production CLI parser (the same
 // in-process dispatch as the binary) and proves the grammar contract directly:

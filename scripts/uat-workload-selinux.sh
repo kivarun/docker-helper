@@ -341,6 +341,69 @@ rt_priv_runc_verdict() {
   printf 'VERDICT=%s ctx=%s mode=%s valid=%d incomplete=%d gone=%d first=%s\n' \
     "$overall" "$ctx_v" "$mode_v" "$valid" "$incomplete" "$gone" "$first"
 }
+
+# rt_priv_memfd_verdict CAPTURE_FILE CTX_A CTX_B — the R7 P6 exec-boundary
+# classifier over the privacy stage's /proc memfd-exe sweep. Sweep records
+# have the shape
+#
+#   memfd-proc pid=<p> comm=6 ctx=<ctx> exe=<exe>
+#
+# written by the tight /proc sweep that runs while the two concurrent
+# builds execute: any live process whose comm equals the basename of the
+# exeseal exec path ("6" for /proc/self/fd/6, the kernel sets comm from
+# the exec path inside begin_new_exec) is journaled with its SELinux
+# context and its /proc/<pid>/exe link. Classification (set-based, every
+# record checked, one pid of an operation counted once):
+#   - VALID hit: exe starts with /memfd:runc_cloned: and ctx is a
+#     docker_helper_buildkitd_t context carrying the operation's own
+#     category suffix (execute_no_trans semantics: the exec'd clone
+#     inherits the invoking runc parent's domain and per-op category) —
+#     the sealed clone demonstrably EXECUTED as a live userspace process
+#     in that operation's own domain;
+#   - everything else (a foreign category, a non-buildkitd domain, a
+#     comm=6 process whose exe is not the memfd clone, or an unreadable
+#     field) is FOREIGN — fail-closed;
+#   - VERDICT=OK only when BOTH operations carry at least one valid hit
+#     and zero foreign hits. Zero hits for an operation mean the exec
+#     boundary was never observed crossed for it — absence of observation
+#     is never a pass.
+rt_priv_memfd_verdict() {
+  capture="$1"; ctx_a="$2"; ctx_b="$3"
+  cat_a="${ctx_a##*:s0}"; cat_b="${ctx_b##*:s0}"
+  if [ -z "$cat_a" ] || [ -z "$cat_b" ]; then
+    printf 'VERDICT=FAIL reason=own-context-unobserved A=0 B=0 foreign=0 first_a=never-seen first_b=never-seen\n'
+    return 0
+  fi
+  hits_a=0; hits_b=0; foreign=0; first_a=""; first_b=""; seen_a=" "; seen_b=" "
+  if [ -f "$capture" ]; then
+    while IFS= read -r rec; do
+      [ -n "$rec" ] || continue
+      case "$rec" in "memfd-proc "*) ;; *) continue ;; esac
+      pid="$(printf '%s' "$rec" | sed -n 's/^memfd-proc pid=\([0-9][0-9]*\) .*/\1/p')"
+      ctx="$(printf '%s' "$rec" | sed -n 's/.* ctx=\([^ ]*\).*/\1/p')"
+      exe="$(printf '%s' "$rec" | sed -n 's/.* exe=//p')"
+      case "$exe" in /memfd:runc_cloned:*) ;; *) foreign=$((foreign + 1)); continue ;; esac
+      case "$ctx" in
+        *docker_helper_buildkitd_t:s0"$cat_a")
+          case " $seen_a " in *" $pid "*) continue ;; esac
+          seen_a="$seen_a$pid "
+          hits_a=$((hits_a + 1)); [ -z "$first_a" ] && first_a="$rec" ;;
+        *docker_helper_buildkitd_t:s0"$cat_b")
+          case " $seen_b " in *" $pid "*) continue ;; esac
+          seen_b="$seen_b$pid "
+          hits_b=$((hits_b + 1)); [ -z "$first_b" ] && first_b="$rec" ;;
+        *) foreign=$((foreign + 1)) ;;
+      esac
+    done < "$capture"
+  fi
+  if [ "$hits_a" -ge 1 ] && [ "$hits_b" -ge 1 ] && [ "$foreign" -eq 0 ]; then
+    overall=OK
+  else
+    overall=FAIL
+  fi
+  printf 'VERDICT=%s A=%d B=%d foreign=%d first_a=%s first_b=%s\n' \
+    "$overall" "$hits_a" "$hits_b" "$foreign" "${first_a:-never-seen}" "${first_b:-never-seen}"
+}
 scenario() { say "scenario $1"; }
 
 dh() { /usr/bin/docker-helper "$@"; }
@@ -2224,6 +2287,32 @@ else
       fi
     fi
   fi
+  # The R7 P6 exec-boundary instrument: a tight /proc sweep running while
+  # the two builds execute. The exeseal init child is SHORT-LIVED (it
+  # waits for bootstrap data the failing parent never sends, then the
+  # parent's cleanup kills it), so it is invisible to file watching; its
+  # userspace execution is nevertheless provable process-bound: after the
+  # exec completes, /proc/<pid>/exe is the sealed memfd clone and comm is
+  # "6" (the basename of /proc/self/fd/6, set by the kernel inside
+  # begin_new_exec). The sweep journals every live comm=6 process with
+  # its SELinux context and exe link; the classifier turns those records
+  # into the per-operation exec-completion verdict. The comm read is the
+  # bash $(<file) builtin (no fork per probe) to keep the sweep period
+  # well inside the child's lifetime; the exe/attr reads run only for the
+  # rare matches.
+  RT_MEMFD_CAPTURE=/tmp/uat-wls-privacy-memfd-proc.txt
+  : > "$RT_MEMFD_CAPTURE"
+  ( while :; do
+      for RT_MP in /proc/[0-9]*; do
+        [ "$( < "$RT_MP/comm" 2>/dev/null )" = "6" ] || continue
+        RT_MPID="${RT_MP#/proc/}"
+        RT_MCTX="$(cat "$RT_MP/attr/current" 2>/dev/null)"
+        RT_MEXE="$(readlink "$RT_MP/exe" 2>/dev/null)"
+        printf 'memfd-proc pid=%s comm=6 ctx=%s exe=%s\n' \
+          "$RT_MPID" "${RT_MCTX:-?}" "${RT_MEXE:-?}" >> "$RT_MEMFD_CAPTURE"
+      done
+    done ) &
+  RT_MEMFD_SWEEP_PID=$!
   ( DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" dh build runtime-privacy \
       --dockerfile Dockerfile --image uat-privacy-a:2.2 \
       >/tmp/uat-wls-privacy-a.log 2>&1 ) & RT_PID_A=$!
@@ -2318,6 +2407,8 @@ else
   info "R7-privacy capture: event-driven=$RT_EVENT_CAPTURE (events observed: ${RT_EVENT_EVENTS:-0}; watcher survived: ${RT_INO_ALIVE:-n/a}; capture-degraded=${RT_CAPTURE_DEGRADED:-n/a}; watch-errors=run:$RT_WATCH_ERRORS_RUN/var:$RT_WATCH_ERRORS_VAR; watcher stderr: $(head -2 /tmp/uat-wls-privacy-inotify.err 2>/dev/null || echo none))"
   wait "$RT_PID_A"; RT_RC_A=$?
   wait "$RT_PID_B"; RT_RC_B=$?
+  kill "$RT_MEMFD_SWEEP_PID" 2>/dev/null || true
+  wait "$RT_MEMFD_SWEEP_PID" 2>/dev/null || true
   RT_OPS="$(grep '^op ' "$RT_SURVEY" | awk '{ print $2 }' | awk '!seen[$0]++')"
   RT_OP_COUNT=0
   RT_STAT_A=""; RT_STAT_B=""
@@ -2344,6 +2435,22 @@ else
   else
     acc_fail "R7 runtime privacy: the per-operation category allocation did not show two distinct concurrent categories (ops seen: $RT_OP_COUNT)"
   fi
+  # The R7 P6 exec-boundary leg: the sealed memfd clone EXECUTED as a live
+  # userspace process inside each operation's own buildkitd context. The
+  # verdict is set-based over the /proc sweep journal (classifier above):
+  # a valid hit is /proc/<pid>/exe=/memfd:runc_cloned:* with the process
+  # context carrying the op's own category; zero hits for an op, a
+  # foreign category, or a non-memfd comm=6 process fails the leg.
+  RT_MEMFD_VERDICT="$(rt_priv_memfd_verdict "$RT_MEMFD_CAPTURE" "$RT_CTX_A" "$RT_CTX_B")"
+  info "R7-privacy memfd-proc: ${RT_MEMFD_VERDICT:-unavailable} (capture lines: $(wc -l < "$RT_MEMFD_CAPTURE" 2>/dev/null || echo 0))"
+  case "$RT_MEMFD_VERDICT" in
+    VERDICT=OK*)
+      acc_ok "R7 runtime privacy: the exec'd sealed memfd clone ran as a live userspace process in each op's own buildkitd context (exec-boundary evidence: /proc/<pid>/exe=/memfd:runc_cloned:* observed by the /proc sweep; ${RT_MEMFD_VERDICT})"
+      ;;
+    *)
+      acc_fail "R7 runtime privacy: the exec'd sealed memfd clone was not observed running in both operations' own contexts (${RT_MEMFD_VERDICT:-unavailable})"
+      ;;
+  esac
   # The runc-dir verdicts are set-based (the classifier above): EVERY
   # complete observation (survey sweep or immediate per-event capture)
   # must carry the op's own context, owner-only mode, and the op tree's
