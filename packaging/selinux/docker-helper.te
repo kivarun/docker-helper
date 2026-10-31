@@ -3103,6 +3103,57 @@ allow docker_helper_buildkitd_t tmp_t:dir { write add_name create mounton remove
 # One bit, self-scoped, appended to the existing rule — no parallel
 # allow.
 allow docker_helper_buildkitd_t self:cap_userns { sys_admin chown };
+# The P11 cap_userns sys_chroot corrective (single permission, exact-SHA
+# UAT run 41216831649): the P10 enforcing UAT proved the mount-source
+# goroutine's os.Open completed (the nsfs open denial family gone) and
+# setns(CLONE_NEWNS) reached the kernel's mntns_install, whose CURRENT
+# hardening demands THREE capability checks:
+#   ns_capable(mnt_ns->user_ns, CAP_SYS_ADMIN)  — passed (the standing
+#       self:cap_userns sys_admin bit, no AVC);
+#   ns_capable(user_ns, CAP_SYS_CHROOT)         — DENIED, the observed
+#       terminal (capability=18, sctx=tctx=buildkitd_t:s0:c1, serials
+#       1352/10410, audited);
+#   ns_capable(user_ns, CAP_SYS_ADMIN)          — not reached.
+# The cred-side fact is proven by the AVC's very existence (the module's
+# established LSM-order argument: the commoncap hook runs first and
+# short-circuits, so a cap_userns AVC means the kernel's own capability
+# check PASSED — the process holds CAP_SYS_CHROOT in its effective set
+# within the flow's child userns; only the SELinux gate denied).
+#
+# CAPABILITY PREFLIGHT (assessed before the grant):
+#   - the subject's existing cap_userns authority is EXACTLY the one
+#     { sys_admin chown } rule above; sys_chroot arrives as a SEPARATE
+#     single-permission rule, never merged into the brace form;
+#   - beyond setns the bit opens chroot(2) in the subject's OWN userns
+#     (the classic consumer; no other significant kernel consumer); no
+#     flow path calls chroot(2) at this stage — the demand is the
+#     kernel's own mntns_install check;
+#   - the standing sibling pattern: the rootlesskit parent domain
+#     ALREADY carries sys_chroot in its own evidenced cap_userns set —
+#     the parent-side mount orchestration has needed this bit in this
+#     flow all along;
+#   - chroot changes the subject's OWN path-resolution root only; the
+#     subject can chroot exclusively where it can already search (TE
+#     search on dirs + DAC); read/write authority after chroot is
+#     unchanged (the same TE rules + the same MCS constraints) — no new
+#     file authority, no out-of-scope access;
+#   - cross-operation isolation is untouched: cap_userns is a
+#     self-referential class (the observed denial's sctx = tctx), the
+#     MCS constraints do not mediate capability checks, and the
+#     cross-op namespace-handle gate (process:ptrace, TE-absent + the
+#     loaded mlsconstrain) is unchanged; the namespace this bit enables
+#     joining is the subject's OWN container's mount namespace — the
+#     flow's own target;
+#   - rootless no-delegation is untouched: no plain capability bit, no
+#     capability2, no process surface, no other domain gains a bit.
+# Deliberately NOT granted: sys_ptrace/net_admin/setuid/setgid (the
+# class stays exactly as declared), any plain self:capability bit, any
+# other class or subject, any process/process2 widening. The committed-
+# policy tests pin the buildkitd domain's cap_userns authority at
+# EXACTLY the two canonical rules (the brace pair + the sys_chroot
+# singleton) and the named-allow count moves 39 -> 40 by exactly this
+# one rule.
+allow docker_helper_buildkitd_t self:cap_userns sys_chroot;
 
 # R7 (green attempt, scope=selinux run 38979563860): the mount's own
 # read-only flag application. The same bind mount
