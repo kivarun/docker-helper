@@ -246,24 +246,198 @@ rt_priv_capture_desc() {
   printf 'capture=%s degraded=%s watch-errors=%s' "$1" "$2" "$3"
 }
 
+# The fd-pinned runc-attribute reader. The P9 UAT exposed the two-path-
+# stat TOCTOU: the capture resolved the pathname once for mode|uid|gid
+# and again for the SELinux context, and the short-lived runc dir's
+# removal landed between the two resolutions (mode read OK, context read
+# lost — the tuple became 1700|...|? and the observation degraded to
+# created-but-unreadable for BOTH ops). The fix pins the object's
+# identity FIRST: the open of the directory FD is the single
+# pathname-dependent step, and every attribute is then read THROUGH the
+# open file description — /proc/self/fd/N is a magic link whose kernel
+# handler (proc_fd_link, fs/proc/fd.c) hands out the open file's own
+# f_path, so stat -L and getfilecon through it operate on the pinned
+# inode even after the pathname is unlinked (the fd keeps the dentry
+# referenced; the deletion cannot invalidate any subsequent read). The
+# technique is never assumed: rt_priv_fd_selftest proves it per-run, as
+# the SAME subject that performs the live captures, against a scratch
+# dir with the production object type — deletion between open and reads,
+# substitution of another inode at the same pathname, and a failed open
+# are all exercised deterministically; only an all-green control
+# activates the mechanism, otherwise the captures degrade to the legacy
+# two-path-stat contract (fail-closed, the P9 evidence shape).
+rt_priv_runc_open() {
+  # PATH — open the directory O_RDONLY (opening a directory for reading
+  # is allowed by the kernel; read(2) is never attempted). On success fd
+  # 9 holds the pinned open file description; on failure fd 9 stays
+  # closed and the rc is nonzero.
+  exec 9<"$1" 2>/dev/null
+}
+rt_priv_runc_readfd() {
+  # Read mode|uid|gid, the inode number and the SELinux context THROUGH
+  # the pinned FD (requires fd 9 held by rt_priv_runc_open), then release
+  # it. Every read follows /proc/self/fd/9 with stat -L to the open
+  # file's own dentry; each read carries its own exit status and stderr.
+  # Without an open fd 9 the reads are skipped with explicit statuses
+  # (never silently attributed to a stale or foreign descriptor).
+  RT_FD_TUPLE=""; RT_FD_INO=""; RT_FD_CTX=""
+  RT_FD_ST_RC=2; RT_FD_ST_ERR="skipped-no-open-fd"
+  RT_FD_CX_RC=2; RT_FD_CX_ERR="skipped-no-open-fd"
+  if [ -e /proc/self/fd/9 ]; then
+    RT_FD_TUPLE="$(stat -Lc '%a|%U|%G' /proc/self/fd/9 2>"$RT_SURVEY.sterr")"
+    RT_FD_ST_RC=$?
+    RT_FD_ST_ERR="$(tr '\n' ' ' <"$RT_SURVEY.sterr" 2>/dev/null | tr ' ' '_')"
+    RT_FD_INO="$(stat -Lc '%i' /proc/self/fd/9 2>/dev/null)"
+    RT_FD_CTX="$(stat -Lc '%C' /proc/self/fd/9 2>"$RT_SURVEY.cxerr")"
+    RT_FD_CX_RC=$?
+    RT_FD_CX_ERR="$(tr '\n' ' ' <"$RT_SURVEY.cxerr" 2>/dev/null | tr ' ' '_')"
+  fi
+  exec 9<&- 2>/dev/null || true
+}
+rt_priv_runc_read() {
+  # PATH PREFIX — the shared runc-attribute evidence reader used by BOTH
+  # the immediate per-event capture and the survey sweep. With the fd
+  # technique proven (RT_FD_METHOD=proven) the record carries fd_rc /
+  # fd_err / ino ahead of the per-read statuses: fd_rc=0 means the
+  # pathname was resolved exactly once (at the open) and the tuple and
+  # context were read from the pinned inode — a deletion after the open
+  # cannot split the tuple anymore. fd_rc nonzero means the dir vanished
+  # (or the open was refused) BEFORE the identity could be pinned — an
+  # honest incomplete observation, never a validation. When the technique
+  # could not be proven on this kernel the reader degrades to the legacy
+  # two-path-stat contract (no fd fields), the exact P9 evidence shape.
+  if [ "$RT_FD_METHOD" = "proven" ]; then
+    RT_R_FD_RC=1; RT_R_FD_ERR="open-failed"; RT_R_TUPLE=""; RT_R_INO=""
+    RT_R_ST_RC=2; RT_R_ST_ERR="skipped-no-open-fd"
+    RT_R_CX_RC=2; RT_R_CX_ERR="skipped-no-open-fd"
+    RT_R_CTX=""
+    if rt_priv_runc_open "$1"; then
+      RT_R_FD_RC=0; RT_R_FD_ERR="none"
+      rt_priv_runc_readfd
+      RT_R_TUPLE="$RT_FD_TUPLE"; RT_R_INO="$RT_FD_INO"; RT_R_CTX="$RT_FD_CTX"
+      RT_R_ST_RC=$RT_FD_ST_RC; RT_R_ST_ERR="$RT_FD_ST_ERR"
+      RT_R_CX_RC=$RT_FD_CX_RC; RT_R_CX_ERR="$RT_FD_CX_ERR"
+    else
+      # Post-facto labeling only: the open already failed, so the -d
+      # probe cannot change the evidence — it just distinguishes a dir
+      # that vanished before the open (ENOENT-class) from one that was
+      # present but refused (EACCES-class, e.g. a confinement change).
+      if [ -d "$1" ]; then
+        RT_R_FD_ERR="open-failed-dir-present"
+      else
+        RT_R_FD_ERR="open-failed-dir-absent"
+      fi
+    fi
+    printf '%s fd_rc=%d fd_err=%s ino=%s st_rc=%d st_err=%s cx_rc=%d cx_err=%s %s|%s\n' \
+      "$2" "$RT_R_FD_RC" "$RT_R_FD_ERR" "${RT_R_INO:-}" \
+      "$RT_R_ST_RC" "${RT_R_ST_ERR:-none}" \
+      "$RT_R_CX_RC" "${RT_R_CX_ERR:-none}" \
+      "${RT_R_TUPLE:-}" "${RT_R_CTX:-?}" >> "$RT_SURVEY"
+  else
+    RT_R_TUPLE="$(stat -c '%a|%U|%G' "$1" 2>"$RT_SURVEY.sterr")"
+    RT_R_ST_RC=$?
+    RT_R_ST_ERR="$(tr '\n' ' ' <"$RT_SURVEY.sterr" 2>/dev/null | tr ' ' '_')"
+    RT_R_CTX="$(stat -c '%C' "$1" 2>"$RT_SURVEY.cxerr")"
+    RT_R_CX_RC=$?
+    RT_R_CX_ERR="$(tr '\n' ' ' <"$RT_SURVEY.cxerr" 2>/dev/null | tr ' ' '_')"
+    printf '%s st_rc=%d st_err=%s cx_rc=%d cx_err=%s %s|%s\n' \
+      "$2" "$RT_R_ST_RC" "${RT_R_ST_ERR:-none}" \
+      "$RT_R_CX_RC" "${RT_R_CX_ERR:-none}" \
+      "${RT_R_TUPLE:-}" "${RT_R_CTX:-?}" >> "$RT_SURVEY"
+  fi
+}
+rt_priv_fd_selftest() {
+  # The per-run positive control for the fd-pinned reader, run as the
+  # SAME subject (DAC and SELinux) that will perform the live captures.
+  # Deterministically reproduces the P9 race shapes against a scratch
+  # dir with the production runc-dir object type (chcon'ed away from the
+  # tmpfs parent's tmp_t, plus its own MCS category when the relabel is
+  # accepted, so a parent- or procfs-substituted context can never pass
+  # the context check) and activates the mechanism only on an all-green
+  # result:
+  #   - open the dir FD; delete the pathname; the link must report
+  #     "(deleted)";
+  #   - substitute ANOTHER inode at the same pathname (different mode);
+  #   - read mode|uid|gid|ino and the context THROUGH the FD: both must
+  #     equal the pre-delete reference and the tuple must differ from the
+  #     substituted path's (the pinned identity, not the substitution);
+  #   - the context read must equal the reference context AND, when the
+  #     chcon control succeeded, differ from the parent's context;
+  #   - a failed open must leave no FD behind (the reads are skipped).
+  RT_FD_METHOD=unavailable
+  RT_FD_DELETED=no; RT_FD_SUBSTITUTED=no; RT_FD_OPENFAIL=no; RT_FD_CTX_DISCRIM=no
+  RT_FD_BASE=/tmp/uat-wls-privacy-fdselftest
+  rm -rf "$RT_FD_BASE"
+  mkdir -p "$RT_FD_BASE/parent" || return 0
+  RT_FD_PATH="$RT_FD_BASE/parent/target"
+  mkdir "$RT_FD_PATH" || return 0
+  chmod 1700 "$RT_FD_PATH" "$RT_FD_BASE/parent" 2>/dev/null
+  if command -v chcon >/dev/null 2>&1; then
+    if chcon -t docker_helper_builder_runtime_t "$RT_FD_PATH" 2>/dev/null; then
+      chcon -l c777 "$RT_FD_PATH" 2>/dev/null || true
+    else
+      chcon -t device_t "$RT_FD_PATH" 2>/dev/null || true
+    fi
+  fi
+  RT_FD_REF="$(stat -c '%a|%U|%G|%i' "$RT_FD_PATH" 2>/dev/null)"
+  RT_FD_REF_CTX="$(stat -c '%C' "$RT_FD_PATH" 2>/dev/null)"
+  RT_FD_PARENT_CTX="$(stat -c '%C' "$RT_FD_BASE/parent" 2>/dev/null)"
+  if [ -n "$RT_FD_REF_CTX" ] && [ -n "$RT_FD_PARENT_CTX" ] \
+      && [ "$RT_FD_REF_CTX" != "$RT_FD_PARENT_CTX" ] && [ "$RT_FD_REF_CTX" != "?" ]; then
+    RT_FD_CTX_DISCRIM=yes
+  fi
+  if [ -n "$RT_FD_REF" ] && rt_priv_runc_open "$RT_FD_PATH"; then
+    rmdir "$RT_FD_PATH" 2>/dev/null
+    case "$(readlink /proc/self/fd/9 2>/dev/null)" in *" (deleted)") RT_FD_DELETED=yes ;; esac
+    if mkdir "$RT_FD_PATH" 2>/dev/null && chmod 0755 "$RT_FD_PATH" 2>/dev/null; then
+      RT_FD_SUBSTITUTED=yes
+      RT_FD_SUB_TUPLE="$(stat -c '%a|%U|%G|%i' "$RT_FD_PATH" 2>/dev/null)"
+    fi
+    rt_priv_runc_readfd
+    if [ "$RT_FD_DELETED" = yes ] && [ "$RT_FD_SUBSTITUTED" = yes ] \
+        && [ "$RT_FD_TUPLE" = "$RT_FD_REF" ] && [ "$RT_FD_TUPLE" != "$RT_FD_SUB_TUPLE" ] \
+        && [ -n "$RT_FD_CTX" ] && [ "$RT_FD_CTX" = "$RT_FD_REF_CTX" ] \
+        && { [ "$RT_FD_CTX_DISCRIM" != yes ] || [ "$RT_FD_CTX" != "$RT_FD_PARENT_CTX" ]; }; then
+      RT_FD_METHOD=proven
+    fi
+  fi
+  if ! rt_priv_runc_open "$RT_FD_BASE/parent/absent"; then
+    if [ ! -e /proc/self/fd/9 ]; then
+      RT_FD_OPENFAIL=yes
+    fi
+  fi
+  rm -rf "$RT_FD_BASE"
+}
+
 # rt_priv_runc_verdict SURVEY OP OWN_TUPLE CAPTURE_QUALITY — the R7
 # privacy runc-dir observation classifier. Survey records have the shapes
 #
-#   runc <op> st_rc=<n> st_err=<t> cx_rc=<n> cx_err=<t> <a|U|G>|<ctx>
-#   runc-obs <op> ev=<E> st_rc=<n> st_err=<t> cx_rc=<n> cx_err=<t> <a|U|G>|<ctx>
+#   runc <op> fd_rc=<n> fd_err=<t> ino=<i> st_rc=<n> st_err=<t> cx_rc=<n> cx_err=<t> <a|U|G>|<ctx>
+#   runc-obs <op> ev=<E> fd_rc=<n> fd_err=<t> ino=<i> st_rc=<n> st_err=<t> cx_rc=<n> cx_err=<t> <a|U|G>|<ctx>
 #   runc-gone <op> ev=<E> path=<p>
 #
 # where the runc lines come from the periodic survey sweep and the
-# runc-obs lines from the immediate per-event capture (each stat read
-# carries its own exit status and stderr). OWN_TUPLE is the op's own
+# runc-obs lines from the immediate per-event capture (each read carries
+# its own exit status and stderr). The fd_* fields are present only when
+# the fd-pinned reader produced the record: fd_rc is the open of the
+# directory FD — the single pathname-dependent step — and ino the pinned
+# inode's number; every attribute was then read THROUGH that open file
+# description, so one complete record is guaranteed to describe ONE
+# inode (the P9 TOCTOU — mode read OK, context read lost to the removal
+# — cannot produce a split tuple anymore). fd_rc present and nonzero
+# means the dir vanished (or the open was refused) before the identity
+# could be pinned — incomplete evidence. Legacy records (the fallback
+# when the fd technique could not be proven on this kernel) carry no fd
+# fields and keep the plain two-path-stat contract. OWN_TUPLE is the op's own
 # runtime-tree stat tuple (mode|uid|gid|ctx) — it supplies both the
 # expected context and the expected flow identity (owner). CAPTURE_QUALITY
 # is "full" only when the event capture ran active, survived, observed
 # events, suffered no overflow, and the watcher reported NO registration
 # errors; anything else is "incomplete". Classification (set-based, never
 # FIRST-only or LAST-only):
-#   - COMPLETE observation: st_rc=0 AND cx_rc=0 AND a non-empty tuple
-#     whose context is readable (not "?"). Decisive: its context MUST
+#   - COMPLETE observation: fd_rc (when present) is 0 AND st_rc=0 AND
+#     cx_rc=0 AND a non-empty tuple whose context is readable (not "?").
+#     Decisive: its context MUST
 #     equal the op tree's own context, its mode MUST be owner-only, and
 #     its owner MUST equal the op tree's flow identity. EVERY complete
 #     observation is checked.
@@ -297,7 +471,9 @@ rt_priv_runc_verdict() {
     tuple="$(printf '%s' "$rec" | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[^ ]*\|/) { print $i; exit } }')"
     st_rc="$(printf '%s' "$rec" | sed -n 's/.* st_rc=\([0-9][0-9]*\).*/\1/p')"
     cx_rc="$(printf '%s' "$rec" | sed -n 's/.* cx_rc=\([0-9][0-9]*\).*/\1/p')"
-    if [ "$st_rc" = "0" ] && [ "$cx_rc" = "0" ] && [ -n "$tuple" ]; then
+    fd_rc="$(printf '%s' "$rec" | sed -n 's/.* fd_rc=\([0-9][0-9]*\).*/\1/p')"
+    if [ "$st_rc" = "0" ] && [ "$cx_rc" = "0" ] && [ -n "$tuple" ] \
+        && { [ -z "$fd_rc" ] || [ "$fd_rc" = "0" ]; }; then
       mode="${tuple%%|*}"
       owner="$(printf '%s' "${tuple#*|}" | awk -F'|' '{ print $1 "|" $2 }')"
       ctx="$(printf '%s' "$tuple" | awk -F'|' '{ print $4 }')"
@@ -2143,12 +2319,21 @@ if [ -z "$RT_SESEARCH_BIN" ] || [ -z "$RT_SEINFO_BIN" ]; then
 else
   RT_SURVEY=/tmp/uat-wls-privacy-survey.txt
   : > "$RT_SURVEY"
+  # The fd-pinned reader's per-run positive control, BEFORE any capture
+  # can bind to the mechanism (the control exercises deletion-after-open,
+  # inode substitution and the failed-open path as the SAME subject that
+  # will perform the live captures; see rt_priv_fd_selftest). The result
+  # is journaled in the run log: method=proven activates the fd-pinned
+  # records, anything else degrades to the legacy two-path-stat contract
+  # (fail-closed, the exact P9 evidence shape).
+  rt_priv_fd_selftest
+  info "R7-privacy fd-control: method=$RT_FD_METHOD deleted=$RT_FD_DELETED substituted=$RT_FD_SUBSTITUTED openfail=$RT_FD_OPENFAIL ctx-discrim=$RT_FD_CTX_DISCRIM ref=${RT_FD_REF:-none} got=${RT_FD_TUPLE:-none} ctx=${RT_FD_CTX:-none} parent-ctx=${RT_FD_PARENT_CTX:-none}"
   # The short-lived runc dir and runc-log.json died inside the fixed
   # 0.3s poll window in earlier runs (never-seen). The capture is now
   # EVENT-DRIVEN: a recursive inotify watcher over both op-tree roots
   # feeds a FIFO, and every create/attrib/moved_to/delete/moved_from
   # event is journaled: lifecycle events on an ops/<op>/runc dir fire an
-  # IMMEDIATE per-event stat capture (microseconds after the kernel
+  # IMMEDIATE per-event fd-pinned capture (microseconds after the kernel
   # event — the fixup chmod fires attrib, the runc dir creation fires
   # create) and delete/moved_from events journal the removal itself, so
   # a created-and-removed lifetime is provable instead of silent. The
@@ -2166,22 +2351,14 @@ else
       RT_OP="$(basename "$RT_OPDIR")"
       printf 'op %s %s\n' "$RT_OP" "$(stat -c '%a|%U|%G|%C' "$RT_OPDIR" 2>/dev/null)" >> "$RT_SURVEY"
       if [ -d "$RT_OPDIR/runc" ]; then
-        # Two separate reads with their own exit status and stderr (the
-        # same contract as the runc-log lines): the dir existed at test
-        # time but may vanish before the stat — that degenerate record
-        # is an incomplete observation the classifier counts, never the
+        # The shared fd-pinned reader (the same contract as the per-event
+        # capture and the runc-log lines): with the technique proven, the
+        # open is the single pathname-dependent step and the attributes
+        # come from the pinned inode; the dir existed at test time but
+        # may vanish before the open — that degenerate record is an
+        # incomplete observation the classifier counts, never the
         # authoritative one.
-        RT_RUNC_MODE="$(stat -c '%a|%U|%G' "$RT_OPDIR/runc" 2>"$RT_SURVEY.sterr")"
-        RT_RUNC_ST_RC=$?
-        RT_RUNC_ST_ERR="$(tr '\n' ' ' <"$RT_SURVEY.sterr" 2>/dev/null | tr ' ' '_')"
-        RT_RUNC_CTX="$(stat -c '%C' "$RT_OPDIR/runc" 2>"$RT_SURVEY.cxerr")"
-        RT_RUNC_CX_RC=$?
-        RT_RUNC_CX_ERR="$(tr '\n' ' ' <"$RT_SURVEY.cxerr" 2>/dev/null | tr ' ' '_')"
-        printf 'runc %s st_rc=%d st_err=%s cx_rc=%d cx_err=%s %s|%s\n' \
-          "$RT_OP" \
-          "$RT_RUNC_ST_RC" "${RT_RUNC_ST_ERR:-none}" \
-          "$RT_RUNC_CX_RC" "${RT_RUNC_CX_ERR:-none}" \
-          "${RT_RUNC_MODE:-}" "${RT_RUNC_CTX:-?}" >> "$RT_SURVEY"
+        rt_priv_runc_read "$RT_OPDIR/runc" "runc $RT_OP"
       fi
     done
     for RT_STDIR in /var/lib/docker-helper-builder/ops/*; do
@@ -2212,24 +2389,16 @@ else
   # rt_priv_capture_runc PATH EVENT — the immediate per-event capture:
   # fired by the reader loop the moment inotify reports a lifecycle event
   # (create/attrib/moved_to) on an ops/<op>/runc dir, microseconds after
-  # the kernel event instead of at the next survey sweep. Same two-read
-  # contract as the survey line: the journal records the attempt with its
-  # own exit statuses, so a delete-before-stat race produces an explicit
+  # the kernel event instead of at the next survey sweep. Same reader as
+  # the survey line: with the fd technique proven, the open pins the
+  # inode and every attribute is read through the pinned FD, so the
+  # removal racing the capture cannot split the tuple (the P9
+  # regression); a dir gone before the open journals an explicit
   # incomplete runc-obs record — evidence, never a silent gap and never
   # a validation.
   rt_priv_capture_runc() {
     RT_CAP_OP="$(basename "$(dirname "$1")")"
-    RT_CAP_MODE="$(stat -c '%a|%U|%G' "$1" 2>"$RT_SURVEY.sterr")"
-    RT_CAP_ST_RC=$?
-    RT_CAP_ST_ERR="$(tr '\n' ' ' <"$RT_SURVEY.sterr" 2>/dev/null | tr ' ' '_')"
-    RT_CAP_CTX="$(stat -c '%C' "$1" 2>"$RT_SURVEY.cxerr")"
-    RT_CAP_CX_RC=$?
-    RT_CAP_CX_ERR="$(tr '\n' ' ' <"$RT_SURVEY.cxerr" 2>/dev/null | tr ' ' '_')"
-    printf 'runc-obs %s ev=%s st_rc=%d st_err=%s cx_rc=%d cx_err=%s %s|%s\n' \
-      "$RT_CAP_OP" "$2" \
-      "$RT_CAP_ST_RC" "${RT_CAP_ST_ERR:-none}" \
-      "$RT_CAP_CX_RC" "${RT_CAP_CX_ERR:-none}" \
-      "${RT_CAP_MODE:-}" "${RT_CAP_CTX:-?}" >> "$RT_SURVEY"
+    rt_priv_runc_read "$1" "runc-obs $RT_CAP_OP ev=$2"
   }
   RT_EVENT_CAPTURE=unavailable
   RT_INO_PID=""
@@ -2437,9 +2606,10 @@ else
                 # silent), and a failed registration prints the ENOENT
                 # adoption error seen in the P5 run — a sibling event
                 # while the dir lives is an independent second capture
-                # chance. The capture attempts the stat and journals the
-                # outcome with its own exit statuses; a vanished dir
-                # records an incomplete observation, never a validation.
+                # chance. The capture pins the dir through the fd-pinned
+                # reader and journals the outcome with its own exit
+                # statuses; a vanished dir records an incomplete
+                # observation, never a validation.
                 RT_CAP_OPDIR="$(printf '%s' "$RT_EVT_PATH" | sed -n 's|^\(/run/docker-helper-builder/ops/[^/]*\).*|\1|p')"
                 if [ -n "$RT_CAP_OPDIR" ] && [ -d "$RT_CAP_OPDIR/runc" ]; then
                   rt_priv_capture_runc "$RT_CAP_OPDIR/runc" "$RT_EVT_NAME"

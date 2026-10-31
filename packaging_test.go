@@ -12729,6 +12729,21 @@ func TestUATWorkloadSELinuxRuncLogObservationClassifier(t *testing.T) {
 //     complete tuple still decisive);
 //   - two concurrent operations with independent dirs classify
 //     independently (one op's evidence never poisons the other's).
+//
+// The fd-pinned reader (the P9-C corrective) extends the contract:
+//   - a record produced through the pinned directory FD carries fd_rc /
+//     fd_err / ino ahead of the per-read statuses, and completeness
+//     additionally requires fd_rc=0 — one complete record is then
+//     guaranteed to describe ONE inode (the P9 TOCTOU — mode read OK,
+//     context read lost to the removal — cannot produce a split tuple
+//     anymore), and the P9 evidence shape itself fails closed;
+//   - fd_rc nonzero (the dir vanished before the open) is incomplete
+//     evidence, never a validation;
+//   - a record claiming fd_rc=0 but carrying a failed read still fails
+//     closed (defense in depth);
+//   - legacy records without fd fields (the fallback when the technique
+//     could not be proven on this kernel) keep the plain contract — the
+//     pre-P9-C subtests below are exactly that shape.
 func TestUATWorkloadSELinuxRuncDirObservationClassifier(t *testing.T) {
 	const ctxC1 = "system_u:object_r:docker_helper_builder_runtime_t:s0:c1"
 	const ctxC2 = "system_u:object_r:docker_helper_builder_runtime_t:s0:c2"
@@ -12903,6 +12918,332 @@ func TestUATWorkloadSELinuxRuncDirObservationClassifier(t *testing.T) {
 		if got := strings.TrimSpace(out); got != want {
 			t.Errorf("the degraded display must print the literal flag value (the ${var:+-DEGRADED} truthiness bug must not return), got %q want %q", got, want)
 		}
+	})
+
+	t.Run("the P9 regression shape fails closed (mode read OK, context read lost to the removal)", func(t *testing.T) {
+		write("runc opP9 st_rc=0 st_err=none cx_rc=1 cx_err=stat:_cannot_stat..._No_such_file_or_directory 1700|docker-helper-builder|docker-helper-builder|?")
+		if got := run("opP9", dirC1, "full"); !strings.HasPrefix(got, "VERDICT=FAIL reason=created-but-unreadable ctx=FAIL mode=FAIL valid=0 incomplete=1") {
+			t.Errorf("the exact P9 evidence shape (a tuple whose context was lost to the removal) must never validate, got: %s", got)
+		}
+	})
+
+	t.Run("an fd-pinned complete observation decides the verdict (the P9 TOCTOU resolved)", func(t *testing.T) {
+		write(
+			"runc opR fd_rc=0 fd_err=none ino=1701 st_rc=0 st_err=none cx_rc=0 cx_err=none 1700|docker-helper-builder|docker-helper-builder|"+ctxC1,
+			"runc-obs opR ev=DELETE,ISDIR fd_rc=1 fd_err=open-failed-dir-absent ino= st_rc=2 st_err=skipped-no-open-fd cx_rc=2 cx_err=skipped-no-open-fd ||?",
+			"runc-gone opR ev=DELETE,ISDIR path=/run/docker-helper-builder/ops/opR/runc",
+		)
+		if got := run("opR", dirC1, "full"); !strings.HasPrefix(got, "VERDICT=OK ctx=OK mode=OK valid=1 incomplete=1 gone=1") {
+			t.Errorf("the fd-pinned complete tuple must decide with the post-open failure and the delete event counted, got: %s", got)
+		}
+	})
+
+	t.Run("a failed fd open is incomplete evidence, never a validation", func(t *testing.T) {
+		write("runc-obs opS ev=CREATE,ISDIR fd_rc=1 fd_err=open-failed-dir-absent ino= st_rc=2 st_err=skipped-no-open-fd cx_rc=2 cx_err=skipped-no-open-fd ||?")
+		if got := run("opS", dirC1, "full"); !strings.HasPrefix(got, "VERDICT=FAIL reason=created-but-unreadable ctx=FAIL mode=FAIL valid=0 incomplete=1 gone=0") {
+			t.Errorf("a dir that vanished before the FD could be pinned must stay incomplete and fail, got: %s", got)
+		}
+	})
+
+	t.Run("an fd-pinned record with a lost context read still fails closed", func(t *testing.T) {
+		write("runc opT fd_rc=0 fd_err=none ino=1702 st_rc=0 st_err=none cx_rc=1 cx_err=No_such_file_or_directory 1700|docker-helper-builder|docker-helper-builder|?")
+		if got := run("opT", dirC1, "full"); !strings.HasPrefix(got, "VERDICT=FAIL reason=created-but-unreadable ctx=FAIL mode=FAIL valid=0 incomplete=1") {
+			t.Errorf("even a structurally unreachable fd_rc=0/cx-failed record must never validate, got: %s", got)
+		}
+	})
+
+	t.Run("fd-pinned foreign-context observation fails", func(t *testing.T) {
+		write("runc opU fd_rc=0 fd_err=none ino=1703 st_rc=0 st_err=none cx_rc=0 cx_err=none 1700|docker-helper-builder|docker-helper-builder|" + ctxC2)
+		if got := run("opU", dirC1, "full"); !strings.HasPrefix(got, "VERDICT=FAIL ctx=FAIL(seen="+ctxC2+")") {
+			t.Errorf("an fd-pinned foreign-context observation must fail, got: %s", got)
+		}
+	})
+
+	t.Run("fd-pinned mode and owner violations fail", func(t *testing.T) {
+		write("runc opV fd_rc=0 fd_err=none ino=1704 st_rc=0 st_err=none cx_rc=0 cx_err=none 0755|root|root|" + ctxC1)
+		if got := run("opV", dirC1, "full"); !strings.HasPrefix(got, "VERDICT=FAIL ctx=OK mode=FAIL(mode=0755-not-owner-only owner=root|root-drifted-from-docker-helper-builder|docker-helper-builder)") {
+			t.Errorf("an fd-pinned observation with a widened mode and drifted owner must fail, got: %s", got)
+		}
+	})
+
+	t.Run("two concurrent operations with fd-pinned evidence classify independently", func(t *testing.T) {
+		write(
+			"runc opW fd_rc=0 fd_err=none ino=1705 st_rc=0 st_err=none cx_rc=0 cx_err=none 1700|docker-helper-builder|docker-helper-builder|"+ctxC1,
+			"runc opX fd_rc=0 fd_err=none ino=1706 st_rc=0 st_err=none cx_rc=0 cx_err=none 1700|docker-helper-builder|docker-helper-builder|"+ctxC2,
+		)
+		if got := run("opW", dirC1, "full"); !strings.HasPrefix(got, "VERDICT=OK ctx=OK mode=OK valid=1") {
+			t.Errorf("op W must classify on its own fd-pinned evidence, got: %s", got)
+		}
+		if got := run("opX", dirC2, "full"); !strings.HasPrefix(got, "VERDICT=OK ctx=OK mode=OK valid=1") {
+			t.Errorf("op X must classify on its own fd-pinned evidence, got: %s", got)
+		}
+		if got := run("opW", dirC2, "full"); !strings.HasPrefix(got, "VERDICT=FAIL ctx=FAIL") {
+			t.Errorf("op W judged against op X's own tree must fail (per-op binding), got: %s", got)
+		}
+	})
+}
+
+// TestUATWorkloadSELinuxRuncDirFdPinnedReader runs the shipped fd-pinned
+// reader against real filesystem state and proves the P9-C TOCTOU fix with
+// deterministic reproductions of every race shape:
+//   - a live dir read through the pinned FD journals fd_rc=0 and the
+//     pinned inode's own tuple and inode number (the open is the single
+//     pathname-dependent step; the SELinux context itself needs SELinux
+//     and is proven per-run by the harness self-test control, not here);
+//   - deleting the pathname AFTER the open but BEFORE the attribute reads
+//     — the exact P9 regression timing — still yields the complete
+//     pre-delete tuple and inode number through the pinned FD (the link
+//     reports "(deleted)"), so a split tuple can no longer be produced;
+//   - substituting ANOTHER inode at the same pathname cannot leak into
+//     the pinned reads (the tuple stays the original inode's and differs
+//     from the substitute's);
+//   - a dir gone before the open journals an honest incomplete record
+//     (fd_rc=1, reads skipped) that the classifier refuses;
+//   - the legacy fallback (technique unproven) keeps the plain
+//     two-path-stat record shape;
+//   - the harness self-test control exercises its own scenario table
+//     (deletion, substitution, failed open) and stays fail-closed: the
+//     mechanism activates only when its context control could be proven.
+func TestUATWorkloadSELinuxRuncDirFdPinnedReader(t *testing.T) {
+	fns := extractShellFunction(t, "scripts/uat-workload-selinux.sh", "rt_priv_runc_open") +
+		"\n" + extractShellFunction(t, "scripts/uat-workload-selinux.sh", "rt_priv_runc_readfd") +
+		"\n" + extractShellFunction(t, "scripts/uat-workload-selinux.sh", "rt_priv_runc_read") +
+		"\n" + extractShellFunction(t, "scripts/uat-workload-selinux.sh", "rt_priv_fd_selftest") +
+		"\n" + extractShellFunction(t, "scripts/uat-workload-selinux.sh", "rt_priv_runc_verdict") +
+		"\n" + extractShellFunction(t, "scripts/uat-workload-selinux.sh", "rt_priv_owner_only")
+
+	dir := t.TempDir()
+	survey := filepath.Join(dir, "survey.txt")
+
+	run := func(script string) string {
+		t.Helper()
+		out, err := runBashIn(t, dir, fns+"\n"+script)
+		if err != nil {
+			t.Fatalf("reader run failed: %v\n%s", err, out)
+		}
+		return out
+	}
+	record := func(out, prefix string) string {
+		t.Helper()
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(line, prefix+" ") {
+				return line
+			}
+		}
+		t.Fatalf("no %q record in reader output:\n%s", prefix, out)
+		return ""
+	}
+	field := func(line, name string) string {
+		t.Helper()
+		for _, f := range strings.Fields(line) {
+			if after, ok := strings.CutPrefix(f, name+"="); ok {
+				return after
+			}
+		}
+		t.Fatalf("field %s missing in record %q", name, line)
+		return ""
+	}
+	tupleField := func(line string) string {
+		t.Helper()
+		for _, f := range strings.Fields(line) {
+			if strings.Contains(f, "|") {
+				return f
+			}
+		}
+		t.Fatalf("no tuple field in record %q", line)
+		return ""
+	}
+	refLine := func(out string) [4]string {
+		t.Helper()
+		for _, line := range strings.Split(out, "\n") {
+			if after, ok := strings.CutPrefix(line, "REF="); ok {
+				parts := strings.Split(strings.TrimSpace(after), "|")
+				if len(parts) == 4 {
+					return [4]string{parts[0], parts[1], parts[2], parts[3]}
+				}
+			}
+		}
+		t.Fatalf("no REF line in reader output:\n%s", out)
+		return [4]string{}
+	}
+
+	t.Run("a live dir read through the pinned FD journals the pinned inode", func(t *testing.T) {
+		out := run(`RT_SURVEY=` + strconv.Quote(survey) + `
+: > "$RT_SURVEY"
+mkdir -p t/parent && mkdir t/parent/target && chmod 1700 t/parent/target
+RT_FD_METHOD=proven
+rt_priv_runc_read "$PWD/t/parent/target" "runc opLive"
+printf 'REF=%s\n' "$(stat -c '%a|%U|%G|%i' "$PWD/t/parent/target")"
+cat "$RT_SURVEY"
+`)
+		ref := refLine(out)
+		rec := record(out, "runc opLive")
+		if got := field(rec, "fd_rc"); got != "0" {
+			t.Errorf("a live dir must pin through a successful open, fd_rc=%s", got)
+		}
+		if got := field(rec, "fd_err"); got != "none" {
+			t.Errorf("a successful open must carry no error, fd_err=%s", got)
+		}
+		if got := field(rec, "st_rc"); got != "0" {
+			t.Errorf("the pinned mode|uid|gid read must succeed, st_rc=%s", got)
+		}
+		if got := field(rec, "ino"); got != ref[3] {
+			t.Errorf("the record must carry the pinned inode's number, ino=%s want %s", got, ref[3])
+		}
+		tuple := tupleField(rec)
+		parts := strings.Split(tuple, "|")
+		if len(parts) < 3 || parts[0]+"|"+parts[1]+"|"+parts[2] != ref[0]+"|"+ref[1]+"|"+ref[2] {
+			t.Errorf("the record tuple must be the pinned inode's own, got %q want %q", tuple, ref[0]+"|"+ref[1]+"|"+ref[2])
+		}
+	})
+
+	t.Run("deletion after the open still yields the complete pinned tuple", func(t *testing.T) {
+		out := run(`RT_SURVEY=` + strconv.Quote(survey) + `
+: > "$RT_SURVEY"
+mkdir -p t/target && chmod 1700 t/target
+printf 'REF=%s\n' "$(stat -c '%a|%U|%G|%i' "$PWD/t/target")"
+rt_priv_runc_open "$PWD/t/target" || echo OPEN-FAILED
+rmdir "$PWD/t/target"
+printf 'LINK=%s\n' "$(readlink /proc/self/fd/9)"
+rt_priv_runc_readfd
+printf 'GOT tuple=%s ino=%s st=%s/%s\n' "$RT_FD_TUPLE" "$RT_FD_INO" "$RT_FD_ST_RC" "$RT_FD_ST_ERR"
+`)
+		if strings.Contains(out, "OPEN-FAILED") {
+			t.Fatalf("the open must succeed while the dir lives:\n%s", out)
+		}
+		ref := refLine(out)
+		var link, got string
+		for _, line := range strings.Split(out, "\n") {
+			if after, ok := strings.CutPrefix(line, "LINK="); ok {
+				link = strings.TrimSpace(after)
+			}
+			if after, ok := strings.CutPrefix(line, "GOT tuple="); ok {
+				got = strings.TrimSpace(after)
+			}
+		}
+		if !strings.HasSuffix(link, " (deleted)") {
+			t.Errorf("the deletion must be proven before the reads (the link must report deleted), got %q", link)
+		}
+		f := strings.Fields(got)
+		if len(f) != 3 {
+			t.Fatalf("malformed GOT line in reader output:\n%s", out)
+		}
+		tuple := f[0]
+		ino := strings.TrimPrefix(f[1], "ino=")
+		if tuple != ref[0]+"|"+ref[1]+"|"+ref[2] || ino != ref[3] {
+			t.Errorf("the pinned FD must return the pre-delete tuple and inode after the removal, got tuple=%q ino=%q want %q|%q", tuple, ino, ref[0]+"|"+ref[1]+"|"+ref[2], ref[3])
+		}
+		if !strings.HasPrefix(f[2], "st=0/") {
+			t.Errorf("the pinned read must succeed after the removal, got %q", f[2])
+		}
+	})
+
+	t.Run("a substituted inode at the same pathname cannot be read through the pinned FD", func(t *testing.T) {
+		out := run(`RT_SURVEY=` + strconv.Quote(survey) + `
+: > "$RT_SURVEY"
+mkdir -p t/target && chmod 1700 t/target
+printf 'REF=%s\n' "$(stat -c '%a|%U|%G|%i' "$PWD/t/target")"
+rt_priv_runc_open "$PWD/t/target" || echo OPEN-FAILED
+rmdir "$PWD/t/target"
+mkdir "$PWD/t/target" && chmod 0755 "$PWD/t/target"
+printf 'SUB=%s\n' "$(stat -c '%a|%U|%G|%i' "$PWD/t/target")"
+rt_priv_runc_readfd
+printf 'GOT tuple=%s ino=%s\n' "$RT_FD_TUPLE" "$RT_FD_INO"
+`)
+		ref := refLine(out)
+		var sub string
+		for _, line := range strings.Split(out, "\n") {
+			if after, ok := strings.CutPrefix(line, "SUB="); ok {
+				sub = strings.TrimSpace(after)
+			}
+		}
+		if sub == "" {
+			t.Fatalf("no SUB line in reader output:\n%s", out)
+		}
+		var got string
+		for _, line := range strings.Split(out, "\n") {
+			if after, ok := strings.CutPrefix(line, "GOT tuple="); ok {
+				f := strings.Fields(strings.TrimSpace(after))
+				got = f[0] + "|" + strings.TrimPrefix(f[1], "ino=")
+			}
+		}
+		if got == "" {
+			t.Fatalf("no GOT line in reader output:\n%s", out)
+		}
+		if got != ref[0]+"|"+ref[1]+"|"+ref[2]+"|"+ref[3] {
+			t.Errorf("the pinned FD must keep reporting the ORIGINAL inode, got %q want %q", got, ref[0]+"|"+ref[1]+"|"+ref[2]+"|"+ref[3])
+		}
+		if got == sub {
+			t.Errorf("the pinned FD must not observe the substituted inode %q", sub)
+		}
+	})
+
+	t.Run("a dir gone before the open journals an honest incomplete record", func(t *testing.T) {
+		out := run(`RT_SURVEY=` + strconv.Quote(survey) + `
+: > "$RT_SURVEY"
+RT_FD_METHOD=proven
+rt_priv_runc_read "$PWD/never-existed" "runc opGone"
+cat "$RT_SURVEY"
+rt_priv_runc_verdict "$RT_SURVEY" opGone '700|docker-helper-builder|docker-helper-builder|system_u:object_r:docker_helper_builder_runtime_t:s0:c1' full
+`)
+		rec := record(out, "runc opGone")
+		if got := field(rec, "fd_rc"); got != "1" {
+			t.Errorf("a vanished dir must journal the failed open, fd_rc=%s", got)
+		}
+		if got := field(rec, "fd_err"); got != "open-failed-dir-absent" {
+			t.Errorf("the failure label must distinguish an absent dir, fd_err=%s", got)
+		}
+		if got := field(rec, "st_rc"); got != "2" || !strings.Contains(rec, "st_err=skipped-no-open-fd") {
+			t.Errorf("without a pinned FD the reads must be skipped explicitly, got %s in %q", got, rec)
+		}
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(line, "VERDICT=") {
+				if !strings.HasPrefix(line, "VERDICT=FAIL reason=created-but-unreadable ctx=FAIL mode=FAIL valid=0 incomplete=1 gone=0") {
+					t.Errorf("an unpinnable dir must fail as created-but-unreadable, got: %s", line)
+				}
+				return
+			}
+		}
+		t.Fatalf("no VERDICT line in reader output:\n%s", out)
+	})
+
+	t.Run("the legacy fallback keeps the plain two-path-stat contract", func(t *testing.T) {
+		out := run(`RT_SURVEY=` + strconv.Quote(survey) + `
+: > "$RT_SURVEY"
+mkdir -p t/target && chmod 1700 t/target
+RT_FD_METHOD=unavailable
+rt_priv_runc_read "$PWD/t/target" "runc opLegacy"
+cat "$RT_SURVEY"
+`)
+		rec := record(out, "runc opLegacy")
+		if strings.Contains(rec, "fd_rc=") {
+			t.Errorf("a legacy record must carry no fd fields, got %q", rec)
+		}
+		if !strings.HasPrefix(rec, "runc opLegacy st_rc=0 st_err=none ") {
+			t.Errorf("the legacy record shape must be preserved, got %q", rec)
+		}
+	})
+
+	t.Run("the self-test control exercises its scenario table and stays fail-closed", func(t *testing.T) {
+		out := run(`rt_priv_fd_selftest
+printf 'method=%s deleted=%s substituted=%s openfail=%s discrim=%s\n' "$RT_FD_METHOD" "$RT_FD_DELETED" "$RT_FD_SUBSTITUTED" "$RT_FD_OPENFAIL" "$RT_FD_CTX_DISCRIM"
+if [ -e /proc/self/fd/9 ]; then echo FD9-LEAKED; else echo FD9-CLOSED; fi
+`)
+		for _, want := range []string{"deleted=yes", "substituted=yes", "openfail=yes", "FD9-CLOSED"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("the control's scenario table must include %s, output:\n%s", want, out)
+			}
+		}
+		for _, line := range strings.Split(out, "\n") {
+			if !strings.HasPrefix(line, "method=") {
+				continue
+			}
+			if strings.Contains(line, "discrim=no") && !strings.HasPrefix(line, "method=unavailable") {
+				t.Errorf("without a provable context control the mechanism must stay off (no false activation), got: %s", line)
+			}
+			return
+		}
+		t.Fatalf("no method= line in control output:\n%s", out)
 	})
 }
 
