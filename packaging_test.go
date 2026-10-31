@@ -13325,6 +13325,190 @@ if [ -e /proc/self/fd/9 ]; then echo FD9-LEAKED; else echo FD9-CLOSED; fi
 	})
 }
 
+// TestUATWorkloadSELinuxObserverCoverageClaim runs the shipped P10-C
+// per-op coverage claim (rt_priv_op_quality) together with the runc-dir
+// classifier over the eight required negative scenarios and proves the
+// tiered honesty:
+//   - scenario 1/7: under the inotify fallback the coverage claim is
+//     incomplete BY CONSTRUCTION (even with an op-arm catch-up record
+//     present — the probe detects surviving gap children but cannot
+//     exclude a full lifecycle inside the adoption window), so a
+//     zero-record observation fails as observation-incomplete and can
+//     NEVER be classified as never-created + claimed-full;
+//   - scenario 7: even under the proven fanotify observer a missing
+//     per-op arm journal, a degraded capture, watcher errors or zero
+//     observed events keep the claim incomplete (fail-closed);
+//   - scenario 8: under the proven-full claim a true absence
+//     classifies as never-created — the gap-free filesystem mark
+//     delivers every directory-entry event, so zero records is a
+//     justified (failing) non-creation claim;
+//   - scenarios 4-6: under the proven-full claim every violation shape
+//     still fails (a foreign context, a widened mode, an owner drift);
+//   - created-but-unreadable stays distinct from never-created under
+//     the proven-full claim (a runc-gone record is not an absence).
+func TestUATWorkloadSELinuxObserverCoverageClaim(t *testing.T) {
+	const ctxC1 = "system_u:object_r:docker_helper_builder_runtime_t:s0:c1"
+	const ctxC2 = "system_u:object_r:docker_helper_builder_runtime_t:s0:c2"
+	const dirC1 = "700|docker-helper-builder|docker-helper-builder|" + ctxC1
+	fns := extractShellFunction(t, "scripts/uat-workload-selinux.sh", "rt_priv_op_quality") +
+		"\n" + extractShellFunction(t, "scripts/uat-workload-selinux.sh", "rt_priv_runc_verdict") +
+		"\n" + extractShellFunction(t, "scripts/uat-workload-selinux.sh", "rt_priv_owner_only")
+
+	dir := t.TempDir()
+	survey := filepath.Join(dir, "survey.txt")
+	write := func(records ...string) {
+		t.Helper()
+		if err := os.WriteFile(survey, []byte(strings.Join(records, "\n")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	env := func(kind, degraded, fanErrors, events string) string {
+		return "RT_SURVEY=" + strconv.Quote(survey) + "\n" +
+			"RT_OBSERVER_KIND=" + strconv.Quote(kind) + "\n" +
+			"RT_CAPTURE_DEGRADED=" + strconv.Quote(degraded) + "\n" +
+			"RT_FAN_ERRORS=" + strconv.Quote(fanErrors) + "\n" +
+			"RT_EVENT_EVENTS=" + strconv.Quote(events) + "\n"
+	}
+	run := func(envPrefix, op, own, records string) string {
+		t.Helper()
+		script := envPrefix + fns + "\n" +
+			"RT_Q=\"$(rt_priv_op_quality " + op + ")\"\n" +
+			"rt_priv_runc_verdict " + strconv.Quote(survey) + " " + op + " " + strconv.Quote(own) + " \"$RT_Q\"\n"
+		out, err := runBashIn(t, dir, script)
+		if err != nil {
+			t.Fatalf("coverage-claim run failed: %v\n%s", err, out)
+		}
+		verdict := ""
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(line, "VERDICT=") {
+				verdict = line
+			}
+		}
+		if verdict == "" {
+			t.Fatalf("no VERDICT line, output:\n%s", out)
+		}
+		if !strings.Contains(out, "full") && !strings.Contains(out, "incomplete") {
+			t.Errorf("the quality function must print a claim, output:\n%s", out)
+		}
+		return verdict
+	}
+
+	t.Run("scenario 1/7: the inotify fallback never claims full and never reports never-created", func(t *testing.T) {
+		write("op-arm opA catchup=runc-absent src=reader", "op opA "+dirC1)
+		out, err := runBashIn(t, dir, env("inotify-fallback", "0", "0", "5")+fns+"\nprintf 'Q=%s\\n' \"$(rt_priv_op_quality opA)\"\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out, "Q=incomplete") {
+			t.Errorf("the fallback coverage claim must be incomplete BY CONSTRUCTION even with an arm record, got:\n%s", out)
+		}
+		if got := run(env("inotify-fallback", "0", "0", "5"), "opA", dirC1, ""); !strings.HasPrefix(got, "VERDICT=FAIL reason=observation-incomplete") {
+			t.Errorf("a zero-record fallback observation must fail as observation-incomplete, never never-created, got: %s", got)
+		}
+	})
+
+	t.Run("scenario 7: a missing per-op arm journal keeps even a proven observer incomplete", func(t *testing.T) {
+		write("op opB " + dirC1)
+		if got := run(env("fanotify-proven", "0", "0", "5"), "opB", dirC1, ""); !strings.HasPrefix(got, "VERDICT=FAIL reason=observation-incomplete") {
+			t.Errorf("without the per-op arm journal the claim must stay incomplete, got: %s", got)
+		}
+	})
+
+	t.Run("scenario 7: a degraded capture, watcher errors or zero events keep the claim incomplete", func(t *testing.T) {
+		write("op-arm opC catchup=runc-absent ev=CREATE", "op opC "+dirC1)
+		if got := run(env("fanotify-proven", "1", "0", "5"), "opC", dirC1, ""); !strings.HasPrefix(got, "VERDICT=FAIL reason=observation-incomplete") {
+			t.Errorf("a degraded capture must keep the claim incomplete, got: %s", got)
+		}
+		if got := run(env("fanotify-proven", "0", "1", "5"), "opC", dirC1, ""); !strings.HasPrefix(got, "VERDICT=FAIL reason=observation-incomplete") {
+			t.Errorf("watcher errors must keep the claim incomplete, got: %s", got)
+		}
+		if got := run(env("fanotify-proven", "0", "0", "0"), "opC", dirC1, ""); !strings.HasPrefix(got, "VERDICT=FAIL reason=observation-incomplete") {
+			t.Errorf("zero observed events must keep the claim incomplete, got: %s", got)
+		}
+	})
+
+	t.Run("scenario 8: under the proven-full claim a true absence is a justified never-created", func(t *testing.T) {
+		write("op-arm opD catchup=runc-absent ev=CREATE", "op opD "+dirC1)
+		if got := run(env("fanotify-proven", "0", "0", "5"), "opD", dirC1, ""); !strings.HasPrefix(got, "VERDICT=FAIL reason=never-created ctx=FAIL mode=FAIL valid=0 incomplete=0 gone=0") {
+			t.Errorf("the proven gap-free claim must make a zero-record observation a justified never-created (still a FAIL for the leg), got: %s", got)
+		}
+	})
+
+	t.Run("scenarios 4-6: violations still fail under the proven-full claim", func(t *testing.T) {
+		e := env("fanotify-proven", "0", "0", "5")
+		write(
+			"op-arm opE catchup=runc-absent ev=CREATE",
+			"runc opE fd_rc=0 fd_err=none ino=1801 st_rc=0 st_err=none cx_rc=0 cx_err=none 1700|docker-helper-builder|docker-helper-builder|"+ctxC2,
+		)
+		if got := run(e, "opE", dirC1, ""); !strings.HasPrefix(got, "VERDICT=FAIL ctx=FAIL(seen="+ctxC2+")") {
+			t.Errorf("a foreign context must fail under the proven-full claim, got: %s", got)
+		}
+		write(
+			"op-arm opF catchup=runc-absent ev=CREATE",
+			"runc opF fd_rc=0 fd_err=none ino=1802 st_rc=0 st_err=none cx_rc=0 cx_err=none 0755|root|root|"+ctxC1,
+		)
+		if got := run(e, "opF", dirC1, ""); !strings.HasPrefix(got, "VERDICT=FAIL ctx=OK mode=FAIL(mode=0755-not-owner-only owner=root|root-drifted-from-docker-helper-builder|docker-helper-builder)") {
+			t.Errorf("a widened mode with an owner drift must fail under the proven-full claim, got: %s", got)
+		}
+	})
+
+	t.Run("created-but-unreadable stays distinct from never-created under the proven-full claim", func(t *testing.T) {
+		write(
+			"op-arm opG catchup=runc-absent ev=CREATE",
+			"runc-gone opG ev=DELETE,ISDIR path=/run/docker-helper-builder/ops/opG/runc",
+		)
+		if got := run(env("fanotify-proven", "0", "0", "5"), "opG", dirC1, ""); !strings.HasPrefix(got, "VERDICT=FAIL reason=created-but-unreadable ctx=FAIL mode=FAIL valid=0 incomplete=0 gone=1") {
+			t.Errorf("a proven created-and-removed lifetime must classify as created-but-unreadable, never as never-created, got: %s", got)
+		}
+	})
+}
+
+// TestUATWorkloadSELinuxFanotifyWatcherScript extracts the embedded P10-C
+// fanotify observer from the shipped harness and proves it parses as
+// python and carries the load-bearing mechanics: the filesystem mark with
+// the directory-entry event set, the DFID_NAME fid reporting, the
+// top-down handle cache over the stable runtime root, the fd-pinned
+// capture at the kernel-event boundary (open, fstat, getxattr through
+// the open file description), the direct runc-gone and per-op arm
+// journaling, the inotify-format event forwarding for the unchanged
+// reader loop, and the never-hanging FIFO rendezvous with the
+// fail-closed failure reporting.
+func TestUATWorkloadSELinuxFanotifyWatcherScript(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 is not available in this environment; the UAT self-test proves the observer on the VM")
+	}
+	data, err := os.ReadFile("scripts/uat-workload-selinux.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?s)cat > "\$RT_FAN_SCRIPT" <<'PYEOF'\n(.*?)\nPYEOF`).FindSubmatch(data)
+	if m == nil {
+		t.Fatal("the embedded fanotify watcher script was not found in the harness")
+	}
+	script := string(m[1])
+	dir := t.TempDir()
+	path := filepath.Join(dir, "watcher.py")
+	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("python3", "-c", "compile(open("+strconv.Quote(path)+").read(), 'watcher', 'exec')").CombinedOutput()
+	if err != nil {
+		t.Fatalf("the embedded fanotify watcher must parse as python: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"FAN_MARK_FILESYSTEM", "FAN_REPORT_DFID_NAME", "FAN_CREATE", "FAN_DELETE",
+		"FAN_MOVED_FROM", "FAN_MOVED_TO", "FAN_ATTRIB", "FAN_ONDIR", "FAN_Q_OVERFLOW",
+		"INFO_DFID_NAME", "INFO_DFID", "name_to_handle_at", "security.selinux",
+		"os.fstat", "os.getxattr", "op-arm", "runc-gone", "runc-obs",
+		"fan-selftest", "fan-watch start", "fan-watch stop", "fan-watch failed",
+		"O_NONBLOCK", "capture-overflow",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("the embedded fanotify watcher must carry %s", want)
+		}
+	}
+}
+
 // TestUATWorkloadSELinuxMemfdProcClassifier runs the shipped
 // rt_priv_memfd_verdict classifier over /proc sweep fixtures and proves the
 // R7 P6 exec-boundary contract end-to-end:
