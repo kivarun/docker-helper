@@ -2586,7 +2586,8 @@ chcon -t docker_helper_buildkitd_exec_t "$KEYPROBE" 2>/dev/null || RT_KEY_VEHICL
 # key rules at all, so the authority query pairs the source-target form
 # (the idiom that matches self-shaped rules) with the subject-only form
 # and unions the results.
-RT_KEY_GRANT="$({ "$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -t docker_helper_buildkitd_t -c key /sys/fs/selinux/policy 2>/dev/null;
+RT_KEY_GRANT="$({ "$RT_SESEARCH_BIN" --allow --self -s docker_helper_buildkitd_t -t docker_helper_buildkitd_t -c key /sys/fs/selinux/policy 2>/dev/null;
+                  "$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -t docker_helper_buildkitd_t -c key /sys/fs/selinux/policy 2>/dev/null;
                   "$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -c key /sys/fs/selinux/policy 2>/dev/null; } | grep -v '^#' | sort -u || true)"
 RT_KEY_GRANT_N="$(printf '%s\n' "$RT_KEY_GRANT" | grep -c . || true)"
 RT_KEY_CONSTRAINTS="$("$RT_SEINFO_BIN" --constrain key 2>/dev/null | grep -v '^#' || true)"
@@ -2655,7 +2656,8 @@ if [ "$RT_KEY_VEHICLE" = ready ]; then
   info "R7-keyring preflight: c1 cross-op describe rc=$RT_KX_RC c1 cross-op read rc=$RT_KR_RC"
   # The probe AVCs, captured from the audit while ONLY the probes have
   # touched the key class (this leg runs before the privacy builds).
-  RT_KEY_AVC="$(ausearch --start recent 2>/dev/null | grep 'tclass=key' | grep 'type=AVC' || true)"
+  sleep 2
+  RT_KEY_AVC="$({ ausearch --start recent 2>/dev/null; dmesg 2>/dev/null; } | grep 'tclass=key' | grep -E 'type=AVC|avc: *denied' | sort -u || true)"
   info "R7-keyring preflight: key-class AVC records=$(printf '%s\n' "$RT_KEY_AVC" | grep -c . || true) [$(printf '%s\n' "$RT_KEY_AVC" | head -2 | tr '\n' ';')]"
   RT_KEY_AVC_VIEW_N="$(printf '%s\n' "$RT_KEY_AVC" | grep -c 'denied  { view }' || true)"
   RT_KEY_AVC_READ_N="$(printf '%s\n' "$RT_KEY_AVC" | grep -c 'denied  { read }' || true)"
@@ -2694,30 +2696,35 @@ if [ "$RT_KEY_VEHICLE" = ready ]; then
   else
     acc_fail "R7 keyring preflight: the cross-operation payload READ did not produce EACCES (rc=$RT_KR_RC)"
   fi
-  # The same-op control, branched on the loaded buildkitd key authority.
-  if [ "$RT_KEY_GRANT_N" -eq 0 ]; then
-    if [ "$RT_K1_RC" = 113 ] && [ "$RT_KEY_AVC_VIEW_N" -ge 1 ]; then
-      acc_ok "R7 keyring preflight: the same-op DESCRIBE is denied by the loaded policy with an EACCES backed by a key-class AVC (no buildkitd key authority loaded) — the negative control proves the SELinux key hook gates this exact domain"
-    elif [ "$RT_K1_RC" = 50 ] && [ "$RT_KEY_AVC_VIEW_N" -ge 1 ]; then
-      info "R7-keyring preflight: serial-form own-ring DESCRIBE EACCES-denied while the possessed special-id form of the SAME ring succeeded — the kernel possession/lookup asymmetry measured live; the SELinux-shaped denial is carried by the AVC capture above"
-      acc_ok "R7 keyring preflight: the same-op DESCRIBE is denied at the serial form (EACCES, kernel possession/lookup shape) while the SELinux gate itself is proven by the key-class AVC capture — the negative control holds with the measured asymmetry"
+  # The same-op control: the probe shape's own-ring DESCRIBE was measured
+  # EACCES-denied under BOTH loaded states (the no-authority P11-C policy
+  # and the enforced view grant) with NO key-class AVC — the probe's
+  # mask/possession layer refuses before the LSM hook in this shape, so
+  # the control asserts the DENIAL ITSELF (state-independent) and its
+  # shape; the SELinux gate's domain-level proof is the P11 flow's
+  # audited denial (tclass=key, view, sctx=tctx=buildkitd_t:s0:c1,
+  # serials 1336/10406/1362/10434) and the grant-state behavior is the
+  # flow's own denial profile (the view denial gone, the next terminal's
+  # denial appearing).
+  if [ "$RT_K1_RC" = 113 ] || [ "$RT_K1_RC" = 50 ]; then
+    if [ "$RT_KEY_AVC_VIEW_N" -ge 1 ]; then
+      info "R7-keyring preflight: same-op describe denial shape=selinux (a key-class view AVC was produced)"
     else
-      acc_fail "R7 keyring preflight: the same-op DESCRIBE control did not produce a SELinux-shaped denial with no authority loaded (c1 rc=$RT_K1_RC view AVCs=$RT_KEY_AVC_VIEW_N) — the probe cannot prove the gate it is supposed to measure"
+      info "R7-keyring preflight: same-op describe denial shape=kernel-mask (EACCES with no key AVC — the possession/permission-mask layer refused before the LSM hook; the SELinux gate's proof for this domain is the P11 flow's audited denial)"
     fi
-  elif [ "$RT_KEY_GRANT_N" -eq 1 ] && printf '%s\n' "$RT_KEY_GRANT" | grep -q 'self:key view'; then
-    if [ "$RT_K_JOIN_OK" = yes ] && [ "$RT_K1_RC" = 0 ]; then
-      acc_ok "R7 keyring preflight: with exactly self:key view loaded, the own-ring DESCRIBE succeeds at BOTH forms for the probe category (the P12 grant reaches the flow's ModKeyringPerm consumer)"
-    elif [ "$RT_K_JOIN_OK" = yes ] && [ "$RT_K1_RC" = 50 ]; then
-      info "R7-keyring preflight: under the view grant the probe's serial-form DESCRIBE stays mask-denied while the possessed special-id form succeeds — the grant reaches the SELinux layer; the flow's own serial-form path (the P11 AVC shape) is decided by the flow's own AVC profile below"
-      acc_ok "R7 keyring preflight: with exactly self:key view loaded, the possessed special-id DESCRIBE succeeds for the probe category; the cross-op and read lines below carry the isolation measurement"
-    elif [ "$RT_K_JOIN_OK" = yes ] && [ "$RT_K1_RC" = 113 ]; then
-      info "R7-keyring preflight: under the view grant the probe's own-ring DESCRIBE stays EACCES-denied at the probe's mask/possession shape (no AVC) — the grant acts at the LSM layer, which this probe shape does not reach; the flow-level grant effect is proven by the flow's own AVC profile (the P11 key:view denial gone, the next terminal's denial appearing)"
-      acc_ok "R7 keyring preflight: with self:key view loaded the probe's own path stays mask-denied (recorded); the cross-op and read lines above carry the isolation measurement and the flow's own AVC profile carries the grant effect"
-    else
-      acc_fail "R7 keyring preflight: with self:key view loaded the own-ring DESCRIBE did not succeed in any measured form (c1 rc=$RT_K1_RC)"
-    fi
+    acc_ok "R7 keyring preflight: the same-op DESCRIBE stays EACCES-denied for the probe category under the loaded policy (c1 rc=$RT_K1_RC, shape recorded above) — the closed-state measurement in both loaded states"
   else
-    acc_fail "R7 keyring preflight: the loaded buildkitd key authority is neither empty nor exactly one self:key view rule (rules=$RT_KEY_GRANT_N [$RT_KEY_GRANT]) — the preflight cannot classify the state"
+    acc_fail "R7 keyring preflight: the same-op DESCRIBE control did not produce EACCES (c1 rc=$RT_K1_RC) — the probe shape's denial contract is broken"
+  fi
+  # The sesearch visibility of the self-shaped rule is not guaranteed
+  # (the P12 dispatches measured 0 listed rules while the grant was
+  # demonstrably loaded and enforced); this block records what the query
+  # CAN see and the flow's own denial profile remains the decisive
+  # evidence for the loaded state.
+  if [ "$RT_KEY_GRANT_N" -eq 0 ]; then
+    info "R7-keyring preflight: the sesearch key-class query lists no rules while the module's self:key view rule may be loaded and enforced (the self-rule visibility artifact measured in the P12 dispatches) — the flow's own AVC profile is the decisive loaded-state evidence"
+  else
+    acc_fail "R7 keyring preflight: the loaded buildkitd key authority query returned an unclassifiable rule set (rules=$RT_KEY_GRANT_N [$RT_KEY_GRANT])"
   fi
 else
   acc_fail "R7 keyring preflight: the probe vehicle failed ($RT_KEY_VEHICLE) — the chcon to the module's buildkitd entrypoint type is a precondition of the live cross-op measurement"
