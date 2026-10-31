@@ -2327,6 +2327,18 @@ else
         && : > "$RT_TRACE_DIR/trace" 2>/dev/null \
         && echo 1 > "$RT_TRACE_DIR/tracing_on" 2>/dev/null; then
       RT_TRACE_READY=1
+      # The P7 cgroup-stage probe: the runc PARENT's openat2 completions
+      # (comm is the exec'd binary's basename, no exec happens inside the
+      # parent task). The P7 grant removed the TE read denial, yet the
+      # parent's supportedControllers() openat2 still fails with EACCES
+      # and NO AVC — the per-event probe records every openat2 EXIT of
+      # the parent (its ret field exposes the -13 completions) so the
+      # failure is proven to be a real syscall outcome, not a cached
+      # error, and its unaudited nature becomes decisive alongside the
+      # loaded-policy dontaudit introspection in the analysis section.
+      printf 'comm == "buildkit-runc"' > "$RT_TRACE_DIR/events/syscalls/sys_exit_openat2/filter" 2>/dev/null \
+        && echo 1 > "$RT_TRACE_DIR/events/syscalls/sys_exit_openat2/enable" 2>/dev/null \
+        || info "R7-privacy ftrace: the openat2 parent probe could not be armed (continuing without it)"
     fi
   fi
   RT_TRACE_CTRL=0
@@ -2474,7 +2486,7 @@ else
   wait "$RT_PID_B"; RT_RC_B=$?
   kill "$RT_MEMFD_SWEEP_PID" 2>/dev/null || true
   wait "$RT_MEMFD_SWEEP_PID" 2>/dev/null || true
-  RT_TRACE_EXEC=0; RT_TRACE_EXECVE=0; RT_TRACE_ENTER=0; RT_TRACE_SAMPLE=""; RT_TRACE_RAW_LINES=0
+  RT_TRACE_EXEC=0; RT_TRACE_EXECVE=0; RT_TRACE_ENTER=0; RT_TRACE_SAMPLE=""; RT_TRACE_RAW_LINES=0; RT_TRACE_OPENAT2_EACCES=0
   if [ "$RT_TRACE_READY" -eq 1 ]; then
     echo 0 > "$RT_TRACE_DIR/tracing_on" 2>/dev/null || true
     RT_TRACE_RAW="$(cat "$RT_TRACE_DIR/trace" 2>/dev/null || true)"
@@ -2486,10 +2498,13 @@ else
     RT_TRACE_EXEC="$(printf '%s\n' "$RT_TRACE_RAW" | grep -c 'sched_process_exec' || true)"
     RT_TRACE_EXECVE="$(printf '%s\n' "$RT_TRACE_RAW" | grep -c 'sys_exit_execve' || true)"
     RT_TRACE_ENTER="$(printf '%s\n' "$RT_TRACE_RAW" | grep -c 'sys_enter_' || true)"
+    RT_TRACE_OPENAT2_EACCES="$(printf '%s\n' "$RT_TRACE_RAW" | grep 'sys_exit_openat2' | grep -c 'ret=-13' || true)"
+    RT_TRACE_OPENAT2_ALL="$(printf '%s\n' "$RT_TRACE_RAW" | grep -c 'sys_exit_openat2' || true)"
     RT_TRACE_RAW_LINES="$(printf '%s\n' "$RT_TRACE_RAW" | grep -c . || true)"
     RT_TRACE_SAMPLE="$(printf '%s\n' "$RT_TRACE_RAW" | grep 'sched_process_exec\|sys_exit_execve' | head -1)"
+    RT_TRACE_O2_SAMPLE="$(printf '%s\n' "$RT_TRACE_RAW" | grep 'sys_exit_openat2' | grep 'ret=-13' | head -1)"
   fi
-  info "R7-privacy ftrace: ready=$RT_TRACE_READY sched_process_exec=$RT_TRACE_EXEC sys_exit_execve=$RT_TRACE_EXECVE sys_enter=$RT_TRACE_ENTER raw_lines=$RT_TRACE_RAW_LINES first=${RT_TRACE_SAMPLE:-none}"
+  info "R7-privacy ftrace: ready=$RT_TRACE_READY sched_process_exec=$RT_TRACE_EXEC sys_exit_execve=$RT_TRACE_EXECVE sys_enter=$RT_TRACE_ENTER openat2_exit=$RT_TRACE_OPENAT2_ALL openat2_eacces=$RT_TRACE_OPENAT2_EACCES raw_lines=$RT_TRACE_RAW_LINES first=${RT_TRACE_SAMPLE:-none} o2=${RT_TRACE_O2_SAMPLE:-none}"
   RT_OPS="$(grep '^op ' "$RT_SURVEY" | awk '{ print $2 }' | awk '!seen[$0]++')"
   RT_OP_COUNT=0
   RT_STAT_A=""; RT_STAT_B=""
@@ -2634,6 +2649,18 @@ else
   else
     acc_fail "R7 runtime privacy: a concurrent sleep build did not complete (rcA=$RT_RC_A rcB=$RT_RC_B): $(redact </tmp/uat-wls-privacy-a.log | tail -3) | $(redact </tmp/uat-wls-privacy-b.log | tail -3)"
   fi
+  # The P7 cgroup-stage introspection: the loaded policy's exact
+  # buildkitd_t -> cgroup_t:file authority and ANY dontaudit rule
+  # covering the pair. The P7 grant removed the TE read denial, yet the
+  # runc parent's supportedControllers() openat2 still fails with EACCES
+  # and no AVC; an unaudited SELinux denial is only producible by a
+  # dontaudit rule, so this listing decides between a silent TE denial
+  # (an open-completion demand suppressed by the distro policy) and a
+  # non-SELinux boundary.
+  RT_CG_ALLOW="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -t cgroup_t -c file /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+  RT_CG_DONTAUDIT="$("$RT_SESEARCH_BIN" --dontaudit -s docker_helper_buildkitd_t -t cgroup_t /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+  RT_CG_DA_DOMAIN="$("$RT_SESEARCH_BIN" --dontaudit -s domain -t cgroup_t /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+  info "R7-privacy cgroup introspection: allow=[$RT_CG_ALLOW] dontaudit-targeted=[$RT_CG_DONTAUDIT] dontaudit-domain=[$RT_CG_DA_DOMAIN]"
   RT_SESEARCH_OUT="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t \
     -t docker_helper_builder_runtime_t -c dir /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
   RT_SESEARCH_HIT="$(printf '%s\n' "$RT_SESEARCH_OUT" | grep 'docker_helper_buildkitd_t docker_helper_builder_runtime_t:dir' || true)"
