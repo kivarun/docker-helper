@@ -129,6 +129,7 @@ module docker_helper 1.2;
 		class capability2 { wake_alarm kill };
 		class user_namespace { create };
 		class cap_userns { sys_admin sys_ptrace sys_chroot net_admin chown };
+		class key view;
 		class process { transition siginh noatsecure rlimitinh sigkill setexec signull signal setpgid };
 		class process2 { nnp_transition };
 	}
@@ -3154,6 +3155,69 @@ allow docker_helper_buildkitd_t self:cap_userns { sys_admin chown };
 # singleton) and the named-allow count moves 39 -> 40 by exactly this
 # one rule.
 allow docker_helper_buildkitd_t self:cap_userns sys_chroot;
+
+# The P12 key:view rung (single permission, live preflight measured under
+# the P11-C policy in the 41245855184 dispatch). The P11 UAT proved the
+# flow's NEXT terminal: runc's standard init, after its session-keyring
+# join, runs ModKeyringPerm, whose FIRST call is
+# unix.KeyctlString(KEYCTL_DESCRIBE, ring) — the kernel's
+# keyctl_describe_key resolves the ring with KEY_NEED_VIEW and the
+# SELinux key hook denies it (the audited terminal: tclass=key,
+# permission view, sctx=tctx=buildkitd_t:s0:c1, comm runc:[2:INIT],
+# serials 1336/10406 in the P11 run and 1362/10434 in the P11-C run).
+# The denial is FATAL: runc tolerates only ENOSYS from the keyring setup,
+# so every BUILD-path container dies before prepareRootfs.
+#
+# KEYRING PREFLIGHT (measured live in the VM, the exact subject domain):
+#   - the loaded policy carries ZERO key-class allow rules for ANY subject
+#     and ZERO key-class constraints (sesearch --allow -c key: 0 rules;
+#     seinfo --constrain key: empty) — the SELinux key layer currently
+#     adds nothing beyond "no rules at all", and `self` in this rule
+#     matches the TYPE, not the MCS categories;
+#   - the probe process (runcon into buildkitd_t:s0:c1, CapEff full) that
+#     joins a fresh named session keyring cannot DESCRIBE it: EACCES at
+#     the serial form AND at the possessed KEY_SPEC_SESSION_KEYRING form,
+#     with NO key-class AVC — under the no-authority policy the denial
+#     shape is the kernel's own permission-mask/possession layer for this
+#     probe shape (the flow-shaped init reaches the LSM and produces the
+#     audited denial, per the P11 evidence);
+#   - the cross-operation DESCRIBE (c1 describing the c2-created ring by
+#     its serial) is EACCES-denied and the cross-operation payload READ
+#     is EACCES-denied, both without AVCs, under the no-authority policy;
+#   - the kernel's own keyring model is PER-UID: the join's default ring
+#     permissions are KEY_POS_ALL | KEY_USR_VIEW | KEY_USR_READ |
+#     KEY_USR_LINK (security/keys/process_keys.c join_session_keyring),
+#     and key_task_permission selects the owner-class bits whenever
+#     uid_eq(key->uid, cred->fsuid) — ALL flow operations run as ONE uid,
+#     so the mask layer passes a same-uid DESCRIBE toward the LSM for
+#     flow-shaped rings regardless of which operation created the ring;
+#     the SELinux layer is the ONLY per-operation gate for those objects,
+#     and with ZERO constraints the `self` rule does not re-introduce one
+#     on the view permission;
+#   - the accepted read-class cross-op surface of this policy is STRICTLY
+#     RICHER than what view exposes: the category-blind
+#     docker_helper_builder_state_t:file { read ... } rule already lets
+#     one operation READ another operation's runc-log.json (the full runc
+#     log text, which contains strictly more than the ring's description
+#     "_ses.<containerID>", uid/gid and perm bits that view returns) —
+#     the key:view cross-op surface is a SUBSET of the already-accepted
+#     read-class surface, so this grant creates no new exposure CLASS;
+#   - the hard confidentiality line is the key PAYLOAD: view never
+#     implies read, the read permission is NOT part of this grant, and
+#     the live cross-op read probe measured EACCES; the write-class
+#     surface (setattr for a hypothetical later rung) has NO such
+#     precedent and would require its own constraint-backed decision;
+#   - the join itself needs NO key permission (measured: the join
+#     succeeded for both probe categories with zero key authority).
+#
+# Deliberately NOT granted: read/write/search/link/setattr/create on the
+# key class (the require block declares exactly view), any key rule for
+# any other subject, any capability/process/other-class change. The
+# committed-policy tests pin the buildkitd domain's key authority at
+# EXACTLY this one rule and the module's key-class surface at EXACTLY
+# this require declaration; the named-allow count moves 40 -> 41 by
+# exactly this one rule.
+allow docker_helper_buildkitd_t self:key view;
 
 # R7 (green attempt, scope=selinux run 38979563860): the mount's own
 # read-only flag application. The same bind mount

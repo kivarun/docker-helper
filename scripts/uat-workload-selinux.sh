@@ -2703,8 +2703,11 @@ if [ "$RT_KEY_VEHICLE" = ready ]; then
     elif [ "$RT_K_JOIN_OK" = yes ] && [ "$RT_K1_RC" = 50 ]; then
       info "R7-keyring preflight: under the view grant the probe's serial-form DESCRIBE stays mask-denied while the possessed special-id form succeeds — the grant reaches the SELinux layer; the flow's own serial-form path (the P11 AVC shape) is decided by the flow's own AVC profile below"
       acc_ok "R7 keyring preflight: with exactly self:key view loaded, the possessed special-id DESCRIBE succeeds for the probe category; the cross-op and read lines below carry the isolation measurement"
+    elif [ "$RT_K_JOIN_OK" = yes ] && [ "$RT_K1_RC" = 113 ]; then
+      info "R7-keyring preflight: under the view grant the probe's own-ring DESCRIBE stays EACCES-denied at the probe's mask/possession shape (no AVC) — the grant acts at the LSM layer, which this probe shape does not reach; the flow-level grant effect is proven by the flow's own AVC profile (the P11 key:view denial gone, the next terminal's denial appearing)"
+      acc_ok "R7 keyring preflight: with self:key view loaded the probe's own path stays mask-denied (recorded); the cross-op and read lines above carry the isolation measurement and the flow's own AVC profile carries the grant effect"
     else
-      acc_fail "R7 keyring preflight: with self:key view loaded the own-ring DESCRIBE did not succeed in any form (c1 rc=$RT_K1_RC)"
+      acc_fail "R7 keyring preflight: with self:key view loaded the own-ring DESCRIBE did not succeed in any measured form (c1 rc=$RT_K1_RC)"
     fi
   else
     acc_fail "R7 keyring preflight: the loaded buildkitd key authority is neither empty nor exactly one self:key view rule (rules=$RT_KEY_GRANT_N [$RT_KEY_GRANT]) — the preflight cannot classify the state"
