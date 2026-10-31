@@ -2754,6 +2754,13 @@ def handle_event(mask, recs):
         stats["unresolved"] += 1
         return
     evname = mask_events(mask)
+    if name == ".":
+        # The kernel's convention for an event on a directory itself
+        # (FAN_ONDIR): DFID_NAME carries the directory's own handle with
+        # the name "." — normalize to the nameless self-event shape so
+        # the path stays clean and the fixup ATTRIB on the runc dir
+        # resolves to its own create-time cached handle.
+        name = ""
     if name:
         # An entry event (create/delete/move/attrib-on-child): the DFID
         # is the PARENT directory, the name the entry.
