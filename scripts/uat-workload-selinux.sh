@@ -2645,16 +2645,20 @@ RT_KEY_CONSTRAINTS="$("$RT_SEINFO_BIN" --constrain key 2>/dev/null | grep -v '^#
 RT_KEY_ALL="$("$RT_SESEARCH_BIN" --allow -c key /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
 RT_KEY_ALL_N="$(printf '%s\n' "$RT_KEY_ALL" | grep -c . || true)"
 info "R7-keyring preflight: vehicle=$RT_KEY_VEHICLE loaded buildkitd key authority rules=$RT_KEY_GRANT_N [$RT_KEY_GRANT] key-constraints=[$RT_KEY_CONSTRAINTS] all-key-rules=$RT_KEY_ALL_N"
-# Every probe writes its evidence to a FILE under the runtime tree, never
-# to stdout: the probe domain has no authority to write the harness's
-# capture pipe, while files it creates on the tmpfs runtime tree land in
-# its own granted runc_memfd_t type via the module's type_transition.
-KSER1=/run/docker-helper-builder/.uat-keyprobe-c1.serial
-KSER2=/run/docker-helper-builder/.uat-keyprobe-c2.serial
-KOUT1=/run/docker-helper-builder/.uat-keyprobe-c1.out
-KOUT2=/run/docker-helper-builder/.uat-keyprobe-c2.out
-KOUTX=/run/docker-helper-builder/.uat-keyprobe-x.out
-KOUTR=/run/docker-helper-builder/.uat-keyprobe-r.out
+# Every probe writes its evidence to a FILE in the builder's STATE tree,
+# never to stdout: the probe domain has no authority to write the
+# harness's capture pipe (pipefs fifo_file write is ungranted), and a
+# tmpfs create would land in runc_memfd_t whose grant set has no create
+# permission — while the state-tree file type carries the flow's own
+# create/write/open authority (the category-blind builder_state_t:file
+# rule), so the probes' evidence files are exactly the class of object
+# the flow itself writes there.
+KSER1=/var/lib/docker-helper-builder/.uat-keyprobe-c1.serial
+KSER2=/var/lib/docker-helper-builder/.uat-keyprobe-c2.serial
+KOUT1=/var/lib/docker-helper-builder/.uat-keyprobe-c1.out
+KOUT2=/var/lib/docker-helper-builder/.uat-keyprobe-c2.out
+KOUTX=/var/lib/docker-helper-builder/.uat-keyprobe-x.out
+KOUTR=/var/lib/docker-helper-builder/.uat-keyprobe-r.out
 rm -f "$KSER1" "$KSER2" "$KOUT1" "$KOUT2" "$KOUTX" "$KOUTR"
 RT_K1_OUT=""
 RT_K2_OUT=""
