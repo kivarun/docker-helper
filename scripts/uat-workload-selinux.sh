@@ -2763,14 +2763,20 @@ def handle_event(mask, recs):
         # FAN_ONDIR) reports the directory's own DFID without a name.
         path = ppath
     ops_dir = os.path.join(ROOT, "ops")
-    if ppath == SELFTEST_DIR:
+    if ppath == SELFTEST_DIR or ppath.startswith(SELFTEST_DIR + "/"):
         # The self-test surface: journal delivery and, while the entry
         # lives, one fd-pinned capture for the capture-correctness
-        # proof. Self-test events are never forwarded to the reader.
-        jline("fan-selftest ev=%s name=%s" % (evname, name))
-        if name and "DELETE" not in evname and "MOVED_FROM" not in evname:
-            full = os.path.join(SELFTEST_DIR, name)
+        # proof. An entry event names the entry; an event ON a cached
+        # self-test directory itself (the chmod ATTRIB arrives as a
+        # nameless DFID of the directory's own handle) is captured the
+        # same way. Self-test events are never forwarded to the reader.
+        shown = name if name else os.path.basename(ppath)
+        jline("fan-selftest ev=%s name=%s" % (evname, shown))
+        deleted = "DELETE" in evname or "MOVED_FROM" in evname
+        if not deleted:
+            full = os.path.join(ppath, name) if name else ppath
             if os.path.isdir(full):
+                cache_path(full)
                 pinned_record("fan-selftest-obs ev=%s" % evname,
                               full, "open-failed-present")
         return
