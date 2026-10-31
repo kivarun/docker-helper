@@ -4977,6 +4977,60 @@ allow docker_helper_buildkitd_t cgroup_t:dir { search };
 # plane here). The standing cgroup subjects (the daemon, the builder,
 # the launcher, the rootlesskit child) keep their own rules unchanged.
 allow docker_helper_buildkitd_t cgroup_t:filesystem getattr;
+# The P7 cgroup-controllers read corrective (single permission, exact-SHA
+# UAT run 41141011880): the P6 enforcing UAT proved the exeseal exec
+# COMPLETED (the kernel's sched_process_exec record for
+# filename=/proc/self/fd/6 exists only after the full load finished) and
+# the flow's terminal moved to the runc parent's cgroup stage — avc
+# denied { read } comm="buildkit-runc" name="cgroup.controllers"
+# scontext docker_helper_buildkitd_t:s0:c1 tcontext cgroup_t:s0
+# (serials 1336/1337 first workload, 10353/10354 privacy window),
+# exactly runc v1.4.3's process_linux.go:825 p.manager.Apply ->
+# opencontainers/cgroups fs2 CreateCgroupPath -> supportedControllers()
+# openat2("/sys/fs/cgroup/cgroup.controllers") returning EACCES, whose
+# fs2.go rootless branch raises "rootless needs no limits + no
+# cgrouppath when no permission is granted for cgroups" and fails
+# Apply before any bootstrap data is sent — the parent's cleanup then
+# kills the (proven started) init child before its first userspace
+# syscall. The grant makes the controller enumeration SUCCEED so the
+# runtime can proceed past its own cgroup stage; the read is the
+# runtime's required environment probe (the same library family the
+# statfs detection rung above serves).
+#
+# PREFLIGHT SCOPE (assessed before the grant): cgroup_t is the base
+# policy's type for the cgroup2 mount — its superblock (filesystem
+# class), every directory of the host hierarchy (dir class), and every
+# control file (cgroup.controllers, cpu.max, memory.*, io.*, cgroup.procs,
+# ...). The delta is TYPE-WIDE file-class read: every cgroupfs control
+# file the subject can otherwise reach becomes readable — NOT limited to
+# the cgroup.controllers basename. The read is MUTATION-FREE (no
+# write/append/create/unlink/relabel/mount — the rootless no-delegation
+# model stays intact: the subject still cannot create or configure any
+# cgroup), it exposes host controller topology and limits (environment
+# metadata, identical for every operation — no operation-classified
+# object lives on cgroupfs, so no cross-operation channel is created),
+# and file READ is outside the loaded mlsconstrain write set (the
+# constraint never mediated cgroup reads; the denial was pure TE). The
+# standing helper subjects (docker_helper_t, docker_helper_builder_t,
+# docker_helper_rootlesskit_t) already hold the WIDER pair
+# cgroup_t:file { read open } from their own earlier rungs — the
+# buildkitd's single read is narrower than the standing pattern. The
+# cpu.max reads (same family, the Go runtimes' GOMAXPROCS probes and
+# the graceful-degradation surface) fall under the same rule by
+# construction — the family's denial noise disappears with the rung.
+# open is deliberately NOT granted: the observed denial is exactly
+# { read } (the read check fires inside may_open before the open
+# completion hook is reached); if the completion hook demands
+# file:open separately once read passes, that is its own observed
+# terminal under the proof-first protocol. Deliberately NOT granted:
+# getattr/write/append/lock/create/setattr/unlink/execute/map/
+# relabelfrom/relabelto, any cgroup_t:dir rider beyond the standing
+# bare { search }, any cgroup_t:filesystem rider beyond the standing
+# bare getattr, any other class or subject. The committed-policy tests
+# pin the buildkitd domain's cgroup authority at EXACTLY the three
+# canonical singletons (the count pin moves 35 -> 36 by exactly this
+# one rule).
+allow docker_helper_buildkitd_t cgroup_t:file read;
 
 # --- 4C-72: the shared runtime-root dir search — the NEW pair/plane
 # --- (PLANE G); the bare singleton, never a widening of any existing
