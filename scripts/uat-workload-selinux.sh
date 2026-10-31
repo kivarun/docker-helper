@@ -2500,12 +2500,18 @@ PYEOF
 RT_KEY_GRANT="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -c key /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
 RT_KEY_GRANT_N="$(printf '%s\n' "$RT_KEY_GRANT" | grep -c . || true)"
 RT_KEY_CONSTRAINTS="$("$RT_SEINFO_BIN" --constrain key 2>/dev/null | grep -v '^#' || true)"
-info "R7-keyring preflight: loaded buildkitd key authority rules=$RT_KEY_GRANT_N [$RT_KEY_GRANT] key-constraints=[$RT_KEY_CONSTRAINTS]"
+RT_KEY_ALL="$("$RT_SESEARCH_BIN" --allow -c key /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+RT_KEY_ALL_N="$(printf '%s\n' "$RT_KEY_ALL" | grep -c . || true)"
+info "R7-keyring preflight: loaded buildkitd key authority rules=$RT_KEY_GRANT_N [$RT_KEY_GRANT] key-constraints=[$RT_KEY_CONSTRAINTS] all-key-rules=$RT_KEY_ALL_N"
 KSER1=/tmp/uat-wls-keyprobe-c1.serial
 KSER2=/tmp/uat-wls-keyprobe-c2.serial
 rm -f "$KSER1" "$KSER2"
-RT_K1_OUT="$(runcon -t docker_helper_buildkitd_t -l s0:c1 python3 "$KEYPROBE" join uat-k-c1 "$KSER1" 2>&1)"
-RT_K2_OUT="$(runcon -t docker_helper_buildkitd_t -l s0:c2 python3 "$KEYPROBE" join uat-k-c2 "$KSER2" 2>&1)"
+# The probe processes enter the EXACT candidate subject domain via the
+# full exec context (user:role:type:level): the module's types live in
+# system_r, so a -t/-l-only runcon would keep the caller's role and fail
+# with EINVAL (the 41230476608 preflight dispatch).
+RT_K1_OUT="$(runcon system_u:system_r:docker_helper_buildkitd_t:s0:c1 python3 "$KEYPROBE" join uat-k-c1 "$KSER1" 2>&1)"
+RT_K2_OUT="$(runcon system_u:system_r:docker_helper_buildkitd_t:s0:c2 python3 "$KEYPROBE" join uat-k-c2 "$KSER2" 2>&1)"
 info "R7-keyring preflight: c1 join+own-describe=[$(printf '%s' "$RT_K1_OUT" | tr '\n' ';')] c2 join+own-describe=[$(printf '%s' "$RT_K2_OUT" | tr '\n' ';')]"
 RT_K_JOIN_OK=yes
 printf '%s' "$RT_K1_OUT" | grep -q '^rc=[0-9]' || RT_K_JOIN_OK=no
@@ -2517,13 +2523,13 @@ else
 fi
 RT_KX_OUT=""
 if [ -s "$KSER2" ]; then
-  RT_KX_OUT="$(runcon -t docker_helper_buildkitd_t -l s0:c1 python3 "$KEYPROBE" describe "$(cat "$KSER2")" 2>&1)"
+  RT_KX_OUT="$(runcon system_u:system_r:docker_helper_buildkitd_t:s0:c1 python3 "$KEYPROBE" describe "$(cat "$KSER2")" 2>&1)"
 else
   RT_KX_OUT="c2-serial-missing"
 fi
 RT_KR_OUT=""
 if [ -s "$KSER2" ]; then
-  RT_KR_OUT="$(runcon -t docker_helper_buildkitd_t -l s0:c1 python3 "$KEYPROBE" read "$(cat "$KSER2")" 2>&1)"
+  RT_KR_OUT="$(runcon system_u:system_r:docker_helper_buildkitd_t:s0:c1 python3 "$KEYPROBE" read "$(cat "$KSER2")" 2>&1)"
 else
   RT_KR_OUT="c2-serial-missing"
 fi
