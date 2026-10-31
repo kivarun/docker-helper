@@ -143,12 +143,19 @@ acc_blocked() { printf '  BLOCKED: %s\n' "$*" >&2; BLOCKED_COUNT=$((BLOCKED_COUN
 # rt_priv_log_verdict SURVEY OP OWN_CTX — the R7 privacy runc-log.json
 # observation classifier. Survey records have the shape
 #
-#   runc-log <op> st_rc=<n> st_err=<t> cx_rc=<n> cx_err=<t> <a|U|G>|<ctx>
+#   runc-log <op> fd_rc=<n> fd_err=<t> ino=<i> st_rc=<n> st_err=<t> cx_rc=<n> cx_err=<t> <a|U|G>|<ctx>
 #
-# where st_* covers the stat(-c '%a|%U|%G') read and cx_* the separate
-# stat(-c '%C') context read, each with its own exit status and
-# newline-flattened stderr. Classification:
-#   - COMPLETE observation: st_rc=0 AND cx_rc=0 AND the context field is
+# where st_* covers the mode|uid|gid read and cx_* the context read,
+# each with its own exit status and newline-flattened stderr; the fd_*
+# fields are present only when the fd-pinned reader produced the record
+# (the open of the file FD — the single pathname-dependent step — and
+# ino, the pinned inode's number; the P9-C UAT caught the same
+# mode-OK/context-lost TOCTOU biting this file read after a flow-timing
+# shift). fd_rc present and nonzero is incomplete evidence. Legacy
+# records (no fd fields) keep the plain two-path-stat contract.
+# Classification:
+#   - COMPLETE observation: fd_rc (when present) is 0 AND st_rc=0 AND
+#     cx_rc=0 AND the context field is
 #     non-empty and not "?". Decisive: its context MUST equal OWN_CTX.
 #   - mode-read failure (st_rc!=0, e.g. ENOENT teardown): incomplete, NOT
 #     decisive, counted.
@@ -172,8 +179,10 @@ rt_priv_log_verdict() {
     esac
     st_rc="$(printf '%s' "$rec" | sed -n 's/.* st_rc=\([0-9][0-9]*\).*/\1/p')"
     cx_rc="$(printf '%s' "$rec" | sed -n 's/.* cx_rc=\([0-9][0-9]*\).*/\1/p')"
+    fd_rc="$(printf '%s' "$rec" | sed -n 's/.* fd_rc=\([0-9][0-9]*\).*/\1/p')"
     ctx="$(printf '%s' "$rec" | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[^ ]*\|/) { n = split($i, a, "|"); print a[n] } }')"
-    if [ "$st_rc" = "0" ] && [ "$cx_rc" = "0" ] && [ -n "$ctx" ] && [ "$ctx" != "?" ]; then
+    if [ "$st_rc" = "0" ] && [ "$cx_rc" = "0" ] && [ -n "$ctx" ] && [ "$ctx" != "?" ] \
+        && { [ -z "$fd_rc" ] || [ "$fd_rc" = "0" ]; }; then
       valid=$((valid + 1))
       if [ "$ctx" != "$own_ctx" ]; then
         foreign="$ctx"
@@ -295,17 +304,20 @@ rt_priv_runc_readfd() {
   exec 9<&- 2>/dev/null || true
 }
 rt_priv_runc_read() {
-  # PATH PREFIX — the shared runc-attribute evidence reader used by BOTH
-  # the immediate per-event capture and the survey sweep. With the fd
+  # PATH PREFIX — the shared pinned-object evidence reader used by the
+  # immediate per-event capture, the survey sweep's runc-dir reads and
+  # the survey sweep's runc-log.json reads (PATH may be a directory or a
+  # regular file). With the fd
   # technique proven (RT_FD_METHOD=proven) the record carries fd_rc /
   # fd_err / ino ahead of the per-read statuses: fd_rc=0 means the
   # pathname was resolved exactly once (at the open) and the tuple and
   # context were read from the pinned inode — a deletion after the open
-  # cannot split the tuple anymore. fd_rc nonzero means the dir vanished
-  # (or the open was refused) BEFORE the identity could be pinned — an
-  # honest incomplete observation, never a validation. When the technique
-  # could not be proven on this kernel the reader degrades to the legacy
-  # two-path-stat contract (no fd fields), the exact P9 evidence shape.
+  # cannot split the tuple anymore. fd_rc nonzero means the object
+  # vanished (or the open was refused) BEFORE the identity could be
+  # pinned — an honest incomplete observation, never a validation. When
+  # the technique could not be proven on this kernel the reader degrades
+  # to the legacy two-path-stat contract (no fd fields), the exact P9
+  # evidence shape.
   if [ "$RT_FD_METHOD" = "proven" ]; then
     RT_R_FD_RC=1; RT_R_FD_ERR="open-failed"; RT_R_TUPLE=""; RT_R_INO=""
     RT_R_ST_RC=2; RT_R_ST_ERR="skipped-no-open-fd"
@@ -318,14 +330,14 @@ rt_priv_runc_read() {
       RT_R_ST_RC=$RT_FD_ST_RC; RT_R_ST_ERR="$RT_FD_ST_ERR"
       RT_R_CX_RC=$RT_FD_CX_RC; RT_R_CX_ERR="$RT_FD_CX_ERR"
     else
-      # Post-facto labeling only: the open already failed, so the -d
-      # probe cannot change the evidence — it just distinguishes a dir
-      # that vanished before the open (ENOENT-class) from one that was
-      # present but refused (EACCES-class, e.g. a confinement change).
-      if [ -d "$1" ]; then
-        RT_R_FD_ERR="open-failed-dir-present"
+      # Post-facto labeling only: the open already failed, so the probe
+      # cannot change the evidence — it just distinguishes an object that
+      # vanished before the open (ENOENT-class) from one that was present
+      # but refused (EACCES-class, e.g. a confinement change).
+      if [ -e "$1" ]; then
+        RT_R_FD_ERR="open-failed-present"
       else
-        RT_R_FD_ERR="open-failed-dir-absent"
+        RT_R_FD_ERR="open-failed-absent"
       fi
     fi
     printf '%s fd_rc=%d fd_err=%s ino=%s st_rc=%d st_err=%s cx_rc=%d cx_err=%s %s|%s\n' \
@@ -2374,22 +2386,13 @@ else
       printf 'state-op %s %s\n' "$RT_OP" "$(stat -c '%a|%U|%G|%C' "$RT_STDIR" 2>/dev/null)" >> "$RT_SURVEY"
       RT_LOG_PATH="$RT_STDIR/root/runc-native/executor/runc-log.json"
       if [ -f "$RT_LOG_PATH" ]; then
-        # Two separate reads with their own exit status and stderr, so the
-        # analysis can distinguish a teardown ENOENT (mode read failed,
-        # file already gone) from a genuine context-read failure (file
-        # present, %C unresolvable). Every observation is recorded, not
-        # only the surviving ones.
-        RT_LOG_MODE="$(stat -c '%a|%U|%G' "$RT_LOG_PATH" 2>"$RT_SURVEY.sterr")"
-        RT_LOG_ST_RC=$?
-        RT_LOG_ST_ERR="$(tr '\n' ' ' <"$RT_SURVEY.sterr" 2>/dev/null | tr ' ' '_')"
-        RT_LOG_CTX="$(stat -c '%C' "$RT_LOG_PATH" 2>"$RT_SURVEY.cxerr")"
-        RT_LOG_CX_RC=$?
-        RT_LOG_CX_ERR="$(tr '\n' ' ' <"$RT_SURVEY.cxerr" 2>/dev/null | tr ' ' '_')"
-        printf 'runc-log %s st_rc=%d st_err=%s cx_rc=%d cx_err=%s %s|%s\n' \
-          "$RT_OP" \
-          "$RT_LOG_ST_RC" "${RT_LOG_ST_ERR:-none}" \
-          "$RT_LOG_CX_RC" "${RT_LOG_CX_ERR:-none}" \
-          "${RT_LOG_MODE:-}" "${RT_LOG_CTX:-?}" >> "$RT_SURVEY"
+        # The shared fd-pinned reader (the same contract as the runc-dir
+        # reads): with the technique proven, the open is the single
+        # pathname-dependent step and the attributes come from the pinned
+        # inode; the file existed at test time but may vanish before the
+        # open — that degenerate record is an incomplete observation the
+        # classifier counts, never the authoritative one.
+        rt_priv_runc_read "$RT_LOG_PATH" "runc-log $RT_OP"
       fi
     done
   }
@@ -2893,8 +2896,8 @@ else
   RT_LOG_FIRST_A=""; RT_LOG_FIRST_B=""
   for RT_OP in $RT_OPS; do
     RT_ST="$(grep "^state-op $RT_OP " "$RT_SURVEY" | awk '$3 != ""' | head -1 | awk '{ print $3 }')"
-    RT_LOG_FIRST="$(grep "^runc-log $RT_OP " "$RT_SURVEY" | head -1 | awk '{ v = $7; for (i = 8; i <= NF; i++) v = v "|" $i; print v }')"
-    RT_LOG_LAST="$(grep "^runc-log $RT_OP " "$RT_SURVEY" | tail -1 | awk '{ v = $7; for (i = 8; i <= NF; i++) v = v "|" $i; print v }')"
+    RT_LOG_FIRST="$(grep "^runc-log $RT_OP " "$RT_SURVEY" | head -1 | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[^ ]*\|/) { print $i; exit } }')"
+    RT_LOG_LAST="$(grep "^runc-log $RT_OP " "$RT_SURVEY" | tail -1 | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[^ ]*\|/) { print $i; exit } }')"
     RT_LOG_CTX="$(rt_priv_log_verdict "$RT_SURVEY" "$RT_OP" "${RT_ST##*|}")"
     RT_ST_COUNT=$((RT_ST_COUNT + 1))
     if [ "$RT_ST_COUNT" -eq 1 ]; then

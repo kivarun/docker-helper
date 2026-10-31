@@ -12603,6 +12603,13 @@ func TestUATWorkloadSELinuxInventoryAssertionsFailClosed(t *testing.T) {
 //     is distinguished from the ENOENT teardown case: it is not decisive
 //     by itself, but zero complete observations fail;
 //   - an empty survey fails (no evidence is never green).
+//
+// The fd-pinned reader (the P9-C corrective) extends the contract: a
+// record produced through the pinned file FD carries fd_rc / fd_err /
+// ino and completeness additionally requires fd_rc=0 — the P9-C UAT
+// caught the same mode-OK/context-lost TOCTOU biting this file read
+// after a flow-timing shift, so the runc-log evidence now comes from
+// the same pinned-identity mechanism as the runc-dir evidence.
 func TestUATWorkloadSELinuxRuncLogObservationClassifier(t *testing.T) {
 	const ctxC1 = "system_u:object_r:docker_helper_builder_state_t:s0:c1"
 	const ctxC2 = "system_u:object_r:docker_helper_builder_state_t:s0:c2"
@@ -12698,6 +12705,38 @@ func TestUATWorkloadSELinuxRuncLogObservationClassifier(t *testing.T) {
 		write()
 		if got := run("opG", ctxC1); !strings.HasPrefix(got, "VERDICT=FAIL reason=no-valid-observation valid=0 incomplete=0") {
 			t.Errorf("an empty survey must fail, got: %s", got)
+		}
+	})
+
+	t.Run("fd-pinned complete observations stay green", func(t *testing.T) {
+		write(
+			"runc-log opH fd_rc=0 fd_err=none ino=4401 st_rc=0 st_err=none cx_rc=0 cx_err=none 644|b|b|"+ctxC1,
+			"runc-log opH fd_rc=0 fd_err=none ino=4401 st_rc=0 st_err=none cx_rc=0 cx_err=none 644|b|b|"+ctxC1,
+		)
+		if got := run("opH", ctxC1); !strings.HasPrefix(got, "VERDICT=OK valid=2 incomplete=0") {
+			t.Errorf("two correct fd-pinned observations must stay green, got: %s", got)
+		}
+	})
+
+	t.Run("fd-pinned foreign-category observation fails", func(t *testing.T) {
+		write("runc-log opI fd_rc=0 fd_err=none ino=4402 st_rc=0 st_err=none cx_rc=0 cx_err=none 644|b|b|" + ctxC2)
+		got := run("opI", ctxC1)
+		if !strings.HasPrefix(got, "VERDICT=FAIL reason=foreign-category") || !strings.Contains(got, "foreign="+ctxC2) {
+			t.Errorf("an fd-pinned foreign-category observation must fail with the category named, got: %s", got)
+		}
+	})
+
+	t.Run("a failed fd open is incomplete evidence for the log file too", func(t *testing.T) {
+		write("runc-log opJ fd_rc=1 fd_err=open-failed-absent ino= st_rc=2 st_err=skipped-no-open-fd cx_rc=2 cx_err=skipped-no-open-fd ||?")
+		if got := run("opJ", ctxC1); !strings.HasPrefix(got, "VERDICT=FAIL reason=no-valid-observation valid=0 incomplete=1") {
+			t.Errorf("a file that vanished before the FD could be pinned must stay incomplete and fail, got: %s", got)
+		}
+	})
+
+	t.Run("an fd-pinned record with a lost context read still fails closed", func(t *testing.T) {
+		write("runc-log opK fd_rc=0 fd_err=none ino=4403 st_rc=0 st_err=none cx_rc=1 cx_err=No_such_file_or_directory 644|b|b|?")
+		if got := run("opK", ctxC1); !strings.HasPrefix(got, "VERDICT=FAIL reason=no-valid-observation valid=0 incomplete=1") {
+			t.Errorf("even a structurally unreachable fd_rc=0/cx-failed record must never validate, got: %s", got)
 		}
 	})
 }
@@ -12930,7 +12969,7 @@ func TestUATWorkloadSELinuxRuncDirObservationClassifier(t *testing.T) {
 	t.Run("an fd-pinned complete observation decides the verdict (the P9 TOCTOU resolved)", func(t *testing.T) {
 		write(
 			"runc opR fd_rc=0 fd_err=none ino=1701 st_rc=0 st_err=none cx_rc=0 cx_err=none 1700|docker-helper-builder|docker-helper-builder|"+ctxC1,
-			"runc-obs opR ev=DELETE,ISDIR fd_rc=1 fd_err=open-failed-dir-absent ino= st_rc=2 st_err=skipped-no-open-fd cx_rc=2 cx_err=skipped-no-open-fd ||?",
+			"runc-obs opR ev=DELETE,ISDIR fd_rc=1 fd_err=open-failed-absent ino= st_rc=2 st_err=skipped-no-open-fd cx_rc=2 cx_err=skipped-no-open-fd ||?",
 			"runc-gone opR ev=DELETE,ISDIR path=/run/docker-helper-builder/ops/opR/runc",
 		)
 		if got := run("opR", dirC1, "full"); !strings.HasPrefix(got, "VERDICT=OK ctx=OK mode=OK valid=1 incomplete=1 gone=1") {
@@ -12939,7 +12978,7 @@ func TestUATWorkloadSELinuxRuncDirObservationClassifier(t *testing.T) {
 	})
 
 	t.Run("a failed fd open is incomplete evidence, never a validation", func(t *testing.T) {
-		write("runc-obs opS ev=CREATE,ISDIR fd_rc=1 fd_err=open-failed-dir-absent ino= st_rc=2 st_err=skipped-no-open-fd cx_rc=2 cx_err=skipped-no-open-fd ||?")
+		write("runc-obs opS ev=CREATE,ISDIR fd_rc=1 fd_err=open-failed-absent ino= st_rc=2 st_err=skipped-no-open-fd cx_rc=2 cx_err=skipped-no-open-fd ||?")
 		if got := run("opS", dirC1, "full"); !strings.HasPrefix(got, "VERDICT=FAIL reason=created-but-unreadable ctx=FAIL mode=FAIL valid=0 incomplete=1 gone=0") {
 			t.Errorf("a dir that vanished before the FD could be pinned must stay incomplete and fail, got: %s", got)
 		}
@@ -13190,7 +13229,7 @@ rt_priv_runc_verdict "$RT_SURVEY" opGone '700|docker-helper-builder|docker-helpe
 		if got := field(rec, "fd_rc"); got != "1" {
 			t.Errorf("a vanished dir must journal the failed open, fd_rc=%s", got)
 		}
-		if got := field(rec, "fd_err"); got != "open-failed-dir-absent" {
+		if got := field(rec, "fd_err"); got != "open-failed-absent" {
 			t.Errorf("the failure label must distinguish an absent dir, fd_err=%s", got)
 		}
 		if got := field(rec, "st_rc"); got != "2" || !strings.Contains(rec, "st_err=skipped-no-open-fd") {
@@ -13221,6 +13260,45 @@ cat "$RT_SURVEY"
 		}
 		if !strings.HasPrefix(rec, "runc opLegacy st_rc=0 st_err=none ") {
 			t.Errorf("the legacy record shape must be preserved, got %q", rec)
+		}
+	})
+
+	t.Run("a deleted regular file still yields the complete pinned tuple", func(t *testing.T) {
+		out := run(`RT_SURVEY=` + strconv.Quote(survey) + `
+: > "$RT_SURVEY"
+echo payload > t/file && chmod 644 t/file
+printf 'REF=%s\n' "$(stat -c '%a|%U|%G|%i' "$PWD/t/file")"
+rt_priv_runc_open "$PWD/t/file" || echo OPEN-FAILED
+rm "$PWD/t/file"
+printf 'LINK=%s\n' "$(readlink /proc/self/fd/9)"
+rt_priv_runc_readfd
+printf 'GOT tuple=%s ino=%s st=%s/%s\n' "$RT_FD_TUPLE" "$RT_FD_INO" "$RT_FD_ST_RC" "$RT_FD_ST_ERR"
+`)
+		if strings.Contains(out, "OPEN-FAILED") {
+			t.Fatalf("the open must succeed while the file lives:\n%s", out)
+		}
+		ref := refLine(out)
+		var link, got string
+		for _, line := range strings.Split(out, "\n") {
+			if after, ok := strings.CutPrefix(line, "LINK="); ok {
+				link = strings.TrimSpace(after)
+			}
+			if after, ok := strings.CutPrefix(line, "GOT tuple="); ok {
+				got = strings.TrimSpace(after)
+			}
+		}
+		if !strings.HasSuffix(link, " (deleted)") {
+			t.Errorf("the deletion must be proven before the reads, got %q", link)
+		}
+		f := strings.Fields(got)
+		if len(f) != 3 {
+			t.Fatalf("malformed GOT line in reader output:\n%s", out)
+		}
+		if f[0] != ref[0]+"|"+ref[1]+"|"+ref[2] || strings.TrimPrefix(f[1], "ino=") != ref[3] {
+			t.Errorf("the pinned FD must return the pre-delete tuple and inode for a regular file too, got %q", got)
+		}
+		if !strings.HasPrefix(f[2], "st=0/") {
+			t.Errorf("the pinned read must succeed after the removal, got %q", f[2])
 		}
 	})
 
