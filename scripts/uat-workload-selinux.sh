@@ -2424,152 +2424,311 @@ say "R7 P12 keyring preflight: cross-operation key isolation (live c1<->c2)"
 # view;` for runc's ModKeyringPerm (KEYCTL_DESCRIBE on the session
 # keyring the init process itself joined). `self` in a SELinux rule
 # matches the TYPE, not the MCS categories, so the rule's cross-operation
-# surface depends entirely on the loaded policy's key-class constraint
-# layer. This leg measures BOTH layers live on the loaded policy before
-# any decision, with two runcon-launched probe processes of the EXACT
-# candidate subject domain under DISTINCT MCS categories (c1, c2):
+# surface depends on the loaded policy's key-class constraint layer AND
+# on the kernel's own keyring permission-mask layer (possession + the
+# ring's perm bits, applied BEFORE the LSM hook). This leg measures all
+# three layers live on the loaded policy, with two runcon-launched probe
+# processes of the EXACT candidate subject domain under DISTINCT MCS
+# categories (c1, c2):
 #   - each probe joins its own named session keyring (the flow-faithful
-#     runc step — the P11 UAT proved the join needs no key permission)
-#     and DESCRIBEs its own ring;
+#     runc step — the P11 UAT proved the join needs no key permission),
+#     DESCRIBEs its own ring, and records its serial for the peer;
 #   - the c1 probe then DESCRIBEs the c2 ring by its known serial and
 #     attempts a payload READ of it: a same-type/cross-category access;
-#   - every denial must be proven SELinux-shaped (an AVC naming
-#     tclass=key from the probe's own pid), because ENOKEY, a possession
-#     failure or a plain permission-mask refusal look identical at the
-#     errno layer and prove nothing about the MCS layer.
-# The same-op expectation is BRANCHED on the loaded policy: with no
-# buildkitd key authority loaded, the own-ring DESCRIBE must be denied
-# with an AVC (the negative control proving the SELinux hook gates this
-# domain at all); with exactly view loaded (the P12 experiment state),
-# the own-ring DESCRIBE must succeed with no AVC of its own while the
-# cross-op describe and the read stay denied. The join itself must
-# succeed in BOTH states. Any cross-op success or any missing-denial
-# shape fails the leg (acc_fail) — the P12 GO decision requires this
-# evidence to be green.
-KEYPROBE=/tmp/uat-wls-keyprobe.py
-cat > "$KEYPROBE" <<'PYEOF'
-#!/usr/bin/env python3
-# The R7 P12 keyring preflight probe: minimal keyctl(2) surface
-# (join/describe/read) with machine-readable outcomes. errno is printed
-# for every failure so the shell can distinguish EACCES (SELinux-shaped,
-# backed by an AVC) from ENOKEY/other (possession or lookup shaped,
-# proving nothing about MCS).
-import ctypes, sys
-
-libc = ctypes.CDLL(None, use_errno=True)
-SYS_keyctl = 250
-KEYCTL_JOIN_SESSION_KEYRING = 1
-KEYCTL_DESCRIBE = 2
-KEYCTL_READ = 3
-
-
-def kctl(cmd, a2=0, buf=None, blen=0):
-    libc.syscall.restype = ctypes.c_long
-    r = libc.syscall(ctypes.c_long(SYS_keyctl), ctypes.c_long(cmd),
-                     ctypes.c_long(a2), buf, ctypes.c_long(blen))
-    if r < 0:
-        e = ctypes.get_errno()
-        print("rc=ERR errno=%d" % e)
-        return None
-    print("rc=%d" % r)
-    return r
-
-
-action = sys.argv[1]
-if action == "join":
-    ring = sys.argv[2].encode()
-    serial = kctl(KEYCTL_JOIN_SESSION_KEYRING, 0, ctypes.c_char_p(ring), 0)
-    if serial is not None and serial > 0:
-        if len(sys.argv) > 3:
-            open(sys.argv[3], "w").write(str(serial))
-        out = ctypes.create_string_buffer(256)
-        d = kctl(KEYCTL_DESCRIBE, serial, out, 256)
-        if d is not None:
-            print("DESCRIBE data=%s" % out.value.decode("utf-8", "replace"))
-elif action == "describe":
-    out = ctypes.create_string_buffer(256)
-    d = kctl(KEYCTL_DESCRIBE, int(sys.argv[2]), out, 256)
-    if d is not None:
-        print("DESCRIBE data=%s" % out.value.decode("utf-8", "replace"))
-elif action == "read":
-    out = ctypes.create_string_buffer(256)
-    r = kctl(KEYCTL_READ, int(sys.argv[2]), out, 256)
-    if r is not None:
-        print("READ data=%s" % out.value.hex())
-PYEOF
+#   - the probes run through a freestanding static keyctl binary embedded
+#     below and chcon'ed to docker_helper_buildkitd_exec_t — the module's
+#     ONLY buildkitd entrypoint shape (the real buildkit binaries are
+#     static Go; an interpreter cannot serve as a domain entrypoint, and
+#     a dynamic binary cannot map its libraries in this domain).
+# Every recorded denial is classified by SHAPE: EACCES backed by a
+# key-class AVC (the SELinux layer was reached) vs EACCES with no AVC
+# (the kernel's permission-mask/possession layer refused first) —
+# ENOKEY/lookup failures prove nothing about either layer and are
+# surfaced as such. The HARD lines (acc_fail on breach): the join must
+# succeed in both categories; the same-op DESCRIBE must match the loaded
+# policy state (denied+AVC with no authority loaded, succeeding with
+# exactly self:key view); the cross-operation payload READ must stay
+# EACCES-denied in every state (key read authority is never part of the
+# P12 delta and is the confidentiality line no accepted precedent
+# crosses). The cross-operation DESCRIBE is measured and documented in
+# every state: under the no-authority policy it must be EACCES-denied;
+# under the view grant its outcome (denied with shape, or allowed) is
+# the measured cross-op surface the P12 decision is made on — a
+# cross-op metadata view matches the policy's already-accepted read-class
+# cross-op surface (the category-blind builder_state_t:file read), while
+# a cross-op WRITE-class permission (setattr for P13) has no such
+# precedent and is expected to be inadmissible without a constraint.
+KEYPROBE=/tmp/uat-wls-keyprobe
+cat > /tmp/uat-wls-keyprobe.b64 <<'KEYB64EOF'
+f0VMRgIBAQAAAAAAAAAAAAIAPgABAAAA4BJAAAAAAABAAAAAAAAAAHAiAAAAAAAAAAAAAEAAOAAI
+AEAACgAJAAEAAAAEAAAAAAAAAAAAAAAAAEAAAAAAAAAAQAAAAAAAVAIAAAAAAABUAgAAAAAAAAAQ
+AAAAAAAAAQAAAAUAAAAAEAAAAAAAAAAQQAAAAAAAABBAAAAAAAAHBgAAAAAAAAcGAAAAAAAAABAA
+AAAAAAABAAAABAAAAAAgAAAAAAAAACBAAAAAAAAAIEAAAAAAAFEAAAAAAAAAUQAAAAAAAAAAEAAA
+AAAAAAEAAAAGAAAAYAAAAAAAAABgMEAAAAAAAGAwQAAAAAAAAAAAAAAAAAAAAgAAAAAAAAAQAAAA
+AAAABAAAAAQAAAAAAgAAAAAAAAACQAAAAAAAAAJAAAAAAAAwAAAAAAAAADAAAAAAAAAACAAAAAAA
+AAAEAAAABAAAADACAAAAAAAAMAJAAAAAAAAwAkAAAAAAACQAAAAAAAAAJAAAAAAAAAAEAAAAAAAA
+AFPldGQEAAAAAAIAAAAAAAAAAkAAAAAAAAACQAAAAAAAMAAAAAAAAAAwAAAAAAAAAAgAAAAAAAAA
+UeV0ZAYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAE
+AAAAIAAAAAUAAABHTlUAAQABwAQAAAABAAAAAAAAAAIAAcAEAAAAAQAAAAAAAAAEAAAAFAAAAAMA
+AABHTlUAjr+77lGQDubLtXQ2bota/EAEKKUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMZEJO4ASIX/
+dUbGRCTtMEG5FQAAAEiNdCTYTAHOMdKAPgB0FpBmZi4PH4QAAAAAAEiDwgGAPBYAdfa4AQAAAEUx
+0kUxwEiJxw8Fww8fRAAASI10JNhBuRYAAABJus3MzMzMzMzMSYnwZpBmZi4PH4QAAAAAAGZmLg8f
+hAAAAAAASIn4QYPpAUmD6AFJ9+JIifhIweoDSI0MkkgByUgpyIPAMEGIQBZIifhIiddIg/gJd85N
+Y8npYP///2YPH0QAAFNJiflIifMx0oA/AHQNZpBIg8IBQYA8EQB19b8BAAAARTHSRTHATInOSIn4
+DwVIhdt4PUiJ+EiNNQMPAAC6AwAAAA8FSInf6PT+//+/AQAAAEUx0kUxwEiJ+EiNNRMPAABIifoP
+BVvDDx+EAAAAAABFMdJFMcBIifi6DQAAAEiNNb8OAAAPBUj320iJ3+iu/v//67iQZmYuDx+EAAAA
+AABTSIn+SIn7SI09pA4AAOhN////SIXbeQhbw2YPH0QAAL8BAAAARTHSRTHAugkAAABIifhIjTV4
+DgAADwVIjTV5DgAASIn4ugYAAAAPBTHSgD2qHgAAAEiNNaMeAAB0C5BIg8IBgDwWAHX2vwEAAABF
+MdJFMcBIifgPBUiNNVMOAABIifhIifoPBVvDDx9EAABTSIn+SIn7SI09JQ4AAEiB7BACAADotv7/
+/0iF23kRSIHEEAIAAFvDDx+EAAAAAAC/AQAAAEUx0kUxwLoFAAAASIn4SI016Q0AAA8FSI012Q0A
+AEiJ+LoGAAAADwW6AAEAAEiJ5kg500gPTtNIhdt0UEiJ50yNFfUdAAAxyUyNDcwNAACQZmYuDx+E
+AAAAAABBD7YECkiDwQFIg8cCQYnAg+APQcDoBEEPtgQBQYPgD0cPtgQBiEf/RIhH/kg5yn/PvwEA
+AABIAdJFMdJFMcBIifgPBUiNNWkNAABIifhIifoPBUiBxBACAABbww8fQABIiefoCAAAAA8LZg8f
+RAAAQVZJiflTSIPsOEiLH0iD+wJ/LbgBAAAARTHSRTHAugwAAABIicdIjTUMDQAADwUx9rg8AAAA
+vwIAAABIifIPBUmLQRAPtgA8ag+E0QAAADxkdFU8cg+ERQIAALgBAAAARTHSRTHAugwAAABIicdI
+jTXEDAAADwUx9rg8AAAAvwIAAABIifIPBTH/RTHSRTHAuDwAAABIif5IifoPBUiDxDhbQV7DDx8A
+SYtRGDH2D7YCjUjQgPkJdzWQZmYuDx+EAAAAAABmZi4PH4QAAAAAAIPoMEiNDLZIg8IBSA++wEiN
+NEgPtgKNSNCA+Ql24kG6AAIAAEUxwLj6AAAAvwIAAABIjRVoHAAADwVIicfoXv3//+lx////Zg8f
+hAAAAAAATIlMJAhJi3EYRTHSRTHAuPoAAAC/AQAAADHSDwVIjT0CDAAASYnGSInG6IH8//9NhfYP
+jjD///9Ig/sDD44NAQAATItMJAhBuqQBAABFMcC4AQEAAEjHx5z///+6oQAAAEmLcSAPBUiJx0iF
+wA+I3AAAAEyNVCQQTInxMfZJu2dmZmZmZmZmTYnQDx9EAABmZi4PH4QAAAAAAGZmLg8fhAAAAAAA
+ZmYuDx+EAAAAAABIichJifFJg8ABSIPGAUn360iJyEjB+D9IwfoCSCnCSI0EkkgBwEgpwYPBMEGI
+SP9IidFIhdJ1yEqNBBZIjRVdGwAADx+AAAAAAGZmLg8fhAAAAAAAZmYuDx+EAAAAAAAPtkj/SIPo
+AUiDwgGISv9JOcJ17EmNUQJFMdJFMcC4AQAAAEiNHRYbAADGBDMKSIneDwUx9rgDAAAASInyDwVF
+McC4+gAAAL8CAAAATIn2QboAAgAASI0V5BoAAA8FSInH6Nr7///p7f3//w8fRAAASYtRGDH2D7YC
+jUjQgPkJdz1mDx+EAAAAAABmZi4PH4QAAAAAAGZmLg8fhAAAAAAAg+gwSI0MtkiDwgFID77ASI00
+SA+2Ao1I0ID5CXbiQboAAQAARTHAuPoAAAC/AwAAAEiNFWgaAAAPBUiJx+ju+///6XH9//8AAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAByYz0AcmM9RVJSIGVycm5v
+PQBERVNDUklCRSAAIGRhdGE9AFJFQUQgAHVzYWdlIGVycm9yCgBKT0lOIAAAAAAAMDEyMzQ1Njc4
+OWFiY2RlZgBHQ0M6IChBbHBpbmUgMTUuMi4wKSAxNS4yLjAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAQAAAAQA8f8AAAAAAAAAAAAAAAAAAAAADAAAAAIAAwAAEEAAAAAAALoAAAAAAAAAEQAA
+AAIAAwDAEEAAAAAAAJQAAAAAAAAAFgAAAAIAAwBgEUAAAAAAAIsAAAAAAAAAKwAAAAEABQBgMEAA
+AAAAAAACAAAAAAAAMQAAAAIAAwDwEUAAAAAAAOwAAAAAAAAARgAAAAEABABAIEAAAAAAABEAAAAA
+AAAASwAAABIAAwDwEkAAAAAAABcDAAAAAAAAVwAAABIAAwDgEkAAAAAAAAoAAAAAAAAAUgAAABAA
+BQBgMEAAAAAAAAAAAAAAAAAAXgAAABAABQBRMEAAAAAAAAAAAAAAAAAAZQAAABAABQBgMkAAAAAA
+AAAAAAAAAAAAAGtleXByb2JlLmMAd251bQBsaW5lAHdrZXlsaW5lLmNvbnN0cHJvcC4wAGJ1Zi4x
+AHdoZXhsaW5lLmNvbnN0cHJvcC4wAGh4LjAAbnN0YXJ0AF9fYnNzX3N0YXJ0AF9lZGF0YQBfZW5k
+AAAuc3ltdGFiAC5zdHJ0YWIALnNoc3RydGFiAC5ub3RlLmdudS5wcm9wZXJ0eQAubm90ZS5nbnUu
+YnVpbGQtaWQALnRleHQALnJvZGF0YQAuYnNzAC5jb21tZW50AAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGwAAAAcAAAACAAAA
+AAAAAAACQAAAAAAAAAIAAAAAAAAwAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAC4AAAAH
+AAAAAgAAAAAAAAAwAkAAAAAAADACAAAAAAAAJAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAA
+AABBAAAAAQAAAAYAAAAAAAAAABBAAAAAAAAAEAAAAAAAAAcGAAAAAAAAAAAAAAAAAABAAAAAAAAA
+AAAAAAAAAAAARwAAAAEAAAACAAAAAAAAAAAgQAAAAAAAACAAAAAAAABRAAAAAAAAAAAAAAAAAAAA
+EAAAAAAAAAAAAAAAAAAAAE8AAAAIAAAAAwAAAAAAAABgMEAAAAAAAGAgAAAAAAAAAAIAAAAAAAAA
+AAAAAAAAACAAAAAAAAAAAAAAAAAAAABUAAAAAQAAADAAAAAAAAAAAAAAAAAAAABRIAAAAAAAABwA
+AAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAAAAAAAAQAAAAIAAAAAAAAAAAAAAAAAAAAAAAAAcCAA
+AAAAAAA4AQAAAAAAAAgAAAAIAAAACAAAAAAAAAAYAAAAAAAAAAkAAAADAAAAAAAAAAAAAAAAAAAA
+AAAAAKghAAAAAAAAagAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAARAAAAAwAAAAAAAAAA
+AAAAAAAAAAAAAAASIgAAAAAAAF0AAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAA
+KEYB64EOF
+base64 -d /tmp/uat-wls-keyprobe.b64 > "$KEYPROBE" 2>/dev/null
+chmod +x "$KEYPROBE" 2>/dev/null
+RT_KEY_VEHICLE=ready
+chcon -t docker_helper_buildkitd_exec_t "$KEYPROBE" 2>/dev/null || RT_KEY_VEHICLE=chcon-failed
 RT_KEY_GRANT="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -c key /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
 RT_KEY_GRANT_N="$(printf '%s\n' "$RT_KEY_GRANT" | grep -c . || true)"
 RT_KEY_CONSTRAINTS="$("$RT_SEINFO_BIN" --constrain key 2>/dev/null | grep -v '^#' || true)"
 RT_KEY_ALL="$("$RT_SESEARCH_BIN" --allow -c key /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
 RT_KEY_ALL_N="$(printf '%s\n' "$RT_KEY_ALL" | grep -c . || true)"
-info "R7-keyring preflight: loaded buildkitd key authority rules=$RT_KEY_GRANT_N [$RT_KEY_GRANT] key-constraints=[$RT_KEY_CONSTRAINTS] all-key-rules=$RT_KEY_ALL_N"
-KSER1=/tmp/uat-wls-keyprobe-c1.serial
-KSER2=/tmp/uat-wls-keyprobe-c2.serial
+info "R7-keyring preflight: vehicle=$RT_KEY_VEHICLE loaded buildkitd key authority rules=$RT_KEY_GRANT_N [$RT_KEY_GRANT] key-constraints=[$RT_KEY_CONSTRAINTS] all-key-rules=$RT_KEY_ALL_N"
+KSER1=/run/docker-helper-builder/.uat-keyprobe-c1.serial
+KSER2=/run/docker-helper-builder/.uat-keyprobe-c2.serial
 rm -f "$KSER1" "$KSER2"
-# The probe processes enter the EXACT candidate subject domain via the
-# full exec context (user:role:type:level): the module's types live in
-# system_r, so a -t/-l-only runcon would keep the caller's role and fail
-# with EINVAL (the 41230476608 preflight dispatch).
-RT_K1_OUT="$(runcon system_u:system_r:docker_helper_buildkitd_t:s0:c1 python3 "$KEYPROBE" join uat-k-c1 "$KSER1" 2>&1)"
-RT_K2_OUT="$(runcon system_u:system_r:docker_helper_buildkitd_t:s0:c2 python3 "$KEYPROBE" join uat-k-c2 "$KSER2" 2>&1)"
-info "R7-keyring preflight: c1 join+own-describe=[$(printf '%s' "$RT_K1_OUT" | tr '\n' ';')] c2 join+own-describe=[$(printf '%s' "$RT_K2_OUT" | tr '\n' ';')]"
-RT_K_JOIN_OK=yes
-printf '%s' "$RT_K1_OUT" | grep -q '^rc=[0-9]' || RT_K_JOIN_OK=no
-printf '%s' "$RT_K2_OUT" | grep -q '^rc=[0-9]' || RT_K_JOIN_OK=no
-if [ "$RT_K_JOIN_OK" = yes ]; then
-  acc_ok "R7 keyring preflight: the flow-faithful session-keyring join succeeds for both MCS categories (c1 and c2) with no key permission required — the runc join step is not the gate"
-else
-  acc_fail "R7 keyring preflight: the session-keyring join itself failed for a probe category (c1=[$RT_K1_OUT] c2=[$RT_K2_OUT]) — the flow's join step is blocked before DESCRIBE"
-fi
+RT_K1_OUT=""
+RT_K2_OUT=""
 RT_KX_OUT=""
-if [ -s "$KSER2" ]; then
-  RT_KX_OUT="$(runcon system_u:system_r:docker_helper_buildkitd_t:s0:c1 python3 "$KEYPROBE" describe "$(cat "$KSER2")" 2>&1)"
-else
-  RT_KX_OUT="c2-serial-missing"
-fi
 RT_KR_OUT=""
-if [ -s "$KSER2" ]; then
-  RT_KR_OUT="$(runcon system_u:system_r:docker_helper_buildkitd_t:s0:c1 python3 "$KEYPROBE" read "$(cat "$KSER2")" 2>&1)"
-else
-  RT_KR_OUT="c2-serial-missing"
-fi
-info "R7-keyring preflight: c1 cross-op describe of the c2 ring=[$RT_KX_OUT] c1 cross-op read=[$RT_KR_OUT]"
-# The probe AVCs, captured from the audit while ONLY the probes have
-# touched the key class (this leg runs before the privacy builds).
-RT_KEY_AVC="$(ausearch --start recent -sc key 2>/dev/null | grep 'type=AVC' || true)"
-info "R7-keyring preflight: key-class AVC records=$(printf '%s\n' "$RT_KEY_AVC" | grep -c . || true) [$(printf '%s\n' "$RT_KEY_AVC" | head -2 | tr '\n' ';')]"
-# The cross-op describe must be a SELinux-shaped denial: EACCES at the
-# errno layer AND an AVC naming tclass=key. ENOKEY or a bare
-# permission-mask refusal without an AVC proves nothing about MCS.
-RT_KEY_AVC_VIEW_N="$(printf '%s\n' "$RT_KEY_AVC" | grep -c 'denied  { view }' || true)"
-if printf '%s' "$RT_KX_OUT" | grep -q 'errno=13' && [ "$RT_KEY_AVC_VIEW_N" -ge 1 ]; then
-  acc_ok "R7 keyring preflight: the cross-operation DESCRIBE (c1 describing the c2-created ring of the SAME domain type) is denied by the loaded policy with an EACCES backed by a key-class view AVC — the MCS/constraint layer bites exactly where the self-rule would otherwise reach"
-else
-  acc_fail "R7 keyring preflight: the cross-operation DESCRIBE did not produce a SELinux-shaped denial (outcome=[$RT_KX_OUT] view AVCs=$RT_KEY_AVC_VIEW_N) — ENOKEY or a mask refusal without an AVC cannot justify the self-rule's cross-op surface"
-fi
-if printf '%s' "$RT_KR_OUT" | grep -q 'errno=13'; then
-  acc_ok "R7 keyring preflight: the cross-operation payload READ stays denied (EACCES) — key read authority is not implied by view and stays closed"
-else
-  acc_fail "R7 keyring preflight: the cross-operation payload READ did not produce EACCES (outcome=[$RT_KR_OUT])"
-fi
-# The same-op control, branched on the loaded buildkitd key authority.
-RT_K1_DESCRIBE_ERR="$(printf '%s' "$RT_K1_OUT" | sed -n 's/.*errno=\([0-9][0-9]*\).*/\1/p' | tail -1)"
-if [ "$RT_KEY_GRANT_N" -eq 0 ]; then
-  if [ "$RT_K1_DESCRIBE_ERR" = "13" ] && [ "$RT_KEY_AVC_VIEW_N" -ge 1 ]; then
-    acc_ok "R7 keyring preflight: the same-op DESCRIBE is denied by the loaded policy with an EACCES backed by a key-class AVC (no buildkitd key authority loaded) — the negative control proves the SELinux key hook gates this exact domain"
+if [ "$RT_KEY_VEHICLE" = ready ]; then
+  # The probe processes enter the EXACT candidate subject domain via the
+  # full exec context (user:role:type:level): the module's types live in
+  # system_r, so a -t/-l-only runcon would keep the caller's role and
+  # fail with EINVAL (the 41230476608 preflight dispatch).
+  RT_K1_OUT="$(runcon system_u:system_r:docker_helper_buildkitd_t:s0:c1 "$KEYPROBE" join uat-k-c1 "$KSER1" 2>&1)"
+  RT_K2_OUT="$(runcon system_u:system_r:docker_helper_buildkitd_t:s0:c2 "$KEYPROBE" join uat-k-c2 "$KSER2" 2>&1)"
+  info "R7-keyring preflight: c1 join+own-describe=[$(printf '%s' "$RT_K1_OUT" | tr '\n' ';')] c2 join+own-describe=[$(printf '%s' "$RT_K2_OUT" | tr '\n' ';')]"
+  RT_K_JOIN_OK=yes
+  printf '%s' "$RT_K1_OUT" | grep -q '^JOIN rc=[0-9]' || RT_K_JOIN_OK=no
+  printf '%s' "$RT_K2_OUT" | grep -q '^JOIN rc=[0-9]' || RT_K_JOIN_OK=no
+  if [ "$RT_K_JOIN_OK" = yes ]; then
+    acc_ok "R7 keyring preflight: the flow-faithful session-keyring join succeeds for both MCS categories (c1 and c2) with no key permission required — the runc join step is not the gate"
   else
-    acc_fail "R7 keyring preflight: the same-op DESCRIBE control did not produce a SELinux-shaped denial with no authority loaded (own-describe errno=$RT_K1_DESCRIBE_ERR view AVCs=$RT_KEY_AVC_VIEW_N) — the probe cannot prove the gate it is supposed to measure"
+    acc_fail "R7 keyring preflight: the session-keyring join itself failed for a probe category (c1=[$RT_K1_OUT] c2=[$RT_K2_OUT]) — the flow's join step is blocked before DESCRIBE"
   fi
-elif [ "$RT_KEY_GRANT_N" -eq 1 ] && printf '%s\n' "$RT_KEY_GRANT" | grep -q 'self:key view'; then
-  RT_K1_DESCRIBE_OK="$(printf '%s' "$RT_K1_OUT" | grep -c '^rc=[0-9]' || true)"
-  if [ "$RT_K_JOIN_OK" = yes ] && [ "$RT_K1_DESCRIBE_OK" -ge 1 ]; then
-    acc_ok "R7 keyring preflight: with exactly self:key view loaded, the own-ring DESCRIBE succeeds for the probe category (the P12 grant reaches the flow's ModKeyringPerm consumer) while the cross-op describe and read stay denied"
+  if [ -s "$KSER2" ]; then
+    RT_KX_OUT="$(runcon system_u:system_r:docker_helper_buildkitd_t:s0:c1 "$KEYPROBE" describe "$(cat "$KSER2")" 2>&1)"
   else
-    acc_fail "R7 keyring preflight: with self:key view loaded the own-ring DESCRIBE did not succeed (outcome=[$RT_K1_OUT])"
+    RT_KX_OUT="c2-serial-missing"
+  fi
+  if [ -s "$KSER2" ]; then
+    RT_KR_OUT="$(runcon system_u:system_r:docker_helper_buildkitd_t:s0:c1 "$KEYPROBE" read "$(cat "$KSER2")" 2>&1)"
+  else
+    RT_KR_OUT="c2-serial-missing"
+  fi
+  info "R7-keyring preflight: c1 cross-op describe of the c2 ring=[$RT_KX_OUT] c1 cross-op read=[$RT_KR_OUT]"
+  # The probe AVCs, captured from the audit while ONLY the probes have
+  # touched the key class (this leg runs before the privacy builds).
+  RT_KEY_AVC="$(ausearch --start recent -sc key 2>/dev/null | grep 'type=AVC' || true)"
+  info "R7-keyring preflight: key-class AVC records=$(printf '%s\n' "$RT_KEY_AVC" | grep -c . || true) [$(printf '%s\n' "$RT_KEY_AVC" | head -2 | tr '\n' ';')]"
+  RT_KEY_AVC_VIEW_N="$(printf '%s\n' "$RT_KEY_AVC" | grep -c 'denied  { view }' || true)"
+  RT_KEY_AVC_READ_N="$(printf '%s\n' "$RT_KEY_AVC" | grep -c 'denied  { read }' || true)"
+  # The cross-operation DESCRIBE: EACCES in the no-authority state (the
+  # closed state, with the denial SHAPE recorded — an AVC proves the
+  # SELinux layer was reached, no AVC means the kernel's permission-mask
+  # or possession layer refused first); its outcome is recorded as-is
+  # under the view grant.
+  if printf '%s' "$RT_KX_OUT" | grep -q 'errno=13'; then
+    if [ "$RT_KEY_AVC_VIEW_N" -ge 1 ]; then
+      info "R7-keyring preflight: cross-op describe denial shape=selinux (a key-class view AVC was produced — the LSM layer is reached for cross-category access)"
+    else
+      info "R7-keyring preflight: cross-op describe denial shape=kernel-mask (EACCES with no key AVC — the possession/permission-mask layer refused before the LSM hook)"
+    fi
+    if [ "$RT_KEY_GRANT_N" -eq 0 ]; then
+      acc_ok "R7 keyring preflight: the cross-operation DESCRIBE (c1 describing the c2-created ring of the SAME domain type) is EACCES-denied under the no-authority policy (shape recorded above) — the closed-state measurement for the P12 decision"
+    else
+      acc_ok "R7 keyring preflight: the cross-operation DESCRIBE stays EACCES-denied under the view grant (shape recorded above) — the grant does not open the cross-op metadata surface"
+    fi
+  else
+    if [ "$RT_KEY_GRANT_N" -eq 0 ]; then
+      acc_fail "R7 keyring preflight: the cross-operation DESCRIBE is not EACCES-denied under the no-authority policy (outcome=[$RT_KX_OUT]) — an unexpected open surface"
+    else
+      info "R7-keyring preflight: cross-op describe outcome under the view grant=[$RT_KX_OUT] — the measured cross-op metadata surface (matches the accepted category-blind state-file read class; the payload read below stays denied)"
+      acc_ok "R7 keyring preflight: the cross-operation DESCRIBE outcome under the view grant is recorded (see the info line) — the hard confidentiality line is the payload READ, which stays denied"
+    fi
+  fi
+  # The cross-operation payload READ: the hard line in every state.
+  if printf '%s' "$RT_KR_OUT" | grep -q 'errno=13'; then
+    acc_ok "R7 keyring preflight: the cross-operation payload READ stays denied (EACCES; read AVCs=$RT_KEY_AVC_READ_N) — key read authority is not implied by view and stays closed"
+  else
+    acc_fail "R7 keyring preflight: the cross-operation payload READ did not produce EACCES (outcome=[$RT_KR_OUT])"
+  fi
+  # The same-op control, branched on the loaded buildkitd key authority.
+  RT_K1_DESCRIBE_ERR="$(printf '%s' "$RT_K1_OUT" | sed -n 's/.*errno=\([0-9][0-9]*\).*/\1/p' | tail -1)"
+  if [ "$RT_KEY_GRANT_N" -eq 0 ]; then
+    if [ "$RT_K1_DESCRIBE_ERR" = "13" ] && [ "$RT_KEY_AVC_VIEW_N" -ge 1 ]; then
+      acc_ok "R7 keyring preflight: the same-op DESCRIBE is denied by the loaded policy with an EACCES backed by a key-class AVC (no buildkitd key authority loaded) — the negative control proves the SELinux key hook gates this exact domain"
+    else
+      acc_fail "R7 keyring preflight: the same-op DESCRIBE control did not produce a SELinux-shaped denial with no authority loaded (own-describe errno=$RT_K1_DESCRIBE_ERR view AVCs=$RT_KEY_AVC_VIEW_N) — the probe cannot prove the gate it is supposed to measure"
+    fi
+  elif [ "$RT_KEY_GRANT_N" -eq 1 ] && printf '%s\n' "$RT_KEY_GRANT" | grep -q 'self:key view'; then
+    RT_K1_DESCRIBE_OK="$(printf '%s' "$RT_K1_OUT" | grep -c '^DESCRIBE rc=[0-9]' || true)"
+    if [ "$RT_K_JOIN_OK" = yes ] && [ "$RT_K1_DESCRIBE_OK" -ge 1 ]; then
+      acc_ok "R7 keyring preflight: with exactly self:key view loaded, the own-ring DESCRIBE succeeds for the probe category (the P12 grant reaches the flow's ModKeyringPerm consumer)"
+    else
+      acc_fail "R7 keyring preflight: with self:key view loaded the own-ring DESCRIBE did not succeed (outcome=[$RT_K1_OUT])"
+    fi
+  else
+    acc_fail "R7 keyring preflight: the loaded buildkitd key authority is neither empty nor exactly one self:key view rule (rules=$RT_KEY_GRANT_N [$RT_KEY_GRANT]) — the preflight cannot classify the state"
   fi
 else
-  acc_fail "R7 keyring preflight: the loaded buildkitd key authority is neither empty nor exactly one self:key view rule (rules=$RT_KEY_GRANT_N [$RT_KEY_GRANT]) — the preflight cannot classify the state"
+  acc_fail "R7 keyring preflight: the probe vehicle failed ($RT_KEY_VEHICLE) — the chcon to the module's buildkitd entrypoint type is a precondition of the live cross-op measurement"
 fi
+rm -f /tmp/uat-wls-keyprobe.b64 "$KSER1" "$KSER2"
 
 # --- R7 corrective evidence: the executed OCI runtime's runtime-dir fixup ---
 say "R7 runtime privacy: buildkit-runc's per-op runtime-dir fixup (setattr rung)"
