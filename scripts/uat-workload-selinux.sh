@@ -2418,6 +2418,153 @@ else
   acc_blocked "S14 hostile fixture build failed (source-image escalation proof impossible)"
 fi
 
+# --- scenario R7 P12 keyring preflight: cross-operation key isolation -----
+say "R7 P12 keyring preflight: cross-operation key isolation (live c1<->c2)"
+# The P12 candidate grant is `allow docker_helper_buildkitd_t self:key
+# view;` for runc's ModKeyringPerm (KEYCTL_DESCRIBE on the session
+# keyring the init process itself joined). `self` in a SELinux rule
+# matches the TYPE, not the MCS categories, so the rule's cross-operation
+# surface depends entirely on the loaded policy's key-class constraint
+# layer. This leg measures BOTH layers live on the loaded policy before
+# any decision, with two runcon-launched probe processes of the EXACT
+# candidate subject domain under DISTINCT MCS categories (c1, c2):
+#   - each probe joins its own named session keyring (the flow-faithful
+#     runc step — the P11 UAT proved the join needs no key permission)
+#     and DESCRIBEs its own ring;
+#   - the c1 probe then DESCRIBEs the c2 ring by its known serial and
+#     attempts a payload READ of it: a same-type/cross-category access;
+#   - every denial must be proven SELinux-shaped (an AVC naming
+#     tclass=key from the probe's own pid), because ENOKEY, a possession
+#     failure or a plain permission-mask refusal look identical at the
+#     errno layer and prove nothing about the MCS layer.
+# The same-op expectation is BRANCHED on the loaded policy: with no
+# buildkitd key authority loaded, the own-ring DESCRIBE must be denied
+# with an AVC (the negative control proving the SELinux hook gates this
+# domain at all); with exactly view loaded (the P12 experiment state),
+# the own-ring DESCRIBE must succeed with no AVC of its own while the
+# cross-op describe and the read stay denied. The join itself must
+# succeed in BOTH states. Any cross-op success or any missing-denial
+# shape fails the leg (acc_fail) — the P12 GO decision requires this
+# evidence to be green.
+KEYPROBE=/tmp/uat-wls-keyprobe.py
+cat > "$KEYPROBE" <<'PYEOF'
+#!/usr/bin/env python3
+# The R7 P12 keyring preflight probe: minimal keyctl(2) surface
+# (join/describe/read) with machine-readable outcomes. errno is printed
+# for every failure so the shell can distinguish EACCES (SELinux-shaped,
+# backed by an AVC) from ENOKEY/other (possession or lookup shaped,
+# proving nothing about MCS).
+import ctypes, sys
+
+libc = ctypes.CDLL(None, use_errno=True)
+SYS_keyctl = 250
+KEYCTL_JOIN_SESSION_KEYRING = 1
+KEYCTL_DESCRIBE = 2
+KEYCTL_READ = 3
+
+
+def kctl(cmd, a2=0, buf=None, blen=0):
+    libc.syscall.restype = ctypes.c_long
+    r = libc.syscall(ctypes.c_long(SYS_keyctl), ctypes.c_long(cmd),
+                     ctypes.c_long(a2), buf, ctypes.c_long(blen))
+    if r < 0:
+        e = ctypes.get_errno()
+        print("rc=ERR errno=%d" % e)
+        return None
+    print("rc=%d" % r)
+    return r
+
+
+action = sys.argv[1]
+if action == "join":
+    ring = sys.argv[2].encode()
+    serial = kctl(KEYCTL_JOIN_SESSION_KEYRING, 0, ctypes.c_char_p(ring), 0)
+    if serial is not None and serial > 0:
+        if len(sys.argv) > 3:
+            open(sys.argv[3], "w").write(str(serial))
+        out = ctypes.create_string_buffer(256)
+        d = kctl(KEYCTL_DESCRIBE, serial, out, 256)
+        if d is not None:
+            print("DESCRIBE data=%s" % out.value.decode("utf-8", "replace"))
+elif action == "describe":
+    out = ctypes.create_string_buffer(256)
+    d = kctl(KEYCTL_DESCRIBE, int(sys.argv[2]), out, 256)
+    if d is not None:
+        print("DESCRIBE data=%s" % out.value.decode("utf-8", "replace"))
+elif action == "read":
+    out = ctypes.create_string_buffer(256)
+    r = kctl(KEYCTL_READ, int(sys.argv[2]), out, 256)
+    if r is not None:
+        print("READ data=%s" % out.value.hex())
+PYEOF
+RT_KEY_GRANT="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -c key /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+RT_KEY_GRANT_N="$(printf '%s\n' "$RT_KEY_GRANT" | grep -c . || true)"
+RT_KEY_CONSTRAINTS="$("$RT_SEINFO_BIN" --constrain key 2>/dev/null | grep -v '^#' || true)"
+info "R7-keyring preflight: loaded buildkitd key authority rules=$RT_KEY_GRANT_N [$RT_KEY_GRANT] key-constraints=[$RT_KEY_CONSTRAINTS]"
+KSER1=/tmp/uat-wls-keyprobe-c1.serial
+KSER2=/tmp/uat-wls-keyprobe-c2.serial
+rm -f "$KSER1" "$KSER2"
+RT_K1_OUT="$(runcon -t docker_helper_buildkitd_t -l s0:c1 python3 "$KEYPROBE" join uat-k-c1 "$KSER1" 2>&1)"
+RT_K2_OUT="$(runcon -t docker_helper_buildkitd_t -l s0:c2 python3 "$KEYPROBE" join uat-k-c2 "$KSER2" 2>&1)"
+info "R7-keyring preflight: c1 join+own-describe=[$(printf '%s' "$RT_K1_OUT" | tr '\n' ';')] c2 join+own-describe=[$(printf '%s' "$RT_K2_OUT" | tr '\n' ';')]"
+RT_K_JOIN_OK=yes
+printf '%s' "$RT_K1_OUT" | grep -q '^rc=[0-9]' || RT_K_JOIN_OK=no
+printf '%s' "$RT_K2_OUT" | grep -q '^rc=[0-9]' || RT_K_JOIN_OK=no
+if [ "$RT_K_JOIN_OK" = yes ]; then
+  acc_ok "R7 keyring preflight: the flow-faithful session-keyring join succeeds for both MCS categories (c1 and c2) with no key permission required — the runc join step is not the gate"
+else
+  acc_fail "R7 keyring preflight: the session-keyring join itself failed for a probe category (c1=[$RT_K1_OUT] c2=[$RT_K2_OUT]) — the flow's join step is blocked before DESCRIBE"
+fi
+RT_KX_OUT=""
+if [ -s "$KSER2" ]; then
+  RT_KX_OUT="$(runcon -t docker_helper_buildkitd_t -l s0:c1 python3 "$KEYPROBE" describe "$(cat "$KSER2")" 2>&1)"
+else
+  RT_KX_OUT="c2-serial-missing"
+fi
+RT_KR_OUT=""
+if [ -s "$KSER2" ]; then
+  RT_KR_OUT="$(runcon -t docker_helper_buildkitd_t -l s0:c1 python3 "$KEYPROBE" read "$(cat "$KSER2")" 2>&1)"
+else
+  RT_KR_OUT="c2-serial-missing"
+fi
+info "R7-keyring preflight: c1 cross-op describe of the c2 ring=[$RT_KX_OUT] c1 cross-op read=[$RT_KR_OUT]"
+# The probe AVCs, captured from the audit while ONLY the probes have
+# touched the key class (this leg runs before the privacy builds).
+RT_KEY_AVC="$(ausearch --start recent -sc key 2>/dev/null | grep 'type=AVC' || true)"
+info "R7-keyring preflight: key-class AVC records=$(printf '%s\n' "$RT_KEY_AVC" | grep -c . || true) [$(printf '%s\n' "$RT_KEY_AVC" | head -2 | tr '\n' ';')]"
+# The cross-op describe must be a SELinux-shaped denial: EACCES at the
+# errno layer AND an AVC naming tclass=key. ENOKEY or a bare
+# permission-mask refusal without an AVC proves nothing about MCS.
+RT_KEY_AVC_VIEW_N="$(printf '%s\n' "$RT_KEY_AVC" | grep -c 'denied  { view }' || true)"
+if printf '%s' "$RT_KX_OUT" | grep -q 'errno=13' && [ "$RT_KEY_AVC_VIEW_N" -ge 1 ]; then
+  acc_ok "R7 keyring preflight: the cross-operation DESCRIBE (c1 describing the c2-created ring of the SAME domain type) is denied by the loaded policy with an EACCES backed by a key-class view AVC — the MCS/constraint layer bites exactly where the self-rule would otherwise reach"
+else
+  acc_fail "R7 keyring preflight: the cross-operation DESCRIBE did not produce a SELinux-shaped denial (outcome=[$RT_KX_OUT] view AVCs=$RT_KEY_AVC_VIEW_N) — ENOKEY or a mask refusal without an AVC cannot justify the self-rule's cross-op surface"
+fi
+if printf '%s' "$RT_KR_OUT" | grep -q 'errno=13'; then
+  acc_ok "R7 keyring preflight: the cross-operation payload READ stays denied (EACCES) — key read authority is not implied by view and stays closed"
+else
+  acc_fail "R7 keyring preflight: the cross-operation payload READ did not produce EACCES (outcome=[$RT_KR_OUT])"
+fi
+# The same-op control, branched on the loaded buildkitd key authority.
+RT_K1_DESCRIBE_ERR="$(printf '%s' "$RT_K1_OUT" | sed -n 's/.*errno=\([0-9][0-9]*\).*/\1/p' | tail -1)"
+if [ "$RT_KEY_GRANT_N" -eq 0 ]; then
+  if [ "$RT_K1_DESCRIBE_ERR" = "13" ] && [ "$RT_KEY_AVC_VIEW_N" -ge 1 ]; then
+    acc_ok "R7 keyring preflight: the same-op DESCRIBE is denied by the loaded policy with an EACCES backed by a key-class AVC (no buildkitd key authority loaded) — the negative control proves the SELinux key hook gates this exact domain"
+  else
+    acc_fail "R7 keyring preflight: the same-op DESCRIBE control did not produce a SELinux-shaped denial with no authority loaded (own-describe errno=$RT_K1_DESCRIBE_ERR view AVCs=$RT_KEY_AVC_VIEW_N) — the probe cannot prove the gate it is supposed to measure"
+  fi
+elif [ "$RT_KEY_GRANT_N" -eq 1 ] && printf '%s\n' "$RT_KEY_GRANT" | grep -q 'self:key view'; then
+  RT_K1_DESCRIBE_OK="$(printf '%s' "$RT_K1_OUT" | grep -c '^rc=[0-9]' || true)"
+  if [ "$RT_K_JOIN_OK" = yes ] && [ "$RT_K1_DESCRIBE_OK" -ge 1 ]; then
+    acc_ok "R7 keyring preflight: with exactly self:key view loaded, the own-ring DESCRIBE succeeds for the probe category (the P12 grant reaches the flow's ModKeyringPerm consumer) while the cross-op describe and read stay denied"
+  else
+    acc_fail "R7 keyring preflight: with self:key view loaded the own-ring DESCRIBE did not succeed (outcome=[$RT_K1_OUT])"
+  fi
+else
+  acc_fail "R7 keyring preflight: the loaded buildkitd key authority is neither empty nor exactly one self:key view rule (rules=$RT_KEY_GRANT_N [$RT_KEY_GRANT]) — the preflight cannot classify the state"
+fi
+
 # --- R7 corrective evidence: the executed OCI runtime's runtime-dir fixup ---
 say "R7 runtime privacy: buildkit-runc's per-op runtime-dir fixup (setattr rung)"
 # The R7 setattr rung serves the executed bundled buildkit-runc's own
