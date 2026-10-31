@@ -2580,7 +2580,14 @@ base64 -d /tmp/uat-wls-keyprobe.b64 > "$KEYPROBE" 2>/dev/null
 chmod +x "$KEYPROBE" 2>/dev/null
 RT_KEY_VEHICLE=ready
 chcon -t docker_helper_buildkitd_exec_t "$KEYPROBE" 2>/dev/null || RT_KEY_VEHICLE=chcon-failed
-RT_KEY_GRANT="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -c key /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+# The self-rule visibility: the P12 first experiment (run
+# 41247897180) had the grant demonstrably loaded - the flow's view
+# denial had become setattr - yet the -s-only sesearch query listed no
+# key rules at all, so the authority query pairs the source-target form
+# (the idiom that matches self-shaped rules) with the subject-only form
+# and unions the results.
+RT_KEY_GRANT="$({ "$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -t docker_helper_buildkitd_t -c key /sys/fs/selinux/policy 2>/dev/null;
+                  "$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -c key /sys/fs/selinux/policy 2>/dev/null; } | grep -v '^#' | sort -u || true)"
 RT_KEY_GRANT_N="$(printf '%s\n' "$RT_KEY_GRANT" | grep -c . || true)"
 RT_KEY_CONSTRAINTS="$("$RT_SEINFO_BIN" --constrain key 2>/dev/null | grep -v '^#' || true)"
 RT_KEY_ALL="$("$RT_SESEARCH_BIN" --allow -c key /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
