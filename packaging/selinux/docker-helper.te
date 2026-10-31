@@ -3375,6 +3375,53 @@ allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:lnk_file { creat
 # helper's own 4C-29 authority, a different subject); every other nsfs
 # permission and every other namespace path stays closed.
 allow docker_helper_buildkitd_t nsfs_t:file getattr;
+# The P9 nsfs namespace-handle read corrective (single permission, exact-SHA
+# UAT run 41185912572): the P8 enforcing UAT proved the cgroup stage fully
+# passed (supportedControllers succeeded, Apply advanced past the
+# "rootless needs no limits" error behaviorally) and the flow's terminal
+# moved to the runc parent's mount-source goroutine — avc denied { read }
+# comm="buildkit-runc" path="pid:[4026532352]" dev="nsfs" scontext
+# docker_helper_buildkitd_t:s0:c1 tcontext nsfs_t:s0 (serials 1344 first
+# workload, 10406 privacy window), exactly runc v1.4.3's
+# process_linux.go:709 mount-source thread os.Open("/proc/<pid>/ns/mnt")
+# of the container init child's mount namespace (the goroutine then
+# setns(CLONE_NEWNS) into it to prepare the container's rootfs mounts).
+# The read is the observed os.Open O_RDONLY check (may_open ->
+# inode_permission -> file:read; the AVC is exactly { read }).
+#
+# PREFLIGHT SCOPE (assessed before the grant): nsfs_t is the GLOBAL label
+# of namespace handles — every /proc/<pid>/ns/* magic link (mnt, net, pid,
+# user, uts, ipc, cgroup, time) of every process, never limited to mount
+# namespaces or to the observed path. The buildkitd's standing nsfs
+# authority is the 4C-83 getattr singleton above (the
+# stat("/proc/self/ns/user") probe, its own recorded evidence); read
+# arrives as a SECOND separate file-class singleton — getattr/read/open
+# are distinct hooks (the P7/P8 lesson: the P8 cgroup denial was exactly
+# { read } with the open-completion hook masked behind it). read alone
+# does NOT enable joining a namespace: setns(2) is gated by the nsfd's
+# OWN open (the open-completion hook is the next, separate check —
+# deliberately NOT granted), by procfs ptrace_may_access, and by the
+# userns capability machinery; SELinux implements no dedicated
+# namespace-install check (the kernel's security_namespace_install hook
+# is unimplemented in selinux hooks.c), so the open completion IS the
+# SELinux boundary of the setns path. The reachability of ANOTHER
+# operation's namespace handle is closed by the existing isolation
+# chain: /proc/<pid>/ns/* open requires ptrace_may_access, and the
+# loaded mlsconstrain process ptrace (h1 dom h2 or t1 !=
+# mcs_constrained_type) denies buildkitd_t:s0:c1 -> buildkitd_t:s0:c2
+# (neither dominates the other, both are mcs_constrained members) while
+# TE grants no process:ptrace at all — the read adds no cross-operation
+# channel, and namespace handles carry no namespace-interior data (the
+# read observes identity, not contents). The grant covers the subject's
+# own container setup path (parent -> its own init child, same domain
+# and category, the flow the P8 AVC names). Deliberately NOT granted:
+# open/getattr-write-side/ioctl/lock/write/execute/map/create/setattr/
+# unlink/relabel*, any nsfs_t dir/lnk_file surface, any other type,
+# class or subject; the getattr singleton above stays exactly its own
+# 4C-83 shape. The committed-policy tests pin the buildkitd domain's
+# nsfs authority at EXACTLY the two canonical singletons (the count pin
+# moves 37 -> 38 by exactly this one rule).
+allow docker_helper_buildkitd_t nsfs_t:file read;
 
 # R7 (green attempt, scope=selinux run 39023951708 at e6826204): the
 # unprivileged mount-flags probe on the first context bind. With the

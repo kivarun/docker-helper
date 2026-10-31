@@ -514,8 +514,8 @@ func s15LauncherCgroupViolations(policy string) []string {
 			violations = append(violations, fmt.Sprintf("the standing cgroup owner drifted (must stay exactly its bare { search } dir singleton): %s", want))
 		}
 	}
-	if buildkitdNamedAllow != 37 {
-		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 37 (the S15 phase had exactly 9; R7 added the manager child-lifecycle rule, the per-op endpoint peer edge, the rootlesskit parent's buildkitd child-authority rule the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr, the unprivileged-mount-flags statfs getattr, the OCI-worker process-group setup rule, the cgroup2 root traversal singleton, the cgroup2 statfs detection filesystem getattr singleton, the runtime-tree exec.fifo fifo_file { create setattr } singleton (widened in place by the setattr rung), the P1 runc-memfd file write corrective (docker_helper_runc_memfd_t:file write), the P2 runc-memfd file setattr corrective (docker_helper_runc_memfd_t:file setattr) and the P3 runc-memfd file execute corrective (docker_helper_runc_memfd_t:file execute) and the P4 runc-memfd atomic { read open } corrective and the P5 runc-memfd execute_no_trans corrective and the P6 runc-memfd map corrective (docker_helper_runc_memfd_t:file map) and the P7 buildkitd cgroup_t:file read singleton (docker_helper_buildkitd_t cgroup_t:file read) and the P8 buildkitd cgroup_t:file open singleton (docker_helper_buildkitd_t cgroup_t:file open); a NON-buildkitd S15 rule never trips it), found %d", buildkitdNamedAllow))
+	if buildkitdNamedAllow != 38 {
+		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 38 (the S15 phase had exactly 9; R7 added the manager child-lifecycle rule, the per-op endpoint peer edge, the rootlesskit parent's buildkitd child-authority rule the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr, the unprivileged-mount-flags statfs getattr, the OCI-worker process-group setup rule, the cgroup2 root traversal singleton, the cgroup2 statfs detection filesystem getattr singleton, the runtime-tree exec.fifo fifo_file { create setattr } singleton (widened in place by the setattr rung), the P1 runc-memfd file write corrective (docker_helper_runc_memfd_t:file write), the P2 runc-memfd file setattr corrective (docker_helper_runc_memfd_t:file setattr) and the P3 runc-memfd file execute corrective (docker_helper_runc_memfd_t:file execute) and the P4 runc-memfd atomic { read open } corrective and the P5 runc-memfd execute_no_trans corrective and the P6 runc-memfd map corrective (docker_helper_runc_memfd_t:file map) and the P7 buildkitd cgroup_t:file read singleton (docker_helper_buildkitd_t cgroup_t:file read) and the P8 buildkitd cgroup_t:file open singleton (docker_helper_buildkitd_t cgroup_t:file open) and the P9 buildkitd nsfs_t:file read singleton (docker_helper_buildkitd_t nsfs_t:file read); a NON-buildkitd S15 rule never trips it), found %d", buildkitdNamedAllow))
 	}
 	return violations
 }
@@ -706,6 +706,106 @@ func TestSELinuxPolicyBuildkitdCgroupAuthority(t *testing.T) {
 	}
 	if removed := strings.Replace(policy, canonicalStatfs+"\n", "", 1); removed == policy {
 		t.Fatal("the standing cgroup statfs line was not found for the removal mutation")
+	}
+}
+
+// TestSELinuxPolicyBuildkitdNsfsAuthority pins the buildkitd domain's
+// nsfs namespace-handle authority at EXACTLY the two canonical
+// singletons, each its own proven surface:
+//   - the 4C-83 user-namespace probe rung's ONE bare file getattr
+//     singleton (the stat("/proc/self/ns/user") probe of
+//     RunningInUserNS; UAT evidence in the 4C-83 window, every
+//     enforcing run since, identical modulo pid/ino) — no getattr
+//     rider, no brace-form alias;
+//   - the R7 P9 nsfs namespace-handle read rung's ONE bare file read
+//     singleton (UAT run 41185912572 serials 1344/10406 + the pinned
+//     runc v1.4.3 process_linux.go:709 source proof: the mount-source
+//     goroutine's os.Open("/proc/<pid>/ns/mnt") of the container init
+//     child's mount namespace) — the observed check is exactly
+//     { read }; the open-completion hook is the next separate check
+//     (the P7/P8 two-checks lesson) and stays closed; no merged
+//     { read open }, no ioctl/lock/write/execute/map rider, no
+//     dir/lnk_file surface;
+//   - no other domain gains a buildkitd-nsfs rule and no rule is a
+//     duplication of the other.
+func TestSELinuxPolicyBuildkitdNsfsAuthority(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	const (
+		canonicalProbeGetattr = "allow docker_helper_buildkitd_t nsfs_t:file getattr;"
+		canonicalReadFile     = "allow docker_helper_buildkitd_t nsfs_t:file read;"
+	)
+	checkPolicy := func(text string) (failed bool, reason string) {
+		getattr := 0
+		readFile := 0
+		for _, line := range strings.Split(text, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if !strings.HasPrefix(trimmed, "allow ") || !strings.Contains(trimmed, "nsfs_t") {
+				continue
+			}
+			if !strings.Contains(trimmed, "docker_helper_buildkitd_t") {
+				continue
+			}
+			switch trimmed {
+			case canonicalProbeGetattr:
+				getattr++
+			case canonicalReadFile:
+				readFile++
+			default:
+				return true, "non-canonical buildkitd nsfs rule: " + trimmed
+			}
+		}
+		if getattr != 1 {
+			return true, "the canonical getattr singleton count is not exactly one"
+		}
+		if readFile != 1 {
+			return true, "the canonical read singleton count is not exactly one"
+		}
+		return false, ""
+	}
+	if failed, reason := checkPolicy(policy); failed {
+		t.Errorf("the committed policy violates the buildkitd nsfs authority invariants: %s", reason)
+	}
+	singleton := map[string]string{"getattr": canonicalProbeGetattr, "readFile": canonicalReadFile}
+	for _, mut := range []struct {
+		name   string
+		target string
+		rule   string
+	}{
+		{"missing getattr (the 4C-83 probe rung removed)", "getattr", ""},
+		{"missing nsfs read (the P9 rung removed)", "readFile", ""},
+		{"parallel duplicate getattr", "", "allow docker_helper_buildkitd_t nsfs_t:file getattr;\n"},
+		{"parallel duplicate read", "", "allow docker_helper_buildkitd_t nsfs_t:file read;\n"},
+		{"merged { read open } (the open-completion hook is a separate check)", "", "allow docker_helper_buildkitd_t nsfs_t:file { read open };\n"},
+		{"bare open ride-along", "", "allow docker_helper_buildkitd_t nsfs_t:file open;\n"},
+		{"getattr rider on the read singleton", "readFile", "REPLACE:allow docker_helper_buildkitd_t nsfs_t:file { read getattr };\n"},
+		{"ioctl rider on the read singleton", "readFile", "REPLACE:allow docker_helper_buildkitd_t nsfs_t:file { read ioctl };\n"},
+		{"lock rider on the read singleton", "readFile", "REPLACE:allow docker_helper_buildkitd_t nsfs_t:file { read lock };\n"},
+		{"write rider on the read singleton", "readFile", "REPLACE:allow docker_helper_buildkitd_t nsfs_t:file { read write };\n"},
+		{"read wrong source domain", "readFile", "REPLACE:allow docker_helper_builder_launcher_t nsfs_t:file read;"},
+		{"read wrong class", "readFile", "REPLACE:allow docker_helper_buildkitd_t nsfs_t:dir read;"},
+		{"read instead of getattr (the probe singleton displaced)", "getattr", "REPLACE:allow docker_helper_buildkitd_t nsfs_t:file read;"},
+		{"getattr instead of read (the read singleton displaced)", "readFile", "REPLACE:allow docker_helper_buildkitd_t nsfs_t:file getattr;"},
+	} {
+		mutated := policy
+		switch {
+		case mut.target != "" && mut.rule == "":
+			mutated = strings.Replace(policy, singleton[mut.target]+"\n", "", 1)
+		case mut.target != "" && strings.HasPrefix(mut.rule, "REPLACE:"):
+			after, _ := strings.CutPrefix(mut.rule, "REPLACE:")
+			mutated = strings.Replace(policy, singleton[mut.target], after, 1)
+		default:
+			mutated = policy + mut.rule
+		}
+		if failed, _ := checkPolicy(mutated); !failed {
+			t.Errorf("mutation %q must trip the buildkitd nsfs authority invariants", mut.name)
+		}
+	}
+	// The removal mutations must actually remove their singletons.
+	if removed := strings.Replace(policy, canonicalProbeGetattr+"\n", "", 1); removed == policy {
+		t.Fatal("the standing nsfs getattr line was not found for the removal mutation")
+	}
+	if removed := strings.Replace(policy, canonicalReadFile+"\n", "", 1); removed == policy {
+		t.Fatal("the standing nsfs read line was not found for the removal mutation")
 	}
 }
 
@@ -5418,8 +5518,8 @@ func buildkitdIdentityViolations(policy string) []string {
 			buildkitdNamedAllow++
 		}
 	}
-	if buildkitdNamedAllow != 37 {
-		violations = append(violations, fmt.Sprintf("the module must carry exactly the thirty-seven buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr open execute_no_trans }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir setattr }, the categorized state-tree file { create read open lock write getattr rename setattr unlink append }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name create remove_name mounton setattr }, the categorized runtime-tree sock_file { create unlink setattr }, and the R7 manager child-lifecycle { signull signal sigkill } authority, the daemon's per-op BuildKit endpoint { connectto } peer edge, the rootlesskit parent's buildkitd child-authority rule, the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr, the unprivileged-mount-flags statfs getattr, the OCI-worker process-group setup rule, the cgroup2 root traversal dir { search } singleton, the cgroup2 statfs detection filesystem getattr singleton, the runtime-tree exec.fifo fifo_file { create setattr } singleton widened in place by the setattr rung, the P1 runc-memfd file write corrective, the P2 runc-memfd file setattr corrective and the P3 runc-memfd file execute corrective and the P4 runc-memfd atomic { read open } corrective and the P5 runc-memfd file execute_no_trans corrective and the P6 runc-memfd file map corrective and the P7 buildkitd cgroup_t:file read singleton and the P8 buildkitd cgroup_t:file open singleton), found %d", buildkitdNamedAllow))
+	if buildkitdNamedAllow != 38 {
+		violations = append(violations, fmt.Sprintf("the module must carry exactly the thirty-eight buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr open execute_no_trans }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir setattr }, the categorized state-tree file { create read open lock write getattr rename setattr unlink append }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name create remove_name mounton setattr }, the categorized runtime-tree sock_file { create unlink setattr }, and the R7 manager child-lifecycle { signull signal sigkill } authority, the daemon's per-op BuildKit endpoint { connectto } peer edge, the rootlesskit parent's buildkitd child-authority rule, the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr, the unprivileged-mount-flags statfs getattr, the OCI-worker process-group setup rule, the cgroup2 root traversal dir { search } singleton, the cgroup2 statfs detection filesystem getattr singleton, the runtime-tree exec.fifo fifo_file { create setattr } singleton widened in place by the setattr rung, the P1 runc-memfd file write corrective, the P2 runc-memfd file setattr corrective and the P3 runc-memfd file execute corrective and the P4 runc-memfd atomic { read open } corrective and the P5 runc-memfd file execute_no_trans corrective and the P6 runc-memfd file map corrective and the P7 buildkitd cgroup_t:file read singleton and the P8 buildkitd cgroup_t:file open singleton and the P9 buildkitd nsfs_t:file read singleton), found %d", buildkitdNamedAllow))
 	}
 	// The shared runtime-root dir surface has exactly the standing
 	// owners above; a NEW or reshaped rule on the pair (any source,
@@ -5537,7 +5637,7 @@ func buildkitdIdentityViolations(policy string) []string {
 			if strings.Contains(trimmed, "docker_helper_buildkitd_exec_t") && trimmed != canonicalExec && trimmed != canonicalEntry {
 				violations = append(violations, "the only allow rules naming the buildkitd exec type are the exact source-exec grant { execute read open } and the exact target-side { entrypoint read execute getattr open execute_no_trans } grant: "+trimmed)
 			}
-			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot && trimmed != canonicalRuntimeTree && trimmed != canonicalRuntimeSockFile && trimmed != canonicalManagerLifecycle && trimmed != "allow docker_helper_t docker_helper_buildkitd_t:unix_stream_socket { connectto };" && trimmed != "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { signal sigkill };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:dir { write add_name create mounton remove_name read };" && trimmed != "allow docker_helper_buildkitd_t self:cap_userns { sys_admin chown };" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem { remount unmount };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:file { create };" && trimmed != "allow docker_helper_buildkitd_t self:udp_socket { create setopt connect getattr read write };" && trimmed != "allow docker_helper_buildkitd_t self:tcp_socket { create setopt connect getattr read write getopt };" && trimmed != "allow docker_helper_buildkitd_t http_port_t:tcp_socket { name_connect };" && trimmed != "allow docker_helper_buildkitd_t cert_t:dir { search };" && trimmed != "allow docker_helper_buildkitd_t cert_t:file { read open getattr };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:lnk_file { create };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file { create setattr getattr read };" && trimmed != "allow docker_helper_buildkitd_t nsfs_t:file getattr;" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem getattr;" && trimmed != "allow docker_helper_buildkitd_t self:process setpgid;" && trimmed != "allow docker_helper_buildkitd_t cgroup_t:dir { search };" && trimmed != "allow docker_helper_buildkitd_t cgroup_t:filesystem getattr;" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:fifo_file { create setattr };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file write;" && trimmed != "allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file setattr;" && trimmed != "allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file execute;" && trimmed != "allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file execute_no_trans;" && trimmed != "allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file { read open };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file map;" && trimmed != "allow docker_helper_buildkitd_t cgroup_t:file read;" && trimmed != "allow docker_helper_buildkitd_t cgroup_t:file open;" {
+			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot && trimmed != canonicalRuntimeTree && trimmed != canonicalRuntimeSockFile && trimmed != canonicalManagerLifecycle && trimmed != "allow docker_helper_t docker_helper_buildkitd_t:unix_stream_socket { connectto };" && trimmed != "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { signal sigkill };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:dir { write add_name create mounton remove_name read };" && trimmed != "allow docker_helper_buildkitd_t self:cap_userns { sys_admin chown };" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem { remount unmount };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:file { create };" && trimmed != "allow docker_helper_buildkitd_t self:udp_socket { create setopt connect getattr read write };" && trimmed != "allow docker_helper_buildkitd_t self:tcp_socket { create setopt connect getattr read write getopt };" && trimmed != "allow docker_helper_buildkitd_t http_port_t:tcp_socket { name_connect };" && trimmed != "allow docker_helper_buildkitd_t cert_t:dir { search };" && trimmed != "allow docker_helper_buildkitd_t cert_t:file { read open getattr };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:lnk_file { create };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file { create setattr getattr read };" && trimmed != "allow docker_helper_buildkitd_t nsfs_t:file getattr;" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem getattr;" && trimmed != "allow docker_helper_buildkitd_t self:process setpgid;" && trimmed != "allow docker_helper_buildkitd_t cgroup_t:dir { search };" && trimmed != "allow docker_helper_buildkitd_t cgroup_t:filesystem getattr;" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:fifo_file { create setattr };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file write;" && trimmed != "allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file setattr;" && trimmed != "allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file execute;" && trimmed != "allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file execute_no_trans;" && trimmed != "allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file { read open };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file map;" && trimmed != "allow docker_helper_buildkitd_t cgroup_t:file read;" && trimmed != "allow docker_helper_buildkitd_t cgroup_t:file open;" && trimmed != "allow docker_helper_buildkitd_t nsfs_t:file read;" {
 				violations = append(violations, "the only allow rules toward the buildkitd domain are the exact process transition grant, the exact target-entrypoint grant, and the exact state/runtime surfaces: "+trimmed)
 			}
 			fields := strings.Fields(trimmed)
