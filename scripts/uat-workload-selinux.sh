@@ -2458,7 +2458,11 @@ say "R7 P12 keyring preflight: cross-operation key isolation (live c1<->c2)"
 # cross-op surface (the category-blind builder_state_t:file read), while
 # a cross-op WRITE-class permission (setattr for P13) has no such
 # precedent and is expected to be inadmissible without a constraint.
-KEYPROBE=/tmp/uat-wls-keyprobe
+# The probe lives under the runtime tree's tmpfs: /tmp is mounted noexec
+# on the UAT guest (the 41233869654 preflight dispatch's exec denial with
+# no AVC — the mount's exec gate refuses before any LSM check), while the
+# runtime tree execs the flow's own binaries routinely.
+KEYPROBE=/run/docker-helper-builder/.uat-wls-keyprobe
 cat > /tmp/uat-wls-keyprobe.b64 <<'KEYB64EOF'
 f0VMRgIBAQAAAAAAAAAAAAIAPgABAAAA4BJAAAAAAABAAAAAAAAAAHAiAAAAAAAAAAAAAEAAOAAI
 AEAACgAJAAEAAAAEAAAAAAAAAAAAAAAAAEAAAAAAAAAAQAAAAAAAVAIAAAAAAABUAgAAAAAAAAAQ
@@ -2728,7 +2732,7 @@ if [ "$RT_KEY_VEHICLE" = ready ]; then
 else
   acc_fail "R7 keyring preflight: the probe vehicle failed ($RT_KEY_VEHICLE) — the chcon to the module's buildkitd entrypoint type is a precondition of the live cross-op measurement"
 fi
-rm -f /tmp/uat-wls-keyprobe.b64 "$KSER1" "$KSER2"
+rm -f /tmp/uat-wls-keyprobe.b64 "$KEYPROBE" "$KSER1" "$KSER2"
 
 # --- R7 corrective evidence: the executed OCI runtime's runtime-dir fixup ---
 say "R7 runtime privacy: buildkit-runc's per-op runtime-dir fixup (setattr rung)"
