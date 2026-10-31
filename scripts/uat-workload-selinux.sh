@@ -2458,11 +2458,13 @@ say "R7 P12 keyring preflight: cross-operation key isolation (live c1<->c2)"
 # cross-op surface (the category-blind builder_state_t:file read), while
 # a cross-op WRITE-class permission (setattr for P13) has no such
 # precedent and is expected to be inadmissible without a constraint.
-# The probe lives under the runtime tree's tmpfs: /tmp is mounted noexec
-# on the UAT guest (the 41233869654 preflight dispatch's exec denial with
-# no AVC — the mount's exec gate refuses before any LSM check), while the
-# runtime tree execs the flow's own binaries routinely.
-KEYPROBE=/run/docker-helper-builder/.uat-wls-keyprobe
+# The probe lives in the builder's STATE tree on the root filesystem:
+# both /tmp and /run are mounted noexec on the UAT guest (the
+# 41233869654 and 41235387541 preflight dispatches' exec denials with no
+# AVC — the mount's exec gate refuses before any LSM check), while the
+# root filesystem execs the flow's own binaries routinely and its
+# search authority into the state tree is proven by the flow itself.
+KEYPROBE=/var/lib/docker-helper-builder/.uat-wls-keyprobe
 cat > /tmp/uat-wls-keyprobe.b64 <<'KEYB64EOF'
 f0VMRgIBAQAAAAAAAAAAAAIAPgABAAAA4BJAAAAAAABAAAAAAAAAAHAiAAAAAAAAAAAAAEAAOAAI
 AEAACgAJAAEAAAAEAAAAAAAAAAAAAAAAAEAAAAAAAAAAQAAAAAAAVAIAAAAAAABUAgAAAAAAAAAQ
