@@ -2856,6 +2856,27 @@ def stop(_signum, _frame):
 signal.signal(signal.SIGTERM, stop)
 
 try:
+    # The FIFO rendezvous comes FIRST: the shell opens the read end
+    # right after spawning the watcher, so an open failure here can only
+    # mean a dead watcher path — bounded retries, never a hang.
+    deadline = time.time() + 10
+    while True:
+        try:
+            fifo = os.fdopen(os.open(FIFO_PATH,
+                                     os.O_WRONLY | os.O_NONBLOCK), "w",
+                             encoding="utf-8", errors="replace")
+            break
+        except OSError as e:
+            if e.errno != errno.ENXIO or time.time() > deadline:
+                jline("fan-watch failed=fifo-open-%s"
+                      % str(e).replace(" ", "_"))
+                os._exit(0)
+            time.sleep(0.05)
+except OSError as e:
+    jline("fan-watch failed=fifo-open-%s" % str(e).replace(" ", "_"))
+    os._exit(0)
+
+try:
     fan = libc.fanotify_init(FAN_CLASS_NOTIF | FAN_REPORT_DFID_NAME
                              | FAN_CLOEXEC,
                              os.O_RDONLY | os.O_CLOEXEC | 0x8000)
@@ -2872,27 +2893,11 @@ try:
     if os.path.isdir(SELFTEST_DIR):
         cache_path(SELFTEST_DIR)
 except OSError as e:
-    # The failure path must NEVER hang the shell's FIFO rendezvous: the
-    # watcher reports through the journal only.
+    # The failure path reports through the journal; the FIFO write end
+    # closes on exit and the shell falls back to the inotify chain.
     jline("fan-watch failed=%s" % str(e).replace(" ", "_"))
     os._exit(0)
 
-# The FIFO rendezvous: the shell opens the read end after it sees the
-# start line, so the write end is opened non-blocking with bounded
-# retries (an ENXIO retry can never hang the harness).
-deadline = time.time() + 10
-while True:
-    try:
-        fifo = os.fdopen(os.open(FIFO_PATH,
-                                 os.O_WRONLY | os.O_NONBLOCK), "w",
-                         encoding="utf-8", errors="replace")
-        break
-    except OSError as e:
-        if e.errno != errno.ENXIO or time.time() > deadline:
-            jline("fan-watch failed=fifo-open-%s"
-                  % str(e).replace(" ", "_"))
-            os._exit(0)
-        time.sleep(0.05)
 jline("fan-watch start root=%s pid=%d" % (ROOT, os.getpid()))
 while True:
     try:
@@ -2921,7 +2926,13 @@ PYEOF
               /run/docker-helper-builder "$RT_SURVEY" "$RT_FIFO" \
               "$RT_FAN_TEST_DIR" 2>/tmp/uat-wls-privacy-fanotify.err &
             RT_FAN_PID=$!
-            RT_FAN_END=$(( $(date +%s) + 5 ))
+            # The FIFO rendezvous happens FIRST (the watcher opens its
+            # write end before anything else, bounded retries), so this
+            # read-end open can only wait for the watcher's open, never
+            # for a failed init.
+            exec 3<"$RT_FIFO"
+            RT_EVENT_EVENTS=0
+            RT_FAN_END=$(( $(date +%s) + 8 ))
             while [ "$(date +%s)" -lt "$RT_FAN_END" ]; do
               if grep -q "^fan-watch start \|^fan-watch failed=" "$RT_SURVEY" 2>/dev/null; then
                 break
@@ -2929,8 +2940,6 @@ PYEOF
               sleep 0.1
             done
             if grep -q "^fan-watch start " "$RT_SURVEY" 2>/dev/null; then
-              exec 3<"$RT_FIFO"
-              RT_EVENT_EVENTS=0
               # The fanotify self-test (fail-closed): the scratch dir
               # under the watched mount must deliver CREATE, ATTRIB and
               # DELETE for the target entry AND one captured record
