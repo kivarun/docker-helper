@@ -380,6 +380,12 @@ rt_priv_fd_selftest() {
     fi
   fi
   RT_FD_REF="$(stat -c '%a|%U|%G|%i' "$RT_FD_PATH" 2>/dev/null)"
+  # The reference carries the pinned inode's number as its fourth field:
+  # the tuple comparison strips it (the FD tuple is mode|uid|gid) and
+  # the inode comparison uses it explicitly — both must match the
+  # pre-delete reference AND differ from the substitute.
+  RT_FD_REF_TUPLE="${RT_FD_REF%|*}"
+  RT_FD_REF_INO="${RT_FD_REF##*|}"
   RT_FD_REF_CTX="$(stat -c '%C' "$RT_FD_PATH" 2>/dev/null)"
   RT_FD_PARENT_CTX="$(stat -c '%C' "$RT_FD_BASE/parent" 2>/dev/null)"
   if [ -n "$RT_FD_REF_CTX" ] && [ -n "$RT_FD_PARENT_CTX" ] \
@@ -395,8 +401,9 @@ rt_priv_fd_selftest() {
     fi
     rt_priv_runc_readfd
     if [ "$RT_FD_DELETED" = yes ] && [ "$RT_FD_SUBSTITUTED" = yes ] \
-        && [ "$RT_FD_TUPLE" = "$RT_FD_REF" ] && [ "$RT_FD_TUPLE" != "$RT_FD_SUB_TUPLE" ] \
-        && [ -n "$RT_FD_CTX" ] && [ "$RT_FD_CTX" = "$RT_FD_REF_CTX" ] \
+        && [ "$RT_FD_TUPLE" = "$RT_FD_REF_TUPLE" ] && [ -n "$RT_FD_INO" ] && [ "$RT_FD_INO" = "$RT_FD_REF_INO" ] \
+        && [ -n "$RT_FD_SUB_TUPLE" ] && [ "$RT_FD_INO" != "${RT_FD_SUB_TUPLE##*|}" ] \
+        && [ -n "$RT_FD_CTX" ] && [ "$RT_FD_CTX" = "$RT_FD_REF_CTX" ] && [ "$RT_FD_REF_CTX" != "?" ] \
         && { [ "$RT_FD_CTX_DISCRIM" != yes ] || [ "$RT_FD_CTX" != "$RT_FD_PARENT_CTX" ]; }; then
       RT_FD_METHOD=proven
     fi
@@ -2327,7 +2334,7 @@ else
   # records, anything else degrades to the legacy two-path-stat contract
   # (fail-closed, the exact P9 evidence shape).
   rt_priv_fd_selftest
-  info "R7-privacy fd-control: method=$RT_FD_METHOD deleted=$RT_FD_DELETED substituted=$RT_FD_SUBSTITUTED openfail=$RT_FD_OPENFAIL ctx-discrim=$RT_FD_CTX_DISCRIM ref=${RT_FD_REF:-none} got=${RT_FD_TUPLE:-none} ctx=${RT_FD_CTX:-none} parent-ctx=${RT_FD_PARENT_CTX:-none}"
+  info "R7-privacy fd-control: method=$RT_FD_METHOD deleted=$RT_FD_DELETED substituted=$RT_FD_SUBSTITUTED openfail=$RT_FD_OPENFAIL ctx-discrim=$RT_FD_CTX_DISCRIM ref=${RT_FD_REF:-none} got=${RT_FD_TUPLE:-none} ino=${RT_FD_INO:-none} ctx=${RT_FD_CTX:-none} parent-ctx=${RT_FD_PARENT_CTX:-none}"
   # The short-lived runc dir and runc-log.json died inside the fixed
   # 0.3s poll window in earlier runs (never-seen). The capture is now
   # EVENT-DRIVEN: a recursive inotify watcher over both op-tree roots
