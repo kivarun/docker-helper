@@ -5031,6 +5031,43 @@ allow docker_helper_buildkitd_t cgroup_t:filesystem getattr;
 # canonical singletons (the count pin moves 35 -> 36 by exactly this
 # one rule).
 allow docker_helper_buildkitd_t cgroup_t:file read;
+# The P8 cgroup-file open corrective (single permission, exact-SHA UAT run
+# 41181407043): the P7 enforcing UAT proved the read grant removed the TE
+# denial family (every buildkit-runc/buildkitd cgroup_t:file read AVC
+# gone, the rule confirmed loaded by sesearch) yet the runc parent's
+# supportedControllers() openat2 STILL failed with the identical EACCES
+# and NO AVC record. The layer was identified with the loaded-policy
+# introspection: the openSUSE base policy carries
+#   dontaudit domain cgroup_t:file { append getattr ioctl lock open write };
+# so the open-completion hook's demand is silently denied: with read
+# granted the open proceeds past may_open's inode_permission (the P6
+# { read } AVC proved that check fires first and masks the later hook)
+# into do_dentry_open -> security_file_open -> selinux_file_open, whose
+# open_file_to_av = file_to_av(FMODE_READ -> READ) + FILE__OPEN demands
+# FILE__OPEN — TE-denied because no rule grants it, and SILENCED by the
+# dontaudit. The two permissions are therefore TWO sequentially reached
+# checks (read in the VFS permission pass, open in the open-completion
+# hook) — NOT one atomic check like the runc memfd exec-open pair — and
+# they stay TWO separate single-permission rules, never merged into
+# { read open }. The grant stays pointed at the same pair; open is
+# mutation-free (write/append/setattr stay closed — the rootless
+# no-delegation model is untouched), the standing helper subjects'
+# { read open } pair is exactly this two-check shape, and the cross-
+# operation boundary is unchanged (no operation-classified object lives
+# on cgroupfs).
+#
+# PROTOCOL NOTE (recorded because it shapes the next rung's evidence):
+# the open denial on this pair is INVISIBLE in the audit log while the
+# dontaudit stands — this grant's proof is BEHAVIORAL (the openat2
+# succeeds, supportedControllers() returns, Apply advances past the
+# "rootless needs no limits" error), not AVC-based. Deliberately NOT
+# granted: getattr/write/append/lock/create/setattr/unlink/execute/map/
+# relabelfrom/relabelto, any dir or filesystem rider beyond the standing
+# bare singletons, any other class or subject. The committed-policy
+# tests pin the buildkitd domain's cgroup authority at EXACTLY the four
+# canonical singletons (the count pin moves 36 -> 37 by exactly this
+# one rule).
+allow docker_helper_buildkitd_t cgroup_t:file open;
 
 # --- 4C-72: the shared runtime-root dir search — the NEW pair/plane
 # --- (PLANE G); the bare singleton, never a widening of any existing
