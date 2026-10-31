@@ -140,8 +140,9 @@ acc_ok() { printf '  ok:      %s\n' "$*"; }
 acc_fail() { printf '  FAIL:    %s\n' "$*" >&2; FAIL_COUNT=$((FAIL_COUNT + 1)); }
 acc_blocked() { printf '  BLOCKED: %s\n' "$*" >&2; BLOCKED_COUNT=$((BLOCKED_COUNT + 1)); }
 
-# rt_priv_log_verdict SURVEY OP OWN_CTX — the R7 privacy runc-log.json
-# observation classifier. Survey records have the shape
+# rt_priv_log_verdict SURVEY OP OWN_CTX OWN_OWNER [QUALITY] — the R7
+# privacy runc-log.json observation classifier. Survey records have the
+# shape
 #
 #   runc-log <op> fd_rc=<n> fd_err=<t> ino=<i> st_rc=<n> st_err=<t> cx_rc=<n> cx_err=<t> <a|U|G>|<ctx>
 #
@@ -152,51 +153,88 @@ acc_blocked() { printf '  BLOCKED: %s\n' "$*" >&2; BLOCKED_COUNT=$((BLOCKED_COUN
 # ino, the pinned inode's number; the P9-C UAT caught the same
 # mode-OK/context-lost TOCTOU biting this file read after a flow-timing
 # shift). fd_rc present and nonzero is incomplete evidence. Legacy
-# records (no fd fields) keep the plain two-path-stat contract.
+# records (no fd fields) keep the plain two-path-stat contract. The
+# log-gone records (`log-gone <op> ev=...`) journal the kernel-side
+# removal itself and are counted, never decisive alone.
 # Classification:
 #   - COMPLETE observation: fd_rc (when present) is 0 AND st_rc=0 AND
 #     cx_rc=0 AND the context field is
-#     non-empty and not "?". Decisive: its context MUST equal OWN_CTX.
+#     non-empty and not "?". Decisive on THREE invariants: its context
+#     MUST equal OWN_CTX (the per-op category match), its owner|group
+#     MUST equal OWN_OWNER (the op's own state-tree owner — a foreign
+#     owner is a privacy breach even with a correct category), and its
+#     mode must carry NO group/other write bit (rt_priv_no_write — the
+#     shared-path write invariant; the log's group/other READ bits are
+#     by design, a writable 6xx/7xx mode is not).
 #   - mode-read failure (st_rc!=0, e.g. ENOENT teardown): incomplete, NOT
 #     decisive, counted.
 #   - context-read failure (cx_rc!=0 or "?" with the file still present):
 #     incomplete, NOT decisive, counted — distinguished from the ENOENT
 #     teardown case by cx_rc/cx_err instead of being folded into it.
 # Verdict: FAIL foreign-category when any complete observation carries a
-# different context; FAIL no-valid-observation when zero complete
-# observations exist; otherwise OK. Never decisive from FIRST or LAST
-# alone: every complete observation is checked, and incomplete ones are
-# surfaced in the verdict so a teardown race cannot silently flip the
-# evidence either way.
+# different context; FAIL owner-or-mode when a complete observation is
+# category-correct but breaks the owner or the no-write invariant; zero
+# complete observations fail WITH THE P10-C TIERED REASON: under a
+# per-run PROVEN state-tree observer (QUALITY=full — the filesystem mark
+# was armed before the workload and the per-op state arm record proves
+# the op tree was seen at the kernel-event boundary) a zero-record
+# observation is a justified never-created, while under ANY other
+# observer (QUALITY=incomplete) it fails as observation-incomplete —
+# never a proven non-creation (the P10-C negative-test-1 invariant).
+# Zero complete observations WITH counted incomplete/gone records fail
+# as created-but-unreadable regardless of the quality. Never decisive
+# from FIRST or LAST alone: every complete observation is checked, and
+# incomplete ones are surfaced in the verdict so a teardown race cannot
+# silently flip the evidence either way.
 rt_priv_log_verdict() {
-  survey="$1"; op="$2"; own_ctx="$3"
-  valid=0; incomplete=0; foreign=""
+  survey="$1"; op="$2"; own_ctx="$3"; own_owner="$4"; quality="${5:-incomplete}"
+  valid=0; incomplete=0; gone=0; foreign=""; bad=""
   while IFS= read -r rec; do
     [ -n "$rec" ] || continue
     case "$rec" in
       "runc-log $op "*) ;;
+      "log-gone $op "*) gone=$((gone + 1)); continue ;;
       *) continue ;;
     esac
     st_rc="$(printf '%s' "$rec" | sed -n 's/.* st_rc=\([0-9][0-9]*\).*/\1/p')"
     cx_rc="$(printf '%s' "$rec" | sed -n 's/.* cx_rc=\([0-9][0-9]*\).*/\1/p')"
     fd_rc="$(printf '%s' "$rec" | sed -n 's/.* fd_rc=\([0-9][0-9]*\).*/\1/p')"
-    ctx="$(printf '%s' "$rec" | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[^ ]*\|/) { n = split($i, a, "|"); print a[n] } }')"
+    tuple="$(printf '%s' "$rec" | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[^ ]*\|/) { print $i; exit } }')"
+    ctx="$(printf '%s' "$tuple" | awk -F'|' '{ print $4 }')"
     if [ "$st_rc" = "0" ] && [ "$cx_rc" = "0" ] && [ -n "$ctx" ] && [ "$ctx" != "?" ] \
         && { [ -z "$fd_rc" ] || [ "$fd_rc" = "0" ]; }; then
       valid=$((valid + 1))
       if [ "$ctx" != "$own_ctx" ]; then
         foreign="$ctx"
       fi
+      owner="$(printf '%s' "$tuple" | awk -F'|' '{ print $2 "|" $3 }')"
+      mode="${tuple%%|*}"
+      if [ -n "$own_owner" ] && [ "$owner" != "$own_owner" ]; then
+        bad="$bad owner=$owner-drifted-from-$own_owner"
+      fi
+      if ! rt_priv_no_write "$mode"; then
+        bad="$bad mode=$mode-group-or-other-writable"
+      fi
     else
       incomplete=$((incomplete + 1))
     fi
   done < "$survey"
   if [ -n "$foreign" ]; then
-    printf 'VERDICT=FAIL reason=foreign-category valid=%d incomplete=%d foreign=%s\n' "$valid" "$incomplete" "$foreign"
+    printf 'VERDICT=FAIL reason=foreign-category valid=%d incomplete=%d gone=%d foreign=%s\n' "$valid" "$incomplete" "$gone" "$foreign"
+  elif [ -n "$bad" ]; then
+    printf 'VERDICT=FAIL reason=owner-or-mode valid=%d incomplete=%d gone=%d detail=%s\n' "$valid" "$incomplete" "$gone" "$(printf '%s' "$bad" | sed 's/^ //')"
   elif [ "$valid" -eq 0 ]; then
-    printf 'VERDICT=FAIL reason=no-valid-observation valid=0 incomplete=%d foreign=none\n' "$incomplete"
+    if [ $((incomplete + gone)) -eq 0 ]; then
+      if [ "$quality" = "full" ]; then
+        printf 'VERDICT=FAIL reason=never-created valid=0 incomplete=0 gone=%d foreign=none\n' "$gone"
+      else
+        printf 'VERDICT=FAIL reason=observation-incomplete valid=0 incomplete=%d gone=%d foreign=none\n' "$incomplete" "$gone"
+      fi
+    else
+      printf 'VERDICT=FAIL reason=created-but-unreadable valid=0 incomplete=%d gone=%d foreign=none\n' "$incomplete" "$gone"
+    fi
   else
-    printf 'VERDICT=OK valid=%d incomplete=%d foreign=none\n' "$valid" "$incomplete"
+    printf 'VERDICT=OK valid=%d incomplete=%d gone=%d foreign=none\n' "$valid" "$incomplete" "$gone"
   fi
 }
 # Two DISTINCT mode invariants, classified on the LAST THREE octal
@@ -285,6 +323,33 @@ rt_priv_op_quality() {
     return 0
   fi
   grep -q "^op-arm $1 " "$RT_SURVEY" 2>/dev/null || { printf 'incomplete'; return 0; }
+  printf 'full'
+}
+
+# rt_priv_log_quality OP — the per-op coverage claim of the P11-C
+# STATE-tree observer, the runc-log.json counterpart of
+# rt_priv_op_quality. "full" is reachable ONLY under the per-run PROVEN
+# state-tree mark (the state self-test proved the delivery of
+# create/attrib/delete AND the at-the-boundary captured record equal to
+# the pre-delete reference on a scratch dir INSIDE the watched state
+# tree), with a healthy watcher and the op's own state-op-arm record
+# (the state op tree was seen at the kernel-event boundary — no
+# registration window). Under any other observer the runc-log coverage
+# is NOT provable (the survey sweep can miss a file that lives shorter
+# than one sweep — the P11 UAT's c2 loss), so the claim stays incomplete
+# BY CONSTRUCTION and a zero-record observation fails as
+# observation-incomplete, never as a justified never-created.
+rt_priv_log_quality() {
+  if [ "$RT_STATE_OBSERVER" != "state-proven" ]; then
+    printf 'incomplete'
+    return 0
+  fi
+  if [ "$RT_CAPTURE_DEGRADED" = "1" ] || [ "${RT_FAN_ERRORS:-0}" -gt 0 ] \
+      || [ "${RT_EVENT_EVENTS:-0}" -eq 0 ]; then
+    printf 'incomplete'
+    return 0
+  fi
+  grep -q "^state-op-arm $1 " "$RT_SURVEY" 2>/dev/null || { printf 'incomplete'; return 0; }
   printf 'full'
 }
 
@@ -2399,6 +2464,7 @@ else
   : > "$RT_SURVEY"
   declare -A RT_ARM_SEEN
   RT_OBSERVER_KIND=inotify-legacy
+  RT_STATE_OBSERVER=inotify-legacy
   # The fd-pinned reader's per-run positive control, BEFORE any capture
   # can bind to the mechanism (the control exercises deletion-after-open,
   # inode substitution and the failed-open path as the SAME subject that
@@ -2562,10 +2628,19 @@ else
           RT_FAN_SCRIPT=/tmp/uat-wls-fanotify-watcher.py
           cat > "$RT_FAN_SCRIPT" <<'PYEOF'
 #!/usr/bin/env python3
-# The R7 P10-C gap-free privacy observer: a fanotify filesystem-mark
-# watcher over the /run mount. See the harness block above for the
-# structural rationale (no adoption window, capture at the kernel-event
-# boundary, fail-closed self-test, inotify fallback).
+# The R7 P10-C gap-free privacy observer, extended by the P11-C corrective
+# to cover the STATE tree as well: one fanotify group holds TWO filesystem
+# marks — the /run mount (the runtime tree, the P10-C contract unchanged)
+# and the mount of /var/lib/docker-helper-builder (the state tree lives on
+# the root filesystem, where a filesystem mark necessarily covers the whole
+# mount; the receiver FILTERS every event through the per-tree handle
+# cache and only the state-tree ancestry is acted on or forwarded, so the
+# ambient root-filesystem traffic costs one parse and one dict lookup per
+# event and is counted in the dropped/unresolved counters — the load is
+# evaluated per-run by those counters and by the queue-overflow guard,
+# which degrades the capture fail-closed). See the harness block above for
+# the structural rationale (no adoption window, capture at the kernel-event
+# boundary, fail-closed self-tests, inotify fallback).
 import ctypes, errno, os, pwd, grp, signal, struct, sys, time
 
 AT_FDCWD = -100
@@ -2586,12 +2661,14 @@ INFO_DFID = 3
 INFO_OLD_DFID_NAME = 10
 INFO_NEW_DFID_NAME = 12
 
-ROOT, JOURNAL_PATH, FIFO_PATH, SELFTEST_DIR = sys.argv[1:5]
+ROOT, STATE_ROOT, JOURNAL_PATH, FIFO_PATH, SELFTEST_DIR, STATE_SELFTEST_DIR = \
+    sys.argv[1:7]
 libc = ctypes.CDLL("libc.so.6", use_errno=True)
 journal = open(JOURNAL_PATH, "a", encoding="utf-8", errors="replace")
 stats = {"events": 0, "forwarded": 0, "dropped": 0, "unresolved": 0,
-         "captured": 0, "gone": 0, "overflow": 0, "errors": 0}
-fh_cache = {}
+         "captured": 0, "gone": 0, "overflow": 0, "errors": 0, "loggone": 0}
+fh_rt = {}
+fh_st = {}
 
 
 def jline(line):
@@ -2622,11 +2699,27 @@ def name_to_handle(path):
     return None
 
 
-def cache_path(path):
+def cache_path(path, cache):
     h = name_to_handle(path)
     if h is not None:
-        fh_cache[h] = path
+        cache[h] = path
     return h is not None
+
+
+def resolve(parent):
+    # The two watched trees live on two filesystems (tmpfs /run and the
+    # root filesystem), so every handle is resolved in the cache of ITS
+    # tree; a handle that resolves in both caches with different paths
+    # would be an ambiguity the receiver refuses (counted, never guessed).
+    pr = fh_rt.get(parent)
+    ps = fh_st.get(parent)
+    if pr is not None and ps is not None:
+        if pr == ps:
+            return pr
+        stats["errors"] += 1
+        jline("fan-watch error=handle-ambiguity-across-trees")
+        return None
+    return pr if pr is not None else ps
 
 
 def parse_events(buf):
@@ -2749,7 +2842,7 @@ def handle_event(mask, recs):
     if parent is None:
         stats["dropped"] += 1
         return
-    ppath = fh_cache.get(parent)
+    ppath = resolve(parent)
     if ppath is None:
         stats["unresolved"] += 1
         return
@@ -2770,25 +2863,34 @@ def handle_event(mask, recs):
         # FAN_ONDIR) reports the directory's own DFID without a name.
         path = ppath
     ops_dir = os.path.join(ROOT, "ops")
-    if ppath == SELFTEST_DIR or ppath.startswith(SELFTEST_DIR + "/"):
-        # The self-test surface: journal delivery and, while the entry
-        # lives, one fd-pinned capture for the capture-correctness
-        # proof. An entry event names the entry; an event ON a cached
-        # self-test directory itself (the chmod ATTRIB arrives as a
-        # nameless DFID of the directory's own handle) is captured the
-        # same way. Self-test events are never forwarded to the reader.
+    sops_dir = os.path.join(STATE_ROOT, "ops")
+    if ppath == SELFTEST_DIR or ppath.startswith(SELFTEST_DIR + "/") \
+            or ppath == STATE_SELFTEST_DIR \
+            or ppath.startswith(STATE_SELFTEST_DIR + "/"):
+        # The per-run positive-control surface (one scratch dir per
+        # watched tree, pre-created and pre-cached): journal delivery
+        # and, while the entry lives, one fd-pinned capture for the
+        # capture-correctness proof. An entry event names the entry; an
+        # event ON a cached self-test directory itself (the chmod
+        # ATTRIB arrives as a nameless DFID of the directory's own
+        # handle) is captured the same way. Self-test events are never
+        # forwarded to the reader.
+        st_tree = ppath == STATE_SELFTEST_DIR \
+            or ppath.startswith(STATE_SELFTEST_DIR + "/")
         shown = name if name else os.path.basename(ppath)
-        jline("fan-selftest ev=%s name=%s" % (evname, shown))
+        jline("fan-%sselftest ev=%s name=%s"
+              % ("state" if st_tree else "", evname, shown))
         deleted = "DELETE" in evname or "MOVED_FROM" in evname
         if not deleted:
             full = os.path.join(ppath, name) if name else ppath
             if os.path.isdir(full):
-                cache_path(full)
-                pinned_record("fan-selftest-obs ev=%s" % evname,
+                cache_path(full, fh_st if st_tree else fh_rt)
+                pinned_record("fan-%sselftest-obs ev=%s"
+                              % ("state" if st_tree else "", evname),
                               full, "open-failed-present")
         return
     if ppath == ROOT and name == "ops":
-        cache_path(path)
+        cache_path(path, fh_rt)
         stats["forwarded"] += 1
         fifo_write("%s|%s\n" % (evname, path))
         return
@@ -2797,7 +2899,7 @@ def handle_event(mask, recs):
         # journals the per-op arm record with the catch-up probe (the
         # P9-C fd-pinned reader would run later; here the probe runs in
         # the event receiver itself).
-        cache_path(path)
+        cache_path(path, fh_rt)
         runc_path = os.path.join(path, "runc")
         label = "runc-present" if os.path.isdir(runc_path) else "runc-absent"
         jline("op-arm %s catchup=%s ev=%s" % (name, label, evname))
@@ -2818,16 +2920,57 @@ def handle_event(mask, recs):
         else:
             pinned_record("runc-obs %s ev=%s" % (op, evname),
                           path, "open-failed-present")
-            cache_path(path)
+            cache_path(path, fh_rt)
+        stats["forwarded"] += 1
+        fifo_write("%s|%s\n" % (evname, path))
+        return
+    if ppath == STATE_ROOT and name == "ops":
+        cache_path(path, fh_st)
+        stats["forwarded"] += 1
+        fifo_write("%s|%s\n" % (evname, path))
+        return
+    if ppath == sops_dir and name:
+        # The STATE op dir's creation is the earliest boundary of the
+        # runc-log.json observation: the watcher journals the per-op
+        # state arm record with the catch-up probe (if the log file
+        # already exists at the event boundary, it is captured right
+        # here through the pinned fd).
+        cache_path(path, fh_st)
+        log_path = os.path.join(path, "root", "runc-native", "executor",
+                                "runc-log.json")
+        label = "log-present" if os.path.isfile(log_path) else "log-absent"
+        jline("state-op-arm %s catchup=%s ev=%s" % (name, label, evname))
+        if label == "log-present":
+            pinned_record("runc-log %s catchup=%s" % (name, label),
+                          log_path, "open-failed-present")
+        stats["forwarded"] += 1
+        fifo_write("%s|%s\n" % (evname, path))
+        return
+    if path.startswith(sops_dir + "/") and name == "runc-log.json":
+        # The executor runc-log.json's own lifecycle (create + the
+        # write/close ATTRIB churn + the teardown delete): capture IN
+        # the receiver at the kernel-event boundary — the file may live
+        # shorter than one survey sweep, so the survey-only contract
+        # cannot carry this evidence (the P11 UAT's c2 no-valid-
+        # observation gap); journal the removal directly.
+        op = path[len(sops_dir) + 1:].split("/")[0]
+        if "DELETE" in evname or "MOVED_FROM" in evname:
+            stats["loggone"] += 1
+            jline("log-gone %s ev=%s path=%s" % (op, evname, path))
+        else:
+            pinned_record("runc-log %s ev=%s" % (op, evname),
+                          path, "open-failed-present")
         stats["forwarded"] += 1
         fifo_write("%s|%s\n" % (evname, path))
         return
     if name and os.path.isdir(path):
-        cache_path(path)
-    if path == ops_dir or path.startswith(ops_dir + "/"):
-        # Any other lifecycle event inside the watched op tree: forward
-        # it in the inotifywait line format — the reader loop's sibling
-        # capture uses it as an independent second capture chance.
+        cache_path(path, fh_st if path.startswith(STATE_ROOT) else fh_rt)
+    if path == ops_dir or path.startswith(ops_dir + "/") \
+            or path == sops_dir or path.startswith(sops_dir + "/"):
+        # Any other lifecycle event inside either watched op tree:
+        # forward it in the inotifywait line format — the reader loop's
+        # sibling capture uses it as an independent second capture
+        # chance.
         stats["forwarded"] += 1
         fifo_write("%s|%s\n" % (evname, path))
         return
@@ -2860,8 +3003,8 @@ def stop(_signum, _frame):
     try:
         jline("fan-watch stop events=%(events)d forwarded=%(forwarded)d"
               " dropped=%(dropped)d unresolved=%(unresolved)d"
-              " captured=%(captured)d gone=%(gone)d overflow=%(overflow)d"
-              " errors=%(errors)d" % stats)
+              " captured=%(captured)d gone=%(gone)d loggone=%(loggone)d"
+              " overflow=%(overflow)d errors=%(errors)d" % stats)
     finally:
         os._exit(0)
 
@@ -2897,21 +3040,26 @@ try:
         raise OSError(ctypes.get_errno(), "fanotify_init failed")
     mark_mask = (FAN_ATTRIB | FAN_CREATE | FAN_DELETE | FAN_MOVED_FROM
                  | FAN_MOVED_TO | FAN_ONDIR)
-    if libc.fanotify_mark(fan, FAN_MARK_ADD | FAN_MARK_FILESYSTEM,
-                          mark_mask, AT_FDCWD, os.fsencode("/run")) != 0:
-        raise OSError(ctypes.get_errno(), "fanotify_mark failed")
-    for p in (ROOT, os.path.join(ROOT, "ops")):
+    for watched in (ROOT, STATE_ROOT):
+        if libc.fanotify_mark(fan, FAN_MARK_ADD | FAN_MARK_FILESYSTEM,
+                              mark_mask, AT_FDCWD,
+                              os.fsencode(watched)) != 0:
+            raise OSError(ctypes.get_errno(),
+                          "fanotify_mark failed for %s" % watched)
+    for p, cache in ((ROOT, fh_rt), (os.path.join(ROOT, "ops"), fh_rt),
+                     (STATE_ROOT, fh_st),
+                     (os.path.join(STATE_ROOT, "ops"), fh_st),
+                     (SELFTEST_DIR, fh_rt), (STATE_SELFTEST_DIR, fh_st)):
         if os.path.isdir(p):
-            cache_path(p)
-    if os.path.isdir(SELFTEST_DIR):
-        cache_path(SELFTEST_DIR)
+            cache_path(p, cache)
 except OSError as e:
     # The failure path reports through the journal; the FIFO write end
     # closes on exit and the shell falls back to the inotify chain.
     jline("fan-watch failed=%s" % str(e).replace(" ", "_"))
     os._exit(0)
 
-jline("fan-watch start root=%s pid=%d" % (ROOT, os.getpid()))
+jline("fan-watch start root=%s state=%s pid=%d"
+      % (ROOT, STATE_ROOT, os.getpid()))
 while True:
     try:
         buf = os.read(fan, 65536)
@@ -2925,19 +3073,27 @@ while True:
         except Exception as exc:  # never die on a malformed event
             stats["errors"] += 1
             jline("fan-watch error=%s" % str(exc).replace(" ", "_"))
+
 PYEOF
           if python3 -c "compile(open('$RT_FAN_SCRIPT').read(), 'watcher', 'exec')" 2>/dev/null; then
             RT_FAN_TEST_DIR=/run/uat-wls-fanotify-selftest
-            rm -rf "$RT_FAN_TEST_DIR"
-            mkdir -p "$RT_FAN_TEST_DIR"
+            RT_FAN_ST_TEST_DIR=/var/lib/docker-helper-builder/.uat-wls-fanotify-selftest
+            rm -rf "$RT_FAN_TEST_DIR" "$RT_FAN_ST_TEST_DIR"
+            mkdir -p "$RT_FAN_TEST_DIR" "$RT_FAN_ST_TEST_DIR"
             RT_FAN_REASON=""
+            RT_FAN_ST_REASON=""
             if command -v chcon >/dev/null 2>&1 \
                 && chcon -t docker_helper_builder_runtime_t "$RT_FAN_TEST_DIR" 2>/dev/null; then
               chcon -l c777 "$RT_FAN_TEST_DIR" 2>/dev/null || true
             fi
+            if command -v chcon >/dev/null 2>&1 \
+                && chcon -t docker_helper_builder_state_t "$RT_FAN_ST_TEST_DIR" 2>/dev/null; then
+              chcon -l c777 "$RT_FAN_ST_TEST_DIR" 2>/dev/null || true
+            fi
             python3 "$RT_FAN_SCRIPT" \
-              /run/docker-helper-builder "$RT_SURVEY" "$RT_FIFO" \
-              "$RT_FAN_TEST_DIR" 2>/tmp/uat-wls-privacy-fanotify.err &
+              /run/docker-helper-builder /var/lib/docker-helper-builder \
+              "$RT_SURVEY" "$RT_FIFO" \
+              "$RT_FAN_TEST_DIR" "$RT_FAN_ST_TEST_DIR" 2>/tmp/uat-wls-privacy-fanotify.err &
             RT_FAN_PID=$!
             # The FIFO rendezvous happens FIRST (the watcher opens its
             # write end before anything else, bounded retries), so this
@@ -2993,6 +3149,52 @@ PYEOF
               else
                 RT_FAN_REASON="selftest delivered=$RT_FAN_DELIVERED obs-ok=$RT_FAN_OBS_OK"
               fi
+              # The STATE-tree positive control (the P11-C corrective):
+              # the same protocol on a scratch dir INSIDE the watched
+              # state tree, relabeled to the state type. Only an
+              # all-green control activates the state mark's coverage
+              # claim; anything else keeps the state-tree runc-log
+              # evidence survey-driven (incomplete by construction) —
+              # the runtime tree's own proven coverage is NOT downgraded
+              # by a state-side failure.
+              RT_STATE_OBSERVER=survey-only
+              if [ -d "$RT_FAN_ST_TEST_DIR" ]; then
+                mkdir "$RT_FAN_ST_TEST_DIR/target" 2>/dev/null
+                chmod 1700 "$RT_FAN_ST_TEST_DIR/target" 2>/dev/null
+                RT_FAN_ST_REF="$(stat -c '%a|%U|%G|%i|%C' "$RT_FAN_ST_TEST_DIR/target" 2>/dev/null)"
+                rmdir "$RT_FAN_ST_TEST_DIR/target" 2>/dev/null
+                RT_FAN_ST_END=$(( $(date +%s) + 4 ))
+                while [ "$(date +%s)" -lt "$RT_FAN_ST_END" ]; do
+                  grep -q "fan-stateselftest ev=DELETE" "$RT_SURVEY" 2>/dev/null && break
+                  sleep 0.1
+                done
+                RT_FAN_ST_DELIVERED=0
+                grep -q "fan-stateselftest ev=CREATE" "$RT_SURVEY" 2>/dev/null && RT_FAN_ST_DELIVERED=$((RT_FAN_ST_DELIVERED + 1))
+                grep -q "fan-stateselftest ev=ATTRIB" "$RT_SURVEY" 2>/dev/null && RT_FAN_ST_DELIVERED=$((RT_FAN_ST_DELIVERED + 1))
+                grep -q "fan-stateselftest ev=DELETE" "$RT_SURVEY" 2>/dev/null && RT_FAN_ST_DELIVERED=$((RT_FAN_ST_DELIVERED + 1))
+                RT_FAN_ST_REF_MODE="$(printf '%s' "$RT_FAN_ST_REF" | awk -F'|' '{ print $1 }')"
+                RT_FAN_ST_REF_INO="$(printf '%s' "$RT_FAN_ST_REF" | awk -F'|' '{ print $4 }')"
+                RT_FAN_ST_REF_CTX="$(printf '%s' "$RT_FAN_ST_REF" | awk -F'|' '{ print $5 }')"
+                RT_FAN_ST_OBS_LINE="$(grep "fan-stateselftest-obs ev=ATTRIB" "$RT_SURVEY" 2>/dev/null | tail -1)"
+                RT_FAN_ST_OBS_OK=no
+                case "$RT_FAN_ST_OBS_LINE" in
+                  *"fd_rc=0"*"st_rc=0"*"cx_rc=0"*)
+                    RT_FAN_ST_OBS_TUPLE="$(printf '%s' "$RT_FAN_ST_OBS_LINE" | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[^ ]*\|/) { print $i; exit } }')"
+                    RT_FAN_ST_OBS_INO="$(printf '%s' "$RT_FAN_ST_OBS_LINE" | sed -n 's/.* ino=\([0-9][0-9]*\).*/\1/p')"
+                    if [ "$RT_FAN_ST_OBS_TUPLE" = "$RT_FAN_ST_REF_MODE|$(printf '%s' "$RT_FAN_ST_REF" | awk -F'|' '{ print $2 }')|$(printf '%s' "$RT_FAN_ST_REF" | awk -F'|' '{ print $3 }')|$RT_FAN_ST_REF_CTX" ] \
+                        && [ "$RT_FAN_ST_OBS_INO" = "$RT_FAN_ST_REF_INO" ]; then
+                      RT_FAN_ST_OBS_OK=yes
+                    fi
+                    ;;
+                esac
+                if [ "$RT_FAN_ST_DELIVERED" -eq 3 ] && [ "$RT_FAN_ST_OBS_OK" = yes ]; then
+                  RT_STATE_OBSERVER=state-proven
+                else
+                  RT_FAN_ST_REASON="state-selftest delivered=$RT_FAN_ST_DELIVERED obs-ok=$RT_FAN_ST_OBS_OK"
+                fi
+              else
+                RT_FAN_ST_REASON="state-selftest dir absent"
+              fi
             else
               RT_FAN_REASON="$(grep '^fan-watch failed=' "$RT_SURVEY" 2>/dev/null | tail -1 | cut -c1-120)"
               [ -n "$RT_FAN_REASON" ] || RT_FAN_REASON="no start record"
@@ -3001,10 +3203,17 @@ PYEOF
               [ -n "$RT_FAN_PID" ] && kill "$RT_FAN_PID" 2>/dev/null || true
               wait "$RT_FAN_PID" 2>/dev/null || true
               RT_FAN_PID=""
-              rm -rf "$RT_FAN_TEST_DIR"
+              rm -rf "$RT_FAN_TEST_DIR" "$RT_FAN_ST_TEST_DIR"
               info "R7-privacy fanotify: unavailable ($RT_FAN_REASON) — falling back to the inotify -r chain (its adoption window keeps the coverage claim incomplete by construction)"
             else
               info "R7-privacy fanotify: proven (delivery create/attrib/delete + the captured record equals the pre-delete reference $RT_FAN_REF)"
+              rm -rf "$RT_FAN_TEST_DIR"
+              if [ "$RT_STATE_OBSERVER" = "state-proven" ]; then
+                info "R7-privacy fanotify state: proven (delivery create/attrib/delete + the captured record equals the pre-delete reference $RT_FAN_ST_REF)"
+              else
+                info "R7-privacy fanotify state: unavailable ($RT_FAN_ST_REASON) — the state-tree runc-log evidence stays survey-driven (incomplete by construction)"
+              fi
+              rm -rf "$RT_FAN_ST_TEST_DIR"
             fi
           else
             info "R7-privacy fanotify: the watcher script did not compile — falling back to the inotify -r chain"
@@ -3241,7 +3450,7 @@ PYEOF
     kill "$RT_FAN_PID" 2>/dev/null || true
     wait "$RT_FAN_PID" 2>/dev/null || true
     RT_FAN_STOP="$(grep '^fan-watch stop ' "$RT_SURVEY" 2>/dev/null | tail -1)"
-    for RT_FAN_K in events forwarded dropped unresolved captured gone overflow errors; do
+    for RT_FAN_K in events forwarded dropped unresolved captured gone loggone overflow errors; do
       RT_FAN_V="$(printf '%s' "$RT_FAN_STOP" | sed -n "s/.* ${RT_FAN_K}=\([0-9][0-9]*\).*/\1/p")"
       [ -n "$RT_FAN_V" ] || RT_FAN_V=0
       eval "RT_FAN_$(printf '%s' "$RT_FAN_K" | tr 'a-z' 'A-Z')=$RT_FAN_V"
@@ -3267,7 +3476,7 @@ PYEOF
     RT_CAPTURE_QUALITY=incomplete
   fi
   RT_CAP_DESC="$(rt_priv_capture_desc "$RT_EVENT_CAPTURE" "$RT_CAPTURE_DEGRADED" "run:$RT_WATCH_ERRORS_RUN/var:$RT_WATCH_ERRORS_VAR")"
-  info "R7-privacy capture: observer=$RT_OBSERVER_KIND event-driven=$RT_EVENT_CAPTURE (events observed: ${RT_EVENT_EVENTS:-0}; watcher survived: ${RT_INO_ALIVE:-n/a}; capture-degraded=${RT_CAPTURE_DEGRADED:-n/a}; watch-errors=run:$RT_WATCH_ERRORS_RUN/var:$RT_WATCH_ERRORS_VAR; watcher stderr: $(head -2 /tmp/uat-wls-privacy-inotify.err 2>/dev/null || echo none))"
+  info "R7-privacy capture: observer=$RT_OBSERVER_KIND state-observer=$RT_STATE_OBSERVER event-driven=$RT_EVENT_CAPTURE (events observed: ${RT_EVENT_EVENTS:-0}; watcher survived: ${RT_INO_ALIVE:-n/a}; capture-degraded=${RT_CAPTURE_DEGRADED:-n/a}; watch-errors=run:$RT_WATCH_ERRORS_RUN/var:$RT_WATCH_ERRORS_VAR; watcher stderr: $(head -2 /tmp/uat-wls-privacy-inotify.err 2>/dev/null || echo none))"
   if [ "$RT_OBSERVER_KIND" = "fanotify-proven" ]; then
     info "R7-privacy fanotify receiver: events=$RT_FAN_EVENTS forwarded=$RT_FAN_FORWARDED captured=$RT_FAN_CAPTURED gone=$RT_FAN_GONE unresolved=$RT_FAN_UNRESOLVED dropped=$RT_FAN_DROPPED overflow=$RT_FAN_OVERFLOW errors=$RT_FAN_ERRORS survived=$RT_FAN_ALIVE"
   fi
@@ -3316,8 +3525,9 @@ PYEOF
   # behavior is reconstructable from the run log alone (the P10 root
   # cause was blocked exactly by the survey journal living only on the
   # VM). Records carry paths and event names only — no secrets.
-  info "R7-privacy observer journal: kind=$RT_OBSERVER_KIND $(grep -E '^(op-arm |fan-watch |fan-selftest|capture-overflow)' "$RT_SURVEY" 2>/dev/null | tr '\n' ';' | cut -c1-1400)"
+  info "R7-privacy observer journal: kind=$RT_OBSERVER_KIND state-kind=$RT_STATE_OBSERVER $(grep -E '^(op-arm |state-op-arm |fan-watch |fan-selftest|fan-stateselftest|capture-overflow)' "$RT_SURVEY" 2>/dev/null | tr '\n' ';' | cut -c1-1800)"
   info "R7-privacy runc journal: $(grep -E '^(runc |runc-obs |runc-gone )' "$RT_SURVEY" 2>/dev/null | tr '\n' ';' | cut -c1-2600)"
+  info "R7-privacy state journal: $(grep -E '^(state-op-arm |runc-log |log-gone )' "$RT_SURVEY" 2>/dev/null | tr '\n' ';' | cut -c1-2600)"
   # stat tuples are mode|uid|gid|context
   RT_CTX_A="$(printf '%s' "$RT_STAT_A" | awk -F'|' '{ print $4 }')"
   RT_CTX_B="$(printf '%s' "$RT_STAT_B" | awk -F'|' '{ print $4 }')"
@@ -3514,7 +3724,7 @@ PYEOF
     RT_ST="$(grep "^state-op $RT_OP " "$RT_SURVEY" | awk '$3 != ""' | head -1 | awk '{ print $3 }')"
     RT_LOG_FIRST="$(grep "^runc-log $RT_OP " "$RT_SURVEY" | head -1 | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[^ ]*\|/) { print $i; exit } }')"
     RT_LOG_LAST="$(grep "^runc-log $RT_OP " "$RT_SURVEY" | tail -1 | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[^ ]*\|/) { print $i; exit } }')"
-    RT_LOG_CTX="$(rt_priv_log_verdict "$RT_SURVEY" "$RT_OP" "${RT_ST##*|}")"
+    RT_LOG_CTX="$(rt_priv_log_verdict "$RT_SURVEY" "$RT_OP" "${RT_ST##*|}" "$(printf '%s' "$RT_ST" | awk -F'|' '{ print $2 "|" $3 }')" "$(rt_priv_log_quality "$RT_OP")")"
     RT_ST_COUNT=$((RT_ST_COUNT + 1))
     if [ "$RT_ST_COUNT" -eq 1 ]; then
       RT_ST_A="$RT_ST"; RT_LOG_FIRST_A="$RT_LOG_FIRST"; RT_LOG_LAST_A="$RT_LOG_LAST"

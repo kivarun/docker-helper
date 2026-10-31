@@ -12592,9 +12592,13 @@ func TestUATWorkloadSELinuxInventoryAssertionsFailClosed(t *testing.T) {
 // rt_priv_log_verdict classifier over survey fixtures and proves the R7
 // privacy runc-log.json observation contract end-to-end:
 //   - every COMPLETE observation (both reads rc=0, readable context) must
-//     carry the operation's own state-tree category; a complete
+//     carry the operation's own state-tree category, its own state-tree
+//     owner, and a mode without group/other write bits; a complete
 //     FOREIGN-CATEGORY observation fails even when later observations are
-//     correct (the pre-corrective LAST-only check would have hidden it);
+//     correct (the pre-corrective LAST-only check would have hidden it),
+//     and a category-correct observation with a drifted owner or a
+//     group/other-writable mode fails as owner-or-mode (the P11-C
+//     corrective's extended invariants);
 //   - a teardown-time ENOENT observation (mode read failed) is incomplete,
 //     never decisive, and never converts a correctly observed inode into a
 //     false mismatch (the P0 UAT's B=? shape with a correct complete
@@ -12602,7 +12606,21 @@ func TestUATWorkloadSELinuxInventoryAssertionsFailClosed(t *testing.T) {
 //   - a genuine context-read failure ("?" context with the file present)
 //     is distinguished from the ENOENT teardown case: it is not decisive
 //     by itself, but zero complete observations fail;
+//   - zero complete observations fail WITH THE P10-C TIERED REASONS:
+//     under the proven state-tree observer quality a bare zero-record
+//     observation is a justified never-created, under any other observer
+//     it is observation-incomplete, and counted incomplete/log-gone
+//     records make it created-but-unreadable regardless of the quality —
+//     incomplete evidence can never produce a PASS;
 //   - an empty survey fails (no evidence is never green).
+//
+// The P11-C corrective's required regression scenarios are all covered:
+// a create+delete pair captured entirely between polling intervals
+// through the kernel-event receiver stays green; a full lifecycle inside
+// the survey blind spot (log-gone only) fails honestly; a deletion after
+// the fd was pinned keeps its complete record; a deletion before the
+// open journals incomplete evidence and fails; parallel c1/c2 records are
+// classified independently per op.
 //
 // The fd-pinned reader (the P9-C corrective) extends the contract: a
 // record produced through the pinned file FD carries fd_rc / fd_err /
@@ -12613,7 +12631,9 @@ func TestUATWorkloadSELinuxInventoryAssertionsFailClosed(t *testing.T) {
 func TestUATWorkloadSELinuxRuncLogObservationClassifier(t *testing.T) {
 	const ctxC1 = "system_u:object_r:docker_helper_builder_state_t:s0:c1"
 	const ctxC2 = "system_u:object_r:docker_helper_builder_state_t:s0:c2"
-	classifier := extractShellFunction(t, "scripts/uat-workload-selinux.sh", "rt_priv_log_verdict")
+	const owner = "b|b"
+	classifier := extractShellFunction(t, "scripts/uat-workload-selinux.sh", "rt_priv_log_verdict") +
+		"\n" + extractShellFunction(t, "scripts/uat-workload-selinux.sh", "rt_priv_no_write")
 
 	dir := t.TempDir()
 	survey := filepath.Join(dir, "survey.txt")
@@ -12623,9 +12643,11 @@ func TestUATWorkloadSELinuxRuncLogObservationClassifier(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	run := func(op, own string) string {
+	run := func(op, own string, rest ...string) string {
 		t.Helper()
-		script := classifier + "\nrt_priv_log_verdict " + strconv.Quote(survey) + " " + op + " " + strconv.Quote(own) + "\n"
+		args := []string{strconv.Quote(survey), op, strconv.Quote(own), strconv.Quote(owner)}
+		args = append(args, rest...)
+		script := classifier + "\nrt_priv_log_verdict " + strings.Join(args, " ") + "\n"
 		out, err := runBashIn(t, dir, script)
 		if err != nil {
 			t.Fatalf("classifier run failed: %v\n%s", err, out)
@@ -12686,8 +12708,8 @@ func TestUATWorkloadSELinuxRuncLogObservationClassifier(t *testing.T) {
 
 	t.Run("genuine context-read failure alone fails", func(t *testing.T) {
 		write("runc-log opE st_rc=0 st_err=none cx_rc=0 cx_err=none 644|b|b|?")
-		if got := run("opE", ctxC1); !strings.HasPrefix(got, "VERDICT=FAIL reason=no-valid-observation") {
-			t.Errorf("a live file whose context is unreadable in every observation must fail, got: %s", got)
+		if got := run("opE", ctxC1); !strings.HasPrefix(got, "VERDICT=FAIL reason=created-but-unreadable") {
+			t.Errorf("a live file whose context is unreadable in every observation must fail as created-but-unreadable, got: %s", got)
 		}
 	})
 
@@ -12696,15 +12718,22 @@ func TestUATWorkloadSELinuxRuncLogObservationClassifier(t *testing.T) {
 			"runc-log opF st_rc=1 st_err=ENOENT cx_rc=1 cx_err=ENOENT ||?",
 			"runc-log opF st_rc=1 st_err=ENOENT cx_rc=1 cx_err=ENOENT ||?",
 		)
-		if got := run("opF", ctxC1); !strings.HasPrefix(got, "VERDICT=FAIL reason=no-valid-observation valid=0 incomplete=2") {
-			t.Errorf("zero complete observations must fail, got: %s", got)
+		if got := run("opF", ctxC1); !strings.HasPrefix(got, "VERDICT=FAIL reason=created-but-unreadable valid=0 incomplete=2") {
+			t.Errorf("zero complete observations with counted incomplete records must fail as created-but-unreadable, got: %s", got)
 		}
 	})
 
-	t.Run("empty survey fails", func(t *testing.T) {
+	t.Run("empty survey fails as observation-incomplete without a proven observer", func(t *testing.T) {
 		write()
-		if got := run("opG", ctxC1); !strings.HasPrefix(got, "VERDICT=FAIL reason=no-valid-observation valid=0 incomplete=0") {
-			t.Errorf("an empty survey must fail, got: %s", got)
+		if got := run("opG", ctxC1); !strings.HasPrefix(got, "VERDICT=FAIL reason=observation-incomplete valid=0 incomplete=0 gone=0") {
+			t.Errorf("an empty survey without a proven observer must fail as observation-incomplete, got: %s", got)
+		}
+	})
+
+	t.Run("empty survey under a proven observer is a justified never-created", func(t *testing.T) {
+		write()
+		if got := run("opG", ctxC1, "full"); !strings.HasPrefix(got, "VERDICT=FAIL reason=never-created valid=0 incomplete=0 gone=0") {
+			t.Errorf("an empty survey under the proven state observer must fail as never-created, got: %s", got)
 		}
 	})
 
@@ -12728,15 +12757,109 @@ func TestUATWorkloadSELinuxRuncLogObservationClassifier(t *testing.T) {
 
 	t.Run("a failed fd open is incomplete evidence for the log file too", func(t *testing.T) {
 		write("runc-log opJ fd_rc=1 fd_err=open-failed-absent ino= st_rc=2 st_err=skipped-no-open-fd cx_rc=2 cx_err=skipped-no-open-fd ||?")
-		if got := run("opJ", ctxC1); !strings.HasPrefix(got, "VERDICT=FAIL reason=no-valid-observation valid=0 incomplete=1") {
+		if got := run("opJ", ctxC1); !strings.HasPrefix(got, "VERDICT=FAIL reason=created-but-unreadable valid=0 incomplete=1") {
 			t.Errorf("a file that vanished before the FD could be pinned must stay incomplete and fail, got: %s", got)
 		}
 	})
 
 	t.Run("an fd-pinned record with a lost context read still fails closed", func(t *testing.T) {
 		write("runc-log opK fd_rc=0 fd_err=none ino=4403 st_rc=0 st_err=none cx_rc=1 cx_err=No_such_file_or_directory 644|b|b|?")
-		if got := run("opK", ctxC1); !strings.HasPrefix(got, "VERDICT=FAIL reason=no-valid-observation valid=0 incomplete=1") {
+		if got := run("opK", ctxC1); !strings.HasPrefix(got, "VERDICT=FAIL reason=created-but-unreadable valid=0 incomplete=1") {
 			t.Errorf("even a structurally unreachable fd_rc=0/cx-failed record must never validate, got: %s", got)
+		}
+	})
+
+	// The P11-C corrective's required regression scenarios.
+	t.Run("create and delete between polling intervals captured by the receiver stays green", func(t *testing.T) {
+		write(
+			"state-op-arm opL catchup=log-absent ev=CREATE,ISDIR",
+			"runc-log opL ev=CREATE fd_rc=0 fd_err=none ino=5501 st_rc=0 st_err=none cx_rc=0 cx_err=none 644|b|b|"+ctxC1,
+			"runc-log opL ev=ATTRIB fd_rc=0 fd_err=none ino=5501 st_rc=0 st_err=none cx_rc=0 cx_err=none 644|b|b|"+ctxC1,
+			"log-gone opL ev=DELETE path=/var/lib/docker-helper-builder/ops/opL/root/runc-native/executor/runc-log.json",
+		)
+		got := run("opL", ctxC1)
+		if !strings.HasPrefix(got, "VERDICT=OK valid=2 incomplete=0 gone=1") {
+			t.Errorf("a create+attrib+delete lifecycle that never coincided with a sweep must stay green on the receiver's fd-pinned captures, got: %s", got)
+		}
+	})
+
+	t.Run("full lifecycle inside the survey blind spot fails honestly", func(t *testing.T) {
+		write(
+			"state-op-arm opM catchup=log-absent ev=CREATE,ISDIR",
+			"log-gone opM ev=DELETE path=/var/lib/docker-helper-builder/ops/opM/root/runc-native/executor/runc-log.json",
+		)
+		got := run("opM", ctxC1, "full")
+		if !strings.HasPrefix(got, "VERDICT=FAIL reason=created-but-unreadable valid=0 incomplete=0 gone=1") {
+			t.Errorf("a log that lived and died entirely between sweeps must fail as created-but-unreadable even under the proven observer, got: %s", got)
+		}
+	})
+
+	t.Run("log-gone alone without any arm record fails as created-but-unreadable", func(t *testing.T) {
+		write("log-gone opN ev=DELETE path=/var/lib/docker-helper-builder/ops/opN/root/runc-native/executor/runc-log.json")
+		got := run("opN", ctxC1, "full")
+		if !strings.HasPrefix(got, "VERDICT=FAIL reason=created-but-unreadable valid=0 incomplete=0 gone=1") {
+			t.Errorf("a removal event without any capture must fail honestly, got: %s", got)
+		}
+	})
+
+	t.Run("deletion after the fd was pinned keeps the complete record", func(t *testing.T) {
+		write(
+			"state-op-arm opO catchup=log-absent ev=CREATE,ISDIR",
+			"runc-log opO ev=ATTRIB fd_rc=0 fd_err=none ino=5601 st_rc=0 st_err=none cx_rc=0 cx_err=none 644|b|b|"+ctxC1,
+			"log-gone opO ev=DELETE path=/var/lib/docker-helper-builder/ops/opO/root/runc-native/executor/runc-log.json",
+		)
+		if got := run("opO", ctxC1); !strings.HasPrefix(got, "VERDICT=OK valid=1 incomplete=0 gone=1") {
+			t.Errorf("a capture taken through the pinned fd before the deletion must stay decisive, got: %s", got)
+		}
+	})
+
+	t.Run("deletion before the open journals incomplete evidence and fails", func(t *testing.T) {
+		write(
+			"state-op-arm opP catchup=log-absent ev=CREATE,ISDIR",
+			"runc-log opP ev=CREATE fd_rc=1 fd_err=open-failed-absent ino= st_rc=2 st_err=skipped-no-open-fd cx_rc=2 cx_err=skipped-no-open-fd ||?",
+			"log-gone opP ev=DELETE path=/var/lib/docker-helper-builder/ops/opP/root/runc-native/executor/runc-log.json",
+		)
+		if got := run("opP", ctxC1); !strings.HasPrefix(got, "VERDICT=FAIL reason=created-but-unreadable valid=0 incomplete=1 gone=1") {
+			t.Errorf("a file gone before the open must fail with the incomplete record and the removal both counted, got: %s", got)
+		}
+	})
+
+	t.Run("wrong MCS context fails", func(t *testing.T) {
+		write("runc-log opQ ev=CREATE fd_rc=0 fd_err=none ino=5701 st_rc=0 st_err=none cx_rc=0 cx_err=none 644|b|b|" + ctxC2)
+		if got := run("opQ", ctxC1); !strings.HasPrefix(got, "VERDICT=FAIL reason=foreign-category") || !strings.Contains(got, "foreign="+ctxC2) {
+			t.Errorf("a log labeled with another operation's category must fail, got: %s", got)
+		}
+	})
+
+	t.Run("wrong owner fails as owner-or-mode", func(t *testing.T) {
+		write("runc-log opR ev=CREATE fd_rc=0 fd_err=none ino=5801 st_rc=0 st_err=none cx_rc=0 cx_err=none 644|root|root|" + ctxC1)
+		if got := run("opR", ctxC1); !strings.HasPrefix(got, "VERDICT=FAIL reason=owner-or-mode") || !strings.Contains(got, "owner=root|root-drifted-from-b|b") {
+			t.Errorf("a category-correct log owned by a foreign identity must fail, got: %s", got)
+		}
+	})
+
+	t.Run("group/other-writable mode fails as owner-or-mode", func(t *testing.T) {
+		write("runc-log opS ev=CREATE fd_rc=0 fd_err=none ino=5901 st_rc=0 st_err=none cx_rc=0 cx_err=none 666|b|b|" + ctxC1)
+		if got := run("opS", ctxC1); !strings.HasPrefix(got, "VERDICT=FAIL reason=owner-or-mode") || !strings.Contains(got, "mode=666-group-or-other-writable") {
+			t.Errorf("a category-correct log with a group/other-writable mode must fail, got: %s", got)
+		}
+	})
+
+	t.Run("parallel c1 and c2 records are classified independently", func(t *testing.T) {
+		write(
+			"state-op-arm opT1 catchup=log-absent ev=CREATE,ISDIR",
+			"runc-log opT1 ev=CREATE fd_rc=0 fd_err=none ino=6001 st_rc=0 st_err=none cx_rc=0 cx_err=none 644|b|b|"+ctxC1,
+			"state-op-arm opT2 catchup=log-absent ev=CREATE,ISDIR",
+			"runc-log opT2 ev=CREATE fd_rc=0 fd_err=none ino=6002 st_rc=0 st_err=none cx_rc=0 cx_err=none 644|b|b|"+ctxC2,
+		)
+		if got := run("opT1", ctxC1); !strings.HasPrefix(got, "VERDICT=OK valid=1 incomplete=0") {
+			t.Errorf("the c1 query must validate only the c1 records, got: %s", got)
+		}
+		if got := run("opT2", ctxC2); !strings.HasPrefix(got, "VERDICT=OK valid=1 incomplete=0") {
+			t.Errorf("the c2 query must validate only the c2 records, got: %s", got)
+		}
+		if got := run("opT1", ctxC2); !strings.HasPrefix(got, "VERDICT=FAIL reason=foreign-category") {
+			t.Errorf("querying c1's records against c2's own context must fail, got: %s", got)
 		}
 	})
 }
@@ -13463,16 +13586,74 @@ func TestUATWorkloadSELinuxObserverCoverageClaim(t *testing.T) {
 	})
 }
 
+// TestUATWorkloadSELinuxLogQualityGate runs the shipped rt_priv_log_quality
+// function over the observer-state variables and proves the P11-C tiered
+// coverage claim for the state-tree runc-log observation:
+//   - "full" is reachable ONLY under the per-run proven state-tree observer
+//     (state-proven) with a healthy watcher (not degraded, no fanotify
+//     journal errors, events observed) AND the op's own state-op-arm record
+//     in the survey (the state op tree was seen at the kernel-event
+//     boundary);
+//   - every other state — the inotify fallback, a degraded capture, an
+//     observer error, an event-free window, a missing arm record — keeps
+//     the claim incomplete, so a zero-record runc-log observation can never
+//     be classified as a justified never-created (incomplete evidence can
+//     never produce a PASS or a proven non-creation).
+func TestUATWorkloadSELinuxLogQualityGate(t *testing.T) {
+	fn := extractShellFunction(t, "scripts/uat-workload-selinux.sh", "rt_priv_log_quality")
+	dir := t.TempDir()
+	survey := filepath.Join(dir, "survey.txt")
+	run := func(content, env string) string {
+		t.Helper()
+		if err := os.WriteFile(survey, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		script := fn + "\nRT_SURVEY=" + strconv.Quote(survey) + "\n" + env +
+			"\nprintf '%s' \"$(rt_priv_log_quality opX)\"\n"
+		out, err := runBashIn(t, dir, script)
+		if err != nil {
+			t.Fatalf("quality run failed: %v\n%s", err, out)
+		}
+		return strings.TrimSpace(out)
+	}
+	const arm = "state-op-arm opX catchup=log-absent ev=CREATE,ISDIR\n"
+
+	if got := run(arm, "RT_STATE_OBSERVER=state-proven RT_CAPTURE_DEGRADED=0 RT_FAN_ERRORS=0 RT_EVENT_EVENTS=5"); got != "full" {
+		t.Errorf("a proven, healthy, armed observer must claim full, got: %s", got)
+	}
+	if got := run(arm, "RT_STATE_OBSERVER=inotify-legacy RT_CAPTURE_DEGRADED=0 RT_FAN_ERRORS=0 RT_EVENT_EVENTS=5"); got != "incomplete" {
+		t.Errorf("the inotify fallback must never claim full, got: %s", got)
+	}
+	if got := run(arm, "RT_STATE_OBSERVER=survey-only RT_CAPTURE_DEGRADED=0 RT_FAN_ERRORS=0 RT_EVENT_EVENTS=5"); got != "incomplete" {
+		t.Errorf("a survey-only state observer must never claim full, got: %s", got)
+	}
+	if got := run(arm, "RT_STATE_OBSERVER=state-proven RT_CAPTURE_DEGRADED=1 RT_FAN_ERRORS=0 RT_EVENT_EVENTS=5"); got != "incomplete" {
+		t.Errorf("a degraded capture must never claim full, got: %s", got)
+	}
+	if got := run(arm, "RT_STATE_OBSERVER=state-proven RT_CAPTURE_DEGRADED=0 RT_FAN_ERRORS=2 RT_EVENT_EVENTS=5"); got != "incomplete" {
+		t.Errorf("an observer error must never claim full, got: %s", got)
+	}
+	if got := run(arm, "RT_STATE_OBSERVER=state-proven RT_CAPTURE_DEGRADED=0 RT_FAN_ERRORS=0 RT_EVENT_EVENTS=0"); got != "incomplete" {
+		t.Errorf("an event-free window must never claim full, got: %s", got)
+	}
+	if got := run("", "RT_STATE_OBSERVER=state-proven RT_CAPTURE_DEGRADED=0 RT_FAN_ERRORS=0 RT_EVENT_EVENTS=5"); got != "incomplete" {
+		t.Errorf("a missing state-op-arm record must never claim full, got: %s", got)
+	}
+}
+
 // TestUATWorkloadSELinuxFanotifyWatcherScript extracts the embedded P10-C
-// fanotify observer from the shipped harness and proves it parses as
-// python and carries the load-bearing mechanics: the filesystem mark with
-// the directory-entry event set, the DFID_NAME fid reporting, the
-// top-down handle cache over the stable runtime root, the fd-pinned
-// capture at the kernel-event boundary (open, fstat, getxattr through
-// the open file description), the direct runc-gone and per-op arm
-// journaling, the inotify-format event forwarding for the unchanged
-// reader loop, and the never-hanging FIFO rendezvous with the
-// fail-closed failure reporting.
+// fanotify observer (extended by the P11-C corrective to a second
+// filesystem mark over the state tree) from the shipped harness and proves
+// it parses as python and carries the load-bearing mechanics: the
+// filesystem marks with the directory-entry event set, the DFID_NAME fid
+// reporting, the top-down handle caches over both stable roots (with the
+// cross-tree ambiguity refusal), the fd-pinned capture at the kernel-event
+// boundary (open, fstat, getxattr through the open file description), the
+// direct runc-gone and per-op arm journaling for BOTH trees (op-arm and
+// state-op-arm, runc-gone and log-gone, runc-obs and the runc-log
+// captures), the per-tree positive-control surfaces, the inotify-format
+// event forwarding for the unchanged reader loop, and the never-hanging
+// FIFO rendezvous with the fail-closed failure reporting.
 func TestUATWorkloadSELinuxFanotifyWatcherScript(t *testing.T) {
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 is not available in this environment; the UAT self-test proves the observer on the VM")
@@ -13500,8 +13681,12 @@ func TestUATWorkloadSELinuxFanotifyWatcherScript(t *testing.T) {
 		"FAN_MOVED_FROM", "FAN_MOVED_TO", "FAN_ATTRIB", "FAN_ONDIR", "FAN_Q_OVERFLOW",
 		"INFO_DFID_NAME", "INFO_DFID", "name_to_handle_at", "security.selinux",
 		"os.fstat", "os.getxattr", "op-arm", "runc-gone", "runc-obs",
-		"fan-selftest", "fan-watch start", "fan-watch stop", "fan-watch failed",
+		"fan-watch start", "fan-watch stop", "fan-watch failed",
 		"O_NONBLOCK", "capture-overflow",
+		// The P11-C state-tree coverage mechanics.
+		"STATE_ROOT", "STATE_SELFTEST_DIR", "fan-%sselftest",
+		"state-op-arm", "log-gone", "runc-log.json", "handle-ambiguity",
+		"for watched in (ROOT, STATE_ROOT)", "fh_st", "fh_rt", "loggone",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("the embedded fanotify watcher must carry %s", want)
