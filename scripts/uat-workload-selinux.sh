@@ -3003,6 +3003,32 @@ else
   else
     acc_fail "R7 runtime privacy: no single loaded file-class constraint expression carries the append permission with the t1-gated mcs_constrained_type gating (seinfo --constrain file output: ${RT_ST_CONSTRAINTS:-absent})"
   fi
+  # The P10 nsfs open rung's cross-operation isolation introspection. The
+  # open grant is type-wide TE authority on the GLOBAL nsfs_t label (every
+  # /proc/<pid>/ns/* handle of every process), so the reachability of
+  # ANOTHER operation's namespace handle must stay closed by the
+  # process-class gate: /proc/<pid>/ns/* acquisition requires
+  # ptrace_may_access, whose SELinux surface is process:ptrace. Captured
+  # live on the loaded policy as a fail-closed leg:
+  #   - sesearch --allow -s docker_helper_buildkitd_t -c process — the
+  #     subject's ENTIRE loaded process-class authority must contain NO
+  #     ptrace permission (the TE surface stays closed; the query must be
+  #     alive — at least one rule — or the introspection is void);
+  #   - seinfo --constrain process (info): the loaded process-class
+  #     constraint set, the second, constraint-side layer of the same
+  #     gate (the subject-gated mcs form denies c1 -> c2 even for a
+  #     hypothetical ptrace rule).
+  RT_PROC_ALLOW="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -c process 2>/dev/null | grep -v '^#' || true)"
+  RT_PROC_ALLOW_N="$(printf '%s\n' "$RT_PROC_ALLOW" | grep -c . || true)"
+  RT_PROC_PTRACE="$(printf '%s\n' "$RT_PROC_ALLOW" | grep ' ptrace' || true)"
+  RT_PROC_CONSTRAINTS="$("$RT_SEINFO_BIN" --constrain process 2>/dev/null | grep -v '^#' || true)"
+  RT_PROC_PTRACE_CONSTRAINT="$(printf '%s\n' "$RT_PROC_CONSTRAINTS" | grep 'ptrace' || true)"
+  info "R7-privacy nsfs-isolation introspection: process-class allow rules=$RT_PROC_ALLOW_N ptrace-authority=[${RT_PROC_PTRACE:-none}] ptrace-constraints=[${RT_PROC_PTRACE_CONSTRAINT:-none}]"
+  if [ "$RT_PROC_ALLOW_N" -ge 1 ] && [ -z "$RT_PROC_PTRACE" ]; then
+    acc_ok "R7 runtime privacy: the loaded policy grants the builder subject docker_helper_buildkitd_t NO process:ptrace authority ($RT_PROC_ALLOW_N process-class rules, none carrying ptrace) — the /proc/<pid>/ns/* acquisition gate stays closed across operations despite the category-blind nsfs_t:file { getattr read open } authority"
+  else
+    acc_fail "R7 runtime privacy: the loaded buildkitd_t process-class authority must stay ptrace-free with a live introspection (rules=$RT_PROC_ALLOW_N ptrace=[$RT_PROC_PTRACE])"
+  fi
 fi
 
 # --- scenario S15: helper-created build staging strips SUID/SGID (C1) ---------
