@@ -1854,12 +1854,13 @@ allow docker_helper_buildkitd_t proc_t:filesystem mount;
 #
 # Deliberately NOT granted: remount/unmount/getattr/associate/mounton/
 # relabelfrom/relabelto on tmpfs_t:filesystem, any other filesystem target
-# type, any dir:mounton addition, any tmpfs_t file/dir class surface, any
-# capability change, any other subject. The committed-policy tests pin the
-# buildkitd domain's tmpfs_t:filesystem authority at EXACTLY this one
-# rule; the named-allow count moved 44 -> 45 by exactly this one rule
-# (the tmpfs_t:dir surface gained its own separately-evidenced R7 P17
-# rung below).
+# type, any dir:mounton addition (the tmpfs_t:dir create and mounton rungs
+# are their own separately-evidenced R7 P17/P18 grants below), any tmpfs_t
+# file/dir class surface, any capability change, any other subject. The
+# committed-policy tests pin the buildkitd domain's tmpfs_t:filesystem
+# authority at EXACTLY this one rule; the named-allow count moved 44 -> 45
+# by exactly this one rule (the tmpfs_t:dir surface gained its own
+# separately-evidenced R7 P17/P18 rungs below).
 allow docker_helper_buildkitd_t tmpfs_t:filesystem mount;
 
 # The buildkitd container-init /dev tmpfs mountpoint creation (R7 P17):
@@ -1933,11 +1934,113 @@ allow docker_helper_buildkitd_t tmpfs_t:filesystem mount;
 # Deliberately NOT granted: add_name/write/search/setattr/remove_name/
 # rmdir/rename or any other dir permission on tmpfs_t, any file/lnk_file/
 # chr_file/blk_file/sock_file/fifo_file tmpfs_t surface, any new
-# filesystem-class or dir:mounton authority, any capability change, any
-# other subject. The committed-policy tests pin the buildkitd domain's
-# tmpfs_t:dir authority at EXACTLY this one rule; the named-allow count
-# moves 45 -> 46 by exactly this one rule.
+# filesystem-class or dir:mounton authority (the dir:mounton rung for the
+# devpts mountpoint mount is its own separately-evidenced R7 P18 rung
+# below), any capability change, any other subject. The committed-policy
+# tests pin the buildkitd domain's tmpfs_t:dir authority at EXACTLY this
+# one rule; the named-allow count moves 45 -> 46 by exactly this one rule.
 allow docker_helper_buildkitd_t tmpfs_t:dir create;
+
+# The buildkitd container-init devpts mount (R7 P18): with the P17
+# tmpfs_t:dir create rung granted, the container init created the /dev/pts
+# mountpoint directory inside the fresh /dev tmpfs and died at the NEXT
+# step — mounting devpts on /dev/pts. The P17 authoritative run
+# (41341108003) proved the fatal terminal from BOTH sides: the build's own
+# stderr ("error mounting \"devpts\" to rootfs at \"/dev/pts\": mount
+# src=devpts, dst=/dev/pts, dstFd=/proc/thread-self/fd/12,
+# flags=MS_NOSUID|MS_NOEXEC, data=newinstance,ptmxmode=0666,mode=0620,
+# gid=5: permission denied") and the audited kernel decision
+# `tclass=dir denied { mounton } tcontext=tmpfs_t:s0` from
+# comm="runc:[2:INIT]" (serials 1362/10452; 3 records). The call is
+# runc's classic mount(2) path again (mountViaFds with srcFile=nil):
+# mount(src=procfd path, dst=procfd path of the freshly created rootfs
+# /dev/pts dir, "devpts", MS_NOSUID|MS_NOEXEC,
+# data="newinstance,ptmxmode=0666,mode=0620,gid=5").
+#
+# KERNEL CHECK CHAIN (v7.3): path_mount -> security_sb_mount — the LSM
+# sb_mount hook runs at the TOP of path_mount, BEFORE may_mount() — then
+# selinux_mount's non-remount branch: path_has_perm(FILE__MOUNTON) on the
+# TARGET dentry's context — the dir:mounton denial, exactly the grant
+# below (the mount options carry no SELinux-specific keys, so the option
+# parsing introduces no other authority). THEN may_mount()
+# (ns_capable(CAP_SYS_ADMIN) in the userns owning the target's mount
+# namespace — passed, the same gate the P14/P15/P16 mounts already
+# crossed), then do_new_mount: devpts declares FS_USERNS_MOUNT only (no
+# FS_USERNS_VISIBLE, so the kernel's mount-too-revealing gate does not
+# apply),
+# the monolithic data parses through fs_param_is_gid — gid=5 resolves via
+# make_kgid(current_user_ns()) and IS valid (the flow user namespace
+# carries the live-captured full subid range "0 473 1" +
+# "1 165536 65536", the same mapping evidence the R7 uid-map forensics
+# captured), mount_capable passes, then do_new_mount_fc: fc_mount ->
+# devpts_get_tree -> get_tree_nodev (a NEW private superblock per mount —
+# every devpts mount is its own instance, the `newinstance` option is the
+# accepted no-op flag of that semantics) -> security_sb_kern_mount ->
+# superblock_has_perm(FILESYSTEM__MOUNT) — THE NEXT TERMINAL
+# (devpts_t:filesystem mount, deliberately NOT granted here; the distro
+# policy's genfscon labels the devpts superblock devpts_t, so the next
+# rung's denial family is buildkitd_t -> devpts_t:filesystem mount).
+#
+# ISOLATION BOUNDARY (the type-wide extension measured, never assumed):
+#   - tmpfs_t IS the type of other tmpfs instances (host /dev/shm,
+#     /run/lock, ...): the grant makes the dir:mounton LSM check pass for
+#     the TYPE, not for one path. The residual venues are bounded by the
+#     same three independent layers as every earlier mounton rung:
+#     (a) the kernel may_mount/namespace venue model — mounting ON a dir
+#     requires CAP_SYS_ADMIN in the userns OWNING the mount namespace
+#     that contains the target dir; the host's tmpfs mounts live in the
+#     init mount namespace (owner init_user_ns), where no buildkitd_t
+#     process holds authority, and the domain cannot manufacture
+#     namespaces (both unshare shapes remain measured denials — P14
+#     legs); (b) pathname reachability (the daemon's host-namespace
+#     view); (c) DAC on the target dir;
+#   - tmpfs_t:s0 IS NOT itself a cross-operation isolation boundary (the
+#     bare type, no categories — every operation's tmpfs objects measure
+#     the same s0): the inter-op isolation stays owned by the
+#     mount-namespace venue model, the measured cross-op setns denial and
+#     the per-op MCS categories — none of which this rung touches;
+#   - WITHIN the flow's own namespace the type-wide surface covers the
+#     container's OWN /dev, /dev/shm and /dev/mqueue dirs (the P17
+#     created mountpoints): the same-syscall devpts mount is this rung's
+#     purpose, the /dev/shm tmpfs mount would then hit the already-
+#     granted P16 tmpfs_t:filesystem mount singleton, and the
+#     /dev/mqueue mount would reach its own mqueue_t:filesystem gate (a
+#     separate future rung) — all inside the container's private mount
+#     namespace;
+#   - PTY SCOPE: the mount grant creates only the EMPTY per-container
+#     devpts instance (the kernel-internal ptmx node is made by
+#     mknod_ptmx during fill_super, not by the process; no PTYs are
+#     allocated by a mount). PTY allocation is a separate future surface
+#     bounded by the GLOBAL sysctls (kernel.pty.max / kernel.pty.reserve:
+#     container mounts run with reserve=false, the global pty_count
+#     ceiling is pty_limit minus pty_reserve) and the per-instance
+#     `max` option cap; PTYs bind to their own devpts instance
+#     (devpts_mntget's same-instance check) and stay unreachable from
+#     other operations' namespaces. The /dev/ptmx relative symlink
+#     (runc's setupPtmx, pts/ptmx) is created only AFTER the whole mount
+#     table loop — a later rung, not part of this authority;
+#   - NO other dir permission rides the rung: mounton does NOT grant
+#     create/add_name/write/setattr or any other dir permission (the P17
+#     create singleton stays its own rule; the merged { create mounton }
+#     form is forbidden by the committed-policy tests), and no file/
+#     lnk_file/chr_file surface on tmpfs_t or devpts_t;
+#   - PRECEDENT (the SAME class+permission on the SAME target type,
+#     already accepted): the rootlesskit parent's copy-up stage carries
+#     the 4C-46 tmpfs_t:dir { create mounton } pair (its own /etc
+#     copy-up tmpfs) — P18 extends the same evidenced mounton shape to
+#     the buildkitd domain's container init as its own single-permission
+#     rule.
+#
+# Deliberately NOT granted: devpts_t (any class — the recorded next
+# terminal, the devpts_t:filesystem mount of the same syscall's get_tree
+# stage), mqueue_t or sysfs authority, any other filesystem-class target,
+# any other dir permission on tmpfs_t, the merged { create mounton } form,
+# any file/lnk_file/chr_file surface, any capability change, any other
+# subject. The committed-policy tests pin the buildkitd domain's
+# tmpfs_t:dir authority at EXACTLY the two evidenced singletons (the P17
+# create rung and this P18 mounton rung); the named-allow count moves
+# 46 -> 47 by exactly this one rule.
+allow docker_helper_buildkitd_t tmpfs_t:dir mounton;
 
 # The copy-up /tmp directory write (P5-S2 Phase 4C-40) and the mkdir
 # name mediation of the same mkdir(2) (P5-S2 Phase 4C-41): the child's
