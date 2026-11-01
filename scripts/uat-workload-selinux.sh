@@ -3439,6 +3439,127 @@ else
   acc_fail "R7 tmpfs preflight: the audit window is degenerate (no buildkitd_t cap_userns container-init records) — a zero-denial tmpfs claim would be unproven; the flow-based control cannot run"
 fi
 
+# --- scenario R7 P17 tmpfs-dir preflight: /dev mountpoint creation authority -
+say "R7 P17 tmpfs-dir preflight: tmpfs_t:dir create (flow-evidenced, boundary-bounded)"
+# The P17 candidate grant is the buildkitd container-init tmpfs_t:dir
+# create: with the P16 tmpfs mount rung granted, the container init mounted
+# the container's /dev tmpfs and died at the NEXT step — creating the
+# /dev/pts mountpoint directory INSIDE the fresh /dev tmpfs before the
+# devpts mount can proceed. The P16 authoritative run (41327209512) proved
+# the fatal terminal from BOTH sides: the build's own stderr ("error
+# mounting \"devpts\" to rootfs at \"/dev/pts\": create mountpoint for
+# /dev/pts mount: make mountpoint \"/dev/pts\": mkdirat .../rootfs/dev/pts:
+# permission denied") and the audited kernel decision
+# `tclass=dir denied { create } name="pts" tcontext=tmpfs_t:s0` from
+# comm="runc:[2:INIT]" (serials 1368/10458; 3 records). The call is runc's
+# pathrs.MkdirAllInRoot mkdirat(2) of the /dev/pts (and /dev/shm,
+# /dev/mqueue) mountpoint directories inside the container's own /dev tmpfs.
+#
+# KERNEL CHECK CHAIN (v7.3, selinux/hooks.c may_create — the mkdirat
+# (do_mkdirat -> filename_create -> may_create) path):
+#   (1) avc_has_perm(sid, PARENT sid, dir, { add_name search }) — PASSED
+#       (the denial came later; the standing base domain surface carries
+#       the parent-dir write/search authority, the same surface the 4C-46
+#       rootlesskit mkdirat already proved passing);
+#   (2) selinux_determine_inode_label — no fscreate (the flow never calls
+#       setfscreate), no MNTPOINT behavior: security_transition_sid
+#       (buildkitd_t, tmpfs_t, dir, "pts") with NO matching type_transition
+#       (the module's only tmpfs_t transition is the runc_memfd FILE
+#       transition) — the computed new-inode SID is the measured bare
+#       tmpfs_t:s0 (the denial's own tcontext; the same measured
+#       no-categories inheritance the 4C-46 .ro creation proved live);
+#   (3) avc_has_perm(sid, newsid, dir, create) — THE DENIED ONE, exactly
+#       the grant below;
+#   (4) avc_has_perm(newsid, sb sid, filesystem, FILESYSTEM__ASSOCIATE) —
+#       the post-create association gate, subject = the NEW sid (tmpfs_t),
+#       target = the tmpfs superblock (tmpfs_t); the 4C-46 precedent
+#       PROVES this gate passes on the loaded policy's base surface for
+#       the identical tmpfs_t->tmpfs_t pair (rootlesskit's granted .ro
+#       mkdirat succeeded and the flow moved past it), and the leg
+#       re-verifies the pair statically below.
+#
+# ISOLATION BOUNDARY (the type-wide extension measured, never assumed):
+#   - tmpfs_t IS the type of other tmpfs instances (host /dev/shm,
+#     /run/lock, ...): the grant makes the dir:create LSM check pass for
+#     the TYPE, not for one path. The residual venues are bounded by three
+#     independent layers that all still apply: (a) the namespace venue
+#     model (the domain cannot manufacture namespaces — re-measured live
+#     in the P14 legs above; the only fresh tmpfs instances it can mount
+#     are its own container's), (b) pathname reachability (the daemon's
+#     host-namespace view), (c) DAC on the parent dir (host /dev/shm is
+#     mode 1777 — the authority equals what EVERY local user already
+#     holds; other host tmpfs are DAC-bounded the same way they bound
+#     every unprivileged identity);
+#   - cross-operation isolation is UNCHANGED: the created objects are bare
+#     s0 (measured), other operations' tmpfs objects are s0 too, and the
+#     intended venues live inside the container's own mount namespace —
+#     path-unreachable cross-op; the MCS constraint and the cross-op setns
+#     denial stay as measured;
+#   - NO file-class riders: dir:create does NOT grant file:create,
+#     lnk_file:create, chr_file:create or any other class on tmpfs_t (the
+#     /dev device-node and /dev/shm file surfaces are separate future
+#     boundaries); add_name/write/search/setattr/remove_name/rmdir stay
+#     exactly the standing base surface (never granted by this module);
+#   - the P16 resource model is unchanged: directory inodes are negligible
+#     against the 64 MiB page budget, the two-instance cap and the memcg
+#     accounting hold as established;
+#   - PRECEDENT: the rootlesskit parent's copy-up stage carries the 4C-46
+#     tmpfs_t:dir { create mounton } pair (its own /etc copy-up tmpfs) —
+#     the SAME class+permission on the SAME target type.
+#
+# MEASUREMENT BOUNDARY (explicit): the created directory's final owner and
+# mode are unobservable from outside the container's namespaces; the
+# flow-side evidence is the audit window (the denial family's
+# disappearance) plus the build's own next stderr terminal, exactly as in
+# P15/P16.
+RT_TDIR_SESEARCH="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -t tmpfs_t -c dir /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+RT_TDIR_RKL_PRECEDENT="$("$RT_SESEARCH_BIN" --allow -s docker_helper_rootlesskit_t -t tmpfs_t -c dir /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+RT_TDIR_ASSOC="$("$RT_SESEARCH_BIN" --allow -s tmpfs_t -t tmpfs_t -c filesystem /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+RT_TDIR_FILE_SESEARCH="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -t tmpfs_t -c file /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+info "R7-tmpfsdir preflight: buildkitd->tmpfs_t:dir=[$RT_TDIR_SESEARCH] rootlesskit->tmpfs_t:dir=[$RT_TDIR_RKL_PRECEDENT] tmpfs_t->tmpfs_t:filesystem=[$RT_TDIR_ASSOC] buildkitd->tmpfs_t:file=[$RT_TDIR_FILE_SESEARCH]"
+if printf '%s\n' "$RT_TDIR_SESEARCH" | grep -q '^allow docker_helper_buildkitd_t tmpfs_t:dir create;' && printf '%s' "$RT_TDIR_RKL_PRECEDENT" | grep -q 'tmpfs_t:dir'; then
+  acc_ok "R7 tmpfsdir preflight: the loaded policy carries the exact P17 candidate authority for the container-init mountpoint creation (buildkitd_t -> tmpfs_t:dir create), and the SAME class+permission shape is already accepted for the rootlesskit parent's copy-up stage (the 4C-46 { create mounton } pair) — an existing owner's shape, not a new mechanism"
+else
+  acc_fail "R7 tmpfsdir preflight: the P17 candidate rule or the 4C-46 precedent is not present in the loaded policy (query=[$RT_TDIR_SESEARCH] precedent=[$RT_TDIR_RKL_PRECEDENT]) — the preflight cannot proceed on the measured architecture"
+fi
+RT_TDIR_CREATE_N="$(printf '%s\n' "$RT_TDIR_SESEARCH" | grep -c '^allow docker_helper_buildkitd_t tmpfs_t:dir' || true)"
+RT_TDIR_EXTRA_CREATE="$(printf '%s\n' "$RT_TDIR_SESEARCH" | grep '^allow docker_helper_buildkitd_t tmpfs_t:dir' | grep -vE '^allow docker_helper_buildkitd_t tmpfs_t:dir create;$' || true)"
+if [ "$RT_TDIR_CREATE_N" -ne 1 ] 2>/dev/null || [ -n "$RT_TDIR_EXTRA_CREATE" ]; then
+  acc_fail "R7 tmpfsdir preflight: the buildkitd tmpfs_t:dir module surface drifted beyond the accepted scope (rules=$RT_TDIR_CREATE_N unexpected=[$RT_TDIR_EXTRA_CREATE]) — the P17 scope claim (exactly one bare-create singleton) does not match the loaded state"
+else
+  acc_ok "R7 tmpfsdir preflight: the buildkitd tmpfs_t:dir module surface matches the accepted scope exactly (exactly one buildkitd-subject rule, bare create only; the parent-dir add_name/write/search authority stays the standing base surface, never module-borne)"
+fi
+if printf '%s' "$RT_TDIR_ASSOC" | grep -q 'associate'; then
+  acc_ok "R7 tmpfsdir preflight: the post-create association gate is pre-proven on the loaded policy's base surface (tmpfs_t -> tmpfs_t:filesystem associate present: [$RT_TDIR_ASSOC]) — the same gate the 4C-46 rootlesskit mkdirat already crossed live, so the created /dev/pts inode associates without new module authority"
+else
+  acc_fail "R7 tmpfsdir preflight: the tmpfs_t->tmpfs_t:filesystem associate authority is ABSENT ([$RT_TDIR_ASSOC]) — the mkdirat would fail at the association gate right after the create grant; investigate before proceeding"
+fi
+if printf '%s' "$RT_TDIR_FILE_SESEARCH" | grep -qE '(^|[ {])(read|write|open|create)([ ;}])'; then
+  acc_fail "R7 tmpfsdir preflight: the buildkitd tmpfs_t file-class authority is present — the /dev device-node and /dev/shm file surfaces are separate future rungs and must NOT ride the P17 dir-create grant"
+else
+  acc_ok "R7 tmpfsdir preflight: the buildkitd tmpfs_t:file surface shows NO read/write/open/create authority ([$RT_TDIR_FILE_SESEARCH]) — no file-class riders on the dir-create rung"
+fi
+# The flow-based positive control: the boot-wide raw audit log must contain
+# the container-init marker records (non-degenerate window) and ZERO
+# tmpfs_t:dir create denials plus ZERO tmpfs/proc filesystem-mount denials
+# and zero dir:mounton denials for the flow domain — the P17 fatal shape
+# and both earlier rungs must be gone from the flow's REAL execution.
+RT_TDIR_AUDIT="$({ cat /var/log/audit/audit.log 2>/dev/null; dmesg 2>/dev/null; } | grep -E 'type=AVC|avc: *denied' | sort -u || true)"
+RT_TDIR_FLOW_INIT_N="$(printf '%s\n' "$RT_TDIR_AUDIT" | grep 'tclass=cap_userns' | grep -c 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
+RT_TDIR_CREATE_DEN="$(printf '%s\n' "$RT_TDIR_AUDIT" | grep 'tclass=dir' | grep '{ create }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:tmpfs_t:s0' || true)"
+RT_TFS_TMPFS_DEN="$(printf '%s\n' "$RT_TDIR_AUDIT" | grep 'tclass=filesystem' | grep '{ mount }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:tmpfs_t:s0' || true)"
+RT_TFS_MOUNTON_DEN="$(printf '%s\n' "$RT_TDIR_AUDIT" | grep 'tclass=dir' | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
+info "R7-tmpfsdir preflight: audit window buildkitd_t cap_userns init records=$RT_TDIR_FLOW_INIT_N tmpfs dir-create denials=[$RT_TDIR_CREATE_DEN] tmpfs mount denials=[$RT_TFS_TMPFS_DEN] mounton denials=[$RT_TFS_MOUNTON_DEN]"
+if [ "${RT_TDIR_FLOW_INIT_N:-0}" -ge 1 ] 2>/dev/null; then
+  if [ -z "$RT_TDIR_CREATE_DEN" ] && [ -z "$RT_TFS_TMPFS_DEN" ] && [ -z "$RT_TFS_MOUNTON_DEN" ]; then
+    acc_ok "R7 tmpfsdir preflight: the boot-wide audit window covering the candidate-policy flow builds ($RT_TDIR_FLOW_INIT_N buildkitd_t cap_userns container-init records) contains ZERO tmpfs_t:dir create denials, zero tmpfs_t:filesystem mount denials AND zero dir:mounton denials for the flow domain — the P17 grant reached the may_create create hook in the flow's REAL execution and both earlier rungs hold"
+  else
+    acc_fail "R7 tmpfsdir preflight: the flow's fatal shapes reappeared in the audit window despite the candidate grants (dir-create=[$RT_TDIR_CREATE_DEN] tmpfs-mount=[$RT_TFS_TMPFS_DEN] mounton=[$RT_TFS_MOUNTON_DEN])"
+  fi
+else
+  acc_fail "R7 tmpfsdir preflight: the audit window is degenerate (no buildkitd_t cap_userns container-init records) — a zero-denial tmpfs-dir claim would be unproven; the flow-based control cannot run"
+fi
+
 rm -f /tmp/uat-wls-keyprobe.b64 "$KEYPROBE"
 
 
