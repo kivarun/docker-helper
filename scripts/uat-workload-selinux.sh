@@ -2509,17 +2509,17 @@ say "R7 P13 keyring preflight: setattr authority + cross-op key isolation (live 
 #     AVC profile are mutually confirming evidence of the rung.
 KEYPROBE=/var/lib/docker-helper-builder/.uat-wls-keyprobe
 cat > /tmp/uat-wls-keyprobe.b64 <<'KEYB64EOF'
-f0VMRgIBAQAAAAAAAAAAAAIAPgABAAAAdBBAAAAAAABAAAAAAAAAAPggAAAAAAAAAAAAAEAAOAAI
+f0VMRgIBAQAAAAAAAAAAAAIAPgABAAAAdBBAAAAAAABAAAAAAAAAAAAhAAAAAAAAAAAAAEAAOAAI
 AEAACQAIAAEAAAAEAAAAAAAAAAAAAAAAAEAAAAAAAAAAQAAAAAAAVAIAAAAAAABUAgAAAAAAAAAQ
-AAAAAAAAAQAAAAUAAAAAEAAAAAAAAAAQQAAAAAAAABBAAAAAAAC1BwAAAAAAALUHAAAAAAAAABAA
-AAAAAAABAAAABAAAAAAgAAAAAAAAACBAAAAAAAAAIEAAAAAAAIAAAAAAAAAAgAAAAAAAAAAAEAAA
+AAAAAAAAAQAAAAUAAAAAEAAAAAAAAAAQQAAAAAAAABBAAAAAAACBCQAAAAAAAIEJAAAAAAAAABAA
+AAAAAAABAAAABAAAAAAgAAAAAAAAACBAAAAAAAAAIEAAAAAAAIgAAAAAAAAAiAAAAAAAAAAAEAAA
 AAAAAAEAAAAGAAAAABAAAAAAAAAAMEAAAAAAAAAwQAAAAAAAAAAAAAAAAAAAAgAAAAAAAAAQAAAA
 AAAABAAAAAQAAAAAAgAAAAAAAAACQAAAAAAAAAJAAAAAAAAwAAAAAAAAADAAAAAAAAAACAAAAAAA
 AAAEAAAABAAAADACAAAAAAAAMAJAAAAAAAAwAkAAAAAAACQAAAAAAAAAJAAAAAAAAAAEAAAAAAAA
 AFPldGQEAAAAAAIAAAAAAAAAAkAAAAAAAAACQAAAAAAAMAAAAAAAAAAwAAAAAAAAAAgAAAAAAAAA
 UeV0ZAYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAE
 AAAAIAAAAAUAAABHTlUAAQABwAQAAAABAAAAAAAAAAIAAcAEAAAAAQAAAAAAAAAEAAAAFAAAAAMA
-AABHTlUAd6KS0puUrhSKDx09BudJ3vCYwIYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AABHTlUA5zi71JaupsfdeWVuaCAI1qifcZUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
@@ -2583,39 +2583,47 @@ AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADHAD74XjUrQ
 gPkJdwWD6jDrGI1Kn4D5BXcFg+pX6wuNSr+A+QV3EoPqN0jB4ARIY9JI/8dIAdDrycNIjYcAMEAA
 MdK/ADBAAEg5x3Mhig+EyXQbgPk7SI1/AXXs/8KD+gN15eiY////SIkGMcDDuP/////DSInn6AQA
-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
+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
@@ -2644,30 +2652,22 @@ AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABrZXlyaW5nABQAAAAAAAAA
-AXpSAAF4EAEbDAcIkAEAABAAAAAcAAAA2O///zoAAAAAAAAAEAAAADAAAAD+7///OgAAAAAAAAAQ
-AAAARAAAACTw//8MAAAAAAAAACAAAABYAAAAHPD//zUHAAAAXg4QjAJBDhiGA0EOIIMERA4wAEdD
-QzogKEFscGluZSAxNS4yLjApIDE1LjIuMAAALnNoc3RydGFiAC5ub3RlLmdudS5wcm9wZXJ0eQAu
-bm90ZS5nbnUuYnVpbGQtaWQALnRleHQALnJvZGF0YQAuZWhfZnJhbWUALmJzcwAuY29tbWVudAAA
-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-AAAAAAAAAAAAAAALAAAABwAAAAIAAAAAAAAAAAJAAAAAAAAAAgAAAAAAADAAAAAAAAAAAAAAAAAA
-AAAIAAAAAAAAAAAAAAAAAAAAHgAAAAcAAAACAAAAAAAAADACQAAAAAAAMAIAAAAAAAAkAAAAAAAA
-AAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAADEAAAABAAAABgAAAAAAAAAAEEAAAAAAAAAQAAAAAAAA
-tQcAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAA3AAAAAQAAAAIAAAAAAAAAACBAAAAAAAAA
-IAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAPwAAAAEAAAACAAAAAAAAAAgg
-QAAAAAAACCAAAAAAAAB4AAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAEkAAAAIAAAAAwAA
-AAAAAAAAMEAAAAAAAAAwAAAAAAAAAAIAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAABOAAAA
-AQAAADAAAAAAAAAAAAAAAAAAAACAIAAAAAAAABwAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAAA
-AAAAAQAAAAMAAAAAAAAAAAAAAAAAAAAAAAAAnCAAAAAAAABXAAAAAAAAAAAAAAAAAAAAAQAAAAAA
-AAAAAAAAAAAAAA==
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAvAAAAAAAAAGtleXJpbmcA
+FAAAAAAAAAABelIAAXgQARsMBwiQAQAAEAAAABwAAADQ7///OgAAAAAAAAAQAAAAMAAAAPbv//86
+AAAAAAAAABAAAABEAAAAHPD//wwAAAAAAAAAIAAAAFgAAAAU8P//AQkAAABeDhCMAkEOGIYDQQ4g
+gwREDjAAR0NDOiAoQWxwaW5lIDE1LjIuMCkgMTUuMi4wAAAuc2hzdHJ0YWIALm5vdGUuZ251LnBy
+b3BlcnR5AC5ub3RlLmdudS5idWlsZC1pZAAudGV4dAAucm9kYXRhAC5laF9mcmFtZQAuYnNzAC5j
+b21tZW50AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAsAAAAHAAAAAgAAAAAAAAAAAkAAAAAAAAACAAAAAAAAMAAAAAAA
+AAAAAAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAeAAAABwAAAAIAAAAAAAAAMAJAAAAAAAAwAgAAAAAA
+ACQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAMQAAAAEAAAAGAAAAAAAAAAAQQAAAAAAA
+ABAAAAAAAACBCQAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAADcAAAABAAAAAgAAAAAAAAAA
+IEAAAAAAAAAgAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAgAAAAAAAAAAAAAAAAAAAA/AAAAAQAAAAIA
+AAAAAAAAECBAAAAAAAAQIAAAAAAAAHgAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAASQAA
+AAgAAAADAAAAAAAAAAAwQAAAAAAAADAAAAAAAAAAAgAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAA
+AAAAAE4AAAABAAAAMAAAAAAAAAAAAAAAAAAAAIggAAAAAAAAHAAAAAAAAAAAAAAAAAAAAAEAAAAA
+AAAAAQAAAAAAAAABAAAAAwAAAAAAAAAAAAAAAAAAAAAAAACkIAAAAAAAAFcAAAAAAAAAAAAAAAAA
+AAABAAAAAAAAAAAAAAAAAAAA
 KEYB64EOF
 base64 -d /tmp/uat-wls-keyprobe.b64 > "$KEYPROBE" 2>/dev/null
 chmod +x "$KEYPROBE" 2>/dev/null
@@ -2997,6 +2997,155 @@ if [ "$RT_KW_RC" = 0 ] && [ "$RT_KXSW_RC" != unmeasured ]; then
 else
   acc_fail "R7 keyring preflight: the widened-shape constraint control was not measurable (widen rc=$RT_KW_RC setperm rc=$RT_KXSW_RC) — the denial-shape classification records above lose their control guarantee"
 fi
+# --- scenario R7 P14 mounton preflight: root mount propagation authority ----
+say "R7 P14 mounton preflight: root_t:dir mounton (live, in-namespace)"
+# The P14 candidate grant is `allow docker_helper_buildkitd_t root_t:dir
+# mounton;` for runc's prepareRoot: the container init's FIRST mount is
+# mount("", "/", "", MS_REC|MS_SLAVE, "") — the propagation setup that
+# makes the container's own mount namespace a slave of its origin peer
+# group. The P13 UAT proved the fatal boundary: audited
+# `tclass=dir denied { mounton } tcontext=root_t:s0` from runc:[2:INIT]
+# (serials 1341/10424) 39-50ms before the build's own stderr
+# "error preparing rootfs: mount dst=/, flags=MS_REC|MS_SLAVE: permission
+# denied" — the exact causal chain runc's error text names. The kernel
+# check chain (v7.3, fs/namespace.c + selinux/hooks.c): path_mount calls
+# security_sb_mount BEFORE may_mount(); selinux_mount for a non-MS_REMOUNT
+# mount performs EXACTLY ONE check — path_has_perm(FILE__MOUNTON) on the
+# TARGET dentry (the dir:mounton audit) — a propagation-only change runs
+# do_change_type with NO per-submount LSM checks, so the one denial IS the
+# whole LSM gate for this syscall.
+#
+# PRECEDENT (the same responsibility, already accepted): the rootlesskit
+# parent's own propagation setup issues the identical operation shape and
+# carries the 4C-39 grant `allow docker_helper_rootlesskit_t root_t:dir
+# mounton;` (canonical 4C-38 run 37063277489, "share mount point: /").
+# P14 extends the SAME evidenced authority to the buildkitd domain's
+# container init — an existing owner's shape, not a new mechanism.
+#
+# THE ISOLATION MODEL (not based on root_t:s0's missing categories):
+#   - the mutation target of mount("", "/", ..., MS_REC|MS_SLAVE) is the
+#     CALLER'S OWN mount namespace: do_change_type changes the propagation
+#     of the mounts IN THE CALLER'S namespace tree only; the host
+#     namespace's mounts and every other operation's namespace are
+#     distinct objects the caller cannot reach (mount(2) has no
+#     cross-namespace mutation path);
+#   - the shared target INODE (the host root dentry, root_t:s0) is only
+#     the LSM CHECK object, never the mutation target;
+#   - the authoritative may_mount() gate (CAP_SYS_ADMIN in the user
+#     namespace owning the current mount namespace) is untouched: the
+#     flow's init holds it through the accepted P11 cap_userns grant (the
+#     P13 run's cap_userns setuid/setgid records are live evidence the
+#     init's capability checks evaluate against a NON-init user namespace);
+#   - the candidate does NOT add any filesystem-class authority (no
+#     filesystem:mount/remount — the real-fs get_tree gate
+#     security_sb_kern_mount stays closed for proc_t and everything else),
+#     no remount, no relabel, no capability change;
+#   - residual type-wide surface, measured live below: a buildkitd_t
+#     process holding may_mount authority in ITS OWN namespace can now
+#     pass the mounton check for root_t:dir points inside that namespace
+#     (propagation changes and bind-mount points); the cross-operation
+#     direction is measured with a live setns leg against another
+#     operation's live mount namespace — the P12-measured
+#     `mlsconstrain process ptrace (h1 dom h2 ...)` and the missing
+#     namespace-handle authority keep the other operation's namespace
+#     unreachable;
+#   - this leg measures the constraint layer for dir:mounton (sesearch
+#     --constrain dir) and enumerates which guest directories carry
+#     root_t, so the type-wide scope is documented rather than assumed.
+#
+# Probe actions (keyprobe13, extended): `un` = unshare(CLONE_NEWNS) only;
+# `mp <flagshex>` = unshare then the flow-faithful
+# mount("", "/", "", flags, "") INSIDE the probe's OWN new namespace
+# (a failed unshare exits BEFORE any mount — the probe never mounts in
+# the host namespace); `mb <src> <dst>` = unshare then a bind mount
+# inside the probe's own new namespace (the residual own-namespace
+# surface); `sn <procpath>` = open + setns(CLONE_NEWNS) against the given
+# namespace handle (the cross-operation attempt). Exit codes: 0 = the
+# action succeeded; 100+errno = the open/unshare-stage errno (113 =
+# EACCES, 1 = EPERM); 110+errno = the setns-stage errno; 120+errno =
+# the propagation-mount errno; 130+errno = the bind-mount errno; 200+errno
+# = the unshare stage inside mp/mb; 9 = bad arguments.
+RT_MOUNT_VEHICLE=ready
+RT_MNT_SESEARCH="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -t root_t -c dir /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+RT_MNT_RKL_SESEARCH="$("$RT_SESEARCH_BIN" --allow -s docker_helper_rootlesskit_t -t root_t -c dir /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+RT_MNT_FS_SESEARCH="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -c filesystem /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+RT_MNT_CONSTRAINTS="$("$RT_SEINFO_BIN" --constrain dir 2>/dev/null | grep -v '^#' || true)"
+RT_ROOT_T_DIRS="$(for d in / /boot /mnt /srv /opt /media /efi; do [ -d "$d" ] && printf '%s=%s ' "$d" "$(stat -c %C "$d" 2>/dev/null || echo '?')"; done)"
+info "R7-mounton preflight: buildkitd->root_t:dir=[$RT_MNT_SESEARCH] rootlesskit->root_t:dir=[$RT_MNT_RKL_SESEARCH] buildkitd filesystem-class=[$RT_MNT_FS_SESEARCH] dir-constraints=[$RT_MNT_CONSTRAINTS] root_t dirs=[$RT_ROOT_T_DIRS]"
+if printf '%s' "$RT_MNT_RKL_SESEARCH" | grep -q 'root_t:dir mounton' && [ -x "$KEYPROBE" ]; then
+  acc_ok "R7 mounton preflight: the loaded policy already carries the accepted same-shape authority for the rootlesskit parent (root_t:dir mounton, the 4C-39 propagation rung) — the P14 candidate extends an existing owner's evidenced shape, and the probe vehicle is in place"
+else
+  acc_fail "R7 mounton preflight: the precedent query or the probe vehicle failed (rootlesskit rule=[$RT_MNT_RKL_SESEARCH] probe=$KEYPROBE) — the preflight cannot proceed on the measured architecture"
+fi
+if printf '%s' "$RT_MNT_FS_SESEARCH" | grep -q 'filesystem.*mount'; then
+  acc_fail "R7 mounton preflight: the buildkitd domain already carries a filesystem-class mount authority — the candidate's scope claim (mounton only, no filesystem:mount) does not match the loaded state; investigate before any grant"
+else
+  acc_ok "R7 mounton preflight: the buildkitd filesystem-class query shows NO filesystem:mount authority ([$RT_MNT_FS_SESEARCH]) — the candidate adds no filesystem-class permission and the real-fs get_tree gate (security_sb_kern_mount, the proc_t mount stage observed in P13) stays closed"
+fi
+# Leg M1 — the unshare control: the probe may create its OWN mount
+# namespace (may_mount authority through the accepted cap_userns grant).
+RT_MUN_RC="$(keyfg s0:c1 un)"
+case "$RT_MUN_RC" in
+  0)   acc_ok "R7 mounton preflight: the unshare(CLONE_NEWNS) control succeeds — the probe holds the namespace-creation authority (cap_userns sys_admin), so every later mount leg runs inside the probe's OWN new namespace" ;;
+  *)   acc_fail "R7 mounton preflight: the unshare control failed (rc=$RT_MUN_RC) — the in-namespace measurement design is void" ;;
+esac
+# Leg M2 — the flow-faithful propagation mount INSIDE the probe's own new
+# namespace: mount("", "/", "", MS_REC|MS_SLAVE=0x204000, "") — exactly
+# runc prepareRoot's call. Success under the candidate policy is the
+# measured positive control; the P13 run's audited mounton denial is the
+# closed-state evidence.
+RT_MMP1_RC=unmeasured
+RT_MMP2_RC=unmeasured
+RT_MMP1_RC="$(keyfg s0:c1 mp 204000)"
+RT_MMP2_RC="$(keyfg s0:c2 mp 204000)"
+info "R7-mounton preflight: propagation-mount rc c1=$RT_MMP1_RC c2=$RT_MMP2_RC"
+case "$RT_MMP1_RC" in
+  0)
+    case "$RT_MMP2_RC" in
+      0) acc_ok "R7 mounton preflight: the flow-faithful propagation mount succeeds for BOTH probe categories inside their own new namespaces (c1 rc=$RT_MMP1_RC c2 rc=$RT_MMP2_RC) — the candidate grant reaches the runc prepareRoot shape (mount dst=/, MS_REC|MS_SLAVE), and the mutation is namespace-scoped to each caller" ;;
+      *) acc_fail "R7 mounton preflight: the c2 propagation-mount leg diverged (c1 rc=$RT_MMP1_RC c2 rc=$RT_MMP2_RC) — the grant must be domain-wide, not category-scoped" ;;
+    esac
+    ;;
+  113) acc_fail "R7 mounton preflight: the propagation mount is still EACCES-denied under the candidate policy (c1 rc=$RT_MMP1_RC) — the grant did not reach the LSM gate" ;;
+  *)   acc_fail "R7 mounton preflight: the propagation-mount measurement is void (c1 rc=$RT_MMP1_RC c2 rc=$RT_MMP2_RC)" ;;
+esac
+# Leg M3 — the residual own-namespace surface: a bind mount of /tmp over
+# the probe's own namespace root. This measures what the type-wide
+# mounton leaves reachable BEYOND the flow shape (bind-mount points on
+# root_t:dir inside the caller's own namespace). The mutation is
+# namespace-scoped by kernel structure; the leg records the outcome
+# either way and never treats an own-namespace success as a policy
+# violation.
+RT_MMB_RC="$(keyfg s0:c1 mb /tmp /)"
+info "R7-mounton preflight: own-namespace bind-mount residual probe rc=$RT_MMB_RC (0 = succeeded inside the probe's own namespace; 1xx = denied — errno recorded)"
+acc_ok "R7 mounton preflight: the residual own-namespace bind-mount surface is measured and recorded (rc=$RT_MMB_RC; every outcome of this leg is a mutation INSIDE the probe's own new mount namespace — the host namespace and other operations' namespaces are structurally unreachable from it)"
+# Leg M4 — the cross-operation namespace-handle attempt: c1 opens c2's
+# live /proc/<pid>/ns/mnt and attempts setns(CLONE_NEWNS). A live c2
+# process in the flow domain is provided by a hanging keyring probe
+# (the join action hangs after its own-ring describe, keeping the ring
+# and the process alive for the harness).
+keybgprobe s0:c2 j uat-m-c2
+RT_MC2_PID=$!
+keybgwait $RT_MC2_PID
+RT_MC2_OUT="$KEYWAIT_OUT"
+RT_MSN_RC=unmeasured
+if [ "$RT_MC2_OUT" = alive ]; then
+  RT_MSN_RC="$(keyfg s0:c1 sn /proc/$RT_MC2_PID/ns/mnt)"
+fi
+kill "$RT_MC2_PID" 2>/dev/null || true
+wait "$RT_MC2_PID" 2>/dev/null || true
+info "R7-mounton preflight: cross-op setns attempt rc=$RT_MSN_RC (c2 probe=[$RT_MC2_OUT])"
+case "$RT_MSN_RC" in
+  113|1[0-1][0-9]|1[2-9][0-9])
+    acc_ok "R7 mounton preflight: the cross-operation namespace-handle attempt stays denied (rc=$RT_MSN_RC — the open stage and/or the setns stage refused) — the other operation's mount namespace is not reachable and the candidate creates no cross-op mount-topology authority" ;;
+  0)
+    acc_fail "R7 mounton preflight: the cross-operation setns SUCCEEDED — c1 entered c2's mount namespace; a cross-op topology authority this candidate must never create" ;;
+  unmeasured)
+    acc_fail "R7 mounton preflight: the cross-op setns leg was unmeasurable (the c2 hang probe did not survive) — the cross-op direction is unmeasured" ;;
+  *)
+    acc_fail "R7 mounton preflight: the cross-op setns leg returned an unexpected code (rc=$RT_MSN_RC) — the measurement is void" ;;
+esac
+
 rm -f /tmp/uat-wls-keyprobe.b64 "$KEYPROBE"
 
 

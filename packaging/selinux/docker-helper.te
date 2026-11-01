@@ -1635,6 +1635,64 @@ allow docker_helper_rootlesskit_t self:netlink_route_socket { create setopt bind
 # second rule, no other subject.
 allow docker_helper_rootlesskit_t root_t:dir mounton;
 
+# The buildkitd container-init root mount propagation (R7 P14): runc's
+# prepareRootfs begins with prepareRoot — mount("", "/", "",
+# MS_REC|MS_SLAVE, "") — the propagation setup that makes the container's
+# OWN mount namespace a slave of its origin peer group before the rootfs
+# is mounted. The P13 UAT proved the fatal boundary (the direct successor
+# of the P13 key:setattr rung): audited `tclass=dir denied { mounton }
+# tcontext=root_t:s0` from comm="runc:[2:INIT]",
+# sctx=tctx=buildkitd_t:s0:c1, serials 1341/10424 in the P13 run, with the
+# build's own stderr naming the identical operation 39-50ms later
+# ("error preparing rootfs: mount dst=/, flags=MS_REC|MS_SLAVE: permission
+# denied") — the causal chain the kernel error text carries itself. The
+# denial is FATAL for every BUILD-path container with a RUN step.
+#
+# KERNEL CHECK CHAIN (v7.3 = the measured guest kernel 7.3.0-1-default):
+# path_mount() calls security_sb_mount BEFORE may_mount(); the
+# selinux_mount hook for a non-MS_REMOUNT mount performs EXACTLY ONE
+# check — path_has_perm(FILE__MOUNTON) on the TARGET dentry (the audited
+# dir:mounton) — and a propagation-only change dispatches to
+# do_change_type(), which runs NO per-submount LSM checks; so this one
+# denial is the whole SELinux gate for this syscall, and the same hook
+# shape means the grant reaches no other class.
+#
+# ISOLATION MODEL (NOT based on root_t:s0's missing categories):
+#   - the mutation target of this mount is the CALLER'S OWN mount
+#     namespace: do_change_type changes the propagation of the mounts in
+#     the caller's namespace tree only; the host namespace and every
+#     other operation's namespace are distinct objects with no
+#     mount(2) mutation path from the caller; the shared root_t:s0 INODE
+#     is only the LSM CHECK object, never the mutation target;
+#   - the kernel's own may_mount() gate (CAP_SYS_ADMIN in the user
+#     namespace owning the current mount namespace) is untouched and
+#     remains the authoritative confinement: the flow's init holds it
+#     through the accepted P11 cap_userns grant, and its capability
+#     checks evaluate against the operation's NON-init user namespace
+#     (the standing cap_userns records prove this live);
+#   - no filesystem-class authority is added: the real-fs get_tree gate
+#     (security_sb_kern_mount — the proc_t:filesystem mount stage the
+#     P13 run observed) stays closed for proc_t and every other type;
+#     no remount, no relabel, no capability change, no second rule;
+#   - the type-wide residual surface (a process holding may_mount
+#     authority can pass the mounton check for root_t:dir points inside
+#     ITS OWN namespace, e.g. bind-mount points or other propagation
+#     changes) is measured live in the P14 preflight leg, including the
+#     cross-operation setns attempt against another operation's LIVE
+#     mount namespace, which stays denied;
+#   - PRECEDENT: the rootlesskit parent carries the identical
+#     already-accepted authority for its own propagation setup (the 4C-39
+#     grant above, "share mount point: /") — P14 extends the same
+#     evidenced shape to the buildkitd domain's container init.
+#
+# Deliberately NOT granted: any other dir permission, any other target
+# type (tmp_t etc. keep their own owners), any filesystem-class grant
+# (mount/remount), any capability change, any other subject. The
+# committed-policy tests pin the buildkitd domain's root_t authority at
+# EXACTLY this one rule; the named-allow count moves 42 -> 43 by exactly
+# this one rule.
+allow docker_helper_buildkitd_t root_t:dir mounton;
+
 # The copy-up /tmp directory write (P5-S2 Phase 4C-40) and the mkdir
 # name mediation of the same mkdir(2) (P5-S2 Phase 4C-41): the child's
 # copy-up setup — rootlesskit's bind0/bind1 directory creation under
