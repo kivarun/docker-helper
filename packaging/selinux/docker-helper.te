@@ -1857,8 +1857,87 @@ allow docker_helper_buildkitd_t proc_t:filesystem mount;
 # type, any dir:mounton addition, any tmpfs_t file/dir class surface, any
 # capability change, any other subject. The committed-policy tests pin the
 # buildkitd domain's tmpfs_t:filesystem authority at EXACTLY this one
-# rule; the named-allow count moves 44 -> 45 by exactly this one rule.
+# rule; the named-allow count moved 44 -> 45 by exactly this one rule
+# (the tmpfs_t:dir surface gained its own separately-evidenced R7 P17
+# rung below).
 allow docker_helper_buildkitd_t tmpfs_t:filesystem mount;
+
+# The buildkitd container-init /dev tmpfs mountpoint creation (R7 P17):
+# with the P16 tmpfs mount rung granted, the container init mounted the
+# container's /dev tmpfs and died at the NEXT step — creating the
+# /dev/pts mountpoint directory INSIDE the fresh /dev tmpfs before the
+# devpts mount can proceed. The P16 authoritative run (41327209512)
+# proved the fatal terminal from BOTH sides: the build's own stderr
+# ("error mounting \"devpts\" to rootfs at \"/dev/pts\": create mountpoint
+# for /dev/pts mount: make mountpoint \"/dev/pts\": mkdirat
+# <op>/rootfs/dev/pts: permission denied") and the audited kernel decision
+# `tclass=dir denied { create } name="pts" tcontext=tmpfs_t:s0` from
+# comm="runc:[2:INIT]" (serials 1368/10458; 3 records). The call is runc's
+# pathrs.MkdirAllInRoot mkdirat(2) of the /dev/pts (and /dev/shm, /dev/
+# mqueue) mountpoint directories inside the container's own /dev tmpfs.
+#
+# KERNEL CHECK CHAIN (v7.3, selinux/hooks.c may_create — the mkdirat
+# (do_mkdirat -> filename_create -> may_create) path):
+#   (1) avc_has_perm(sid, PARENT sid, dir, { add_name search }) — PASSED
+#       (the denial came later; the standing base domain surface carries
+#       the parent-dir write/search authority, the same surface the
+#       4C-46 rootlesskit mkdirat already proved passing);
+#   (2) selinux_determine_inode_label — no fscreate (the flow never calls
+#       setfscreate), no MNTPOINT behavior: security_transition_sid
+#       (buildkitd_t, tmpfs_t, dir, "pts") with NO matching type_transition
+#       (the module's only tmpfs_t transition is the runc_memfd FILE
+#       transition) — the computed new-inode SID is the measured bare
+#       tmpfs_t:s0 (the denial's own tcontext; the same measured
+#       no-categories inheritance the 4C-46 .ro creation proved live);
+#   (3) avc_has_perm(sid, newsid, dir, create) — THE DENIED ONE, exactly
+#       the grant below;
+#   (4) avc_has_perm(newsid, sb sid, filesystem, FILESYSTEM__ASSOCIATE) —
+#       the post-create association gate, subject = the NEW sid (tmpfs_t),
+#       target = the tmpfs superblock (tmpfs_t); the 4C-46 precedent
+#       PROVES this gate passes on the loaded policy's base surface for
+#       the identical tmpfs_t->tmpfs_t pair (rootlesskit's granted .ro
+#       mkdirat succeeded and the flow moved past it), and the leg
+#       re-verifies the pair statically (sesearch).
+#
+# ISOLATION BOUNDARY (the type-wide extension measured, never assumed):
+#   - tmpfs_t IS the type of other tmpfs instances (host /dev/shm,
+#     /run/lock, ...): the grant makes the dir:create LSM check pass for
+#     the TYPE, not for one path. The residual venues are bounded by three
+#     independent layers that all still apply: (a) the kernel may_mount/
+#     namespace venue model (P14/P15/P16 — the domain cannot manufacture
+#     namespaces; the only fresh tmpfs instances it can mount are its own
+#     container's), (b) pathname reachability (the daemon's host-namespace
+#     view), (c) DAC on the parent dir (host /dev/shm is mode 1777 — the
+#     authority equals what EVERY local user already holds; /run/lock and
+#     other host tmpfs are DAC-bounded the same way they bound every
+#     unprivileged identity);
+#   - cross-operation isolation is UNCHANGED: the created objects are
+#     bare s0 (measured), other operations' tmpfs objects are s0 too, and
+#     the intended venues live inside the container's own mount namespace
+#     — path-unreachable cross-op; the MCS constraint and the cross-op
+#     setns denial stay as measured;
+#   - NO file-class riders: dir:create does NOT grant file:create,
+#     lnk_file:create, chr_file:create or any other class on tmpfs_t (the
+#     /dev device-node and /dev/shm file surfaces are separate future
+#     boundaries); add_name/write/search/setattr/remove_name/rmdir stay
+#     exactly the standing base surface (never granted by this module);
+#   - the P16 resource model is unchanged: directory inodes are
+#     negligible against the 64 MiB page budget, the two-instance cap and
+#     the memcg accounting hold as established.
+#   - PRECEDENT (the SAME class+permission on the SAME target type, already
+#     accepted): the rootlesskit parent's copy-up stage carries the 4C-46
+#     tmpfs_t:dir { create mounton } pair (its own /etc copy-up tmpfs) —
+#     P17 extends the same evidenced create shape to the buildkitd domain's
+#     container init.
+#
+# Deliberately NOT granted: add_name/write/search/setattr/remove_name/
+# rmdir/rename or any other dir permission on tmpfs_t, any file/lnk_file/
+# chr_file/blk_file/sock_file/fifo_file tmpfs_t surface, any new
+# filesystem-class or dir:mounton authority, any capability change, any
+# other subject. The committed-policy tests pin the buildkitd domain's
+# tmpfs_t:dir authority at EXACTLY this one rule; the named-allow count
+# moves 45 -> 46 by exactly this one rule.
+allow docker_helper_buildkitd_t tmpfs_t:dir create;
 
 # The copy-up /tmp directory write (P5-S2 Phase 4C-40) and the mkdir
 # name mediation of the same mkdir(2) (P5-S2 Phase 4C-41): the child's
