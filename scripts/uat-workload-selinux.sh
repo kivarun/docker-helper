@@ -3166,11 +3166,11 @@ esac
 # audit log).
 RT_MNT_AUDIT="$({ cat /var/log/audit/audit.log 2>/dev/null; dmesg 2>/dev/null; } | grep -E 'type=AVC|avc: *denied' | sort -u || true)"
 RT_MNT_FLOW_INIT_N="$(printf '%s\n' "$RT_MNT_AUDIT" | grep 'tclass=cap_userns' | grep -c 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
-RT_MNT_MOUNTON_DEN="$(printf '%s\n' "$RT_MNT_AUDIT" | grep 'tclass=dir' | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep -v 'tcontext=system_u:object_r:tmpfs_t:s0 ' || true)"
+RT_MNT_MOUNTON_DEN="$(printf '%s\n' "$RT_MNT_AUDIT" | grep 'tclass=dir' | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
 info "R7-mounton preflight: audit window buildkitd_t cap_userns init records=$RT_MNT_FLOW_INIT_N mounton denials=[$RT_MNT_MOUNTON_DEN]"
 if [ "${RT_MNT_FLOW_INIT_N:-0}" -ge 1 ] 2>/dev/null; then
   if [ -z "$RT_MNT_MOUNTON_DEN" ]; then
-    acc_ok "R7 mounton preflight: the boot-wide audit window covering the candidate-policy flow builds ($RT_MNT_FLOW_INIT_N buildkitd_t cap_userns container-init records) contains ZERO dir:mounton denials for the flow domain outside the RECORDED next-terminal family (the R7 P17-run's measured tmpfs_t:dir mounton on the fresh /dev/pts — the next candidate, deliberately NOT granted) — the P13 fatal root_t shape is gone from the live path, and the denial-free window is proven non-degenerate"
+    acc_ok "R7 mounton preflight: the boot-wide audit window covering the candidate-policy flow builds ($RT_MNT_FLOW_INIT_N buildkitd_t cap_userns container-init records) contains ZERO dir:mounton denials for the flow domain (the root_t mounton rung is granted and the tmpfs_t:dir mounton rung — the R7 P18 devpts-mount rung — is granted by the candidate policy, so any reappearing dir:mounton denial would be a regression of an accepted rung) — the P13 fatal root_t shape is gone from the live path, and the denial-free window is proven non-degenerate"
   else
     acc_fail "R7 mounton preflight: UNEXPECTED dir:mounton denials (outside the recorded tmpfs_t next-terminal family) reappeared in the audit window — $RT_MNT_MOUNTON_DEN"
   fi
@@ -3317,12 +3317,12 @@ fi
 # zero as the standing regression guard.
 RT_PFS_AUDIT="$({ cat /var/log/audit/audit.log 2>/dev/null; dmesg 2>/dev/null; } | grep -E 'type=AVC|avc: *denied' | sort -u || true)"
 RT_PFS_FLOW_INIT_N="$(printf '%s\n' "$RT_PFS_AUDIT" | grep 'tclass=cap_userns' | grep -c 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
-RT_PFS_MOUNTON_DEN="$(printf '%s\n' "$RT_PFS_AUDIT" | grep 'tclass=dir' | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep -v 'tcontext=system_u:object_r:tmpfs_t:s0 ' || true)"
+RT_PFS_MOUNTON_DEN="$(printf '%s\n' "$RT_PFS_AUDIT" | grep 'tclass=dir' | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
 RT_PFS_FS_DEN="$(printf '%s\n' "$RT_PFS_AUDIT" | grep 'tclass=filesystem' | grep '{ mount }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:proc_t:s0' || true)"
 info "R7-procfs preflight: audit window buildkitd_t cap_userns init records=$RT_PFS_FLOW_INIT_N proc_t filesystem-mount denials=[$RT_PFS_FS_DEN] mounton denials=[$RT_PFS_MOUNTON_DEN]"
 if [ "${RT_PFS_FLOW_INIT_N:-0}" -ge 1 ] 2>/dev/null; then
   if [ -z "$RT_PFS_FS_DEN" ] && [ -z "$RT_PFS_MOUNTON_DEN" ]; then
-    acc_ok "R7 procfs preflight: the boot-wide audit window covering the candidate-policy flow builds ($RT_PFS_FLOW_INIT_N buildkitd_t cap_userns container-init records) contains ZERO proc_t:filesystem mount denials AND zero dir:mounton denials outside the recorded tmpfs_t next-terminal family (the R7 P17-run's measured /dev/pts mounton — the next candidate, deliberately NOT granted) — the P15 grant reached the get_tree gate in the flow's REAL execution (the P14 fatal shape is gone from the live path) and the earlier rung holds"
+    acc_ok "R7 procfs preflight: the boot-wide audit window covering the candidate-policy flow builds ($RT_PFS_FLOW_INIT_N buildkitd_t cap_userns container-init records) contains ZERO proc_t:filesystem mount denials AND zero dir:mounton denials for the flow domain (the root_t and tmpfs_t:dir mounton rungs are granted by the candidate policy, so any reappearing dir:mounton denial would be a regression of an accepted rung) — the P15 grant reached the get_tree gate in the flow's REAL execution (the P14 fatal shape is gone from the live path) and the earlier rungs hold"
   else
     acc_fail "R7 procfs preflight: the flow's fatal mount shapes reappeared (proc_t=[$RT_PFS_FS_DEN] unexpected dir-mounton=[$RT_PFS_MOUNTON_DEN])"
   fi
@@ -3427,11 +3427,11 @@ RT_TFS_AUDIT="$({ cat /var/log/audit/audit.log 2>/dev/null; dmesg 2>/dev/null; }
 RT_TFS_FLOW_INIT_N="$(printf '%s\n' "$RT_TFS_AUDIT" | grep 'tclass=cap_userns' | grep -c 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
 RT_TFS_TMPFS_DEN="$(printf '%s\n' "$RT_TFS_AUDIT" | grep 'tclass=filesystem' | grep '{ mount }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:tmpfs_t:s0' || true)"
 RT_TFS_PROC_DEN="$(printf '%s\n' "$RT_TFS_AUDIT" | grep 'tclass=filesystem' | grep '{ mount }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:proc_t:s0' || true)"
-RT_TFS_MOUNTON_DEN="$(printf '%s\n' "$RT_TFS_AUDIT" | grep 'tclass=dir' | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep -v 'tcontext=system_u:object_r:tmpfs_t:s0 ' || true)"
+RT_TFS_MOUNTON_DEN="$(printf '%s\n' "$RT_TFS_AUDIT" | grep 'tclass=dir' | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
 info "R7-tmpfs preflight: audit window buildkitd_t cap_userns init records=$RT_TFS_FLOW_INIT_N tmpfs mount denials=[$RT_TFS_TMPFS_DEN] proc mount denials=[$RT_TFS_PROC_DEN] mounton denials=[$RT_TFS_MOUNTON_DEN]"
 if [ "${RT_TFS_FLOW_INIT_N:-0}" -ge 1 ] 2>/dev/null; then
   if [ -z "$RT_TFS_TMPFS_DEN" ] && [ -z "$RT_TFS_PROC_DEN" ] && [ -z "$RT_TFS_MOUNTON_DEN" ]; then
-    acc_ok "R7 tmpfs preflight: the boot-wide audit window covering the candidate-policy flow builds ($RT_TFS_FLOW_INIT_N buildkitd_t cap_userns container-init records) contains ZERO tmpfs_t:filesystem mount denials, zero proc_t:filesystem mount denials AND zero dir:mounton denials outside the recorded tmpfs_t next-terminal family (the R7 P17-run's measured /dev/pts mounton — the next candidate, deliberately NOT granted) — the P16 grant reached the get_tree gate in the flow's REAL execution and both earlier rungs hold"
+    acc_ok "R7 tmpfs preflight: the boot-wide audit window covering the candidate-policy flow builds ($RT_TFS_FLOW_INIT_N buildkitd_t cap_userns container-init records) contains ZERO tmpfs_t:filesystem mount denials, zero proc_t:filesystem mount denials AND zero dir:mounton denials for the flow domain (the root_t and tmpfs_t:dir mounton rungs are granted by the candidate policy, so any reappearing dir:mounton denial would be a regression of an accepted rung) — the P16 grant reached the get_tree gate in the flow's REAL execution and both earlier rungs hold"
   else
     acc_fail "R7 tmpfs preflight: the flow's fatal mount shapes reappeared (tmpfs=[$RT_TFS_TMPFS_DEN] proc=[$RT_TFS_PROC_DEN] unexpected dir-mounton=[$RT_TFS_MOUNTON_DEN])"
   fi
@@ -3548,16 +3548,164 @@ RT_TDIR_AUDIT="$({ cat /var/log/audit/audit.log 2>/dev/null; dmesg 2>/dev/null; 
 RT_TDIR_FLOW_INIT_N="$(printf '%s\n' "$RT_TDIR_AUDIT" | grep 'tclass=cap_userns' | grep -c 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
 RT_TDIR_CREATE_DEN="$(printf '%s\n' "$RT_TDIR_AUDIT" | grep 'tclass=dir' | grep '{ create }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:tmpfs_t:s0' || true)"
 RT_TFS_TMPFS_DEN="$(printf '%s\n' "$RT_TDIR_AUDIT" | grep 'tclass=filesystem' | grep '{ mount }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:tmpfs_t:s0' || true)"
-RT_TFS_MOUNTON_DEN="$(printf '%s\n' "$RT_TDIR_AUDIT" | grep 'tclass=dir' | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep -v 'tcontext=system_u:object_r:tmpfs_t:s0 ' || true)"
+RT_TFS_MOUNTON_DEN="$(printf '%s\n' "$RT_TDIR_AUDIT" | grep 'tclass=dir' | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
 info "R7-tmpfsdir preflight: audit window buildkitd_t cap_userns init records=$RT_TDIR_FLOW_INIT_N tmpfs dir-create denials=[$RT_TDIR_CREATE_DEN] tmpfs mount denials=[$RT_TFS_TMPFS_DEN] mounton denials=[$RT_TFS_MOUNTON_DEN]"
 if [ "${RT_TDIR_FLOW_INIT_N:-0}" -ge 1 ] 2>/dev/null; then
   if [ -z "$RT_TDIR_CREATE_DEN" ] && [ -z "$RT_TFS_TMPFS_DEN" ] && [ -z "$RT_TFS_MOUNTON_DEN" ]; then
-    acc_ok "R7 tmpfsdir preflight: the boot-wide audit window covering the candidate-policy flow builds ($RT_TDIR_FLOW_INIT_N buildkitd_t cap_userns container-init records) contains ZERO tmpfs_t:dir create denials, zero tmpfs_t:filesystem mount denials AND zero dir:mounton denials outside the recorded tmpfs_t next-terminal family (the measured /dev/pts mounton — the next candidate, deliberately NOT granted) — the P17 grant reached the may_create create hook in the flow's REAL execution and both earlier rungs hold"
+    acc_ok "R7 tmpfsdir preflight: the boot-wide audit window covering the candidate-policy flow builds ($RT_TDIR_FLOW_INIT_N buildkitd_t cap_userns container-init records) contains ZERO tmpfs_t:dir create denials, zero tmpfs_t:filesystem mount denials AND zero dir:mounton denials for the flow domain (the root_t and tmpfs_t:dir mounton rungs are granted by the candidate policy, so any reappearing dir:mounton denial would be a regression of an accepted rung) — the P17 grant reached the may_create create hook in the flow's REAL execution and both earlier rungs hold"
   else
     acc_fail "R7 tmpfsdir preflight: the flow's fatal shapes reappeared (dir-create=[$RT_TDIR_CREATE_DEN] tmpfs-mount=[$RT_TFS_TMPFS_DEN] unexpected dir-mounton=[$RT_TFS_MOUNTON_DEN])"
   fi
 else
   acc_fail "R7 tmpfsdir preflight: the audit window is degenerate (no buildkitd_t cap_userns container-init records) — a zero-denial tmpfs-dir claim would be unproven; the flow-based control cannot run"
+fi
+
+# --- scenario R7 P18 tmpfs-dir-mounton preflight: devpts mountpoint mount authority
+say "R7 P18 tmpfs-dir mounton preflight: tmpfs_t:dir mounton (flow-evidenced, venue-bounded)"
+# The P18 candidate grant is the buildkitd container-init devpts mount:
+# with the P17 tmpfs_t:dir create rung granted, the container init created
+# the /dev/pts mountpoint inside the fresh /dev tmpfs and died at the NEXT
+# step — mounting devpts on /dev/pts. The P17 authoritative run
+# (41341108003) proved the fatal terminal from BOTH sides: the build's own
+# stderr ("error mounting \"devpts\" to rootfs at \"/dev/pts\": mount
+# src=devpts, dst=/dev/pts, dstFd=/proc/thread-self/fd/12,
+# flags=MS_NOSUID|MS_NOEXEC, data=newinstance,ptmxmode=0666,mode=0620,
+# gid=5: permission denied") and the audited kernel decision
+# `tclass=dir denied { mounton } tcontext=tmpfs_t:s0` from
+# comm="runc:[2:INIT]" (serials 1362/10452; 3 records). The call is
+# runc's classic mount(2) path again (mountViaFds with srcFile=nil):
+# mount(src=procfd path, dst=procfd path of the freshly created rootfs
+# /dev/pts dir, "devpts", MS_NOSUID|MS_NOEXEC,
+# data="newinstance,ptmxmode=0666,mode=0620,gid=5").
+#
+# KERNEL CHECK CHAIN (v7.3): path_mount -> security_sb_mount — the LSM
+# sb_mount hook runs at the TOP of path_mount, BEFORE may_mount() — then
+# selinux_mount's non-remount branch: path_has_perm(FILE__MOUNTON) on the
+# TARGET dentry's context — the dir:mounton denial, exactly the grant
+# below. THEN may_mount() (ns_capable(CAP_SYS_ADMIN) in the userns owning
+# the target's mount namespace — passed, the same gate the P14/P15/P16
+# mounts already crossed), then do_new_mount: devpts declares
+# FS_USERNS_MOUNT only (no FS_USERNS_VISIBLE, so the kernel's
+# mount-too-revealing gate does not apply), the monolithic data parses
+# through fs_param_is_gid — gid=5 resolves via make_kgid
+# (current_user_ns()) and IS valid (the flow user namespace carries the
+# live-captured full subid range "0 473 1" + "1 165536 65536", the same
+# mapping evidence the R7 uid-map forensics captured), mount_capable
+# passes, then do_new_mount_fc: fc_mount -> devpts_get_tree ->
+# get_tree_nodev (a NEW private superblock per mount — every devpts mount
+# is its own instance) -> security_sb_kern_mount ->
+# superblock_has_perm(FILESYSTEM__MOUNT) — THE NEXT TERMINAL
+# (devpts_t:filesystem mount, deliberately NOT granted by this rung; the
+# distro policy's genfscon labels the devpts superblock devpts_t).
+#
+# ISOLATION BOUNDARY (the type-wide extension measured, never assumed):
+#   - tmpfs_t IS the type of other tmpfs instances (host /dev/shm,
+#     /run/lock, ...): the grant makes the dir:mounton LSM check pass for
+#     the TYPE, not for one path. The residual venues are bounded by the
+#     same three independent layers as every earlier mounton rung:
+#     (a) the kernel may_mount/namespace venue model — mounting ON a dir
+#     requires CAP_SYS_ADMIN in the userns OWNING the mount namespace
+#     that contains the target dir; the host's tmpfs mounts live in the
+#     init mount namespace (owner init_user_ns), where no buildkitd_t
+#     process holds authority, and the domain cannot manufacture
+#     namespaces (both unshare shapes remain measured denials — the P14
+#     legs above); (b) pathname reachability (the daemon's host-namespace
+#     view); (c) DAC on the target dir;
+#   - tmpfs_t:s0 IS NOT itself a cross-operation isolation boundary (the
+#     bare type, no categories — every operation's tmpfs objects measure
+#     the same s0): the inter-op isolation stays owned by the
+#     mount-namespace venue model, the measured cross-op setns denial and
+#     the per-op MCS categories — none of which this rung touches;
+#   - WITHIN the flow's own namespace the type-wide surface covers the
+#     container's OWN /dev, /dev/shm and /dev/mqueue dirs (the P17
+#     created mountpoints): the same-syscall devpts mount is this rung's
+#     purpose, the /dev/shm tmpfs mount would then hit the already-
+#     granted P16 tmpfs_t:filesystem mount singleton, and the
+#     /dev/mqueue mount would reach its own mqueue_t:filesystem gate (a
+#     separate future rung) — all inside the container's private mount
+#     namespace;
+#   - PTY SCOPE: the mount grant creates only the EMPTY per-container
+#     devpts instance (the kernel-internal ptmx node is made by
+#     mknod_ptmx during fill_super, not by the process; no PTYs are
+#     allocated by a mount). PTY allocation is a separate future surface
+#     bounded by the GLOBAL sysctls (kernel.pty.max / kernel.pty.reserve:
+#     container mounts run with reserve=false, the global pty_count
+#     ceiling is pty_limit minus pty_reserve) and the per-instance
+#     `max` option cap; PTYs bind to their own devpts instance
+#     (devpts_mntget's same-instance check) and stay unreachable from
+#     other operations' namespaces. The /dev/ptmx relative symlink
+#     (runc's setupPtmx, pts/ptmx) is created only AFTER the whole mount
+#     table loop — a later rung, not part of this authority;
+#   - NO other dir permission rides the rung: the P17 create singleton
+#     stays its own rule and the merged { create mounton } form is
+#     forbidden by the committed-policy tests;
+#   - PRECEDENT (the SAME class+permission on the SAME target type,
+#     already accepted): the rootlesskit parent's copy-up stage carries
+#     the 4C-46 tmpfs_t:dir { create mounton } pair (its own /etc
+#     copy-up tmpfs) — P18 extends the same evidenced mounton shape to
+#     the buildkitd domain's container init as its own single-permission
+#     rule.
+#
+# MEASUREMENT BOUNDARY (explicit): the mounted devpts instance's final
+# contents are unobservable from outside the container's namespaces and
+# the mount does NOT complete under this rung (the devpts_t:filesystem
+# gate denies); the flow-side evidence is the audit window — the
+# mounton denial family's disappearance together with the NEW
+# devpts_t:filesystem mount denial family of the same syscall's
+# get_tree stage — plus the build's own next stderr terminal, exactly as
+# in P15/P16/P17.
+RT_TDMS_SESEARCH="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -t tmpfs_t -c dir /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+RT_TDMS_RKL_PRECEDENT="$("$RT_SESEARCH_BIN" --allow -s docker_helper_rootlesskit_t -t tmpfs_t -c dir /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+RT_TDMS_DEVPTS_SESEARCH="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -t devpts_t /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+RT_TDMS_FILE_SESEARCH="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -t tmpfs_t -c file /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+info "R7-tmpfsdir-mounton preflight: buildkitd->tmpfs_t:dir=[$RT_TDMS_SESEARCH] rootlesskit->tmpfs_t:dir=[$RT_TDMS_RKL_PRECEDENT] buildkitd->devpts_t=[$RT_TDMS_DEVPTS_SESEARCH] buildkitd->tmpfs_t:file=[$RT_TDMS_FILE_SESEARCH]"
+if printf '%s\n' "$RT_TDMS_SESEARCH" | grep -q '^allow docker_helper_buildkitd_t tmpfs_t:dir create;' && printf '%s\n' "$RT_TDMS_SESEARCH" | grep -q '^allow docker_helper_buildkitd_t tmpfs_t:dir mounton;' && printf '%s' "$RT_TDMS_RKL_PRECEDENT" | grep -q 'tmpfs_t:dir'; then
+  acc_ok "R7 tmpfsdir-mounton preflight: the loaded policy carries the exact P18 candidate authority for the container-init devpts mount (buildkitd_t -> tmpfs_t:dir mounton, alongside the standing P17 create singleton), and the SAME class+permission shape is already accepted for the rootlesskit parent's copy-up stage (the 4C-46 { create mounton } pair) — an existing owner's shape, not a new mechanism"
+else
+  acc_fail "R7 tmpfsdir-mounton preflight: the P18 candidate rule or the 4C-46 precedent is not present in the loaded policy (query=[$RT_TDMS_SESEARCH] precedent=[$RT_TDMS_RKL_PRECEDENT]) — the preflight cannot proceed on the measured architecture"
+fi
+RT_TDMS_DIR_N="$(printf '%s\n' "$RT_TDMS_SESEARCH" | grep -c '^allow docker_helper_buildkitd_t tmpfs_t:dir' || true)"
+RT_TDMS_EXTRA="$(printf '%s\n' "$RT_TDMS_SESEARCH" | grep '^allow docker_helper_buildkitd_t tmpfs_t:dir' | grep -vE '^allow docker_helper_buildkitd_t tmpfs_t:dir (create|mounton);$' || true)"
+if [ "$RT_TDMS_DIR_N" -ne 2 ] 2>/dev/null || [ -n "$RT_TDMS_EXTRA" ]; then
+  acc_fail "R7 tmpfsdir-mounton preflight: the buildkitd tmpfs_t:dir module surface drifted beyond the accepted scope (rules=$RT_TDMS_DIR_N unexpected=[$RT_TDMS_EXTRA]) — the P17/P18 scope claim (exactly the two bare singletons, no merged { create mounton } form) does not match the loaded state"
+else
+  acc_ok "R7 tmpfsdir-mounton preflight: the buildkitd tmpfs_t:dir module surface matches the accepted scope exactly (exactly the two buildkitd-subject bare singletons — the P17 create and this P18 mounton — never merged; the parent-dir add_name/write/search authority stays the standing base surface, never module-borne)"
+fi
+if [ -n "$RT_TDMS_DEVPTS_SESEARCH" ]; then
+  acc_fail "R7 tmpfsdir-mounton preflight: the buildkitd devpts_t surface is present — the devpts_t:filesystem mount of the same devpts syscall is the recorded NEXT terminal and must NOT ride the P18 mounton grant"
+else
+  acc_ok "R7 tmpfsdir-mounton preflight: the buildkitd devpts_t surface shows NO authority ([$RT_TDMS_DEVPTS_SESEARCH]) — the devpts_t:filesystem mount of the same syscall's get_tree stage stays closed and outside this rung"
+fi
+if printf '%s' "$RT_TDMS_FILE_SESEARCH" | grep -qE '(^|[ {])(read|write|open|create)([ ;}])'; then
+  acc_fail "R7 tmpfsdir-mounton preflight: the buildkitd tmpfs_t file-class authority is present — the /dev device-node and /dev/shm file surfaces are separate future rungs and must NOT ride the P18 dir-mounton grant"
+else
+  acc_ok "R7 tmpfsdir-mounton preflight: the buildkitd tmpfs_t:file surface shows NO read/write/open/create authority ([$RT_TDMS_FILE_SESEARCH]) — no file-class riders on the dir-mounton rung"
+fi
+# The flow-based positive control: the boot-wide raw audit log must contain
+# the container-init marker records (non-degenerate window) and ZERO
+# tmpfs_t:dir mounton denials (the P18 fatal shape — now granted, so a
+# reappearing denial would be a regression), zero tmpfs_t:dir create
+# denials, zero tmpfs/proc filesystem-mount denials, AND the recorded NEW
+# next-terminal family (devpts_t:filesystem mount from the same devpts
+# mount syscall — the get_tree stage AFTER the granted sb_mount mounton
+# gate) — the P18 grant advanced the flow's REAL execution past
+# security_sb_mount and every earlier rung holds.
+RT_TDMS_AUDIT="$({ cat /var/log/audit/audit.log 2>/dev/null; dmesg 2>/dev/null; } | grep -E 'type=AVC|avc: *denied' | sort -u || true)"
+RT_TDMS_FLOW_INIT_N="$(printf '%s\n' "$RT_TDMS_AUDIT" | grep 'tclass=cap_userns' | grep -c 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
+RT_TDMS_MOUNTON_DEN="$(printf '%s\n' "$RT_TDMS_AUDIT" | grep 'tclass=dir' | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:tmpfs_t:s0' || true)"
+RT_TDMS_CREATE_DEN="$(printf '%s\n' "$RT_TDMS_AUDIT" | grep 'tclass=dir' | grep '{ create }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:tmpfs_t:s0' || true)"
+RT_TDMS_TMPFS_DEN="$(printf '%s\n' "$RT_TDMS_AUDIT" | grep 'tclass=filesystem' | grep '{ mount }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:tmpfs_t:s0' || true)"
+RT_TDMS_PROC_DEN="$(printf '%s\n' "$RT_TDMS_AUDIT" | grep 'tclass=filesystem' | grep '{ mount }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:proc_t:s0' || true)"
+RT_TDMS_DEVPTS_DEN="$(printf '%s\n' "$RT_TDMS_AUDIT" | grep 'tclass=filesystem' | grep '{ mount }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:devpts_t' || true)"
+info "R7-tmpfsdir-mounton preflight: audit window buildkitd_t cap_userns init records=$RT_TDMS_FLOW_INIT_N tmpfs dir-mounton denials=[$RT_TDMS_MOUNTON_DEN] tmpfs dir-create denials=[$RT_TDMS_CREATE_DEN] tmpfs mount denials=[$RT_TDMS_TMPFS_DEN] proc mount denials=[$RT_TDMS_PROC_DEN] devpts mount denials=[$RT_TDMS_DEVPTS_DEN]"
+if [ "${RT_TDMS_FLOW_INIT_N:-0}" -ge 1 ] 2>/dev/null; then
+  if [ -z "$RT_TDMS_MOUNTON_DEN" ] && [ -z "$RT_TDMS_CREATE_DEN" ] && [ -z "$RT_TDMS_TMPFS_DEN" ] && [ -z "$RT_TDMS_PROC_DEN" ] && [ -n "$RT_TDMS_DEVPTS_DEN" ]; then
+    acc_ok "R7 tmpfsdir-mounton preflight: the boot-wide audit window covering the candidate-policy flow builds ($RT_TDMS_FLOW_INIT_N buildkitd_t cap_userns container-init records) contains ZERO tmpfs_t:dir mounton/create denials, zero tmpfs_t/proc_t filesystem mount denials AND the recorded NEW next-terminal family (devpts_t:filesystem mount from the same devpts mount syscall — the get_tree stage AFTER the granted security_sb_mount mounton gate) — the P18 grant advanced the flow's REAL execution past the sb_mount hook and all earlier rungs hold"
+  else
+    acc_fail "R7 tmpfsdir-mounton preflight: the flow's fatal shapes reappeared or the expected next terminal is missing (dir-mounton=[$RT_TDMS_MOUNTON_DEN] dir-create=[$RT_TDMS_CREATE_DEN] tmpfs-mount=[$RT_TDMS_TMPFS_DEN] proc-mount=[$RT_TDMS_PROC_DEN] devpts-mount=[$RT_TDMS_DEVPTS_DEN])"
+  fi
+else
+  acc_fail "R7 tmpfsdir-mounton preflight: the audit window is degenerate (no buildkitd_t cap_userns container-init records) — a zero-denial tmpfs-dir-mounton claim would be unproven; the flow-based control cannot run"
 fi
 
 rm -f /tmp/uat-wls-keyprobe.b64 "$KEYPROBE"
