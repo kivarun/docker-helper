@@ -3166,13 +3166,13 @@ esac
 # audit log).
 RT_MNT_AUDIT="$({ cat /var/log/audit/audit.log 2>/dev/null; dmesg 2>/dev/null; } | grep -E 'type=AVC|avc: *denied' | sort -u || true)"
 RT_MNT_FLOW_INIT_N="$(printf '%s\n' "$RT_MNT_AUDIT" | grep 'tclass=cap_userns' | grep -c 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
-RT_MNT_MOUNTON_DEN="$(printf '%s\n' "$RT_MNT_AUDIT" | grep 'tclass=dir' | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
+RT_MNT_MOUNTON_DEN="$(printf '%s\n' "$RT_MNT_AUDIT" | grep 'tclass=dir' | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep -v 'tcontext=system_u:object_r:tmpfs_t:s0 ' || true)"
 info "R7-mounton preflight: audit window buildkitd_t cap_userns init records=$RT_MNT_FLOW_INIT_N mounton denials=[$RT_MNT_MOUNTON_DEN]"
 if [ "${RT_MNT_FLOW_INIT_N:-0}" -ge 1 ] 2>/dev/null; then
   if [ -z "$RT_MNT_MOUNTON_DEN" ]; then
-    acc_ok "R7 mounton preflight: the boot-wide audit window covering the candidate-policy flow builds ($RT_MNT_FLOW_INIT_N buildkitd_t cap_userns container-init records) contains ZERO dir:mounton denials for the flow domain — the candidate grant reached the gate in the flow's REAL execution (the P13 fatal shape is gone from the live path), and the denial-free window is proven non-degenerate"
+    acc_ok "R7 mounton preflight: the boot-wide audit window covering the candidate-policy flow builds ($RT_MNT_FLOW_INIT_N buildkitd_t cap_userns container-init records) contains ZERO dir:mounton denials for the flow domain outside the RECORDED next-terminal family (the R7 P17-run's measured tmpfs_t:dir mounton on the fresh /dev/pts — the next candidate, deliberately NOT granted) — the P13 fatal root_t shape is gone from the live path, and the denial-free window is proven non-degenerate"
   else
-    acc_fail "R7 mounton preflight: dir:mounton denials for the flow domain reappeared in the audit window despite the candidate grant — $RT_MNT_MOUNTON_DEN"
+    acc_fail "R7 mounton preflight: UNEXPECTED dir:mounton denials (outside the recorded tmpfs_t next-terminal family) reappeared in the audit window — $RT_MNT_MOUNTON_DEN"
   fi
 else
   acc_fail "R7 mounton preflight: the audit window is degenerate (no buildkitd_t cap_userns container-init records) — a zero-denial mounton claim would be unproven; the flow-based control cannot run"
@@ -3317,14 +3317,14 @@ fi
 # zero as the standing regression guard.
 RT_PFS_AUDIT="$({ cat /var/log/audit/audit.log 2>/dev/null; dmesg 2>/dev/null; } | grep -E 'type=AVC|avc: *denied' | sort -u || true)"
 RT_PFS_FLOW_INIT_N="$(printf '%s\n' "$RT_PFS_AUDIT" | grep 'tclass=cap_userns' | grep -c 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
-RT_PFS_MOUNTON_DEN="$(printf '%s\n' "$RT_PFS_AUDIT" | grep 'tclass=dir' | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
+RT_PFS_MOUNTON_DEN="$(printf '%s\n' "$RT_PFS_AUDIT" | grep 'tclass=dir' | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep -v 'tcontext=system_u:object_r:tmpfs_t:s0 ' || true)"
 RT_PFS_FS_DEN="$(printf '%s\n' "$RT_PFS_AUDIT" | grep 'tclass=filesystem' | grep '{ mount }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:proc_t:s0' || true)"
 info "R7-procfs preflight: audit window buildkitd_t cap_userns init records=$RT_PFS_FLOW_INIT_N proc_t filesystem-mount denials=[$RT_PFS_FS_DEN] mounton denials=[$RT_PFS_MOUNTON_DEN]"
 if [ "${RT_PFS_FLOW_INIT_N:-0}" -ge 1 ] 2>/dev/null; then
   if [ -z "$RT_PFS_FS_DEN" ] && [ -z "$RT_PFS_MOUNTON_DEN" ]; then
-    acc_ok "R7 procfs preflight: the boot-wide audit window covering the candidate-policy flow builds ($RT_PFS_FLOW_INIT_N buildkitd_t cap_userns container-init records) contains ZERO proc_t:filesystem mount denials AND zero dir:mounton denials for the flow domain — the P15 grant reached the get_tree gate in the flow's REAL execution (the P14 fatal shape is gone from the live path) and the earlier rung holds"
+    acc_ok "R7 procfs preflight: the boot-wide audit window covering the candidate-policy flow builds ($RT_PFS_FLOW_INIT_N buildkitd_t cap_userns container-init records) contains ZERO proc_t:filesystem mount denials AND zero dir:mounton denials outside the recorded tmpfs_t next-terminal family (the R7 P17-run's measured /dev/pts mounton — the next candidate, deliberately NOT granted) — the P15 grant reached the get_tree gate in the flow's REAL execution (the P14 fatal shape is gone from the live path) and the earlier rung holds"
   else
-    acc_fail "R7 procfs preflight: the flow's fatal mount shapes reappeared in the audit window despite the candidate grants (proc_t mounton=[$RT_PFS_FS_DEN] dir-mounton=[$RT_PFS_MOUNTON_DEN])"
+    acc_fail "R7 procfs preflight: the flow's fatal mount shapes reappeared (proc_t=[$RT_PFS_FS_DEN] unexpected dir-mounton=[$RT_PFS_MOUNTON_DEN])"
   fi
 else
   acc_fail "R7 procfs preflight: the audit window is degenerate (no buildkitd_t cap_userns container-init records) — a zero-denial procfs claim would be unproven; the flow-based control cannot run"
@@ -3427,13 +3427,13 @@ RT_TFS_AUDIT="$({ cat /var/log/audit/audit.log 2>/dev/null; dmesg 2>/dev/null; }
 RT_TFS_FLOW_INIT_N="$(printf '%s\n' "$RT_TFS_AUDIT" | grep 'tclass=cap_userns' | grep -c 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
 RT_TFS_TMPFS_DEN="$(printf '%s\n' "$RT_TFS_AUDIT" | grep 'tclass=filesystem' | grep '{ mount }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:tmpfs_t:s0' || true)"
 RT_TFS_PROC_DEN="$(printf '%s\n' "$RT_TFS_AUDIT" | grep 'tclass=filesystem' | grep '{ mount }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:proc_t:s0' || true)"
-RT_TFS_MOUNTON_DEN="$(printf '%s\n' "$RT_TFS_AUDIT" | grep 'tclass=dir' | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
+RT_TFS_MOUNTON_DEN="$(printf '%s\n' "$RT_TFS_AUDIT" | grep 'tclass=dir' | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep -v 'tcontext=system_u:object_r:tmpfs_t:s0 ' || true)"
 info "R7-tmpfs preflight: audit window buildkitd_t cap_userns init records=$RT_TFS_FLOW_INIT_N tmpfs mount denials=[$RT_TFS_TMPFS_DEN] proc mount denials=[$RT_TFS_PROC_DEN] mounton denials=[$RT_TFS_MOUNTON_DEN]"
 if [ "${RT_TFS_FLOW_INIT_N:-0}" -ge 1 ] 2>/dev/null; then
   if [ -z "$RT_TFS_TMPFS_DEN" ] && [ -z "$RT_TFS_PROC_DEN" ] && [ -z "$RT_TFS_MOUNTON_DEN" ]; then
-    acc_ok "R7 tmpfs preflight: the boot-wide audit window covering the candidate-policy flow builds ($RT_TFS_FLOW_INIT_N buildkitd_t cap_userns container-init records) contains ZERO tmpfs_t:filesystem mount denials, zero proc_t:filesystem mount denials AND zero dir:mounton denials for the flow domain — the P16 grant reached the get_tree gate in the flow's REAL execution and both earlier rungs hold"
+    acc_ok "R7 tmpfs preflight: the boot-wide audit window covering the candidate-policy flow builds ($RT_TFS_FLOW_INIT_N buildkitd_t cap_userns container-init records) contains ZERO tmpfs_t:filesystem mount denials, zero proc_t:filesystem mount denials AND zero dir:mounton denials outside the recorded tmpfs_t next-terminal family (the R7 P17-run's measured /dev/pts mounton — the next candidate, deliberately NOT granted) — the P16 grant reached the get_tree gate in the flow's REAL execution and both earlier rungs hold"
   else
-    acc_fail "R7 tmpfs preflight: the flow's fatal mount shapes reappeared in the audit window despite the candidate grants (tmpfs=[$RT_TFS_TMPFS_DEN] proc=[$RT_TFS_PROC_DEN] mounton=[$RT_TFS_MOUNTON_DEN])"
+    acc_fail "R7 tmpfs preflight: the flow's fatal mount shapes reappeared (tmpfs=[$RT_TFS_TMPFS_DEN] proc=[$RT_TFS_PROC_DEN] unexpected dir-mounton=[$RT_TFS_MOUNTON_DEN])"
   fi
 else
   acc_fail "R7 tmpfs preflight: the audit window is degenerate (no buildkitd_t cap_userns container-init records) — a zero-denial tmpfs claim would be unproven; the flow-based control cannot run"
@@ -3548,13 +3548,13 @@ RT_TDIR_AUDIT="$({ cat /var/log/audit/audit.log 2>/dev/null; dmesg 2>/dev/null; 
 RT_TDIR_FLOW_INIT_N="$(printf '%s\n' "$RT_TDIR_AUDIT" | grep 'tclass=cap_userns' | grep -c 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
 RT_TDIR_CREATE_DEN="$(printf '%s\n' "$RT_TDIR_AUDIT" | grep 'tclass=dir' | grep '{ create }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:tmpfs_t:s0' || true)"
 RT_TFS_TMPFS_DEN="$(printf '%s\n' "$RT_TDIR_AUDIT" | grep 'tclass=filesystem' | grep '{ mount }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:tmpfs_t:s0' || true)"
-RT_TFS_MOUNTON_DEN="$(printf '%s\n' "$RT_TDIR_AUDIT" | grep 'tclass=dir' | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
+RT_TFS_MOUNTON_DEN="$(printf '%s\n' "$RT_TDIR_AUDIT" | grep 'tclass=dir' | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep -v 'tcontext=system_u:object_r:tmpfs_t:s0 ' || true)"
 info "R7-tmpfsdir preflight: audit window buildkitd_t cap_userns init records=$RT_TDIR_FLOW_INIT_N tmpfs dir-create denials=[$RT_TDIR_CREATE_DEN] tmpfs mount denials=[$RT_TFS_TMPFS_DEN] mounton denials=[$RT_TFS_MOUNTON_DEN]"
 if [ "${RT_TDIR_FLOW_INIT_N:-0}" -ge 1 ] 2>/dev/null; then
   if [ -z "$RT_TDIR_CREATE_DEN" ] && [ -z "$RT_TFS_TMPFS_DEN" ] && [ -z "$RT_TFS_MOUNTON_DEN" ]; then
-    acc_ok "R7 tmpfsdir preflight: the boot-wide audit window covering the candidate-policy flow builds ($RT_TDIR_FLOW_INIT_N buildkitd_t cap_userns container-init records) contains ZERO tmpfs_t:dir create denials, zero tmpfs_t:filesystem mount denials AND zero dir:mounton denials for the flow domain — the P17 grant reached the may_create create hook in the flow's REAL execution and both earlier rungs hold"
+    acc_ok "R7 tmpfsdir preflight: the boot-wide audit window covering the candidate-policy flow builds ($RT_TDIR_FLOW_INIT_N buildkitd_t cap_userns container-init records) contains ZERO tmpfs_t:dir create denials, zero tmpfs_t:filesystem mount denials AND zero dir:mounton denials outside the recorded tmpfs_t next-terminal family (the measured /dev/pts mounton — the next candidate, deliberately NOT granted) — the P17 grant reached the may_create create hook in the flow's REAL execution and both earlier rungs hold"
   else
-    acc_fail "R7 tmpfsdir preflight: the flow's fatal shapes reappeared in the audit window despite the candidate grants (dir-create=[$RT_TDIR_CREATE_DEN] tmpfs-mount=[$RT_TFS_TMPFS_DEN] mounton=[$RT_TFS_MOUNTON_DEN])"
+    acc_fail "R7 tmpfsdir preflight: the flow's fatal shapes reappeared (dir-create=[$RT_TDIR_CREATE_DEN] tmpfs-mount=[$RT_TFS_TMPFS_DEN] unexpected dir-mounton=[$RT_TFS_MOUNTON_DEN])"
   fi
 else
   acc_fail "R7 tmpfsdir preflight: the audit window is degenerate (no buildkitd_t cap_userns container-init records) — a zero-denial tmpfs-dir claim would be unproven; the flow-based control cannot run"
