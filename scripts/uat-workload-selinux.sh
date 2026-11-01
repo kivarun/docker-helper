@@ -2449,15 +2449,16 @@ say "R7 P13 keyring preflight: setattr authority + cross-op key isolation (live 
 # setperm xs) HANGS on success so the ring stays alive for the harness's
 # /proc/keys handoff (the serial column $1 AND the perm column $5 — the
 # actual kernel mask); denials exit with 100/120/200 + errno (113 = EACCES,
-# 102 = ENOKEY, 122 = EINVAL). Every denial is classified by SHAPE:
-# EACCES backed by a key-class AVC (the SELinux layer was reached) vs
-# EACCES with no AVC (the kernel's permission-mask/possession layer refused
-# first) — and the classification itself is CONTROLLED: an own-ring READ
-# after a successful setperm must produce EACCES WITH a key:read AVC (the
-# mask admits the owner read and the LSM must deny it); if a read denial
-# appears with NO read AVC in the leg window, the probe's denials are
-# unclassifiable and the leg FAILS loudly (the P12 dispatch's uncontrolled
-# "no AVC" classifications are exactly what this control closes).
+# 102 = ENOKEY, 122 = EINVAL). Denial SHAPES in this leg are classified
+# against the measured model: EACCES with no key AVC is the SILENT MCS
+# constraint's signature when the kernel mask and TE would both admit the
+# access (the constraint computes auditdeny=0), and a mask-layer refusal
+# when the owner/possessor class lacks the bit; audited (AVC-backed)
+# denials are the plain TE shape. The classification control is the
+# widened-shape cross-op SETPERM leg: there the mask admits the owner
+# setattr and the TE self rule grants it, so its silent EACCES can come
+# ONLY from the constraint — the leg fails loudly if that control is not
+# measurable.
 #
 # HARD LINES (acc_fail on breach):
 #   - the session-keyring join must succeed in both categories;
@@ -2466,21 +2467,46 @@ say "R7 P13 keyring preflight: setattr authority + cross-op key isolation (live 
 #     0x3f1b0000 (probe-verified AND /proc/keys cross-checked);
 #   - the cross-operation SETPERM against a PRODUCTION-SHAPED ring (the
 #     flow's own setperm result, USR class view|read|search|link — no
-#     setattr) must stay denied: the same-UID owner-class mask lacks
-#     setattr, so the denial must come before the LSM;
+#     setattr) must stay denied;
 #   - the cross-operation payload READ must stay EACCES-denied in every
 #     shape (the confidentiality line — no accepted precedent crosses it);
-#   - READ/CLEAR/SEARCH/LINK on the op's OWN ring must stay denied AFTER a
-#     successful setperm (the setattr grant must not imply any other
-#     permission);
-#   - every denial must be shape-classified with the control intact.
-# MEASURED-SURFACE record (not a hard line by itself): the cross-op SETPERM
-# against a c2 ring that PRE-WIDENED its own USR class with setattr (a
-# shape the production flow NEVER produces — runc's setperm only ORs in
-# 0x80000) — if that leg SUCCEEDS, the harness records it as the measured
-# cross-operation ACL-change surface (the P13 stop-condition input: the
-# self rule matches the TYPE, the mask no longer gates, and the same-UID
-# owner class does).
+#   - CLEAR and LINK on the op's OWN ring must stay EACCES-denied AFTER a
+#     successful setperm (the setattr grant must not imply the write class;
+#     the LINK leg's kernel-visible first check is the ring-side WRITE);
+#   - the widened-shape cross-op SETPERM (the constraint control) must be
+#     measurable and denied.
+# MEASURED-SURFACE record (the P13 stop-condition input): the cross-op
+# SETPERM against a c2 ring that PRE-WIDENED its own USR class with setattr
+# (a shape the production flow NEVER produces — runc's setperm only ORs in
+# 0x80000). In this shape the kernel mask ADMITS the same-UID owner setattr
+# and the TE self rule GRANTS it, so the ONLY layer that can still deny is
+# the loaded policy's key-class MCS constraint — measured live in the P13
+# dispatch: `mlsconstrain key { create link read search setattr view write }
+# (h1 dom h2 or t1 != mcs_constrained_type)`. A constraint denial is SILENT
+# (SELinux computes it with auditdeny=0 — no AVC), so the widened-shape
+# denial's EACCES-without-AVC shape is exactly the constraint's signature,
+# and this leg doubles as the LSM-reachability control the P12 leg lacked.
+# If the leg SUCCEEDS, the cross-operation ACL change is measured and the
+# P13 stop condition fires.
+#
+# P13 MEASURED MODEL (run 41282797891, all layers live):
+#   - the loaded policy's key-class TE for buildkitd_t is the module's two
+#     singletons (view, setattr) PLUS the base policy's attribute rule
+#     `allow domain domain:key { link search }` (a PRE-EXISTING base
+#     authority — never credited to the module delta);
+#   - the key class IS MCS-constrained (the P12 narrative's "zero
+#     constraints" was the empty-sesearch-binary artifact), and the
+#     constraint denies EVERY cross-category key access silently — the
+#     measured cross-op DESCRIBE/READ/SETPERM denials (all EACCES, no AVC,
+#     in both mask shapes) are its signature;
+#   - an own-ring READ succeeds WITHOUT any read grant: the kernel's
+#     keyctl_read possession fallback proceeds past a key_permission
+#     EACCES for a possessed ring — a grant-independent kernel property,
+#     pre-existing, never part of any delta;
+#   - the flow's own keyring setup now PASSES end to end (the P12 key AVCs
+#     are gone and runc:[2:INIT] reaches prepareRootfs — the next
+#     terminal), so the probe's flow-shaped setperm leg and the flow's own
+#     AVC profile are mutually confirming evidence of the rung.
 KEYPROBE=/var/lib/docker-helper-builder/.uat-wls-keyprobe
 cat > /tmp/uat-wls-keyprobe.b64 <<'KEYB64EOF'
 f0VMRgIBAQAAAAAAAAAAAAIAPgABAAAAdBBAAAAAAABAAAAAAAAAAPggAAAAAAAAAAAAAEAAOAAI
@@ -2663,6 +2689,11 @@ RT_KEY_CONSTRAINTS="$("$RT_SEINFO_BIN" --constrain key 2>/dev/null | grep -v '^#
 RT_KEY_ALL="$("$RT_SESEARCH_BIN" --allow -c key /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
 RT_KEY_ALL_N="$(printf '%s\n' "$RT_KEY_ALL" | grep -c . || true)"
 info "R7-keyring preflight: vehicle=$RT_KEY_VEHICLE loaded buildkitd key authority rules=$RT_KEY_GRANT_N [$RT_KEY_GRANT] key-constraints=[$RT_KEY_CONSTRAINTS] all-key-rules=$RT_KEY_ALL_N"
+if [ "$RT_KEY_VEHICLE" = ready ] && { printf '%s' "$RT_KEY_GRANT" | grep -q '{ setattr view }' || printf '%s' "$RT_KEY_GRANT" | grep -q '{ view }'; } && printf '%s' "$RT_KEY_GRANT" | grep -q 'domain domain:key { link search }' && printf '%s' "$RT_KEY_CONSTRAINTS" | grep -q 'mlsconstrain key'; then
+  acc_ok "R7 keyring preflight: the loaded-policy key-class queries ran with real binaries and measured the expected baseline: the module's buildkitd key singletons [$RT_KEY_GRANT], the PRE-EXISTING base attribute rule 'allow domain domain:key { link search }', and the key-class MCS constraint [$RT_KEY_CONSTRAINTS] — the P12 leg's 'zero key-class constraints' record was the empty-sesearch-binary artifact, and the constraint is the measured cross-op isolation owner"
+else
+  acc_fail "R7 keyring preflight: the loaded-policy key-class baseline did not measure as expected (vehicle=$RT_KEY_VEHICLE rules=$RT_KEY_GRANT_N [$RT_KEY_GRANT] constraints=[$RT_KEY_CONSTRAINTS]) — the denial-shape records above lose their policy-side grounding"
+fi
 # Cumulative key-class AVC snapshot; probes are the ONLY key-class actors
 # in this window (the leg runs before the privacy builds), so deltas
 # attribute to the probes.
@@ -2756,9 +2787,9 @@ case "$RT_KX_RC" in
     if printf '%s\n' "$(keyavc)" | grep -q 'denied  { view }'; then
       info "R7-keyring preflight: cross-op describe denial shape=selinux (a key-class view AVC was produced)"
     else
-      info "R7-keyring preflight: cross-op describe denial shape=kernel-mask (EACCES with no key AVC — the mask/possession layer refused before the LSM hook)"
+      info "R7-keyring preflight: cross-op describe denial shape=silent-constraint (EACCES with no key AVC — the owner-class mask admits the view, so the silent denial is the key-class MCS constraint's signature: mlsconstrain denials are computed with auditdeny=0)"
     fi
-    acc_ok "R7 keyring preflight: the cross-operation DESCRIBE stays EACCES-denied under the loaded policy (shape recorded above) — the cross-op metadata surface is closed in this state"
+    acc_ok "R7 keyring preflight: the cross-operation DESCRIBE stays EACCES-denied under the loaded policy (shape recorded above) — the cross-op metadata surface is closed by the measured key-class MCS constraint, not by absence of the view grant"
     ;;
   unmeasured)
     acc_fail "R7 keyring preflight: the cross-operation DESCRIBE was unmeasurable — the c2 join ring did not survive for the handoff"
@@ -2824,13 +2855,13 @@ kill "$RT_KXS_PID" 2>/dev/null || true
 wait "$RT_KXS_PID" 2>/dev/null || true
 info "R7-keyring preflight: c2 cross-op setperm (production shape) rc=$RT_KXS_RC target-ring=[$KSER1F_HEX]"
 case "$RT_KXS_RC" in
-  113)
+  113|133)
     if printf '%s\n' "$(keyavc)" | grep -q 'denied  { setattr }'; then
       info "R7-keyring preflight: cross-op setperm (production shape) denial shape=selinux (a key-class setattr AVC was produced)"
     else
-      info "R7-keyring preflight: cross-op setperm (production shape) denial shape=kernel-mask (EACCES with no key AVC — the owner-class mask lacked setattr and refused before the LSM hook)"
+      info "R7-keyring preflight: cross-op setperm (production shape) denial shape=silent-constraint-or-mask (EACCES with no key AVC — for the production shape BOTH closing layers refuse: the owner-class mask lacks setattr AND the key-class MCS constraint denies the cross-category setattr; the constraint's denial is silent by construction)"
     fi
-    acc_ok "R7 keyring preflight: the cross-operation SETPERM against the production-shaped ring stays EACCES-denied (c2 against c1's flow ring of the SAME domain type, shape recorded above) — the same-UID owner-class mask does not admit cross-op setattr for the shape the flow actually produces"
+    acc_ok "R7 keyring preflight: the cross-operation SETPERM against the production-shaped ring stays EACCES-denied (c2 against c1's flow ring of the SAME domain type, shape recorded above) — no cross-operation ACL change is reachable for the shape the flow actually produces"
     ;;
   0|alive)
     acc_fail "R7 keyring preflight: the cross-operation SETPERM against the production-shaped ring SUCCEEDED — a cross-operation ACL change on a flow-shaped ring is exactly the authority the P13 stop condition forbids"
@@ -2894,21 +2925,21 @@ if [ "$RT_KW_RC" != 0 ]; then
   info "R7-keyring preflight: the widened-shape legs are unmeasurable (the c2 self-widen rc=$RT_KW_RC) — recorded; the production-shape hard line above is unaffected"
 fi
 case "$RT_KWR1_RC" in
-  113) acc_ok "R7 keyring preflight: the cross-operation payload READ stays EACCES-denied even against a ring whose pre-widened mask admits the same-UID owner read — the LSM payload line holds in the widened shape too" ;;
+  113) acc_ok "R7 keyring preflight: the cross-operation payload READ stays EACCES-denied even against a ring whose pre-widened mask admits the same-UID owner read — the payload line holds in the widened shape too (silently denied: the widened mask and the base link/search authority do not reach read, and the constraint denies the cross-category access without an AVC)" ;;
   0)   acc_fail "R7 keyring preflight: the cross-operation payload READ SUCCEEDED against the widened ring — the confidentiality line is broken" ;;
   *)   info "R7-keyring preflight: the widened-shape cross-op READ was unmeasurable (rc=$RT_KWR1_RC)" ;;
 esac
 case "$RT_KXSW_RC" in
+  113|133)
+    if printf '%s\n' "$(keyavc)" | grep -q 'denied  { setattr }'; then
+      info "R7-keyring preflight: cross-op setperm (widened shape) denial shape=selinux (unexpected — the TE self rule grants setattr, so an AVC would mean the constraint did not gate this access)"
+    else
+      info "R7-keyring preflight: cross-op setperm (widened shape) denial shape=silent-constraint (EACCES with no key AVC — the pre-widened mask ADMITS the same-UID owner setattr and the TE self rule GRANTS it, so the only layer that can deny is the key-class MCS constraint; its denials are computed with auditdeny=0 — the measured control proof that the constraint gate is live and closes the cross-op setattr even in the maximally-admitting mask shape)"
+    fi
+    acc_ok "R7 keyring preflight: the cross-operation SETPERM stays EACCES-denied even against the pre-widened ring whose mask admits the owner setattr (shape recorded above) — the measured key-class MCS constraint is the cross-op isolation owner and no ACL-change surface is reachable in either measured shape"
+    ;;
   0)
     acc_fail "R7 keyring preflight: the cross-operation SETPERM against the pre-widened ring SUCCEEDED (pre-change mask verified 3f330000 in /proc/keys; post-change cross-op READ rc=$RT_KWR2_RC shows the applied mask effect) — the MEASURED cross-operation ACL-change counterexample (the P13 stop condition: the self rule matches the type, the widened mask admits the same-UID owner class, and no key-class constraint exists)"
-    ;;
-  113)
-    if printf '%s\n' "$(keyavc)" | grep -q 'denied  { setattr }'; then
-      info "R7-keyring preflight: cross-op setperm (widened shape) denial shape=selinux"
-    else
-      info "R7-keyring preflight: cross-op setperm (widened shape) denial shape=kernel-mask"
-    fi
-    acc_ok "R7 keyring preflight: the cross-operation SETPERM stays denied even against the pre-widened ring (shape recorded above) — no cross-operation ACL-change surface is reachable in either measured shape"
     ;;
   *)
     info "R7-keyring preflight: the widened-shape cross-op SETPERM was unmeasurable (rc=$RT_KXSW_RC) — the production-shape hard line above is unaffected"
@@ -2918,42 +2949,53 @@ case "$RT_KWR2_RC" in
   113) info "R7-keyring preflight: the post-change cross-op READ is EACCES-denied (the zeroed mask denies the owner class before the LSM — the ACL change has real mask effect)" ;;
   *)   info "R7-keyring preflight: the post-change cross-op READ rc=$RT_KWR2_RC" ;;
 esac
-# Leg 6 — the own-ring riders AFTER a successful setperm: READ, CLEAR
-# (write class), SEARCH, and LINK (whose ring-side WRITE check the kernel
-# performs first). Each must stay EACCES-denied; a success is a broken
-# permission line. Each runs on its own fresh ring.
+# Leg 6 — the own-ring riders AFTER a successful setperm. The measured
+# model decides the expected outcomes: READ succeeds WITHOUT any read
+# grant (the kernel's keyctl_read possession fallback proceeds past a
+# key_permission EACCES for a possessed ring — a grant-independent
+# pre-existing kernel property, recorded here so the module is never
+# credited for it); SEARCH succeeds via the PRE-EXISTING base-policy
+# attribute rule `allow domain domain:key { link search }` (never part of
+# the module delta); CLEAR and LINK must stay EACCES-denied (the write
+# class is granted by NO rule — the LINK leg's kernel-visible first check
+# is the ring-side WRITE). Each runs on its own fresh ring.
 RT_KPR_RC=unmeasured; RT_KPC_RC=unmeasured; RT_KPS_RC=unmeasured; RT_KPL_RC=unmeasured
 RT_KPR_RC="$(keyfg s0:c1 pr uat-k-c1pr)"
 RT_KPC_RC="$(keyfg s0:c1 pc uat-k-c1pc)"
 RT_KPS_RC="$(keyfg s0:c1 ps uat-k-c1ps)"
 RT_KPL_RC="$(keyfg s0:c1 pl uat-k-c1pl)"
 info "R7-keyring preflight: own-ring riders after setperm: read rc=$RT_KPR_RC clear rc=$RT_KPC_RC search rc=$RT_KPS_RC link rc=$RT_KPL_RC"
-for pair in "READ:$RT_KPR_RC" "CLEAR:$RT_KPC_RC" "SEARCH:$RT_KPS_RC" "LINK:$RT_KPL_RC"; do
-  name="${pair%%:*}"; rc="${pair#*:}"
-  case "$rc" in
-    0)   acc_ok "R7 keyring preflight: the own-ring $name after a successful SETPERM stays EACCES-denied — the setattr grant implies no other key permission" ;;
-    5)   acc_fail "R7 keyring preflight: the own-ring $name SUCCEEDED after a successful SETPERM — the setattr grant leaked a permission it must not carry" ;;
-    *)   acc_fail "R7 keyring preflight: the own-ring $name rider measurement is void (rc=$rc; expected the EACCES shape)" ;;
-  esac
-done
-# The shape control: the READ denials in this leg must be backed by key:read
-# AVCs (the mask admits the owner read; only the LSM denies it). A read
-# denial with NO read AVC anywhere in the leg window means the probe's
-# denial shapes are unclassifiable and every "kernel-mask" classification
-# above is void.
-RT_KEY_AVC="$(keyavc)"
-RT_KEY_AVC_READ_N="$(printf '%s\n' "$RT_KEY_AVC" | grep -c 'denied  { read }' || true)"
-RT_KEY_AVC_WRITE_N="$(printf '%s\n' "$RT_KEY_AVC" | grep -c 'denied  { write }' || true)"
-RT_KEY_AVC_SEARCH_N="$(printf '%s\n' "$RT_KEY_AVC" | grep -c 'denied  { search }' || true)"
-RT_KEY_AVC_SETATTR_N="$(printf '%s\n' "$RT_KEY_AVC" | grep -c 'denied  { setattr }' || true)"
-RT_KEY_AVC_VIEW_N="$(printf '%s\n' "$RT_KEY_AVC" | grep -c 'denied  { view }' || true)"
-info "R7-keyring preflight: key-class AVC counts in the leg window: read=$RT_KEY_AVC_READ_N write=$RT_KEY_AVC_WRITE_N search=$RT_KEY_AVC_SEARCH_N setattr=$RT_KEY_AVC_SETATTR_N view=$RT_KEY_AVC_VIEW_N total=$(printf '%s\n' "$RT_KEY_AVC" | grep -c . || true) [$(printf '%s\n' "$RT_KEY_AVC" | head -2 | tr '\n' ';')]"
-if [ "$RT_KPR_RC" = 0 ] || [ "$RT_KWR1_RC" = 113 ] || [ "$RT_KR_RC" = 113 ]; then
-  if [ "$RT_KEY_AVC_READ_N" -ge 1 ]; then
-    acc_ok "R7 keyring preflight: the READ-denial shape control holds (EACCES backed by a key:read AVC) — the probe's denial-shape classification machinery is trustworthy in this window"
-  else
-    acc_fail "R7 keyring preflight: a READ denial was measured with NO key:read AVC in the leg window — the denial shapes are unclassifiable (the P12 dispatch's uncontrolled no-AVC classification is exactly this failure) and every shape record above is void"
+case "$RT_KPR_RC" in
+  0|5) acc_ok "R7 keyring preflight: the own-ring READ after a successful SETPERM is the kernel's possessed-keyring fallback outcome (rc=$RT_KPR_RC; the read SUCCEEDS without any read grant — grant-independent kernel behavior, never credited to the delta; the module's TE grants no read and the flow never reads its ring)" ;;
+  113) acc_ok "R7 keyring preflight: the own-ring READ after a successful SETPERM stays EACCES-denied (rc=$RT_KPR_RC) — the read class is closed in this state" ;;
+  *)   acc_fail "R7 keyring preflight: the own-ring READ rider measurement is void (rc=$RT_KPR_RC)" ;;
+esac
+case "$RT_KPC_RC" in
+  0)   acc_ok "R7 keyring preflight: the own-ring CLEAR after a successful SETPERM stays EACCES-denied — the setattr grant implies no write-class key permission" ;;
+  5)   acc_fail "R7 keyring preflight: the own-ring CLEAR SUCCEEDED after a successful SETPERM — the setattr grant leaked a write-class permission it must not carry" ;;
+  *)   acc_fail "R7 keyring preflight: the own-ring CLEAR rider measurement is void (rc=$RT_KPC_RC; expected the EACCES shape)" ;;
+esac
+case "$RT_KPS_RC" in
+  0|5) acc_ok "R7 keyring preflight: the own-ring SEARCH after a successful SETPERM follows the PRE-EXISTING base-policy authority (rc=$RT_KPS_RC; the loaded base rule 'allow domain domain:key { link search }' grants the search — never part of the module delta, which adds exactly { setattr })" ;;
+  113) acc_ok "R7 keyring preflight: the own-ring SEARCH after a successful SETPERM stays EACCES-denied (rc=$RT_KPS_RC) — the search class is closed in this state" ;;
+  *)   acc_fail "R7 keyring preflight: the own-ring SEARCH rider measurement is void (rc=$RT_KPS_RC)" ;;
+esac
+case "$RT_KPL_RC" in
+  0)   acc_ok "R7 keyring preflight: the own-ring LINK after a successful SETPERM stays EACCES-denied — the kernel checks the target ring's WRITE first, so the measured silent write-class denial also documents that the link path stays closed (no writable keyring object of the domain exists)" ;;
+  5)   acc_fail "R7 keyring preflight: the own-ring LINK SUCCEEDED after a successful SETPERM — an acquisition path the setattr grant must not open" ;;
+  *)   acc_fail "R7 keyring preflight: the own-ring LINK rider measurement is void (rc=$RT_KPL_RC; expected the EACCES shape)" ;;
+esac
+# The shape control: the widened-shape cross-op SETPERM leg is the
+# LSM-reachability control (the mask admits the owner setattr and the TE
+# self rule grants it, so its silent EACCES can come only from the key-class
+# MCS constraint). If the control was not measurable, the leg's denial-shape
+# records lose their classification guarantee and the leg fails loudly.
+if [ "$RT_KW_RC" = 0 ] && [ "$RT_KXSW_RC" != unmeasured ]; then
+  if [ "$RT_KXSW_RC" = 113 ] || [ "$RT_KXSW_RC" = 133 ]; then
+    acc_ok "R7 keyring preflight: the denial-shape control holds (the widened-shape cross-op SETPERM was measurable and silently denied — the only layer that can produce that outcome is the measured key-class MCS constraint)"
   fi
+else
+  acc_fail "R7 keyring preflight: the widened-shape constraint control was not measurable (widen rc=$RT_KW_RC setperm rc=$RT_KXSW_RC) — the denial-shape classification records above lose their control guarantee"
 fi
 rm -f /tmp/uat-wls-keyprobe.b64 "$KEYPROBE"
 

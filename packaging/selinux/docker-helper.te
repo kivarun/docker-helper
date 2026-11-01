@@ -3254,10 +3254,14 @@ allow docker_helper_buildkitd_t self:key view;
 #     DESCRIBE=6 was intended, 3 = REVOKE where READ=11 was intended); its
 #     EACCES-without-AVC shapes were owner-class WRITE denials of
 #     UPDATE/REVOKE, not view/read measurements. The P13 leg below re-meets
-#     the surface with the correct opcodes, a per-stage exit protocol, and
-#     an LSM-reachability control (an own-ring READ must produce EACCES
-#     WITH a key:read AVC — a denial without that AVC is unclassifiable
-#     and fails the leg);
+#     the surface with the correct opcodes and a per-stage exit protocol;
+#     the intended LSM-reachability control (an own-ring READ denied WITH a
+#     key:read AVC) measured as a SUCCESS instead — the kernel's
+#     keyctl_read_key possession fallback proceeds past a key_permission
+#     EACCES for a possessed ring, so an own-ring READ is a
+#     grant-independent kernel property and can NEVER serve as an LSM
+#     probe; the leg's control is the widened-shape cross-op SETPERM
+#     instead (see below);
 #   - the decisive cross-operation question is measured LIVE with the
 #     correct opcodes, in BOTH shapes: a production-shaped c2 ring (the
 #     flow's own setperm result, mask 0x3f1b0000, USR class
@@ -3268,8 +3272,21 @@ allow docker_helper_buildkitd_t self:key view;
 #     cross-op SETPERM must stay EACCES-denied BEFORE the LSM; in the
 #     pre-widened shape the mask passes and the self rule (TYPE match,
 #     zero key-class constraints measured live under P12) admits the
-#     cross-category setattr — if that leg succeeds it is the measured
-#     cross-operation ACL-change counterexample and the P13 stop condition;
+#     cross-category setattr — CORRECTED BY THE P13 PREFLIGHT (run
+#     41282797891): the loaded policy DOES carry the key-class MCS
+#     constraint `mlsconstrain key { create link read search setattr view
+#     write } (h1 dom h2 or t1 != mcs_constrained_type)`; the P12 leg's
+#     "zero constraints" record was the empty-sesearch-binary artifact.
+#     The constraint denies every cross-category key access SILENTLY
+#     (constraint denials are computed with auditdeny=0 — no AVC), and the
+#     live P13 measurement confirmed it closes the cross-op setattr in the
+#     maximally-admitting shape: a c2 ring whose owner had pre-widened its
+#     own USR class with setattr (mask 0x3f330000, verified in
+#     /proc/keys) still refused c1's SETPERM with EACCES and no AVC —
+#     the mask and the TE self rule both admit that access, so the silent
+#     denial is the constraint's measured signature. The cross-op surface
+#     of BOTH key grants is therefore closed by the constraint layer, and
+#     this grant creates no cross-operation ACL-change authority;
 #   - the payload line is unchanged: the setattr grant does NOT grant
 #     read/write/search/link; the leg re-proves each stays LSM-denied on
 #     the op's own ring AFTER a successful setperm (read via KEYCTL_READ,
