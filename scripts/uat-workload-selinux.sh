@@ -2418,70 +2418,82 @@ else
   acc_blocked "S14 hostile fixture build failed (source-image escalation proof impossible)"
 fi
 
-# --- scenario R7 P12 keyring preflight: cross-operation key isolation -----
-say "R7 P12 keyring preflight: cross-operation key isolation (live c1<->c2)"
-# The P12 candidate grant is `allow docker_helper_buildkitd_t self:key
-# view;` for runc's ModKeyringPerm (KEYCTL_DESCRIBE on the session
-# keyring the init process itself joined). `self` in a SELinux rule
-# matches the TYPE, not the MCS categories, so the rule's cross-operation
-# surface depends on the loaded policy's key-class constraint layer AND
-# on the kernel's own keyring permission-mask layer (possession + the
-# ring's perm bits, applied BEFORE the LSM hook). This leg measures all
-# three layers live on the loaded policy, with two runcon-launched probe
-# processes of the EXACT candidate subject domain under DISTINCT MCS
-# categories (c1, c2):
-#   - each probe joins its own named session keyring (the flow-faithful
-#     runc step — the P11 UAT proved the join needs no key permission)
-#     and DESCRIBEs its own ring;
-#   - the harness reads the c2 ring's serial from /proc/keys (root, the
-#     harness's own domain) and the c1 probe DESCRIBEs that exact serial
-#     and attempts a payload READ of it: same-type, cross-category;
-#   - the probes run through a freestanding static keyctl binary embedded
-#     below and chcon'ed to docker_helper_buildkitd_exec_t — the module's
-#     ONLY buildkitd entrypoint shape (the real buildkit binaries are
-#     static Go; an interpreter cannot serve as a domain entrypoint, and
-#     the probe domain has no writable output surface at all, so every
-#     outcome is the process exit code).
-# Exit codes (the probe's contract): every describe/read exits 0 on
-# success or 100+|errno| on failure (113 = EACCES, 102 = ENOKEY,
-# 122 = EINVAL, 114 = EFAULT) so the exact errno layer of each refusal is
-# visible; the join action exits 200+|join-errno| when the join itself
-# fails, 100+|errno| when only the own-ring DESCRIBE failed, and 50 when
-# the serial-form own-ring DESCRIBE was EACCES-denied while the SAME ring
-# described through the KEY_SPEC_SESSION_KEYRING special id (-3, resolved
-# THROUGH the cred and therefore possessed) SUCCEEDED — the kernel-side
-# possession/lookup asymmetry, measured live.
-# Every recorded denial is classified by SHAPE: EACCES backed by a
-# key-class AVC (the SELinux layer was reached) vs EACCES with no AVC
-# (the kernel's permission-mask/possession layer refused first) —
-# ENOKEY/lookup failures prove nothing about either layer and are
-# surfaced as such. The HARD lines (acc_fail on breach): the join must
-# succeed in both categories; the same-op DESCRIBE must match the loaded
-# policy state (EACCES+AVC with no authority loaded, succeeding with
-# exactly self:key view); the cross-operation payload READ must stay
-# EACCES-denied in every state (key read authority is never part of the
-# P12 delta and is the confidentiality line no accepted precedent
-# crosses); the cross-operation DESCRIBE must stay EACCES-denied in the
-# no-authority state. Under the view grant the cross-operation DESCRIBE
-# outcome is measured and documented in every shape: a denial (either
-# layer) keeps the cross-op metadata surface closed; a success is the
-# measured cross-op surface the P12 decision is made on — a cross-op
-# metadata view matches the policy's already-accepted read-class cross-op
-# surface (the category-blind builder_state_t:file read), while a
-# cross-op WRITE-class permission (setattr for P13) has no such precedent
-# and is expected to be inadmissible without a constraint.
+# --- scenario R7 P13 keyring preflight: setattr rung + cross-op surface -----
+say "R7 P13 keyring preflight: setattr authority + cross-op key isolation (live c1<->c2)"
+# The P13 candidate grant is `allow docker_helper_buildkitd_t self:key
+# setattr;` (second single-permission key grant, kept separate from the P12
+# `self:key view` singleton) for runc's ModKeyringPerm KEYCTL_SETPERM step.
+# `self` in a SELinux rule matches the TYPE, not the MCS categories, and the
+# loaded policy carries no key-class constraints, so the rule's
+# cross-operation surface is owned by the kernel's own keyring layers:
+# the permission-mask layer (owner/possessor classes applied BEFORE the LSM
+# hook) and the LSM hook itself. This leg measures ALL layers live on the
+# loaded candidate policy with two runcon-launched probe processes of the
+# EXACT candidate subject domain under DISTINCT MCS categories (c1, c2).
+#
+# P12 CORRECTION (recorded here because it re-opens the closed-state
+# baseline): the P12 preflight probe invoked keyctl option 2 (UPDATE) for
+# its "describe" legs and option 3 (REVOKE) for its "read" leg — not
+# DESCRIBE=6 / READ=11 — so its EACCES-without-AVC shapes were owner-class
+# WRITE (and write-or-setattr) mask denials of UPDATE/REVOKE, never
+# view/read measurements. The P12 probe also ran its sesearch queries with
+# an EMPTY sesearch binary (defined later in this file), so the in-leg
+# "loaded key authority rules=0" record was a no-op query, not a policy
+# measurement. This leg re-meets the whole surface with the correct
+# opcodes and working queries.
+#
+# The probe (freestanding static keyctl binary embedded below, chcon'ed to
+# docker_helper_buildkitd_exec_t — the module's ONLY buildkitd entrypoint
+# shape) uses a per-stage exit protocol and a uniform success shape:
+# every state-producing action (join j, flow setperm s, widen w, cross-op
+# setperm xs) HANGS on success so the ring stays alive for the harness's
+# /proc/keys handoff (the serial column $1 AND the perm column $5 — the
+# actual kernel mask); denials exit with 100/120/200 + errno (113 = EACCES,
+# 102 = ENOKEY, 122 = EINVAL). Every denial is classified by SHAPE:
+# EACCES backed by a key-class AVC (the SELinux layer was reached) vs
+# EACCES with no AVC (the kernel's permission-mask/possession layer refused
+# first) — and the classification itself is CONTROLLED: an own-ring READ
+# after a successful setperm must produce EACCES WITH a key:read AVC (the
+# mask admits the owner read and the LSM must deny it); if a read denial
+# appears with NO read AVC in the leg window, the probe's denials are
+# unclassifiable and the leg FAILS loudly (the P12 dispatch's uncontrolled
+# "no AVC" classifications are exactly what this control closes).
+#
+# HARD LINES (acc_fail on breach):
+#   - the session-keyring join must succeed in both categories;
+#   - the flow-shaped own-ring SETPERM must SUCCEED under the P13 candidate
+#     policy and the resulting kernel mask must equal runc's expectation
+#     0x3f1b0000 (probe-verified AND /proc/keys cross-checked);
+#   - the cross-operation SETPERM against a PRODUCTION-SHAPED ring (the
+#     flow's own setperm result, USR class view|read|search|link — no
+#     setattr) must stay denied: the same-UID owner-class mask lacks
+#     setattr, so the denial must come before the LSM;
+#   - the cross-operation payload READ must stay EACCES-denied in every
+#     shape (the confidentiality line — no accepted precedent crosses it);
+#   - READ/CLEAR/SEARCH/LINK on the op's OWN ring must stay denied AFTER a
+#     successful setperm (the setattr grant must not imply any other
+#     permission);
+#   - every denial must be shape-classified with the control intact.
+# MEASURED-SURFACE record (not a hard line by itself): the cross-op SETPERM
+# against a c2 ring that PRE-WIDENED its own USR class with setattr (a
+# shape the production flow NEVER produces — runc's setperm only ORs in
+# 0x80000) — if that leg SUCCEEDS, the harness records it as the measured
+# cross-operation ACL-change surface (the P13 stop-condition input: the
+# self rule matches the TYPE, the mask no longer gates, and the same-UID
+# owner class does).
 KEYPROBE=/var/lib/docker-helper-builder/.uat-wls-keyprobe
 cat > /tmp/uat-wls-keyprobe.b64 <<'KEYB64EOF'
-f0VMRgIBAQAAAAAAAAAAAAIAPgABAAAAABBAAAAAAABAAAAAAAAAAIgUAAAAAAAAAAAAAEAAOAAH
-AEAACQAIAAEAAAAEAAAAAAAAAAAAAAAAAEAAAAAAAAAAQAAAAAAAHAIAAAAAAAAcAgAAAAAAAAAQ
-AAAAAAAAAQAAAAUAAAAAEAAAAAAAAAAQQAAAAAAAABBAAAAAAAD/AgAAAAAAAP8CAAAAAAAAABAA
-AAAAAAABAAAABgAAAAAQAAAAAAAAACBAAAAAAAAAIEAAAAAAAAAAAAAAAAAAIAIAAAAAAAAAEAAA
-AAAAAAQAAAAEAAAAyAEAAAAAAADIAUAAAAAAAMgBQAAAAAAAMAAAAAAAAAAwAAAAAAAAAAgAAAAA
-AAAABAAAAAQAAAD4AQAAAAAAAPgBQAAAAAAA+AFAAAAAAAAkAAAAAAAAACQAAAAAAAAABAAAAAAA
-AABT5XRkBAAAAMgBAAAAAAAAyAFAAAAAAADIAUAAAAAAADAAAAAAAAAAMAAAAAAAAAAIAAAAAAAA
-AFHldGQGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAA
-BAAAACAAAAAFAAAAR05VAAEAAcAEAAAAAQAAAAAAAAACAAHABAAAAAEAAAAAAAAABAAAABQAAAAD
-AAAAR05VALPvK8r7p8zRD5lc7pJx7ZXVLeJDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+f0VMRgIBAQAAAAAAAAAAAAIAPgABAAAAdBBAAAAAAABAAAAAAAAAAPggAAAAAAAAAAAAAEAAOAAI
+AEAACQAIAAEAAAAEAAAAAAAAAAAAAAAAAEAAAAAAAAAAQAAAAAAAVAIAAAAAAABUAgAAAAAAAAAQ
+AAAAAAAAAQAAAAUAAAAAEAAAAAAAAAAQQAAAAAAAABBAAAAAAAClBwAAAAAAAKUHAAAAAAAAABAA
+AAAAAAABAAAABAAAAAAgAAAAAAAAACBAAAAAAAAAIEAAAAAAAIAAAAAAAAAAgAAAAAAAAAAAEAAA
+AAAAAAEAAAAGAAAAABAAAAAAAAAAMEAAAAAAAAAwQAAAAAAAAAAAAAAAAAAAAgAAAAAAAAAQAAAA
+AAAABAAAAAQAAAAAAgAAAAAAAAACQAAAAAAAAAJAAAAAAAAwAAAAAAAAADAAAAAAAAAACAAAAAAA
+AAAEAAAABAAAADACAAAAAAAAMAJAAAAAAAAwAkAAAAAAACQAAAAAAAAAJAAAAAAAAAAEAAAAAAAA
+AFPldGQEAAAAAAIAAAAAAAAAAkAAAAAAAAACQAAAAAAAMAAAAAAAAAAwAAAAAAAAAAgAAAAAAAAA
+UeV0ZAYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAE
+AAAAIAAAAAUAAABHTlUAAQABwAQAAAABAAAAAAAAAAIAAcAEAAAAAQAAAAAAAAAEAAAAFAAAAAMA
+AABHTlUAMNS1aQ0LZ1CDHKtFKH6SCJRMr84AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
@@ -2542,50 +2554,107 @@ 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
+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
-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
-AAAAAAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAuAAAABwAAAAIAAAAAAAAA+AFAAAAAAAD4AQAAAAAA
-ACQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAQQAAAAEAAAAGAAAAAAAAAAAQQAAAAAAA
-ABAAAAAAAAD/AgAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAEcAAAAIAAAAAwAAAAAAAAAA
-IEAAAAAAAAAgAAAAAAAAIAIAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAABMAAAAAQAAADAA
-AAAAAAAAAAAAAAAAAAD/EgAAAAAAABwAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAAAAAAAAQAA
-AAIAAAAAAAAAAAAAAAAAAAAAAAAAIBMAAAAAAADYAAAAAAAAAAcAAAAEAAAACAAAAAAAAAAYAAAA
-AAAAAAkAAAADAAAAAAAAAAAAAAAAAAAAAAAAAPgTAAAAAAAANAAAAAAAAAAAAAAAAAAAAAEAAAAA
-AAAAAAAAAAAAAAARAAAAAwAAAAAAAAAAAAAAAAAAAAAAAAAsFAAAAAAAAFUAAAAAAAAAAAAAAAAA
-AAABAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABrZXlyaW5nABQAAAAAAAAA
+AXpSAAF4EAEbDAcIkAEAABAAAAAcAAAA2O///zoAAAAAAAAAEAAAADAAAAD+7///OgAAAAAAAAAQ
+AAAARAAAACTw//8MAAAAAAAAACAAAABYAAAAHPD//yUHAAAAXg4QjAJBDhiGA0EOIIMERA4wAEdD
+QzogKEFscGluZSAxNS4yLjApIDE1LjIuMAAALnNoc3RydGFiAC5ub3RlLmdudS5wcm9wZXJ0eQAu
+bm90ZS5nbnUuYnVpbGQtaWQALnRleHQALnJvZGF0YQAuZWhfZnJhbWUALmJzcwAuY29tbWVudAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAALAAAABwAAAAIAAAAAAAAAAAJAAAAAAAAAAgAAAAAAADAAAAAAAAAAAAAAAAAA
+AAAIAAAAAAAAAAAAAAAAAAAAHgAAAAcAAAACAAAAAAAAADACQAAAAAAAMAIAAAAAAAAkAAAAAAAA
+AAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAADEAAAABAAAABgAAAAAAAAAAEEAAAAAAAAAQAAAAAAAA
+pQcAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAA3AAAAAQAAAAIAAAAAAAAAACBAAAAAAAAA
+IAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAPwAAAAEAAAACAAAAAAAAAAgg
+QAAAAAAACCAAAAAAAAB4AAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAEkAAAAIAAAAAwAA
+AAAAAAAAMEAAAAAAAAAwAAAAAAAAAAIAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAABOAAAA
+AQAAADAAAAAAAAAAAAAAAAAAAACAIAAAAAAAABwAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAAA
+AAAAAQAAAAMAAAAAAAAAAAAAAAAAAAAAAAAAnCAAAAAAAABXAAAAAAAAAAAAAAAAAAAAAQAAAAAA
+AAAAAAAAAAAAAA==
 KEYB64EOF
 base64 -d /tmp/uat-wls-keyprobe.b64 > "$KEYPROBE" 2>/dev/null
 chmod +x "$KEYPROBE" 2>/dev/null
 RT_KEY_VEHICLE=ready
 chcon -t docker_helper_buildkitd_exec_t "$KEYPROBE" 2>/dev/null || RT_KEY_VEHICLE=chcon-failed
-# The self-rule visibility: the P12 first experiment (run
-# 41247897180) had the grant demonstrably loaded - the flow's view
-# denial had become setattr - yet the -s-only sesearch query listed no
-# key rules at all, so the authority query pairs the source-target form
-# (the idiom that matches self-shaped rules) with the subject-only form
-# and unions the results.
+RT_SESEARCH_BIN="$(command -v sesearch || true)"
+RT_SEINFO_BIN="$(command -v seinfo || true)"
+# The self-rule visibility is not guaranteed (the P12 dispatches measured 0
+# listed rules while the view grant was demonstrably loaded and enforced),
+# so the authority query pairs the source-target form (the idiom that
+# matches self-shaped rules) with the subject-only form and unions the
+# results — and this leg DEFINES the query binaries before use (the P12 leg
+# ran them empty).
 RT_KEY_GRANT="$({ "$RT_SESEARCH_BIN" --allow --self -s docker_helper_buildkitd_t -t docker_helper_buildkitd_t -c key /sys/fs/selinux/policy 2>/dev/null;
                   "$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -t docker_helper_buildkitd_t -c key /sys/fs/selinux/policy 2>/dev/null;
                   "$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -c key /sys/fs/selinux/policy 2>/dev/null; } | grep -v '^#' | sort -u || true)"
@@ -2594,142 +2663,271 @@ RT_KEY_CONSTRAINTS="$("$RT_SEINFO_BIN" --constrain key 2>/dev/null | grep -v '^#
 RT_KEY_ALL="$("$RT_SESEARCH_BIN" --allow -c key /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
 RT_KEY_ALL_N="$(printf '%s\n' "$RT_KEY_ALL" | grep -c . || true)"
 info "R7-keyring preflight: vehicle=$RT_KEY_VEHICLE loaded buildkitd key authority rules=$RT_KEY_GRANT_N [$RT_KEY_GRANT] key-constraints=[$RT_KEY_CONSTRAINTS] all-key-rules=$RT_KEY_ALL_N"
-RT_K1_RC=""
-RT_K2_RC=""
-RT_KX_RC=""
-RT_KR_RC=""
-KSER2_HEX=""
-if [ "$RT_KEY_VEHICLE" = ready ]; then
-  # The probe processes enter the EXACT candidate subject domain via the
-  # full exec context (user:role:type:level): the module's types live in
-  # system_r, so a -t/-l-only runcon would keep the caller's role and
-  # fail with EINVAL (the 41230476608 preflight dispatch).
-  # The context/capability ground truth for the probe process itself:
-  # the c1 join probe is launched so it HANGS first (the hang action),
-  # the harness inspects /proc/<pid>/attr/current and CapEff of the LIVE
-  # probe, then kills it and records the hang rc; the real join probe
-  # runs afterwards.
-  runcon system_u:system_r:docker_helper_buildkitd_t:s0:c1 "$KEYPROBE" hang 4 >/dev/null 2>&1 &
-  RT_KHANG_PID=$!
-  sleep 1
-  RT_KHANG_CTX="$(cat /proc/$RT_KHANG_PID/attr/current 2>/dev/null | tr -d '\0')"
-  RT_KHANG_CAPS="$(grep -E '^(Cap|Uid|Gid)' /proc/$RT_KHANG_PID/status 2>/dev/null | tr '\n' ';' | tr -d '\t')"
-  kill "$RT_KHANG_PID" 2>/dev/null || true
-  wait "$RT_KHANG_PID" 2>/dev/null || true
-  info "R7-keyring preflight: probe ground truth: ctx=[$RT_KHANG_CTX] caps=[$RT_KHANG_CAPS]"
-  runcon system_u:system_r:docker_helper_buildkitd_t:s0:c1 "$KEYPROBE" join uat-k-c1 >/dev/null 2>&1
-  RT_K1_RC=$?
-  runcon system_u:system_r:docker_helper_buildkitd_t:s0:c2 "$KEYPROBE" join uat-k-c2 >/dev/null 2>&1
-  RT_K2_RC=$?
-  # The join step alone succeeded iff the code is below 200 (0 = the own
-  # DESCRIBE also succeeded; 1xx = the own DESCRIBE failed with its
-  # errno; 2xx = the join itself failed).
-  # The c2 ring's serial, read by the harness itself (root) from
-  # /proc/keys (the serial column is hexadecimal; the probe parses
-  # decimal, so convert once here).
-  KSER2_HEX="$(grep -w 'uat-k-c2' /proc/keys 2>/dev/null | awk '{ print $1 }' | head -1)"
-  RT_KSER2=""
-  case "$KSER2_HEX" in
-    ''|*[!0-9a-f]*) RT_KSER2="" ;;
-    *) RT_KSER2=$(( 16#$KSER2_HEX )) ;;
-  esac
-  info "R7-keyring preflight: c1 join/own-describe rc=$RT_K1_RC c2 join/own-describe rc=$RT_K2_RC c2-ring serial=[$KSER2_HEX]"
-  RT_K_JOIN_OK=yes
-  case "$RT_K1_RC" in 2??) RT_K_JOIN_OK=no ;; esac
-  case "$RT_K2_RC" in 2??) RT_K_JOIN_OK=no ;; esac
-  case "$RT_K1_RC" in ''|*[!0-9]*) RT_K_JOIN_OK=no ;; esac
-  case "$RT_K2_RC" in ''|*[!0-9]*) RT_K_JOIN_OK=no ;; esac
-  if [ "$RT_K_JOIN_OK" = yes ]; then
-    acc_ok "R7 keyring preflight: the flow-faithful session-keyring join succeeds for both MCS categories (c1 and c2) with no key permission required — the runc join step is not the gate (c1 rc=$RT_K1_RC c2 rc=$RT_K2_RC)"
-  else
-    acc_fail "R7 keyring preflight: the session-keyring join itself failed for a probe category (c1 rc=$RT_K1_RC c2 rc=$RT_K2_RC) — the flow's join step is blocked before DESCRIBE"
-  fi
-  if [ -n "$RT_KSER2" ]; then
-    runcon system_u:system_r:docker_helper_buildkitd_t:s0:c1 "$KEYPROBE" describe "$RT_KSER2" >/dev/null 2>&1
-    RT_KX_RC=$?
-    runcon system_u:system_r:docker_helper_buildkitd_t:s0:c1 "$KEYPROBE" read "$RT_KSER2" >/dev/null 2>&1
-    RT_KR_RC=$?
-  else
-    RT_KX_RC=c2-serial-missing
-    RT_KR_RC=c2-serial-missing
-  fi
-  info "R7-keyring preflight: c1 cross-op describe rc=$RT_KX_RC c1 cross-op read rc=$RT_KR_RC"
-  # The probe AVCs, captured from the audit while ONLY the probes have
-  # touched the key class (this leg runs before the privacy builds).
-  sleep 2
-  RT_KEY_AVC="$({ ausearch --start recent 2>/dev/null; dmesg 2>/dev/null; } | grep 'tclass=key' | grep -E 'type=AVC|avc: *denied' | sort -u || true)"
-  info "R7-keyring preflight: key-class AVC records=$(printf '%s\n' "$RT_KEY_AVC" | grep -c . || true) [$(printf '%s\n' "$RT_KEY_AVC" | head -2 | tr '\n' ';')]"
-  RT_KEY_AVC_VIEW_N="$(printf '%s\n' "$RT_KEY_AVC" | grep -c 'denied  { view }' || true)"
-  RT_KEY_AVC_READ_N="$(printf '%s\n' "$RT_KEY_AVC" | grep -c 'denied  { read }' || true)"
-  # The cross-operation DESCRIBE (the exit code carries the errno).
-  case "$RT_KX_RC" in
-    113)
-      if [ "$RT_KEY_AVC_VIEW_N" -ge 1 ]; then
-        info "R7-keyring preflight: cross-op describe denial shape=selinux (a key-class view AVC was produced — the LSM layer is reached for cross-category access)"
-      else
-        info "R7-keyring preflight: cross-op describe denial shape=kernel-mask (EACCES with no key AVC — the possession/permission-mask layer refused before the LSM hook)"
-      fi
-      if [ "$RT_KEY_GRANT_N" -eq 0 ]; then
-        acc_ok "R7 keyring preflight: the cross-operation DESCRIBE (c1 describing the c2-created ring of the SAME domain type) is EACCES-denied under the no-authority policy (shape recorded above) — the closed-state measurement for the P12 decision"
-      else
-        acc_ok "R7 keyring preflight: the cross-operation DESCRIBE stays EACCES-denied under the view grant (shape recorded above) — the grant does not open the cross-op metadata surface"
-      fi
-      ;;
-    0)
-      if [ "$RT_KEY_GRANT_N" -eq 0 ]; then
-        acc_fail "R7 keyring preflight: the cross-operation DESCRIBE succeeded under the no-authority policy — an unexpected open surface"
-      else
-        info "R7-keyring preflight: cross-op describe outcome under the view grant=ALLOWED — the measured cross-op metadata surface (matches the accepted category-blind state-file read class; the payload read below stays denied)"
-        acc_ok "R7 keyring preflight: the cross-operation DESCRIBE outcome under the view grant is ALLOWED and recorded — the hard confidentiality line is the payload READ, which stays denied"
-      fi
-      ;;
-    102)
-      acc_fail "R7 keyring preflight: the cross-operation DESCRIBE returned ENOKEY (rc=102) — the c2 ring serial handoff failed and the cross-op surface is unmeasured"
-      ;;
-    *)
-      acc_fail "R7 keyring preflight: the cross-operation DESCRIBE returned an unexpected errno (rc=$RT_KX_RC) — the measurement is void"
-      ;;
-  esac
-  # The cross-operation payload READ: the hard line in every state.
-  if [ "$RT_KR_RC" = 113 ]; then
-    acc_ok "R7 keyring preflight: the cross-operation payload READ stays denied (EACCES; read AVCs=$RT_KEY_AVC_READ_N) — key read authority is not implied by view and stays closed"
-  else
-    acc_fail "R7 keyring preflight: the cross-operation payload READ did not produce EACCES (rc=$RT_KR_RC)"
-  fi
-  # The same-op control: the probe shape's own-ring DESCRIBE was measured
-  # EACCES-denied under BOTH loaded states (the no-authority P11-C policy
-  # and the enforced view grant) with NO key-class AVC — the probe's
-  # mask/possession layer refuses before the LSM hook in this shape, so
-  # the control asserts the DENIAL ITSELF (state-independent) and its
-  # shape; the SELinux gate's domain-level proof is the P11 flow's
-  # audited denial (tclass=key, view, sctx=tctx=buildkitd_t:s0:c1,
-  # serials 1336/10406/1362/10434) and the grant-state behavior is the
-  # flow's own denial profile (the view denial gone, the next terminal's
-  # denial appearing).
-  if [ "$RT_K1_RC" = 113 ] || [ "$RT_K1_RC" = 50 ]; then
-    if [ "$RT_KEY_AVC_VIEW_N" -ge 1 ]; then
-      info "R7-keyring preflight: same-op describe denial shape=selinux (a key-class view AVC was produced)"
-    else
-      info "R7-keyring preflight: same-op describe denial shape=kernel-mask (EACCES with no key AVC — the possession/permission-mask layer refused before the LSM hook; the SELinux gate's proof for this domain is the P11 flow's audited denial)"
-    fi
-    acc_ok "R7 keyring preflight: the same-op DESCRIBE stays EACCES-denied for the probe category under the loaded policy (c1 rc=$RT_K1_RC, shape recorded above) — the closed-state measurement in both loaded states"
-  else
-    acc_fail "R7 keyring preflight: the same-op DESCRIBE control did not produce EACCES (c1 rc=$RT_K1_RC) — the probe shape's denial contract is broken"
-  fi
-  # The sesearch visibility of the self-shaped rule is not guaranteed
-  # (the P12 dispatches measured 0 listed rules while the grant was
-  # demonstrably loaded and enforced); this block records what the query
-  # CAN see and the flow's own denial profile remains the decisive
-  # evidence for the loaded state.
-  if [ "$RT_KEY_GRANT_N" -eq 0 ]; then
-    info "R7-keyring preflight: the sesearch key-class query lists no rules while the module's self:key view rule may be loaded and enforced (the self-rule visibility artifact measured in the P12 dispatches) — the flow's own AVC profile is the decisive loaded-state evidence"
-  else
-    acc_fail "R7 keyring preflight: the loaded buildkitd key authority query returned an unclassifiable rule set (rules=$RT_KEY_GRANT_N [$RT_KEY_GRANT])"
-  fi
+# Cumulative key-class AVC snapshot; probes are the ONLY key-class actors
+# in this window (the leg runs before the privacy builds), so deltas
+# attribute to the probes.
+keyavc() { { ausearch --start recent 2>/dev/null; dmesg 2>/dev/null; } | grep 'tclass=key' | grep -E 'type=AVC|avc: *denied' | sort -u || true; }
+# keybgprobe CAT ACTION ARGS... — run a probe in the background; success is
+# the uniform HANG (the process stays alive); every other exit is a stage
+# code captured by keybgwait.
+keybgprobe() {
+  runcon system_u:system_r:docker_helper_buildkitd_t:"$1" "$KEYPROBE" "${@:2}" >/dev/null 2>&1 &
+}
+keybgwait() { sleep 1; kill -0 "$1" 2>/dev/null && { echo alive; return 0; }; wait "$1" 2>/dev/null; echo "$?"; }
+keyfg() { runcon system_u:system_r:docker_helper_buildkitd_t:"$1" "$KEYPROBE" "${@:2}" >/dev/null 2>&1; echo $?; }
+keyring_line() { grep -w "$1" /proc/keys 2>/dev/null | awk '{ print $1, $5 }' | head -1; }
+# The probe processes enter the EXACT candidate subject domain via the full
+# exec context (user:role:type:level): the module's types live in system_r,
+# so a -t/-l-only runcon would keep the caller's role and fail with EINVAL.
+# The context/capability ground truth for the probe process itself: the
+# hang probe is inspected LIVE via /proc (attr/current, CapEff), then
+# killed.
+keybgprobe s0:c1 h 4
+RT_KHANG_PID=$!
+sleep 1
+RT_KHANG_CTX="$(cat /proc/$RT_KHANG_PID/attr/current 2>/dev/null | tr -d '\0')"
+RT_KHANG_CAPS="$(grep -E '^(Cap|Uid|Gid)' /proc/$RT_KHANG_PID/status 2>/dev/null | tr '\n' ';' | tr -d '\t')"
+kill "$RT_KHANG_PID" 2>/dev/null || true
+wait "$RT_KHANG_PID" 2>/dev/null || true
+info "R7-keyring preflight: probe ground truth: ctx=[$RT_KHANG_CTX] caps=[$RT_KHANG_CAPS]"
+RT_K_JOIN_OK=yes
+# Leg 1 — the flow-faithful join + own-ring DESCRIBE (correct opcodes), both
+# categories; success is the uniform HANG.
+keybgprobe s0:c1 j uat-k-c1
+RT_K1_PID=$!
+RT_K1_OUT="$(keybgwait $RT_K1_PID)"
+case "$RT_K1_OUT" in alive) RT_K1_RC=0 ;; *) RT_K1_RC="$RT_K1_OUT" ;; esac
+keybgprobe s0:c2 j uat-k-c2
+RT_K2_PID=$!
+RT_K2_OUT="$(keybgwait $RT_K2_PID)"
+case "$RT_K2_OUT" in alive) RT_K2_RC=0 ;; *) RT_K2_RC="$RT_K2_OUT" ;; esac
+case "$RT_K1_RC" in ''|*[!0-9]*) RT_K_JOIN_OK=no ;; esac
+case "$RT_K2_RC" in ''|*[!0-9]*) RT_K_JOIN_OK=no ;; esac
+case "$RT_K1_RC" in 2??) RT_K_JOIN_OK=no ;; esac
+case "$RT_K2_RC" in 2??) RT_K_JOIN_OK=no ;; esac
+if [ "$RT_K_JOIN_OK" = yes ]; then
+  acc_ok "R7 keyring preflight: the flow-faithful session-keyring join + own-ring DESCRIBE (keyctl opcodes 1 and 6) succeeds for both MCS categories (c1 rc=$RT_K1_RC c2 rc=$RT_K2_RC) — the join and the owned-ring metadata view are not the gate"
 else
-  acc_fail "R7 keyring preflight: the probe vehicle failed ($RT_KEY_VEHICLE) — the chcon to the module's buildkitd entrypoint type is a precondition of the live cross-op measurement"
+  acc_fail "R7 keyring preflight: the session-keyring join or the own-ring DESCRIBE failed for a probe category (c1 rc=$RT_K1_RC c2 rc=$RT_K2_RC) — the flow's keyring setup is blocked before SETPERM"
+fi
+# Leg 2 — cross-op DESCRIBE + READ against the c2 join ring while it is
+# ALIVE (the P12 continuity legs, now with the correct opcodes and the
+# measured-open state recorded either way).
+RT_KX_RC=unmeasured
+RT_KR_RC=unmeasured
+KSER2_HEX=""
+KPERM2_HEX=""
+if [ "$RT_K2_OUT" = alive ]; then
+  read -r KSER2_HEX KPERM2_HEX <<<"$(keyring_line uat-k-c2)"
+  if [ -n "$KSER2_HEX" ]; then
+    RT_KSER2=$(( 16#$KSER2_HEX ))
+    RT_KX_RC="$(keyfg s0:c1 xd "$RT_KSER2")"
+    RT_KR_RC="$(keyfg s0:c1 xr "$RT_KSER2")"
+  fi
+fi
+info "R7-keyring preflight: c1 cross-op describe rc=$RT_KX_RC c1 cross-op read rc=$RT_KR_RC c2-ring=[$KSER2_HEX $(test -n "$KPERM2_HEX" && printf '%s' "$KPERM2_HEX")]"
+case "$RT_KX_RC" in
+  0)
+    info "R7-keyring preflight: cross-op DESCRIBE=ALLOWED — the measured cross-op metadata surface under the loaded key authority (the accepted read-class cross-op precedent; the payload READ below stays the hard line)"
+    acc_ok "R7 keyring preflight: the cross-operation DESCRIBE outcome under the loaded policy is ALLOWED and recorded (c1 describing the c2-created ring of the SAME domain type) — the metadata surface matches the policy's accepted read-class cross-op precedent"
+    ;;
+  113)
+    if printf '%s\n' "$(keyavc)" | grep -q 'denied  { view }'; then
+      info "R7-keyring preflight: cross-op describe denial shape=selinux (a key-class view AVC was produced)"
+    else
+      info "R7-keyring preflight: cross-op describe denial shape=kernel-mask (EACCES with no key AVC — the mask/possession layer refused before the LSM hook)"
+    fi
+    acc_ok "R7 keyring preflight: the cross-operation DESCRIBE stays EACCES-denied under the loaded policy (shape recorded above) — the cross-op metadata surface is closed in this state"
+    ;;
+  unmeasured)
+    acc_fail "R7 keyring preflight: the cross-operation DESCRIBE was unmeasurable — the c2 join ring did not survive for the handoff"
+    ;;
+  *)
+    acc_fail "R7 keyring preflight: the cross-operation DESCRIBE returned an unexpected code (rc=$RT_KX_RC) — the measurement is void"
+    ;;
+esac
+case "$RT_KR_RC" in
+  113) acc_ok "R7 keyring preflight: the cross-operation payload READ stays denied (EACCES) — key read authority is not part of the delta and stays closed" ;;
+  0)   acc_fail "R7 keyring preflight: the cross-operation payload READ SUCCEEDED — the confidentiality line is broken" ;;
+  *)   acc_fail "R7 keyring preflight: the cross-operation payload READ did not produce EACCES (rc=$RT_KR_RC)" ;;
+esac
+kill "$RT_K1_PID" 2>/dev/null || true
+wait "$RT_K1_PID" 2>/dev/null || true
+# Leg 3 — the flow-shaped own-ring SETPERM (THE rung): join -> DESCRIBE ->
+# SETPERM(mask|0x80000), exactly runc's ModKeyringPerm. Success = the
+# uniform HANG; the /proc/keys perm column must equal 0x3f1b0000 (the
+# probe's internal verify exits 62 on mismatch, so alive implies matched).
+RT_KS_RC=unmeasured
+KPERM1F_HEX=""
+keybgprobe s0:c1 s uat-k-c1f
+RT_KS_PID=$!
+RT_KS_OUT="$(keybgwait $RT_KS_PID)"
+case "$RT_KS_OUT" in alive) RT_KS_RC=0 ;; *) RT_KS_RC="$RT_KS_OUT" ;; esac
+if [ "$RT_KS_OUT" = alive ]; then
+  read -r _ KPERM1F_HEX <<<"$(keyring_line uat-k-c1f)"
+fi
+info "R7-keyring preflight: c1 flow-shaped setperm rc=$RT_KS_RC post-mask=[$KPERM1F_HEX]"
+case "$RT_KS_RC" in
+  0)
+    if [ "$KPERM1F_HEX" = "3f1b0000" ]; then
+      acc_ok "R7 keyring preflight: the flow-shaped own-ring SETPERM succeeds under the loaded policy and the resulting kernel mask is 0x3f1b0000 (probe-verified and /proc/keys cross-checked) — exactly runc's ModKeyringPerm expectation (described mask | KEY_USR_SEARCH)"
+    else
+      acc_fail "R7 keyring preflight: the flow-shaped SETPERM succeeded but the post-setperm kernel mask is [$KPERM1F_HEX], not runc's expected 0x3f1b0000"
+    fi
+    ;;
+  1[0-9][0-9]|2[0-9][0-9]) acc_fail "R7 keyring preflight: the flow-shaped own-ring SETPERM failed (rc=$RT_KS_RC) — the P13 rung does not advance the flow" ;;
+  *) acc_fail "R7 keyring preflight: the flow-shaped own-ring SETPERM measurement is void (rc=$RT_KS_RC)" ;;
+esac
+# Leg 4 — cross-op SETPERM against the PRODUCTION-SHAPED ring: c2 acts on
+# c1's flow ring (mask 0x3f1b0000, USR class without setattr). HARD LINE:
+# the same-UID owner-class mask lacks setattr, so this must stay denied.
+RT_KXS_RC=unmeasured
+KSER1F_HEX=""
+if [ "$RT_KS_OUT" = alive ]; then
+  read -r KSER1F_HEX _ <<<"$(keyring_line uat-k-c1f)"
+  if [ -n "$KSER1F_HEX" ]; then
+    # The actor runs in the background because its success shape is the
+    # uniform HANG (a foreground call would block the leg on exactly the
+    # outcome the stop condition cares about).
+    keybgprobe s0:c2 xs $(( 16#$KSER1F_HEX )) 3f1b0000
+    RT_KXS_PID=$!
+    RT_KXS_OUT="$(keybgwait $RT_KXS_PID)"
+    case "$RT_KXS_OUT" in alive) RT_KXS_RC=0 ;; *) RT_KXS_RC="$RT_KXS_OUT" ;; esac
+  fi
+fi
+kill "$RT_KXS_PID" 2>/dev/null || true
+wait "$RT_KXS_PID" 2>/dev/null || true
+info "R7-keyring preflight: c2 cross-op setperm (production shape) rc=$RT_KXS_RC target-ring=[$KSER1F_HEX]"
+case "$RT_KXS_RC" in
+  113)
+    if printf '%s\n' "$(keyavc)" | grep -q 'denied  { setattr }'; then
+      info "R7-keyring preflight: cross-op setperm (production shape) denial shape=selinux (a key-class setattr AVC was produced)"
+    else
+      info "R7-keyring preflight: cross-op setperm (production shape) denial shape=kernel-mask (EACCES with no key AVC — the owner-class mask lacked setattr and refused before the LSM hook)"
+    fi
+    acc_ok "R7 keyring preflight: the cross-operation SETPERM against the production-shaped ring stays EACCES-denied (c2 against c1's flow ring of the SAME domain type, shape recorded above) — the same-UID owner-class mask does not admit cross-op setattr for the shape the flow actually produces"
+    ;;
+  0|alive)
+    acc_fail "R7 keyring preflight: the cross-operation SETPERM against the production-shaped ring SUCCEEDED — a cross-operation ACL change on a flow-shaped ring is exactly the authority the P13 stop condition forbids"
+    ;;
+  unmeasured)
+    acc_blocked "R7 keyring preflight: the cross-operation SETPERM (production shape) was unmeasurable — the c1 flow ring did not survive for the handoff"
+    ;;
+  *)
+    acc_fail "R7 keyring preflight: the cross-operation SETPERM (production shape) returned an unexpected code (rc=$RT_KXS_RC) — the measurement is void"
+    ;;
+esac
+kill "$RT_KS_PID" 2>/dev/null || true
+wait "$RT_KS_PID" 2>/dev/null || true
+# Leg 5 — the pre-widened shape: c2 widens its OWN ring's USR class with
+# setattr (KEY_POS_ALL | KEY_USR view|read|link|setattr = 0x3f330000; a
+# shape the production flow never produces), then c1 measures the full
+# cross-op surface against it: READ first (the payload line), then SETPERM
+# (the counterexample candidate), then READ again against the zeroed mask.
+RT_KW_RC=unmeasured
+RT_KWR1_RC=unmeasured
+RT_KXSW_RC=unmeasured
+RT_KWR2_RC=unmeasured
+KSER2W_HEX=""
+KPERM2W_HEX=""
+keybgprobe s0:c2 w uat-k-c2w
+RT_KW_PID=$!
+RT_KW_OUT="$(keybgwait $RT_KW_PID)"
+case "$RT_KW_OUT" in alive) RT_KW_RC=0 ;; *) RT_KW_RC="$RT_KW_OUT" ;; esac
+if [ "$RT_KW_OUT" = alive ]; then
+  read -r KSER2W_HEX KPERM2W_HEX <<<"$(keyring_line uat-k-c2w)"
+  # The pre-change mask must be the widened shape; after c1's setperm the
+  # ring VANISHES from /proc/keys for the harness (the proc reader needs
+  # the view bit the zeroed mask no longer carries), so the post-change
+  # state is verified BEHAVIORALLY by the cross-op READ's mask denial.
+  if [ -n "$KSER2W_HEX" ] && [ "$KPERM2W_HEX" = "3f330000" ]; then
+    RT_KSER2W=$(( 16#$KSER2W_HEX ))
+    RT_KWR1_RC="$(keyfg s0:c1 xr "$RT_KSER2W")"
+    keybgprobe s0:c1 xs "$RT_KSER2W" 00000000
+    RT_KXSW_PID=$!
+    RT_KXSW_OUT="$(keybgwait $RT_KXSW_PID)"
+    case "$RT_KXSW_OUT" in alive) RT_KXSW_RC=0 ;; *) RT_KXSW_RC="$RT_KXSW_OUT" ;; esac
+    if [ "$RT_KXSW_OUT" = alive ]; then
+      RT_KWR2_RC="$(keyfg s0:c1 xr "$RT_KSER2W")"
+    fi
+    kill "$RT_KXSW_PID" 2>/dev/null || true
+    wait "$RT_KXSW_PID" 2>/dev/null || true
+  else
+    RT_KW_RC=mask-mismatch
+  fi
+fi
+kill "$RT_KW_PID" 2>/dev/null || true
+wait "$RT_KW_PID" 2>/dev/null || true
+kill "$RT_K2_PID" 2>/dev/null || true
+wait "$RT_K2_PID" 2>/dev/null || true
+info "R7-keyring preflight: widened-shape legs: widen rc=$RT_KW_RC cross-read-before rc=$RT_KWR1_RC cross-setperm rc=$RT_KXSW_RC cross-read-after rc=$RT_KWR2_RC (widened mask=[$KPERM2W_HEX])"
+if [ "$RT_KW_RC" != 0 ]; then
+  info "R7-keyring preflight: the widened-shape legs are unmeasurable (the c2 self-widen rc=$RT_KW_RC) — recorded; the production-shape hard line above is unaffected"
+fi
+case "$RT_KWR1_RC" in
+  113) acc_ok "R7 keyring preflight: the cross-operation payload READ stays EACCES-denied even against a ring whose pre-widened mask admits the same-UID owner read — the LSM payload line holds in the widened shape too" ;;
+  0)   acc_fail "R7 keyring preflight: the cross-operation payload READ SUCCEEDED against the widened ring — the confidentiality line is broken" ;;
+  *)   info "R7-keyring preflight: the widened-shape cross-op READ was unmeasurable (rc=$RT_KWR1_RC)" ;;
+esac
+case "$RT_KXSW_RC" in
+  0)
+    acc_fail "R7 keyring preflight: the cross-operation SETPERM against the pre-widened ring SUCCEEDED (pre-change mask verified 3f330000 in /proc/keys; post-change cross-op READ rc=$RT_KWR2_RC shows the applied mask effect) — the MEASURED cross-operation ACL-change counterexample (the P13 stop condition: the self rule matches the type, the widened mask admits the same-UID owner class, and no key-class constraint exists)"
+    ;;
+  113)
+    if printf '%s\n' "$(keyavc)" | grep -q 'denied  { setattr }'; then
+      info "R7-keyring preflight: cross-op setperm (widened shape) denial shape=selinux"
+    else
+      info "R7-keyring preflight: cross-op setperm (widened shape) denial shape=kernel-mask"
+    fi
+    acc_ok "R7 keyring preflight: the cross-operation SETPERM stays denied even against the pre-widened ring (shape recorded above) — no cross-operation ACL-change surface is reachable in either measured shape"
+    ;;
+  *)
+    info "R7-keyring preflight: the widened-shape cross-op SETPERM was unmeasurable (rc=$RT_KXSW_RC) — the production-shape hard line above is unaffected"
+    ;;
+esac
+case "$RT_KWR2_RC" in
+  113) info "R7-keyring preflight: the post-change cross-op READ is EACCES-denied (the zeroed mask denies the owner class before the LSM — the ACL change has real mask effect)" ;;
+  *)   info "R7-keyring preflight: the post-change cross-op READ rc=$RT_KWR2_RC" ;;
+esac
+# Leg 6 — the own-ring riders AFTER a successful setperm: READ, CLEAR
+# (write class), SEARCH, and LINK (whose ring-side WRITE check the kernel
+# performs first). Each must stay EACCES-denied; a success is a broken
+# permission line. Each runs on its own fresh ring.
+RT_KPR_RC=unmeasured; RT_KPC_RC=unmeasured; RT_KPS_RC=unmeasured; RT_KPL_RC=unmeasured
+RT_KPR_RC="$(keyfg s0:c1 pr uat-k-c1pr)"
+RT_KPC_RC="$(keyfg s0:c1 pc uat-k-c1pc)"
+RT_KPS_RC="$(keyfg s0:c1 ps uat-k-c1ps)"
+RT_KPL_RC="$(keyfg s0:c1 pl uat-k-c1pl)"
+info "R7-keyring preflight: own-ring riders after setperm: read rc=$RT_KPR_RC clear rc=$RT_KPC_RC search rc=$RT_KPS_RC link rc=$RT_KPL_RC"
+for pair in "READ:$RT_KPR_RC" "CLEAR:$RT_KPC_RC" "SEARCH:$RT_KPS_RC" "LINK:$RT_KPL_RC"; do
+  name="${pair%%:*}"; rc="${pair#*:}"
+  case "$rc" in
+    0)   acc_ok "R7 keyring preflight: the own-ring $name after a successful SETPERM stays EACCES-denied — the setattr grant implies no other key permission" ;;
+    5)   acc_fail "R7 keyring preflight: the own-ring $name SUCCEEDED after a successful SETPERM — the setattr grant leaked a permission it must not carry" ;;
+    *)   acc_fail "R7 keyring preflight: the own-ring $name rider measurement is void (rc=$rc; expected the EACCES shape)" ;;
+  esac
+done
+# The shape control: the READ denials in this leg must be backed by key:read
+# AVCs (the mask admits the owner read; only the LSM denies it). A read
+# denial with NO read AVC anywhere in the leg window means the probe's
+# denial shapes are unclassifiable and every "kernel-mask" classification
+# above is void.
+RT_KEY_AVC="$(keyavc)"
+RT_KEY_AVC_READ_N="$(printf '%s\n' "$RT_KEY_AVC" | grep -c 'denied  { read }' || true)"
+RT_KEY_AVC_WRITE_N="$(printf '%s\n' "$RT_KEY_AVC" | grep -c 'denied  { write }' || true)"
+RT_KEY_AVC_SEARCH_N="$(printf '%s\n' "$RT_KEY_AVC" | grep -c 'denied  { search }' || true)"
+RT_KEY_AVC_SETATTR_N="$(printf '%s\n' "$RT_KEY_AVC" | grep -c 'denied  { setattr }' || true)"
+RT_KEY_AVC_VIEW_N="$(printf '%s\n' "$RT_KEY_AVC" | grep -c 'denied  { view }' || true)"
+info "R7-keyring preflight: key-class AVC counts in the leg window: read=$RT_KEY_AVC_READ_N write=$RT_KEY_AVC_WRITE_N search=$RT_KEY_AVC_SEARCH_N setattr=$RT_KEY_AVC_SETATTR_N view=$RT_KEY_AVC_VIEW_N total=$(printf '%s\n' "$RT_KEY_AVC" | grep -c . || true) [$(printf '%s\n' "$RT_KEY_AVC" | head -2 | tr '\n' ';')]"
+if [ "$RT_KPR_RC" = 0 ] || [ "$RT_KWR1_RC" = 113 ] || [ "$RT_KR_RC" = 113 ]; then
+  if [ "$RT_KEY_AVC_READ_N" -ge 1 ]; then
+    acc_ok "R7 keyring preflight: the READ-denial shape control holds (EACCES backed by a key:read AVC) — the probe's denial-shape classification machinery is trustworthy in this window"
+  else
+    acc_fail "R7 keyring preflight: a READ denial was measured with NO key:read AVC in the leg window — the denial shapes are unclassifiable (the P12 dispatch's uncontrolled no-AVC classification is exactly this failure) and every shape record above is void"
+  fi
 fi
 rm -f /tmp/uat-wls-keyprobe.b64 "$KEYPROBE"
+
 
 # --- R7 corrective evidence: the executed OCI runtime's runtime-dir fixup ---
 say "R7 runtime privacy: buildkit-runc's per-op runtime-dir fixup (setattr rung)"
