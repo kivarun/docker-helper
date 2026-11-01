@@ -3517,17 +3517,24 @@ RT_TDIR_RKL_PRECEDENT="$("$RT_SESEARCH_BIN" --allow -s docker_helper_rootlesskit
 RT_TDIR_ASSOC="$("$RT_SESEARCH_BIN" --allow -s tmpfs_t -t tmpfs_t -c filesystem /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
 RT_TDIR_FILE_SESEARCH="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -t tmpfs_t -c file /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
 info "R7-tmpfsdir preflight: buildkitd->tmpfs_t:dir=[$RT_TDIR_SESEARCH] rootlesskit->tmpfs_t:dir=[$RT_TDIR_RKL_PRECEDENT] tmpfs_t->tmpfs_t:filesystem=[$RT_TDIR_ASSOC] buildkitd->tmpfs_t:file=[$RT_TDIR_FILE_SESEARCH]"
-if printf '%s\n' "$RT_TDIR_SESEARCH" | grep -q '^allow docker_helper_buildkitd_t tmpfs_t:dir create;' && printf '%s' "$RT_TDIR_RKL_PRECEDENT" | grep -q 'tmpfs_t:dir'; then
-  acc_ok "R7 tmpfsdir preflight: the loaded policy carries the exact P17 candidate authority for the container-init mountpoint creation (buildkitd_t -> tmpfs_t:dir create), and the SAME class+permission shape is already accepted for the rootlesskit parent's copy-up stage (the 4C-46 { create mounton } pair) — an existing owner's shape, not a new mechanism"
+# LOADED-STATE REPRESENTATION: the module SOURCE keeps the P17 and P18
+# rungs as two separate bare singletons (pinned by the committed-policy
+# tests), but the guest's semodule/CIL linker MERGES same-(subject,target,
+# class) rules — the loaded policy shows the two perms as ONE merged
+# { create mounton } rule. The loaded-state pins accept exactly that
+# representation: one rule, both perms, nothing else (a removed or
+# widened singleton removes/adds a perm and trips).
+if printf '%s\n' "$RT_TDIR_SESEARCH" | grep -q '^allow docker_helper_buildkitd_t tmpfs_t:dir { create mounton };$' && printf '%s' "$RT_TDIR_RKL_PRECEDENT" | grep -q 'tmpfs_t:dir'; then
+  acc_ok "R7 tmpfsdir preflight: the loaded policy carries the exact P17 candidate authority for the container-init mountpoint creation (the merged loaded representation of the P17 dir:create and P18 dir:mounton source singletons — the CIL linker merges same-(subject,target,class) rules), and the SAME class+permission shape is already accepted for the rootlesskit parent's copy-up stage (the 4C-46 { create mounton } pair) — an existing owner's shape, not a new mechanism"
 else
-  acc_fail "R7 tmpfsdir preflight: the P17 candidate rule or the 4C-46 precedent is not present in the loaded policy (query=[$RT_TDIR_SESEARCH] precedent=[$RT_TDIR_RKL_PRECEDENT]) — the preflight cannot proceed on the measured architecture"
+  acc_fail "R7 tmpfsdir preflight: the P17 candidate authority or the 4C-46 precedent is not present in the loaded policy (query=[$RT_TDIR_SESEARCH] precedent=[$RT_TDIR_RKL_PRECEDENT]) — the preflight cannot proceed on the measured architecture"
 fi
 RT_TDIR_CREATE_N="$(printf '%s\n' "$RT_TDIR_SESEARCH" | grep -c '^allow docker_helper_buildkitd_t tmpfs_t:dir' || true)"
-RT_TDIR_EXTRA_CREATE="$(printf '%s\n' "$RT_TDIR_SESEARCH" | grep '^allow docker_helper_buildkitd_t tmpfs_t:dir' | grep -vE '^allow docker_helper_buildkitd_t tmpfs_t:dir create;$' || true)"
+RT_TDIR_EXTRA_CREATE="$(printf '%s\n' "$RT_TDIR_SESEARCH" | grep '^allow docker_helper_buildkitd_t tmpfs_t:dir' | grep -vE '^allow docker_helper_buildkitd_t tmpfs_t:dir \{ create mounton \};$' || true)"
 if [ "$RT_TDIR_CREATE_N" -ne 1 ] 2>/dev/null || [ -n "$RT_TDIR_EXTRA_CREATE" ]; then
-  acc_fail "R7 tmpfsdir preflight: the buildkitd tmpfs_t:dir module surface drifted beyond the accepted scope (rules=$RT_TDIR_CREATE_N unexpected=[$RT_TDIR_EXTRA_CREATE]) — the P17 scope claim (exactly one bare-create singleton) does not match the loaded state"
+  acc_fail "R7 tmpfsdir preflight: the buildkitd tmpfs_t:dir module surface drifted beyond the accepted scope (rules=$RT_TDIR_CREATE_N unexpected=[$RT_TDIR_EXTRA_CREATE]) — the P17/P18 loaded-state scope claim (exactly the one merged { create mounton } representation of the two bare source singletons) does not match the loaded state"
 else
-  acc_ok "R7 tmpfsdir preflight: the buildkitd tmpfs_t:dir module surface matches the accepted scope exactly (exactly one buildkitd-subject rule, bare create only; the parent-dir add_name/write/search authority stays the standing base surface, never module-borne)"
+  acc_ok "R7 tmpfsdir preflight: the buildkitd tmpfs_t:dir module surface matches the accepted scope exactly (exactly one loaded rule — the merged representation of the P17 create and P18 mounton source singletons, both perms present, nothing else; the parent-dir add_name/write/search authority stays the standing base surface, never module-borne)"
 fi
 if printf '%s' "$RT_TDIR_ASSOC" | grep -q 'associate'; then
   acc_ok "R7 tmpfsdir preflight: the post-create association gate is pre-proven on the loaded policy's base surface (tmpfs_t -> tmpfs_t:filesystem associate present: [$RT_TDIR_ASSOC]) — the same gate the 4C-46 rootlesskit mkdirat already crossed live, so the created /dev/pts inode associates without new module authority"
@@ -3659,22 +3666,31 @@ RT_TDMS_RKL_PRECEDENT="$("$RT_SESEARCH_BIN" --allow -s docker_helper_rootlesskit
 RT_TDMS_DEVPTS_SESEARCH="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -t devpts_t /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
 RT_TDMS_FILE_SESEARCH="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -t tmpfs_t -c file /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
 info "R7-tmpfsdir-mounton preflight: buildkitd->tmpfs_t:dir=[$RT_TDMS_SESEARCH] rootlesskit->tmpfs_t:dir=[$RT_TDMS_RKL_PRECEDENT] buildkitd->devpts_t=[$RT_TDMS_DEVPTS_SESEARCH] buildkitd->tmpfs_t:file=[$RT_TDMS_FILE_SESEARCH]"
-if printf '%s\n' "$RT_TDMS_SESEARCH" | grep -q '^allow docker_helper_buildkitd_t tmpfs_t:dir create;' && printf '%s\n' "$RT_TDMS_SESEARCH" | grep -q '^allow docker_helper_buildkitd_t tmpfs_t:dir mounton;' && printf '%s' "$RT_TDMS_RKL_PRECEDENT" | grep -q 'tmpfs_t:dir'; then
-  acc_ok "R7 tmpfsdir-mounton preflight: the loaded policy carries the exact P18 candidate authority for the container-init devpts mount (buildkitd_t -> tmpfs_t:dir mounton, alongside the standing P17 create singleton), and the SAME class+permission shape is already accepted for the rootlesskit parent's copy-up stage (the 4C-46 { create mounton } pair) — an existing owner's shape, not a new mechanism"
+# LOADED-STATE REPRESENTATION: the module SOURCE keeps the P17 and P18
+# rungs as two separate bare singletons (pinned by the committed-policy
+# tests and the checkmodule compiled-CIL parity test), but the guest's
+# semodule/CIL linker MERGES same-(subject,target,class) rules — the
+# loaded policy shows the two perms as ONE merged { create mounton }
+# rule. The loaded-state pins accept exactly that representation: one
+# rule, both perms, nothing else (a removed or widened singleton
+# removes/adds a perm and trips).
+RT_TDMS_DEVPTS_SURFACE="$(printf '%s\n' "$RT_TDMS_DEVPTS_SESEARCH" | grep -v '^allow domain file_type:' || true)"
+if printf '%s\n' "$RT_TDMS_SESEARCH" | grep -q '^allow docker_helper_buildkitd_t tmpfs_t:dir { create mounton };$' && printf '%s' "$RT_TDMS_RKL_PRECEDENT" | grep -q 'tmpfs_t:dir'; then
+  acc_ok "R7 tmpfsdir-mounton preflight: the loaded policy carries the exact P18 candidate authority for the container-init devpts mount (the merged loaded representation of the P17 dir:create and this P18 dir:mounton source singleton — the CIL linker merges same-(subject,target,class) rules), and the SAME class+permission shape is already accepted for the rootlesskit parent's copy-up stage (the 4C-46 { create mounton } pair) — an existing owner's shape, not a new mechanism"
 else
-  acc_fail "R7 tmpfsdir-mounton preflight: the P18 candidate rule or the 4C-46 precedent is not present in the loaded policy (query=[$RT_TDMS_SESEARCH] precedent=[$RT_TDMS_RKL_PRECEDENT]) — the preflight cannot proceed on the measured architecture"
+  acc_fail "R7 tmpfsdir-mounton preflight: the P18 candidate authority or the 4C-46 precedent is not present in the loaded policy (query=[$RT_TDMS_SESEARCH] precedent=[$RT_TDMS_RKL_PRECEDENT]) — the preflight cannot proceed on the measured architecture"
 fi
 RT_TDMS_DIR_N="$(printf '%s\n' "$RT_TDMS_SESEARCH" | grep -c '^allow docker_helper_buildkitd_t tmpfs_t:dir' || true)"
-RT_TDMS_EXTRA="$(printf '%s\n' "$RT_TDMS_SESEARCH" | grep '^allow docker_helper_buildkitd_t tmpfs_t:dir' | grep -vE '^allow docker_helper_buildkitd_t tmpfs_t:dir (create|mounton);$' || true)"
-if [ "$RT_TDMS_DIR_N" -ne 2 ] 2>/dev/null || [ -n "$RT_TDMS_EXTRA" ]; then
-  acc_fail "R7 tmpfsdir-mounton preflight: the buildkitd tmpfs_t:dir module surface drifted beyond the accepted scope (rules=$RT_TDMS_DIR_N unexpected=[$RT_TDMS_EXTRA]) — the P17/P18 scope claim (exactly the two bare singletons, no merged { create mounton } form) does not match the loaded state"
+RT_TDMS_EXTRA="$(printf '%s\n' "$RT_TDMS_SESEARCH" | grep '^allow docker_helper_buildkitd_t tmpfs_t:dir' | grep -vE '^allow docker_helper_buildkitd_t tmpfs_t:dir \{ create mounton \};$' || true)"
+if [ "$RT_TDMS_DIR_N" -ne 1 ] 2>/dev/null || [ -n "$RT_TDMS_EXTRA" ]; then
+  acc_fail "R7 tmpfsdir-mounton preflight: the buildkitd tmpfs_t:dir module surface drifted beyond the accepted scope (rules=$RT_TDMS_DIR_N unexpected=[$RT_TDMS_EXTRA]) — the P17/P18 loaded-state scope claim (exactly the one merged { create mounton } representation of the two bare source singletons) does not match the loaded state"
 else
-  acc_ok "R7 tmpfsdir-mounton preflight: the buildkitd tmpfs_t:dir module surface matches the accepted scope exactly (exactly the two buildkitd-subject bare singletons — the P17 create and this P18 mounton — never merged; the parent-dir add_name/write/search authority stays the standing base surface, never module-borne)"
+  acc_ok "R7 tmpfsdir-mounton preflight: the buildkitd tmpfs_t:dir module surface matches the accepted scope exactly (exactly one loaded rule — the merged representation of the P17 create and this P18 mounton source singleton, both perms present, nothing else; the parent-dir add_name/write/search authority stays the standing base surface, never module-borne)"
 fi
-if [ -n "$RT_TDMS_DEVPTS_SESEARCH" ]; then
-  acc_fail "R7 tmpfsdir-mounton preflight: the buildkitd devpts_t surface is present — the devpts_t:filesystem mount of the same devpts syscall is the recorded NEXT terminal and must NOT ride the P18 mounton grant"
+if [ -n "$RT_TDMS_DEVPTS_SURFACE" ]; then
+  acc_fail "R7 tmpfsdir-mounton preflight: the buildkitd devpts_t surface is present outside the standing base-policy attribute expansions — the devpts_t:filesystem mount of the same devpts syscall is the recorded NEXT terminal and must NOT ride the P18 mounton grant (unexpected=[$RT_TDMS_DEVPTS_SURFACE])"
 else
-  acc_ok "R7 tmpfsdir-mounton preflight: the buildkitd devpts_t surface shows NO authority ([$RT_TDMS_DEVPTS_SESEARCH]) — the devpts_t:filesystem mount of the same syscall's get_tree stage stays closed and outside this rung"
+  acc_ok "R7 tmpfsdir-mounton preflight: the buildkitd devpts_t surface shows NO authority beyond the standing base-policy attribute expansions ([$RT_TDMS_DEVPTS_SESEARCH]) — the devpts_t:filesystem mount of the same syscall's get_tree stage stays closed and outside this rung"
 fi
 if printf '%s' "$RT_TDMS_FILE_SESEARCH" | grep -qE '(^|[ {])(read|write|open|create)([ ;}])'; then
   acc_fail "R7 tmpfsdir-mounton preflight: the buildkitd tmpfs_t file-class authority is present — the /dev device-node and /dev/shm file surfaces are separate future rungs and must NOT ride the P18 dir-mounton grant"
