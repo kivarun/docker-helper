@@ -2519,7 +2519,7 @@ AAAEAAAABAAAADACAAAAAAAAMAJAAAAAAAAwAkAAAAAAACQAAAAAAAAAJAAAAAAAAAAEAAAAAAAA
 AFPldGQEAAAAAAIAAAAAAAAAAkAAAAAAAAACQAAAAAAAMAAAAAAAAAAwAAAAAAAAAAgAAAAAAAAA
 UeV0ZAYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAE
 AAAAIAAAAAUAAABHTlUAAQABwAQAAAABAAAAAAAAAAIAAcAEAAAAAQAAAAAAAAAEAAAAFAAAAAMA
-AABHTlUA5zi71JaupsfdeWVuaCAI1qifcZUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AABHTlUAbTTfmxTUYr1DkT0QDftKpY5ti5gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
@@ -2615,11 +2615,11 @@ SIXAeRi/eAAAADH2KcdIifK4PAAAAEhj/w8F6/6KRQE8cnQ5fxw8Y3RIPGx1VkUx0r8IAAAASMfC
 /f///0iJ2Os+PHN1Pk2JykUxwLoIIEAAvwoAAABIidgPBes6QboAAgAAvwsAAABIidi6ADBAAOsO
 vwcAAAAx0kiJ2A8F6xcPBesTMfa4PAAAAL8JAAAASInyDwXr/kiFwHgTMfa4PAAAAL8FAAAASIny
 DwXr/kiD+PN1ETH/uDwAAABIif5IifoPBev+v2QAAAAx9inHSInyuDwAAABIY/8PBev+PHV1OYB9
-AW4PhcwBAAAx9rgQAQAAvwAAAgBIifIPBb9kAAAAKcdIhcC4AAAAAA9J+Lg8AAAASGP/DwXr/jxt
-D4WVAQAAikUBPHAPhYcAAABNhcl1EzH2uDwAAAC/CQAAAEiJ8g8F6/4x9rgQAQAAvwAAAgBIifIP
+AW4PhcwBAAAx9rgQAQAAvwAAAhBIifIPBb9kAAAAKcdIhcC4AAAAAA9J+Lg8AAAASGP/DwXr/jxt
+D4WVAQAAikUBPHAPhYcAAABNhcl1EzH2uDwAAAC/CQAAAEiJ8g8F6/4x9rgQAQAAvwAAAhBIifIP
 BUiFwHkTv8gAAAApx7g8AAAASGP/DwXr/kyJz0G4ASBAAL4AIEAA6Mj3//9MicdMicJJicK4pQAA
 AA8Fv3gAAAApx0iFwLgAAAAAD0n4Mfa4PAAAAEiJ8khj/w8F6/48Yg+F+wAAAE2FyXQFSIXbdRMx
-9rg8AAAAvwkAAABIifIPBev+Mfa4EAEAAL8AAAIASInyDwVIhcB5E7/IAAAAKce4PAAAAEhj/w8F
+9rg8AAAAvwkAAABIifIPBev+Mfa4EAEAAL8AAAIQSInyDwVIhcB5E7/IAAAAKce4PAAAAEhj/w8F
 6/5BuAEgQABBugAQAABMic9Iid64pQAAAEyJwg8Fv4IAAAApx0iFwLgAAAAAD0n4Mfa4PAAAAEiJ
 8khj/w8F6/48bnVyTYXJdRS4PAAAAL8JAAAATInOTInKDwXr/jH2uAIAAABMic9IifIPBUiJx0iF
 wHkTuGQAAAAp+Ehj+Lg8AAAADwXr/rg0AQAAvgAAAgAx0g8Fv24AAABIidYpx0iFwLgAAAAAD0n4
@@ -3077,7 +3077,7 @@ if printf '%s' "$RT_MNT_RKL_SESEARCH" | grep -q 'root_t:dir mounton' && [ -x "$K
 else
   acc_fail "R7 mounton preflight: the precedent query or the probe vehicle failed (rootlesskit rule=[$RT_MNT_RKL_SESEARCH] probe=$KEYPROBE) — the preflight cannot proceed on the measured architecture"
 fi
-if printf '%s' "$RT_MNT_FS_SESEARCH" | grep -q 'filesystem.*mount'; then
+if printf '%s' "$RT_MNT_FS_SESEARCH" | grep -qE '(^|[ {])mount([ ;}])'; then
   acc_fail "R7 mounton preflight: the buildkitd domain already carries a filesystem-class mount authority — the candidate's scope claim (mounton only, no filesystem:mount) does not match the loaded state; investigate before any grant"
 else
   acc_ok "R7 mounton preflight: the buildkitd filesystem-class query shows NO filesystem:mount authority ([$RT_MNT_FS_SESEARCH]) — the candidate adds no filesystem-class permission and the real-fs get_tree gate (security_sb_kern_mount, the proc_t mount stage observed in P13) stays closed"
@@ -3086,7 +3086,7 @@ fi
 # namespace (may_mount authority through the accepted cap_userns grant).
 RT_MUN_RC="$(keyfg s0:c1 un)"
 case "$RT_MUN_RC" in
-  0)   acc_ok "R7 mounton preflight: the unshare(CLONE_NEWNS) control succeeds — the probe holds the namespace-creation authority (cap_userns sys_admin), so every later mount leg runs inside the probe's OWN new namespace" ;;
+  0)   acc_ok "R7 mounton preflight: the unshare(CLONE_NEWUSER|CLONE_NEWNS) control succeeds — the namespace-creation capability check evaluates through the cap_userns class (the accepted P11 grant) for the new namespace's owner userns, so every later mount leg runs inside the probe's OWN new namespace exactly like the flow's container init" ;;
   *)   acc_fail "R7 mounton preflight: the unshare control failed (rc=$RT_MUN_RC) — the in-namespace measurement design is void" ;;
 esac
 # Leg M2 — the flow-faithful propagation mount INSIDE the probe's own new
