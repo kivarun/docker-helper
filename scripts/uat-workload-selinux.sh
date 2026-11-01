@@ -3079,11 +3079,18 @@ say "R7 P14 mounton preflight: root_t:dir mounton (flow-evidenced, namespace-rea
 # the probe's own new namespace) are therefore unmeasurable-by-design:
 # their unshare stage can never pass in this domain. The probe binary
 # keeps the actions for provenance, but the leg does not call them. The
-# POSITIVE CONTROL is the flow itself: every scenario stage above this leg
-# ran real builds under the candidate policy, so the audit window contains
-# the flow's own container-init records (buildkitd_t cap_userns class
-# records — the P13-measured runc:[2:INIT] stage marker). A zero-denial
-# mounton claim is asserted only when that window is proven non-degenerate.
+# POSITIVE CONTROL is the flow itself: the candidate-policy build stages in
+# this UAT job (the black-box phase's real builds, plus every other phase
+# before this leg — the VM is fresh per job, so every buildkitd_t record in
+# today's audit log was produced under the candidate policy) all pass
+# through the container-init cap_userns stage (the P13-measured
+# runc:[2:INIT] marker records). A zero-denial mounton claim is asserted
+# only when that window is proven non-degenerate. The window is
+# `ausearch --start today` (this boot), NOT `--start recent`: the last
+# buildkit-reaching builds belong to the earlier UAT phases and were
+# measured to fall outside the 10-minute recent window at mount-leg time
+# (P14 iteration 3, run 41303059883 — window degenerate with the builds at
+# T-11min), while the boot-wide window provably contains them.
 #
 # Probe actions in this leg (keyprobe14): `us` = unshare(CLONE_NEWNS) only
 # (the plain shape; fail 100+errno, so EPERM -> 101); `un` =
@@ -3133,21 +3140,21 @@ case "$RT_MUN_RC:$RT_MUN2_RC" in
   *:0) acc_fail "R7 mounton preflight: the combined unshare SUCCEEDED for a probe category (c1 rc=$RT_MUN_RC c2 rc=$RT_MUN2_RC) — the domain gained namespace-creation authority; model drift, the reachability analysis is void" ;;
   *)   acc_fail "R7 mounton preflight: the combined-unshare measurement returned unexpected codes (c1 rc=$RT_MUN_RC c2 rc=$RT_MUN2_RC; expected the EACCES shape 113 for both) — the measurement is void" ;;
 esac
-# Leg M2 — the flow-based positive control (the audit window): the
-# scenario stages above ran real builds under the candidate policy, and
+# Leg M2 — the flow-based positive control (the audit window): the UAT
+# job's earlier phases ran real builds under the candidate policy, and
 # every build's container init passes through the buildkitd_t cap_userns
 # stage (the P13-measured runc:[2:INIT] marker records). The window MUST
 # contain such records (a degenerate window proves nothing) and MUST
 # contain ZERO dir:mounton denials for the flow domain — the P13 fatal
 # shape (tclass=dir mounton, tcontext=root_t:s0, runc:[2:INIT]) must be
 # gone from the flow's real execution, not merely absent from a probe.
-RT_MNT_AUDIT="$({ ausearch --start recent 2>/dev/null; dmesg 2>/dev/null; } | grep -E 'type=AVC|avc: *denied' | sort -u || true)"
+RT_MNT_AUDIT="$({ ausearch --start today 2>/dev/null; dmesg 2>/dev/null; } | grep -E 'type=AVC|avc: *denied' | sort -u || true)"
 RT_MNT_FLOW_INIT_N="$(printf '%s\n' "$RT_MNT_AUDIT" | grep 'tclass=cap_userns' | grep -c 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
 RT_MNT_MOUNTON_DEN="$(printf '%s\n' "$RT_MNT_AUDIT" | grep 'tclass=dir' | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
 info "R7-mounton preflight: audit window buildkitd_t cap_userns init records=$RT_MNT_FLOW_INIT_N mounton denials=[$RT_MNT_MOUNTON_DEN]"
 if [ "${RT_MNT_FLOW_INIT_N:-0}" -ge 1 ] 2>/dev/null; then
   if [ -z "$RT_MNT_MOUNTON_DEN" ]; then
-    acc_ok "R7 mounton preflight: the audit window covering the flow's own container inits ($RT_MNT_FLOW_INIT_N buildkitd_t cap_userns records across the scenario builds) contains ZERO dir:mounton denials for the flow domain — the candidate grant reached the gate in the flow's REAL execution (the P13 fatal shape is gone from the live path), and the denial-free window is proven non-degenerate"
+    acc_ok "R7 mounton preflight: the boot-wide audit window covering the candidate-policy flow builds ($RT_MNT_FLOW_INIT_N buildkitd_t cap_userns container-init records) contains ZERO dir:mounton denials for the flow domain — the candidate grant reached the gate in the flow's REAL execution (the P13 fatal shape is gone from the live path), and the denial-free window is proven non-degenerate"
   else
     acc_fail "R7 mounton preflight: dir:mounton denials for the flow domain reappeared in the audit window despite the candidate grant — $RT_MNT_MOUNTON_DEN"
   fi
