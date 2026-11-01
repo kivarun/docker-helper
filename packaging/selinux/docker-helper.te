@@ -128,8 +128,8 @@ module docker_helper 1.2;
 		class capability { dac_read_search dac_override sys_admin fowner setuid setgid };
 		class capability2 { wake_alarm kill };
 		class user_namespace { create };
-		class cap_userns { sys_admin sys_ptrace sys_chroot net_admin chown };
-		class key view;
+	class cap_userns { sys_admin sys_ptrace sys_chroot net_admin chown };
+	class key { view setattr };
 		class process { transition siginh noatsecure rlimitinh sigkill setexec signull signal setpgid };
 		class process2 { nnp_transition };
 	}
@@ -3218,6 +3218,75 @@ allow docker_helper_buildkitd_t self:cap_userns sys_chroot;
 # this require declaration; the named-allow count moves 40 -> 41 by
 # exactly this one rule.
 allow docker_helper_buildkitd_t self:key view;
+
+# The P13 key:setattr rung (single permission, second key grant, still
+# separate from the P12 view singleton). The P12 UAT proved the flow's NEXT
+# terminal after the view rung: runc's ModKeyringPerm, having DESCRIBEd the
+# session keyring it joined (the rung above), calls
+# unix.KeyctlSetperm(ring, newperm) with newperm = (described-mask |
+# KEY_USR_SEARCH 0x80000) and keepperms 0xffffffff; the kernel's
+# keyctl_setperm_key resolves the ring with KEY_NEED_SETATTR and the SELinux
+# key hook denies it (the audited terminal: tclass=key, permission setattr,
+# sctx=tcontext=buildkitd_t:s0:c1, comm runc:[2:INIT], serials 1343/10422 in
+# the P12 run). The denial is FATAL: runc tolerates only ENOSYS from the
+# keyring setup, so every BUILD-path container still dies at init.
+#
+# SETATTR PREFLIGHT (kernel sources, v7.3 = the measured guest kernel
+# 7.3.0-1-default; libcontainer/keys/keyctl.go + standard_init_linux.go of
+# the shipped runc 1.4.3):
+#   - keyctl_setperm_key (security/keys/keyctl.c): EINVAL range check, then
+#     lookup_user_key(id, KEY_LOOKUP_CREATE|KEY_LOOKUP_PARTIAL,
+#     KEY_NEED_SETATTR), then the ownership gate
+#     `uid_eq(key->uid, current_fsuid()) || capable(CAP_SYS_ADMIN)` — the
+#     join-created ring's uid IS the joining process's uid, so every
+#     same-UID operation passes the ownership gate for ANY op's ring;
+#   - key_task_permission (security/keys/permission.c): the OWNER class
+#     (uid_eq) reads the ring's USR 8-bits; possession adds the POS 8-bits
+#     only when the lookup marks the key possessed; SETATTR is required
+#     through the mask BEFORE the LSM hook;
+#   - the join default mask (security/keys/process_keys.c
+#     join_session_keyring) is KEY_POS_ALL | KEY_USR_VIEW | KEY_USR_READ |
+#     KEY_USR_LINK: the USR class has NO setattr, so the owner-class mask
+#     path alone does NOT admit setattr; the flow's own ring reaches the
+#     mask pass through the POSSESSION path (POS_ALL), which the P12 UAT
+#     proved live (the audited setattr denial IS the LSM being reached);
+#   - the P12 preflight probe used WRONG keyctl opcodes (2 = UPDATE where
+#     DESCRIBE=6 was intended, 3 = REVOKE where READ=11 was intended); its
+#     EACCES-without-AVC shapes were owner-class WRITE denials of
+#     UPDATE/REVOKE, not view/read measurements. The P13 leg below re-meets
+#     the surface with the correct opcodes, a per-stage exit protocol, and
+#     an LSM-reachability control (an own-ring READ must produce EACCES
+#     WITH a key:read AVC — a denial without that AVC is unclassifiable
+#     and fails the leg);
+#   - the decisive cross-operation question is measured LIVE with the
+#     correct opcodes, in BOTH shapes: a production-shaped c2 ring (the
+#     flow's own setperm result, mask 0x3f1b0000, USR class
+#     view|read|search|link — NO setattr) and a c2 ring that
+#     pre-widened its own USR class with setattr (a shape the production
+#     flow never produces — runc's setperm only ORs in 0x80000). In the
+#     production shape the same-UID owner-class mask lacks setattr and the
+#     cross-op SETPERM must stay EACCES-denied BEFORE the LSM; in the
+#     pre-widened shape the mask passes and the self rule (TYPE match,
+#     zero key-class constraints measured live under P12) admits the
+#     cross-category setattr — if that leg succeeds it is the measured
+#     cross-operation ACL-change counterexample and the P13 stop condition;
+#   - the payload line is unchanged: the setattr grant does NOT grant
+#     read/write/search/link; the leg re-proves each stays LSM-denied on
+#     the op's own ring AFTER a successful setperm (read via KEYCTL_READ,
+#     write via KEYCTL_CLEAR, search via KEYCTL_SEARCH, and the link path
+#     structurally via KEYCTL_LINK whose ring-side write check is measured
+#     first), and a cross-op READ stays denied even against a ring whose
+#     widened mask would admit the same-UID owner.
+#
+# Deliberately NOT granted: read/write/search/link/create on the key class
+# (the require block declares exactly { view setattr }), any key rule for
+# any other subject, any MCS constraint change, any capability/process/
+# other-class change. The committed-policy tests pin the buildkitd domain's
+# key authority at EXACTLY the two single-permission rules (the P12 view
+# singleton and this P13 setattr singleton — no merged or widened forms)
+# and the module's key-class surface at EXACTLY the require declaration;
+# the named-allow count moves 41 -> 42 by exactly this one rule.
+allow docker_helper_buildkitd_t self:key setattr;
 
 # R7 (green attempt, scope=selinux run 38979563860): the mount's own
 # read-only flag application. The same bind mount
