@@ -1775,13 +1775,90 @@ allow docker_helper_buildkitd_t root_t:dir mounton;
 #
 # Deliberately NOT granted: remount/unmount/getattr/associate/mounton/
 # relabelfrom/relabelto on proc_t:filesystem, any other filesystem target
-# type (tmpfs_t stays rootlesskit-owned), any dir:mounton addition, any
-# proc_t file/dir class surface (the /proc/stat read is a SEPARATE future
-# experiment), any capability change, any other subject. The
+# type (tmpfs_t has its own per-domain owners: the 4C-45 rootlesskit
+# copy-up singleton and, since the separately-evidenced R7 P16 rung below,
+# the buildkitd container-init /dev singleton), any dir:mounton addition,
+# any proc_t file/dir class surface (the /proc/stat read is a SEPARATE
+# future experiment), any capability change, any other subject. The
 # committed-policy tests pin the buildkitd domain's proc_t:filesystem
-# authority at EXACTLY this one rule; the named-allow count moves 43 -> 44
+# authority at EXACTLY this one rule; the named-allow count moved 43 -> 44
 # by exactly this one rule.
 allow docker_helper_buildkitd_t proc_t:filesystem mount;
+
+# The buildkitd container-init /dev tmpfs mount (R7 P16): with the P15
+# procfs rung granted, the container init mounted the container's /proc
+# and died at the NEXT real-filesystem mount — runc's tmpfs mount of the
+# container's /dev. The P15 authoritative run (41314742868) proved the new
+# fatal terminal from BOTH sides: the build's own stderr ("error during
+# container init: error mounting \"tmpfs\" to rootfs at \"/dev\": mount
+# src=tmpfs, dst=/dev, dstFd=/proc/thread-self/fd/12,
+# flags=MS_NOSUID|MS_STRICTATIME, data=mode=0755,mode=755,size=65536k:
+# permission denied") and the audited kernel decision
+# `tclass=filesystem denied { mount } tcontext=tmpfs_t:s0` from
+# comm="runc:[2:INIT]" (serial-1350 shape; 3 records in the run). The call
+# is runc's classic mount(2) path again (mountViaFds with srcFile=nil):
+# mount(src=procfd path, dst=procfd path of the rootfs /dev dir, "tmpfs",
+# MS_NOSUID|MS_STRICTATIME, data="mode=0755,mode=755,size=65536k").
+#
+# KERNEL CHECK CHAIN: identical to the P15 rung's (path_mount ->
+# security_sb_mount dir:mounton on the target — PASSED, the flow reached
+# the get_tree stage — then may_mount(), then vfs_get_tree -> tmpfs
+# get_tree -> a NEW private superblock per mount, then
+# security_sb_kern_mount -> superblock_has_perm(FILESYSTEM__MOUNT) —
+# avc_has_perm(buildkitd_t, tmpfs_t, filesystem, mount)). tmpfs is
+# explicitly on the kernel's user-namespace label whitelist
+# (selinux_set_mnt_opts exempts tmpfs/ramfs/devpts/overlay), so the
+# superblock keeps its fs_use label: the measured tcontext=tmpfs_t:s0
+# (bare) — the exact LSM check object.
+#
+# RESOURCE ISOLATION (each property established, none assumed):
+#   - SIZE IS EXPLICITLY BOUNDED BY THE RUNTIME ITSELF: runc's default
+#     mount table (libcontainer/specconv/example.go) specifies
+#     "size=65536k" for BOTH its tmpfs mounts (/dev and /dev/shm) — the
+#     kernel's 50%-of-RAM default NEVER applies to the flow's mounts; the
+#     worst case is 2 x 64 MiB of pages per container, and tmpfs consumes
+#     only as much memory as current contents (tmpfs(5)) — no
+#     reservation;
+#   - nr_inodes is unspecified and defaults to the kernel's own cap (half
+#     of RAM pages per docs/filesystems/tmpfs.html) — a cap, not a
+#     reservation, and irrelevant at a 64 MiB page budget;
+#   - tmpfs pages are swappable under host memory pressure (tmpfs(5)) and
+#     are released at namespace teardown (the container's mnt_ns dies with
+#     the container; the systemd unit's default control-group kill mode is
+#     the documented outer safety net for the whole builder cgroup);
+#   - ACCOUNTING: tmpfs (shmem) pages charge to the memcg of the faulting
+#     process; the whole flow (manager -> rootlesskit -> buildkitd ->
+#     runc init) lives inside the docker-helper-builder.service unit's
+#     cgroup subtree (the manager recognizes that boundary itself through
+#     its /proc/<pid>/cgroup check), so consumption counts against the
+#     builder unit's cgroup, not against unaccounted host memory; the
+#     accepted resource contract adds no memory.max beyond this (the
+#     architecture documents exactly that boundary);
+#   - MULTIPLE MOUNTS: exactly two tmpfs instances per container (the
+#     default table's /dev and /dev/shm — both size=65536k); containers
+#     run sequentially within one operation; concurrent operations are
+#     bounded by the per-op MCS categories;
+#   - the namespace/propagation model is UNCHANGED from P14/P15: the
+#     mounter is the container init in its own CLONE_NEWNS namespace
+#     (nsexec unshares all namespaces including CLONE_NEWPID), the mount
+#     stays inside the MS_REC|MS_SLAVE slave tree (no export to host or
+#     other ops), the cross-op setns attempt stays denied, and the domain
+#     cannot manufacture new venues (both unshare shapes remain measured
+#     denials); a host-namespace tmpfs attempt by the daemon still fails
+#     the kernel's may_mount() gate with EPERM;
+#   - PRECEDENT (the SAME target type and class+permission shape, already
+#     accepted): the rootlesskit parent's copy-up stage carries the 4C-45
+#     tmpfs superblock singleton (rootlesskit_t -> tmpfs_t:filesystem,
+#     bare mount) — P16 extends the same evidenced shape to the buildkitd
+#     domain's container init.
+#
+# Deliberately NOT granted: remount/unmount/getattr/associate/mounton/
+# relabelfrom/relabelto on tmpfs_t:filesystem, any other filesystem target
+# type, any dir:mounton addition, any tmpfs_t file/dir class surface, any
+# capability change, any other subject. The committed-policy tests pin the
+# buildkitd domain's tmpfs_t:filesystem authority at EXACTLY this one
+# rule; the named-allow count moves 44 -> 45 by exactly this one rule.
+allow docker_helper_buildkitd_t tmpfs_t:filesystem mount;
 
 # The copy-up /tmp directory write (P5-S2 Phase 4C-40) and the mkdir
 # name mediation of the same mkdir(2) (P5-S2 Phase 4C-41): the child's
