@@ -1672,7 +1672,10 @@ allow docker_helper_rootlesskit_t root_t:dir mounton;
 #     (the standing cap_userns records prove this live);
 #   - no filesystem-class authority is added: the real-fs get_tree gate
 #     (security_sb_kern_mount — the proc_t:filesystem mount stage the
-#     P13 run observed) stays closed for proc_t and every other type;
+#     P13 run observed) stays closed for every type at this rung (it
+#     became the measured next fatal terminal of the P14 run and is
+#     granted by the SEPARATE, individually-evidenced R7 P15 procfs rung
+#     below; this rule itself adds none);
 #     no remount, no relabel, no capability change, no second rule;
 #   - the type-wide residual surface (a process holding may_mount
 #     authority can pass the mounton check for root_t:dir points inside
@@ -1692,6 +1695,93 @@ allow docker_helper_rootlesskit_t root_t:dir mounton;
 # EXACTLY this one rule; the named-allow count moves 42 -> 43 by exactly
 # this one rule.
 allow docker_helper_buildkitd_t root_t:dir mounton;
+
+# The buildkitd container-init procfs mount (R7 P15): with the P14
+# propagation rung granted, the container init advanced past prepareRoot
+# into the mount table and died at the FIRST real-filesystem mount —
+# runc's procfs mount of the container's /proc. The P14 authoritative run
+# (41306196357) proved the new fatal terminal from BOTH sides: the build's
+# own stderr ("error during container init: error mounting \"proc\" to
+# rootfs at \"/proc\": mount src=proc, dst=/proc,
+# dstFd=/proc/thread-self/fd/13, flags=MS_NOSUID|MS_NODEV|MS_NOEXEC:
+# permission denied") and the audited kernel decision
+# `tclass=filesystem denied { mount } tcontext=proc_t:s0` from
+# comm="runc:[2:INIT]" (serials 1352/1353; all 18 proc_t:filesystem mount
+# denials in the run carry comm="runc:[2:INIT]" — the daemon never mounts
+# procfs). The call is runc's classic mount(2) path (mountViaFds with
+# srcFile=nil, no move_mount): mount(src=procfd path, dst=procfd path of
+# the rootfs /proc dir, "proc", MS_NOSUID|MS_NODEV|MS_NOEXEC, data="").
+#
+# KERNEL CHECK CHAIN (v7.3 = the measured guest kernel): for a NEW
+# filesystem mount, path_mount() runs (1) security_sb_mount — the
+# dir:mounton check on the TARGET dentry (PASSED under the P14 rung; the
+# flow reached the get_tree stage, which is itself the proof), then
+# (2) may_mount() — CAP_SYS_ADMIN in the user namespace owning the current
+# mount namespace (the P11 cap_userns authority; untouched), then
+# (3) do_new_mount -> vfs_get_tree -> proc_get_tree -> get_tree_nodev —
+# procfs mounts ALWAYS create a NEW private superblock (the 5.x procfs
+# modernization; no keyed reuse) — and do_new_mount_fc() then runs
+# (4) security_sb_kern_mount -> superblock_has_perm(FILESYSTEM__MOUNT):
+# avc_has_perm(mounting-cred sid, superblock sid, filesystem, mount).
+# This grant opens EXACTLY check (4) for the procfs superblock and nothing
+# else — a different class (filesystem, not dir) and a different stage
+# (get_tree, not sb_mount) than the P14 rung.
+#
+# SUPERBLOCK LABEL: procfs has no xattr labels; the loaded targeted policy
+# defines it via fs_use_trans with type proc_t, and the measured audit
+# record carries the bare tcontext=proc_t:s0 (no categories) — the
+# transitioned superblock label, the exact LSM check object of check (4).
+#
+# ISOLATION MODEL (each property measured or kernel-structural):
+#   - the mounting process is the container init AFTER nsexec's
+#     try_unshare of ALL namespaces (runc libcontainer/nsenter/nsexec.c:
+#     "Unshare all of the namespaces" — cloneflags include CLONE_NEWNS and
+#     CLONE_NEWPID): the mount happens in the CONTAINER'S OWN mount
+#     namespace and the procfs instance's pid namespace is the MOUNTER'S
+#     ACTIVE pid namespace (proc_fill_super: fs_info->pid_ns = ctx->pid_ns;
+#     runc passes no pidns= option — data=""), i.e. the CONTAINER's pid
+#     namespace. The instance shows container tasks only; the host /proc
+#     is a different superblock in a different namespace and is untouched;
+#   - the host mount namespace and every other operation's namespaces are
+#     unreachable: mount(2) has no cross-namespace mutation path; the
+#     cross-operation setns attempt against another operation's LIVE mount
+#     namespace stays denied (P14 preflight, measured 113), and the
+#     process ptrace constraint plus the missing namespace-handle authority
+#     keep the acquisition paths closed;
+#   - the container mount tree is a MS_REC|MS_SLAVE slave of its origin
+#     peer group (the P14 rung's own operation): mounts made inside the
+#     slave DO NOT propagate to the master — the host and other
+#     operations' trees cannot receive the new procfs mount;
+#   - the domain cannot manufacture new mount-namespace venues for itself:
+#     both unshare shapes are measured EPERM/EACCES-denied for buildkitd_t
+#     (P14 preflight, plain CLONE_NEWNS -> 101, combined -> 113 for both
+#     categories), so the only procfs-mount venues are flow-owned
+#     container namespaces;
+#   - a host-namespace procfs attempt by the daemon would still fail the
+#     kernel's may_mount() gate (CAP_SYS_ADMIN in the INIT user namespace
+#     — the unprivileged daemon holds none) with EPERM after this LSM
+#     check: the grant cannot turn the host namespace into a venue;
+#   - the mounted procfs's FILES carry proc_t (bare s0), and this rung
+#     grants NO file-class authority: buildkitd_t's proc_t:file surface
+#     stays closed (the /proc/stat read denials remain measured standing
+#     denials — a deliberately separate future rung); filesystem:mount
+#     grants no read, open or traversal on proc_t files;
+#   - PRECEDENT (the same class+permission shape, already accepted): the
+#     rootlesskit parent's copy-up stage carries the 4C-45 tmpfs
+#     superblock singleton (rootlesskit_t -> tmpfs_t:filesystem, bare
+#     mount) — P15 extends the same evidenced shape to the buildkitd
+#     domain's container init, for the one type the flow's next stage
+#     mounts.
+#
+# Deliberately NOT granted: remount/unmount/getattr/associate/mounton/
+# relabelfrom/relabelto on proc_t:filesystem, any other filesystem target
+# type (tmpfs_t stays rootlesskit-owned), any dir:mounton addition, any
+# proc_t file/dir class surface (the /proc/stat read is a SEPARATE future
+# experiment), any capability change, any other subject. The
+# committed-policy tests pin the buildkitd domain's proc_t:filesystem
+# authority at EXACTLY this one rule; the named-allow count moves 43 -> 44
+# by exactly this one rule.
+allow docker_helper_buildkitd_t proc_t:filesystem mount;
 
 # The copy-up /tmp directory write (P5-S2 Phase 4C-40) and the mkdir
 # name mediation of the same mkdir(2) (P5-S2 Phase 4C-41): the child's
