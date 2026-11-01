@@ -3085,12 +3085,14 @@ say "R7 P14 mounton preflight: root_t:dir mounton (flow-evidenced, namespace-rea
 # today's audit log was produced under the candidate policy) all pass
 # through the container-init cap_userns stage (the P13-measured
 # runc:[2:INIT] marker records). A zero-denial mounton claim is asserted
-# only when that window is proven non-degenerate. The window is
-# `ausearch --start today` (this boot), NOT `--start recent`: the last
-# buildkit-reaching builds belong to the earlier UAT phases and were
-# measured to fall outside the 10-minute recent window at mount-leg time
-# (P14 iteration 3, run 41303059883 — window degenerate with the builds at
-# T-11min), while the boot-wide window provably contains them.
+# only when that window is proven non-degenerate. The window is the RAW
+# boot audit log plus dmesg (see Leg M2): `ausearch --start recent` missed
+# the last buildkit-reaching builds (they belong to the earlier UAT phases
+# at T-11min — P14 iteration 3, run 41299734617), and `ausearch
+# --start today` returned nothing at all even with those records provably
+# present in the boot's audit log (P14 iteration 4, run 41303059883), so
+# the capture reads /var/log/audit/audit.log directly (the S13 leg's
+# measured-working raw-log path).
 #
 # Probe actions in this leg (keyprobe14): `us` = unshare(CLONE_NEWNS) only
 # (the plain shape; fail 100+errno, so EPERM -> 101); `un` =
@@ -3148,7 +3150,13 @@ esac
 # contain ZERO dir:mounton denials for the flow domain — the P13 fatal
 # shape (tclass=dir mounton, tcontext=root_t:s0, runc:[2:INIT]) must be
 # gone from the flow's real execution, not merely absent from a probe.
-RT_MNT_AUDIT="$({ ausearch --start today 2>/dev/null; dmesg 2>/dev/null; } | grep -E 'type=AVC|avc: *denied' | sort -u || true)"
+# The capture reads the RAW audit log directly (whole boot) plus dmesg:
+# the S13 leg's raw-log fallback is the measured-working path, while
+# `ausearch --start recent/today` was measured to return nothing in the
+# guest (P14 iterations 3-4: window degenerate even with the black-box
+# phase's buildkitd_t cap_userns records provably present in the boot's
+# audit log).
+RT_MNT_AUDIT="$({ cat /var/log/audit/audit.log 2>/dev/null; dmesg 2>/dev/null; } | grep -E 'type=AVC|avc: *denied' | sort -u || true)"
 RT_MNT_FLOW_INIT_N="$(printf '%s\n' "$RT_MNT_AUDIT" | grep 'tclass=cap_userns' | grep -c 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
 RT_MNT_MOUNTON_DEN="$(printf '%s\n' "$RT_MNT_AUDIT" | grep 'tclass=dir' | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
 info "R7-mounton preflight: audit window buildkitd_t cap_userns init records=$RT_MNT_FLOW_INIT_N mounton denials=[$RT_MNT_MOUNTON_DEN]"
