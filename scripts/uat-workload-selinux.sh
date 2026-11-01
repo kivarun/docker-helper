@@ -3045,10 +3045,11 @@ say "R7 P14 mounton preflight: root_t:dir mounton (flow-evidenced, namespace-rea
 #     flow's init holds it through the accepted P11 cap_userns grant (the
 #     P13 run's cap_userns setuid/setgid records are live evidence the
 #     init's capability checks evaluate against a NON-init user namespace);
-#   - the candidate does NOT add any filesystem-class authority (no
-#     filesystem:mount/remount — the real-fs get_tree gate
-#     security_sb_kern_mount stays closed for proc_t and everything else),
-#     no remount, no relabel, no capability change;
+#   - the P14 rung itself adds NO filesystem-class authority (no
+#     filesystem:mount/remount beyond the SEPARATE, individually-evidenced
+#     R7 P15 procfs singleton `proc_t:filesystem mount` — the measured
+#     next terminal of this rung, granted by its own rule and pinned by
+#     its own test); no relabel, no capability change;
 #   - residual type-wide surface, DOCUMENTED BY STRUCTURE (the direct
 #     probe measurement of the own-namespace surface is
 #     unmeasurable-by-design — see the MEASURED REACHABILITY FACTS below):
@@ -3114,11 +3115,19 @@ if printf '%s' "$RT_MNT_RKL_SESEARCH" | grep -q 'root_t:dir mounton' && [ -x "$K
 else
   acc_fail "R7 mounton preflight: the precedent query or the probe vehicle failed (rootlesskit rule=[$RT_MNT_RKL_SESEARCH] probe=$KEYPROBE) — the preflight cannot proceed on the measured architecture"
 fi
-if printf '%s' "$RT_MNT_FS_SESEARCH" | grep -qE '(^|[ {])mount([ ;}])'; then
-  acc_fail "R7 mounton preflight: the buildkitd domain already carries a filesystem-class mount authority — the candidate's scope claim (mounton only, no filesystem:mount) does not match the loaded state; investigate before any grant"
-else
-  acc_ok "R7 mounton preflight: the buildkitd filesystem-class query shows NO filesystem:mount authority ([$RT_MNT_FS_SESEARCH]) — the candidate adds no filesystem-class permission and the real-fs get_tree gate (security_sb_kern_mount, the proc_t mount stage observed in P13) stays closed"
-fi
+# The filesystem-class surface check: the ONLY mount-bearing filesystem
+# rule for the buildkitd domain must be the exact R7 P15 procfs singleton
+# (its own separately-evidenced rung); any other filesystem:mount form or
+# any remount/associate/mounton addition is a scope violation.
+RT_MNT_FS_MOUNT_RULES="$(printf '%s\n' "$RT_MNT_FS_SESEARCH" | grep -E '(^|[ {])mount([ ;}])' || true)"
+case "$RT_MNT_FS_MOUNT_RULES" in
+  "allow docker_helper_buildkitd_t proc_t:filesystem mount;")
+    acc_ok "R7 mounton preflight: the buildkitd filesystem-class surface carries EXACTLY the one evidenced R7 P15 procfs singleton ([$RT_MNT_FS_MOUNT_RULES]) — no other filesystem:mount, remount, or associate authority exists, and the get_tree gate stays closed for every type beyond that one measured rule"
+    ;;
+  *)
+    acc_fail "R7 mounton preflight: the buildkitd filesystem-class mount surface does not match the accepted scope (expected exactly the one proc_t:filesystem mount singleton, got: [$RT_MNT_FS_MOUNT_RULES]) — investigate before proceeding"
+    ;;
+esac
 # Leg M1 — the measured namespace-creation closure: BOTH unshare shapes
 # are denied to the probe subject, so the domain cannot manufacture a
 # mount namespace of its own and no in-namespace probe measurement exists
@@ -3196,6 +3205,130 @@ case "$RT_MSN_RC" in
     acc_fail "R7 mounton preflight: the cross-op setns leg returned an unexpected code (rc=$RT_MSN_RC) — the measurement is void" ;;
 esac
 
+# --- scenario R7 P15 procfs preflight: container-init procfs mount authority -
+say "R7 P15 procfs preflight: proc_t:filesystem mount (flow-evidenced, isolation-measured)"
+# The P15 candidate grant is `allow docker_helper_buildkitd_t proc_t:filesystem
+# mount;` for runc's container-init procfs mount: with the P14 propagation
+# rung granted, the container init advanced past prepareRoot into the mount
+# table and died at the FIRST real-filesystem mount — the procfs mount of the
+# container's /proc. The P14 authoritative run (41306196357) proved the fatal
+# terminal from BOTH sides: the build's own stderr ("error during container
+# init: error mounting \"proc\" to rootfs at \"/proc\": mount src=proc,
+# dst=/proc, dstFd=/proc/thread-self/fd/13, flags=MS_NOSUID|MS_NODEV|MS_NOEXEC:
+# permission denied") and the audited kernel decision
+# `tclass=filesystem denied { mount } tcontext=proc_t:s0` from
+# comm="runc:[2:INIT]" (serials 1352/1353; all 18 proc_t:filesystem mount
+# denials in that run carry comm="runc:[2:INIT]" — the daemon never mounts
+# procfs). The call is runc's classic mount(2) path (mountViaFds with
+# srcFile=nil): mount(procfd-src, procfd-dst, "proc", MS_NOSUID|MS_NODEV|
+# MS_NOEXEC, data="").
+#
+# KERNEL CHECK CHAIN (v7.3 = the measured guest kernel): for a NEW filesystem
+# mount, path_mount() runs (1) security_sb_mount — the dir:mounton check on
+# the TARGET dentry (PASSED under the P14 rung; reaching the get_tree stage is
+# itself the proof), (2) may_mount() — CAP_SYS_ADMIN in the user namespace
+# owning the current mount namespace (the P11 cap_userns authority; the same
+# gate the P14 mount already passed live), then (3) do_new_mount ->
+# vfs_get_tree -> proc_get_tree -> get_tree_nodev — procfs mounts ALWAYS
+# create a NEW private superblock (the 5.x procfs modernization; no keyed
+# reuse) — and (4) security_sb_kern_mount ->
+# superblock_has_perm(FILESYSTEM__MOUNT): avc_has_perm(mounting-cred sid,
+# superblock sid, filesystem, mount). The grant opens EXACTLY check (4) for
+# the procfs superblock — a different class (filesystem, not dir) and stage
+# (get_tree, not sb_mount) than the P14 rung.
+#
+# SUPERBLOCK LABEL: procfs carries no xattr labels; the loaded targeted policy
+# defines it via fs_use_trans with type proc_t and the measured audit record
+# carries the bare tcontext=proc_t:s0 (no categories) — the transitioned
+# superblock label, the exact LSM check object.
+#
+# ISOLATION MODEL (each property measured or kernel-structural):
+#   - the mounter is the container init AFTER nsexec's try_unshare of ALL
+#     namespaces (runc libcontainer/nsenter/nsexec.c: "Unshare all of the
+#     namespaces" — cloneflags include CLONE_NEWNS and CLONE_NEWPID): the
+#     mount happens in the CONTAINER'S OWN mount namespace, NOT the host's;
+#   - the procfs instance's pid namespace is the MOUNTER'S ACTIVE pid
+#     namespace (proc_fill_super: fs_info->pid_ns = ctx->pid_ns; runc passes
+#     no pidns= option — data=""), i.e. the CONTAINER's pid namespace: the
+#     instance shows container tasks only, the host /proc is a different
+#     superblock in a different namespace and is untouched (no host PID
+#     namespace exposure);
+#   - the container mount tree is a MS_REC|MS_SLAVE slave of its origin peer
+#     group (the P14 rung's own operation): mounts made inside the slave DO
+#     NOT propagate to the master — no export to the host or other ops;
+#   - the domain cannot manufacture new mount-namespace venues for itself:
+#     both unshare shapes are measured EPERM/EACCES-denied (the P14
+#     preflight legs above re-measure them live in every run), so the only
+#     procfs-mount venues are flow-owned container namespaces; a
+#     host-namespace procfs attempt by the daemon still fails may_mount()
+#     (CAP_SYS_ADMIN in the init user namespace — the unprivileged daemon
+#     holds none) with EPERM even after this LSM check passes;
+#   - the mounted procfs's FILES carry proc_t and this rung grants NO
+#     file-class authority: the /proc/stat read denials stay standing — a
+#     deliberately separate future rung; filesystem:mount grants no
+#     read/open/traversal on proc_t files;
+#   - PRECEDENT (the same class+permission shape, already accepted): the
+#     rootlesskit parent's copy-up stage carries
+#     `allow docker_helper_rootlesskit_t tmpfs_t:filesystem mount;`
+#     (4C-45) — P15 extends the same evidenced shape to the buildkitd
+#     domain's container init for the one type the flow's next stage mounts.
+#
+# MEASUREMENT BOUNDARY (explicit): the harness cannot observe the mounted
+# instance's internals from outside the container's namespaces; the
+# flow-side evidence is the audit window (the denial family's disappearance)
+# plus the build's own next stderr terminal, and the cross-operation
+# namespace direction is covered by the P14 setns leg above. The mounted
+# procfs's pidns association and the new-instance behavior are
+# kernel-structural facts (proc_get_tree -> get_tree_nodev), not live
+# harness measurements — documented, not asserted as harness PASS.
+#
+# In-namespace probe measurements are UNMEASURABLE-BY-DESIGN for this domain
+# (both unshare shapes denied — measured in the P14 legs above), so the
+# positive control is the flow itself, exactly as in P14: the boot-wide raw
+# audit log must contain the container-init records and ZERO proc_t
+# filesystem-mount denials for the flow domain under the candidate policy.
+RT_PFS_SESEARCH="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -t proc_t -c filesystem /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+RT_PFS_TMPL_PRECEDENT="$("$RT_SESEARCH_BIN" --allow -s docker_helper_rootlesskit_t -t tmpfs_t -c filesystem /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+RT_PFS_FILE_SESEARCH="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -t proc_t -c file /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+RT_PFS_ALL_FS="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -c filesystem /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+info "R7-procfs preflight: buildkitd->proc_t:filesystem=[$RT_PFS_SESEARCH] rootlesskit->tmpfs_t:filesystem=[$RT_PFS_TMPL_PRECEDENT] buildkitd->proc_t:file=[$RT_PFS_FILE_SESEARCH] buildkitd filesystem-class=[$RT_PFS_ALL_FS]"
+if printf '%s' "$RT_PFS_SESEARCH" | grep -q 'proc_t:filesystem mount'; then
+  acc_ok "R7 procfs preflight: the loaded policy carries the exact P15 candidate authority for the container-init procfs mount (buildkitd_t -> proc_t:filesystem mount) — and the same class+permission shape is already accepted for the rootlesskit parent's copy-up stage (the 4C-45 tmpfs_t:filesystem mount singleton) — an existing owner's shape, not a new mechanism"
+else
+  acc_fail "R7 procfs preflight: the P15 candidate rule is not present in the loaded policy (query=[$RT_PFS_SESEARCH]) — the preflight cannot proceed on the measured architecture"
+fi
+RT_PFS_MOUNT_N="$(printf '%s\n' "$RT_PFS_ALL_FS" | grep -c 'proc_t:filesystem' || true)"
+RT_PFS_EXTRA="$(printf '%s\n' "$RT_PFS_ALL_FS" | grep -vE '^(allow (domain|docker_helper_buildkitd_t) (cgroup_t|fs_t|proc_t|security_t|sysfs_t|tmpfs_t|root_t|var_t|etc_t):filesystem )' || true)"
+if printf '%s' "$RT_PFS_ALL_FS" | grep -qE 'proc_t:filesystem (remount|unmount|associate|mounton|relabelfrom|relabelto|getattr|quota)' || [ "$RT_PFS_MOUNT_N" -gt 1 ] 2>/dev/null || [ -n "$RT_PFS_EXTRA" ]; then
+  acc_fail "R7 procfs preflight: the buildkitd filesystem-class surface drifted beyond the accepted scope (proc_t:filesystem rules=$RT_PFS_MOUNT_N unexpected=[$RT_PFS_EXTRA]) — the P15 scope claim (exactly one bare-mount proc_t singleton) does not match the loaded state"
+else
+  acc_ok "R7 procfs preflight: the buildkitd filesystem-class surface matches the accepted scope exactly (exactly one proc_t:filesystem rule, bare mount only, no remount/unmount/associate/mounton/getattr additions on proc_t; the standing base domain-getattr and the rootlesskit-owned tmpfs singleton are the only other filesystem surface)"
+fi
+if printf '%s' "$RT_PFS_FILE_SESEARCH" | grep -qE '(^|[ {])read([ ;}])'; then
+  acc_fail "R7 procfs preflight: the buildkitd proc_t:file READ authority is present — the /proc/stat read is a SEPARATE experiment that must NOT ride the P15 mount grant"
+else
+  acc_ok "R7 procfs preflight: the buildkitd proc_t:file surface shows NO read authority ([$RT_PFS_FILE_SESEARCH]) — the /proc/stat read stays closed and outside this rung"
+fi
+# The flow-based positive control: the boot-wide raw audit log (the
+# measured-working capture path) must contain the container-init marker
+# records (non-degenerate window) and ZERO tclass=filesystem { mount }
+# denials with tcontext=proc_t for the flow domain — the P14 fatal shape
+# must be gone from the flow's REAL execution. The P14 mounton shape stays
+# zero as the standing regression guard.
+RT_PFS_AUDIT="$({ cat /var/log/audit/audit.log 2>/dev/null; dmesg 2>/dev/null; } | grep -E 'type=AVC|avc: *denied' | sort -u || true)"
+RT_PFS_FLOW_INIT_N="$(printf '%s\n' "$RT_PFS_AUDIT" | grep 'tclass=cap_userns' | grep -c 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
+RT_PFS_MOUNTON_DEN="$(printf '%s\n' "$RT_PFS_AUDIT" | grep 'tclass=dir' | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
+RT_PFS_FS_DEN="$(printf '%s\n' "$RT_PFS_AUDIT" | grep 'tclass=filesystem' | grep '{ mount }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:proc_t:s0' || true)"
+info "R7-procfs preflight: audit window buildkitd_t cap_userns init records=$RT_PFS_FLOW_INIT_N proc_t filesystem-mount denials=[$RT_PFS_FS_DEN] mounton denials=[$RT_PFS_MOUNTON_DEN]"
+if [ "${RT_PFS_FLOW_INIT_N:-0}" -ge 1 ] 2>/dev/null; then
+  if [ -z "$RT_PFS_FS_DEN" ] && [ -z "$RT_PFS_MOUNTON_DEN" ]; then
+    acc_ok "R7 procfs preflight: the boot-wide audit window covering the candidate-policy flow builds ($RT_PFS_FLOW_INIT_N buildkitd_t cap_userns container-init records) contains ZERO proc_t:filesystem mount denials AND zero dir:mounton denials for the flow domain — the P15 grant reached the get_tree gate in the flow's REAL execution (the P14 fatal shape is gone from the live path) and the earlier rung holds"
+  else
+    acc_fail "R7 procfs preflight: the flow's fatal mount shapes reappeared in the audit window despite the candidate grants (proc_t mounton=[$RT_PFS_FS_DEN] dir-mounton=[$RT_PFS_MOUNTON_DEN])"
+  fi
+else
+  acc_fail "R7 procfs preflight: the audit window is degenerate (no buildkitd_t cap_userns container-init records) — a zero-denial procfs claim would be unproven; the flow-based control cannot run"
+fi
 rm -f /tmp/uat-wls-keyprobe.b64 "$KEYPROBE"
 
 
