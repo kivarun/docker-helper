@@ -3297,12 +3297,13 @@ if printf '%s' "$RT_PFS_SESEARCH" | grep -q 'proc_t:filesystem mount'; then
 else
   acc_fail "R7 procfs preflight: the P15 candidate rule is not present in the loaded policy (query=[$RT_PFS_SESEARCH]) — the preflight cannot proceed on the measured architecture"
 fi
-RT_PFS_MOUNT_N="$(printf '%s\n' "$RT_PFS_ALL_FS" | grep -c 'proc_t:filesystem' || true)"
+RT_PFS_MOUNT_N="$(printf '%s\n' "$RT_PFS_ALL_FS" | grep -c '^allow docker_helper_buildkitd_t proc_t:filesystem' || true)"
+RT_PFS_BASE_N="$(printf '%s\n' "$RT_PFS_ALL_FS" | grep -c '^allow domain proc_t:filesystem getattr;' || true)"
 RT_PFS_EXTRA="$(printf '%s\n' "$RT_PFS_ALL_FS" | grep -vE '^(allow (domain|docker_helper_buildkitd_t) (cgroup_t|fs_t|proc_t|security_t|sysfs_t|tmpfs_t|root_t|var_t|etc_t):filesystem )' || true)"
-if printf '%s' "$RT_PFS_ALL_FS" | grep -qE 'proc_t:filesystem (remount|unmount|associate|mounton|relabelfrom|relabelto|getattr|quota)' || [ "$RT_PFS_MOUNT_N" -gt 1 ] 2>/dev/null || [ -n "$RT_PFS_EXTRA" ]; then
-  acc_fail "R7 procfs preflight: the buildkitd filesystem-class surface drifted beyond the accepted scope (proc_t:filesystem rules=$RT_PFS_MOUNT_N unexpected=[$RT_PFS_EXTRA]) — the P15 scope claim (exactly one bare-mount proc_t singleton) does not match the loaded state"
+if printf '%s\n' "$RT_PFS_ALL_FS" | grep '^allow docker_helper_buildkitd_t proc_t:filesystem' | grep -qE '(remount|unmount|associate|mounton|relabelfrom|relabelto|quota|getattr)' || [ "$RT_PFS_MOUNT_N" -ne 1 ] 2>/dev/null || [ "$RT_PFS_BASE_N" -ne 1 ] 2>/dev/null || [ -n "$RT_PFS_EXTRA" ]; then
+  acc_fail "R7 procfs preflight: the buildkitd filesystem-class surface drifted beyond the accepted scope (buildkitd proc_t:filesystem rules=$RT_PFS_MOUNT_N base domain-getattr rules=$RT_PFS_BASE_N unexpected=[$RT_PFS_EXTRA]) — the P15 scope claim (exactly one bare-mount proc_t singleton plus the standing base domain-getattr) does not match the loaded state"
 else
-  acc_ok "R7 procfs preflight: the buildkitd filesystem-class surface matches the accepted scope exactly (exactly one proc_t:filesystem rule, bare mount only, no remount/unmount/associate/mounton/getattr additions on proc_t; the standing base domain-getattr and the rootlesskit-owned tmpfs singleton are the only other filesystem surface)"
+  acc_ok "R7 procfs preflight: the buildkitd filesystem-class surface matches the accepted scope exactly (exactly one buildkitd-subject proc_t:filesystem rule, bare mount only; the standing base domain-getattr singleton and the rootlesskit-owned tmpfs singleton are the only other filesystem surface; no remount/unmount/associate/mounton/getattr additions on the buildkitd proc_t pair)"
 fi
 if printf '%s' "$RT_PFS_FILE_SESEARCH" | grep -qE '(^|[ {])read([ ;}])'; then
   acc_fail "R7 procfs preflight: the buildkitd proc_t:file READ authority is present — the /proc/stat read is a SEPARATE experiment that must NOT ride the P15 mount grant"
