@@ -3116,18 +3116,17 @@ else
   acc_fail "R7 mounton preflight: the precedent query or the probe vehicle failed (rootlesskit rule=[$RT_MNT_RKL_SESEARCH] probe=$KEYPROBE) — the preflight cannot proceed on the measured architecture"
 fi
 # The filesystem-class surface check: the ONLY mount-bearing filesystem
-# rule for the buildkitd domain must be the exact R7 P15 procfs singleton
-# (its own separately-evidenced rung); any other filesystem:mount form or
-# any remount/associate/mounton addition is a scope violation.
+# rules for the buildkitd domain must be the two evidenced singletons —
+# the R7 P15 procfs rung and the R7 P16 /dev tmpfs rung (each its own
+# separately-evidenced bare-mount rule); any other filesystem:mount form
+# or any remount/associate/mounton addition is a scope violation.
 RT_MNT_FS_MOUNT_RULES="$(printf '%s\n' "$RT_MNT_FS_SESEARCH" | grep -E '(^|[ {])mount([ ;}])' || true)"
-case "$RT_MNT_FS_MOUNT_RULES" in
-  "allow docker_helper_buildkitd_t proc_t:filesystem mount;")
-    acc_ok "R7 mounton preflight: the buildkitd filesystem-class surface carries EXACTLY the one evidenced R7 P15 procfs singleton ([$RT_MNT_FS_MOUNT_RULES]) — no other filesystem:mount, remount, or associate authority exists, and the get_tree gate stays closed for every type beyond that one measured rule"
-    ;;
-  *)
-    acc_fail "R7 mounton preflight: the buildkitd filesystem-class mount surface does not match the accepted scope (expected exactly the one proc_t:filesystem mount singleton, got: [$RT_MNT_FS_MOUNT_RULES]) — investigate before proceeding"
-    ;;
-esac
+RT_MNT_FS_MOUNT_EXTRA="$(printf '%s\n' "$RT_MNT_FS_MOUNT_RULES" | grep -cvE '^allow docker_helper_buildkitd_t (proc_t|tmpfs_t):filesystem mount;$' || true)"
+if [ "$RT_MNT_FS_MOUNT_EXTRA" -eq 0 ] 2>/dev/null && printf '%s\n' "$RT_MNT_FS_MOUNT_RULES" | grep -q 'proc_t:filesystem mount' && printf '%s\n' "$RT_MNT_FS_MOUNT_RULES" | grep -q 'tmpfs_t:filesystem mount'; then
+  acc_ok "R7 mounton preflight: the buildkitd filesystem-class surface carries EXACTLY the two evidenced mount singletons (the R7 P15 procfs rung and the R7 P16 /dev tmpfs rung) — no other filesystem:mount, remount, or associate authority exists"
+else
+  acc_fail "R7 mounton preflight: the buildkitd filesystem-class mount surface does not match the accepted scope (expected exactly the P15 procfs and P16 tmpfs bare-mount singletons, got: [$RT_MNT_FS_MOUNT_RULES]) — investigate before proceeding"
+fi
 # Leg M1 — the measured namespace-creation closure: BOTH unshare shapes
 # are denied to the probe subject, so the domain cannot manufacture a
 # mount namespace of its own and no in-namespace probe measurement exists
@@ -3303,7 +3302,7 @@ RT_PFS_EXTRA="$(printf '%s\n' "$RT_PFS_ALL_FS" | grep -vE '^(allow (domain|docke
 if printf '%s\n' "$RT_PFS_ALL_FS" | grep '^allow docker_helper_buildkitd_t proc_t:filesystem' | grep -qE '(remount|unmount|associate|mounton|relabelfrom|relabelto|quota|getattr)' || [ "$RT_PFS_MOUNT_N" -ne 1 ] 2>/dev/null || [ "$RT_PFS_BASE_N" -ne 1 ] 2>/dev/null || [ -n "$RT_PFS_EXTRA" ]; then
   acc_fail "R7 procfs preflight: the buildkitd filesystem-class surface drifted beyond the accepted scope (buildkitd proc_t:filesystem rules=$RT_PFS_MOUNT_N base domain-getattr rules=$RT_PFS_BASE_N unexpected=[$RT_PFS_EXTRA]) — the P15 scope claim (exactly one bare-mount proc_t singleton plus the standing base domain-getattr) does not match the loaded state"
 else
-  acc_ok "R7 procfs preflight: the buildkitd filesystem-class surface matches the accepted scope exactly (exactly one buildkitd-subject proc_t:filesystem rule, bare mount only; the standing base domain-getattr singleton and the rootlesskit-owned tmpfs singleton are the only other filesystem surface; no remount/unmount/associate/mounton/getattr additions on the buildkitd proc_t pair)"
+  acc_ok "R7 procfs preflight: the buildkitd filesystem-class surface matches the accepted scope exactly (exactly one buildkitd-subject proc_t:filesystem rule, bare mount only; the standing base domain-getattr singleton and the separately-evidenced R7 P16 tmpfs singleton are the other accepted filesystem surface; no remount/unmount/associate/mounton/getattr additions on the buildkitd proc_t pair)"
 fi
 if printf '%s' "$RT_PFS_FILE_SESEARCH" | grep -qE '(^|[ {])read([ ;}])'; then
   acc_fail "R7 procfs preflight: the buildkitd proc_t:file READ authority is present — the /proc/stat read is a SEPARATE experiment that must NOT ride the P15 mount grant"
@@ -3330,6 +3329,116 @@ if [ "${RT_PFS_FLOW_INIT_N:-0}" -ge 1 ] 2>/dev/null; then
 else
   acc_fail "R7 procfs preflight: the audit window is degenerate (no buildkitd_t cap_userns container-init records) — a zero-denial procfs claim would be unproven; the flow-based control cannot run"
 fi
+# --- scenario R7 P16 tmpfs preflight: container-init /dev tmpfs mount authority
+say "R7 P16 tmpfs preflight: tmpfs_t:filesystem mount (flow-evidenced, resource-bounded)"
+# The P16 candidate grant is the buildkitd container-init tmpfs mount: with
+# the P15 procfs rung granted, the container init mounted the container's
+# /proc and died at the NEXT real-filesystem mount — runc's tmpfs mount of
+# the container's /dev. The P15 authoritative run (41314742868) proved the
+# fatal terminal from BOTH sides: the build's own stderr ("error during
+# container init: error mounting \"tmpfs\" to rootfs at \"/dev\": mount
+# src=tmpfs, dst=/dev, dstFd=/proc/thread-self/fd/12,
+# flags=MS_NOSUID|MS_STRICTATIME, data=mode=0755,mode=755,size=65536k:
+# permission denied") and the audited kernel decision
+# `tclass=filesystem denied { mount } tcontext=tmpfs_t:s0` from
+# comm="runc:[2:INIT]" (serial-1350 shape; 3 records). The call is runc's
+# classic mount(2) path again (mountViaFds with srcFile=nil):
+# mount(procfd-src, procfd-dst, "tmpfs", MS_NOSUID|MS_STRICTATIME,
+# data="mode=0755,mode=755,size=65536k").
+#
+# KERNEL CHECK CHAIN: identical to the P15 rung's (path_mount ->
+# security_sb_mount dir:mounton on the target — PASSED, the flow reached
+# the get_tree stage — may_mount() (the P11 authority), then vfs_get_tree
+# -> tmpfs get_tree -> a NEW private superblock per mount, then
+# security_sb_kern_mount -> superblock_has_perm(FILESYSTEM__MOUNT) —
+# avc_has_perm(buildkitd_t, tmpfs_t, filesystem, mount)). tmpfs is
+# explicitly on the kernel's user-namespace label whitelist
+# (selinux_set_mnt_opts exempts tmpfs/ramfs/devpts/overlay), so the
+# superblock keeps its fs_use label: the measured tcontext=tmpfs_t:s0.
+#
+# RESOURCE ISOLATION (each property established, none assumed):
+#   - SIZE IS EXPLICITLY BOUNDED BY THE RUNTIME ITSELF: runc's default
+#     mount table (libcontainer/specconv/example.go) specifies
+#     "size=65536k" for BOTH its tmpfs mounts (/dev and /dev/shm) — the
+#     kernel's 50%-of-RAM default NEVER applies to the flow's mounts;
+#     worst case 2 x 64 MiB of pages per container, no reservation (tmpfs
+#     consumes only as much memory as current contents);
+#   - nr_inodes defaults to the kernel's own cap (half of RAM pages) — a
+#     cap, not a reservation, irrelevant at a 64 MiB page budget;
+#   - tmpfs pages are swappable under host memory pressure (tmpfs(5)) and
+#     released at namespace teardown (the container mnt_ns dies with the
+#     container; the docker-helper-builder.service unit's default
+#     control-group kill mode is the documented outer safety net);
+#   - ACCOUNTING: tmpfs (shmem) pages charge to the memcg of the faulting
+#     process; the whole flow lives inside the docker-helper-builder.service
+#     unit's cgroup subtree (the manager recognizes that boundary itself
+#     through its /proc/<pid>/cgroup check), so consumption counts against
+#     the builder unit's cgroup, not unaccounted host memory; the accepted
+#     resource contract adds no memory.max beyond this;
+#   - MULTIPLE MOUNTS: exactly two tmpfs instances per container (the
+#     default table's /dev and /dev/shm — both size=65536k); containers run
+#     sequentially within one operation; concurrent operations are bounded
+#     by the per-op MCS categories;
+#   - the namespace/propagation model is UNCHANGED from P14/P15 (own
+#     CLONE_NEWNS namespace after nsexec's full unshare, MS_REC|MS_SLAVE
+#     slave tree with no export, cross-op setns denied, unshare shapes
+#     measured denied — re-measured live in the P14 legs above); a
+#     host-namespace tmpfs attempt by the daemon still fails may_mount()
+#     with EPERM;
+#   - PRECEDENT: the rootlesskit parent's copy-up stage carries the 4C-45
+#     tmpfs superblock singleton (rootlesskit_t -> tmpfs_t:filesystem,
+#     bare mount) — the SAME target type and class+permission shape.
+#
+# MEASUREMENT BOUNDARY (explicit): the size caps and the nr_inodes default
+# are runtime/kernel-structural facts (runc's default mount table +
+# docs/filesystems/tmpfs.html), not live harness measurements — the
+# mounted instance's internals are unobservable from outside the
+# container's namespaces; the flow-side evidence is the audit window (the
+# denial family's disappearance) plus the build's own next stderr
+# terminal, exactly as in P15.
+RT_TFS_SESEARCH="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -t tmpfs_t -c filesystem /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+RT_TFS_RKL_PRECEDENT="$("$RT_SESEARCH_BIN" --allow -s docker_helper_rootlesskit_t -t tmpfs_t -c filesystem /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+RT_TFS_FILE_SESEARCH="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -t tmpfs_t -c file /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+RT_TFS_ALL_FS="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -c filesystem /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+info "R7-tmpfs preflight: buildkitd->tmpfs_t:filesystem=[$RT_TFS_SESEARCH] rootlesskit->tmpfs_t:filesystem=[$RT_TFS_RKL_PRECEDENT] buildkitd->tmpfs_t:file=[$RT_TFS_FILE_SESEARCH] buildkitd filesystem-class=[$RT_TFS_ALL_FS]"
+if printf '%s\n' "$RT_TFS_ALL_FS" | grep -q '^allow docker_helper_buildkitd_t tmpfs_t:filesystem mount;' && printf '%s' "$RT_TFS_RKL_PRECEDENT" | grep -q 'tmpfs_t:filesystem mount'; then
+  acc_ok "R7 tmpfs preflight: the loaded policy carries the exact P16 candidate authority for the container-init /dev tmpfs mount (buildkitd_t -> tmpfs_t:filesystem mount), and the SAME target type already carries the accepted 4C-45 rootlesskit copy-up singleton — the same evidenced shape extended to the container-init rung, not a new mechanism"
+else
+  acc_fail "R7 tmpfs preflight: the P16 candidate rule or the 4C-45 precedent is not present in the loaded policy (query=[$RT_TFS_SESEARCH] precedent=[$RT_TFS_RKL_PRECEDENT]) — the preflight cannot proceed on the measured architecture"
+fi
+RT_TFS_MOUNT_N="$(printf '%s\n' "$RT_TFS_ALL_FS" | grep -c '^allow docker_helper_buildkitd_t tmpfs_t:filesystem' || true)"
+RT_TFS_EXTRA="$(printf '%s\n' "$RT_TFS_ALL_FS" | grep -vE '^(allow (domain|docker_helper_buildkitd_t) (cgroup_t|fs_t|proc_t|security_t|sysfs_t|tmpfs_t|root_t|var_t|etc_t):filesystem )' || true)"
+if printf '%s\n' "$RT_TFS_ALL_FS" | grep '^allow docker_helper_buildkitd_t tmpfs_t:filesystem' | grep -qE '(remount|unmount|associate|mounton|relabelfrom|relabelto|quota|getattr)' || [ "$RT_TFS_MOUNT_N" -ne 1 ] 2>/dev/null || [ -n "$RT_TFS_EXTRA" ]; then
+  acc_fail "R7 tmpfs preflight: the buildkitd filesystem-class surface drifted beyond the accepted scope (buildkitd tmpfs_t:filesystem rules=$RT_TFS_MOUNT_N unexpected=[$RT_TFS_EXTRA]) — the P16 scope claim (exactly one bare-mount tmpfs singleton) does not match the loaded state"
+else
+  acc_ok "R7 tmpfs preflight: the buildkitd filesystem-class surface matches the accepted scope exactly (exactly one buildkitd-subject tmpfs_t:filesystem rule, bare mount only; no remount/unmount/associate/mounton/getattr additions on the buildkitd tmpfs pair)"
+fi
+if printf '%s' "$RT_TFS_FILE_SESEARCH" | grep -qE '(^|[ {])(read|write|open)([ ;}])'; then
+  acc_fail "R7 tmpfs preflight: the buildkitd tmpfs_t:file read/write/open authority is present — the tmpfs file-class surface is a separate future rung and must NOT ride the P16 mount grant"
+else
+  acc_ok "R7 tmpfs preflight: the buildkitd tmpfs_t:file surface shows NO read/write/open authority ([$RT_TFS_FILE_SESEARCH]) — the tmpfs file-class surface stays closed and outside this rung"
+fi
+# The flow-based positive control: the boot-wide raw audit log must contain
+# the container-init marker records (non-degenerate window) and ZERO
+# filesystem-mount denials (tmpfs_t AND proc_t) plus zero dir:mounton
+# denials for the flow domain — the P15 fatal shape and the P14 rung must
+# both be gone from the flow's REAL execution.
+RT_TFS_AUDIT="$({ cat /var/log/audit/audit.log 2>/dev/null; dmesg 2>/dev/null; } | grep -E 'type=AVC|avc: *denied' | sort -u || true)"
+RT_TFS_FLOW_INIT_N="$(printf '%s\n' "$RT_TFS_AUDIT" | grep 'tclass=cap_userns' | grep -c 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
+RT_TFS_TMPFS_DEN="$(printf '%s\n' "$RT_TFS_AUDIT" | grep 'tclass=filesystem' | grep '{ mount }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:tmpfs_t:s0' || true)"
+RT_TFS_PROC_DEN="$(printf '%s\n' "$RT_TFS_AUDIT" | grep 'tclass=filesystem' | grep '{ mount }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:proc_t:s0' || true)"
+RT_TFS_MOUNTON_DEN="$(printf '%s\n' "$RT_TFS_AUDIT" | grep 'tclass=dir' | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
+info "R7-tmpfs preflight: audit window buildkitd_t cap_userns init records=$RT_TFS_FLOW_INIT_N tmpfs mount denials=[$RT_TFS_TMPFS_DEN] proc mount denials=[$RT_TFS_PROC_DEN] mounton denials=[$RT_TFS_MOUNTON_DEN]"
+if [ "${RT_TFS_FLOW_INIT_N:-0}" -ge 1 ] 2>/dev/null; then
+  if [ -z "$RT_TFS_TMPFS_DEN" ] && [ -z "$RT_TFS_PROC_DEN" ] && [ -z "$RT_TFS_MOUNTON_DEN" ]; then
+    acc_ok "R7 tmpfs preflight: the boot-wide audit window covering the candidate-policy flow builds ($RT_TFS_FLOW_INIT_N buildkitd_t cap_userns container-init records) contains ZERO tmpfs_t:filesystem mount denials, zero proc_t:filesystem mount denials AND zero dir:mounton denials for the flow domain — the P16 grant reached the get_tree gate in the flow's REAL execution and both earlier rungs hold"
+  else
+    acc_fail "R7 tmpfs preflight: the flow's fatal mount shapes reappeared in the audit window despite the candidate grants (tmpfs=[$RT_TFS_TMPFS_DEN] proc=[$RT_TFS_PROC_DEN] mounton=[$RT_TFS_MOUNTON_DEN])"
+  fi
+else
+  acc_fail "R7 tmpfs preflight: the audit window is degenerate (no buildkitd_t cap_userns container-init records) — a zero-denial tmpfs claim would be unproven; the flow-based control cannot run"
+fi
+
 rm -f /tmp/uat-wls-keyprobe.b64 "$KEYPROBE"
 
 
