@@ -1,0 +1,20 @@
+name: Security corrective candidate - SELinux UAT (2.4)
+on:
+  pull_request:
+    branches: [release/2.4]
+    paths:
+      - 'staging_linux.go'
+      - 'staging_linux_test.go'
+      - 'build.go'
+      - 'scripts/uat-regression-d1-build-staging-symlinks.sh'
+      - 'docs/architecture.md'
+      - '.github/workflows/uat-security-etc-relabel-24-vm.yml'
+permissions:
+  contents: read
+jobs:
+  selinux-corrective:
+    if: github.head_ref == 'security/fix-etc-relabel-release-2.4'
+    uses: ./.github/workflows/artifact-gate.yml
+    with:
+      scope: selinux
+      uat_version: '2.4.0-uat'
