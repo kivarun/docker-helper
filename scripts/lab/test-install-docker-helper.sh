@@ -185,6 +185,7 @@ chmod +x "$SHIM"/*
 export LAB_GUEST_ROOT="$GUESTROOT" LAB_HELPER_ALLOWED_ROOT="$GUESTROOT/home/agent"
 mkdir -p "$LAB_HELPER_ALLOWED_ROOT"
 export DH_V230_URL="https://artifact.test/fake.tar.gz" DH_V230_SHA256="$FAKE_SHA"
+export DH_V230_VERSION=2.3.0 DH_V230_COMMIT=0000000000000000000000000000000000000001
 
 run_wrapper() { # -> OUT, RC
   PATH="$SHIM:$PATH" bash "$SCRIPT" >"$WORK/out" 2>&1
@@ -239,6 +240,18 @@ else
 fi
 contains "the pinned version stays after the re-run" "installed version: 2.3.0" "$OUT"
 contains "the sha256 pinning stays enforced after the re-run" "artifact sha256 verified" "$OUT"
+
+# --- RC security gate: missing digest never reaches curl or service stop ---
+reset_state
+saved_sha="$DH_V230_SHA256"
+DH_V230_SHA256='' run_wrapper && bad "missing digest permitted" || ok "missing digest refused"
+contains "missing checksum refusal explains the pin" "missing/invalid DH_V230_SHA256" "$OUT"
+if grep -qE '^curl|^systemctl stop' "$REC"; then
+  bad "missing digest allowed state mutation"
+else
+  ok "missing digest stopped before download/service stop"
+fi
+DH_V230_SHA256="$saved_sha"; export DH_V230_SHA256
 
 # --- T5: a tampered artifact fails the sha256 pinning ---------------------------
 reset_state

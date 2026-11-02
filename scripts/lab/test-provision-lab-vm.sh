@@ -163,6 +163,9 @@ exit 2
 SH
 chmod +x "$WORK/qemu-img"
 
+export LAB_HELPER_SHA256="$(printf 'a%.0s' {1..64})"
+export LAB_HELPER_COMMIT="$(printf 'b%.0s' {1..40})"
+
 run_driver() { # stage...
   PATH="$WORK:$PATH" bash "$REPO/lab/provision-lab-vm.sh" "$@" >"$WORK/out" 2>&1
   RC=$?

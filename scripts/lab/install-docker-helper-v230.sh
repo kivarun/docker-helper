@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# install-docker-helper-v230.sh — reproducibly install Docker Helper v2.3.0
-# (commit dcb886f0) INSIDE the lab VM, from the pinned release artifact, and
+# install-docker-helper-v230.sh — reproducibly install Docker Helper v2.3.2-rc.1
+# (historical filename, parameterized installer) INSIDE the lab VM, from the pinned release artifact, and
 # leave it running as the systemd service.
 #
 # Why the release tarball and not a local build: the tarball is the published,
@@ -36,9 +36,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-DH_V230_VERSION="${DH_V230_VERSION:-2.3.0}"
-DH_V230_COMMIT="${DH_V230_COMMIT:-dcb886f09ad5c09b18a4083f82331e2205cc3177}"
-DH_V230_SHA256="${DH_V230_SHA256:-e2a24a7d01025a9d1269b8edbea7a2d94607efec08a06f5a93935b20d141a0f1}"
+DH_V230_VERSION="${DH_V230_VERSION:-2.3.2-rc.1}"
+DH_V230_COMMIT="${DH_V230_COMMIT:-}"
+DH_V230_SHA256="${DH_V230_SHA256:-}"
 DH_V230_URL="${DH_V230_URL:-https://github.com/kivarun/docker-helper/releases/download/v${DH_V230_VERSION}/docker-helper-${DH_V230_VERSION}-linux-amd64.tar.gz}"
 LAB_HELPER_ALLOWED_ROOT="${LAB_HELPER_ALLOWED_ROOT:-/home/agent}"
 
@@ -83,6 +83,15 @@ sanitize_helper_output() { # FILE -> sanitized output on stdout
 # shellcheck source=lab-vm-guard.sh
 . "$SCRIPT_DIR/lab-vm-guard.sh"
 require_lab_vm
+
+# A release-candidate is never installed on the strength of an unpinned
+# URL, a stale 2.3.0 checksum or an unverified artifact. The published
+# tarball digest must be set explicitly after the candidate Release exists.
+# Both gates run before package installation, service stop, or download.
+[[ "$DH_V230_SHA256" =~ ^[0-9a-f]{64}$ ]] ||
+  die "missing/invalid DH_V230_SHA256: supply the verified v$DH_V230_VERSION tarball SHA256"
+[[ "$DH_V230_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
+  die "missing/invalid DH_V230_COMMIT: pin the exact release candidate source SHA"
 
 # The allowed root must already exist and be a directory: the daemon's
 # workspace canonicalization refuses nonexistent paths, and the agent home is

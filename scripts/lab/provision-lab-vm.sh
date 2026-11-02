@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # provision-lab-vm.sh — orchestrate the provisioning of the EXISTING lab VM:
-# snapshot, a temporary ONLINE window (packages, Docker Helper v2.3.0,
+# snapshot, a temporary ONLINE window (packages, Docker Helper v2.3.2-rc.1,
 # operator files, pinned OCI images), then back to the ISOLATED posture with
 # offline verification.
 #
@@ -334,6 +334,13 @@ verify_online_tls() {
 }
 
 stage_online() {
+  # Preflight before opening the network window or touching the guest. The
+  # release workflow publishes only after its full UAT; never fabricate a
+  # checksum or quietly reuse the vulnerable v2.3.0 bundle.
+  [[ "${LAB_HELPER_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] ||
+    die "LAB_HELPER_SHA256 must be pinned to the published v2.3.2-rc.1 tarball"
+  [[ "${LAB_HELPER_COMMIT:-}" =~ ^[0-9a-f]{40}$ ]] ||
+    die "LAB_HELPER_COMMIT must be the exact release/2.3 RC source SHA"
   stop_vm_if_running
   log "preflight: any leftover online VM from a killed previous run is closed before this window opens"
   # R2: the lifecycle owns the start ATTEMPT. The traps are installed BEFORE
@@ -362,8 +369,8 @@ stage_online() {
   log "provisioning the agent account (phase 1)"
   "$DEVVM" ssh 'sudo bash /opt/lab/setup-agent-user.sh' < /dev/null || die "agent provisioning (phase 1) failed"
 
-  log "installing Docker Helper v2.3.0 (pinned artifact)"
-  "$DEVVM" ssh 'sudo bash /opt/lab/install-docker-helper-v230.sh' < /dev/null || die "docker-helper install failed"
+  log "installing Docker Helper v2.3.2-rc.1 (pinned artifact)"
+  "$DEVVM" ssh "sudo env DH_V230_SHA256=${LAB_HELPER_SHA256} DH_V230_COMMIT=${LAB_HELPER_COMMIT} bash /opt/lab/install-docker-helper-v230.sh" < /dev/null || die "docker-helper install failed"
 
   log "completing the agent provisioning (phase 2)"
   "$DEVVM" ssh 'sudo bash /opt/lab/setup-agent-user.sh' < /dev/null || die "agent provisioning (phase 2) failed"
@@ -560,7 +567,7 @@ case "$stage" in
 usage: provision-lab-vm.sh snapshot|online|isolate|verify|uat-networked|uat-diagnose|all
 
   snapshot  stop the VM and take the pre-provisioning qcow2 snapshot
-  online    temporary network-open window: Docker, Docker Helper v2.3.0,
+  online    temporary network-open window: Docker, Docker Helper v2.3.2-rc.1,
             agent provisioning, operator files, pinned image pre-pull
   isolate   boot isolated (DEV_VM_NET_ISOLATED=1) and prove the posture
   verify    run the offline integration suite inside the VM

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 #
 # integration-agent-vm.sh — REAL end-to-end checks inside the lab VM
-# (SELinux enforcing, real dockerd + docker-helper v2.3.0, real container).
+# (SELinux enforcing, real dockerd + docker-helper v2.3.2-rc.1, real container).
 #
 # Run as root in the guest, after install-docker-helper-v230.sh and
 # setup-agent-user.sh have run. Complements the stubbed unit tests by entering
 # through the real production paths.
 #
 # What it proves (one invariant per check):
-#   1. the installed docker-helper is the pinned v2.3.0;
+#   1. the installed docker-helper is the pinned v2.3.2-rc.1;
 #   2. opc and agent have distinct uids and no duplicate-uid resolution;
 #   3. the principal record matches the OS uid;
 #   4. SELinux is enforcing, the daemon runs in docker_helper_t, the binary is
@@ -47,7 +47,7 @@
 set -u
 umask 077
 
-EXPECT_VERSION="${EXPECT_VERSION:-2.3.0}"
+EXPECT_VERSION="${EXPECT_VERSION:-2.3.2-rc.1}"
 AGENT_USER="${AGENT_USER:-agent}"
 AGENT_HOME="/home/$AGENT_USER"
 DH=/usr/bin/docker-helper
