@@ -1375,9 +1375,13 @@ func TestSELinuxPolicyBuildkitdDevptsMountAuthority(t *testing.T) {
 // lifecycle rule (the merged loaded form is the CIL linker's
 // same-(subject,target,class) representation), no other file permission,
 // no dir-class addition, no builder_runtime_t mounton, no chr_file/
-// lnk_file tmpfs surface (the recorded next terminal — the createDevices
-// mknod of the /dev device nodes, tmpfs_t:chr_file create — stays
-// ungranted), no capability change, no other subject. Mutations prove the
+// lnk_file tmpfs surface (the recorded next terminal measured by run
+// 41518644028 — in the userns flow runc NEVER mknods: the NEWUSER
+// namespace forces useBindMount=true, so createDevices'
+// bindMountDeviceNode openat-O_CREATs a placeholder file in the container
+// /dev tmpfs (tmpfs_t:file create) and binds the host device node over it
+// (tmpfs_t:file mounton) — stays ungranted), no capability change, no
+// other subject. Mutations prove the
 // carve-out is narrow.
 func TestSELinuxPolicyBuildkitdStateFileMountonAuthority(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
@@ -1427,7 +1431,7 @@ func TestSELinuxPolicyBuildkitdStateFileMountonAuthority(t *testing.T) {
 				continue
 			}
 			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && (strings.HasPrefix(fields[2], "tmpfs_t:chr_file") || strings.HasPrefix(fields[2], "tmpfs_t:lnk_file")) {
-				out = append(out, "the tmpfs_t chr_file/lnk_file surfaces stay closed for the container-init rung (the createDevices mknod of the /dev device nodes is the recorded NEXT terminal, deliberately NOT granted by this rung): "+trimmed)
+				out = append(out, "the tmpfs_t chr_file/lnk_file surfaces stay closed for the container-init rung (the createDevices device-node stage is the recorded NEXT terminal measured by run 41518644028 — the userns path bind-mounts the nodes and never mknods — deliberately NOT granted by this rung): "+trimmed)
 				continue
 			}
 		}
