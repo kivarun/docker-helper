@@ -1,18 +1,16 @@
 #!/usr/bin/env bash
+# D1 SELinux UAT, corrected for 2026-11-02 host-integrity incident:
+# internal relative symlinks are preserved, but escaping symlinks are rejected
+# before Docker/BuildKit, with no host relabel or staging residue.
+# This is a breaking correction of the previous D1 external-symlink contract.
 #
-# uat-regression-d1-build-staging-symlinks.sh — v2.2.0-rc.8 UAT regression
-# group 10: D1 build-context staging preserves symlinks
-# (Tumbleweed / RPM / SELinux).
-#
-# Preserve relative in-context symlinks; reject absolute and escaping
-# relative symlinks during staging. A failed BuildKit COPY is too late:
-# rootful dockerd previously relabelled the host /etc inode.
-#
+set -uo pipefail
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/uat-regression-lib.sh
 source "$SCRIPT_DIR/uat-regression-lib.sh"
 
-reg_init "10. build staging symlink boundary and host integrity"
+reg_init "10. D1 staging allows internal symlinks and refuses escapes"
 
 reg_require_root
 reg_require_service
@@ -133,42 +131,37 @@ run_image_expects() { # IMAGE EXPECT_SUBSTRING LABEL [CONTAINER_PATH]
   fi
 }
 
-# Any external symlink must be refused before backend admission. Preserve
-# host-inode identity and SELinux labels even on the failure path.
-reject_escape() {
-  local label="$1" ctx="$2" image="$3" before_etc before_passwd cursor journal
-  before_etc="$(stat -c '%C|%d:%i' /etc)"
-  before_passwd="$(stat -c '%C|%d:%i' /etc/passwd)"
-  case "$before_etc" in *:etc_t:*) ;; *) reg_fail "$label: /etc already mislabelled"; return;; esac
-  case "$before_passwd" in *:passwd_file_t:*) ;; *) reg_fail "$label: /etc/passwd already mislabelled"; return;; esac
-  cursor="$(journalctl -u docker-helper.service -n 1 --show-cursor --no-pager 2>/dev/null | sed -n 's/^-- cursor: //p')"
+# Escaping symlinks must never reach BuildKit: the vulnerable Docker fsutil
+# DiskWriter applies source xattrs through setxattr, following the link target.
+build_starts() {
+  journalctl -u docker-helper.service --no-pager 2>/dev/null |
+    grep -c '"event":"build.start"' || true
+}
+expect_escape_rejected() { # LABEL CTXDIR IMAGE
+  local label="$1" ctx="$2" image="$3" before after
+  before="$(build_starts)"
   if dh_build "$ctx" --dockerfile Dockerfile --image "$image"; then
-    reg_fail "$label: escaped symlink build succeeded"
-  elif grep -qF 'invalid_build_context' /tmp/d1-build.err; then
-    reg_ok "$label: refused as invalid_build_context"
+    reg_fail "$label: unsafe context unexpectedly built successfully"
+  elif grep -q 'invalid_build_context' /tmp/d1-build.err; then
+    reg_ok "$label: typed pre-Docker symlink escape refusal"
   else
-    reg_fail "$label: wrong refusal: $(head -2 /tmp/d1-build.err | redact)"
+    reg_fail "$label: unexpected error (expected invalid_build_context): $(head -3 /tmp/d1-build.err | redact)"
   fi
-  if [ -n "$cursor" ]; then
-    journal="$(journalctl -u docker-helper.service --after-cursor="$cursor" --no-pager 2>/dev/null || true)"
-    if printf '%s\n' "$journal" | grep -q '"event":"build.start"'; then
-      reg_fail "$label: build.start occurred after refusal"
-    else
-      reg_ok "$label: no build.start (backend was not admitted)"
-    fi
+  after="$(build_starts)"
+  if [ "$before" = "$after" ]; then
+    reg_ok "$label: no build.start (Docker/BuildKit never invoked)"
   else
-    reg_fail "$label: missing journal cursor"
+    reg_fail "$label: build.start observed for a refused context ($before -> $after)"
+  fi
+  if curl --silent --fail --max-time 2 --unix-socket "$SOCK" http://localhost/health >/dev/null 2>&1; then
+    reg_ok "$label: API remains healthy"
+  else
+    reg_fail "$label: API unhealthy"
   fi
   if [ "$(inventory_count "$RUNTIME_DIR/builds")" = "0" ]; then
     reg_ok "$label: no staging residue"
   else
-    reg_fail "$label: staging residue remains"
-  fi
-  if [ "$(stat -c '%C|%d:%i' /etc)" = "$before_etc" ] &&
-     [ "$(stat -c '%C|%d:%i' /etc/passwd)" = "$before_passwd" ]; then
-    reg_ok "$label: host /etc and passwd labels/inodes unchanged"
-  else
-    reg_fail "$label: host /etc or passwd inode/label changed"
+    reg_fail "$label: staging residue"
   fi
 }
 
@@ -233,19 +226,38 @@ fi
 require_healthy_after_build "case 2" "$EPOCH" "$MARK"
 run_image_expects uat-d1-2:2.2 "d1-payload" "case 2"
 
-# --- case 3: the incident's absolute symlink to host /etc ---------------
+# --- case 3: absolute external symlink, rejected before Docker ------------
 make_case case3
-ln -s /etc "$WS/case3/ctx/hostetc"
-printf 'FROM %s\nCOPY hostetc/passwd /from-symlink\n' "$IMAGE_BASE" > "$WS/case3/ctx/Dockerfile"
-chown -R "$USER:$USER" "$WS/case3"
-reject_escape "case 3: /etc absolute link" case3/ctx uat-d1-3:2.2
+OUTSIDE_ABS="$WS/outside-abs"
+mkdir -p "$OUTSIDE_ABS"
+printf 'host payload\n' > "$OUTSIDE_ABS/host.txt"
+ln -s "$OUTSIDE_ABS" "$WS/case3/ctx/link"
+chown -R "$USER:$USER" "$WS/case3" "$OUTSIDE_ABS"
+expect_escape_rejected "case 3 absolute external" case3/ctx uat-d1-3:2.3
 
-# --- case 4: relative target outside staged root -------------------------
+# --- case 4: relative target escapes the context (within workspace) --------
 make_case case4
 printf 'workspace payload\n' > "$WS/outside-file"
 ln -s ../outside-file "$WS/case4/ctx/link"
 chown -R "$USER:$USER" "$WS/case4" "$WS/outside-file"
-reject_escape "case 4: relative escape" case4/ctx uat-d1-4:2.2
+expect_escape_rejected "case 4 relative external" case4/ctx uat-d1-4:2.3
+
+# --- case 4b: direct host /etc and /etc/passwd targets, label integrity ----
+ETC_BEFORE="$(stat -c '%d:%i %C' /etc)"
+PASSWD_BEFORE="$(stat -c '%d:%i %C' /etc/passwd)"
+make_case case4-etc
+ln -s /etc "$WS/case4-etc/ctx/link"
+make_case case4-passwd
+ln -s /etc/passwd "$WS/case4-passwd/ctx/link"
+chown -R "$USER:$USER" "$WS/case4-etc" "$WS/case4-passwd"
+expect_escape_rejected "host etc" case4-etc/ctx uat-d1-etc:2.3
+expect_escape_rejected "host passwd" case4-passwd/ctx uat-d1-passwd:2.3
+if [ "$(stat -c '%d:%i %C' /etc)" = "$ETC_BEFORE" ] &&
+   [ "$(stat -c '%d:%i %C' /etc/passwd)" = "$PASSWD_BEFORE" ]; then
+  reg_ok "host /etc and passwd inode+SELinux contexts unchanged"
+else
+  reg_fail "host /etc or passwd inode/SELinux context was mutated"
+fi
 
 # --- case 5: symlink-free control ----------------------------------------------
 make_case case5
