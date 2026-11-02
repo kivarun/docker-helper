@@ -17,6 +17,19 @@ WORK="$(mktemp -d /opt/uat-audit-smoke.XXXXXXXX)"
 KEY="dhas_$(date +%s)_$$"
 LOST_BEFORE="$(auditctl -s | awk '$1 == "lost" { print $2}')"
 [ -n "$LOST_BEFORE" ] || { echo "BLOCKED: auditctl lost counter missing"; exit 2; }
+echo 'AUDIT_RULES_BEFORE_BEGIN'
+auditctl -l
+echo 'AUDIT_RULES_BEFORE_END'
+if auditctl -l | grep -Eq '^-a never,task([[:space:]]|$)'; then
+  echo 'AUDIT_NEVER_TASK_FOUND: removing *inside disposable VM only*'
+  auditctl -d never,task || { echo 'BLOCKED: cannot remove never,task in guest'; exit 2; }
+  if auditctl -l | grep -Eq '^-a never,task([[:space:]]|$)'; then
+    echo 'BLOCKED: never,task still loaded'; exit 2
+  fi
+  echo 'AUDIT_NEVER_TASK_REMOVED'
+else
+  echo 'AUDIT_NEVER_TASK_ABSENT'
+fi
 RULE=0
 cleanup() {
   [ "$RULE" = 0 ] || auditctl -d always,exit -F arch=b64 -S setxattr -S lsetxattr -S fsetxattr -k "$KEY" >/dev/null 2>&1 || true
@@ -48,6 +61,14 @@ for i in $(seq 1 40); do
   if [ "$(grep -c '^type=SYSCALL' "$WORK/audit.raw" || true)" -ge 3 ]; then break; fi
   sleep 0.2
 done
+if [ ! -s "$WORK/audit.raw" ]; then
+  echo 'AUDIT_ZERO_EVENTS_DIAGNOSTICS'
+  auditctl -l
+  auditctl -s
+  ls -l /var/log/audit/audit.log 2>&1 || true
+  tail -25 /var/log/audit/audit.log 2>/dev/null | grep -E 'type=(SYSCALL|PATH)|key=' | tail -15 || true
+  journalctl -k --no-pager 2>/dev/null | grep -F "$KEY" | tail -15 || true
+fi
 # Join SYSCALL and PATH by audit serial; require PID, success, and exact inode.
 python3 - "$PID" "$FILE_INO" "$DIR_INO" "$WORK/audit.raw" <<'PY'
 import re, sys
