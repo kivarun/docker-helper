@@ -144,7 +144,7 @@ PROBE="$OBS_DIR/positive-control"
   reg_blocked "observer positive control is not on /etc filesystem"
 FAN_LOG="$OBS_DIR/fanotify.log"
 python3 -u "$SCRIPT_DIR/uat-selinux-etc-fanotify.py" \
-  --ready "$OBS_DIR/ready" --probe "$PROBE" > "$FAN_LOG" 2>&1 &
+  --ready "$OBS_DIR/ready" --probe "$PROBE" --probe-dir "$OBS_DIR" > "$FAN_LOG" 2>&1 &
 WATCH_PID=$!
 for _ in $(seq 1 30); do
   [ -f "$OBS_DIR/ready" ] && break
@@ -158,13 +158,16 @@ fi
 python3 - "$PROBE" <<'PY'
 import os, sys
 os.setxattr(sys.argv[1], "user.dhec_positivectrl", b"1")
+os.setxattr(os.path.dirname(sys.argv[1]), "user.dhec_dir_positivectrl", b"1")
 PY
 for _ in $(seq 1 30); do
-  grep -Fq "FANOTIFY_TARGET path=$PROBE " "$FAN_LOG" && break
+  if grep -Fq "FANOTIFY_TARGET path=$PROBE " "$FAN_LOG" &&
+     grep -Fq "FANOTIFY_TARGET path=$OBS_DIR " "$FAN_LOG"; then break; fi
   sleep 0.1
 done
-if grep -Fq "FANOTIFY_TARGET path=$PROBE " "$FAN_LOG"; then
-  reg_ok "FAN_ATTRIB positive control observed on root filesystem"
+if grep -Fq "FANOTIFY_TARGET path=$PROBE " "$FAN_LOG" &&
+   grep -Fq "FANOTIFY_TARGET path=$OBS_DIR " "$FAN_LOG"; then
+  reg_ok "FAN_ATTRIB positive controls observed on file and directory"
 else
   forensic_dump
   reg_blocked "FAN_ATTRIB positive control not observed"
