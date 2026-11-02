@@ -11,7 +11,7 @@ systemd-detect-virt --vm >/dev/null 2>&1 || reg_blocked "not inside a VM"
 reg_require_root
 reg_require_service
 reg_require_docker
-for cmd in stat auditctl ausearch timeout getenforce; do reg_require_cmd "$cmd" "host integrity observation"; done
+for cmd in stat auditctl ausearch timeout getenforce python3; do reg_require_cmd "$cmd" "host integrity observation"; done
 [ "$(getenforce)" = Enforcing ] || reg_blocked "not enforcing SELinux"
 ctx() { stat -c '%C' -- "$1" 2>/dev/null; }
 ino() { stat -c '%d:%i' -- "$1" 2>/dev/null; }
@@ -27,8 +27,12 @@ reg_info "before: /etc=$ETC inode=$EI; passwd=$PASSWD inode=$PI"
 # Unique keys avoid broken ausearch --start recent/today parsing.
 KEY="dhec_$(date +%s)_$$"; WK="dhew_$(date +%s)_$$"
 ADDED=0; WE=0; WP=0; INCIDENT=0
-WS=""; SID=""; CRED=""
+WS=""; SID=""; CRED=""; OBS_DIR=""; WATCH_PID=""; FAN_LOG=""
 cleanup() {
+  if [ -n "$WATCH_PID" ]; then
+    kill "$WATCH_PID" >/dev/null 2>&1 || true
+    wait "$WATCH_PID" 2>/dev/null || true
+  fi
   if [ "$INCIDENT" = 1 ]; then
     echo "SECURITY_INCIDENT=1; guest forensic state deliberately preserved" >&2
   elif [ -n "$SID" ] && [ -n "$CRED" ]; then
@@ -38,7 +42,10 @@ cleanup() {
   [ "$ADDED" = 1 ] && auditctl -d always,exit -F arch=b64 -S setxattr -S lsetxattr -S fsetxattr -k "$KEY" >/dev/null 2>&1 || true
   [ "$WE" = 1 ] && auditctl -W /etc -p a -k "$WK" >/dev/null 2>&1 || true
   [ "$WP" = 1 ] && auditctl -W /etc/passwd -p a -k "$WK" >/dev/null 2>&1 || true
-  [ "$INCIDENT" = 1 ] || { [ -z "$CRED" ] || rm -f -- "$CRED"; }
+  if [ "$INCIDENT" != 1 ]; then
+    [ -z "$CRED" ] || rm -f -- "$CRED"
+    [ -z "$OBS_DIR" ] || rm -rf -- "$OBS_DIR"
+  fi
 }
 trap cleanup EXIT
 auditctl -a always,exit -F arch=b64 -S setxattr -S lsetxattr -S fsetxattr -k "$KEY" >/dev/null 2>&1 || reg_blocked "audit syscall rule failed"
@@ -48,8 +55,27 @@ WE=1
 auditctl -w /etc/passwd -p a -k "$WK" >/dev/null 2>&1 || reg_blocked "audit passwd watch failed"
 WP=1
 audit_dump() {
+  echo "--- auditctl status ---"
+  auditctl -s 2>&1 | tail -12 || true
+  echo "--- audit key $KEY / inode-watch $WK records ---"
   { ausearch -k "$KEY" --raw 2>/dev/null; ausearch -k "$WK" --raw 2>/dev/null; } |
-    grep -E '^type=(SYSCALL|PATH|AVC)' | sort -u | redact | tail -90 || true
+    grep -E '^type=(SYSCALL|PATH|AVC|PROCTITLE)' | sort -u | redact | tail -90 || true
+  echo "--- raw audit-log tail (filtered to xattr or protected inode) ---"
+  if [ -r /var/log/audit/audit.log ]; then
+    grep -E "(key=\"($KEY|$WK)\"|key=($KEY|$WK)|syscall=(188|189|190)( |$))" /var/log/audit/audit.log 2>/dev/null |
+      tail -60 | redact || true
+  fi
+}
+forensic_dump() {
+  # Allow the independent observer to drain its event queue after build exit.
+  sleep 0.5
+  echo "--- FAN_ATTRIB exact-inode attribution ---"
+  if [ -n "$FAN_LOG" ] && [ -f "$FAN_LOG" ]; then
+    cat "$FAN_LOG" | redact
+  else
+    echo "(fanotify observer not started)"
+  fi
+  audit_dump
 }
 # Fail even on transient xattr writes subsequently undone: exact inode match.
 # A parent PATH in an unrelated /etc child operation is not an inode write.
@@ -64,7 +90,7 @@ check_audit() {
   if [ -n "$hit" ]; then
     INCIDENT=1
     printf 'SECURITY_FAIL: successful xattr mutation on protected inode\n%s\n' "$hit" | redact >&2
-    audit_dump
+    forensic_dump
     reg_fail "host /etc or passwd inode xattr changed"
     reg_result
   fi
@@ -77,7 +103,7 @@ check_host() {
     INCIDENT=1
     printf 'SECURITY_FAIL at %s: /etc %s->%s; passwd %s->%s; inode %s->%s and %s->%s\n' \
       "$phase" "$ETC" "$ec" "$PASSWD" "$pc" "$EI" "$ei" "$PI" "$pi" >&2
-    audit_dump
+    forensic_dump
     reg_fail "host label/inode/NSS integrity changed at $phase"
     reg_result
   fi
@@ -106,6 +132,48 @@ fi
 EI="$(ino /etc)"; PI="$(ino /etc/passwd)"
 [ -n "$EI" ] && [ -n "$PI" ] || reg_blocked "post-principal inode inventory missing"
 check_host "principal setup"
+
+# Independent kernel FAN_ATTRIB evidence. Global filesystem mark covers
+# aliases without relying on the path the mutating process used.
+# Positive control is a USER xattr on a disposable scratch inode.
+OBS_DIR="$(mktemp -d /opt/uat/dhec-observer.XXXXXXXX)" ||
+  reg_blocked "cannot allocate root-filesystem observer scratch"
+PROBE="$OBS_DIR/positive-control"
+: > "$PROBE"
+[ "$(stat -c %d "$PROBE")" = "$(stat -c %d /etc)" ] ||
+  reg_blocked "observer positive control is not on /etc filesystem"
+FAN_LOG="$OBS_DIR/fanotify.log"
+python3 -u "$SCRIPT_DIR/uat-selinux-etc-fanotify.py" \
+  --ready "$OBS_DIR/ready" --probe "$PROBE" > "$FAN_LOG" 2>&1 &
+WATCH_PID=$!
+for _ in $(seq 1 30); do
+  [ -f "$OBS_DIR/ready" ] && break
+  kill -0 "$WATCH_PID" 2>/dev/null || break
+  sleep 0.1
+done
+if [ ! -f "$OBS_DIR/ready" ]; then
+  cat "$FAN_LOG" >&2 || true
+  reg_blocked "fanotify could not establish filesystem observation"
+fi
+python3 - "$PROBE" <<'PY'
+import os, sys
+os.setxattr(sys.argv[1], "user.dhec_positivectrl", b"1")
+PY
+for _ in $(seq 1 30); do
+  grep -Fq "FANOTIFY_TARGET path=$PROBE " "$FAN_LOG" && break
+  sleep 0.1
+done
+if grep -Fq "FANOTIFY_TARGET path=$PROBE " "$FAN_LOG"; then
+  reg_ok "FAN_ATTRIB positive control observed on root filesystem"
+else
+  forensic_dump
+  reg_blocked "FAN_ATTRIB positive control not observed"
+fi
+if ausearch -k "$KEY" --raw 2>/dev/null | grep -q 'type=SYSCALL'; then
+  reg_ok "syscall audit positive control observed"
+else
+  reg_info "syscall audit source lacks positive control; FAN_ATTRIB remains authoritative"
+fi
 reg_session "$CRED" "$WS" || reg_blocked "session creation failed"
 SID="$REG_SESSION_ID"; export DOCKER_HELPER_SESSION_TOKEN="$REG_SESSION_TOKEN"
 check_host "session create"
@@ -128,7 +196,7 @@ build_case() {
     reg_fail "$name: unexpected failure stage (rc=$rc): $(printf '%s\n' "$out" | redact | tail -4)"
   fi
   check_host "after $name"
-  audit_dump
+  forensic_dump
 }
 # Exact malicious fixture from second incident (minus output-only filtering).
 build_case _btest3 /etc $'FROM alpine:3.20\nCOPY hostetc/passwd /from-symlink\nRUN echo "== copy symlink target =="; head -1 /from-symlink || echo FAILCOPY\nRUN echo "== bind mount hostetc =="; ls /mnt 2>/dev/null | head -3 || true' dh-ptest:sym
@@ -145,5 +213,5 @@ check_host "symlink-free control"
 dh session delete --token-file "$CRED" "$SID" >/dev/null 2>&1 || reg_fail "session delete failed"
 SID=""
 check_host "session delete"
-audit_dump
+forensic_dump
 reg_result
