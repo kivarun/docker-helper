@@ -43,7 +43,7 @@
 # restore a moved credential) — no secrets or evidence files are left behind.
 # Bearers are never printed to stdout/stderr or any report.
 #
-# Env: EXPECT_VERSION (default 2.3.0), AGENT_USER (default agent).
+# Env: EXPECT_VERSION (default 2.3.2-rc.1), AGENT_USER (default agent).
 set -u
 umask 077
 

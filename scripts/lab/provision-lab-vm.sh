@@ -19,7 +19,7 @@
 #       guest: install Docker and baseline CLI tools (signature-checked zypper),
 #       provision the agent
 #       account (phase 1 of setup-agent-user.sh), install Docker Helper
-#       v2.3.0 with the minimal --allowed-root, complete the agent setup
+#       v2.3.2-rc.1 with the minimal --allowed-root, complete the agent setup
 #       (phase 2), transfer operator files (SSH key / CA / gitconfig /
 #       known_hosts — all optional), optionally prove the corporate CA
 #       against a live TLS endpoint (LAB_CA_TEST_URL), and pre-pull the
@@ -337,6 +337,7 @@ stage_online() {
   # Preflight before opening the network window or touching the guest. The
   # release workflow publishes only after its full UAT; never fabricate a
   # checksum or quietly reuse the vulnerable v2.3.0 bundle.
+  LAB_HELPER_SHA256="${LAB_HELPER_SHA256-47867ce9356680e55ab8172132c88d7dab9818e2f3a9ed4a9e18f4146c6e8ad4}"
   [[ "${LAB_HELPER_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] ||
     die "LAB_HELPER_SHA256 must be pinned to the published v2.3.2-rc.1 tarball"
   LAB_HELPER_COMMIT="${LAB_HELPER_COMMIT:-6d72b449e0c76a43a00836bd3e3db2fd35d9138b}"

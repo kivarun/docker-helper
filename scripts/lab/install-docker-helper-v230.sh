@@ -38,7 +38,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DH_V230_VERSION="${DH_V230_VERSION:-2.3.2-rc.1}"
 DH_V230_COMMIT="${DH_V230_COMMIT:-6d72b449e0c76a43a00836bd3e3db2fd35d9138b}"
-DH_V230_SHA256="${DH_V230_SHA256:-}"
+DH_V230_SHA256="${DH_V230_SHA256-47867ce9356680e55ab8172132c88d7dab9818e2f3a9ed4a9e18f4146c6e8ad4}"
 DH_V230_URL="${DH_V230_URL:-https://github.com/kivarun/docker-helper/releases/download/v${DH_V230_VERSION}/docker-helper-${DH_V230_VERSION}-linux-amd64.tar.gz}"
 LAB_HELPER_ALLOWED_ROOT="${LAB_HELPER_ALLOWED_ROOT:-/home/agent}"
 
@@ -86,7 +86,7 @@ require_lab_vm
 
 # A release-candidate is never installed on the strength of an unpinned
 # URL, a stale 2.3.0 checksum or an unverified artifact. The published
-# tarball digest must be set explicitly after the candidate Release exists.
+# tarball digest is pinned to the verified v2.3.2-rc.1 GitHub Release.
 # Both gates run before package installation, service stop, or download.
 [[ "$DH_V230_SHA256" =~ ^[0-9a-f]{64}$ ]] ||
   die "missing/invalid DH_V230_SHA256: supply the verified v$DH_V230_VERSION tarball SHA256"
