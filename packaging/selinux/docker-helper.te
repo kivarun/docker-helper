@@ -2128,6 +2128,99 @@ allow docker_helper_buildkitd_t tmpfs_t:dir mounton;
 # one rule.
 allow docker_helper_buildkitd_t devpts_t:filesystem mount;
 
+# The buildkitd container-init per-op bind-target file mounton (R7 P20):
+# with the P19 devpts superblock rung granted, the container init's mount
+# table ran through /dev/pts (completed), /dev/shm (the P16 tmpfs mount),
+# /dev/mqueue, /sys and /sys/fs/cgroup (all no-AVC), and died at the FIRST
+# bind-mount entry of the table — the per-operation /etc/resolv.conf bind.
+# The P19 authoritative run (41404962088) proved the fatal terminal from
+# BOTH sides: the build's own stderr ("error mounting
+# \".../ops/<op>/root/runc-native/executor/resolv.conf\" to rootfs at
+# \"/etc/resolv.conf\": mount src=..., dst=/etc/resolv.conf,
+# dstFd=/proc/thread-self/fd/10, flags=MS_RDONLY|MS_NOSUID|MS_NODEV|
+# MS_NOEXEC|MS_BIND|MS_REC: permission denied") and the audited kernel
+# decision `tclass=file denied { mounton }` with
+# tcontext=docker_helper_builder_state_t:s0:c1 from comm="runc:[2:INIT]"
+# (serials 1339/10429).
+#
+# VENUE (measured, never assumed): BOTH endpoints of the bind live inside
+# the per-operation tree — the SOURCE is the executor's own generated
+# resolv.conf (ops/<op>/root/runc-native/executor/resolv.conf, the flow's
+# own per-op materialization) and the TARGET is the container rootfs copy
+# (ops/<op>/root/runc-native/executor/<rand>/rootfs/etc/resolv.conf — the
+# op's snapshot tree, labeled builder_state_t with the OP'S OWN category
+# s0:c1). The host /etc is never a mount target: the daemon only READS the
+# host resolver config when materializing the per-op copy (standing
+# surface). The mount(2) executes inside the container init's private
+# CLONE_NEWNS namespace (runc:[2:INIT]).
+#
+# KERNEL CHECK CHAIN (v7.3): a bind mount takes path_mount ->
+# security_sb_mount -> selinux_mount's non-remount branch ->
+# path_has_perm(FILE__MOUNTON) on the TARGET dentry — for a file target
+# the tclass is file: exactly the grant below — then may_mount(), then
+# MS_BIND dispatches to do_loopback: NO get_tree and NO
+# security_sb_kern_mount on this path (the source superblock already
+# exists), so a bind needs NO filesystem-class authority. The MS_RDONLY
+# flag rides the same bind (no separate remount step in path_mount for a
+# fresh bind), so the grant covers the recorded operation exactly.
+#
+# ISOLATION BOUNDARY (the type-wide extension measured, never assumed):
+#   - builder_state_t IS the type of every operation's state tree,
+#     including OTHER operations' files: the grant makes the file:mounton
+#     LSM check pass for the TYPE. The cross-operation boundary for
+#     mounton is NOT the MCS constraint (measured: the file-class
+#     mlsconstrain covers { append link rename setattr unlink write } and
+#     the dir-class constraints likewise omit mounton — a type-wide
+#     mounton check is category-blind exactly like the already-accepted
+#     builder_state_t:dir mounton inside the standing state-tree rule);
+#     it is owned by the same layers that bound every earlier mounton
+#     rung: (a) the kernel may_mount/namespace venue model — the only
+#     subjects that can act on the grant are the container init (in its
+#     OWN private CLONE_NEWNS copy) and the daemon, which holds no
+#     CAP_SYS_ADMIN in any mount-namespace-owning user namespace (the
+#     P14 unshare probes stay measured denials); (b) SLAVE PROPAGATION
+#     (P14's MS_REC|MS_SLAVE root fence): any mount grafted inside the
+#     container's private namespace copy never propagates to the host
+#     tree, so a mount-over of ANY builder_state_t file — own or foreign
+#     — is visible only inside that operation's own namespace copy and
+#     can never change what the host or another operation observes;
+#     (c) pathname reachability (the daemon's host-namespace view and
+#     the runc fds opened for THIS operation only);
+#   - the per-op categories stay measured and enforced on every
+#     constrained permission (the S13 file/dir constraint planes); this
+#     rung adds no category-blind write/read surface: mounton onto a file
+#     HIDES it behind a mount inside a private namespace copy — the
+#     underlying inode's content, owner, and label are untouched, and no
+#     file-class read/write/open authority is granted;
+#   - NO other file permission rides the rung: the standing state-tree
+#     file rule (create/read/open/lock/write/getattr/rename/setattr/
+#     unlink/append) stays its own owner and the new mounton singleton
+#     stays a SEPARATE bare rule (the merged loaded representation is the
+#     CIL linker's same-(subject,target,class) merge, pinned by the leg;
+#     the committed SOURCE keeps two rules);
+#   - WITHIN the flow the grant lets the container init bind-mount the
+#     per-op resolv.conf (this rung's recorded denial), the sibling
+#     per-op /etc/hosts and /etc/hostname binds (the same family), and
+#     the masked-path /dev/null binds runc issues later in standard_init
+#     — all inside the container's private namespace;
+#   - PRECEDENT (the SAME target type, the dir-class sibling, already
+#     accepted): the buildkitd state-tree dir rule carries dir:mounton
+#     (4C-74-era widening) — mounting ON TOP of state-tree DIRECTORIES is
+#     standing authority; P20 extends the same venue-bounded primitive to
+#     the FILE class as its own single-permission rule.
+#
+# Deliberately NOT granted: any other builder_state_t file permission
+# (the standing rule stays exactly its own owner), any dir-class addition,
+# builder_runtime_t mounton of any class, chr_file/lnk_file tmpfs surfaces
+# (the NEXT terminal — the createDevices mknod of the /dev device nodes,
+# tmpfs_t:chr_file create — is a separate future rung), any
+# filesystem-class addition, any capability change, any other subject.
+# The committed-policy tests pin the buildkitd builder_state_t:file
+# authority at EXACTLY the two evidenced rules (the standing lifecycle
+# rule and this P20 mounton singleton); the named-allow count moves
+# 48 -> 49 by exactly this one rule.
+allow docker_helper_buildkitd_t docker_helper_builder_state_t:file mounton;
+
 # The copy-up /tmp directory write (P5-S2 Phase 4C-40) and the mkdir
 # name mediation of the same mkdir(2) (P5-S2 Phase 4C-41): the child's
 # copy-up setup — rootlesskit's bind0/bind1 directory creation under
