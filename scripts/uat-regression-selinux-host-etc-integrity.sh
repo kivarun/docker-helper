@@ -23,82 +23,63 @@ case "$PASSWD" in *:passwd_file_t:*) ;; *) reg_blocked "passwd baseline incorrec
 getent passwd sshd >/dev/null && getent passwd opc >/dev/null || reg_blocked "baseline NSS unavailable"
 reg_info "before: /etc=$ETC inode=$EI; passwd=$PASSWD inode=$PI"
 
-# Capture setxattr family on all paths; inode watches detect aliases.
-# Unique keys avoid broken ausearch --start recent/today parsing.
-KEY="dhec_$(date +%s)_$$"; WK="dhew_$(date +%s)_$$"
-ADDED=0; WE=0; WP=0; INCIDENT=0
-WS=""; SID=""; CRED=""; OBS_DIR=""; WATCH_PID=""; FAN_LOG=""
+# Linux audit syscall receiver proven in independent VM run 41446427180.
+# Audit raw source is /var/log/audit/audit.log, never ausearch-key.
+KEY="dhec_$(date +%s)_$$"; RULE=0; INCIDENT=0
+WS=""; SID=""; CRED=""; OBS_DIR=""; LOST_BEFORE=""
+AUDIT_PARSER="$SCRIPT_DIR/uat-selinux-etc-audit-evidence.py"
+[ -r "$AUDIT_PARSER" ] || reg_blocked "raw audit reader missing"
 cleanup() {
-  if [ -n "$WATCH_PID" ]; then
-    kill "$WATCH_PID" >/dev/null 2>&1 || true
-    wait "$WATCH_PID" 2>/dev/null || true
-  fi
   if [ "$INCIDENT" = 1 ]; then
-    echo "SECURITY_INCIDENT=1; guest forensic state deliberately preserved" >&2
+    echo "SECURITY_INCIDENT=1; operation stopped for review" >&2
   elif [ -n "$SID" ] && [ -n "$CRED" ]; then
     dh session delete --token-file "$CRED" "$SID" >/dev/null 2>&1 || true
     [ -z "$WS" ] || rm -rf -- "$WS"
-  elif [ -n "$WS" ]; then rm -rf -- "$WS"; fi
-  [ "$ADDED" = 1 ] && auditctl -d always,exit -F arch=b64 -S setxattr -S lsetxattr -S fsetxattr -k "$KEY" >/dev/null 2>&1 || true
-  [ "$WE" = 1 ] && auditctl -W /etc -p a -k "$WK" >/dev/null 2>&1 || true
-  [ "$WP" = 1 ] && auditctl -W /etc/passwd -p a -k "$WK" >/dev/null 2>&1 || true
+  elif [ -n "$WS" ]; then
+    rm -rf -- "$WS"
+  fi
+  [ "$RULE" = 0 ] || auditctl -d always,exit -F arch=b64 -S setxattr -S lsetxattr -S fsetxattr -k "$KEY" >/dev/null 2>&1 || true
   if [ "$INCIDENT" != 1 ]; then
     [ -z "$CRED" ] || rm -f -- "$CRED"
     [ -z "$OBS_DIR" ] || rm -rf -- "$OBS_DIR"
   fi
 }
 trap cleanup EXIT
-auditctl -a always,exit -F arch=b64 -S setxattr -S lsetxattr -S fsetxattr -k "$KEY" >/dev/null 2>&1 || reg_blocked "audit syscall rule failed"
-ADDED=1
-auditctl -w /etc -p a -k "$WK" >/dev/null 2>&1 || reg_blocked "audit /etc watch failed"
-WE=1
-auditctl -w /etc/passwd -p a -k "$WK" >/dev/null 2>&1 || reg_blocked "audit passwd watch failed"
-WP=1
-audit_dump() {
-  echo "--- auditctl status ---"
-  auditctl -s 2>&1 | tail -12 || true
-  echo "--- audit key $KEY / inode-watch $WK records ---"
-  { ausearch -k "$KEY" --raw 2>/dev/null; ausearch -k "$WK" --raw 2>/dev/null; } |
-    grep -E '^type=(SYSCALL|PATH|AVC|PROCTITLE)' | sort -u | redact | tail -90 || true
-  echo "--- raw audit-log tail (filtered to xattr or protected inode) ---"
-  if [ -r /var/log/audit/audit.log ]; then
-    grep -E "(key=\"($KEY|$WK)\"|key=($KEY|$WK)|syscall=(188|189|190)( |$))" /var/log/audit/audit.log 2>/dev/null |
-      tail -60 | redact || true
-  fi
+snapshot() { [ "$RULE" = 1 ] && python3 "$AUDIT_PARSER" capture "$KEY" "$OBS_DIR/audit.raw"; }
+audit_health() {
+  [ "$RULE" = 1 ] || return 0
+  local lost
+  lost="$(auditctl -s | awk '$1=="lost" {print $2}')"
+  [ -n "$lost" ] && [ "$lost" = "$LOST_BEFORE" ] ||
+    reg_blocked "audit event loss or unreadable counter (was=$LOST_BEFORE now=$lost)"
 }
 forensic_dump() {
-  # Allow the independent observer to drain its event queue after build exit.
-  sleep 0.5
-  echo "--- FAN_ATTRIB exact-inode attribution ---"
-  if [ -n "$FAN_LOG" ] && [ -f "$FAN_LOG" ]; then
-    cat "$FAN_LOG" | redact
+  sleep 0.3
+  snapshot || true
+  echo "--- raw audit xattr events, complete serials ---"
+  if [ -s "$OBS_DIR/audit.raw" ]; then
+    python3 "$AUDIT_PARSER" explain "$OBS_DIR/audit.raw" /etc /etc/passwd | redact
   else
-    echo "(fanotify observer not started)"
+    echo "NO_KEYED_RECORDS (verify positive control and audit health)"
   fi
-  audit_dump
+  auditctl -s || true
+  audit_health
 }
-# Fail even on transient xattr writes subsequently undone: exact inode match.
-# A parent PATH in an unrelated /etc child operation is not an inode write.
 check_audit() {
-  local hit
-  hit="$(ausearch -k "$WK" --raw 2>/dev/null | awk -v e="${EI##*:}" -v p="${PI##*:}" '
-    function sn(s,t) { t=s; sub(/^.*audit\([^:]+:/,"",t); sub(/\).*$/,"",t); return t }
-    /^type=SYSCALL / && /success=yes/ && /syscall=(188|189|190)( |$)/ { sc[sn($0)]=$0 }
-    /^type=PATH / && !/nametype=PARENT/ && ($0 ~ "inode=" e "( |$)" || $0 ~ "inode=" p "( |$)") { paths[sn($0)]=$0 }
-    END { for (x in paths) if (x in sc) { print sc[x]; print paths[x] } }
-  ' | head -20)"
-  if [ -n "$hit" ]; then
-    INCIDENT=1
-    printf 'SECURITY_FAIL: successful xattr mutation on protected inode\n%s\n' "$hit" | redact >&2
-    forensic_dump
-    reg_fail "host /etc or passwd inode xattr changed"
-    reg_result
-  fi
+  [ "$RULE" = 1 ] || return 0
+  snapshot || reg_blocked "raw audit snapshot failed"
+  audit_health
+  if python3 "$AUDIT_PARSER" protected "$OBS_DIR/audit.raw" /etc /etc/passwd; then return 0; fi
+  INCIDENT=1
+  forensic_dump
+  reg_fail "protected host inode had successful xattr write"
+  reg_result
 }
 check_host() {
   local phase="$1" ec pc ei pi
   ec="$(ctx /etc)"; pc="$(ctx /etc/passwd)"; ei="$(ino /etc)"; pi="$(ino /etc/passwd)"
-  if [ "$ec" != "$ETC" ] || [ "$pc" != "$PASSWD" ] || [ "$ei" != "$EI" ] || [ "$pi" != "$PI" ] ||
+  if [ "$ec" != "$ETC" ] || [ "$pc" != "$PASSWD" ] ||
+     [ "$ei" != "$EI" ] || [ "$pi" != "$PI" ] ||
      ! getent passwd sshd >/dev/null 2>&1 || ! getent passwd opc >/dev/null 2>&1; then
     INCIDENT=1
     printf 'SECURITY_FAIL at %s: /etc %s->%s; passwd %s->%s; inode %s->%s and %s->%s\n' \
@@ -133,50 +114,55 @@ EI="$(ino /etc)"; PI="$(ino /etc/passwd)"
 [ -n "$EI" ] && [ -n "$PI" ] || reg_blocked "post-principal inode inventory missing"
 check_host "principal setup"
 
-# Independent kernel FAN_ATTRIB evidence. Global filesystem mark covers
-# aliases without relying on the path the mutating process used.
-# Positive control is a USER xattr on a disposable scratch inode.
-OBS_DIR="$(mktemp -d /opt/uat/dhec-observer.XXXXXXXX)" ||
-  reg_blocked "cannot allocate root-filesystem observer scratch"
-PROBE="$OBS_DIR/positive-control"
-: > "$PROBE"
-[ "$(stat -c %d "$PROBE")" = "$(stat -c %d /etc)" ] ||
-  reg_blocked "observer positive control is not on /etc filesystem"
-FAN_LOG="$OBS_DIR/fanotify.log"
-python3 -u "$SCRIPT_DIR/uat-selinux-etc-fanotify.py" \
-  --ready "$OBS_DIR/ready" --probe "$PROBE" --probe-dir "$OBS_DIR" > "$FAN_LOG" 2>&1 &
-WATCH_PID=$!
-for _ in $(seq 1 30); do
-  [ -f "$OBS_DIR/ready" ] && break
-  kill -0 "$WATCH_PID" 2>/dev/null || break
-  sleep 0.1
-done
-if [ ! -f "$OBS_DIR/ready" ]; then
-  cat "$FAN_LOG" >&2 || true
-  reg_blocked "fanotify could not establish filesystem observation"
+# Arm the proven audit observer after useradd replaced /etc/passwd
+# legitimately. This rule monitors host xattr writes through ANY pathname.
+systemctl enable --now auditd >/dev/null 2>&1 ||
+  reg_blocked "auditd service unavailable"
+auditctl -e 1 >/dev/null 2>&1 || reg_blocked "cannot enable audit"
+[ "$(auditctl -s | awk '$1=="enabled" {print $2}')" = 1 ] ||
+  reg_blocked "audit is disabled"
+echo "AUDIT_RULES_BEFORE"; auditctl -l
+if auditctl -l | grep -Eq '^-a never,task([[:space:]]|$)'; then
+  auditctl -d never,task >/dev/null 2>&1 ||
+    reg_blocked "cannot remove never,task in disposable VM"
+  if auditctl -l | grep -Eq '^-a never,task([[:space:]]|$)'; then
+    reg_blocked "never,task remained active"
+  fi
+  reg_ok "audit never,task filter disabled in guest"
 fi
-python3 - "$PROBE" <<'PY'
+[ -r /var/log/audit/audit.log ] || reg_blocked "raw audit log not readable"
+LOST_BEFORE="$(auditctl -s | awk '$1=="lost" {print $2}')"
+[ -n "$LOST_BEFORE" ] || reg_blocked "audit loss counter missing"
+OBS_DIR="$(mktemp -d /opt/uat/dhec-audit.XXXXXXXX)" ||
+  reg_blocked "cannot allocate scratch on /etc filesystem"
+[ "$(stat -c %d "$OBS_DIR")" = "$(stat -c %d /etc)" ] ||
+  reg_blocked "audit positive controls must be on /etc device"
+mkdir "$OBS_DIR/directory"
+printf 'control\n' > "$OBS_DIR/file"
+ln "$OBS_DIR/file" "$OBS_DIR/alias"
+auditctl -a always,exit -F arch=b64 -S setxattr -S lsetxattr -S fsetxattr -k "$KEY" >/dev/null ||
+  reg_blocked "cannot install xattr syscall audit rule"
+RULE=1
+auditctl -l | grep -F -- "$KEY" || reg_blocked "xattr audit rule missing"
+python3 - "$OBS_DIR" <<'PY'
 import os, sys
-os.setxattr(sys.argv[1], "user.dhec_positivectrl", b"1")
-os.setxattr(os.path.dirname(sys.argv[1]), "user.dhec_dir_positivectrl", b"1")
+w=sys.argv[1]
+with open(w+"/control.pid","w") as f: f.write(str(os.getpid()))
+for p,n in (("file","user.dhec_file"),("directory","user.dhec_dir"),("alias","user.dhec_alias")):
+    os.setxattr(w+"/"+p,n,b"1")
 PY
+PROVEN=0
 for _ in $(seq 1 30); do
-  if grep -Fq "FANOTIFY_TARGET path=$PROBE " "$FAN_LOG" &&
-     grep -Fq "FANOTIFY_TARGET path=$OBS_DIR " "$FAN_LOG"; then break; fi
+  snapshot || reg_blocked "cannot read raw audit evidence"
+  if python3 "$AUDIT_PARSER" control "$OBS_DIR/audit.raw" \
+     "$(cat "$OBS_DIR/control.pid")" "$OBS_DIR/file" "$OBS_DIR/directory"; then
+    PROVEN=1; break
+  fi
   sleep 0.1
 done
-if grep -Fq "FANOTIFY_TARGET path=$PROBE " "$FAN_LOG" &&
-   grep -Fq "FANOTIFY_TARGET path=$OBS_DIR " "$FAN_LOG"; then
-  reg_ok "FAN_ATTRIB positive controls observed on file and directory"
-else
-  forensic_dump
-  reg_blocked "FAN_ATTRIB positive control not observed"
-fi
-if ausearch -k "$KEY" --raw 2>/dev/null | grep -q 'type=SYSCALL'; then
-  reg_ok "syscall audit positive control observed"
-else
-  reg_info "syscall audit source lacks positive control; FAN_ATTRIB remains authoritative"
-fi
+[ "$PROVEN" = 1 ] || reg_blocked "audit positive control missing: file, dir, alias"
+audit_health
+reg_ok "raw audit receiver proved on file, directory, hardlink"
 reg_session "$CRED" "$WS" || reg_blocked "session creation failed"
 SID="$REG_SESSION_ID"; export DOCKER_HELPER_SESSION_TOKEN="$REG_SESSION_TOKEN"
 check_host "session create"
