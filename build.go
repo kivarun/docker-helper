@@ -13,6 +13,9 @@ import (
 	"github.com/distribution/reference"
 )
 
+// Cross-platform staging refusal, shared by the Linux walker and BUILD handler.
+var errBuildStagingSymlinkOutsideContext = errors.New("build context symlink escapes staged context")
+
 func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	authority, ok := a.requireSessionFilesystemCapability(w, r, "build")
 	if !ok {
