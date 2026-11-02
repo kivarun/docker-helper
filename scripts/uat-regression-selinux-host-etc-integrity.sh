@@ -93,6 +93,18 @@ WS="$HOME_DIR/ws-etc-pentest"
 mkdir -p "$WS"; chown "$U:$U" "$WS"
 CRED="/tmp/dh-etc-$(date +%s)-$$.token"
 reg_principal_credential "$U" "$CRED" || reg_blocked "credential setup failed"
+# Creating the *test principal* legitimately replaces /etc/passwd via useradd.
+# The initial label contract must survive; only the inode identity baseline is
+# re-established after this known test fixture preparation, before any Session
+# or untrusted build is admitted. No relabel is tolerated in either phase.
+if [ "$(ctx /etc)" != "$ETC" ] || [ "$(ctx /etc/passwd)" != "$PASSWD" ]; then
+  INCIDENT=1
+  reg_fail "SELinux host label changed during principal setup"
+  audit_dump
+  reg_result
+fi
+EI="$(ino /etc)"; PI="$(ino /etc/passwd)"
+[ -n "$EI" ] && [ -n "$PI" ] || reg_blocked "post-principal inode inventory missing"
 check_host "principal setup"
 reg_session "$CRED" "$WS" || reg_blocked "session creation failed"
 SID="$REG_SESSION_ID"; export DOCKER_HELPER_SESSION_TOKEN="$REG_SESSION_TOKEN"
