@@ -262,7 +262,7 @@ record_stage "black-box UAT" "$BB_RESULT"
 # ---------------------------------------------------------------------------
 log "== incident: host /etc SELinux xattr integrity (guest-only) =="
 if run_guest_capture "incident /etc integrity probe inside disposable VM" \
-  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_DISPOSABLE_VM=YES bash scripts/uat-regression-selinux-host-etc-integrity.sh"; then
+  "cd /opt/uat && sudo systemctl enable --now docker-helper.service && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_DISPOSABLE_VM=YES bash scripts/uat-regression-selinux-host-etc-integrity.sh"; then
   record_stage "Host /etc integrity" PASS
 else
   record_stage "Host /etc integrity" FAIL
