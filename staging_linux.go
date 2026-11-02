@@ -4,12 +4,32 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
+
+// errBuildContextSymlinkEscape is a pre-Docker security admission refusal.
+// An external link would carry the helper's SELinux xattr into Docker's
+// unrooted fsutil DiskWriter, which follows links when applying xattrs.
+var errBuildContextSymlinkEscape = errors.New("build context symlink escapes the build context")
+
+// symlinkTargetEscapesContext checks link text relative to its containing
+// directory in the CONTEXT, not the host workspace or staging runtime path.
+// All components are built by the no-follow walker, so relPrefix contains
+// only real context directories. Reject absolute targets and any relative
+// spelling which lexically climbs above the context root.
+func symlinkTargetEscapesContext(relPrefix, target string) bool {
+	if filepath.IsAbs(target) || target == "" {
+		return true
+	}
+	resolved := filepath.Clean(filepath.Join(relPrefix, target))
+	return resolved == ".." || strings.HasPrefix(resolved, ".."+string(filepath.Separator))
+}
 
 // buildStagingCeilings holds the fixed Release-2.2 build-staging security
 // ceilings for one staging operation. The values are measured production
@@ -541,6 +561,9 @@ func copyEntry(ctx context.Context, sourceDirFD int, name string, stagingRootFD 
 			return fmt.Errorf("cannot read symlink %s: %w", name, err)
 		}
 		target := unix.ByteSliceToString(buf[:n])
+		if symlinkTargetEscapesContext(relPrefix, target) {
+			return fmt.Errorf("%w: %s", errBuildContextSymlinkEscape, filepath.Join(relPrefix, name))
+		}
 
 		// The symlink target payload is reserved before the destination
 		// symlink is created; the entry itself was already reserved once

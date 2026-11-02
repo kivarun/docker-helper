@@ -96,12 +96,9 @@ func TestStageBuildContextOperationIDUnsafe(t *testing.T) {
 	}
 }
 
-// D1 (v2.2.0-rc.8 UAT) regression: a symlink entry located inside an
-// authorized build context is part of the build-context data. Staging must
-// preserve the symlink itself — its link text and its own metadata — and
-// must never dereference the host-side target: an absolute or relative
-// target outside the build context must not cause the target's contents to
-// be copied into staging; the target string stays symlink metadata.
+// D1 plus the host-integrity corrective: internal relative symlinks remain
+// ordinary staged metadata; absolute or lexically escaping targets are
+// rejected BEFORE Docker can misapply security.selinux via Setxattr.
 func TestStageBuildContextSymlinkEntries(t *testing.T) {
 	// setup creates the case's build-context content and returns the
 	// context-relative path of the symlink entry under test together with
@@ -109,6 +106,7 @@ func TestStageBuildContextSymlinkEntries(t *testing.T) {
 	// symlink-free control context.
 	cases := []struct {
 		name  string
+		wantRejected bool
 		setup func(t *testing.T, workspace, ctxDir string) (linkRel string, wantTarget string)
 	}{
 		{
@@ -147,6 +145,7 @@ func TestStageBuildContextSymlinkEntries(t *testing.T) {
 		},
 		{
 			name: "absolute symlink target outside the build context",
+			wantRejected: true,
 			setup: func(t *testing.T, workspace, ctxDir string) (string, string) {
 				// An existing target outside the authorized workspace (and
 				// therefore outside the build context) with real content,
@@ -167,6 +166,7 @@ func TestStageBuildContextSymlinkEntries(t *testing.T) {
 		},
 		{
 			name: "relative symlink target outside the build context",
+			wantRejected: true,
 			setup: func(t *testing.T, workspace, ctxDir string) (string, string) {
 				// Target outside the build context but inside the
 				// authorized workspace, with real content, so a
@@ -195,6 +195,18 @@ func TestStageBuildContextSymlinkEntries(t *testing.T) {
 			}
 
 			staged, err := StageBuildContext(context.Background(), workspace, abs(t, ctxDir), "Dockerfile", runtimeDir, "op1")
+			if tc.wantRejected {
+				if !errors.Is(err, errBuildContextSymlinkEscape) {
+					t.Fatalf("escaping link must be refused before Docker; got staged=%v err=%v", staged, err)
+				}
+				if staged != nil {
+					t.Fatalf("unsafe context returned staged output: %+v", staged)
+				}
+				if _, err := os.Lstat(filepath.Join(runtimeDir, "builds", "op1")); !os.IsNotExist(err) {
+					t.Fatalf("unsafe stage left operation residue: %v", err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("StageBuildContext: %v", err)
 			}
@@ -240,6 +252,30 @@ func TestStageBuildContextSymlinkEntries(t *testing.T) {
 			}
 			if !info.ModTime().Equal(srcInfo.ModTime()) {
 				t.Errorf("staged symlink mtime %v != source symlink mtime %v: the no-follow metadata operation must apply the source symlink's own timestamps to the staged symlink", info.ModTime(), srcInfo.ModTime())
+			}
+		})
+	}
+}
+
+func TestSymlinkTargetEscapesContext(t *testing.T) {
+	cases := []struct {
+		name, prefix, target string
+		want bool
+	}{
+		{"internal-direct", "", "target.txt", false},
+		{"internal-subdir", "sub", "../target.txt", false},
+		{"internal-nested", "a/b", "../../target.txt", false},
+		{"absolute-dir", "", "/etc", true},
+		{"absolute-file", "a", "/etc/passwd", true},
+		{"escape-root", "", "../outside", true},
+		{"escape-nested", "sub", "../../etc", true},
+		{"escape-deep", "a/b", "../../../etc", true},
+		{"internal-normalized", "a/b", "../c/../d", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := symlinkTargetEscapesContext(tc.prefix, tc.target); got != tc.want {
+				t.Fatalf("prefix=%q target=%q: got %v want %v", tc.prefix, tc.target, got, tc.want)
 			}
 		})
 	}

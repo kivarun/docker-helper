@@ -1,57 +1,16 @@
 #!/usr/bin/env bash
+# D1 SELinux UAT, corrected for 2026-11-02 host-integrity incident:
+# internal relative symlinks are preserved, but escaping symlinks are rejected
+# before Docker/BuildKit, with no host relabel or staging residue.
+# This is a breaking correction of the previous D1 external-symlink contract.
 #
-# uat-regression-d1-build-staging-symlinks.sh — v2.2.0-rc.8 UAT regression
-# group 10: D1 build-context staging preserves symlinks
-# (Tumbleweed / RPM / SELinux).
-#
-# Pre-fix (rc.8), any symlink entry anywhere in the build context broke
-# daemon-side staging before BuildKit started: CLI exit 1, HTTP 500
-# internal_error, no image. The staging walker already preserves the symlink
-# itself and its link text and never dereferences the host-side target; the
-# shipped SELinux module denied two operations of that preserving walk:
-#   * the source-side fstat of a workspace symlink entry (the O_PATH fd
-#     fstat in copyEntry, staging_linux.go) — getattr on
-#     user_home_type:lnk_file for the supported home-workspace UAT setup;
-#   * the staged symlink's own no-follow metadata operation
-#     (utimensat AT_SYMLINK_NOFOLLOW in setTimesFromStat) — setattr on
-#     docker_helper_runtime_t:lnk_file.
-#
-# Post-fix contract proven here against the real packaged system service
-# under enforcing SELinux, for the exact five-case UAT matrix:
-#   1. internal same-directory symlink (link -> target.txt);
-#   2. internal relative symlink across a directory (dir/link -> ../target.txt);
-#   3. absolute symlink target outside the build context;
-#   4. relative symlink target outside the build context but inside the
-#      authorized workspace;
-#   5. symlink-free control.
-# For every case: the build is accepted, staging completes, BuildKit starts
-# (build.start audit event present), the build succeeds and the produced
-# image runs. For every case: NO fresh docker_helper_t AVC denial in the case
-# window (the pre-fix denials were exactly lnk_file getattr/setattr) and no
-# staging residue under the runtime builds directory.
-#
-# The no-dereference invariant is additionally proven through consuming
-# builds of the staged symlink entries:
-#   * case 1: COPYing the internal link into an image and reading its content
-#     through the produced image proves the preserved link text resolves
-#     inside the staged context;
-#   * cases 3-4: COPYing the outside-target link must FAIL as a real Docker
-#     build failure (docker_build_failed) with build.start present — proving
-#     staging completed and BuildKit started (the symlink entry itself was
-#     transferred), while the link stays dangling inside the staged context
-#     because the host-side target contents were never imported.
-#
-# Requires: installed docker-helper system service (active), Docker
-# reachable, enforcing SELinux, root, ausearch or dmesg/journalctl. Exits
-# 0 = PASS, 1 = FAIL, 2 = BLOCKED (see uat-regression-lib.sh).
-
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/uat-regression-lib.sh
 source "$SCRIPT_DIR/uat-regression-lib.sh"
 
-reg_init "10. D1 build staging preserves build-context symlinks"
+reg_init "10. D1 staging allows internal symlinks and refuses escapes"
 
 reg_require_root
 reg_require_service
@@ -172,26 +131,38 @@ run_image_expects() { # IMAGE EXPECT_SUBSTRING LABEL [CONTAINER_PATH]
   fi
 }
 
-# link_copy_build_dangling LABEL CTXDIR IMAGE asserts that COPYing the
-# outside-target link fails as a real Docker build failure (the symlink
-# itself was transferred, its preserved text is dangling inside the staged
-# context, and the host-side target contents were not imported), with
-# build.start present so the failure provably happened inside BuildKit after
-# staging completed.
-link_copy_build_dangling() { # LABEL CTXDIR IMAGE
-  local label="$1" ctx="$2" image="$3" epoch mark
-  epoch="$(date +%s)"
-  mark="$(date '+%Y-%m-%d %H:%M:%S')"
+# Escaping symlinks must never reach BuildKit: the vulnerable Docker fsutil
+# DiskWriter applies source xattrs through setxattr, following the link target.
+build_starts() {
+  journalctl -u docker-helper.service --no-pager 2>/dev/null |
+    grep -c '"event":"build.start"' || true
+}
+expect_escape_rejected() { # LABEL CTXDIR IMAGE
+  local label="$1" ctx="$2" image="$3" before after
+  before="$(build_starts)"
   if dh_build "$ctx" --dockerfile Dockerfile --image "$image"; then
-    reg_fail "$label: the consuming build must fail: importing the host-side target would make COPY succeed"
+    reg_fail "$label: unsafe context unexpectedly built successfully"
+  elif grep -q 'build_context_symlink_escape' /tmp/d1-build.err; then
+    reg_ok "$label: typed pre-Docker symlink escape refusal"
   else
-    if grep -q 'docker_build_failed' /tmp/d1-build.err; then
-      reg_ok "$label: consuming build failed as a real Docker build failure (target not imported; symlink entry itself transferred)"
-    else
-      reg_fail "$label: unexpected failure surface: $(head -2 /tmp/d1-build.err | redact)"
-    fi
+    reg_fail "$label: unexpected error (expected build_context_symlink_escape): $(head -3 /tmp/d1-build.err | redact)"
   fi
-  require_healthy_after_build "$label" "$epoch" "$mark"
+  after="$(build_starts)"
+  if [ "$before" = "$after" ]; then
+    reg_ok "$label: no build.start (Docker/BuildKit never invoked)"
+  else
+    reg_fail "$label: build.start observed for a refused context ($before -> $after)"
+  fi
+  if curl --silent --fail --max-time 2 --unix-socket "$SOCK" http://localhost/health >/dev/null 2>&1; then
+    reg_ok "$label: API remains healthy"
+  else
+    reg_fail "$label: API unhealthy"
+  fi
+  if [ "$(inventory_count "$RUNTIME_DIR/builds")" = "0" ]; then
+    reg_ok "$label: no staging residue"
+  else
+    reg_fail "$label: staging residue"
+  fi
 }
 
 # --- case fixture builder ------------------------------------------------------
@@ -255,57 +226,38 @@ fi
 require_healthy_after_build "case 2" "$EPOCH" "$MARK"
 run_image_expects uat-d1-2:2.2 "d1-payload" "case 2"
 
-# --- case 3: absolute symlink target outside the build context -----------------
+# --- case 3: absolute external symlink, rejected before Docker ------------
 make_case case3
 OUTSIDE_ABS="$WS/outside-abs"
 mkdir -p "$OUTSIDE_ABS"
 printf 'host payload\n' > "$OUTSIDE_ABS/host.txt"
 ln -s "$OUTSIDE_ABS" "$WS/case3/ctx/link"
-# The consuming proof: COPYing the link must fail as a Docker build failure —
-# the preserved absolute link text is dangling inside the staged context
-# because the host-side target contents were never imported.
-mkdir -p "$WS/case3/ctx-linkcopy"
-printf 'd1-payload\n' > "$WS/case3/ctx-linkcopy/payload.txt"
-ln -s "$OUTSIDE_ABS" "$WS/case3/ctx-linkcopy/link"
-printf 'FROM %s\nCOPY payload.txt /payload.txt\nCOPY link /out.txt\n' "$IMAGE_BASE" \
-  > "$WS/case3/ctx-linkcopy/Dockerfile"
 chown -R "$USER:$USER" "$WS/case3" "$OUTSIDE_ABS"
+expect_escape_rejected "case 3 absolute external" case3/ctx uat-d1-3:2.3
 
-EPOCH="$(date +%s)"
-MARK="$(date '+%Y-%m-%d %H:%M:%S')"
-if dh_build case3/ctx --dockerfile Dockerfile --image uat-d1-3:2.2; then
-  reg_ok "case 3: build accepted and succeeded (absolute target outside the context; target not dereferenced)"
-else
-  reg_fail "case 3: build failed: $(head -3 /tmp/d1-build.err | redact)"
-fi
-require_healthy_after_build "case 3" "$EPOCH" "$MARK"
-run_image_expects uat-d1-3:2.2 "d1-payload" "case 3"
-link_copy_build_dangling "case 3 link-copy" case3/ctx-linkcopy uat-d1-3-copy:2.2
-
-# --- case 4: relative symlink target outside the build context (inside the workspace)
+# --- case 4: relative target escapes the context (within workspace) --------
 make_case case4
 printf 'workspace payload\n' > "$WS/outside-file"
 ln -s ../outside-file "$WS/case4/ctx/link"
-# The consuming proof: COPYing the link must fail as a Docker build failure —
-# the preserved relative link text is dangling inside the staged context
-# because the host-side target contents were never imported.
-mkdir -p "$WS/case4/ctx-linkcopy"
-printf 'd1-payload\n' > "$WS/case4/ctx-linkcopy/payload.txt"
-ln -s ../outside-file "$WS/case4/ctx-linkcopy/link"
-printf 'FROM %s\nCOPY payload.txt /payload.txt\nCOPY link /out.txt\n' "$IMAGE_BASE" \
-  > "$WS/case4/ctx-linkcopy/Dockerfile"
 chown -R "$USER:$USER" "$WS/case4" "$WS/outside-file"
+expect_escape_rejected "case 4 relative external" case4/ctx uat-d1-4:2.3
 
-EPOCH="$(date +%s)"
-MARK="$(date '+%Y-%m-%d %H:%M:%S')"
-if dh_build case4/ctx --dockerfile Dockerfile --image uat-d1-4:2.2; then
-  reg_ok "case 4: build accepted and succeeded (relative target outside the context; target not dereferenced)"
+# --- case 4b: direct host /etc and /etc/passwd targets, label integrity ----
+ETC_BEFORE="$(stat -c '%d:%i %C' /etc)"
+PASSWD_BEFORE="$(stat -c '%d:%i %C' /etc/passwd)"
+make_case case4-etc
+ln -s /etc "$WS/case4-etc/ctx/link"
+make_case case4-passwd
+ln -s /etc/passwd "$WS/case4-passwd/ctx/link"
+chown -R "$USER:$USER" "$WS/case4-etc" "$WS/case4-passwd"
+expect_escape_rejected "host etc" case4-etc/ctx uat-d1-etc:2.3
+expect_escape_rejected "host passwd" case4-passwd/ctx uat-d1-passwd:2.3
+if [ "$(stat -c '%d:%i %C' /etc)" = "$ETC_BEFORE" ] &&
+   [ "$(stat -c '%d:%i %C' /etc/passwd)" = "$PASSWD_BEFORE" ]; then
+  reg_ok "host /etc and passwd inode+SELinux contexts unchanged"
 else
-  reg_fail "case 4: build failed: $(head -3 /tmp/d1-build.err | redact)"
+  reg_fail "host /etc or passwd inode/SELinux context was mutated"
 fi
-require_healthy_after_build "case 4" "$EPOCH" "$MARK"
-run_image_expects uat-d1-4:2.2 "d1-payload" "case 4"
-link_copy_build_dangling "case 4 link-copy" case4/ctx-linkcopy uat-d1-4-copy:2.2
 
 # --- case 5: symlink-free control ----------------------------------------------
 make_case case5
