@@ -32,6 +32,7 @@ ok()  { PASS=$((PASS+1)); printf 'ok   - %s\n' "$1"; }
 bad() { FAIL=$((FAIL+1)); printf 'FAIL - %s\n' "$1"; }
 check() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (want '$2' got '$3')"; fi; }
 contains() { case "$3" in *"$2"*) ok "$1" ;; *) bad "$1 (missing '$2')" ;; esac; }
+not_contains() { case "$3" in *"$2"*) bad "$1 (unexpected '$2')" ;; *) ok "$1" ;; esac; }
 
 # --- fake repo tree ----------------------------------------------------------
 REPO="$WORK/repo/scripts"
@@ -162,6 +163,9 @@ echo "qemu-img stub: unsupported call \$*" >&2
 exit 2
 SH
 chmod +x "$WORK/qemu-img"
+
+export LAB_HELPER_SHA256="$(printf 'a%.0s' {1..64})"
+export LAB_HELPER_COMMIT="$(printf 'b%.0s' {1..40})"
 
 run_driver() { # stage...
   PATH="$WORK:$PATH" bash "$REPO/lab/provision-lab-vm.sh" "$@" >"$WORK/out" 2>&1
@@ -462,18 +466,45 @@ STOP_FAIL=stop-unknown FAIL_ON=docker r2_run
 if [ "$RC" != 0 ]; then ok "R2: an unknown post-stop state is a failure"; else bad "R2: an unknown state looked successful"; fi
 contains "R2: an unknown state produces CRITICAL" "CRITICAL" "$OUT"
 
-# R2.6 SIGINT during the online start -> the window is closed
+# R2.6 SIGINT during the online start -> the window is closed.
+# Non-interactive Bash otherwise launches background jobs with SIGINT ignored.
+# Use job control to give the test its own process group, signal the whole
+# group (including the blocked FIFO reader), and bound the wait. Never write
+# to the FIFO after signalling: there may no longer be a reader.
 mkfifo "$WORK/ctrl.fifo" 2>/dev/null || true
 echo stopped > "$STATE"; : > "$REC"; rm -f "$SNAPMARK"
+set -m
 ( FAIL_ON=start-open PATH="$WORK:$PATH" bash "$REPO/lab/provision-lab-vm.sh" online ) >"$WORK/out" 2>&1 &
 r2_sig_pid=$!
 for _ in $(seq 1 50); do [ -e "$WORK/start.marker" ] && break; sleep 0.1; done
-kill -INT "$r2_sig_pid" 2>/dev/null || true
-printf '\n' > "$WORK/ctrl.fifo"
+r2_sig_pgid="$(ps -o pgid= -p "$r2_sig_pid" 2>/dev/null | tr -d '[:space:]')"
+if [ "$r2_sig_pgid" = "$r2_sig_pid" ]; then
+  kill -INT -- "-$r2_sig_pid" 2>/dev/null || true
+else
+  bad "R2: SIGINT test process group not isolated (pid=$r2_sig_pid pgid=$r2_sig_pgid)"
+  kill -TERM "$r2_sig_pid" 2>/dev/null || true
+fi
+r2_sig_timed_out=0
+for _ in $(seq 1 50); do
+  kill -0 "$r2_sig_pid" 2>/dev/null || break
+  sleep 0.1
+done
+if kill -0 "$r2_sig_pid" 2>/dev/null; then
+  r2_sig_timed_out=1
+  [ "$r2_sig_pgid" = "$r2_sig_pid" ] && kill -TERM -- "-$r2_sig_pid" 2>/dev/null || true
+  kill -TERM "$r2_sig_pid" 2>/dev/null || true
+fi
 wait "$r2_sig_pid" 2>/dev/null
 r2_sig_rc=$?
+set +m
 rm -f "$WORK/ctrl.fifo" "$WORK/start.marker"
-if [ "$r2_sig_rc" != 0 ]; then ok "R2: an interrupted start is a failure"; else bad "R2: an interrupted start looked successful"; fi
+if [ "$r2_sig_timed_out" = 1 ]; then
+  bad "R2: SIGINT teardown timed out"
+elif [ "$r2_sig_rc" = 130 ]; then
+  ok "R2: interrupted start exited on SIGINT (130)"
+else
+  bad "R2: interrupted start had wrong exit code $r2_sig_rc (expected 130)"
+fi
 stop_line="$(printf '%s' "$(cat "$REC")" | grep -n '^stop$' | head -1 | cut -d: -f1)"
 if [ -n "$stop_line" ]; then ok "R2: the interrupted start closed the window"; else bad "R2: the interrupted start left the window open"; fi
 
