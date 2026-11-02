@@ -1,0 +1,24 @@
+name: Security incident - SELinux /etc integrity (disposable VM)
+
+on:
+  pull_request:
+    branches: [release/2.3]
+    paths:
+      - 'scripts/uat-regression-selinux-host-etc-integrity.sh'
+      - 'scripts/uat-selinux-etc-fanotify.py'
+      - 'scripts/uat-vm-opensuse-selinux.sh'
+      - '.github/workflows/uat-security-etc-vm.yml'
+
+permissions:
+  contents: read
+
+# The workflow exists only on the security investigation branch; it never
+# deploys, publishes, or releases. The canonical candidate gate builds from
+# the PR source and runs only the openSUSE SELinux QEMU VM consumer.
+jobs:
+  etc-integrity-vm:
+    if: github.head_ref == 'security/selinux-etc-relabel-repro-20261102'
+    uses: ./.github/workflows/artifact-gate.yml
+    with:
+      scope: selinux
+      uat_version: '2.3.1-uat'
