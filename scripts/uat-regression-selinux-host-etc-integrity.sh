@@ -163,6 +163,31 @@ done
 [ "$PROVEN" = 1 ] || reg_blocked "audit positive control missing: file, dir, alias"
 audit_health
 reg_ok "raw audit receiver proved on file, directory, hardlink"
+
+# PROOF SEAM: never,task was loaded when dockerd/docker-helper were spawned.
+# Removing that rule may not re-enable audit for EXISTING task contexts or
+# their descendants. Recreate both service process trees only in disposable VM
+# AFTER removing never,task and arming the syscall rule. Compare the PIDs.
+OLD_DOCKER="$(systemctl show -p MainPID --value docker.service)"
+OLD_HELPER="$(systemctl show -p MainPID --value docker-helper.service)"
+systemctl restart docker.service || reg_blocked "cannot restart Docker after audit admission"
+systemctl restart docker-helper.service || reg_blocked "cannot restart docker-helper after audit admission"
+NEW_DOCKER="$(systemctl show -p MainPID --value docker.service)"
+NEW_HELPER="$(systemctl show -p MainPID --value docker-helper.service)"
+reg_info "audit-seam: dockerd PID $OLD_DOCKER -> $NEW_DOCKER; docker-helper PID $OLD_HELPER -> $NEW_HELPER"
+[ -n "$NEW_DOCKER" ] && [ -n "$NEW_HELPER" ] &&
+[ "$NEW_DOCKER" != 0 ] && [ "$NEW_HELPER" != 0 ] &&
+[ "$NEW_DOCKER" != "$OLD_DOCKER" ] && [ "$NEW_HELPER" != "$OLD_HELPER" ] ||
+  reg_blocked "post-audit service process-tree replacement not proven"
+systemctl is-active --quiet docker-helper.service ||
+  reg_blocked "docker-helper service not active after audit-seam restart"
+DOCKER_READY=0
+for _ in $(seq 1 20); do
+  if docker info >/dev/null 2>&1; then DOCKER_READY=1; break; fi
+  sleep 0.25
+done
+[ "$DOCKER_READY" = 1 ] || reg_blocked "Docker not healthy after audit-seam restart"
+check_host "after audit-seam service restarts"
 reg_session "$CRED" "$WS" || reg_blocked "session creation failed"
 SID="$REG_SESSION_ID"; export DOCKER_HELPER_SESSION_TOKEN="$REG_SESSION_TOKEN"
 check_host "session create"
