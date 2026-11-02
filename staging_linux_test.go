@@ -143,9 +143,9 @@ func TestStageBuildContextSymlinkEntries(t *testing.T) {
 			},
 		},
 		{
-			name: "absolute symlink target outside the build context",
+			name:   "absolute symlink target outside the build context",
 			reject: true,
-			setup: func(t *testing.T, workspace, ctxDir string) (string, string) {
+			setup:  func(t *testing.T, workspace, ctxDir string) (string, string) {
 				// An existing target outside the authorized workspace (and
 				// therefore outside the build context) with real content,
 				// so a dereferencing implementation would import it.
@@ -164,9 +164,9 @@ func TestStageBuildContextSymlinkEntries(t *testing.T) {
 			},
 		},
 		{
-			name: "relative symlink target outside the build context",
+			name:   "relative symlink target outside the build context",
 			reject: true,
-			setup: func(t *testing.T, workspace, ctxDir string) (string, string) {
+			setup:  func(t *testing.T, workspace, ctxDir string) (string, string) {
 				// Target outside the build context but inside the
 				// authorized workspace, with real content, so a
 				// dereferencing implementation would import it.
@@ -254,7 +254,10 @@ func TestStageBuildContextSymlinkEntries(t *testing.T) {
 }
 
 func TestSymlinkTargetWithinStagedContext(t *testing.T) {
-	cases := []struct { dir, target string; want bool }{
+	cases := []struct {
+		dir, target string
+		want        bool
+	}{
 		{"", "payload", true},
 		{"sub", "../payload", true},
 		{"deep/nested", "../../payload", true},
