@@ -1,0 +1,32 @@
+name: Security incident - audit-only SELinux VM smoke
+
+on:
+  pull_request:
+    branches: [release/2.3]
+    paths:
+      - 'scripts/uat-selinux-audit-smoke-guest.sh'
+      - 'scripts/uat-vm-selinux-audit-smoke.sh'
+      - '.github/workflows/uat-security-audit-smoke.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-smoke-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  audit-only:
+    if: github.head_ref == 'security/selinux-audit-smoke-20261102'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Install disposable VM tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage
+      - name: Verify Linux audit syscall/attribution (NO RPM)
+        run: bash scripts/uat-vm-selinux-audit-smoke.sh
