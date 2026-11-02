@@ -88,6 +88,7 @@ module docker_helper 1.2;
 		type container_file_t;
 		type cgroup_t;
 		type proc_t;
+		type devpts_t;
 		type sysctl_net_t;
 		type sysctl_fs_t;
 		type sysctl_t;
@@ -1854,7 +1855,8 @@ allow docker_helper_buildkitd_t proc_t:filesystem mount;
 #
 # Deliberately NOT granted: remount/unmount/getattr/associate/mounton/
 # relabelfrom/relabelto on tmpfs_t:filesystem, any other filesystem target
-# type, any dir:mounton addition (the tmpfs_t:dir create and mounton rungs
+# type (devpts_t gained its own separately-evidenced R7 P19 rung below),
+# any dir:mounton addition (the tmpfs_t:dir create and mounton rungs
 # are their own separately-evidenced R7 P17/P18 grants below), any tmpfs_t
 # file/dir class surface, any capability change, any other subject. The
 # committed-policy tests pin the buildkitd domain's tmpfs_t:filesystem
@@ -2033,7 +2035,8 @@ allow docker_helper_buildkitd_t tmpfs_t:dir create;
 #
 # Deliberately NOT granted: devpts_t (any class — the recorded next
 # terminal, the devpts_t:filesystem mount of the same syscall's get_tree
-# stage), mqueue_t or sysfs authority, any other filesystem-class target,
+# stage, is its own separately-evidenced R7 P19 rung below), mqueue_t or
+# sysfs authority, any other filesystem-class target,
 # any other dir permission on tmpfs_t, the merged { create mounton } form,
 # any file/lnk_file/chr_file surface, any capability change, any other
 # subject. The committed-policy tests pin the buildkitd domain's
@@ -2041,6 +2044,89 @@ allow docker_helper_buildkitd_t tmpfs_t:dir create;
 # create rung and this P18 mounton rung); the named-allow count moves
 # 46 -> 47 by exactly this one rule.
 allow docker_helper_buildkitd_t tmpfs_t:dir mounton;
+
+# The buildkitd container-init devpts superblock mount (R7 P19): with the
+# P18 tmpfs_t:dir mounton rung granted, the container init's devpts mount
+# passed the sb_mount gate, the whole monolithic option set parsed, and
+# mount_capable passed — the devpts get_tree stage created the private
+# superblock and died at the NEXT SELinux hook: security_sb_kern_mount.
+# The P18 authoritative run (41350838064) proved the fatal terminal from
+# BOTH sides: the build's own stderr ("error mounting \"devpts\" to rootfs
+# at \"/dev/pts\": mount src=devpts, dst=/dev/pts,
+# dstFd=/proc/thread-self/fd/10, flags=MS_NOSUID|MS_NOEXEC,
+# data=newinstance,ptmxmode=0666,mode=0620,gid=5: permission denied") and
+# the audited kernel decision `tclass=filesystem denied { mount }
+# tcontext=devpts_t:s0` from comm="runc:[2:INIT]" (serials 1355/10445).
+# The syscall and options are IDENTICAL to the P18 rung's (the same
+# mount(2); only the failing hook moved down the chain).
+#
+# KERNEL CHECK CHAIN (v7.3): path_mount -> security_sb_mount dir:mounton
+# on the target — PASSED (P18), may_mount() — passed, do_new_mount: devpts
+# declares FS_USERNS_MOUNT only (no FS_USERNS_VISIBLE — the kernel's
+# mount-too-revealing gate does not apply), the data parses (gid=5 valid
+# through fs_param_is_gid in the flow user namespace's full subid range
+# "0 473 1" + "1 165536 65536"), mount_capable passes, then
+# do_new_mount_fc: fc_mount -> devpts_get_tree -> get_tree_nodev
+# (devpts_fill_super: the private per-mount instance, its root inode, and
+# the KERNEL-INTERNAL ptmx node via mknod_ptmx — created by the kernel
+# during fill_super, not by the process) -> security_sb_kern_mount ->
+# superblock_has_perm(FILESYSTEM__MOUNT) — avc_has_perm(buildkitd_t,
+# devpts_t, filesystem, mount) — THE GRANT BELOW. The target sid is the
+# genfscon label of the devpts superblock (devpts_t; the distro policy's
+# genfscon rule; selinux_set_mnt_opts keeps devpts on its user-namespace
+# label whitelist alongside tmpfs/ramfs/overlay, so the sb keeps the
+# genfscon sid). FILESYSTEM__MOUNT on this path means exactly ONE thing:
+# the subject may mount a NEW superblock of this filesystem type; it is
+# NOT an inode, dir, or capability authority and grants nothing about PTY
+# allocation (devpts_pty_new happens only on open("/dev/ptmx"), a
+# separate future surface).
+#
+# ISOLATION BOUNDARY (measured, never assumed):
+#   - INSTANCE ISOLATION IS THE FILESYSTEM'S OWN ARCHITECTURE: every
+#     devpts mount is a NEW private superblock (get_tree_nodev) — PTY
+#     indices live in the instance's own ida, PTY objects bind to their
+#     instance (devpts_mntget's same-instance check), and no path from
+#     one operation's mount namespace reaches another operation's
+#     devpts. The mount stays inside the container's private mount
+#     namespace (no propagation flags on the /dev/pts entry, P14's
+#     MS_REC|MS_SLAVE slave tree) — invisible to the host and to other
+#     operations; the cross-op setns denial stays measured;
+#   - the gid=5 mapping is the flow user namespace's own (full subid
+#     range); the mount options are runc's production defaults, unchanged;
+#   - MCS/DAC/capability boundaries unchanged: the check is subject
+#     buildkitd_t:s0:cX -> devpts_t:s0 (no categories on either side; the
+#     filesystem class carries no MCS constraint that this grant could
+#     interact with); may_mount (CAP_SYS_ADMIN in the owning userns) and
+#     the venue model remain the kernel's own gate for every future
+#     mount(2) on this type;
+#   - RESOURCE CONTRACT: the grant does not allocate PTYs. The per-mount
+#     instance costs only the root inode and the kernel-internal ptmx
+#     node (two static inodes per container, destroyed with the
+#     container's mount namespace). PTY creation (open /dev/ptmx ->
+#     devpts_pty_new) is a separate future surface bounded by the GLOBAL
+#     sysctls (kernel.pty.max / kernel.pty.reserve: container mounts run
+#     with reserve=false, so the global pty_count ceiling for
+#     container-created instances is pty_limit minus pty_reserve) and the
+#     per-instance `max` option cap (unspecified by runc -> the kernel
+#     default NR_UNIX98_PTY_MAX); the whole flow lives inside the
+#     docker-helper-builder.service cgroup subtree as established;
+#   - PRECEDENT (the SAME class+permission, already accepted): the
+#     rootlesskit parent carries the 4C-45 tmpfs_t:filesystem mount
+#     singleton, and the buildkitd container init already carries the
+#     P15 proc_t and P16 tmpfs_t filesystem mount singletons — the
+#     pseudofilesystem per-type mount shape, now for the third and last
+#     default-table pseudofilesystem of the container /dev setup.
+#
+# Deliberately NOT granted: any other devpts_t class (dir/file/chr_file —
+# the ptmx node and PTY inodes are devpts_t objects; open/PTY allocation
+# is a separate future surface), remount/unmount/getattr/associate/
+# mounton/relabelfrom/relabelto on devpts_t:filesystem, mqueue_t or
+# sysfs authority (the NEXT terminal, the /dev/mqueue mount, is a
+# separate future rung), any capability change, any other subject. The
+# committed-policy tests pin the buildkitd devpts_t authority at EXACTLY
+# this one rule; the named-allow count moves 47 -> 48 by exactly this
+# one rule.
+allow docker_helper_buildkitd_t devpts_t:filesystem mount;
 
 # The copy-up /tmp directory write (P5-S2 Phase 4C-40) and the mkdir
 # name mediation of the same mkdir(2) (P5-S2 Phase 4C-41): the child's

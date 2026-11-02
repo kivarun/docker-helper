@@ -514,8 +514,8 @@ func s15LauncherCgroupViolations(policy string) []string {
 			violations = append(violations, fmt.Sprintf("the standing cgroup owner drifted (must stay exactly its bare { search } dir singleton): %s", want))
 		}
 	}
-	if buildkitdNamedAllow != 47 {
-		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 47 (the S15 phase had exactly 9; R7 added the manager child-lifecycle rule, the per-op endpoint peer edge, the rootlesskit parent's buildkitd child-authority rule the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr, the unprivileged-mount-flags statfs getattr, the OCI-worker process-group setup rule, the cgroup2 root traversal singleton, the cgroup2 statfs detection filesystem getattr singleton, the runtime-tree exec.fifo fifo_file { create setattr } singleton (widened in place by the setattr rung), the P1 runc-memfd file write corrective (docker_helper_runc_memfd_t:file write), the P2 runc-memfd file setattr corrective (docker_helper_runc_memfd_t:file setattr) and the P3 runc-memfd file execute corrective (docker_helper_runc_memfd_t:file execute) and the P4 runc-memfd atomic { read open } corrective and the P5 runc-memfd execute_no_trans corrective and the P6 runc-memfd map corrective (docker_helper_runc_memfd_t:file map) and the P7 buildkitd cgroup_t:file read singleton (docker_helper_buildkitd_t cgroup_t:file read) and the P8 buildkitd cgroup_t:file open singleton (docker_helper_buildkitd_t cgroup_t:file open) and the P9 buildkitd nsfs_t:file read singleton (docker_helper_buildkitd_t nsfs_t:file read) and the P10 buildkitd nsfs_t:file open singleton (docker_helper_buildkitd_t nsfs_t:file open), the P11 buildkitd self:cap_userns sys_chroot singleton (docker_helper_buildkitd_t self:cap_userns sys_chroot), and the P12 buildkitd self:key view singleton (docker_helper_buildkitd_t self:key view), the P13 buildkitd self:key setattr singleton (docker_helper_buildkitd_t self:key setattr), and the P14 buildkitd root_t:dir mounton singleton (docker_helper_buildkitd_t root_t:dir mounton), and the P15 buildkitd proc_t:filesystem mount singleton (docker_helper_buildkitd_t proc_t:filesystem mount), and the P16 buildkitd tmpfs_t:filesystem mount singleton (docker_helper_buildkitd_t tmpfs_t:filesystem mount), and the P17 buildkitd tmpfs_t:dir create singleton (docker_helper_buildkitd_t tmpfs_t:dir create), and the P18 buildkitd tmpfs_t:dir mounton singleton (docker_helper_buildkitd_t tmpfs_t:dir mounton); a NON-buildkitd S15 rule never trips it), found %d", buildkitdNamedAllow))
+	if buildkitdNamedAllow != 48 {
+		violations = append(violations, fmt.Sprintf("the buildkitd-named allow count must stay exactly 48 (the S15 phase had exactly 9; R7 added the manager child-lifecycle rule, the per-op endpoint peer edge, the rootlesskit parent's buildkitd child-authority rule the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr, the unprivileged-mount-flags statfs getattr, the OCI-worker process-group setup rule, the cgroup2 root traversal singleton, the cgroup2 statfs detection filesystem getattr singleton, the runtime-tree exec.fifo fifo_file { create setattr } singleton (widened in place by the setattr rung), the P1 runc-memfd file write corrective (docker_helper_runc_memfd_t:file write), the P2 runc-memfd file setattr corrective (docker_helper_runc_memfd_t:file setattr) and the P3 runc-memfd file execute corrective (docker_helper_runc_memfd_t:file execute) and the P4 runc-memfd atomic { read open } corrective and the P5 runc-memfd execute_no_trans corrective and the P6 runc-memfd map corrective (docker_helper_runc_memfd_t:file map) and the P7 buildkitd cgroup_t:file read singleton (docker_helper_buildkitd_t cgroup_t:file read) and the P8 buildkitd cgroup_t:file open singleton (docker_helper_buildkitd_t cgroup_t:file open) and the P9 buildkitd nsfs_t:file read singleton (docker_helper_buildkitd_t nsfs_t:file read) and the P10 buildkitd nsfs_t:file open singleton (docker_helper_buildkitd_t nsfs_t:file open), the P11 buildkitd self:cap_userns sys_chroot singleton (docker_helper_buildkitd_t self:cap_userns sys_chroot), and the P12 buildkitd self:key view singleton (docker_helper_buildkitd_t self:key view), the P13 buildkitd self:key setattr singleton (docker_helper_buildkitd_t self:key setattr), and the P14 buildkitd root_t:dir mounton singleton (docker_helper_buildkitd_t root_t:dir mounton), and the P15 buildkitd proc_t:filesystem mount singleton (docker_helper_buildkitd_t proc_t:filesystem mount), and the P16 buildkitd tmpfs_t:filesystem mount singleton (docker_helper_buildkitd_t tmpfs_t:filesystem mount), and the P17 buildkitd tmpfs_t:dir create singleton (docker_helper_buildkitd_t tmpfs_t:dir create), and the P18 buildkitd tmpfs_t:dir mounton singleton (docker_helper_buildkitd_t tmpfs_t:dir mounton), and the P19 buildkitd devpts_t:filesystem mount singleton (docker_helper_buildkitd_t devpts_t:filesystem mount); a NON-buildkitd S15 rule never trips it), found %d", buildkitdNamedAllow))
 	}
 	return violations
 }
@@ -834,6 +834,13 @@ const testSELinuxPolicyBuildkitdTmpfsDirCreateSingleton = "allow docker_helper_b
 // on the freshly created /dev/pts mountpoint dir (tmpfs_t:s0) inside the
 // container's own /dev tmpfs.
 const testSELinuxPolicyBuildkitdTmpfsDirMountonSingleton = "allow docker_helper_buildkitd_t tmpfs_t:dir mounton;"
+
+// testSELinuxPolicyBuildkitdDevptsMountSingleton is the exact R7 P19
+// canonical rule: the buildkitd container-init devpts superblock mount's
+// FILESYSTEM__MOUNT check (security_sb_kern_mount on the genfscon-labeled
+// devpts_t superblock) of the same /dev/pts devpts mount(2) the P18 rung
+// unblocked at the sb_mount stage.
+const testSELinuxPolicyBuildkitdDevptsMountSingleton = "allow docker_helper_buildkitd_t devpts_t:filesystem mount;"
 
 // TestSELinuxPolicyBuildkitdRootMountonAuthority pins the R7 P14
 // root_t:dir mounton singleton: the buildkitd container init's runc
@@ -1179,10 +1186,10 @@ func TestSELinuxPolicyBuildkitdTmpfsDirCreateAuthority(t *testing.T) {
 // naming the identical mount. The pin is EXACT: one bare-mounton dir
 // singleton SEPARATE from the P17 create singleton (the merged
 // { create mounton } form is forbidden), no other dir permission, no
-// devpts_t/mqueue_t surface (the recorded next terminal — the
-// devpts_t:filesystem mount of the same syscall's get_tree stage —
-// stays ungranted), no file/lnk_file/chr_file riders, no other subject.
-// Mutations prove the carve-out is narrow.
+// devpts_t/mqueue_t surface beyond the separately-evidenced R7 P19
+// devpts_t:filesystem mount singleton (the devpts get_tree mount of the
+// same syscall is its own rung), no file/lnk_file/chr_file riders, no
+// other subject. Mutations prove the carve-out is narrow.
 func TestSELinuxPolicyBuildkitdTmpfsDirMountonAuthority(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
 	const (
@@ -1223,7 +1230,10 @@ func TestSELinuxPolicyBuildkitdTmpfsDirMountonAuthority(t *testing.T) {
 				continue
 			}
 			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && (strings.HasPrefix(fields[2], "devpts_t:") || strings.HasPrefix(fields[2], "mqueue_t:")) {
-				out = append(out, "the devpts_t/mqueue_t surfaces stay closed for the container-init rung (the devpts_t:filesystem mount of the same devpts syscall is the recorded NEXT terminal, deliberately NOT granted by this rung): "+trimmed)
+				if trimmed != testSELinuxPolicyBuildkitdDevptsMountSingleton {
+					out = append(out, "the devpts_t/mqueue_t surfaces stay closed for the container-init rung beyond the exact R7 P19 devpts_t:filesystem mount singleton (the devpts get_tree mount of the same devpts syscall is its own separately-evidenced rung; any other devpts or mqueue class/permission violates): "+trimmed)
+					continue
+				}
 				continue
 			}
 		}
@@ -1245,16 +1255,17 @@ func TestSELinuxPolicyBuildkitdTmpfsDirMountonAuthority(t *testing.T) {
 		t.Errorf("the committed policy violates the tmpfs_t:dir mounton authority invariants: %v", v)
 	}
 	for name, mutated := range map[string]string{
-		"widened dir permission set":    strings.Replace(policy, canonical, "allow docker_helper_buildkitd_t tmpfs_t:dir { mounton setattr };", 1),
-		"setattr rider":                 strings.Replace(policy, canonical, canonical+"\nallow docker_helper_buildkitd_t tmpfs_t:dir setattr;", 1),
-		"add_name rider":                strings.Replace(policy, canonical, canonical+"\nallow docker_helper_buildkitd_t tmpfs_t:dir add_name;", 1),
-		"merged create+mounton rule":    strings.Replace(policy, canonical, "allow docker_helper_buildkitd_t tmpfs_t:dir { create mounton };", 1),
-		"devpts filesystem mount rider": strings.Replace(policy, canonical, canonical+"\nallow docker_helper_buildkitd_t devpts_t:filesystem mount;", 1),
-		"mqueue filesystem mount rider": strings.Replace(policy, canonical, canonical+"\nallow docker_helper_buildkitd_t mqueue_t:filesystem mount;", 1),
-		"chr_file create rider":         strings.Replace(policy, canonical, canonical+"\nallow docker_helper_buildkitd_t tmpfs_t:chr_file create;", 1),
-		"second mounton rule":           strings.Replace(policy, canonical, canonical+"\n"+canonical, 1),
-		"foreign subject mounton":       strings.Replace(policy, canonical, canonical+"\nallow docker_helper_t tmpfs_t:dir mounton;", 1),
-		"removed singleton":             strings.Replace(policy, canonical+"\n", "", 1),
+		"widened dir permission set":      strings.Replace(policy, canonical, "allow docker_helper_buildkitd_t tmpfs_t:dir { mounton setattr };", 1),
+		"setattr rider":                   strings.Replace(policy, canonical, canonical+"\nallow docker_helper_buildkitd_t tmpfs_t:dir setattr;", 1),
+		"add_name rider":                  strings.Replace(policy, canonical, canonical+"\nallow docker_helper_buildkitd_t tmpfs_t:dir add_name;", 1),
+		"merged create+mounton rule":      strings.Replace(policy, canonical, "allow docker_helper_buildkitd_t tmpfs_t:dir { create mounton };", 1),
+		"devpts filesystem remount rider": strings.Replace(policy, canonical, canonical+"\nallow docker_helper_buildkitd_t devpts_t:filesystem remount;", 1),
+		"devpts dir search rider":         strings.Replace(policy, canonical, canonical+"\nallow docker_helper_buildkitd_t devpts_t:dir search;", 1),
+		"mqueue filesystem mount rider":   strings.Replace(policy, canonical, canonical+"\nallow docker_helper_buildkitd_t mqueue_t:filesystem mount;", 1),
+		"chr_file create rider":           strings.Replace(policy, canonical, canonical+"\nallow docker_helper_buildkitd_t tmpfs_t:chr_file create;", 1),
+		"second mounton rule":             strings.Replace(policy, canonical, canonical+"\n"+canonical, 1),
+		"foreign subject mounton":         strings.Replace(policy, canonical, canonical+"\nallow docker_helper_t tmpfs_t:dir mounton;", 1),
+		"removed singleton":               strings.Replace(policy, canonical+"\n", "", 1),
 	} {
 		if v := violations(mutated); len(v) == 0 {
 			t.Errorf("mutation %q must trip the tmpfs_t:dir mounton authority check", name)
@@ -1262,16 +1273,100 @@ func TestSELinuxPolicyBuildkitdTmpfsDirMountonAuthority(t *testing.T) {
 	}
 }
 
+// TestSELinuxPolicyBuildkitdDevptsMountAuthority pins the R7 P19
+// devpts_t:filesystem mount singleton: the buildkitd container-init
+// devpts mount(2)'s security_sb_kern_mount FILESYSTEM__MOUNT check on the
+// genfscon-labeled devpts_t superblock, whose fatal denial the P18
+// authoritative run audited (tclass=filesystem, permission mount,
+// tcontext=devpts_t:s0, comm runc:[2:INIT], serials 1355/10445) with the
+// build's own stderr naming the identical mount. The pin is EXACT: one
+// bare-mount filesystem singleton, no remount/unmount/getattr/associate/
+// mounton, no other devpts_t class (the ptmx node and PTY inodes are
+// devpts_t objects — open/PTY allocation is a separate future surface),
+// no mqueue_t/sysfs surface, no capability change, no second rule, no
+// other subject. Mutations prove the carve-out is narrow.
+func TestSELinuxPolicyBuildkitdDevptsMountAuthority(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	const (
+		canonical            = testSELinuxPolicyBuildkitdDevptsMountSingleton
+		standingTmpfsMount   = testSELinuxPolicyBuildkitdTmpfsMountSingleton
+		standingTmpfsCreate  = testSELinuxPolicyBuildkitdTmpfsDirCreateSingleton
+		standingTmpfsMounton = testSELinuxPolicyBuildkitdTmpfsDirMountonSingleton
+	)
+	violations := func(text string) []string {
+		var out []string
+		count := 0
+		for _, line := range strings.Split(text, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") || !strings.HasPrefix(trimmed, "allow ") {
+				continue
+			}
+			fields := strings.Fields(trimmed)
+			if len(fields) < 4 {
+				continue
+			}
+			if fields[2] == "devpts_t:filesystem" {
+				if trimmed != canonical {
+					out = append(out, "the module's devpts_t:filesystem rules must be exactly the one evidenced bare-mount singleton (the P19 container-init devpts rung — no merged, widened, rider, or foreign-subject forms): "+trimmed)
+				}
+				count++
+				continue
+			}
+			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && strings.HasPrefix(fields[2], "devpts_t:") {
+				out = append(out, "the buildkitd devpts_t surface outside the filesystem class stays closed (the ptmx node and PTY inodes are devpts_t objects; open/PTY allocation and any dir/file/chr_file authority are separate future rungs, never riders of the mount grant): "+trimmed)
+				continue
+			}
+			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && strings.HasPrefix(fields[2], "mqueue_t:") {
+				out = append(out, "the mqueue_t surface stays closed for the container-init rung (the /dev/mqueue mount is the recorded NEXT terminal, deliberately NOT granted by this rung): "+trimmed)
+				continue
+			}
+			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && strings.HasPrefix(fields[2], "tmpfs_t:") {
+				if trimmed != standingTmpfsMount && trimmed != standingTmpfsCreate && trimmed != standingTmpfsMounton {
+					out = append(out, "the standing tmpfs_t surface drifted beyond the P16/P17/P18 singletons: "+trimmed)
+				}
+				continue
+			}
+		}
+		if count != 1 {
+			out = append(out, fmt.Sprintf("the module must carry exactly one buildkitd devpts_t:filesystem allow rule (the P19 singleton), found %d", count))
+		}
+		if !strings.Contains(text, canonical) {
+			out = append(out, "the committed policy must contain the exact P19 buildkitd devpts_t:filesystem mount singleton")
+		}
+		return out
+	}
+	if v := violations(policy); len(v) > 0 {
+		t.Errorf("the committed policy violates the devpts_t:filesystem authority invariants: %v", v)
+	}
+	for name, mutated := range map[string]string{
+		"widened filesystem permission set": strings.Replace(policy, canonical, "allow docker_helper_buildkitd_t devpts_t:filesystem { mount remount };", 1),
+		"remount rider":                     strings.Replace(policy, canonical, canonical+"\nallow docker_helper_buildkitd_t devpts_t:filesystem remount;", 1),
+		"unmount rider":                     strings.Replace(policy, canonical, canonical+"\nallow docker_helper_buildkitd_t devpts_t:filesystem unmount;", 1),
+		"getattr rider":                     strings.Replace(policy, canonical, canonical+"\nallow docker_helper_buildkitd_t devpts_t:filesystem getattr;", 1),
+		"second mount rule":                 strings.Replace(policy, canonical, canonical+"\n"+canonical, 1),
+		"devpts dir search rider":           strings.Replace(policy, canonical, canonical+"\nallow docker_helper_buildkitd_t devpts_t:dir search;", 1),
+		"devpts chr_file open rider":        strings.Replace(policy, canonical, canonical+"\nallow docker_helper_buildkitd_t devpts_t:chr_file open;", 1),
+		"mqueue filesystem mount rider":     strings.Replace(policy, canonical, canonical+"\nallow docker_helper_buildkitd_t mqueue_t:filesystem mount;", 1),
+		"foreign subject mount":             strings.Replace(policy, canonical, canonical+"\nallow docker_helper_t devpts_t:filesystem mount;", 1),
+		"removed singleton":                 strings.Replace(policy, canonical+"\n", "", 1),
+	} {
+		if v := violations(mutated); len(v) == 0 {
+			t.Errorf("mutation %q must trip the devpts_t:filesystem authority check", name)
+		}
+	}
+}
+
 // TestSELinuxPolicyCompiledBuildkitdTmpfsDirParity compiles the shipped
 // module with checkmodule and proves the COMPILED policy — the artifact
 // the kernel actually loads — carries exactly the source-pinned buildkitd
-// tmpfs_t:dir surface, both directions of the parity: the P17 create
-// singleton and the P18 mounton singleton are present in the compiled CIL,
-// and the compiled CIL contains NO other buildkitd_t -> tmpfs_t:dir allow
-// and NO buildkitd_t -> devpts_t allow (an effective permission that a
-// source sweep would miss cannot hide in the compiled output). Skipped
-// when checkmodule is unavailable (the plain go test run stays independent
-// of the SELinux toolchain).
+// tmpfs_t:dir and devpts_t:filesystem surface, both directions of the
+// parity: the P17 create singleton, the P18 mounton singleton and the P19
+// devpts mount singleton are present in the compiled CIL, and the
+// compiled CIL contains NO other buildkitd_t -> tmpfs_t:dir allow and NO
+// buildkitd_t -> devpts_t allow beyond the exact P19 filesystem mount
+// (an effective permission that a source sweep would miss cannot hide in
+// the compiled output). Skipped when checkmodule is unavailable (the
+// plain go test run stays independent of the SELinux toolchain).
 func TestSELinuxPolicyCompiledBuildkitdTmpfsDirParity(t *testing.T) {
 	requirePackagingTool(t, "checkmodule")
 
@@ -1289,6 +1384,7 @@ func TestSELinuxPolicyCompiledBuildkitdTmpfsDirParity(t *testing.T) {
 	for _, want := range []string{
 		"(allow docker_helper_buildkitd_t tmpfs_t (dir (create)))",
 		"(allow docker_helper_buildkitd_t tmpfs_t (dir (mounton)))",
+		"(allow docker_helper_buildkitd_t devpts_t (filesystem (mount)))",
 		"(allow docker_helper_rootlesskit_t tmpfs_t (dir (create mounton)))",
 	} {
 		if !strings.Contains(text, want) {
@@ -1298,8 +1394,8 @@ func TestSELinuxPolicyCompiledBuildkitdTmpfsDirParity(t *testing.T) {
 	if n := strings.Count(text, "(allow docker_helper_buildkitd_t tmpfs_t (dir "); n != 2 {
 		t.Errorf("compiled policy must carry exactly two buildkitd tmpfs_t:dir allow rules, got %d", n)
 	}
-	if strings.Contains(text, "(allow docker_helper_buildkitd_t devpts_t ") {
-		t.Errorf("compiled policy must carry NO buildkitd_t -> devpts_t allow (the devpts_t:filesystem mount of the same devpts syscall is the recorded next terminal, deliberately ungranted)")
+	if n := strings.Count(text, "(allow docker_helper_buildkitd_t devpts_t "); n != 1 {
+		t.Errorf("compiled policy must carry exactly one buildkitd devpts_t allow rule (the P19 filesystem mount singleton), got %d", n)
 	}
 }
 
@@ -6145,8 +6241,8 @@ func buildkitdIdentityViolations(policy string) []string {
 			buildkitdNamedAllow++
 		}
 	}
-	if buildkitdNamedAllow != 47 {
-		violations = append(violations, fmt.Sprintf("the module must carry exactly the forty-seven buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr open execute_no_trans }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir setattr }, the categorized state-tree file { create read open lock write getattr rename setattr unlink append }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name create remove_name mounton setattr }, the categorized runtime-tree sock_file { create unlink setattr }, and the R7 manager child-lifecycle { signull signal sigkill } authority, the daemon's per-op BuildKit endpoint { connectto } peer edge, the rootlesskit parent's buildkitd child-authority rule, the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr, the unprivileged-mount-flags statfs getattr, the OCI-worker process-group setup rule, the cgroup2 root traversal dir { search } singleton, the cgroup2 statfs detection filesystem getattr singleton, the runtime-tree exec.fifo fifo_file { create setattr } singleton widened in place by the setattr rung, the P1 runc-memfd file write corrective, the P2 runc-memfd file setattr corrective and the P3 runc-memfd file execute corrective and the P4 runc-memfd atomic { read open } corrective and the P5 runc-memfd file execute_no_trans corrective and the P6 runc-memfd file map corrective and the P7 buildkitd cgroup_t:file read singleton and the P8 buildkitd cgroup_t:file open singleton and the P9 buildkitd nsfs_t:file read singleton and the P10 buildkitd nsfs_t:file open singleton, the P11 buildkitd self:cap_userns sys_chroot singleton, the P12 buildkitd self:key view singleton, the P13 buildkitd self:key setattr singleton, and the P14 buildkitd root_t:dir mounton singleton, and the P15 buildkitd proc_t:filesystem mount singleton, and the P16 buildkitd tmpfs_t:filesystem mount singleton, and the P17 buildkitd tmpfs_t:dir create singleton, and the P18 buildkitd tmpfs_t:dir mounton singleton), found %d", buildkitdNamedAllow))
+	if buildkitdNamedAllow != 48 {
+		violations = append(violations, fmt.Sprintf("the module must carry exactly the forty-eight buildkitd-named allow rules (the source-exec triple, the bare transition, the target-side { entrypoint read execute getattr open execute_no_trans }, the shared state-root { getattr search }, the categorized state-tree dir { getattr search write add_name read open create remove_name rmdir setattr }, the categorized state-tree file { create read open lock write getattr rename setattr unlink append }, the shared runtime-root dir bare search, the categorized runtime-tree dir { getattr search write add_name create remove_name mounton setattr }, the categorized runtime-tree sock_file { create unlink setattr }, and the R7 manager child-lifecycle { signull signal sigkill } authority, the daemon's per-op BuildKit endpoint { connectto } peer edge, the rootlesskit parent's buildkitd child-authority rule, the buildkitd temp-dir lifecycle rule, the payload cap_userns sys_admin+chown rule, the source-superblock remount/unmount rule, the /tmp file-create rule, the outbound udp/tcp client pair, the registry port-class dial, the trust-anchor read pair, the runtime-tree symlink-create, the snapshot-tree symlink pair, the user-namespace probe getattr, the unprivileged-mount-flags statfs getattr, the OCI-worker process-group setup rule, the cgroup2 root traversal dir { search } singleton, the cgroup2 statfs detection filesystem getattr singleton, the runtime-tree exec.fifo fifo_file { create setattr } singleton widened in place by the setattr rung, the P1 runc-memfd file write corrective, the P2 runc-memfd file setattr corrective and the P3 runc-memfd file execute corrective and the P4 runc-memfd atomic { read open } corrective and the P5 runc-memfd file execute_no_trans corrective and the P6 runc-memfd file map corrective and the P7 buildkitd cgroup_t:file read singleton and the P8 buildkitd cgroup_t:file open singleton and the P9 buildkitd nsfs_t:file read singleton and the P10 buildkitd nsfs_t:file open singleton, the P11 buildkitd self:cap_userns sys_chroot singleton, the P12 buildkitd self:key view singleton, the P13 buildkitd self:key setattr singleton, and the P14 buildkitd root_t:dir mounton singleton, and the P15 buildkitd proc_t:filesystem mount singleton, and the P16 buildkitd tmpfs_t:filesystem mount singleton, and the P17 buildkitd tmpfs_t:dir create singleton, and the P18 buildkitd tmpfs_t:dir mounton singleton, and the P19 buildkitd devpts_t:filesystem mount singleton), found %d", buildkitdNamedAllow))
 	}
 	// The shared runtime-root dir surface has exactly the standing
 	// owners above; a NEW or reshaped rule on the pair (any source,
@@ -6264,7 +6360,7 @@ func buildkitdIdentityViolations(policy string) []string {
 			if strings.Contains(trimmed, "docker_helper_buildkitd_exec_t") && trimmed != canonicalExec && trimmed != canonicalEntry {
 				violations = append(violations, "the only allow rules naming the buildkitd exec type are the exact source-exec grant { execute read open } and the exact target-side { entrypoint read execute getattr open execute_no_trans } grant: "+trimmed)
 			}
-			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot && trimmed != canonicalRuntimeTree && trimmed != canonicalRuntimeSockFile && trimmed != canonicalManagerLifecycle && trimmed != "allow docker_helper_t docker_helper_buildkitd_t:unix_stream_socket { connectto };" && trimmed != "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { signal sigkill };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:dir { write add_name create mounton remove_name read };" && trimmed != "allow docker_helper_buildkitd_t self:cap_userns { sys_admin chown };" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem { remount unmount };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:file { create };" && trimmed != "allow docker_helper_buildkitd_t self:udp_socket { create setopt connect getattr read write };" && trimmed != "allow docker_helper_buildkitd_t self:tcp_socket { create setopt connect getattr read write getopt };" && trimmed != "allow docker_helper_buildkitd_t http_port_t:tcp_socket { name_connect };" && trimmed != "allow docker_helper_buildkitd_t cert_t:dir { search };" && trimmed != "allow docker_helper_buildkitd_t cert_t:file { read open getattr };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:lnk_file { create };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file { create setattr getattr read };" && trimmed != "allow docker_helper_buildkitd_t nsfs_t:file getattr;" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem getattr;" && trimmed != "allow docker_helper_buildkitd_t self:process setpgid;" && trimmed != "allow docker_helper_buildkitd_t cgroup_t:dir { search };" && trimmed != "allow docker_helper_buildkitd_t cgroup_t:filesystem getattr;" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:fifo_file { create setattr };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file write;" && trimmed != "allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file setattr;" && trimmed != "allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file execute;" && trimmed != "allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file execute_no_trans;" && trimmed != "allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file { read open };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file map;" && trimmed != "allow docker_helper_buildkitd_t cgroup_t:file read;" && trimmed != "allow docker_helper_buildkitd_t cgroup_t:file open;" && trimmed != "allow docker_helper_buildkitd_t nsfs_t:file read;" && trimmed != "allow docker_helper_buildkitd_t nsfs_t:file open;" && trimmed != "allow docker_helper_buildkitd_t self:cap_userns sys_chroot;" && trimmed != "allow docker_helper_buildkitd_t self:key view;" && trimmed != "allow docker_helper_buildkitd_t self:key setattr;" && trimmed != "allow docker_helper_buildkitd_t root_t:dir mounton;" && trimmed != testSELinuxPolicyBuildkitdProcfsMountSingleton && trimmed != testSELinuxPolicyBuildkitdTmpfsMountSingleton && trimmed != testSELinuxPolicyBuildkitdTmpfsDirCreateSingleton && trimmed != testSELinuxPolicyBuildkitdTmpfsDirMountonSingleton {
+			if strings.Contains(trimmed, "docker_helper_buildkitd_t") && trimmed != canonicalTransition && trimmed != canonicalEntry && trimmed != canonicalStateRoot && trimmed != canonicalStateTree && trimmed != canonicalStateFile && trimmed != canonicalRuntimeRoot && trimmed != canonicalRuntimeTree && trimmed != canonicalRuntimeSockFile && trimmed != canonicalManagerLifecycle && trimmed != "allow docker_helper_t docker_helper_buildkitd_t:unix_stream_socket { connectto };" && trimmed != "allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process { signal sigkill };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:dir { write add_name create mounton remove_name read };" && trimmed != "allow docker_helper_buildkitd_t self:cap_userns { sys_admin chown };" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem { remount unmount };" && trimmed != "allow docker_helper_buildkitd_t tmp_t:file { create };" && trimmed != "allow docker_helper_buildkitd_t self:udp_socket { create setopt connect getattr read write };" && trimmed != "allow docker_helper_buildkitd_t self:tcp_socket { create setopt connect getattr read write getopt };" && trimmed != "allow docker_helper_buildkitd_t http_port_t:tcp_socket { name_connect };" && trimmed != "allow docker_helper_buildkitd_t cert_t:dir { search };" && trimmed != "allow docker_helper_buildkitd_t cert_t:file { read open getattr };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:lnk_file { create };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_state_t:lnk_file { create setattr getattr read };" && trimmed != "allow docker_helper_buildkitd_t nsfs_t:file getattr;" && trimmed != "allow docker_helper_buildkitd_t fs_t:filesystem getattr;" && trimmed != "allow docker_helper_buildkitd_t self:process setpgid;" && trimmed != "allow docker_helper_buildkitd_t cgroup_t:dir { search };" && trimmed != "allow docker_helper_buildkitd_t cgroup_t:filesystem getattr;" && trimmed != "allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:fifo_file { create setattr };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file write;" && trimmed != "allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file setattr;" && trimmed != "allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file execute;" && trimmed != "allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file execute_no_trans;" && trimmed != "allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file { read open };" && trimmed != "allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file map;" && trimmed != "allow docker_helper_buildkitd_t cgroup_t:file read;" && trimmed != "allow docker_helper_buildkitd_t cgroup_t:file open;" && trimmed != "allow docker_helper_buildkitd_t nsfs_t:file read;" && trimmed != "allow docker_helper_buildkitd_t nsfs_t:file open;" && trimmed != "allow docker_helper_buildkitd_t self:cap_userns sys_chroot;" && trimmed != "allow docker_helper_buildkitd_t self:key view;" && trimmed != "allow docker_helper_buildkitd_t self:key setattr;" && trimmed != "allow docker_helper_buildkitd_t root_t:dir mounton;" && trimmed != testSELinuxPolicyBuildkitdProcfsMountSingleton && trimmed != testSELinuxPolicyBuildkitdTmpfsMountSingleton && trimmed != testSELinuxPolicyBuildkitdTmpfsDirCreateSingleton && trimmed != testSELinuxPolicyBuildkitdTmpfsDirMountonSingleton && trimmed != testSELinuxPolicyBuildkitdDevptsMountSingleton {
 				violations = append(violations, "the only allow rules toward the buildkitd domain are the exact process transition grant, the exact target-entrypoint grant, and the exact state/runtime surfaces: "+trimmed)
 			}
 			fields := strings.Fields(trimmed)
