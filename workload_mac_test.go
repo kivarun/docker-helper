@@ -473,7 +473,7 @@ func TestCoordinatorSELinuxRollbackRetainsLiveWorkerState(t *testing.T) {
 	// worker handle still exists.
 	seam.typeErr = errors.New("xattr proof unavailable")
 	seam.dieAfterFirstAlive = true
-	seam.waitExitErr = errors.New("worker did not exit after unmount")
+	seam.waitExitErr = &workerExitUnprovenError{timeout: workloadWorkerExitTimeout}
 	prep := workloadPreparation{
 		OperationID:   "op_ret3",
 		SessionID:     testWorkloadSessionID,

@@ -100,6 +100,12 @@ install_verify_artifacts() {
   if ! rpm -qf --queryformat '%{NAME}\n' /usr/share/selinux/docker_helper.pp 2>/dev/null | grep -qx 'docker-helper'; then
     fail_uat "SELinux policy module is not owned by the docker-helper package"
   fi
+  # Release 2.3: the system service is the ONLY daemon deployment. The
+  # package payload must not ship the user systemd unit.
+  rpm -qf --queryformat '%{NAME}\n' /usr/lib/systemd/user/docker-helper.service 2>/dev/null | grep -qx 'docker-helper' \
+    && fail_uat "the package payload still ships the user systemd unit (system-mode-only payload broken)"
+  [ ! -e /usr/lib/systemd/user/docker-helper.service ] \
+    || fail_uat "the user systemd unit exists on disk after install"
 }
 
 # install_verify_version fails unless the installed binary reports the exact

@@ -173,13 +173,13 @@ func setupTestMACCoordinator(t *testing.T) (*App, *sessionMACCoordinator, *testS
 		MACCoordinator: mac,
 	}
 
-	// Provision a user-mode daemon-owner Principal + 'default' Launcher so that
+	// Provision the test-owner Principal + 'default' Launcher so that
 	// sessions created through the shared model reference a real launcher_id.
-	home := filepath.Join(allowedRoot, "daemon-home")
+	home := filepath.Join(allowedRoot, "owner-home")
 	if err := os.MkdirAll(home, 0700); err != nil {
-		t.Fatalf("cannot create daemon-owner home: %v", err)
+		t.Fatalf("cannot create owner home: %v", err)
 	}
-	app.userModeDefault = provisionTestOwner(t, db, allowedRoot, home, os.Getuid(), os.Getgid())
+	provisionTestOwner(t, db, allowedRoot, home, os.Getuid(), os.Getgid())
 
 	return app, mac, driver
 }
@@ -212,7 +212,7 @@ func TestLeaseReleaseConditionalBoundaryCleanup(t *testing.T) {
 
 	// Create session binding.
 	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]sessionMACCoverage) error {
-		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-1", workspace)
+		return insertTestSessionTx(app.DB, testOwnerLauncherID(app), "sess-1", workspace)
 	})
 	if err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
@@ -292,12 +292,12 @@ func insertTestSessionTx(db *sql.DB, launcherID, sessionID, workspace string) er
 	return tx.Commit()
 }
 
-// testMACLauncherID provisions an enabled daemon-owner Principal and its
+// testMACLauncherID provisions an enabled test-owner Principal and its
 // 'default' Launcher for tests that build their own DB outside
 // setupTestMACCoordinator, returning a valid launcher_id for session inserts.
 func testMACLauncherID(t *testing.T, db *sql.DB) string {
 	t.Helper()
-	// Reuse an already-provisioned daemon-owner default Launcher if present so
+	// Reuse an already-provisioned test-owner default Launcher if present so
 	// that multiple session inserts in one test share a single launcher_id.
 	const username = "dhtestowner"
 	if p, err := findPrincipalByUsername(db, username); err == nil {
@@ -337,7 +337,7 @@ func TestMACLifecycleWarningUsesOperationalLogger(t *testing.T) {
 	triggerWarning := func(sessionID string) {
 		t.Helper()
 		if _, err := mac.CreateSessionBinding(sessionID, []string{workspace}, func([]sessionMACCoverage) error {
-			return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, sessionID, workspace)
+			return insertTestSessionTx(app.DB, testOwnerLauncherID(app), sessionID, workspace)
 		}); err != nil {
 			t.Fatalf("CreateSessionBinding: %v", err)
 		}
@@ -451,7 +451,7 @@ func TestSessionMACRemovalUsesDurableKindAcrossRestart(t *testing.T) {
 	}
 
 	if _, err := mac.CreateSessionBinding("sess-durable", []string{workspace}, func([]sessionMACCoverage) error {
-		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-durable", workspace)
+		return insertTestSessionTx(app.DB, testOwnerLauncherID(app), "sess-durable", workspace)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
@@ -529,7 +529,7 @@ func TestSessionMACCleanupResumesAfterPartialRemoval(t *testing.T) {
 	}
 
 	if _, err := mac.CreateSessionBinding("sess-resume", []string{workspace}, func([]sessionMACCoverage) error {
-		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-resume", workspace)
+		return insertTestSessionTx(app.DB, testOwnerLauncherID(app), "sess-resume", workspace)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
@@ -943,7 +943,7 @@ func TestLeaseReleaseIdempotent(t *testing.T) {
 
 	// Create session binding.
 	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]sessionMACCoverage) error {
-		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-1", workspace)
+		return insertTestSessionTx(app.DB, testOwnerLauncherID(app), "sess-1", workspace)
 	})
 	if err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
@@ -1291,7 +1291,7 @@ func TestSessionDeleteDefersBoundaryWhilePendingWorkloadUnproven(t *testing.T) {
 
 	const sessionID = "sess-pending-workload"
 	_, err = mac.CreateSessionBinding(sessionID, []string{workspace}, func([]sessionMACCoverage) error {
-		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, sessionID, workspace)
+		return insertTestSessionTx(app.DB, testOwnerLauncherID(app), sessionID, workspace)
 	})
 	if err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
@@ -1405,7 +1405,7 @@ func TestSessionDeleteKeepsBoundaryWhenPendingWorkloadUnresolvable(t *testing.T)
 
 	const sessionID = "sess-real-session"
 	_, err = mac.CreateSessionBinding(sessionID, []string{workspace}, func([]sessionMACCoverage) error {
-		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, sessionID, workspace)
+		return insertTestSessionTx(app.DB, testOwnerLauncherID(app), sessionID, workspace)
 	})
 	if err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
@@ -1584,7 +1584,6 @@ func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
 		OperationRetentionTTL: 10 * time.Minute,
 		OperationMaxCompleted: 200,
 		OperationLogMaxBytes:  4 * 1024 * 1024,
-		Mode:                  ModeSystem,
 	}
 
 	app := &App{
@@ -1720,7 +1719,6 @@ func TestRunHandlerCleanupSuccessReleasesLease(t *testing.T) {
 		OperationRetentionTTL: 10 * time.Minute,
 		OperationMaxCompleted: 200,
 		OperationLogMaxBytes:  4 * 1024 * 1024,
-		Mode:                  ModeSystem,
 	}
 
 	app := &App{
@@ -2113,7 +2111,6 @@ func TestAdmitRejectionRunPinsBeforeLease(t *testing.T) {
 		OperationRetentionTTL: 10 * time.Minute,
 		OperationMaxCompleted: 200,
 		OperationLogMaxBytes:  4 * 1024 * 1024,
-		Mode:                  ModeSystem,
 	}
 
 	app := &App{
@@ -3338,4 +3335,69 @@ func (b *selinuxTestDriver) proveOwnedKind(_ context.Context, boundary string) (
 
 func (s *selinuxSeam) proveOwnedFcontextShape(_ context.Context, boundary string) (macBoundaryKind, bool, error) {
 	return macBoundaryUnknown, false, nil
+}
+
+// TestMACCoordinatorsFailClosedWithoutBackend pins the single-deployment
+// construction contract: MAC confinement is a mandatory startup preflight,
+// so the session and workload MAC coordinators are constructed fail-closed
+// for the active backend — a no-backend detection or a detection error is a
+// construction error, never a nil coordinator runtime.
+func TestMACCoordinatorsFailClosedWithoutBackend(t *testing.T) {
+	app := newTestApp(t)
+
+	t.Run("no backend active", func(t *testing.T) {
+		origDetect := detectLSM
+		detectLSM = func() (LSMBackend, error) { return LSMNone, nil }
+		defer func() { detectLSM = origDetect }()
+
+		sessionMAC, err := newSessionMACCoordinatorForActiveBackend(app.DB, detectLSM)
+		if err == nil {
+			t.Fatal("session MAC coordinator construction must fail without an active backend")
+		}
+		if !strings.Contains(err.Error(), "no MAC backend active") {
+			t.Errorf("session coordinator error should name the missing backend, got: %v", err)
+		}
+		if sessionMAC != nil {
+			t.Error("session MAC coordinator must be nil on construction failure")
+		}
+
+		workloadMAC, err := newWorkloadMACCoordinatorForActiveBackend(app.Config, detectLSM)
+		if err == nil {
+			t.Fatal("workload MAC coordinator construction must fail without an active backend")
+		}
+		if !strings.Contains(err.Error(), "no MAC backend active") {
+			t.Errorf("workload coordinator error should name the missing backend, got: %v", err)
+		}
+		if workloadMAC != nil {
+			t.Error("workload MAC coordinator must be nil on construction failure")
+		}
+	})
+
+	t.Run("backend detection error", func(t *testing.T) {
+		origDetect := detectLSM
+		detectErr := errors.New("detection failed")
+		detectLSM = func() (LSMBackend, error) { return LSMNone, detectErr }
+		defer func() { detectLSM = origDetect }()
+
+		if _, err := newSessionMACCoordinatorForActiveBackend(app.DB, detectLSM); !errors.Is(err, detectErr) {
+			t.Errorf("session coordinator must propagate the detection error, got: %v", err)
+		}
+		if _, err := newWorkloadMACCoordinatorForActiveBackend(app.Config, detectLSM); !errors.Is(err, detectErr) {
+			t.Errorf("workload coordinator must propagate the detection error, got: %v", err)
+		}
+	})
+
+	t.Run("active backend constructs non-nil coordinators", func(t *testing.T) {
+		origDetect := detectLSM
+		detectLSM = func() (LSMBackend, error) { return LSMSELinux, nil }
+		defer func() { detectLSM = origDetect }()
+
+		sessionMAC, err := newSessionMACCoordinatorForActiveBackend(app.DB, detectLSM)
+		if err != nil {
+			t.Fatalf("session MAC coordinator construction: %v", err)
+		}
+		if sessionMAC == nil {
+			t.Fatal("session MAC coordinator must be non-nil for an active backend")
+		}
+	})
 }

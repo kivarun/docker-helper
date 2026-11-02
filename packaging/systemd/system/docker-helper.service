@@ -11,7 +11,7 @@ ConditionSecurity=|selinux
 [Service]
 Type=exec
 ExecStart=/usr/bin/docker-helper serve
-ExecReload=/usr/bin/docker-helper reload --system
+ExecReload=/usr/bin/docker-helper reload
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=45s

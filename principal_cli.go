@@ -29,21 +29,20 @@ var principalCommand = &Command{
 var principalCreateCommand = &Command{
 	Name:       "create",
 	Summary:    "Create a new principal",
-	Usage:      "docker-helper principal create [--system] [--endpoint ENDPOINT] [--token-file PATH] [--issue-credential | --no-credential] [--json] USER",
+	Usage:      "docker-helper principal create [--endpoint ENDPOINT] [--token-file PATH] [--issue-credential | --no-credential] [--json] USER",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 
 	Presentation: humanJSONPresentation(),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		issueCredential := fs.Bool("issue-credential", false, "Issue an initial principal credential")
 		noCredential := fs.Bool("no-credential", false, "Do not issue an initial principal credential")
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:      *system,
 					Endpoint:    endpoint.value,
 					EndpointSet: endpoint.set,
 					TokenFile:   *tokenFile,
@@ -64,7 +63,6 @@ var principalCreateCommand = &Command{
 				}
 
 				client, err := resolveOperatorClient(operatorClientOptions{
-					System:    *system,
 					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
@@ -104,19 +102,18 @@ var principalCreateCommand = &Command{
 var principalShowCommand = &Command{
 	Name:       "show",
 	Summary:    "Show principal details",
-	Usage:      "docker-helper principal show [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] USER [FIELD]",
+	Usage:      "docker-helper principal show [--endpoint ENDPOINT] [--token-file PATH] [--json] USER [FIELD]",
 	MinPosArgs: 1,
 	MaxPosArgs: 2,
 
 	Presentation: humanJSONPresentation(),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output the canonical JSON document")
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:      *system,
 					Endpoint:    endpoint.value,
 					EndpointSet: endpoint.set,
 					TokenFile:   *tokenFile,
@@ -137,7 +134,6 @@ var principalShowCommand = &Command{
 				username := args[0]
 
 				client, err := resolveOperatorClient(operatorClientOptions{
-					System:    *system,
 					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
@@ -193,19 +189,18 @@ func printPrincipalShow(w io.Writer, p *principalResponse) {
 var principalListCommand = &Command{
 	Name:       "list",
 	Summary:    "List all principals",
-	Usage:      "docker-helper principal list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json]",
+	Usage:      "docker-helper principal list [--endpoint ENDPOINT] [--token-file PATH] [--json]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
 
 	Presentation: humanJSONPresentation(),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:      *system,
 					Endpoint:    endpoint.value,
 					EndpointSet: endpoint.set,
 					TokenFile:   *tokenFile,
@@ -216,7 +211,6 @@ var principalListCommand = &Command{
 			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
-					System:    *system,
 					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
@@ -306,19 +300,18 @@ func extractPrincipalField(p *principalResponse, field string) (string, bool) {
 var principalSetCommand = &Command{
 	Name:       "set",
 	Summary:    "Modify principal settings",
-	Usage:      "docker-helper principal set [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] USER FIELD VALUE",
+	Usage:      "docker-helper principal set [--endpoint ENDPOINT] [--token-file PATH] [--json] USER FIELD VALUE",
 	MinPosArgs: 3,
 	MaxPosArgs: 3,
 
 	Presentation: humanJSONPresentation(),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:      *system,
 					Endpoint:    endpoint.value,
 					EndpointSet: endpoint.set,
 					TokenFile:   *tokenFile,
@@ -350,7 +343,6 @@ var principalSetCommand = &Command{
 				}
 
 				client, err := resolveOperatorClient(operatorClientOptions{
-					System:    *system,
 					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
@@ -386,19 +378,18 @@ var principalSetCommand = &Command{
 var principalDeleteCommand = &Command{
 	Name:       "delete",
 	Summary:    "Delete a principal",
-	Usage:      "docker-helper principal delete [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] USER",
+	Usage:      "docker-helper principal delete [--endpoint ENDPOINT] [--token-file PATH] [--json] USER",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 
 	Presentation: humanJSONPresentation(),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:      *system,
 					Endpoint:    endpoint.value,
 					EndpointSet: endpoint.set,
 					TokenFile:   *tokenFile,
@@ -412,7 +403,6 @@ var principalDeleteCommand = &Command{
 				username := args[0]
 
 				client, err := resolveOperatorClient(operatorClientOptions{
-					System:    *system,
 					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
@@ -455,19 +445,18 @@ var principalAllowedRootCommand = &Command{
 var principalAllowedRootListCommand = &Command{
 	Name:       "list",
 	Summary:    "List a principal's allowed roots",
-	Usage:      "docker-helper principal allowed-root list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] USER",
+	Usage:      "docker-helper principal allowed-root list [--endpoint ENDPOINT] [--token-file PATH] [--json] USER",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 
 	Presentation: humanJSONPresentation(),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:      *system,
 					Endpoint:    endpoint.value,
 					EndpointSet: endpoint.set,
 					TokenFile:   *tokenFile,
@@ -480,7 +469,6 @@ var principalAllowedRootListCommand = &Command{
 				username := fs.Args()[0]
 
 				client, err := resolveOperatorClient(operatorClientOptions{
-					System:    *system,
 					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
@@ -508,21 +496,20 @@ var principalAllowedRootListCommand = &Command{
 var principalAllowedRootAddCommand = &Command{
 	Name:       "add",
 	Summary:    "Add an allowed root for a principal",
-	Usage:      "docker-helper principal allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--access ACCESS] [--json] USER PATH",
+	Usage:      "docker-helper principal allowed-root add [--endpoint ENDPOINT] [--token-file PATH] [--access ACCESS] [--json] USER PATH",
 	MinPosArgs: 2,
 	MaxPosArgs: 2,
 
 	Presentation: humanJSONPresentation(),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		endpoint, tokenFile := registerOperatorFlags(fs)
 		access := &accessFlag{}
 		fs.Var(access, "access", "Access mode: read_write (default) or read_only")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:      *system,
 					Endpoint:    endpoint.value,
 					EndpointSet: endpoint.set,
 					TokenFile:   *tokenFile,
@@ -537,7 +524,6 @@ var principalAllowedRootAddCommand = &Command{
 				path := args[1]
 
 				client, err := resolveOperatorClient(operatorClientOptions{
-					System:    *system,
 					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
@@ -576,19 +562,18 @@ var principalAllowedRootAddCommand = &Command{
 var principalAllowedRootSetAccessCommand = &Command{
 	Name:       "set-access",
 	Summary:    "Change the access mode of a principal allowed root",
-	Usage:      "docker-helper principal allowed-root set-access [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] USER PATH read_only|read_write",
+	Usage:      "docker-helper principal allowed-root set-access [--endpoint ENDPOINT] [--token-file PATH] [--json] USER PATH read_only|read_write",
 	MinPosArgs: 3,
 	MaxPosArgs: 3,
 
 	Presentation: humanJSONPresentation(),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output the shared structured set-access result")
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:      *system,
 					Endpoint:    endpoint.value,
 					EndpointSet: endpoint.set,
 					TokenFile:   *tokenFile,
@@ -609,7 +594,6 @@ var principalAllowedRootSetAccessCommand = &Command{
 				}
 
 				client, err := resolveOperatorClient(operatorClientOptions{
-					System:    *system,
 					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
@@ -638,7 +622,7 @@ var principalAllowedRootSetAccessCommand = &Command{
 var principalAllowedRootRemoveCommand = &Command{
 	Name:       "remove",
 	Summary:    "Remove an allowed root for a principal",
-	Usage:      "docker-helper principal allowed-root remove [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] USER PATH",
+	Usage:      "docker-helper principal allowed-root remove [--endpoint ENDPOINT] [--token-file PATH] [--json] USER PATH",
 	MinPosArgs: 2,
 	MaxPosArgs: 2,
 	Help: `Remove one stored Principal allowed root.
@@ -653,12 +637,11 @@ are not rewritten.`,
 	Presentation: humanJSONPresentation(),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:      *system,
 					Endpoint:    endpoint.value,
 					EndpointSet: endpoint.set,
 					TokenFile:   *tokenFile,
@@ -673,7 +656,6 @@ are not rewritten.`,
 				path := args[1]
 
 				client, err := resolveOperatorClient(operatorClientOptions{
-					System:    *system,
 					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})

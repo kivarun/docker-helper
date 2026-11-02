@@ -58,10 +58,9 @@ func TestRaceCredentialRevokedBeforeSessionCommitRefusesSessionCreate(t *testing
 	doorPoint := newParkedQueryPoint("SELECT username, enabled FROM principals WHERE id")
 	boundaryPoint := newParkedQueryPoint("SELECT l.id, l.name, l.enabled")
 	app := &App{
-		Config:          app1.Config,
-		DB:              openParkedQueryDB(t, app1.Config.DatabasePath, doorPoint, boundaryPoint),
-		AdminTokenHash:  app1.AdminTokenHash,
-		userModeDefault: app1.userModeDefault,
+		Config:         app1.Config,
+		DB:             openParkedQueryDB(t, app1.Config.DatabasePath, doorPoint, boundaryPoint),
+		AdminTokenHash: app1.AdminTokenHash,
 	}
 
 	runSinglePinnedP(t, func() {
@@ -139,10 +138,9 @@ func TestRaceLauncherCredentialDeletedBeforeSessionCommitRefusesSessionCreate(t 
 	doorPoint := newParkedQueryPoint("SELECT l.name, l.enabled, l.principal_id")
 	boundaryPoint := newParkedQueryPoint("SELECT l.id, l.name, l.enabled")
 	app := &App{
-		Config:          app1.Config,
-		DB:              openParkedQueryDB(t, app1.Config.DatabasePath, doorPoint, boundaryPoint),
-		AdminTokenHash:  app1.AdminTokenHash,
-		userModeDefault: app1.userModeDefault,
+		Config:         app1.Config,
+		DB:             openParkedQueryDB(t, app1.Config.DatabasePath, doorPoint, boundaryPoint),
+		AdminTokenHash: app1.AdminTokenHash,
 	}
 
 	runSinglePinnedP(t, func() {
@@ -203,10 +201,9 @@ func TestSessionCommitBeforeCredentialRevokeKeepsIssuedSession(t *testing.T) {
 	// linearizes before the revoke commit.
 	revokePoint := newParkedQueryPoint("UPDATE credentials SET revoked_at")
 	app := &App{
-		Config:          app1.Config,
-		DB:              openParkedQueryDB(t, app1.Config.DatabasePath, revokePoint),
-		AdminTokenHash:  app1.AdminTokenHash,
-		userModeDefault: app1.userModeDefault,
+		Config:         app1.Config,
+		DB:             openParkedQueryDB(t, app1.Config.DatabasePath, revokePoint),
+		AdminTokenHash: app1.AdminTokenHash,
 	}
 
 	runSinglePinnedP(t, func() {
@@ -286,10 +283,9 @@ func TestRaceUnrelatedCredentialRevokeDoesNotBlockSessionCreate(t *testing.T) {
 	doorPoint := newParkedQueryPoint("SELECT username, enabled FROM principals WHERE id")
 	boundaryPoint := newParkedQueryPoint("SELECT l.id, l.name, l.enabled")
 	app := &App{
-		Config:          app1.Config,
-		DB:              openParkedQueryDB(t, app1.Config.DatabasePath, doorPoint, boundaryPoint),
-		AdminTokenHash:  app1.AdminTokenHash,
-		userModeDefault: app1.userModeDefault,
+		Config:         app1.Config,
+		DB:             openParkedQueryDB(t, app1.Config.DatabasePath, doorPoint, boundaryPoint),
+		AdminTokenHash: app1.AdminTokenHash,
 	}
 
 	runSinglePinnedP(t, func() {
@@ -355,10 +351,9 @@ func TestCredentialOwnershipProvenanceChangeRefusesSessionCreate(t *testing.T) {
 	doorPoint := newParkedQueryPoint("SELECT username, enabled FROM principals WHERE id")
 	boundaryPoint := newParkedQueryPoint("SELECT l.id, l.name, l.enabled")
 	app := &App{
-		Config:          app1.Config,
-		DB:              openParkedQueryDB(t, app1.Config.DatabasePath, doorPoint, boundaryPoint),
-		AdminTokenHash:  app1.AdminTokenHash,
-		userModeDefault: app1.userModeDefault,
+		Config:         app1.Config,
+		DB:             openParkedQueryDB(t, app1.Config.DatabasePath, doorPoint, boundaryPoint),
+		AdminTokenHash: app1.AdminTokenHash,
 	}
 
 	runSinglePinnedP(t, func() {
@@ -409,7 +404,7 @@ func TestAdminSessionCreateIndependentOfCredentialRevalidation(t *testing.T) {
 	setupTestLoggingDiscard(t)
 	workspace := testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)
 
-	resp := createSessionThroughMux(app, testAdminToken, workspace)
+	resp := createAdminSessionThroughMux(app, workspace)
 	if resp.Code != http.StatusCreated {
 		t.Fatalf("admin create: expected 201, got %d (body=%s)", resp.Code, resp.Body.String())
 	}
@@ -429,10 +424,9 @@ func TestCommitBoundaryCredentialRejectionAuditContract(t *testing.T) {
 	doorPoint := newParkedQueryPoint("SELECT username, enabled FROM principals WHERE id")
 	boundaryPoint := newParkedQueryPoint("SELECT l.id, l.name, l.enabled")
 	app := &App{
-		Config:          app1.Config,
-		DB:              openParkedQueryDB(t, app1.Config.DatabasePath, doorPoint, boundaryPoint),
-		AdminTokenHash:  app1.AdminTokenHash,
-		userModeDefault: app1.userModeDefault,
+		Config:         app1.Config,
+		DB:             openParkedQueryDB(t, app1.Config.DatabasePath, doorPoint, boundaryPoint),
+		AdminTokenHash: app1.AdminTokenHash,
 	}
 
 	runSinglePinnedP(t, func() {

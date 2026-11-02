@@ -276,10 +276,10 @@ func TestCredentialCreatesSessionWithPrincipalID(t *testing.T) {
 	}
 }
 
-func TestAdminCreatesSessionWithNULLPrincipalID(t *testing.T) {
+func TestAdminCreatesSessionOwnedByLauncher(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)}
+	reqBody := map[string]string{"principal": testOwnerUsername, "workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)}
 	body, _ := json.Marshal(reqBody)
 
 	mux := http.NewServeMux()
@@ -301,10 +301,10 @@ func TestAdminCreatesSessionWithNULLPrincipalID(t *testing.T) {
 	}
 
 	// In the Launcher-owned model there is no principal_id column and no
-	// ownerless session. An admin-created session (user mode, no selector) is
-	// owned by the daemon-owner default Launcher.
-	if resp.Session.LauncherID != app.userModeDefault.launcherID {
-		t.Errorf("admin session launcher_id = %q, want daemon-owner default %q", resp.Session.LauncherID, app.userModeDefault.launcherID)
+	// ownerless session. An admin-created session is owned by the selected
+	// Principal's default Launcher.
+	if resp.Session.LauncherID != testOwnerLauncherID(app) {
+		t.Errorf("admin session launcher_id = %q, want the owner default %q", resp.Session.LauncherID, testOwnerLauncherID(app))
 	}
 
 	var launcherID string
@@ -312,8 +312,8 @@ func TestAdminCreatesSessionWithNULLPrincipalID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cannot query session launcher_id: %v", err)
 	}
-	if launcherID != app.userModeDefault.launcherID {
-		t.Errorf("stored launcher_id = %q, want %q", launcherID, app.userModeDefault.launcherID)
+	if launcherID != testOwnerLauncherID(app) {
+		t.Errorf("stored launcher_id = %q, want %q", launcherID, testOwnerLauncherID(app))
 	}
 
 	var colCount int

@@ -101,7 +101,7 @@ func TestMigrateSessionOwnershipLegacyPrincipal(t *testing.T) {
 	insertLegacySession(t, db, "dhs_legacy1", "h1", pid)
 	insertLegacySession(t, db, "dhs_legacy2", "h2", pid)
 
-	res, err := migrateSessionOwnership(db, ModeSystem, nil)
+	res, err := migrateSessionOwnership(db)
 	if err != nil {
 		t.Fatalf("migrateSessionOwnership: %v", err)
 	}
@@ -135,63 +135,16 @@ func TestMigrateSessionOwnershipLegacyPrincipal(t *testing.T) {
 	}
 
 	// Migration is idempotent: running again is a no-op on final schema.
-	again, err := migrateSessionOwnership(db, ModeSystem, nil)
+	again, err := migrateSessionOwnership(db)
 	if err != nil || again.attributedPrincipal != 0 {
 		t.Errorf("second migration: res=%+v err=%v, want empty result", again, err)
 	}
 }
 
-// TestMigrateSessionOwnershipUserModeNullEntry ensures legacy user-mode
-// NULL-owner sessions are attributed to the daemon-owner default Launcher.
-func TestMigrateSessionOwnershipUserModeNullEntry(t *testing.T) {
-	db := buildLegacyPrincipalDB(t)
-	home := filepath.Join(testAllowedRootDir(t), "daemon-home")
-	if err := os.MkdirAll(home, 0755); err != nil {
-		t.Fatal(err)
-	}
-	uid := 4242
-	ownerPID, err := insertDaemonOwnerPrincipal(db, "daemonowner", uid, uid, home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	launcherID, err := ensureDefaultLauncher(db, ownerPID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	owner := &userModeDefaultLauncher{principalID: ownerPID, launcherID: launcherID, username: "daemonowner"}
-
-	if _, err := db.Exec(
-		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
-		 VALUES (?, ?, ?, ?, ?, NULL)`,
-		"dhs_legacynull", "hnull", "/w", time.Now().Unix(), time.Now().Add(time.Hour).Unix(),
-	); err != nil {
-		t.Fatal(err)
-	}
-
-	res, err := migrateSessionOwnership(db, ModeUser, owner)
-	if err != nil {
-		t.Fatalf("migrateSessionOwnership: %v", err)
-	}
-	if res.attributedUserMode != 1 {
-		t.Errorf("attributedUserMode = %d, want 1", res.attributedUserMode)
-	}
-	if res.invalidated != 0 {
-		t.Errorf("invalidated = %d, want 0", res.invalidated)
-	}
-
-	var launcherIDGot string
-	if err := db.QueryRow(`SELECT launcher_id FROM sessions WHERE id = 'dhs_legacynull'`).Scan(&launcherIDGot); err != nil {
-		t.Fatal(err)
-	}
-	if launcherIDGot != launcherID {
-		t.Errorf("legacy NULL session launcher_id = %q, want daemon-owner %q", launcherIDGot, launcherID)
-	}
-}
-
-// TestMigrateSessionOwnershipSystemModeNullInvalidated ensures legacy
+// TestMigrateSessionOwnershipNullOwnerInvalidated ensures legacy
 // system-mode NULL-owner sessions (with no Principal -> Launcher chain) are
 // invalidated and counted, never left ownerless.
-func TestMigrateSessionOwnershipSystemModeNullInvalidated(t *testing.T) {
+func TestMigrateSessionOwnershipNullOwnerInvalidated(t *testing.T) {
 	db := buildLegacyPrincipalDB(t)
 	if _, err := db.Exec(
 		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
@@ -201,7 +154,7 @@ func TestMigrateSessionOwnershipSystemModeNullInvalidated(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := migrateSessionOwnership(db, ModeSystem, nil)
+	res, err := migrateSessionOwnership(db)
 	if err != nil {
 		t.Fatalf("migrateSessionOwnership: %v", err)
 	}
@@ -224,7 +177,7 @@ func TestMigrateSessionOwnershipDanglingPrincipalFails(t *testing.T) {
 	db := buildLegacyPrincipalDB(t)
 	insertLegacySession(t, db, "dhs_dangling", "hdang", 99999)
 
-	if _, err := migrateSessionOwnership(db, ModeSystem, nil); err == nil {
+	if _, err := migrateSessionOwnership(db); err == nil {
 		t.Fatal("expected migration to fail on dangling principal reference")
 	}
 
@@ -242,11 +195,11 @@ func TestMigrateSessionOwnershipDanglingPrincipalFails(t *testing.T) {
 // final schema and never re-adds principal_id.
 func TestMigrateSessionOwnershipFinalNoOp(t *testing.T) {
 	db := openFreshTestDB(t)
-	res, err := migrateSessionOwnership(db, ModeUser, &userModeDefaultLauncher{principalID: 1, launcherID: "x", username: "u"})
+	res, err := migrateSessionOwnership(db)
 	if err != nil {
 		t.Fatalf("migrateSessionOwnership: %v", err)
 	}
-	if res.attributedPrincipal != 0 || res.attributedUserMode != 0 || res.invalidated != 0 {
+	if res.attributedPrincipal != 0 || res.invalidated != 0 {
 		t.Errorf("final no-op result = %+v, want zero counts", res)
 	}
 	var hasPrincipal int
@@ -472,11 +425,11 @@ func TestDefaultLauncherPerPrincipalIsolation(t *testing.T) {
 	if err := os.MkdirAll(homeB, 0755); err != nil {
 		t.Fatal(err)
 	}
-	pidA, err := insertDaemonOwnerPrincipal(db, "dho_a", 2001, 2001, homeA)
+	pidA, err := insertTestPrincipalWithRoots(db, "dho_a", 2001, 2001, homeA, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pidB, err := insertDaemonOwnerPrincipal(db, "dho_b", 2002, 2002, homeB)
+	pidB, err := insertTestPrincipalWithRoots(db, "dho_b", 2002, 2002, homeB, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -513,8 +466,8 @@ func TestDefaultLauncherPerPrincipalIsolation(t *testing.T) {
 // TestStartupSequenceBareToFinal exercises the full startup chain for an R1
 // bare sessions table: initializeDatabase owns the bare -> legacy-principal
 // step (adding principal_id), then migrateSessionOwnership owns the
-// principal -> final step. The R1 ownerless session is attributed to the
-// user-mode daemon-owner default Launcher and the final schema is produced.
+// principal -> final step. The R1 ownerless Session is invalidated (a Session
+// owner is always a Launcher) and the final schema is produced.
 func TestStartupSequenceBareToFinal(t *testing.T) {
 	db := buildLegacyBareDB(t)
 
@@ -536,23 +489,8 @@ func TestStartupSequenceBareToFinal(t *testing.T) {
 		t.Fatalf("after initializeDatabase schema = %v (err=%v), want sessionsSchemaLegacyPrincipal", class, err)
 	}
 
-	// Provision a user-mode daemon-owner default Launcher for attribution.
-	home := filepath.Join(testAllowedRootDir(t), "daemon-home")
-	if err := os.MkdirAll(home, 0755); err != nil {
-		t.Fatal(err)
-	}
-	ownerPID, err := insertDaemonOwnerPrincipal(db, "daemonowner", 4242, 4242, home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	launcherID, err := ensureDefaultLauncher(db, ownerPID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	owner := &userModeDefaultLauncher{principalID: ownerPID, launcherID: launcherID, username: "daemonowner"}
-
 	// Step 2: migrateSessionOwnership owns principal -> final.
-	res, err := migrateSessionOwnership(db, ModeUser, owner)
+	res, err := migrateSessionOwnership(db)
 	if err != nil {
 		t.Fatalf("migrateSessionOwnership: %v", err)
 	}
@@ -568,48 +506,15 @@ func TestStartupSequenceBareToFinal(t *testing.T) {
 	if hasPrincipal != 0 || hasLauncher != 1 {
 		t.Errorf("final schema: principal_id=%d launcher_id=%d, want 0/1", hasPrincipal, hasLauncher)
 	}
-	if res.attributedUserMode != 1 {
-		t.Errorf("attributedUserMode = %d, want 1", res.attributedUserMode)
+	if res.invalidated != 1 {
+		t.Errorf("invalidated = %d, want 1", res.invalidated)
 	}
-	var got string
-	if err := db.QueryRow(`SELECT launcher_id FROM sessions WHERE id = 'dhs_r1'`).Scan(&got); err != nil {
-		t.Fatal(err)
-	}
-	if got != launcherID {
-		t.Errorf("R1 session launcher_id = %q, want daemon-owner %q", got, launcherID)
-	}
-}
-
-// TestMigrateSessionOwnershipIntegrityCheckRollback proves the pre-commit
-// foreign_key_check gate (B9) catches a rebuilt sessions table whose row
-// references a launcher that does not exist, failing the migration and rolling
-// back so the legacy table is left intact. The dangling launcher is introduced
-// via the user-mode NULL-owner attribution with a phantom default-Launcher ID;
-// the insert succeeds only because FK enforcement is off in the fixture, and
-// the integrity check reports the violation regardless.
-func TestMigrateSessionOwnershipIntegrityCheckRollback(t *testing.T) {
-	db := buildLegacyPrincipalDB(t)
-	if _, err := db.Exec(
-		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
-		 VALUES (?, ?, ?, ?, ?, NULL)`,
-		"dhs_badlauncher", "hbad", "/w", time.Now().Unix(), time.Now().Add(time.Hour).Unix(),
-	); err != nil {
-		t.Fatal(err)
-	}
-
-	owner := &userModeDefaultLauncher{principalID: 1, launcherID: "no-such-launcher", username: "u"}
-	_, err := migrateSessionOwnership(db, ModeUser, owner)
-	if err == nil {
-		t.Fatal("expected migration to fail on foreign-key check for dangling launcher")
-	}
-
-	// Transaction rolled back: the legacy sessions table is intact.
 	var count int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 {
-		t.Errorf("after rollback session count = %d, want 1", count)
+	if count != 0 {
+		t.Errorf("after invalidation session count = %d, want 0", count)
 	}
 }
 
@@ -634,7 +539,7 @@ func TestMigrateSessionOwnershipIgnoresUnrelatedFKViolation(t *testing.T) {
 		t.Fatalf("cannot insert dangling launcher: %v", err)
 	}
 
-	res, err := migrateSessionOwnership(db, ModeSystem, nil)
+	res, err := migrateSessionOwnership(db)
 	if err != nil {
 		t.Fatalf("migration failed due to unrelated launchers FK violation: %v", err)
 	}

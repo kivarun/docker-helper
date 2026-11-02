@@ -146,14 +146,13 @@ func setupH8AppArmorParkedCoordinator(t *testing.T) (*App, <-chan struct{}, chan
 		OperationRetentionTTL: 10 * time.Minute,
 		OperationMaxCompleted: 200,
 		OperationLogMaxBytes:  4 * 1024 * 1024,
-		Mode:                  ModeUser,
 	}
 	app := &App{Config: cfg, DB: db, MACCoordinator: newSessionMACCoordinator(db, driver)}
-	home := filepath.Join(allowedRoot, "daemon-home")
+	home := filepath.Join(allowedRoot, "owner-home")
 	if err := os.MkdirAll(home, 0700); err != nil {
 		t.Fatalf("cannot create daemon home: %v", err)
 	}
-	app.userModeDefault = provisionTestOwner(t, db, allowedRoot, home, os.Getuid(), os.Getgid())
+	provisionTestOwner(t, db, allowedRoot, home, os.Getuid(), os.Getgid())
 	return app, entered, release
 }
 
@@ -207,14 +206,13 @@ func setupH8SELinuxParkedCoordinator(t *testing.T) (*App, <-chan struct{}, chan 
 		OperationRetentionTTL: 10 * time.Minute,
 		OperationMaxCompleted: 200,
 		OperationLogMaxBytes:  4 * 1024 * 1024,
-		Mode:                  ModeUser,
 	}
 	app := &App{Config: cfg, DB: db, MACCoordinator: newSessionMACCoordinator(db, driver)}
-	home := filepath.Join(allowedRoot, "daemon-home")
+	home := filepath.Join(allowedRoot, "owner-home")
 	if err := os.MkdirAll(home, 0700); err != nil {
 		t.Fatalf("cannot create daemon home: %v", err)
 	}
-	app.userModeDefault = provisionTestOwner(t, db, allowedRoot, home, os.Getuid(), os.Getgid())
+	provisionTestOwner(t, db, allowedRoot, home, os.Getuid(), os.Getgid())
 	return app, entered, release
 }
 
@@ -382,7 +380,7 @@ func TestH8HungAppArmorParserParksSessionCreateAndBlocksDisable(t *testing.T) {
 
 	h8AwaitCreateFailure(t, createErr)
 	h8DisabledStates(t, app, launcherID, username)
-	h8NoSessionCommitted(t, app, app.userModeDefault.launcherID, launcherID)
+	h8NoSessionCommitted(t, app, testOwnerLauncherID(app), launcherID)
 	h8AdmissionClosed(t, app, launcherID)
 
 	// No coordination lock stays stranded: after the hostile condition is
@@ -522,7 +520,7 @@ func h8RunQueuedCreatesDisableProof(t *testing.T, app *App, entered <-chan struc
 	//    Session was committed by any create, and operation admission is
 	//    closed for the disabled launcher.
 	h8DisabledStates(t, app, launcherID, username)
-	h8NoSessionCommitted(t, app, app.userModeDefault.launcherID, launcherID)
+	h8NoSessionCommitted(t, app, testOwnerLauncherID(app), launcherID)
 	h8AdmissionClosed(t, app, launcherID)
 
 	// 8. No coordination is stranded: after the hostile condition is
@@ -589,7 +587,7 @@ func TestH8HungSELinuxFcontextParksSessionCreateAndBlocksDisable(t *testing.T) {
 
 	h8AwaitCreateFailure(t, createErr)
 	h8DisabledStates(t, app, launcherID, username)
-	h8NoSessionCommitted(t, app, app.userModeDefault.launcherID, launcherID)
+	h8NoSessionCommitted(t, app, testOwnerLauncherID(app), launcherID)
 	h8AdmissionClosed(t, app, launcherID)
 
 	close(release)
@@ -690,7 +688,7 @@ func TestH8ReloadHungTrustedCARestoreconKeepsPreviousConfig(t *testing.T) {
 	defer logging.reset()
 
 	// 1. Load the initial valid config and create the App in the environment
-	//    user mode (the DB and admin token live under the env-resolved dirs).
+	//    (the DB and admin token live under the env-resolved dirs).
 	cfg, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatalf("initial loadAndPrepareRuntimeConfig: %v", err)
@@ -1132,7 +1130,7 @@ func TestH8CreateMACBudgetFailureHTTPClass(t *testing.T) {
 	app.AdminTokenHash = adminHash
 
 	workspace := testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)
-	body, err := json.Marshal(map[string]string{"workspace": workspace})
+	body, err := json.Marshal(map[string]string{"principal": testOwnerUsername, "workspace": workspace})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1156,7 +1154,7 @@ func TestH8CreateMACBudgetFailureHTTPClass(t *testing.T) {
 	if resp.Code != "mac_preparation_failed" {
 		t.Errorf("error code = %q, want mac_preparation_failed", resp.Code)
 	}
-	if got := h8SessionCount(t, app, app.userModeDefault.launcherID); got != 0 {
+	if got := h8SessionCount(t, app, testOwnerLauncherID(app)); got != 0 {
 		t.Errorf("budget-expired create committed %d sessions, want 0", got)
 	}
 }
@@ -1220,7 +1218,7 @@ func TestH8CreateLifecycleBusyHTTPClass(t *testing.T) {
 	if !strings.Contains(auditBuf.String(), `"result":"lifecycle_busy"`) {
 		t.Errorf("audit record does not carry the lifecycle_busy class: %s", auditBuf.String())
 	}
-	if got := h8SessionCount(t, app, app.userModeDefault.launcherID); got != 0 {
+	if got := h8SessionCount(t, app, testOwnerLauncherID(app)); got != 0 {
 		t.Errorf("lifecycle-busy create committed %d sessions, want 0", got)
 	}
 }

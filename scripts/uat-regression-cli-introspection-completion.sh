@@ -79,7 +79,7 @@ mkdir -p "$TMPDIR_REG14"
 # cleanup_principal USER removes the fixture Principal and its OS user.
 cleanup_principal() {
   local user="$1"
-  dh principal delete --system "$user" >/dev/null 2>&1 || true
+  dh principal delete "$user" >/dev/null 2>&1 || true
   userdel -r "$user" >/dev/null 2>&1 || true
 }
 
@@ -218,7 +218,7 @@ assert_boundary_chain() {
 # field).
 launcher_credential_token() {
   local user="$1" launcher="$2" out
-  out="$(dh launcher credential create --system --principal "$user" --json "$launcher" 2>/dev/null)" || return 1
+  out="$(dh launcher credential create --principal "$user" --json "$launcher" 2>/dev/null)" || return 1
   printf '%s' "$out" | json_field token
 }
 
@@ -295,7 +295,7 @@ subcase_a() {
   fi
 
   # 5. admin read of any Principal is unchanged.
-  if out="$(dh principal show --system --json "$user_b" 2>&1)" && printf '%s' "$out" | grep -q '"username"'; then
+  if out="$(dh principal show --json "$user_b" 2>&1)" && printf '%s' "$out" | grep -q '"username"'; then
     reg_ok "A: admin principal read is unchanged"
   else
     reg_fail "A: admin principal show failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
@@ -319,7 +319,7 @@ subcase_b() {
   chown -R "$user:$user" "$home"
 
   local create_out
-  create_out="$(dh launcher create --system --principal "$user" killme --allowed-root "$opt" --no-credential --json 2>&1)" || {
+  create_out="$(dh launcher create --principal "$user" killme --allowed-root "$opt" --no-credential --json 2>&1)" || {
     reg_fail "B: restricted launcher create failed: $(printf '%s' "$create_out" | head -2 | tr '\n' ' ' | redact)"
     cleanup_principal "$user"
     return
@@ -346,7 +346,7 @@ subcase_b() {
   # must answer on the packaged CLI before the COMPREPLY contract is
   # asserted; its failure would attribute to the CLI, not the harness.
   local roots_out roots_rc
-  roots_out="$(dh completion roots session --system --principal "$user" --launcher killme 2>&1)"; roots_rc=$?
+  roots_out="$(dh completion roots session --principal "$user" --launcher killme 2>&1)"; roots_rc=$?
   if [ "$roots_rc" -eq 0 ] && printf '%s' "$roots_out" | grep -qx "$opt"; then
     reg_ok "B: introspection query (admin + typed selectors) answers the restricted root"
   else
@@ -399,7 +399,7 @@ subcase_b() {
 
   # 5. selectorless completion keeps the default-target semantics: the
   #    default Launcher inherits the Principal ceiling (the home root).
-  roots_out="$(dh completion roots session --system --token-file "$cred" 2>&1)"; roots_rc=$?
+  roots_out="$(dh completion roots session --token-file "$cred" 2>&1)"; roots_rc=$?
   if [ "$roots_rc" -eq 0 ] && printf '%s' "$roots_out" | grep -qx "$home"; then
     reg_ok "B: introspection query (principal credential, selectorless) answers the default target"
   else
@@ -421,7 +421,7 @@ subcase_b() {
   # 7. a foreign selector never leaks policy-derived suggestions: the
   #    daemon rejects the selector and the accepted degradation is the
   #    generic filesystem fallback, never the restricted roots.
-  roots_out="$(dh completion roots session --system --token-file "$cred" --launcher does-not-exist 2>/dev/null)"; roots_rc=$?
+  roots_out="$(dh completion roots session --token-file "$cred" --launcher does-not-exist 2>/dev/null)"; roots_rc=$?
   if [ "$roots_rc" -ne 0 ] && [ -z "$roots_out" ]; then
     reg_ok "B: introspection query with a foreign launcher selector fails silently"
   else
@@ -458,7 +458,7 @@ subcase_c() {
   # read_write home ceiling): the effective-root projection normalizes
   # redundant nesting away, so only a genuine mode transition is guaranteed
   # to reach the introspection and completion surfaces.
-  if ! out="$(dh principal allowed-root add --system --access read_only "$user" "$opt" 2>&1)"; then
+  if ! out="$(dh principal allowed-root add --access read_only "$user" "$opt" 2>&1)"; then
     reg_fail "C: nested root fixture failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
     cleanup_principal "$user"
     rm -f "$cred"
@@ -468,7 +468,7 @@ subcase_c() {
   script="$TMPDIR_REG14/completion-c.bash"
   if ! dh completion bash > "$script" 2>/dev/null || [ ! -s "$script" ]; then
     reg_fail "C: completion script generation failed"
-    dh principal allowed-root remove --system "$user" "$opt" >/dev/null 2>&1 || true
+    dh principal allowed-root remove "$user" "$opt" >/dev/null 2>&1 || true
     cleanup_principal "$user"
     rm -f "$cred"
     return
@@ -477,7 +477,7 @@ subcase_c() {
   # The nested roots must reach the introspection surface before the
   # COMPREPLY contract is asserted.
   local roots_out roots_rc
-  roots_out="$(dh completion roots session --system --token-file "$cred" 2>&1)"; roots_rc=$?
+  roots_out="$(dh completion roots session --token-file "$cred" 2>&1)"; roots_rc=$?
   if [ "$roots_rc" -eq 0 ]; then
     assert_unique "C: introspection output is duplicate-free" "$roots_out"
     if printf '%s' "$roots_out" | grep -qx "$opt"; then
@@ -511,7 +511,7 @@ subcase_c() {
     reg_fail "C: COMPREPLY is not deterministic: [$(printf '%s' "$out" | tr '\n' ' ' | redact)] vs [$(printf '%s' "$out2" | tr '\n' ' ' | redact)]"
   fi
 
-  dh principal allowed-root remove --system "$user" "$opt" >/dev/null 2>&1 || true
+  dh principal allowed-root remove "$user" "$opt" >/dev/null 2>&1 || true
   cleanup_principal "$user"
   rm -f "$cred" "$script"
 }
@@ -569,7 +569,7 @@ subcase_e() {
   chown -R "$user:$user" "$home"
 
   local create_out
-  create_out="$(dh launcher create --system --principal "$user" killme --allowed-root "$opt" --no-credential --json 2>&1)" || {
+  create_out="$(dh launcher create --principal "$user" killme --allowed-root "$opt" --no-credential --json 2>&1)" || {
     reg_fail "E: restricted launcher create failed: $(printf '%s' "$create_out" | head -2 | tr '\n' ' ' | redact)"
     cleanup_principal "$user"
     return
@@ -595,19 +595,19 @@ subcase_e() {
   # The selector introspection surface the completion harness drives must
   # answer on the packaged CLI before the COMPREPLY contract is asserted.
   local sel_out sel_rc
-  sel_out="$(dh completion selectors principal --system 2>&1)"; sel_rc=$?
+  sel_out="$(dh completion selectors principal 2>&1)"; sel_rc=$?
   if [ "$sel_rc" -eq 0 ] && printf '%s\n' "$sel_out" | grep -qx "$user"; then
     reg_ok "E: introspection selectors principal answers for admin"
   else
     reg_fail "E: selectors principal query failed (rc=$sel_rc): $(printf '%s' "$sel_out" | head -2 | tr '\n' ' ' | redact)"
   fi
-  sel_out="$(dh completion selectors launcher --system --principal "$user" 2>&1)"; sel_rc=$?
+  sel_out="$(dh completion selectors launcher --principal "$user" 2>&1)"; sel_rc=$?
   if [ "$sel_rc" -eq 0 ] && printf '%s\n' "$sel_out" | grep -qx 'killme'; then
     reg_ok "E: introspection selectors launcher answers with the Principal context"
   else
     reg_fail "E: selectors launcher (context) query failed (rc=$sel_rc): $(printf '%s' "$sel_out" | head -2 | tr '\n' ' ' | redact)"
   fi
-  sel_out="$(dh completion selectors launcher --system --token-file "$cred" 2>&1)"; sel_rc=$?
+  sel_out="$(dh completion selectors launcher --token-file "$cred" 2>&1)"; sel_rc=$?
   if [ "$sel_rc" -eq 0 ] && printf '%s\n' "$sel_out" | grep -qx 'killme'; then
     reg_ok "E: introspection selectors launcher answers for a principal credential"
   else
@@ -632,7 +632,7 @@ subcase_e() {
 
   # 3. admin without a Principal context: only globally resolvable IDs.
   local id_out
-  id_out="$(dh launcher list --system --principal "$user" --json 2>/dev/null | json_field id)"
+  id_out="$(dh launcher list --principal "$user" --json 2>/dev/null | json_field id)"
   out="$(run_completion "$script" /usr/bin/docker-helper --system session create --launcher "")"
   if printf '%s\n' "$out" | grep -qx "$id_out" && ! printf '%s\n' "$out" | grep -qx 'killme'; then
     reg_ok "E: admin --launcher without a context offers only the resolvable Launcher ID"
@@ -682,7 +682,7 @@ subcase_f() {
   chown -R "$user:$user" "$home"
 
   local create_out
-  create_out="$(dh launcher create --system --principal "$user" killme --allowed-root "$opt" --no-credential --json 2>&1)" || {
+  create_out="$(dh launcher create --principal "$user" killme --allowed-root "$opt" --no-credential --json 2>&1)" || {
     reg_fail "F: restricted launcher create failed: $(printf '%s' "$create_out" | head -2 | tr '\n' ' ' | redact)"
     cleanup_principal "$user"
     return
@@ -728,7 +728,7 @@ subcase_f() {
   fi
   # The override typed after the command words selects the same context.
   local out_after
-  out_after="$(run_completion "$script" /usr/bin/docker-helper launcher show --system --principal "$user" "")"
+  out_after="$(run_completion "$script" /usr/bin/docker-helper launcher show --principal "$user" "")"
   if [ "$out_after" = "$out" ]; then
     reg_ok "F: the override after the command words selects the same context"
   else
@@ -737,7 +737,7 @@ subcase_f() {
 
   # 3. Admin without a context: only the globally resolvable Launcher ID.
   local id_out
-  id_out="$(dh launcher list --system --principal "$user" --json 2>/dev/null | json_field id)"
+  id_out="$(dh launcher list --principal "$user" --json 2>/dev/null | json_field id)"
   out="$(run_completion "$script" /usr/bin/docker-helper --system launcher show "")"
   if printf '%s\n' "$out" | grep -qx "$id_out" && ! printf '%s\n' "$out" | grep -qx 'killme'; then
     reg_ok "F: launcher show <TAB> without a context offers only the resolvable Launcher ID"
@@ -875,7 +875,7 @@ subcase_g() {
   local out rc
   # The machine-facing introspection surface the completion harness drives
   # must answer on the packaged CLI before the COMPREPLY contract is asserted.
-  out="$(dh completion selectors principal --system --command "principal show" 2>&1)"; rc=$?
+  out="$(dh completion selectors principal --command "principal show" 2>&1)"; rc=$?
   if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -qx "$user"; then
     reg_ok "G: introspection selectors principal answers for the principal show context"
   else
@@ -927,7 +927,7 @@ subcase_g() {
   assert_completion "G: principal show USER uid <TAB> offers nothing" "" "$out" || true
 
   # 8. operator flags (bool and value-taking) never shift the FIELD position.
-  out="$(run_completion "$script" /usr/bin/docker-helper principal show --system --token-file "$cred" "$user" "")"
+  out="$(run_completion "$script" /usr/bin/docker-helper principal show --token-file "$cred" "$user" "")"
   assert_completion "G: flags do not shift the FIELD position" \
     "allowed_roots|enabled|gid|home|uid|username" "$out" || true
 

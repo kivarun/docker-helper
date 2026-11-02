@@ -16,10 +16,14 @@ import (
 	"time"
 )
 
-// setupConfigTestWithData creates a temp config environment: a config file
-// with the given JSON data (nil = empty), an admin token beside it, and
-// DOCKER_HELPER_CONFIG pointed at the config file. It returns the config
-// path.
+// setupConfigTestWithData creates a temp config environment exercising the
+// system-only client contract: a config file with the given JSON data
+// (nil = empty), an admin token beside it, DOCKER_HELPER_CONFIG pointed at
+// the config file, the system socket path seam pointed at the isolated fake
+// runtime directory, and the operator credential installed at the canonical
+// client store (XDG credential.token) so default endpoint resolution
+// authenticates like a real non-root system client. Tests that need
+// XDG_RUNTIME_DIR empty must set it AFTER calling this helper.
 func setupConfigTestWithData(t *testing.T, data []byte) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -34,17 +38,24 @@ func setupConfigTestWithData(t *testing.T, data []byte) string {
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 
 	// Isolate from host XDG_RUNTIME_DIR so tests cannot reach a real
-	// user-mode docker-helper socket. Tests that need XDG_RUNTIME_DIR
-	// empty must set it AFTER calling this helper.
+	// docker-helper runtime directory.
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
 	if err := os.MkdirAll(filepath.Join(dir, "runtime", "docker-helper"), 0700); err != nil {
 		t.Fatalf("cannot create runtime dir: %v", err)
 	}
 
-	// Prevent tests from reaching a real system daemon.
-	origSocket := systemSocketExists
-	systemSocketExists = func() bool { return false }
-	t.Cleanup(func() { systemSocketExists = origSocket })
+	// Point the system-socket seam at the isolated runtime directory and
+	// install the operator credential at the canonical client store, so the
+	// default CLI endpoint resolves to the (faked) system socket with the
+	// credential.token bearer.
+	origSocketPath := systemSocketPath
+	systemSocketPath = filepath.Join(dir, "runtime", "docker-helper", "docker-helper.sock")
+	t.Cleanup(func() { systemSocketPath = origSocketPath })
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg_config"))
+	if err := os.MkdirAll(filepath.Join(dir, "xdg_config", "docker-helper"), 0700); err != nil {
+		t.Fatalf("cannot create config home: %v", err)
+	}
+	writeTestTokenFile(t, filepath.Join(dir, "xdg_config", "docker-helper", "credential.token"), "dht_testtoken123\n")
 
 	return configPath
 }
@@ -449,7 +460,7 @@ func TestConfigUnsetRemovesMember(t *testing.T) {
 }
 
 // Req 14: unsetting audit_enabled restores log_level-derived behavior
-func TestConfigUnsetAuditEnabledRestoresLogLevel(t *testing.T) {
+func TestConfigUnsetAuditEnabledRestoresSystemDefault(t *testing.T) {
 	cfg := `{
   "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h",
@@ -460,19 +471,19 @@ func TestConfigUnsetAuditEnabledRestoresLogLevel(t *testing.T) {
 
 	runConfigCLI(t, 0, "config", "unset", "audit_enabled")
 
-	// Now show audit_enabled - should be derived from log_level=debug
+	// Now show audit_enabled - the system default is enabled, not
+	// log_level-derived.
 	stdout, _ := runConfigCLI(t, 0, "config", "show", "audit_enabled")
 	if stdout != "true\n" {
-		t.Errorf("expected 'true\\n' (debug enables audit), got %q", stdout)
+		t.Errorf("expected 'true\n' (system default enables audit), got %q", stdout)
 	}
 
 	stdout, _ = runConfigCLI(t, 0, "config", "show", "audit_enabled_source")
-	if stdout != "log_level\n" {
-		t.Errorf("expected 'log_level\\n', got %q", stdout)
+	if stdout != "system_default\n" {
+		t.Errorf("expected 'system_default\n', got %q", stdout)
 	}
 }
 
-// Req 15: unsetting log_level restores info
 func TestConfigUnsetLogLevelRestoresInfo(t *testing.T) {
 	cfg := `{
   "allowed_roots": ["/home/user/work"],
@@ -732,10 +743,21 @@ func TestConfigSetUnsetNoDirCreation(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 	t.Setenv("XDG_STATE_HOME", stateDir)
 
-	// Prevent reaching a real system daemon.
-	origSocket := systemSocketExists
-	systemSocketExists = func() bool { return false }
-	t.Cleanup(func() { systemSocketExists = origSocket })
+	// System-only client contract: point the system-socket seam at a
+	// nonexistent isolated path and install the operator credential at the
+	// canonical client store, without creating the fixture runtime/state
+	// directories the assertion proves untouched.
+	origSocketPath := systemSocketPath
+	systemSocketPath = filepath.Join(runtimeDir, "docker-helper.sock")
+	t.Cleanup(func() { systemSocketPath = origSocketPath })
+	xdgConfigHome := filepath.Join(dir, "xdg_config")
+	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
+	if err := os.MkdirAll(filepath.Join(xdgConfigHome, "docker-helper"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(xdgConfigHome, "docker-helper", "credential.token"), []byte("dht_testtoken123\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 
 	runConfigCLI(t, 0, "config", "set", "log_level", "debug")
 
@@ -808,89 +830,45 @@ func TestConfigUnsetReadOnlyField(t *testing.T) {
 	}
 }
 
-// Additional: runtime-dependent fields fail without XDG_RUNTIME_DIR
-func TestConfigShowRuntimeDependentNoRuntimeDir(t *testing.T) {
+// Additional: runtime-dependent fields resolve to the system deployment paths
+func TestConfigShowRuntimeDependentSystemPaths(t *testing.T) {
 	cfg := `{
   "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h"
 }`
 	setupConfigTestWithData(t, []byte(cfg))
-	t.Setenv("XDG_RUNTIME_DIR", "")
-
-	for _, field := range []string{"runtime_dir", "socket_path", "lock_path"} {
-		t.Run(field, func(t *testing.T) {
-			var stdout, stderr bytes.Buffer
-			code := runCommandWithWriters([]string{"config", "show", field}, &stdout, &stderr)
-			if code != 1 {
-				t.Errorf("expected exit code 1, got %d", code)
-			}
-			if !strings.Contains(stderr.String(), "XDG_RUNTIME_DIR") {
-				t.Errorf("expected XDG_RUNTIME_DIR error, got: %s", stderr.String())
-			}
-		})
-	}
-}
-
-// Additional: runtime-dependent fields work with XDG_RUNTIME_DIR
-func TestConfigShowRuntimeDependentWithRuntimeDir(t *testing.T) {
-	cfg := `{
-  "allowed_roots": ["/home/user/work"],
-  "session_ttl": "12h"
-}`
-	runtimeDir := "/tmp/test-runtime"
-	setupConfigTestWithData(t, []byte(cfg))
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 
 	stdout, _ := runConfigCLI(t, 0, "config", "show", "runtime_dir")
-	if stdout != filepath.Join(runtimeDir, "docker-helper")+"\n" {
+	if stdout != "/run/docker-helper\n" {
 		t.Errorf("expected runtime dir, got %q", stdout)
 	}
 
 	stdout, _ = runConfigCLI(t, 0, "config", "show", "socket_path")
-	if stdout != filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")+"\n" {
+	if stdout != "/run/docker-helper/docker-helper.sock\n" {
 		t.Errorf("expected socket path, got %q", stdout)
 	}
 }
 
-// Additional: show with no args and no XDG_RUNTIME_DIR shows empty runtime fields
-func TestConfigShowAllNoRuntimeDir(t *testing.T) {
+// Additional: show with no args shows the system deployment paths
+func TestConfigShowAllSystemPaths(t *testing.T) {
 	cfg := `{
   "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h"
 }`
 	setupConfigTestWithData(t, []byte(cfg))
-	t.Setenv("XDG_RUNTIME_DIR", "")
 	stdout, _ := runConfigCLI(t, 0, "config", "show", "--json")
 	var result map[string]any
-	json.Unmarshal([]byte(stdout), &result)
-	if result["runtime_dir"] != "" {
-		t.Errorf("runtime_dir should be empty, got %v", result["runtime_dir"])
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatal(err)
 	}
-	if result["socket_path"] != "" {
-		t.Errorf("socket_path should be empty, got %v", result["socket_path"])
+	if result["runtime_dir"] != "/run/docker-helper" {
+		t.Errorf("runtime_dir = %v, want /run/docker-helper", result["runtime_dir"])
 	}
-	if result["lock_path"] != "" {
-		t.Errorf("lock_path should be empty, got %v", result["lock_path"])
+	if result["socket_path"] != "/run/docker-helper/docker-helper.sock" {
+		t.Errorf("socket_path = %v, want /run/docker-helper/docker-helper.sock", result["socket_path"])
 	}
-}
-
-// Additional: show with no args and XDG_RUNTIME_DIR set
-func TestConfigShowAllWithRuntimeDir(t *testing.T) {
-	cfg := `{
-  "allowed_roots": ["/home/user/work"],
-  "session_ttl": "12h"
-}`
-	runtimeDir := "/tmp/test-runtime"
-	setupConfigTestWithData(t, []byte(cfg))
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	stdout, _ := runConfigCLI(t, 0, "config", "show", "--json")
-	var result map[string]any
-	json.Unmarshal([]byte(stdout), &result)
-	if result["runtime_dir"] != filepath.Join(runtimeDir, "docker-helper") {
-		t.Errorf("runtime_dir = %v", result["runtime_dir"])
-	}
-	if result["socket_path"] != filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock") {
-		t.Errorf("socket_path = %v", result["socket_path"])
+	if result["lock_path"] != "/run/docker-helper/docker-helper.sock.lock" {
+		t.Errorf("lock_path = %v, want /run/docker-helper/docker-helper.sock.lock", result["lock_path"])
 	}
 }
 
@@ -1234,12 +1212,23 @@ func TestRegressionInitDaemonConfigShowConsistent(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
 
+	// Init is system-only: the runInit root gate is bypassed with the UID
+	// seam, and the runtime/state directory seams point at the isolated
+	// fixture directories.
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 0 }
+	t.Cleanup(func() { EffectiveUID = origUID })
+	origRuntime := getRuntimeDirFunc
+	getRuntimeDirFunc = func() (string, error) { return filepath.Join(dir, "runtime"), nil }
+	t.Cleanup(func() { getRuntimeDirFunc = origRuntime })
+	origState := getStateDirFunc
+	getStateDirFunc = func() string { return filepath.Join(dir, "state") }
+	t.Cleanup(func() { getStateDirFunc = origState })
+
 	// 1) Run init - should create files at DOCKER_HELPER_CONFIG, not XDG_CONFIG_HOME
 	allowedRoot := testAllowedRootDir(t)
 
-	// Standalone user init (no system daemon, Docker accessible).
-	restore := mockStandaloneUserInit()
-	defer restore()
+	mockDetectLSM(t, LSMAppArmor, nil)
 
 	if err := runInit(allowedRoot, io.Discard, io.Discard); err != nil {
 		t.Fatalf("init failed: %v", err)
@@ -1914,7 +1903,8 @@ func TestLoadAndPrepareRuntimeConfigAcceptsValidConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
+	runtimeDir, _ := stubSystemRuntimeDirsForTest(t)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 	t.Setenv("XDG_STATE_HOME", dir)
 	if err := os.MkdirAll(filepath.Join(dir, "runtime"), 0700); err != nil {
 		t.Fatal(err)
@@ -2102,8 +2092,8 @@ func TestConfigShowEffectiveInvariant(t *testing.T) {
 	}
 
 	checkField("log_level", "info")
-	checkField("audit_enabled", false)
-	checkField("audit_enabled_source", "log_level")
+	checkField("audit_enabled", true)
+	checkField("audit_enabled_source", "system_default")
 	checkField("shutdown_timeout", "30s")
 	checkField("operation_retention_ttl", "10m")
 	checkField("operation_max_completed", float64(200))

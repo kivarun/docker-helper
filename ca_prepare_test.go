@@ -110,7 +110,7 @@ func TestCAPrepareIdempotent(t *testing.T) {
 		t.Error("expected same prepared dir for same CA")
 	}
 
-	trustedCADir := filepath.Join(runtimeDir, "docker-helper", "trusted-ca")
+	trustedCADir := filepath.Join(runtimeDir, "trusted-ca")
 	entries, err := os.ReadDir(trustedCADir)
 	if err != nil {
 		t.Fatal(err)

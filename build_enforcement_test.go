@@ -91,7 +91,7 @@ func assertTreeUnchanged(t *testing.T, before, after *snapshotTreeState) {
 	}
 }
 
-// newBuildEnforcementApp builds a user-mode App with a stubbed docker exec
+// newBuildEnforcementApp builds an App with a stubbed docker exec
 // (real staging) for build filesystem tests. It returns the app and the
 // capture function for the last docker argv.
 func newBuildEnforcementApp(t *testing.T) (*App, func() []string) {

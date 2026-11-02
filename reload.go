@@ -121,8 +121,7 @@ func (a *App) handleReloadWithDeps(w http.ResponseWriter, r *http.Request, deps 
 	}
 
 	// Preserve startup-only fields that cannot be changed at runtime.
-	oldCfg := a.getConfig()
-	newCfg.HTTPAddress = oldCfg.HTTPAddress
+	newCfg.HTTPAddress = a.getConfig().HTTPAddress
 
 	// The authoritative global-ceiling transition: the new global
 	// allowed-root policy becomes durable policy state only together with its
@@ -132,7 +131,7 @@ func (a *App) handleReloadWithDeps(w http.ResponseWriter, r *http.Request, deps 
 	// Session create observes either the old complete hierarchy or the new
 	// complete cascaded hierarchy, never a new parent ceiling with stale
 	// child rows.
-	reconcileResult, err := reconcileStoredAllowedRootsToGlobalCeiling(a.DB, newCfg.AllowedRoots, oldCfg.Mode == ModeUser, a.userModeDaemonOwnerPrincipalID())
+	reconcileResult, err := reconcileStoredAllowedRootsToGlobalCeiling(a.DB, newCfg.AllowedRoots)
 	if err != nil {
 		a.lifecycleMu.Unlock()
 		duration := time.Since(started).Round(time.Millisecond).String()

@@ -321,7 +321,8 @@ func TestLoadAndPrepareRuntimeConfigRichObjectForm(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", dir)
+	runtimeDir, _ := stubSystemRuntimeDirsForTest(t)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 
 	loaded, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
@@ -498,7 +499,8 @@ func TestLegacyAllowedRootSingularLoadReadWriteAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", dir)
+	runtimeDir, _ := stubSystemRuntimeDirsForTest(t)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 
 	loaded, err := loadAndPrepareRuntimeConfig()
 	if err != nil {

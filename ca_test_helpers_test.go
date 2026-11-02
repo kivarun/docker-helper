@@ -124,10 +124,27 @@ func setupCAConfigTest(t *testing.T) (configPath, caPath, runtimeDir string) {
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 	t.Setenv("XDG_STATE_HOME", stateHome)
 
-	// Prevent tests from reaching a real system daemon.
-	origSocket := systemSocketExists
-	systemSocketExists = func() bool { return false }
-	t.Cleanup(func() { systemSocketExists = origSocket })
+	// System-only layout: the runtime/state directory seams point at the
+	// isolated fixture directories so trusted-CA preparation writes there,
+	// and the default client endpoint resolves to the (faked) system socket
+	// with the operator credential at the canonical client store.
+	origRuntime := getRuntimeDirFunc
+	getRuntimeDirFunc = func() (string, error) { return runtimeDir, nil }
+	t.Cleanup(func() { getRuntimeDirFunc = origRuntime })
+	origState := getStateDirFunc
+	getStateDirFunc = func() string { return stateHome }
+	t.Cleanup(func() { getStateDirFunc = origState })
+
+	origSocketPath := systemSocketPath
+	systemSocketPath = filepath.Join(runtimeSubDir, "docker-helper.sock")
+	t.Cleanup(func() { systemSocketPath = origSocketPath })
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg_config"))
+	if err := os.MkdirAll(filepath.Join(dir, "xdg_config", "docker-helper"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "xdg_config", "docker-helper", "credential.token"), []byte("test-admin-token\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 
 	return configPath, caPath, runtimeDir
 }
@@ -157,18 +174,21 @@ func setupCAConfigPreflightTest(t *testing.T) (configPath, caPath string) {
 
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 
-	// Use a short, unique nonexistent runtime dir so the final socket path
-	// stays below the Unix-domain socket pathname limit (~108 bytes on Linux).
-	// t.TempDir() paths can be long; a long socket path causes EINVAL,
-	// not ENOENT, and would not be recognized as daemon-not-running.
-	shortRuntime := filepath.Join(os.TempDir(), fmt.Sprintf("dh-ca-%d", os.Getpid()))
-	t.Setenv("XDG_RUNTIME_DIR", shortRuntime)
-	t.Cleanup(func() { os.RemoveAll(shortRuntime) })
-
-	// Prevent tests from reaching a real system daemon.
-	origSocket := systemSocketExists
-	systemSocketExists = func() bool { return false }
-	t.Cleanup(func() { systemSocketExists = origSocket })
+	// System-only client contract: point the system-socket seam at a short,
+	// unique nonexistent path below the Unix-domain socket pathname limit
+	// (~108 bytes on Linux; a long path causes EINVAL, not ENOENT) and
+	// install the operator credential at the canonical client store.
+	shortSocket := filepath.Join(os.TempDir(), fmt.Sprintf("dh-ca-%d", os.Getpid()), "docker-helper.sock")
+	origSocketPath := systemSocketPath
+	systemSocketPath = shortSocket
+	t.Cleanup(func() { systemSocketPath = origSocketPath; os.RemoveAll(filepath.Dir(shortSocket)) })
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	if err := os.MkdirAll(filepath.Join(dir, "docker-helper"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "docker-helper", "credential.token"), []byte("test-admin-token\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 
 	return configPath, caPath
 }

@@ -82,7 +82,7 @@ type launcherStoredRootPruned struct {
 // never deletes a child (the existing access meet produces the effective
 // mode), and stored roots are never transformed or shortened — a root either
 // remains valid as stored or is deleted.
-func pruneStoredAllowedRootsToCeilings(tx *sql.Tx, globalEntries []AllowedRootEntry, principalID int64, daemonOwnerPrincipalID int64, userMode bool) (storedRootCascadeResult, error) {
+func pruneStoredAllowedRootsToCeilings(tx *sql.Tx, globalEntries []AllowedRootEntry, principalID int64) (storedRootCascadeResult, error) {
 	result := storedRootCascadeResult{}
 
 	principalIDs := []int64{principalID}
@@ -107,7 +107,7 @@ func pruneStoredAllowedRootsToCeilings(tx *sql.Tx, globalEntries []AllowedRootEn
 	}
 
 	for _, pid := range principalIDs {
-		if err := prunePrincipalStoredRootsToCeiling(tx, globalEntries, pid, daemonOwnerPrincipalID, userMode, principalID == 0, &result); err != nil {
+		if err := prunePrincipalStoredRootsToCeiling(tx, globalEntries, pid, principalID == 0, &result); err != nil {
 			return result, err
 		}
 	}
@@ -118,7 +118,7 @@ func pruneStoredAllowedRootsToCeilings(tx *sql.Tx, globalEntries []AllowedRootEn
 // descendant roots to the resulting ceilings. globalScopePrune selects the
 // Principal-root level (global-ceiling transitions only; see
 // pruneStoredAllowedRootsToCeilings). appends the deleted rows to result.
-func prunePrincipalStoredRootsToCeiling(tx *sql.Tx, globalEntries []AllowedRootEntry, principalID int64, daemonOwnerPrincipalID int64, userMode, globalScopePrune bool, result *storedRootCascadeResult) error {
+func prunePrincipalStoredRootsToCeiling(tx *sql.Tx, globalEntries []AllowedRootEntry, principalID int64, globalScopePrune bool, result *storedRootCascadeResult) error {
 	stored, err := readPrincipalAllowedRoots(tx, principalID)
 	if err != nil {
 		return err
@@ -143,7 +143,7 @@ func prunePrincipalStoredRootsToCeiling(tx *sql.Tx, globalEntries []AllowedRootE
 		}
 	}
 
-	ceiling := effectivePrincipalAllowedRoots(globalEntries, surviving, principalID, daemonOwnerPrincipalID, userMode)
+	ceiling := effectivePrincipalAllowedRoots(globalEntries, surviving, principalID)
 	ceilingPaths := allowedRootPaths(ceiling)
 
 	launchers, err := tx.Query(
@@ -188,25 +188,6 @@ func prunePrincipalStoredRootsToCeiling(tx *sql.Tx, globalEntries []AllowedRootE
 	return nil
 }
 
-// userModeDaemonOwnerPrincipalID resolves the user-mode daemon-owner
-// Principal identity for the reconciliation's effective-ceiling computation:
-// zero outside user mode, the startup-resolved identity inside it.
-func (a *App) userModeDaemonOwnerPrincipalID() int64 {
-	if a.userModeDefault != nil {
-		return a.userModeDefault.principalID
-	}
-	return 0
-}
-
-// userModeDefaultOwnerID resolves the daemon-owner Principal identity from
-// the startup ownership projection: zero when system mode resolved none.
-func userModeDefaultOwnerID(owner *userModeDefaultLauncher) int64 {
-	if owner != nil {
-		return owner.principalID
-	}
-	return 0
-}
-
 // logStoredRootReconciliation records the committed reconciliation outcome on
 // the operational log. It never carries bearer or secret material: the
 // cascaded policy-row identities and owner IDs are operational policy facts.
@@ -232,7 +213,7 @@ func logStoredRootReconciliation(ctx context.Context, operation string, result s
 // The global-ceiling transition surfaces (config reload and daemon startup)
 // call this same owner; the lock ordering they own remains lifecycleMu ->
 // a.mu (reload) or the startup path (no concurrent serving yet).
-func reconcileStoredAllowedRootsToGlobalCeiling(db *sql.DB, globalEntries []AllowedRootEntry, userMode bool, daemonOwnerPrincipalID int64) (storedRootCascadeResult, error) {
+func reconcileStoredAllowedRootsToGlobalCeiling(db *sql.DB, globalEntries []AllowedRootEntry) (storedRootCascadeResult, error) {
 	resolved, err := resolveAllowedRootEntries(globalEntries)
 	if err != nil {
 		return storedRootCascadeResult{}, err
@@ -244,7 +225,7 @@ func reconcileStoredAllowedRootsToGlobalCeiling(db *sql.DB, globalEntries []Allo
 	}
 	defer tx.Rollback()
 
-	result, err := pruneStoredAllowedRootsToCeilings(tx, resolved, 0, daemonOwnerPrincipalID, userMode)
+	result, err := pruneStoredAllowedRootsToCeilings(tx, resolved, 0)
 	if err != nil {
 		return storedRootCascadeResult{}, err
 	}
@@ -271,7 +252,7 @@ func reconcileStoredAllowedRootsToGlobalCeiling(db *sql.DB, globalEntries []Allo
 // App lifecycle boundary under the lifecycle serialization (the same
 // lifecycleMu -> a.mu ordering as config reload), so the cascade is computed
 // against exactly the ceiling the mutation linearizes with.
-func removePrincipalAllowedRootCascaded(db *sql.DB, username, rootPath string, globalEntries []AllowedRootEntry, userMode bool, daemonOwnerPrincipalID int64) (changed bool, canonicalPath string, pruned storedRootCascadeResult, err error) {
+func removePrincipalAllowedRootCascaded(db *sql.DB, username, rootPath string, globalEntries []AllowedRootEntry) (changed bool, canonicalPath string, pruned storedRootCascadeResult, err error) {
 	if username == "" {
 		return false, "", storedRootCascadeResult{}, fmt.Errorf("username is required: %w", ErrPrincipalNotFound)
 	}
@@ -315,7 +296,7 @@ func removePrincipalAllowedRootCascaded(db *sql.DB, username, rootPath string, g
 	}
 
 	if affected > 0 {
-		pruned, err = pruneStoredAllowedRootsToCeilings(tx, globalEntries, int64(principalID), daemonOwnerPrincipalID, userMode)
+		pruned, err = pruneStoredAllowedRootsToCeilings(tx, globalEntries, int64(principalID))
 		if err != nil {
 			return false, "", storedRootCascadeResult{}, err
 		}

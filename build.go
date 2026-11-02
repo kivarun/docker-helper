@@ -13,6 +13,9 @@ import (
 	"time"
 )
 
+// Cross-platform staging refusal, shared by the Linux walker and BUILD handler.
+var errBuildStagingSymlinkOutsideContext = errors.New("build context symlink escapes staged context")
+
 func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	authority, ok := a.requireSessionFilesystemCapability(w, r, "build")
 	if !ok {
@@ -199,6 +202,11 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 				slog.String("error", err.Error()),
 			)
 			writeDockerActionRejected(ctx, w, http.StatusBadRequest, "build", "build_context_too_large", "build context exceeds the staging "+ceilingErr.Resource+" ceiling", session.PrincipalName)
+			return
+		}
+		if errors.Is(err, errBuildStagingSymlinkOutsideContext) {
+			opLog(ctx).Warn("build staging refused an unsafe symlink")
+			writeDockerActionRejected(ctx, w, http.StatusBadRequest, "build", "invalid_build_context", "build context contains an unsafe symlink", session.PrincipalName)
 			return
 		}
 		opLog(ctx).Error("build context staging failed",

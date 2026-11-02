@@ -50,6 +50,9 @@ func credentialPath() (string, error) {
 	return filepath.Join(dir, "credential.token"), nil
 }
 
+// credentialPathFunc is injectable for testing.
+var credentialPathFunc = credentialPath
+
 // validateCredentialToken checks the Principal-credential token format defined
 // by the canonical credential.go constants: dhc_ + 64 lowercase hex chars.
 func validateCredentialToken(token string) error {
@@ -67,42 +70,6 @@ func validateCredentialToken(token string) error {
 		}
 	}
 	return nil
-}
-
-// credentialState represents the result of checking an existing credential file.
-type credentialState int
-
-const (
-	// credentialAbsent means no credential file exists.
-	credentialAbsent credentialState = iota
-	// credentialMatch means the existing credential matches the given token.
-	credentialMatch
-	// credentialConflict means a different credential is already installed.
-	credentialConflict
-)
-
-// checkCredentialState checks the credential file against the given token.
-// Returns (credentialAbsent, nil) when the file does not exist (ENOENT).
-// Returns (credentialMatch, nil) when the file exists and contains the same token.
-// Returns (credentialConflict, nil) when the file exists with a different token.
-// Returns (0, error) for credentialPath resolution failures or I/O errors
-// other than ENOENT (fail closed).
-func checkCredentialState(token string) (credentialState, error) {
-	credPath, err := credentialPath()
-	if err != nil {
-		return 0, fmt.Errorf("cannot determine credential path: %w", err)
-	}
-	existing, err := os.ReadFile(credPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return credentialAbsent, nil
-		}
-		return 0, fmt.Errorf("cannot read credential file: %w", err)
-	}
-	if strings.TrimSpace(string(existing)) == token {
-		return credentialMatch, nil
-	}
-	return credentialConflict, nil
 }
 
 // readTokenFromReader reads a single token line from the reader.
@@ -198,7 +165,7 @@ func installCredential(cfg credentialInstallConfig) (string, error) {
 // If the directory already exists, it verifies and fixes the mode to 0700.
 func ensureCredentialDir(dir string) error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("cannot create credential directory: %w", ErrCredentialDirectoryMissing)
+		return fmt.Errorf("cannot create credential directory: %v (%w)", err, ErrCredentialDirectoryMissing)
 	}
 	info, err := os.Stat(dir)
 	if err != nil {

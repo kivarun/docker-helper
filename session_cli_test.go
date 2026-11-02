@@ -33,13 +33,17 @@ func TestSessionCleanupDaemonLockHeld(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Set up XDG seams.
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	t.Setenv("XDG_STATE_HOME", stateDir)
-	t.Setenv("HOME", dir)
+	// The offline cleanup owns the system runtime/state directories; the
+	// test points both seams at the isolated fixture directories.
+	origRuntime := getRuntimeDirFunc
+	getRuntimeDirFunc = func() (string, error) { return runtimeDir, nil }
+	t.Cleanup(func() { getRuntimeDirFunc = origRuntime })
+	origState := getStateDirFunc
+	getStateDirFunc = func() string { return stateDir }
+	t.Cleanup(func() { getStateDirFunc = origState })
 
 	// Create database with an expired session.
-	dbPath := filepath.Join(getStateDir(), "docker-helper.db")
+	dbPath := filepath.Join(stateDir, "docker-helper.db")
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +94,7 @@ func TestSessionCleanupDaemonLockHeld(t *testing.T) {
 	}
 
 	// Expired session should still exist.
-	db, err = openDatabase(filepath.Join(getStateDir(), "docker-helper.db"))
+	db, err = openDatabase(dbPath)
 	if err != nil {
 		t.Fatalf("reopen database: %v", err)
 	}
@@ -132,13 +136,17 @@ func TestSessionCleanupOffline(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Set up XDG seams.
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	t.Setenv("XDG_STATE_HOME", stateDir)
-	t.Setenv("HOME", dir)
+	// The offline cleanup owns the system runtime/state directories; the
+	// test points both seams at the isolated fixture directories.
+	origRuntime := getRuntimeDirFunc
+	getRuntimeDirFunc = func() (string, error) { return runtimeDir, nil }
+	t.Cleanup(func() { getRuntimeDirFunc = origRuntime })
+	origState := getStateDirFunc
+	getStateDirFunc = func() string { return stateDir }
+	t.Cleanup(func() { getStateDirFunc = origState })
 
 	// Create database with an expired session.
-	dbPath := filepath.Join(getStateDir(), "docker-helper.db")
+	dbPath := filepath.Join(stateDir, "docker-helper.db")
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0700); err != nil {
 		t.Fatal(err)
 	}

@@ -112,6 +112,17 @@ else
   fail "could not download/verify the v2.1.1 baseline RPM (pinned fixture)"
 fi
 
+# The published v2.2.0 package is the immutable migration baseline for the
+# Release-2.3 system-mode-only 2.2.0 -> candidate RPM migration gate (same
+# single fixture owner, same pinned-digest contract).
+BASELINE22_RPM_PATH=""
+if upgrade22_fetch_rpm /tmp/uat-baseline22-docker-helper.rpm >/tmp/baseline22-rpm.path 2>/dev/null; then
+  BASELINE22_RPM_PATH="$(cat /tmp/baseline22-rpm.path)"
+  log "v2.2.0 baseline RPM downloaded and SHA-256 verified (pinned fixture)"
+else
+  fail "could not download/verify the v2.2.0 baseline RPM (pinned fixture)"
+fi
+
 # ---------------------------------------------------------------------------
 # canonical Tumbleweed VM harness (VM mechanics; no MAC/package/UAT knowledge)
 # ---------------------------------------------------------------------------
@@ -327,6 +338,14 @@ else
   fail "v2.1.1 baseline RPM transfer to guest failed (exit $EC)"
 fi
 
+log "copying v2.2.0 baseline RPM into guest (/opt/uat-import/docker-helper-baseline-2.2.0.rpm)"
+if vm_scp "$BASELINE22_RPM_PATH" opc@127.0.0.1:/opt/uat-import/docker-helper-baseline-2.2.0.rpm; then
+  :
+else
+  EC=$?
+  fail "v2.2.0 baseline RPM transfer to guest failed (exit $EC)"
+fi
+
 # ---------------------------------------------------------------------------
 # 7. run the existing black-box UAT inside the guest
 # ---------------------------------------------------------------------------
@@ -385,6 +404,17 @@ log "== 7d. 2.1.1 -> candidate RPM migration gate =="
 run_guest_uat "2.1.1 -> candidate RPM migration gate inside the guest" \
   "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_VERSION=$VERSION UAT_RPM=/opt/uat-import/docker-helper.rpm UAT_RPM_SHA256=$UAT_RPM_SHA256 UAT_BASELINE211_RPM=/opt/uat-import/docker-helper-baseline-2.1.1.rpm UAT_BASELINE211_SHA256=$UPGRADE211_RPM_SHA256 UAT_PRINCIPAL=opc scripts/uat-migration-rpm-211.sh"
 log "2.1.1 -> candidate RPM migration gate passed inside the guest"
+
+# ---------------------------------------------------------------------------
+# 7e. Release-2.3 system-mode-only migration gate 2.2.0 -> candidate on the
+#     RPM path (pinned published v2.2.0 baseline, real rpm -U upgrade with
+#     the service running; user-unit removal, removed mode-selection grammar,
+#     identity preservation, no historical user-state adoption)
+# ---------------------------------------------------------------------------
+log "== 7e. 2.2.0 -> candidate RPM migration gate =="
+run_guest_uat "2.2.0 -> candidate RPM migration gate inside the guest" \
+  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_VERSION=$VERSION UAT_RPM=/opt/uat-import/docker-helper.rpm UAT_RPM_SHA256=$UAT_RPM_SHA256 UAT_BASELINE22_RPM=/opt/uat-import/docker-helper-baseline-2.2.0.rpm UAT_BASELINE22_SHA256=$UPGRADE22_RPM_SHA256 UAT_PRINCIPAL=opc scripts/uat-migration-rpm-22.sh"
+log "2.2.0 -> candidate RPM migration gate passed inside the guest"
 
 # ---------------------------------------------------------------------------
 # 8. Summary

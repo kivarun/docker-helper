@@ -375,15 +375,8 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Strings(envNames)
 
-	// Get config for deployment mode and trusted CA injection.
+	// Get config for trusted CA injection.
 	cfg := a.getConfig()
-
-	// helper_socket is a system-mode server-owned capability. User mode
-	// fails closed before any lease, pin, or operation state exists.
-	if req.HelperSocket && cfg.Mode != ModeSystem {
-		writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_helper_socket", "helper_socket is not supported in user mode", session.PrincipalName)
-		return
-	}
 
 	// With the helper runtime projection active, the server owns the socket
 	// locator: the caller may either omit it or supply exactly the canonical
@@ -391,7 +384,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	// pin, operation, or Docker state exists; it is never silently
 	// overwritten. Without helper_socket the locator is an ordinary caller
 	// environment variable with unchanged behavior.
-	if req.HelperSocket && cfg.Mode == ModeSystem {
+	if req.HelperSocket {
 		if v, exists := req.Environment[helperSocketLocatorEnv]; exists && v != helperSocketLocatorEnvValue {
 			writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_helper_socket", "helper_socket requires the canonical socket locator", session.PrincipalName)
 			return
@@ -476,47 +469,17 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// User-mode backend-safety boundary (Release 2.2): user mode has no
-		// inode-pinning handoff, so dockerd would consume the bind source
-		// through its pathname. Only the canonical workspace root carries the
-		// established pathname-stability invariant (the sandbox cannot write
-		// its parent, so it cannot replace the workspace directory entry);
-		// a relative "." mount, a workspace-root symlink alias, and an
-		// absolute spelling resolving exactly to the canonical workspace all
-		// canonicalize to that one stable source. Every other source — child
-		// or file, relative or absolute, disjoint absolute — is refused as
-		// invalid_mount before any pin, operation, or Docker state exists.
-		// This is the user-mode source-shape restriction of the same
-		// workspace-root-only contract the Session-create filesystem-root
-		// boundary enforces; the immutable Session snapshot remains the
-		// filesystem access-mode owner.
-		if cfg.Mode == ModeUser && resolved.SourcePath != session.Workspace {
-			releasePreparation()
-			writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
-			return
-		}
-
 		// Docker bind-mount serialization: the caller-visible fields of
 		// every mount must be representable through the Docker mount grammar
 		// before any pin, operation, or Docker state exists — the container
-		// target in every mode, and the canonical bind source in user mode
-		// (system mode binds a helper-owned pinned path instead of the
-		// resolved host path). The representability proof and the encoding
-		// live in the serializer owner, never as scattered per-caller
-		// prohibitions.
+		// target and the canonical bind source. The representability proof
+		// and the encoding live in the serializer owner, never as scattered
+		// per-caller prohibitions.
 		if err := dockerMountFieldRepresentable(resolved.Target); err != nil {
 			releasePreparation()
 			writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
 			return
 		}
-		if cfg.Mode == ModeUser {
-			if err := dockerMountFieldRepresentable(resolved.SourcePath); err != nil {
-				releasePreparation()
-				writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
-				return
-			}
-		}
-
 		if targetSeen[resolved.Target] {
 			releasePreparation()
 			writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
@@ -629,7 +592,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	// single argv entry (the map is keyed by name). The injection is
 	// server-owned and is not a caller env key, so the audit env keys stay
 	// caller-provided only. No Session token is ever injected here.
-	if req.HelperSocket && cfg.Mode == ModeSystem {
+	if req.HelperSocket {
 		if _, exists := allEnv[helperSocketLocatorEnv]; !exists {
 			allEnv[helperSocketLocatorEnv] = helperSocketLocatorEnvValue
 		}
@@ -670,23 +633,17 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// In system mode, the workload MAC coordinator decides the
-	// container security options and materializes the accepted exposure plan
-	// through the active backend. A missing coordinator means no supported
-	// MAC backend is active — fail closed before any state exists.
-	var securityOpts []string
-	if cfg.Mode == ModeSystem {
-		if a.WorkloadMAC == nil {
-			releasePreparation()
-			opLog(ctx).Error("no MAC backend active for system mode",
-				slog.String("operation", "run"),
-			)
-			writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
-			return
-		}
-	} else {
-		// User mode: disable SELinux labels (existing behavior).
-		securityOpts = []string{"label=disable"}
+	// The workload MAC coordinator decides the container security options and
+	// materializes the accepted exposure plan through the active backend. A
+	// started daemon constructs it mandatorily at startup; this guard fails
+	// closed for directly constructed test App fixtures.
+	if a.WorkloadMAC == nil {
+		releasePreparation()
+		opLog(ctx).Error("no MAC backend active",
+			slog.String("operation", "run"),
+		)
+		writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
+		return
 	}
 
 	bufSize := cfg.OperationLogMaxBytes
@@ -697,10 +654,8 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	op.auditMounts = mountAudit
 	op.auditEnvKeys = envNames
 	op.auditTrustedCAInjected = trustedCAInjected
-	op.auditHelperSocket = req.HelperSocket && cfg.Mode == ModeSystem
-	if cfg.Mode == ModeSystem && a.WorkloadMAC != nil {
-		op.auditWorkloadMACBackend = string(a.WorkloadMAC.Backend())
-	}
+	op.auditHelperSocket = req.HelperSocket
+	op.auditWorkloadMACBackend = string(a.WorkloadMAC.Backend())
 	// Associate the lease with the operation immediately so every failure
 	// path — pre-admission rollback included — releases it through the one
 	// rollback owner. The capacity reservation transfers the same way: the
@@ -722,34 +677,30 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		op.cidfile = filepath.Join(cfg.RuntimeDir, op.ID+".cid")
 	}
 
-	// In system mode, pin each mount source to a helper-owned destination.
-	// In user mode, use the resolved host paths directly. Pins are appended
+	// Pin each mount source to a helper-owned destination. Pins are appended
 	// to the operation incrementally so the shared rollback owner sees the
 	// exact prepared state on failure.
 	pinnedMounts := make([]*pinnedMount, 0, len(resolvedMounts))
-	if cfg.Mode == ModeSystem {
-		for i, m := range resolvedMounts {
-			pm, err := a.pinMountSource(m.SourcePath, cfg.RuntimeDir, op.ID, i)
-			if err != nil {
-				opLog(ctx).Error("cannot pin mount source",
-					slog.String("operation", "run"),
-					slog.String("error", err.Error()),
-				)
-				a.rollbackRunPreparation(ctx, op)
-				writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
-				return
-			}
-			op.pinnedMounts = append(op.pinnedMounts, pm)
-			pinnedMounts = append(pinnedMounts, pm)
+	for i, m := range resolvedMounts {
+		pm, err := a.pinMountSource(m.SourcePath, cfg.RuntimeDir, op.ID, i)
+		if err != nil {
+			opLog(ctx).Error("cannot pin mount source",
+				slog.String("operation", "run"),
+				slog.String("error", err.Error()),
+			)
+			a.rollbackRunPreparation(ctx, op)
+			writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
+			return
 		}
+		op.pinnedMounts = append(op.pinnedMounts, pm)
+		pinnedMounts = append(pinnedMounts, pm)
 	}
 
-	// Workload MAC materialization (system mode only): after the
-	// pins, because the SELinux accepted mechanism projects from the pinned
-	// kernel source; before admission and container creation, because no
-	// admitted or running workload may exist without validated workload
-	// MAC state.
-	if cfg.Mode == ModeSystem {
+	// Workload MAC materialization: after the pins, because the SELinux
+	// accepted mechanism projects from the pinned kernel source; before
+	// admission and container creation, because no admitted or running
+	// workload may exist without validated workload MAC state.
+	{
 		pinnedSources := make([]string, len(pinnedMounts))
 		for i, pm := range pinnedMounts {
 			pinnedSources[i] = pm.PinnedPath
@@ -787,7 +738,6 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		op.workloadMAC = prepared
-		securityOpts = prepared.SecurityOpts
 	}
 
 	// Build and serialize the complete Docker argv after the pins and the
@@ -797,8 +747,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	// admitted Operation left in the supervisor, no run.start audit event,
 	// and no Docker process.
 	//
-	// Container security options come from the prepared workload MAC state
-	// in system mode and from the fixed user-mode label disable otherwise.
+	// Container security options come from the prepared workload MAC state.
 	args := []string{
 		"--config", dockerDir,
 		"run",
@@ -814,7 +763,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	// --security-opt options appended below stay additional independent
 	// confinement layers.
 	args = append(args, workloadPrivilegeFloor...)
-	for _, opt := range securityOpts {
+	for _, opt := range op.workloadMAC.SecurityOpts {
 		args = append(args, "--security-opt", opt)
 	}
 
@@ -860,7 +809,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	// mounts audit): a read-only bind of the daemon's own runtime directory
 	// at the fixed container target, giving the workload transport
 	// reachability to the existing helper Unix socket.
-	if req.HelperSocket && cfg.Mode == ModeSystem {
+	if req.HelperSocket {
 		socketSpec, err := dockerBindMountSpec(dockerBindMount{
 			Source:   cfg.RuntimeDir,
 			Target:   helperSocketContainerDir,
@@ -874,17 +823,13 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Add user mounts from the accepted exposure plan: the bind source is
-	// the prepared MAC materialization source in system mode (the existing
-	// pin, or the helper-owned projection path for a SELinux read-only
-	// exposure) and the canonical resolved path in user mode; the readonly
-	// flag follows exactly the caller-requested consumption mode, never the
-	// snapshot access of the source. Every bind form is serialized by the
-	// one canonical Docker bind-mount owner.
+	// the prepared MAC materialization source (the existing pin, or the
+	// helper-owned projection path for a SELinux read-only exposure); the
+	// readonly flag follows exactly the caller-requested consumption mode,
+	// never the snapshot access of the source. Every bind form is serialized
+	// by the one canonical Docker bind-mount owner.
 	for i, exposure := range exposurePlan {
-		dockerBindSource := exposure.SourcePath
-		if cfg.Mode == ModeSystem {
-			dockerBindSource = op.workloadMAC.MountSources[i]
-		}
+		dockerBindSource := op.workloadMAC.MountSources[i]
 		spec, err := dockerBindMountSpec(dockerBindMount{
 			Source:   dockerBindSource,
 			Target:   exposure.Target,

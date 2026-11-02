@@ -40,9 +40,8 @@ func wideningRoots(inputs string) string {
 // is validated against one ceiling generation and committed against another.
 func TestRaceNarrowedSessionCreateLinearizesBeforeParentMutation(t *testing.T) {
 	app1 := newTestAppWithAdminToken(t)
-	// The multi-root issuance contract is a system-mode capability; the
-	// user-mode workspace-only restriction is proven separately.
-	app1.Config.Mode = ModeSystem
+	// The multi-root issuance contract is proven separately from the
+	// workspace-only narrowing here.
 	setupTestLoggingDiscard(t)
 	workspace, inputs, token := setupSnapshotRacePrincipal(t, app1)
 
@@ -54,9 +53,8 @@ func TestRaceNarrowedSessionCreateLinearizesBeforeParentMutation(t *testing.T) {
 	createBoundaryPoint := newParkedQueryPoint("FROM launchers l JOIN principals p")
 	mutationPoint := newParkedQueryPoint("SELECT id FROM principals WHERE username")
 	app := &App{
-		Config:          app1.Config,
-		DB:              openParkedQueryDB(t, app1.Config.DatabasePath, doorPoint, createBoundaryPoint, mutationPoint),
-		userModeDefault: app1.userModeDefault,
+		Config: app1.Config,
+		DB:     openParkedQueryDB(t, app1.Config.DatabasePath, doorPoint, createBoundaryPoint, mutationPoint),
 	}
 
 	runSinglePinnedP(t, func() {
@@ -117,18 +115,16 @@ func TestRaceNarrowedSessionCreateLinearizesBeforeParentMutation(t *testing.T) {
 // mixed state.
 func TestRaceNarrowedSessionCreateLinearizesAfterParentMutation(t *testing.T) {
 	app1 := newTestAppWithAdminToken(t)
-	// The multi-root issuance contract is a system-mode capability; the
-	// user-mode workspace-only restriction is proven separately.
-	app1.Config.Mode = ModeSystem
+	// The multi-root issuance contract is proven separately from the
+	// workspace-only narrowing here.
 	setupTestLoggingDiscard(t)
 	workspace, inputs, token := setupSnapshotRacePrincipal(t, app1)
 
 	mutationPoint := newParkedQueryPoint("SELECT id FROM principals WHERE username")
 	doorPoint := newParkedQueryPoint("SELECT username, enabled FROM principals WHERE id")
 	app := &App{
-		Config:          app1.Config,
-		DB:              openParkedQueryDB(t, app1.Config.DatabasePath, mutationPoint, doorPoint),
-		userModeDefault: app1.userModeDefault,
+		Config: app1.Config,
+		DB:     openParkedQueryDB(t, app1.Config.DatabasePath, mutationPoint, doorPoint),
 	}
 
 	runSinglePinnedP(t, func() {

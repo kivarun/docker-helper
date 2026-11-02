@@ -155,6 +155,17 @@ else
   fail "could not download/verify the v2.1.1 baseline RPM (pinned fixture)"
 fi
 
+# The published v2.2.0 package is the immutable migration baseline for the
+# Release-2.3 system-mode-only 2.2.0 -> candidate RPM migration gate (same
+# single fixture owner, same pinned-digest contract).
+BASELINE22_RPM_PATH=""
+if upgrade22_fetch_rpm /tmp/uat-baseline22-docker-helper.rpm >/tmp/baseline22-rpm.path 2>/dev/null; then
+  BASELINE22_RPM_PATH="$(cat /tmp/baseline22-rpm.path)"
+  log "v2.2.0 baseline RPM downloaded and SHA-256 verified (pinned fixture)"
+else
+  fail "could not download/verify the v2.2.0 baseline RPM (pinned fixture)"
+fi
+
 # ---------------------------------------------------------------------------
 # shared SELinux host construction (sources the canonical Tumbleweed VM harness
 # and the SELinux bootstrap/proof/transfer/docker-prep); no VM/MAC knowledge
@@ -197,6 +208,7 @@ vm_selinux_transfer_repo
 vm_selinux_transfer_artifact "docker-helper.rpm" "$UAT_RPM"
 vm_selinux_transfer_artifact "docker-helper-baseline.rpm" "$BASELINE_RPM_PATH"
 vm_selinux_transfer_artifact "docker-helper-baseline-2.1.1.rpm" "$BASELINE211_RPM_PATH"
+vm_selinux_transfer_artifact "docker-helper-baseline-2.2.0.rpm" "$BASELINE22_RPM_PATH"
 
 # ---------------------------------------------------------------------------
 # 6c. compile the live-workload proof harness on the host and bind it to the
@@ -325,6 +337,27 @@ record_stage "RuntimeDirectory socket regression" "$RUNDIR_RESULT"
 
 
 # ---------------------------------------------------------------------------
+# 8e2. utab dontaudit boundary diagnostic — the shipped policy suppresses the
+#      libmount utab writability probe with dontaudit (no write authority).
+#      Disposable-VM policy toggling only (dontaudit loaded -> semodule -DB
+#      -> semodule -B), each phase with its own bounded audit window, the
+#      policy restored and verified before returning. This stage runs BEFORE
+#      the workload acceptance, whose audit window starts afterwards — the
+#      diagnostic's own AVCs can never enter the final S13 accounting.
+# ---------------------------------------------------------------------------
+log "== 8e2. utab dontaudit boundary diagnostic (disposable-VM policy toggle) =="
+UTABDIAG_RESULT=FAIL
+if run_guest_capture "utab dontaudit boundary diagnostic inside the guest" \
+  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_RPM=/opt/uat-import/docker-helper.rpm UAT_RPM_SHA256=$UAT_RPM_SHA256 scripts/uat-diag-selinux-utab-dontaudit.sh"; then
+  UTABDIAG_RESULT=PASS
+  log "utab dontaudit boundary diagnostic passed inside the guest"
+else
+  log "utab dontaudit boundary diagnostic FAILED inside the guest (recorded)"
+fi
+record_stage "utab dontaudit diagnostic" "$UTABDIAG_RESULT"
+
+
+# ---------------------------------------------------------------------------
 # 8f. Release-2 SELinux workload-MAC acceptance matrix (the full
 #     docs/release-2.2-mac-enforcement.md SELinux matrix) inside the enforcing
 #     guest, against the exact candidate RPM, with the host-compiled live
@@ -371,6 +404,30 @@ record_stage "2.1.1 RPM migration" "$MIG211_RESULT"
 
 
 # ---------------------------------------------------------------------------
+# 8h. Release-2.3 system-mode-only migration gate 2.2.0 -> candidate on the
+#     RPM path (pinned published v2.2.0 baseline, real rpm -U upgrade with
+#     the service running; user-unit removal, removed mode-selection grammar,
+#     identity preservation, no historical user-state adoption)
+# ---------------------------------------------------------------------------
+log "== 8h. 2.2.0 -> candidate RPM migration gate =="
+MIG22_RESULT=FAIL
+if run_guest_capture "2.2.0 -> candidate RPM migration inside the guest" \
+  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_VERSION=$VERSION UAT_RPM=/opt/uat-import/docker-helper.rpm UAT_RPM_SHA256=$UAT_RPM_SHA256 UAT_BASELINE22_RPM=/opt/uat-import/docker-helper-baseline-2.2.0.rpm UAT_BASELINE22_SHA256=$UPGRADE22_RPM_SHA256 UAT_PRINCIPAL=opc scripts/uat-migration-rpm-22.sh"; then
+  MIG22_RESULT=PASS
+  log "2.2.0 -> candidate RPM migration gate passed inside the guest"
+else
+  MIG22_EC=$?
+  if [ "$MIG22_EC" = 2 ]; then
+    MIG22_RESULT=BLOCKED
+    log "2.2.0 -> candidate RPM migration BLOCKED inside the guest (required scenario not exercised; fails the job)"
+  else
+    log "2.2.0 -> candidate RPM migration FAILED inside the guest (recorded)"
+  fi
+fi
+record_stage "2.2.0 RPM migration" "$MIG22_RESULT"
+
+
+# ---------------------------------------------------------------------------
 # 9. Summary
 # ---------------------------------------------------------------------------
 T1="$(date +%s)"
@@ -389,18 +446,19 @@ echo "RPM:              $UAT_RPM"
 echo "RPM sha256:       $UAT_RPM_SHA256 (producer, verified by UAT)"
 echo "v2.0.0 baseline RPM: $BASELINE_RPM_PATH (pinned fixture, verified)"
 echo "v2.1.1 baseline RPM: $BASELINE211_RPM_PATH (pinned fixture, verified)"
+echo "v2.2.0 baseline RPM: $BASELINE22_RPM_PATH (pinned fixture, verified)"
 echo "UAT version:      $VERSION"
 echo "Docker SELinux:   ${DOCKER_HEALTHY:-0}=naturally healthy two-stage setup (container-selinux before Docker)"
 echo "total:            ${TOTAL}s"
 echo "---- SELinux job stages ----"
-printf '%s\n' "$SELINUX_STAGES"
+printf '%s' "$SELINUX_STAGES"
 echo "============================="
 # Fail-closed acceptance: every gating stage must be PASS. A BLOCKED stage
 # (exit 2) means the required scenario was NOT successfully exercised, which
 # is not acceptable for Release-2 — the historical docker socket blocker that
 # once justified treating BLOCKED as success is closed, so it must not remain
 # encoded as acceptance semantics.
-if selinux_stage_accept "$BB_RESULT" "$SELREG_RESULT" "$MP_RESULT" "$LIFECYCLE_RESULT" "$SELCHECK_RESULT" "$RUNDIR_RESULT" "$WLMAC_RESULT" "$MIG211_RESULT"; then
+if selinux_stage_accept "$BB_RESULT" "$SELREG_RESULT" "$MP_RESULT" "$LIFECYCLE_RESULT" "$SELCHECK_RESULT" "$RUNDIR_RESULT" "$UTABDIAG_RESULT" "$WLMAC_RESULT" "$MIG211_RESULT" "$MIG22_RESULT"; then
   echo "RESULT: openSUSE/SELinux UAT stages PASSED inside Tumbleweed VM"
   echo "=============================================================="
   log "DONE"

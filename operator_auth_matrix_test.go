@@ -118,6 +118,11 @@ type operatorAuthCase struct {
 	// wantAuthResponse, when set, is the exact /auth wire projection of a
 	// successful authentication.
 	wantAuthResponse func(*operatorAuthFixture) authResponse
+	// adminSelectsOwner, for the session-create matrix only: the Admin
+	// authority has no implicit default Launcher, so it selects the test
+	// owner Principal explicitly. Credential authorities resolve the
+	// Launcher from their own Principal and carry no selector.
+	adminSelectsOwner bool
 }
 
 func bearerOf(f func(*operatorAuthFixture) string) func(*operatorAuthFixture) string {
@@ -477,10 +482,11 @@ func TestOperatorAuthSessionControlMatrix(t *testing.T) {
 			wantResult: "credential.not_found",
 		},
 		{
-			name:       "admin token",
-			authHeader: bearerOf(func(*operatorAuthFixture) string { return testAdminToken }),
-			wantStatus: http.StatusCreated,
-			wantResult: "",
+			name:              "admin token",
+			authHeader:        bearerOf(func(*operatorAuthFixture) string { return testAdminToken }),
+			wantStatus:        http.StatusCreated,
+			wantResult:        "",
+			adminSelectsOwner: true,
 		},
 		{
 			name:       "principal credential",
@@ -538,7 +544,21 @@ func TestOperatorAuthSessionControlMatrix(t *testing.T) {
 				tc.mutate(t, app, f)
 			}
 
-			body, _ := json.Marshal(map[string]string{"workspace": f.workspace})
+			// The Admin authority has no implicit default Launcher anymore:
+			// it selects the test owner Principal explicitly. Credential
+			// authorities resolve the Launcher from their own Principal and
+			// carry no selector.
+			selector := ""
+			if tc.adminSelectsOwner {
+				selector = `"principal":"` + testOwnerUsername + `",`
+			}
+			body, _ := json.Marshal(map[string]any{"workspace": f.workspace})
+			if selector != "" {
+				var raw map[string]any
+				_ = json.Unmarshal(body, &raw)
+				raw["principal"] = testOwnerUsername
+				body, _ = json.Marshal(raw)
+			}
 			req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
 			if tc.authHeader != nil {
 				if v := tc.authHeader(&f); v != "" {

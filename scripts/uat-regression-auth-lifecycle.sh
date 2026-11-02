@@ -66,14 +66,14 @@ subcase_a() {
   reg_session "$CRED_BASIC" "$ws" || { reg_fail "A: session create failed"; return; }
   local sid="$REG_SESSION_ID" stok="$REG_SESSION_TOKEN" cid="$REG_CRED_ID"
 
-  if dh credential revoke --system "$cid" >/dev/null 2>&1; then
+  if dh credential revoke "$cid" >/dev/null 2>&1; then
     reg_ok "A: credential $cid revoked"
   else
     reg_fail "A: credential revoke failed"
     return
   fi
 
-  if dh session create --system --token-file "$CRED_BASIC" "$ws" --json >/dev/null 2>&1; then
+  if dh session create --token-file "$CRED_BASIC" "$ws" --json >/dev/null 2>&1; then
     reg_fail "A: revoked credential performed a new control-plane operation (session create)"
   else
     reg_ok "A: revoked credential rejected for new control-plane operation"
@@ -103,14 +103,14 @@ subcase_b() {
   local sid="$REG_SESSION_ID" stok="$REG_SESSION_TOKEN"
 
   # Narrow: remove the broad default root (/home/$user), add the narrow one.
-  dh principal allowed-root remove --system "$user" "$home" >/dev/null 2>&1 || true
-  if ! dh principal allowed-root add --system "$user" "$narrow" >/dev/null 2>&1; then
+  dh principal allowed-root remove "$user" "$home" >/dev/null 2>&1 || true
+  if ! dh principal allowed-root add "$user" "$narrow" >/dev/null 2>&1; then
     reg_fail "B: could not add narrowed allowed root"
     return
   fi
   reg_ok "B: allowed root narrowed to $narrow"
 
-  if dh session create --system --token-file "$cred" "$ws2" --json >/dev/null 2>&1; then
+  if dh session create --token-file "$cred" "$ws2" --json >/dev/null 2>&1; then
     reg_fail "B: new session outside narrowed ceiling was accepted"
   else
     reg_ok "B: new session outside narrowed ceiling rejected"
@@ -138,7 +138,7 @@ subcase_c() {
   reg_session "$cred" "$ws" || { reg_fail "C: session create failed"; return; }
   local sid="$REG_SESSION_ID" stok="$REG_SESSION_TOKEN"
 
-  if ! dh session delete --system "$sid" >/dev/null 2>&1; then
+  if ! dh session delete "$sid" >/dev/null 2>&1; then
     reg_fail "C: session delete failed"
     return
   fi
@@ -197,7 +197,7 @@ subcase_d() {
   hb_before="$(wc -l < "$ctl/heartbeat" 2>/dev/null || echo 0)"
 
   # Lifecycle change: delete the session while the operation is running.
-  dh session delete --system "$sid" >/dev/null 2>&1 || true
+  dh session delete "$sid" >/dev/null 2>&1 || true
   reg_ok "D: session deleted while operation running"
 
   # The Docker operation must continue: the heartbeat in the pinned control
@@ -247,7 +247,7 @@ subcase_e() {
   reg_session "$cred" "$ws" || { reg_fail "E: session create failed"; return; }
   local sid="$REG_SESSION_ID" stok="$REG_SESSION_TOKEN"
 
-  if ! dh principal set --system "$user" enabled false >/dev/null 2>&1; then
+  if ! dh principal set "$user" enabled false >/dev/null 2>&1; then
     reg_fail "E: principal disable failed"
     return
   fi
@@ -259,7 +259,7 @@ subcase_e() {
     reg_ok "E: active session invalidated per contract after principal disable"
   fi
 
-  if dh session create --system --token-file "$cred" "$ws" --json >/dev/null 2>&1; then
+  if dh session create --token-file "$cred" "$ws" --json >/dev/null 2>&1; then
     reg_fail "E: disabled principal credential still controls resources"
   else
     reg_ok "E: disabled principal credential cannot create resources"
@@ -283,7 +283,7 @@ subcase_f() {
   cred_new_file="$CRED_DIR/f-new.token"
 
   # Use the canonical Release-2.1 ownership tree for the whole lifecycle.
-  out_a="$(dh principal credential create --system --name default "$user" 2>/dev/null)" \
+  out_a="$(dh principal credential create --name default "$user" 2>/dev/null)" \
     || { reg_fail "F: canonical principal credential create A failed"; return; }
   id_a="$(printf '%s\n' "$out_a" | sed -n 's/^  ID:    //p' | tr -d '[:space:]')"
   tok_a="$(printf '%s\n' "$out_a" | sed -n 's/^  Token: //p' | tr -d '[:space:]')"
@@ -293,7 +293,7 @@ subcase_f() {
   fi
   printf '%s\n' "$tok_a" > "$cred_a_file"; chmod 600 "$cred_a_file"
 
-  if dh principal credential revoke --system "$id_a" >/dev/null 2>&1; then
+  if dh principal credential revoke "$id_a" >/dev/null 2>&1; then
     reg_ok "F: canonical revoke created revoked history for default ($id_a)"
   else
     reg_fail "F: canonical revoke A failed"
@@ -301,7 +301,7 @@ subcase_f() {
   fi
 
   # With only revoked history, rotate must not select/resurrect it.
-  revoked_out="$(dh principal credential rotate --system --name default "$user" 2>&1)"
+  revoked_out="$(dh principal credential rotate --name default "$user" 2>&1)"
   revoked_rc=$?
   if [ "$revoked_rc" -ne 0 ] && printf '%s' "$revoked_out" | grep -q 'status 409, code credential_revoked'; then
     reg_ok "F: rotate with revoked history only fails closed (409 credential_revoked)"
@@ -310,7 +310,7 @@ subcase_f() {
     return
   fi
 
-  out_b="$(dh principal credential create --system --name default "$user" 2>/dev/null)" \
+  out_b="$(dh principal credential create --name default "$user" 2>/dev/null)" \
     || { reg_fail "F: recreate default credential B after revoke failed"; return; }
   id_b="$(printf '%s\n' "$out_b" | sed -n 's/^  ID:    //p' | tr -d '[:space:]')"
   tok_b="$(printf '%s\n' "$out_b" | sed -n 's/^  Token: //p' | tr -d '[:space:]')"
@@ -323,7 +323,7 @@ subcase_f() {
 
   # Authenticate as B and omit PRINCIPAL: this exercises the canonical CLI's
   # Principal-auth targeting as well as the daemon's atomic rotate endpoint.
-  rotate_out="$(dh principal credential rotate --system --token-file "$cred_b_file" --name default --json 2>/dev/null)" \
+  rotate_out="$(dh principal credential rotate --token-file "$cred_b_file" --name default --json 2>/dev/null)" \
     || { reg_fail "F: Principal-auth canonical rotate failed"; return; }
   rotate_id="$(printf '%s' "$rotate_out" | json_field id || true)"
   rotate_tok="$(printf '%s' "$rotate_out" | json_field token || true)"
@@ -334,19 +334,19 @@ subcase_f() {
     return
   fi
 
-  if dh session create --system --token-file "$cred_b_file" "$ws" --json >/dev/null 2>&1; then
+  if dh session create --token-file "$cred_b_file" "$ws" --json >/dev/null 2>&1; then
     reg_fail "F: pre-rotate bearer B remained valid"
   else
     reg_ok "F: pre-rotate bearer B rejected immediately"
   fi
-  if dh session create --system --token-file "$cred_a_file" "$ws" --json >/dev/null 2>&1; then
+  if dh session create --token-file "$cred_a_file" "$ws" --json >/dev/null 2>&1; then
     reg_fail "F: revoked historical bearer A was resurrected"
   else
     reg_ok "F: historical revoked bearer A remains rejected"
   fi
 
   printf '%s\n' "$rotate_tok" > "$cred_new_file"; chmod 600 "$cred_new_file"
-  sid_new="$(dh session create --system --token-file "$cred_new_file" "$ws" --json 2>/dev/null | json_field id || true)"
+  sid_new="$(dh session create --token-file "$cred_new_file" "$ws" --json 2>/dev/null | json_field id || true)"
   if [ -n "$sid_new" ]; then
     reg_ok "F: replacement bearer authenticates and creates a Session"
   else
@@ -355,7 +355,7 @@ subcase_f() {
 
   # Canonical list proves there are exactly two same-name rows: A remains
   # revoked, B is the one active row, and rotate created no third row.
-  list_out="$(dh principal credential list --system "$user" 2>&1)" \
+  list_out="$(dh principal credential list "$user" 2>&1)" \
     || { reg_fail "F: canonical credential list failed"; return; }
   row_count="$(printf '%s\n' "$list_out" | awk -v p="$user" '$2=="default" && $5==p {c++} END {print c+0}')"
   revoked_a="$(printf '%s\n' "$list_out" | awk -v id="$id_a" '$1==id {print $4; exit}')"
@@ -381,8 +381,8 @@ subcase_f
 
 # best-effort cleanup of OS users (kept for evidence on failure)
 for u in uatreg3a uatreg3b uatreg3c uatreg3d uatreg3e uatreg3f; do
-  dh principal delete --system "$u" >/dev/null 2>&1 || true
-  dh credential revoke --system "$(dh credential list --system "$u" 2>/dev/null | sed -n 's/^  ID:    //p' | head -1)" >/dev/null 2>&1 || true
+  dh principal delete "$u" >/dev/null 2>&1 || true
+  dh credential revoke "$(dh credential list "$u" 2>/dev/null | sed -n 's/^  ID:    //p' | head -1)" >/dev/null 2>&1 || true
   userdel -r "$u" >/dev/null 2>&1 || true
 done
 rm -rf "$CRED_DIR"

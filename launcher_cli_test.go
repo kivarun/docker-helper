@@ -742,7 +742,7 @@ func TestHandleAuthSessionTokenRejected(t *testing.T) {
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		"dhs_authtest", hex.EncodeToString(hash[:]), app.Config.AllowedRoots[0].Path,
 		time.Now().Add(-time.Minute).Unix(), time.Now().Add(time.Hour).Unix(),
-		app.userModeDefault.launcherID,
+		testOwnerLauncherID(app),
 	)
 	if err != nil {
 		t.Fatalf("insert session: %v", err)
@@ -758,7 +758,7 @@ func TestHandleAuthSessionTokenRejected(t *testing.T) {
 		t.Fatalf("status = %d, want 401 (body=%s)", w.Code, w.Body.String())
 	}
 	body := w.Body.String()
-	if strings.Contains(body, "dhtestowner") || strings.Contains(body, app.userModeDefault.launcherID) {
+	if strings.Contains(body, "dhtestowner") || strings.Contains(body, testOwnerLauncherID(app)) {
 		t.Errorf("session token leaked identity information: %s", body)
 	}
 }
@@ -1014,12 +1014,12 @@ func TestLauncherListCLIPrincipalFilter(t *testing.T) {
 // are passed to the daemon, which remains the filtering authority.
 func TestLauncherListCommandExposesLauncherFilter(t *testing.T) {
 	flags := collectFlagsForCommand(launcherListCommand)
-	for _, want := range []string{"--launcher", "--principal", "--json", "--system", "--endpoint", "--token-file"} {
+	for _, want := range []string{"--launcher", "--principal", "--json", "--endpoint", "--token-file"} {
 		if !slices.Contains(flags, want) {
 			t.Errorf("launcher list flags %v missing %s", flags, want)
 		}
 	}
-	if launcherListCommand.Usage != "docker-helper launcher list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--launcher LAUNCHER] [--json]" {
+	if launcherListCommand.Usage != "docker-helper launcher list [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--launcher LAUNCHER] [--json]" {
 		t.Errorf("unexpected launcher list usage: %q", launcherListCommand.Usage)
 	}
 }

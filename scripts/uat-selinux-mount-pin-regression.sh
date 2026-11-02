@@ -133,8 +133,8 @@ printf 'pin-probe-content\n' > "$WS/rw/probe.txt"
 chown -R "$PRINCIPAL:$PRINCIPAL" "$WS"
 chmod 0755 "$WS" "$WS/rw"
 
-docker-helper principal create --system --no-credential "$PRINCIPAL" >/dev/null 2>&1 || true
-docker-helper principal allowed-root add --system "$PRINCIPAL" /home/opc >/dev/null 2>&1 || true
+docker-helper principal create --no-credential "$PRINCIPAL" >/dev/null 2>&1 || true
+docker-helper principal allowed-root add "$PRINCIPAL" /home/opc >/dev/null 2>&1 || true
 
 # Final ownership model: a selector-less principal Session resolves to the
 # principal's inherit-scope 'default' Launcher, so that Launcher must exist
@@ -142,7 +142,7 @@ docker-helper principal allowed-root add --system "$PRINCIPAL" /home/opc >/dev/n
 # atomically at principal creation (also when the principal already exists,
 # e.g. the common black-box UAT created it for this OS user), so prove
 # presence positively via the canonical Admin-scoped launcher show path.
-launcher_json="$(docker-helper launcher show --system --principal "$PRINCIPAL" --json 2>/dev/null)" \
+launcher_json="$(docker-helper launcher show --principal "$PRINCIPAL" --json 2>/dev/null)" \
   || { echo "error: principal '$PRINCIPAL' has no default Launcher after principal create (eager provisioning broken)" >&2; exit 1; }
 printf '%s\n' "$launcher_json" | grep -q "\"principal\": \"$PRINCIPAL\"" \
   || { echo "error: default launcher does not belong to principal '$PRINCIPAL': $launcher_json" >&2; exit 1; }
@@ -155,14 +155,14 @@ printf '%s\n' "$launcher_json" | grep -q '"scope": "inherit"' \
 
 CRED_FILE="/tmp/uat-pin-credential.token"
 rm -f "$CRED_FILE"
-CRED_OUT="$(docker-helper credential create --system --name uat-selinux-pin "$PRINCIPAL" 2>&1)" \
+CRED_OUT="$(docker-helper credential create --name uat-selinux-pin "$PRINCIPAL" 2>&1)" \
   || { echo "error: credential create failed: $CRED_OUT" >&2; exit 1; }
 CRED_TOKEN="$(printf '%s\n' "$CRED_OUT" | sed -n 's/^  Token: //p')"
 [ -n "$CRED_TOKEN" ] || { echo "error: could not parse credential token" >&2; exit 1; }
 printf '%s\n' "$CRED_TOKEN" > "$CRED_FILE"
 chmod 600 "$CRED_FILE"
 
-SESSION_JSON="$(docker-helper session create --system --token-file "$CRED_FILE" "$WS" --json)" \
+SESSION_JSON="$(docker-helper session create --token-file "$CRED_FILE" "$WS" --json)" \
   || { echo "error: session create failed" >&2; exit 1; }
 SESSION_TOKEN="$(printf '%s\n' "$SESSION_JSON" | grep -oP '"token": "\K[^"]+' | head -1)"
 [ -n "$SESSION_TOKEN" ] || { echo "error: session create returned no token" >&2; exit 1; }

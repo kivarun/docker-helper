@@ -112,8 +112,13 @@ func TestCidfileRemovedOnFailedStart(t *testing.T) {
 				break
 			}
 		}
-		// Simulate failed start.
-		return exec.CommandContext(ctx, "/bin/sh", "-c", "exit 1")
+		// The failed START is the docker run command; the correlated
+		// container inspection that the cleanup proof runs must still
+		// succeed (no container exists).
+		if len(args) > 2 && args[0] == "--config" && args[2] == "run" {
+			return exec.CommandContext(ctx, "/bin/sh", "-c", "exit 1")
+		}
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	req := newRunRequest(map[string]any{
@@ -221,15 +226,21 @@ func TestCidfileRaceDelayedPublication(t *testing.T) {
 				break
 			}
 		}
-		// Build and run the SIGTERM-ignoring helper.
-		helperBin := filepath.Join(t.TempDir(), "helper")
-		if err := exec.Command("go", "build", "-o", helperBin, "testhelper_ignore_sigterm.go").Run(); err != nil {
-			t.Logf("failed to build helper: %v", err)
-			return exec.CommandContext(ctx, "/bin/sleep", "60")
+		// The delayed-publication workload is the docker run command; the
+		// correlated container inspection that the cleanup proof runs must
+		// stay a fast no-container answer.
+		if len(args) > 2 && args[0] == "--config" && args[2] == "run" {
+			// Build and run the SIGTERM-ignoring helper.
+			helperBin := filepath.Join(t.TempDir(), "helper")
+			if err := exec.Command("go", "build", "-o", helperBin, "testhelper_ignore_sigterm.go").Run(); err != nil {
+				t.Logf("failed to build helper: %v", err)
+				return exec.CommandContext(ctx, "/bin/sleep", "60")
+			}
+			cmd := exec.CommandContext(ctx, helperBin)
+			cmd.Env = append(os.Environ(), "READY_FILE="+readyFile)
+			return cmd
 		}
-		cmd := exec.CommandContext(ctx, helperBin)
-		cmd.Env = append(os.Environ(), "READY_FILE="+readyFile)
-		return cmd
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	req := newRunRequest(map[string]any{
@@ -315,7 +326,10 @@ func TestCidfileRaceContextExpiresWithoutCidfile(t *testing.T) {
 	}
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sleep", "60")
+		if len(args) > 2 && args[0] == "--config" && args[2] == "run" {
+			return exec.CommandContext(ctx, "/bin/sleep", "60")
+		}
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	req := newRunRequest(map[string]any{

@@ -1179,7 +1179,6 @@ func TestBuildStagingCeilingRefusalClassification(t *testing.T) {
 // acquired session MAC-use lease.
 func TestBuildStagingCeilingRefusalRealPathLeavesNoResidueOrLease(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
 	app.MACCoordinator = newSessionMACCoordinator(app.DB, newTestSessionMACDriver(LSMSELinux))
 

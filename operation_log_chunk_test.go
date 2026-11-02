@@ -51,7 +51,12 @@ func TestOperationLogsResponseBoundedForAdversarialBytes(t *testing.T) {
 
 	t.Cleanup(func() {
 		_ = os.WriteFile(releaseFile, nil, 0644)
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		// Full shutdown budget (graceful + force reserve): with a budget at
+		// or below the force-cleanup reserve the graceful phase is skipped
+		// and the build completion watcher can outlive this test, writing
+		// its build.finish audit into the next test's audit buffer.
+		ctx, cancel := context.WithTimeout(context.Background(),
+			defaultTerminationTimeout+defaultForceCleanupTimeout)
 		defer cancel()
 		app.OperationSupervisor.terminateForShutdown(ctx, nil)
 	})

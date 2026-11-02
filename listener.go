@@ -8,7 +8,7 @@ import (
 	"os"
 )
 
-// DefaultHTTPAddress is the loopback TCP address for system mode.
+// DefaultHTTPAddress is the loopback TCP address of the daemon.
 const DefaultHTTPAddress = "127.0.0.1:52375"
 
 // ListenerFactory creates listeners for the daemon.
@@ -17,8 +17,8 @@ var ListenerFactory listenerFactory = &defaultListenerFactory{}
 
 // listenerFactory defines how listeners are created.
 type listenerFactory interface {
-	// createUnixListener creates a Unix socket listener with mode-appropriate permissions.
-	createUnixListener(socketPath string, mode DeploymentMode) (net.Listener, error)
+	// createUnixListener creates a Unix socket listener.
+	createUnixListener(socketPath string) (net.Listener, error)
 	// createTCPListener creates a loopback TCP listener.
 	createTCPListener(address string) (net.Listener, error)
 }
@@ -27,7 +27,7 @@ type defaultListenerFactory struct{}
 
 // safePrepareUnixListener creates a Unix listener with safe preparation.
 // It checks for existing files, live sockets, and stale sockets before creating.
-// perm is the file mode to set on the socket (e.g., 0600 for user mode, 0666 for system mode).
+// perm is the file mode to set on the socket.
 // Returns the listener, a flag indicating whether a new socket was created, and an error if any.
 func safePrepareUnixListener(socketPath string, perm os.FileMode) (net.Listener, bool, error) {
 	info, err := os.Stat(socketPath)
@@ -82,12 +82,8 @@ func createUnixListenerWithPerm(socketPath string, perm os.FileMode) (net.Listen
 	return l, true, nil
 }
 
-func (f *defaultListenerFactory) createUnixListener(socketPath string, mode DeploymentMode) (net.Listener, error) {
-	perm := os.FileMode(0600)
-	if mode == ModeSystem {
-		perm = 0666
-	}
-	l, _, err := safePrepareUnixListener(socketPath, perm)
+func (f *defaultListenerFactory) createUnixListener(socketPath string) (net.Listener, error) {
+	l, _, err := safePrepareUnixListener(socketPath, 0666)
 	return l, err
 }
 
@@ -105,37 +101,34 @@ func (f *defaultListenerFactory) createTCPListener(address string) (net.Listener
 	return listener, nil
 }
 
-// prepareListeners creates listeners for the given deployment mode.
-// In user mode, only Unix listener is created.
+// prepareListeners creates the daemon listeners.
 //
 // The Unix listener is authoritative: its creation failure is a fatal
-// startup error and no TCP bind is attempted after it. In system mode the
-// optional loopback TCP listener is attempted after a successful Unix bind;
-// a TCP bind failure is DEGRADED STARTUP, not daemon failure — the Unix
-// listener stays live, its socket is not removed, the complete API keeps
-// serving over Unix, the TCP listener is absent for this daemon lifetime
-// (no retry/rebind: the bind itself is the authority, so a port that becomes
-// free later stays free until the next normal service restart), and exactly
-// one bounded operational warning names the configured address and the bind
-// failure. A hostile unprivileged local user can therefore hold the TCP port
-// without denying the authoritative Unix service.
-func prepareListeners(mode DeploymentMode, socketPath, httpAddress string) (unixListener, tcpListener net.Listener, tcpDegradedErr, err error) {
-	unixListener, err = ListenerFactory.createUnixListener(socketPath, mode)
+// startup error and no TCP bind is attempted after it. The optional loopback
+// TCP listener is attempted after a successful Unix bind; a TCP bind failure
+// is DEGRADED STARTUP, not daemon failure — the Unix listener stays live,
+// its socket is not removed, the complete API keeps serving over Unix, the
+// TCP listener is absent for this daemon lifetime (no retry/rebind: the bind
+// itself is the authority, so a port that becomes free later stays free
+// until the next normal service restart), and exactly one bounded
+// operational warning names the configured address and the bind failure. A
+// hostile unprivileged local user can therefore hold the TCP port without
+// denying the authoritative Unix service.
+func prepareListeners(socketPath, httpAddress string) (unixListener, tcpListener net.Listener, tcpDegradedErr, err error) {
+	unixListener, err = ListenerFactory.createUnixListener(socketPath)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	if mode == ModeSystem {
-		tcpListener, tcpDegradedErr = ListenerFactory.createTCPListener(httpAddress)
-		if tcpDegradedErr != nil {
-			tcpListener = nil
-			opLog(context.Background()).Warn(
-				"loopback TCP listener unavailable; continuing Unix-only until the next restart",
-				slog.String("operation", "serve_startup"),
-				slog.String("http", httpAddress),
-				slog.String("error", tcpDegradedErr.Error()),
-			)
-		}
+	tcpListener, tcpDegradedErr = ListenerFactory.createTCPListener(httpAddress)
+	if tcpDegradedErr != nil {
+		tcpListener = nil
+		opLog(context.Background()).Warn(
+			"loopback TCP listener unavailable; continuing Unix-only until the next restart",
+			slog.String("operation", "serve_startup"),
+			slog.String("http", httpAddress),
+			slog.String("error", tcpDegradedErr.Error()),
+		)
 	}
 
 	return unixListener, tcpListener, tcpDegradedErr, nil

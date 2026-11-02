@@ -115,7 +115,7 @@ else
 fi
 
 # best-effort cleanup
-dh principal delete --system "$USER" >/dev/null 2>&1 || true
+dh principal delete "$USER" >/dev/null 2>&1 || true
 userdel -r "$USER" >/dev/null 2>&1 || true
 rm -f "$cred" "$RUN_A" "$RUN_B"
 

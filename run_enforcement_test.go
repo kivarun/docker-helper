@@ -321,14 +321,12 @@ func TestRunReadOnlyRootRefusalLeavesNoResidue(t *testing.T) {
 	}
 }
 
-// TestRunUserModeWholeWorkspaceRWWithNestedRO proves the access-mode
-// enforcement applies in user mode on top of the existing user-mode mount
-// authority: a whole-workspace writable mount is refused by the snapshot
-// owner's writable-parent query when a nested read_only transition exists,
-// exactly like in system mode.
-func TestRunUserModeWholeWorkspaceRWWithNestedRO(t *testing.T) {
+// TestRunWholeWorkspaceRWWithNestedRO proves the access-mode enforcement
+// applies on top of the mount authority: a whole-workspace writable mount is
+// refused by the snapshot owner's writable-parent query when a nested
+// read_only transition exists.
+func TestRunWholeWorkspaceRWWithNestedRO(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeUser
 	app.OperationSupervisor = newOperationSupervisor()
 
 	workspace := testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)
@@ -613,7 +611,6 @@ func TestRunReadOnlyRootRefusalReleasesLease(t *testing.T) {
 		OperationRetentionTTL: 10 * time.Minute,
 		OperationMaxCompleted: 200,
 		OperationLogMaxBytes:  4 * 1024 * 1024,
-		Mode:                  ModeSystem,
 	}
 	mac := newSessionMACCoordinator(db, newTestSessionMACDriver(LSMBackend("test")))
 	app := &App{

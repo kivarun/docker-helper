@@ -87,14 +87,14 @@ assert_narrowed() {
 cleanup_sessions() {
   local sid
   for sid in "$@"; do
-    [ -n "$sid" ] && dh session delete --system "$sid" >/dev/null 2>&1 || true
+    [ -n "$sid" ] && dh session delete "$sid" >/dev/null 2>&1 || true
   done
 }
 
 # cleanup_principal USER: best-effort teardown shared by every subcase.
 cleanup_principal() {
   local user="$1"
-  dh principal delete --system "$user" >/dev/null 2>&1 || true
+  dh principal delete "$user" >/dev/null 2>&1 || true
   userdel -r "$user" >/dev/null 2>&1 || true
 }
 
@@ -107,11 +107,11 @@ setup_pair() {
   home_a="$(reg_setup_principal "$user_a")" || return 1
   home_b="$(reg_setup_principal "$user_b")" || return 1
 
-  alpha_out="$(dh launcher create --system --principal "$user_a" alpha --no-credential --json 2>&1)" || {
+  alpha_out="$(dh launcher create --principal "$user_a" alpha --no-credential --json 2>&1)" || {
     echo "error: alpha launcher create failed: $(printf '%s' "$alpha_out" | head -2 | tr '\n' ' ')" >&2
     return 1
   }
-  beta_out="$(dh launcher create --system --principal "$user_b" beta --no-credential --json 2>&1)" || {
+  beta_out="$(dh launcher create --principal "$user_b" beta --no-credential --json 2>&1)" || {
     echo "error: beta launcher create failed: $(printf '%s' "$beta_out" | head -2 | tr '\n' ' ')" >&2
     return 1
   }
@@ -125,7 +125,7 @@ setup_pair() {
 create_session() { # cred workspace extra-args...
   local cred="$1" ws="$2" out rc
   shift 2
-  out="$(dh session create --system --token-file "$cred" "$ws" --json "$@" 2>"$TMPDIR_REG13/last-session-create.err")"
+  out="$(dh session create --token-file "$cred" "$ws" --json "$@" 2>"$TMPDIR_REG13/last-session-create.err")"
   rc=$?
   if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
     head -2 "$TMPDIR_REG13/last-session-create.err" >&2
@@ -164,29 +164,29 @@ subcase_a() {
 
   local out
   # 1. unfiltered list contains all four fixture Sessions.
-  out="$(dh session list --system --json 2>/dev/null)"
+  out="$(dh session list --json 2>/dev/null)"
   assert_narrowed "A1 unfiltered" "$out" "$sid_ad|$sid_aa|$sid_bd|$sid_bb" ""
 
   # 2. --principal A lists A's sessions and excludes B's.
-  out="$(dh session list --system --principal "$user_a" --json 2>/dev/null)"
+  out="$(dh session list --principal "$user_a" --json 2>/dev/null)"
   assert_narrowed "A2 --principal A" "$out" "$sid_ad|$sid_aa" "$sid_bd|$sid_bb"
 
   # 3. --principal B lists B's sessions and excludes A's.
-  out="$(dh session list --system --principal "$user_b" --json 2>/dev/null)"
+  out="$(dh session list --principal "$user_b" --json 2>/dev/null)"
   assert_narrowed "A3 --principal B" "$out" "$sid_bd|$sid_bb" "$sid_ad|$sid_aa"
 
   # 4. --principal A --launcher alpha returns only A-alpha.
-  out="$(dh session list --system --principal "$user_a" --launcher alpha --json 2>/dev/null)"
+  out="$(dh session list --principal "$user_a" --launcher alpha --json 2>/dev/null)"
   assert_narrowed "A4 --principal A --launcher alpha" "$out" "$sid_aa" "$sid_ad|$sid_bd|$sid_bb"
 
   # 5. --launcher <alpha dhl ID> without Principal returns only A-alpha.
-  out="$(dh session list --system --launcher "$ALPHA_ID" --json 2>/dev/null)"
+  out="$(dh session list --launcher "$ALPHA_ID" --json 2>/dev/null)"
   assert_narrowed "A5 --launcher <alpha ID>" "$out" "$sid_aa" "$sid_ad|$sid_bd|$sid_bb"
 
   # 6. --launcher alpha without Principal fails instead of resolving the
   #    name globally.
   local name_err name_rc
-  name_err="$(dh session list --system --launcher alpha --json 2>&1)"; name_rc=$?
+  name_err="$(dh session list --launcher alpha --json 2>&1)"; name_rc=$?
   if [ "$name_rc" -ne 0 ] && printf '%s' "$name_err" | grep -q 'launcher_name_requires_principal'; then
     reg_ok "A6: --launcher alpha without --principal is rejected, not searched globally"
   else
@@ -195,7 +195,7 @@ subcase_a() {
 
   # 7. --principal A --launcher <B beta dhl ID> fails non-disclosing.
   local foreign_err foreign_rc
-  foreign_err="$(dh session list --system --principal "$user_a" --launcher "$BETA_ID" --json 2>&1)"; foreign_rc=$?
+  foreign_err="$(dh session list --principal "$user_a" --launcher "$BETA_ID" --json 2>&1)"; foreign_rc=$?
   if [ "$foreign_rc" -ne 0 ] \
       && printf '%s' "$foreign_err" | grep -q 'launcher not found' \
       && ! printf '%s' "$foreign_err" | grep -q "$BETA_ID"; then
@@ -240,20 +240,20 @@ subcase_b() {
 
   local out
   # 8. unfiltered list sees A's sessions and not B's.
-  out="$(dh session list --system --token-file "$cred_a" --json 2>/dev/null)"
+  out="$(dh session list --token-file "$cred_a" --json 2>/dev/null)"
   assert_narrowed "B8 unfiltered" "$out" "$sid_ad|$sid_aa" "$sid_bd|$sid_bb"
 
   # 9. --launcher alpha (name) returns only A-alpha.
-  out="$(dh session list --system --token-file "$cred_a" --launcher alpha --json 2>/dev/null)"
+  out="$(dh session list --token-file "$cred_a" --launcher alpha --json 2>/dev/null)"
   assert_narrowed "B9 --launcher alpha" "$out" "$sid_aa" "$sid_ad|$sid_bd|$sid_bb"
 
   # 10. --launcher <alpha dhl ID> returns only A-alpha.
-  out="$(dh session list --system --token-file "$cred_a" --launcher "$ALPHA_ID" --json 2>/dev/null)"
+  out="$(dh session list --token-file "$cred_a" --launcher "$ALPHA_ID" --json 2>/dev/null)"
   assert_narrowed "B10 --launcher <alpha ID>" "$out" "$sid_aa" "$sid_ad|$sid_bd|$sid_bb"
 
   # 11. foreign B Launcher fails non-disclosing.
   local f_err f_rc
-  f_err="$(dh session list --system --token-file "$cred_a" --launcher "$BETA_ID" --json 2>&1)"; f_rc=$?
+  f_err="$(dh session list --token-file "$cred_a" --launcher "$BETA_ID" --json 2>&1)"; f_rc=$?
   if [ "$f_rc" -ne 0 ] \
       && printf '%s' "$f_err" | grep -q 'launcher not found' \
       && ! printf '%s' "$f_err" | grep -q "$BETA_ID"; then
@@ -264,7 +264,7 @@ subcase_b() {
 
   # 12. --principal A is rejected for Principal authority even for self.
   local p_err p_rc
-  p_err="$(dh session list --system --token-file "$cred_a" --principal "$user_a" --json 2>&1)"; p_rc=$?
+  p_err="$(dh session list --token-file "$cred_a" --principal "$user_a" --json 2>&1)"; p_rc=$?
   if [ "$p_rc" -ne 0 ] && printf '%s' "$p_err" | grep -q 'invalid_selector'; then
     reg_ok "B12: --principal is rejected for Principal authority"
   else
@@ -296,7 +296,7 @@ subcase_c() {
   # Issue the alpha Launcher credential (the positional selector is the
   # Launcher's global dhl_ ID).
   local lc_out lc_token lc_cred
-  lc_out="$(dh launcher credential create --system --principal "$user_a" --json "$ALPHA_ID" 2>"$TMPDIR_REG13/lc.err")"
+  lc_out="$(dh launcher credential create --principal "$user_a" --json "$ALPHA_ID" 2>"$TMPDIR_REG13/lc.err")"
   lc_token="$(printf '%s' "$lc_out" | json_field token || true)"
   if [ -z "$lc_token" ]; then
     reg_fail "C: launcher credential create failed: $(head -2 "$TMPDIR_REG13/lc.err" 2>/dev/null | tr '\n' ' ')"
@@ -313,19 +313,19 @@ subcase_c() {
   local out
   # 13. selector-less list remains restricted to the launcher's own Sessions:
   #     A-alpha present, A-default (same Principal, other launcher) absent.
-  out="$(dh session list --system --token-file "$lc_cred" --json 2>/dev/null)"
+  out="$(dh session list --token-file "$lc_cred" --json 2>/dev/null)"
   assert_narrowed "C13 launcher list stays own-scoped" "$out" "$sid_aa" "$sid_ad"
 
   # Narrowing selectors stay rejected for this authority (no redundant
   # second contract).
   local s_err s_rc
-  s_err="$(dh session list --system --token-file "$lc_cred" --launcher "$ALPHA_ID" --json 2>&1)"; s_rc=$?
+  s_err="$(dh session list --token-file "$lc_cred" --launcher "$ALPHA_ID" --json 2>&1)"; s_rc=$?
   if [ "$s_rc" -ne 0 ] && printf '%s' "$s_err" | grep -q 'invalid_selector'; then
     reg_ok "C: launcher-credential --launcher selector stays rejected"
   else
     reg_fail "C: launcher-credential --launcher selector was not rejected (rc=$s_rc): $(printf '%s' "$s_err" | head -2 | tr '\n' ' ')"
   fi
-  s_err="$(dh session list --system --token-file "$lc_cred" --principal "$user_a" --json 2>&1)"; s_rc=$?
+  s_err="$(dh session list --token-file "$lc_cred" --principal "$user_a" --json 2>&1)"; s_rc=$?
   if [ "$s_rc" -ne 0 ] && printf '%s' "$s_err" | grep -q 'invalid_selector'; then
     reg_ok "C: launcher-credential --principal selector stays rejected"
   else

@@ -23,7 +23,7 @@ var registryCommand = &Command{
 var registryLoginCommand = &Command{
 	Name:       "login",
 	Summary:    "Log in to a container registry",
-	Usage:      "docker-helper registry login [--system] [--endpoint ENDPOINT] [--username USER] [--password-stdin] [--json] REGISTRY",
+	Usage:      "docker-helper registry login [--endpoint ENDPOINT] [--username USER] [--password-stdin] [--json] REGISTRY",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 	Help: `Log in to a container registry for the current session.
@@ -58,7 +58,7 @@ Examples:
 	Presentation: humanJSONPresentation(),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint := registerAgentEndpointFlags(fs)
+		endpoint := registerAgentEndpointFlags(fs)
 		username := fs.String("username", "", "Registry username")
 		passwordStdin := fs.Bool("password-stdin", false, "Read password from stdin")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
@@ -68,7 +68,7 @@ Examples:
 				if *username == "" || strings.HasPrefix(*username, "-") {
 					return fmt.Errorf("--username is required")
 				}
-				return validateAgentEndpointOptions(agentClientOptions{System: *system, Endpoint: endpoint.value, EndpointSet: endpoint.set})
+				return validateAgentEndpointOptions(agentClientOptions{Endpoint: endpoint.value, EndpointSet: endpoint.set})
 			},
 			Run: func(stdout, stderr io.Writer) int {
 				var password string
@@ -88,7 +88,7 @@ Examples:
 					return 1
 				}
 
-				client, err := resolveAgentClient(agentClientOptions{System: *system, Endpoint: endpoint.value})
+				client, err := resolveAgentClient(agentClientOptions{Endpoint: endpoint.value})
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1

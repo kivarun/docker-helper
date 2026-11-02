@@ -830,11 +830,22 @@ func TestServeAuditRoutingToStdout(t *testing.T) {
 	}
 	t.Setenv("DOCKER_HELPER_CONFIG", filepath.Join(configDir, "config.json"))
 
-	// Pre-acquire the lock so serve fails after config load.
-	runtimeDir := filepath.Join(dir, "docker-helper")
-	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
-		t.Fatalf("mkdir runtime: %v", err)
+	// The system daemon bootstrap needs the root gate and a (seamed) active
+	// MAC backend before it reaches the audit-enabled logger initialization.
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 0 }
+	t.Cleanup(func() { EffectiveUID = origUID })
+	mockDetectLSM(t, LSMAppArmor, nil)
+	origAAConf := appArmorProcessConfinement
+	appArmorProcessConfinement = func() (string, error) {
+		return "docker-helper-system (enforce)", nil
 	}
+	t.Cleanup(func() { appArmorProcessConfinement = origAAConf })
+
+	// Pre-acquire the lock so serve fails after config load. The runtime
+	// directory seam points at the fixture so the daemon resolves the same
+	// lock path this test pre-acquired.
+	runtimeDir, _ := stubSystemRuntimeDirsForTest(t)
 	lockPath := filepath.Join(runtimeDir, "docker-helper.sock.lock")
 	lockFile, err := acquireDaemonInstanceLock(lockPath)
 	if err != nil {

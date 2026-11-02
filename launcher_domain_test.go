@@ -45,7 +45,7 @@ func testEffectivePrincipalRoots(t *testing.T, db *sql.DB, principalID int64, gl
 		t.Fatalf("readPrincipalAllowedRoots: %v", err)
 	}
 	return allowedRootPaths(effectivePrincipalAllowedRoots(
-		allowedRootEntriesForPaths(globalRoots), stored, principalID, 0, false))
+		allowedRootEntriesForPaths(globalRoots), stored, principalID))
 }
 
 // TestComputeEffectivePrincipalRootsMatrix proves the semantic matrix of the
@@ -56,41 +56,27 @@ func testEffectivePrincipalRoots(t *testing.T, db *sql.DB, principalID int64, gl
 // Principal-level rule to this single function, so the matrix pins the rule
 // exactly once:
 //
-//   - user mode + daemon-owner identity + zero stored roots => the global
-//     roots (the transparent ownership chain defers wholly to the global
-//     ceiling; the ONLY Principal for which empty roots mean the global
-//     ceiling);
-//   - user mode + daemon-owner identity + stray stored roots (a state the
-//     user-mode startup contract refuses) => the plain intersection,
-//     fail-closed;
-//   - everything else (system mode, user-mode non-owners) => the plain
-//     intersection: zero or disjoint stored roots mean an empty ceiling.
+//   - stored roots inside the global ceiling compose normally;
+//   - zero or disjoint stored roots mean an empty ceiling, fail-closed, for
+//     every Principal (there is no daemon-owner special case).
 func TestComputeEffectivePrincipalRootsMatrix(t *testing.T) {
 	global := []AllowedRootEntry{allowedRootEntry("/global")}
-	daemonOwner := int64(7)
-	other := int64(8)
+	const principal = int64(8)
 
 	cases := []struct {
-		name        string
-		userMode    bool
-		principalID int64
-		daemonID    int64
-		stored      []AllowedRootEntry
-		want        []string
+		name   string
+		stored []AllowedRootEntry
+		want   []string
 	}{
-		{"system principal with stored roots", false, other, 0, []AllowedRootEntry{allowedRootEntry("/global/home")}, []string{"/global/home"}},
-		{"system principal with zero stored roots", false, other, 0, nil, nil},
-		{"user-mode daemon-owner with zero stored roots", true, daemonOwner, daemonOwner, nil, []string{"/global"}},
-		{"user-mode daemon-owner with stray stored roots (startup-refused state)", true, daemonOwner, daemonOwner, []AllowedRootEntry{allowedRootEntry("/elsewhere")}, nil},
-		{"user-mode non-owner with zero stored roots", true, other, daemonOwner, nil, nil},
-		{"user-mode non-owner with stored roots", true, other, daemonOwner, []AllowedRootEntry{allowedRootEntry("/global/home")}, []string{"/global/home"}},
+		{"principal with stored roots", []AllowedRootEntry{allowedRootEntry("/global/home")}, []string{"/global/home"}},
+		{"principal with zero stored roots", nil, nil},
+		{"principal with out-of-ceiling stored roots", []AllowedRootEntry{allowedRootEntry("/elsewhere")}, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := allowedRootPaths(effectivePrincipalAllowedRoots(global, tc.stored, tc.principalID, tc.daemonID, tc.userMode))
+			got := allowedRootPaths(effectivePrincipalAllowedRoots(global, tc.stored, principal))
 			if !slices.Equal(got, tc.want) {
-				t.Errorf("effectivePrincipalAllowedRoots(userMode=%v, principal=%d, owner=%d, stored=%v) = %v, want %v",
-					tc.userMode, tc.principalID, tc.daemonID, tc.stored, got, tc.want)
+				t.Errorf("effectivePrincipalAllowedRoots(stored=%v) = %v, want %v", tc.stored, got, tc.want)
 			}
 		})
 	}

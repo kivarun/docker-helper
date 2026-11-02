@@ -112,8 +112,6 @@ func TestScriptSyntax(t *testing.T) {
 		shell string
 		path  string
 	}{
-		{"bash", "packaging/install.sh"},
-		{"bash", "packaging/uninstall.sh"},
 		{"bash", "packaging/install-system.sh"},
 		{"bash", "packaging/uninstall-system.sh"},
 		{"bash", "build-static.sh"},
@@ -135,307 +133,6 @@ func TestScriptSyntax(t *testing.T) {
 				t.Fatalf("%s syntax error: %v", tt.path, err)
 			}
 		})
-	}
-}
-
-// setupInstalledHome creates a temp home with an installed docker-helper
-// (binary, unit, config, state) for running the production uninstall.sh.
-func setupInstalledHome(t *testing.T) string {
-	t.Helper()
-	tempHome := t.TempDir()
-
-	installDir := filepath.Join(tempHome, ".local", "bin")
-	if err := os.MkdirAll(installDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(installDir, "docker-helper"), []byte("#!/bin/bash\necho 1.0.0\n"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	unitDir := filepath.Join(tempHome, ".config", "systemd", "user")
-	if err := os.MkdirAll(unitDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(unitDir, "docker-helper.service"), []byte("[Unit]\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	configDir := filepath.Join(tempHome, ".config", "docker-helper")
-	if err := os.MkdirAll(configDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte("{}"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	writeTestTokenFile(t, filepath.Join(configDir, "admin.token"), "test-admin-token\n")
-
-	stateDir := filepath.Join(tempHome, ".local", "state", "docker-helper")
-	if err := os.MkdirAll(stateDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(stateDir, "docker-helper.db"), []byte("fake db"), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	return tempHome
-}
-
-// runUninstall runs the production packaging/uninstall.sh against a temp home.
-func runUninstall(t *testing.T, tempHome string, args []string) ([]byte, error) {
-	t.Helper()
-	script, err := filepath.Abs("packaging/uninstall.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command("bash", append([]string{script}, args...)...)
-	cmd.Env = append(os.Environ(),
-		"HOME="+tempHome,
-		"XDG_CONFIG_HOME="+filepath.Join(tempHome, ".config"),
-		"XDG_STATE_HOME="+filepath.Join(tempHome, ".local", "state"),
-	)
-	return cmd.CombinedOutput()
-}
-
-// TestInstallIdempotent verifies that running the production install.sh twice
-// does not fail and installs the binary and unit.
-func TestInstallIdempotent(t *testing.T) {
-	tempHome, scriptDir, fakeDir, _ := setupInstallEnv(t, "", "1.0.0")
-
-	if err := os.WriteFile(filepath.Join(fakeDir, "systemctl"), []byte("#!/bin/bash\nexit 0\n"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	for i := 0; i < 2; i++ {
-		out, err := runInstall(t, scriptDir, tempHome, fakeDir, []string{"--yes"}, "")
-		if err != nil {
-			t.Fatalf("install run %d failed: %v\n%s", i+1, err, out)
-		}
-	}
-
-	installedBin := filepath.Join(tempHome, ".local", "bin", "docker-helper")
-	info, err := os.Stat(installedBin)
-	if err != nil {
-		t.Fatalf("binary not installed to %s: %v", installedBin, err)
-	}
-	if mode := info.Mode().Perm(); mode != 0755 {
-		t.Errorf("binary mode = %o, want 0755", mode)
-	}
-
-	installedUnit := filepath.Join(tempHome, ".config", "systemd", "user", "docker-helper.service")
-	if _, err := os.Stat(installedUnit); err != nil {
-		t.Fatalf("unit not installed to %s: %v", installedUnit, err)
-	}
-}
-
-// TestUninstallRemovesBinary verifies that the production uninstall.sh removes
-// the installed binary and unit while a soft uninstall preserves config/state.
-func TestUninstallRemovesBinary(t *testing.T) {
-	tempHome := setupInstalledHome(t)
-
-	out, err := runUninstall(t, tempHome, []string{"--yes"})
-	if err != nil {
-		t.Fatalf("uninstall failed: %v\n%s", err, out)
-	}
-
-	if _, err := os.Stat(filepath.Join(tempHome, ".local", "bin", "docker-helper")); !os.IsNotExist(err) {
-		t.Error("binary should be removed")
-	}
-	if _, err := os.Stat(filepath.Join(tempHome, ".config", "systemd", "user", "docker-helper.service")); !os.IsNotExist(err) {
-		t.Error("unit should be removed")
-	}
-
-	// Soft uninstall preserves config and state.
-	if _, err := os.Stat(filepath.Join(tempHome, ".config", "docker-helper", "config.json")); err != nil {
-		t.Error("config.json should be preserved")
-	}
-	if _, err := os.Stat(filepath.Join(tempHome, ".config", "docker-helper", "admin.token")); err != nil {
-		t.Error("admin.token should be preserved")
-	}
-	if _, err := os.Stat(filepath.Join(tempHome, ".local", "state", "docker-helper", "docker-helper.db")); err != nil {
-		t.Error("database should be preserved")
-	}
-}
-
-// TestUninstallPurgeRemovesConfig verifies that uninstall.sh --purge removes
-// config and state.
-func TestUninstallPurgeRemovesConfig(t *testing.T) {
-	tempHome := setupInstalledHome(t)
-
-	out, err := runUninstall(t, tempHome, []string{"--yes", "--purge"})
-	if err != nil {
-		t.Fatalf("uninstall --purge failed: %v\n%s", err, out)
-	}
-
-	configDir := filepath.Join(tempHome, ".config", "docker-helper")
-	stateDir := filepath.Join(tempHome, ".local", "state", "docker-helper")
-	if _, err := os.Stat(configDir); !os.IsNotExist(err) {
-		t.Error("config dir should be removed on purge")
-	}
-	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
-		t.Error("state dir should be removed on purge")
-	}
-}
-
-// TestUninstallPurgeDoesNotRemoveParent verifies purge removes only
-// docker-helper's config/state dirs, not their parents or siblings.
-func TestUninstallPurgeDoesNotRemoveParent(t *testing.T) {
-	tempHome := setupInstalledHome(t)
-
-	siblingDir := filepath.Join(tempHome, ".config", "other-app")
-	if err := os.MkdirAll(siblingDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	siblingState := filepath.Join(tempHome, ".local", "state", "other-app")
-	if err := os.MkdirAll(siblingState, 0700); err != nil {
-		t.Fatal(err)
-	}
-
-	out, err := runUninstall(t, tempHome, []string{"--yes", "--purge"})
-	if err != nil {
-		t.Fatalf("uninstall --purge failed: %v\n%s", err, out)
-	}
-
-	if _, err := os.Stat(filepath.Join(tempHome, ".config")); err != nil {
-		t.Error("~/.config should not be removed")
-	}
-	if _, err := os.Stat(siblingDir); err != nil {
-		t.Error("sibling config dir should not be removed")
-	}
-	if _, err := os.Stat(filepath.Join(tempHome, ".local", "state")); err != nil {
-		t.Error("~/.local/state should not be removed")
-	}
-	if _, err := os.Stat(siblingState); err != nil {
-		t.Error("sibling state dir should not be removed")
-	}
-}
-
-// TestInstallScriptUnknownFlag verifies install.sh rejects unknown flags
-// and prints a usage hint.
-func TestInstallScriptUnknownFlag(t *testing.T) {
-	cmd := exec.Command("bash", "packaging/install.sh", "--unknown-flag")
-	cmd.Env = append(os.Environ(), "HOME="+t.TempDir())
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		t.Fatal("expected non-zero exit code for unknown flag")
-	}
-	if !strings.Contains(string(out), "Try") {
-		t.Errorf("expected usage hint in stderr, got: %s", out)
-	}
-}
-
-// TestInstallScriptHelp verifies install.sh --help and -h print usage
-// and exit 0.
-func TestInstallScriptHelp(t *testing.T) {
-	for _, flag := range []string{"--help", "-h"} {
-		t.Run(flag, func(t *testing.T) {
-			cmd := exec.Command("bash", "packaging/install.sh", flag)
-			cmd.Env = append(os.Environ(), "HOME="+t.TempDir())
-			out, err := cmd.CombinedOutput()
-			if err != nil {
-				t.Fatalf("expected exit 0 for %s, got: %v: %s", flag, err, out)
-			}
-			output := string(out)
-			if !strings.Contains(output, "--yes") {
-				t.Errorf("--help output missing --yes: %s", output)
-			}
-			if !strings.Contains(output, "--help") {
-				t.Errorf("--help output missing --help: %s", output)
-			}
-		})
-	}
-}
-
-// TestUninstallScriptUnknownFlag verifies uninstall.sh rejects unknown flags
-// and prints a usage hint.
-func TestUninstallScriptUnknownFlag(t *testing.T) {
-	cmd := exec.Command("bash", "packaging/uninstall.sh", "--unknown-flag")
-	cmd.Env = append(os.Environ(), "HOME="+t.TempDir())
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		t.Fatal("expected non-zero exit code for unknown flag")
-	}
-	if !strings.Contains(string(out), "Try") {
-		t.Errorf("expected usage hint in stderr, got: %s", out)
-	}
-}
-
-// TestUninstallScriptHelp verifies uninstall.sh --help and -h print usage
-// and exit 0.
-func TestUninstallScriptHelp(t *testing.T) {
-	for _, flag := range []string{"--help", "-h"} {
-		t.Run(flag, func(t *testing.T) {
-			cmd := exec.Command("bash", "packaging/uninstall.sh", flag)
-			cmd.Env = append(os.Environ(), "HOME="+t.TempDir())
-			out, err := cmd.CombinedOutput()
-			if err != nil {
-				t.Fatalf("expected exit 0 for %s, got: %v: %s", flag, err, out)
-			}
-			output := string(out)
-			if !strings.Contains(output, "--yes") {
-				t.Errorf("--help output missing --yes: %s", output)
-			}
-			if !strings.Contains(output, "--purge") {
-				t.Errorf("--help output missing --purge: %s", output)
-			}
-			if !strings.Contains(output, "--help") {
-				t.Errorf("--help output missing --help: %s", output)
-			}
-		})
-	}
-}
-
-// TestAppArmorProfileHasPlaceholders verifies the AppArmor profile
-// template in the bundle contains both @@BINARY_PATH@@ and @@WORKSPACE_RULE@@
-// placeholders for manual substitution by the administrator.
-func TestAppArmorProfileHasPlaceholders(t *testing.T) {
-	data, err := os.ReadFile("packaging/apparmor/docker-helper")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-	if !strings.Contains(content, "@@BINARY_PATH@@") {
-		t.Fatal("AppArmor profile must contain @@BINARY_PATH@@ placeholder for executable attachment")
-	}
-	if !strings.Contains(content, "@@WORKSPACE_RULE@@") {
-		t.Fatal("AppArmor profile must contain @@WORKSPACE_RULE@@ placeholder for workspace access")
-	}
-	// Verify the profile uses path-based attachment (profile @@BINARY@@)
-	if !strings.Contains(content, "profile @@BINARY_PATH@@") {
-		t.Fatal("AppArmor profile must use path-based attachment: profile @@BINARY_PATH@@")
-	}
-}
-
-// TestInstallScriptNoSudo verifies install.sh does not execute sudo.
-func TestInstallScriptNoSudo(t *testing.T) {
-	data, err := os.ReadFile("packaging/install.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-	for _, line := range strings.Split(content, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		// Lines that are purely informational output (info/warn/error calls)
-		// may reference sudo as user instructions without executing it.
-		if strings.HasPrefix(trimmed, "info ") || strings.HasPrefix(trimmed, "warn ") || strings.HasPrefix(trimmed, "error ") {
-			continue
-		}
-		if strings.Contains(trimmed, "sudo") {
-			t.Error("install.sh must not execute sudo: " + trimmed)
-		}
-	}
-}
-
-// TestUninstallScriptNoSudo verifies uninstall.sh does not contain sudo.
-func TestUninstallScriptNoSudo(t *testing.T) {
-	data, err := os.ReadFile("packaging/uninstall.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(data), "sudo") {
-		t.Error("uninstall.sh must not contain sudo")
 	}
 }
 
@@ -496,55 +193,6 @@ func TestReleaseReadmeCanonicalCLIGrammar(t *testing.T) {
 	}
 }
 
-func TestAskPrompts(t *testing.T) {
-	type testCase struct {
-		name       string
-		script     string
-		input      string
-		wantPrompt string
-		wantStatus int
-	}
-
-	tests := []testCase{
-		{"install enter", "packaging/install.sh", "\n", "test? [Y/n]: ", 0},
-		{"install n", "packaging/install.sh", "n\n", "test? [Y/n]: ", 1},
-		{"uninstall enter", "packaging/uninstall.sh", "\n", "test? [y/N]: ", 1},
-		{"uninstall y", "packaging/uninstall.sh", "y\n", "test? [y/N]: ", 0},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			scriptPath, err := filepath.Abs(tc.script)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			cmd := exec.Command("bash", "-c",
-				"source '"+scriptPath+"' && ask 'test?'",
-			)
-			cmd.Stdin = strings.NewReader(tc.input)
-			out, err := cmd.CombinedOutput()
-			gotStatus := 0
-			if err != nil {
-				var exitErr *exec.ExitError
-				if ok := errors.As(err, &exitErr); ok {
-					gotStatus = exitErr.ExitCode()
-				} else {
-					t.Fatalf("bash failed: %v: %s", err, out)
-				}
-			}
-
-			gotPrompt := string(out)
-			if gotPrompt != tc.wantPrompt {
-				t.Errorf("prompt = %q, want %q", gotPrompt, tc.wantPrompt)
-			}
-			if gotStatus != tc.wantStatus {
-				t.Errorf("status = %d, want %d", gotStatus, tc.wantStatus)
-			}
-		})
-	}
-}
-
 // TestBuildBundleScriptContent verifies build-bundle.sh references the
 // expected bundle layout, places the skill at skills/docker-helper,
 // keeps .claude out of the bundle, fails closed on unconfirmed static
@@ -559,9 +207,9 @@ func TestBuildBundleScriptContent(t *testing.T) {
 
 	// The script must copy these artifacts into the bundle.
 	for _, s := range []string{
-		"docker-helper", "install.sh", "uninstall.sh", "install-system.sh", "uninstall-system.sh",
-		"systemd/user", "systemd/user/docker-helper.service", "systemd/system/docker-helper.service",
-		"apparmor", "apparmor/docker-helper", "apparmor/docker-helper-system",
+		"docker-helper", "install-system.sh", "uninstall-system.sh",
+		"systemd/system/docker-helper.service",
+		"apparmor", "apparmor/docker-helper-system",
 		"apparmor/local/curl",
 		"selinux", "selinux/docker_helper.pp",
 		"build-selinux-policy.sh",
@@ -643,159 +291,8 @@ func TestBuildBundleSELinuxArtifact(t *testing.T) {
 	}
 }
 
-// TestInstallSkillCopied verifies install.sh copies the skill to
-// ~/.claude/skills/docker-helper/SKILL.md when skill installation is accepted.
-func TestInstallSkillCopied(t *testing.T) {
-	tempHome := t.TempDir()
-	scriptDir := t.TempDir()
-
-	// Create a fake binary
-	if err := os.WriteFile(filepath.Join(scriptDir, "docker-helper"), []byte("fake"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create skill source
-	skillDir := filepath.Join(scriptDir, "skills", "docker-helper")
-	if err := os.MkdirAll(skillDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# Docker Helper Skill\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create systemd unit dir
-	unitDir := filepath.Join(scriptDir, "systemd", "user")
-	if err := os.MkdirAll(unitDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(unitDir, "docker-helper.service"), []byte("[Unit]\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create fake docker
-	fakeDockerDir := t.TempDir()
-	fakeDocker := filepath.Join(fakeDockerDir, "docker")
-	if err := os.WriteFile(fakeDocker, []byte("#!/bin/bash\necho ok\n"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Copy install.sh into scriptDir so script_dir resolves correctly
-	installData, err := os.ReadFile("packaging/install.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	installedScript := filepath.Join(scriptDir, "install.sh")
-	if err := os.WriteFile(installedScript, installData, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Run install.sh with --yes (auto-accepts skill installation)
-	cmd := exec.Command("bash", installedScript, "--yes")
-	cmd.Env = append(os.Environ(),
-		"HOME="+tempHome,
-		"XDG_CONFIG_HOME="+filepath.Join(tempHome, ".config"),
-		"XDG_STATE_HOME="+filepath.Join(tempHome, ".local", "state"),
-		"PATH="+fakeDockerDir+":"+os.Getenv("PATH"),
-	)
-	cmd.Dir = scriptDir
-
-	output, err := cmd.CombinedOutput()
-	_ = output
-	_ = err // may fail on systemd/service steps
-
-	// Verify skill was installed
-	skillPath := filepath.Join(tempHome, ".claude", "skills", "docker-helper", "SKILL.md")
-	if _, err := os.Stat(skillPath); err != nil {
-		t.Fatalf("skill not installed to %s: %v", skillPath, err)
-	}
-
-	// Verify skill content
-	data, err := os.ReadFile(skillPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), "Docker Helper Skill") {
-		t.Error("skill content mismatch")
-	}
-}
-
-// TestUninstallSkillRemovesOnlyDockerHelper verifies uninstall.sh removes
-// only the docker-helper skill and does not touch ~/.claude, ~/.claude/skills,
-// or other skills.
-func TestUninstallSkillRemovesOnlyDockerHelper(t *testing.T) {
-	tempHome := t.TempDir()
-
-	// Create ~/.claude/skills with docker-helper and another skill
-	skillsDir := filepath.Join(tempHome, ".claude", "skills")
-	dhSkillDir := filepath.Join(skillsDir, "docker-helper")
-	otherSkillDir := filepath.Join(skillsDir, "other-skill")
-	if err := os.MkdirAll(dhSkillDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(otherSkillDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dhSkillDir, "SKILL.md"), []byte("# Docker Helper\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(otherSkillDir, "SKILL.md"), []byte("# Other Skill\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create script dir with minimal artifacts
-	scriptDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(scriptDir, "docker-helper"), []byte("fake"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	unitDir := filepath.Join(scriptDir, "systemd", "user")
-	if err := os.MkdirAll(unitDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Get absolute path to uninstall.sh
-	uninstallScript, err := filepath.Abs("packaging/uninstall.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Run uninstall.sh with --yes (auto-accepts skill removal)
-	cmd := exec.Command("bash", uninstallScript, "--yes")
-	cmd.Env = append(os.Environ(),
-		"HOME="+tempHome,
-		"XDG_CONFIG_HOME="+filepath.Join(tempHome, ".config"),
-		"XDG_STATE_HOME="+filepath.Join(tempHome, ".local", "state"),
-		"PATH="+os.Getenv("PATH"),
-	)
-	cmd.Dir = scriptDir
-
-	output, err := cmd.CombinedOutput()
-	_ = output
-	_ = err // may fail on systemd steps
-
-	// Verify docker-helper skill was removed
-	if _, err := os.Stat(filepath.Join(dhSkillDir, "SKILL.md")); !os.IsNotExist(err) {
-		t.Error("docker-helper skill should be removed")
-	}
-
-	// Verify docker-helper directory was removed (empty)
-	if _, err := os.Stat(dhSkillDir); !os.IsNotExist(err) {
-		// Directory may still exist if rmdir failed, that's acceptable
-		// as long as SKILL.md is gone
-	}
-
-	// Verify ~/.claude/skills still exists
-	if _, err := os.Stat(skillsDir); err != nil {
-		t.Error("~/.claude/skills should not be removed")
-	}
-
-	// Verify other skill is untouched
-	if _, err := os.Stat(filepath.Join(otherSkillDir, "SKILL.md")); err != nil {
-		t.Error("other skill should not be removed")
-	}
-}
-
 // TestSkillAgentContract verifies the shipped agent-facing SKILL.md keeps
-// the canonical Release 2.2 contract vocabulary and does not resurrect
+// the canonical current contract vocabulary and does not resurrect
 // known-stale claims. The file is a shipped release artifact
 // (skills/docker-helper/SKILL.md in the bundle), so its agent-facing
 // invariants are product contracts, not prose.
@@ -830,25 +327,28 @@ func TestSkillAgentContract(t *testing.T) {
 		t.Error("SKILL.md must not resurrect the retired --filesystem-entry vocabulary")
 	}
 
-	// Socket discovery must cover both deployment modes: the authoritative
-	// override, the user-mode runtime socket, and the system socket.
+	// Socket discovery must state the current two-stage agent/data-plane
+	// contract (the authoritative override and the system socket) and must
+	// not resurrect the retired per-user XDG runtime socket fallback.
 	for _, fact := range []string{
 		"DOCKER_HELPER_SOCKET_PATH",
-		"XDG_RUNTIME_DIR",
 		"/run/docker-helper/docker-helper.sock",
 	} {
 		if !strings.Contains(content, fact) {
 			t.Errorf("SKILL.md socket discovery must state %q", fact)
 		}
 	}
+	if strings.Contains(content, "XDG_RUNTIME_DIR") {
+		t.Error("SKILL.md must not teach the retired XDG user-runtime socket fallback")
+	}
 
-	// The user-mode mount invariant is the canonical workspace rule, never
-	// the literal "." spelling; the known-stale sentence must stay gone.
-	if !strings.Contains(content, "canonical resolved source equals the canonical Session workspace") {
-		t.Error("SKILL.md must state the canonical user-mode mount rule")
+	// The canonicalization-owned containment rule must be stated; the
+	// literal "." spelling must never be presented as the invariant.
+	if !strings.Contains(content, "the canonical resolved source must stay inside the canonical") {
+		t.Error("SKILL.md must state the canonical containment mount rule")
 	}
 	if strings.Contains(content, "only the workspace root source `.` is accepted") {
-		t.Error("SKILL.md must not claim the literal `.` spelling as the user-mode invariant")
+		t.Error("SKILL.md must not claim the literal `.` spelling as the workspace invariant")
 	}
 
 	// A Session bearer introspects its own issued snapshot through self;
@@ -894,7 +394,7 @@ func TestHelperSocketLocatorUserDocs(t *testing.T) {
 // TestCanonicalDocContract verifies the canonical current-design documents
 // keep the Release 2.2 contracts and do not resurrect known-stale claims:
 // the Session MAC lifecycle covers every concrete issued tree (never a
-// workspace-only scope, never preparation-after-persistence), the user-mode
+// workspace-only scope, never preparation-after-persistence), the workspace
 // filesystem authority stays workspace-only, and the shipped man page does
 // not reduce the SELinux MAC scope to concrete Session workspaces.
 func TestCanonicalDocContract(t *testing.T) {
@@ -934,24 +434,15 @@ func TestCanonicalDocContract(t *testing.T) {
 			},
 		},
 		{
-			name: "skill user-mode filesystem roots",
-			file: ".claude/skills/docker-helper/SKILL.md",
-			mustContain: []string{
-				// The canonical user-mode issuance rule: workspace-only.
-				"an explicit root is accepted only when its canonical path equals the canonical workspace",
-			},
-			mustNotContain: []string{},
-		},
-		{
-			name: "readme user-mode filesystem authority",
+			name: "readme workspace filesystem authority",
 			file: "README.md",
 			mustContain: []string{
-				// The canonical user-mode authority statement.
-				"the Session filesystem authority remains workspace-only",
+				// The canonical snapshot authority statement.
+				"the Session filesystem authority remains the persisted immutable snapshot",
 			},
 			mustNotContain: []string{
 				// The stale workspace+issued-roots impression in the
-				// user-mode limitation.
+				// authority description.
 				"workspace + issued filesystem roots) is still the only authority",
 			},
 		},
@@ -1014,8 +505,31 @@ func TestCanonicalDocContract(t *testing.T) {
 				"authority/classification introspection",
 			},
 			mustNotContain: []string{
-				// The stale table wording that conflicted with GET /self.
+				// The stale table wording that conflicted with GET /auth.
 				"`GET /auth` self-inspection",
+			},
+		},
+		{
+			name: "agent integration current mount contract",
+			file: "docs/agent-integration.md",
+			mustContain: []string{
+				// The system-only mount contract: one daemon deployment,
+				// no user-mode workspace-only special case, the issued
+				// snapshot as the absolute-source authority, inode-pinned
+				// run mounts, and read-only semantics from the snapshot
+				// plus mandatory workload MAC.
+				"The system service is the only daemon deployment",
+				"no user-mode workspace-only special case",
+				"issued Session filesystem snapshot",
+				"All run mounts use inode pinning",
+				"mandatory workload MAC",
+			},
+			mustNotContain: []string{
+				// The retired user-mode special cases must not return to
+				// the current guide.
+				"Workspace-parent write invariant for user mode",
+				"Mount policy by deployment mode",
+				"deployment-mode restrictions",
 			},
 		},
 	}
@@ -1060,85 +574,6 @@ func TestCanonicalDocContract(t *testing.T) {
 	})
 }
 
-// setupInstallEnv creates a minimal test environment for install.sh.
-// Returns (tempHome, scriptDir, fakeDir, callLog).
-// Each test writes its own systemctl script to fakeDir.
-func setupInstallEnv(t *testing.T, currentVer, newVer string) (tempHome, scriptDir, fakeDir, callLog string) {
-	t.Helper()
-	tempHome = t.TempDir()
-	scriptDir = t.TempDir()
-	fakeDir = t.TempDir()
-	callLog = filepath.Join(fakeDir, "systemctl_calls.log")
-
-	if err := os.WriteFile(filepath.Join(fakeDir, "docker"),
-		[]byte("#!/bin/bash\necho ok\n"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := os.WriteFile(filepath.Join(scriptDir, "docker-helper"),
-		[]byte(fmt.Sprintf("#!/bin/bash\necho '%s'\n", newVer)), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	unitDir := filepath.Join(scriptDir, "systemd", "user")
-	if err := os.MkdirAll(unitDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(unitDir, "docker-helper.service"),
-		[]byte("[Unit]\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	skillDir := filepath.Join(scriptDir, "skills", "docker-helper")
-	if err := os.MkdirAll(skillDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"),
-		[]byte("# Skill\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	if currentVer != "" {
-		installDir := filepath.Join(tempHome, ".local", "bin")
-		if err := os.MkdirAll(installDir, 0755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(installDir, "docker-helper"),
-			[]byte(fmt.Sprintf("#!/bin/bash\necho '%s'\n", currentVer)), 0755); err != nil {
-			t.Fatal(err)
-		}
-
-		unitInstallDir := filepath.Join(tempHome, ".config", "systemd", "user")
-		if err := os.MkdirAll(unitInstallDir, 0755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(unitInstallDir, "docker-helper.service"),
-			[]byte("[Unit]\nDescription=Old\n"), 0644); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	configDir := filepath.Join(tempHome, ".config", "docker-helper")
-	if err := os.MkdirAll(configDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(configDir, "config.json"),
-		[]byte("{}"), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	installData, err := os.ReadFile("packaging/install.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(scriptDir, "install.sh"),
-		installData, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	return
-}
-
 func readSystemctlCalls(t *testing.T, callLog string) []string {
 	t.Helper()
 	data, err := os.ReadFile(callLog)
@@ -1152,384 +587,6 @@ func readSystemctlCalls(t *testing.T, callLog string) []string {
 		}
 	}
 	return lines
-}
-
-func runInstall(t *testing.T, scriptDir, tempHome, fakeDir string, args []string, stdin string) ([]byte, error) {
-	t.Helper()
-	cmd := exec.Command("bash", append([]string{filepath.Join(scriptDir, "install.sh")}, args...)...)
-	if stdin != "" {
-		cmd.Stdin = strings.NewReader(stdin)
-	}
-	cmd.Env = append(os.Environ(),
-		"HOME="+tempHome,
-		"XDG_CONFIG_HOME="+filepath.Join(tempHome, ".config"),
-		"XDG_STATE_HOME="+filepath.Join(tempHome, ".local", "state"),
-		"PATH="+fakeDir+":"+os.Getenv("PATH"),
-	)
-	cmd.Dir = scriptDir
-	return cmd.CombinedOutput()
-}
-
-// TestInstallActiveServiceConfirmed verifies that when the service is active
-// and the user confirms, stop is called before any file copy, then daemon-reload
-// and start follow. The fake systemctl asserts the binary state at each step.
-func TestInstallActiveServiceConfirmed(t *testing.T) {
-	tempHome, scriptDir, fakeDir, callLog := setupInstallEnv(t, "1.0.0", "1.1.0")
-	installBin := filepath.Join(tempHome, ".local", "bin", "docker-helper")
-
-	systemctlScript := fmt.Sprintf(`#!/bin/bash
-log_file="%s"
-install_bin="%s"
-echo "$@" >> "$log_file"
-case "$*" in
-  *"is-active"*) exit 0 ;;
-  *"stop"*)
-    grep -q '1.0.0' "$install_bin" 2>/dev/null || exit 1
-    exit 0 ;;
-  *"daemon-reload"*)
-    grep -q '1.1.0' "$install_bin" 2>/dev/null || exit 1
-    exit 0 ;;
-  *) exit 0 ;;
-esac
-`, callLog, installBin)
-	if err := os.WriteFile(filepath.Join(fakeDir, "systemctl"),
-		[]byte(systemctlScript), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	out, err := runInstall(t, scriptDir, tempHome, fakeDir, nil, "\n\n\n\n")
-	if err != nil {
-		t.Fatalf("install failed: %v\n%s", err, out)
-	}
-
-	calls := readSystemctlCalls(t, callLog)
-
-	stopIdx, reloadIdx, startIdx := -1, -1, -1
-	for i, c := range calls {
-		if strings.Contains(c, "stop") && stopIdx < 0 {
-			stopIdx = i
-		}
-		if strings.Contains(c, "daemon-reload") && reloadIdx < 0 {
-			reloadIdx = i
-		}
-		if strings.Contains(c, "start") && startIdx < 0 {
-			startIdx = i
-		}
-	}
-	if stopIdx < 0 {
-		t.Fatal("stop was not called")
-	}
-	if !(stopIdx < reloadIdx && reloadIdx < startIdx) {
-		t.Errorf("expected stop(%d) < daemon-reload(%d) < start(%d)", stopIdx, reloadIdx, startIdx)
-	}
-
-	for _, c := range calls {
-		if strings.Contains(c, "enable") {
-			t.Error("enable must not be called when service was previously active")
-		}
-	}
-}
-
-// TestInstallActiveServiceRefused verifies that when the user refuses to stop
-// the service, no files are changed and stop is never called.
-func TestInstallActiveServiceRefused(t *testing.T) {
-	tempHome, scriptDir, fakeDir, callLog := setupInstallEnv(t, "1.0.0", "1.1.0")
-
-	systemctlScript := fmt.Sprintf(`#!/bin/bash
-log_file="%s"
-echo "$@" >> "$log_file"
-case "$*" in
-  *"is-active"*) exit 0 ;;
-  *) exit 0 ;;
-esac
-`, callLog)
-	if err := os.WriteFile(filepath.Join(fakeDir, "systemctl"),
-		[]byte(systemctlScript), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	installedBin := filepath.Join(tempHome, ".local", "bin", "docker-helper")
-	origBin, err := os.ReadFile(installedBin)
-	if err != nil {
-		t.Fatal(err)
-	}
-	installedUnit := filepath.Join(tempHome, ".config", "systemd", "user", "docker-helper.service")
-	origUnit, err := os.ReadFile(installedUnit)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	out, err := runInstall(t, scriptDir, tempHome, fakeDir, nil, "n\n")
-	if err != nil {
-		t.Fatalf("install should exit 0 on refusal, got: %v\n%s", err, out)
-	}
-
-	calls := readSystemctlCalls(t, callLog)
-	for _, c := range calls {
-		if strings.Contains(c, "stop") {
-			t.Error("stop must not be called when user refuses")
-		}
-	}
-
-	newBin, err := os.ReadFile(installedBin)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(newBin) != string(origBin) {
-		t.Error("binary should not be changed when user refuses")
-	}
-
-	newUnit, err := os.ReadFile(installedUnit)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(newUnit) != string(origUnit) {
-		t.Error("unit should not be changed when user refuses")
-	}
-}
-
-// TestInstallActiveServiceYesFlag verifies that --yes auto-confirms the
-// stop prompt and proceeds without reading stdin.
-func TestInstallActiveServiceYesFlag(t *testing.T) {
-	tempHome, scriptDir, fakeDir, callLog := setupInstallEnv(t, "1.0.0", "1.1.0")
-
-	systemctlScript := fmt.Sprintf(`#!/bin/bash
-log_file="%s"
-echo "$@" >> "$log_file"
-exit 0
-`, callLog)
-	if err := os.WriteFile(filepath.Join(fakeDir, "systemctl"),
-		[]byte(systemctlScript), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	out, err := runInstall(t, scriptDir, tempHome, fakeDir, []string{"--yes"}, "")
-	if err != nil {
-		t.Fatalf("install --yes failed: %v\n%s", err, out)
-	}
-
-	calls := readSystemctlCalls(t, callLog)
-	foundStop, foundReload, foundStart := false, false, false
-	for _, c := range calls {
-		if strings.Contains(c, "stop") {
-			foundStop = true
-		}
-		if strings.Contains(c, "daemon-reload") {
-			foundReload = true
-		}
-		if strings.Contains(c, "start") {
-			foundStart = true
-		}
-	}
-	if !foundStop {
-		t.Error("--yes should auto-confirm stop")
-	}
-	if !foundReload {
-		t.Error("--yes should call daemon-reload")
-	}
-	if !foundStart {
-		t.Error("--yes should call start after install")
-	}
-}
-
-// TestInstallInactiveServicePreservesFlow verifies that when the service is
-// not active, the normal enable + start flow is used.
-func TestInstallInactiveServicePreservesFlow(t *testing.T) {
-	tempHome, scriptDir, fakeDir, callLog := setupInstallEnv(t, "", "1.0.0")
-
-	systemctlScript := fmt.Sprintf(`#!/bin/bash
-log_file="%s"
-echo "$@" >> "$log_file"
-case "$*" in
-  *"is-active"*) exit 1 ;;
-  *) exit 0 ;;
-esac
-`, callLog)
-	if err := os.WriteFile(filepath.Join(fakeDir, "systemctl"),
-		[]byte(systemctlScript), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	out, err := runInstall(t, scriptDir, tempHome, fakeDir, []string{"--yes"}, "")
-	if err != nil {
-		t.Fatalf("install failed: %v\n%s", err, out)
-	}
-
-	calls := readSystemctlCalls(t, callLog)
-	foundEnable, foundStart := false, false
-	for _, c := range calls {
-		if strings.Contains(c, "enable") {
-			foundEnable = true
-		}
-		if strings.Contains(c, "start") {
-			foundStart = true
-		}
-	}
-	if !foundEnable {
-		t.Error("enable should be called when service was not active")
-	}
-	if !foundStart {
-		t.Error("start should be called when service was not active")
-	}
-}
-
-// TestInstallSameVersionOutput verifies that when current and new versions
-// match, the output mentions reinstalling the same version.
-func TestInstallSameVersionOutput(t *testing.T) {
-	tempHome, scriptDir, fakeDir, callLog := setupInstallEnv(t, "1.0.0", "1.0.0")
-
-	systemctlScript := fmt.Sprintf(`#!/bin/bash
-log_file="%s"
-echo "$@" >> "$log_file"
-exit 0
-`, callLog)
-	if err := os.WriteFile(filepath.Join(fakeDir, "systemctl"),
-		[]byte(systemctlScript), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	out, err := runInstall(t, scriptDir, tempHome, fakeDir, nil, "\n\n\n\n")
-	if err != nil {
-		t.Fatalf("install failed: %v\n%s", err, out)
-	}
-
-	if !strings.Contains(string(out), "reinstall") || !strings.Contains(string(out), "same version") {
-		t.Errorf("output should mention reinstalling the same version, got:\n%s", out)
-	}
-
-	calls := readSystemctlCalls(t, callLog)
-	foundStop := false
-	for _, c := range calls {
-		if strings.Contains(c, "stop") {
-			foundStop = true
-			break
-		}
-	}
-	if !foundStop {
-		t.Error("stop should be called even for same-version reinstall")
-	}
-}
-
-// TestInstallStopFailureAborts verifies that if systemctl stop fails,
-// no files are modified and the installer exits with an error.
-func TestInstallStopFailureAborts(t *testing.T) {
-	tempHome, scriptDir, fakeDir, _ := setupInstallEnv(t, "1.0.0", "1.1.0")
-
-	systemctlScript := `#!/bin/bash
-case "$*" in
-  *"is-active"*) exit 0 ;;
-  *"stop"*) exit 1 ;;
-  *) exit 0 ;;
-esac
-`
-	if err := os.WriteFile(filepath.Join(fakeDir, "systemctl"),
-		[]byte(systemctlScript), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	installedBin := filepath.Join(tempHome, ".local", "bin", "docker-helper")
-	origBin, err := os.ReadFile(installedBin)
-	if err != nil {
-		t.Fatal(err)
-	}
-	installedUnit := filepath.Join(tempHome, ".config", "systemd", "user", "docker-helper.service")
-	origUnit, err := os.ReadFile(installedUnit)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	out, err := runInstall(t, scriptDir, tempHome, fakeDir, nil, "\n\n")
-	if err == nil {
-		t.Fatal("install should fail when stop fails")
-	}
-
-	if !strings.Contains(string(out), "Failed to stop") {
-		t.Errorf("should report stop failure, got:\n%s", out)
-	}
-
-	newBin, err := os.ReadFile(installedBin)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(newBin) != string(origBin) {
-		t.Error("binary should not be changed when stop fails")
-	}
-
-	newUnit, err := os.ReadFile(installedUnit)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(newUnit) != string(origUnit) {
-		t.Error("unit should not be changed when stop fails")
-	}
-}
-
-// TestInstallDaemonReloadFailure verifies that when daemon-reload fails,
-// the installer exits non-zero, start is not called, and no false
-// "Installation complete" is printed.
-func TestInstallDaemonReloadFailure(t *testing.T) {
-	tempHome, scriptDir, fakeDir, callLog := setupInstallEnv(t, "1.0.0", "1.1.0")
-
-	systemctlScript := fmt.Sprintf(`#!/bin/bash
-log_file="%s"
-echo "$@" >> "$log_file"
-case "$*" in
-  *"is-active"*) exit 0 ;;
-  *"stop"*) exit 0 ;;
-  *"daemon-reload"*) exit 1 ;;
-  *) exit 0 ;;
-esac
-`, callLog)
-	if err := os.WriteFile(filepath.Join(fakeDir, "systemctl"),
-		[]byte(systemctlScript), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	out, err := runInstall(t, scriptDir, tempHome, fakeDir, nil, "\n\n\n\n")
-	if err == nil {
-		t.Fatal("install should fail when daemon-reload fails")
-	}
-
-	calls := readSystemctlCalls(t, callLog)
-	for _, c := range calls {
-		if strings.Contains(c, "start") {
-			t.Error("start must not be called after daemon-reload failure")
-		}
-	}
-
-	if strings.Contains(string(out), "Installation complete") {
-		t.Error("must not print Installation complete on daemon-reload failure")
-	}
-}
-
-// TestInstallStartFailure verifies that when start fails after daemon-reload,
-// the installer exits non-zero and no false "Installation complete" is printed.
-func TestInstallStartFailure(t *testing.T) {
-	tempHome, scriptDir, fakeDir, callLog := setupInstallEnv(t, "1.0.0", "1.1.0")
-
-	systemctlScript := fmt.Sprintf(`#!/bin/bash
-log_file="%s"
-echo "$@" >> "$log_file"
-case "$*" in
-  *"is-active"*) exit 0 ;;
-  *"stop"*) exit 0 ;;
-  *"start"*) exit 1 ;;
-  *) exit 0 ;;
-esac
-`, callLog)
-	if err := os.WriteFile(filepath.Join(fakeDir, "systemctl"),
-		[]byte(systemctlScript), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	out, err := runInstall(t, scriptDir, tempHome, fakeDir, nil, "\n\n\n\n")
-	if err == nil {
-		t.Fatal("install should fail when start fails")
-	}
-
-	if strings.Contains(string(out), "Installation complete") {
-		t.Error("must not print Installation complete on start failure")
-	}
 }
 
 // --- Systemd system unit tests ---
@@ -1548,8 +605,8 @@ func TestSystemUnitFile(t *testing.T) {
 	if !strings.Contains(content, "ExecStart=/usr/bin/docker-helper serve") {
 		t.Error("ExecStart must point to /usr/bin/docker-helper serve")
 	}
-	if !strings.Contains(content, "ExecReload=/usr/bin/docker-helper reload --system") {
-		t.Error("ExecReload must be /usr/bin/docker-helper reload --system")
+	if !strings.Contains(content, "ExecReload=/usr/bin/docker-helper reload") {
+		t.Error("ExecReload must be /usr/bin/docker-helper reload")
 	}
 	if !strings.Contains(content, "AppArmorProfile=docker-helper-system") {
 		t.Error("unit must contain AppArmorProfile=docker-helper-system")
@@ -1714,7 +771,6 @@ func TestUnitNoRestrictSUIDSGID(t *testing.T) {
 		path string
 	}{
 		{"system unit", "packaging/systemd/system/docker-helper.service"},
-		{"user unit", "packaging/systemd/user/docker-helper.service"},
 	}
 
 	for _, tt := range tests {
@@ -1738,13 +794,6 @@ func TestUnitNoRestrictSUIDSGID(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestUserUnitStillExists(t *testing.T) {
-	path := "packaging/systemd/user/docker-helper.service"
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("user unit %s must still exist: %v", path, err)
 	}
 }
 
@@ -1788,7 +837,6 @@ func timeoutStopSecViolation(content string) string {
 func TestSystemdTimeoutStopSecContract(t *testing.T) {
 	units := []string{
 		"packaging/systemd/system/docker-helper.service",
-		"packaging/systemd/user/docker-helper.service",
 	}
 	for _, path := range units {
 		data, err := os.ReadFile(path)
@@ -1979,7 +1027,7 @@ func TestSystemAppArmorProfileParserSyntax(t *testing.T) {
 
 // TestInstallSystemScriptContent guards the facts normal CI cannot
 // exercise: the root fail-closed check, the real system destination paths,
-// and the separation from user-mode artifacts. Allowed-root handling,
+// and the real destination paths. Allowed-root handling,
 // managed-boundaries state migration, AppArmor-before-init ordering, and
 // profile load flags are proven by the behavioral tests below.
 func TestInstallSystemScriptContent(t *testing.T) {
@@ -2018,7 +1066,7 @@ func TestInstallSystemScriptContent(t *testing.T) {
 
 // TestUninstallSystemScriptContent guards the facts normal CI cannot
 // exercise: the root fail-closed check, the real system purge paths, and
-// the separation from user-mode artifacts. Stop-before-remove ordering,
+// and the real purge paths. Stop-before-remove ordering,
 // AppArmor unload, and purge preservation/removal are proven by the
 // behavioral tests below.
 func TestUninstallSystemScriptContent(t *testing.T) {
@@ -9071,7 +8119,7 @@ func TestReleaseReadmeNoR3Features(t *testing.T) {
 }
 
 // TestAppArmorCurlSnippet verifies the curl AppArmor compatibility snippet
-// exists and contains the required socket rules for both deployment modes.
+// exists and contains the required socket rule for the system socket.
 func TestAppArmorCurlSnippet(t *testing.T) {
 	path := "packaging/apparmor/local/curl"
 	data, err := os.ReadFile(path)
@@ -9080,13 +8128,9 @@ func TestAppArmorCurlSnippet(t *testing.T) {
 	}
 	content := string(data)
 
-	// Must contain user-mode socket rule.
-	if !strings.Contains(content, "/run/user/*/docker-helper/docker-helper.sock rw") {
-		t.Error("snippet must contain user-mode socket rule")
-	}
-	// Must contain system-mode socket rule.
+	// Must contain the system-mode socket rule.
 	if !strings.Contains(content, "/run/docker-helper/docker-helper.sock rw") {
-		t.Error("snippet must contain system-mode socket rule")
+		t.Error("snippet must contain the system socket rule")
 	}
 	// Must not contain executable or capability grants.
 	for _, s := range []string{"rix", "ix", "capability"} {
@@ -9133,46 +8177,6 @@ func TestNfpmConfigIncludesCurlSnippet(t *testing.T) {
 	}
 	if !strings.Contains(content, "/usr/share/docker-helper/apparmor/local/curl") {
 		t.Error("nfpm.yaml must install snippet to /usr/share/docker-helper/apparmor/local/curl")
-	}
-}
-
-// TestInstallScriptAppArmorCurlWarning verifies install.sh contains the
-// warn_apparmor_confined_curl function that checks for /etc/apparmor.d/curl
-// and prints a hint without modifying system AppArmor policy.
-func TestInstallScriptAppArmorCurlWarning(t *testing.T) {
-	data, err := os.ReadFile("packaging/install.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-
-	// Must contain the warning function.
-	if !strings.Contains(content, "warn_apparmor_confined_curl") {
-		t.Error("install.sh must contain warn_apparmor_confined_curl function")
-	}
-	// Must check for /etc/apparmor.d/curl.
-	if !strings.Contains(content, "/etc/apparmor.d/curl") {
-		t.Error("install.sh must check for /etc/apparmor.d/curl")
-	}
-	// Must reference the bundled snippet path.
-	if !strings.Contains(content, "apparmor/local/curl") {
-		t.Error("install.sh must reference the bundled snippet path")
-	}
-	// Must not modify system AppArmor policy outside of informational messages.
-	// Check non-info/warn/error lines for automatic modifications.
-	for _, line := range strings.Split(content, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "#") ||
-			strings.HasPrefix(trimmed, "info ") || strings.HasPrefix(trimmed, "warn ") ||
-			strings.HasPrefix(trimmed, "error ") {
-			continue
-		}
-		if strings.Contains(trimmed, ">> /etc/apparmor.d/local/curl") {
-			t.Error("install.sh must not modify /etc/apparmor.d/local/curl automatically: " + trimmed)
-		}
-		if strings.Contains(trimmed, "apparmor_parser") {
-			t.Error("install.sh must not call apparmor_parser: " + trimmed)
-		}
 	}
 }
 
@@ -9239,16 +8243,16 @@ func TestRelease2AcceptanceStrictProofContracts(t *testing.T) {
 	// contract (400 invalid_workspace) — and finally restore the Principal
 	// root state.
 	for _, must := range []string{
-		`principal allowed-root remove --system "$H_USER" "$H_HOME"`,
-		`principal allowed-root add --system "$H_USER" "$H_SUB"`,
+		`principal allowed-root remove "$H_USER" "$H_HOME"`,
+		`principal allowed-root add "$H_USER" "$H_SUB"`,
 		`[ "$H_POS_HTTP" = 201 ]`,
 		`grep -q '"id":"dhs_' /tmp/r2ac-h-pos.json`,
-		`principal allowed-root remove --system "$H_USER" "$H_SUB"`,
+		`principal allowed-root remove "$H_USER" "$H_SUB"`,
 		`grep -q '"scope": "restricted"'`,
 		`grep -q '"allowed_roots": \[\]'`,
 		`[ "$H_CASCADE_HTTP" = 400 ]`,
 		`grep -q '"code":"invalid_workspace"' /tmp/r2ac-h-cascade.json`,
-		`principal allowed-root add --system "$H_USER" "$H_HOME"`,
+		`principal allowed-root add "$H_USER" "$H_HOME"`,
 	} {
 		if !strings.Contains(content, must) {
 			t.Errorf("H5 cascade proof is missing a required step (%s)", must)
@@ -9258,7 +8262,7 @@ func TestRelease2AcceptanceStrictProofContracts(t *testing.T) {
 	// H5R: exact-candidate live global cascade.
 	for _, must := range []string{
 		`dh config allowed-root add "$H5_GLOBAL_ROOT"`,
-		`principal allowed-root add --system "$H_USER" "$H5_GLOBAL_ROOT"`,
+		`principal allowed-root add "$H_USER" "$H5_GLOBAL_ROOT"`,
 		`h5-runtime-cascade`,
 		`dh config allowed-root remove "$H5_GLOBAL_ROOT"`,
 		`live reload pruned the Principal root and restricted-Launcher descendant atomically`,
@@ -10197,6 +9201,8 @@ func TestUpgradeBaselineWorkflowRecovery(t *testing.T) {
 	for _, v := range []string{
 		"UAT_UPGRADE_BASELINE_DEB_URL",
 		"UAT_UPGRADE_BASELINE_RPM_URL",
+		"UAT_UPGRADE22_DEB_URL",
+		"UAT_UPGRADE22_RPM_URL",
 	} {
 		if !strings.Contains(content, "vars."+v) {
 			t.Errorf("artifact-gate.yml must propagate optional repository variable %s for recovery", v)
@@ -10205,11 +9211,13 @@ func TestUpgradeBaselineWorkflowRecovery(t *testing.T) {
 
 	// The pinned hashes/version are source-owned identity and must NOT be
 	// sourced from mutable workflow variables: the ONLY repository variables
-	// referenced may be the two URL source overrides.
+	// referenced may be the URL source overrides.
 	varsRe := regexp.MustCompile(`vars\.[A-Z0-9_]+`)
 	allowed := map[string]bool{
 		"vars.UAT_UPGRADE_BASELINE_DEB_URL": true,
 		"vars.UAT_UPGRADE_BASELINE_RPM_URL": true,
+		"vars.UAT_UPGRADE22_DEB_URL":        true,
+		"vars.UAT_UPGRADE22_RPM_URL":        true,
 	}
 	for _, ref := range varsRe.FindAllString(content, -1) {
 		if !allowed[ref] {
@@ -10641,8 +9649,8 @@ func TestUATHarnessRichListCLIGrammar(t *testing.T) {
 		args []string
 	}{
 		{"config list --json has no positional", []string{"config", "allowed-root", "list", "--json"}},
-		{"principal list --json precedes USER", []string{"principal", "allowed-root", "list", "--system", "--json", "uat-parser-principal"}},
-		{"launcher list --json precedes LAUNCHER", []string{"launcher", "allowed-root", "list", "--system", "--principal", "uat-parser-principal", "--json", "uat-parser-launcher"}},
+		{"principal list --json precedes USER", []string{"principal", "allowed-root", "list", "--json", "uat-parser-principal"}},
+		{"launcher list --json precedes LAUNCHER", []string{"launcher", "allowed-root", "list", "--principal", "uat-parser-principal", "--json", "uat-parser-launcher"}},
 	}
 	for _, tc := range canon {
 		var stdout, stderr strings.Builder
@@ -10656,7 +9664,7 @@ func TestUATHarnessRichListCLIGrammar(t *testing.T) {
 	// it must reach the runtime failure (missing token, exit 1), never the
 	// retired parse rejection (exit 2 with "flags must precede").
 	var stdout, stderr strings.Builder
-	exit := runCommandWithWriters([]string{"principal", "allowed-root", "list", "--system", "uat-parser-principal", "--json"}, &stdout, &stderr)
+	exit := runCommandWithWriters([]string{"principal", "allowed-root", "list", "uat-parser-principal", "--json"}, &stdout, &stderr)
 	if exit == 2 && strings.Contains(stderr.String(), parseRejection) {
 		t.Errorf("the retired parse rejection resurfaced for the flag-after-positional form (exit=%d, stderr=%q)", exit, stderr.String())
 	}
@@ -10681,9 +9689,9 @@ func TestAccessModesHarnessListContracts(t *testing.T) {
 	// for an access mode.
 	for _, must := range []string{
 		`dh config allowed-root list --json 2>/dev/null | allowed_root_json_access "$TREE/global-ro"`,
-		`dh principal allowed-root list --system --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$TREE"`,
-		`dh principal allowed-root list --system --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$WS/pipeline-inputs"`,
-		`dh principal allowed-root list --system --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$WS/project"`,
+		`dh principal allowed-root list --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$TREE"`,
+		`dh principal allowed-root list --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$WS/pipeline-inputs"`,
+		`dh principal allowed-root list --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$WS/project"`,
 	} {
 		if !strings.Contains(content, must) {
 			t.Errorf("access assertion must parse the rich --json projection structurally (%s)", must)
@@ -10705,7 +9713,7 @@ func TestAccessModesHarnessListContracts(t *testing.T) {
 	// mutation step whose failure cannot be skipped by a failed verification —
 	// the read_only set-access line must not be chained behind a projection
 	// verification, and the verification must be a separate collect-all step.
-	restoreLine := `dh principal allowed-root set-access --system "$PRINCIPAL" "$WS/pipeline-inputs" read_only >/dev/null 2>&1`
+	restoreLine := `dh principal allowed-root set-access "$PRINCIPAL" "$WS/pipeline-inputs" read_only >/dev/null 2>&1`
 	if !strings.Contains(content, restoreLine) {
 		t.Fatal("P5 must keep the flip-back to read_only (the downstream read_only fixture state)")
 	}
@@ -11176,7 +10184,7 @@ func TestAccessModesHarnessGlobalROProof(t *testing.T) {
 	for _, must := range []string{
 		`G_WS="$TREE/global-ro/work"`,
 		`dh config allowed-root set-access "$TREE/global-ro" read_only`,
-		`dh principal allowed-root add --system --access read_write "$PRINCIPAL" "$TREE/global-ro"`,
+		`dh principal allowed-root add --access read_write "$PRINCIPAL" "$TREE/global-ro"`,
 		`grep -A1 -F "\"path\": \"$TREE/global-ro\"" | grep -q '"access": "read_write"'`,
 		`issue_launcher_credential "$PRINCIPAL" "$G_L_ID" /tmp/uat-am-cred-globalro`,
 		`G_ID="$(create_session /tmp/uat-am-cred-globalro "$G_WS")"`,
@@ -11216,7 +10224,7 @@ func TestAccessModesHarnessGlobalROProof(t *testing.T) {
 		index int
 	}{
 		{"global RO narrowing", `dh config allowed-root set-access "$TREE/global-ro" read_only`, -1},
-		{"Principal read_write grant", `dh principal allowed-root add --system --access read_write "$PRINCIPAL" "$TREE/global-ro"`, -1},
+		{"Principal read_write grant", `dh principal allowed-root add --access read_write "$PRINCIPAL" "$TREE/global-ro"`, -1},
 		{"Launcher credential", `issue_launcher_credential "$PRINCIPAL" "$G_L_ID" /tmp/uat-am-cred-globalro`, -1},
 		{"issued Session", `G_ID="$(create_session /tmp/uat-am-cred-globalro "$G_WS")"`, -1},
 		{"writable refusal", `expect_read_only_root "$G_TOKEN" . /mnt/g 'echo x > /mnt/g/forbidden.txt' "$G_RESIDUE_BASE"`, -1},
@@ -11261,10 +10269,10 @@ func TestAccessModesHarnessAuthoritySymmetry(t *testing.T) {
 	// launcher selector, Principal through a real principal credential
 	// bearer with no selector.
 	for _, must := range []string{
-		`dh session create --system --token-file /etc/docker-helper/admin.token`,
+		`dh session create --token-file /etc/docker-helper/admin.token`,
 		`--launcher "$MAIN_L_ID" "$WS" --json`,
 		`reg_principal_credential "$PRINCIPAL" /tmp/uat-am-cred-principal`,
-		`dh session create --system --token-file /tmp/uat-am-cred-principal`,
+		`dh session create --token-file /tmp/uat-am-cred-principal`,
 	} {
 		if !strings.Contains(content, must) {
 			t.Errorf("the authority symmetry proof must carry distinct real authorities (%s)", must)
@@ -11438,8 +10446,8 @@ func TestMigrationAndAcceptanceListHarnessContracts(t *testing.T) {
 			path: "scripts/uat-migration-rpm-211.sh",
 			rich: []string{
 				`M_LIST_JSON="$(dh config allowed-root list --json 2>/dev/null || true)"`,
-				`M_PLIST_JSON="$(dh principal allowed-root list --system --json "$M_USER" 2>/dev/null || true)"`,
-				`M_LLIST_JSON="$(dh launcher allowed-root list --system --principal "$M_USER" --json "$M_L_ID" 2>/dev/null || true)"`,
+				`M_PLIST_JSON="$(dh principal allowed-root list --json "$M_USER" 2>/dev/null || true)"`,
+				`M_LLIST_JSON="$(dh launcher allowed-root list --principal "$M_USER" --json "$M_L_ID" 2>/dev/null || true)"`,
 			},
 			stage: "R9",
 		},
@@ -11447,8 +10455,8 @@ func TestMigrationAndAcceptanceListHarnessContracts(t *testing.T) {
 			path: "scripts/uat-release2-acceptance.sh",
 			rich: []string{
 				`M_LIST_JSON="$(dh config allowed-root list --json 2>/dev/null || true)"`,
-				`M_PLIST_JSON="$(dh principal allowed-root list --system --json "$M_USER" 2>/dev/null || true)"`,
-				`M_LLIST_JSON="$(dh launcher allowed-root list --system --principal "$M_USER" --json "$M_L_ID" 2>/dev/null || true)"`,
+				`M_PLIST_JSON="$(dh principal allowed-root list --json "$M_USER" 2>/dev/null || true)"`,
+				`M_LLIST_JSON="$(dh launcher allowed-root list --principal "$M_USER" --json "$M_L_ID" 2>/dev/null || true)"`,
 			},
 			stage: "M8",
 		},
@@ -11659,4 +10667,84 @@ func TestUATSELinuxC3RaceOutcomeClassification(t *testing.T) {
 		// The mandatory positive proof stays the normal post-race lifecycle.
 		"normal session creation works after the race",
 	})
+}
+
+// TestReadmeCanonicalCLIGrammar pins the repository README's executable CLI
+// examples against the real parser grammar: the registry-login example must
+// use the positional REGISTRY operand (the retired --registry spelling was
+// never a parser flag and must not return), and the init example must be
+// the root-only form (init is refused for non-root callers).
+func TestReadmeCanonicalCLIGrammar(t *testing.T) {
+	data, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	if strings.Contains(content, "--registry") {
+		t.Error("README.md must not use the retired --registry flag; registry login takes the positional REGISTRY operand")
+	}
+	if !strings.Contains(content, "docker-helper registry login --username myuser registry.example.com") {
+		t.Error("README.md must teach the canonical positional registry-login grammar")
+	}
+	if !strings.Contains(content, "sudo docker-helper init") {
+		t.Error("README.md init examples must be the root-only form (sudo docker-helper init)")
+	}
+	if strings.Contains(content, "The user's home directory is used as the default") {
+		t.Error("README.md must not resurrect non-root init defaults; the interactive default is /home")
+	}
+}
+
+// TestUATRedactFunctionsMaskBearerSentinels executes every UAT redact
+// implementation in the repository and proves both bearer-token classes
+// (session/admin dht_, Principal/Launcher credential dhc_) disappear from
+// redacted output while non-secret IDs (dhs_ session IDs) survive. A redact
+// that silently stopped masking would leak captured tokens into CI logs.
+// The sed expressions must use ERE (sed -E): in Basic RE a '+' is a literal
+// plus character, so a dropped -E disables the masking without any error.
+func TestUATRedactFunctionsMaskBearerSentinels(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash unavailable: %v", err)
+	}
+	scripts := []string{
+		"scripts/uat-regression-lib.sh",
+		"scripts/uat-migration-deb-22.sh",
+		"scripts/uat-migration-rpm-22.sh",
+		"scripts/uat-migration-rpm-211.sh",
+		"scripts/uat-blackbox.sh",
+	}
+	for _, script := range scripts {
+		t.Run(script, func(t *testing.T) {
+			data, err := os.ReadFile(script)
+			if err != nil {
+				t.Fatal(err)
+			}
+			content := string(data)
+			fnRe := regexp.MustCompile(`(?ms)^(redact(?:_tokens)?)\(\) \{.*?\n\}`)
+			m := fnRe.FindString(content)
+			if m == "" {
+				t.Fatalf("%s has no redact implementation", script)
+			}
+			if !strings.Contains(m, "sed -E") {
+				t.Errorf("%s redact must use ERE (sed -E); a Basic-RE '+' is a literal plus and silently disables masking", script)
+			}
+			fnName := fnRe.FindStringSubmatch(content)[1]
+			probe := "admin dht_AAABBBCCC111222333 session dhs_KEEPME credential dhc_DDDEEEFFF444555666"
+			cmd := exec.Command("bash", "-c", m+"\nprintf '%s\\n' \"$1\" | "+fnName, "--", probe)
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("redact execution failed: %v (%s)", err, out)
+			}
+			redacted := string(out)
+			if strings.Contains(redacted, "dht_") || strings.Contains(redacted, "dhc_") {
+				t.Errorf("%s redact leaves bearer sentinels in output: %s", script, redacted)
+			}
+			if !strings.Contains(redacted, "dhs_KEEPME") {
+				t.Errorf("%s redact removes non-secret session IDs: %s", script, redacted)
+			}
+			if !strings.Contains(redacted, "<redacted-token>") {
+				t.Errorf("%s redact output carries no replacement marker: %s", script, redacted)
+			}
+		})
+	}
 }

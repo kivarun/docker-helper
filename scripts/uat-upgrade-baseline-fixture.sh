@@ -19,7 +19,10 @@
 #   - v2.0.0: the historical pre-Launcher ownership baseline (Release-2
 #     package-lifecycle and ownership-migration scenarios);
 #   - v2.1.1: the mandatory Release 2.2 migration baseline (the last
-#     pre-2.2 path-only release; access-mode migration scenarios).
+#     pre-2.2 path-only release; access-mode migration scenarios);
+#   - v2.2.0: the Release 2.3 system-mode-only migration baseline (the last
+#     dual-deployment release; the user-unit removal and no-user-state
+#     adoption upgrade scenarios).
 #
 # The pinned VERSION and SHA-256 values are IDENTITY and are NEVER overridable
 # by environment variables. Only the artifact SOURCE may be overridden, for
@@ -55,6 +58,10 @@
 # dedicated override variables UAT_UPGRADE211_DEB_PATH/URL and
 # UAT_UPGRADE211_RPM_PATH/URL.
 #
+# v2.2.0 (Release 2.3 migration baseline) uses the same precedence with the
+# dedicated override variables UAT_UPGRADE22_DEB_PATH/URL and
+# UAT_UPGRADE22_RPM_PATH/URL.
+#
 # An explicit bad/unavailable override FAILS CLOSED: it never silently falls
 # back to another source after an explicit override fails. The pinned SHA is
 # always the authority. We never rebuild the baseline package, never accept a
@@ -71,6 +78,8 @@
 #   upgrade_baseline_fetch_rpm DEST — same for the v2.0.0 RPM.
 #   upgrade211_fetch_deb DEST — same for the pinned v2.1.1 DEB.
 #   upgrade211_fetch_rpm DEST — same for the pinned v2.1.1 RPM.
+#   upgrade22_fetch_deb DEST — same for the pinned v2.2.0 DEB.
+#   upgrade22_fetch_rpm DEST — same for the pinned v2.2.0 RPM.
 
 UPGRADE_BASELINE_VERSION="2.0.0"
 
@@ -229,4 +238,61 @@ upgrade211_fetch_rpm() {
     return $?
   fi
   upgrade_baseline_fetch_url "$UPGRADE211_RPM_URL" "$UPGRADE211_RPM_SHA256" "$dest"
+}
+
+# ---------------------------------------------------------------------------
+# Released stable v2.2.0 — the Release 2.3 system-mode-only migration baseline
+# ---------------------------------------------------------------------------
+#
+# The natural baseline for the Release 2.3 system-mode-only cutover is the
+# released stable v2.2.0: the last dual-deployment release, whose package
+# payload still ships the user systemd unit and whose binary still supports
+# the user-mode daemon. The same integrity contract applies: the pinned
+# VERSION and SHA-256 values are IDENTITY and are never overridable by
+# environment variables; only the artifact SOURCE may be overridden, with
+# deterministic precedence and a fail-closed explicit override.
+#
+# The hashes below were verified against the published v2.2.0 release
+# SHA256SUMS (and the downloaded bytes re-hashed) BEFORE being pinned here.
+
+UPGRADE22_VERSION="2.2.0"
+
+UPGRADE22_DEB_SHA256="d29470d181abd0749b4053958f8f0c621506efb6afc45273db01e4bfb701cff8"
+UPGRADE22_DEB_URL="https://github.com/kivarun/docker-helper/releases/download/v2.2.0/docker-helper_2.2.0_amd64.deb"
+
+UPGRADE22_RPM_SHA256="bd22239b978d192b0e686887ae0b889e099974f7103c6f9bc4726dc3b68738de"
+UPGRADE22_RPM_URL="https://github.com/kivarun/docker-helper/releases/download/v2.2.0/docker-helper-2.2.0-1.x86_64.rpm"
+
+# upgrade22_fetch_deb DEST — resolve + verify the v2.2.0 DEB
+# (UAT_UPGRADE22_DEB_PATH -> UAT_UPGRADE22_DEB_URL -> canonical).
+upgrade22_fetch_deb() {
+  local dest="$1"
+  local path="${UAT_UPGRADE22_DEB_PATH:-}"
+  local url="${UAT_UPGRADE22_DEB_URL:-}"
+  if [ -n "$path" ]; then
+    upgrade_baseline_source_from "$path" "$UPGRADE22_DEB_SHA256" "$dest"
+    return $?
+  fi
+  if [ -n "$url" ]; then
+    upgrade_baseline_fetch_url "$url" "$UPGRADE22_DEB_SHA256" "$dest"
+    return $?
+  fi
+  upgrade_baseline_fetch_url "$UPGRADE22_DEB_URL" "$UPGRADE22_DEB_SHA256" "$dest"
+}
+
+# upgrade22_fetch_rpm DEST — resolve + verify the v2.2.0 RPM
+# (UAT_UPGRADE22_RPM_PATH -> UAT_UPGRADE22_RPM_URL -> canonical).
+upgrade22_fetch_rpm() {
+  local dest="$1"
+  local path="${UAT_UPGRADE22_RPM_PATH:-}"
+  local url="${UAT_UPGRADE22_RPM_URL:-}"
+  if [ -n "$path" ]; then
+    upgrade_baseline_source_from "$path" "$UPGRADE22_RPM_SHA256" "$dest"
+    return $?
+  fi
+  if [ -n "$url" ]; then
+    upgrade_baseline_fetch_url "$url" "$UPGRADE22_RPM_SHA256" "$dest"
+    return $?
+  fi
+  upgrade_baseline_fetch_url "$UPGRADE22_RPM_URL" "$UPGRADE22_RPM_SHA256" "$dest"
 }

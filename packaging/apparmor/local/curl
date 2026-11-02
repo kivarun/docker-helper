@@ -15,8 +15,5 @@
 # API requests still require the appropriate valid Session token,
 # Principal credential, or admin token.
 
-# docker-helper user mode socket
-owner /run/user/*/docker-helper/docker-helper.sock rw,
-
-# docker-helper system mode socket
+# docker-helper system socket
 /run/docker-helper/docker-helper.sock rw,

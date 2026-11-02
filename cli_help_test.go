@@ -624,17 +624,15 @@ func TestHelpUnknownNestedCommand(t *testing.T) {
 
 // --- reload operator flags tests ---
 
-func TestReloadSystemFlagAccepted(t *testing.T) {
-	// --system should be accepted by the flag parser.
-	// It will fail at connection time because there's no daemon,
-	// but the flag itself should not be "unknown".
+func TestReloadSystemFlagRejected(t *testing.T) {
+	// The system socket is the only endpoint: --system no longer exists.
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"reload", "--system"}, &stdout, &stderr)
-	if code == 0 {
-		t.Fatal("expected non-zero exit (no daemon running)")
+	if code != 2 {
+		t.Fatalf("expected exit 2, got %d (stderr %s)", code, stderr.String())
 	}
-	if strings.Contains(stderr.String(), "unknown flag") {
-		t.Fatalf("--system should not be unknown: %s", stderr.String())
+	if !strings.Contains(stderr.String(), "flag provided but not defined") {
+		t.Fatalf("--system must be rejected as unknown: %s", stderr.String())
 	}
 }
 
@@ -653,18 +651,15 @@ func TestReloadEndpointTokenFileAccepted(t *testing.T) {
 	}
 }
 
-func TestReloadSystemEndpointMutuallyExclusive(t *testing.T) {
-	dir := t.TempDir()
-	tokenPath := filepath.Join(dir, "token")
-	writeTestTokenFile(t, tokenPath, "test-token")
-
+func TestReloadEndpointWithUnknownSystemFlagStillUsageError(t *testing.T) {
+	// An unknown flag is a usage error even together with other flags.
 	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"reload", "--system", "--endpoint", "http://127.0.0.1:52375", "--token-file", tokenPath}, &stdout, &stderr)
-	if code == 0 {
-		t.Fatal("expected non-zero exit")
+	code := runCommandWithWriters([]string{"reload", "--system", "--endpoint", "http://127.0.0.1:52375"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("expected exit 2, got %d (stderr %s)", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "mutually exclusive") {
-		t.Fatalf("expected mutual exclusion error: %s", stderr.String())
+	if !strings.Contains(stderr.String(), "flag provided but not defined") {
+		t.Fatalf("expected unknown-flag usage error: %s", stderr.String())
 	}
 }
 
@@ -847,18 +842,18 @@ func TestHelpRootVersionFlagDiscoverable(t *testing.T) {
 
 func TestHelpInitMACLifecycleContract(t *testing.T) {
 	// init help must describe the correct MAC lifecycle contract:
-	// system mode has authorization ceiling + session-creation MAC preparation;
-	// user mode requires no MAC preparation; init never prepares MAC state.
+	// the system service is the only daemon deployment, with authorization
+	// ceiling + session-creation MAC preparation; init never prepares MAC state.
 	var stdout, stderr bytes.Buffer
 	initCommand.dispatch([]string{"--help"}, []string{}, &stdout, &stderr)
 	helpText := stdout.String()
 
-	// Must describe system mode and user mode.
+	// Must describe the single system deployment.
 	if !strings.Contains(helpText, "System mode") {
 		t.Error("init help must describe system mode")
 	}
-	if !strings.Contains(helpText, "User mode") {
-		t.Error("init help must describe user mode")
+	if !strings.Contains(helpText, "only daemon deployment") {
+		t.Error("init help must state that system mode is the only daemon deployment")
 	}
 
 	// Must describe the allowed root as the authorization ceiling.
@@ -866,14 +861,9 @@ func TestHelpInitMACLifecycleContract(t *testing.T) {
 		t.Error("init help must describe the allowed root as the authorization ceiling")
 	}
 
-	// Must state that system-mode MAC preparation happens at session creation.
+	// Must state that MAC preparation happens at session creation.
 	if !strings.Contains(helpText, "session") {
 		t.Error("init help must mention session lifecycle for MAC preparation")
-	}
-
-	// Must state that user mode requires no MAC preparation.
-	if !strings.Contains(helpText, "No MAC preparation") {
-		t.Error("init help must state that user mode requires no MAC preparation")
 	}
 
 	// Must NOT claim that init prepares MAC state.
@@ -918,11 +908,6 @@ func TestHelpConfigAllowedRootGlobalCeiling(t *testing.T) {
 	// Must describe system mode MAC at session creation.
 	if !strings.Contains(helpText, "session creation") {
 		t.Error("config allowed-root help must mention session creation for system-mode MAC")
-	}
-
-	// Must describe user mode.
-	if !strings.Contains(helpText, "user mode") {
-		t.Error("config allowed-root help must describe user mode")
 	}
 
 	// Must NOT mention workspace-root add.

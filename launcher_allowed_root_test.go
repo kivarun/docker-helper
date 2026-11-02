@@ -140,7 +140,7 @@ func TestLauncherAllowedRootRemoveLastStaysRestricted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadSessionOwnershipSnapshot: %v", err)
 	}
-	effective, err := effectiveLauncherAllowedRoots(allowedRootEntriesForPaths([]string{globalRoot}), snap, 0, false)
+	effective, err := effectiveLauncherAllowedRoots(allowedRootEntriesForPaths([]string{globalRoot}), snap)
 	if err != nil {
 		t.Fatalf("effectiveLauncherAllowedRoots: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestLauncherAllowedRootExplicitInheritRestoresCeiling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadSessionOwnershipSnapshot: %v", err)
 	}
-	effective, err := effectiveLauncherAllowedRoots(allowedRootEntriesForPaths([]string{globalRoot}), snap, 0, false)
+	effective, err := effectiveLauncherAllowedRoots(allowedRootEntriesForPaths([]string{globalRoot}), snap)
 	if err != nil {
 		t.Fatalf("effectiveLauncherAllowedRoots: %v", err)
 	}
