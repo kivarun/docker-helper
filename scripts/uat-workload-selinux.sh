@@ -3866,7 +3866,11 @@ RT_DFM_NEXT_FS_DEN="$(printf '%s\n' "$RT_DFM_AUDIT" | grep 'tclass=filesystem' |
 # terminal is the FIRST bind-mount entry (/etc/resolv.conf): a mounton
 # on the TARGET FILE of the bind, tclass=file, the op-tree file type —
 # a NEW next-terminal family, deliberately NOT granted by this rung.
-RT_DFM_NEXT_MOUNTON_DEN="$(printf '%s\n' "$RT_DFM_AUDIT" | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep -v 'tcontext=system_u:object_r:tmpfs_t:s0 ' || true)"
+# The per-op bind-target file mounton family (docker_helper_builder_state_t,
+# tclass=file) is granted by the R7 P20 rung below — excluded here like the
+# granted tmpfs_t dir family; any reappearing denial would be a regression
+# caught by the P20 leg.
+RT_DFM_NEXT_MOUNTON_DEN="$(printf '%s\n' "$RT_DFM_AUDIT" | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep -v 'tcontext=system_u:object_r:tmpfs_t:s0 ' | grep -v 'tcontext=system_u:object_r:docker_helper_builder_state_t:s0' || true)"
 RT_DFM_NEXT_DEN="$(printf '%s\n%s\n' "$RT_DFM_NEXT_FS_DEN" "$RT_DFM_NEXT_MOUNTON_DEN" | grep -v '^$' || true)"
 info "R7-devptsmount preflight: audit window buildkitd_t cap_userns init records=$RT_DFM_FLOW_INIT_N devpts mount denials=[$RT_DFM_DEVPTS_DEN] tmpfs mount denials=[$RT_DFM_TMPFS_DEN] proc mount denials=[$RT_DFM_PROC_DEN] tmpfs dir-mounton denials=[$RT_TDMS_MOUNTON_DEN] tmpfs dir-create denials=[$RT_TDMS_CREATE_DEN] next-terminal denials=[$RT_DFM_NEXT_DEN]"
 if [ "${RT_DFM_FLOW_INIT_N:-0}" -ge 1 ] 2>/dev/null; then
@@ -3877,6 +3881,96 @@ if [ "${RT_DFM_FLOW_INIT_N:-0}" -ge 1 ] 2>/dev/null; then
   fi
 else
   acc_fail "R7 devptsmount preflight: the audit window is degenerate (no buildkitd_t cap_userns container-init records) — a zero-denial devpts claim would be unproven; the flow-based control cannot run"
+fi
+
+# --- scenario R7 P20 state-file mounton preflight: per-op bind-target authority
+say "R7 P20 state-file mounton preflight: builder_state_t:file mounton (flow-evidenced, venue-bounded)"
+# The P20 candidate grant is the buildkitd container-init per-op bind
+# TARGET file mounton: with the P19 devpts superblock rung granted, the
+# container init's mount table ran through /dev/pts (completed), /dev/shm
+# (the P16 tmpfs mount), /dev/mqueue, /sys and /sys/fs/cgroup (all no-AVC)
+# and died at the FIRST bind-mount entry — the per-operation
+# /etc/resolv.conf bind. The P19 authoritative run (41404962088) proved
+# the fatal terminal from BOTH sides: the build's own stderr ("error
+# mounting \".../ops/<op>/root/runc-native/executor/resolv.conf\" to
+# rootfs at \"/etc/resolv.conf\": mount src=..., dst=/etc/resolv.conf,
+# dstFd=/proc/thread-self/fd/10, flags=MS_RDONLY|MS_NOSUID|MS_NODEV|
+# MS_NOEXEC|MS_BIND|MS_REC: permission denied") and the audited kernel
+# decision `tclass=file denied { mounton }` with
+# tcontext=docker_helper_builder_state_t:s0:c1 from comm="runc:[2:INIT]"
+# (serials 1339/10429).
+#
+# VENUE (measured): BOTH endpoints live inside the per-operation tree —
+# the SOURCE is the executor's own generated resolv.conf, the TARGET is
+# the container rootfs copy inside the op's snapshot tree (labeled
+# builder_state_t with the OP'S OWN category s0:c1). The host /etc is
+# never a mount target. The mount executes inside the container init's
+# private CLONE_NEWNS namespace.
+#
+# KERNEL CHECK CHAIN (v7.3): bind mount -> path_mount -> security_sb_mount
+# -> selinux_mount non-remount -> path_has_perm(FILE__MOUNTON) on the
+# TARGET dentry (tclass=file for a file target — the grant below), then
+# may_mount(), then do_loopback: NO get_tree and NO security_sb_kern_mount
+# (the source superblock already exists) — a bind needs NO filesystem-class
+# authority, and MS_RDONLY rides the same bind (no separate remount step).
+#
+# ISOLATION BOUNDARY (measured): the cross-operation boundary for mounton
+# is NOT the MCS constraint (measured: the file-class mlsconstrain covers
+# { append link rename setattr unlink write } and omits mounton — exactly
+# like the already-accepted builder_state_t:dir mounton inside the
+# standing state-tree rule); it is owned by the namespace venue layers:
+# may_mount (the daemon holds no CAP_SYS_ADMIN in any mount-ns-owning
+# userns — the P14 probes stay measured denials), SLAVE PROPAGATION (P14's
+# MS_REC|MS_SLAVE root fence — a mount grafted inside the container's
+# private namespace copy never propagates to the host tree, so a
+# mount-over of any builder_state_t file is visible only inside that
+# operation's own namespace copy), and pathname reachability. The
+# underlying inode's content/owner/label are untouched by a mount-over.
+#
+# MEASUREMENT BOUNDARY: the flow-side evidence is the audit window — the
+# file-mounton family's disappearance together with the NEXT terminal of
+# the mount-table loop: after the per-op binds complete, doSetupDev ->
+# createDevices mknods the /dev device nodes INSIDE the fresh /dev tmpfs —
+# tmpfs_t:chr_file create (deliberately NOT granted).
+RT_SFM_SESEARCH="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -t docker_helper_builder_state_t /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+RT_SFM_ALL_STATE_FILE="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -t docker_helper_builder_state_t -c file /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+RT_SFM_CHR_SESEARCH="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -t tmpfs_t -c chr_file /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+RT_SFM_STATE_FILE_SURFACE="$(printf '%s\n' "$RT_SFM_ALL_STATE_FILE" | grep -v '^allow domain file_type:' || true)"
+RT_SFM_CHR_SURFACE="$(printf '%s\n' "$RT_SFM_CHR_SESEARCH" | grep -v '^allow domain file_type:' || true)"
+info "R7-statefile-mounton preflight: buildkitd->builder_state_t:file=[$RT_SFM_STATE_FILE_SURFACE] buildkitd->tmpfs_t:chr_file=[$RT_SFM_CHR_SURFACE]"
+if printf '%s\n' "$RT_SFM_STATE_FILE_SURFACE" | grep -q '^allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { append create getattr lock mounton open read rename setattr unlink write };$' && printf '%s\n' "$RT_SFM_ALL_STATE_FILE" | grep -q '^allow docker_helper_buildkitd_t docker_helper_builder_state_t:dir'; then
+  acc_ok "R7 statefile-mounton preflight: the loaded policy carries the exact P20 candidate authority for the per-op bind-target file (the merged loaded representation of the standing state-file lifecycle rule and this P20 bare mounton singleton — the CIL linker merges same-(subject,target,class) rules; both the lifecycle perms and mounton present, nothing else), and the SAME target type already carries the accepted dir:mounton in the standing state-tree dir rule — the dir-class sibling of this file-class rung"
+else
+  acc_fail "R7 statefile-mounton preflight: the P20 candidate authority or the state-tree dir sibling is not present in the loaded policy (query=[$RT_SFM_STATE_FILE_SURFACE]) — the preflight cannot proceed on the measured architecture"
+fi
+if printf '%s\n' "$RT_SFM_STATE_FILE_SURFACE" | grep -v '^allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { append create getattr lock mounton open read rename setattr unlink write };$' | grep -q .; then
+  acc_fail "R7 statefile-mounton preflight: the buildkitd builder_state_t:file surface drifted beyond the accepted loaded representation (unexpected=[$(printf '%s\n' "$RT_SFM_STATE_FILE_SURFACE" | grep -v '^allow docker_helper_buildkitd_t docker_helper_builder_state_t:file { append create getattr lock mounton open read rename setattr unlink write };')])"
+else
+  acc_ok "R7 statefile-mounton preflight: the buildkitd builder_state_t:file effective surface matches the accepted scope exactly (exactly one loaded merged rule — the lifecycle perms plus this P20 mounton, nothing else)"
+fi
+if [ -n "$RT_SFM_CHR_SURFACE" ]; then
+  acc_fail "R7 statefile-mounton preflight: the buildkitd tmpfs_t:chr_file surface is present outside the standing base-policy attribute expansions — the createDevices mknod of the /dev device nodes is the recorded NEXT terminal and must NOT ride the P20 mounton grant (unexpected=[$RT_SFM_CHR_SURFACE])"
+else
+  acc_ok "R7 statefile-mounton preflight: the buildkitd tmpfs_t:chr_file surface shows NO authority beyond the standing base-policy attribute expansions ([$RT_SFM_CHR_SESEARCH]) — the /dev device-node creation stays closed and outside this rung"
+fi
+RT_SFM_AUDIT="$({ cat /var/log/audit/audit.log 2>/dev/null; dmesg 2>/dev/null; } | grep -E 'type=AVC|avc: *denied' | sort -u || true)"
+RT_SFM_FLOW_INIT_N="$(printf '%s\n' "$RT_SFM_AUDIT" | grep 'tclass=cap_userns' | grep -c 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
+RT_SFM_MOUNTON_DEN="$(printf '%s\n' "$RT_SFM_AUDIT" | grep 'tclass=file' | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:docker_helper_builder_state_t' || true)"
+RT_SFM_DEVPTS_DEN="$(printf '%s\n' "$RT_SFM_AUDIT" | grep 'tclass=filesystem' | grep '{ mount }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:devpts_t' || true)"
+RT_SFM_TMPFS_DEN="$(printf '%s\n' "$RT_SFM_AUDIT" | grep 'tclass=filesystem' | grep '{ mount }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:tmpfs_t:s0' || true)"
+RT_SFM_PROC_DEN="$(printf '%s\n' "$RT_SFM_AUDIT" | grep 'tclass=filesystem' | grep '{ mount }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:proc_t:s0' || true)"
+RT_SFM_TDIR_MOUNTON_DEN="$(printf '%s\n' "$RT_SFM_AUDIT" | grep 'tclass=dir' | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:tmpfs_t:s0' || true)"
+RT_SFM_TDIR_CREATE_DEN="$(printf '%s\n' "$RT_SFM_AUDIT" | grep 'tclass=dir' | grep '{ create }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:tmpfs_t:s0' || true)"
+RT_SFM_CHR_CREATE_DEN="$(printf '%s\n' "$RT_SFM_AUDIT" | grep 'tclass=chr_file' | grep '{ create }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:tmpfs_t' || true)"
+info "R7-statefile-mounton preflight: audit window buildkitd_t cap_userns init records=$RT_SFM_FLOW_INIT_N state-file mounton denials=[$RT_SFM_MOUNTON_DEN] devpts mount denials=[$RT_SFM_DEVPTS_DEN] tmpfs mount denials=[$RT_SFM_TMPFS_DEN] proc mount denials=[$RT_SFM_PROC_DEN] tmpfs dir-mounton denials=[$RT_SFM_TDIR_MOUNTON_DEN] tmpfs dir-create denials=[$RT_SFM_TDIR_CREATE_DEN] chr_file create denials=[$RT_SFM_CHR_CREATE_DEN]"
+if [ "${RT_SFM_FLOW_INIT_N:-0}" -ge 1 ] 2>/dev/null; then
+  if [ -z "$RT_SFM_MOUNTON_DEN" ] && [ -z "$RT_SFM_DEVPTS_DEN" ] && [ -z "$RT_SFM_TMPFS_DEN" ] && [ -z "$RT_SFM_PROC_DEN" ] && [ -z "$RT_SFM_TDIR_MOUNTON_DEN" ] && [ -z "$RT_SFM_TDIR_CREATE_DEN" ] && [ -n "$RT_SFM_CHR_CREATE_DEN" ]; then
+    acc_ok "R7 statefile-mounton preflight: the boot-wide audit window covering the candidate-policy flow builds ($RT_SFM_FLOW_INIT_N buildkitd_t cap_userns container-init records) contains ZERO builder_state_t:file mounton denials (the P20 grant — a reappearing denial would be a regression), zero devpts/tmpfs/proc filesystem mount denials AND zero tmpfs_t:dir mounton/create denials — the per-op bind mounts' REAL execution completed (resolv.conf and the sibling per-op binds inside the container's private namespace) — AND the recorded NEW next-terminal family (tmpfs_t:chr_file create — the createDevices mknod of the /dev device nodes AFTER the mount table loop, deliberately NOT granted) — the P20 grant advanced the flow past the bind-target gate and all earlier rungs hold"
+  else
+    acc_fail "R7 statefile-mounton preflight: the flow's fatal shapes reappeared or the expected next terminal is missing (state-file-mounton=[$RT_SFM_MOUNTON_DEN] devpts-mount=[$RT_SFM_DEVPTS_DEN] tmpfs-mount=[$RT_SFM_TMPFS_DEN] proc-mount=[$RT_SFM_PROC_DEN] dir-mounton=[$RT_SFM_TDIR_MOUNTON_DEN] dir-create=[$RT_SFM_TDIR_CREATE_DEN] chr-create=[$RT_SFM_CHR_CREATE_DEN])"
+  fi
+else
+  acc_fail "R7 statefile-mounton preflight: the audit window is degenerate (no buildkitd_t cap_userns container-init records) — a zero-denial state-file-mounton claim would be unproven; the flow-based control cannot run"
 fi
 
 rm -f /tmp/uat-wls-keyprobe.b64 "$KEYPROBE"
