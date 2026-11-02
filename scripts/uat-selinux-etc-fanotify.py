@@ -17,7 +17,7 @@ import time
 FAN_CLOEXEC = 0x00000001
 FAN_NONBLOCK = 0x00000002
 FAN_MARK_ADD = 0x00000001
-FAN_MARK_FILESYSTEM = 0x00000100
+FAN_MARK_FILESYSTEM = 0x00000100  # intentionally NOT used: guest returns EINVAL
 FAN_ATTRIB = 0x00000004
 FAN_ONDIR = 0x40000000  # Required to observe the /etc directory itself
 FAN_Q_OVERFLOW = 0x00004000
@@ -65,15 +65,20 @@ def main():
     fd = libc.fanotify_init(FAN_CLOEXEC | FAN_NONBLOCK, os.O_RDONLY | os.O_CLOEXEC)
     if fd < 0:
         raise OSError(ctypes.get_errno(), "fanotify_init failed")
-    if libc.fanotify_mark(fd, FAN_MARK_ADD | FAN_MARK_FILESYSTEM,
-                         FAN_ATTRIB | FAN_ONDIR, AT_FDCWD, b"/etc") != 0:
-        raise OSError(ctypes.get_errno(), "fanotify_mark(FILESYSTEM, /etc) failed")
+    # Inode marks, not mount/filesystem marks: covers mutations to these
+    # inodes even when reached by an alias/bind mount, and avoids EINVAL from
+    # FAN_MARK_FILESYSTEM on the current openSUSE guest filesystem.
+    for path in ("/etc", "/etc/passwd", args.probe, args.probe_dir):
+        mask = FAN_ATTRIB | (FAN_ONDIR if os.path.isdir(path) else 0)
+        if libc.fanotify_mark(fd, FAN_MARK_ADD, mask, AT_FDCWD,
+                             os.fsencode(path)) != 0:
+            raise OSError(ctypes.get_errno(), "fanotify_mark(inode, %s) failed" % path)
 
     signal.signal(signal.SIGTERM, stop_signal)
     signal.signal(signal.SIGINT, stop_signal)
     with open(args.ready, "w", encoding="ascii") as out:
         out.write("READY\n")
-    log("FANOTIFY_READY filesystem=/etc targets=" +
+    log("FANOTIFY_READY inode-marks targets=" +
         ",".join("%s:%s=%s" % (*key, path) for key, path in targets.items()))
 
     poll = select.poll()
