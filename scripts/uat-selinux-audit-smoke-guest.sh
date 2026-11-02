@@ -56,11 +56,29 @@ os.setxattr(work + '/directory', 'user.dhas_directory', b'1')
 os.setxattr(work + '/alias', 'user.dhas_hardlink_alias', b'1')
 PY
 PID="$(cat "$WORK/control.pid")"
+# On this guest the event stream is present in /var/log/audit/audit.log,
+# while ausearch -k --raw returned empty despite a valid keyed rule. Use the
+# raw source directly, selecting complete audit-serial groups by SYSCALL key.
+[ -r /var/log/audit/audit.log ] || { echo 'BLOCKED: raw audit log inaccessible'; exit 2; }
 for i in $(seq 1 40); do
-  ausearch -k "$KEY" --raw > "$WORK/audit.raw" 2>/dev/null || true
+  python3 - "$KEY" "$WORK/audit.raw" <<'PY'
+import re, sys
+key, destination = sys.argv[1:]
+with open('/var/log/audit/audit.log', encoding='utf-8', errors='replace') as f:
+    lines = list(f)
+def serial(line):
+    m = re.search(r'msg=audit\([0-9.]+:(\d+)\)', line)
+    return m.group(1) if m else None
+serials = {serial(line) for line in lines
+           if line.startswith('type=SYSCALL ') and ('key="' + key + '"') in line}
+with open(destination, 'w', encoding='utf-8') as f:
+    f.writelines(line for line in lines if serial(line) in serials)
+PY
   if [ "$(grep -c '^type=SYSCALL' "$WORK/audit.raw" || true)" -ge 3 ]; then break; fi
   sleep 0.2
 done
+printf 'ausearch-key-syscall-count=%s (non-authoritative)\n' \
+  "$(ausearch -k "$KEY" --raw 2>/dev/null | grep -c '^type=SYSCALL' || true)"
 if [ ! -s "$WORK/audit.raw" ]; then
   echo 'AUDIT_ZERO_EVENTS_DIAGNOSTICS'
   auditctl -l
