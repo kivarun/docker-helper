@@ -4,8 +4,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -518,6 +520,20 @@ func readDirectoryEntries(fd int, budget *buildStagingBudget) ([]dirEntry, error
 	return entries, nil
 }
 
+// An unsafe symlink is a client-input error, not an internal staging failure.
+var errBuildStagingSymlinkOutsideContext = errors.New("build context symlink escapes staged context")
+
+// Check link text without resolving any host inode. Absolute targets and
+// relative targets traversing above the staged root must never reach a
+// downstream builder, regardless of its current privilege model.
+func symlinkTargetWithinStagedContext(relDir, target string) bool {
+	if filepath.IsAbs(target) {
+		return false
+	}
+	resolved := filepath.Clean(filepath.Join(relDir, target))
+	return resolved != ".." && !strings.HasPrefix(resolved, ".."+string(filepath.Separator))
+}
+
 func copyEntry(ctx context.Context, sourceDirFD int, name string, stagingRootFD int, stagingDirFD int, relPrefix string, hardlinkMap map[devIno]string, hooks *stagingHooks, budget *buildStagingBudget, depth int) error {
 	oPathFD, err := unix.Openat(sourceDirFD, name, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
@@ -541,6 +557,9 @@ func copyEntry(ctx context.Context, sourceDirFD int, name string, stagingRootFD 
 			return fmt.Errorf("cannot read symlink %s: %w", name, err)
 		}
 		target := unix.ByteSliceToString(buf[:n])
+		if !symlinkTargetWithinStagedContext(relPrefix, target) {
+			return errBuildStagingSymlinkOutsideContext
+		}
 
 		// The symlink target payload is reserved before the destination
 		// symlink is created; the entry itself was already reserved once

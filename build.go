@@ -251,6 +251,11 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 			writeDockerActionRejected(ctx, w, http.StatusBadRequest, "build", "build_context_too_large", "build context exceeds the staging "+ceilingErr.Resource+" ceiling", session.PrincipalName)
 			return
 		}
+		if errors.Is(err, errBuildStagingSymlinkOutsideContext) {
+			opLog(ctx).Warn("build staging refused an unsafe symlink")
+			writeDockerActionRejected(ctx, w, http.StatusBadRequest, "build", "invalid_build_context", "build context contains an unsafe symlink", session.PrincipalName)
+			return
+		}
 		opLog(ctx).Error("build context staging failed",
 			slog.String("operation", "build"),
 			slog.String("error", err.Error()),
