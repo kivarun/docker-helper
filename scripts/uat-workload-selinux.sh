@@ -3979,7 +3979,10 @@ FROM alpine:3.24
 RUN true
 EOF
 RT_SFM_PROBE_RC=0
-DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" dh build p20-probe --dockerfile Dockerfile --image uat-p20-probe:2.2 2>/tmp/uat-wls-p20-build.err || RT_SFM_PROBE_RC=1
+# The CLI writes the streamed build output (with the buildkit progress
+# lines carrying the runc error detail) to STDOUT and only the summary to
+# stderr (measured run 41538592872) — capture both.
+DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" dh build p20-probe --dockerfile Dockerfile --image uat-p20-probe:2.2 >/tmp/uat-wls-p20-build.out 2>/tmp/uat-wls-p20-build.err || RT_SFM_PROBE_RC=1
 RT_SFM_AUDIT="$({ cat /var/log/audit/audit.log 2>/dev/null; dmesg 2>/dev/null; } | grep -E 'type=AVC|avc: *denied' | sort -u || true)"
 RT_SFM_FLOW_INIT_N="$(printf '%s\n' "$RT_SFM_AUDIT" | grep 'tclass=cap_userns' | grep -c 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
 RT_SFM_MOUNTON_DEN="$(printf '%s\n' "$RT_SFM_AUDIT" | grep 'tclass=file' | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:docker_helper_builder_state_t' || true)"
@@ -3991,10 +3994,10 @@ RT_SFM_TDIR_CREATE_DEN="$(printf '%s\n' "$RT_SFM_AUDIT" | grep 'tclass=dir' | gr
 RT_SFM_CHR_CREATE_DEN="$(printf '%s\n' "$RT_SFM_AUDIT" | grep 'tclass=chr_file' | grep '{ create }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:tmpfs_t' || true)"
 RT_SFM_FILE_CREATE_DEN="$(printf '%s\n' "$RT_SFM_AUDIT" | grep 'tclass=file' | grep '{ create }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:tmpfs_t' || true)"
 RT_SFM_DONTAUDIT_FILE_CREATE="$("$RT_SESEARCH_BIN" --dontaudit -s docker_helper_buildkitd_t -c file /sys/fs/selinux/policy 2>/dev/null | grep 'tmpfs_t' || true)$("$RT_SESEARCH_BIN" --dontaudit -s docker_helper_buildkitd_t -t tmpfs_t /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
-RT_SFM_DEVSTDERR="$(grep -E 'create device inode /dev/null: openat null: permission denied' /tmp/uat-wls-p20-build.err 2>/dev/null | head -1 || true)"
+RT_SFM_DEVSTDERR="$(grep -E 'create device inode /dev/null: openat null: permission denied' /tmp/uat-wls-p20-build.out /tmp/uat-wls-p20-build.err 2>/dev/null | head -1 | sed 's/^[^:]*://' || true)"
 RT_SFM_D1STDERR="$(grep -E 'create device inode /dev/null: openat null: permission denied' /tmp/d1-build.err 2>/dev/null | head -1 || true)"
 RT_SFM_BACKLOG="$(dmesg 2>/dev/null | grep -ciE 'audit_printk_skb|backlog limit exceeded' || true)"
-info "R7-statefile-mounton preflight: probe build rc=$RT_SFM_PROBE_RC stderr-tail=[$(tail -2 /tmp/uat-wls-p20-build.err 2>/dev/null)] stderr-key-lines=[$(grep -aE 'runc|device|denied|permission|error mounting|ERROR' /tmp/uat-wls-p20-build.err 2>/dev/null | tail -6)] audit-backlog-overflow-records=$RT_SFM_BACKLOG d1-stderr-marker-present=$([ -n "$RT_SFM_D1STDERR" ] && echo yes || echo no)"
+info "R7-statefile-mounton preflight: probe build rc=$RT_SFM_PROBE_RC stderr-tail=[$(tail -2 /tmp/uat-wls-p20-build.err /tmp/uat-wls-p20-build.out 2>/dev/null)] stderr-key-lines=[$(grep -ahE 'runc|device|denied|permission|error mounting|ERROR' /tmp/uat-wls-p20-build.err /tmp/uat-wls-p20-build.out 2>/dev/null | tail -6)] audit-backlog-overflow-records=$RT_SFM_BACKLOG d1-stderr-marker-present=$([ -n "$RT_SFM_D1STDERR" ] && echo yes || echo no)"
 info "R7-statefile-mounton preflight: audit window buildkitd_t cap_userns init records=$RT_SFM_FLOW_INIT_N state-file mounton denials=[$RT_SFM_MOUNTON_DEN] devpts mount denials=[$RT_SFM_DEVPTS_DEN] tmpfs mount denials=[$RT_SFM_TMPFS_DEN] proc mount denials=[$RT_SFM_PROC_DEN] tmpfs dir-mounton denials=[$RT_SFM_TDIR_MOUNTON_DEN] tmpfs dir-create denials=[$RT_SFM_TDIR_CREATE_DEN] tmpfs file-create denials=[$RT_SFM_FILE_CREATE_DEN] dontaudit file-create=[$RT_SFM_DONTAUDIT_FILE_CREATE] device-node stderr=[$RT_SFM_DEVSTDERR]"
 if [ "${RT_SFM_FLOW_INIT_N:-0}" -ge 1 ] 2>/dev/null; then
   if [ "$RT_SFM_PROBE_RC" -eq 1 ] 2>/dev/null && [ -z "$RT_SFM_MOUNTON_DEN" ] && [ -z "$RT_SFM_DEVPTS_DEN" ] && [ -z "$RT_SFM_TMPFS_DEN" ] && [ -z "$RT_SFM_PROC_DEN" ] && [ -z "$RT_SFM_TDIR_MOUNTON_DEN" ] && [ -z "$RT_SFM_TDIR_CREATE_DEN" ] && [ -n "$RT_SFM_DEVSTDERR" ] && { [ -n "$RT_SFM_FILE_CREATE_DEN" ] || [ -n "$RT_SFM_DONTAUDIT_FILE_CREATE" ]; }; then
