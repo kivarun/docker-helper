@@ -188,6 +188,17 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 			op.macLeaseRelease()
 		}
 		op.releaseCapacity()
+		// Unsafe symlinks are rejected before invoking Docker/BuildKit:
+		// its filesystem receiver may follow a link when setting SELinux xattrs.
+		if errors.Is(err, errBuildContextSymlinkEscape) {
+			opLog(ctx).Warn("build context contains an escaping symlink",
+				slog.String("operation", "build"),
+				slog.String("error", err.Error()),
+			)
+			writeDockerActionRejected(ctx, w, http.StatusBadRequest, "build",
+				"build_context_symlink_escape", "build context symlink escapes the context root", session.PrincipalName)
+			return
+		}
 		// The typed build-staging ceiling refusal is an expected
 		// client-input refusal of the single canonical build-context-limit
 		// code; its message names only the exhausted dimension. Every other

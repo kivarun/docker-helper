@@ -4358,6 +4358,26 @@ workload privilege (see
 [Helper socket projection](#helper-socket-projection) for the runtime
 projection boundary).
 
+### Build-context symlink boundary (host-integrity corrective)
+
+The descriptor-relative staging walker copies internal relative symlinks as
+symlinks without dereferencing source targets. As an additional independent
+security boundary, it now refuses absolute symlink link-text and relative
+link-text whose normalized destination escapes the build-context root, before
+starting Docker/BuildKit. This includes targets still inside an authorized
+workspace but outside the selected context. A direct request returns
+`build_context_symlink_escape` (HTTP 400), not an internal 500.
+
+Why this differs from the former D1 contract: Docker Engine 29.7.2's vendored
+`tonistiigi/fsutil.DiskWriter` calls `Setxattr` on a received symlink's
+pathname, following its target while applying the source's SELinux xattr.
+An absolute link such as `hostetc -> /etc` in a staged context could therefore
+cause dockerd to relabel the host /etc inode to
+`docker_helper_runtime_t` while a subsequent COPY failed. The changed D1
+UAT asserts an early refusal, zero Docker start events and no host label
+mutation. The upstream Docker xattr behavior also requires a separate upstream
+security fix; this admission guard protects the Helper's own API boundary.
+
 ### Build staging privilege bits
 
 The staging owner writes only into helper-owned staging under the runtime

@@ -1,0 +1,20 @@
+name: Security corrective candidate - SELinux UAT
+on:
+  pull_request:
+    branches: [release/2.3]
+    paths:
+      - 'staging_linux.go'
+      - 'staging_linux_test.go'
+      - 'build.go'
+      - 'scripts/uat-regression-d1-build-staging-symlinks.sh'
+      - 'docs/architecture.md'
+      - '.github/workflows/uat-security-symlink-fix-vm.yml'
+permissions:
+  contents: read
+jobs:
+  selinux-corrective:
+    if: github.head_ref == 'security/fix-build-context-symlink-escape-20261102'
+    uses: ./.github/workflows/artifact-gate.yml
+    with:
+      scope: selinux
+      uat_version: '2.3.1-uat'
