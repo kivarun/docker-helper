@@ -3967,7 +3967,11 @@ fi
 # FLOW PROBE: the leg runs its OWN candidate-policy build and captures the
 # build's stderr — the probe makes the claimed flow evidence observable
 # regardless of what other suites ran before this leg on this boot.
-RT_SFM_PROBE_DIR=/tmp/uat-wls-p20-probe
+# The build-context authorization is workspace-scoped: the probe context
+# must live inside the SESSION WORKSPACE tree (the same rule the S15
+# staged chain obeys) — a /tmp context is rejected at admission with
+# invalid_build_context (measured run 41533068541).
+RT_SFM_PROBE_DIR="$TREE/work/p20-probe"
 rm -rf "$RT_SFM_PROBE_DIR"
 mkdir -p "$RT_SFM_PROBE_DIR"
 cat >"$RT_SFM_PROBE_DIR/Dockerfile" <<'EOF'
@@ -3975,7 +3979,7 @@ FROM alpine:3.24
 RUN true
 EOF
 RT_SFM_PROBE_RC=0
-DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" dh build "$RT_SFM_PROBE_DIR" --dockerfile Dockerfile --image uat-p20-probe:2.2 2>/tmp/uat-wls-p20-build.err || RT_SFM_PROBE_RC=1
+DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" dh build p20-probe --dockerfile Dockerfile --image uat-p20-probe:2.2 2>/tmp/uat-wls-p20-build.err || RT_SFM_PROBE_RC=1
 RT_SFM_AUDIT="$({ cat /var/log/audit/audit.log 2>/dev/null; dmesg 2>/dev/null; } | grep -E 'type=AVC|avc: *denied' | sort -u || true)"
 RT_SFM_FLOW_INIT_N="$(printf '%s\n' "$RT_SFM_AUDIT" | grep 'tclass=cap_userns' | grep -c 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
 RT_SFM_MOUNTON_DEN="$(printf '%s\n' "$RT_SFM_AUDIT" | grep 'tclass=file' | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:docker_helper_builder_state_t' || true)"
