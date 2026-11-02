@@ -20,4 +20,4 @@ jobs:
     uses: ./.github/workflows/artifact-gate.yml
     with:
       scope: selinux
-      uat_version: '2.3.1-uat-etc'
+      uat_version: '2.3.1-uat'
