@@ -3810,14 +3810,18 @@ say "R7 P19 devpts preflight: devpts_t:filesystem mount (flow-evidenced, instanc
 # /dev/ptmx readiness or the container lifecycle beyond the mount table.
 RT_DFM_SESEARCH="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -t devpts_t /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
 RT_DFM_RKL_PRECEDENT="$("$RT_SESEARCH_BIN" --allow -s docker_helper_rootlesskit_t -t tmpfs_t -c filesystem /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
-RT_DFM_MQUEUE_SESEARCH="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -t mqueue_t /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+# NOTE (P19 iteration 1 measurement): mqueue_t is NOT a defined type in
+# the loaded distro policy (sesearch rejects it — "not a valid type
+# attribute"), so no sesearch -t mqueue_t query is possible; the
+# /dev/mqueue mount's superblock labeling is owned by the distro base
+# policy and the /dev/mqueue mount table entry produced NO AVC in the
+# P19 flow (the container init passed it and died on a later entry).
 RT_DFM_ALL_FS="$("$RT_SESEARCH_BIN" --allow -s docker_helper_buildkitd_t -c filesystem /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
 RT_DFM_DEVPTS_SURFACE="$(printf '%s\n' "$RT_DFM_SESEARCH" | grep -v '^allow domain file_type:' || true)"
-RT_DFM_MQUEUE_SURFACE="$(printf '%s\n' "$RT_DFM_MQUEUE_SESEARCH" | grep -v '^allow domain file_type:' || true)"
 RT_DFM_PTY_MAX="$(cat /proc/sys/kernel/pty/max 2>/dev/null || true)"
 RT_DFM_PTY_RESERVE="$(cat /proc/sys/kernel/pty/reserve 2>/dev/null || true)"
 RT_DFM_PTY_NR="$(cat /proc/sys/kernel/pty/nr 2>/dev/null || true)"
-info "R7-devptsmount preflight: buildkitd->devpts_t=[$RT_DFM_DEVPTS_SURFACE] rootlesskit->tmpfs_t:filesystem=[$RT_DFM_RKL_PRECEDENT] buildkitd->mqueue_t=[$RT_DFM_MQUEUE_SURFACE] buildkitd filesystem-class=[$RT_DFM_ALL_FS] kernel.pty.max=[$RT_DFM_PTY_MAX] kernel.pty.reserve=[$RT_DFM_PTY_RESERVE] kernel.pty.nr=[$RT_DFM_PTY_NR]"
+info "R7-devptsmount preflight: buildkitd->devpts_t=[$RT_DFM_DEVPTS_SURFACE] rootlesskit->tmpfs_t:filesystem=[$RT_DFM_RKL_PRECEDENT] buildkitd filesystem-class=[$RT_DFM_ALL_FS] kernel.pty.max=[$RT_DFM_PTY_MAX] kernel.pty.reserve=[$RT_DFM_PTY_RESERVE] kernel.pty.nr=[$RT_DFM_PTY_NR]"
 if printf '%s\n' "$RT_DFM_DEVPTS_SURFACE" | grep -q '^allow docker_helper_buildkitd_t devpts_t:filesystem mount;$' && printf '%s' "$RT_DFM_RKL_PRECEDENT" | grep -q 'tmpfs_t:filesystem mount'; then
   acc_ok "R7 devptsmount preflight: the loaded policy carries the exact P19 candidate authority for the container-init devpts mount (buildkitd_t -> devpts_t:filesystem mount — one bare rule, no loaded-state merging ambiguity for a single rule), and the SAME class+permission shape is already accepted for the rootlesskit parent's copy-up stage (the 4C-45 tmpfs_t:filesystem mount singleton) and the buildkitd P15/P16 procfs/tmpfs rungs — an existing owner's shape, not a new mechanism"
 else
@@ -3828,16 +3832,16 @@ if printf '%s\n' "$RT_DFM_DEVPTS_SURFACE" | grep -v '^allow docker_helper_buildk
 else
   acc_ok "R7 devptsmount preflight: the buildkitd devpts_t effective surface matches the accepted scope exactly (exactly one loaded rule — the bare filesystem mount singleton; the ptmx/PTY inode surfaces and every other devpts_t class stay closed)"
 fi
+# LOADED-STATE REPRESENTATION: the CIL linker merges same-(subject,target,
+# class) rules — the source keeps the fs_t getattr singleton and the
+# fs_t { remount unmount } rule separate; the loaded surface shows the
+# merged fs_t form. The loaded-state pins accept BOTH representations.
 RT_DFM_EXTRA="$(printf '%s\n' "$RT_DFM_ALL_FS" | grep -vE '^(allow (domain|docker_helper_buildkitd_t) (cgroup_t|fs_t|proc_t|devpts_t|security_t|sysfs_t|tmpfs_t|root_t|var_t|etc_t):filesystem )' || true)"
-if printf '%s\n' "$RT_DFM_ALL_FS" | grep '^allow docker_helper_buildkitd_t' | grep -vE '^allow docker_helper_buildkitd_t (proc_t|tmpfs_t|devpts_t):filesystem mount;$' | grep -q . || [ -n "$RT_DFM_EXTRA" ]; then
-  acc_fail "R7 devptsmount preflight: the buildkitd filesystem-class surface drifted beyond the accepted scope (unexpected=[$RT_DFM_EXTRA] mount-shape drift=[$(printf '%s\n' "$RT_DFM_ALL_FS" | grep '^allow docker_helper_buildkitd_t' | grep -vE '^allow docker_helper_buildkitd_t (proc_t|tmpfs_t|devpts_t):filesystem mount;$')]) — the P15/P16/P19 scope claim (exactly the three bare-mount singletons) does not match the loaded state"
+RT_DFM_DRIFT="$(printf '%s\n' "$RT_DFM_ALL_FS" | grep '^allow docker_helper_buildkitd_t' | grep -vE '^allow docker_helper_buildkitd_t (proc_t|tmpfs_t|devpts_t):filesystem mount;$' | grep -vE '^allow docker_helper_buildkitd_t fs_t:filesystem \{ getattr( remount unmount)?\};$' | grep -vE '^allow docker_helper_buildkitd_t fs_t:filesystem \{ remount unmount\};$' | grep -vE '^allow docker_helper_buildkitd_t cgroup_t:filesystem \{? ?getattr\}? ?;$' || true)"
+if [ -n "$RT_DFM_EXTRA" ] || [ -n "$RT_DFM_DRIFT" ]; then
+  acc_fail "R7 devptsmount preflight: the buildkitd filesystem-class surface drifted beyond the accepted scope (unexpected=[$RT_DFM_EXTRA] drift=[$RT_DFM_DRIFT]) — the P15/P16/P19 scope claim (exactly the three bare-mount singletons plus the standing fs_t/cgroup_t getattr and remount/unmount surface) does not match the loaded state"
 else
-  acc_ok "R7 devptsmount preflight: the buildkitd filesystem-class surface matches the accepted scope exactly (exactly the three evidenced bare-mount singletons — P15 proc_t, P16 tmpfs_t, P19 devpts_t; the standing base fs_t remount/unmount and getattr singletons are the other accepted filesystem surface; no remount/unmount/associate/mounton additions on the buildkitd devpts_t pair)"
-fi
-if [ -n "$RT_DFM_MQUEUE_SURFACE" ]; then
-  acc_fail "R7 devptsmount preflight: the buildkitd mqueue_t surface is present outside the standing base-policy attribute expansions — the /dev/mqueue mount is the recorded NEXT terminal and must NOT ride the P19 devpts grant (unexpected=[$RT_DFM_MQUEUE_SURFACE])"
-else
-  acc_ok "R7 devptsmount preflight: the buildkitd mqueue_t surface shows NO authority beyond the standing base-policy attribute expansions ([$RT_DFM_MQUEUE_SESEARCH]) — the /dev/mqueue mount of the same mount table stays closed and outside this rung"
+  acc_ok "R7 devptsmount preflight: the buildkitd filesystem-class surface matches the accepted scope exactly (exactly the three evidenced bare-mount singletons — P15 proc_t, P16 tmpfs_t, P19 devpts_t — plus the standing fs_t getattr/remount/unmount and cgroup_t getattr surface in its loaded CIL-merged representation; no remount/unmount/associate/mounton additions on the buildkitd devpts_t pair)"
 fi
 # The flow-based positive control: the boot-wide raw audit log must contain
 # the container-init marker records (non-degenerate window) and ZERO
@@ -3855,11 +3859,19 @@ RT_DFM_TMPFS_DEN="$(printf '%s\n' "$RT_DFM_AUDIT" | grep 'tclass=filesystem' | g
 RT_DFM_PROC_DEN="$(printf '%s\n' "$RT_DFM_AUDIT" | grep 'tclass=filesystem' | grep '{ mount }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:proc_t:s0' || true)"
 RT_TDMS_MOUNTON_DEN="$(printf '%s\n' "$RT_DFM_AUDIT" | grep 'tclass=dir' | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:tmpfs_t:s0' || true)"
 RT_TDMS_CREATE_DEN="$(printf '%s\n' "$RT_DFM_AUDIT" | grep 'tclass=dir' | grep '{ create }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:tmpfs_t:s0' || true)"
-RT_DFM_NEXT_DEN="$(printf '%s\n' "$RT_DFM_AUDIT" | grep 'tclass=filesystem' | grep '{ mount }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep -v 'tcontext=system_u:object_r:\(tmpfs_t\|proc_t\|devpts_t\)' || true)"
-info "R7-devptsmount preflight: audit window buildkitd_t cap_userns init records=$RT_DFM_FLOW_INIT_N devpts mount denials=[$RT_DFM_DEVPTS_DEN] tmpfs mount denials=[$RT_DFM_TMPFS_DEN] proc mount denials=[$RT_DFM_PROC_DEN] tmpfs dir-mounton denials=[$RT_TDMS_MOUNTON_DEN] tmpfs dir-create denials=[$RT_TDMS_CREATE_DEN] next-terminal filesystem mount denials=[$RT_DFM_NEXT_DEN]"
+RT_DFM_NEXT_FS_DEN="$(printf '%s\n' "$RT_DFM_AUDIT" | grep 'tclass=filesystem' | grep '{ mount }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep -v 'tcontext=system_u:object_r:\(tmpfs_t\|proc_t\|devpts_t\)' || true)"
+# The FOLLOWING mount table entries' mounts produced NO AVC (measured,
+# P19 iteration 1): /dev/mqueue (mqueue_t is not even a defined type in
+# the loaded distro policy), /sys and /sys/fs/cgroup — the flow's next
+# terminal is the FIRST bind-mount entry (/etc/resolv.conf): a mounton
+# on the TARGET FILE of the bind, tclass=file, the op-tree file type —
+# a NEW next-terminal family, deliberately NOT granted by this rung.
+RT_DFM_NEXT_MOUNTON_DEN="$(printf '%s\n' "$RT_DFM_AUDIT" | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep -v 'tcontext=system_u:object_r:tmpfs_t:s0 ' || true)"
+RT_DFM_NEXT_DEN="$(printf '%s\n%s\n' "$RT_DFM_NEXT_FS_DEN" "$RT_DFM_NEXT_MOUNTON_DEN" | grep -v '^$' || true)"
+info "R7-devptsmount preflight: audit window buildkitd_t cap_userns init records=$RT_DFM_FLOW_INIT_N devpts mount denials=[$RT_DFM_DEVPTS_DEN] tmpfs mount denials=[$RT_DFM_TMPFS_DEN] proc mount denials=[$RT_DFM_PROC_DEN] tmpfs dir-mounton denials=[$RT_TDMS_MOUNTON_DEN] tmpfs dir-create denials=[$RT_TDMS_CREATE_DEN] next-terminal denials=[$RT_DFM_NEXT_DEN]"
 if [ "${RT_DFM_FLOW_INIT_N:-0}" -ge 1 ] 2>/dev/null; then
   if [ -z "$RT_DFM_DEVPTS_DEN" ] && [ -z "$RT_DFM_TMPFS_DEN" ] && [ -z "$RT_DFM_PROC_DEN" ] && [ -z "$RT_TDMS_MOUNTON_DEN" ] && [ -z "$RT_TDMS_CREATE_DEN" ] && [ -n "$RT_DFM_NEXT_DEN" ]; then
-    acc_ok "R7 devptsmount preflight: the boot-wide audit window covering the candidate-policy flow builds ($RT_DFM_FLOW_INIT_N buildkitd_t cap_userns container-init records) contains ZERO devpts_t:filesystem mount denials, zero tmpfs_t/proc_t filesystem mount denials AND zero tmpfs_t:dir mounton/create denials — the devpts mount's REAL execution passed the get_tree stage (the private per-mount instance was created; the denial only fires at security_sb_kern_mount, downstream of fill_super) — AND the recorded NEW next-terminal family (a filesystem-mount denial beyond the three granted types: the FOLLOWING mount table entry's get_tree stage) — the P19 grant advanced the flow past the devpts gate and all earlier rungs hold"
+    acc_ok "R7 devptsmount preflight: the boot-wide audit window covering the candidate-policy flow builds ($RT_DFM_FLOW_INIT_N buildkitd_t cap_userns container-init records) contains ZERO devpts_t:filesystem mount denials, zero tmpfs_t/proc_t filesystem mount denials AND zero tmpfs_t:dir mounton/create denials — the devpts mount's REAL execution passed the get_tree stage and the mount table continued through the FOLLOWING entries (no AVC on /dev/mqueue, /sys, /sys/fs/cgroup) up to the FIRST bind-mount entry's recorded NEW next-terminal family (the bind-target file mounton — a separate future rung, deliberately NOT granted) — the P19 grant advanced the flow past the devpts gate and all earlier rungs hold"
   else
     acc_fail "R7 devptsmount preflight: the flow's fatal shapes reappeared or the expected next terminal is missing (devpts-mount=[$RT_DFM_DEVPTS_DEN] tmpfs-mount=[$RT_DFM_TMPFS_DEN] proc-mount=[$RT_DFM_PROC_DEN] dir-mounton=[$RT_TDMS_MOUNTON_DEN] dir-create=[$RT_TDMS_CREATE_DEN] next-terminal=[$RT_DFM_NEXT_DEN])"
   fi
