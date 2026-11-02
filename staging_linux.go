@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -518,6 +519,32 @@ func readDirectoryEntries(fd int, budget *buildStagingBudget) ([]dirEntry, error
 	return entries, nil
 }
 
+// Check link text without following host paths. A lexical containment test
+// alone is insufficient: "a/link/../../outside" may escape when a/link is
+// itself a symlink. Permit only a leading group of ".." components before
+// any ordinary pathname component. Every symlink encountered during
+// resolution then independently obeys the same context-boundary contract.
+func symlinkTargetWithinStagedContext(relDir, target string) bool {
+	if target == "" || filepath.IsAbs(target) {
+		return false
+	}
+	seenName := false
+	for _, part := range strings.Split(target, string(filepath.Separator)) {
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if seenName {
+				return false
+			}
+		default:
+			seenName = true
+		}
+	}
+	resolved := filepath.Clean(filepath.Join(relDir, target))
+	return resolved != ".." && !strings.HasPrefix(resolved, ".."+string(filepath.Separator))
+}
+
 func copyEntry(ctx context.Context, sourceDirFD int, name string, stagingRootFD int, stagingDirFD int, relPrefix string, hardlinkMap map[devIno]string, hooks *stagingHooks, budget *buildStagingBudget, depth int) error {
 	oPathFD, err := unix.Openat(sourceDirFD, name, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
@@ -541,6 +568,9 @@ func copyEntry(ctx context.Context, sourceDirFD int, name string, stagingRootFD 
 			return fmt.Errorf("cannot read symlink %s: %w", name, err)
 		}
 		target := unix.ByteSliceToString(buf[:n])
+		if !symlinkTargetWithinStagedContext(relPrefix, target) {
+			return errBuildStagingSymlinkOutsideContext
+		}
 
 		// The symlink target payload is reserved before the destination
 		// symlink is created; the entry itself was already reserved once

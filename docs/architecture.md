@@ -3180,9 +3180,12 @@ labels (schema, `com.dockerhelper.operation.id`, Session ID), never a PID.
 
 The Linux build implementation creates an isolated helper-owned staging
 copy of the build context. Traversal is FD-relative and restricted with
-`openat2` flags (`RESOLVE_NO_SYMLINKS`, `RESOLVE_BENEATH`). Docker
-receives only the staged context and Dockerfile paths, never the
-original workspace paths.
+`openat2` flags (`RESOLVE_NO_SYMLINKS`, `RESOLVE_BENEATH`). Internal
+relative symlinks are preserved without dereferencing, but absolute and
+lexically escaping relative symlinks are refused at staging with
+`400 invalid_build_context`, before Docker or BuildKit admission. This
+protects host inodes independently of the build backend. Docker/BuildKit
+receives only staged paths, never original workspace paths.
 
 Staging is the one current helper content-ingest path (the accepted
 filesystem-capability boundary): the root-owned daemon copies the workspace capability's
