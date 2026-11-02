@@ -105,9 +105,9 @@ func TestStageBuildContextSymlinkEntries(t *testing.T) {
 	// the exact link text that must survive staging. nil is the
 	// symlink-free control context.
 	cases := []struct {
-		name  string
+		name         string
 		wantRejected bool
-		setup func(t *testing.T, workspace, ctxDir string) (linkRel string, wantTarget string)
+		setup        func(t *testing.T, workspace, ctxDir string) (linkRel string, wantTarget string)
 	}{
 		{
 			name: "control symlink-free context",
@@ -144,7 +144,7 @@ func TestStageBuildContextSymlinkEntries(t *testing.T) {
 			},
 		},
 		{
-			name: "absolute symlink target outside the build context",
+			name:         "absolute symlink target outside the build context",
 			wantRejected: true,
 			setup: func(t *testing.T, workspace, ctxDir string) (string, string) {
 				// An existing target outside the authorized workspace (and
@@ -165,7 +165,7 @@ func TestStageBuildContextSymlinkEntries(t *testing.T) {
 			},
 		},
 		{
-			name: "relative symlink target outside the build context",
+			name:         "relative symlink target outside the build context",
 			wantRejected: true,
 			setup: func(t *testing.T, workspace, ctxDir string) (string, string) {
 				// Target outside the build context but inside the
@@ -260,7 +260,7 @@ func TestStageBuildContextSymlinkEntries(t *testing.T) {
 func TestSymlinkTargetEscapesContext(t *testing.T) {
 	cases := []struct {
 		name, prefix, target string
-		want bool
+		want                 bool
 	}{
 		{"internal-direct", "", "target.txt", false},
 		{"internal-subdir", "sub", "../target.txt", false},
