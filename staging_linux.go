@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -519,9 +518,6 @@ func readDirectoryEntries(fd int, budget *buildStagingBudget) ([]dirEntry, error
 
 	return entries, nil
 }
-
-// An unsafe symlink is a client-input error, not an internal staging failure.
-var errBuildStagingSymlinkOutsideContext = errors.New("build context symlink escapes staged context")
 
 // Check link text without resolving any host inode. Absolute targets and
 // relative targets traversing above the staged root must never reach a
