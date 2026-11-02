@@ -259,6 +259,14 @@ else
   reg_fail "host /etc or passwd inode/SELinux context was mutated"
 fi
 
+# --- case 4c: lexical-safe but symlink-chain escape -------------------------
+make_case case4-chain
+mkdir -p "$WS/case4-chain/ctx/a"
+ln -s .. "$WS/case4-chain/ctx/a/up"
+ln -s a/up/../../outside "$WS/case4-chain/ctx/chain"
+chown -R "$USER:$USER" "$WS/case4-chain"
+expect_escape_rejected "case 4c: symlink chain with later dotdot" case4-chain/ctx uat-d1-chain:2.3
+
 # --- case 5: symlink-free control ----------------------------------------------
 make_case case5
 chown -R "$USER:$USER" "$WS/case5"

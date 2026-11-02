@@ -270,7 +270,11 @@ func TestSymlinkTargetEscapesContext(t *testing.T) {
 		{"escape-root", "", "../outside", true},
 		{"escape-nested", "sub", "../../etc", true},
 		{"escape-deep", "a/b", "../../../etc", true},
-		{"internal-normalized", "a/b", "../c/../d", false},
+		{"internal-normalized", "a/b", "../c/../d", true},
+		{"link-chain-escape", "", "a/up/../../outside", true},
+		{"link-chain-nested", "sub", "../a/up/../../outside", true},
+		{"internal-leading-dotdots", "a/b/c", "../../file", false},
+		{"empty-target", "", "", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -278,6 +282,30 @@ func TestSymlinkTargetEscapesContext(t *testing.T) {
 				t.Fatalf("prefix=%q target=%q: got %v want %v", tc.prefix, tc.target, got, tc.want)
 			}
 		})
+	}
+}
+
+// The lexical target is inside the context, but its middle component
+// resolves through a second symlink, so later ".." escapes the boundary.
+// Staging must reject the context before it reaches an external builder.
+func TestStageBuildContextRejectsSymlinkChainEscape(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+	if err := os.Mkdir(filepath.Join(ctxDir, "a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("..", filepath.Join(ctxDir, "a", "up")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("a/up/../../outside", filepath.Join(ctxDir, "chain")); err != nil {
+		t.Fatal(err)
+	}
+	staged, err := StageBuildContext(context.Background(), workspace, abs(t, ctxDir), "Dockerfile", runtimeDir, "op1")
+	if !errors.Is(err, errBuildStagingSymlinkOutsideContext) || staged != nil {
+		t.Fatalf("symlink chain must be rejected before build; staged=%v err=%v", staged, err)
+	}
+	if _, statErr := os.Lstat(filepath.Join(runtimeDir, "builds", "op1")); !os.IsNotExist(statErr) {
+		t.Fatalf("symlink rejection left staged residue: %v", statErr)
 	}
 }
 

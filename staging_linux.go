@@ -519,12 +519,27 @@ func readDirectoryEntries(fd int, budget *buildStagingBudget) ([]dirEntry, error
 	return entries, nil
 }
 
-// Check link text without resolving any host inode. Absolute targets and
-// relative targets traversing above the staged root must never reach a
-// downstream builder, regardless of its current privilege model.
+// Check link text without following host paths. A lexical containment test
+// alone is insufficient: "a/link/../../outside" may escape when a/link is
+// itself a symlink. Permit only a leading group of ".." components before
+// any ordinary pathname component. Every symlink encountered during
+// resolution then independently obeys the same context-boundary contract.
 func symlinkTargetWithinStagedContext(relDir, target string) bool {
-	if filepath.IsAbs(target) {
+	if target == "" || filepath.IsAbs(target) {
 		return false
+	}
+	seenName := false
+	for _, part := range strings.Split(target, string(filepath.Separator)) {
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if seenName {
+				return false
+			}
+		default:
+			seenName = true
+		}
 	}
 	resolved := filepath.Clean(filepath.Join(relDir, target))
 	return resolved != ".." && !strings.HasPrefix(resolved, ".."+string(filepath.Separator))
