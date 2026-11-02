@@ -2211,9 +2211,14 @@ allow docker_helper_buildkitd_t devpts_t:filesystem mount;
 #
 # Deliberately NOT granted: any other builder_state_t file permission
 # (the standing rule stays exactly its own owner), any dir-class addition,
-# builder_runtime_t mounton of any class, chr_file/lnk_file tmpfs surfaces
-# (the NEXT terminal — the createDevices mknod of the /dev device nodes,
-# tmpfs_t:chr_file create — is a separate future rung), any
+# builder_runtime_t mounton of any class, and the tmpfs_t file-class
+# surfaces of the NEXT terminal (measured run 41518644028: in the userns
+# flow runc NEVER mknods device nodes — the NEWUSER namespace forces
+# useBindMount=true from the start, so createDevices' bindMountDeviceNode
+# openat-O_CREATs a placeholder FILE inside the container /dev tmpfs —
+# tmpfs_t:file create — and then binds the host device node over it —
+# tmpfs_t:file mounton; the openat died EACCES with NO audited AVC, whose
+# dontaudit shape the leg measures) — all separate future rungs, plus any
 # filesystem-class addition, any capability change, any other subject.
 # The committed-policy tests pin the buildkitd builder_state_t:file
 # authority at EXACTLY the two evidenced rules (the standing lifecycle
