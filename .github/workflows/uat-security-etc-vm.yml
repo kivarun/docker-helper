@@ -5,6 +5,7 @@ on:
     branches: [release/2.3]
     paths:
       - 'scripts/uat-regression-selinux-host-etc-integrity.sh'
+      - 'scripts/uat-selinux-etc-fanotify.py'
       - 'scripts/uat-vm-opensuse-selinux.sh'
       - '.github/workflows/uat-security-etc-vm.yml'
 
