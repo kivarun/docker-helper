@@ -3837,7 +3837,7 @@ fi
 # fs_t { remount unmount } rule separate; the loaded surface shows the
 # merged fs_t form. The loaded-state pins accept BOTH representations.
 RT_DFM_EXTRA="$(printf '%s\n' "$RT_DFM_ALL_FS" | grep -vE '^(allow (domain|docker_helper_buildkitd_t) (cgroup_t|fs_t|proc_t|devpts_t|security_t|sysfs_t|tmpfs_t|root_t|var_t|etc_t):filesystem )' || true)"
-RT_DFM_DRIFT="$(printf '%s\n' "$RT_DFM_ALL_FS" | grep '^allow docker_helper_buildkitd_t' | grep -vE '^allow docker_helper_buildkitd_t (proc_t|tmpfs_t|devpts_t):filesystem mount;$' | grep -vE '^allow docker_helper_buildkitd_t fs_t:filesystem \{ getattr( remount unmount)?\};$' | grep -vE '^allow docker_helper_buildkitd_t fs_t:filesystem \{ remount unmount\};$' | grep -vE '^allow docker_helper_buildkitd_t cgroup_t:filesystem \{? ?getattr\}? ?;$' || true)"
+RT_DFM_DRIFT="$(printf '%s\n' "$RT_DFM_ALL_FS" | grep '^allow docker_helper_buildkitd_t' | grep -vE '^allow docker_helper_buildkitd_t (proc_t|tmpfs_t|devpts_t):filesystem mount;$' | grep -vE '^allow docker_helper_buildkitd_t fs_t:filesystem \{ getattr( remount unmount)? ?\};$' | grep -vE '^allow docker_helper_buildkitd_t fs_t:filesystem \{ remount unmount\};$' | grep -vE '^allow docker_helper_buildkitd_t cgroup_t:filesystem \{? ?getattr\}? ?;$' || true)"
 if [ -n "$RT_DFM_EXTRA" ] || [ -n "$RT_DFM_DRIFT" ]; then
   acc_fail "R7 devptsmount preflight: the buildkitd filesystem-class surface drifted beyond the accepted scope (unexpected=[$RT_DFM_EXTRA] drift=[$RT_DFM_DRIFT]) — the P15/P16/P19 scope claim (exactly the three bare-mount singletons plus the standing fs_t/cgroup_t getattr and remount/unmount surface) does not match the loaded state"
 else
