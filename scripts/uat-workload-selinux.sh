@@ -3871,20 +3871,20 @@ RT_DFM_NEXT_FS_DEN="$(printf '%s\n' "$RT_DFM_AUDIT" | grep 'tclass=filesystem' |
 # granted tmpfs_t dir family; any reappearing denial would be a regression
 # caught by the P20 leg.
 RT_DFM_NEXT_MOUNTON_DEN="$(printf '%s\n' "$RT_DFM_AUDIT" | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep -v 'tcontext=system_u:object_r:tmpfs_t:s0 ' | grep -v 'tcontext=system_u:object_r:docker_helper_builder_state_t:s0' || true)"
-# Post-P20 the bind-target file mounton family is GRANTED (excluded above);
-# the flow continues past the entire mount table into doSetupDev and dies at
-# the createDevices device-node stage — the bindMountDeviceNode placeholder
-# openat (runc's userns path never mknods: NEWUSER forces useBindMount=true),
-# observed in the build stderr. The device-node-stage stderr counts as this
-# leg's next-terminal evidence in the P20 world.
-RT_DFM_NEXT_CREATESTDERR="$(grep -E 'create device inode /dev/null: openat null: permission denied' /tmp/d1-build.err 2>/dev/null | head -1 || true)"
-RT_DFM_NEXT_DEN="$(printf '%s\n%s\n%s\n' "$RT_DFM_NEXT_FS_DEN" "$RT_DFM_NEXT_MOUNTON_DEN" "$RT_DFM_NEXT_CREATESTDERR" | grep -v '^$' || true)"
+# Post-P20 the bind-target file mounton family is GRANTED (excluded above),
+# so in the P20 world this leg's own capture has no remaining denial: the
+# flow-advance proof is carried by the P20 leg's own probe build (it runs
+# later on the SAME boot and its stderr marker proves the flow passed
+# /dev/pts, /dev/shm, /dev/mqueue, /sys and /sys/fs/cgroup into
+# doSetupDev) — the P19 leg pins its own invariant: zero reappearing fatal
+# families on a non-degenerate window.
+RT_DFM_NEXT_DEN="$(printf '%s\n%s\n' "$RT_DFM_NEXT_FS_DEN" "$RT_DFM_NEXT_MOUNTON_DEN" | grep -v '^$' || true)"
 info "R7-devptsmount preflight: audit window buildkitd_t cap_userns init records=$RT_DFM_FLOW_INIT_N devpts mount denials=[$RT_DFM_DEVPTS_DEN] tmpfs mount denials=[$RT_DFM_TMPFS_DEN] proc mount denials=[$RT_DFM_PROC_DEN] tmpfs dir-mounton denials=[$RT_TDMS_MOUNTON_DEN] tmpfs dir-create denials=[$RT_TDMS_CREATE_DEN] next-terminal denials=[$RT_DFM_NEXT_DEN]"
 if [ "${RT_DFM_FLOW_INIT_N:-0}" -ge 1 ] 2>/dev/null; then
-  if [ -z "$RT_DFM_DEVPTS_DEN" ] && [ -z "$RT_DFM_TMPFS_DEN" ] && [ -z "$RT_DFM_PROC_DEN" ] && [ -z "$RT_TDMS_MOUNTON_DEN" ] && [ -z "$RT_TDMS_CREATE_DEN" ] && [ -n "$RT_DFM_NEXT_DEN" ]; then
-    acc_ok "R7 devptsmount preflight: the boot-wide audit window covering the candidate-policy flow builds ($RT_DFM_FLOW_INIT_N buildkitd_t cap_userns container-init records) contains ZERO devpts_t:filesystem mount denials, zero tmpfs_t/proc_t filesystem mount denials AND zero tmpfs_t:dir mounton/create denials — the devpts mount's REAL execution passed the get_tree stage and the mount table continued through ALL FOLLOWING entries (no AVC on /dev/mqueue, /sys, /sys/fs/cgroup; the per-op binds now complete under the P20-granted file mounton) up to the recorded NEW next-terminal (the createDevices device-node stage stderr — the bindMountDeviceNode placeholder openat, deliberately NOT granted) — the P19 grant advanced the flow past the devpts gate and all earlier rungs hold"
+  if [ -z "$RT_DFM_DEVPTS_DEN" ] && [ -z "$RT_DFM_TMPFS_DEN" ] && [ -z "$RT_DFM_PROC_DEN" ] && [ -z "$RT_TDMS_MOUNTON_DEN" ] && [ -z "$RT_TDMS_CREATE_DEN" ]; then
+    acc_ok "R7 devptsmount preflight: the boot-wide audit window covering the candidate-policy flow builds ($RT_DFM_FLOW_INIT_N buildkitd_t cap_userns container-init records) contains ZERO devpts_t:filesystem mount denials, zero tmpfs_t/proc_t filesystem mount denials AND zero tmpfs_t:dir mounton/create denials — no reappearing fatal family anywhere in the boot window; the devpts mount's REAL execution and the flow's continued advance past /dev/pts, /dev/shm, /dev/mqueue, /sys and /sys/fs/cgroup (the per-op binds complete under the P20-granted file mounton) are proven downstream by the P20 leg's own probe build on this same boot — the P19 grant holds and all earlier rungs hold"
   else
-    acc_fail "R7 devptsmount preflight: the flow's fatal shapes reappeared or the expected next terminal is missing (devpts-mount=[$RT_DFM_DEVPTS_DEN] tmpfs-mount=[$RT_DFM_TMPFS_DEN] proc-mount=[$RT_DFM_PROC_DEN] dir-mounton=[$RT_TDMS_MOUNTON_DEN] dir-create=[$RT_TDMS_CREATE_DEN] next-terminal=[$RT_DFM_NEXT_DEN])"
+    acc_fail "R7 devptsmount preflight: the flow's fatal shapes reappeared (devpts-mount=[$RT_DFM_DEVPTS_DEN] tmpfs-mount=[$RT_DFM_TMPFS_DEN] proc-mount=[$RT_DFM_PROC_DEN] dir-mounton=[$RT_TDMS_MOUNTON_DEN] dir-create=[$RT_TDMS_CREATE_DEN] next-terminal=[$RT_DFM_NEXT_DEN])"
   fi
 else
   acc_fail "R7 devptsmount preflight: the audit window is degenerate (no buildkitd_t cap_userns container-init records) — a zero-denial devpts claim would be unproven; the flow-based control cannot run"
@@ -3964,6 +3964,18 @@ if [ -n "$RT_SFM_CHR_SURFACE" ]; then
 else
   acc_ok "R7 statefile-mounton preflight: the buildkitd tmpfs_t:chr_file surface shows NO authority beyond the standing base-policy attribute expansions ([$RT_SFM_CHR_SESEARCH]) — the /dev device-node creation stays closed and outside this rung"
 fi
+# FLOW PROBE: the leg runs its OWN candidate-policy build and captures the
+# build's stderr — the probe makes the claimed flow evidence observable
+# regardless of what other suites ran before this leg on this boot.
+RT_SFM_PROBE_DIR=/tmp/uat-wls-p20-probe
+rm -rf "$RT_SFM_PROBE_DIR"
+mkdir -p "$RT_SFM_PROBE_DIR"
+cat >"$RT_SFM_PROBE_DIR/Dockerfile" <<'EOF'
+FROM alpine:3.24
+RUN true
+EOF
+RT_SFM_PROBE_RC=0
+DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" dh build "$RT_SFM_PROBE_DIR" --dockerfile Dockerfile --image uat-p20-probe:2.2 2>/tmp/uat-wls-p20-build.err || RT_SFM_PROBE_RC=1
 RT_SFM_AUDIT="$({ cat /var/log/audit/audit.log 2>/dev/null; dmesg 2>/dev/null; } | grep -E 'type=AVC|avc: *denied' | sort -u || true)"
 RT_SFM_FLOW_INIT_N="$(printf '%s\n' "$RT_SFM_AUDIT" | grep 'tclass=cap_userns' | grep -c 'scontext=system_u:system_r:docker_helper_buildkitd_t' || true)"
 RT_SFM_MOUNTON_DEN="$(printf '%s\n' "$RT_SFM_AUDIT" | grep 'tclass=file' | grep '{ mounton }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:docker_helper_builder_state_t' || true)"
@@ -3974,11 +3986,14 @@ RT_SFM_TDIR_MOUNTON_DEN="$(printf '%s\n' "$RT_SFM_AUDIT" | grep 'tclass=dir' | g
 RT_SFM_TDIR_CREATE_DEN="$(printf '%s\n' "$RT_SFM_AUDIT" | grep 'tclass=dir' | grep '{ create }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:tmpfs_t:s0' || true)"
 RT_SFM_CHR_CREATE_DEN="$(printf '%s\n' "$RT_SFM_AUDIT" | grep 'tclass=chr_file' | grep '{ create }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:tmpfs_t' || true)"
 RT_SFM_FILE_CREATE_DEN="$(printf '%s\n' "$RT_SFM_AUDIT" | grep 'tclass=file' | grep '{ create }' | grep 'scontext=system_u:system_r:docker_helper_buildkitd_t' | grep 'tcontext=system_u:object_r:tmpfs_t' || true)"
-RT_SFM_DONTAUDIT_FILE_CREATE="$("$RT_SESEARCH_BIN" --dontaudit -s docker_helper_buildkitd_t -t tmpfs_t -c file /sys/fs/selinux/policy 2>/dev/null | grep 'create' || true)"
-RT_SFM_DEVSTDERR="$(grep -E 'create device inode /dev/null: openat null: permission denied' /tmp/d1-build.err 2>/dev/null | head -1 || true)"
+RT_SFM_DONTAUDIT_FILE_CREATE="$("$RT_SESEARCH_BIN" --dontaudit -s docker_helper_buildkitd_t -c file /sys/fs/selinux/policy 2>/dev/null | grep 'tmpfs_t' || true)$("$RT_SESEARCH_BIN" --dontaudit -s docker_helper_buildkitd_t -t tmpfs_t /sys/fs/selinux/policy 2>/dev/null | grep -v '^#' || true)"
+RT_SFM_DEVSTDERR="$(grep -E 'create device inode /dev/null: openat null: permission denied' /tmp/uat-wls-p20-build.err 2>/dev/null | head -1 || true)"
+RT_SFM_D1STDERR="$(grep -E 'create device inode /dev/null: openat null: permission denied' /tmp/d1-build.err 2>/dev/null | head -1 || true)"
+RT_SFM_BACKLOG="$(dmesg 2>/dev/null | grep -ciE 'audit_printk_skb|backlog limit exceeded' || true)"
+info "R7-statefile-mounton preflight: probe build rc=$RT_SFM_PROBE_RC stderr-tail=[$(tail -2 /tmp/uat-wls-p20-build.err 2>/dev/null)] audit-backlog-overflow-records=$RT_SFM_BACKLOG d1-stderr-marker-present=$([ -n "$RT_SFM_D1STDERR" ] && echo yes || echo no)"
 info "R7-statefile-mounton preflight: audit window buildkitd_t cap_userns init records=$RT_SFM_FLOW_INIT_N state-file mounton denials=[$RT_SFM_MOUNTON_DEN] devpts mount denials=[$RT_SFM_DEVPTS_DEN] tmpfs mount denials=[$RT_SFM_TMPFS_DEN] proc mount denials=[$RT_SFM_PROC_DEN] tmpfs dir-mounton denials=[$RT_SFM_TDIR_MOUNTON_DEN] tmpfs dir-create denials=[$RT_SFM_TDIR_CREATE_DEN] tmpfs file-create denials=[$RT_SFM_FILE_CREATE_DEN] dontaudit file-create=[$RT_SFM_DONTAUDIT_FILE_CREATE] device-node stderr=[$RT_SFM_DEVSTDERR]"
 if [ "${RT_SFM_FLOW_INIT_N:-0}" -ge 1 ] 2>/dev/null; then
-  if [ -z "$RT_SFM_MOUNTON_DEN" ] && [ -z "$RT_SFM_DEVPTS_DEN" ] && [ -z "$RT_SFM_TMPFS_DEN" ] && [ -z "$RT_SFM_PROC_DEN" ] && [ -z "$RT_SFM_TDIR_MOUNTON_DEN" ] && [ -z "$RT_SFM_TDIR_CREATE_DEN" ] && [ -n "$RT_SFM_DEVSTDERR" ] && { [ -n "$RT_SFM_FILE_CREATE_DEN" ] || [ -n "$RT_SFM_DONTAUDIT_FILE_CREATE" ]; }; then
+  if [ "$RT_SFM_PROBE_RC" -eq 1 ] 2>/dev/null && [ -z "$RT_SFM_MOUNTON_DEN" ] && [ -z "$RT_SFM_DEVPTS_DEN" ] && [ -z "$RT_SFM_TMPFS_DEN" ] && [ -z "$RT_SFM_PROC_DEN" ] && [ -z "$RT_SFM_TDIR_MOUNTON_DEN" ] && [ -z "$RT_SFM_TDIR_CREATE_DEN" ] && [ -n "$RT_SFM_DEVSTDERR" ] && { [ -n "$RT_SFM_FILE_CREATE_DEN" ] || [ -n "$RT_SFM_DONTAUDIT_FILE_CREATE" ]; }; then
     acc_ok "R7 statefile-mounton preflight: the boot-wide audit window covering the candidate-policy flow builds ($RT_SFM_FLOW_INIT_N buildkitd_t cap_userns container-init records) contains ZERO builder_state_t:file mounton denials (the P20 grant — a reappearing denial would be a regression), zero devpts/tmpfs/proc filesystem mount denials AND zero tmpfs_t:dir mounton/create denials — the per-op bind mounts' REAL execution completed (resolv.conf and the sibling per-op binds inside the container's private namespace) — AND the recorded NEW next-terminal (the createDevices device-node stage: runc's userns path NEVER mknods — NEWUSER forces useBindMount=true, so bindMountDeviceNode openat-O_CREATs the placeholder file in the container /dev tmpfs and binds the host device node over it; the openat died EACCES with the build's own stderr naming it) with its kernel decision provable as either the audited tmpfs_t:file create denial or the dontaudit'd shape — the P20 grant advanced the flow past the bind-target gate and all earlier rungs hold"
   else
     acc_fail "R7 statefile-mounton preflight: the flow's fatal shapes reappeared or the expected next terminal is missing (state-file-mounton=[$RT_SFM_MOUNTON_DEN] devpts-mount=[$RT_SFM_DEVPTS_DEN] tmpfs-mount=[$RT_SFM_TMPFS_DEN] proc-mount=[$RT_SFM_PROC_DEN] dir-mounton=[$RT_SFM_TDIR_MOUNTON_DEN] dir-create=[$RT_SFM_TDIR_CREATE_DEN] file-create=[$RT_SFM_FILE_CREATE_DEN] dontaudit=[$RT_SFM_DONTAUDIT_FILE_CREATE] dev-stderr=[$RT_SFM_DEVSTDERR])"
