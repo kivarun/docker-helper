@@ -98,7 +98,8 @@ reg_session "$CRED" "$WS" || reg_blocked "session creation failed"
 SID="$REG_SESSION_ID"; export DOCKER_HELPER_SESSION_TOKEN="$REG_SESSION_TOKEN"
 check_host "session create"
 build_case() {
-  local name="$1" target="$2" dockerfile="$3" image="$4" ctx="$WS/$name" out rc=0
+  local name="$1" target="$2" dockerfile="$3" image="$4" ctx out rc=0
+  ctx="$WS/$name"
   mkdir -p "$ctx"
   ln -s "$target" "$ctx/hostetc"
   printf '%s\n' "$dockerfile" > "$ctx/Dockerfile"
