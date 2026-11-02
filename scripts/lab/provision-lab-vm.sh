@@ -339,6 +339,7 @@ stage_online() {
   # checksum or quietly reuse the vulnerable v2.3.0 bundle.
   [[ "${LAB_HELPER_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] ||
     die "LAB_HELPER_SHA256 must be pinned to the published v2.3.2-rc.1 tarball"
+  LAB_HELPER_COMMIT="${LAB_HELPER_COMMIT:-6d72b449e0c76a43a00836bd3e3db2fd35d9138b}"
   [[ "${LAB_HELPER_COMMIT:-}" =~ ^[0-9a-f]{40}$ ]] ||
     die "LAB_HELPER_COMMIT must be the exact release/2.3 RC source SHA"
   stop_vm_if_running

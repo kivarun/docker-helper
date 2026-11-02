@@ -37,7 +37,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DH_V230_VERSION="${DH_V230_VERSION:-2.3.2-rc.1}"
-DH_V230_COMMIT="${DH_V230_COMMIT:-}"
+DH_V230_COMMIT="${DH_V230_COMMIT:-6d72b449e0c76a43a00836bd3e3db2fd35d9138b}"
 DH_V230_SHA256="${DH_V230_SHA256:-}"
 DH_V230_URL="${DH_V230_URL:-https://github.com/kivarun/docker-helper/releases/download/v${DH_V230_VERSION}/docker-helper-${DH_V230_VERSION}-linux-amd64.tar.gz}"
 LAB_HELPER_ALLOWED_ROOT="${LAB_HELPER_ALLOWED_ROOT:-/home/agent}"
