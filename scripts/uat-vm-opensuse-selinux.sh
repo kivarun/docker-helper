@@ -255,6 +255,21 @@ fi
 record_stage "black-box UAT" "$BB_RESULT"
 
 # ---------------------------------------------------------------------------
+# Incident-only forensic gate. Runs exclusively INSIDE the disposable guest
+# after installing the candidate. Never relax Enforcing and never run this
+# probe on the GitHub runner host. Stop immediately on FAIL/BLOCKED so a
+# damaged guest is not further mutated by later migration/reinstall tests.
+# ---------------------------------------------------------------------------
+log "== incident: host /etc SELinux xattr integrity (guest-only) =="
+if run_guest_capture "incident /etc integrity probe inside disposable VM" \
+  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_DISPOSABLE_VM=YES bash scripts/uat-regression-selinux-host-etc-integrity.sh"; then
+  record_stage "Host /etc integrity" PASS
+else
+  record_stage "Host /etc integrity" FAIL
+  fail "host /etc integrity probe failed or was BLOCKED — STOP to preserve guest forensic evidence"
+fi
+
+# ---------------------------------------------------------------------------
 # 7b. docker-helper selinux check diagnostic (read-only operator diagnostic)
 # ---------------------------------------------------------------------------
 log "== 7b. docker-helper selinux check diagnostic =="
