@@ -19,6 +19,7 @@ FAN_NONBLOCK = 0x00000002
 FAN_MARK_ADD = 0x00000001
 FAN_MARK_FILESYSTEM = 0x00000100
 FAN_ATTRIB = 0x00000004
+FAN_ONDIR = 0x40000000  # Required to observe the /etc directory itself
 FAN_Q_OVERFLOW = 0x00004000
 FAN_NOFD = -1
 AT_FDCWD = -100
@@ -46,10 +47,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ready", required=True)
     parser.add_argument("--probe", required=True)
+    parser.add_argument("--probe-dir", required=True)
     args = parser.parse_args()
 
     targets = {}
-    for p in ("/etc", "/etc/passwd", args.probe):
+    for p in ("/etc", "/etc/passwd", args.probe, args.probe_dir):
         st = os.stat(p)
         targets[(st.st_dev, st.st_ino)] = p
 
@@ -64,7 +66,7 @@ def main():
     if fd < 0:
         raise OSError(ctypes.get_errno(), "fanotify_init failed")
     if libc.fanotify_mark(fd, FAN_MARK_ADD | FAN_MARK_FILESYSTEM,
-                         FAN_ATTRIB, AT_FDCWD, b"/etc") != 0:
+                         FAN_ATTRIB | FAN_ONDIR, AT_FDCWD, b"/etc") != 0:
         raise OSError(ctypes.get_errno(), "fanotify_mark(FILESYSTEM, /etc) failed")
 
     signal.signal(signal.SIGTERM, stop_signal)
