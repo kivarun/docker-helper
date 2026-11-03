@@ -280,6 +280,37 @@ cmd_ssh() {
   fi
 }
 
+# scp uses the canonical vm_scp transport. ':' marks the guest endpoint;
+# local relative paths must be anchored BEFORE vm_attach changes $PWD.
+cmd_scp() {
+  local caller_pwd="$PWD" src dst
+  local -a scp_opts=()
+  if [ "${1:-}" = '-r' ]; then
+    scp_opts=(-r)
+    shift
+  fi
+  [ "$#" -eq 2 ] || fail "scp: usage: scp [-r] <local> :<guest> | scp [-r] :<guest> <local>"
+  src="$1"
+  dst="$2"
+  if [[ "$src" == :* && "$dst" == :* ]] || [[ "$src" != :* && "$dst" != :* ]]; then
+    fail "scp: exactly one endpoint must begin with ':' (guest path)"
+  fi
+  [ "$src" != ':' ] && [ "$dst" != ':' ] || fail "scp: empty guest path"
+  if [[ "$src" == :* ]]; then
+    src="${VM_USER}@127.0.0.1:${src#:}"
+  elif [[ "$src" != /* ]]; then
+    src="$caller_pwd/$src"
+  fi
+  if [[ "$dst" == :* ]]; then
+    dst="${VM_USER}@127.0.0.1:${dst#:}"
+  elif [[ "$dst" != /* ]]; then
+    dst="$caller_pwd/$dst"
+  fi
+  vm_attach
+  vm_running || fail "VM is not running (run 'start')"
+  vm_scp "${scp_opts[@]}" "$src" "$dst"
+}
+
 # _agent_shell_bootstrap — the agent-side bootstrap for `agent-shell`,
 # printed on stdout with CHILD_CMD as the interactive child. The host first
 # waits for the READY marker and only then streams two plain `NAME=value`
@@ -521,6 +552,7 @@ $PREFIX <operation>
   stop              gracefully power off the guest
   status            report lifecycle state
   ssh [cmd...]      interactive SSH, or run a remote command
+  scp [-r] SRC DST  copy to/from VM; guest paths begin with :
   agent-shell       interactive shell as the agent account with LLM_SERVER
                     and LLM_KEY forwarded from the host environment (they
                     travel only through the SSH session; nothing is stored
@@ -540,9 +572,10 @@ case "$op" in
   stop)    cmd_stop ;;
   status)  cmd_status ;;
   ssh)     cmd_ssh "$@" ;;
+  scp)     cmd_scp "$@" ;;
   agent-shell) cmd_agent_shell ;;
   set-ipv6-disable) cmd_set_ipv6_disable ;;
   destroy) cmd_destroy "$@" ;;
   ""|-h|--help|help) usage ;;
-  *) fail "unknown operation '$op' (create|start|stop|status|ssh|set-ipv6-disable|destroy)" ;;
+  *) fail "unknown operation '$op' (create|start|stop|status|ssh|scp|set-ipv6-disable|destroy)" ;;
 esac
