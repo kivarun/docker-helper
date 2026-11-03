@@ -551,6 +551,64 @@ func TestR7P21BVerdictRegressionSectionHeadersFailClosed(t *testing.T) {
 	}
 }
 
+// TestR7P21BVerdictHeaderIntegrityFailClosed proves header recognition is
+// whole-line and consistent with the AWK section anchoring: a header that
+// appears only as a substring of a corrupted line (prefixed, suffixed, or
+// trailing-whitespace variant) is a MISSING header (BLOCKED — damaged or
+// truncated evidence can never be MEASURED), even when the damaged section
+// carries a real AVC record; a corrupted duplicate header line is body
+// content of the preceding section, so a real AVC in it decides FAIL.
+func TestR7P21BVerdictHeaderIntegrityFailClosed(t *testing.T) {
+	headers := []string{
+		"== devnode-terminal runc-init AVCs (both windows) ==",
+		"== regression controls (must be EMPTY) ==",
+		"-- P20 terminal (runc_memfd_t:file create) --",
+		"-- pre-B terminal (tmpfs_t:file write) --",
+		"-- associate denials (must be EMPTY — the singleton is granted) --",
+	}
+	corruptions := map[string]func(string) string{
+		"prefixed":       func(h string) string { return "X" + h },
+		"suffixed":       func(h string) string { return h + "X" },
+		"trailing space": func(h string) string { return h + " " },
+	}
+	for _, header := range headers {
+		for cname, corrupt := range corruptions {
+			mutated := strings.Replace(p21bGreenTerminals(), header+"\n", corrupt(header)+"\n", 1)
+			dir := p21bWriteEvidence(t, strings.Join(p21bGreenMatrix(), "\n")+"\n",
+				strings.Join(p21bGreenAV(), "\n")+"\n", mutated)
+			line, rc := p21bRunEvaluator(t, dir)
+			if rc == 0 || !strings.Contains(line, "DECISION=P21B-BLOCKED") {
+				t.Errorf("header %q with %q corruption must decide BLOCKED (the header is not a whole line), got rc=%d: %s", header, cname, rc, line)
+			}
+		}
+	}
+	// A real AVC record under a corrupted header copy: the corrupted line is
+	// not a section boundary, so the record lands inside the preceding
+	// control section's body and must decide FAIL — never MEASURED.
+	realAVC := `type=AVC msg=audit(1793714070.816:9990): avc:  denied  { create } for  pid=3288 comm="runc:[2:INIT]" name="null" scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:docker_helper_runc_memfd_t:s0 tclass=file permissive=0`
+	damaged := strings.Replace(p21bGreenTerminals(),
+		"-- pre-B terminal (tmpfs_t:file write) --\n",
+		"-- pre-B terminal (tmpfs_t:file write) --\nX-- P20 terminal (runc_memfd_t:file create) --\n"+realAVC+"\n", 1)
+	dir := p21bWriteEvidence(t, strings.Join(p21bGreenMatrix(), "\n")+"\n",
+		strings.Join(p21bGreenAV(), "\n")+"\n", damaged)
+	line, rc := p21bRunEvaluator(t, dir)
+	if rc == 0 || !strings.Contains(line, "DECISION=P21B-FAIL") {
+		t.Errorf("a real AVC under a corrupted header copy must decide FAIL (never MEASURED), got rc=%d: %s", rc, line)
+	}
+	// The task's exact scenario: the P20 header replaced by a prefixed
+	// variant with a real AVC in the damaged section — the missing whole-line
+	// header decides BLOCKED, never MEASURED.
+	damaged2 := strings.Replace(p21bGreenTerminals(),
+		"-- P20 terminal (runc_memfd_t:file create) --\n",
+		"X-- P20 terminal (runc_memfd_t:file create) --\n"+realAVC+"\n", 1)
+	dir = p21bWriteEvidence(t, strings.Join(p21bGreenMatrix(), "\n")+"\n",
+		strings.Join(p21bGreenAV(), "\n")+"\n", damaged2)
+	line, rc = p21bRunEvaluator(t, dir)
+	if rc == 0 || !strings.Contains(line, "DECISION=P21B-BLOCKED") {
+		t.Errorf("a real AVC in a section whose header is corrupted must decide BLOCKED (never MEASURED), got rc=%d: %s", rc, line)
+	}
+}
+
 // TestR7P21BVerdictMissingEvidenceFilesBlock pins the file-level fail-closed
 // branch: a missing or empty required evidence file can never produce a
 // passing decision, and a missing evaluator input directory is BLOCKED.
@@ -601,6 +659,10 @@ func TestR7P21BVerdictGateMode(t *testing.T) {
 		"R7-P21B-VERDICT=DECISION=P21B-MEASURED;SCOPE=six-names-ok;",
 		"R7-P21B-VERDICT=DECISION=P21B-MEASURED;SCOPE=six-names-ok;JUNK",
 		"R7-P21B-VERDICT=DECISION=P21B-MEASURED;SCOPE=six-names-ok;UNEXPECTED-FIELD=1",
+		"R7-P21B-VERDICT=DECISION=P21B-MEASURED;SCOPE=not-established;ARBITRARY-NAME-KEEPS-MEMFD=yes;MEMFD=intact;CROSSOP-CONTENT=closed;NEXT-TERMINAL=<type=AVC msg=audit(1.0:1190)>",
+		"R7-P21B-VERDICT=DECISION=P21B-MEASURED;SCOPE=six-names-ok;ARBITRARY-NAME-KEEPS-MEMFD=no;MEMFD=intact;CROSSOP-CONTENT=closed;NEXT-TERMINAL=<type=AVC msg=audit(1.0:1190)>",
+		"R7-P21B-VERDICT=DECISION=P21B-MEASURED;SCOPE=six-names-ok;ARBITRARY-NAME-KEEPS-MEMFD=yes;MEMFD=regressed;CROSSOP-CONTENT=closed;NEXT-TERMINAL=<type=AVC msg=audit(1.0:1190)>",
+		"R7-P21B-VERDICT=DECISION=P21B-MEASURED;SCOPE=six-names-ok;ARBITRARY-NAME-KEEPS-MEMFD=yes;MEMFD=intact;CROSSOP-CONTENT=open;NEXT-TERMINAL=<type=AVC msg=audit(1.0:1190)>",
 		"R7-P21B-VERDICT=DECISION=P21B-MEASURED;NEXT-TERMINAL=<(none)>",
 		"R7-P21B-VERDICT=DECISION=P21B-MEASURED;NEXT-TERMINAL=<type=AVC line;broken=field>",
 		"R7-P21B-VERDICT=DECISION=P21B-MEASURED;SCOPE=six-names-ok;ARBITRARY-NAME-KEEPS-MEMFD=yes;MEMFD=intact;CROSSOP-CONTENT=closed",

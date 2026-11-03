@@ -19,8 +19,10 @@
 #     R7-P21B-VERDICT line whose FIRST field is the single
 #     DECISION=P21B-MEASURED — no second DECISION field, no DECISION
 #     substring inside another field's value, no malformed prefix, no
-#     truncated or empty fields, and (for a MEASURED decision) a real
-#     NEXT-TERMINAL record (the workflow gate).
+#     truncated or empty fields, summary fields exactly at their
+#     MEASURED-consistent values (SCOPE=six-names-ok,
+#     ARBITRARY-NAME-KEEPS-MEMFD=yes, MEMFD=intact, CROSSOP-CONTENT=closed),
+#     and a real NEXT-TERMINAL record (the workflow gate).
 #
 # Decision precedence (mirrors the B′ evaluator): FAIL (a positive
 # violation was proven) beats BLOCKED (required evidence missing, empty,
@@ -41,13 +43,17 @@
 #     permission DENIED; unconfined must be DENIED for all fifteen;
 #     the associate rows must be devnode_t=ALLOW, runc_memfd_t=DENY,
 #     control=ALLOW.
-#   p21b-terminals.log — the live-flow windows: at least one
-#     comm="runc:[2:INIT]" tclass=file record carrying
-#     tcontext=docker_helper_devnode_t:s0 (the recorded next terminal and,
-#     by process existence, the proof the sealed memfd clone exec
-#     completed), and the three regression-control sections EMPTY (no
-#     runc_memfd_t:file create denial, no tmpfs_t:file write denial, no
-#     associate denial).
+#   p21b-terminals.log — the live-flow windows: at least one record
+#     matching the FULL measured terminal shape (the exact
+#     "denied  { read open }" pair, permissive=0,
+#     scontext=buildkitd_t:s0:cX, tcontext=docker_helper_devnode_t:s0,
+#     tclass=file, comm="runc:[2:INIT]", and a per-operation-tree
+#     /rootfs/dev/null path — the recorded next terminal and, by process
+#     existence, the proof the sealed memfd clone exec completed), the
+#     section headers present as WHOLE lines (missing → BLOCKED,
+#     duplicated → FAIL), and the three regression-control sections EMPTY
+#     (no runc_memfd_t:file create denial, no tmpfs_t:file write denial,
+#     no associate denial).
 
 set -uo pipefail
 
@@ -74,9 +80,13 @@ if [ "${1:-}" = "--gate" ]; then
   case "$tail" in *DECISION=*) exit 1 ;; esac
   case "$tail" in *';;'*) exit 1 ;; esac
   case "$tail" in *';') exit 1 ;; esac
-  # The evaluator's fixed field grammar, in its fixed field order, ending
-  # in a real NEXT-TERMINAL record whose value contains no field separator.
-  GATE_RE='^SCOPE=[a-z-]+;ARBITRARY-NAME-KEEPS-MEMFD=(yes|no);MEMFD=(intact|regressed);CROSSOP-CONTENT=(closed|open);NEXT-TERMINAL=<type=AVC [^;]*>$'
+  # The evaluator's fixed field grammar, in its fixed field order. A
+  # MEASURED decision is internally consistent only with its exact summary
+  # values: SCOPE=six-names-ok, ARBITRARY-NAME-KEEPS-MEMFD=yes,
+  # MEMFD=intact, CROSSOP-CONTENT=closed — any other value contradicts the
+  # DECISION and is rejected — and it must end in a real NEXT-TERMINAL
+  # record whose value contains no field separator.
+  GATE_RE='^SCOPE=six-names-ok;ARBITRARY-NAME-KEEPS-MEMFD=yes;MEMFD=intact;CROSSOP-CONTENT=closed;NEXT-TERMINAL=<type=AVC [^;]*>$'
   [[ "$tail" =~ $GATE_RE ]] || exit 1
   exit 0
 fi
@@ -258,26 +268,37 @@ fi
 # ---------------------------------------------------------------------------
 TERM="$DIR/p21b-terminals.log"
 NEXT_TERMINAL="(none)"
+# The exact section-header lines. Header recognition and the AWK section
+# anchoring below share THESE EXACT strings, so header presence and section
+# boundaries can never diverge: a prefixed/suffixed/corrupted header line
+# is not counted by check_header AND is not recognized by the AWK parsers.
+DEV_HDR='== devnode-terminal runc-init AVCs (both windows) =='
+CTRL_HDR='== regression controls (must be EMPTY) =='
+P20_HDR='-- P20 terminal (runc_memfd_t:file create) --'
+PREB_HDR='-- pre-B terminal (tmpfs_t:file write) --'
+ASSOC_HDR='-- associate denials (must be EMPTY — the singleton is granted) --'
 if require_file p21b-terminals.log; then
-  # Section headers are mandatory and must be unambiguous: a missing header
-  # is incomplete evidence (BLOCKED); a duplicated header is ambiguous
-  # evidence (FAIL).
+  # Section headers are mandatory and must be unambiguous, and must match
+  # the WHOLE line (grep -Fxc): a header embedded as a substring of a
+  # longer/corrupted line is a damaged header, not a present one. A missing
+  # header is incomplete evidence (BLOCKED); a duplicated header is
+  # ambiguous evidence (FAIL).
   check_header() { # <header-line> <label>
     local n
-    n="$(grep -Fc -- "$1" "$TERM" || true)"
+    n="$(grep -Fxc -- "$1" "$TERM" || true)"
     case "$n" in
       1) return 0 ;;
-      0) note BLOCKED "terminals: the required section header for '$2' is missing (damaged or truncated evidence)"; return 1 ;;
+      0) note BLOCKED "terminals: the required section header for '$2' is missing, corrupted, or not a whole line (damaged or truncated evidence)"; return 1 ;;
       *) note FAIL "terminals: the section header for '$2' appears $n times (ambiguous evidence)"; return 1 ;;
     esac
   }
   DEV_HEADER_OK=1
-  check_header '== devnode-terminal runc-init AVCs (both windows) ==' 'devnode terminal' || DEV_HEADER_OK=0
+  check_header "$DEV_HDR" 'devnode terminal' || DEV_HEADER_OK=0
   CTRL_HEADERS_OK=1
-  check_header '== regression controls (must be EMPTY) ==' 'regression controls' || CTRL_HEADERS_OK=0
-  check_header '-- P20 terminal (runc_memfd_t:file create) --' 'P20 terminal' || CTRL_HEADERS_OK=0
-  check_header '-- pre-B terminal (tmpfs_t:file write) --' 'pre-B terminal' || CTRL_HEADERS_OK=0
-  check_header '-- associate denials (must be EMPTY — the singleton is granted) --' 'associate denials' || CTRL_HEADERS_OK=0
+  check_header "$CTRL_HDR" 'regression controls' || CTRL_HEADERS_OK=0
+  check_header "$P20_HDR" 'P20 terminal' || CTRL_HEADERS_OK=0
+  check_header "$PREB_HDR" 'pre-B terminal' || CTRL_HEADERS_OK=0
+  check_header "$ASSOC_HDR" 'associate denials' || CTRL_HEADERS_OK=0
 
   if [ "$DEV_HEADER_OK" = 1 ]; then
     # The terminal record must match the FULL measured shape (the real
@@ -286,8 +307,8 @@ if require_file p21b-terminals.log; then
     # buildkitd_t:s0:cX source context, the devnode_t:s0 target context,
     # tclass=file, and a per-operation-tree /rootfs/dev/null path. An
     # arbitrary AVC on the same type is NOT accepted as the terminal.
-    DEV_TERMINAL="$(awk '
-      /^== devnode-terminal runc-init AVCs/ { sec = 1; next }
+    DEV_TERMINAL="$(awk -v hdr="$DEV_HDR" '
+      $0 == hdr { sec = 1; next }
       /^== / || /^-- / { if (sec) exit }
       sec &&
         /avc:  denied  \{ read open \} / &&
@@ -306,14 +327,17 @@ if require_file p21b-terminals.log; then
   fi
   # Each regression-control section must be present (checked above) and
   # EMPTY: a non-empty section is a positive violation (the exact denial
-  # family reappeared).
+  # family reappeared). The section body is anchored on the same exact
+  # header line check_header verified, and ends at the next header-shaped
+  # line.
   if [ "$CTRL_HEADERS_OK" = 1 ]; then
-    for secname in 'P20 terminal' 'pre-B terminal' 'associate denials'; do
-      SEC_BODY="$(awk -v want="$secname" '
-        index($0, "-- " want " ") == 1 { sec = 1; next }
+    for sechdr in "$P20_HDR" "$PREB_HDR" "$ASSOC_HDR"; do
+      SEC_BODY="$(awk -v hdr="$sechdr" '
+        $0 == hdr { sec = 1; next }
         /^== / || /^-- / { if (sec) exit }
         sec && NF { print }
       ' "$TERM")"
+      secname="${sechdr#-- }"; secname="${secname%% (*}"
       if [ -n "$SEC_BODY" ]; then
         note FAIL "REGRESSION-CONTROL-REAPPEARED ${secname}: $SEC_BODY"
       else
