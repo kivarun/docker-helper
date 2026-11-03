@@ -3498,6 +3498,103 @@ allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file execute_no_trans
 allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file { read open };
 allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file map;
 
+# --- R7 P21-B: the OCI device-node placeholder type (the accepted E1 ---
+# --- narrowing of the P21-A memfd transition-scope conflict) ---
+#
+# The P20 terminal proved the bare memfd transition's scope conflict: runc's
+# user-namespace device-node path (createDevices -> bindMountDeviceNode,
+# rootfs_linux.go:967-1017 in runc v1.4.3) openat-O_CREATs SIX named
+# placeholder regular files inside the container's /dev tmpfs (null, random,
+# full, tty, zero, urandom — AllowedDevices, spec_linux.go:236-330) before
+# bind-mounting the real host device nodes over them. Without a name-scoped
+# diversion those pathname creations receive docker_helper_runc_memfd_t
+# through the bare tmpfs_t:file transition — the "memfd" type would carry a
+# mandatory named-file creation surface.
+#
+# The P21-A investigation (REPORT.md in
+# /exchange/outbox/r7-p21a-memfd-transition-scope/, diagnostic run
+# 41612846007) established, with live enforcing evidence:
+#   - creation-time labeling is PARENT-DIRECTORY-keyed and name-carrying
+#     (may_create -> selinux_determine_inode_label ->
+#     security_transition_sid(creator, PARENT dir sid, class, d_name)); a
+#     filename transition overrides a bare transition whenever an exact
+#     (source, target, class, name) rule exists (filename_compute_type,
+#     ss/services.c) — live-validated on this consumer's loaded policy by
+#     the distro's own icastats_0 filename rule diverting buildkitd_t
+#     (create-matrix row [icastats_0] -> ica_tmpfs_t);
+#   - the memfd population CANNOT be diverted or scoped by filename
+#     transitions: the lazy SECURITY_FS_USE_TRANS labeling passes name=NULL
+#     (inode_doinit_with_dentry), so the bare transition above stays
+#     unchanged and remains the ONLY route to the memfd type;
+#   - the bare runc_memfd_t:file create grant is REJECTED (UNSAFE TO
+#     GRANT): the type carries domain-wide write/execute/execute_no_trans/
+#     map/read/open authority, and a named persistent object of that type
+#     in a SHARED tmpfs_t venue (the host /dev/shm — the same superblock
+#     measured in both concurrent operations' buildkitd mount namespaces,
+#     DAC 1777, exec-permitted mount) would be a fully-writable
+#     cross-operation channel; the MCS layer gates nothing for s0 objects
+#     of this attribute-free type;
+#   - with ONLY file create the flow does not advance either: the next
+#     kernel hook is the may_create step-4 association gate
+#     (avc denied { associate } scontext=the NEW object sid
+#     tcontext=tmpfs_t tclass=filesystem, serial 1800) — the memfd
+#     population never faces that hook because memfd creation runs no
+#     may_create at all.
+#
+# THIS RUNG (the accepted P21-A option E1): a dedicated, attribute-free
+# type for the device placeholders only, reached ONLY through the six
+# exact-basename filename transitions:
+#
+#   - the type is attribute-free (deliberately NOT file_type): no
+#     base-policy attribute rule applies to it in either direction. The
+#     associate grant is the exact singleton pair the may_create chain
+#     demands: subject = the NEW object's SID (the created placeholder),
+#     target = the tmpfs superblock type (fs_use_trans tmpfs tmpfs_t).
+#   - create ONLY: no write/append/read/open/map/execute/execute_no_trans/
+#     setattr/getattr/unlink/rename/link/ioctl/lock — the placeholder is a
+#     mount target, not a content object. The flow next binds the host
+#     device node over the placeholder (a file-class mounton — its own
+#     future evidenced rung, deliberately NOT granted here), and the
+#     openat that creates the placeholder still completes through the
+#     open-permission hook (the open_perms policycap is set): the
+#     predicted next terminal is therefore the devnode file { read open }
+#     open-completion pair (the P4 memfd precedent recorded exactly that
+#     single { read open } check shape), NOT a content authority.
+#   - ORPHAN SIDE EFFECT (recorded, measured by the P21-B diagnostic):
+#     a failed openat(O_CREAT) does NOT roll back the created inode
+#     (fs/namei.c do_open returns the error without unlinking; the
+#     FMODE_CREATED dentry persists). Six mode-0000 placeholder inodes
+#     per failed container start stay in the per-op container /dev tmpfs
+#     until that tmpfs dies with the operation's own mount namespace —
+#     no host or cross-operation residue. The same applies to the shared
+#     /dev/shm venue only if a production path created one of the six
+#     basenames there — none does; and even then the objects are
+#     content-dead (no read/write/execute authority for ANY subject),
+#     a name-presence surface only (the same surface the accepted P17
+#     dir-create rung already carries for directories).
+#   - the filename transitions are name-keyed, not path-keyed: a file with
+#     one of the six basenames created by buildkitd_t under ANY tmpfs_t
+#     parent receives this type — recorded, never claimed otherwise.
+#   - arbitrary basenames keep the bare transition: an unnamed or
+#     differently-named creation in a tmpfs_t parent is NOT retyped to
+#     the placeholder type, and WITHOUT the bare transition's create grant
+#     (which stays refused) it stays denied as before.
+#   - memfd regression guard: the bare transition and the six P1-P6 rules
+#     are untouched; the committed runcMemfdPolicyViolations pins keep
+#     holding (exactly one bare declaration, exactly one transition, six
+#     allows on the memfd type).
+type docker_helper_devnode_t;
+
+type_transition docker_helper_buildkitd_t tmpfs_t:file docker_helper_devnode_t "null";
+type_transition docker_helper_buildkitd_t tmpfs_t:file docker_helper_devnode_t "zero";
+type_transition docker_helper_buildkitd_t tmpfs_t:file docker_helper_devnode_t "full";
+type_transition docker_helper_buildkitd_t tmpfs_t:file docker_helper_devnode_t "random";
+type_transition docker_helper_buildkitd_t tmpfs_t:file docker_helper_devnode_t "urandom";
+type_transition docker_helper_buildkitd_t tmpfs_t:file docker_helper_devnode_t "tty";
+
+allow docker_helper_buildkitd_t docker_helper_devnode_t:file create;
+allow docker_helper_devnode_t tmpfs_t:filesystem associate;
+
 # --- R7-A: the daemon's buildctl executable identity (full artifact-gate
 # --- evidence, failed release run 38944346311) ---
 #
