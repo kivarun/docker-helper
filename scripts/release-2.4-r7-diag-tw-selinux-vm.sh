@@ -73,6 +73,11 @@ if [ "$R7_MODE" = "bprime" ]; then
   vm_scp "$SCRIPT_DIR/release-2.4-r7-bprime-verdict.sh" \
     opc@127.0.0.1:/tmp/r7-diag/release-2.4-r7-bprime-verdict.sh
 fi
+if [ "$R7_MODE" = "p21b" ]; then
+  # The P21-B gate evaluator rides along (the same contract as B′).
+  vm_scp "$SCRIPT_DIR/release-2.4-r7-p21b-verdict.sh" \
+    opc@127.0.0.1:/tmp/r7-diag/release-2.4-r7-p21b-verdict.sh
+fi
 
 set +e
 # The diag VM reboots mid-diagnosis (observed ~55s after boot; runs
@@ -188,9 +193,19 @@ RMT
 done
 set -e
 
-# The B′ job conclusion must REFLECT the machine verdict: a BLOCKED or FAIL
-# result is a failed gate (the evidence artifacts still upload; the
+# The B′/P21-B job conclusion must REFLECT the machine verdict: a BLOCKED
+# or FAIL result is a failed gate (the evidence artifacts still upload; the
 # workflow-level upload step runs under `if: always()`).
+if [ "$R7_MODE" = "p21b" ]; then
+  FINAL_VERDICT="$(grep -aoE 'R7-P21B-VERDICT=.*' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"
+  if [ -z "$FINAL_VERDICT" ]; then
+    fail "the R7 P21-B run produced no machine verdict"
+  fi
+  if ! bash "$SCRIPT_DIR/release-2.4-r7-p21b-verdict.sh" --gate "$FINAL_VERDICT"; then
+    fail "the R7 P21-B gate did not reach P21B-MEASURED: $FINAL_VERDICT"
+  fi
+  log "R7 P21-B gate: P21B-MEASURED"
+fi
 if [ "$R7_MODE" = "bprime" ]; then
   FINAL_VERDICT="$(grep -aoE 'R7-BPRIME-VERDICT=.*' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"
   if [ -z "$FINAL_VERDICT" ]; then

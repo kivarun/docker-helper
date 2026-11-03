@@ -3556,22 +3556,33 @@ allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file map;
 #     device node over the placeholder (a file-class mounton — its own
 #     future evidenced rung, deliberately NOT granted here), and the
 #     openat that creates the placeholder still completes through the
-#     open-permission hook (the open_perms policycap is set): the
-#     predicted next terminal is therefore the devnode file { read open }
-#     open-completion pair (the P4 memfd precedent recorded exactly that
-#     single { read open } check shape), NOT a content authority.
+#     open-permission hook (the open_perms policycap is set): the next
+#     terminal is the devnode file { read open } open-completion pair —
+#     MEASURED by the enforcing UAT 41620147450 (serials 1352/11088) and
+#     the diagnostic run 41623047086 (serials 1168/1795; the P4 memfd
+#     precedent recorded exactly that single { read open } check shape) —
+#     NOT a content authority.
 #   - ORPHAN SIDE EFFECT (recorded, measured by the P21-B diagnostic):
 #     a failed openat(O_CREAT) does NOT roll back the created inode
 #     (fs/namei.c do_open returns the error without unlinking; the
-#     FMODE_CREATED dentry persists). Six mode-0000 placeholder inodes
-#     per failed container start stay in the per-op container /dev tmpfs
-#     until that tmpfs dies with the operation's own mount namespace —
-#     no host or cross-operation residue. The same applies to the shared
-#     /dev/shm venue only if a production path created one of the six
-#     basenames there — none does; and even then the objects are
-#     content-dead (no read/write/execute authority for ANY subject),
-#     a name-presence surface only (the same surface the accepted P17
-#     dir-create rung already carries for directories).
+#     FMODE_CREATED dentry persists). The MEASURED per-failed-start
+#     count is EXACTLY ONE created placeholder inode — /dev/null, the
+#     FIRST AllowedDevices entry (dev="tmpfs" ino=5, tcontext=
+#     docker_helper_devnode_t:s0, UAT 41620147450 serials 1352/11088,
+#     diag 41623047086 serials 1168/1795): runc's createDevices loop
+#     aborts at the first createDeviceNode error (rootfs_linux.go:978),
+#     so the remaining five placeholders are never attempted — the
+#     enforcing windows carry no other devnode_t pathname record. The
+#     created inode's LIFETIME is an expectation, not a measurement: a
+#     tmpfs inode dies with its superblock, so the orphan is expected to
+#     disappear with the per-op container /dev tmpfs (the operation's
+#     own mount namespace) — no host or cross-operation residue is
+#     claimed. The same applies to the shared /dev/shm venue only if a
+#     production path created one of the six basenames there — none
+#     does; and even then the objects are content-dead (no read/write/
+#     execute authority for ANY subject), a name-presence surface only
+#     (the same surface the accepted P17 dir-create rung already carries
+#     for directories).
 #   - the filename transitions are name-keyed, not path-keyed: a file with
 #     one of the six basenames created by buildkitd_t under ANY tmpfs_t
 #     parent receives this type — recorded, never claimed otherwise.

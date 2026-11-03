@@ -38,9 +38,12 @@
 #   6. Runtime: the enforcing flow's actual next terminal after
 #      create+associate.
 #
-# Machine verdict contract:
-#   R7-P21B-VERDICT=SCOPE=<six-names-ok|drift>;MEMFD=<intact|regressed>;\
-#     NEXT-TERMINAL=<...>;CROSSOP-CONTENT=<closed|open>;ROLLBACK=<n/a>
+# Machine verdict contract (the evaluator is scripts/
+# release-2.4-r7-p21b-verdict.sh — fail-closed, row-by-row):
+#   R7-P21B-VERDICT=DECISION=P21B-MEASURED|P21B-FAIL|P21B-BLOCKED;\
+#     SCOPE=<six-names-ok|not-established>;\
+#     ARBITRARY-NAME-KEEPS-MEMFD=<yes|no>;MEMFD=<intact|regressed>;\
+#     CROSSOP-CONTENT=<closed|open>;NEXT-TERMINAL=<...>
 
 set -uo pipefail
 
@@ -115,6 +118,8 @@ log "=== section 2: candidate install (rpm) ==="
 rpm -q docker-helper >/dev/null 2>&1 && rpm -e docker-helper >/dev/null 2>&1 || true
 rpm -i "$ARTIFACT" || fail "rpm -i failed"
 log "RPM installed: $(rpm -q docker-helper)"
+sha256sum "$ARTIFACT" > "$EVIDENCE_DIR/candidate-rpm-sha256.log"
+log "candidate RPM sha256: $(cat "$EVIDENCE_DIR/candidate-rpm-sha256.log")"
 PRINCIPAL="${SUDO_USER:-}"
 [ -n "$PRINCIPAL" ] && [ "$PRINCIPAL" != "root" ] || fail "cannot derive non-root principal"
 PRINCIPAL_HOME="$(getent passwd "$PRINCIPAL" | cut -d: -f6)"
@@ -303,6 +308,10 @@ DEVNODE="system_u:object_r:docker_helper_devnode_t:s0"
 MEMFD="system_u:object_r:docker_helper_runc_memfd_t:s0"
 
 create_matrix() { # <suffix>
+  # The matrix the gate evaluator validates row-by-row (16 required rows):
+  # all six basenames for BOTH operation categories (the diversion), the
+  # arbitrary-basename control and the name=NULL (memfd) control for BOTH
+  # categories (the bare transition), and the unconfined controls.
   "$EVIDENCE_DIR/p21b_create_probe" \
     "$BKD_CTX" "$TMPFS_CTX" file null \
     "$BKD_CTX" "$TMPFS_CTX" file zero \
@@ -310,9 +319,15 @@ create_matrix() { # <suffix>
     "$BKD_CTX" "$TMPFS_CTX" file random \
     "$BKD_CTX" "$TMPFS_CTX" file urandom \
     "$BKD_CTX" "$TMPFS_CTX" file tty \
+    "$BKD_C2" "$TMPFS_CTX" file null \
+    "$BKD_C2" "$TMPFS_CTX" file zero \
+    "$BKD_C2" "$TMPFS_CTX" file full \
+    "$BKD_C2" "$TMPFS_CTX" file random \
+    "$BKD_C2" "$TMPFS_CTX" file urandom \
+    "$BKD_C2" "$TMPFS_CTX" file tty \
     "$BKD_CTX" "$TMPFS_CTX" file someothername \
     "$BKD_CTX" "$TMPFS_CTX" file - \
-    "$BKD_C2" "$TMPFS_CTX" file null \
+    "$BKD_C2" "$TMPFS_CTX" file someothername \
     "$BKD_C2" "$TMPFS_CTX" file - \
     "$UNCONF_CTX" "$TMPFS_CTX" file null \
     "$UNCONF_CTX" "$TMPFS_CTX" file - \
@@ -437,33 +452,20 @@ touch "$STATE_DIR/sec6"
 fi
 
 # ============================================================================
-# Machine verdict
+# Machine verdict — the standalone fail-closed evaluator is the single
+# authority (mirrors the B′ guest/driver contract): the guest only runs it
+# and records its verdict; the driver gates on DECISION=P21B-MEASURED.
 # ============================================================================
-SCOPE="six-names-ok"
-if ! grep -aq 'docker_helper_devnode_t:s0' "$EVIDENCE_DIR/create-matrix-before.log" 2>/dev/null; then
-  SCOPE="drift"
+if [ -r /tmp/r7-diag/release-2.4-r7-p21b-verdict.sh ]; then
+  bash /tmp/r7-diag/release-2.4-r7-p21b-verdict.sh "$EVIDENCE_DIR" \
+    > "$EVIDENCE_DIR/p21b-verdict.log" 2>&1
+  VERDICT_RC=$?
+  log "p21b evaluator exit=$VERDICT_RC"
+  cat "$EVIDENCE_DIR/p21b-verdict.log"
+else
+  log "verdict evaluator missing from /tmp/r7-diag; recording BLOCKED"
+  printf 'R7-P21B-VERDICT=DECISION=P21B-BLOCKED;REASON=evaluator-script-missing\n' \
+    > "$EVIDENCE_DIR/p21b-verdict.log"
+  cat "$EVIDENCE_DIR/p21b-verdict.log"
 fi
-N_OK="$(grep -ac 'x docker_helper_devnode_t' "$EVIDENCE_DIR/create-matrix-before.log" 2>/dev/null || echo 0)"
-if [ "${N_OK:-0}" -lt 6 ] 2>/dev/null; then SCOPE="drift"; fi
-ARBITRARY_OK="no"
-grep -aq 'x docker_helper_runc_memfd_t:s0' "$EVIDENCE_DIR/create-matrix-before.log" 2>/dev/null && ARBITRARY_OK="yes"
-MEMFD="intact"
-if grep -aq '{ create }' "$EVIDENCE_DIR/p21b-avc-c1.log" 2>/dev/null \
-   && grep -ah '{ create }' "$EVIDENCE_DIR/p21b-avc-c1.log" "$EVIDENCE_DIR/p21b-avc-c2.log" 2>/dev/null \
-      | grep -aq 'docker_helper_runc_memfd_t'; then
-  MEMFD="regressed"
-fi
-CROSSOP_CONTENT="closed"
-if awk '/CROSS-OP/{f=1} f && / (write|open|read|execute) /{if ($0 ~ /ALLOW/) {print; exit}}' \
-     "$EVIDENCE_DIR/av-matrix-before.log" 2>/dev/null | grep -q ALLOW; then
-  CROSSOP_CONTENT="open"
-fi
-NEXT_TERMINAL="(none)"
-DEV_AVC="$(grep -ah 'runc:\[2:INIT\]' "$EVIDENCE_DIR/p21b-avc-c1.log" 2>/dev/null | grep -a 'docker_helper_devnode_t' | head -1 || true)"
-if [ -n "$DEV_AVC" ]; then
-  NEXT_TERMINAL="$DEV_AVC"
-fi
-
-printf 'R7-P21B-VERDICT=SCOPE=%s;ARBITRARY-NAME-KEEPS-MEMFD=%s;MEMFD=%s;CROSSOP-CONTENT=%s;NEXT-TERMINAL=<%s>\n' \
-  "$SCOPE" "$ARBITRARY_OK" "$MEMFD" "$CROSSOP_CONTENT" "$NEXT_TERMINAL"
 exit 0
