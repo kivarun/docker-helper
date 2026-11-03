@@ -9,14 +9,16 @@ import (
 )
 
 // R7 P21-B gate evaluator regression fixtures (the r7-p21b-corrective
-// task): the fail-closed classification is proven against the REAL
+// tasks): the fail-closed classification is proven against the REAL
 // diagnostic output lines captured by enforcing run 41623047086 (the
 // create-decision matrix and the kernel-AV matrix of the accepted E1
-// candidate), plus synthetic mutations for every fail-closed branch —
-// including the "0\n0" grep-artifact shape that defeated the replaced
-// count-based classifier. The evaluator (scripts/
-// release-2.4-r7-p21b-verdict.sh) is the single authority for the
-// machine-readable verdict; no test reimplements its semantics.
+// candidate) and run 41648049864 (the live-flow terminal records, whose
+// exact format defines the evaluator's strict terminal matcher), plus
+// synthetic mutations for every fail-closed branch — including the
+// "0\n0" grep-artifact shape that defeated the replaced count-based
+// classifier. The evaluator (scripts/release-2.4-r7-p21b-verdict.sh) is
+// the single authority for the machine-readable verdict; no test
+// reimplements its semantics.
 
 const (
 	p21bC1      = "system_u:system_r:docker_helper_buildkitd_t:s0:c1"
@@ -98,17 +100,22 @@ func p21bGreenAV() []string {
 }
 
 // p21bGreenTerminals returns the real live-flow window records of run
-// 41623047086 (serials 1166-1168 and 1793-1795): the recorded
+// 41648049864 (serials 1188-1190 and 1815-1817, verbatim): the recorded
 // docker_helper_devnode_t:file { read open } next terminal for both
-// windows, and the three EMPTY regression-control sections.
+// windows, and the three EMPTY regression-control sections. These real
+// records define the format the evaluator's strict terminal matcher must
+// accept.
 func p21bGreenTerminals() string {
 	return `== devnode-terminal runc-init AVCs (both windows) ==
-type=AVC msg=audit(1793703417.980:1166): avc:  denied  { setuid } for  pid=3261 comm="runc:[2:INIT]" capability=7  scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns permissive=0
-type=AVC msg=audit(1793703417.981:1167): avc:  denied  { setgid } for  pid=3261 comm="runc:[2:INIT]" capability=6  scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns permissive=0
-type=AVC msg=audit(1793703417.986:1168): avc:  denied  { read open } for  pid=3261 comm="runc:[2:INIT]" path="/var/lib/docker-helper-builder/ops/op_a44f535d2da1de6c18970cdeb750ef20/root/runc-native/executor/6chlzxb27bzkq49angn8crxx3/rootfs/dev/null" dev="tmpfs" ino=5 scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file permissive=0
-type=AVC msg=audit(1793703419.665:1793): avc:  denied  { setuid } for  pid=3394 comm="runc:[2:INIT]" capability=7  scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns permissive=0
-type=AVC msg=audit(1793703419.665:1794): avc:  denied  { setgid } for  pid=3394 comm="runc:[2:INIT]" capability=6  scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns permissive=0
-type=AVC msg=audit(1793703419.671:1795): avc:  denied  { read open } for  pid=3394 comm="runc:[2:INIT]" path="/var/lib/docker-helper-builder/ops/op_6290f1defbd2a250eec56a76758c231d/root/runc-native/executor/hwz86gix3u404ngdnixi0u4xb/rootfs/dev/null" dev="tmpfs" ino=5 scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file permissive=0
+type=AVC msg=audit(1793714070.810:1188): avc:  denied  { setuid } for  pid=3288 comm="runc:[2:INIT]" capability=7  scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns permissive=0
+type=AVC msg=audit(1793714070.810:1189): avc:  denied  { setgid } for  pid=3288 comm="runc:[2:INIT]" capability=6  scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns permissive=0
+type=AVC msg=audit(1793714070.816:1190): avc:  denied  { read open } for  pid=3288 comm="runc:[2:INIT]" path="/var/lib/docker-helper-builder/ops/op_557f5cc38c677ba14475b5dd2f88dbaa/root/runc-native/executor/6jinf8i9db2cl6rsdw8zcony9/rootfs/dev/null" dev="tmpfs" ino=5 scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file permissive=0
+type=AVC msg=audit(1793714070.810:1188): avc:  denied  { setuid } for  pid=3288 comm="runc:[2:INIT]" capability=7  scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns permissive=0
+type=AVC msg=audit(1793714070.810:1189): avc:  denied  { setgid } for  pid=3288 comm="runc:[2:INIT]" capability=6  scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns permissive=0
+type=AVC msg=audit(1793714070.816:1190): avc:  denied  { read open } for  pid=3288 comm="runc:[2:INIT]" path="/var/lib/docker-helper-builder/ops/op_557f5cc38c677ba14475b5dd2f88dbaa/root/runc-native/executor/6jinf8i9db2cl6rsdw8zcony9/rootfs/dev/null" dev="tmpfs" ino=5 scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file permissive=0
+type=AVC msg=audit(1793714072.887:1815): avc:  denied  { setuid } for  pid=3424 comm="runc:[2:INIT]" capability=7  scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns permissive=0
+type=AVC msg=audit(1793714072.887:1816): avc:  denied  { setgid } for  pid=3424 comm="runc:[2:INIT]" capability=6  scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns permissive=0
+type=AVC msg=audit(1793714072.893:1817): avc:  denied  { read open } for  pid=3424 comm="runc:[2:INIT]" path="/var/lib/docker-helper-builder/ops/op_349ddf17ce6f9448f30d8c2ffad0c32f/root/runc-native/executor/ygn48dtxodtbs22evtqnhhktx/rootfs/dev/null" dev="tmpfs" ino=5 scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file permissive=0
 == regression controls (must be EMPTY) ==
 -- P20 terminal (runc_memfd_t:file create) --
 -- pre-B terminal (tmpfs_t:file write) --
@@ -306,6 +313,51 @@ func TestR7P21BVerdictMatrixMutationsFailClosed(t *testing.T) {
 	}
 }
 
+// TestR7P21BVerdictMatrixStructureMutationsFailClosed proves the FULL row
+// structure is part of the requirement: a row whose RESULT alone would
+// look right is still rejected when its parent (target) context, class,
+// source context, or name is wrong — no partial-structure acceptance.
+func TestR7P21BVerdictMatrixStructureMutationsFailClosed(t *testing.T) {
+	mutations := []struct {
+		name    string
+		corrupt func(string) string
+	}{
+		{"wrong parent context, result still devnode_t", func(r string) string {
+			return strings.Replace(r,
+				"CREATE "+p21bC1+" x "+p21bTmpfs+" x file [null] -> "+p21bDevnode,
+				"CREATE "+p21bC1+" x system_u:object_r:builder_runtime_t:s0 x file [null] -> "+p21bDevnode, 1)
+		}},
+		{"wrong class, result still devnode_t", func(r string) string {
+			return strings.Replace(r,
+				"CREATE "+p21bC1+" x "+p21bTmpfs+" x file [null] -> "+p21bDevnode,
+				"CREATE "+p21bC1+" x "+p21bTmpfs+" x dir [null] -> "+p21bDevnode, 1)
+		}},
+		{"wrong source context, right name and result", func(r string) string {
+			return strings.Replace(r,
+				"CREATE "+p21bC1+" x "+p21bTmpfs+" x file [null] -> "+p21bDevnode,
+				"CREATE system_u:system_r:docker_helper_t:s0:c1 x "+p21bTmpfs+" x file [null] -> "+p21bDevnode, 1)
+		}},
+		{"wrong name, right result", func(r string) string {
+			return strings.Replace(r,
+				"CREATE "+p21bC1+" x "+p21bTmpfs+" x file [null] -> "+p21bDevnode,
+				"CREATE "+p21bC1+" x "+p21bTmpfs+" x file [nul] -> "+p21bDevnode, 1)
+		}},
+		{"wrong result", func(r string) string {
+			return strings.Replace(r,
+				"CREATE "+p21bC1+" x "+p21bTmpfs+" x file [null] -> "+p21bDevnode,
+				"CREATE "+p21bC1+" x "+p21bTmpfs+" x file [null] -> "+p21bMemfd, 1)
+		}},
+	}
+	for _, mut := range mutations {
+		dir := p21bWriteEvidence(t, mut.corrupt(strings.Join(p21bGreenMatrix(), "\n")+"\n"),
+			strings.Join(p21bGreenAV(), "\n")+"\n", p21bGreenTerminals())
+		line, rc := p21bRunEvaluator(t, dir)
+		if rc == 0 || strings.Contains(line, "DECISION=P21B-MEASURED") {
+			t.Errorf("mutation %q must fail closed, got rc=%d: %s", mut.name, rc, line)
+		}
+	}
+}
+
 // TestR7P21BVerdictAVMutationsFailClosed proves the AV-matrix branches:
 // any content permission ALLOW for either operation category, any missing
 // or duplicated row, an associate flip, and an unparseable row fail closed.
@@ -414,6 +466,91 @@ func TestR7P21BVerdictTerminalMutationsFailClosed(t *testing.T) {
 	}
 }
 
+// TestR7P21BVerdictTerminalRecordMutationsFailClosed proves the strict
+// terminal matcher: an arbitrary AVC carrying the same type is NOT
+// accepted as the required terminal. Each mutation corrupts EVERY terminal
+// record (both windows) of the real run-41648049864 shape; the flow then
+// has no correctly formed terminal record and must decide BLOCKED, never
+// MEASURED.
+func TestR7P21BVerdictTerminalRecordMutationsFailClosed(t *testing.T) {
+	realTerminal := `type=AVC msg=audit(1793714070.816:1190): avc:  denied  { read open } for  pid=3288 comm="runc:[2:INIT]" path="/var/lib/docker-helper-builder/ops/op_557f5cc38c677ba14475b5dd2f88dbaa/root/runc-native/executor/6jinf8i9db2cl6rsdw8zcony9/rootfs/dev/null" dev="tmpfs" ino=5 scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file permissive=0`
+	mutations := []struct {
+		name    string
+		corrupt func(string) string
+	}{
+		{"extra permission in the pair", func(p string) string {
+			return strings.ReplaceAll(p, "denied  { read open }", "denied  { read open map }")
+		}},
+		{"permissive=1", func(p string) string {
+			return strings.ReplaceAll(p, "tclass=file permissive=0", "tclass=file permissive=1")
+		}},
+		{"unconfined source context", func(p string) string {
+			return strings.ReplaceAll(p, "scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=",
+				"scontext=unconfined_u:unconfined_r:unconfined_t:s0-s0:c0.c1023 tcontext=")
+		}},
+		{"runc_memfd_t target context", func(p string) string {
+			return strings.ReplaceAll(p, "tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=",
+				"tcontext=system_u:object_r:docker_helper_runc_memfd_t:s0 tclass=")
+		}},
+		{"wrong class", func(p string) string {
+			return strings.ReplaceAll(p, "tclass=file permissive", "tclass=chr_file permissive")
+		}},
+		{"path outside the per-operation tree", func(p string) string {
+			return strings.ReplaceAll(p, "/rootfs/dev/null", "/tmp/dev/null")
+		}},
+		{"only the read permission of the pair", func(p string) string {
+			return strings.ReplaceAll(p, "denied  { read open }", "denied  { read }")
+		}},
+	}
+	for _, mut := range mutations {
+		mutated := mut.corrupt(p21bGreenTerminals())
+		if mutated == p21bGreenTerminals() {
+			t.Fatalf("mutation %q must corrupt at least one terminal record", mut.name)
+		}
+		if strings.Contains(mut.corrupt(realTerminal), realTerminal) && mut.name != "only the read permission of the pair" {
+			t.Fatalf("mutation %q must corrupt the canonical real terminal record", mut.name)
+		}
+		dir := p21bWriteEvidence(t, strings.Join(p21bGreenMatrix(), "\n")+"\n",
+			strings.Join(p21bGreenAV(), "\n")+"\n", mutated)
+		line, rc := p21bRunEvaluator(t, dir)
+		if rc == 0 || !strings.Contains(line, "DECISION=P21B-BLOCKED") {
+			t.Errorf("mutation %q must decide BLOCKED (no correctly formed terminal record), got rc=%d: %s", mut.name, rc, line)
+		}
+	}
+}
+
+// TestR7P21BVerdictRegressionSectionHeadersFailClosed proves the
+// regression-control sections are mandatory evidence: a missing section
+// header decides BLOCKED (damaged or truncated evidence can never be
+// MEASURED), a duplicated header decides FAIL (ambiguous evidence), and a
+// missing devnode-terminal section header also decides BLOCKED.
+func TestR7P21BVerdictRegressionSectionHeadersFailClosed(t *testing.T) {
+	headers := []string{
+		"-- P20 terminal (runc_memfd_t:file create) --",
+		"-- pre-B terminal (tmpfs_t:file write) --",
+		"-- associate denials (must be EMPTY — the singleton is granted) --",
+		"== devnode-terminal runc-init AVCs (both windows) ==",
+	}
+	for _, header := range headers {
+		missing := strings.Replace(p21bGreenTerminals(), header+"\n", "", 1)
+		dir := p21bWriteEvidence(t, strings.Join(p21bGreenMatrix(), "\n")+"\n",
+			strings.Join(p21bGreenAV(), "\n")+"\n", missing)
+		line, rc := p21bRunEvaluator(t, dir)
+		if rc == 0 || !strings.Contains(line, "DECISION=P21B-BLOCKED") {
+			t.Errorf("missing header %q must decide BLOCKED, got rc=%d: %s", header, rc, line)
+		}
+	}
+	for _, header := range headers[:3] {
+		duplicated := strings.Replace(p21bGreenTerminals(), header+"\n", header+"\n"+header+"\n", 1)
+		dir := p21bWriteEvidence(t, strings.Join(p21bGreenMatrix(), "\n")+"\n",
+			strings.Join(p21bGreenAV(), "\n")+"\n", duplicated)
+		line, rc := p21bRunEvaluator(t, dir)
+		if rc == 0 || !strings.Contains(line, "DECISION=P21B-FAIL") {
+			t.Errorf("duplicated header %q must decide FAIL, got rc=%d: %s", header, rc, line)
+		}
+	}
+}
+
 // TestR7P21BVerdictMissingEvidenceFilesBlock pins the file-level fail-closed
 // branch: a missing or empty required evidence file can never produce a
 // passing decision, and a missing evaluator input directory is BLOCKED.
@@ -437,16 +574,36 @@ func TestR7P21BVerdictMissingEvidenceFilesBlock(t *testing.T) {
 }
 
 // TestR7P21BVerdictGateMode pins the driver-side gate: exit 0 iff the
-// verdict line carries DECISION=P21B-MEASURED.
+// argument is EXACTLY ONE correctly formed R7-P21B-VERDICT line whose
+// first field is the single DECISION=P21B-MEASURED — a verdict whose
+// DECISION is not P21B-MEASURED, a second DECISION field, the MEASURED
+// literal as a substring of another field's value, a malformed prefix, a
+// truncated line, an empty/trailing field, an unknown field, or a
+// missing/placeholder/corrupted NEXT-TERMINAL is rejected.
 func TestR7P21BVerdictGateMode(t *testing.T) {
-	if rc := exec.Command("bash", "scripts/release-2.4-r7-p21b-verdict.sh", "--gate",
-		"R7-P21B-VERDICT=DECISION=P21B-MEASURED;SCOPE=six-names-ok").Run(); rc != nil {
-		t.Errorf("--gate must accept DECISION=P21B-MEASURED: %v", rc)
+	accepted := "R7-P21B-VERDICT=DECISION=P21B-MEASURED;SCOPE=six-names-ok;ARBITRARY-NAME-KEEPS-MEMFD=yes;MEMFD=intact;CROSSOP-CONTENT=closed;NEXT-TERMINAL=<type=AVC msg=audit(1793714070.816:1190): avc:  denied  { read open } for  pid=3288 comm=\"runc:[2:INIT]\" path=\"/var/lib/docker-helper-builder/ops/op_557f5cc38c677ba14475b5dd2f88dbaa/root/runc-native/executor/6jinf8i9db2cl6rsdw8zcony9/rootfs/dev/null\" scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file permissive=0>"
+	if rc := exec.Command("bash", "scripts/release-2.4-r7-p21b-verdict.sh", "--gate", accepted).Run(); rc != nil {
+		t.Errorf("--gate must accept a correctly formed MEASURED verdict line: %v", rc)
 	}
 	for _, bad := range []string{
+		"R7-P21B-VERDICT=DECISION=P21B-FAIL;NOTE=DECISION=P21B-MEASURED",
+		"R7-P21B-VERDICT=DECISION=P21B-BLOCKED;DECISION=P21B-MEASURED",
+		"R7-P21B-VERDICT=DECISION=P21B-MEASURED;DECISION=P21B-FAIL",
 		"R7-P21B-VERDICT=DECISION=P21B-FAIL;SCOPE=not-established",
 		"R7-P21B-VERDICT=DECISION=P21B-BLOCKED;REASON=no-evidence-dir",
 		"R7-P21B-VERDICT=SCOPE=six-names-ok",
+		"XR7-P21B-VERDICT=DECISION=P21B-MEASURED;SCOPE=six-names-ok",
+		"R7-P21B-VERDICTX=DECISION=P21B-MEASURED;SCOPE=six-names-ok",
+		"R7-P21B-VERDICT=DECISION=P21B-MEAS",
+		"R7-P21B-VERDICT=DECISION=P21B-MEASURED",
+		"R7-P21B-VERDICT=DECISION=P21B-MEASURED;SCOPE=six-names-ok",
+		"R7-P21B-VERDICT=DECISION=P21B-MEASURED;SCOPE=six-names-ok;;",
+		"R7-P21B-VERDICT=DECISION=P21B-MEASURED;SCOPE=six-names-ok;",
+		"R7-P21B-VERDICT=DECISION=P21B-MEASURED;SCOPE=six-names-ok;JUNK",
+		"R7-P21B-VERDICT=DECISION=P21B-MEASURED;SCOPE=six-names-ok;UNEXPECTED-FIELD=1",
+		"R7-P21B-VERDICT=DECISION=P21B-MEASURED;NEXT-TERMINAL=<(none)>",
+		"R7-P21B-VERDICT=DECISION=P21B-MEASURED;NEXT-TERMINAL=<type=AVC line;broken=field>",
+		"R7-P21B-VERDICT=DECISION=P21B-MEASURED;SCOPE=six-names-ok;ARBITRARY-NAME-KEEPS-MEMFD=yes;MEMFD=intact;CROSSOP-CONTENT=closed",
 	} {
 		if rc := exec.Command("bash", "scripts/release-2.4-r7-p21b-verdict.sh", "--gate", bad).Run(); rc == nil {
 			t.Errorf("--gate must reject %q", bad)

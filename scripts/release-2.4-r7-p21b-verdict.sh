@@ -15,7 +15,12 @@
 #     per-row classification to <evidence-dir>/p21b-classification.log.
 #     Exit codes: 0 = P21B-MEASURED, 1 = P21B-FAIL, 2 = P21B-BLOCKED.
 #   release-2.4-r7-p21b-verdict.sh --gate <verdict-line>
-#     Exit 0 iff the line's DECISION is P21B-MEASURED (the workflow gate).
+#     Exit 0 iff the argument is EXACTLY ONE correctly formed
+#     R7-P21B-VERDICT line whose FIRST field is the single
+#     DECISION=P21B-MEASURED — no second DECISION field, no DECISION
+#     substring inside another field's value, no malformed prefix, no
+#     truncated or empty fields, and (for a MEASURED decision) a real
+#     NEXT-TERMINAL record (the workflow gate).
 #
 # Decision precedence (mirrors the B′ evaluator): FAIL (a positive
 # violation was proven) beats BLOCKED (required evidence missing, empty,
@@ -47,10 +52,33 @@
 set -uo pipefail
 
 if [ "${1:-}" = "--gate" ]; then
-  case "${2:-}" in
-    *DECISION=P21B-MEASURED*) exit 0 ;;
+  line="${2:-}"
+  # The gate accepts EXACTLY ONE correctly formed R7-P21B-VERDICT line:
+  #   - the fixed prefix R7-P21B-VERDICT=DECISION=P21B-MEASURED; — a
+  #     different decision, a malformed prefix, or a truncated line never
+  #     passes, and the MEASURED literal appearing as a substring of
+  #     another field's value does not satisfy the prefix;
+  #   - no second DECISION field;
+  #   - no empty or trailing field, no apostrophe, no newline;
+  #   - exactly the evaluator's field grammar, in the evaluator's field
+  #     order — SCOPE, ARBITRARY-NAME-KEEPS-MEMFD, MEMFD, CROSSOP-CONTENT —
+  #     followed by a real NEXT-TERMINAL record (never the empty or
+  #     "(none)" placeholder, never a value corrupted across a field
+  #     separator).
+  case "$line" in
+    *"'"*|*$'\n'*) exit 1 ;;
+    R7-P21B-VERDICT=DECISION=P21B-MEASURED\;*) : ;;
     *) exit 1 ;;
   esac
+  tail="${line#R7-P21B-VERDICT=DECISION=P21B-MEASURED;}"
+  case "$tail" in *DECISION=*) exit 1 ;; esac
+  case "$tail" in *';;'*) exit 1 ;; esac
+  case "$tail" in *';') exit 1 ;; esac
+  # The evaluator's fixed field grammar, in its fixed field order, ending
+  # in a real NEXT-TERMINAL record whose value contains no field separator.
+  GATE_RE='^SCOPE=[a-z-]+;ARBITRARY-NAME-KEEPS-MEMFD=(yes|no);MEMFD=(intact|regressed);CROSSOP-CONTENT=(closed|open);NEXT-TERMINAL=<type=AVC [^;]*>$'
+  [[ "$tail" =~ $GATE_RE ]] || exit 1
+  exit 0
 fi
 
 DIR="${1:-}"
@@ -86,11 +114,14 @@ require_file() { # <name>
 
 # ---------------------------------------------------------------------------
 # 1. The create-decision matrix: every required transition checked
-#    individually, exactly once, against its exact expected result.
+#    individually, exactly once, against its exact FULL expected structure —
+#    source context, parent (target) context, class, name, AND result. A
+#    row whose RESULT alone would look right is still rejected when its
+#    source, parent context, or class is wrong.
 # ---------------------------------------------------------------------------
 MATRIX="$DIR/create-matrix-before.log"
 if require_file create-matrix-before.log; then
-  SCOPE_ROW_FAILS="$(awk -v C1="$C1" -v C2="$C2" -v UN="$UN" -v DEV="$DEV" -v MEM="$MEM" -v UNRES="$UNRES" '
+  SCOPE_ROW_FAILS="$(awk -v C1="$C1" -v C2="$C2" -v UN="$UN" -v DEV="$DEV" -v MEM="$MEM" -v UNRES="$UNRES" -v TMP="$TMP" '
     BEGIN {
       split("null zero full random urandom tty", NAMES, " ")
       for (i = 1; i <= 6; i++) {
@@ -109,6 +140,14 @@ if require_file create-matrix-before.log; then
         next
       }
       n = split(line, f, " ")
+      # The FULL structure is part of the requirement: the row grammar
+      # already fixed f[1]="CREATE", f[8]="->", f[9]=result; the parent
+      # context, the "x" separators, and the file class are checked here.
+      if (f[3] != "x" || f[4] != TMP || f[5] != "x" || f[6] != "file") {
+        printf "STRUCTURE-ROW\t%s (parent=%s class=%s)\n", line, f[4], f[6]
+        viol = 1
+        next
+      }
       name = f[7]; gsub(/^\[/, "", name); gsub(/\]$/, "", name)
       key = f[2] "|" name
       cnt[key]++
@@ -211,37 +250,77 @@ if require_file av-matrix-before.log; then
 fi
 
 # ---------------------------------------------------------------------------
-# 3. The live-flow windows: the recorded next terminal and the empty
-#    regression-control sections.
+# 3. The live-flow windows: the recorded next terminal (FULL record
+#    structure required — the exact { read open } permission pair,
+#    permissive=0, the buildkitd_t:s0:cX source context, the devnode_t:s0
+#    target context, the file class, and a per-operation-tree
+#    /rootfs/dev/null path) and the mandatory regression-control sections.
 # ---------------------------------------------------------------------------
 TERM="$DIR/p21b-terminals.log"
 NEXT_TERMINAL="(none)"
 if require_file p21b-terminals.log; then
-  DEV_TERMINAL="$(awk '
-    /^== devnode-terminal runc-init AVCs/ { sec = 1; next }
-    /^== / || /^-- / { if (sec) exit }
-    sec && /comm="runc:\[2:INIT\]"/ && /tcontext=system_u:object_r:docker_helper_devnode_t:s0/ && /tclass=file/ { print; exit }
-  ' "$TERM")"
-  if [ -n "$DEV_TERMINAL" ]; then
-    NEXT_TERMINAL="$DEV_TERMINAL"
-    printf 'TERMINAL-OK\t%s\n' "$DEV_TERMINAL" >> "$CLASS_LOG"
-  else
-    note BLOCKED "terminals: no comm=runc:[2:INIT] tclass=file record carrying tcontext=docker_helper_devnode_t:s0 (the flow never reached the devnode terminal)"
-  fi
-  # Each regression-control section must be EMPTY: a non-empty section is a
-  # positive violation (the exact denial family reappeared).
-  for secname in 'P20 terminal' 'pre-B terminal' 'associate denials'; do
-    SEC_BODY="$(awk -v want="$secname" '
-      index($0, "-- " want " ") == 1 { sec = 1; next }
+  # Section headers are mandatory and must be unambiguous: a missing header
+  # is incomplete evidence (BLOCKED); a duplicated header is ambiguous
+  # evidence (FAIL).
+  check_header() { # <header-line> <label>
+    local n
+    n="$(grep -Fc -- "$1" "$TERM" || true)"
+    case "$n" in
+      1) return 0 ;;
+      0) note BLOCKED "terminals: the required section header for '$2' is missing (damaged or truncated evidence)"; return 1 ;;
+      *) note FAIL "terminals: the section header for '$2' appears $n times (ambiguous evidence)"; return 1 ;;
+    esac
+  }
+  DEV_HEADER_OK=1
+  check_header '== devnode-terminal runc-init AVCs (both windows) ==' 'devnode terminal' || DEV_HEADER_OK=0
+  CTRL_HEADERS_OK=1
+  check_header '== regression controls (must be EMPTY) ==' 'regression controls' || CTRL_HEADERS_OK=0
+  check_header '-- P20 terminal (runc_memfd_t:file create) --' 'P20 terminal' || CTRL_HEADERS_OK=0
+  check_header '-- pre-B terminal (tmpfs_t:file write) --' 'pre-B terminal' || CTRL_HEADERS_OK=0
+  check_header '-- associate denials (must be EMPTY — the singleton is granted) --' 'associate denials' || CTRL_HEADERS_OK=0
+
+  if [ "$DEV_HEADER_OK" = 1 ]; then
+    # The terminal record must match the FULL measured shape (the real
+    # serials 1190/1817 of run 41648049864 define the format): the exact
+    # "denied  { read open }" permission pair, permissive=0, the
+    # buildkitd_t:s0:cX source context, the devnode_t:s0 target context,
+    # tclass=file, and a per-operation-tree /rootfs/dev/null path. An
+    # arbitrary AVC on the same type is NOT accepted as the terminal.
+    DEV_TERMINAL="$(awk '
+      /^== devnode-terminal runc-init AVCs/ { sec = 1; next }
       /^== / || /^-- / { if (sec) exit }
-      sec && NF { print }
+      sec &&
+        /avc:  denied  \{ read open \} / &&
+        /permissive=0/ &&
+        /scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c[0-9]+ tcontext=/ &&
+        /tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file / &&
+        /comm="runc:\[2:INIT\]"/ &&
+        /path="[^"]*\/ops\/op_[^"]*\/rootfs\/dev\/null"/ { print; exit }
     ' "$TERM")"
-    if [ -n "$SEC_BODY" ]; then
-      note FAIL "REGRESSION-CONTROL-REAPPEARED ${secname}: $SEC_BODY"
+    if [ -n "$DEV_TERMINAL" ]; then
+      NEXT_TERMINAL="$DEV_TERMINAL"
+      printf 'TERMINAL-OK\t%s\n' "$DEV_TERMINAL" >> "$CLASS_LOG"
     else
-      printf 'CONTROL-OK\t%s (empty)\n' "$secname" >> "$CLASS_LOG"
+      note BLOCKED "terminals: no record matching the FULL measured terminal shape (denied { read open }, permissive=0, scontext=buildkitd_t:s0:cX, tcontext=docker_helper_devnode_t:s0, tclass=file, comm=runc:[2:INIT], per-op rootfs/dev/null path) — an arbitrary same-type AVC is not accepted"
     fi
-  done
+  fi
+  # Each regression-control section must be present (checked above) and
+  # EMPTY: a non-empty section is a positive violation (the exact denial
+  # family reappeared).
+  if [ "$CTRL_HEADERS_OK" = 1 ]; then
+    for secname in 'P20 terminal' 'pre-B terminal' 'associate denials'; do
+      SEC_BODY="$(awk -v want="$secname" '
+        index($0, "-- " want " ") == 1 { sec = 1; next }
+        /^== / || /^-- / { if (sec) exit }
+        sec && NF { print }
+      ' "$TERM")"
+      if [ -n "$SEC_BODY" ]; then
+        note FAIL "REGRESSION-CONTROL-REAPPEARED ${secname}: $SEC_BODY"
+      else
+        printf 'CONTROL-OK\t%s (empty)\n' "$secname" >> "$CLASS_LOG"
+      fi
+    done
+  fi
 fi
 
 # ---------------------------------------------------------------------------
