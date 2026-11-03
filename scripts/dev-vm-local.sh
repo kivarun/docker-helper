@@ -280,35 +280,103 @@ cmd_ssh() {
   fi
 }
 
-# scp uses the canonical vm_scp transport. ':' marks the guest endpoint;
-# local relative paths must be anchored BEFORE vm_attach changes $PWD.
+# scp uses the canonical VM SSH transport. ':' marks the guest endpoint.
+# The optional --user performs guest file access as that user via sudo -n,
+# while the SSH login remains opc; guest agent intentionally has no SSH key.
 cmd_scp() {
-  local caller_pwd="$PWD" src dst
+  local caller_pwd="$PWD" src dst remote_user="$VM_USER" guest_path local_path
   local -a scp_opts=()
-  if [ "${1:-}" = '-r' ]; then
-    scp_opts=(-r)
-    shift
-  fi
-  [ "$#" -eq 2 ] || fail "scp: usage: scp [-r] <local> :<guest> | scp [-r] :<guest> <local>"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -r) scp_opts=(-r); shift ;;
+      -u|--user)
+        [ "$#" -ge 2 ] || fail "scp: missing username for $1"
+        remote_user="$2"; shift 2 ;;
+      --user=*) remote_user="${1#--user=}"; shift ;;
+      --) shift; break ;;
+      *) break ;;
+    esac
+  done
+  [ "$#" -eq 2 ] || fail "scp: usage: scp [-r] [-u USER] <local> :<guest> | scp [-r] [-u USER] :<guest> <local>"
   src="$1"
   dst="$2"
+  [[ "$remote_user" =~ ^[a-z_][a-z0-9_-]*\$?$ ]] \
+    || fail "scp: invalid guest username"
   if [[ "$src" == :* && "$dst" == :* ]] || [[ "$src" != :* && "$dst" != :* ]]; then
     fail "scp: exactly one endpoint must begin with ':' (guest path)"
   fi
   [ "$src" != ':' ] && [ "$dst" != ':' ] || fail "scp: empty guest path"
-  if [[ "$src" == :* ]]; then
-    src="${VM_USER}@127.0.0.1:${src#:}"
-  elif [[ "$src" != /* ]]; then
-    src="$caller_pwd/$src"
-  fi
-  if [[ "$dst" == :* ]]; then
-    dst="${VM_USER}@127.0.0.1:${dst#:}"
-  elif [[ "$dst" != /* ]]; then
-    dst="$caller_pwd/$dst"
-  fi
+  # Make local relative paths independent of vm_attach's cd to VM_WORKDIR.
+  if [[ "$src" != :* && "$src" != /* ]]; then src="$caller_pwd/$src"; fi
+  if [[ "$dst" != :* && "$dst" != /* ]]; then dst="$caller_pwd/$dst"; fi
   vm_attach
   vm_running || fail "VM is not running (run 'start')"
-  vm_scp "${scp_opts[@]}" "$src" "$dst"
+  if [ "$remote_user" = "$VM_USER" ]; then
+    if [[ "$src" == :* ]]; then
+      src="${VM_USER}@127.0.0.1:${src#:}"
+    else
+      dst="${VM_USER}@127.0.0.1:${dst#:}"
+    fi
+    vm_scp "${scp_opts[@]}" "$src" "$dst"
+    return
+  fi
+
+  # No direct SSH access is provisioned for the agent account. Impersonate
+  # only for the remote file operation; do not install another SSH key.
+  local q_path q_dir q_name q_dst filename remote_dir is_dir=0
+  if [[ "$src" == :* ]]; then
+    guest_path="${src#:}"
+    local_path="$dst"
+    [[ "$guest_path" == /* ]] || fail "scp -u: guest path must be absolute"
+    q_path="$(scp_shell_quote "$guest_path")"
+    if vm_ssh "sudo -n -u $remote_user test -d $q_path"; then is_dir=1; fi
+    if [ "$is_dir" -eq 1 ]; then
+      [ "${#scp_opts[@]}" -gt 0 ] || fail "scp -u: directory requires -r"
+      remote_dir="$(dirname -- "$guest_path")"
+      filename="$(basename -- "$guest_path")"
+      q_dir="$(scp_shell_quote "$remote_dir")"
+      q_name="$(scp_shell_quote "$filename")"
+      if [ -d "$local_path" ]; then
+        vm_ssh "sudo -n -u $remote_user tar -C $q_dir -cf - -- $q_name" | tar -xf - -C "$local_path"
+      else
+        [ -d "$(dirname -- "$local_path")" ] || fail "scp -u: local parent directory missing"
+        mkdir -- "$local_path" || return
+        vm_ssh "sudo -n -u $remote_user tar -C $q_dir -cf - -- $q_name" | tar -xf - -C "$local_path" --strip-components=1
+      fi
+    else
+      if [ -d "$local_path" ]; then local_path="${local_path%/}/$(basename -- "$guest_path")"; fi
+      vm_ssh "sudo -n -u $remote_user cat -- $q_path" > "$local_path"
+    fi
+  else
+    local_path="$src"
+    guest_path="${dst#:}"
+    [[ "$guest_path" == /* ]] || fail "scp -u: guest path must be absolute"
+    q_path="$(scp_shell_quote "$guest_path")"
+    if [ -d "$local_path" ]; then
+      [ "${#scp_opts[@]}" -gt 0 ] || fail "scp -u: directory requires -r"
+      remote_dir="$(dirname -- "$local_path")"
+      filename="$(basename -- "$local_path")"
+      q_dir="$(scp_shell_quote "$guest_path")"
+      # An existing remote directory is required for recursive upload.
+      vm_ssh "sudo -n -u $remote_user test -d $q_dir" \
+        || fail "scp -u: remote destination must be an existing directory"
+      tar -C "$remote_dir" -cf - -- "$filename" | vm_ssh "sudo -n -u $remote_user tar -C $q_dir -xf -"
+    else
+      [ -f "$local_path" ] || fail "scp -u: local source is not a regular file"
+      if vm_ssh "sudo -n -u $remote_user test -d $q_path"; then
+        guest_path="${guest_path%/}/$(basename -- "$local_path")"
+        q_path="$(scp_shell_quote "$guest_path")"
+      fi
+      vm_ssh "sudo -n -u $remote_user tee -- $q_path >/dev/null" < "$local_path"
+    fi
+  fi
+}
+
+# POSIX-shell quoting for guest path arguments passed to vm_ssh.
+scp_shell_quote() {
+  local quoted="$1"
+  quoted=${quoted//\'/\'\\\'\'}
+  printf "'%s'" "$quoted"
 }
 
 # _agent_shell_bootstrap — the agent-side bootstrap for `agent-shell`,
@@ -552,7 +620,7 @@ $PREFIX <operation>
   stop              gracefully power off the guest
   status            report lifecycle state
   ssh [cmd...]      interactive SSH, or run a remote command
-  scp [-r] SRC DST  copy to/from VM; guest paths begin with :
+  scp [-r] [-u USER] SRC DST  copy to/from VM; guest paths begin with :
   agent-shell       interactive shell as the agent account with LLM_SERVER
                     and LLM_KEY forwarded from the host environment (they
                     travel only through the SSH session; nothing is stored
