@@ -35,7 +35,8 @@ case "$R7_MODE" in
   mcs-audit) GUEST_SCRIPT='release-2.4-r7-mcs-audit-guest.sh' ;;
   exeseal) GUEST_SCRIPT='release-2.4-r7-exeseal-guest.sh' ;;
   bprime) GUEST_SCRIPT='release-2.4-r7-bprime-guest.sh' ;;
-  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime)" ;;
+  p21a) GUEST_SCRIPT='release-2.4-r7-p21a-guest.sh' ;;
+  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a)" ;;
 esac
 
 log()  { printf '%s %s\n' "$PREFIX" "$*"; }
@@ -146,6 +147,20 @@ RMT
       *)
         if [ "$attempt" -eq 3 ]; then
           fail "the R7 B′ probe produced no verdict (guest exit $GUEST_RC)"
+        fi
+        log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
+        ;;
+    esac
+  elif [ "$R7_MODE" = "p21a" ]; then
+    VERDICT="$(grep -aoE 'R7-P21A-VERDICT=.*' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"
+    case "$VERDICT" in
+      R7-P21A-VERDICT=*)
+        log "R7 P21-A probe verdict: $VERDICT"
+        break
+        ;;
+      *)
+        if [ "$attempt" -eq 3 ]; then
+          fail "the R7 P21-A probe produced no verdict (guest exit $GUEST_RC)"
         fi
         log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
         ;;
