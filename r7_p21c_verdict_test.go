@@ -9,22 +9,25 @@ import (
 	"testing"
 )
 
-// R7 P21-C gate evaluator regression fixtures, revision 2 (the
-// r7-p21c-corrective-1 task): the fail-closed classification now requires
-// TWO INDEPENDENTLY ATTRIBUTED per-operation runtime windows. The evidence
-// grammar is the corrected per-operation section shape (distinct daemon
-// operation id and session id per section, exact audit.log line-offset
-// window boundaries, op-path/pid attribution with MCS category never an
-// attribution key). The fail-closed branches are proven for every
-// falsification the review identified: a missing second window, a copied
-// window, a second operation that failed before runc:[2:INIT], records
-// distinguishable only by MCS category, a first-window record placed into
-// the second window, truncated/overlapping/gapped captures, a duplicated
-// operation id, and the eliminated { read open } shape confined to the
-// second window. The evaluator (scripts/release-2.4-r7-p21c-verdict.sh) is
-// the single authority for the machine-readable verdict; the P21-B
-// evaluator stays untouched as the historical instrument, and no test
-// reimplements its semantics.
+// R7 P21-C gate evaluator regression fixtures, revision 3 (the
+// r7-p21c-corrective-2 task): on top of the revision-2 per-operation
+// runtime-window attribution, the audit CAPTURE itself is part of the
+// proof. The producer reads every window through ONE pinned read
+// descriptor on the audit source and records the identity checkpoints
+// around every drain, the drain outcomes, and a MEASURED accounting
+// (before/after/expected/actual, actual = the extracted file's own line
+// count); the evaluator accepts MEASURED only when every checkpoint is
+// proven, the accounting is internally consistent, and the RAW window
+// artifacts independently corroborate the section (same line count,
+// every cited record present verbatim, every raw runc:[2:INIT] record
+// accounted for, no regression-control shape in the raw bytes). The
+// fail-closed branches are proven for every falsification the review
+// identified, including the producer-side scenarios driven through the
+// REAL guest capture functions (the --capture-selftest battery). The
+// evaluator (scripts/release-2.4-r7-p21c-verdict.sh) is the single
+// authority for the machine-readable verdict; the P21-B evaluator stays
+// untouched as the historical instrument, and no test reimplements its
+// semantics.
 
 const (
 	p21cC1      = "system_u:system_r:docker_helper_buildkitd_t:s0:c1"
@@ -140,16 +143,48 @@ const (
 // the devnode_t file object, permissive=0, with a per-operation path.
 const p21cOldTerminal = `type=AVC msg=audit(1793714070.816:1190): avc:  denied  { read open } for  pid=3288 comm="runc:[2:INIT]" path="` + p21cOp1Rootfs + `" dev="tmpfs" ino=5 scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file permissive=0`
 
+// p21cWindow1/p21cWindow2 are the green raw windows: EXACTLY the bytes the
+// producer drained through the pinned descriptor for each operation.
+var (
+	p21cWindow1 = p21cMounton1 + "\n" + p21cSetuid1 + "\n" + p21cSetgid1 + "\n"
+	p21cWindow2 = p21cMounton2 + "\n" + p21cSetuid2 + "\n" + p21cSetgid2 + "\n"
+)
+
+// p21cWindowLines counts the non-empty record lines of a raw window
+// fixture — the same measurement the producer records as `actual` (the
+// extracted file's own line count, never the boundary arithmetic).
+func p21cWindowLines(records string) int {
+	n := 0
+	for _, l := range strings.Split(records, "\n") {
+		if strings.TrimSpace(l) != "" {
+			n++
+		}
+	}
+	return n
+}
+
 // p21cOpSection composes one per-operation evidence section in the
-// corrected grammar: header (tag + daemon operation id + session id),
-// exact window boundaries, the operation result, the attributed runtime
-// records partitioned by attribution quality, and the whole-window
-// regression-control sections.
-func p21cOpSection(tag, opid, session string, before, after int, opAttributed, pidCorrelated, misattributed, unattributed, p21bTerminal string) string {
+// corrected grammar: header (tag + daemon operation id + session id), the
+// pinned-source capture-integrity accounting (identity checkpoints, drain
+// outcomes, measured before/after/expected/actual), the operation result,
+// the attributed runtime records partitioned by attribution quality, the
+// whole-window regression-control sections, and the raw window records the
+// capture claims to have extracted.
+func p21cOpSection(tag, opid, session string, before, after int, opAttributed, pidCorrelated, misattributed, unattributed, p21bTerminal, windowRecords string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "== operation %s op_%s session %s ==\n", tag, opid, session)
-	b.WriteString("-- window boundaries (audit.log line offsets) --\n")
-	fmt.Fprintf(&b, "before=%d after=%d captured=%d\n", before, after, after-before)
+	b.WriteString("-- window boundaries (pinned-source capture integrity) --\n")
+	b.WriteString("identity-begin-pre=proven\n")
+	b.WriteString("pre-drain=ok\n")
+	b.WriteString("identity-begin-post=proven\n")
+	fmt.Fprintf(&b, "before=%d\n", before)
+	b.WriteString("identity-extract-pre=proven\n")
+	b.WriteString("window-drain=ok\n")
+	b.WriteString("identity-extract-post=proven\n")
+	fmt.Fprintf(&b, "after=%d\n", after)
+	fmt.Fprintf(&b, "expected=%d\n", after-before)
+	fmt.Fprintf(&b, "actual=%d\n", p21cWindowLines(windowRecords))
+	b.WriteString("source=proven\n")
 	b.WriteString("-- operation result --\n")
 	b.WriteString(`"status": "failed" "result_code": "docker_build_failed" "exit_code": 1` + "\n")
 	b.WriteString("-- op-attributed runc-init records --\n")
@@ -170,13 +205,21 @@ func p21cOpSection(tag, opid, session string, before, after int, opAttributed, p
 }
 
 // p21cInterSection composes the inter-window region section: the records
-// appended between the two operations' capture boundaries, attributable to
-// NEITHER operation (host audit noise is expected there).
+// drained between the two operations (attributable to NEITHER operation;
+// host audit noise is expected there), with the same capture-integrity
+// accounting as the operation windows.
 func p21cInterSection(gapAfter, gapBefore int, records string) string {
 	var b strings.Builder
 	b.WriteString("== inter-window records (attributable to NEITHER operation) ==\n")
-	b.WriteString("-- window boundaries (audit.log line offsets) --\n")
-	fmt.Fprintf(&b, "gap-after=%d gap-before=%d captured=%d\n", gapAfter, gapBefore, gapBefore-gapAfter)
+	b.WriteString("-- window boundaries (pinned-source capture integrity) --\n")
+	b.WriteString("identity-gap-pre=proven\n")
+	b.WriteString("identity-gap-post=proven\n")
+	b.WriteString("inter-drain=ok\n")
+	fmt.Fprintf(&b, "gap-after=%d\n", gapAfter)
+	fmt.Fprintf(&b, "gap-before=%d\n", gapBefore)
+	fmt.Fprintf(&b, "expected=%d\n", gapBefore-gapAfter)
+	fmt.Fprintf(&b, "actual=%d\n", p21cWindowLines(records))
+	b.WriteString("source=proven\n")
 	b.WriteString("-- records --\n")
 	b.WriteString(records)
 	return b.String()
@@ -194,15 +237,22 @@ func p21cGreenTerminals() string {
 	return p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
 		p21cMounton1+"\n",
 		p21cSetuid1+"\n"+p21cSetgid1+"\n",
-		"", "", "") +
+		"", "", "", p21cWindow1) +
 		p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
 			p21cMounton2+"\n",
 			p21cSetuid2+"\n"+p21cSetgid2+"\n",
-			"", "", "") +
+			"", "", "", p21cWindow2) +
 		p21cInterSection(103, 103, "")
 }
 
-func p21cWriteEvidence(t *testing.T, matrix, av, terminals string) string {
+// p21cGreenRawWindows returns the raw window artifacts of the green
+// fixture: the exact drained bytes per operation plus the empty
+// inter-window artifact.
+func p21cGreenRawWindows() map[string]string {
+	return map[string]string{"c1": p21cWindow1, "c2": p21cWindow2, "inter": ""}
+}
+
+func p21cWriteEvidence(t *testing.T, matrix, av, terminals string, raw map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()
 	write := func(name, content string) {
@@ -213,6 +263,9 @@ func p21cWriteEvidence(t *testing.T, matrix, av, terminals string) string {
 	write("create-matrix-before.log", matrix)
 	write("av-matrix-before.log", av)
 	write("p21c-terminals.log", terminals)
+	write("avc-window-c1.log", raw["c1"])
+	write("avc-window-c2.log", raw["c2"])
+	write("inter-window.log", raw["inter"])
 	return dir
 }
 
@@ -254,7 +307,7 @@ func p21cGreenDir(t *testing.T) string {
 	return p21cWriteEvidence(t,
 		strings.Join(p21cGreenMatrix(), "\n")+"\n",
 		strings.Join(p21cGreenAV(), "\n")+"\n",
-		p21cGreenTerminals())
+		p21cGreenTerminals(), p21cGreenRawWindows())
 }
 
 // TestR7P21CVerdictGreenEvidenceIsMeasured proves the evaluator decides
@@ -301,12 +354,15 @@ func TestR7P21CVerdictSingleWindowCannotMeasure(t *testing.T) {
 	for name, terminals := range map[string]struct {
 		want string
 		text string
+		raw  map[string]string
 	}{
-		"second window missing entirely":                                        {"P21C-BLOCKED", firstOnly},
-		"second window is a copy of the first (the first op's paths inside it)": {"P21C-FAIL", copied},
+		"second window missing entirely": {"P21C-BLOCKED", firstOnly,
+			map[string]string{"c1": p21cWindow1, "c2": "", "inter": ""}},
+		"second window is a copy of the first (the first op's paths inside it)": {"P21C-FAIL", copied,
+			map[string]string{"c1": p21cWindow1, "c2": p21cWindow1, "inter": ""}},
 	} {
 		dir := p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
-			strings.Join(p21cGreenAV(), "\n")+"\n", terminals.text)
+			strings.Join(p21cGreenAV(), "\n")+"\n", terminals.text, terminals.raw)
 		line, rc := p21cRunEvaluator(t, dir)
 		if rc == 0 || !strings.Contains(line, "DECISION="+terminals.want) {
 			t.Errorf("%s must decide %s, got rc=%d: %s", name, terminals.want, rc, line)
@@ -322,11 +378,13 @@ func TestR7P21CVerdictSecondOperationFailsBeforeInitBlocks(t *testing.T) {
 	terminals := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
 		p21cMounton1+"\n",
 		p21cSetuid1+"\n"+p21cSetgid1+"\n",
-		"", "", "") +
-		p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
-			"", "", "", "", "")
+		"", "", "", p21cWindow1) +
+		p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 104,
+			"", "", "", "", "", "host noise record\n") +
+		p21cInterSection(103, 103, "")
 	dir := p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
-		strings.Join(p21cGreenAV(), "\n")+"\n", terminals)
+		strings.Join(p21cGreenAV(), "\n")+"\n", terminals,
+		map[string]string{"c1": p21cWindow1, "c2": "host noise record\n", "inter": ""})
 	line, rc := p21cRunEvaluator(t, dir)
 	if rc == 0 || !strings.Contains(line, "DECISION=P21C-BLOCKED") {
 		t.Errorf("a second operation with no attributed runtime record must decide BLOCKED, got rc=%d: %s", rc, line)
@@ -341,15 +399,18 @@ func TestR7P21CVerdictSecondOperationFailsBeforeInitBlocks(t *testing.T) {
 // distinguishable ONLY by category labels (no per-operation path, no
 // pid proven by an op-attributed record) are AMBIGUOUS evidence — BLOCKED.
 func TestR7P21CVerdictCategoryOnlyAttributionBlocks(t *testing.T) {
-	onlyCategory := `type=AVC msg=audit(1793789899.001:1999): avc:  denied  { mounton } for  pid=3999 comm="runc:[2:INIT]" path="` + p21cOp1Rootfs + `" dev="tmpfs" ino=5 scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file permissive=0`
-	// Pathless records only: nothing anchors them to an operation.
-	pathless := `type=AVC msg=audit(1793789899.001:1999): avc:  denied  { mounton } for  pid=3999 comm="runc:[2:INIT]" capability=7  scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns permissive=0`
-	terminals := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
-		"", "", "", pathless+"\n", "") +
-		p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
-			"", "", "", onlyCategory+"\n", "")
+	// Pathless records only: nothing anchors them to an operation. Both
+	// carry the SAME c1 category label — the category is never the key.
+	pathlessSetuid := `type=AVC msg=audit(1793789899.001:1999): avc:  denied  { setuid } for  pid=3999 comm="runc:[2:INIT]" capability=7  scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns permissive=0`
+	pathlessMounton := `type=AVC msg=audit(1793789899.002:2000): avc:  denied  { mounton } for  pid=3999 comm="runc:[2:INIT]" dev="tmpfs" ino=5 scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file permissive=0`
+	terminals := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 101,
+		"", "", "", pathlessSetuid+"\n", "", pathlessSetuid+"\n") +
+		p21cOpSection("c2", p21cOp2ID, p21cSession2, 104, 105,
+			"", "", "", pathlessMounton+"\n", "", pathlessMounton+"\n") +
+		p21cInterSection(101, 104, "")
 	dir := p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
-		strings.Join(p21cGreenAV(), "\n")+"\n", terminals)
+		strings.Join(p21cGreenAV(), "\n")+"\n", terminals,
+		map[string]string{"c1": pathlessSetuid + "\n", "c2": pathlessMounton + "\n", "inter": ""})
 	line, rc := p21cRunEvaluator(t, dir)
 	if rc == 0 || !strings.Contains(line, "DECISION=P21C-BLOCKED") {
 		t.Errorf("category-only distinguishable records must decide BLOCKED (attribution never rests on the category), got rc=%d: %s", rc, line)
@@ -367,28 +428,37 @@ func TestR7P21CVerdictMisattributedAndUnattributedFailClosed(t *testing.T) {
 	for name, terminals := range map[string]struct {
 		want string
 		text string
+		raw  map[string]string
 	}{
 		"first op's terminal record placed into the second window": {"P21C-FAIL",
 			p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
 				p21cMounton1+"\n",
 				p21cSetuid1+"\n"+p21cSetgid1+"\n",
-				"", "", "") +
-				p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
+				"", "", "", p21cWindow1) +
+				p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 107,
 					p21cMounton1+"\n"+p21cMounton2+"\n",
 					p21cSetuid2+"\n"+p21cSetgid2+"\n",
-					"", "", "")},
+					"", "", "",
+					p21cMounton1+"\n"+p21cMounton2+"\n"+p21cSetuid2+"\n"+p21cSetgid2+"\n"),
+			map[string]string{
+				"c1":    p21cWindow1,
+				"c2":    p21cMounton1 + "\n" + p21cMounton2 + "\n" + p21cSetuid2 + "\n" + p21cSetgid2 + "\n",
+				"inter": "",
+			}},
 		"unattributed runc-init record in the first window": {"P21C-BLOCKED",
-			p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
+			p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 104,
 				p21cMounton1+"\n",
 				p21cSetuid1+"\n"+p21cSetgid1+"\n",
-				"", stray+"\n", "") +
-				p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
+				"", stray+"\n", "",
+				p21cWindow1+stray+"\n") +
+				p21cOpSection("c2", p21cOp2ID, p21cSession2, 104, 107,
 					p21cMounton2+"\n",
 					p21cSetuid2+"\n"+p21cSetgid2+"\n",
-					"", "", "")},
+					"", "", "", p21cWindow2),
+			map[string]string{"c1": p21cWindow1 + stray + "\n", "c2": p21cWindow2, "inter": ""}},
 	} {
 		dir := p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
-			strings.Join(p21cGreenAV(), "\n")+"\n", terminals.text)
+			strings.Join(p21cGreenAV(), "\n")+"\n", terminals.text, terminals.raw)
 		line, rc := p21cRunEvaluator(t, dir)
 		if rc == 0 || !strings.Contains(line, "DECISION="+terminals.want) {
 			t.Errorf("%s must decide %s, got rc=%d: %s", name, terminals.want, rc, line)
@@ -401,75 +471,47 @@ func TestR7P21CVerdictMisattributedAndUnattributedFailClosed(t *testing.T) {
 // BLOCKED, an overlapping second window decides FAIL, a gap between the
 // windows decides BLOCKED.
 func TestR7P21CVerdictWindowBoundaryFailClosed(t *testing.T) {
-	truncated := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
+	greenC1 := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
 		p21cMounton1+"\n",
 		p21cSetuid1+"\n"+p21cSetgid1+"\n",
-		"", "", "") +
-		strings.Replace(p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
+		"", "", "", p21cWindow1)
+	greenInter := p21cInterSection(103, 103, "")
+	c2 := func() string {
+		return p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
 			p21cMounton2+"\n",
 			p21cSetuid2+"\n"+p21cSetgid2+"\n",
-			"", "", ""), "before=103 after=106 captured=3", "before=103 after=106 captured=2", 1) +
-		p21cInterSection(103, 103, "")
-	overlapping := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
-		p21cMounton1+"\n",
-		p21cSetuid1+"\n"+p21cSetgid1+"\n",
-		"", "", "") +
-		strings.Replace(p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
-			p21cMounton2+"\n",
-			p21cSetuid2+"\n"+p21cSetgid2+"\n",
-			"", "", ""), "before=103 after=106 captured=3", "before=102 after=105 captured=3", 1) +
-		p21cInterSection(103, 103, "")
-	unaccountedGap := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
-		p21cMounton1+"\n",
-		p21cSetuid1+"\n"+p21cSetgid1+"\n",
-		"", "", "") +
-		strings.Replace(p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
-			p21cMounton2+"\n",
-			p21cSetuid2+"\n"+p21cSetgid2+"\n",
-			"", "", ""), "before=103 after=106 captured=3", "before=110 after=113 captured=3", 1) +
-		p21cInterSection(103, 103, "")
+			"", "", "", p21cWindow2)
+	}
+	shiftC2 := func(before, after string) string {
+		out := strings.Replace(c2(), "before=103\n", "before="+before+"\n", 1)
+		return strings.Replace(out, "after=106\n", "after="+after+"\n", 1)
+	}
+	truncated := greenC1 + strings.Replace(c2(), "actual=3", "actual=2", 1) + greenInter
+	overlapping := greenC1 + shiftC2("102", "105") + greenInter
+	unaccountedGap := greenC1 + shiftC2("110", "113") + greenInter
 	// A capture gap WITH a faithful inter-window section (host noise only)
-	// is sound evidence: the gap region is accounted and carries no
-	// ambiguous runtime record.
-	accountedGap := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
-		p21cMounton1+"\n",
-		p21cSetuid1+"\n"+p21cSetgid1+"\n",
-		"", "", "") +
-		strings.Replace(p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
-			p21cMounton2+"\n",
-			p21cSetuid2+"\n"+p21cSetgid2+"\n",
-			"", "", ""), "before=103 after=106 captured=3", "before=110 after=113 captured=3", 1) +
-		p21cInterSection(103, 110, "")
-	unbounded := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
-		p21cMounton1+"\n",
-		p21cSetuid1+"\n"+p21cSetgid1+"\n",
-		"", "", "") +
-		strings.Replace(p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
-			p21cMounton2+"\n",
-			p21cSetuid2+"\n"+p21cSetgid2+"\n",
-			"", "", ""), "before=103 after=106 captured=3", "before=103 after=105 captured=ROTATED", 1) +
-		p21cInterSection(103, 103, "")
-	ambiguousGap := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
-		p21cMounton1+"\n",
-		p21cSetuid1+"\n"+p21cSetgid1+"\n",
-		"", "", "") +
-		p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
-			p21cMounton2+"\n",
-			p21cSetuid2+"\n"+p21cSetgid2+"\n",
-			"", "", "") +
-		p21cInterSection(103, 110, p21cMounton2+"\n")
+	// is sound evidence: the gap region is accounted — seven real records
+	// captured, all of them host noise — and carries no ambiguous runtime
+	// record.
+	accountedGap := greenC1 + shiftC2("110", "113") +
+		p21cInterSection(103, 110,
+			"host noise 1\nhost noise 2\nhost noise 3\nhost noise 4\nhost noise 5\nhost noise 6\nhost noise 7\n")
+	unproven := greenC1 +
+		strings.Replace(c2(), "identity-extract-post=proven", "identity-extract-post=unproven:path-replaced(pinned=95:1,path=95:2)", 1) +
+		greenInter
+	ambiguousGap := greenC1 + c2() + p21cInterSection(103, 110, p21cMounton2+"\n")
 	for name, terminals := range map[string]struct {
 		want string
 		text string
 	}{
-		"truncated capture (boundary inconsistent)":           {"P21C-BLOCKED", truncated},
-		"second window overlaps the first":                    {"P21C-FAIL", overlapping},
-		"capture gap between the windows is unaccounted":      {"P21C-BLOCKED", unaccountedGap},
-		"a runc-init record inside the inter-window region":   {"P21C-BLOCKED", ambiguousGap},
-		"rotated capture (capture-unavailable boundary mark)": {"P21C-BLOCKED", unbounded},
+		"truncated capture (actual does not match the boundary arithmetic)": {"P21C-BLOCKED", truncated},
+		"second window overlaps the first":                                  {"P21C-FAIL", overlapping},
+		"capture gap between the windows is unaccounted":                    {"P21C-BLOCKED", unaccountedGap},
+		"a runc-init record inside the inter-window region":                 {"P21C-BLOCKED", ambiguousGap},
+		"capture not proven at the extraction boundary":                     {"P21C-BLOCKED", unproven},
 	} {
 		dir := p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
-			strings.Join(p21cGreenAV(), "\n")+"\n", terminals.text)
+			strings.Join(p21cGreenAV(), "\n")+"\n", terminals.text, p21cGreenRawWindows())
 		line, rc := p21cRunEvaluator(t, dir)
 		if rc == 0 || !strings.Contains(line, "DECISION="+terminals.want) {
 			t.Errorf("%s must decide %s, got rc=%d: %s", name, terminals.want, rc, line)
@@ -478,7 +520,9 @@ func TestR7P21CVerdictWindowBoundaryFailClosed(t *testing.T) {
 	// The accounted-gap control: with a faithful inter-window section the
 	// same gapped capture measures.
 	dir := p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
-		strings.Join(p21cGreenAV(), "\n")+"\n", accountedGap)
+		strings.Join(p21cGreenAV(), "\n")+"\n", accountedGap,
+		map[string]string{"c1": p21cWindow1, "c2": p21cWindow2,
+			"inter": "host noise 1\nhost noise 2\nhost noise 3\nhost noise 4\nhost noise 5\nhost noise 6\nhost noise 7\n"})
 	line, rc := p21cRunEvaluator(t, dir)
 	if rc != 0 || !strings.Contains(line, "DECISION=P21C-MEASURED") {
 		t.Errorf("a capture gap WITH a faithful inter-window section must decide MEASURED, got rc=%d: %s", rc, line)
@@ -493,34 +537,35 @@ func TestR7P21CVerdictDuplicateIdentityFailsClosed(t *testing.T) {
 	sameOp := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
 		p21cMounton1+"\n",
 		p21cSetuid1+"\n"+p21cSetgid1+"\n",
-		"", "", "") +
+		"", "", "", p21cWindow1) +
 		p21cOpSection("c2", p21cOp1ID, p21cSession2, 103, 106,
 			p21cMounton2+"\n",
 			p21cSetuid2+"\n"+p21cSetgid2+"\n",
-			"", "", "")
+			"", "", "", p21cWindow2)
 	sameSession := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
 		p21cMounton1+"\n",
 		p21cSetuid1+"\n"+p21cSetgid1+"\n",
-		"", "", "") +
+		"", "", "", p21cWindow1) +
 		p21cOpSection("c2", p21cOp2ID, p21cSession1, 103, 106,
 			p21cMounton2+"\n",
 			p21cSetuid2+"\n"+p21cSetgid2+"\n",
-			"", "", "")
+			"", "", "", p21cWindow2)
 	sameTerminal := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
 		p21cMounton1+"\n",
 		p21cSetuid1+"\n"+p21cSetgid1+"\n",
-		"", "", "") +
+		"", "", "", p21cWindow1) +
 		p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
 			p21cMounton1+"\n",
 			p21cSetuid2+"\n"+p21cSetgid2+"\n",
-			"", "", "")
+			"", "", "",
+			p21cMounton1+"\n"+p21cSetuid2+"\n"+p21cSetgid2+"\n")
 	for name, terminals := range map[string]string{
 		"same operation id in both windows":                       sameOp,
 		"same session id in both windows":                         sameSession,
 		"the same AVC record for both terminals (misattribution)": sameTerminal,
 	} {
 		dir := p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
-			strings.Join(p21cGreenAV(), "\n")+"\n", terminals)
+			strings.Join(p21cGreenAV(), "\n")+"\n", terminals, p21cGreenRawWindows())
 		line, rc := p21cRunEvaluator(t, dir)
 		if rc == 0 || !strings.Contains(line, "DECISION=P21C-FAIL") {
 			t.Errorf("%s must decide FAIL, got rc=%d: %s", name, rc, line)
@@ -534,18 +579,20 @@ func TestR7P21CVerdictDuplicateIdentityFailsClosed(t *testing.T) {
 // record and via the whole-window control section) decides FAIL with
 // OPEN-COMPLETION=live.
 func TestR7P21CVerdictEliminatedShapeConfinedToSecondWindowFails(t *testing.T) {
-	op2WithOld := strings.Replace(p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
+	window2WithOld := p21cWindow2 + p21cOldTerminal + "\n"
+	op2WithOld := strings.Replace(p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 107,
 		p21cMounton2+"\n",
 		p21cSetuid2+"\n"+p21cSetgid2+"\n",
-		"", "", ""),
+		"", "", "", window2WithOld),
 		"-- P21-B terminal (devnode_t:file { read open }; the ELIMINATED shape) --\n",
 		"-- P21-B terminal (devnode_t:file { read open }; the ELIMINATED shape) --\n"+p21cOldTerminal+"\n", 1)
 	terminals := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
 		p21cMounton1+"\n",
 		p21cSetuid1+"\n"+p21cSetgid1+"\n",
-		"", "", "") + op2WithOld
+		"", "", "", p21cWindow1) + op2WithOld
 	dir := p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
-		strings.Join(p21cGreenAV(), "\n")+"\n", terminals)
+		strings.Join(p21cGreenAV(), "\n")+"\n", terminals,
+		map[string]string{"c1": p21cWindow1, "c2": window2WithOld, "inter": ""})
 	line, rc := p21cRunEvaluator(t, dir)
 	if rc == 0 || !strings.Contains(line, "DECISION=P21C-FAIL") {
 		t.Errorf("the eliminated shape confined to the second window must decide FAIL, got rc=%d: %s", rc, line)
@@ -564,7 +611,7 @@ func TestR7P21CVerdictZeroNewlineGrepArtifactFailsClosed(t *testing.T) {
 		"empty file":                    "",
 		"garbage only":                  "grep: no matches\n",
 	} {
-		dir := p21cWriteEvidence(t, matrix, strings.Join(p21cGreenAV(), "\n")+"\n", p21cGreenTerminals())
+		dir := p21cWriteEvidence(t, matrix, strings.Join(p21cGreenAV(), "\n")+"\n", p21cGreenTerminals(), p21cGreenRawWindows())
 		line, rc := p21cRunEvaluator(t, dir)
 		if rc == 0 || strings.Contains(line, "DECISION=P21C-MEASURED") || strings.Contains(line, "SCOPE=six-names-ok") {
 			t.Errorf("mutation %q must fail closed (no MEASURED, no six-names-ok), got rc=%d: %s", name, rc, line)
@@ -615,7 +662,7 @@ func TestR7P21CVerdictMatrixMutationsFailClosed(t *testing.T) {
 	for _, mut := range mutations {
 		mutated := mut.mutate(append([]string(nil), rows...))
 		dir := p21cWriteEvidence(t, strings.Join(mutated, "\n")+"\n",
-			strings.Join(p21cGreenAV(), "\n")+"\n", p21cGreenTerminals())
+			strings.Join(p21cGreenAV(), "\n")+"\n", p21cGreenTerminals(), p21cGreenRawWindows())
 		line, rc := p21cRunEvaluator(t, dir)
 		if rc == 0 || strings.Contains(line, "DECISION=P21C-MEASURED") {
 			t.Errorf("mutation %q must fail closed, got rc=%d: %s", mut.name, rc, line)
@@ -669,7 +716,7 @@ func TestR7P21CVerdictAVMutationsFailClosed(t *testing.T) {
 		}},
 	}
 	for _, mut := range mutations {
-		dir := p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n", mut.mutate(green), p21cGreenTerminals())
+		dir := p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n", mut.mutate(green), p21cGreenTerminals(), p21cGreenRawWindows())
 		line, rc := p21cRunEvaluator(t, dir)
 		if rc == 0 || strings.Contains(line, "DECISION=P21C-MEASURED") {
 			t.Errorf("mutation %q must fail closed, got rc=%d: %s", mut.name, rc, line)
@@ -712,8 +759,18 @@ func TestR7P21CVerdictNextTerminalMutationsFailClosed(t *testing.T) {
 		if mutated == p21cGreenTerminals() {
 			t.Fatalf("mutation %q must corrupt at least one record", mut.name)
 		}
+		// The corruption is applied to the raw window artifacts too, so the
+		// evidence stays internally consistent and the next-terminal
+		// matcher itself is what must fail closed.
+		raw := p21cGreenRawWindows()
+		for tag, content := range raw {
+			raw[tag] = mut.corrupt(content)
+			if tag == "inter" && raw[tag] != "" && content == "" {
+				t.Fatalf("mutation %q must not fabricate inter-window records", mut.name)
+			}
+		}
 		dir := p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
-			strings.Join(p21cGreenAV(), "\n")+"\n", mutated)
+			strings.Join(p21cGreenAV(), "\n")+"\n", mutated, raw)
 		line, rc := p21cRunEvaluator(t, dir)
 		if rc == 0 || !strings.Contains(line, "DECISION="+mut.wantDECISION) {
 			t.Errorf("mutation %q must decide %s, got rc=%d: %s", mut.name, mut.wantDECISION, rc, line)
@@ -729,18 +786,15 @@ func TestR7P21CVerdictNextTerminalMutationsFailClosed(t *testing.T) {
 func TestR7P21CVerdictSectionHeaderIntegrityFailClosed(t *testing.T) {
 	green := p21cGreenTerminals()
 	missingOp2 := green[:strings.Index(green, "== operation c2 ")]
-	if rc := (func() bool { return false })(); rc {
-		t.Fatal("unreachable")
-	}
 	dir := p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
-		strings.Join(p21cGreenAV(), "\n")+"\n", missingOp2)
+		strings.Join(p21cGreenAV(), "\n")+"\n", missingOp2, p21cGreenRawWindows())
 	line, rc := p21cRunEvaluator(t, dir)
 	if rc == 0 || !strings.Contains(line, "DECISION=P21C-BLOCKED") {
 		t.Errorf("a missing second operation header must decide BLOCKED, got rc=%d: %s", rc, line)
 	}
 	duplicatedOp1 := green + "== operation c1 op_" + p21cOp1ID + " session " + p21cSession1 + " ==\n"
 	dir = p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
-		strings.Join(p21cGreenAV(), "\n")+"\n", duplicatedOp1)
+		strings.Join(p21cGreenAV(), "\n")+"\n", duplicatedOp1, p21cGreenRawWindows())
 	line, rc = p21cRunEvaluator(t, dir)
 	if rc == 0 || !strings.Contains(line, "DECISION=P21C-FAIL") {
 		t.Errorf("a duplicated operation header must decide FAIL, got rc=%d: %s", rc, line)
@@ -748,7 +802,7 @@ func TestR7P21CVerdictSectionHeaderIntegrityFailClosed(t *testing.T) {
 	missingControl := strings.Replace(green,
 		"-- P20 terminal (runc_memfd_t:file create) --\n", "", 1)
 	dir = p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
-		strings.Join(p21cGreenAV(), "\n")+"\n", missingControl)
+		strings.Join(p21cGreenAV(), "\n")+"\n", missingControl, p21cGreenRawWindows())
 	line, rc = p21cRunEvaluator(t, dir)
 	if rc == 0 || !strings.Contains(line, "DECISION=P21C-BLOCKED") {
 		t.Errorf("a missing control header (both sections) must decide BLOCKED, got rc=%d: %s", rc, line)
@@ -757,7 +811,7 @@ func TestR7P21CVerdictSectionHeaderIntegrityFailClosed(t *testing.T) {
 		"== operation c1 op_"+p21cOp1ID+" session "+p21cSession1+" ==\n",
 		"X== operation c1 op_"+p21cOp1ID+" session "+p21cSession1+" ==\n", 1)
 	dir = p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
-		strings.Join(p21cGreenAV(), "\n")+"\n", corruptedHeader)
+		strings.Join(p21cGreenAV(), "\n")+"\n", corruptedHeader, p21cGreenRawWindows())
 	line, rc = p21cRunEvaluator(t, dir)
 	if rc == 0 || !strings.Contains(line, "DECISION=P21C-BLOCKED") {
 		t.Errorf("a corrupted (not whole-line) operation header must decide BLOCKED, got rc=%d: %s", rc, line)
@@ -765,9 +819,12 @@ func TestR7P21CVerdictSectionHeaderIntegrityFailClosed(t *testing.T) {
 }
 
 // TestR7P21CVerdictMissingEvidenceFilesBlock pins the file-level
-// fail-closed branch.
+// fail-closed branch, including the raw capture artifacts.
 func TestR7P21CVerdictMissingEvidenceFilesBlock(t *testing.T) {
-	for _, name := range []string{"create-matrix-before.log", "av-matrix-before.log", "p21c-terminals.log"} {
+	for _, name := range []string{
+		"create-matrix-before.log", "av-matrix-before.log", "p21c-terminals.log",
+		"avc-window-c1.log", "avc-window-c2.log", "inter-window.log",
+	} {
 		broken := p21cGreenDir(t)
 		if err := os.Remove(filepath.Join(broken, name)); err != nil {
 			t.Fatal(err)
@@ -781,6 +838,250 @@ func TestR7P21CVerdictMissingEvidenceFilesBlock(t *testing.T) {
 	if rc == 0 || !strings.Contains(line, "DECISION=P21C-BLOCKED") {
 		t.Errorf("an empty evidence directory must decide BLOCKED, got rc=%d: %s", rc, line)
 	}
+}
+
+// TestR7P21CVerdictCaptureIntegrityFailClosed proves the revision-3
+// capture-integrity branches: an unproven identity checkpoint or drain
+// outcome, an actual/expected mismatch, a raw window artifact that does
+// not corroborate the section (wrong line count, missing cited record,
+// an unaccounted runc-init record, a hidden misattribution, the
+// eliminated shape) can never decide MEASURED.
+func TestR7P21CVerdictCaptureIntegrityFailClosed(t *testing.T) {
+	stray2 := `type=AVC msg=audit(1793789899.003:2002): avc:  denied  { getattr } for  pid=4243 comm="runc:[2:INIT]" path="/tmp/y" dev="vda3" ino=2 scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:tmp_t:s0 tclass=file permissive=0`
+	greenC1 := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
+		p21cMounton1+"\n",
+		p21cSetuid1+"\n"+p21cSetgid1+"\n",
+		"", "", "", p21cWindow1)
+	greenInter := p21cInterSection(103, 103, "")
+	c2 := func() string {
+		return p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
+			p21cMounton2+"\n",
+			p21cSetuid2+"\n"+p21cSetgid2+"\n",
+			"", "", "", p21cWindow2)
+	}
+	c2Window4 := func(extra string) string {
+		// A c2 section consistent with a FOUR-record raw window: the
+		// boundary accounting is shifted to match the fabricated bytes.
+		out := strings.Replace(c2(), "after=106\n", "after=107\n", 1)
+		out = strings.Replace(out, "expected=3\n", "expected=4\n", 1)
+		return strings.Replace(out, "actual=3\n", "actual=4\n", 1) + extra
+	}
+	mutations := []struct {
+		name string
+		text string
+		raw  map[string]string
+		want string
+	}{
+		{"actual does not match the boundary arithmetic",
+			greenC1 + strings.Replace(c2(), "actual=3", "actual=2", 1) + greenInter,
+			p21cGreenRawWindows(), "P21C-BLOCKED"},
+		{"capture source state not proven",
+			greenC1 + strings.Replace(c2(), "source=proven", "source=unproven", 1) + greenInter,
+			p21cGreenRawWindows(), "P21C-BLOCKED"},
+		{"identity checkpoint not proven",
+			greenC1 + strings.Replace(c2(), "identity-extract-pre=proven", "identity-extract-pre=unproven:path-replaced(pinned=95:1,path=95:2)", 1) + greenInter,
+			p21cGreenRawWindows(), "P21C-BLOCKED"},
+		{"window drain not ok",
+			greenC1 + strings.Replace(c2(), "window-drain=ok", "window-drain=failed:read-error", 1) + greenInter,
+			p21cGreenRawWindows(), "P21C-BLOCKED"},
+		{"raw window holds fewer lines than the claimed capture",
+			greenC1 + c2() + greenInter,
+			map[string]string{"c1": p21cWindow1, "c2": p21cMounton2 + "\n" + p21cSetuid2 + "\n", "inter": ""},
+			"P21C-BLOCKED"},
+		{"a cited record is absent from the raw window",
+			greenC1 + c2() + greenInter,
+			map[string]string{"c1": p21cWindow1, "c2": p21cMounton2 + "\n" + p21cSetgid2 + "\nhost noise\n", "inter": ""},
+			"P21C-BLOCKED"},
+		{"the raw window carries an unaccounted runc-init record",
+			greenC1 + c2Window4("") + greenInter,
+			map[string]string{"c1": p21cWindow1, "c2": p21cWindow2 + stray2 + "\n", "inter": ""},
+			"P21C-BLOCKED"},
+		{"the raw window carries a hidden misattribution",
+			greenC1 + c2Window4("") + greenInter,
+			map[string]string{"c1": p21cWindow1, "c2": p21cWindow2 + p21cMounton1 + "\n", "inter": ""},
+			"P21C-FAIL"},
+		{"the raw window carries the eliminated shape",
+			greenC1 + c2Window4("") + greenInter,
+			map[string]string{"c1": p21cWindow1, "c2": p21cWindow2 + p21cOldTerminal + "\n", "inter": ""},
+			"P21C-FAIL"},
+	}
+	for _, mut := range mutations {
+		dir := p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
+			strings.Join(p21cGreenAV(), "\n")+"\n", mut.text, mut.raw)
+		line, rc := p21cRunEvaluator(t, dir)
+		if rc == 0 || !strings.Contains(line, "DECISION="+mut.want) {
+			t.Errorf("mutation %q must decide %s, got rc=%d: %s", mut.name, mut.want, rc, line)
+		}
+	}
+	// A missing raw artifact decides BLOCKED.
+	broken := p21cGreenDir(t)
+	if err := os.Remove(filepath.Join(broken, "avc-window-c2.log")); err != nil {
+		t.Fatal(err)
+	}
+	line, rc := p21cRunEvaluator(t, broken)
+	if rc == 0 || !strings.Contains(line, "DECISION=P21C-BLOCKED") {
+		t.Errorf("a missing raw window artifact must decide BLOCKED, got rc=%d: %s", rc, line)
+	}
+}
+
+// TestR7P21CVerdictInterWindowCaptureIntegrityFailClosed proves the
+// inter-window capture is held to the SAME integrity contract: an
+// unproven checkpoint, an actual/expected mismatch, or a raw artifact
+// that does not corroborate the section decides BLOCKED; a faithful
+// inter-window capture with real host-noise records still measures.
+func TestR7P21CVerdictInterWindowCaptureIntegrityFailClosed(t *testing.T) {
+	noise := "host noise record one\nhost noise record two\nhost noise record three\n"
+	c1 := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
+		p21cMounton1+"\n",
+		p21cSetuid1+"\n"+p21cSetgid1+"\n",
+		"", "", "", p21cWindow1)
+	c2 := p21cOpSection("c2", p21cOp2ID, p21cSession2, 106, 109,
+		p21cMounton2+"\n",
+		p21cSetuid2+"\n"+p21cSetgid2+"\n",
+		"", "", "", p21cWindow2)
+	// Positive control: a proven inter-window capture with three real
+	// host-noise records, fully accounted, still measures.
+	interGreen := p21cInterSection(103, 106, noise)
+	green := c1 + c2 + interGreen
+	dir := p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
+		strings.Join(p21cGreenAV(), "\n")+"\n", green,
+		map[string]string{"c1": p21cWindow1, "c2": p21cWindow2, "inter": noise})
+	if line, rc := p21cRunEvaluator(t, dir); rc != 0 || !strings.Contains(line, "DECISION=P21C-MEASURED") {
+		t.Fatalf("a proven inter-window capture with accounted noise must decide MEASURED, got rc=%d: %s", rc, line)
+	}
+	mutations := []struct {
+		name string
+		text string
+		raw  map[string]string
+		want string
+	}{
+		{"inter capture not proven", c1 + c2 + strings.Replace(interGreen, "source=proven", "source=unproven", 1),
+			map[string]string{"c1": p21cWindow1, "c2": p21cWindow2, "inter": ""}, "P21C-BLOCKED"},
+		{"inter identity checkpoint not proven", c1 + c2 + strings.Replace(interGreen, "identity-gap-pre=proven", "identity-gap-pre=unproven:path-replaced(pinned=95:1,path=95:2)", 1),
+			map[string]string{"c1": p21cWindow1, "c2": p21cWindow2, "inter": noise}, "P21C-BLOCKED"},
+		{"inter actual does not match expected", c1 + c2 + strings.Replace(interGreen, "actual=3\n", "actual=2\n", 1),
+			map[string]string{"c1": p21cWindow1, "c2": p21cWindow2, "inter": noise}, "P21C-BLOCKED"},
+		{"raw inter artifact holds fewer lines than claimed", green,
+			map[string]string{"c1": p21cWindow1, "c2": p21cWindow2, "inter": "host noise record one\n"}, "P21C-BLOCKED"},
+	}
+	for _, mut := range mutations {
+		dir = p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
+			strings.Join(p21cGreenAV(), "\n")+"\n", mut.text, mut.raw)
+		line, rc := p21cRunEvaluator(t, dir)
+		if rc == 0 || !strings.Contains(line, "DECISION="+mut.want) {
+			t.Errorf("%s must decide %s, got rc=%d: %s", mut.name, mut.want, rc, line)
+		}
+	}
+	// A missing raw inter artifact decides BLOCKED.
+	broken := p21cGreenDir(t)
+	if err := os.Remove(filepath.Join(broken, "inter-window.log")); err != nil {
+		t.Fatal(err)
+	}
+	line, rc := p21cRunEvaluator(t, broken)
+	if rc == 0 || !strings.Contains(line, "DECISION=P21C-BLOCKED") {
+		t.Errorf("a missing raw inter-window artifact must decide BLOCKED, got rc=%d: %s", rc, line)
+	}
+}
+
+// TestR7P21CGuestCaptureSelftest runs the guest harness's own capture
+// battery: the REAL production capture functions
+// (audit_open/audit_identity/audit_drain/capture_begin/capture_end)
+// against synthetic audit sources, covering the review's RED/GREEN
+// scenarios on the actual evidence-production path — append-only growth
+// stays valid, while torn records, read errors, same-inode truncation,
+// and rename/replacement (fewer, equal, or more lines, including between
+// the extraction checkpoints) are all fail-closed, for the operation
+// windows AND the inter-window capture.
+func TestR7P21CGuestCaptureSelftest(t *testing.T) {
+	dir := t.TempDir()
+	out, err := exec.Command("bash", "scripts/release-2.4-r7-p21c-guest.sh",
+		"--capture-selftest", dir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("capture selftest failed to run: %v\n%s", err, out)
+	}
+	kv := func(name string) map[string]string {
+		t.Helper()
+		raw, err := os.ReadFile(filepath.Join(dir, "results", name))
+		if err != nil {
+			t.Fatalf("selftest result %s missing: %v\n%s", name, err, out)
+		}
+		m := make(map[string]string)
+		for _, l := range strings.Split(string(raw), "\n") {
+			if k, v, ok := strings.Cut(l, "="); ok && k != "" {
+				m[k] = v
+			}
+		}
+		return m
+	}
+	expect := func(name string, want map[string]string) {
+		t.Helper()
+		got := kv(name)
+		for k, v := range want {
+			if strings.HasPrefix(v, "~") {
+				if !strings.Contains(got[k], strings.TrimPrefix(v, "~")) {
+					t.Errorf("%s: %s = %q, want it to contain %q", name, k, got[k], strings.TrimPrefix(v, "~"))
+				}
+				continue
+			}
+			if got[k] != v {
+				t.Errorf("%s: %s = %q, want %q (full result: %v)", name, k, got[k], v, got)
+			}
+		}
+	}
+	// 1. Normal append-only growth: proven, and actual is measured from
+	//    the extracted file (5 records), not the arithmetic alone.
+	expect("append-only-green.boundaries", map[string]string{
+		"identity-begin-pre": "proven", "identity-begin-post": "proven",
+		"identity-extract-pre": "proven", "identity-extract-post": "proven",
+		"pre-drain": "ok", "window-drain": "ok",
+		"before": "3", "after": "8", "expected": "5", "actual": "5",
+		"source": "proven",
+	})
+	if window, err := os.ReadFile(filepath.Join(dir, "evidence-s1", "avc-window-s1.log")); err != nil {
+		t.Fatal(err)
+	} else if n := p21cWindowLines(string(window)); n != 5 {
+		t.Errorf("the green window artifact must hold the 5 drained records, got %d lines", n)
+	}
+	// 1b. The inter-window capture on the SAME pinned flow: proven.
+	expect("inter-window-green.inter", map[string]string{
+		"identity-gap-pre": "proven", "identity-gap-post": "proven",
+		"inter-drain": "ok", "gap-after": "8", "gap-before": "12",
+		"expected": "4", "actual": "4", "source": "proven",
+	})
+	// 2. Torn record: the capture fails closed.
+	expect("torn-record.boundaries", map[string]string{
+		"source": "unproven", "window-drain": "failed:partial-record",
+	})
+	// 3. Read error through the descriptor: the capture fails closed.
+	expect("read-error.boundaries", map[string]string{
+		"source": "unproven", "pre-drain": "failed:read-error",
+	})
+	// 4. Truncate WITHOUT an inode change: detected by the consumed-cursor
+	//    size check.
+	expect("truncate-same-inode.boundaries", map[string]string{
+		"source": "unproven", "identity-extract-pre": "~unproven:truncated",
+	})
+	// 5/6/7. Rename/replacement with FEWER, EQUAL, or MORE lines: the
+	//        inode mismatch decides, never the line count.
+	for _, name := range []string{"replace-fewer", "replace-same", "replace-more"} {
+		expect(name+".boundaries", map[string]string{
+			"identity-begin-pre":   "proven",
+			"identity-extract-pre": "~unproven:path-replaced",
+			"source":               "unproven",
+		})
+	}
+	// 8. Replacement DURING the extraction (between the extraction
+	//    checkpoints): the pinned descriptor still delivers the drained
+	//    bytes, but the capture cannot be proven afterwards.
+	expect("replace-during-extract.steps", map[string]string{
+		"identity-extract-pre":  "proven",
+		"window-drain":          "ok",
+		"identity-extract-post": "~unproven:path-replaced",
+	})
+	// 10. An incomplete inter-window capture: fails closed.
+	expect("inter-window-unsound.inter", map[string]string{
+		"source": "unproven", "identity-gap-pre": "~unproven:path-replaced",
+	})
 }
 
 // TestR7P21CVerdictGateMode pins the driver-side gate: exit 0 iff the

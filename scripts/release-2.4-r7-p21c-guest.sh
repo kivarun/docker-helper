@@ -54,6 +54,21 @@
 #      shape. The exact next terminal is OBSERVED, never pre-granted: the
 #      evaluator accepts any real new-flow record and the REPORT names it.
 #      Absence of AVCs alone is NEVER a passing outcome (BLOCKED).
+#   5. Capture integrity (r7-p21c-corrective-2): every window is read
+#      through ONE pinned read descriptor opened once on the audit source,
+#      so a rename/replacement/rotation of the path can never alter what a
+#      drain sees. Identity checkpoints (path dev:ino == pinned dev:ino,
+#      pinned size never below the consumed cursor) wrap every drain;
+#      torn trailing records and read errors fail the capture. The
+#      evidence stores before/after/expected/actual measured independently
+#      (cursor arithmetic vs the extracted file's own line count) plus the
+#      identity state; an unproven capture is capture=unavailable and the
+#      evaluator decides BLOCKED — never a partial MEASURED.
+#   6. Regression controls: the P20 runc_memfd_t:file create terminal, the
+#      pre-B' tmpfs_t:file write terminal, and the associate denial stay
+#      absent from both windows; the six filename transitions, the
+#      arbitrary-basename control, and the memfd P1-P6 surface stay
+#      byte-intact on the loaded policy.
 #   5. Regression controls: the P20 runc_memfd_t:file create terminal, the
 #      pre-B' tmpfs_t:file write terminal, and the associate denial stay
 #      absent from both windows; the six filename transitions, the
@@ -71,18 +86,30 @@
 
 set -uo pipefail
 
-ARTIFACT="${R7_ARTIFACT:?R7_ARTIFACT required}"
-ARTIFACT_SHA="${R7_ARTIFACT_SHA256:?R7_ARTIFACT_SHA256 required}"
-
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 log()  { printf '[r7-p21c] %s\n' "$*"; }
 fail() { printf '[r7-p21c] FAILED: %s\n' "$*" >&2; exit 1; }
 
-EVIDENCE_DIR="${R7_EVIDENCE_DIR:-/tmp/r7-p21c-evidence}"
-mkdir -p "$EVIDENCE_DIR"
-STATE_DIR=/tmp/r7-p21c-state
-mkdir -p "$STATE_DIR"
+# The audit source path is parameterized ONLY for the capture selftest
+# (--capture-selftest exercises the real capture functions against
+# synthetic sources under a scratch workdir); the VM flow always uses the
+# real audit log.
+AUDIT_LOG_PATH="${R7_P21C_AUDIT_LOG_PATH:-/var/log/audit/audit.log}"
+
+SELFTEST_WORKDIR=""
+if [ "${1:-}" = "--capture-selftest" ]; then
+  SELFTEST_WORKDIR="${2:-}"
+  [ -n "$SELFTEST_WORKDIR" ] || fail "usage: $0 --capture-selftest <workdir>"
+  EVIDENCE_DIR="$SELFTEST_WORKDIR/evidence-scratch"
+  STATE_DIR="$SELFTEST_WORKDIR/state-scratch"
+else
+  ARTIFACT="${R7_ARTIFACT:?R7_ARTIFACT required}"
+  ARTIFACT_SHA="${R7_ARTIFACT_SHA256:?R7_ARTIFACT_SHA256 required}"
+  EVIDENCE_DIR="${R7_EVIDENCE_DIR:-/tmp/r7-p21c-evidence}"
+  STATE_DIR=/tmp/r7-p21c-state
+fi
+mkdir -p "$EVIDENCE_DIR" "$STATE_DIR"
 DH_SOCK=/run/docker-helper/docker-helper.sock
 
 cap() { # <name> <max-lines> <cmd...>
@@ -112,6 +139,391 @@ avc_tail() { # <label>
   fi
   log "avc capture [$1]: $(wc -l < "$EVIDENCE_DIR/$1.log") lines"
 }
+
+# ============================================================================
+# Audit capture core (r7-p21c-corrective-2). IDENTITY MODEL:
+#   1. ONE pinned O_RDONLY descriptor is opened ONCE on the audit source;
+#      every window byte is read THROUGH this descriptor, so a rename,
+#      replacement, or rotation of the path can never alter what a drain
+#      reads (the descriptor is bound to the inode, not the name).
+#   2. At every capture checkpoint (immediately before and after every
+#      drain) the PATH's st_dev:st_ino must equal the PINNED descriptor's
+#      st_dev:st_ino — a replacement/rotation between checkpoints fails
+#      the capture. During the pinned interval an st_dev:st_ino match
+#      means the path IS the pinned inode (a replacement cannot reuse the
+#      inode while this descriptor holds it open), so the check detects
+#      replacement; it is NOT the content authority — the pinned stream is.
+#   3. The pinned inode's size must never be smaller than the bytes already
+#      consumed through the descriptor — truncate is detected. Normal
+#      append-only growth stays valid (no size-equality requirement).
+#   4. Every drained region must be newline-terminated — a torn trailing
+#      record (a record split across a drain boundary) fails the capture.
+#   5. A read error through the descriptor fails the capture.
+#   DOCUMENTED LIMITATION: a same-inode in-place rewrite that never lets
+#   the file size drop below the consumed cursor (truncate-to-0 is caught
+#   by (3)) is outside this model — the pinned content stream is the
+#   authority and such a rewrite requires direct write access to the audit
+#   source itself, outside the diagnostic threat model. Under this model an
+#   undetected anomaly can only ever REMOVE records from a window (a
+#   false-negative capture the evaluator decides BLOCKED on), never
+#   fabricate records into one.
+# ============================================================================
+AUD_FD=""
+AUD_LINES=0   # complete records consumed through the pinned descriptor
+AUD_BYTES=0   # bytes consumed through the pinned descriptor
+AUD_BROKEN="" # set once source continuity can no longer be proven
+
+audit_close() {
+  [ -n "$AUD_FD" ] || return 0
+  eval "exec ${AUD_FD}<&-" 2>/dev/null || true
+  AUD_FD=""
+}
+
+audit_open() {
+  audit_close
+  AUD_LINES=0
+  AUD_BYTES=0
+  AUD_BROKEN=""
+  exec {AUD_FD}<"$AUDIT_LOG_PATH" 2>/dev/null || { AUD_FD=""; return 1; }
+  return 0
+}
+
+audit_identity() { # prints proven, or unproven:<reason> (rc 1 when unproven)
+  local pin path size
+  if [ -z "$AUD_FD" ]; then
+    printf 'unproven:no-pinned-descriptor'
+    return 1
+  fi
+  if [ -n "$AUD_BROKEN" ]; then
+    printf 'unproven:session-broken(%s)' "$AUD_BROKEN"
+    return 1
+  fi
+  pin="$(stat -Lc '%d:%i' "/proc/self/fd/$AUD_FD" 2>/dev/null)" || {
+    printf 'unproven:descriptor-stat-error'
+    return 1
+  }
+  path="$(stat -c '%d:%i' "$AUDIT_LOG_PATH" 2>/dev/null)" || {
+    printf 'unproven:path-stat-error'
+    return 1
+  }
+  if [ "$pin" != "$path" ]; then
+    printf 'unproven:path-replaced(pinned=%s,path=%s)' "$pin" "$path"
+    return 1
+  fi
+  size="$(stat -Lc '%s' "/proc/self/fd/$AUD_FD" 2>/dev/null)" || {
+    printf 'unproven:descriptor-size-error'
+    return 1
+  }
+  if [ "$size" -lt "$AUD_BYTES" ]; then
+    printf 'unproven:truncated(size=%s,consumed=%s)' "$size" "$AUD_BYTES"
+    return 1
+  fi
+  printf 'proven'
+}
+
+audit_drain() { # <outfile> — appends EXACTLY the bytes appended to the
+  # pinned source since the previous drain; rc 0 iff the drain is sound
+  local out="$1" tmp lines bytes tailnl
+  if [ -z "$AUD_FD" ] || [ -n "$AUD_BROKEN" ]; then
+    AUD_BROKEN="${AUD_BROKEN:-drain-after-broken}"
+    return 1
+  fi
+  tmp="$(mktemp "$STATE_DIR/drain.XXXXXX")" || { AUD_BROKEN="drain-temp-error"; return 1; }
+  if ! cat <&"$AUD_FD" >"$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    AUD_BROKEN="read-error"
+    return 1
+  fi
+  if [ -s "$tmp" ]; then
+    tailnl="$(tail -c 1 "$tmp" | wc -l)"
+    if [ "$tailnl" -eq 0 ]; then
+      rm -f "$tmp"
+      AUD_BROKEN="partial-record"
+      return 1
+    fi
+  fi
+  lines="$(wc -l <"$tmp")"
+  bytes="$(wc -c <"$tmp")"
+  if ! cat "$tmp" >>"$out" 2>/dev/null; then
+    rm -f "$tmp"
+    AUD_BROKEN="drain-output-error"
+    return 1
+  fi
+  rm -f "$tmp"
+  AUD_LINES=$((AUD_LINES + lines))
+  AUD_BYTES=$((AUD_BYTES + bytes))
+  return 0
+}
+
+# capture_begin <tag> [inter] — the pre-build identity checks and drain.
+# The records consumed here precede THIS build and are excluded from its
+# window. For the SECOND operation (mode=inter) the same drain IS the
+# inter-window evidence: those records are attributable to NEITHER
+# operation, and they get their own full integrity accounting.
+capture_begin() { # <tag> [inter]
+  local tag="$1" mode="${2:-}"
+  local BOUND="$EVIDENCE_DIR/window-boundaries-$tag.log"
+  local out="$EVIDENCE_DIR/pre-drain-$tag.log"
+  local i1 i2 drainstat ok=1 gap_after
+  : > "$BOUND"
+  i1="$(audit_identity)"
+  [ "$i1" = "proven" ] || ok=0
+  printf 'identity-begin-pre=%s\n' "$i1" >>"$BOUND"
+  if [ "$mode" = "inter" ]; then
+    out="$EVIDENCE_DIR/inter-window.log"
+    : > "$out"
+    gap_after="$AUD_LINES"
+  fi
+  if audit_drain "$out"; then
+    drainstat="ok"
+  else
+    drainstat="failed:$AUD_BROKEN"
+    ok=0
+  fi
+  printf 'pre-drain=%s\n' "$drainstat" >>"$BOUND"
+  i2="$(audit_identity)"
+  [ "$i2" = "proven" ] || ok=0
+  printf 'identity-begin-post=%s\n' "$i2" >>"$BOUND"
+  printf 'before=%s\n' "$AUD_LINES" >>"$BOUND"
+  if [ "$mode" = "inter" ]; then
+    local gap_before="$AUD_LINES" gexp=0 gact=0 gsrc="unproven"
+    if [ -n "$gap_after" ]; then
+      gexp=$((gap_before - gap_after))
+    fi
+    gact="$(wc -l <"$out" 2>/dev/null || printf 0)"
+    if [ "$ok" = 1 ] && [ -n "$gap_after" ]; then
+      gsrc="proven"
+    fi
+    {
+      printf 'identity-gap-pre=%s\n' "$i1"
+      printf 'identity-gap-post=%s\n' "$i2"
+      printf 'inter-drain=%s\n' "$drainstat"
+      printf 'gap-after=%s\n' "$gap_after"
+      printf 'gap-before=%s\n' "$gap_before"
+      printf 'expected=%s\n' "$gexp"
+      printf 'actual=%s\n' "$gact"
+      printf 'source=%s\n' "$gsrc"
+    } >"$EVIDENCE_DIR/inter-boundaries.log"
+  fi
+  return 0
+}
+
+# capture_end <tag> — the post-operation identity check, the window drain
+# through the pinned descriptor (THE extraction), the post-extract identity
+# check, and the MEASURED accounting: expected is the cursor arithmetic,
+# actual is the extracted file's own line count, and source is proven only
+# when every identity checkpoint and both drains were sound.
+capture_end() { # <tag>
+  local tag="$1"
+  local BOUND="$EVIDENCE_DIR/window-boundaries-$tag.log"
+  local WIN="$EVIDENCE_DIR/avc-window-$tag.log"
+  local i1 i2 drainstat ok=1
+  local BEFORE AFTER EXPECTED=0 ACTUAL=0 SOURCE="unproven"
+  : > "$WIN"
+  i1="$(audit_identity)"
+  [ "$i1" = "proven" ] || ok=0
+  printf 'identity-extract-pre=%s\n' "$i1" >>"$BOUND"
+  if audit_drain "$WIN"; then
+    drainstat="ok"
+  else
+    drainstat="failed:$AUD_BROKEN"
+    ok=0
+  fi
+  printf 'window-drain=%s\n' "$drainstat" >>"$BOUND"
+  i2="$(audit_identity)"
+  [ "$i2" = "proven" ] || ok=0
+  printf 'identity-extract-post=%s\n' "$i2" >>"$BOUND"
+  BEFORE="$(sed -n 's/^before=//p' "$BOUND" | head -1)"
+  AFTER="$AUD_LINES"
+  printf 'after=%s\n' "$AFTER" >>"$BOUND"
+  if [ -n "$BEFORE" ]; then
+    EXPECTED=$((AFTER - BEFORE))
+  fi
+  ACTUAL="$(wc -l <"$WIN" 2>/dev/null || printf 0)"
+  if [ "$ok" = 1 ] && [ -n "$BEFORE" ]; then
+    SOURCE="proven"
+  fi
+  printf 'expected=%s\n' "$EXPECTED" >>"$BOUND"
+  printf 'actual=%s\n' "$ACTUAL" >>"$BOUND"
+  printf 'source=%s\n' "$SOURCE" >>"$BOUND"
+  return 0
+}
+
+# ============================================================================
+# Capture selftest (--capture-selftest <workdir>): exercises the REAL
+# capture functions (audit_open/audit_identity/audit_drain/capture_begin/
+# capture_end — the exact production path) against synthetic audit sources
+# under the workdir, and records each scenario's measured accounting under
+# <workdir>/results/ for the Go tests to assert. NO assertions here: the
+# outcomes are the evidence; the Go tests are the judge. Scenario 9 of the
+# review battery (actual != expected) is evaluator-side by construction:
+# the producer measures both values from the same drained bytes, so a
+# mismatch can only exist as fabricated evidence — covered by the
+# evaluator tests.
+# ============================================================================
+SELFTEST_COUNTER=0
+
+selftest_scrub() { # <scenario>
+  audit_close
+  AUD_LINES=0
+  AUD_BYTES=0
+  AUD_BROKEN=""
+  EVIDENCE_DIR="$SELFTEST_WORKDIR/evidence-$1"
+  STATE_DIR="$SELFTEST_WORKDIR/state-$1"
+  mkdir -p "$EVIDENCE_DIR" "$STATE_DIR"
+}
+
+selftest_emit() { # <file> <count> — append <count> synthetic audit records
+  local i=1
+  while [ "$i" -le "$2" ]; do
+    SELFTEST_COUNTER=$((SELFTEST_COUNTER + 1))
+    printf 'type=SYNTH msg=audit(1000000.000:%d): synthetic record %d\n' \
+      "$SELFTEST_COUNTER" "$SELFTEST_COUNTER" >>"$1"
+    i=$((i + 1))
+  done
+}
+
+selftest_keep() { # <scenario> <src> <kind>
+  cp "$2" "$SELFTEST_WORKDIR/results/$1.$3" 2>/dev/null || true
+}
+
+p21c_capture_selftest() { # <workdir>
+  local work="$1" logf other i1 i2 dstat
+  mkdir -p "$work/results"
+
+  # 1. append-only green: 3 pre-existing records, the "build" appends 5,
+  #    the window is EXACTLY those 5, proven.
+  logf="$work/audit-s1.log"
+  : > "$logf"
+  selftest_emit "$logf" 3
+  AUDIT_LOG_PATH="$logf"
+  selftest_scrub s1
+  audit_open || printf 'open-failed\n' >"$work/results/append-only-green.open"
+  capture_begin s1
+  selftest_emit "$logf" 5
+  capture_end s1
+  selftest_keep append-only-green "$EVIDENCE_DIR/window-boundaries-s1.log" boundaries
+
+  # 1b. inter-window green: the SAME pinned flow continues; the next
+  #     pre-build drain IS the inter-window capture (4 records appended).
+  selftest_emit "$logf" 4
+  capture_begin s1b inter
+  selftest_keep inter-window-green "$EVIDENCE_DIR/inter-boundaries.log" inter
+
+  # 2. torn record: the build's last record was never completed (no
+  #    trailing newline) — the drain must fail the capture.
+  logf="$work/audit-s2.log"
+  : > "$logf"
+  selftest_emit "$logf" 2
+  AUDIT_LOG_PATH="$logf"
+  selftest_scrub s2
+  audit_open || true
+  capture_begin s2
+  selftest_emit "$logf" 4
+  printf 'type=SYNTH msg=audit(1000000.999:999): torn record no newline' >>"$logf"
+  capture_end s2
+  selftest_keep torn-record "$EVIDENCE_DIR/window-boundaries-s2.log" boundaries
+
+  # 3. read error: the source cannot be read through the descriptor.
+  AUDIT_LOG_PATH="$work/audit-s3.dir"
+  mkdir -p "$AUDIT_LOG_PATH"
+  selftest_scrub s3
+  audit_open || true
+  capture_begin s3
+  capture_end s3
+  selftest_keep read-error "$EVIDENCE_DIR/window-boundaries-s3.log" boundaries
+
+  # 4. truncate WITHOUT an inode change: the pinned source shrinks below
+  #    the consumed cursor and is rewritten.
+  logf="$work/audit-s4.log"
+  : > "$logf"
+  selftest_emit "$logf" 3
+  AUDIT_LOG_PATH="$logf"
+  selftest_scrub s4
+  audit_open || true
+  capture_begin s4
+  selftest_emit "$logf" 5
+  truncate -s 0 "$logf"
+  selftest_emit "$logf" 1
+  capture_end s4
+  selftest_keep truncate-same-inode "$EVIDENCE_DIR/window-boundaries-s4.log" boundaries
+
+  # 5/6/7. rename/replacement with FEWER / SAME / MORE lines than the
+  #        original source carried: the inode mismatch must decide, never
+  #        the line count.
+  for scenario in replace-fewer replace-same replace-more; do
+    case "$scenario" in
+      replace-fewer) other=1 ;;
+      replace-same) other=8 ;;
+      replace-more) other=12 ;;
+    esac
+    logf="$work/audit-$scenario.log"
+    : > "$logf"
+    selftest_emit "$logf" 3
+    other="$work/other-$scenario.log"
+    : > "$other"
+    selftest_emit "$other" "$other"
+    AUDIT_LOG_PATH="$logf"
+    selftest_scrub "$scenario"
+    audit_open || true
+    capture_begin "$scenario"
+    selftest_emit "$logf" 5
+    mv "$other" "$logf"
+    capture_end "$scenario"
+    selftest_keep "$scenario" "$EVIDENCE_DIR/window-boundaries-$scenario.log" boundaries
+  done
+
+  # 8. replacement DURING the extraction: capture_end's exact internal
+  #    order (identity check, window drain, identity check), driven
+  #    stepwise with the replacement injected between the checkpoints.
+  logf="$work/audit-replace-during-extract.log"
+  : > "$logf"
+  selftest_emit "$logf" 3
+  other="$work/other-replace-during-extract.log"
+  : > "$other"
+  selftest_emit "$other" 9
+  AUDIT_LOG_PATH="$logf"
+  selftest_scrub replace-during-extract
+  audit_open || true
+  capture_begin replace-during-extract
+  selftest_emit "$logf" 5
+  i1="$(audit_identity)"
+  mv "$other" "$logf"
+  if audit_drain "$EVIDENCE_DIR/avc-window-replace-during-extract.log"; then
+    dstat="ok"
+  else
+    dstat="$AUD_BROKEN"
+  fi
+  i2="$(audit_identity)"
+  {
+    printf 'identity-extract-pre=%s\n' "$i1"
+    printf 'window-drain=%s\n' "$dstat"
+    printf 'identity-extract-post=%s\n' "$i2"
+  } >"$work/results/replace-during-extract.steps"
+
+  # 10. incomplete inter-window: the source is replaced between the first
+  #     operation's window and the inter-window capture.
+  logf="$work/audit-inter-unsound.log"
+  : > "$logf"
+  selftest_emit "$logf" 3
+  other="$work/other-inter-unsound.log"
+  : > "$other"
+  selftest_emit "$other" 7
+  AUDIT_LOG_PATH="$logf"
+  selftest_scrub inter-unsound
+  audit_open || true
+  capture_begin inter-unsound
+  selftest_emit "$logf" 5
+  capture_end inter-unsound
+  mv "$other" "$logf"
+  capture_begin inter-unsound-b inter
+  selftest_keep inter-window-unsound "$EVIDENCE_DIR/inter-boundaries.log" inter
+}
+
+if [ -n "$SELFTEST_WORKDIR" ]; then
+  p21c_capture_selftest "$SELFTEST_WORKDIR"
+  exit 0
+fi
 
 [ "$(id -u)" = "0" ] || fail "must run as root"
 [ -f "$ARTIFACT" ] || fail "artifact missing: $ARTIFACT"
@@ -436,11 +848,13 @@ fi
 # captured and classified INDEPENDENTLY:
 #   1. Session ID + daemon Operation ID recorded per operation (the HTTP
 #      /build response and the /sessions response).
-#   2. EXACT audit capture boundaries: the audit.log line count is recorded
-#      immediately before and after each build; the operation's window is
-#      STRICTLY the records appended in between (no tail window, no
-#      ausearch "recent", no arbitrary head -N truncation). Rotation
-#      (after < before) is recorded as capture-unavailable.
+#   2. EXACT audit capture boundaries: the window is EXACTLY the bytes
+#      appended to the pinned audit source between the pre-build drain and
+#      the post-operation drain, read THROUGH one pinned descriptor (no
+#      tail window, no ausearch "recent", no arbitrary head -N truncation,
+#      no re-read from the path). The identity checkpoints around every
+#      drain and the measured before/after/expected/actual accounting are
+#      recorded; an unproven capture is capture-unavailable.
 #   3. Per-record attribution inside each window (MCS category is NEVER the
 #      attribution key — both runtimes may share one category):
 #        - op-attributed: the record's path carries THIS operation's
@@ -458,7 +872,6 @@ fi
 #      reached is evidenced by the attributed records themselves (the
 #      presence of the runc:[2:INIT] comm and of the boundary records).
 # ============================================================================
-audit_lines() { wc -l < /var/log/audit/audit.log 2>/dev/null || printf '0'; }
 
 classify_window() { # <tag> <operation-id (with or without the op_ prefix)>
   local tag="$1" opid="$2"
@@ -496,7 +909,7 @@ classify_window() { # <tag> <operation-id (with or without the op_ prefix)>
   done < "$W"
 }
 
-run_one_build() { # <tag> <session-token>
+run_one_build() { # <tag> <session-token> [inter]
   local tag="$1" token="$2"
   # The build goes through the HTTP API so the daemon operation id is
   # captured verbatim in the evidence (the CLI streams logs only).
@@ -512,11 +925,12 @@ run_one_build() { # <tag> <session-token>
   printf '%s\n' "$OP" > "$EVIDENCE_DIR/operation-id-$tag.log"
   log "build $tag http=$CODE operation_id=$OP"
   [ -n "$OP" ] || { log "build $tag: no operation id (http $CODE)"; return 1; }
-  # EXACT audit capture boundary: the audit.log line count immediately
-  # before the build. The window is what gets appended during THIS build.
-  local BEFORE AFTER
-  BEFORE="$(audit_lines)"
-  printf 'before=%s\n' "$BEFORE" > "$EVIDENCE_DIR/window-boundaries-$tag.log"
+  # EXACT capture boundary: the pinned-source identity checks and the
+  # pre-build drain immediately before the status poll. The operation's
+  # window is EXACTLY the bytes appended to the pinned audit source
+  # between this drain and capture_end's post-operation drain — read
+  # through the pinned descriptor, never re-read from the path.
+  capture_begin "$tag" "${3:-}" || true
   local STATUS=""
   for _ in $(seq 1 400); do
     STATUS="$(curl --silent --max-time 2 \
@@ -528,17 +942,7 @@ run_one_build() { # <tag> <session-token>
     sleep 0.05
   done
   printf '%s\n' "$STATUS" > "$EVIDENCE_DIR/build-status-$tag.json"
-  AFTER="$(audit_lines)"
-  printf 'after=%s\n' "$AFTER" >> "$EVIDENCE_DIR/window-boundaries-$tag.log"
-  if [ "$AFTER" -ge "$BEFORE" ] 2>/dev/null; then
-    sed -n "$((BEFORE + 1)),${AFTER}p" /var/log/audit/audit.log \
-      > "$EVIDENCE_DIR/avc-window-$tag.log" 2>/dev/null || true
-  else
-    # Rotation or truncation between the boundary marks: the window is
-    # capture-unavailable (the evaluator decides BLOCKED — never guesses).
-    printf 'captured=ROTATED\n' >> "$EVIDENCE_DIR/window-boundaries-$tag.log"
-    : > "$EVIDENCE_DIR/avc-window-$tag.log"
-  fi
+  capture_end "$tag" || true
   curl --silent --max-time 2 \
     --unix-socket "$DH_SOCK" -H "Authorization: Bearer $token" \
     "http://localhost/operations/$OP/logs?offset=0" \
@@ -547,7 +951,7 @@ run_one_build() { # <tag> <session-token>
   return 0
 }
 
-make_session_build() { # <tag>
+make_session_build() { # <tag> [inter]
   local tag="$1"
   local WS="$PRINCIPAL_HOME/r7-p21c-ws-$tag"
   rm -rf "$WS"; mkdir -p "$WS/ctx"
@@ -572,24 +976,18 @@ make_session_build() { # <tag>
     return 1
   fi
   docker-helper pull alpine:3.24 >"$EVIDENCE_DIR/pull-$tag.log" 2>&1 || true
-  run_one_build "$tag" "$TOKEN" || true
+  run_one_build "$tag" "$TOKEN" "${2:-}" || true
   return 0
 }
 
 compose_op_section() { # <tag>
   local tag="$1"
-  local OPID SID B A C
+  local OPID SID
   OPID="$(cat "$EVIDENCE_DIR/operation-id-$tag.log" 2>/dev/null)"
   SID="$(cat "$EVIDENCE_DIR/session-id-$tag.log" 2>/dev/null)"
-  B="$(sed -n 's/^before=//p' "$EVIDENCE_DIR/window-boundaries-$tag.log" 2>/dev/null | head -1)"
-  A="$(sed -n 's/^after=//p' "$EVIDENCE_DIR/window-boundaries-$tag.log" 2>/dev/null | head -1)"
-  C=""
-  if [ -n "$B" ] && [ -n "$A" ] && [ "$A" -ge "$B" ] 2>/dev/null; then
-    C=$((A - B))
-  fi
   printf '== operation %s %s session %s ==\n' "$tag" "$OPID" "$SID"
-  printf -- '-- window boundaries (audit.log line offsets) --\n'
-  printf 'before=%s after=%s captured=%s\n' "$B" "$A" "${C:-UNAVAILABLE}"
+  printf -- '-- window boundaries (pinned-source capture integrity) --\n'
+  cat "$EVIDENCE_DIR/window-boundaries-$tag.log" 2>/dev/null || true
   printf -- '-- operation result --\n'
   grep -oE '"(status|result_code|exit_code)": *("[^"]*"|[0-9]+)' \
     "$EVIDENCE_DIR/build-status-$tag.json" 2>/dev/null | tr '\n' ' ' || true
@@ -621,33 +1019,24 @@ for _ in $(seq 1 50); do
   sleep 0.2
 done
 [ -n "$ADMIN_TOKEN" ] || fail "admin token unreadable; the live proof cannot run"
-[ -f /var/log/audit/audit.log ] || fail "audit.log unavailable; per-operation windows cannot be bounded"
+[ -f "$AUDIT_LOG_PATH" ] || fail "audit source unavailable; per-operation windows cannot be bounded"
+audit_open || fail "cannot open the pinned audit-source descriptor"
+log "pinned audit-source descriptor: fd=$AUD_FD identity=$(audit_identity || true)"
 make_session_build c1
 classify_window c1 "$(cat "$EVIDENCE_DIR/operation-id-c1.log" 2>/dev/null)"
-make_session_build c2
+# The SECOND operation's pre-build drain IS the inter-window capture: the
+# records consumed between the two operations are attributable to NEITHER
+# operation by position; unrelated host audit noise is expected there. Any
+# runc:[2:INIT] record in this region is AMBIGUOUS evidence (the evaluator
+# decides BLOCKED — it is never assumed to belong to an operation).
+make_session_build c2 inter
 classify_window c2 "$(cat "$EVIDENCE_DIR/operation-id-c2.log" 2>/dev/null)"
-# The INTER-WINDOW region: records appended between the two operations'
-# capture boundaries. They are attributable to NEITHER operation by
-# position; unrelated host audit noise is expected here. Any runc:[2:INIT]
-# record in this region is AMBIGUOUS evidence (the evaluator decides
-# BLOCKED — it is never assumed to belong to an operation).
-B1="$(sed -n 's/^after=//p' "$EVIDENCE_DIR/window-boundaries-c1.log" 2>/dev/null | head -1)"
-B2="$(sed -n 's/^before=//p' "$EVIDENCE_DIR/window-boundaries-c2.log" 2>/dev/null | head -1)"
-: > "$EVIDENCE_DIR/inter-window.log"
-GAP="UNAVAILABLE"
-if [ -n "$B1" ] && [ -n "$B2" ] && [ "$B2" -ge "$B1" ] 2>/dev/null; then
-  GAP=$((B2 - B1))
-  if [ "$B2" -gt "$B1" ]; then
-    sed -n "$((B1 + 1)),${B2}p" /var/log/audit/audit.log \
-      > "$EVIDENCE_DIR/inter-window.log" 2>/dev/null || true
-  fi
-fi
 {
   compose_op_section c1
   compose_op_section c2
   printf '== inter-window records (attributable to NEITHER operation) ==\n'
-  printf -- '-- window boundaries (audit.log line offsets) --\n'
-  printf 'gap-after=%s gap-before=%s captured=%s\n' "$B1" "$B2" "$GAP"
+  printf -- '-- window boundaries (pinned-source capture integrity) --\n'
+  cat "$EVIDENCE_DIR/inter-boundaries.log" 2>/dev/null || true
   printf -- '-- records --\n'
   cat "$EVIDENCE_DIR/inter-window.log" 2>/dev/null
 } > "$EVIDENCE_DIR/p21c-terminals.log" 2>&1

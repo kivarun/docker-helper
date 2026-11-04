@@ -1,8 +1,23 @@
 #!/usr/bin/env bash
 #
-# release-2.4-r7-p21c-verdict.sh — the R7 P21-C gate evaluator (revision 2,
-# r7-p21c-corrective-1: fail-closed per-operation runtime-window
-# attribution).
+# release-2.4-r7-p21c-verdict.sh — the R7 P21-C gate evaluator (revision 3,
+# r7-p21c-corrective-2: fail-closed audit-capture integrity on top of the
+# revision-2 per-operation runtime-window attribution).
+#
+# Revision 3 addition: the capture itself is now part of the proof. The
+# producer reads every window through ONE pinned read descriptor on the
+# audit source and records, per capture: the identity checkpoints around
+# every drain (path st_dev:st_ino == pinned st_dev:st_ino; pinned size
+# never below the consumed cursor), the drain outcomes, and a MEASURED
+# accounting (before/after/expected/actual, actual = the extracted file's
+# own line count, not the boundary arithmetic). The evaluator accepts
+# MEASURED only when every checkpoint is proven, both drains are ok, the
+# accounting is internally consistent, and the RAW window artifacts
+# (avc-window-<tag>.log, inter-window.log) independently corroborate the
+# section: same line count as `actual`, every cited record present
+# verbatim, every runc:[2:INIT] record in the raw bytes accounted for by
+# the section's classification, and no regression-control shape anywhere
+# in the raw bytes.
 #
 # Pure file-based evaluation of a P21-C evidence directory (no VM, no policy
 # access). Fail-closed: missing, duplicated, corrupted, or ambiguous
@@ -286,6 +301,36 @@ if require_file p21c-terminals.log; then
     fi
   fi
 
+  # Positive-violation scans on the RAW captured bytes. These are valid
+  # regardless of capture soundness: a recorded violation in the drained
+  # bytes proves the policy allowed it, even when the capture cannot prove
+  # completeness. (The raw window is the bytes actually read through the
+  # pinned descriptor — the section cannot be more authoritative than it.)
+  raw_positive_scans() { # <opid> <raw>
+    local opid="$1" raw="$2" hit
+    hit="$(grep -a 'docker_helper_runc_memfd_t' "$raw" | grep -a 'tclass=file' | grep -a '{ create }' | head -1 || true)"
+    if [ -n "$hit" ]; then
+      note FAIL "REGRESSION-CONTROL-REAPPEARED op_$opid P20 terminal (raw window): $hit"
+    fi
+    hit="$(grep -a 'tcontext=system_u:object_r:tmpfs_t:s0 tclass=file' "$raw" | grep -a '{ write }' | head -1 || true)"
+    if [ -n "$hit" ]; then
+      note FAIL "REGRESSION-CONTROL-REAPPEARED op_$opid pre-B terminal (raw window): $hit"
+    fi
+    hit="$(grep -a 'denied  \{ associate \}' "$raw" | head -1 || true)"
+    if [ -n "$hit" ]; then
+      note FAIL "REGRESSION-CONTROL-REAPPEARED op_$opid associate (raw window): $hit"
+    fi
+    hit="$(grep -a 'tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file' "$raw" | grep -a 'denied  { read open }' | head -1 || true)"
+    if [ -n "$hit" ]; then
+      note FAIL "OPEN-COMPLETION-LIVE op_$opid (raw window): $hit"
+    fi
+    hit="$(grep -a 'comm="runc:\[2:INIT\]"' "$raw" | grep -aE 'ops/op_[0-9a-f]+/' | grep -av "ops/op_${opid}/" | head -1 || true)"
+    if [ -n "$hit" ]; then
+      note FAIL "ATTRIBUTION-VIOLATION op_$opid (raw window): a record of ANOTHER operation appears in this operation's raw window: $hit"
+    fi
+    return 0
+  }
+
   # --- per-operation section evaluation ------------------------------------
   eval_op_section() { # <section-header-line> <opid> <first(1)|second(2)>
     local hdr="$1" opid="$2" pos="$3"
@@ -298,22 +343,92 @@ if require_file p21c-terminals.log; then
     ' "$TERM")"
     [ -n "$BODY" ] || { note BLOCKED "terminals: the section for op_$opid is empty"; return; }
 
-    # (a) window boundaries: EXACT, consistent, and non-overlapping.
-    local BOUND
-    BOUND="$(printf '%s\n' "$BODY" | grep -E '^before=[0-9]+ after=[0-9]+ captured=[0-9]+$' | head -1)"
-    local BEFORE AFTER CAPTURED
-    BEFORE="$(printf '%s' "$BOUND" | sed -n 's/^before=\([0-9]*\) .*/\1/p')"
-    AFTER="$(printf '%s' "$BOUND" | sed -n 's/^.* after=\([0-9]*\) .*/\1/p')"
-    CAPTURED="$(printf '%s' "$BOUND" | sed -n 's/^.* captured=\([0-9]*\)$/\1/p')"
-    if [ -z "$BEFORE" ] || [ -z "$AFTER" ] || [ -z "$CAPTURED" ]; then
-      note BLOCKED "terminals: op_$opid has no consistent whole-line audit window boundary (before=<n> after=<m> captured=<k>) — truncated or rotated capture cannot be measured"
+    # (a) capture integrity: the pinned-source identity checkpoints and
+    # the MEASURED extraction accounting. Every key must appear EXACTLY
+    # once; every identity checkpoint must be proven and both drains ok;
+    # the accounting must be internally consistent (expected = the cursor
+    # arithmetic, actual = the extracted file's own line count, and the
+    # two must agree with a non-empty window).
+    local key total prov val badcap=0
+    for key in identity-begin-pre identity-begin-post identity-extract-pre identity-extract-post; do
+      total="$(printf '%s\n' "$BODY" | grep -Ecx -- "^$key=.+" || true)"
+      prov="$(printf '%s\n' "$BODY" | grep -Ecx -- "^$key=proven" || true)"
+      if [ "$total" -ne 1 ] || [ "$prov" -ne 1 ]; then
+        note BLOCKED "terminals: op_$opid capture checkpoint '$key' is missing, duplicated, or not proven (records=$total proven=$prov)"
+        badcap=1
+      fi
+    done
+    for key in pre-drain window-drain; do
+      total="$(printf '%s\n' "$BODY" | grep -Ecx -- "^$key=.+" || true)"
+      prov="$(printf '%s\n' "$BODY" | grep -Ecx -- "^$key=ok" || true)"
+      if [ "$total" -ne 1 ] || [ "$prov" -ne 1 ]; then
+        note BLOCKED "terminals: op_$opid drain outcome '$key' is missing, duplicated, or not ok (records=$total ok=$prov)"
+        badcap=1
+      fi
+    done
+    local BEFORE="" AFTER="" EXPECTED="" ACTUAL=""
+    for key in before after expected actual; do
+      total="$(printf '%s\n' "$BODY" | grep -Ecx -- "^$key=[0-9]+\$" || true)"
+      if [ "$total" -ne 1 ]; then
+        note BLOCKED "terminals: op_$opid capture accounting key '$key' is missing, duplicated, or not a plain number (records=$total)"
+        badcap=1
+        continue
+      fi
+      val="$(printf '%s\n' "$BODY" | sed -n "s/^$key=//p" | head -1)"
+      case "$key" in
+        before) BEFORE="$val" ;;
+        after) AFTER="$val" ;;
+        expected) EXPECTED="$val" ;;
+        actual) ACTUAL="$val" ;;
+      esac
+    done
+    total="$(printf '%s\n' "$BODY" | grep -Ecx -- '^source=.+' || true)"
+    prov="$(printf '%s\n' "$BODY" | grep -Ecx -- '^source=proven' || true)"
+    if [ "$total" -ne 1 ] || [ "$prov" -ne 1 ]; then
+      note BLOCKED "terminals: op_$opid capture source state is missing, duplicated, or not proven (records=$total proven=$prov)"
+      badcap=1
+    fi
+    local TAG="${hdr#== operation }"
+    TAG="${TAG%% *}"
+    local RAW="$DIR/avc-window-$TAG.log"
+    if [ "$badcap" = 1 ]; then
+      # The capture is not proven — it can never measure. Positive
+      # violations recorded in the raw captured bytes are still detected.
+      [ -r "$RAW" ] && raw_positive_scans "$opid" "$RAW"
       return
     fi
-    if [ "$AFTER" -lt "$BEFORE" ] || [ "$CAPTURED" -ne $((AFTER - BEFORE)) ] || [ "$CAPTURED" -eq 0 ]; then
-      note BLOCKED "terminals: op_$opid window boundary inconsistent (before=$BEFORE after=$AFTER captured=$CAPTURED) — truncated or rotated capture cannot be measured"
+    if [ "$EXPECTED" -ne $((AFTER - BEFORE)) ]; then
+      note BLOCKED "terminals: op_$opid capture accounting inconsistent (expected=$EXPECTED, but after=$AFTER - before=$BEFORE)"
+      badcap=1
+    fi
+    if [ "$ACTUAL" -ne "$EXPECTED" ]; then
+      note BLOCKED "terminals: op_$opid captured line count does not match the boundary arithmetic (actual=$ACTUAL expected=$EXPECTED) — the extraction is not the measured window"
+      badcap=1
+    fi
+    if [ "$ACTUAL" -eq 0 ]; then
+      note BLOCKED "terminals: op_$opid window captured 0 records — absence of AVCs alone is never a passing outcome"
+      badcap=1
+    fi
+    if [ "$badcap" = 1 ]; then
+      [ -r "$RAW" ] && raw_positive_scans "$opid" "$RAW"
       return
     fi
-    printf 'WINDOW-OK\top_%s before=%s after=%s captured=%s\n' "$opid" "$BEFORE" "$AFTER" "$CAPTURED" >> "$CLASS_LOG"
+
+    # (a2) the raw window artifact must independently corroborate the
+    # section: EXACTLY the measured line count.
+    if [ ! -r "$RAW" ]; then
+      note BLOCKED "terminals: op_$opid raw window artifact avc-window-$TAG.log is missing"
+      return
+    fi
+    local RAW_LINES
+    RAW_LINES="$(wc -l <"$RAW" 2>/dev/null || printf 0)"
+    if [ "$RAW_LINES" -ne "$ACTUAL" ]; then
+      note BLOCKED "terminals: op_$opid raw window artifact holds $RAW_LINES lines but the capture accounting claims actual=$ACTUAL"
+      [ -s "$RAW" ] && raw_positive_scans "$opid" "$RAW"
+      return
+    fi
+    printf 'WINDOW-OK\top_%s before=%s after=%s expected=%s actual=%s capture=proven\n' \
+      "$opid" "$BEFORE" "$AFTER" "$EXPECTED" "$ACTUAL" >> "$CLASS_LOG"
 
     # (b) the whole-window attributed record sets.
     local OPATT PIDC MIS UNATT
@@ -364,6 +479,35 @@ if require_file p21c-terminals.log; then
     if [ -n "$UNATT" ]; then
       note BLOCKED "terminals: op_$opid carries runc:[2:INIT] records that cannot be attributed to any operation (ambiguous evidence — never assumed): $UNATT"
     fi
+
+    # (c2) the section must be a faithful view of the raw captured bytes:
+    # every cited record present verbatim, and every runc:[2:INIT] record
+    # in the raw bytes accounted for by the classification (own path, a
+    # misattributed FAIL, or a pid proven by an op-attributed record).
+    local MISSING_RECS=""
+    while IFS= read -r rec; do
+      [ -n "$rec" ] || continue
+      grep -aqF -- "$rec" "$RAW" || MISSING_RECS="$MISSING_RECS$rec"$'\n'
+    done <<<"$(printf '%s\n' "$OPATT" "$PIDC")"
+    if [ -n "$MISSING_RECS" ]; then
+      note BLOCKED "terminals: op_$opid cites records that are NOT in its raw window artifact avc-window-$TAG.log (the section is not the captured bytes): $MISSING_RECS"
+    fi
+    local RAW_UNACCT="" rpid
+    while IFS= read -r rec; do
+      [ -n "$rec" ] || continue
+      case "$rec" in *"ops/op_${opid}/"*) continue ;; esac
+      if printf '%s' "$rec" | grep -qaE 'ops/op_[0-9a-f]+/'; then
+        continue  # another operation's path — the raw misattribution scan
+      fi
+      rpid="$(printf '%s' "$rec" | grep -aoE 'pid=[0-9]+' | sed 's/pid=//' | head -1)"
+      if [ -z "$rpid" ] || ! printf '%s\n' "$OWN_PIDS" | grep -qx "$rpid"; then
+        RAW_UNACCT="$RAW_UNACCT$rec"$'\n'
+      fi
+    done <<<"$(grep -a 'comm="runc:\[2:INIT\]"' "$RAW" || true)"
+    if [ -n "$RAW_UNACCT" ]; then
+      note BLOCKED "terminals: op_$opid raw window carries runc:[2:INIT] records the section classification does not account for (ambiguous evidence — never assumed): $RAW_UNACCT"
+    fi
+    raw_positive_scans "$opid" "$RAW"
 
     # (d) the eliminated P21-B terminal shape: absent from this
     # operation's attributed+correlated runtime records.
@@ -471,13 +615,48 @@ if require_file p21c-terminals.log; then
         $0 == hdr { sec = 1; next }
         /^== / { if (sec) exit }
         sec { print }' "$TERM")"
-      INTER_GAPA="$(printf '%s\n' "$INTER_BODY" | sed -n 's/^gap-after=\([0-9]*\) .*/\1/p' | head -1)"
-      INTER_GAPB="$(printf '%s\n' "$INTER_BODY" | sed -n 's/^.* gap-before=\([0-9]*\) .*/\1/p' | head -1)"
-      INTER_CAP="$(printf '%s\n' "$INTER_BODY" | sed -n 's/^.* captured=\([0-9]*\)$/\1/p' | head -1)"
-      if [ -z "$INTER_GAPA" ] || [ -z "$INTER_GAPB" ] || [ -z "$INTER_CAP" ]; then
-        note BLOCKED "terminals: the inter-window section carries no consistent whole-line gap boundary (gap-after=<n> gap-before=<m> captured=<k>)"
-      elif [ "$INTER_GAPB" -lt "$INTER_GAPA" ] || [ "$INTER_CAP" -ne $((INTER_GAPB - INTER_GAPA)) ]; then
-        note BLOCKED "terminals: the inter-window gap boundary is inconsistent (gap-after=$INTER_GAPA gap-before=$INTER_GAPB captured=$INTER_CAP)"
+      # capture integrity for the inter-window capture: the same pinned-
+      # source requirements as the operation windows.
+      ikey=""; itotal=""; iprov=""
+      for ikey in identity-gap-pre identity-gap-post; do
+        itotal="$(printf '%s\n' "$INTER_BODY" | grep -Ecx -- "^$ikey=.+" || true)"
+        iprov="$(printf '%s\n' "$INTER_BODY" | grep -Ecx -- "^$ikey=proven" || true)"
+        if [ "$itotal" -ne 1 ] || [ "$iprov" -ne 1 ]; then
+          note BLOCKED "terminals: the inter-window capture checkpoint '$ikey' is missing, duplicated, or not proven (records=$itotal proven=$iprov)"
+        fi
+      done
+      itotal="$(printf '%s\n' "$INTER_BODY" | grep -Ecx -- '^inter-drain=.+' || true)"
+      iprov="$(printf '%s\n' "$INTER_BODY" | grep -Ecx -- '^inter-drain=ok' || true)"
+      if [ "$itotal" -ne 1 ] || [ "$iprov" -ne 1 ]; then
+        note BLOCKED "terminals: the inter-window drain outcome is missing, duplicated, or not ok (records=$itotal ok=$iprov)"
+      fi
+      itotal="$(printf '%s\n' "$INTER_BODY" | grep -Ecx -- '^source=.+' || true)"
+      iprov="$(printf '%s\n' "$INTER_BODY" | grep -Ecx -- '^source=proven' || true)"
+      if [ "$itotal" -ne 1 ] || [ "$iprov" -ne 1 ]; then
+        note BLOCKED "terminals: the inter-window capture source state is missing, duplicated, or not proven (records=$itotal proven=$iprov)"
+      fi
+      INTER_GAPA=""; INTER_GAPB=""; INTER_EXP=""; INTER_ACT=""
+      for ikey in gap-after gap-before expected actual; do
+        itotal="$(printf '%s\n' "$INTER_BODY" | grep -Ecx -- "^$ikey=[0-9]+\$" || true)"
+        if [ "$itotal" -ne 1 ]; then
+          note BLOCKED "terminals: the inter-window capture accounting key '$ikey' is missing, duplicated, or not a plain number (records=$itotal)"
+          continue
+        fi
+        case "$ikey" in
+          gap-after) INTER_GAPA="$(printf '%s\n' "$INTER_BODY" | sed -n 's/^gap-after=//p' | head -1)" ;;
+          gap-before) INTER_GAPB="$(printf '%s\n' "$INTER_BODY" | sed -n 's/^gap-before=//p' | head -1)" ;;
+          expected) INTER_EXP="$(printf '%s\n' "$INTER_BODY" | sed -n 's/^expected=//p' | head -1)" ;;
+          actual) INTER_ACT="$(printf '%s\n' "$INTER_BODY" | sed -n 's/^actual=//p' | head -1)" ;;
+        esac
+      done
+      if [ -z "$INTER_GAPA" ] || [ -z "$INTER_GAPB" ] || [ -z "$INTER_EXP" ] || [ -z "$INTER_ACT" ]; then
+        note BLOCKED "terminals: the inter-window capture accounting is incomplete"
+      elif [ "$INTER_EXP" -ne $((INTER_GAPB - INTER_GAPA)) ]; then
+        note BLOCKED "terminals: the inter-window capture accounting is inconsistent (expected=$INTER_EXP, but gap-before=$INTER_GAPB - gap-after=$INTER_GAPA)"
+      elif [ "$INTER_ACT" -ne "$INTER_EXP" ]; then
+        note BLOCKED "terminals: the inter-window captured line count does not match the boundary arithmetic (actual=$INTER_ACT expected=$INTER_EXP) — the extraction is not the measured window"
+      elif [ "$INTER_GAPB" -lt "$INTER_GAPA" ]; then
+        note BLOCKED "terminals: the inter-window gap boundary is inconsistent (gap-after=$INTER_GAPA gap-before=$INTER_GAPB)"
       elif [ "$INTER_GAPB" -lt "$FIRST_WINDOW_END" ] 2>/dev/null; then
         note FAIL "WINDOW-OVERLAP: the inter-window region (gap-before=$INTER_GAPB) reaches into the first window (after=$FIRST_WINDOW_END)"
       elif [ "$INTER_GAPA" -gt "$FIRST_WINDOW_END" ] 2>/dev/null; then
@@ -485,21 +664,51 @@ if require_file p21c-terminals.log; then
       elif [ -n "$SECOND_WINDOW_BEGIN" ] && [ "$INTER_GAPB" -ne "$SECOND_WINDOW_BEGIN" ]; then
         note BLOCKED "terminals: the inter-window region (gap-before=$INTER_GAPB) does not end at the second window's begin ($SECOND_WINDOW_BEGIN) — records between them are unaccounted"
       fi
+      # The raw inter-window artifact must independently corroborate the
+      # section: EXACTLY the measured line count.
+      INTER_RAW="$DIR/inter-window.log"
+      if [ ! -r "$INTER_RAW" ]; then
+        note BLOCKED "terminals: the raw inter-window artifact inter-window.log is missing"
+      else
+        INTER_RAW_LINES=""
+        INTER_RAW_LINES="$(wc -l <"$INTER_RAW" 2>/dev/null || printf 0)"
+        if [ -n "$INTER_ACT" ] && [ "$INTER_RAW_LINES" -ne "$INTER_ACT" ]; then
+          note BLOCKED "terminals: the raw inter-window artifact holds $INTER_RAW_LINES lines but the capture accounting claims actual=$INTER_ACT"
+        fi
+      fi
       INTER_RUNC="$(printf '%s\n' "$INTER_BODY" | awk -v hdr='-- records --' '
         $0 == hdr { sec = 1; next }
         sec && /comm="runc:\[2:INIT\]"/ && NF { print }')"
       if [ -n "$INTER_RUNC" ]; then
         note BLOCKED "terminals: runc:[2:INIT] records exist in the inter-window region where they are attributable to NEITHER operation (ambiguous evidence — never assumed): $INTER_RUNC"
       fi
-      for sechdr_shape in 'docker_helper_runc_memfd_t.*tclass=file.*\{ create \}' 'tcontext=system_u:object_r:tmpfs_t:s0 tclass=file.*\{ write \}' 'denied  { associate }'; do
+      if [ -r "$INTER_RAW" ]; then
+        INTER_RUNC="$(grep -a 'comm="runc:\[2:INIT\]"' "$INTER_RAW" | head -2 || true)"
+        if [ -n "$INTER_RUNC" ]; then
+          note BLOCKED "terminals: runc:[2:INIT] records exist in the raw inter-window artifact where they are attributable to NEITHER operation (ambiguous evidence — never assumed): $INTER_RUNC"
+        fi
+      fi
+      for sechdr_shape in 'docker_helper_runc_memfd_t.*tclass=file.*\{ create \}' 'tcontext=system_u:object_r:tmpfs_t:s0 tclass=file.*\{ write \}' 'denied  \{ associate \}'; do
         INTER_CTRL="$(printf '%s\n' "$INTER_BODY" | grep -aE "$sechdr_shape" | head -2 || true)"
         if [ -n "$INTER_CTRL" ]; then
           note FAIL "REGRESSION-CONTROL-REAPPEARED inter-window: $INTER_CTRL"
+        fi
+        if [ -r "$INTER_RAW" ]; then
+          INTER_CTRL="$(grep -aE "$sechdr_shape" "$INTER_RAW" | head -2 || true)"
+          if [ -n "$INTER_CTRL" ]; then
+            note FAIL "REGRESSION-CONTROL-REAPPEARED inter-window (raw): $INTER_CTRL"
+          fi
         fi
       done
       INTER_OLD="$(printf '%s\n' "$INTER_BODY" | grep -a 'tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file' | grep -a 'denied  { read open }' | head -1 || true)"
       if [ -n "$INTER_OLD" ]; then
         note FAIL "OPEN-COMPLETION-LIVE: the eliminated devnode { read open } shape appears in the inter-window region: $INTER_OLD"
+      fi
+      if [ -r "$INTER_RAW" ]; then
+        INTER_OLD="$(grep -a 'tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file' "$INTER_RAW" | grep -a 'denied  { read open }' | head -1 || true)"
+        if [ -n "$INTER_OLD" ]; then
+          note FAIL "OPEN-COMPLETION-LIVE: the eliminated devnode { read open } shape appears in the raw inter-window artifact: $INTER_OLD"
+        fi
       fi
     fi
   fi
