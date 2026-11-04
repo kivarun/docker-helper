@@ -38,7 +38,8 @@ case "$R7_MODE" in
   p21a) GUEST_SCRIPT='release-2.4-r7-p21a-guest.sh' ;;
   p21b) GUEST_SCRIPT='release-2.4-r7-p21b-guest.sh' ;;
   p21c) GUEST_SCRIPT='release-2.4-r7-p21c-guest.sh' ;;
-  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c)" ;;
+  p21d) GUEST_SCRIPT='release-2.4-r7-p21d-guest.sh' ;;
+  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d)" ;;
 esac
 
 log()  { printf '%s %s\n' "$PREFIX" "$*"; }
@@ -83,6 +84,13 @@ if [ "$R7_MODE" = "p21c" ]; then
   # The P21-C gate evaluator rides along (the same contract as P21-B).
   vm_scp "$SCRIPT_DIR/release-2.4-r7-p21c-verdict.sh" \
     opc@127.0.0.1:/tmp/r7-diag/release-2.4-r7-p21c-verdict.sh
+fi
+if [ "$R7_MODE" = "p21d" ]; then
+  # The P21-D gate evaluator rides along (the same contract as P21-B).
+  vm_scp "$SCRIPT_DIR/release-2.4-r7-p21d-guest.sh" \
+    opc@127.0.0.1:/tmp/r7-diag/release-2.4-r7-diag-guest.sh
+  vm_scp "$SCRIPT_DIR/release-2.4-r7-p21d-verdict.sh" \
+    opc@127.0.0.1:/tmp/r7-diag/release-2.4-r7-p21d-verdict.sh
 fi
 
 set +e
@@ -191,6 +199,20 @@ RMT
         log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
         ;;
     esac
+  elif [ "$R7_MODE" = "p21d" ]; then
+    VERDICT="$(grep -aoE 'R7-P21D-VERDICT=.*' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"
+    case "$VERDICT" in
+      R7-P21D-VERDICT=*)
+        log "R7 P21-D probe verdict: $VERDICT"
+        break
+        ;;
+      *)
+        if [ "$attempt" -eq 3 ]; then
+          fail "the R7 P21-D probe produced no verdict (guest exit $GUEST_RC)"
+        fi
+        log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
+        ;;
+    esac
   else
   VERDICT="$(grep -aoE 'R7-DIAG-RESULT=[A-Z-]+' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"
   case "$VERDICT" in
@@ -235,6 +257,17 @@ if [ "$R7_MODE" = "p21c" ]; then
     fail "the R7 P21-C gate did not reach P21C-MEASURED: $FINAL_VERDICT"
   fi
   log "R7 P21-C gate: P21C-MEASURED"
+fi
+
+if [ "$R7_MODE" = "p21d" ]; then
+  FINAL_VERDICT="$(grep -aoE 'R7-P21D-VERDICT=.*' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"
+  if [ -z "$FINAL_VERDICT" ]; then
+    fail "the R7 P21-D run produced no machine verdict"
+  fi
+  if ! bash "$SCRIPT_DIR/release-2.4-r7-p21d-verdict.sh" --gate "$FINAL_VERDICT"; then
+    fail "the R7 P21-D gate did not reach P21D-MEASURED: $FINAL_VERDICT"
+  fi
+  log "R7 P21-D gate: P21D-MEASURED"
 fi
 if [ "$R7_MODE" = "bprime" ]; then
   FINAL_VERDICT="$(grep -aoE 'R7-BPRIME-VERDICT=.*' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"

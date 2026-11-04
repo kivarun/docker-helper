@@ -3686,6 +3686,119 @@ allow docker_helper_devnode_t tmpfs_t:filesystem associate;
 #     is — the next terminal is OBSERVED, never preempted.
 allow docker_helper_buildkitd_t docker_helper_devnode_t:file { read open };
 
+# --- R7 P21-D: the devnode bind-mount target singleton `file mounton` — ---
+# --- the measured next terminal after the P21-C open-completion pair; ---
+# --- ONE NEW rule, never a widening of the create singleton or the pair ---
+#
+# PROVENANCE (the authoritative C3 enforcing UAT 41843207196, serials
+# 1204 and 1832 — the MEASURED next terminal after the P21-C pair took
+# effect; both operations, independently attributed windows):
+#
+#   avc:  denied  { mounton } for  pid=... comm="runc:[2:INIT]"
+#     path="/var/lib/docker-helper-builder/ops/op_<id>/root/runc-native/
+#     executor/<id>/rootfs/dev/null" dev="tmpfs" ino=5
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:docker_helper_devnode_t:s0
+#     tclass=file permissive=0
+#
+# MOUNT CONTRACT (source-level, pinned runc v1.4.3 commit bb14dab, and the
+# RUNNING vendor kernel Linux 7.3.1-1-default; the relevant functions are
+# byte-identical between the pinned v7.2 analysis tree and v7.3 —
+# selinux_mount, path_has_perm, may_mount, graft_tree are IDENTICAL, and
+# v7.3's only do_loopback delta is an MS_REC-only nsfs-copy guard that a
+# plain MS_BIND never engages):
+#   - WHO: runc's createDevices (rootfs_linux.go:967) — in the user-
+#     namespace flow useBindMount is true from the start, runc NEVER
+#     mknods device nodes; bindMountDeviceNode (rootfs_linux.go:985)
+#     openat(O_CREAT|O_NOFOLLOW|O_CLOEXEC, 0000)s the regular-file
+#     placeholder (the P21-B create + P21-C { read open } pair) and then
+#     mountViaFds(node.Path, nil, ..., "bind", unix.MS_BIND, "") dispatches
+#     to the CLASSIC mount(2) (mount_linux.go:158, srcFile==nil);
+#   - SOURCE: the HOST device node path (AllowedDevices: /dev/null, zero,
+#     full, random, urandom, tty — spec_linux.go:236), resolved by the
+#     kernel from the caller's namespace pre-pivot; the mount syscall never
+#     reads the source (generic lookup mediation only, dir:search per
+#     directory);
+#   - TARGET: the placeholder regular file on the container's OWN /dev
+#     tmpfs superblock (a fresh per-container superblock, P16), addressed
+#     through its own fd (/proc/thread-self/fd/<n>) — the kernel resolves
+#     it to the placeholder dentry, hence the audited path;
+#   - WHERE: the container init's private CLONE_NEWNS copy, before
+#     pivot_root; root propagation is P14's measured MS_REC|MS_SLAVE fence;
+#   - KERNEL CHECK (Linux 7.3.1-1-default, fs/namespace.c:4267):
+#     path_mount -> security_sb_mount -> selinux_mount's non-remount branch
+#     -> path_has_perm(FILE__MOUNTON) on the DESTINATION — the ONLY SELinux
+#     check of the whole bind (no get_tree, no security_sb_kern_mount, a
+#     bind needs NO filesystem-class authority) — then may_mount()
+#     (ns_capable CAP_SYS_ADMIN in the mount-namespace-owning user
+#     namespace; live-proven passable for this exact subject in this exact
+#     namespace by the completed P15/P16/P18/P19/P20 mounts), then
+#     MS_BIND -> do_loopback: kern_path on the source (generic dir:search
+#     lookup mediation), check_mnt, the clone, and graft_tree (VFS-only,
+#     no LSM hook). The mount syscall completes with NO further SELinux
+#     decision after mounton.
+#   - THE GRANT IS DESTINATION-ONLY: mounton constrains the mount point,
+#     never the source; the grant reads or modifies NO source inode and
+#     grants NO post-bind access — the first access THROUGH a mounted-over
+#     path is checked against the MOUNTED (cloned source) inode's own label
+#     and class (for the host device: the chr_file class on the distro
+#     device type — NOT devnode_t:file, NOT granted by this rung, a
+#     separate future surface observed when reached).
+#
+# TYPE-WIDE EXPOSURE (not P20-equivalent, analyzed per-scenario): devnode_t
+# is uncategorized s0 and the six filename transitions are NAME-keyed, not
+# path-keyed, so the type is reachable in ANY tmpfs_t venue with directory
+# authority (the distro base policy's domain tmpfs_t:dir grant; measured
+# host venues /dev/shm, /dev/mqueue, /run/initramfs are tmpfs_t). The
+# mounton check is category-blind (mounton appears in NO file- or
+# dir-class constraint — measured). The bound is therefore NOT "MCS on the
+# target" and this rung is NOT a strict subset of P20 (whose target type is
+# per-op categorized AND pathname-owned); it is:
+#   (a) NAMESPACE VISIBILITY: every mount is grafted inside the acting
+#       container init's private CLONE_NEWNS copy; the P14 MS_REC|MS_SLAVE
+#       root fence means the mount never propagates to the host or to any
+#       other operation's namespace copy, including for shared-venue
+#       destinations — the only cross-op-visible effect of any mount-over
+#       is NONE;
+#   (b) SOURCE SELECTION: a mount source inside another operation's tree
+#       requires resolving it — dir:search IS category-constrained
+#       (mlsconstrain dir { ioctl lock read search } — measured), so
+#       cross-op sources are unreachable; own-operation sources expose only
+#       material the subject could read at the source path anyway;
+#   (c) POST-BIND ACCESS: content seen through the destination is governed
+#       by the mounted source inode's own label and the file-class MCS
+#       constraint (mlsconstrain file { execute execute_no_trans ioctl lock
+#       read } — measured); the placeholder type itself stays content-dead
+#       (no subject holds any write-class authority; the P21-C pair admits
+#       only the empty-object read);
+#   (d) SUBJECT BOUND: only the container init can mount at all (the
+#       daemon holds no CAP_SYS_ADMIN in any mount-namespace-owning user
+#       namespace — the P14 unshare probes stay measured denials);
+#   (e) the underlying placeholder inode is never modified: the mount-over
+#       HIDES it behind a mount inside the acting namespace copy, and the
+#       hidden object is a zero-length placeholder (strictly less than the
+#       accepted P20 hide-over-content shape).
+#
+# WITHIN the flow the grant lets the container init bind the six host
+# device nodes over their placeholders (the six AllowedDevices entries —
+# the exact pairs the six filename transitions were created for), all
+# inside the container's private namespace.
+#
+# Deliberately NOT granted: every other devnode_t file permission (the
+# standing create singleton and the { read open } pair stay exactly their
+# own owners — no merged { create mounton } or { read open mounton } form),
+# the dir-class tmpfs_t mounton rider on the associate singleton, any
+# chr_file or device-type authority for the POST-BIND access (the expected
+# next terminal — the first access through the bound host device — is
+# OBSERVED when reached, never preempted), any device_t:dir search grant
+# (the source-walk lookup — likewise observed if it denies), any
+# filesystem-class addition (remount/unmount/getattr/mounton), any
+# capability change, any other subject, and the next runtime surface
+# whatever it proves to be. The committed-policy tests pin the buildkitd
+# devnode_t authority at EXACTLY the FOUR reviewed rules; the buildkitd
+# named-allow count moves 51 -> 52 by exactly this one rule.
+allow docker_helper_buildkitd_t docker_helper_devnode_t:file mounton;
+
 # --- R7-A: the daemon's buildctl executable identity (full artifact-gate
 # --- evidence, failed release run 38944346311) ---
 #
