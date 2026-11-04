@@ -143,6 +143,11 @@ const (
 // the devnode_t file object, permissive=0, with a per-operation path.
 const p21cOldTerminal = `type=AVC msg=audit(1793714070.816:1190): avc:  denied  { read open } for  pid=3288 comm="runc:[2:INIT]" path="` + p21cOp1Rootfs + `" dev="tmpfs" ino=5 scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file permissive=0`
 
+// p21cAssociateDenial is the associate-denial shape the raw-window
+// regression controls must catch (the singleton is granted; any associate
+// denial on the loaded candidate policy is a positive violation).
+const p21cAssociateDenial = `type=AVC msg=audit(1793789899.004:2003): avc:  denied  { associate } for  pid=3517 comm="runc:[2:INIT]" path="/dev/shm/x" dev="tmpfs" ino=9 scontext=system_u:object_r:docker_helper_devnode_t:s0 tcontext=system_u:object_r:tmpfs_t:s0 tclass=filesystem permissive=0`
+
 // p21cWindow1/p21cWindow2 are the green raw windows: EXACTLY the bytes the
 // producer drained through the pinned descriptor for each operation.
 var (
@@ -903,6 +908,10 @@ func TestR7P21CVerdictCaptureIntegrityFailClosed(t *testing.T) {
 		{"the raw window carries the eliminated shape",
 			greenC1 + c2Window4("") + greenInter,
 			map[string]string{"c1": p21cWindow1, "c2": p21cWindow2 + p21cOldTerminal + "\n", "inter": ""},
+			"P21C-FAIL"},
+		{"the raw window carries an associate denial",
+			greenC1 + c2Window4("") + greenInter,
+			map[string]string{"c1": p21cWindow1, "c2": p21cWindow2 + p21cAssociateDenial + "\n", "inter": ""},
 			"P21C-FAIL"},
 	}
 	for _, mut := range mutations {

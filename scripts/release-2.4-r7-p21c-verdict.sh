@@ -316,7 +316,7 @@ if require_file p21c-terminals.log; then
     if [ -n "$hit" ]; then
       note FAIL "REGRESSION-CONTROL-REAPPEARED op_$opid pre-B terminal (raw window): $hit"
     fi
-    hit="$(grep -a 'denied  \{ associate \}' "$raw" | head -1 || true)"
+    hit="$(grep -aF -e 'denied  { associate }' "$raw" | head -1 || true)"
     if [ -n "$hit" ]; then
       note FAIL "REGRESSION-CONTROL-REAPPEARED op_$opid associate (raw window): $hit"
     fi
