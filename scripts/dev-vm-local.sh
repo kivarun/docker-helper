@@ -69,6 +69,7 @@ fail() {
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEV_VM_DIR="${DEV_VM_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/$(basename "$(dirname "$SCRIPT_DIR")")}"
 
 # In-guest trust marker: the destructive lab scripts run only where this
 # exists and its embedded machine-id matches the guest. Written by this
