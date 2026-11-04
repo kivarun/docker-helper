@@ -460,8 +460,11 @@ fi
 # ============================================================================
 audit_lines() { wc -l < /var/log/audit/audit.log 2>/dev/null || printf '0'; }
 
-classify_window() { # <tag> <opid>
+classify_window() { # <tag> <operation-id (with or without the op_ prefix)>
   local tag="$1" opid="$2"
+  # The HTTP operation id carries the op_ prefix; the per-op tree path is
+  # /var/lib|/run/.../ops/op_<hex>/... — normalize once.
+  opid="${opid#op_}"
   local W="$EVIDENCE_DIR/avc-window-$tag.log"
   local OPATT="$EVIDENCE_DIR/op-attributed-$tag.log"
   local PIDC="$EVIDENCE_DIR/pid-correlated-$tag.log"
@@ -584,7 +587,7 @@ compose_op_section() { # <tag>
   if [ -n "$B" ] && [ -n "$A" ] && [ "$A" -ge "$B" ] 2>/dev/null; then
     C=$((A - B))
   fi
-  printf '== operation %s op_%s session %s ==\n' "$tag" "$OPID" "$SID"
+  printf '== operation %s %s session %s ==\n' "$tag" "$OPID" "$SID"
   printf -- '-- window boundaries (audit.log line offsets) --\n'
   printf 'before=%s after=%s captured=%s\n' "$B" "$A" "${C:-UNAVAILABLE}"
   printf -- '-- operation result --\n'
