@@ -83,9 +83,17 @@
 #       - violates NO regression control anywhere in its window (P20
 #         runc_memfd_t:file create, pre-B' tmpfs_t:file write, associate);
 #       - carries NO misattributed record (a record whose path names a
-#         DIFFERENT operation id inside this operation's window) and NO
-#         unattributed runc:[2:INIT] record (ambiguous attribution —
-#         BLOCKED, never assumed).
+#         DIFFERENT operation id inside this operation's window — FAIL).
+#         PATHLESS runc:[2:INIT] records (the P21-D post-rung shape: the
+#         observed terminals of the device-bind stage carry name=/no-path
+#         forms) are attributed by the PROVEN window — the window opened
+#         before THIS operation's POST and closed at THIS operation's
+#         terminal, the windows are proven non-overlapping, and the
+#         pid-singleton invariant pins every runc:[2:INIT] record of the
+#         window to ONE container init whose pid the OTHER window never
+#         shares (the same pid in both windows decides FAIL). A window
+#         carrying runc:[2:INIT] records of MULTIPLE container inits is
+#         ambiguous evidence (BLOCKED, never assumed).
 
 set -uo pipefail
 
@@ -286,6 +294,8 @@ TERM="$DIR/p21d-terminals.log"
 NEXT_TERMINAL="(none)"
 OP1_RESULT=""
 OP2_RESULT=""
+WINDOW_PID_1=""
+WINDOW_PID_2=""
 
 # The exact section-header lines. Header recognition and the AWK section
 # anchoring below share THESE EXACT strings, so header presence and section
@@ -520,11 +530,30 @@ if require_file p21d-terminals.log; then
     if [ -n "$MIS" ]; then
       note FAIL "ATTRIBUTION-VIOLATION op_$opid: a record of ANOTHER operation appears in this operation's window: $MIS"
     fi
+    # Pathless runc:[2:INIT] records are attributed by the PROVEN window:
+    # the window opened before THIS operation's POST and closed at THIS
+    # operation's terminal, the windows are proven non-overlapping, and
+    # the pid-singleton invariant below pins every runc:[2:INIT] record of
+    # the window to ONE container init whose pid the OTHER window never
+    # shares. A record carrying ANOTHER operation's path stays a positive
+    # violation (the misattribution checks above and the raw scan).
+    local RAW_RUNCPIDS WINDOW_PID
+    RAW_RUNCPIDS="$(grep -a 'comm="runc:\[2:INIT\]"' "$RAW" | grep -aoE 'pid=[0-9]+' | sed 's/pid=//' | sort -u || true)"
+    if [ "$(printf '%s\n' "$RAW_RUNCPIDS" | grep -c . || true)" -gt 1 ]; then
+      note BLOCKED "terminals: op_$opid window carries runc:[2:INIT] records of MULTIPLE container inits (pid set: $(printf '%s ' $RAW_RUNCPIDS)) — ambiguous evidence"
+      RAW_RUNCPIDS=""
+    fi
+    WINDOW_PID="$(printf '%s' "$RAW_RUNCPIDS" | head -1)"
+    if [ "$pos" = "1" ]; then WINDOW_PID_1="$WINDOW_PID"; else WINDOW_PID_2="$WINDOW_PID"; fi
     if [ -n "$UNATT" ]; then
-      if [ "$OP_SUCCEEDED" = 1 ]; then
-        printf 'OP-WINDOW-RECORDS\top_%s pathless records are window-scoped under proven completion\n' "$opid" >> "$CLASS_LOG"
+      local FOREIGN_UNATT
+      FOREIGN_UNATT="$(printf '%s\n' "$UNATT" | grep -a 'ops/op_' || true)"
+      if [ -n "$FOREIGN_UNATT" ]; then
+        note BLOCKED "terminals: op_$opid unattributed section carries a PATH-carrying record (the classifier contract is broken): $FOREIGN_UNATT"
+      elif [ -z "$WINDOW_PID" ]; then
+        note BLOCKED "terminals: op_$opid carries pathless runc:[2:INIT] records but the window's container-init pid is ambiguous"
       else
-        note BLOCKED "terminals: op_$opid carries runc:[2:INIT] records that cannot be attributed to any operation (ambiguous evidence — never assumed): $UNATT"
+        printf 'OP-WINDOW-RECORDS\top_%s pathless records are window-scoped (attribution = the proven window + the container-init pid singleton %s)\n' "$opid" "$WINDOW_PID" >> "$CLASS_LOG"
       fi
     fi
 
@@ -547,17 +576,15 @@ if require_file p21d-terminals.log; then
       if printf '%s' "$rec" | grep -qaE 'ops/op_[0-9a-f]+/'; then
         continue  # another operation's path — the raw misattribution scan
       fi
+      # pathless: window-scoped under the pid-singleton invariant above
       rpid="$(printf '%s' "$rec" | grep -aoE 'pid=[0-9]+' | sed 's/pid=//' | head -1)"
-      if [ -z "$rpid" ] || ! printf '%s\n' "$OWN_PIDS" | grep -qx "$rpid"; then
-        RAW_UNACCT="$RAW_UNACCT$rec"$'\n'
+      if [ -n "$rpid" ] && printf '%s\n' "$OWN_PIDS" | grep -qx "$rpid"; then
+        continue
       fi
+      RAW_UNACCT="$RAW_UNACCT$rec"$'\n'
     done <<<"$(grep -a 'comm="runc:\[2:INIT\]"' "$RAW" || true)"
-    if [ -n "$RAW_UNACCT" ]; then
-      if [ "$OP_SUCCEEDED" = 1 ]; then
-        printf 'OP-WINDOW-RECORDS\top_%s raw pathless records are window-scoped under proven completion\n' "$opid" >> "$CLASS_LOG"
-      else
-        note BLOCKED "terminals: op_$opid raw window carries runc:[2:INIT] records the section classification does not account for (ambiguous evidence — never assumed): $RAW_UNACCT"
-      fi
+    if [ -n "$RAW_UNACCT" ] && [ -z "$WINDOW_PID" ]; then
+      note BLOCKED "terminals: op_$opid raw window carries runc:[2:INIT] records the section classification does not account for (ambiguous evidence — never assumed): $RAW_UNACCT"
     fi
     raw_positive_scans "$opid" "$RAW"
 
@@ -565,11 +592,11 @@ if require_file p21d-terminals.log; then
     # P21-C mounton): absent from this operation's attributed+correlated
     # runtime records.
     local OLD_HERE
-    OLD_HERE="$(printf '%s\n' "$OPATT" "$PIDC" | grep -a 'tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file' | grep -a 'denied  { read open }' | head -1)"
+    OLD_HERE="$(printf '%s\n' "$OPATT" "$PIDC" "$UNATT" | grep -a 'tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file' | grep -a 'denied  { read open }' | head -1)"
     if [ -n "$OLD_HERE" ]; then
       note FAIL "OPEN-COMPLETION-LIVE op_$opid: the P21-B measured devnode { read open } terminal reappeared in this operation's window: $OLD_HERE"
     fi
-    OLD_HERE="$(printf '%s\n' "$OPATT" "$PIDC" | grep -a 'tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file' | grep -a 'denied  { mounton }' | head -1)"
+    OLD_HERE="$(printf '%s\n' "$OPATT" "$PIDC" "$UNATT" | grep -a 'tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file' | grep -a 'denied  { mounton }' | head -1)"
     if [ -n "$OLD_HERE" ]; then
       note FAIL "MOUNTON-TERMINAL-LIVE op_$opid: the P21-C measured devnode mounton terminal reappeared in this operation's window: $OLD_HERE"
     fi
@@ -580,7 +607,7 @@ if require_file p21d-terminals.log; then
     # never pre-classified; absence is BLOCKED (AVC absence alone is
     # never a passing outcome).
     local NEW_HERE
-    NEW_HERE="$(printf '%s\n' "$OPATT" "$PIDC" | awk '
+    NEW_HERE="$(printf '%s\n' "$OPATT" "$PIDC" "$UNATT" | awk '
       /avc:  denied  / &&
       /permissive=0/ &&
       /scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c[0-9]+ / &&
@@ -605,7 +632,11 @@ if require_file p21d-terminals.log; then
         note BLOCKED "terminals: op_$opid has NO attributed next-terminal record and NO proven operation completion (the flow must be observed advancing past the open-completion boundary IN THIS OPERATION — absence of AVCs alone is never a passing outcome)"
       fi
     else
-      printf 'OP-TERMINAL-OK\top_%s %s\n' "$opid" "$NEW_HERE" >> "$CLASS_LOG"
+      if printf '%s' "$NEW_HERE" | grep -qa 'ops/op_'; then
+        printf 'OP-TERMINAL-OK\top_%s %s\n' "$opid" "$NEW_HERE" >> "$CLASS_LOG"
+      else
+        printf 'OP-TERMINAL-OK\top_%s (window-scoped attribution) %s\n' "$opid" "$NEW_HERE" >> "$CLASS_LOG"
+      fi
       if [ "$pos" = "1" ]; then OP1_RESULT="terminal"; else OP2_RESULT="terminal"; fi
       if [ -z "$NEXT_TERMINAL" ] || [ "$NEXT_TERMINAL" = "(none)" ]; then
         NEXT_TERMINAL="$NEW_HERE"
@@ -665,6 +696,8 @@ if require_file p21d-terminals.log; then
   TERMINAL_2=""
   OP1_RESULT=""
   OP2_RESULT=""
+  WINDOW_PID_1=""
+  WINDOW_PID_2=""
   if [ "$OP_HEADERS" -eq 2 ] && [ -n "$OP1_ID" ] && [ -n "$OP2_ID" ] \
      && [ "$OP1_ID" != "$OP2_ID" ] && [ -n "$OP1_SESSION" ] && [ -n "$OP2_SESSION" ] \
      && [ "$OP1_SESSION" != "$OP2_SESSION" ]; then
@@ -674,6 +707,11 @@ if require_file p21d-terminals.log; then
     # AVC can never serve as the evidence for both operations.
     if [ -n "$TERMINAL_1" ] && [ -n "$TERMINAL_2" ] && [ "$TERMINAL_1" = "$TERMINAL_2" ]; then
       note FAIL "TERMINAL-NOT-DISTINCT: both operations cite the SAME AVC record as their next terminal (one window can never serve both operations)"
+    fi
+    # The two operations' container-init pids must be DISTINCT: one
+    # runc:[2:INIT] process can never serve two operations.
+    if [ -n "$WINDOW_PID_1" ] && [ -n "$WINDOW_PID_2" ] && [ "$WINDOW_PID_1" = "$WINDOW_PID_2" ]; then
+      note FAIL "PID-NOT-DISTINCT: both windows carry runc:[2:INIT] records of the SAME container init (pid=$WINDOW_PID_1) — one container init can never serve two operations"
     fi
 
     # --- the inter-window region: attributable to NEITHER operation ------

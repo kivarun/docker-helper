@@ -422,20 +422,55 @@ func TestR7P21DVerdictSecondOperationFailsBeforeInitBlocks(t *testing.T) {
 // never rests on the MCS category: two windows whose records are
 // distinguishable ONLY by category labels (no per-operation path, no
 // pid proven by an op-attributed record) are AMBIGUOUS evidence — BLOCKED.
-func TestR7P21DVerdictCategoryOnlyAttributionBlocks(t *testing.T) {
-	// Pathless records only: nothing anchors them to an operation. Both
-	// carry the SAME c1 category label — the category is never the key.
-	pathlessSetuid := `type=AVC msg=audit(1793789899.001:1999): avc:  denied  { setuid } for  pid=3999 comm="runc:[2:INIT]" capability=7  scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns permissive=0`
-	pathlessGetattr := `type=AVC msg=audit(1793899120.005:3110): avc:  denied  { getattr } for  pid=3999 comm="runc:[2:INIT]" dev="tmpfs" ino=5 scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file permissive=0`
-	terminals := p21dOpSection("c1", p21dOp1ID, p21dSession1, 100, 101, "", "", "", pathlessSetuid+"\n", "", "", pathlessSetuid+"\n", "failed") +
-		p21dOpSection("c2", p21dOp2ID, p21dSession2, 104, 105, "", "", "", pathlessGetattr+"\n", "", "", pathlessGetattr+"\n", "failed") +
-		p21dInterSection(101, 104, "")
+// TestR7P21DVerdictWindowScopedAttribution proves the P21-D attribution
+// grammar for PATHLESS runtime records (the post-rung flow: the observed
+// terminals of the device-bind stage carry name=/pathless shapes, no
+// operation path): attribution rests on the PROVEN window and the
+// container-init pid singleton — NEVER on the MCS category. Pathless
+// records of distinct container-init pids in distinct proven windows
+// attribute cleanly and measure; the SAME pid appearing in BOTH windows
+// is a positive violation (one container init can never serve two
+// operations, no matter what the category labels claim).
+func TestR7P21DVerdictWindowScopedAttribution(t *testing.T) {
+	// Distinct pids, distinct proven windows, pathless records only: the
+	// records are window-scoped, the category label (c1 in BOTH windows)
+	// is irrelevant, and each window's own terminal decides its
+	// operation's advancement.
+	pathlessSetuid1 := `type=AVC msg=audit(1793899120.001:3101): avc:  denied  { setuid } for  pid=5353 comm="runc:[2:INIT]" capability=7  scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns permissive=0`
+	pathlessTerminal1 := `type=AVC msg=audit(1793899120.005:3110): avc:  denied  { create } for  pid=5353 comm="runc:[2:INIT]" name="ptmx" scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:tmpfs_t:s0 tclass=lnk_file permissive=0`
+	pathlessSetuid2 := `type=AVC msg=audit(1793899122.001:4101): avc:  denied  { setuid } for  pid=5517 comm="runc:[2:INIT]" capability=7  scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns permissive=0`
+	pathlessTerminal2 := `type=AVC msg=audit(1793899122.005:4110): avc:  denied  { create } for  pid=5517 comm="runc:[2:INIT]" name="ptmx" scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:tmpfs_t:s0 tclass=lnk_file permissive=0`
+	terminals := p21dOpSection("c1", p21dOp1ID, p21dSession1, 100, 102, "", "",
+		"", pathlessSetuid1+"\n"+pathlessTerminal1+"\n", "", "",
+		pathlessSetuid1+"\n"+pathlessTerminal1+"\n", "failed") +
+		p21dOpSection("c2", p21dOp2ID, p21dSession2, 102, 104, "", "",
+			"", pathlessSetuid2+"\n"+pathlessTerminal2+"\n", "", "",
+			pathlessSetuid2+"\n"+pathlessTerminal2+"\n", "failed") +
+		p21dInterSection(102, 102, "")
 	dir := p21dWriteEvidence(t, strings.Join(p21dGreenMatrix(), "\n")+"\n",
 		strings.Join(p21dGreenAV(), "\n")+"\n", terminals,
-		map[string]string{"c1": pathlessSetuid + "\n", "c2": pathlessGetattr + "\n", "inter": ""})
+		map[string]string{"c1": pathlessSetuid1 + "\n" + pathlessTerminal1 + "\n",
+			"c2": pathlessSetuid2 + "\n" + pathlessTerminal2 + "\n", "inter": ""})
 	line, rc := p21dRunEvaluator(t, dir)
-	if rc == 0 || !strings.Contains(line, "DECISION=P21D-BLOCKED") {
-		t.Errorf("category-only distinguishable records must decide BLOCKED (attribution never rests on the category), got rc=%d: %s", rc, line)
+	if rc != 0 || !strings.Contains(line, "DECISION=P21D-MEASURED") {
+		t.Errorf("window-scoped pathless records with distinct container-init pids must measure (the category is never the key), got rc=%d: %s", rc, line)
+	}
+	// The SAME container-init pid in BOTH windows: one runc:[2:INIT]
+	// process can never serve two operations — FAIL.
+	samePidTerminals := p21dOpSection("c1", p21dOp1ID, p21dSession1, 100, 102, "", "",
+		"", pathlessSetuid1+"\n"+pathlessTerminal1+"\n", "", "",
+		pathlessSetuid1+"\n"+pathlessTerminal1+"\n", "failed") +
+		p21dOpSection("c2", p21dOp2ID, p21dSession2, 102, 104, "", "",
+			"", pathlessSetuid1+"\n"+pathlessTerminal1+"\n", "", "",
+			pathlessSetuid1+"\n"+pathlessTerminal1+"\n", "failed") +
+		p21dInterSection(102, 102, "")
+	dir = p21dWriteEvidence(t, strings.Join(p21dGreenMatrix(), "\n")+"\n",
+		strings.Join(p21dGreenAV(), "\n")+"\n", samePidTerminals,
+		map[string]string{"c1": pathlessSetuid1 + "\n" + pathlessTerminal1 + "\n",
+			"c2": pathlessSetuid1 + "\n" + pathlessTerminal1 + "\n", "inter": ""})
+	line, rc = p21dRunEvaluator(t, dir)
+	if rc == 0 || !strings.Contains(line, "DECISION=P21D-FAIL") {
+		t.Errorf("the same container-init pid in both windows must decide FAIL, got rc=%d: %s", rc, line)
 	}
 }
 

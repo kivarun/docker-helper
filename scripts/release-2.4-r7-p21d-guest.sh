@@ -1131,10 +1131,18 @@ fi
 #          adjacency within the strict window bounds pid reuse);
 #        - misattributed: a record whose path carries a DIFFERENT
 #          operation's id — recorded as a positive attribution violation;
-#        - unattributed: everything else. A runc:[2:INIT] record that
-#          cannot be attributed is AMBIGUOUS evidence (the evaluator
-#          decides BLOCKED — it is never assumed to belong to an
-#          operation).
+#        - unattributed (P21-D: the WINDOW-SCOPED bucket): everything
+#          else. The P21-D post-rung flow produces PATHLESS runc:[2:INIT]
+#          records (the observed terminals of the device-bind stage carry
+#          name=/no-path forms, no operation path); with no op-attributed
+#          anchor record their pid cannot be correlated per-record, so
+#          the P21-D evaluator attributes them by the PROVEN window —
+#          the window opened before THIS operation's POST and closed at
+#          THIS operation's terminal, the windows are proven
+#          non-overlapping, and every runc:[2:INIT] record of the window
+#          must share ONE container-init pid that the OTHER window never
+#          shares (multiple inits per window: BLOCKED; the same pid in
+#          both windows: FAIL). The category label is NEVER the key.
 #   4. The final operation status is recorded verbatim; the runtime stage
 #      reached is evidenced by the attributed records themselves (the
 #      presence of the runc:[2:INIT] comm and of the boundary records).
