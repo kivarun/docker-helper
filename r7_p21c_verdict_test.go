@@ -1071,9 +1071,20 @@ func TestR7P21CGuestCaptureSelftest(t *testing.T) {
 		"source": "unproven", "identity-extract-pre": "~unproven:truncated",
 	})
 	// 5/6/7. Rename/replacement with FEWER, EQUAL, or MORE lines: the
-	//        inode mismatch decides, never the line count.
-	for _, name := range []string{"replace-fewer", "replace-same", "replace-more"} {
-		expect(name+".boundaries", map[string]string{
+	//        inode mismatch decides, never the line count. The replacement
+	//        fixtures themselves are verified BEFORE the replacement:
+	//        1, 8, and 12 records respectively, newline-terminated.
+	for scenario, count := range map[string]string{
+		"replace-fewer": "1", "replace-same": "8", "replace-more": "12",
+	} {
+		fixture := kv(scenario + ".fixture")
+		if fixture["replacement-records"] != count {
+			t.Errorf("%s: the replacement fixture must carry %s records before the replacement, got %q", scenario, count, fixture["replacement-records"])
+		}
+		if fixture["replacement-newline-terminated"] != "yes" {
+			t.Errorf("%s: the replacement fixture must be newline-terminated, got %q", scenario, fixture["replacement-newline-terminated"])
+		}
+		expect(scenario+".boundaries", map[string]string{
 			"identity-begin-pre":   "proven",
 			"identity-extract-pre": "~unproven:path-replaced",
 			"source":               "unproven",
@@ -1091,6 +1102,116 @@ func TestR7P21CGuestCaptureSelftest(t *testing.T) {
 	expect("inter-window-unsound.inter", map[string]string{
 		"source": "unproven", "identity-gap-pre": "~unproven:path-replaced",
 	})
+}
+
+// TestR7P21CGuestEarlyAVCOrdering proves the window opens BEFORE the build
+// is admitted: an AVC raised after POST /build is sent but before the HTTP
+// 201 response exists must land in THIS operation's raw window artifact —
+// never in the pre-build drain, never in the inter-window region — and the
+// evidence the mock run produced must be decisive in the evaluator: with
+// the eliminated { read open } shape it decides FAIL (OPEN-COMPLETION=
+// live), with a normal next terminal and no regressions it decides
+// MEASURED. The transport is a controlled mock curl seam inside the guest
+// harness's selftest battery (deterministic, no sleeps); capture_begin,
+// capture_end, classify_window, and the terminals composition are the
+// production path verbatim.
+func TestR7P21CGuestEarlyAVCOrdering(t *testing.T) {
+	dir := t.TempDir()
+	out, err := exec.Command("bash", "scripts/release-2.4-r7-p21c-guest.sh",
+		"--capture-selftest", dir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("capture selftest failed to run: %v\n%s", err, out)
+	}
+	kv := func(path string) map[string]string {
+		t.Helper()
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("file %s missing: %v\n%s", path, err, out)
+		}
+		m := make(map[string]string)
+		for _, l := range strings.Split(string(raw), "\n") {
+			if k, v, ok := strings.Cut(l, "="); ok && k != "" {
+				m[k] = v
+			}
+		}
+		return m
+	}
+	for name, want := range map[string]struct{ decision, openCompletion string }{
+		"early-avc-old":  {"P21C-FAIL", "live"},
+		"early-avc-next": {"P21C-MEASURED", "eliminated"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ev := filepath.Join(dir, "evidence-"+name)
+			summary := kv(filepath.Join(dir, "results", name+".summary"))
+			op1 := summary["op1"]
+			if op1 == "" {
+				t.Fatal("the selftest summary carries no op1 id")
+			}
+			// The producer's own evidence is fed to the evaluator verbatim;
+			// only the two policy matrices come from the green fixtures
+			// (the mock run does not run sesearch — it exercises capture
+			// and ordering, not the policy inventory).
+			if err := os.WriteFile(filepath.Join(ev, "create-matrix-before.log"),
+				[]byte(strings.Join(p21cGreenMatrix(), "\n")+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(ev, "av-matrix-before.log"),
+				[]byte(strings.Join(p21cGreenAV(), "\n")+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			// The early AVC (a runc-init record carrying THIS operation's
+			// op path) is present in BOTH operation windows...
+			for _, pair := range []struct{ tag, opid string }{{"c1", op1}, {"c2", summary["op2"]}} {
+				raw, err := os.ReadFile(filepath.Join(ev, "avc-window-"+pair.tag+".log"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(string(raw), `comm="runc:[2:INIT]"`) ||
+					!strings.Contains(string(raw), "ops/op_"+pair.opid+"/") {
+					t.Fatalf("the early AVC must be captured in avc-window-%s.log, got: %q", pair.tag, string(raw))
+				}
+			}
+			// ...and absent from the pre-build drain and the inter-window
+			// region (the accounting there must never absorb it).
+			for _, file := range []string{"pre-drain-c1.log", "inter-window.log"} {
+				raw, err := os.ReadFile(filepath.Join(ev, file))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(string(raw), `comm="runc:[2:INIT]"`) {
+					t.Errorf("%s must not carry the early AVC (a runc-init record), got: %q", file, string(raw))
+				}
+			}
+			// Both captures are proven with the early AVC counted.
+			for _, tag := range []string{"c1", "c2"} {
+				b := kv(filepath.Join(ev, "window-boundaries-"+tag+".log"))
+				if b["source"] != "proven" || b["actual"] != "1" || b["expected"] != "1" {
+					t.Errorf("%s window accounting must be proven with actual=expected=1, got %v", tag, b)
+				}
+			}
+			// The recorded HTTP admission status.
+			httpRaw, err := os.ReadFile(filepath.Join(ev, "build-start-c1.http.log"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.TrimSpace(string(httpRaw)) != "201" {
+				t.Errorf("the mock admission must record HTTP 201, got %q", string(httpRaw))
+			}
+			line, rc := p21cRunEvaluator(t, ev)
+			if want.decision == "P21C-MEASURED" && rc != 0 {
+				t.Fatalf("%s must decide %s (exit 0), got rc=%d: %s", name, want.decision, rc, line)
+			}
+			if want.decision != "P21C-MEASURED" && rc == 0 {
+				t.Fatalf("%s must NOT exit 0 (want %s), got: %s", name, want.decision, line)
+			}
+			if !strings.Contains(line, "DECISION="+want.decision) {
+				t.Fatalf("%s must decide %s, got: %s", name, want.decision, line)
+			}
+			if got := p21cField(t, line, "OPEN-COMPLETION"); got != want.openCompletion {
+				t.Errorf("%s: OPEN-COMPLETION must be %s, got %q", name, want.openCompletion, got)
+			}
+		})
+	}
 }
 
 // TestR7P21CVerdictGateMode pins the driver-side gate: exit 0 iff the

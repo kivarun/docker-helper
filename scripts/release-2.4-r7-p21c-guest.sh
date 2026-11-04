@@ -388,7 +388,7 @@ selftest_keep() { # <scenario> <src> <kind>
 }
 
 p21c_capture_selftest() { # <workdir>
-  local work="$1" logf other i1 i2 dstat
+  local work="$1" logf other replacement_count replacement_path i1 i2 dstat
   mkdir -p "$work/results"
 
   # 1. append-only green: 3 pre-existing records, the "build" appends 5,
@@ -450,25 +450,36 @@ p21c_capture_selftest() { # <workdir>
 
   # 5/6/7. rename/replacement with FEWER / SAME / MORE lines than the
   #        original source carried: the inode mismatch must decide, never
-  #        the line count.
+  #        the line count. The replacement fixtures are verified BEFORE
+  #        the replacement (record count + newline termination) and the
+  #        counts are recorded for the Go tests.
   for scenario in replace-fewer replace-same replace-more; do
     case "$scenario" in
-      replace-fewer) other=1 ;;
-      replace-same) other=8 ;;
-      replace-more) other=12 ;;
+      replace-fewer) replacement_count=1 ;;
+      replace-same) replacement_count=8 ;;
+      replace-more) replacement_count=12 ;;
     esac
     logf="$work/audit-$scenario.log"
     : > "$logf"
     selftest_emit "$logf" 3
-    other="$work/other-$scenario.log"
-    : > "$other"
-    selftest_emit "$other" "$other"
+    replacement_path="$work/other-$scenario.log"
+    : > "$replacement_path"
+    selftest_emit "$replacement_path" "$replacement_count"
+    {
+      printf 'replacement-records=%s\n' "$(wc -l <"$replacement_path")"
+      if [ -s "$replacement_path" ] \
+        && [ "$(tail -c 1 "$replacement_path" | wc -l)" -ge 1 ]; then
+        printf 'replacement-newline-terminated=yes\n'
+      else
+        printf 'replacement-newline-terminated=no\n'
+      fi
+    } >"$work/results/$scenario.fixture"
     AUDIT_LOG_PATH="$logf"
     selftest_scrub "$scenario"
     audit_open || true
     capture_begin "$scenario"
     selftest_emit "$logf" 5
-    mv "$other" "$logf"
+    mv "$replacement_path" "$logf"
     capture_end "$scenario"
     selftest_keep "$scenario" "$EVIDENCE_DIR/window-boundaries-$scenario.log" boundaries
   done
@@ -518,6 +529,248 @@ p21c_capture_selftest() { # <workdir>
   mv "$other" "$logf"
   capture_begin inter-unsound-b inter
   selftest_keep inter-window-unsound "$EVIDENCE_DIR/inter-boundaries.log" inter
+
+  # 11/12. early-AVC ordering: an AVC raised AFTER the POST is sent but
+  #        BEFORE the HTTP 201 response exists must land in THIS
+  #        operation's window — never in the pre-build drain, never in
+  #        the inter-window region. The transport is a controlled mock
+  #        curl seam (deterministic; no sleeps); capture_begin,
+  #        capture_end, classify_window, and the terminals composition
+  #        are the production path verbatim. <perms> chooses the emitted
+  #        denial: the eliminated "read open" shape (the evaluator must
+  #        decide FAIL) or the observed next-terminal shape (MEASURED).
+  selftest_early_avc() { # <scenario> <denied-perms>
+    local scenario="$1" perms="$2"
+    local work="$SELFTEST_WORKDIR"
+    local logf="$work/audit-$scenario.log"
+    local op1="1a1a2a3a4a5a6a7a8a9a0b1b2b3b4b5b" \
+          op2="3c3c4c4c5c5c6c6c7c7c8c8c9c9c0c0c" \
+          sid1="dhs_d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1" \
+          sid2="dhs_e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2" \
+          mock_serial=4700
+    selftest_scrub "$scenario"
+    : > "$logf"
+    selftest_emit "$logf" 2
+    AUDIT_LOG_PATH="$logf"
+    audit_open || true
+    mock_curl() {
+      local url="${@: -1}" out="" body="" i
+      for ((i = 1; i < $#; i++)); do
+        if [ "${!i}" = "-o" ]; then
+          out="${@: $((i + 1)):1}"
+        elif [ "${!i}" = "-d" ]; then
+          body="${@: $((i + 1)):1}"
+        fi
+      done
+      case "$url" in
+        */logs*)
+          ;;
+        http://localhost/build)
+          local opid pid
+          case "$body" in
+            *uat-p21c:c1*) opid="$op1"; pid=4701 ;;
+            *) opid="$op2"; pid=4702 ;;
+          esac
+          # THE ORDERING UNDER TEST: the kernel denial is appended to the
+          # audit source BEFORE the HTTP response exists.
+          mock_serial=$((mock_serial + 1))
+          printf 'type=AVC msg=audit(1793799999.001:%d): avc:  denied  { %s } for  pid=%d comm="runc:[2:INIT]" path="/var/lib/docker-helper-builder/ops/op_%s/root/runc-native/executor/mockexecutor/rootfs/dev/null" dev="tmpfs" ino=5 scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file permissive=0\n' \
+            "$mock_serial" "$perms" "$pid" "$opid" >>"$AUDIT_LOG_PATH"
+          if [ -n "$out" ]; then
+            printf '{"operation_id": "op_%s"}\n' "$opid" >"$out"
+          fi
+          printf '201'
+          ;;
+        *)
+          printf '{"status": "failed", "result_code": "docker_build_failed"}'
+          ;;
+      esac
+    }
+    curl() { mock_curl "$@"; }
+    printf '%s\n' "$sid1" >"$EVIDENCE_DIR/session-id-c1.log"
+    printf '%s\n' "$sid2" >"$EVIDENCE_DIR/session-id-c2.log"
+    run_one_build c1 mock-token || true
+    classify_window c1 "$op1"
+    # Host noise between the operations: the second capture_begin IS the
+    # inter-window capture and must close this region BEFORE the second
+    # POST is sent — the second operation's early AVC can never appear here.
+    selftest_emit "$logf" 1
+    run_one_build c2 mock-token inter || true
+    classify_window c2 "$op2"
+    compose_terminals_log
+    unset -f curl
+    {
+      printf 'op1=%s\n' "$op1"
+      printf 'op2=%s\n' "$op2"
+      printf 'perms=%s\n' "$perms"
+    } >"$work/results/$scenario.summary"
+  }
+  selftest_early_avc early-avc-old "read open"
+  selftest_early_avc early-avc-next "mounton"
+}
+
+classify_window() { # <tag> <operation-id (with or without the op_ prefix)>
+  local tag="$1" opid="$2"
+  # The HTTP operation id carries the op_ prefix; the per-op tree path is
+  # /var/lib|/run/.../ops/op_<hex>/... — normalize once.
+  opid="${opid#op_}"
+  local W="$EVIDENCE_DIR/avc-window-$tag.log"
+  local OPATT="$EVIDENCE_DIR/op-attributed-$tag.log"
+  local PIDC="$EVIDENCE_DIR/pid-correlated-$tag.log"
+  local MIS="$EVIDENCE_DIR/misattributed-$tag.log"
+  local UNATT="$EVIDENCE_DIR/unattributed-$tag.log"
+  : > "$OPATT"; : > "$PIDC"; : > "$MIS"; : > "$UNATT"
+  # op-attributed: the path carries THIS operation's id (any comm).
+  grep -a "ops/op_${opid}/" "$W" > "$OPATT" 2>/dev/null || true
+  # The pid set proven by op-attributed records.
+  local PIDS
+  PIDS="$(grep -aoE 'pid=[0-9]+' "$OPATT" | sed 's/pid=//' | sort -u | tr '\n' '|' | sed 's/|$//')"
+  local rec rpid
+  while IFS= read -r rec; do
+    [ -n "$rec" ] || continue
+    if grep -aq "ops/op_${opid}/" <<<"$rec"; then
+      continue  # already op-attributed
+    fi
+    if grep -qaE 'ops/op_[0-9a-f]+/' <<<"$rec"; then
+      printf '%s\n' "$rec" >> "$MIS"   # a DIFFERENT operation's path
+      continue
+    fi
+    # pid-correlated: pathless record whose pid is in the op-attributed set.
+    rpid="$(grep -aoE 'pid=[0-9]+' <<<"$rec" | sed 's/pid=//' | head -1)"
+    if [ -n "$rpid" ] && printf '%s' "$PIDS" | tr '|' '\n' | grep -qx "$rpid"; then
+      printf '%s\n' "$rec" >> "$PIDC"
+    else
+      printf '%s\n' "$rec" >> "$UNATT"
+    fi
+  done < "$W"
+}
+
+run_one_build() { # <tag> <session-token> [inter]
+  local tag="$1" token="$2"
+  # The audit window opens BEFORE the build is admitted (r7-p21c-corrective-3):
+  # POST /build is asynchronous, and AVCs raised between the operation's
+  # admission and the HTTP 201 response belong to THIS operation's window.
+  # They must never be absorbed by the pre-build drain (that would silently
+  # weaken the eliminated-shape proof), and for the second operation they
+  # must never leak into the inter-window region — this capture_begin closes
+  # the inter-window region BEFORE the second POST is sent.
+  capture_begin "$tag" "${3:-}" || true
+  # The build goes through the HTTP API so the daemon operation id is
+  # captured verbatim in the evidence (the CLI streams logs only). The
+  # HTTP status is recorded next to the response.
+  local RESP="$EVIDENCE_DIR/build-start-$tag.json"
+  local CODE
+  CODE="$(curl --silent --max-time 10 \
+    --unix-socket "$DH_SOCK" -H "Authorization: Bearer $token" \
+    -H 'Content-Type: application/json' \
+    -d '{"context":"ctx","dockerfile":"Dockerfile","image":"uat-p21c:'"$tag"'"}' \
+    -o "$RESP" -w '%{http_code}' http://localhost/build)" || true
+  printf '%s\n' "$CODE" > "$EVIDENCE_DIR/build-start-$tag.http.log"
+  local OP
+  OP="$(grep -oE '"operation_id": *"[^"]+"' "$RESP" 2>/dev/null | head -1 | sed 's/.*"operation_id": *"//;s/"$//')"
+  printf '%s\n' "$OP" > "$EVIDENCE_DIR/operation-id-$tag.log"
+  log "build $tag http=$CODE operation_id=$OP"
+  if [ -z "$OP" ]; then
+    # The POST did not admit an operation (or its id is unparseable): the
+    # window is closed here and the evaluator decides BLOCKED — a failed
+    # admission can never produce MEASURED.
+    log "build $tag: no operation id (http $CODE); closing the capture window"
+    capture_end "$tag" || true
+    return 1
+  fi
+  local STATUS=""
+  for _ in $(seq 1 400); do
+    STATUS="$(curl --silent --max-time 2 \
+      --unix-socket "$DH_SOCK" -H "Authorization: Bearer $token" \
+      "http://localhost/operations/$OP" 2>/dev/null || true)"
+    case "$STATUS" in
+      *'"succeeded"'*|*'"failed"'*) break ;;
+    esac
+    sleep 0.05
+  done
+  printf '%s\n' "$STATUS" > "$EVIDENCE_DIR/build-status-$tag.json"
+  capture_end "$tag" || true
+  curl --silent --max-time 2 \
+    --unix-socket "$DH_SOCK" -H "Authorization: Bearer $token" \
+    "http://localhost/operations/$OP/logs?offset=0" \
+    > "$EVIDENCE_DIR/build-$tag.log" 2>&1 || true
+  log "build $tag status: $(printf '%s' "$STATUS" | grep -oE '"(status|result_code)":"[^"]*"' | tr '\n' ' ')"
+  return 0
+}
+
+make_session_build() { # <tag> [inter]
+  local tag="$1"
+  local WS="$PRINCIPAL_HOME/r7-p21c-ws-$tag"
+  rm -rf "$WS"; mkdir -p "$WS/ctx"
+  printf 'FROM alpine:3.24\nRUN true\n' > "$WS/ctx/Dockerfile"
+  chown -R "$PRINCIPAL:$PRINCIPAL" "$WS"
+  docker-helper principal show "$PRINCIPAL" >/dev/null 2>&1 \
+    || docker-helper principal create --no-credential "$PRINCIPAL" >/dev/null 2>&1 || true
+  docker-helper principal allowed-root add "$PRINCIPAL" "$PRINCIPAL_HOME" >/dev/null 2>&1 || true
+  local RESP="$EVIDENCE_DIR/session-response-$tag.json"
+  local CODE
+  CODE="$(curl --silent --max-time 5 \
+    --unix-socket "$DH_SOCK" -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H 'Content-Type: application/json' \
+    -d "{\"workspace\":\"$WS\",\"principal\":\"$PRINCIPAL\"}" \
+    -o "$RESP" -w '%{http_code}' http://localhost/sessions)" || true
+  local TOKEN SID
+  TOKEN="$(grep -oE '"token": *"[^"]+"' "$RESP" 2>/dev/null | head -1 | sed 's/.*"token": *"//;s/"$//')"
+  SID="$(grep -oE '"id": *"dhs_[^"]+"' "$RESP" 2>/dev/null | head -1 | sed 's/.*"id": *"//;s/"$//')"
+  printf '%s\n' "$SID" > "$EVIDENCE_DIR/session-id-$tag.log"
+  if [ -z "$TOKEN" ]; then
+    log "session create failed for $tag (HTTP $CODE); skipping this build"
+    return 1
+  fi
+  docker-helper pull alpine:3.24 >"$EVIDENCE_DIR/pull-$tag.log" 2>&1 || true
+  run_one_build "$tag" "$TOKEN" "${2:-}" || true
+  return 0
+}
+
+compose_op_section() { # <tag>
+  local tag="$1"
+  local OPID SID
+  OPID="$(cat "$EVIDENCE_DIR/operation-id-$tag.log" 2>/dev/null)"
+  SID="$(cat "$EVIDENCE_DIR/session-id-$tag.log" 2>/dev/null)"
+  printf '== operation %s %s session %s ==\n' "$tag" "$OPID" "$SID"
+  printf -- '-- window boundaries (pinned-source capture integrity) --\n'
+  cat "$EVIDENCE_DIR/window-boundaries-$tag.log" 2>/dev/null || true
+  printf -- '-- operation result --\n'
+  grep -oE '"(status|result_code|exit_code)": *("[^"]*"|[0-9]+)' \
+    "$EVIDENCE_DIR/build-status-$tag.json" 2>/dev/null | tr '\n' ' ' || true
+  printf '\n'
+  printf -- '-- op-attributed runc-init records --\n'
+  grep -a 'comm="runc:\[2:INIT\]"' "$EVIDENCE_DIR/op-attributed-$tag.log" 2>/dev/null || true
+  printf -- '-- pid-correlated runc-init records --\n'
+  grep -a 'comm="runc:\[2:INIT\]"' "$EVIDENCE_DIR/pid-correlated-$tag.log" 2>/dev/null || true
+  printf -- '-- misattributed records (a path carries a DIFFERENT operation id) --\n'
+  cat "$EVIDENCE_DIR/misattributed-$tag.log" 2>/dev/null || true
+  printf -- '-- unattributed runc-init records --\n'
+  grep -a 'comm="runc:\[2:INIT\]"' "$EVIDENCE_DIR/unattributed-$tag.log" 2>/dev/null || true
+  printf -- '-- regression controls (the WHOLE window; must be EMPTY) --\n'
+  printf -- '-- P20 terminal (runc_memfd_t:file create) --\n'
+  grep -ah 'docker_helper_runc_memfd_t.*tclass=file' "$EVIDENCE_DIR/avc-window-$tag.log" 2>/dev/null | grep -a '{ create }' || true
+  printf -- '-- pre-B terminal (tmpfs_t:file write) --\n'
+  grep -ah 'tcontext=system_u:object_r:tmpfs_t:s0 tclass=file' "$EVIDENCE_DIR/avc-window-$tag.log" 2>/dev/null | grep -a '{ write }' || true
+  printf -- '-- associate denials (must be EMPTY — the singleton is granted) --\n'
+  grep -ah 'denied  { associate }' "$EVIDENCE_DIR/avc-window-$tag.log" 2>/dev/null || true
+  printf -- '-- P21-B terminal (devnode_t:file { read open }; the ELIMINATED shape) --\n'
+  grep -ah 'runc:\[2:INIT\]' "$EVIDENCE_DIR/avc-window-$tag.log" 2>/dev/null | grep -a 'tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file' | grep -a 'denied  { read open }' || true
+}
+
+# The terminals-log composition is the single owner of the evidence
+# grammar shape: two per-operation sections followed by the inter-window
+# region (used by the live flow AND by the early-AVC selftest scenarios).
+compose_terminals_log() {
+  {
+    compose_op_section c1
+    compose_op_section c2
+    printf '== inter-window records (attributable to NEITHER operation) ==\n'
+    printf -- '-- window boundaries (pinned-source capture integrity) --\n'
+    cat "$EVIDENCE_DIR/inter-boundaries.log" 2>/dev/null || true
+    printf -- '-- records --\n'
+    cat "$EVIDENCE_DIR/inter-window.log" 2>/dev/null
+  } > "$EVIDENCE_DIR/p21c-terminals.log" 2>&1
 }
 
 if [ -n "$SELFTEST_WORKDIR" ]; then
@@ -529,6 +782,8 @@ fi
 [ -f "$ARTIFACT" ] || fail "artifact missing: $ARTIFACT"
 now_sha="$(sha256sum "$ARTIFACT" | awk '{print $1}')"
 [ "$now_sha" = "$ARTIFACT_SHA" ] || fail "artifact SHA mismatch (expected $ARTIFACT_SHA, got $now_sha)"
+
+
 
 # ============================================================================
 # Section 1: platform + SELinux enforcing proof
@@ -873,144 +1128,6 @@ fi
 #      presence of the runc:[2:INIT] comm and of the boundary records).
 # ============================================================================
 
-classify_window() { # <tag> <operation-id (with or without the op_ prefix)>
-  local tag="$1" opid="$2"
-  # The HTTP operation id carries the op_ prefix; the per-op tree path is
-  # /var/lib|/run/.../ops/op_<hex>/... — normalize once.
-  opid="${opid#op_}"
-  local W="$EVIDENCE_DIR/avc-window-$tag.log"
-  local OPATT="$EVIDENCE_DIR/op-attributed-$tag.log"
-  local PIDC="$EVIDENCE_DIR/pid-correlated-$tag.log"
-  local MIS="$EVIDENCE_DIR/misattributed-$tag.log"
-  local UNATT="$EVIDENCE_DIR/unattributed-$tag.log"
-  : > "$OPATT"; : > "$PIDC"; : > "$MIS"; : > "$UNATT"
-  # op-attributed: the path carries THIS operation's id (any comm).
-  grep -a "ops/op_${opid}/" "$W" > "$OPATT" 2>/dev/null || true
-  # The pid set proven by op-attributed records.
-  local PIDS
-  PIDS="$(grep -aoE 'pid=[0-9]+' "$OPATT" | sed 's/pid=//' | sort -u | tr '\n' '|' | sed 's/|$//')"
-  local rec rpid
-  while IFS= read -r rec; do
-    [ -n "$rec" ] || continue
-    if grep -aq "ops/op_${opid}/" <<<"$rec"; then
-      continue  # already op-attributed
-    fi
-    if grep -qaE 'ops/op_[0-9a-f]+/' <<<"$rec"; then
-      printf '%s\n' "$rec" >> "$MIS"   # a DIFFERENT operation's path
-      continue
-    fi
-    # pid-correlated: pathless record whose pid is in the op-attributed set.
-    rpid="$(grep -aoE 'pid=[0-9]+' <<<"$rec" | sed 's/pid=//' | head -1)"
-    if [ -n "$rpid" ] && printf '%s' "$PIDS" | tr '|' '\n' | grep -qx "$rpid"; then
-      printf '%s\n' "$rec" >> "$PIDC"
-    else
-      printf '%s\n' "$rec" >> "$UNATT"
-    fi
-  done < "$W"
-}
-
-run_one_build() { # <tag> <session-token> [inter]
-  local tag="$1" token="$2"
-  # The build goes through the HTTP API so the daemon operation id is
-  # captured verbatim in the evidence (the CLI streams logs only).
-  local RESP="$EVIDENCE_DIR/build-start-$tag.json"
-  local CODE
-  CODE="$(curl --silent --max-time 10 \
-    --unix-socket "$DH_SOCK" -H "Authorization: Bearer $token" \
-    -H 'Content-Type: application/json' \
-    -d '{"context":"ctx","dockerfile":"Dockerfile","image":"uat-p21c:'"$tag"'"}' \
-    -o "$RESP" -w '%{http_code}' http://localhost/build)" || true
-  local OP
-  OP="$(grep -oE '"operation_id": *"[^"]+"' "$RESP" 2>/dev/null | head -1 | sed 's/.*"operation_id": *"//;s/"$//')"
-  printf '%s\n' "$OP" > "$EVIDENCE_DIR/operation-id-$tag.log"
-  log "build $tag http=$CODE operation_id=$OP"
-  [ -n "$OP" ] || { log "build $tag: no operation id (http $CODE)"; return 1; }
-  # EXACT capture boundary: the pinned-source identity checks and the
-  # pre-build drain immediately before the status poll. The operation's
-  # window is EXACTLY the bytes appended to the pinned audit source
-  # between this drain and capture_end's post-operation drain — read
-  # through the pinned descriptor, never re-read from the path.
-  capture_begin "$tag" "${3:-}" || true
-  local STATUS=""
-  for _ in $(seq 1 400); do
-    STATUS="$(curl --silent --max-time 2 \
-      --unix-socket "$DH_SOCK" -H "Authorization: Bearer $token" \
-      "http://localhost/operations/$OP" 2>/dev/null || true)"
-    case "$STATUS" in
-      *'"succeeded"'*|*'"failed"'*) break ;;
-    esac
-    sleep 0.05
-  done
-  printf '%s\n' "$STATUS" > "$EVIDENCE_DIR/build-status-$tag.json"
-  capture_end "$tag" || true
-  curl --silent --max-time 2 \
-    --unix-socket "$DH_SOCK" -H "Authorization: Bearer $token" \
-    "http://localhost/operations/$OP/logs?offset=0" \
-    > "$EVIDENCE_DIR/build-$tag.log" 2>&1 || true
-  log "build $tag status: $(printf '%s' "$STATUS" | grep -oE '"(status|result_code)":"[^"]*"' | tr '\n' ' ')"
-  return 0
-}
-
-make_session_build() { # <tag> [inter]
-  local tag="$1"
-  local WS="$PRINCIPAL_HOME/r7-p21c-ws-$tag"
-  rm -rf "$WS"; mkdir -p "$WS/ctx"
-  printf 'FROM alpine:3.24\nRUN true\n' > "$WS/ctx/Dockerfile"
-  chown -R "$PRINCIPAL:$PRINCIPAL" "$WS"
-  docker-helper principal show "$PRINCIPAL" >/dev/null 2>&1 \
-    || docker-helper principal create --no-credential "$PRINCIPAL" >/dev/null 2>&1 || true
-  docker-helper principal allowed-root add "$PRINCIPAL" "$PRINCIPAL_HOME" >/dev/null 2>&1 || true
-  local RESP="$EVIDENCE_DIR/session-response-$tag.json"
-  local CODE
-  CODE="$(curl --silent --max-time 5 \
-    --unix-socket "$DH_SOCK" -H "Authorization: Bearer $ADMIN_TOKEN" \
-    -H 'Content-Type: application/json' \
-    -d "{\"workspace\":\"$WS\",\"principal\":\"$PRINCIPAL\"}" \
-    -o "$RESP" -w '%{http_code}' http://localhost/sessions)" || true
-  local TOKEN SID
-  TOKEN="$(grep -oE '"token": *"[^"]+"' "$RESP" 2>/dev/null | head -1 | sed 's/.*"token": *"//;s/"$//')"
-  SID="$(grep -oE '"id": *"dhs_[^"]+"' "$RESP" 2>/dev/null | head -1 | sed 's/.*"id": *"//;s/"$//')"
-  printf '%s\n' "$SID" > "$EVIDENCE_DIR/session-id-$tag.log"
-  if [ -z "$TOKEN" ]; then
-    log "session create failed for $tag (HTTP $CODE); skipping this build"
-    return 1
-  fi
-  docker-helper pull alpine:3.24 >"$EVIDENCE_DIR/pull-$tag.log" 2>&1 || true
-  run_one_build "$tag" "$TOKEN" "${2:-}" || true
-  return 0
-}
-
-compose_op_section() { # <tag>
-  local tag="$1"
-  local OPID SID
-  OPID="$(cat "$EVIDENCE_DIR/operation-id-$tag.log" 2>/dev/null)"
-  SID="$(cat "$EVIDENCE_DIR/session-id-$tag.log" 2>/dev/null)"
-  printf '== operation %s %s session %s ==\n' "$tag" "$OPID" "$SID"
-  printf -- '-- window boundaries (pinned-source capture integrity) --\n'
-  cat "$EVIDENCE_DIR/window-boundaries-$tag.log" 2>/dev/null || true
-  printf -- '-- operation result --\n'
-  grep -oE '"(status|result_code|exit_code)": *("[^"]*"|[0-9]+)' \
-    "$EVIDENCE_DIR/build-status-$tag.json" 2>/dev/null | tr '\n' ' ' || true
-  printf '\n'
-  printf -- '-- op-attributed runc-init records --\n'
-  grep -a 'comm="runc:\[2:INIT\]"' "$EVIDENCE_DIR/op-attributed-$tag.log" 2>/dev/null || true
-  printf -- '-- pid-correlated runc-init records --\n'
-  grep -a 'comm="runc:\[2:INIT\]"' "$EVIDENCE_DIR/pid-correlated-$tag.log" 2>/dev/null || true
-  printf -- '-- misattributed records (a path carries a DIFFERENT operation id) --\n'
-  cat "$EVIDENCE_DIR/misattributed-$tag.log" 2>/dev/null || true
-  printf -- '-- unattributed runc-init records --\n'
-  grep -a 'comm="runc:\[2:INIT\]"' "$EVIDENCE_DIR/unattributed-$tag.log" 2>/dev/null || true
-  printf -- '-- regression controls (the WHOLE window; must be EMPTY) --\n'
-  printf -- '-- P20 terminal (runc_memfd_t:file create) --\n'
-  grep -ah 'docker_helper_runc_memfd_t.*tclass=file' "$EVIDENCE_DIR/avc-window-$tag.log" 2>/dev/null | grep -a '{ create }' || true
-  printf -- '-- pre-B terminal (tmpfs_t:file write) --\n'
-  grep -ah 'tcontext=system_u:object_r:tmpfs_t:s0 tclass=file' "$EVIDENCE_DIR/avc-window-$tag.log" 2>/dev/null | grep -a '{ write }' || true
-  printf -- '-- associate denials (must be EMPTY — the singleton is granted) --\n'
-  grep -ah 'denied  { associate }' "$EVIDENCE_DIR/avc-window-$tag.log" 2>/dev/null || true
-  printf -- '-- P21-B terminal (devnode_t:file { read open }; the ELIMINATED shape) --\n'
-  grep -ah 'runc:\[2:INIT\]' "$EVIDENCE_DIR/avc-window-$tag.log" 2>/dev/null | grep -a 'tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file' | grep -a 'denied  { read open }' || true
-}
-
 if [ -f "$STATE_DIR/sec7" ]; then log "phase marker: section 7 done; skipping"; else
 log "=== section 7: live flow probes (candidate policy; independent windows) ==="
 for _ in $(seq 1 50); do
@@ -1031,15 +1148,7 @@ classify_window c1 "$(cat "$EVIDENCE_DIR/operation-id-c1.log" 2>/dev/null)"
 # decides BLOCKED — it is never assumed to belong to an operation).
 make_session_build c2 inter
 classify_window c2 "$(cat "$EVIDENCE_DIR/operation-id-c2.log" 2>/dev/null)"
-{
-  compose_op_section c1
-  compose_op_section c2
-  printf '== inter-window records (attributable to NEITHER operation) ==\n'
-  printf -- '-- window boundaries (pinned-source capture integrity) --\n'
-  cat "$EVIDENCE_DIR/inter-boundaries.log" 2>/dev/null || true
-  printf -- '-- records --\n'
-  cat "$EVIDENCE_DIR/inter-window.log" 2>/dev/null
-} > "$EVIDENCE_DIR/p21c-terminals.log" 2>&1
+compose_terminals_log
 cat "$EVIDENCE_DIR/p21c-terminals.log"
 touch "$STATE_DIR/sec7"
 fi
