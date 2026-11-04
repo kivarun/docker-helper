@@ -169,13 +169,27 @@ func p21cOpSection(tag, opid, session string, before, after int, opAttributed, p
 	return b.String()
 }
 
+// p21cInterSection composes the inter-window region section: the records
+// appended between the two operations' capture boundaries, attributable to
+// NEITHER operation (host audit noise is expected there).
+func p21cInterSection(gapAfter, gapBefore int, records string) string {
+	var b strings.Builder
+	b.WriteString("== inter-window records (attributable to NEITHER operation) ==\n")
+	b.WriteString("-- window boundaries (audit.log line offsets) --\n")
+	fmt.Fprintf(&b, "gap-after=%d gap-before=%d captured=%d\n", gapAfter, gapBefore, gapBefore-gapAfter)
+	b.WriteString("-- records --\n")
+	b.WriteString(records)
+	return b.String()
+}
+
 // p21cGreenTerminals returns the green live-flow fixture: two DISTINCT
 // operations (distinct operation ids, distinct session ids), each with its
 // own bounded non-overlapping audit window, its own attributed runtime
 // records (op-path terminal + pid-correlated pre-boundary self-denials),
-// its own observed next terminal, and EMPTY control sections. BOTH windows
-// carry the buildkitd_t:s0:c1 source context — the same MCS category —
-// because attribution never rests on the category.
+// its own observed next terminal, EMPTY control sections, and an empty
+// inter-window region. BOTH windows carry the buildkitd_t:s0:c1 source
+// context — the same MCS category — because attribution never rests on
+// the category.
 func p21cGreenTerminals() string {
 	return p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
 		p21cMounton1+"\n",
@@ -184,7 +198,8 @@ func p21cGreenTerminals() string {
 		p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
 			p21cMounton2+"\n",
 			p21cSetuid2+"\n"+p21cSetgid2+"\n",
-			"", "", "")
+			"", "", "") +
+		p21cInterSection(103, 103, "")
 }
 
 func p21cWriteEvidence(t *testing.T, matrix, av, terminals string) string {
@@ -393,7 +408,8 @@ func TestR7P21CVerdictWindowBoundaryFailClosed(t *testing.T) {
 		strings.Replace(p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
 			p21cMounton2+"\n",
 			p21cSetuid2+"\n"+p21cSetgid2+"\n",
-			"", "", ""), "before=103 after=106 captured=3", "before=103 after=106 captured=2", 1)
+			"", "", ""), "before=103 after=106 captured=3", "before=103 after=106 captured=2", 1) +
+		p21cInterSection(103, 103, "")
 	overlapping := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
 		p21cMounton1+"\n",
 		p21cSetuid1+"\n"+p21cSetgid1+"\n",
@@ -401,15 +417,29 @@ func TestR7P21CVerdictWindowBoundaryFailClosed(t *testing.T) {
 		strings.Replace(p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
 			p21cMounton2+"\n",
 			p21cSetuid2+"\n"+p21cSetgid2+"\n",
-			"", "", ""), "before=103 after=106 captured=3", "before=102 after=105 captured=3", 1)
-	gapped := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
+			"", "", ""), "before=103 after=106 captured=3", "before=102 after=105 captured=3", 1) +
+		p21cInterSection(103, 103, "")
+	unaccountedGap := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
 		p21cMounton1+"\n",
 		p21cSetuid1+"\n"+p21cSetgid1+"\n",
 		"", "", "") +
 		strings.Replace(p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
 			p21cMounton2+"\n",
 			p21cSetuid2+"\n"+p21cSetgid2+"\n",
-			"", "", ""), "before=103", "before=110", 1)
+			"", "", ""), "before=103 after=106 captured=3", "before=110 after=113 captured=3", 1) +
+		p21cInterSection(103, 103, "")
+	// A capture gap WITH a faithful inter-window section (host noise only)
+	// is sound evidence: the gap region is accounted and carries no
+	// ambiguous runtime record.
+	accountedGap := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
+		p21cMounton1+"\n",
+		p21cSetuid1+"\n"+p21cSetgid1+"\n",
+		"", "", "") +
+		strings.Replace(p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
+			p21cMounton2+"\n",
+			p21cSetuid2+"\n"+p21cSetgid2+"\n",
+			"", "", ""), "before=103 after=106 captured=3", "before=110 after=113 captured=3", 1) +
+		p21cInterSection(103, 110, "")
 	unbounded := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
 		p21cMounton1+"\n",
 		p21cSetuid1+"\n"+p21cSetgid1+"\n",
@@ -417,14 +447,25 @@ func TestR7P21CVerdictWindowBoundaryFailClosed(t *testing.T) {
 		strings.Replace(p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
 			p21cMounton2+"\n",
 			p21cSetuid2+"\n"+p21cSetgid2+"\n",
-			"", "", ""), "before=103 after=106 captured=3", "before=103 after=105 captured=ROTATED", 1)
+			"", "", ""), "before=103 after=106 captured=3", "before=103 after=105 captured=ROTATED", 1) +
+		p21cInterSection(103, 103, "")
+	ambiguousGap := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
+		p21cMounton1+"\n",
+		p21cSetuid1+"\n"+p21cSetgid1+"\n",
+		"", "", "") +
+		p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
+			p21cMounton2+"\n",
+			p21cSetuid2+"\n"+p21cSetgid2+"\n",
+			"", "", "") +
+		p21cInterSection(103, 110, p21cMounton2+"\n")
 	for name, terminals := range map[string]struct {
 		want string
 		text string
 	}{
 		"truncated capture (boundary inconsistent)":           {"P21C-BLOCKED", truncated},
 		"second window overlaps the first":                    {"P21C-FAIL", overlapping},
-		"capture gap between the windows":                     {"P21C-BLOCKED", gapped},
+		"capture gap between the windows is unaccounted":      {"P21C-BLOCKED", unaccountedGap},
+		"a runc-init record inside the inter-window region":   {"P21C-BLOCKED", ambiguousGap},
 		"rotated capture (capture-unavailable boundary mark)": {"P21C-BLOCKED", unbounded},
 	} {
 		dir := p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
@@ -433,6 +474,14 @@ func TestR7P21CVerdictWindowBoundaryFailClosed(t *testing.T) {
 		if rc == 0 || !strings.Contains(line, "DECISION="+terminals.want) {
 			t.Errorf("%s must decide %s, got rc=%d: %s", name, terminals.want, rc, line)
 		}
+	}
+	// The accounted-gap control: with a faithful inter-window section the
+	// same gapped capture measures.
+	dir := p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
+		strings.Join(p21cGreenAV(), "\n")+"\n", accountedGap)
+	line, rc := p21cRunEvaluator(t, dir)
+	if rc != 0 || !strings.Contains(line, "DECISION=P21C-MEASURED") {
+		t.Errorf("a capture gap WITH a faithful inter-window section must decide MEASURED, got rc=%d: %s", rc, line)
 	}
 }
 

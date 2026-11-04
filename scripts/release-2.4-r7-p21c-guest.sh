@@ -626,9 +626,30 @@ make_session_build c1
 classify_window c1 "$(cat "$EVIDENCE_DIR/operation-id-c1.log" 2>/dev/null)"
 make_session_build c2
 classify_window c2 "$(cat "$EVIDENCE_DIR/operation-id-c2.log" 2>/dev/null)"
+# The INTER-WINDOW region: records appended between the two operations'
+# capture boundaries. They are attributable to NEITHER operation by
+# position; unrelated host audit noise is expected here. Any runc:[2:INIT]
+# record in this region is AMBIGUOUS evidence (the evaluator decides
+# BLOCKED — it is never assumed to belong to an operation).
+B1="$(sed -n 's/^after=//p' "$EVIDENCE_DIR/window-boundaries-c1.log" 2>/dev/null | head -1)"
+B2="$(sed -n 's/^before=//p' "$EVIDENCE_DIR/window-boundaries-c2.log" 2>/dev/null | head -1)"
+: > "$EVIDENCE_DIR/inter-window.log"
+GAP="UNAVAILABLE"
+if [ -n "$B1" ] && [ -n "$B2" ] && [ "$B2" -ge "$B1" ] 2>/dev/null; then
+  GAP=$((B2 - B1))
+  if [ "$B2" -gt "$B1" ]; then
+    sed -n "$((B1 + 1)),${B2}p" /var/log/audit/audit.log \
+      > "$EVIDENCE_DIR/inter-window.log" 2>/dev/null || true
+  fi
+fi
 {
   compose_op_section c1
   compose_op_section c2
+  printf '== inter-window records (attributable to NEITHER operation) ==\n'
+  printf -- '-- window boundaries (audit.log line offsets) --\n'
+  printf 'gap-after=%s gap-before=%s captured=%s\n' "$B1" "$B2" "$GAP"
+  printf -- '-- records --\n'
+  cat "$EVIDENCE_DIR/inter-window.log" 2>/dev/null
 } > "$EVIDENCE_DIR/p21c-terminals.log" 2>&1
 cat "$EVIDENCE_DIR/p21c-terminals.log"
 touch "$STATE_DIR/sec7"

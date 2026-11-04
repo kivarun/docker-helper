@@ -426,23 +426,25 @@ if require_file p21c-terminals.log; then
       fi
     done
 
-    # Window-boundary overlap: the SECOND window must begin exactly where
-    # the FIRST ended (strictly partitioned capture; an overlap is a
-    # positive violation, a gap means records were dropped between the
-    # windows — both make per-window attribution unreliable).
+    # Window-boundary ordering: the SECOND window must begin AT OR AFTER
+    # the first window's end (an overlap would make records attributable
+    # to both operations — a positive violation). Records BETWEEN the
+    # windows are accounted by the separate inter-window section (host
+    # audit noise is expected there; any runc-init record in it is
+    # ambiguous).
     if [ "$pos" = "1" ]; then
       FIRST_WINDOW_END="$AFTER"
     elif [ -z "$FIRST_WINDOW_END" ]; then
       note BLOCKED "terminals: the first window was never bounded; the second window's boundary cannot be checked"
     else
+      SECOND_WINDOW_BEGIN="$BEFORE"
       if [ "$BEFORE" -lt "$FIRST_WINDOW_END" ]; then
         note FAIL "WINDOW-OVERLAP: the second window (before=$BEFORE) overlaps the first window (after=$FIRST_WINDOW_END) — records would be attributable to both operations"
-      elif [ "$BEFORE" -gt "$FIRST_WINDOW_END" ]; then
-        note BLOCKED "terminals: a capture gap exists between the windows (first after=$FIRST_WINDOW_END, second before=$BEFORE) — records may have been dropped between the operations"
       fi
     fi
   }
   FIRST_WINDOW_END=""
+  SECOND_WINDOW_BEGIN=""
   TERMINAL_1=""
   TERMINAL_2=""
   if [ "$OP_HEADERS" -eq 2 ] && [ -n "$OP1_ID" ] && [ -n "$OP2_ID" ] \
@@ -454,6 +456,51 @@ if require_file p21c-terminals.log; then
     # AVC can never serve as the evidence for both operations.
     if [ -n "$TERMINAL_1" ] && [ -n "$TERMINAL_2" ] && [ "$TERMINAL_1" = "$TERMINAL_2" ]; then
       note FAIL "TERMINAL-NOT-DISTINCT: both operations cite the SAME AVC record as their next terminal (one window can never serve both operations)"
+    fi
+
+    # --- the inter-window region: attributable to NEITHER operation ------
+    INTER_HDR='== inter-window records (attributable to NEITHER operation) =='
+    N_INTER="$(grep -Fxc -- "$INTER_HDR" "$TERM" || true)"
+    case "$N_INTER" in
+      1) ;;
+      0) note BLOCKED "terminals: the inter-window region section is missing (the capture region between the two windows must be accounted for)"; ;;
+      *) note FAIL "terminals: the inter-window section header appears $N_INTER times (ambiguous evidence)"; ;;
+    esac
+    if [ "$N_INTER" = "1" ]; then
+      INTER_BODY="$(awk -v hdr="$INTER_HDR" '
+        $0 == hdr { sec = 1; next }
+        /^== / { if (sec) exit }
+        sec { print }' "$TERM")"
+      INTER_GAPA="$(printf '%s\n' "$INTER_BODY" | sed -n 's/^gap-after=\([0-9]*\) .*/\1/p' | head -1)"
+      INTER_GAPB="$(printf '%s\n' "$INTER_BODY" | sed -n 's/^.* gap-before=\([0-9]*\) .*/\1/p' | head -1)"
+      INTER_CAP="$(printf '%s\n' "$INTER_BODY" | sed -n 's/^.* captured=\([0-9]*\)$/\1/p' | head -1)"
+      if [ -z "$INTER_GAPA" ] || [ -z "$INTER_GAPB" ] || [ -z "$INTER_CAP" ]; then
+        note BLOCKED "terminals: the inter-window section carries no consistent whole-line gap boundary (gap-after=<n> gap-before=<m> captured=<k>)"
+      elif [ "$INTER_GAPB" -lt "$INTER_GAPA" ] || [ "$INTER_CAP" -ne $((INTER_GAPB - INTER_GAPA)) ]; then
+        note BLOCKED "terminals: the inter-window gap boundary is inconsistent (gap-after=$INTER_GAPA gap-before=$INTER_GAPB captured=$INTER_CAP)"
+      elif [ "$INTER_GAPB" -lt "$FIRST_WINDOW_END" ] 2>/dev/null; then
+        note FAIL "WINDOW-OVERLAP: the inter-window region (gap-before=$INTER_GAPB) reaches into the first window (after=$FIRST_WINDOW_END)"
+      elif [ "$INTER_GAPA" -gt "$FIRST_WINDOW_END" ] 2>/dev/null; then
+        note BLOCKED "terminals: the inter-window region (gap-after=$INTER_GAPA) does not start at the first window's end ($FIRST_WINDOW_END) — records between them are unaccounted"
+      elif [ -n "$SECOND_WINDOW_BEGIN" ] && [ "$INTER_GAPB" -ne "$SECOND_WINDOW_BEGIN" ]; then
+        note BLOCKED "terminals: the inter-window region (gap-before=$INTER_GAPB) does not end at the second window's begin ($SECOND_WINDOW_BEGIN) — records between them are unaccounted"
+      fi
+      INTER_RUNC="$(printf '%s\n' "$INTER_BODY" | awk -v hdr='-- records --' '
+        $0 == hdr { sec = 1; next }
+        sec && /comm="runc:\[2:INIT\]"/ && NF { print }')"
+      if [ -n "$INTER_RUNC" ]; then
+        note BLOCKED "terminals: runc:[2:INIT] records exist in the inter-window region where they are attributable to NEITHER operation (ambiguous evidence — never assumed): $INTER_RUNC"
+      fi
+      for sechdr_shape in 'docker_helper_runc_memfd_t.*tclass=file.*\{ create \}' 'tcontext=system_u:object_r:tmpfs_t:s0 tclass=file.*\{ write \}' 'denied  { associate }'; do
+        INTER_CTRL="$(printf '%s\n' "$INTER_BODY" | grep -aE "$sechdr_shape" | head -2 || true)"
+        if [ -n "$INTER_CTRL" ]; then
+          note FAIL "REGRESSION-CONTROL-REAPPEARED inter-window: $INTER_CTRL"
+        fi
+      done
+      INTER_OLD="$(printf '%s\n' "$INTER_BODY" | grep -a 'tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file' | grep -a 'denied  { read open }' | head -1 || true)"
+      if [ -n "$INTER_OLD" ]; then
+        note FAIL "OPEN-COMPLETION-LIVE: the eliminated devnode { read open } shape appears in the inter-window region: $INTER_OLD"
+      fi
     fi
   fi
 fi
