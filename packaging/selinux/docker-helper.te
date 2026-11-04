@@ -3579,8 +3579,10 @@ allow docker_helper_buildkitd_t docker_helper_runc_memfd_t:file map;
 #     own mount namespace) — no host or cross-operation residue is
 #     claimed. The same applies to the shared /dev/shm venue only if a
 #     production path created one of the six basenames there — none
-#     does; and even then the objects are content-dead (no read/write/
-#     execute authority for ANY subject), a name-presence surface only
+#     does; and even then the objects are content-dead — no write/execute
+#     authority for ANY subject, and the P21-C open-completion { read open }
+#     pair admits only the EMPTY-object read (no subject can write content
+#     into the type; see the P21-C block) — a name-presence surface only
 #     (the same surface the accepted P17 dir-create rung already carries
 #     for directories).
 #   - the filename transitions are name-keyed, not path-keyed: a file with
@@ -3605,6 +3607,84 @@ type_transition docker_helper_buildkitd_t tmpfs_t:file docker_helper_devnode_t "
 
 allow docker_helper_buildkitd_t docker_helper_devnode_t:file create;
 allow docker_helper_devnode_t tmpfs_t:filesystem associate;
+
+# --- R7 P21-C: the devnode open-completion pair { read open } — the ---
+# --- measured next terminal after the P21-B create+associate pair; ---
+# --- ONE NEW rule, never a widening of the create singleton ---
+#
+# PROVENANCE (the P21-B enforcing UAT 41620147450, serials 1352/11088, and
+# the P21-B diagnostic 41623047086, serials 1168/1795 — the MEASURED next
+# terminal after the P21-B create+associate pair took effect):
+#
+#   avc:  denied  { read open } for  pid=... comm="runc:[2:INIT]"
+#     path="/var/lib/docker-helper-builder/ops/op_<id>/root/runc-native/
+#     executor/<id>/rootfs/dev/null" dev="tmpfs" ino=5
+#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+#     tcontext=system_u:object_r:docker_helper_devnode_t:s0
+#     tclass=file permissive=0
+#
+# runc's createDevices openat(O_CREAT) created the placeholder (create is
+# the granted member; the inode persisted — the P21-B orphan record) and
+# the flow stopped at the open-completion hook: with the open_perms
+# policycap set, selinux_file_open derives file_to_av =
+# (FMODE_READ -> FILE__READ) + FILE__OPEN inside ONE check — the exact
+# same single-check shape the P4 memfd corrective measured on the
+# exec-target open. A single-permission grant cannot advance past it (the
+# remaining vector re-denies inside the same check), so the pair is ONE
+# atomic open-completion grant, not two permissions. The creating openat
+# is O_RDONLY|O_CREAT (FMODE_READ, no FMODE_WRITE): the pair is exactly
+# the creating opener's own read+open hooks.
+#
+# THE DELTA IS EXACTLY +{ read open } (ONE new rule; the create singleton
+# and the associate singleton stay byte-unchanged):
+#   - the pair is the open-completion check's own shape, NOT a
+#     content-authority bundle: NO write, append, map, execute,
+#     execute_no_trans, setattr, getattr, unlink, rename, link, ioctl,
+#     lock, entrypoint, mounton rides — the placeholder stays a mount
+#     target, content-dead;
+#   - CONTENT-DEAD IS A POLICY FACT, NOT A NAMESPACE CLAIM: no subject of
+#     the loaded policy holds any write-class authority on the type (the
+#     only two target-side allows are create and this pair — write,
+#     append, setattr, map stay denied for EVERY domain, including
+#     buildkitd_t itself), and the kernel's open-completion check maps
+#     FMODE_WRITE -> FILE__WRITE, so even the creator cannot obtain a
+#     writable fd on the type (a writable or O_TRUNC creation openat
+#     fails the same open-completion check; ftruncate needs setattr;
+#     PROT_WRITE mmap needs write+map) — every object of this type
+#     therefore stays a zero-length placeholder inode for its whole
+#     lifetime;
+#   - CROSS-OPERATION: the created placeholders carry NO categories
+#     (tcontext docker_helper_devnode_t:s0, measured), so the MCS layer
+#     never separated them (both categories' creations land at s0) and
+#     the file-read constraint (l1 dom l2 over an s0 object) admits
+#     read/open for BOTH operation categories — the six filename
+#     transitions are name-keyed, not path-keyed, so a same-named
+#     creation in a SHARED tmpfs_t venue (e.g. /dev/shm, the same
+#     superblock measured in concurrent operations' mount namespaces)
+#     would also land here. THE CHANNEL PROOF DOES NOT RELY ON MOUNT
+#     NAMESPACE ISOLATION: no subject can write content into the type at
+#     all (above), so a cross-operation reader — even one path-reachable
+#     into another operation's object — reads an EMPTY object; the only
+#     conveyable information is name-presence/timing, the same surface
+#     the accepted P17 dir-create rung already carries for directories
+#     and that the P21-B create rung already carried for these names (a
+#     failed creation persisted its inode). No cross-operation content
+#     channel exists or is created by this rung;
+#   - NO runc_memfd_t authority change: the bare memfd transition and
+#     the six P1-P6 allows are untouched; an arbitrary basename and the
+#     nameless memfd route still receive docker_helper_runc_memfd_t, and
+#     this rung grants NOTHING on that type;
+#   - no authority for any other subject (the compiled devnode_t surface
+#     stays exactly THREE target/source rules: create toward it, the
+#     open-completion pair toward it, associate from it — attribute-free,
+#     so no attribute expansion is possible);
+#   - the predicted FOLLOW-ON hooks are NOT granted here (each its own
+#     live-evidence phase, no speculation is authority): the
+#     file-class mounton of the host device node over the placeholder,
+#     the cap_userns setuid/setgid records the P21-B windows carried
+#     pre-terminally, and whatever the advanced flow's own next decision
+#     is — the next terminal is OBSERVED, never preempted.
+allow docker_helper_buildkitd_t docker_helper_devnode_t:file { read open };
 
 # --- R7-A: the daemon's buildctl executable identity (full artifact-gate
 # --- evidence, failed release run 38944346311) ---
