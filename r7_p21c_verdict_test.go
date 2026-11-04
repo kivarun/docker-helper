@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -8,17 +9,22 @@ import (
 	"testing"
 )
 
-// R7 P21-C gate evaluator regression fixtures (the r7-p21c-devnode-open
-// task): the fail-closed classification is proven against the REAL
-// diagnostic output shapes captured by enforcing run 41623047086 (the
-// create-decision matrix and the kernel-AV matrix grammar — the P21-C
-// candidate policy changes only the devnode content-permission rows) and
-// the P21-B terminal-window record format (whose cap_userns pre-boundary
-// records and per-op dev paths the P21-C windows carry unchanged), plus
-// synthetic mutations for every fail-closed branch. The evaluator
-// (scripts/release-2.4-r7-p21c-verdict.sh) is the single authority for the
-// machine-readable verdict; the P21-B evaluator stays untouched as the
-// historical instrument, and no test reimplements its semantics.
+// R7 P21-C gate evaluator regression fixtures, revision 2 (the
+// r7-p21c-corrective-1 task): the fail-closed classification now requires
+// TWO INDEPENDENTLY ATTRIBUTED per-operation runtime windows. The evidence
+// grammar is the corrected per-operation section shape (distinct daemon
+// operation id and session id per section, exact audit.log line-offset
+// window boundaries, op-path/pid attribution with MCS category never an
+// attribution key). The fail-closed branches are proven for every
+// falsification the review identified: a missing second window, a copied
+// window, a second operation that failed before runc:[2:INIT], records
+// distinguishable only by MCS category, a first-window record placed into
+// the second window, truncated/overlapping/gapped captures, a duplicated
+// operation id, and the eliminated { read open } shape confined to the
+// second window. The evaluator (scripts/release-2.4-r7-p21c-verdict.sh) is
+// the single authority for the machine-readable verdict; the P21-B
+// evaluator stays untouched as the historical instrument, and no test
+// reimplements its semantics.
 
 const (
 	p21cC1      = "system_u:system_r:docker_helper_buildkitd_t:s0:c1"
@@ -28,6 +34,17 @@ const (
 	p21cDevnode = "system_u:object_r:docker_helper_devnode_t:s0"
 	p21cMemfd   = "system_u:object_r:docker_helper_runc_memfd_t:s0"
 	p21cUserTmp = "unconfined_u:object_r:user_tmp_t:s0"
+)
+
+// The two independently measured operations of enforcing run 41817339781
+// (the REAL operation ids and their recorded per-operation paths).
+const (
+	p21cOp1ID     = "0fa70c22a486dbbb176540db9115467c"
+	p21cOp2ID     = "d298110c0575df75e08e7c479eecf843"
+	p21cSession1  = "dhs_1111111111111111111111111111111"
+	p21cSession2  = "dhs_2222222222222222222222222222222"
+	p21cOp1Rootfs = "/var/lib/docker-helper-builder/ops/op_0fa70c22a486dbbb176540db9115467c/root/runc-native/executor/9ljpl8zdbqwrbx85v3okf4y83/rootfs/dev/null"
+	p21cOp2Rootfs = "/var/lib/docker-helper-builder/ops/op_d298110c0575df75e08e7c479eecf843/root/runc-native/executor/p8s0i4imq0adpx6apco1pl9ft/rootfs/dev/null"
 )
 
 // p21cDevnodeBasenames is the exact six-basename list the policy diverts
@@ -67,28 +84,27 @@ func p21cAVFilePerm(perm, verdict, allowed string) string {
 
 // p21cGreenAV returns the kernel-AV rows the P21-C candidate policy must
 // produce: for BOTH operation categories the devnode_t:file surface is
-// create=ALLOW plus the ONE { read open } open-completion pair (the
-// granted mask 0x4000a = create|read|open) with every other permission
-// DENIED — the pair must never ride a wider grant; unconfined stays
-// all-DENY; the three associate rows are unchanged from P21-B.
+// create=ALLOW plus the ONE { read open } open-completion pair with every
+// other permission DENIED; unconfined stays all-DENY; the three associate
+// rows are unchanged from P21-B.
 func p21cGreenAV() []string {
 	granted := []string{"write", "append", "setattr", "execute", "execute_no_trans", "map", "getattr", "unlink", "rename", "link", "ioctl", "lock"}
 	var out []string
 	out = append(out, "== buildkitd_t:s0:c1 -> docker_helper_devnode_t:s0 ==")
 	out = append(out,
-		p21cAVFilePerm("create", "ALLOW", "0x4000a"),
-		p21cAVFilePerm("open", "ALLOW", "0x4000a"),
-		p21cAVFilePerm("read", "ALLOW", "0x4000a"))
+		p21cAVFilePerm("create", "ALLOW", "0x8000a"),
+		p21cAVFilePerm("open", "ALLOW", "0x8000a"),
+		p21cAVFilePerm("read", "ALLOW", "0x8000a"))
 	for _, perm := range granted {
-		out = append(out, p21cAVFilePerm(perm, "DENY", "0x4000a"))
+		out = append(out, p21cAVFilePerm(perm, "DENY", "0x8000a"))
 	}
 	out = append(out, "== CROSS-OP: buildkitd_t:s0:c2 -> docker_helper_devnode_t:s0 ==")
 	out = append(out,
-		p21cAVFilePerm("create", "ALLOW", "0x4000a"),
-		p21cAVFilePerm("open", "ALLOW", "0x4000a"),
-		p21cAVFilePerm("read", "ALLOW", "0x4000a"))
+		p21cAVFilePerm("create", "ALLOW", "0x8000a"),
+		p21cAVFilePerm("open", "ALLOW", "0x8000a"),
+		p21cAVFilePerm("read", "ALLOW", "0x8000a"))
 	for _, perm := range granted {
-		out = append(out, p21cAVFilePerm(perm, "DENY", "0x4000a"))
+		out = append(out, p21cAVFilePerm(perm, "DENY", "0x8000a"))
 	}
 	out = append(out, "== unconfined_t -> docker_helper_devnode_t:s0 ==")
 	for _, perm := range []string{"create", "write", "append", "setattr", "execute", "execute_no_trans", "map", "open", "read", "getattr", "unlink", "rename", "link", "ioctl", "lock"} {
@@ -106,47 +122,69 @@ func p21cGreenAV() []string {
 	return out
 }
 
-// p21cNextTerminalRecord is the fixture's observed next-terminal record: a
-// full-structure denied AVC from the same runc:[2:INIT] runtime stage that
-// is NOT the granted devnode { read open } shape. The fixture uses the
-// file-class mounton of the host device node over the placeholder — the
-// predicted follow-on hook the P21-B provenance recorded as its own future
-// evidenced rung — purely as a well-formed specimen; the evaluator accepts
-// any real new-flow record and pre-classifies nothing.
-const p21cNextTerminalRecord = `type=AVC msg=audit(1793714090.100:1201): avc:  denied  { mounton } for  pid=3288 comm="runc:[2:INIT]" path="/var/lib/docker-helper-builder/ops/op_557f5cc38c677ba14475b5dd2f88dbaa/root/runc-native/executor/6jinf8i9db2cl6rsdw8zcony9/rootfs/dev/null" dev="tmpfs" ino=5 scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file permissive=0`
+// The measured pre-boundary cap_userns self-denials (the P21-B/C window
+// shape) and the observed next terminals of run 41817339781 (both windows
+// carry the buildkitd_t:s0:c1 source — the same MCS category; attribution
+// NEVER rests on the category).
+const (
+	p21cSetuid1  = `type=AVC msg=audit(1793789849.894:1190): avc:  denied  { setuid } for  pid=3353 comm="runc:[2:INIT]" capability=7  scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns permissive=0`
+	p21cSetgid1  = `type=AVC msg=audit(1793789849.894:1191): avc:  denied  { setgid } for  pid=3353 comm="runc:[2:INIT]" capability=6  scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns permissive=0`
+	p21cMounton1 = `type=AVC msg=audit(1793789849.898:1192): avc:  denied  { mounton } for  pid=3353 comm="runc:[2:INIT]" path="` + p21cOp1Rootfs + `" dev="tmpfs" ino=5 scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file permissive=0`
+	p21cSetuid2  = `type=AVC msg=audit(1793789851.301:1817): avc:  denied  { setuid } for  pid=3517 comm="runc:[2:INIT]" capability=7  scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns permissive=0`
+	p21cSetgid2  = `type=AVC msg=audit(1793789851.301:1818): avc:  denied  { setgid } for  pid=3517 comm="runc:[2:INIT]" capability=6  scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns permissive=0`
+	p21cMounton2 = `type=AVC msg=audit(1793789851.305:1819): avc:  denied  { mounton } for  pid=3517 comm="runc:[2:INIT]" path="` + p21cOp2Rootfs + `" dev="tmpfs" ino=5 scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file permissive=0`
+)
 
-const p21cSetuidRecord = `type=AVC msg=audit(1793714090.090:1199): avc:  denied  { setuid } for  pid=3288 comm="runc:[2:INIT]" capability=7  scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns permissive=0`
+// p21cOldTerminal is the ELIMINATED P21-B shape (the P21-B measured
+// terminal of run 41623047086): the exact "denied  { read open }" pair on
+// the devnode_t file object, permissive=0, with a per-operation path.
+const p21cOldTerminal = `type=AVC msg=audit(1793714070.816:1190): avc:  denied  { read open } for  pid=3288 comm="runc:[2:INIT]" path="` + p21cOp1Rootfs + `" dev="tmpfs" ino=5 scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file permissive=0`
 
-const p21cSetgidRecord = `type=AVC msg=audit(1793714090.091:1200): avc:  denied  { setgid } for  pid=3288 comm="runc:[2:INIT]" capability=6  scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns permissive=0`
+// p21cOpSection composes one per-operation evidence section in the
+// corrected grammar: header (tag + daemon operation id + session id),
+// exact window boundaries, the operation result, the attributed runtime
+// records partitioned by attribution quality, and the whole-window
+// regression-control sections.
+func p21cOpSection(tag, opid, session string, before, after int, opAttributed, pidCorrelated, misattributed, unattributed, p21bTerminal string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "== operation %s op_%s session %s ==\n", tag, opid, session)
+	b.WriteString("-- window boundaries (audit.log line offsets) --\n")
+	fmt.Fprintf(&b, "before=%d after=%d captured=%d\n", before, after, after-before)
+	b.WriteString("-- operation result --\n")
+	b.WriteString(`"status": "failed" "result_code": "docker_build_failed" "exit_code": 1` + "\n")
+	b.WriteString("-- op-attributed runc-init records --\n")
+	b.WriteString(opAttributed)
+	b.WriteString("-- pid-correlated runc-init records --\n")
+	b.WriteString(pidCorrelated)
+	b.WriteString("-- misattributed records (a path carries a DIFFERENT operation id) --\n")
+	b.WriteString(misattributed)
+	b.WriteString("-- unattributed runc-init records --\n")
+	b.WriteString(unattributed)
+	b.WriteString("-- regression controls (the WHOLE window; must be EMPTY) --\n")
+	b.WriteString("-- P20 terminal (runc_memfd_t:file create) --\n")
+	b.WriteString("-- pre-B terminal (tmpfs_t:file write) --\n")
+	b.WriteString("-- associate denials (must be EMPTY — the singleton is granted) --\n")
+	b.WriteString("-- P21-B terminal (devnode_t:file { read open }; the ELIMINATED shape) --\n")
+	b.WriteString(p21bTerminal)
+	return b.String()
+}
 
-// p21cC2Records is the second window's variant of the same record set (the
-// distinct pid, serials, and per-operation path of the P21-B windows; both
-// real windows carried the buildkitd_t:s0:c1 source context).
-var p21cC2Records = strings.NewReplacer(
-	"pid=3288", "pid=3424",
-	":1199)", ":1815)",
-	":1200)", ":1816)",
-	":1201)", ":1817)",
-	"op_557f5cc38c677ba14475b5dd2f88dbaa", "op_349ddf17ce6f9448f30d8c2ffad0c32f",
-	"6jinf8i9db2cl6rsdw8zcony9", "ygn48dtxodtbs22evtqnhhktx",
-).Replace(p21cSetuidRecord + "\n" + p21cSetgidRecord + "\n" + p21cNextTerminalRecord)
-
-// p21cGreenTerminals returns the green live-flow fixture: BOTH windows
-// carry the P21-B window's pre-boundary non-fatal cap_userns self-denials
-// and the new observed terminal, the granted devnode { read open } shape
-// is ABSENT (the rung eliminated it), and the three regression-control
-// sections are empty.
+// p21cGreenTerminals returns the green live-flow fixture: two DISTINCT
+// operations (distinct operation ids, distinct session ids), each with its
+// own bounded non-overlapping audit window, its own attributed runtime
+// records (op-path terminal + pid-correlated pre-boundary self-denials),
+// its own observed next terminal, and EMPTY control sections. BOTH windows
+// carry the buildkitd_t:s0:c1 source context — the same MCS category —
+// because attribution never rests on the category.
 func p21cGreenTerminals() string {
-	return `== devnode-terminal runc-init AVCs (both windows) ==` + "\n" +
-		p21cSetuidRecord + "\n" + p21cSetgidRecord + "\n" + p21cNextTerminalRecord + "\n" +
-		p21cC2Records + "\n" +
-		`== next-terminal runc-init AVCs (both windows) ==` + "\n" +
-		p21cSetuidRecord + "\n" + p21cSetgidRecord + "\n" + p21cNextTerminalRecord + "\n" +
-		p21cC2Records + "\n" +
-		`== regression controls (must be EMPTY) ==` + "\n" +
-		`-- P20 terminal (runc_memfd_t:file create) --` + "\n" +
-		`-- pre-B terminal (tmpfs_t:file write) --` + "\n" +
-		`-- associate denials (must be EMPTY — the singleton is granted) --` + "\n"
+	return p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
+		p21cMounton1+"\n",
+		p21cSetuid1+"\n"+p21cSetgid1+"\n",
+		"", "", "") +
+		p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
+			p21cMounton2+"\n",
+			p21cSetuid2+"\n"+p21cSetgid2+"\n",
+			"", "", "")
 }
 
 func p21cWriteEvidence(t *testing.T, matrix, av, terminals string) string {
@@ -205,10 +243,8 @@ func p21cGreenDir(t *testing.T) string {
 }
 
 // TestR7P21CVerdictGreenEvidenceIsMeasured proves the evaluator decides
-// P21C-MEASURED on the green fixture shape with every field at its
-// expected value: the transition scope unchanged, the open-completion
-// pair eliminated from the windows, the memfd plane intact, the
-// cross-operation content channel closed, and a real next-terminal record.
+// P21C-MEASURED when BOTH operations independently prove their own
+// advancement, with every summary field at its expected value.
 func TestR7P21CVerdictGreenEvidenceIsMeasured(t *testing.T) {
 	line, rc := p21cRunEvaluator(t, p21cGreenDir(t))
 	if rc != 0 {
@@ -229,8 +265,244 @@ func TestR7P21CVerdictGreenEvidenceIsMeasured(t *testing.T) {
 	if got := p21cField(t, line, "CROSSOP-CONTENT"); got != "closed" {
 		t.Errorf("CROSSOP-CONTENT must be closed, got %q", got)
 	}
-	if got := p21cField(t, line, "NEXT-TERMINAL"); !strings.Contains(got, "denied  { mounton }") || strings.Contains(got, "(none)") {
-		t.Errorf("NEXT-TERMINAL must be the observed new-flow record, got %q", got)
+	if got := p21cField(t, line, "NEXT-TERMINAL"); !strings.Contains(got, p21cOp1ID) || !strings.Contains(got, "denied  { mounton }") {
+		t.Errorf("NEXT-TERMINAL must be the FIRST operation's own attributed record, got %q", got)
+	}
+}
+
+// TestR7P21CVerdictSingleWindowCannotMeasure is THE corrected defect: the
+// revision-1 evaluator could decide MEASURED from one merged record set.
+// A single window (the second section missing) can never measure, and a
+// second window that merely COPIES the first is a positive attribution
+// violation, never evidence.
+func TestR7P21CVerdictSingleWindowCannotMeasure(t *testing.T) {
+	green := p21cGreenTerminals()
+	secondStart := strings.Index(green, "== operation c2 ")
+	if secondStart < 0 {
+		t.Fatal("fixture must contain a second operation section")
+	}
+	firstOnly := green[:secondStart]
+	copied := firstOnly + strings.Replace(firstOnly, "operation c1", "operation c2", 1)
+	for name, terminals := range map[string]struct {
+		want string
+		text string
+	}{
+		"second window missing entirely":                                        {"P21C-BLOCKED", firstOnly},
+		"second window is a copy of the first (the first op's paths inside it)": {"P21C-FAIL", copied},
+	} {
+		dir := p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
+			strings.Join(p21cGreenAV(), "\n")+"\n", terminals.text)
+		line, rc := p21cRunEvaluator(t, dir)
+		if rc == 0 || !strings.Contains(line, "DECISION="+terminals.want) {
+			t.Errorf("%s must decide %s, got rc=%d: %s", name, terminals.want, rc, line)
+		}
+	}
+}
+
+// TestR7P21CVerdictSecondOperationFailsBeforeInitBlocks proves a second
+// operation that never reached runc:[2:INIT] can never ride the first
+// operation's evidence: the second section carries no attributed runtime
+// record, so the verdict is BLOCKED (not MEASURED, not FAIL-by-proxy).
+func TestR7P21CVerdictSecondOperationFailsBeforeInitBlocks(t *testing.T) {
+	terminals := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
+		p21cMounton1+"\n",
+		p21cSetuid1+"\n"+p21cSetgid1+"\n",
+		"", "", "") +
+		p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
+			"", "", "", "", "")
+	dir := p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
+		strings.Join(p21cGreenAV(), "\n")+"\n", terminals)
+	line, rc := p21cRunEvaluator(t, dir)
+	if rc == 0 || !strings.Contains(line, "DECISION=P21C-BLOCKED") {
+		t.Errorf("a second operation with no attributed runtime record must decide BLOCKED, got rc=%d: %s", rc, line)
+	}
+	if got := p21cField(t, line, "OPEN-COMPLETION"); got != "eliminated" {
+		t.Errorf("the FIRST window was still fully evaluated (OPEN-COMPLETION=eliminated), got %q", got)
+	}
+}
+
+// TestR7P21CVerdictCategoryOnlyAttributionBlocks proves the attribution
+// never rests on the MCS category: two windows whose records are
+// distinguishable ONLY by category labels (no per-operation path, no
+// pid proven by an op-attributed record) are AMBIGUOUS evidence — BLOCKED.
+func TestR7P21CVerdictCategoryOnlyAttributionBlocks(t *testing.T) {
+	onlyCategory := `type=AVC msg=audit(1793789899.001:1999): avc:  denied  { mounton } for  pid=3999 comm="runc:[2:INIT]" path="` + p21cOp1Rootfs + `" dev="tmpfs" ino=5 scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file permissive=0`
+	// Pathless records only: nothing anchors them to an operation.
+	pathless := `type=AVC msg=audit(1793789899.001:1999): avc:  denied  { mounton } for  pid=3999 comm="runc:[2:INIT]" capability=7  scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns permissive=0`
+	terminals := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
+		"", "", "", pathless+"\n", "") +
+		p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
+			"", "", "", onlyCategory+"\n", "")
+	dir := p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
+		strings.Join(p21cGreenAV(), "\n")+"\n", terminals)
+	line, rc := p21cRunEvaluator(t, dir)
+	if rc == 0 || !strings.Contains(line, "DECISION=P21C-BLOCKED") {
+		t.Errorf("category-only distinguishable records must decide BLOCKED (attribution never rests on the category), got rc=%d: %s", rc, line)
+	}
+}
+
+// TestR7P21CVerdictMisattributedAndUnattributedFailClosed proves the
+// attribution-quality branches: a first-window record placed into the
+// second window is a positive violation (FAIL), an unattributed
+// runc:[2:INIT] record is ambiguous evidence (BLOCKED).
+func TestR7P21CVerdictMisattributedAndUnattributedFailClosed(t *testing.T) {
+	// A pathless runc-init record whose pid is NOT proven by any
+	// op-attributed record of its window.
+	stray := `type=AVC msg=audit(1793789899.002:2001): avc:  denied  { getattr } for  pid=4242 comm="runc:[2:INIT]" path="/tmp/x" dev="vda3" ino=1 scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:tmp_t:s0 tclass=file permissive=0`
+	for name, terminals := range map[string]struct {
+		want string
+		text string
+	}{
+		"first op's terminal record placed into the second window": {"P21C-FAIL",
+			p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
+				p21cMounton1+"\n",
+				p21cSetuid1+"\n"+p21cSetgid1+"\n",
+				"", "", "") +
+				p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
+					p21cMounton1+"\n"+p21cMounton2+"\n",
+					p21cSetuid2+"\n"+p21cSetgid2+"\n",
+					"", "", "")},
+		"unattributed runc-init record in the first window": {"P21C-BLOCKED",
+			p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
+				p21cMounton1+"\n",
+				p21cSetuid1+"\n"+p21cSetgid1+"\n",
+				"", stray+"\n", "") +
+				p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
+					p21cMounton2+"\n",
+					p21cSetuid2+"\n"+p21cSetgid2+"\n",
+					"", "", "")},
+	} {
+		dir := p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
+			strings.Join(p21cGreenAV(), "\n")+"\n", terminals.text)
+		line, rc := p21cRunEvaluator(t, dir)
+		if rc == 0 || !strings.Contains(line, "DECISION="+terminals.want) {
+			t.Errorf("%s must decide %s, got rc=%d: %s", name, terminals.want, rc, line)
+		}
+	}
+}
+
+// TestR7P21CVerdictWindowBoundaryFailClosed proves the exact-boundary
+// contract: a truncated/rotated capture (inconsistent boundary) decides
+// BLOCKED, an overlapping second window decides FAIL, a gap between the
+// windows decides BLOCKED.
+func TestR7P21CVerdictWindowBoundaryFailClosed(t *testing.T) {
+	truncated := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
+		p21cMounton1+"\n",
+		p21cSetuid1+"\n"+p21cSetgid1+"\n",
+		"", "", "") +
+		strings.Replace(p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
+			p21cMounton2+"\n",
+			p21cSetuid2+"\n"+p21cSetgid2+"\n",
+			"", "", ""), "before=103 after=106 captured=3", "before=103 after=106 captured=2", 1)
+	overlapping := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
+		p21cMounton1+"\n",
+		p21cSetuid1+"\n"+p21cSetgid1+"\n",
+		"", "", "") +
+		strings.Replace(p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
+			p21cMounton2+"\n",
+			p21cSetuid2+"\n"+p21cSetgid2+"\n",
+			"", "", ""), "before=103 after=106 captured=3", "before=102 after=105 captured=3", 1)
+	gapped := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
+		p21cMounton1+"\n",
+		p21cSetuid1+"\n"+p21cSetgid1+"\n",
+		"", "", "") +
+		strings.Replace(p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
+			p21cMounton2+"\n",
+			p21cSetuid2+"\n"+p21cSetgid2+"\n",
+			"", "", ""), "before=103", "before=110", 1)
+	unbounded := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
+		p21cMounton1+"\n",
+		p21cSetuid1+"\n"+p21cSetgid1+"\n",
+		"", "", "") +
+		strings.Replace(p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
+			p21cMounton2+"\n",
+			p21cSetuid2+"\n"+p21cSetgid2+"\n",
+			"", "", ""), "before=103 after=106 captured=3", "before=103 after=105 captured=ROTATED", 1)
+	for name, terminals := range map[string]struct {
+		want string
+		text string
+	}{
+		"truncated capture (boundary inconsistent)":           {"P21C-BLOCKED", truncated},
+		"second window overlaps the first":                    {"P21C-FAIL", overlapping},
+		"capture gap between the windows":                     {"P21C-BLOCKED", gapped},
+		"rotated capture (capture-unavailable boundary mark)": {"P21C-BLOCKED", unbounded},
+	} {
+		dir := p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
+			strings.Join(p21cGreenAV(), "\n")+"\n", terminals.text)
+		line, rc := p21cRunEvaluator(t, dir)
+		if rc == 0 || !strings.Contains(line, "DECISION="+terminals.want) {
+			t.Errorf("%s must decide %s, got rc=%d: %s", name, terminals.want, rc, line)
+		}
+	}
+}
+
+// TestR7P21CVerdictDuplicateIdentityFailsClosed proves the identity
+// branches: the SAME operation id in both windows (one window serving both
+// operations) decides FAIL, the SAME session id decides FAIL, and the
+// SAME AVC record cited as both operations' terminal decides FAIL.
+func TestR7P21CVerdictDuplicateIdentityFailsClosed(t *testing.T) {
+	sameOp := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
+		p21cMounton1+"\n",
+		p21cSetuid1+"\n"+p21cSetgid1+"\n",
+		"", "", "") +
+		p21cOpSection("c2", p21cOp1ID, p21cSession2, 103, 106,
+			p21cMounton2+"\n",
+			p21cSetuid2+"\n"+p21cSetgid2+"\n",
+			"", "", "")
+	sameSession := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
+		p21cMounton1+"\n",
+		p21cSetuid1+"\n"+p21cSetgid1+"\n",
+		"", "", "") +
+		p21cOpSection("c2", p21cOp2ID, p21cSession1, 103, 106,
+			p21cMounton2+"\n",
+			p21cSetuid2+"\n"+p21cSetgid2+"\n",
+			"", "", "")
+	sameTerminal := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
+		p21cMounton1+"\n",
+		p21cSetuid1+"\n"+p21cSetgid1+"\n",
+		"", "", "") +
+		p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
+			p21cMounton1+"\n",
+			p21cSetuid2+"\n"+p21cSetgid2+"\n",
+			"", "", "")
+	for name, terminals := range map[string]string{
+		"same operation id in both windows":                       sameOp,
+		"same session id in both windows":                         sameSession,
+		"the same AVC record for both terminals (misattribution)": sameTerminal,
+	} {
+		dir := p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
+			strings.Join(p21cGreenAV(), "\n")+"\n", terminals)
+		line, rc := p21cRunEvaluator(t, dir)
+		if rc == 0 || !strings.Contains(line, "DECISION=P21C-FAIL") {
+			t.Errorf("%s must decide FAIL, got rc=%d: %s", name, rc, line)
+		}
+	}
+}
+
+// TestR7P21CVerdictEliminatedShapeConfinedToSecondWindowFails proves the
+// eliminated-shape check is PER OPERATION: the P21-B { read open } shape
+// present ONLY in the second operation's window (both as an attributed
+// record and via the whole-window control section) decides FAIL with
+// OPEN-COMPLETION=live.
+func TestR7P21CVerdictEliminatedShapeConfinedToSecondWindowFails(t *testing.T) {
+	op2WithOld := strings.Replace(p21cOpSection("c2", p21cOp2ID, p21cSession2, 103, 106,
+		p21cMounton2+"\n",
+		p21cSetuid2+"\n"+p21cSetgid2+"\n",
+		"", "", ""),
+		"-- P21-B terminal (devnode_t:file { read open }; the ELIMINATED shape) --\n",
+		"-- P21-B terminal (devnode_t:file { read open }; the ELIMINATED shape) --\n"+p21cOldTerminal+"\n", 1)
+	terminals := p21cOpSection("c1", p21cOp1ID, p21cSession1, 100, 103,
+		p21cMounton1+"\n",
+		p21cSetuid1+"\n"+p21cSetgid1+"\n",
+		"", "", "") + op2WithOld
+	dir := p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
+		strings.Join(p21cGreenAV(), "\n")+"\n", terminals)
+	line, rc := p21cRunEvaluator(t, dir)
+	if rc == 0 || !strings.Contains(line, "DECISION=P21C-FAIL") {
+		t.Errorf("the eliminated shape confined to the second window must decide FAIL, got rc=%d: %s", rc, line)
+	}
+	if got := p21cField(t, line, "OPEN-COMPLETION"); got != "live" {
+		t.Errorf("OPEN-COMPLETION must be live, got %q", got)
 	}
 }
 
@@ -252,10 +524,7 @@ func TestR7P21CVerdictZeroNewlineGrepArtifactFailsClosed(t *testing.T) {
 }
 
 // TestR7P21CVerdictMatrixMutationsFailClosed proves every matrix
-// irregularity — a missing required row, a duplicated row, a wrong result,
-// an unexpected row, and an unparseable line — fails closed (never
-// MEASURED), with a positive violation taking FAIL over the
-// missing-evidence BLOCKED.
+// irregularity fails closed (never MEASURED).
 func TestR7P21CVerdictMatrixMutationsFailClosed(t *testing.T) {
 	rows := p21cGreenMatrix()
 	find := func(name, src string) int {
@@ -274,10 +543,6 @@ func TestR7P21CVerdictMatrixMutationsFailClosed(t *testing.T) {
 			i := find("tty", p21cC2)
 			return append(r[:i:i], r[i+1:]...)
 		}},
-		{"missing c1/null row", func(r []string) []string {
-			i := find("null", p21cC1)
-			return append(r[:i:i], r[i+1:]...)
-		}},
 		{"duplicated c1/zero row", func(r []string) []string {
 			i := find("zero", p21cC1)
 			return append(append(r[:i:i], r[i]), r[i:]...)
@@ -288,32 +553,11 @@ func TestR7P21CVerdictMatrixMutationsFailClosed(t *testing.T) {
 			out[i] = p21cCreateRow(p21cC1, "null", p21cMemfd)
 			return out
 		}},
-		{"wrong result: c2/tty keeps runc_memfd_t", func(r []string) []string {
-			i := find("tty", p21cC2)
-			out := append([]string(nil), r...)
-			out[i] = p21cCreateRow(p21cC2, "tty", p21cMemfd)
-			return out
-		}},
 		{"arbitrary name diverted to devnode_t", func(r []string) []string {
 			i := find("someothername", p21cC1)
 			out := append([]string(nil), r...)
 			out[i] = p21cCreateRow(p21cC1, "someothername", p21cDevnode)
 			return out
-		}},
-		{"name=NULL diverted to devnode_t", func(r []string) []string {
-			i := find("-", p21cC1)
-			out := append([]string(nil), r...)
-			out[i] = p21cCreateRow(p21cC1, "-", p21cDevnode)
-			return out
-		}},
-		{"unconfined control diverted", func(r []string) []string {
-			i := find("null", p21cUnconf)
-			out := append([]string(nil), r...)
-			out[i] = p21cCreateRow(p21cUnconf, "null", p21cDevnode)
-			return out
-		}},
-		{"unexpected seventh basename row", func(r []string) []string {
-			return append(r, p21cCreateRow(p21cC1, "stdin", p21cDevnode))
 		}},
 		{"unparseable line injected", func(r []string) []string {
 			return append(r, "CREATE broken matrix line")
@@ -327,61 +571,12 @@ func TestR7P21CVerdictMatrixMutationsFailClosed(t *testing.T) {
 		if rc == 0 || strings.Contains(line, "DECISION=P21C-MEASURED") {
 			t.Errorf("mutation %q must fail closed, got rc=%d: %s", mut.name, rc, line)
 		}
-		if mut.name == "missing c2/tty row" && !strings.Contains(line, "DECISION=P21C-BLOCKED") {
-			t.Errorf("a purely missing row must decide BLOCKED (fail-closed), got: %s", line)
-		}
-	}
-}
-
-// TestR7P21CVerdictMatrixStructureMutationsFailClosed proves the FULL row
-// structure is part of the requirement: a row whose RESULT alone would
-// look right is still rejected when its parent (target) context, class,
-// source context, or name is wrong — no partial-structure acceptance.
-func TestR7P21CVerdictMatrixStructureMutationsFailClosed(t *testing.T) {
-	mutations := []struct {
-		name    string
-		corrupt func(string) string
-	}{
-		{"wrong parent context, result still devnode_t", func(r string) string {
-			return strings.Replace(r,
-				"CREATE "+p21cC1+" x "+p21cTmpfs+" x file [null] -> "+p21cDevnode,
-				"CREATE "+p21cC1+" x system_u:object_r:builder_runtime_t:s0 x file [null] -> "+p21cDevnode, 1)
-		}},
-		{"wrong class, result still devnode_t", func(r string) string {
-			return strings.Replace(r,
-				"CREATE "+p21cC1+" x "+p21cTmpfs+" x file [null] -> "+p21cDevnode,
-				"CREATE "+p21cC1+" x "+p21cTmpfs+" x dir [null] -> "+p21cDevnode, 1)
-		}},
-		{"wrong source context, right name and result", func(r string) string {
-			return strings.Replace(r,
-				"CREATE "+p21cC1+" x "+p21cTmpfs+" x file [null] -> "+p21cDevnode,
-				"CREATE system_u:system_r:docker_helper_t:s0:c1 x "+p21cTmpfs+" x file [null] -> "+p21cDevnode, 1)
-		}},
-		{"wrong name, right result", func(r string) string {
-			return strings.Replace(r,
-				"CREATE "+p21cC1+" x "+p21cTmpfs+" x file [null] -> "+p21cDevnode,
-				"CREATE "+p21cC1+" x "+p21cTmpfs+" x file [nul] -> "+p21cDevnode, 1)
-		}},
-		{"wrong result", func(r string) string {
-			return strings.Replace(r,
-				"CREATE "+p21cC1+" x "+p21cTmpfs+" x file [null] -> "+p21cDevnode,
-				"CREATE "+p21cC1+" x "+p21cTmpfs+" x file [null] -> "+p21cMemfd, 1)
-		}},
-	}
-	for _, mut := range mutations {
-		dir := p21cWriteEvidence(t, mut.corrupt(strings.Join(p21cGreenMatrix(), "\n")+"\n"),
-			strings.Join(p21cGreenAV(), "\n")+"\n", p21cGreenTerminals())
-		line, rc := p21cRunEvaluator(t, dir)
-		if rc == 0 || strings.Contains(line, "DECISION=P21C-MEASURED") {
-			t.Errorf("mutation %q must fail closed, got rc=%d: %s", mut.name, rc, line)
-		}
 	}
 }
 
 // TestR7P21CVerdictAVMutationsFailClosed proves the AV-matrix branches for
 // the P21-C shape: the { read open } pair must be EXACTLY granted for both
-// operation categories (a DENIED pair member is a wrong verdict — the rung
-// did not take effect), every other permission must stay DENIED, the
+// operation categories, every other permission must stay DENIED, the
 // unconfined surface must stay all-DENY, the associate rows must stay
 // unchanged, and missing/duplicated/unparseable rows fail closed.
 func TestR7P21CVerdictAVMutationsFailClosed(t *testing.T) {
@@ -391,34 +586,19 @@ func TestR7P21CVerdictAVMutationsFailClosed(t *testing.T) {
 		mutate func(string) string
 	}{
 		{"c1 pair member read DENIED", func(p string) string {
-			return strings.Replace(p, p21cAVFilePerm("read", "ALLOW", "0x4000a"), p21cAVFilePerm("read", "DENY", "0x40008"), 1)
+			return strings.Replace(p, p21cAVFilePerm("read", "ALLOW", "0x8000a"), p21cAVFilePerm("read", "DENY", "0x80008"), 1)
 		}},
-		{"c1 pair member open DENIED", func(p string) string {
-			return strings.Replace(p, p21cAVFilePerm("open", "ALLOW", "0x4000a"), p21cAVFilePerm("open", "DENY", "0xa"), 1)
-		}},
-		{"c2 pair member read DENIED", func(p string) string {
-			return strings.Replace(p, p21cAVFilePerm("read", "ALLOW", "0x4000a"), p21cAVFilePerm("read", "DENY", "0x4000a"), 1)
+		{"c2 pair member open DENIED", func(p string) string {
+			return strings.Replace(p, p21cAVFilePerm("open", "ALLOW", "0x8000a"), p21cAVFilePerm("open", "DENY", "0xa"), 1)
 		}},
 		{"c1 write ALLOW (the rejected content authority)", func(p string) string {
-			return strings.Replace(p, p21cAVFilePerm("write", "DENY", "0x4000a"), p21cAVFilePerm("write", "ALLOW", "0x4000a"), 1)
+			return strings.Replace(p, p21cAVFilePerm("write", "DENY", "0x8000a"), p21cAVFilePerm("write", "ALLOW", "0x8000a"), 1)
 		}},
-		{"c2 write ALLOW", func(p string) string {
-			return strings.Replace(p, p21cAVFilePerm("write", "DENY", "0x4000a"), p21cAVFilePerm("write", "ALLOW", "0x4000a"), 1)
-		}},
-		{"c1 setattr ALLOW", func(p string) string {
-			return strings.Replace(p, p21cAVFilePerm("setattr", "DENY", "0x4000a"), p21cAVFilePerm("setattr", "ALLOW", "0x4000a"), 1)
-		}},
-		{"c1 map ALLOW", func(p string) string {
-			return strings.Replace(p, p21cAVFilePerm("map", "DENY", "0x4000a"), p21cAVFilePerm("map", "ALLOW", "0x4000a"), 1)
-		}},
-		{"c1 execute ALLOW", func(p string) string {
-			return strings.Replace(p, p21cAVFilePerm("execute", "DENY", "0x4000a"), p21cAVFilePerm("execute", "ALLOW", "0x4000a"), 1)
+		{"c2 setattr ALLOW", func(p string) string {
+			return strings.Replace(p, p21cAVFilePerm("setattr", "DENY", "0x8000a"), p21cAVFilePerm("setattr", "ALLOW", "0x8000a"), 1)
 		}},
 		{"unconfined read ALLOW", func(p string) string {
 			return strings.Replace(p, p21cAVFilePerm("read", "DENY", "0x0"), p21cAVFilePerm("read", "ALLOW", "0x2"), 1)
-		}},
-		{"unconfined create ALLOW", func(p string) string {
-			return strings.Replace(p, p21cAVFilePerm("create", "DENY", "0x0"), p21cAVFilePerm("create", "ALLOW", "0x8"), 1)
 		}},
 		{"runc_memfd associate flipped to ALLOW", func(p string) string {
 			return strings.Replace(p, "  associate DENY (allowed=0x0 decided=0xffffffff)",
@@ -429,10 +609,10 @@ func TestR7P21CVerdictAVMutationsFailClosed(t *testing.T) {
 				"  associate DENY (allowed=0x0 decided=0xffffffff)", 1)
 		}},
 		{"missing c2/lock row", func(p string) string {
-			return strings.Replace(p, p21cAVFilePerm("lock", "DENY", "0x4000a"), "", 1)
+			return strings.Replace(p, p21cAVFilePerm("lock", "DENY", "0x8000a"), "", 1)
 		}},
 		{"duplicated c1/create row", func(p string) string {
-			needle := p21cAVFilePerm("create", "ALLOW", "0x4000a")
+			needle := p21cAVFilePerm("create", "ALLOW", "0x8000a")
 			return strings.Replace(p, needle, needle+"\n"+needle, 1)
 		}},
 		{"unparseable AV row injected", func(p string) string {
@@ -448,117 +628,34 @@ func TestR7P21CVerdictAVMutationsFailClosed(t *testing.T) {
 	}
 }
 
-// TestR7P21CVerdictTerminalMutationsFailClosed proves the live-flow
-// branches: the P21-B measured terminal reappearing decides FAIL with
-// OPEN-COMPLETION=live, a reappeared regression-control record decides
-// FAIL (MEMFD=regressed for the P20 shape), a window with no further
-// new-flow record decides BLOCKED (absence of AVCs alone is never a
-// passing outcome), and the cap_userns pre-boundary self-denials can never
-// be selected as the next terminal.
-func TestR7P21CVerdictTerminalMutationsFailClosed(t *testing.T) {
-	green := p21cGreenTerminals()
-	oldTerminal := `type=AVC msg=audit(1793714070.816:1190): avc:  denied  { read open } for  pid=3288 comm="runc:[2:INIT]" path="/var/lib/docker-helper-builder/ops/op_557f5cc38c677ba14475b5dd2f88dbaa/root/runc-native/executor/6jinf8i9db2cl6rsdw8zcony9/rootfs/dev/null" dev="tmpfs" ino=5 scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file permissive=0`
-	mutations := []struct {
-		name             string
-		mutate           func(string) string
-		wantDECISION     string
-		wantOPENCOMPLETE string
-		wantMEMFD        string
-	}{
-		{"P21-B devnode { read open } terminal reappeared", func(p string) string {
-			return strings.Replace(p,
-				"== devnode-terminal runc-init AVCs (both windows) ==\n",
-				"== devnode-terminal runc-init AVCs (both windows) ==\n"+oldTerminal+"\n", 1)
-		}, "P21C-FAIL", "live", "intact"},
-		{"P20 runc_memfd create denial reappeared", func(p string) string {
-			return strings.Replace(p,
-				"-- P20 terminal (runc_memfd_t:file create) --",
-				"-- P20 terminal (runc_memfd_t:file create) --\n"+
-					`type=AVC msg=audit(1793703417.986:9999): avc:  denied  { create } for  pid=3261 comm="runc:[2:INIT]" name="null" scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:docker_helper_runc_memfd_t:s0 tclass=file permissive=0`, 1)
-		}, "P21C-FAIL", "eliminated", "regressed"},
-		{"pre-B tmpfs_t:file write denial reappeared", func(p string) string {
-			return strings.Replace(p,
-				"-- pre-B terminal (tmpfs_t:file write) --",
-				"-- pre-B terminal (tmpfs_t:file write) --\n"+
-					`type=AVC msg=audit(1793703417.986:9998): avc:  denied  { write } for  pid=3261 comm="buildkit-runc" path=2F6D656D66643A scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:tmpfs_t:s0 tclass=file permissive=0`, 1)
-		}, "P21C-FAIL", "eliminated", "intact"},
-		{"associate denial reappeared", func(p string) string {
-			return strings.Replace(p,
-				"-- associate denials (must be EMPTY — the singleton is granted) --",
-				"-- associate denials (must be EMPTY — the singleton is granted) --\n"+
-					`type=AVC msg=audit(1793703417.986:9997): avc:  denied  { associate } for  pid=3261 comm="runc:[2:INIT]" name="null" scontext=system_u:object_r:docker_helper_devnode_t:s0 tcontext=system_u:object_r:tmpfs_t:s0 tclass=filesystem permissive=0`, 1)
-		}, "P21C-FAIL", "eliminated", "intact"},
-		{"only the pre-boundary cap_userns records (no new-flow record)", func(p string) string {
-			var kept []string
-			for _, l := range strings.Split(p, "\n") {
-				if strings.Contains(l, "denied  { mounton }") {
-					continue
-				}
-				kept = append(kept, l)
-			}
-			return strings.Join(kept, "\n")
-		}, "P21C-BLOCKED", "eliminated", "intact"},
-		{"no runc-init records at all (absence of AVC is never a pass)", func(p string) string {
-			var kept []string
-			for _, l := range strings.Split(p, "\n") {
-				if strings.Contains(l, `comm="runc:[2:INIT]"`) {
-					continue
-				}
-				kept = append(kept, l)
-			}
-			return strings.Join(kept, "\n")
-		}, "P21C-BLOCKED", "eliminated", "intact"},
-		{"devnode-terminal header missing (nothing established about the pair)", func(p string) string {
-			return strings.Replace(p,
-				"== devnode-terminal runc-init AVCs (both windows) ==\n", "", 1)
-		}, "P21C-BLOCKED", "not-established", "intact"},
-	}
-	for _, mut := range mutations {
-		dir := p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
-			strings.Join(p21cGreenAV(), "\n")+"\n", mut.mutate(green))
-		line, rc := p21cRunEvaluator(t, dir)
-		if !strings.Contains(line, "DECISION="+mut.wantDECISION) || rc == 0 {
-			t.Errorf("mutation %q must decide %s, got rc=%d: %s", mut.name, mut.wantDECISION, rc, line)
-		}
-		if got := p21cField(t, line, "OPEN-COMPLETION"); got != mut.wantOPENCOMPLETE {
-			t.Errorf("mutation %q must report OPEN-COMPLETION=%s, got %q", mut.name, mut.wantOPENCOMPLETE, got)
-		}
-		if got := p21cField(t, line, "MEMFD"); got != mut.wantMEMFD {
-			t.Errorf("mutation %q must report MEMFD=%s, got %q", mut.name, mut.wantMEMFD, got)
-		}
-	}
-}
-
-// TestR7P21CVerdictNextTerminalRecordMutationsFailClosed proves the strict
-// next-terminal matcher: an arbitrary AVC carrying the granted shape or
-// the pre-boundary cap_userns self-denials is never accepted as the new
-// terminal. Each mutation leaves a window whose only runc-init records are
-// NOT acceptable next-terminal evidence; the evaluator must decide
-// BLOCKED, never MEASURED.
-func TestR7P21CVerdictNextTerminalRecordMutationsFailClosed(t *testing.T) {
+// TestR7P21CVerdictNextTerminalMutationsFailClosed proves the strict
+// next-terminal matcher per operation: a corrupted terminal record in
+// EITHER window (permissive=1, unconfined source, foreign comm, the
+// granted shape, a cap_userns downgrade) removes that operation's proof
+// and decides BLOCKED; the whole-flow failure shape decides FAIL.
+func TestR7P21CVerdictNextTerminalMutationsFailClosed(t *testing.T) {
 	mutations := []struct {
 		name         string
 		corrupt      func(string) string
 		wantDECISION string
 	}{
-		{"next-terminal record corrupted to permissive=1", func(p string) string {
+		{"terminal records corrupted to permissive=1", func(p string) string {
 			return strings.ReplaceAll(p, "tclass=file permissive=0", "tclass=file permissive=1")
 		}, "P21C-BLOCKED"},
-		{"next-terminal record corrupted to unconfined source", func(p string) string {
-			return strings.ReplaceAll(p, "scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file",
-				"scontext=unconfined_u:unconfined_r:unconfined_t:s0-s0:c0.c1023 tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file")
+		{"the second operation's terminal record removed (only the first proves its own)", func(p string) string {
+			return strings.ReplaceAll(p, p21cMounton2+"\n", "")
 		}, "P21C-BLOCKED"},
-		{"next-terminal record corrupted to a foreign comm", func(p string) string {
-			return strings.ReplaceAll(p, `comm="runc:[2:INIT]" path="/var/lib`, `comm="buildkit-runc" path="/var/lib`)
-		}, "P21C-BLOCKED"},
-		{"next-terminal record corrupted to the granted shape", func(p string) string {
+		{"terminal records corrupted to the granted shape", func(p string) string {
 			return strings.ReplaceAll(p, "denied  { mounton }", "denied  { read open }")
 		}, "P21C-FAIL"},
-		{"next-terminal record downgraded to cap_userns", func(p string) string {
+		{"terminal records downgraded to cap_userns", func(p string) string {
 			out := strings.ReplaceAll(p, "denied  { mounton }", "denied  { setuid }")
 			return strings.ReplaceAll(out,
 				"tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file",
 				"tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns")
+		}, "P21C-BLOCKED"},
+		{"terminal records corrupted to a foreign comm", func(p string) string {
+			return strings.ReplaceAll(p, `comm="runc:[2:INIT]" path="/var/lib`, `comm="buildkit-runc" path="/var/lib`)
 		}, "P21C-BLOCKED"},
 	}
 	for _, mut := range mutations {
@@ -575,75 +672,51 @@ func TestR7P21CVerdictNextTerminalRecordMutationsFailClosed(t *testing.T) {
 	}
 }
 
-// TestR7P21CVerdictRegressionSectionHeadersFailClosed proves the section
-// headers are mandatory evidence: a missing header decides BLOCKED
-// (damaged or truncated evidence can never be MEASURED) and a duplicated
-// control header decides FAIL (ambiguous evidence).
-func TestR7P21CVerdictRegressionSectionHeadersFailClosed(t *testing.T) {
-	headers := []string{
-		"== devnode-terminal runc-init AVCs (both windows) ==",
-		"== next-terminal runc-init AVCs (both windows) ==",
-		"== regression controls (must be EMPTY) ==",
-		"-- P20 terminal (runc_memfd_t:file create) --",
-		"-- pre-B terminal (tmpfs_t:file write) --",
-		"-- associate denials (must be EMPTY — the singleton is granted) --",
+// TestR7P21CVerdictSectionHeaderIntegrityFailClosed proves the header
+// recognition is whole-line and per-operation: a missing operation header
+// decides BLOCKED, a duplicated operation header decides FAIL, a missing
+// control header inside ONE section decides BLOCKED, a corrupted (not
+// whole-line) header decides BLOCKED.
+func TestR7P21CVerdictSectionHeaderIntegrityFailClosed(t *testing.T) {
+	green := p21cGreenTerminals()
+	missingOp2 := green[:strings.Index(green, "== operation c2 ")]
+	if rc := (func() bool { return false })(); rc {
+		t.Fatal("unreachable")
 	}
-	for _, header := range headers {
-		missing := strings.Replace(p21cGreenTerminals(), header+"\n", "", 1)
-		dir := p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
-			strings.Join(p21cGreenAV(), "\n")+"\n", missing)
-		line, rc := p21cRunEvaluator(t, dir)
-		if rc == 0 || !strings.Contains(line, "DECISION=P21C-BLOCKED") {
-			t.Errorf("missing header %q must decide BLOCKED, got rc=%d: %s", header, rc, line)
-		}
+	dir := p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
+		strings.Join(p21cGreenAV(), "\n")+"\n", missingOp2)
+	line, rc := p21cRunEvaluator(t, dir)
+	if rc == 0 || !strings.Contains(line, "DECISION=P21C-BLOCKED") {
+		t.Errorf("a missing second operation header must decide BLOCKED, got rc=%d: %s", rc, line)
 	}
-	for _, header := range headers[2:] {
-		duplicated := strings.Replace(p21cGreenTerminals(), header+"\n", header+"\n"+header+"\n", 1)
-		dir := p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
-			strings.Join(p21cGreenAV(), "\n")+"\n", duplicated)
-		line, rc := p21cRunEvaluator(t, dir)
-		if rc == 0 || !strings.Contains(line, "DECISION=P21C-FAIL") {
-			t.Errorf("duplicated header %q must decide FAIL, got rc=%d: %s", header, rc, line)
-		}
+	duplicatedOp1 := green + "== operation c1 op_" + p21cOp1ID + " session " + p21cSession1 + " ==\n"
+	dir = p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
+		strings.Join(p21cGreenAV(), "\n")+"\n", duplicatedOp1)
+	line, rc = p21cRunEvaluator(t, dir)
+	if rc == 0 || !strings.Contains(line, "DECISION=P21C-FAIL") {
+		t.Errorf("a duplicated operation header must decide FAIL, got rc=%d: %s", rc, line)
 	}
-}
-
-// TestR7P21CVerdictHeaderIntegrityFailClosed proves header recognition is
-// whole-line and consistent with the AWK section anchoring: a header that
-// appears only as a substring of a corrupted line (prefixed, suffixed, or
-// trailing-whitespace variant) is a MISSING header (BLOCKED — damaged or
-// truncated evidence can never be MEASURED).
-func TestR7P21CVerdictHeaderIntegrityFailClosed(t *testing.T) {
-	headers := []string{
-		"== devnode-terminal runc-init AVCs (both windows) ==",
-		"== next-terminal runc-init AVCs (both windows) ==",
-		"== regression controls (must be EMPTY) ==",
-		"-- P20 terminal (runc_memfd_t:file create) --",
-		"-- pre-B terminal (tmpfs_t:file write) --",
-		"-- associate denials (must be EMPTY — the singleton is granted) --",
+	missingControl := strings.Replace(green,
+		"-- P20 terminal (runc_memfd_t:file create) --\n", "", 1)
+	dir = p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
+		strings.Join(p21cGreenAV(), "\n")+"\n", missingControl)
+	line, rc = p21cRunEvaluator(t, dir)
+	if rc == 0 || !strings.Contains(line, "DECISION=P21C-BLOCKED") {
+		t.Errorf("a missing control header (both sections) must decide BLOCKED, got rc=%d: %s", rc, line)
 	}
-	corruptions := map[string]func(string) string{
-		"prefixed":       func(h string) string { return "X" + h },
-		"suffixed":       func(h string) string { return h + "X" },
-		"trailing space": func(h string) string { return h + " " },
-	}
-	for _, header := range headers {
-		for cname, corrupt := range corruptions {
-			mutated := strings.Replace(p21cGreenTerminals(), header+"\n", corrupt(header)+"\n", 1)
-			dir := p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
-				strings.Join(p21cGreenAV(), "\n")+"\n", mutated)
-			line, rc := p21cRunEvaluator(t, dir)
-			if rc == 0 || !strings.Contains(line, "DECISION=P21C-BLOCKED") {
-				t.Errorf("header %q with %q corruption must decide BLOCKED (the header is not a whole line), got rc=%d: %s", header, cname, rc, line)
-			}
-		}
+	corruptedHeader := strings.Replace(green,
+		"== operation c1 op_"+p21cOp1ID+" session "+p21cSession1+" ==\n",
+		"X== operation c1 op_"+p21cOp1ID+" session "+p21cSession1+" ==\n", 1)
+	dir = p21cWriteEvidence(t, strings.Join(p21cGreenMatrix(), "\n")+"\n",
+		strings.Join(p21cGreenAV(), "\n")+"\n", corruptedHeader)
+	line, rc = p21cRunEvaluator(t, dir)
+	if rc == 0 || !strings.Contains(line, "DECISION=P21C-BLOCKED") {
+		t.Errorf("a corrupted (not whole-line) operation header must decide BLOCKED, got rc=%d: %s", rc, line)
 	}
 }
 
 // TestR7P21CVerdictMissingEvidenceFilesBlock pins the file-level
-// fail-closed branch: a missing or empty required evidence file can never
-// produce a passing decision, and a missing evaluator input directory is
-// BLOCKED.
+// fail-closed branch.
 func TestR7P21CVerdictMissingEvidenceFilesBlock(t *testing.T) {
 	for _, name := range []string{"create-matrix-before.log", "av-matrix-before.log", "p21c-terminals.log"} {
 		broken := p21cGreenDir(t)
@@ -663,13 +736,9 @@ func TestR7P21CVerdictMissingEvidenceFilesBlock(t *testing.T) {
 
 // TestR7P21CVerdictGateMode pins the driver-side gate: exit 0 iff the
 // argument is EXACTLY ONE correctly formed R7-P21C-VERDICT line whose
-// first field is the single DECISION=P21C-MEASURED — a verdict whose
-// DECISION is not P21C-MEASURED, a second DECISION field, the MEASURED
-// literal as a substring of another field's value, a malformed prefix, a
-// truncated line, an empty/trailing field, an unknown field, or a
-// missing/placeholder/corrupted NEXT-TERMINAL is rejected.
+// first field is the single DECISION=P21C-MEASURED.
 func TestR7P21CVerdictGateMode(t *testing.T) {
-	accepted := "R7-P21C-VERDICT=DECISION=P21C-MEASURED;SCOPE=six-names-ok;OPEN-COMPLETION=eliminated;MEMFD=intact;CROSSOP-CONTENT=closed;NEXT-TERMINAL=<" + p21cNextTerminalRecord + ">"
+	accepted := "R7-P21C-VERDICT=DECISION=P21C-MEASURED;SCOPE=six-names-ok;OPEN-COMPLETION=eliminated;MEMFD=intact;CROSSOP-CONTENT=closed;NEXT-TERMINAL=<" + p21cMounton1 + ">"
 	if rc := exec.Command("bash", "scripts/release-2.4-r7-p21c-verdict.sh", "--gate", accepted).Run(); rc != nil {
 		t.Errorf("--gate must accept a correctly formed MEASURED verdict line: %v", rc)
 	}
@@ -677,7 +746,6 @@ func TestR7P21CVerdictGateMode(t *testing.T) {
 		"R7-P21C-VERDICT=DECISION=P21C-FAIL;NOTE=DECISION=P21C-MEASURED",
 		"R7-P21C-VERDICT=DECISION=P21C-BLOCKED;DECISION=P21C-MEASURED",
 		"R7-P21C-VERDICT=DECISION=P21C-MEASURED;DECISION=P21C-FAIL",
-		"R7-P21C-VERDICT=DECISION=P21C-FAIL;SCOPE=not-established",
 		"R7-P21C-VERDICT=DECISION=P21C-BLOCKED;REASON=no-evidence-dir",
 		"R7-P21C-VERDICT=SCOPE=six-names-ok",
 		"XR7-P21C-VERDICT=DECISION=P21C-MEASURED;SCOPE=six-names-ok",

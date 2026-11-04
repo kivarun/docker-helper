@@ -431,7 +431,67 @@ fi
 
 # ============================================================================
 # Section 7: live flow probes (the enforcing runtime; two operations)
+#
+# ATTRIBUTION CONTRACT (r7-p21c-corrective-1): each operation's evidence is
+# captured and classified INDEPENDENTLY:
+#   1. Session ID + daemon Operation ID recorded per operation (the HTTP
+#      /build response and the /sessions response).
+#   2. EXACT audit capture boundaries: the audit.log line count is recorded
+#      immediately before and after each build; the operation's window is
+#      STRICTLY the records appended in between (no tail window, no
+#      ausearch "recent", no arbitrary head -N truncation). Rotation
+#      (after < before) is recorded as capture-unavailable.
+#   3. Per-record attribution inside each window (MCS category is NEVER the
+#      attribution key — both runtimes may share one category):
+#        - op-attributed: the record's path carries THIS operation's
+#          ops/op_<id>/ prefix (the per-operation tree path is unique);
+#        - pid-correlated: a pathless record whose pid equals the pid of an
+#          op-attributed record of the SAME window (audit serial/time
+#          adjacency within the strict window bounds pid reuse);
+#        - misattributed: a record whose path carries a DIFFERENT
+#          operation's id — recorded as a positive attribution violation;
+#        - unattributed: everything else. A runc:[2:INIT] record that
+#          cannot be attributed is AMBIGUOUS evidence (the evaluator
+#          decides BLOCKED — it is never assumed to belong to an
+#          operation).
+#   4. The final operation status is recorded verbatim; the runtime stage
+#      reached is evidenced by the attributed records themselves (the
+#      presence of the runc:[2:INIT] comm and of the boundary records).
 # ============================================================================
+audit_lines() { wc -l < /var/log/audit/audit.log 2>/dev/null || printf '0'; }
+
+classify_window() { # <tag> <opid>
+  local tag="$1" opid="$2" W="$EVIDENCE_DIR/avc-window-$tag.log"
+  local OPATT="$EVIDENCE_DIR/op-attributed-$tag.log"
+  local PIDC="$EVIDENCE_DIR/pid-correlated-$tag.log"
+  local MIS="$EVIDENCE_DIR/misattributed-$tag.log"
+  local UNATT="$EVIDENCE_DIR/unattributed-$tag.log"
+  : > "$OPATT"; : > "$PIDC"; : > "$MIS"; : > "$UNATT"
+  # op-attributed: the path carries THIS operation's id (any comm).
+  grep -a "ops/op_${opid}/" "$W" > "$OPATT" 2>/dev/null || true
+  # The pid set proven by op-attributed records.
+  local PIDS
+  PIDS="$(grep -aoE 'pid=[0-9]+' "$OPATT" | sed 's/pid=//' | sort -u | tr '\n' '|' | sed 's/|$//')"
+  local rec rpid
+  while IFS= read -r rec; do
+    [ -n "$rec" ] || continue
+    if grep -aq "ops/op_${opid}/" <<<"$rec"; then
+      continue  # already op-attributed
+    fi
+    if grep -qaE 'ops/op_[0-9a-f]+/' <<<"$rec"; then
+      printf '%s\n' "$rec" >> "$MIS"   # a DIFFERENT operation's path
+      continue
+    fi
+    # pid-correlated: pathless record whose pid is in the op-attributed set.
+    rpid="$(grep -aoE 'pid=[0-9]+' <<<"$rec" | sed 's/pid=//' | head -1)"
+    if [ -n "$rpid" ] && printf '%s' "$PIDS" | tr '|' '\n' | grep -qx "$rpid"; then
+      printf '%s\n' "$rec" >> "$PIDC"
+    else
+      printf '%s\n' "$rec" >> "$UNATT"
+    fi
+  done < "$W"
+}
+
 run_one_build() { # <tag> <session-token>
   local tag="$1" token="$2"
   # The build goes through the HTTP API so the daemon operation id is
@@ -448,6 +508,11 @@ run_one_build() { # <tag> <session-token>
   printf '%s\n' "$OP" > "$EVIDENCE_DIR/operation-id-$tag.log"
   log "build $tag http=$CODE operation_id=$OP"
   [ -n "$OP" ] || { log "build $tag: no operation id (http $CODE)"; return 1; }
+  # EXACT audit capture boundary: the audit.log line count immediately
+  # before the build. The window is what gets appended during THIS build.
+  local BEFORE AFTER
+  BEFORE="$(audit_lines)"
+  printf 'before=%s\n' "$BEFORE" > "$EVIDENCE_DIR/window-boundaries-$tag.log"
   local STATUS=""
   for _ in $(seq 1 400); do
     STATUS="$(curl --silent --max-time 2 \
@@ -459,6 +524,17 @@ run_one_build() { # <tag> <session-token>
     sleep 0.05
   done
   printf '%s\n' "$STATUS" > "$EVIDENCE_DIR/build-status-$tag.json"
+  AFTER="$(audit_lines)"
+  printf 'after=%s\n' "$AFTER" >> "$EVIDENCE_DIR/window-boundaries-$tag.log"
+  if [ "$AFTER" -ge "$BEFORE" ] 2>/dev/null; then
+    sed -n "$((BEFORE + 1)),${AFTER}p" /var/log/audit/audit.log \
+      > "$EVIDENCE_DIR/avc-window-$tag.log" 2>/dev/null || true
+  else
+    # Rotation or truncation between the boundary marks: the window is
+    # capture-unavailable (the evaluator decides BLOCKED — never guesses).
+    printf 'captured=ROTATED\n' >> "$EVIDENCE_DIR/window-boundaries-$tag.log"
+    : > "$EVIDENCE_DIR/avc-window-$tag.log"
+  fi
   curl --silent --max-time 2 \
     --unix-socket "$DH_SOCK" -H "Authorization: Bearer $token" \
     "http://localhost/operations/$OP/logs?offset=0" \
@@ -483,8 +559,10 @@ make_session_build() { # <tag>
     -H 'Content-Type: application/json' \
     -d "{\"workspace\":\"$WS\",\"principal\":\"$PRINCIPAL\"}" \
     -o "$RESP" -w '%{http_code}' http://localhost/sessions)" || true
-  local TOKEN
+  local TOKEN SID
   TOKEN="$(grep -oE '"token": *"[^"]+"' "$RESP" 2>/dev/null | head -1 | sed 's/.*"token": *"//;s/"$//')"
+  SID="$(grep -oE '"id": *"dhs_[^"]+"' "$RESP" 2>/dev/null | head -1 | sed 's/.*"id": *"//;s/"$//')"
+  printf '%s\n' "$SID" > "$EVIDENCE_DIR/session-id-$tag.log"
   if [ -z "$TOKEN" ]; then
     log "session create failed for $tag (HTTP $CODE); skipping this build"
     return 1
@@ -494,35 +572,59 @@ make_session_build() { # <tag>
   return 0
 }
 
+compose_op_section() { # <tag>
+  local tag="$1"
+  local OPID SID B A C
+  OPID="$(cat "$EVIDENCE_DIR/operation-id-$tag.log" 2>/dev/null)"
+  SID="$(cat "$EVIDENCE_DIR/session-id-$tag.log" 2>/dev/null)"
+  B="$(sed -n 's/^before=//p' "$EVIDENCE_DIR/window-boundaries-$tag.log" 2>/dev/null | head -1)"
+  A="$(sed -n 's/^after=//p' "$EVIDENCE_DIR/window-boundaries-$tag.log" 2>/dev/null | head -1)"
+  C=""
+  if [ -n "$B" ] && [ -n "$A" ] && [ "$A" -ge "$B" ] 2>/dev/null; then
+    C=$((A - B))
+  fi
+  printf '== operation %s op_%s session %s ==\n' "$tag" "$OPID" "$SID"
+  printf -- '-- window boundaries (audit.log line offsets) --\n'
+  printf 'before=%s after=%s captured=%s\n' "$B" "$A" "${C:-UNAVAILABLE}"
+  printf -- '-- operation result --\n'
+  grep -oE '"(status|result_code|exit_code)": *("[^"]*"|[0-9]+)' \
+    "$EVIDENCE_DIR/build-status-$tag.json" 2>/dev/null | tr '\n' ' ' || true
+  printf '\n'
+  printf -- '-- op-attributed runc-init records --\n'
+  grep -a 'comm="runc:\[2:INIT\]"' "$EVIDENCE_DIR/op-attributed-$tag.log" 2>/dev/null || true
+  printf -- '-- pid-correlated runc-init records --\n'
+  grep -a 'comm="runc:\[2:INIT\]"' "$EVIDENCE_DIR/pid-correlated-$tag.log" 2>/dev/null || true
+  printf -- '-- misattributed records (a path carries a DIFFERENT operation id) --\n'
+  cat "$EVIDENCE_DIR/misattributed-$tag.log" 2>/dev/null || true
+  printf -- '-- unattributed runc-init records --\n'
+  grep -a 'comm="runc:\[2:INIT\]"' "$EVIDENCE_DIR/unattributed-$tag.log" 2>/dev/null || true
+  printf -- '-- regression controls (the WHOLE window; must be EMPTY) --\n'
+  printf -- '-- P20 terminal (runc_memfd_t:file create) --\n'
+  grep -ah 'docker_helper_runc_memfd_t.*tclass=file' "$EVIDENCE_DIR/avc-window-$tag.log" 2>/dev/null | grep -a '{ create }' || true
+  printf -- '-- pre-B terminal (tmpfs_t:file write) --\n'
+  grep -ah 'tcontext=system_u:object_r:tmpfs_t:s0 tclass=file' "$EVIDENCE_DIR/avc-window-$tag.log" 2>/dev/null | grep -a '{ write }' || true
+  printf -- '-- associate denials (must be EMPTY — the singleton is granted) --\n'
+  grep -ah 'denied  { associate }' "$EVIDENCE_DIR/avc-window-$tag.log" 2>/dev/null || true
+  printf -- '-- P21-B terminal (devnode_t:file { read open }; the ELIMINATED shape) --\n'
+  grep -ah 'runc:\[2:INIT\]' "$EVIDENCE_DIR/avc-window-$tag.log" 2>/dev/null | grep -a 'tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file' | grep -a 'denied  { read open }' || true
+}
+
 if [ -f "$STATE_DIR/sec7" ]; then log "phase marker: section 7 done; skipping"; else
-log "=== section 7: live flow probes (candidate policy) ==="
+log "=== section 7: live flow probes (candidate policy; independent windows) ==="
 for _ in $(seq 1 50); do
   [ -S "$DH_SOCK" ] && curl --silent --fail --max-time 1 \
     --unix-socket "$DH_SOCK" http://localhost/health >/dev/null 2>&1 && break
   sleep 0.2
 done
 [ -n "$ADMIN_TOKEN" ] || fail "admin token unreadable; the live proof cannot run"
+[ -f /var/log/audit/audit.log ] || fail "audit.log unavailable; per-operation windows cannot be bounded"
 make_session_build c1
-avc_tail p21c-avc-c1
+classify_window c1 "$(cat "$EVIDENCE_DIR/operation-id-c1.log" 2>/dev/null)"
 make_session_build c2
-avc_tail p21c-avc-c2
-# The terminal sections and the regression controls, from BOTH windows.
-# The devnode-terminal section carries EVERY runc:[2:INIT] record of both
-# windows: the evaluator requires the P21-B { read open } shape ABSENT
-# from it, and the next-terminal section requires at least one further
-# real record that is NOT that shape.
+classify_window c2 "$(cat "$EVIDENCE_DIR/operation-id-c2.log" 2>/dev/null)"
 {
-  echo "== devnode-terminal runc-init AVCs (both windows) =="
-  grep -ah 'runc:\[2:INIT\]' "$EVIDENCE_DIR/p21c-avc-c1.log" "$EVIDENCE_DIR/p21c-avc-c2.log" 2>/dev/null | head -30
-  echo "== next-terminal runc-init AVCs (both windows) =="
-  grep -ah 'runc:\[2:INIT\]' "$EVIDENCE_DIR/p21c-avc-c1.log" "$EVIDENCE_DIR/p21c-avc-c2.log" 2>/dev/null | head -30
-  echo "== regression controls (must be EMPTY) =="
-  echo "-- P20 terminal (runc_memfd_t:file create) --"
-  grep -ah 'docker_helper_runc_memfd_t.*tclass=file' "$EVIDENCE_DIR/p21c-avc-c1.log" "$EVIDENCE_DIR/p21c-avc-c2.log" 2>/dev/null | grep -a '{ create }' | head -4
-  echo "-- pre-B terminal (tmpfs_t:file write) --"
-  grep -ah 'tcontext=system_u:object_r:tmpfs_t:s0 tclass=file' "$EVIDENCE_DIR/p21c-avc-c1.log" "$EVIDENCE_DIR/p21c-avc-c2.log" 2>/dev/null | grep -a '{ write }' | head -4
-  echo "-- associate denials (must be EMPTY — the singleton is granted) --"
-  grep -ah 'denied  { associate }' "$EVIDENCE_DIR/p21c-avc-c1.log" "$EVIDENCE_DIR/p21c-avc-c2.log" 2>/dev/null | head -4
+  compose_op_section c1
+  compose_op_section c2
 } > "$EVIDENCE_DIR/p21c-terminals.log" 2>&1
 cat "$EVIDENCE_DIR/p21c-terminals.log"
 touch "$STATE_DIR/sec7"

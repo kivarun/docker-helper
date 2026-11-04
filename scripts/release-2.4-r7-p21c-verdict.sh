@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 #
-# release-2.4-r7-p21c-verdict.sh — the R7 P21-C gate evaluator.
+# release-2.4-r7-p21c-verdict.sh — the R7 P21-C gate evaluator (revision 2,
+# r7-p21c-corrective-1: fail-closed per-operation runtime-window
+# attribution).
 #
 # Pure file-based evaluation of a P21-C evidence directory (no VM, no policy
 # access). Fail-closed: missing, duplicated, corrupted, or ambiguous
 # evidence can never produce a passing decision, and grep-match COUNTING is
 # never used as a substitute for checking the specific records — every
-# required kernel-decision row is validated individually, exactly once,
-# against its exact expected result.
+# required kernel-decision row and every required per-operation record is
+# validated individually, exactly once, against its exact expected result.
 #
 # Usage:
 #   release-2.4-r7-p21c-verdict.sh <evidence-dir>
@@ -26,55 +28,45 @@
 #
 # Decision precedence (mirrors the P21-B evaluator): FAIL (a positive
 # violation was proven) beats BLOCKED (required evidence missing, empty,
-# unparseable, or unreadable) beats MEASURED.
+# unparseable, or ambiguous) beats MEASURED.
 #
 # The evidence checked (all produced by release-2.4-r7-p21c-guest.sh):
-#   create-matrix-before.log — the security_compute_create(_name)_raw
-#     decision matrix. Required rows are the UNCHANGED P21-B transition
-#     surface (each EXACTLY once, each with the EXACT expected result; any
-#     other row or any unparseable line fails):
-#       (buildkitd_t:s0:c1, {null,zero,full,random,urandom,tty}) -> devnode_t:s0
-#       (buildkitd_t:s0:c2, {null,zero,full,random,urandom,tty}) -> devnode_t:s0
-#       (buildkitd_t:s0:cX, someothername)                       -> runc_memfd_t:s0
-#       (buildkitd_t:s0:cX, name=NULL)                           -> runc_memfd_t:s0
-#       (unconfined_t,      null / name=NULL)                    -> user_tmp_t:s0
-#   av-matrix-before.log — the kernel-AV matrix on the candidate policy.
-#     Required rows (each EXACTLY once per section): for BOTH operation
-#     categories the devnode_t:file surface must be create=ALLOW,
-#     read=ALLOW, open=ALLOW (the ONE P21-C rung) and every other
-#     permission DENIED — the pair must never ride a wider grant; unconfined
-#     must be DENIED for all fifteen; the associate rows must be
-#     devnode_t=ALLOW, runc_memfd_t=DENY, control=ALLOW.
-#   p21c-terminals.log — the live-flow windows:
-#     - the devnode-terminal section must contain NO record matching the
-#       P21-B measured terminal shape (the exact "denied  { read open }"
-#       pair on docker_helper_devnode_t, permissive=0, comm="runc:[2:INIT]"):
-#       the former terminal is ELIMINATED; its reappearance is a FAIL;
-#     - the next-terminal section must contain at least one further
-#       full-structure denied record (permissive=0,
-#       scontext=buildkitd_t:s0:cX, comm="runc:[2:INIT]") that is NOT the
-#       granted devnode { read open } shape — the flow advanced past the
-#       open-completion boundary and hit a NEW kernel decision. The exact
-#       permission is OBSERVED, never pre-classified by this evaluator.
-#       Absence of AVCs alone is never a passing outcome (BLOCKED);
-#     - the three regression-control sections EMPTY (no runc_memfd_t:file
-#       create denial, no tmpfs_t:file write denial, no associate denial).
+#   create-matrix-before.log / av-matrix-before.log — the UNCHANGED
+#     transition surface and the P21-C permission matrix (identical to
+#     revision 1).
+#   p21c-terminals.log — TWO INDEPENDENT per-operation sections, each of
+#     which must ALONE prove that its own operation:
+#       - is a DISTINCT operation (distinct daemon operation id and
+#         distinct session id; one window or one operation id can never
+#         serve as the evidence for both);
+#       - was captured inside EXACT, non-overlapping audit.log line-offset
+#         windows (before/after/captured consistent; rotation or an
+#         inconsistent boundary decides BLOCKED; overlapping windows are a
+#         positive violation);
+#       - really reached the runc:[2:INIT] runtime stage on records
+#         ATTRIBUTED to it (path-carried ops/op_<own-id>/ records, or
+#         pathless records whose pid is proven by an op-attributed record
+#         of the same window — MCS category is NEVER an attribution key);
+#       - carries NO record of the ELIMINATED P21-B terminal shape
+#         (devnode_t:file { read open }) anywhere in its whole window —
+#         reappearance is a FAIL (OPEN-COMPLETION=live);
+#       - has its OWN next-terminal record: a full-structure denied AVC
+#         (permissive=0, scontext=buildkitd_t:s0:cX, comm="runc:[2:INIT]")
+#         attributed to THAT operation, NOT the granted shape and NOT the
+#         measured pre-boundary cap_userns self-denials. The exact
+#         permission is OBSERVED, never pre-classified by this evaluator;
+#         absence of AVCs alone is never a passing outcome (BLOCKED);
+#       - violates NO regression control anywhere in its window (P20
+#         runc_memfd_t:file create, pre-B' tmpfs_t:file write, associate);
+#       - carries NO misattributed record (a record whose path names a
+#         DIFFERENT operation id inside this operation's window) and NO
+#         unattributed runc:[2:INIT] record (ambiguous attribution —
+#         BLOCKED, never assumed).
 
 set -uo pipefail
 
 if [ "${1:-}" = "--gate" ]; then
   line="${2:-}"
-  # The gate accepts EXACTLY ONE correctly formed R7-P21C-VERDICT line:
-  #   - the fixed prefix R7-P21C-VERDICT=DECISION=P21C-MEASURED; — a
-  #     different decision, a malformed prefix, or a truncated line never
-  #     passes, and the MEASURED literal appearing as a substring of
-  #     another field's value does not satisfy the prefix;
-  #   - no second DECISION field;
-  #   - no empty or trailing field, no apostrophe, no newline;
-  #   - exactly the evaluator's field grammar, in the evaluator's field
-  #     order — SCOPE, OPEN-COMPLETION, MEMFD, CROSSOP-CONTENT — followed
-  #     by a real NEXT-TERMINAL record (never the empty or "(none)"
-  #     placeholder, never a value corrupted across a field separator).
   case "$line" in
     *"'"*|*$'\n'*) exit 1 ;;
     R7-P21C-VERDICT=DECISION=P21C-MEASURED\;*) : ;;
@@ -123,8 +115,7 @@ require_file() { # <name>
 # ---------------------------------------------------------------------------
 # 1. The create-decision matrix: the UNCHANGED P21-B transition surface,
 #    every required row checked individually, exactly once, against its
-#    exact FULL expected structure — source context, parent (target)
-#    context, class, name, AND result.
+#    exact FULL expected structure.
 # ---------------------------------------------------------------------------
 MATRIX="$DIR/create-matrix-before.log"
 if require_file create-matrix-before.log; then
@@ -192,9 +183,8 @@ fi
 # ---------------------------------------------------------------------------
 # 2. The AV matrix: per-permission decisions checked individually. The
 #    P21-C expectation: create AND the { read open } pair ALLOW for both
-#    operation categories; EVERY other permission DENIED (the pair must
-#    never ride a wider grant); unconfined all-DENY; associate rows
-#    unchanged.
+#    operation categories; EVERY other permission DENIED; unconfined
+#    all-DENY; associate rows unchanged.
 # ---------------------------------------------------------------------------
 AV="$DIR/av-matrix-before.log"
 if require_file av-matrix-before.log; then
@@ -216,7 +206,7 @@ if require_file av-matrix-before.log; then
       if (line ~ /^== buildkitd_t:s0:c1 -> docker_helper_devnode_t:s0 ==$/) { sec = "c1"; next }
       if (line ~ /^== CROSS-OP: buildkitd_t:s0:c2 -> docker_helper_devnode_t:s0 ==$/) { sec = "c2"; next }
       if (line ~ /^== unconfined_t -> docker_helper_devnode_t:s0 ==$/) { sec = "un"; next }
-      if (line ~ /^== /) { next }   # a structural banner, not evidence
+      if (line ~ /^== /) { next }
       if (line ~ /^-- devnode_t -> tmpfs_t /) { sec = "assoc-dev"; next }
       if (line ~ /^-- runc_memfd_t -> tmpfs_t /) { sec = "assoc-mem"; next }
       if (line ~ /^-- tmpfs_t -> tmpfs_t /) { sec = "assoc-ctl"; next }
@@ -255,130 +245,216 @@ if require_file av-matrix-before.log; then
 fi
 
 # ---------------------------------------------------------------------------
-# 3. The live-flow windows: the P21-B measured terminal must be ELIMINATED
-#    from the devnode-terminal section, a NEW full-structure record must be
-#    present in the next-terminal section, and the mandatory
-#    regression-control sections must be EMPTY.
+# 3. The two independent per-operation runtime windows.
 # ---------------------------------------------------------------------------
 TERM="$DIR/p21c-terminals.log"
 NEXT_TERMINAL="(none)"
+
 # The exact section-header lines. Header recognition and the AWK section
 # anchoring below share THESE EXACT strings, so header presence and section
 # boundaries can never diverge: a prefixed/suffixed/corrupted header line
-# is not counted by check_header AND is not recognized by the AWK parsers.
-DEV_HDR='== devnode-terminal runc-init AVCs (both windows) =='
-NEXT_HDR='== next-terminal runc-init AVCs (both windows) =='
-CTRL_HDR='== regression controls (must be EMPTY) =='
+# matches neither the whole-line header counts NOR the AWK section anchors.
+OP_HDR_RE='^== operation [a-z0-9]+ op_[0-9a-f]+ session dhs_[0-9a-f]+ ==$'
 P20_HDR='-- P20 terminal (runc_memfd_t:file create) --'
 PREB_HDR='-- pre-B terminal (tmpfs_t:file write) --'
 ASSOC_HDR='-- associate denials (must be EMPTY — the singleton is granted) --'
+OLDSHAPE_HDR='-- P21-B terminal (devnode_t:file { read open }; the ELIMINATED shape) --'
+
 if require_file p21c-terminals.log; then
-  # Section headers are mandatory and must be unambiguous, and must match
-  # the WHOLE line (grep -Fxc): a header embedded as a substring of a
-  # longer/corrupted line is a damaged header, not a present one. A missing
-  # header is incomplete evidence (BLOCKED); a duplicated header is
-  # ambiguous evidence (FAIL).
-  check_header() { # <header-line> <label>
-    local n
-    n="$(grep -Fxc -- "$1" "$TERM" || true)"
-    case "$n" in
-      1) return 0 ;;
-      0) note BLOCKED "terminals: the required section header for '$2' is missing, corrupted, or not a whole line (damaged or truncated evidence)"; return 1 ;;
-      *) note FAIL "terminals: the section header for '$2' appears $n times (ambiguous evidence)"; return 1 ;;
-    esac
-  }
-  DEV_HEADER_OK=1
-  check_header "$DEV_HDR" 'devnode terminal' || DEV_HEADER_OK=0
-  NEXT_HEADER_OK=1
-  check_header "$NEXT_HDR" 'next terminal' || NEXT_HEADER_OK=0
-  CTRL_HEADERS_OK=1
-  check_header "$CTRL_HDR" 'regression controls' || CTRL_HEADERS_OK=0
-  check_header "$P20_HDR" 'P20 terminal' || CTRL_HEADERS_OK=0
-  check_header "$PREB_HDR" 'pre-B terminal' || CTRL_HEADERS_OK=0
-  check_header "$ASSOC_HDR" 'associate denials' || CTRL_HEADERS_OK=0
-
-  if [ "$DEV_HEADER_OK" = 1 ]; then
-    # The P21-B measured terminal shape must be GONE from both live
-    # windows: the exact "denied  { read open }" permission pair on the
-    # devnode_t target, permissive=0, the buildkitd_t:s0:cX source, and
-    # the runc:[2:INIT] comm. Its reappearance is a positive violation
-    # (the rung did not take effect).
-    OLD_TERMINAL="$(awk -v hdr="$DEV_HDR" '
-      $0 == hdr { sec = 1; next }
-      /^== / || /^-- / { if (sec) exit }
-      sec &&
-        /avc:  denied  \{ read open \} / &&
-        /permissive=0/ &&
-        /scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c[0-9]+ tcontext=/ &&
-        /tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file / &&
-        /comm="runc:\[2:INIT\]"/ { print; exit }
-    ' "$TERM")"
-    if [ -n "$OLD_TERMINAL" ]; then
-      note FAIL "OPEN-COMPLETION-LIVE: the P21-B measured devnode { read open } terminal reappeared in the enforcing windows: $OLD_TERMINAL"
+  # --- operation section headers: EXACTLY TWO, distinct ids ---------------
+  OP_HEADERS="$(grep -Ec "$OP_HDR_RE" "$TERM" || true)"
+  OP_HEADERS_LIST="$(grep -E "$OP_HDR_RE" "$TERM" || true)"
+  if [ "$OP_HEADERS" -lt 2 ]; then
+    note BLOCKED "terminals: two independent per-operation sections are required (found $OP_HEADERS whole-line operation headers)"
+  elif [ "$OP_HEADERS" -gt 2 ]; then
+    note FAIL "terminals: more than two operation sections ($OP_HEADERS) — ambiguous evidence"
+  else
+    OP1_HDR="$(printf '%s\n' "$OP_HEADERS_LIST" | sed -n 1p)"
+    OP2_HDR="$(printf '%s\n' "$OP_HEADERS_LIST" | sed -n 2p)"
+    OP1_ID="$(printf '%s' "$OP1_HDR" | sed -n 's/^== operation [a-z0-9]* op_\([0-9a-f]*\) session .*/\1/p')"
+    OP2_ID="$(printf '%s' "$OP2_HDR" | sed -n 's/^== operation [a-z0-9]* op_\([0-9a-f]*\) session .*/\1/p')"
+    OP1_SESSION="$(printf '%s' "$OP1_HDR" | sed -n 's/^== operation [a-z0-9]* op_[0-9a-f]* session \(dhs_[0-9a-f]*\) ==$/\1/p')"
+    OP2_SESSION="$(printf '%s' "$OP2_HDR" | sed -n 's/^== operation [a-z0-9]* op_[0-9a-f]* session \(dhs_[0-9a-f]*\) ==$/\1/p')"
+    if [ -z "$OP1_ID" ] || [ -z "$OP2_ID" ] || [ -z "$OP1_SESSION" ] || [ -z "$OP2_SESSION" ]; then
+      note BLOCKED "terminals: operation header grammar carries no parseable operation/session identity"
+    elif [ "$OP1_ID" = "$OP2_ID" ]; then
+      note FAIL "terminals: the SAME operation id appears in both windows (one window can never serve as the evidence for both operations): op_$OP1_ID"
+    elif [ "$OP1_SESSION" = "$OP2_SESSION" ]; then
+      note FAIL "terminals: the SAME session id appears in both windows: $OP1_SESSION"
     else
-      printf 'TERMINAL-ELIMINATED\tthe P21-B { read open } devnode terminal is absent from both windows\n' >> "$CLASS_LOG"
+      printf 'OPS-DISTINCT\top_%s/%s and op_%s/%s\n' "$OP1_ID" "$OP1_SESSION" "$OP2_ID" "$OP2_SESSION" >> "$CLASS_LOG"
     fi
   fi
 
-  if [ "$NEXT_HEADER_OK" = 1 ]; then
-    # The flow must have advanced to a NEW kernel boundary: at least one
-    # further full-structure denied record from the same runtime stage,
-    # NOT the granted devnode { read open } shape. The exact permission
-    # is observed, never pre-classified here; absence of AVCs alone is
-    # never a passing outcome.
-    NEW_TERMINAL="$(awk -v hdr="$NEXT_HDR" '
+  # --- per-operation section evaluation ------------------------------------
+  eval_op_section() { # <section-header-line> <opid> <first(1)|second(2)>
+    local hdr="$1" opid="$2" pos="$3"
+    # The section body: from this header to the next header-shaped line.
+    local BODY
+    BODY="$(awk -v hdr="$hdr" '
       $0 == hdr { sec = 1; next }
-      /^== / || /^-- / { if (sec) exit }
-      sec &&
-        /avc:  denied  / &&
-        /permissive=0/ &&
-        /scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c[0-9]+ / &&
-        /comm="runc:\[2:INIT\]"/ {
-          # Only the EXACT granted shape is excluded (the P21-B measured
-          # terminal: the { read open } pair on the devnode_t file object);
-          # every other denial — including a new denial on the SAME
-          # devnode_t object with a different permission (e.g. a file-class
-          # mounton) — is a legitimate observed next terminal.
-          if ($0 ~ /tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file / &&
-              $0 ~ /denied  \{ read open \} /) next
-          # The cap_userns self-denials (setuid/setgid, scontext ==
-          # tcontext) are the MEASURED PRE-BOUNDARY non-fatal records of
-          # the same P21-B windows (serials 1188/1189 BEFORE the 1190
-          # terminal): they cannot prove the flow advanced past the
-          # open-completion boundary, so they are never selected. A
-          # cap_userns-shaped TRUE boundary yields BLOCKED and is
-          # reviewed, never silently accepted.
-          if ($0 ~ /tclass=cap_userns /) next
-          print; exit
-        }
+      /^== / { if (sec) exit }
+      sec { print }
     ' "$TERM")"
-    if [ -n "$NEW_TERMINAL" ]; then
-      NEXT_TERMINAL="$NEW_TERMINAL"
-      printf 'TERMINAL-OK\t%s\n' "$NEW_TERMINAL" >> "$CLASS_LOG"
-    else
-      note BLOCKED "terminals: no further full-structure runc:[2:INIT] denial record (the flow must be observed advancing past the open-completion boundary — absence of AVCs alone is never a passing outcome)"
-    fi
-  fi
+    [ -n "$BODY" ] || { note BLOCKED "terminals: the section for op_$opid is empty"; return; }
 
-  # Each regression-control section must be present (checked above) and
-  # EMPTY: a non-empty section is a positive violation (the exact denial
-  # family reappeared). The section body is anchored on the same exact
-  # header line check_header verified, and ends at the next header-shaped
-  # line.
-  if [ "$CTRL_HEADERS_OK" = 1 ]; then
-    for sechdr in "$P20_HDR" "$PREB_HDR" "$ASSOC_HDR"; do
-      SEC_BODY="$(awk -v hdr="$sechdr" '
+    # (a) window boundaries: EXACT, consistent, and non-overlapping.
+    local BOUND
+    BOUND="$(printf '%s\n' "$BODY" | grep -E '^before=[0-9]+ after=[0-9]+ captured=[0-9]+$' | head -1)"
+    local BEFORE AFTER CAPTURED
+    BEFORE="$(printf '%s' "$BOUND" | sed -n 's/^before=\([0-9]*\) .*/\1/p')"
+    AFTER="$(printf '%s' "$BOUND" | sed -n 's/^.* after=\([0-9]*\) .*/\1/p')"
+    CAPTURED="$(printf '%s' "$BOUND" | sed -n 's/^.* captured=\([0-9]*\)$/\1/p')"
+    if [ -z "$BEFORE" ] || [ -z "$AFTER" ] || [ -z "$CAPTURED" ]; then
+      note BLOCKED "terminals: op_$opid has no consistent whole-line audit window boundary (before=<n> after=<m> captured=<k>) — truncated or rotated capture cannot be measured"
+      return
+    fi
+    if [ "$AFTER" -lt "$BEFORE" ] || [ "$CAPTURED" -ne $((AFTER - BEFORE)) ] || [ "$CAPTURED" -eq 0 ]; then
+      note BLOCKED "terminals: op_$opid window boundary inconsistent (before=$BEFORE after=$AFTER captured=$CAPTURED) — truncated or rotated capture cannot be measured"
+      return
+    fi
+    printf 'WINDOW-OK\top_%s before=%s after=%s captured=%s\n' "$opid" "$BEFORE" "$AFTER" "$CAPTURED" >> "$CLASS_LOG"
+
+    # (b) the whole-window attributed record sets.
+    local OPATT PIDC MIS UNATT
+    OPATT="$(printf '%s\n' "$BODY" | awk -v hdr='-- op-attributed runc-init records --' '
+      $0 == hdr { sec = 1; next }
+      /^-- / || /^== / { if (sec) exit }
+      sec && NF { print }')"
+    PIDC="$(printf '%s\n' "$BODY" | awk -v hdr='-- pid-correlated runc-init records --' '
+      $0 == hdr { sec = 1; next }
+      /^-- / || /^== / { if (sec) exit }
+      sec && NF { print }')"
+    MIS="$(printf '%s\n' "$BODY" | awk -v hdr='-- misattributed records (a path carries a DIFFERENT operation id) --' '
+      $0 == hdr { sec = 1; next }
+      /^-- / || /^== / { if (sec) exit }
+      sec && NF { print }')"
+    UNATT="$(printf '%s\n' "$BODY" | awk -v hdr='-- unattributed runc-init records --' '
+      $0 == hdr { sec = 1; next }
+      /^-- / || /^== / { if (sec) exit }
+      sec && NF { print }')"
+
+    # (c) attribution re-validation: every op-attributed record must carry
+    # THIS operation's own path; every pid-correlated record must be
+    # pathless and its pid must be proven by an op-attributed record.
+    local BAD_OWN
+    BAD_OWN="$(printf '%s\n' "$OPATT" | grep -av "ops/op_${opid}/" || true)"
+    if [ -n "$BAD_OWN" ]; then
+      note FAIL "ATTRIBUTION-VIOLATION op_$opid: an op-attributed record does not carry this operation's own path: $BAD_OWN"
+    fi
+    local OWN_PIDS BAD_PIDC
+    OWN_PIDS="$(printf '%s\n' "$OPATT" | grep -aoE 'pid=[0-9]+' | sed 's/pid=//' | sort -u)"
+    BAD_PIDC="$(printf '%s\n' "$PIDC" | while IFS= read -r rec; do
+      [ -n "$rec" ] || continue
+      if printf '%s' "$rec" | grep -qaE 'ops/op_[0-9a-f]+/'; then
+        printf '%s\n' "$rec"
+        continue
+      fi
+      rpid="$(printf '%s' "$rec" | grep -aoE 'pid=[0-9]+' | sed 's/pid=//' | head -1)"
+      if [ -z "$rpid" ] || ! printf '%s\n' "$OWN_PIDS" | grep -qx "$rpid"; then
+        printf '%s\n' "$rec"
+      fi
+    done)"
+    if [ -n "$BAD_PIDC" ]; then
+      note BLOCKED "terminals: op_$opid carries pid-correlated records whose pid is not proven by any op-attributed record (ambiguous attribution): $BAD_PIDC"
+    fi
+    if [ -n "$MIS" ]; then
+      note FAIL "ATTRIBUTION-VIOLATION op_$opid: a record of ANOTHER operation appears in this operation's window: $MIS"
+    fi
+    if [ -n "$UNATT" ]; then
+      note BLOCKED "terminals: op_$opid carries runc:[2:INIT] records that cannot be attributed to any operation (ambiguous evidence — never assumed): $UNATT"
+    fi
+
+    # (d) the eliminated P21-B terminal shape: absent from this
+    # operation's attributed+correlated runtime records.
+    local OLD_HERE
+    OLD_HERE="$(printf '%s\n' "$OPATT" "$PIDC" | grep -a 'tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file' | grep -a 'denied  { read open }' | head -1)"
+    if [ -n "$OLD_HERE" ]; then
+      note FAIL "OPEN-COMPLETION-LIVE op_$opid: the P21-B measured devnode { read open } terminal reappeared in this operation's window: $OLD_HERE"
+    fi
+
+    # (e) THIS operation's own next terminal: a full-structure denied
+    # record attributed to it, NOT the granted shape, NOT the measured
+    # pre-boundary cap_userns self-denials. The permission is observed,
+    # never pre-classified; absence is BLOCKED (AVC absence alone is
+    # never a passing outcome).
+    local NEW_HERE
+    NEW_HERE="$(printf '%s\n' "$OPATT" "$PIDC" | awk '
+      /avc:  denied  / &&
+      /permissive=0/ &&
+      /scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c[0-9]+ / &&
+      /comm="runc:\[2:INIT\]"/ {
+        if ($0 ~ /tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file / &&
+            $0 ~ /denied  \{ read open \} /) next
+        if ($0 ~ /tclass=cap_userns /) next
+        print; exit
+      }')"
+    if [ -z "$NEW_HERE" ]; then
+      note BLOCKED "terminals: op_$opid has NO attributed next-terminal record (the flow must be observed advancing past the open-completion boundary IN THIS OPERATION — absence of AVCs alone is never a passing outcome)"
+    else
+      printf 'OP-TERMINAL-OK\top_%s %s\n' "$opid" "$NEW_HERE" >> "$CLASS_LOG"
+      if [ "$pos" = "1" ]; then
+        NEXT_TERMINAL="$NEW_HERE"
+        TERMINAL_1="$NEW_HERE"
+      else
+        TERMINAL_2="$NEW_HERE"
+      fi
+    fi
+
+    # (f) the regression controls for THIS operation's whole window. Each
+    # control section must exist EXACTLY once inside this section (a
+    # missing header is damaged evidence — BLOCKED; a duplicated one is
+    # ambiguous — FAIL) and be EMPTY.
+    for sechdr in "$P20_HDR" "$PREB_HDR" "$ASSOC_HDR" "$OLDSHAPE_HDR"; do
+      local SEC_BODY N_HEADS
+      N_HEADS="$(printf '%s\n' "$BODY" | grep -Fxc -- "$sechdr" || true)"
+      case "$N_HEADS" in
+        1) ;;
+        0) note BLOCKED "terminals: op_$opid is missing the control section header '$sechdr' (damaged or truncated evidence)"; continue ;;
+        *) note FAIL "terminals: op_$opid carries the control section header '$sechdr' $N_HEADS times (ambiguous evidence)"; continue ;;
+      esac
+      SEC_BODY="$(printf '%s\n' "$BODY" | awk -v hdr="$sechdr" '
         $0 == hdr { sec = 1; next }
-        /^== / || /^-- / { if (sec) exit }
-        sec && NF { print }
-      ' "$TERM")"
+        /^-- / { if (sec) exit }
+        sec && NF { print }')"
+      local secname
       secname="${sechdr#-- }"; secname="${secname%% (*}"
       if [ -n "$SEC_BODY" ]; then
-        note FAIL "REGRESSION-CONTROL-REAPPEARED ${secname}: $SEC_BODY"
+        note FAIL "REGRESSION-CONTROL-REAPPEARED op_$opid ${secname}: $SEC_BODY"
       else
-        printf 'CONTROL-OK\t%s (empty)\n' "$secname" >> "$CLASS_LOG"
+        printf 'CONTROL-OK\top_%s %s (empty)\n' "$opid" "$secname" >> "$CLASS_LOG"
       fi
     done
+
+    # Window-boundary overlap: the SECOND window must begin exactly where
+    # the FIRST ended (strictly partitioned capture; an overlap is a
+    # positive violation, a gap means records were dropped between the
+    # windows — both make per-window attribution unreliable).
+    if [ "$pos" = "1" ]; then
+      FIRST_WINDOW_END="$AFTER"
+    elif [ -z "$FIRST_WINDOW_END" ]; then
+      note BLOCKED "terminals: the first window was never bounded; the second window's boundary cannot be checked"
+    else
+      if [ "$BEFORE" -lt "$FIRST_WINDOW_END" ]; then
+        note FAIL "WINDOW-OVERLAP: the second window (before=$BEFORE) overlaps the first window (after=$FIRST_WINDOW_END) — records would be attributable to both operations"
+      elif [ "$BEFORE" -gt "$FIRST_WINDOW_END" ]; then
+        note BLOCKED "terminals: a capture gap exists between the windows (first after=$FIRST_WINDOW_END, second before=$BEFORE) — records may have been dropped between the operations"
+      fi
+    fi
+  }
+  FIRST_WINDOW_END=""
+  TERMINAL_1=""
+  TERMINAL_2=""
+  if [ "$OP_HEADERS" -eq 2 ] && [ -n "$OP1_ID" ] && [ -n "$OP2_ID" ] \
+     && [ "$OP1_ID" != "$OP2_ID" ] && [ -n "$OP1_SESSION" ] && [ -n "$OP2_SESSION" ] \
+     && [ "$OP1_SESSION" != "$OP2_SESSION" ]; then
+    eval_op_section "$OP1_HDR" "$OP1_ID" 1
+    eval_op_section "$OP2_HDR" "$OP2_ID" 2
+    # The two operations' terminal records must be DISTINCT records: one
+    # AVC can never serve as the evidence for both operations.
+    if [ -n "$TERMINAL_1" ] && [ -n "$TERMINAL_2" ] && [ "$TERMINAL_1" = "$TERMINAL_2" ]; then
+      note FAIL "TERMINAL-NOT-DISTINCT: both operations cite the SAME AVC record as their next terminal (one window can never serve both operations)"
+    fi
   fi
 fi
 
@@ -388,18 +464,24 @@ fi
 SCOPE="six-names-ok"
 [ "$DECISION" = "P21C-MEASURED" ] || SCOPE="not-established"
 # OPEN-COMPLETION summarizes the former terminal's state: live (its exact
-# shape reappeared — a positive violation), eliminated (the windows were
-# checked and the shape is absent), not-established (the windows were
-# missing/unreadable, so nothing can be said).
-if grep -q 'OPEN-COMPLETION-LIVE' "$CLASS_LOG" 2>/dev/null; then
+# shape reappeared in ANY operation's window — a positive violation),
+# eliminated (BOTH independently attributed windows were checked and the
+# shape is absent), not-established (the windows were missing, ambiguous,
+# or never fully evaluated).
+if grep -q 'OPEN-COMPLETION-LIVE' "$CLASS_LOG" 2>/dev/null \
+  || grep -q 'REGRESSION-CONTROL-REAPPEARED op_[0-9a-f]* P21-B terminal' "$CLASS_LOG" 2>/dev/null; then
   OPEN_COMPLETION="live"
-elif grep -q '^TERMINAL-ELIMINATED' "$CLASS_LOG" 2>/dev/null; then
+elif [ "$(grep -c '^WINDOW-OK' "$CLASS_LOG" 2>/dev/null || true)" -ge 2 ]; then
+  # Both windows were bounded and their attributed/correlated record sets
+  # were checked against the eliminated shape (the per-operation check
+  # runs for every bounded window), and no window found it live.
   OPEN_COMPLETION="eliminated"
 else
   OPEN_COMPLETION="not-established"
 fi
 MEMFD="intact"
-grep -q 'REGRESSION-CONTROL-REAPPEARED P20 terminal' "$CLASS_LOG" 2>/dev/null && MEMFD="regressed"
+grep -q 'REGRESSION-CONTROL-REAPPEARED' "$CLASS_LOG" 2>/dev/null \
+  && grep -q 'P20 terminal' "$CLASS_LOG" 2>/dev/null && MEMFD="regressed"
 CROSSOP="closed"
 if grep -q $'^WRONG-VERDICT\tc2|' "$CLASS_LOG" 2>/dev/null; then CROSSOP="open"; fi
 
