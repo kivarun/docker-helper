@@ -461,7 +461,8 @@ fi
 audit_lines() { wc -l < /var/log/audit/audit.log 2>/dev/null || printf '0'; }
 
 classify_window() { # <tag> <opid>
-  local tag="$1" opid="$2" W="$EVIDENCE_DIR/avc-window-$tag.log"
+  local tag="$1" opid="$2"
+  local W="$EVIDENCE_DIR/avc-window-$tag.log"
   local OPATT="$EVIDENCE_DIR/op-attributed-$tag.log"
   local PIDC="$EVIDENCE_DIR/pid-correlated-$tag.log"
   local MIS="$EVIDENCE_DIR/misattributed-$tag.log"
