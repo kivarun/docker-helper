@@ -210,32 +210,50 @@ AUD_LINES=0   # complete records consumed through the pinned descriptor
 AUD_BYTES=0   # bytes consumed through the pinned descriptor
 AUD_BROKEN="" # set once source continuity can no longer be proven
 
-audit_close() {
-  [ -n "$AUD_FD" ] || return 0
-  eval "exec ${AUD_FD}<&-" 2>/dev/null || true
-  AUD_FD=""
+# The capture core is SLOT-PARAMETERIZED (r7-p21d-corrective-1): the
+# sequential flow uses the legacy AUD slot (the globals AUD_FD/AUD_LINES/
+# AUD_BYTES/AUD_BROKEN, unchanged behavior), and the concurrent cx
+# negative scenario uses INDEPENDENT per-window slots (CX1/CX2) so the two
+# OVERLAPPING windows each get their OWN pinned descriptor and their OWN
+# cursor arithmetic — a single shared cursor cannot deliver the same
+# appended bytes to two windows. The slot functions carry the exact C2/C3
+# identity model (one pinned descriptor per slot, identity checkpoints
+# around every drain, truncate detection, torn-record detection).
+audit_close_impl() { # <slot-prefix>
+  local -n fd="$1_FD"
+  [ -n "$fd" ] || return 0
+  eval "exec ${fd}<&-" 2>/dev/null || true
+  fd=""
 }
 
-audit_open() {
-  audit_close
-  AUD_LINES=0
-  AUD_BYTES=0
-  AUD_BROKEN=""
-  exec {AUD_FD}<"$AUDIT_LOG_PATH" 2>/dev/null || { AUD_FD=""; return 1; }
+audit_open_impl() { # <slot-prefix>
+  local -n fd="$1_FD"
+  local -n lines="$1_LINES"
+  local -n bytes="$1_BYTES"
+  local -n broken="$1_BROKEN"
+  audit_close_impl "$1"
+  lines=0
+  bytes=0
+  broken=""
+  exec {fd}<"$AUDIT_LOG_PATH" 2>/dev/null || { fd=""; return 1; }
   return 0
 }
 
-audit_identity() { # prints proven, or unproven:<reason> (rc 1 when unproven)
+audit_identity_impl() { # <slot-prefix> — prints proven, or
+  # unproven:<reason> (rc 1 when unproven)
+  local -n fd="$1_FD"
+  local -n broken="$1_BROKEN"
+  local -n bytes="$1_BYTES"
   local pin path size
-  if [ -z "$AUD_FD" ]; then
+  if [ -z "$fd" ]; then
     printf 'unproven:no-pinned-descriptor'
     return 1
   fi
-  if [ -n "$AUD_BROKEN" ]; then
-    printf 'unproven:session-broken(%s)' "$AUD_BROKEN"
+  if [ -n "$broken" ]; then
+    printf 'unproven:session-broken(%s)' "$broken"
     return 1
   fi
-  pin="$(stat -Lc '%d:%i' "/proc/self/fd/$AUD_FD" 2>/dev/null)" || {
+  pin="$(stat -Lc '%d:%i' "/proc/self/fd/$fd" 2>/dev/null)" || {
     printf 'unproven:descriptor-stat-error'
     return 1
   }
@@ -247,83 +265,96 @@ audit_identity() { # prints proven, or unproven:<reason> (rc 1 when unproven)
     printf 'unproven:path-replaced(pinned=%s,path=%s)' "$pin" "$path"
     return 1
   fi
-  size="$(stat -Lc '%s' "/proc/self/fd/$AUD_FD" 2>/dev/null)" || {
+  size="$(stat -Lc '%s' "/proc/self/fd/$fd" 2>/dev/null)" || {
     printf 'unproven:descriptor-size-error'
     return 1
   }
-  if [ "$size" -lt "$AUD_BYTES" ]; then
-    printf 'unproven:truncated(size=%s,consumed=%s)' "$size" "$AUD_BYTES"
+  if [ "$size" -lt "$bytes" ]; then
+    printf 'unproven:truncated(size=%s,consumed=%s)' "$size" "$bytes"
     return 1
   fi
   printf 'proven'
 }
 
-audit_drain() { # <outfile> — appends EXACTLY the bytes appended to the
-  # pinned source since the previous drain; rc 0 iff the drain is sound
-  local out="$1" tmp lines bytes tailnl
-  if [ -z "$AUD_FD" ] || [ -n "$AUD_BROKEN" ]; then
-    AUD_BROKEN="${AUD_BROKEN:-drain-after-broken}"
+audit_drain_impl() { # <slot-prefix> <outfile> — appends EXACTLY the bytes
+  # appended to the slot's pinned source since the slot's previous drain;
+  # rc 0 iff the drain is sound
+  local -n fd="$1_FD"
+  local -n lines="$1_LINES"
+  local -n bytes="$1_BYTES"
+  local -n broken="$1_BROKEN"
+  local out="$2" tmp nlines nbytes tailnl
+  if [ -z "$fd" ] || [ -n "$broken" ]; then
+    broken="${broken:-drain-after-broken}"
     return 1
   fi
-  tmp="$(mktemp "$STATE_DIR/drain.XXXXXX")" || { AUD_BROKEN="drain-temp-error"; return 1; }
-  if ! cat <&"$AUD_FD" >"$tmp" 2>/dev/null; then
+  tmp="$(mktemp "$STATE_DIR/drain.XXXXXX")" || { broken="drain-temp-error"; return 1; }
+  if ! cat <&"$fd" >"$tmp" 2>/dev/null; then
     rm -f "$tmp"
-    AUD_BROKEN="read-error"
+    broken="read-error"
     return 1
   fi
   if [ -s "$tmp" ]; then
     tailnl="$(tail -c 1 "$tmp" | wc -l)"
     if [ "$tailnl" -eq 0 ]; then
       rm -f "$tmp"
-      AUD_BROKEN="partial-record"
+      broken="partial-record"
       return 1
     fi
   fi
-  lines="$(wc -l <"$tmp")"
-  bytes="$(wc -c <"$tmp")"
+  nlines="$(wc -l <"$tmp")"
+  nbytes="$(wc -c <"$tmp")"
   if ! cat "$tmp" >>"$out" 2>/dev/null; then
     rm -f "$tmp"
-    AUD_BROKEN="drain-output-error"
+    broken="drain-output-error"
     return 1
   fi
   rm -f "$tmp"
-  AUD_LINES=$((AUD_LINES + lines))
-  AUD_BYTES=$((AUD_BYTES + bytes))
+  lines=$((lines + nlines))
+  bytes=$((bytes + nbytes))
   return 0
 }
 
-# capture_begin <tag> [inter] — the pre-build identity checks and drain.
-# The records consumed here precede THIS build and are excluded from its
-# window. For the SECOND operation (mode=inter) the same drain IS the
-# inter-window evidence: those records are attributable to NEITHER
-# operation, and they get their own full integrity accounting.
-capture_begin() { # <tag> [inter]
-  local tag="$1" mode="${2:-}"
+audit_close() { audit_close_impl AUD; }
+audit_open() { audit_open_impl AUD; }
+audit_identity() { audit_identity_impl AUD; }
+audit_drain() { audit_drain_impl AUD "$@"; }
+
+# capture_begin_impl <slot> <tag> [inter] — the pre-build identity checks
+# and drain on the slot's pinned descriptor. The records consumed here
+# precede THIS build and are excluded from its window. For the SECOND
+# sequential operation (mode=inter) the same drain IS the inter-window
+# evidence: those records are attributable to NEITHER operation, and they
+# get their own full integrity accounting.
+capture_begin_impl() { # <slot> <tag> [inter]
+  local slot="$1" tag="$2" mode="${3:-}"
+  local -n lines="${slot}_LINES"
+  local -n broken="${slot}_BROKEN"
   local BOUND="$EVIDENCE_DIR/window-boundaries-$tag.log"
   local out="$EVIDENCE_DIR/pre-drain-$tag.log"
   local i1 i2 drainstat ok=1 gap_after
   : > "$BOUND"
-  i1="$(audit_identity)"
+  i1="$(audit_identity_impl "$slot")"
   [ "$i1" = "proven" ] || ok=0
   printf 'identity-begin-pre=%s\n' "$i1" >>"$BOUND"
   if [ "$mode" = "inter" ]; then
     out="$EVIDENCE_DIR/inter-window.log"
     : > "$out"
-    gap_after="$AUD_LINES"
+    gap_after="$lines"
   fi
-  if audit_drain "$out"; then
+  if audit_drain_impl "$slot" "$out"; then
     drainstat="ok"
   else
-    drainstat="failed:$AUD_BROKEN"
+    drainstat="failed:$broken"
     ok=0
   fi
   printf 'pre-drain=%s\n' "$drainstat" >>"$BOUND"
-  i2="$(audit_identity)"
+  i2="$(audit_identity_impl "$slot")"
   [ "$i2" = "proven" ] || ok=0
   printf 'identity-begin-post=%s\n' "$i2" >>"$BOUND"
-  printf 'before=%s\n' "$AUD_LINES" >>"$BOUND"
+  printf 'before=%s\n' "$lines" >>"$BOUND"
   if [ "$mode" = "inter" ]; then
-    local gap_before="$AUD_LINES" gexp=0 gact=0 gsrc="unproven"
+    local gap_before="$lines" gexp=0 gact=0 gsrc="unproven"
     if [ -n "$gap_after" ]; then
       gexp=$((gap_before - gap_after))
     fi
@@ -345,33 +376,38 @@ capture_begin() { # <tag> [inter]
   return 0
 }
 
-# capture_end <tag> — the post-operation identity check, the window drain
-# through the pinned descriptor (THE extraction), the post-extract identity
-# check, and the MEASURED accounting: expected is the cursor arithmetic,
-# actual is the extracted file's own line count, and source is proven only
-# when every identity checkpoint and both drains were sound.
-capture_end() { # <tag>
-  local tag="$1"
+capture_begin() { capture_begin_impl AUD "$@"; }
+
+# capture_end_impl <slot> <tag> — the post-operation identity check, the
+# window drain through the slot's pinned descriptor (THE extraction), the
+# post-extract identity check, and the MEASURED accounting: expected is
+# the cursor arithmetic, actual is the extracted file's own line count,
+# and source is proven only when every identity checkpoint and both drains
+# were sound.
+capture_end_impl() { # <slot> <tag>
+  local slot="$1" tag="$2"
+  local -n lines="${slot}_LINES"
+  local -n broken="${slot}_BROKEN"
   local BOUND="$EVIDENCE_DIR/window-boundaries-$tag.log"
   local WIN="$EVIDENCE_DIR/avc-window-$tag.log"
   local i1 i2 drainstat ok=1
   local BEFORE AFTER EXPECTED=0 ACTUAL=0 SOURCE="unproven"
   : > "$WIN"
-  i1="$(audit_identity)"
+  i1="$(audit_identity_impl "$slot")"
   [ "$i1" = "proven" ] || ok=0
   printf 'identity-extract-pre=%s\n' "$i1" >>"$BOUND"
-  if audit_drain "$WIN"; then
+  if audit_drain_impl "$slot" "$WIN"; then
     drainstat="ok"
   else
-    drainstat="failed:$AUD_BROKEN"
+    drainstat="failed:$broken"
     ok=0
   fi
   printf 'window-drain=%s\n' "$drainstat" >>"$BOUND"
-  i2="$(audit_identity)"
+  i2="$(audit_identity_impl "$slot")"
   [ "$i2" = "proven" ] || ok=0
   printf 'identity-extract-post=%s\n' "$i2" >>"$BOUND"
   BEFORE="$(sed -n 's/^before=//p' "$BOUND" | head -1)"
-  AFTER="$AUD_LINES"
+  AFTER="$lines"
   printf 'after=%s\n' "$AFTER" >>"$BOUND"
   if [ -n "$BEFORE" ]; then
     EXPECTED=$((AFTER - BEFORE))
@@ -385,6 +421,8 @@ capture_end() { # <tag>
   printf 'source=%s\n' "$SOURCE" >>"$BOUND"
   return 0
 }
+
+capture_end() { capture_end_impl AUD "$@"; }
 
 # ============================================================================
 # Capture selftest (--capture-selftest <workdir>): exercises the REAL
@@ -682,13 +720,15 @@ classify_window() { # <tag> <operation-id (with or without the op_ prefix)>
   done < "$W"
 }
 
-build_post() { # <tag> <session-token>
+build_post() { # <tag> <session-token> [inter] [slot]
   # Opens THIS operation's audit window BEFORE the build is admitted
   # (r7-p21d-corrective-3) and issues POST /build. Asynchronous admission
   # AVCs raised between the POST and the HTTP 201 belong to THIS
   # operation's window. The HTTP status is recorded next to the response.
-  local tag="$1" token="$2"
-  capture_begin "$tag" "${3:-}" || true
+  # The capture slot defaults to the sequential AUD slot; the concurrent
+  # cx windows pass their own slots (independent pinned descriptors).
+  local tag="$1" token="$2" slot="${4:-AUD}"
+  capture_begin_impl "$slot" "$tag" "${3:-}" || true
   local RESP="$EVIDENCE_DIR/build-start-$tag.json"
   local CODE
   CODE="$(curl --silent --max-time 10 \
@@ -706,7 +746,7 @@ build_post() { # <tag> <session-token>
     # window is closed here and the evaluator decides BLOCKED — a failed
     # admission can never produce MEASURED.
     log "build $tag: no operation id (http $CODE); closing the capture window"
-    capture_end "$tag" || true
+    capture_end_impl "$slot" "$tag" || true
     return 1
   fi
   return 0
@@ -730,13 +770,13 @@ build_wait() { # <tag> <session-token>
   return 0
 }
 
-build_close() { # <tag> <session-token> — closes THIS operation's capture
-  # window BEFORE the per-operation logs are fetched (the original
+build_close() { # <tag> <session-token> [slot] — closes THIS operation's
+  # capture window BEFORE the per-operation logs are fetched (the original
   # run_one_build ordering: the log-fetch records must never enter the
   # operation's own window).
-  local tag="$1" token="$2"
+  local tag="$1" token="$2" slot="${3:-AUD}"
   local OP STATUS
-  capture_end "$tag" || true
+  capture_end_impl "$slot" "$tag" || true
   OP="$(cat "$EVIDENCE_DIR/operation-id-$tag.log" 2>/dev/null)"
   STATUS="$(cat "$EVIDENCE_DIR/build-status-$tag.json" 2>/dev/null)"
   curl --silent --max-time 2 \
@@ -1446,17 +1486,24 @@ if [ -n "$CX_TOKEN_1" ] && [ -n "$CX_TOKEN_2" ]; then
   rm -f "$P21D_CX_SAMPLER_STOP"
   "$EVIDENCE_DIR/p21d_pid_sampler" "$EVIDENCE_DIR/pid-sampler-cx.log" "$P21D_CX_SAMPLER_STOP" &
   P21D_CX_SAMPLER_PID=$!
+  # Each concurrent window gets its OWN pinned descriptor and its own
+  # cursor arithmetic (the CX1/CX2 capture slots): a single shared cursor
+  # cannot deliver the same appended bytes to two windows.
+  audit_open_impl CX1 || true
   # The second window opens AFTER the first operation's POST: the two
   # windows provably overlap in the concurrent region, and each proven
   # window carries BOTH operations' runtime records.
-  build_post cx1 "$CX_TOKEN_1" || true
-  build_post cx2 "$CX_TOKEN_2" || true
+  build_post cx1 "$CX_TOKEN_1" "" CX1 || true
+  audit_open_impl CX2 || true
+  build_post cx2 "$CX_TOKEN_2" "" CX2 || true
   build_wait cx1 "$CX_TOKEN_1" || true
   build_wait cx2 "$CX_TOKEN_2" || true
   # BOTH windows close only after BOTH operations reached their terminal
   # state: each proven window spans the whole concurrent region.
-  build_close cx1 "$CX_TOKEN_1"
-  build_close cx2 "$CX_TOKEN_2"
+  build_close cx1 "$CX_TOKEN_1" CX1
+  build_close cx2 "$CX_TOKEN_2" CX2
+  audit_close_impl CX1
+  audit_close_impl CX2
   touch "$P21D_CX_SAMPLER_STOP"
   wait "$P21D_CX_SAMPLER_PID" 2>/dev/null || true
   classify_window cx1 "$(cat "$EVIDENCE_DIR/operation-id-cx1.log" 2>/dev/null)"
