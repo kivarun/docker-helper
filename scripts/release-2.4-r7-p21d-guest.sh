@@ -209,6 +209,17 @@ AUD_FD=""
 AUD_LINES=0   # complete records consumed through the pinned descriptor
 AUD_BYTES=0   # bytes consumed through the pinned descriptor
 AUD_BROKEN="" # set once source continuity can no longer be proven
+# The concurrent cx capture slots (independent pinned descriptors): the
+# slot state MUST be initialized — under set -u a nameref expansion of an
+# unset target aborts the script.
+CX1_FD=""
+CX1_LINES=0
+CX1_BYTES=0
+CX1_BROKEN=""
+CX2_FD=""
+CX2_LINES=0
+CX2_BYTES=0
+CX2_BROKEN=""
 
 # The capture core is SLOT-PARAMETERIZED (r7-p21d-corrective-1): the
 # sequential flow uses the legacy AUD slot (the globals AUD_FD/AUD_LINES/
