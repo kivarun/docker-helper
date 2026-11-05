@@ -1170,10 +1170,12 @@ static void read_link(int pid, const char *which, char *out, size_t outsz)
 
 static int all_digits(const char *s)
 {
+	if (*s == '\0')
+		return 0;
 	for (; *s; s++)
 		if (*s < '0' || *s > '9')
 			return 0;
-	return *s != '\0' ? 1 : 0;
+	return 1;
 }
 
 int main(int argc, char **argv)
