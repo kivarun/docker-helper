@@ -270,6 +270,37 @@ func p21dGreenRawWindows() map[string]string {
 	return map[string]string{"c1": p21dWindow1, "c2": p21dWindow2, "inter": ""}
 }
 
+// The executor bundle directories the pid-proof sampler binds (the
+// runc-native bundle paths carry the daemon operation id — the ONE
+// pathname fact that names the operation outside the audit stream).
+var (
+	p21dOp1Bundle = "/var/lib/docker-helper-builder/ops/op_" + p21dOp1ID + "/root/runc-native/executor/m1n2o3p4q5r6s7t8u9v0w1x2"
+	p21dOp2Bundle = "/var/lib/docker-helper-builder/ops/op_" + p21dOp2ID + "/root/runc-native/executor/n2o3p4q5r6s7t8u9v0w1x2y3"
+)
+
+// p21dSamplerLine is one SAMPLE record in the sampler's exact TAB grammar.
+func p21dSamplerLine(ts, pid, ppid, comm, cmd, root, cwd string) string {
+	return strings.Join([]string{"SAMPLE", ts, pid, ppid, comm, cmd, root, cwd}, "\t")
+}
+
+// p21dGreenSampler returns the green pid-proof sampler artifact: for each
+// operation the runc CLI parent whose /proc cmdline carries THIS
+// operation's bundle path, and the runc:[2:INIT] process whose ppid is
+// that parent — kernel ancestry, no window membership involved.
+func p21dGreenSampler() string {
+	return strings.Join([]string{
+		p21dSamplerLine("1793899119.000000001", "5350", "3353", "buildkit-runc",
+			"runc --root /var/lib/docker-helper-builder/runc-root --log "+p21dOp1Bundle+"/runc-log.json run --bundle "+p21dOp1Bundle+" c1", "/", "-"),
+		p21dSamplerLine("1793899119.000000002", "5353", "5350", "runc:[2:INIT]",
+			"runc init", "/", "-"),
+		p21dSamplerLine("1793899121.000000001", "5516", "3353", "buildkit-runc",
+			"runc --root /var/lib/docker-helper-builder/runc-root --log "+p21dOp2Bundle+"/runc-log.json run --bundle "+p21dOp2Bundle+" c2", "/", "-"),
+		p21dSamplerLine("1793899121.000000002", "5517", "5516", "runc:[2:INIT]",
+			"runc init", "/", "-"),
+		"DONE\tsweeps=812",
+	}, "\n") + "\n"
+}
+
 func p21dWriteEvidence(t *testing.T, matrix, av, terminals string, raw map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -284,6 +315,14 @@ func p21dWriteEvidence(t *testing.T, matrix, av, terminals string, raw map[strin
 	write("avc-window-c1.log", raw["c1"])
 	write("avc-window-c2.log", raw["c2"])
 	write("inter-window.log", raw["inter"])
+	// The pid-proof sampler artifact (r7-p21d-corrective-1) is part of the
+	// evidence contract for every live flow; the green binding is the
+	// default, a fixture may override it with the "sampler" key.
+	sampler, ok := raw["sampler"]
+	if !ok {
+		sampler = p21dGreenSampler()
+	}
+	write("pid-sampler.log", sampler)
 	return dir
 }
 
@@ -871,6 +910,7 @@ func TestR7P21DVerdictMissingEvidenceFilesBlock(t *testing.T) {
 	for _, name := range []string{
 		"create-matrix-before.log", "av-matrix-before.log", "p21d-terminals.log",
 		"avc-window-c1.log", "avc-window-c2.log", "inter-window.log",
+		"pid-sampler.log",
 	} {
 		broken := p21dGreenDir(t)
 		if err := os.Remove(filepath.Join(broken, name)); err != nil {
@@ -1186,7 +1226,15 @@ func TestR7P21DGuestEarlyAVCOrdering(t *testing.T) {
 			// The producer's own evidence is fed to the evaluator verbatim;
 			// only the two policy matrices come from the green fixtures
 			// (the mock run does not run sesearch — it exercises capture
-			// and ordering, not the policy inventory).
+			// and ordering, not the policy inventory). The pid-proof
+			// sampler artifact is likewise injected: the mock transport
+			// does not run the sampler, and the early-AVC records carry
+			// the operation's own path (op-attributed), so no binding is
+			// consulted — only the artifact's presence and validity.
+			if err := os.WriteFile(filepath.Join(ev, "pid-sampler.log"),
+				[]byte(p21dGreenSampler()), 0o644); err != nil {
+				t.Fatal(err)
+			}
 			if err := os.WriteFile(filepath.Join(ev, "create-matrix-before.log"),
 				[]byte(strings.Join(p21dGreenMatrix(), "\n")+"\n"), 0o644); err != nil {
 				t.Fatal(err)
@@ -1307,6 +1355,315 @@ func TestR7P21DVerdictCompletionEvidenceIsMeasured(t *testing.T) {
 	line, rc = p21dRunEvaluator(t, dir)
 	if rc == 0 || !strings.Contains(line, "DECISION=P21D-FAIL") {
 		t.Errorf("a misattributed record must decide FAIL even under a proven completion, got rc=%d: %s", rc, line)
+	}
+}
+
+// TestR7P21DVerdictPidProofFailsClosed proves the r7-p21d-corrective-1
+// pid-proof contract: window-scoped attribution of PATHLESS runc:[2:INIT]
+// records requires the sampler's independent Operation->container-init-pid
+// binding. A missing, empty, or unparseable sampler is an evidence gap
+// (BLOCKED); a window whose container-init pid the sampler proves belongs
+// to the OTHER operation is a positive misattribution (FAIL — the shape
+// the pre-corrective window-scoped evaluator accepted as P21D-MEASURED);
+// a window pid the sampler binds to nobody is contradicted by the
+// operation's own proven ancestry (FAIL); the same init bound to BOTH
+// operations is a conflict (FAIL).
+func TestR7P21DVerdictPidProofFailsClosed(t *testing.T) {
+	pathlessSetuid1 := `type=AVC msg=audit(1793899120.001:3101): avc:  denied  { setuid } for  pid=5353 comm="runc:[2:INIT]" capability=7  scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns permissive=0`
+	pathlessTerminal1 := `type=AVC msg=audit(1793899120.005:3110): avc:  denied  { create } for  pid=5353 comm="runc:[2:INIT]" name="ptmx" scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:tmpfs_t:s0 tclass=lnk_file permissive=0`
+	pathlessSetuid2 := `type=AVC msg=audit(1793899122.001:4101): avc:  denied  { setuid } for  pid=5517 comm="runc:[2:INIT]" capability=7  scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns permissive=0`
+	pathlessTerminal2 := `type=AVC msg=audit(1793899122.005:4110): avc:  denied  { create } for  pid=5517 comm="runc:[2:INIT]" name="ptmx" scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:tmpfs_t:s0 tclass=lnk_file permissive=0`
+	window1Of := func(setuid, terminal string) string { return setuid + "\n" + terminal + "\n" }
+	// THE NEGATIVE SCENARIO IN SEQUENTIAL FORM: window 1 carries ONLY the
+	// container-init records of the SECOND operation's proven init pid and
+	// vice versa — every window is single-pid, the pids are distinct, both
+	// operations failed, and the pre-corrective window-scoped evaluator
+	// accepted exactly this shape as P21D-MEASURED.
+	swappedTerminals := p21dOpSection("c1", p21dOp1ID, p21dSession1, 100, 102, "", "",
+		"", window1Of(pathlessSetuid2, pathlessTerminal2), "", "",
+		window1Of(pathlessSetuid2, pathlessTerminal2), "failed") +
+		p21dOpSection("c2", p21dOp2ID, p21dSession2, 102, 104, "", "",
+			"", window1Of(pathlessSetuid1, pathlessTerminal1), "", "",
+			window1Of(pathlessSetuid1, pathlessTerminal1), "failed") +
+		p21dInterSection(102, 102, "")
+	unboundSampler := strings.Join([]string{
+		p21dSamplerLine("1793899119.000000001", "5350", "3353", "buildkit-runc",
+			"runc --root /var/lib/docker-helper-builder/runc-root run --bundle "+p21dOp1Bundle+" c1", "/", "-"),
+		p21dSamplerLine("1793899119.000000002", "5353", "5350", "runc:[2:INIT]",
+			"runc init", "/", "-"),
+		// The second operation's init was NEVER sampled: no binding.
+		"DONE\tsweeps=812",
+	}, "\n") + "\n"
+	conflictSampler := strings.Join([]string{
+		p21dSamplerLine("1793899119.000000001", "5350", "3353", "buildkit-runc",
+			"runc --root /var/lib/docker-helper-builder/runc-root run --bundle "+p21dOp1Bundle+" c1", "/", "-"),
+		p21dSamplerLine("1793899119.000000002", "5353", "5350", "runc:[2:INIT]",
+			"runc init", "/", "-"),
+		p21dSamplerLine("1793899121.000000001", "5516", "3353", "buildkit-runc",
+			"runc --root /var/lib/docker-helper-builder/runc-root run --bundle "+p21dOp2Bundle+" c2", "/", "-"),
+		// The SAME init pid claimed by BOTH parents' ancestry: one
+		// container init can never serve two operations.
+		p21dSamplerLine("1793899121.000000002", "5353", "5516", "runc:[2:INIT]",
+			"runc init", "/", "-"),
+		"DONE\tsweeps=812",
+	}, "\n") + "\n"
+	for name, tc := range map[string]struct {
+		terminals string
+		sampler   string
+		want      string
+	}{
+		"the swapped container-init pids (the pre-corrective false-MEASURED shape)": {
+			swappedTerminals, p21dGreenSampler(), "P21D-FAIL"},
+		"a window pid the sampler binds to nobody": {
+			swappedTerminals, unboundSampler, "P21D-FAIL"},
+		"the sampler binds the same init to both operations": {
+			swappedTerminals, conflictSampler, "P21D-FAIL"},
+		"an empty sampler artifact": {
+			swappedTerminals, "", "P21D-BLOCKED"},
+		"a sampler with no DONE terminator": {
+			swappedTerminals,
+			p21dSamplerLine("1793899119.000000001", "5350", "3353", "buildkit-runc",
+				"runc --root /r run --bundle "+p21dOp1Bundle+" c1", "/", "-") + "\n",
+			"P21D-BLOCKED"},
+		"a sampler with zero sweeps": {
+			swappedTerminals, "DONE\tsweeps=0\n", "P21D-BLOCKED"},
+		"a sampler with an unparseable line": {
+			swappedTerminals, p21dGreenSampler() + "garbage line\n", "P21D-BLOCKED"},
+		"a sampler whose SAMPLE rows are short": {
+			swappedTerminals, "SAMPLE\t1\t2\t3\tbuildkit-runc\nDONE\tsweeps=1\n", "P21D-BLOCKED"},
+	} {
+		dir := p21dWriteEvidence(t, strings.Join(p21dGreenMatrix(), "\n")+"\n",
+			strings.Join(p21dGreenAV(), "\n")+"\n", tc.terminals,
+			map[string]string{"c1": window1Of(pathlessSetuid2, pathlessTerminal2),
+				"c2":    window1Of(pathlessSetuid1, pathlessTerminal1),
+				"inter": "", "sampler": tc.sampler})
+		line, rc := p21dRunEvaluator(t, dir)
+		if rc == 0 || !strings.Contains(line, "DECISION="+tc.want) {
+			t.Errorf("%s must decide %s, got rc=%d: %s", name, tc.want, rc, line)
+		}
+	}
+	// The pid-proof GREEN control: the same pathless shape with the
+	// CORRECT bindings measures — the proof is additive, not prohibitive.
+	greenTerminals := p21dOpSection("c1", p21dOp1ID, p21dSession1, 100, 102, "", "",
+		"", window1Of(pathlessSetuid1, pathlessTerminal1), "", "",
+		window1Of(pathlessSetuid1, pathlessTerminal1), "failed") +
+		p21dOpSection("c2", p21dOp2ID, p21dSession2, 102, 104, "", "",
+			"", window1Of(pathlessSetuid2, pathlessTerminal2), "", "",
+			window1Of(pathlessSetuid2, pathlessTerminal2), "failed") +
+		p21dInterSection(102, 102, "")
+	dir := p21dWriteEvidence(t, strings.Join(p21dGreenMatrix(), "\n")+"\n",
+		strings.Join(p21dGreenAV(), "\n")+"\n", greenTerminals,
+		map[string]string{"c1": window1Of(pathlessSetuid1, pathlessTerminal1),
+			"c2": window1Of(pathlessSetuid2, pathlessTerminal2), "inter": ""})
+	line, rc := p21dRunEvaluator(t, dir)
+	if rc != 0 || !strings.Contains(line, "DECISION=P21D-MEASURED") {
+		t.Errorf("correctly proven window-scoped attribution must measure, got rc=%d: %s", rc, line)
+	}
+}
+
+// The cx (concurrent) fixtures: two operations built CONCURRENTLY, so a
+// foreign pathless runc-init AVC lands inside a PROVEN window while the
+// window's own operation completes with an error. The pathless ptmx
+// terminals carry NO operation path — only the pid proof can attribute
+// them.
+var (
+	p21dCxOp1ID     = "93d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8"
+	p21dCxOp2ID     = "a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9"
+	p21dCxSession1  = "dhs_ccc3333333333333333333333333333"
+	p21dCxSession2  = "dhs_ddd4444444444444444444444444444"
+	p21dCxOp1Bundle = "/var/lib/docker-helper-builder/ops/op_" + p21dCxOp1ID + "/root/runc-native/executor/e1e2e3e4e5e6e7e8e9e0e1e2"
+	p21dCxOp2Bundle = "/var/lib/docker-helper-builder/ops/op_" + p21dCxOp2ID + "/root/runc-native/executor/f1f2f3f4f5f6f7f8f9f0f1f2"
+
+	p21dCxSetuid1 = `type=AVC msg=audit(1793899130.001:5101): avc:  denied  { setuid } for  pid=6102 comm="runc:[2:INIT]" capability=7  scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns permissive=0`
+	p21dCxSetgid1 = `type=AVC msg=audit(1793899130.002:5102): avc:  denied  { setgid } for  pid=6102 comm="runc:[2:INIT]" capability=6  scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns permissive=0`
+	p21dCxPtmx1   = `type=AVC msg=audit(1793899130.003:5103): avc:  denied  { create } for  pid=6102 comm="runc:[2:INIT]" name="ptmx" scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:tmpfs_t:s0 tclass=lnk_file permissive=0`
+	p21dCxSetuid2 = `type=AVC msg=audit(1793899130.004:5104): avc:  denied  { setuid } for  pid=6103 comm="runc:[2:INIT]" capability=7  scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns permissive=0`
+	p21dCxSetgid2 = `type=AVC msg=audit(1793899130.005:5105): avc:  denied  { setgid } for  pid=6103 comm="runc:[2:INIT]" capability=6  scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tclass=cap_userns permissive=0`
+	p21dCxPtmx2   = `type=AVC msg=audit(1793899130.006:5106): avc:  denied  { create } for  pid=6103 comm="runc:[2:INIT]" name="ptmx" scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:tmpfs_t:s0 tclass=lnk_file permissive=0`
+)
+
+// p21dCxWindow is ONE concurrent window: BOTH operations' pathless
+// runc-init records (the proven windows overlap, so each window spans the
+// whole concurrent region).
+var p21dCxWindow = strings.Join([]string{
+	p21dCxSetuid1, p21dCxSetgid1, p21dCxPtmx1,
+	p21dCxSetuid2, p21dCxSetgid2, p21dCxPtmx2,
+}, "\n") + "\n"
+
+// p21dCxSampler binds the two concurrent container inits (6102 -> op cx1
+// via parent 6100, 6103 -> op cx2 via parent 6101).
+func p21dCxSampler() string {
+	return strings.Join([]string{
+		p21dSamplerLine("1793899129.000000001", "6100", "3353", "buildkit-runc",
+			"runc --root /var/lib/docker-helper-builder/runc-root run --bundle "+p21dCxOp1Bundle+" cx1", "/", "-"),
+		p21dSamplerLine("1793899129.000000002", "6102", "6100", "runc:[2:INIT]",
+			"runc init", "/", "-"),
+		p21dSamplerLine("1793899129.000000003", "6101", "3353", "buildkit-runc",
+			"runc --root /var/lib/docker-helper-builder/runc-root run --bundle "+p21dCxOp2Bundle+" cx2", "/", "-"),
+		p21dSamplerLine("1793899129.000000004", "6103", "6101", "runc:[2:INIT]",
+			"runc init", "/", "-"),
+		"DONE\tsweeps=903",
+	}, "\n") + "\n"
+}
+
+// p21dCxSection composes one concurrent-operation section: the proven
+// window boundaries overlap the other operation's window, and the
+// unattributed bucket carries BOTH operations' pathless records (that is
+// precisely what the pid proof must resolve).
+func p21dCxSection(tag, opid, session string, before, after int, opResult string, window string, extra string) string {
+	return p21dOpSection(tag, opid, session, before, after, "", "", "", window, "", "", window, opResult) + extra
+}
+
+// p21dCxWriteEvidence writes the cx evidence directory (the cx classifier
+// reads only the cx terminals log, the two raw windows, and the cx
+// sampler artifact).
+func p21dCxWriteEvidence(t *testing.T, terminals, cx1, cx2, sampler string) string {
+	t.Helper()
+	dir := t.TempDir()
+	write := func(name, content string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("p21d-cx-terminals.log", terminals)
+	write("avc-window-cx1.log", cx1)
+	write("avc-window-cx2.log", cx2)
+	write("pid-sampler-cx.log", sampler)
+	return dir
+}
+
+// p21dRunEvaluatorCX runs the evaluator's --cx mode.
+func p21dRunEvaluatorCX(t *testing.T, dir string) (string, int) {
+	t.Helper()
+	out, err := exec.Command("bash", "scripts/release-2.4-r7-p21d-verdict.sh", "--cx", dir).CombinedOutput()
+	line := ""
+	for _, l := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(l, "R7-P21D-CX-VERDICT=") {
+			line = l
+		}
+	}
+	rc := 0
+	if err != nil {
+		exitErr, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("cx evaluator failed to run: %v\n%s", err, out)
+		}
+		rc = exitErr.ExitCode()
+	}
+	if line == "" {
+		t.Fatalf("cx evaluator produced no verdict line (rc=%d):\n%s", rc, out)
+	}
+	return line, rc
+}
+
+// p21dCxField extracts one field of a CX verdict line.
+func p21dCxField(t *testing.T, verdict, key string) string {
+	t.Helper()
+	for _, part := range strings.Split(strings.TrimPrefix(verdict, "R7-P21D-CX-VERDICT="), ";") {
+		if strings.HasPrefix(part, key+"=") {
+			return strings.TrimPrefix(part, key+"=")
+		}
+	}
+	t.Fatalf("cx verdict %q carries no %s field", verdict, key)
+	return ""
+}
+
+// TestR7P21DCXClassifierProven proves the negative scenario's GREEN
+// outcome: with both windows proven and both container inits bound by the
+// sampler, every foreign pathless runc-init record inside a proven window
+// is EXCLUDED WITH PROOF (never misattributed), each operation's own
+// terminal is attributed to its own pid, the overlap is measured, and the
+// verdict is P21D-CX-PROVEN with FOREIGN-EXCLUDED>=1.
+func TestR7P21DCXClassifierProven(t *testing.T) {
+	terminals := p21dCxSection("cx1", p21dCxOp1ID, p21dCxSession1, 200, 206, "failed", p21dCxWindow, "") +
+		p21dCxSection("cx2", p21dCxOp2ID, p21dCxSession2, 203, 209, "failed", p21dCxWindow, "")
+	dir := p21dCxWriteEvidence(t, terminals, p21dCxWindow, p21dCxWindow, p21dCxSampler())
+	line, rc := p21dRunEvaluatorCX(t, dir)
+	if rc != 0 || !strings.Contains(line, "DECISION=P21D-CX-PROVEN") {
+		t.Fatalf("the realized negative scenario with proven pid ownership must decide P21D-CX-PROVEN, got rc=%d: %s", rc, line)
+	}
+	if got := p21dCxField(t, line, "OVERLAP"); got != "measured" {
+		t.Errorf("OVERLAP must be measured, got %q", got)
+	}
+	if got := p21dCxField(t, line, "FOREIGN-EXCLUDED"); got != "6" {
+		t.Errorf("FOREIGN-EXCLUDED must count both windows' foreign records (6), got %q", got)
+	}
+	// The cx gate accepts exactly the PROVEN measured form.
+	if err := exec.Command("bash", "scripts/release-2.4-r7-p21d-verdict.sh", "--cx-gate", line).Run(); err != nil {
+		t.Errorf("--cx-gate must accept the proven line: %v", err)
+	}
+}
+
+// TestR7P21DCXClassifierFailsClosed proves the cx classifier's fail-closed
+// branches: an unproven container-init pid inside a proven window decides
+// BLOCKED (never attribution by window membership), a missing foreign
+// record or a missing overlap means the negative scenario was NOT realized
+// (BLOCKED), a succeeded operation breaks the scenario premise (BLOCKED),
+// and a policy violation inside a concurrent window is still FAIL.
+func TestR7P21DCXClassifierFailsClosed(t *testing.T) {
+	stray := `type=AVC msg=audit(1793899130.007:5107): avc:  denied  { getattr } for  pid=7999 comm="runc:[2:INIT]" path="/tmp/z" dev="vda3" ino=3 scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:tmp_t:s0 tclass=file permissive=0`
+	mountonShape := `type=AVC msg=audit(1793899130.008:5108): avc:  denied  { mounton } for  pid=6102 comm="runc:[2:INIT]" path="` + p21dCxOp1Bundle + `/rootfs/dev/null" dev="tmpfs" ino=5 scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1 tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file permissive=0`
+	greenTerminals := p21dCxSection("cx1", p21dCxOp1ID, p21dCxSession1, 200, 206, "failed", p21dCxWindow, "") +
+		p21dCxSection("cx2", p21dCxOp2ID, p21dCxSession2, 203, 209, "failed", p21dCxWindow, "")
+	noOverlapTerminals := p21dCxSection("cx1", p21dCxOp1ID, p21dCxSession1, 200, 206, "failed", p21dCxWindow, "") +
+		p21dCxSection("cx2", p21dCxOp2ID, p21dCxSession2, 300, 306, "failed", p21dCxWindow, "")
+	noForeignTerminals := p21dCxSection("cx1", p21dCxOp1ID, p21dCxSession1, 200, 203, "failed",
+		p21dCxSetuid1+"\n"+p21dCxSetgid1+"\n"+p21dCxPtmx1+"\n", "") +
+		p21dCxSection("cx2", p21dCxOp2ID, p21dCxSession2, 203, 206, "failed",
+			p21dCxSetuid2+"\n"+p21dCxSetgid2+"\n"+p21dCxPtmx2+"\n", "")
+	succeededTerminals := p21dCxSection("cx1", p21dCxOp1ID, p21dCxSession1, 200, 206, "succeeded", p21dCxWindow, "") +
+		p21dCxSection("cx2", p21dCxOp2ID, p21dCxSession2, 203, 209, "failed", p21dCxWindow, "")
+	for name, tc := range map[string]struct {
+		terminals string
+		cx1, cx2  string
+		want      string
+	}{
+		"an unproven container-init pid inside a proven window": {
+			greenTerminals, p21dCxWindow + stray, p21dCxWindow, "P21D-CX-BLOCKED"},
+		"the proven windows do not overlap (scenario not realized)": {
+			noOverlapTerminals, p21dCxWindow, p21dCxWindow, "P21D-CX-BLOCKED"},
+		"no foreign record inside any proven window (scenario not realized)": {
+			noForeignTerminals,
+			p21dCxSetuid1 + "\n" + p21dCxSetgid1 + "\n" + p21dCxPtmx1 + "\n",
+			p21dCxSetuid2 + "\n" + p21dCxSetgid2 + "\n" + p21dCxPtmx2 + "\n",
+			"P21D-CX-BLOCKED"},
+		"the window's own operation succeeded (premise broken)": {
+			succeededTerminals, p21dCxWindow, p21dCxWindow, "P21D-CX-BLOCKED"},
+		"the eliminated P21-C mounton shape inside a concurrent window": {
+			strings.Replace(greenTerminals, p21dCxPtmx1, mountonShape, 1),
+			strings.Replace(p21dCxWindow, p21dCxPtmx1, mountonShape, 1),
+			p21dCxWindow,
+			"P21D-CX-FAIL"},
+	} {
+		dir := p21dCxWriteEvidence(t, tc.terminals, tc.cx1, tc.cx2, p21dCxSampler())
+		line, rc := p21dRunEvaluatorCX(t, dir)
+		if rc == 0 || !strings.Contains(line, "DECISION="+tc.want) {
+			t.Errorf("%s must decide %s, got rc=%d: %s", name, tc.want, rc, line)
+		}
+	}
+	// A missing or invalid cx sampler is an evidence gap (BLOCKED).
+	for name, sampler := range map[string]string{
+		"missing cx sampler":      "",
+		"invalid cx sampler":      "garbage\n",
+		"cx sampler with no init": "DONE\tsweeps=5\n",
+	} {
+		dir := p21dCxWriteEvidence(t, greenTerminals, p21dCxWindow, p21dCxWindow, sampler)
+		line, rc := p21dRunEvaluatorCX(t, dir)
+		if rc == 0 || !strings.Contains(line, "DECISION=P21D-CX-BLOCKED") {
+			t.Errorf("%s must decide P21D-CX-BLOCKED, got rc=%d: %s", name, rc, line)
+		}
+	}
+	// The cx gate rejects every non-proven form.
+	for _, bad := range []string{
+		"R7-P21D-CX-VERDICT=DECISION=P21D-CX-BLOCKED;OVERLAP=absent;FOREIGN-EXCLUDED=0;REASON=x",
+		"R7-P21D-CX-VERDICT=DECISION=P21D-CX-FAIL;OVERLAP=measured;FOREIGN-EXCLUDED=4;REASON=x",
+		"R7-P21D-CX-VERDICT=DECISION=P21D-CX-PROVEN;OVERLAP=absent;FOREIGN-EXCLUDED=4",
+		"R7-P21D-CX-VERDICT=DECISION=P21D-CX-PROVEN;OVERLAP=measured;FOREIGN-EXCLUDED=0",
+		"R7-P21D-CX-VERDICT=DECISION=P21D-CX-PROVEN;OVERLAP=measured",
+	} {
+		if err := exec.Command("bash", "scripts/release-2.4-r7-p21d-verdict.sh", "--cx-gate", bad).Run(); err == nil {
+			t.Errorf("--cx-gate must reject %q", bad)
+		}
 	}
 }
 

@@ -83,6 +83,34 @@
 #      absent from both windows; the six filename transitions, the
 #      arbitrary-basename control, and the memfd P1-P6 surface stay
 #      byte-intact on the loaded policy.
+#   7. PID PROOF (r7-p21d-corrective-1): the window-scoped attribution of
+#      PATHLESS runc:[2:INIT] records is no longer carried by the window
+#      alone. While the audited operations run, a /proc sampler records,
+#      for every process whose comm contains "runc", the kernel-provided
+#      identity facts (pid, ppid, comm, cmdline, root/cwd link targets).
+#      The evaluator binds each daemon operation id to a container-init
+#      pid INDEPENDENTLY of the audit windows: the runc CLI process whose
+#      /proc cmdline (or cwd/root) carries THIS operation's
+#      ops/op_<id>/root/runc-native/executor/ bundle path is the parent,
+#      and the runc:[2:INIT] process whose ppid is that parent is THIS
+#      operation's container init — ancestry is a kernel fact, never a
+#      timing heuristic. A window that attributes pathless records to a
+#      container-init pid the sampler does NOT prove owned by this
+#      operation fails closed (contradiction: FAIL; unproven: BLOCKED).
+#   8. THE NEGATIVE SCENARIO (r7-p21d-corrective-1): two operations are
+#      built CONCURRENTLY, so a foreign pathless runc-init AVC lands
+#      inside a PROVEN window while the window's own operation completes
+#      with an error. The evaluator classifies every runc:[2:INIT] record
+#      of each proven window by its sampler-proven pid (own / foreign /
+#      unproven) — a foreign record is EXCLUDED WITH PROOF, never
+#      misattributed, and an unproven record decides BLOCKED. The
+#      concurrent case emits its own verdict line
+#      R7-P21D-CX-VERDICT=DECISION=P21D-CX-PROVEN|P21D-CX-FAIL|\
+#      P21D-CX-BLOCKED;OVERLAP=<measured|absent>;FOREIGN-EXCLUDED=<n>;
+#      OVERLAP=measured requires the second window's begin strictly inside
+#      the first window's span, and FOREIGN-EXCLUDED>=1 requires the
+#      negative scenario to have actually been realized — the overlap
+#      alone is never accepted as the demonstration.
 #
 # Machine verdict contract (the evaluator is scripts/
 # release-2.4-r7-p21d-verdict.sh — fail-closed, row-by-row; the P21-B
@@ -654,19 +682,13 @@ classify_window() { # <tag> <operation-id (with or without the op_ prefix)>
   done < "$W"
 }
 
-run_one_build() { # <tag> <session-token> [inter]
+build_post() { # <tag> <session-token>
+  # Opens THIS operation's audit window BEFORE the build is admitted
+  # (r7-p21d-corrective-3) and issues POST /build. Asynchronous admission
+  # AVCs raised between the POST and the HTTP 201 belong to THIS
+  # operation's window. The HTTP status is recorded next to the response.
   local tag="$1" token="$2"
-  # The audit window opens BEFORE the build is admitted (r7-p21d-corrective-3):
-  # POST /build is asynchronous, and AVCs raised between the operation's
-  # admission and the HTTP 201 response belong to THIS operation's window.
-  # They must never be absorbed by the pre-build drain (that would silently
-  # weaken the eliminated-shape proof), and for the second operation they
-  # must never leak into the inter-window region — this capture_begin closes
-  # the inter-window region BEFORE the second POST is sent.
   capture_begin "$tag" "${3:-}" || true
-  # The build goes through the HTTP API so the daemon operation id is
-  # captured verbatim in the evidence (the CLI streams logs only). The
-  # HTTP status is recorded next to the response.
   local RESP="$EVIDENCE_DIR/build-start-$tag.json"
   local CODE
   CODE="$(curl --silent --max-time 10 \
@@ -687,7 +709,14 @@ run_one_build() { # <tag> <session-token> [inter]
     capture_end "$tag" || true
     return 1
   fi
-  local STATUS=""
+  return 0
+}
+
+build_wait() { # <tag> <session-token>
+  local tag="$1" token="$2"
+  local OP STATUS=""
+  OP="$(cat "$EVIDENCE_DIR/operation-id-$tag.log" 2>/dev/null)"
+  [ -n "$OP" ] || return 1
   for _ in $(seq 1 400); do
     STATUS="$(curl --silent --max-time 2 \
       --unix-socket "$DH_SOCK" -H "Authorization: Bearer $token" \
@@ -698,16 +727,36 @@ run_one_build() { # <tag> <session-token> [inter]
     sleep 0.05
   done
   printf '%s\n' "$STATUS" > "$EVIDENCE_DIR/build-status-$tag.json"
+  return 0
+}
+
+build_close() { # <tag> <session-token> — closes THIS operation's capture
+  # window BEFORE the per-operation logs are fetched (the original
+  # run_one_build ordering: the log-fetch records must never enter the
+  # operation's own window).
+  local tag="$1" token="$2"
+  local OP STATUS
   capture_end "$tag" || true
+  OP="$(cat "$EVIDENCE_DIR/operation-id-$tag.log" 2>/dev/null)"
+  STATUS="$(cat "$EVIDENCE_DIR/build-status-$tag.json" 2>/dev/null)"
   curl --silent --max-time 2 \
     --unix-socket "$DH_SOCK" -H "Authorization: Bearer $token" \
     "http://localhost/operations/$OP/logs?offset=0" \
     > "$EVIDENCE_DIR/build-$tag.log" 2>&1 || true
   log "build $tag status: $(printf '%s' "$STATUS" | grep -oE '"(status|result_code)":"[^"]*"' | tr '\n' ' ')"
+}
+
+run_one_build() { # <tag> <session-token> [inter]
+  local tag="$1" token="$2"
+  build_post "$tag" "$token" "${3:-}" || return 1
+  build_wait "$tag" "$token" || true
+  build_close "$tag" "$token"
   return 0
 }
 
-make_session_build() { # <tag> [inter]
+make_session() { # <tag> — workspace + principal + session + pull; sets
+  # the global SESSION_TOKEN for the caller (cx needs the token across a
+  # split post/wait/close flow; it is NEVER written to the evidence).
   local tag="$1"
   local WS="$PRINCIPAL_HOME/r7-p21d-ws-$tag"
   rm -rf "$WS"; mkdir -p "$WS/ctx"
@@ -727,12 +776,19 @@ make_session_build() { # <tag> [inter]
   TOKEN="$(grep -oE '"token": *"[^"]+"' "$RESP" 2>/dev/null | head -1 | sed 's/.*"token": *"//;s/"$//')"
   SID="$(grep -oE '"id": *"dhs_[^"]+"' "$RESP" 2>/dev/null | head -1 | sed 's/.*"id": *"//;s/"$//')"
   printf '%s\n' "$SID" > "$EVIDENCE_DIR/session-id-$tag.log"
+  SESSION_TOKEN="$TOKEN"
   if [ -z "$TOKEN" ]; then
     log "session create failed for $tag (HTTP $CODE); skipping this build"
     return 1
   fi
   docker-helper pull alpine:3.24 >"$EVIDENCE_DIR/pull-$tag.log" 2>&1 || true
-  run_one_build "$tag" "$TOKEN" "${2:-}" || true
+  return 0
+}
+
+make_session_build() { # <tag> [inter]
+  local tag="$1"
+  make_session "$tag" || return 1
+  run_one_build "$tag" "$SESSION_TOKEN" "${2:-}" || true
   return 0
 }
 
@@ -1001,6 +1057,185 @@ int main(int argc, char **argv)
 CEOF
 gcc -O2 -o "$EVIDENCE_DIR/p21d_av_probe" "$EVIDENCE_DIR/p21d_av_probe.c" -lselinux \
   || fail "p21d_av_probe build failed"
+
+cat > "$EVIDENCE_DIR/p21d_pid_sampler.c" <<'CEOF'
+/* p21d_pid_sampler.c — the R7 P21-D-C1 pid-proof sampler (diagnostic
+ * harness only; no production, no policy change). While the audited
+ * operations run, the sampler sweeps /proc and records, for EVERY process
+ * whose comm contains "runc", the kernel-provided identity facts:
+ *   pid, ppid, comm, cmdline, and the readlink targets of /proc/<pid>/root
+ * and /proc/<pid>/cwd.
+ * The sampler owns NO attribution: it only records runtime state. The
+ * evaluator binds each daemon operation id to a container-init pid from
+ * these facts alone: the runc process whose cmdline/cwd/root carries THIS
+ * operation's ops/op_<id>/root/runc-native/executor/ bundle path is the
+ * parent; the runc:[2:INIT] process whose ppid is that parent is THIS
+ * operation's container init (kernel ancestry, not a timing heuristic).
+ * Output: TAB-separated lines —
+ *   SAMPLE\t<ts>\t<pid>\t<ppid>\t<comm>\t<cmd>\t<root>\t<cwd>
+ *   DONE\tsweeps=<n>
+ * A negative ppid means the stat read failed for that sample (transient
+ * process exit); unreadable cmdline/link fields are recorded as
+ * <err:errno> placeholders. Missing evidence must stay visible. */
+#define _GNU_SOURCE
+#include <dirent.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+
+#define CMD_MAX 2048
+#define LINK_MAX 1024
+
+static int read_comm(int pid, char *out, size_t outsz)
+{
+	char path[64];
+	FILE *f;
+	snprintf(path, sizeof(path), "/proc/%d/comm", pid);
+	if (!(f = fopen(path, "r")))
+		return -1;
+	if (!fgets(out, (int)outsz, f)) {
+		fclose(f);
+		return -1;
+	}
+	fclose(f);
+	out[strcspn(out, "\n")] = '\0';
+	return 0;
+}
+
+static int read_ppid(int pid, int *ppid)
+{
+	char path[64], buf[1024];
+	FILE *f;
+	char *p;
+	snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+	if (!(f = fopen(path, "r"))) return -1;
+	if (!fgets(buf, sizeof(buf), f)) { fclose(f); return -1; }
+	fclose(f);
+	p = strrchr(buf, ')');
+	if (!p) return -1;
+	p += 2;                    /* skip ") " -> state */
+	while (*p == ' ') p++;
+	p = strchr(p, ' ');        /* skip state -> ppid */
+	if (!p) return -1;
+	*ppid = atoi(p + 1);
+	return 0;
+}
+
+static void sanitize(char *s)
+{
+	for (; *s; s++)
+		if (*s == '\t' || *s == '\n' || *s == '\r')
+			*s = ' ';
+}
+
+static void read_cmdline(int pid, char *out, size_t outsz)
+{
+	char path[64], buf[CMD_MAX];
+	FILE *f;
+	size_t i, j, n;
+	snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
+	if (!(f = fopen(path, "rb"))) {
+		snprintf(out, outsz, "<err:%d>", errno);
+		return;
+	}
+	n = fread(buf, 1, sizeof(buf), f);
+	fclose(f);
+	if (n == 0) {
+		snprintf(out, outsz, "-");
+		return;
+	}
+	for (i = 0, j = 0; i < n && j + 1 < outsz; i++)
+		out[j++] = buf[i] == '\0' ? ' ' : buf[i];
+	out[j] = '\0';
+	sanitize(out);
+}
+
+static void read_link(int pid, const char *which, char *out, size_t outsz)
+{
+	char path[80];
+	ssize_t r;
+	snprintf(path, sizeof(path), "/proc/%d/%s", pid, which);
+	if ((r = readlink(path, out, outsz - 1)) < 0) {
+		snprintf(out, outsz, "<err:%d>", errno);
+		return;
+	}
+	out[r] = '\0';
+	sanitize(out);
+	if (out[0] == '\0')
+		snprintf(out, outsz, "-");
+}
+
+static int all_digits(const char *s)
+{
+	for (; *s; s++)
+		if (*s < '0' || *s > '9')
+			return 0;
+	return *s != '\0' ? 1 : 0;
+}
+
+int main(int argc, char **argv)
+{
+	FILE *out;
+	const char *stopfile;
+	long sweeps = 0;
+	time_t start;
+
+	if (argc < 3) {
+		fprintf(stderr, "usage: p21d_pid_sampler <output-file> <stop-file>\n");
+		return 2;
+	}
+	if (!(out = fopen(argv[1], "w"))) {
+		fprintf(stderr, "sampler: cannot open %s: %s\n", argv[1], strerror(errno));
+		return 2;
+	}
+	stopfile = argv[2];
+	start = time(NULL);
+	for (;;) {
+		DIR *d = opendir("/proc");
+		struct dirent *e;
+		if (!d) {
+			fprintf(out, "FATAL\topendir-errno=%d\n", errno);
+			break;
+		}
+		while ((e = readdir(d)) != NULL) {
+			int pid, ppid;
+			char comm[64], cmd[CMD_MAX], root[LINK_MAX], cwd[LINK_MAX];
+			struct timespec ts;
+			if (!all_digits(e->d_name))
+				continue;
+			pid = atoi(e->d_name);
+			if (read_comm(pid, comm, sizeof(comm)))
+				continue;
+			if (!strstr(comm, "runc"))
+				continue;
+			clock_gettime(CLOCK_REALTIME, &ts);
+			if (read_ppid(pid, &ppid) != 0)
+				ppid = -1;
+			read_cmdline(pid, cmd, sizeof(cmd));
+			read_link(pid, "root", root, sizeof(root));
+			read_link(pid, "cwd", cwd, sizeof(cwd));
+			fprintf(out, "SAMPLE\t%lld.%09ld\t%d\t%d\t%s\t%s\t%s\t%s\n",
+				(long long)ts.tv_sec, ts.tv_nsec, pid, ppid, comm, cmd, root, cwd);
+		}
+		closedir(d);
+		sweeps++;
+		fflush(out);
+		if (access(stopfile, F_OK) == 0)
+			break;
+		if (time(NULL) - start > 600)
+			break;
+		usleep(2000);
+	}
+	fprintf(out, "DONE\tsweeps=%ld\n", sweeps);
+	fclose(out);
+	return 0;
+}
+CEOF
+gcc -O2 -o "$EVIDENCE_DIR/p21d_pid_sampler" "$EVIDENCE_DIR/p21d_pid_sampler.c" \
+  || fail "p21d_pid_sampler build failed"
 log "kernel-decision helpers built"
 touch "$STATE_DIR/sec4"
 fi
@@ -1159,6 +1394,13 @@ done
 [ -f "$AUDIT_LOG_PATH" ] || fail "audit source unavailable; per-operation windows cannot be bounded"
 audit_open || fail "cannot open the pinned audit-source descriptor"
 log "pinned audit-source descriptor: fd=$AUD_FD identity=$(audit_identity || true)"
+# The pid-proof sampler (r7-p21d-corrective-1): runtime /proc ancestry is
+# recorded WHILE the audited operations run; the evaluator binds each
+# operation id to its container-init pid from these facts alone.
+P21D_SAMPLER_STOP="$STATE_DIR/sampler.stop"
+rm -f "$P21D_SAMPLER_STOP"
+"$EVIDENCE_DIR/p21d_pid_sampler" "$EVIDENCE_DIR/pid-sampler.log" "$P21D_SAMPLER_STOP" &
+P21D_SAMPLER_PID=$!
 make_session_build c1
 classify_window c1 "$(cat "$EVIDENCE_DIR/operation-id-c1.log" 2>/dev/null)"
 # The SECOND operation's pre-build drain IS the inter-window capture: the
@@ -1168,9 +1410,78 @@ classify_window c1 "$(cat "$EVIDENCE_DIR/operation-id-c1.log" 2>/dev/null)"
 # decides BLOCKED — it is never assumed to belong to an operation).
 make_session_build c2 inter
 classify_window c2 "$(cat "$EVIDENCE_DIR/operation-id-c2.log" 2>/dev/null)"
+touch "$P21D_SAMPLER_STOP"
+wait "$P21D_SAMPLER_PID" 2>/dev/null || true
 compose_terminals_log
 cat "$EVIDENCE_DIR/p21d-terminals.log"
 touch "$STATE_DIR/sec7"
+fi
+
+# ============================================================================
+# Section 7b: the CONCURRENT negative scenario (r7-p21d-corrective-1).
+#
+# Two operations are built CONCURRENTLY: a foreign pathless runc-init AVC
+# lands inside a PROVEN window while the window's own operation completes
+# with an error. Window-scoped attribution alone cannot survive this —
+# the demonstration proves the pid proof does: every runc:[2:INIT] record
+# of each proven window is classified by its sampler-proven pid (own /
+# foreign / unproven); a foreign record is EXCLUDED WITH PROOF, never
+# misattributed; an unproven record decides BLOCKED. The cx evaluator
+# requires OVERLAP=measured (the second window's begin strictly inside the
+# first window's span) and FOREIGN-EXCLUDED>=1 — the negative scenario
+# must actually have been realized, never assumed.
+# ============================================================================
+if [ -f "$STATE_DIR/sec7b" ]; then log "phase marker: section 7b done; skipping"; else
+log "=== section 7b: the concurrent negative scenario (cx) ==="
+[ -n "$ADMIN_TOKEN" ] || fail "admin token unreadable; the cx scenario cannot run"
+[ -x "$EVIDENCE_DIR/p21d_pid_sampler" ] || fail "pid sampler missing"
+make_session cx1 || true
+CX_TOKEN_1="$SESSION_TOKEN"
+make_session cx2 || true
+CX_TOKEN_2="$SESSION_TOKEN"
+if [ -n "$CX_TOKEN_1" ] && [ -n "$CX_TOKEN_2" ]; then
+  P21D_CX_SAMPLER_STOP="$STATE_DIR/sampler-cx.stop"
+  rm -f "$P21D_CX_SAMPLER_STOP"
+  "$EVIDENCE_DIR/p21d_pid_sampler" "$EVIDENCE_DIR/pid-sampler-cx.log" "$P21D_CX_SAMPLER_STOP" &
+  P21D_CX_SAMPLER_PID=$!
+  # The second window opens AFTER the first operation's POST: the two
+  # windows provably overlap in the concurrent region, and each proven
+  # window carries BOTH operations' runtime records.
+  build_post cx1 "$CX_TOKEN_1" || true
+  build_post cx2 "$CX_TOKEN_2" || true
+  build_wait cx1 "$CX_TOKEN_1" || true
+  build_wait cx2 "$CX_TOKEN_2" || true
+  # BOTH windows close only after BOTH operations reached their terminal
+  # state: each proven window spans the whole concurrent region.
+  build_close cx1 "$CX_TOKEN_1"
+  build_close cx2 "$CX_TOKEN_2"
+  touch "$P21D_CX_SAMPLER_STOP"
+  wait "$P21D_CX_SAMPLER_PID" 2>/dev/null || true
+  classify_window cx1 "$(cat "$EVIDENCE_DIR/operation-id-cx1.log" 2>/dev/null)"
+  classify_window cx2 "$(cat "$EVIDENCE_DIR/operation-id-cx2.log" 2>/dev/null)"
+  {
+    compose_op_section cx1
+    compose_op_section cx2
+  } > "$EVIDENCE_DIR/p21d-cx-terminals.log" 2>&1
+  cat "$EVIDENCE_DIR/p21d-cx-terminals.log"
+  if [ -r /tmp/r7-diag/release-2.4-r7-p21d-verdict.sh ]; then
+    bash /tmp/r7-diag/release-2.4-r7-p21d-verdict.sh --cx "$EVIDENCE_DIR" \
+      > "$EVIDENCE_DIR/p21d-cx-verdict.log" 2>&1
+    log "cx evaluator exit=$?"
+    cat "$EVIDENCE_DIR/p21d-cx-verdict.log"
+  else
+    log "cx evaluator missing from /tmp/r7-diag; recording BLOCKED"
+    printf 'R7-P21D-CX-VERDICT=DECISION=P21D-CX-BLOCKED;OVERLAP=absent;FOREIGN-EXCLUDED=0;REASON=evaluator-script-missing\n' \
+      > "$EVIDENCE_DIR/p21d-cx-verdict.log"
+    cat "$EVIDENCE_DIR/p21d-cx-verdict.log"
+  fi
+else
+  log "cx session creation failed; recording BLOCKED"
+  printf 'R7-P21D-CX-VERDICT=DECISION=P21D-CX-BLOCKED;OVERLAP=absent;FOREIGN-EXCLUDED=0;REASON=session-creation-failed\n' \
+    > "$EVIDENCE_DIR/p21d-cx-verdict.log"
+  cat "$EVIDENCE_DIR/p21d-cx-verdict.log"
+fi
+touch "$STATE_DIR/sec7b"
 fi
 
 # ============================================================================

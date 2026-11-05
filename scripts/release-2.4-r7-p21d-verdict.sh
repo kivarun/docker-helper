@@ -49,6 +49,23 @@
 #     the explicit NEXT-TERMINAL=none token, admissible ONLY when BOTH
 #     operations proved their own completion (the P21-D alternative form
 #     of runtime advancement) (the workflow gate).
+#   release-2.4-r7-p21d-verdict.sh --cx <evidence-dir>
+#     The CONCURRENT negative-scenario classifier (r7-p21d-corrective-1):
+#     evaluates p21d-cx-terminals.log — two operations built
+#     CONCURRENTLY, so a foreign pathless runc-init AVC lands inside a
+#     PROVEN window while the window's own operation completes with an
+#     error. Every runc:[2:INIT] record of each proven window is
+#     classified by its pid-proof binding (own / foreign / unproven); a
+#     foreign record is EXCLUDED WITH PROOF, never misattributed; an
+#     unproven record decides BLOCKED. OVERLAP=measured requires the
+#     second window's begin strictly inside the first window's span and
+#     FOREIGN-EXCLUDED>=1 requires the negative scenario to have actually
+#     been realized. Emits
+#     R7-P21D-CX-VERDICT=DECISION=P21D-CX-PROVEN|P21D-CX-FAIL|\
+#     P21D-CX-BLOCKED;OVERLAP=...;FOREIGN-EXCLUDED=...;[REASON=...]
+#   release-2.4-r7-p21d-verdict.sh --cx-gate <cx-verdict-line>
+#     Exit 0 iff the argument is exactly
+#     DECISION=P21D-CX-PROVEN;OVERLAP=measured;FOREIGN-EXCLUDED=<n>=1.. .
 #
 # Decision precedence (mirrors the P21-B evaluator): FAIL (a positive
 # violation was proven) beats BLOCKED (required evidence missing, empty,
@@ -124,8 +141,33 @@ if [ "${1:-}" = "--gate" ]; then
   exit 0
 fi
 
+if [ "${1:-}" = "--cx-gate" ]; then
+  line="${2:-}"
+  case "$line" in
+    *"'"*|*$'\n'*|*';;'*|*';') exit 1 ;;
+    R7-P21D-CX-VERDICT=DECISION=P21D-CX-PROVEN\;*) : ;;
+    *) exit 1 ;;
+  esac
+  tail="${line#R7-P21D-CX-VERDICT=DECISION=P21D-CX-PROVEN;}"
+  case "$tail" in *DECISION=*|*OVERLAP=absent*) exit 1 ;; esac
+  [[ "$tail" =~ ^OVERLAP=measured\;FOREIGN-EXCLUDED=[1-9][0-9]*$ ]] || exit 1
+  exit 0
+fi
+
+CX_MODE=0
 DIR="${1:-}"
-[ -n "$DIR" ] && [ -d "$DIR" ] || { printf 'R7-P21D-VERDICT=DECISION=P21D-BLOCKED;REASON=no-evidence-dir\n'; exit 2; }
+if [ "${1:-}" = "--cx" ]; then
+  CX_MODE=1
+  DIR="${2:-}"
+fi
+[ -n "$DIR" ] && [ -d "$DIR" ] || {
+  if [ "$CX_MODE" = 1 ]; then
+    printf 'R7-P21D-CX-VERDICT=DECISION=P21D-CX-BLOCKED;OVERLAP=absent;FOREIGN-EXCLUDED=0;REASON=no-evidence-dir\n'
+  else
+    printf 'R7-P21D-VERDICT=DECISION=P21D-BLOCKED;REASON=no-evidence-dir\n'
+  fi
+  exit 2
+}
 
 C1='system_u:system_r:docker_helper_buildkitd_t:s0:c1'
 C2='system_u:system_r:docker_helper_buildkitd_t:s0:c2'
@@ -135,12 +177,32 @@ MEM='system_u:object_r:docker_helper_runc_memfd_t:s0'
 UNRES='unconfined_u:object_r:user_tmp_t:s0'
 TMP='system_u:object_r:tmpfs_t:s0'
 
-CLASS_LOG="$DIR/p21d-classification.log"
-: > "$CLASS_LOG" 2>/dev/null || { printf 'R7-P21D-VERDICT=DECISION=P21D-BLOCKED;REASON=classification-log-unwritable\n'; exit 2; }
+if [ "$CX_MODE" = 1 ]; then
+  CLASS_LOG="$DIR/p21d-cx-classification.log"
+else
+  CLASS_LOG="$DIR/p21d-classification.log"
+fi
+: > "$CLASS_LOG" 2>/dev/null || {
+  if [ "$CX_MODE" = 1 ]; then
+    printf 'R7-P21D-CX-VERDICT=DECISION=P21D-CX-BLOCKED;OVERLAP=absent;FOREIGN-EXCLUDED=0;REASON=classification-log-unwritable\n'
+  else
+    printf 'R7-P21D-VERDICT=DECISION=P21D-BLOCKED;REASON=classification-log-unwritable\n'
+  fi
+  exit 2
+}
 
 DECISION="P21D-MEASURED"
-note() { # <severity> <detail> — FAIL beats BLOCKED beats MEASURED
+note() { # <severity> <detail> — FAIL beats BLOCKED beats MEASURED; the
+  # decision token follows the mode (the cx classifier carries the
+  # P21D-CX- tokens)
   printf '%s\t%s\n' "$1" "$2" >> "$CLASS_LOG"
+  if [ "$CX_MODE" = 1 ]; then
+    case "$1" in
+      FAIL) DECISION="P21D-CX-FAIL" ;;
+      BLOCKED) [ "$DECISION" = "P21D-CX-FAIL" ] || DECISION="P21D-CX-BLOCKED" ;;
+    esac
+    return 0
+  fi
   case "$1" in
     FAIL) DECISION="P21D-FAIL" ;;
     BLOCKED) [ "$DECISION" = "P21D-FAIL" ] || DECISION="P21D-BLOCKED" ;;
@@ -154,6 +216,444 @@ require_file() { # <name>
   fi
   return 0
 }
+
+# Positive-violation scans on the RAW captured bytes. These are valid
+# regardless of capture soundness: a recorded violation in the drained
+# bytes proves the policy allowed it, even when the capture cannot prove
+# completeness. (The raw window is the bytes actually read through the
+# pinned descriptor — the section cannot be more authoritative than it.)
+raw_policy_scans() { # <opid> <raw> — the policy-level positive-violation
+  # scans over a raw window: the regression controls and BOTH eliminated
+  # devnode terminal shapes. Shared by the sequential acceptance path and
+  # the concurrent (cx) classifier; the attribution scan below is the
+  # sequential-only addition (in cx, records of the OTHER concurrently
+  # running operation inside a proven window are the EXPECTED shape the
+  # pid proof must exclude — never a policy violation).
+  local opid="$1" raw="$2" hit
+  hit="$(grep -a 'docker_helper_runc_memfd_t' "$raw" | grep -a 'tclass=file' | grep -a '{ create }' | head -1 || true)"
+  if [ -n "$hit" ]; then
+    note FAIL "REGRESSION-CONTROL-REAPPEARED op_$opid P20 terminal (raw window): $hit"
+  fi
+  hit="$(grep -a 'tcontext=system_u:object_r:tmpfs_t:s0 tclass=file' "$raw" | grep -a '{ write }' | head -1 || true)"
+  if [ -n "$hit" ]; then
+    note FAIL "REGRESSION-CONTROL-REAPPEARED op_$opid pre-B terminal (raw window): $hit"
+  fi
+  hit="$(grep -aF -e 'denied  { associate }' "$raw" | head -1 || true)"
+  if [ -n "$hit" ]; then
+    note FAIL "REGRESSION-CONTROL-REAPPEARED op_$opid associate (raw window): $hit"
+  fi
+  hit="$(grep -a 'tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file' "$raw" | grep -a 'denied  { read open }' | head -1 || true)"
+  if [ -n "$hit" ]; then
+    note FAIL "OPEN-COMPLETION-LIVE op_$opid (raw window): $hit"
+  fi
+  hit="$(grep -a 'tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file' "$raw" | grep -a 'denied  { mounton }' | head -1 || true)"
+  if [ -n "$hit" ]; then
+    note FAIL "MOUNTON-TERMINAL-LIVE op_$opid (raw window): the P21-C measured devnode mounton terminal reappeared: $hit"
+  fi
+  return 0
+}
+
+raw_positive_scans() { # <opid> <raw> — the sequential acceptance scans:
+  # the policy-level scans PLUS the sequential attribution violation (a
+  # record of ANOTHER operation inside this operation's raw window).
+  local opid="$1" raw="$2" hit
+  raw_policy_scans "$opid" "$raw"
+  hit="$(grep -a 'comm="runc:\[2:INIT\]"' "$raw" | grep -aE 'ops/op_[0-9a-f]+/' | grep -av "ops/op_${opid}/" | head -1 || true)"
+  if [ -n "$hit" ]; then
+    note FAIL "ATTRIBUTION-VIOLATION op_$opid (raw window): a record of ANOTHER operation appears in this operation's raw window: $hit"
+  fi
+  return 0
+}
+
+  # The strict next-terminal matcher: a full-structure denied record
+  # (permissive=0, buildkitd_t:s0:cX source, comm="runc:[2:INIT]"), NOT the
+  # granted devnode { read open } shape, NOT the granted devnode { mounton }
+  # shape, NOT the measured pre-boundary cap_userns self-denials. The
+  # permission is observed, never pre-classified. Records on stdin; prints
+  # the FIRST matching record.
+  next_terminal_matcher() {
+    awk '
+      /avc:  denied  / &&
+      /permissive=0/ &&
+      /scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c[0-9]+ / &&
+      /comm="runc:\[2:INIT\]"/ {
+        if ($0 ~ /tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file / &&
+            $0 ~ /denied  \{ read open \} /) next
+        if ($0 ~ /tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file / &&
+            $0 ~ /denied  \{ mounton \} /) next
+        if ($0 ~ /tclass=cap_userns /) next
+        print; exit
+      }'
+  }
+
+  # verify_capture <opid> <tag> — the (a)/(a2) capture-integrity contract,
+  # shared verbatim by the sequential acceptance path and the concurrent
+  # (cx) classifier. Requires the section BODY. Emits the notes itself and
+  # runs the policy-level raw scans on every unsound path; returns 0 only
+  # when the capture is proven AND the raw artifact corroborates the
+  # section. Sets CAP_BEFORE/CAP_AFTER/CAP_EXPECTED/CAP_ACTUAL/CAP_SOUND.
+  verify_capture() { # <opid> <tag>
+    local opid="$1" tag="$2" key total prov val badcap=0
+    CAP_SOUND=0; CAP_BEFORE=""; CAP_AFTER=""; CAP_EXPECTED=""; CAP_ACTUAL=""
+    local RAW="$DIR/avc-window-$tag.log"
+    for key in identity-begin-pre identity-begin-post identity-extract-pre identity-extract-post; do
+      total="$(printf '%s\n' "$BODY" | grep -Ecx -- "^$key=.+" || true)"
+      prov="$(printf '%s\n' "$BODY" | grep -Ecx -- "^$key=proven" || true)"
+      if [ "$total" -ne 1 ] || [ "$prov" -ne 1 ]; then
+        note BLOCKED "terminals: op_$opid capture checkpoint '$key' is missing, duplicated, or not proven (records=$total proven=$prov)"
+        badcap=1
+      fi
+    done
+    for key in pre-drain window-drain; do
+      total="$(printf '%s\n' "$BODY" | grep -Ecx -- "^$key=.+" || true)"
+      prov="$(printf '%s\n' "$BODY" | grep -Ecx -- "^$key=ok" || true)"
+      if [ "$total" -ne 1 ] || [ "$prov" -ne 1 ]; then
+        note BLOCKED "terminals: op_$opid drain outcome '$key' is missing, duplicated, or not ok (records=$total ok=$prov)"
+        badcap=1
+      fi
+    done
+    for key in before after expected actual; do
+      total="$(printf '%s\n' "$BODY" | grep -Ecx -- "^$key=[0-9]+\$" || true)"
+      if [ "$total" -ne 1 ]; then
+        note BLOCKED "terminals: op_$opid capture accounting key '$key' is missing, duplicated, or not a plain number (records=$total)"
+        badcap=1
+        continue
+      fi
+      val="$(printf '%s\n' "$BODY" | sed -n "s/^$key=//p" | head -1)"
+      case "$key" in
+        before) CAP_BEFORE="$val" ;;
+        after) CAP_AFTER="$val" ;;
+        expected) CAP_EXPECTED="$val" ;;
+        actual) CAP_ACTUAL="$val" ;;
+      esac
+    done
+    total="$(printf '%s\n' "$BODY" | grep -Ecx -- '^source=.+' || true)"
+    prov="$(printf '%s\n' "$BODY" | grep -Ecx -- '^source=proven' || true)"
+    if [ "$total" -ne 1 ] || [ "$prov" -ne 1 ]; then
+      note BLOCKED "terminals: op_$opid capture source state is missing, duplicated, or not proven (records=$total proven=$prov)"
+      badcap=1
+    fi
+    if [ "$badcap" = 1 ]; then
+      # The capture is not proven — it can never measure. Positive
+      # violations recorded in the raw captured bytes are still detected.
+      [ -r "$RAW" ] && raw_positive_scans "$opid" "$RAW"
+      return 1
+    fi
+    if [ "$CAP_EXPECTED" -ne $((CAP_AFTER - CAP_BEFORE)) ]; then
+      note BLOCKED "terminals: op_$opid capture accounting inconsistent (expected=$CAP_EXPECTED, but after=$CAP_AFTER - before=$CAP_BEFORE)"
+      badcap=1
+    fi
+    if [ "$CAP_ACTUAL" -ne "$CAP_EXPECTED" ]; then
+      note BLOCKED "terminals: op_$opid captured line count does not match the boundary arithmetic (actual=$CAP_ACTUAL expected=$CAP_EXPECTED) — the extraction is not the measured window"
+      badcap=1
+    fi
+    if [ "$CAP_ACTUAL" -eq 0 ]; then
+      note BLOCKED "terminals: op_$opid window captured 0 records — absence of AVCs alone is never a passing outcome"
+      badcap=1
+    fi
+    if [ "$badcap" = 1 ]; then
+      [ -r "$RAW" ] && raw_positive_scans "$opid" "$RAW"
+      return 1
+    fi
+    # (a2) the raw window artifact must independently corroborate the
+    # section: EXACTLY the measured line count.
+    if [ ! -r "$RAW" ]; then
+      note BLOCKED "terminals: op_$opid raw window artifact avc-window-$tag.log is missing"
+      return 1
+    fi
+    local RAW_LINES
+    RAW_LINES="$(wc -l <"$RAW" 2>/dev/null || printf 0)"
+    if [ "$RAW_LINES" -ne "$CAP_ACTUAL" ]; then
+      note BLOCKED "terminals: op_$opid raw window artifact holds $RAW_LINES lines but the capture accounting claims actual=$CAP_ACTUAL"
+      [ -s "$RAW" ] && raw_positive_scans "$opid" "$RAW"
+      return 1
+    fi
+    printf 'WINDOW-OK\top_%s before=%s after=%s expected=%s actual=%s capture=proven\n' \
+      "$opid" "$CAP_BEFORE" "$CAP_AFTER" "$CAP_EXPECTED" "$CAP_ACTUAL" >> "$CLASS_LOG"
+    CAP_SOUND=1
+    return 0
+  }
+
+  # The pid-proof sampler binding (r7-p21d-corrective-1). Reads a sampler
+  # log and binds each operation id to its container-init pid from the
+  # kernel-provided /proc facts ALONE:
+  #   OWNER(op): sampled processes whose comm contains "runc" and whose
+  #     cmdline/cwd/root carries THIS operation's ops/op_<id>/
+  #     .../runc-native/executor/ bundle path (the runc CLI invocation of
+  #     THIS operation);
+  #   INIT(op): sampled comm="runc:[2:INIT]" processes whose ppid is an
+  #     OWNER(op) process, or whose own cmdline/cwd/root carries the op's
+  #     bundle path.
+  # Ancestry (ppid) is a kernel fact, never a timing heuristic; the audit
+  # windows are NOT an input to the binding. Sets S_VALID (ok | missing |
+  # invalid:<detail>), S_INIT1/S_INIT2 (a single pid | none |
+  # ambiguous:<pids>) and S_CONFLICTS (pids bound to BOTH operations).
+  sampler_bindings() { # <sampler-file> <op1-id> <op2-id>
+    local f="$1" out
+    S_VALID=""; S_INIT1=""; S_INIT2=""; S_CONFLICTS=""
+    if [ ! -r "$f" ]; then
+      S_VALID="missing"
+      return 0
+    fi
+    out="$(awk -v OP1="$2" -v OP2="$3" '
+      BEGIN { FS = "\t" }
+      $1 == "DONE" { done++; sw = $2; next }
+      $1 == "SAMPLE" {
+        if (NF != 8) { bad++; next }
+        if ($2 !~ /^[0-9]+(\.[0-9]+)?$/) { bad++; next }
+        if ($3 !~ /^[0-9]+$/ || $4 !~ /^-?[0-9]+$/) { bad++; next }
+        if ($5 == "") { bad++; next }
+        n++; L[n] = $0; next
+      }
+      { bad++ }
+      END {
+        if (bad > 0) { printf "INVALID\tunparseable-lines=%d\n", bad; exit }
+        if (done != 1) { printf "INVALID\tdone-records=%d\n", done + 0; exit }
+        if (sw !~ /^sweeps=[0-9]+$/) { print "INVALID\tdone-grammar"; exit }
+        sub(/^sweeps=/, "", sw)
+        if (sw + 0 < 1) { print "INVALID\tzero-sweeps"; exit }
+        if (n < 1) { print "INVALID\tno-samples"; exit }
+        m1 = "ops/op_" OP1 "/"
+        m2 = "ops/op_" OP2 "/"
+        for (i = 1; i <= n; i++) {
+          split(L[i], f, "\t")
+          if (f[5] ~ /runc/) {
+            if (f[6] ~ m1 || f[7] ~ m1 || f[8] ~ m1) own1[f[3]] = 1
+            if (f[6] ~ m2 || f[7] ~ m2 || f[8] ~ m2) own2[f[3]] = 1
+          }
+        }
+        for (i = 1; i <= n; i++) {
+          split(L[i], f, "\t")
+          if (f[5] != "runc:[2:INIT]") continue
+          if ((f[4] in own1) || f[6] ~ m1 || f[7] ~ m1 || f[8] ~ m1) i1[f[3]] = 1
+          if ((f[4] in own2) || f[6] ~ m2 || f[7] ~ m2 || f[8] ~ m2) i2[f[3]] = 1
+        }
+        c1 = 0; s1 = ""
+        for (p in i1) { c1++; s1 = s1 (c1 > 1 ? "," : "") p }
+        c2 = 0; s2 = ""
+        for (p in i2) { c2++; s2 = s2 (c2 > 1 ? "," : "") p }
+        print "VALID"
+        printf "BIND1\t%s\n", (c1 == 0 ? "none" : (c1 > 1 ? "ambiguous:" s1 : s1))
+        printf "BIND2\t%s\n", (c2 == 0 ? "none" : (c2 > 1 ? "ambiguous:" s2 : s2))
+        for (p in i1) if (p in i2) printf "CONFLICT\t%s\n", p
+      }' "$f")"
+    case "$out" in
+      VALID*)
+        S_VALID="ok"
+        S_INIT1="$(printf '%s\n' "$out" | sed -n 's/^BIND1\t//p')"
+        S_INIT2="$(printf '%s\n' "$out" | sed -n 's/^BIND2\t//p')"
+        S_CONFLICTS="$(printf '%s\n' "$out" | sed -n 's/^CONFLICT\t//p' | sort -u | tr '\n' ' ')"
+        ;;
+      *) S_VALID="invalid:$(printf '%s\n' "$out" | head -1 | tr '\t' ' ')" ;;
+    esac
+    return 0
+  }
+
+  # pid_proof_check <opid> <pos> <window-pid> — the fail-closed decision
+  # for WINDOW-SCOPED pathless attribution: the window's container-init
+  # pid must be the sampler-proven init pid of THIS operation. A
+  # contradiction is a positive violation (FAIL): the window claims
+  # records the kernel ancestry assigns elsewhere. An unavailable proof
+  # (sampler missing/invalid, no init bound, ambiguous binding) is
+  # BLOCKED — window membership alone is never accepted as pid ownership.
+  pid_proof_check() { # <opid> <pos> <window-pid>
+    local opid="$1" pos="$2" wpid="$3" mine others
+    if [ "$S_VALID" != "ok" ]; then
+      note BLOCKED "terminals: op_$opid attributes pathless runc:[2:INIT] records to the proven window, but the pid-proof sampler evidence is $S_VALID"
+      return 0
+    fi
+    if [ "$pos" = "1" ]; then mine="$S_INIT1"; others="$S_INIT2"; else mine="$S_INIT2"; others="$S_INIT1"; fi
+    case "$mine" in
+      none)
+        note BLOCKED "terminals: op_$opid has NO container-init pid proven by the sampler (the /proc ancestry binding found no init for op_$opid) — window membership alone is never pid ownership"
+        return 0
+        ;;
+      ambiguous:*)
+        note BLOCKED "terminals: the sampler binds MULTIPLE container inits to op_$opid (${mine#ambiguous:}) — ambiguous evidence"
+        return 0
+        ;;
+    esac
+    if [ "$wpid" != "$mine" ]; then
+      case ",$others," in
+        *",$wpid,"*)
+          note FAIL "PID-PROOF-CONTRADICTION op_$opid: the window's container-init pid $wpid is proven by the sampler to belong to the OTHER operation — the window-scoped attribution is affirmatively wrong"
+          ;;
+        *)
+          note FAIL "PID-PROOF-CONTRADICTION op_$opid: the window's container-init pid $wpid is not the operation's sampler-proven init pid $mine"
+          ;;
+      esac
+      return 0
+    fi
+    printf 'PID-PROOF\top_%s window container-init pid %s is the sampler-proven init (kernel ancestry: the runc parent whose /proc identity carries ops/op_%s/)\n' \
+      "$opid" "$wpid" "$opid" >> "$CLASS_LOG"
+    return 0
+  }
+
+
+# The exact section-header lines. Header recognition and the AWK section
+# anchoring below share THESE EXACT strings, so header presence and section
+# boundaries can never diverge: a prefixed/suffixed/corrupted header line
+# matches neither the whole-line header counts NOR the AWK section anchors.
+OP_HDR_RE='^== operation [a-z0-9]+ op_[0-9a-f]+ session dhs_[0-9a-f]+ ==$'
+P20_HDR='-- P20 terminal (runc_memfd_t:file create) --'
+PREB_HDR='-- pre-B terminal (tmpfs_t:file write) --'
+ASSOC_HDR='-- associate denials (must be EMPTY — the singleton is granted) --'
+OLDSHAPE_HDR='-- P21-B terminal (devnode_t:file { read open }; the ELIMINATED shape) --'
+OLDMOUNTON_HDR='-- P21-C terminal (devnode_t:file mounton; the ELIMINATED shape) --'
+
+# ---------------------------------------------------------------------------
+# The CONCURRENT negative-scenario classifier (--cx, r7-p21d-corrective-1).
+# Two operations are built CONCURRENTLY: a foreign pathless runc-init AVC
+# lands inside a PROVEN window while the window's own operation completes
+# with an error. Every runc:[2:INIT] record of each proven window is
+# classified by its pid-proof binding — OWN (the operation's sampler-proven
+# init pid), FOREIGN (the other operation's proven init pid — excluded WITH
+# proof, never misattributed), UNPROVEN (BLOCKED). The record-based
+# attribution of the sequential path is replaced by the per-pid binding:
+# under concurrency the window can prove only WHERE bytes were drained,
+# never WHOSE records they are.
+# ---------------------------------------------------------------------------
+if [ "$CX_MODE" = 1 ]; then
+  DECISION="P21D-CX-PROVEN"
+  OVERLAP="absent"
+  FOREIGN_EXCLUDED=0
+  CX1_AFTER=""
+  CX2_BEFORE=""
+
+  eval_cx_section() { # <hdr> <opid> <pos>
+    local hdr="$1" opid="$2" pos="$3"
+    local TAG="${hdr#== operation }"
+    TAG="${TAG%% *}"
+    local RAW="$DIR/avc-window-$TAG.log"
+    BODY="$(awk -v hdr="$hdr" '
+      $0 == hdr { sec = 1; next }
+      /^== / { if (sec) exit }
+      sec { print }
+    ' "$DIR/p21d-cx-terminals.log")"
+    [ -n "$BODY" ] || { note BLOCKED "cx: the section for op_$opid is empty"; return 1; }
+    if ! verify_capture "$opid" "$TAG"; then
+      return 1
+    fi
+    if [ "$pos" = "1" ]; then CX1_AFTER="$CAP_AFTER"; else CX2_BEFORE="$CAP_BEFORE"; fi
+    # The premise: the window's own operation completed with an error.
+    local OPRESULT
+    OPRESULT="$(printf '%s\n' "$BODY" | awk -v hdr='-- operation result --' '
+      $0 == hdr { sec = 1; next }
+      /^-- / || /^== / { if (sec) exit }
+      sec { print }')"
+    if ! printf '%s' "$OPRESULT" | grep -q '"status": *"failed"'; then
+      note BLOCKED "cx: op_$opid did not complete with an error — the negative scenario premise is not met: $OPRESULT"
+    fi
+    # The sampler-proven init pid of THIS operation and of the other one.
+    local mine others
+    if [ "$pos" = "1" ]; then mine="$S_INIT1"; others="$S_INIT2"; else mine="$S_INIT2"; others="$S_INIT1"; fi
+    case "$mine" in
+      none)
+        note BLOCKED "cx: no container-init pid is proven to belong to op_$opid (sampler binding: none)"
+        return 1
+        ;;
+      ambiguous:*)
+        note BLOCKED "cx: the sampler binds MULTIPLE container inits to op_$opid (${mine#ambiguous:}) — ambiguous evidence"
+        return 1
+        ;;
+    esac
+    # Per-record pid classification of the raw window's runc-init records.
+    local rec rpid ownn=0 foreignn=0 terminal=""
+    while IFS= read -r rec; do
+      [ -n "$rec" ] || continue
+      rpid="$(printf '%s' "$rec" | grep -aoE 'pid=[0-9]+' | sed 's/pid=//' | head -1)"
+      if [ "$rpid" = "$mine" ]; then
+        ownn=$((ownn + 1))
+        if printf '%s' "$rec" | grep -qaE "ops/op_[0-9a-f]+/" && ! printf '%s' "$rec" | grep -qa "ops/op_${opid}/"; then
+          note FAIL "ATTRIBUTION-VIOLATION cx op_$opid: a record of THIS operation's own init pid carries ANOTHER operation's path: $rec"
+        fi
+        if [ -z "$terminal" ] && printf '%s\n' "$rec" | next_terminal_matcher | grep -qa .; then
+          terminal="$rec"
+        fi
+      elif [ "$rpid" = "$others" ]; then
+        foreignn=$((foreignn + 1))
+      else
+        note BLOCKED "cx: an UNPROVEN container-init pid ($rpid) inside op_$opid's proven window — the pid proof binds neither operation: $rec"
+      fi
+    done <<<"$(grep -a 'comm="runc:\[2:INIT\]"' "$RAW" || true)"
+    if [ "$ownn" -eq 0 ]; then
+      note BLOCKED "cx: op_$opid's own container init (pid $mine) has NO records in its proven window"
+      return 1
+    fi
+    if [ -z "$terminal" ]; then
+      note BLOCKED "cx: op_$opid has NO next-terminal record among its own pid's records — absence of AVCs alone is never a passing outcome"
+    fi
+    printf 'CX-OWN-RECORDS\top_%s init=%s own=%d foreign-excluded=%d\n' "$opid" "$mine" "$ownn" "$foreignn" >> "$CLASS_LOG"
+    FOREIGN_EXCLUDED=$((FOREIGN_EXCLUDED + foreignn))
+    raw_policy_scans "$opid" "$RAW"
+    return 0
+  }
+
+  if require_file p21d-cx-terminals.log; then
+    OP_HEADERS="$(grep -Ec "$OP_HDR_RE" "$DIR/p21d-cx-terminals.log" || true)"
+    OP_HEADERS_LIST="$(grep -E "$OP_HDR_RE" "$DIR/p21d-cx-terminals.log" || true)"
+    if [ "$OP_HEADERS" -lt 2 ]; then
+      note BLOCKED "cx: two concurrent per-operation sections are required (found $OP_HEADERS)"
+    elif [ "$OP_HEADERS" -gt 2 ]; then
+      note FAIL "cx: more than two operation sections ($OP_HEADERS) — ambiguous evidence"
+    else
+      OP1_HDR="$(printf '%s\n' "$OP_HEADERS_LIST" | sed -n 1p)"
+      OP2_HDR="$(printf '%s\n' "$OP_HEADERS_LIST" | sed -n 2p)"
+      OP1_ID="$(printf '%s' "$OP1_HDR" | sed -n 's/^== operation [a-z0-9]* op_\([0-9a-f]*\) session .*/\1/p')"
+      OP2_ID="$(printf '%s' "$OP2_HDR" | sed -n 's/^== operation [a-z0-9]* op_\([0-9a-f]*\) session .*/\1/p')"
+      OP1_SESSION="$(printf '%s' "$OP1_HDR" | sed -n 's/^== operation [a-z0-9]* op_[0-9a-f]* session \(dhs_[0-9a-f]*\) ==$/\1/p')"
+      OP2_SESSION="$(printf '%s' "$OP2_HDR" | sed -n 's/^== operation [a-z0-9]* op_[0-9a-f]* session \(dhs_[0-9a-f]*\) ==$/\1/p')"
+      if [ -z "$OP1_ID" ] || [ -z "$OP2_ID" ] || [ -z "$OP1_SESSION" ] || [ -z "$OP2_SESSION" ]; then
+        note BLOCKED "cx: operation header grammar carries no parseable operation/session identity"
+      elif [ "$OP1_ID" = "$OP2_ID" ]; then
+        note FAIL "cx: the SAME operation id in both concurrent windows: op_$OP1_ID"
+      elif [ "$OP1_SESSION" = "$OP2_SESSION" ]; then
+        note FAIL "cx: the SAME session id in both concurrent windows: $OP1_SESSION"
+      else
+        printf 'CX-OPS-DISTINCT\top_%s/%s and op_%s/%s\n' "$OP1_ID" "$OP1_SESSION" "$OP2_ID" "$OP2_SESSION" >> "$CLASS_LOG"
+        S_VALID="missing"
+        if require_file pid-sampler-cx.log; then
+          sampler_bindings "$DIR/pid-sampler-cx.log" "$OP1_ID" "$OP2_ID"
+          if [ "$S_VALID" != "ok" ]; then
+            note BLOCKED "cx: the pid-proof sampler evidence is $S_VALID"
+          elif [ -n "$S_CONFLICTS" ]; then
+            note FAIL "PID-PROOF-CONFLICT: the sampler binds the SAME container-init pid to BOTH concurrent operations ($S_CONFLICTS)"
+          else
+            eval_cx_section "$OP1_HDR" "$OP1_ID" 1 || true
+            eval_cx_section "$OP2_HDR" "$OP2_ID" 2 || true
+          fi
+        fi
+      fi
+    fi
+    # The overlap IS the negative scenario: the second proven window must
+    # begin strictly inside the first proven window's span — otherwise the
+    # foreign record never entered a proven window and the demonstration
+    # did not take place.
+    if [ -n "$CX1_AFTER" ] && [ -n "$CX2_BEFORE" ] && [ "$CX2_BEFORE" -lt "$CX1_AFTER" ]; then
+      OVERLAP="measured"
+      printf 'CX-OVERLAP\tmeasured (second window begin=%s < first window end=%s)\n' "$CX2_BEFORE" "$CX1_AFTER" >> "$CLASS_LOG"
+    elif [ "$DECISION" = "P21D-CX-PROVEN" ]; then
+      note BLOCKED "cx: the proven windows do not overlap (first end=$CX1_AFTER, second begin=$CX2_BEFORE) — the foreign record never entered a proven window and the negative scenario was NOT realized"
+    fi
+    # The demonstration requires at least one foreign record actually
+    # excluded WITH proof inside a proven window.
+    if [ "$FOREIGN_EXCLUDED" -lt 1 ] && [ "$DECISION" = "P21D-CX-PROVEN" ]; then
+      note BLOCKED "cx: NO foreign runc-init record was excluded inside a proven window — the negative scenario was NOT realized"
+    fi
+  fi
+
+  if [ "$DECISION" = "P21D-CX-PROVEN" ]; then
+    printf 'R7-P21D-CX-VERDICT=DECISION=P21D-CX-PROVEN;OVERLAP=%s;FOREIGN-EXCLUDED=%d\n' "$OVERLAP" "$FOREIGN_EXCLUDED"
+    exit 0
+  fi
+  CX_REASON="$(grep -m1 -E $'^(FAIL|BLOCKED)\t' "$CLASS_LOG" 2>/dev/null | cut -f2- | tr ';:' '__' | tr -c '[:alnum:]_=._ -' '_' | sed 's/ *$//')"
+  printf 'R7-P21D-CX-VERDICT=DECISION=%s;OVERLAP=%s;FOREIGN-EXCLUDED=%d;REASON=%s\n' \
+    "$DECISION" "$OVERLAP" "$FOREIGN_EXCLUDED" "$CX_REASON"
+  case "$DECISION" in
+    P21D-CX-FAIL) exit 1 ;;
+    *) exit 2 ;;
+  esac
+fi
 
 # ---------------------------------------------------------------------------
 # 1. The create-decision matrix: the UNCHANGED P21-B transition surface,
@@ -297,16 +797,6 @@ OP2_RESULT=""
 WINDOW_PID_1=""
 WINDOW_PID_2=""
 
-# The exact section-header lines. Header recognition and the AWK section
-# anchoring below share THESE EXACT strings, so header presence and section
-# boundaries can never diverge: a prefixed/suffixed/corrupted header line
-# matches neither the whole-line header counts NOR the AWK section anchors.
-OP_HDR_RE='^== operation [a-z0-9]+ op_[0-9a-f]+ session dhs_[0-9a-f]+ ==$'
-P20_HDR='-- P20 terminal (runc_memfd_t:file create) --'
-PREB_HDR='-- pre-B terminal (tmpfs_t:file write) --'
-ASSOC_HDR='-- associate denials (must be EMPTY — the singleton is granted) --'
-OLDSHAPE_HDR='-- P21-B terminal (devnode_t:file { read open }; the ELIMINATED shape) --'
-OLDMOUNTON_HDR='-- P21-C terminal (devnode_t:file mounton; the ELIMINATED shape) --'
 
 if require_file p21d-terminals.log; then
   # --- operation section headers: EXACTLY TWO, distinct ids ---------------
@@ -334,45 +824,11 @@ if require_file p21d-terminals.log; then
     fi
   fi
 
-  # Positive-violation scans on the RAW captured bytes. These are valid
-  # regardless of capture soundness: a recorded violation in the drained
-  # bytes proves the policy allowed it, even when the capture cannot prove
-  # completeness. (The raw window is the bytes actually read through the
-  # pinned descriptor — the section cannot be more authoritative than it.)
-  raw_positive_scans() { # <opid> <raw>
-    local opid="$1" raw="$2" hit
-    hit="$(grep -a 'docker_helper_runc_memfd_t' "$raw" | grep -a 'tclass=file' | grep -a '{ create }' | head -1 || true)"
-    if [ -n "$hit" ]; then
-      note FAIL "REGRESSION-CONTROL-REAPPEARED op_$opid P20 terminal (raw window): $hit"
-    fi
-    hit="$(grep -a 'tcontext=system_u:object_r:tmpfs_t:s0 tclass=file' "$raw" | grep -a '{ write }' | head -1 || true)"
-    if [ -n "$hit" ]; then
-      note FAIL "REGRESSION-CONTROL-REAPPEARED op_$opid pre-B terminal (raw window): $hit"
-    fi
-    hit="$(grep -aF -e 'denied  { associate }' "$raw" | head -1 || true)"
-    if [ -n "$hit" ]; then
-      note FAIL "REGRESSION-CONTROL-REAPPEARED op_$opid associate (raw window): $hit"
-    fi
-    hit="$(grep -a 'tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file' "$raw" | grep -a 'denied  { read open }' | head -1 || true)"
-    if [ -n "$hit" ]; then
-      note FAIL "OPEN-COMPLETION-LIVE op_$opid (raw window): $hit"
-    fi
-    hit="$(grep -a 'tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file' "$raw" | grep -a 'denied  { mounton }' | head -1 || true)"
-    if [ -n "$hit" ]; then
-      note FAIL "MOUNTON-TERMINAL-LIVE op_$opid (raw window): the P21-C measured devnode mounton terminal reappeared: $hit"
-    fi
-    hit="$(grep -a 'comm="runc:\[2:INIT\]"' "$raw" | grep -aE 'ops/op_[0-9a-f]+/' | grep -av "ops/op_${opid}/" | head -1 || true)"
-    if [ -n "$hit" ]; then
-      note FAIL "ATTRIBUTION-VIOLATION op_$opid (raw window): a record of ANOTHER operation appears in this operation's raw window: $hit"
-    fi
-    return 0
-  }
-
   # --- per-operation section evaluation ------------------------------------
   eval_op_section() { # <section-header-line> <opid> <first(1)|second(2)>
     local hdr="$1" opid="$2" pos="$3"
     # The section body: from this header to the next header-shaped line.
-    local BODY
+    # BODY is global: the shared verify_capture helper reads it.
     BODY="$(awk -v hdr="$hdr" '
       $0 == hdr { sec = 1; next }
       /^== / { if (sec) exit }
@@ -380,92 +836,14 @@ if require_file p21d-terminals.log; then
     ' "$TERM")"
     [ -n "$BODY" ] || { note BLOCKED "terminals: the section for op_$opid is empty"; return; }
 
-    # (a) capture integrity: the pinned-source identity checkpoints and
-    # the MEASURED extraction accounting. Every key must appear EXACTLY
-    # once; every identity checkpoint must be proven and both drains ok;
-    # the accounting must be internally consistent (expected = the cursor
-    # arithmetic, actual = the extracted file's own line count, and the
-    # two must agree with a non-empty window).
-    local key total prov val badcap=0
-    for key in identity-begin-pre identity-begin-post identity-extract-pre identity-extract-post; do
-      total="$(printf '%s\n' "$BODY" | grep -Ecx -- "^$key=.+" || true)"
-      prov="$(printf '%s\n' "$BODY" | grep -Ecx -- "^$key=proven" || true)"
-      if [ "$total" -ne 1 ] || [ "$prov" -ne 1 ]; then
-        note BLOCKED "terminals: op_$opid capture checkpoint '$key' is missing, duplicated, or not proven (records=$total proven=$prov)"
-        badcap=1
-      fi
-    done
-    for key in pre-drain window-drain; do
-      total="$(printf '%s\n' "$BODY" | grep -Ecx -- "^$key=.+" || true)"
-      prov="$(printf '%s\n' "$BODY" | grep -Ecx -- "^$key=ok" || true)"
-      if [ "$total" -ne 1 ] || [ "$prov" -ne 1 ]; then
-        note BLOCKED "terminals: op_$opid drain outcome '$key' is missing, duplicated, or not ok (records=$total ok=$prov)"
-        badcap=1
-      fi
-    done
-    local BEFORE="" AFTER="" EXPECTED="" ACTUAL=""
-    for key in before after expected actual; do
-      total="$(printf '%s\n' "$BODY" | grep -Ecx -- "^$key=[0-9]+\$" || true)"
-      if [ "$total" -ne 1 ]; then
-        note BLOCKED "terminals: op_$opid capture accounting key '$key' is missing, duplicated, or not a plain number (records=$total)"
-        badcap=1
-        continue
-      fi
-      val="$(printf '%s\n' "$BODY" | sed -n "s/^$key=//p" | head -1)"
-      case "$key" in
-        before) BEFORE="$val" ;;
-        after) AFTER="$val" ;;
-        expected) EXPECTED="$val" ;;
-        actual) ACTUAL="$val" ;;
-      esac
-    done
-    total="$(printf '%s\n' "$BODY" | grep -Ecx -- '^source=.+' || true)"
-    prov="$(printf '%s\n' "$BODY" | grep -Ecx -- '^source=proven' || true)"
-    if [ "$total" -ne 1 ] || [ "$prov" -ne 1 ]; then
-      note BLOCKED "terminals: op_$opid capture source state is missing, duplicated, or not proven (records=$total proven=$prov)"
-      badcap=1
-    fi
+    # (a)/(a2) capture integrity — the shared verify_capture contract
+    # (the pinned-source identity checkpoints, the MEASURED extraction
+    # accounting, and the raw-artifact corroboration).
     local TAG="${hdr#== operation }"
     TAG="${TAG%% *}"
     local RAW="$DIR/avc-window-$TAG.log"
-    if [ "$badcap" = 1 ]; then
-      # The capture is not proven — it can never measure. Positive
-      # violations recorded in the raw captured bytes are still detected.
-      [ -r "$RAW" ] && raw_positive_scans "$opid" "$RAW"
-      return
-    fi
-    if [ "$EXPECTED" -ne $((AFTER - BEFORE)) ]; then
-      note BLOCKED "terminals: op_$opid capture accounting inconsistent (expected=$EXPECTED, but after=$AFTER - before=$BEFORE)"
-      badcap=1
-    fi
-    if [ "$ACTUAL" -ne "$EXPECTED" ]; then
-      note BLOCKED "terminals: op_$opid captured line count does not match the boundary arithmetic (actual=$ACTUAL expected=$EXPECTED) — the extraction is not the measured window"
-      badcap=1
-    fi
-    if [ "$ACTUAL" -eq 0 ]; then
-      note BLOCKED "terminals: op_$opid window captured 0 records — absence of AVCs alone is never a passing outcome"
-      badcap=1
-    fi
-    if [ "$badcap" = 1 ]; then
-      [ -r "$RAW" ] && raw_positive_scans "$opid" "$RAW"
-      return
-    fi
-
-    # (a2) the raw window artifact must independently corroborate the
-    # section: EXACTLY the measured line count.
-    if [ ! -r "$RAW" ]; then
-      note BLOCKED "terminals: op_$opid raw window artifact avc-window-$TAG.log is missing"
-      return
-    fi
-    local RAW_LINES
-    RAW_LINES="$(wc -l <"$RAW" 2>/dev/null || printf 0)"
-    if [ "$RAW_LINES" -ne "$ACTUAL" ]; then
-      note BLOCKED "terminals: op_$opid raw window artifact holds $RAW_LINES lines but the capture accounting claims actual=$ACTUAL"
-      [ -s "$RAW" ] && raw_positive_scans "$opid" "$RAW"
-      return
-    fi
-    printf 'WINDOW-OK\top_%s before=%s after=%s expected=%s actual=%s capture=proven\n' \
-      "$opid" "$BEFORE" "$AFTER" "$EXPECTED" "$ACTUAL" >> "$CLASS_LOG"
+    verify_capture "$opid" "$TAG" || return
+    local BEFORE="$CAP_BEFORE" AFTER="$CAP_AFTER"
 
     # (b) the whole-window attributed record sets.
     local OPATT PIDC MIS UNATT
@@ -553,7 +931,11 @@ if require_file p21d-terminals.log; then
       elif [ -z "$WINDOW_PID" ]; then
         note BLOCKED "terminals: op_$opid carries pathless runc:[2:INIT] records but the window's container-init pid is ambiguous"
       else
-        printf 'OP-WINDOW-RECORDS\top_%s pathless records are window-scoped (attribution = the proven window + the container-init pid singleton %s)\n' "$opid" "$WINDOW_PID" >> "$CLASS_LOG"
+        # Window-scoped attribution (r7-p21d-corrective-1): the proven
+        # window alone is no longer accepted as the pid owner — the
+        # sampler must independently bind the window's container-init pid
+        # to THIS operation via /proc ancestry.
+        pid_proof_check "$opid" "$pos" "$WINDOW_PID"
       fi
     fi
 
@@ -607,18 +989,7 @@ if require_file p21d-terminals.log; then
     # never pre-classified; absence is BLOCKED (AVC absence alone is
     # never a passing outcome).
     local NEW_HERE
-    NEW_HERE="$(printf '%s\n' "$OPATT" "$PIDC" "$UNATT" | awk '
-      /avc:  denied  / &&
-      /permissive=0/ &&
-      /scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c[0-9]+ / &&
-      /comm="runc:\[2:INIT\]"/ {
-        if ($0 ~ /tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file / &&
-            $0 ~ /denied  \{ read open \} /) next
-        if ($0 ~ /tcontext=system_u:object_r:docker_helper_devnode_t:s0 tclass=file / &&
-            $0 ~ /denied  \{ mounton \} /) next
-        if ($0 ~ /tclass=cap_userns /) next
-        print; exit
-      }')"
+    NEW_HERE="$(printf '%s\n' "$OPATT" "$PIDC" "$UNATT" | next_terminal_matcher)"
     if [ -z "$NEW_HERE" ]; then
       # The P21-D alternative: the rung lets runc COMPLETE the device
       # binds, so the operation may run to its OWN terminal state with no
@@ -701,6 +1072,21 @@ if require_file p21d-terminals.log; then
   if [ "$OP_HEADERS" -eq 2 ] && [ -n "$OP1_ID" ] && [ -n "$OP2_ID" ] \
      && [ "$OP1_ID" != "$OP2_ID" ] && [ -n "$OP1_SESSION" ] && [ -n "$OP2_SESSION" ] \
      && [ "$OP1_SESSION" != "$OP2_SESSION" ]; then
+    # The pid-proof sampler (r7-p21d-corrective-1): the /proc ancestry
+    # binding of each operation id to its container-init pid. The evidence
+    # contract requires the sampler artifact for EVERY live flow; a
+    # missing or unparseable sampler is an evidence gap (BLOCKED), a
+    # binding contradiction is a positive violation (FAIL).
+    S_VALID="missing"
+    if require_file pid-sampler.log; then
+      sampler_bindings "$DIR/pid-sampler.log" "$OP1_ID" "$OP2_ID"
+      if [ "$S_VALID" != "ok" ]; then
+        note BLOCKED "terminals: the pid-proof sampler evidence is $S_VALID"
+      fi
+      if [ -n "$S_CONFLICTS" ]; then
+        note FAIL "PID-PROOF-CONFLICT: the sampler binds the SAME container-init pid to BOTH operations ($S_CONFLICTS) — one container init can never serve two operations"
+      fi
+    fi
     eval_op_section "$OP1_HDR" "$OP1_ID" 1
     eval_op_section "$OP2_HDR" "$OP2_ID" 2
     # The two operations' terminal records must be DISTINCT records: one

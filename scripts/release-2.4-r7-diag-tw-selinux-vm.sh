@@ -268,6 +268,17 @@ if [ "$R7_MODE" = "p21d" ]; then
     fail "the R7 P21-D gate did not reach P21D-MEASURED: $FINAL_VERDICT"
   fi
   log "R7 P21-D gate: P21D-MEASURED"
+  # The concurrent negative scenario (r7-p21d-corrective-1) is part of the
+  # run's contract: a foreign pathless runc-init AVC inside a proven window
+  # must be excluded WITH pid proof, never misattributed.
+  CX_VERDICT="$(grep -aoE 'R7-P21D-CX-VERDICT=.*' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"
+  if [ -z "$CX_VERDICT" ]; then
+    fail "the R7 P21-D run produced no concurrent-scenario (cx) machine verdict"
+  fi
+  if ! bash "$SCRIPT_DIR/release-2.4-r7-p21d-verdict.sh" --cx-gate "$CX_VERDICT"; then
+    fail "the R7 P21-D concurrent-scenario gate did not reach P21D-CX-PROVEN: $CX_VERDICT"
+  fi
+  log "R7 P21-D cx gate: $CX_VERDICT"
 fi
 if [ "$R7_MODE" = "bprime" ]; then
   FINAL_VERDICT="$(grep -aoE 'R7-BPRIME-VERDICT=.*' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"
