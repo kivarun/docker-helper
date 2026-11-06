@@ -448,7 +448,11 @@ func (m *builderManager) start(opID string, settled func()) string {
 	if !m.launchInstance(inst) {
 		return builderManagerRespInternal
 	}
-	return builderManagerRespOK
+	// The typed START success: the authoritative category of THIS
+	// operation, emitted only after proven manager readiness
+	// (P21-E-A2-C5). The token is the record's own category — the single
+	// allocator's value, not a recomputation.
+	return builderManagerStartSuccessResponse(category)
 }
 
 // launchInstance performs the filesystem preparation, process-group spawn,

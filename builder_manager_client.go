@@ -178,7 +178,7 @@ func (c *builderManagerClient) roundTrip(ctx context.Context, command, opID stri
 	}
 	line := string(buf[:n])
 	line = trimNewlineSuffix(line)
-	if !isWellFormedManagerResponse(line) {
+	if !isWellFormedManagerResponse(command, line) {
 		return "", &builderClientAmbiguous{cause: errors.New("malformed response")}
 	}
 	return line, nil
@@ -191,28 +191,56 @@ func trimNewlineSuffix(line string) string {
 	return line
 }
 
-// isWellFormedManagerResponse accepts exactly the fixed response
-// vocabulary.
-func isWellFormedManagerResponse(line string) bool {
+// isWellFormedManagerResponse accepts exactly the per-command response
+// vocabulary: the ERR forms are command-independent, while the success
+// forms differ — START success is "OK <category>" (the token validated
+// exclusively by parseBuilderCategory; a bare "OK" is malformed for
+// START), and STOP/PURGE success stays "OK"/"OK absent" (an "OK <token>"
+// success form of one command is malformed for every other command and
+// fails closed into the ambiguity machinery — P21-E-A2-C5-C1).
+func isWellFormedManagerResponse(command, line string) bool {
 	switch line {
-	case builderManagerRespOK,
-		builderManagerRespOKAbsent,
+	case builderManagerRespOKAbsent,
 		builderManagerRespBadOpID,
 		builderManagerRespOpExists,
 		builderManagerRespAtCeiling,
 		builderManagerRespInternal:
 		return true
+	case builderManagerRespOK:
+		return command != builderManagerCmdStart
 	}
-	return false
+	if command != builderManagerCmdStart {
+		return false
+	}
+	token, ok := builderManagerStartCategoryToken(line)
+	if !ok {
+		return false
+	}
+	_, valid := parseBuilderCategory(token)
+	return valid
 }
 
-// mapManagerResponse maps a well-formed response line to (typed error or
-// nil). Protocol strings do not leak beyond this internal client
-// boundary.
-func mapManagerResponse(line string) error {
+// mapManagerResponse maps a well-formed STOP/PURGE response line to a
+// typed error or nil. Protocol strings do not leak beyond this internal
+// client boundary.
+func mapManagerResponse(command, line string) error {
 	switch line {
 	case builderManagerRespOK, builderManagerRespOKAbsent:
+		if command == builderManagerCmdStart {
+			// Unreachable: the START validation never accepts a bare
+			// success form; kept defensive so a caller mistake cannot
+			// report convergence for the wrong command.
+			return &builderManagerError{kind: builderManagerRespInternal}
+		}
 		return nil
+	}
+	return mapManagerErrorResponse(line)
+}
+
+// mapManagerErrorResponse maps the command-independent ERR vocabulary to
+// typed errors.
+func mapManagerErrorResponse(line string) error {
+	switch line {
 	case builderManagerRespOpExists:
 		return &builderManagerError{kind: builderManagerRespOpExists}
 	case builderManagerRespAtCeiling:
@@ -226,22 +254,43 @@ func mapManagerResponse(line string) error {
 	return &builderManagerError{kind: builderManagerRespInternal}
 }
 
-// Start issues START for the canonical operation ID. It owns ambiguity
-// cleanup: for every ambiguous outcome (EOF, read timeout, context
-// cancellation, connection reset, malformed/truncated response) it runs
-// a fresh bounded STOP <same op_id> on a context derived from
-// context.Background() — NEVER the cancelled caller context.
-func (c *builderManagerClient) Start(ctx context.Context, operationID string) error {
+// mapManagerStartResponse maps a well-formed START response line to the
+// authoritative category (nil error) or a typed error. No category is
+// ever returned with an error.
+func mapManagerStartResponse(line string) (builderCategory, error) {
+	if token, ok := builderManagerStartCategoryToken(line); ok {
+		category, valid := parseBuilderCategory(token)
+		if valid {
+			return category, nil
+		}
+		// Unreachable: the START validation accepted only canonical
+		// tokens; kept defensive so a mapping slip cannot fabricate a
+		// category.
+		return 0, &builderManagerError{kind: builderManagerRespInternal}
+	}
+	return 0, mapManagerErrorResponse(line)
+}
+
+// Start issues START for the canonical operation ID and returns the
+// authoritative per-operation MCS category on the typed success response.
+// It owns ambiguity cleanup: for every ambiguous outcome (EOF, read
+// timeout, context cancellation, connection reset, malformed/truncated
+// response) it runs a fresh bounded STOP <same op_id> on a context
+// derived from context.Background() — NEVER the cancelled caller context.
+// No category is ever returned with an error, on cancellation, on an
+// ambiguous START, or on a refused compensation (the zero category is the
+// never-issued value).
+func (c *builderManagerClient) Start(ctx context.Context, operationID string) (builderCategory, error) {
 	if !isOperationID(operationID) {
-		return &builderManagerError{kind: builderManagerRespBadOpID}
+		return 0, &builderManagerError{kind: builderManagerRespBadOpID}
 	}
 	line, err := c.roundTrip(ctx, builderManagerCmdStart, operationID, builderClientStartRead)
 	if err == nil {
-		return mapManagerResponse(line)
+		return mapManagerStartResponse(line)
 	}
 	var ambiguous *builderClientAmbiguous
 	if !errors.As(err, &ambiguous) {
-		return err
+		return 0, err
 	}
 	// Ambiguous: the START bytes may have reached the manager. Converge
 	// with a fresh bounded STOP on a fresh context. Only a well-formed
@@ -254,12 +303,12 @@ func (c *builderManagerClient) Start(ctx context.Context, operationID string) er
 	defer cancel()
 	stopLine, stopErr := c.roundTrip(stopCtx, builderManagerCmdStop, operationID, builderClientStopRead)
 	if stopErr != nil {
-		return fmt.Errorf("builder manager START was ambiguous and convergence STOP failed: %w", stopErr)
+		return 0, fmt.Errorf("builder manager START was ambiguous and convergence STOP failed: %w", stopErr)
 	}
-	if compErr := mapManagerResponse(stopLine); compErr != nil {
-		return fmt.Errorf("builder manager START was ambiguous and the compensating STOP was refused: %w", compErr)
+	if compErr := mapManagerResponse(builderManagerCmdStop, stopLine); compErr != nil {
+		return 0, fmt.Errorf("builder manager START was ambiguous and the compensating STOP was refused: %w", compErr)
 	}
-	return &builderManagerError{kind: builderManagerRespInternal}
+	return 0, &builderManagerError{kind: builderManagerRespInternal}
 }
 
 // Stop issues STOP with the lost-STOP convergence contract: send STOP;
@@ -272,7 +321,7 @@ func (c *builderManagerClient) Stop(ctx context.Context, operationID string) err
 	}
 	line, err := c.roundTrip(ctx, builderManagerCmdStop, operationID, builderClientStopRead)
 	if err == nil {
-		return mapManagerResponse(line)
+		return mapManagerResponse(builderManagerCmdStop, line)
 	}
 	var ambiguous *builderClientAmbiguous
 	if !errors.As(err, &ambiguous) {
@@ -282,7 +331,7 @@ func (c *builderManagerClient) Stop(ctx context.Context, operationID string) err
 	defer cancel()
 	line, retryErr := c.roundTrip(retryCtx, builderManagerCmdStop, operationID, builderClientStopRead)
 	if retryErr == nil {
-		return mapManagerResponse(line)
+		return mapManagerResponse(builderManagerCmdStop, line)
 	}
 	var retryAmbiguous *builderClientAmbiguous
 	if errors.As(retryErr, &retryAmbiguous) {
@@ -295,7 +344,7 @@ func (c *builderManagerClient) Stop(ctx context.Context, operationID string) err
 func (c *builderManagerClient) Purge(ctx context.Context) error {
 	line, err := c.roundTrip(ctx, builderManagerCmdPurge, "", builderClientStopRead)
 	if err == nil {
-		return mapManagerResponse(line)
+		return mapManagerResponse(builderManagerCmdPurge, line)
 	}
 	var ambiguous *builderClientAmbiguous
 	if !errors.As(err, &ambiguous) {

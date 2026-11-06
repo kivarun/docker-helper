@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"strings"
 )
 
 // Builder-manager wire protocol (internal backend, not a public surface).
@@ -17,6 +18,19 @@ import (
 // (isOperationID) owned by operation.go — no second grammar exists.
 // Responses come exactly from the fixed vocabulary below; the protocol
 // never carries filesystem paths, PIDs, argv, or internal errors.
+//
+// The success vocabulary is command-specific:
+//
+//	START  →  "OK " + the canonical category token (builderCategory.String();
+//	          validated exclusively by parseBuilderCategory on the client) —
+//	          the authoritative per-operation MCS category allocated for
+//	          exactly this START, emitted only after proven manager readiness
+//	          (P21-E-A2-C5);
+//	STOP   →  "OK" or "OK absent" (unchanged);
+//	PURGE  →  "OK" (unchanged).
+//
+// A success form of one command is malformed for every other command and
+// fails closed into the existing ambiguity/refusal machinery (P21-E-A2-C5-C1).
 const (
 	builderManagerRequestCeiling = 128 // bytes; the grammar needs far less
 
@@ -34,6 +48,21 @@ const (
 	builderManagerRespUnknownCmd   = "ERR unknown_command"
 	builderManagerRespUnauthorized = "ERR unauthorized"
 )
+
+// builderManagerStartSuccessResponse renders the START success response
+// "OK <category>": the single emission point of the authoritative
+// category token on the wire.
+func builderManagerStartSuccessResponse(category builderCategory) string {
+	return builderManagerRespOK + " " + category.String()
+}
+
+// builderManagerStartCategoryToken extracts the category token from a
+// well-formed START success response ("OK <token>"). It reports false for
+// every other shape; the token itself is validated by the caller through
+// parseBuilderCategory.
+func builderManagerStartCategoryToken(line string) (string, bool) {
+	return strings.CutPrefix(line, builderManagerRespOK+" ")
+}
 
 // builderManagerRequest is one parsed manager request.
 type builderManagerRequest struct {

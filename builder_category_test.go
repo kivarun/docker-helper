@@ -87,6 +87,20 @@ func builderManagerCategoryOf(t *testing.T, m *builderManager, opID string) (bui
 	return inst.category, true
 }
 
+// assertStartSuccessResponse asserts one START response is the typed
+// success form of the record's own category (the response token and the
+// record must agree — no second category source exists).
+func assertStartSuccessResponse(t *testing.T, m *builderManager, opID, resp string) {
+	t.Helper()
+	category, ok := builderManagerCategoryOf(t, m, opID)
+	if !ok {
+		t.Fatalf("START %s: bound record vanished", opID)
+	}
+	if resp != builderManagerStartSuccessResponse(category) {
+		t.Fatalf("START %s = %q, want the typed success form of the record category", opID, resp)
+	}
+}
+
 // startWithCategory runs one real START through the production admission
 // path, binds the fake buildkitd socket so the readiness converges, and
 // returns the bound category.
@@ -98,12 +112,12 @@ func startWithCategory(t *testing.T, m *builderManager, opID string) builderCate
 		t.Fatalf("START %s did not reserve the map entry", opID)
 	}
 	bindFakeBuildkitdSocket(t, opID)
-	if resp := <-respCh; resp != builderManagerRespOK {
-		t.Fatalf("START %s = %q, want OK", opID, resp)
-	}
 	category, ok := builderManagerCategoryOf(t, m, opID)
 	if !ok {
 		t.Fatalf("START %s: bound record vanished", opID)
+	}
+	if resp := <-respCh; resp != builderManagerStartSuccessResponse(category) {
+		t.Fatalf("START %s = %q, want the typed success form of the record category", opID, resp)
 	}
 	return category
 }
@@ -185,9 +199,10 @@ func TestBuilderManagerConcurrentStartsNoDuplicateCategory(t *testing.T) {
 		bindFakeBuildkitdSocket(t, opID)
 	}
 	wg.Wait()
-	for i, resp := range resps {
-		if resp != builderManagerRespOK {
-			t.Fatalf("START %s = %q, want OK", opIDs[i], resp)
+	for i, opID := range opIDs {
+		category, _ := builderManagerCategoryOf(t, m, opID)
+		if resps[i] != builderManagerStartSuccessResponse(category) {
+			t.Fatalf("START %s = %q, want the typed success form of the record category", opIDs[i], resps[i])
 		}
 	}
 	first, _ := builderManagerCategoryOf(t, m, opIDs[0])
@@ -368,11 +383,11 @@ func TestBuilderManagerFailedStartKeepsCategoryUntilConvergence(t *testing.T) {
 				return 0
 			}
 			bindFakeBuildkitdSocket(t, op2)
-			if resp := <-respCh2; resp != builderManagerRespOK {
-				t.Errorf("concurrent admission = %q, want OK", resp)
+			category, _ := builderManagerCategoryOf(t, m, op2)
+			if resp := <-respCh2; resp != builderManagerStartSuccessResponse(category) {
+				t.Errorf("concurrent admission = %q, want the typed success form of the record category", resp)
 				return 0
 			}
-			category, _ := builderManagerCategoryOf(t, m, op2)
 			return category
 		}()
 	}()

@@ -19,6 +19,17 @@ import (
 	"time"
 )
 
+// fakeManagerSuccessReply answers one request line with its typed
+// success form: START carries the canonical category token (the fake
+// endpoint tracks no records; c1 is the fixed success token for the
+// gate-facing fixtures), STOP/PURGE keep the plain success vocabulary.
+func fakeManagerSuccessReply(line string) string {
+	if strings.HasPrefix(line, builderManagerCmdStart+" ") {
+		return builderManagerStartSuccessResponse(builderCategory(1))
+	}
+	return builderManagerRespOK
+}
+
 // fakeManagerEndpoint mounts a test unix endpoint for the builder-manager
 // client seams and serves every request line with the given response line
 // (the established rpc-test pattern: the real client speaks the real wire
@@ -221,7 +232,7 @@ func TestBuildAdmissionRefusedWhileManagerStateUnknown(t *testing.T) {
 		if refuse {
 			return builderManagerRespInternal
 		}
-		return builderManagerRespOK
+		return fakeManagerSuccessReply(line)
 	})
 
 	// The run surface never consults the gate: it stays available while
@@ -362,9 +373,7 @@ func TestBuilderAdmissionStartupReconcilePurgesLiveManagerState(t *testing.T) {
 	bindFakeBuildkitdSocket(t, opID)
 	select {
 	case resp := <-startResp:
-		if resp != builderManagerRespOK {
-			t.Fatalf("START = %q, want OK", resp)
-		}
+		assertStartSuccessResponse(t, m, opID, resp)
 	case <-time.After(10 * time.Second):
 		t.Fatal("START did not converge")
 	}
@@ -414,7 +423,7 @@ func TestReviewBuildAtCapacityMustNotQueueBehindReconciliation(t *testing.T) {
 			purges.Add(1)
 			<-releasePurge
 		}
-		return builderManagerRespOK
+		return fakeManagerSuccessReply(line)
 	})
 
 	// Saturate the Session ceiling exactly: four live reservations, pure
@@ -656,7 +665,7 @@ func newGateProofHarness(t *testing.T) *gateProofHarness {
 	}
 	fakeManagerEndpoint(t, func(line string) string {
 		if line != builderManagerCmdPurge {
-			return builderManagerRespOK
+			return fakeManagerSuccessReply(line)
 		}
 		n := int(h.purges.Add(1))
 		if n > gateProofControlledPurges {

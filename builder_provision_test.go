@@ -169,9 +169,7 @@ func TestBuilderProvisioningSuccessOrderContextsBeforeSpawn(t *testing.T) {
 		t.Fatalf("record category = %s, want c1 (the context authority is the record)", recordCategory)
 	}
 	bindFakeBuildkitdSocket(t, opID)
-	if resp := <-respCh; resp != builderManagerRespOK {
-		t.Fatalf("START = %q, want OK", resp)
-	}
+	assertStartSuccessResponse(t, m, opID, <-respCh)
 
 	wantOrder := []struct {
 		kind  string
@@ -303,8 +301,8 @@ func TestBuilderProvisioningReadBackTerminalNULCanonicalizes(t *testing.T) {
 		t.Fatalf("record category = %s, want c1 (the forced NUL overrides must match the record)", recordCategory)
 	}
 	bindFakeBuildkitdSocket(t, opID)
-	if resp := <-respCh; resp != builderManagerRespOK {
-		t.Fatalf("START = %q, want OK (terminal-NUL read-back must canonicalize)", resp)
+	if resp := <-respCh; resp != builderManagerStartSuccessResponse(recordCategory) {
+		t.Fatalf("START = %q, want the typed success form (terminal-NUL read-back must canonicalize)", resp)
 	}
 
 	entries := f.entries()
@@ -420,9 +418,7 @@ func TestBuilderProvisioningSkippedOnNonSELinux(t *testing.T) {
 	bindFakeBuildkitdSocket(t, opID)
 	select {
 	case resp := <-respCh:
-		if resp != builderManagerRespOK {
-			t.Fatalf("START = %q, want OK", resp)
-		}
+		assertStartSuccessResponse(t, m, opID, resp)
 	case <-time.After(10 * time.Second):
 		t.Fatal("START did not converge")
 	}

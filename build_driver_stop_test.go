@@ -275,11 +275,12 @@ func (s *stopBarrierState) gateStopUntil(reply string) chan struct{} {
 	return s.gate
 }
 
-// recordStop implements the fake manager behavior hook: START replies OK
-// (default fixture behavior), STOP is observed and optionally gated.
+// recordStop implements the fake manager behavior hook: START replies
+// with the typed category success (default fixture behavior), STOP is
+// observed and optionally gated.
 func (s *stopBarrierState) recordStop(command, _ string, reply func(string)) {
 	if command == builderManagerCmdStart {
-		reply(builderManagerRespOK)
+		reply(builderManagerStartSuccessResponse(builderCategory(1)))
 		return
 	}
 	if command != builderManagerCmdStop {
@@ -694,7 +695,7 @@ func TestBuildDriverStopLostReplyThenOKAbsent(t *testing.T) {
 	manager.mu.Lock()
 	manager.behavior = func(command, _ string, reply func(string)) {
 		if command == builderManagerCmdStart {
-			reply(builderManagerRespOK)
+			reply(builderManagerStartSuccessResponse(builderCategory(1)))
 			return
 		}
 		if command != builderManagerCmdStop {
@@ -747,7 +748,7 @@ func TestBuildDriverStopTwiceUnknowablePreventsImport(t *testing.T) {
 	manager.mu.Lock()
 	manager.behavior = func(command, _ string, reply func(string)) {
 		if command == builderManagerCmdStart {
-			reply(builderManagerRespOK)
+			reply(builderManagerStartSuccessResponse(builderCategory(1)))
 			return
 		}
 		if command != builderManagerCmdStop {
@@ -1055,5 +1056,61 @@ func TestBuildDriverCancelWhileStopPendingLatches(t *testing.T) {
 	}
 	if rc != resultCancelled {
 		t.Errorf("result_code = %q, want cancelled", rc)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// §7: typed START category propagation.
+// ---------------------------------------------------------------------------
+
+// TestBuildDriverStartCategoryPropagation proves the typed manager START
+// transfer through the production stage: the stage enters through the real
+// client against the fake manager endpoint, the canonical category token
+// is stored on the operation-local driver state (no allocator, no
+// persistent mapping, no label inference), and a malformed START response
+// leaves the zero (never-issued) category in place.
+func TestBuildDriverStartCategoryPropagation(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		response string
+		want     builderCategory
+		wantErr  bool
+	}{
+		{name: "canonical token propagates", response: builderManagerStartSuccessResponse(builderCategory(7)), want: builderCategory(7)},
+		{name: "c1023 boundary propagates", response: builderManagerStartSuccessResponse(builderCategory(1023)), want: builderCategory(1023)},
+		{name: "malformed token leaves zero category", response: "OK c01", wantErr: true},
+		{name: "bare OK leaves zero category", response: builderManagerRespOK, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, _, result, manager, calls := setupBuildBackendTest(t)
+			newBackendChildRunner(t, app, calls)
+			_ = result
+			manager.setStartResp(tc.response)
+
+			op := &operation{ID: "op_0123456789abcdef0123456789abcdef", SessionID: "sess_test"}
+			d := newBuildDriver(app, op, buildDriverRequest{})
+			res := d.managerStartStage()
+			if tc.wantErr {
+				if res.Err == nil {
+					t.Fatalf("response %q: stage must fail closed", tc.response)
+				}
+				if d.startCategory != 0 {
+					t.Fatalf("response %q: category %s stored despite failure", tc.response, d.startCategory)
+				}
+				return
+			}
+			if res.Terminated || res.Err != nil {
+				t.Fatalf("response %q: stage must succeed, got terminated=%v err=%v", tc.response, res.Terminated, res.Err)
+			}
+			if d.startCategory != tc.want {
+				t.Fatalf("propagated category = %s, want %s", d.startCategory, tc.want)
+			}
+			// The stage consumed exactly one START round-trip; the START
+			// success needs no compensation.
+			if got := manager.stopCount(); got != 0 {
+				t.Fatalf("STOP count = %d, want 0 for a typed START success", got)
+			}
+			_ = calls
+		})
 	}
 }

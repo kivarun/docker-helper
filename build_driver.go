@@ -68,6 +68,13 @@ type buildDriver struct {
 	a   *App
 	op  *operation
 	req buildDriverRequest
+
+	// startCategory carries the authoritative per-operation MCS category
+	// returned by the typed manager START (P21-E-A2-C5). It is the future
+	// trusted-preparation input; the manager stays the single allocator,
+	// no category inference from filesystem labels exists, and the value
+	// is consumed strictly within this operation's lifetime.
+	startCategory builderCategory
 }
 
 func newBuildDriver(a *App, op *operation, req buildDriverRequest) *buildDriver {
@@ -291,12 +298,17 @@ func (d *buildDriver) validateSocket() error {
 }
 
 // managerStartStage runs the manager START round-trip through the
-// cancellable no-child control stage and the P2 client.
+// cancellable no-child control stage and the P2 client, capturing the
+// typed authoritative category for the future trusted preparation.
 func (d *buildDriver) managerStartStage() buildStageResult {
 	client := d.builderClient()
 	var startErr error
 	res := runOperationControlStage(d.op, func(ctx context.Context) error {
-		startErr = client.Start(ctx, d.op.ID)
+		var category builderCategory
+		category, startErr = client.Start(ctx, d.op.ID)
+		if startErr == nil {
+			d.startCategory = category
+		}
 		return startErr
 	})
 	if res.Terminated {

@@ -54,7 +54,7 @@ func newFakeBuilderManager(t *testing.T) *fakeBuilderManager {
 	t.Helper()
 	m := &fakeBuilderManager{
 		t:               t,
-		startResp:       "OK",
+		startResp:       builderManagerStartSuccessResponse(builderCategory(1)),
 		stopResp:        "OK",
 		startedCh:       make(chan string, 16),
 		stoppedCh:       make(chan string, 16),

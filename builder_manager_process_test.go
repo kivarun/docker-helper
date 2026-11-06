@@ -171,9 +171,7 @@ func TestBuilderManagerStartReadinessSuccess(t *testing.T) {
 
 	select {
 	case resp := <-respCh:
-		if resp != builderManagerRespOK {
-			t.Fatalf("START response = %q, want OK", resp)
-		}
+		assertStartSuccessResponse(t, m, opID, resp)
 	case <-time.After(10 * time.Second):
 		t.Fatal("START did not converge")
 	}
@@ -203,10 +201,12 @@ func TestBuilderManagerConcurrentStartSameOpExactlyOneChild(t *testing.T) {
 	bindFakeBuildkitdSocket(t, opID)
 	wg.Wait()
 	close(respCh)
+	category, _ := builderManagerCategoryOf(t, m, opID)
+	success := builderManagerStartSuccessResponse(category)
 	var okCount, existsCount int
 	for resp := range respCh {
 		switch resp {
-		case builderManagerRespOK:
+		case success:
 			okCount++
 		case builderManagerRespOpExists:
 			existsCount++
@@ -235,9 +235,7 @@ func TestBuilderManagerThirdStartAtCeiling(t *testing.T) {
 			t.Fatalf("START %s did not reserve", opID)
 		}
 		bindFakeBuildkitdSocket(t, opID)
-		if resp := <-respCh; resp != builderManagerRespOK {
-			t.Fatalf("START %s = %q, want OK", opID, resp)
-		}
+		assertStartSuccessResponse(t, m, opID, <-respCh)
 	}
 	if resp := m.start("op_11111111111111111111111111111111", nil); resp != builderManagerRespAtCeiling {
 		t.Fatalf("third START = %q, want builder_at_ceiling", resp)
@@ -285,9 +283,7 @@ func TestBuilderManagerStopDuringReadiness(t *testing.T) {
 		t.Fatal("post-STOP reservation missing")
 	}
 	bindFakeBuildkitdSocket(t, op2)
-	if resp := <-resp2Ch; resp != builderManagerRespOK {
-		t.Fatalf("post-STOP START = %q, want OK (ceiling must release)", resp)
-	}
+	assertStartSuccessResponse(t, m, op2, <-resp2Ch)
 }
 
 // TestBuilderManagerTwoConcurrentStops: both STOPs return OK (single
@@ -304,9 +300,7 @@ func TestBuilderManagerTwoConcurrentStops(t *testing.T) {
 		t.Fatal("reservation missing")
 	}
 	bindFakeBuildkitdSocket(t, opID)
-	if resp := <-respCh; resp != builderManagerRespOK {
-		t.Fatalf("START = %q", resp)
-	}
+	assertStartSuccessResponse(t, m, opID, <-respCh)
 
 	var wg sync.WaitGroup
 	stopCh := make(chan string, 2)
@@ -343,9 +337,7 @@ func TestBuilderManagerPurgeRacingStop(t *testing.T) {
 		t.Fatal("reservation missing")
 	}
 	bindFakeBuildkitdSocket(t, opID)
-	if resp := <-respCh; resp != builderManagerRespOK {
-		t.Fatalf("START = %q", resp)
-	}
+	assertStartSuccessResponse(t, m, opID, <-respCh)
 
 	var wg sync.WaitGroup
 	resp2 := make(chan string, 2)
@@ -632,9 +624,7 @@ func TestBuilderManagerStopWaitsLaunchQuiescence(t *testing.T) {
 	bindFakeBuildkitdSocket(t, opID)
 	select {
 	case resp := <-start2Resp:
-		if resp != builderManagerRespOK {
-			t.Fatalf("immediate same-ID START = %q, want OK", resp)
-		}
+		assertStartSuccessResponse(t, m, opID, resp)
 	case <-time.After(10 * time.Second):
 		t.Fatal("immediate same-ID START did not converge")
 	}
@@ -1201,7 +1191,8 @@ func TestBuilderClientCompensatingStopConvergesDispatchedStart(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
-		startErrCh <- (&builderManagerClient{}).Start(ctx, opID)
+		_, err := (&builderManagerClient{}).Start(ctx, opID)
+		startErrCh <- err
 	}()
 
 	select {
@@ -1910,9 +1901,7 @@ func TestBuilderManagerStartupPurgeResidue(t *testing.T) {
 		bindFakeBuildkitdSocket(t, opID)
 		select {
 		case resp := <-startResp:
-			if resp != builderManagerRespOK {
-				t.Fatalf("same-ID START after the purge = %q, want OK", resp)
-			}
+			assertStartSuccessResponse(t, m, opID, resp)
 		case <-time.After(10 * time.Second):
 			t.Fatal("same-ID START after the purge did not converge")
 		}

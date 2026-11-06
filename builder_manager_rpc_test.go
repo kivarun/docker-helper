@@ -128,7 +128,7 @@ func TestBuilderClientRejectsWrongManagerPeerUID(t *testing.T) {
 		}
 	}()
 	c := &builderManagerClient{}
-	err := c.Start(context.Background(), "op_0123456789abcdef0123456789abcdef")
+	_, err := c.Start(context.Background(), "op_0123456789abcdef0123456789abcdef")
 	if err == nil {
 		t.Fatal("wrong manager peer uid must be rejected before write")
 	}
@@ -185,7 +185,7 @@ func TestBuilderClientAmbiguousStartConvergesWithFreshContextStop(t *testing.T) 
 	c := &builderManagerClient{}
 	ctx, cancel := context.WithCancel(context.Background())
 	go time.AfterFunc(50*time.Millisecond, cancel)
-	err := c.Start(ctx, "op_0123456789abcdef0123456789abcdef")
+	_, err := c.Start(ctx, "op_0123456789abcdef0123456789abcdef")
 	cancel()
 	if err == nil {
 		t.Fatal("ambiguous START must not report success")
@@ -307,7 +307,7 @@ func TestBuilderClientMapsWellFormedErr(t *testing.T) {
 		}
 	}()
 	c := &builderManagerClient{}
-	err := c.Start(context.Background(), "op_0123456789abcdef0123456789abcdef")
+	_, err := c.Start(context.Background(), "op_0123456789abcdef0123456789abcdef")
 	var mgrErr *builderManagerError
 	if !errors.As(err, &mgrErr) {
 		t.Fatalf("well-formed ERR must map to typed manager error, got %v", err)
@@ -319,7 +319,7 @@ func TestBuilderClientMapsWellFormedErr(t *testing.T) {
 
 func TestBuilderClientStartRefusesNoncanonicalID(t *testing.T) {
 	c := &builderManagerClient{}
-	if err := c.Start(context.Background(), "OP_UPPER"); err == nil {
+	if _, err := c.Start(context.Background(), "OP_UPPER"); err == nil {
 		t.Fatal("noncanonical op id must be refused client-side")
 	}
 }
@@ -347,7 +347,7 @@ func TestBuilderClientAmbiguousStartErrStopIsNotProvenConvergence(t *testing.T) 
 	c := &builderManagerClient{}
 	ctx, cancel := context.WithCancel(context.Background())
 	go time.AfterFunc(50*time.Millisecond, cancel)
-	err := c.Start(ctx, "op_0123456789abcdef0123456789abcdef")
+	_, err := c.Start(ctx, "op_0123456789abcdef0123456789abcdef")
 	cancel()
 	if err == nil {
 		t.Fatal("refused compensation must fail closed")
@@ -393,7 +393,7 @@ func TestBuilderClientAmbiguousStartErrStopDistinctFromProvenConvergence(t *test
 			c := &builderManagerClient{}
 			ctx, cancel := context.WithCancel(context.Background())
 			go time.AfterFunc(50*time.Millisecond, cancel)
-			err := c.Start(ctx, "op_0123456789abcdef0123456789abcdef")
+			_, err := c.Start(ctx, "op_0123456789abcdef0123456789abcdef")
 			cancel()
 			if err == nil {
 				t.Fatal("ambiguous START must never report success")
@@ -424,7 +424,7 @@ func TestBuilderClientStartDeadlineBounded(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go time.AfterFunc(100*time.Millisecond, cancel)
 	start := time.Now()
-	err := c.Start(ctx, "op_0123456789abcdef0123456789abcdef")
+	_, err := c.Start(ctx, "op_0123456789abcdef0123456789abcdef")
 	elapsed := time.Since(start)
 	cancel()
 	if err == nil {
@@ -442,3 +442,191 @@ var (
 	_ = os.Geteuid
 	_ = user.Lookup
 )
+
+// TestBuilderClientStartTypedCategorySuccessBoundaries proves the typed
+// START success contract at the client boundary: exactly the canonical
+// category tokens succeed and carry their parsed value to the caller,
+// every other START success shape (bare OK, boundary-invalid, non-
+// canonical, extra/missing tokens) is malformed — ambiguous — and the
+// compensating STOP reaches the manager (fail-closed, no category).
+func TestBuilderClientStartTypedCategorySuccessBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		response string
+		want     builderCategory
+		wantOK   bool
+	}{
+		{name: "c1", response: builderManagerStartSuccessResponse(builderCategory(1)), want: builderCategory(1), wantOK: true},
+		{name: "c1023", response: builderManagerStartSuccessResponse(builderCategory(1023)), want: builderCategory(1023), wantOK: true},
+		{name: "c7", response: builderManagerStartSuccessResponse(builderCategory(7)), want: builderCategory(7), wantOK: true},
+		{name: "bare OK is malformed for START", response: builderManagerRespOK},
+		{name: "c0 invalid", response: builderManagerStartSuccessResponse(builderCategory(0))},
+		{name: "c1024 invalid", response: builderManagerStartSuccessResponse(builderCategory(1024))},
+		{name: "zero-padded token noncanonical", response: "OK c01"},
+		{name: "non-numeric token", response: "OK cx"},
+		{name: "empty token", response: "OK "},
+		{name: "double space", response: "OK  c1"},
+		{name: "extra token", response: "OK c1 extra"},
+		{name: "OK absent is malformed for START", response: builderManagerRespOKAbsent},
+		{name: "no space", response: "OKc1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			listener, _ := rpcTestEndpoint(t)
+			fakeManagerUID(t, 4312, 4312)
+			fakeManagerPeer(t, 4312, 4312)
+
+			requests := make(chan string, 8)
+			go func() {
+				for {
+					conn, err := listener.AcceptUnix()
+					if err != nil {
+						return
+					}
+					go func() {
+						defer conn.Close()
+						buf := make([]byte, builderManagerRequestCeiling)
+						_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+						n, err := conn.Read(buf)
+						if err != nil {
+							return
+						}
+						line := strings.TrimRight(string(buf[:n]), "\n")
+						requests <- line
+						switch {
+						case strings.HasPrefix(line, "STOP "):
+							_, _ = conn.Write([]byte(builderManagerRespOKAbsent + "\n"))
+						case strings.HasPrefix(line, "START ") && tc.wantOK:
+							_, _ = conn.Write([]byte(tc.response + "\n"))
+						}
+					}()
+				}
+			}()
+
+			c := &builderManagerClient{}
+			category, err := c.Start(context.Background(), "op_0123456789abcdef0123456789abcdef")
+			if !tc.wantOK {
+				if err == nil {
+					t.Fatalf("response %q must not report START success", tc.response)
+				}
+				if category != 0 {
+					t.Fatalf("response %q returned category %s with an error", tc.response, category)
+				}
+				// Fail-closed proof: the compensating STOP reached the
+				// manager (the malformed START response is ambiguous, and
+				// only proven convergence ends the attempt).
+				deadline := time.After(10 * time.Second)
+				for {
+					select {
+					case line := <-requests:
+						if strings.HasPrefix(line, "STOP op_0123456789abcdef0123456789abcdef") {
+							return
+						}
+					case <-deadline:
+						t.Fatalf("response %q: compensating STOP never reached the manager", tc.response)
+					}
+				}
+			}
+			if err != nil {
+				t.Fatalf("response %q must report START success with the category, got %v", tc.response, err)
+			}
+			if category != tc.want {
+				t.Fatalf("response %q returned category %s, want %s", tc.response, category, tc.want)
+			}
+			select {
+			case line := <-requests:
+				if strings.HasPrefix(line, "STOP ") {
+					t.Fatalf("successful START must not compensate: STOP %q observed", line)
+				}
+			default:
+			}
+		})
+	}
+}
+
+// TestBuilderClientStopRejectsCategorySuccessForm proves the wrong-command
+// success form fails closed on STOP: "OK <token>" is malformed for STOP,
+// the ambiguity retry runs exactly once, and a second malformed reply
+// surfaces as the twice-unknowable failure — never as convergence.
+func TestBuilderClientStopRejectsCategorySuccessForm(t *testing.T) {
+	listener, _ := rpcTestEndpoint(t)
+	fakeManagerUID(t, 4312, 4312)
+	fakeManagerPeer(t, 4312, 4312)
+
+	var stopMu sync.Mutex
+	stopCount := 0
+	go func() {
+		for {
+			conn, err := listener.AcceptUnix()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				buf := make([]byte, builderManagerRequestCeiling)
+				_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+				n, err := conn.Read(buf)
+				if err != nil {
+					return
+				}
+				line := strings.TrimRight(string(buf[:n]), "\n")
+				if !strings.HasPrefix(line, "STOP ") {
+					return
+				}
+				stopMu.Lock()
+				stopCount++
+				stopMu.Unlock()
+				_, _ = conn.Write([]byte(builderManagerStartSuccessResponse(builderCategory(1)) + "\n"))
+			}()
+		}
+	}()
+
+	c := &builderManagerClient{}
+	err := c.Stop(context.Background(), "op_0123456789abcdef0123456789abcdef")
+	if err == nil {
+		t.Fatal("a category success form must never report STOP convergence")
+	}
+	if !strings.Contains(err.Error(), "twice unknowable") {
+		t.Fatalf("STOP must fail closed as twice unknowable, got %v", err)
+	}
+	stopMu.Lock()
+	got := stopCount
+	stopMu.Unlock()
+	if got != 2 {
+		t.Fatalf("stop attempts = %d, want exactly 2 (one ambiguity retry)", got)
+	}
+}
+
+// TestBuilderClientPurgeRejectsCategorySuccessForm proves the
+// wrong-command success form fails closed on PURGE: "OK <token>" is
+// malformed for PURGE and must not report convergence.
+func TestBuilderClientPurgeRejectsCategorySuccessForm(t *testing.T) {
+	listener, _ := rpcTestEndpoint(t)
+	fakeManagerUID(t, 4312, 4312)
+	fakeManagerPeer(t, 4312, 4312)
+	go func() {
+		for {
+			conn, err := listener.AcceptUnix()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				buf := make([]byte, builderManagerRequestCeiling)
+				_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+				n, err := conn.Read(buf)
+				if err != nil {
+					return
+				}
+				line := strings.TrimRight(string(buf[:n]), "\n")
+				if line == builderManagerCmdPurge {
+					_, _ = conn.Write([]byte(builderManagerStartSuccessResponse(builderCategory(1)) + "\n"))
+				}
+			}()
+		}
+	}()
+
+	c := &builderManagerClient{}
+	if err := c.Purge(context.Background()); err == nil {
+		t.Fatal("a category success form must never report PURGE convergence")
+	}
+}

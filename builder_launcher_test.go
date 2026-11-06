@@ -557,9 +557,7 @@ func TestBuilderManagerSingleCompositionDecision(t *testing.T) {
 		t.Fatal("START did not reserve")
 	}
 	bindFakeBuildkitdSocket(t, opID)
-	if resp := <-respCh; resp != builderManagerRespOK {
-		t.Fatalf("START = %q, want OK", resp)
-	}
+	assertStartSuccessResponse(t, m, opID, <-respCh)
 	cmdMu.Lock()
 	decided := capturedProvision
 	cmdMu.Unlock()

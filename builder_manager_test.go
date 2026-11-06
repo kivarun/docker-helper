@@ -263,9 +263,7 @@ func TestBuilderManagerConnectionHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("no response: %v", err)
 	}
-	if strings.TrimSpace(string(buf[:n])) != builderManagerRespOK {
-		t.Fatalf("response = %q, want OK", buf[:n])
-	}
+	assertStartSuccessResponse(t, m, opID, strings.TrimSpace(string(buf[:n])))
 }
 
 // ---------------- stale-PID identity proof (§14/§19/§20) ----------------

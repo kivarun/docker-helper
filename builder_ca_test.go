@@ -234,9 +234,7 @@ func TestBuilderManagerChildReceivesSelectedCABundleEnv(t *testing.T) {
 		t.Fatal("START did not reserve the map entry")
 	}
 	bindFakeBuildkitdSocket(t, opID)
-	if resp := <-respCh; resp != builderManagerRespOK {
-		t.Fatalf("START = %q, want OK", resp)
-	}
+	assertStartSuccessResponse(t, m, opID, <-respCh)
 
 	m.mu.Lock()
 	inst := m.instances[opID]
