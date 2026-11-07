@@ -8,6 +8,7 @@ package main
 // termination latch cannot terminate a blocked Unix RPC.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -171,17 +172,39 @@ func (c *builderManagerClient) roundTrip(ctx context.Context, command, opID stri
 		}
 	}()
 
-	buf := make([]byte, builderManagerRequestCeiling+1)
-	n, readErr := unixConn.Read(buf)
-	if readErr != nil {
-		return "", &builderClientAmbiguous{cause: readErr}
+	// Bounded complete-line read (P21-E-R1-C1): the response is exactly
+	// one newline-terminated line on this connection. The read loop
+	// accumulates under the existing per-command deadline and
+	// caller-context cancellation (the deadline watcher above unblocks
+	// every Read), never interprets an incomplete prefix, rejects EOF
+	// before the terminating newline as ambiguous, and enforces the wire
+	// ceiling on the line. Bytes after the first newline are ignored (one
+	// response line per connection).
+
+	readBuf := make([]byte, builderManagerRequestCeiling+1)
+	filled := 0
+	var line []byte
+	for {
+		n, readErr := unixConn.Read(readBuf[filled:])
+		filled += n
+		if idx := bytes.IndexByte(readBuf[:filled], '\n'); idx >= 0 {
+			line = readBuf[:idx]
+			break
+		}
+		if readErr != nil {
+			// EOF, timeout, or cancellation before the terminating
+			// newline: the response is incomplete — ambiguous.
+			return "", &builderClientAmbiguous{cause: readErr}
+		}
+		if filled == len(readBuf) {
+			return "", &builderClientAmbiguous{cause: errors.New("response line exceeds the wire ceiling")}
+		}
 	}
-	line := string(buf[:n])
-	line = trimNewlineSuffix(line)
-	if !isWellFormedManagerResponse(command, line) {
+	text := trimNewlineSuffix(string(line))
+	if !isWellFormedManagerResponse(command, text) {
 		return "", &builderClientAmbiguous{cause: errors.New("malformed response")}
 	}
-	return line, nil
+	return text, nil
 }
 
 func trimNewlineSuffix(line string) string {
@@ -195,19 +218,23 @@ func trimNewlineSuffix(line string) string {
 // vocabulary: the ERR forms are command-independent, while the success
 // forms differ — START success is "OK <category>" (the token validated
 // exclusively by parseBuilderCategory; a bare "OK" is malformed for
-// START), and STOP/PURGE success stays "OK"/"OK absent" (an "OK <token>"
-// success form of one command is malformed for every other command and
-// fails closed into the ambiguity machinery — P21-E-A2-C5-C1).
+// START), STOP success is "OK"/"OK absent", and PURGE success is "OK".
+// A success form of one command is malformed for every other command and
+// fails closed into the ambiguity machinery — P21-E-A2-C5-C1.
 func isWellFormedManagerResponse(command, line string) bool {
 	switch line {
-	case builderManagerRespOKAbsent,
-		builderManagerRespBadOpID,
+	case builderManagerRespBadOpID,
 		builderManagerRespOpExists,
 		builderManagerRespAtCeiling,
 		builderManagerRespInternal:
 		return true
 	case builderManagerRespOK:
 		return command != builderManagerCmdStart
+	case builderManagerRespOKAbsent:
+		// "OK absent" is the STOP-only success form: it carries the
+		// START/STOP ordering guarantee, which PURGE has no counterpart
+		// for and START must never accept (P21-E-R1-C1).
+		return command == builderManagerCmdStop
 	}
 	if command != builderManagerCmdStart {
 		return false
@@ -225,7 +252,7 @@ func isWellFormedManagerResponse(command, line string) bool {
 // client boundary.
 func mapManagerResponse(command, line string) error {
 	switch line {
-	case builderManagerRespOK, builderManagerRespOKAbsent:
+	case builderManagerRespOK:
 		if command == builderManagerCmdStart {
 			// Unreachable: the START validation never accepts a bare
 			// success form; kept defensive so a caller mistake cannot
@@ -233,6 +260,14 @@ func mapManagerResponse(command, line string) error {
 			return &builderManagerError{kind: builderManagerRespInternal}
 		}
 		return nil
+	case builderManagerRespOKAbsent:
+		if command == builderManagerCmdStop {
+			return nil
+		}
+		// Unreachable: validation restricts "OK absent" to STOP; kept
+		// defensive so a caller mistake cannot report convergence for the
+		// wrong command.
+		return &builderManagerError{kind: builderManagerRespInternal}
 	}
 	return mapManagerErrorResponse(line)
 }

@@ -31,6 +31,12 @@ import (
 //
 // A success form of one command is malformed for every other command and
 // fails closed into the existing ambiguity/refusal machinery (P21-E-A2-C5-C1).
+//
+// Framing: exactly one newline-terminated response line per connection.
+// The client reads to the terminating newline, never interprets an
+// incomplete prefix, rejects EOF before the newline and an
+// over-ceiling line as ambiguous, and enforces
+// builderManagerRequestCeiling on the line (P21-E-R1-C1).
 const (
 	builderManagerRequestCeiling = 128 // bytes; the grammar needs far less
 

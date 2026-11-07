@@ -495,7 +495,11 @@ func TestBuilderClientStartTypedCategorySuccessBoundaries(t *testing.T) {
 						switch {
 						case strings.HasPrefix(line, "STOP "):
 							_, _ = conn.Write([]byte(builderManagerRespOKAbsent + "\n"))
-						case strings.HasPrefix(line, "START ") && tc.wantOK:
+						case strings.HasPrefix(line, "START "):
+							// Every case actually sends its scripted
+							// response: the malformedness of each shape is
+							// exercised on the wire, not approximated by
+							// an EOF shortcut.
 							_, _ = conn.Write([]byte(tc.response + "\n"))
 						}
 					}()
@@ -628,5 +632,132 @@ func TestBuilderClientPurgeRejectsCategorySuccessForm(t *testing.T) {
 	c := &builderManagerClient{}
 	if err := c.Purge(context.Background()); err == nil {
 		t.Fatal("a category success form must never report PURGE convergence")
+	}
+}
+
+// TestBuilderClientStartFragmentedResponseCompletesToFullLine is the
+// framing regression (P21-E-R1-C1): the manager sends "OK c1" WITHOUT the
+// terminating newline and holds the connection open, then later completes
+// the response as "0\n". The client must not interpret the incomplete
+// prefix (never c1): it must still be waiting when only the fragment has
+// arrived, and the final accepted category must be c10 — the complete
+// line "OK c10".
+func TestBuilderClientStartFragmentedResponseCompletesToFullLine(t *testing.T) {
+	listener, _ := rpcTestEndpoint(t)
+	fakeManagerUID(t, 4312, 4312)
+	fakeManagerPeer(t, 4312, 4312)
+
+	fragmentWritten := make(chan struct{})
+	release := make(chan struct{})
+	go func() {
+		conn, err := listener.AcceptUnix()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, builderManagerRequestCeiling)
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if _, err := conn.Read(buf); err != nil {
+			return
+		}
+		// Fragment one: an incomplete prefix — no terminating newline.
+		_, _ = conn.Write([]byte("OK c1"))
+		close(fragmentWritten)
+		<-release
+		// Fragment two completes the line: "OK c1" + "0\n" = "OK c10".
+		_, _ = conn.Write([]byte("0\n"))
+	}()
+
+	c := &builderManagerClient{}
+	result := make(chan struct {
+		category builderCategory
+		err      error
+	}, 1)
+	go func() {
+		category, err := c.Start(context.Background(), "op_0123456789abcdef0123456789abcdef")
+		result <- struct {
+			category builderCategory
+			err      error
+		}{category, err}
+	}()
+
+	<-fragmentWritten
+	// The incomplete prefix must not have been accepted: Start is still
+	// waiting for the terminating newline.
+	select {
+	case got := <-result:
+		t.Fatalf("incomplete prefix accepted without the newline: category=%s err=%v", got.category, got.err)
+	default:
+	}
+
+	close(release)
+	select {
+	case got := <-result:
+		if got.err != nil {
+			t.Fatalf("complete line must succeed, got %v", got.err)
+		}
+		if got.category != builderCategory(10) {
+			t.Fatalf("final accepted category = %s, want c10 (the complete line)", got.category)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Start never consumed the completed response line")
+	}
+}
+
+// TestBuilderClientStartTruncatedResponseEOFCompensates proves the
+// truncated-response contract: a response prefix without a terminating
+// newline followed by EOF is ambiguous (never a success), the
+// compensating STOP reaches the manager, and no category is returned.
+func TestBuilderClientStartTruncatedResponseEOFCompensates(t *testing.T) {
+	listener, _ := rpcTestEndpoint(t)
+	fakeManagerUID(t, 4312, 4312)
+	fakeManagerPeer(t, 4312, 4312)
+
+	requests := make(chan string, 8)
+	go func() {
+		for {
+			conn, err := listener.AcceptUnix()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				buf := make([]byte, builderManagerRequestCeiling)
+				_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+				n, err := conn.Read(buf)
+				if err != nil {
+					return
+				}
+				line := strings.TrimRight(string(buf[:n]), "\n")
+				requests <- line
+				switch {
+				case strings.HasPrefix(line, "STOP "):
+					_, _ = conn.Write([]byte(builderManagerRespOKAbsent + "\n"))
+				case strings.HasPrefix(line, "START "):
+					// Truncated response: an incomplete prefix, then EOF.
+					_, _ = conn.Write([]byte("OK c1"))
+				}
+			}()
+		}
+	}()
+
+	c := &builderManagerClient{}
+	category, err := c.Start(context.Background(), "op_0123456789abcdef0123456789abcdef")
+	if err == nil {
+		t.Fatal("a truncated response must never report START success")
+	}
+	if category != 0 {
+		t.Fatalf("truncated response returned category %s with an error", category)
+	}
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case line := <-requests:
+			if strings.HasPrefix(line, "STOP op_0123456789abcdef0123456789abcdef") {
+				return // compensation proved on the wire
+			}
+		case <-deadline:
+			t.Fatal("compensating STOP never reached the manager")
+		}
 	}
 }
