@@ -143,8 +143,12 @@ func TestSELinuxPolicyContainerProcAndChrFile(t *testing.T) {
 	//   scontext=docker_helper_container_t tcontext=container_file_t tclass=chr_file denied { open } paths /dev/tty, /dev/null, /dev/zero
 	// The chr_file class declaration and the container_file_t rule must both carry
 	// open and write so the container can open/write its character devices.
-	if !strings.Contains(content, "class chr_file { append create getattr ioctl read watch open write };") {
-		t.Error("chr_file class declaration must include open and write")
+	// The declaration additionally carries setattr + unlink from the R7
+	// P21-E-R3-P1 trusted dev-prep rung (the preparer's umask-correction
+	// chmod and the own-residue cleanup unlink); the container's open/write
+	// surface stays required by the regression above.
+	if !strings.Contains(content, "class chr_file { append create getattr ioctl read watch open write setattr unlink };") {
+		t.Error("chr_file class declaration must include open, write, setattr and unlink")
 	}
 	if !strings.Contains(content, "allow docker_helper_container_t container_file_t:chr_file { create getattr read append ioctl watch open write };") {
 		t.Error("container_file_t:chr_file rule must include open and write")
@@ -2351,7 +2355,7 @@ func TestSELinuxPolicyBindfsProjectionMount(t *testing.T) {
 		"allow docker_helper_t mount_exec_t:file { execute execute_no_trans read open };",
 		"allow docker_helper_t mount_var_run_t:dir { search };",
 		"allow docker_helper_t mount_var_run_t:file { getattr read open };",
-		"class capability { dac_read_search dac_override sys_admin fowner setuid setgid };",
+		"class capability { dac_read_search dac_override sys_admin fowner setuid setgid mknod };",
 	} {
 		if !strings.Contains(content, rule) {
 			t.Errorf("SELinux policy must grant: %s", rule)
@@ -2443,7 +2447,7 @@ func TestSELinuxPolicyBindfsProjectionMount(t *testing.T) {
 	if strings.Contains(content, "docker_helper_container_t mount_var_run_t") {
 		t.Error("docker_helper_container_t must have no mount_var_run_t access (the utab bookkeeping is daemon-domain only)")
 	}
-	wantCaps := map[string]bool{"dac_read_search": true, "dac_override": true, "sys_admin": true, "fowner": true, "setuid": true}
+	wantCaps := map[string]bool{"dac_read_search": true, "dac_override": true, "sys_admin": true, "fowner": true, "setuid": true, "mknod": true}
 	for p := range wantCaps {
 		if !capPerms[p] {
 			t.Errorf("docker_helper_t capability grants must include %s", p)
@@ -3135,5 +3139,34 @@ func TestReadPathSELinuxTypeCanonicalNULForms(t *testing.T) {
 				t.Errorf("readPathSELinuxType(raw %q) = %q, want %q", tc.raw, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestSELinuxPolicyDevprepFileContext pins the R7 P21-E-R3-P1 dev-prep
+// file-context row: the exact more-specific spelling for the dev-prep
+// subtree, the devprep type at the uncategorized level, and its placement
+// relative to the generic state row (the specific stem must exist exactly
+// once; the generic state row must remain — restorecon's longest-stem
+// match selects the devprep row for dev-prep paths and the state row for
+// everything else).
+func TestSELinuxPolicyDevprepFileContext(t *testing.T) {
+	content, err := os.ReadFile("packaging/selinux/docker-helper.fc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(content)
+	const devPrepRow = "/var/lib/docker-helper/dev-prep(/.*)?   system_u:object_r:docker_helper_devprep_t:s0"
+	if n := strings.Count(text, devPrepRow); n != 1 {
+		t.Fatalf("the dev-prep fc row must exist EXACTLY once verbatim, found %d", n)
+	}
+	const genericStateRow = "/var/lib/docker-helper(/.*)?            system_u:object_r:docker_helper_state_t:s0"
+	if n := strings.Count(text, genericStateRow); n != 1 {
+		t.Fatalf("the generic state fc row must remain exactly once, found %d", n)
+	}
+	if strings.Contains(text, "docker_helper_devprep_t:s0:") {
+		t.Error("the devprep fc row must stay at the uncategorized level (per-operation categories come only from the preparer's direct xattr write)")
+	}
+	if strings.Index(text, devPrepRow) < strings.Index(text, genericStateRow) {
+		t.Error("the dev-prep fc row must sit after (more specific than) the generic state row, matching the shipped ops/.*-vs-root ordering discipline")
 	}
 }

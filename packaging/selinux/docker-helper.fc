@@ -74,6 +74,11 @@
 /usr/libexec/docker-helper/buildkit/buildkit-runc  --  system_u:object_r:docker_helper_buildkitd_exec_t:s0
 /etc/docker-helper(/.*)?                system_u:object_r:docker_helper_config_t:s0
 /var/lib/docker-helper(/.*)?            system_u:object_r:docker_helper_state_t:s0
+# R7 P21-E-R3-P1: the trusted dev-prep subtree. The more-specific stem wins
+# over the generic state rule above (the ops/.*-vs-root precedent below);
+# the per-operation directories receive their categorized level through the
+# preparer's direct security.selinux xattr write, never through restorecon.
+/var/lib/docker-helper/dev-prep(/.*)?   system_u:object_r:docker_helper_devprep_t:s0
 /run/docker-helper(/.*)?                system_u:object_r:docker_helper_runtime_t:s0
 /run/docker-helper/trusted-ca(/.*)?     system_u:object_r:docker_helper_trusted_ca_t:s0
 # P5-S1/P5-S2 G32 r3: builder-owned runtime/state trees, split into root

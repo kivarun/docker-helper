@@ -117,7 +117,14 @@ module docker_helper 1.2;
 		class dir { add_name create getattr ioctl open read remove_name rmdir search setattr write mounton map relabelfrom relabelto lock link unlink rename reparent };
 		class sock_file { append create getattr ioctl read setattr unlink write open rename link lock };
 		class lnk_file { create getattr read unlink write setattr append rename link ioctl lock relabelfrom relabelto };
-		class chr_file { append create getattr ioctl read watch open write };
+		# R7 P21-E-R3-P1: + setattr + unlink — the trusted dev-prep
+		# preparer's umask-correction chmod on the six created character
+		# devices (selinux_inode_setattr ATTR_MODE → chr_file setattr,
+		# hooks.c:3298-3313; may_setattr runs no inode_permission for
+		# ATTR_MODE) and the synchronous own-residue cleanup's device
+		# unlinks (may_link → FILE__UNLINK). Exactly these two perms; the
+		# content-dead devices carry no open/read/write/append/ioctl.
+		class chr_file { append create getattr ioctl read watch open write setattr unlink };
 		class blk_file { append create getattr ioctl read };
 		class fifo_file { append create getattr ioctl read watch write open setattr rename link unlink lock relabelfrom relabelto };
 		class filesystem { mount remount unmount getattr associate mounton relabelfrom relabelto };
@@ -126,7 +133,13 @@ module docker_helper 1.2;
 		class udp_socket { create setopt connect getattr read write };
 		class netlink_route_socket { create setopt bind getattr write nlmsg_read read nlmsg_write };
 		class tun_socket { create relabelfrom relabelto };
-		class capability { dac_read_search dac_override sys_admin fowner setuid setgid };
+		# R7 P21-E-R3-P1: + mknod — the VFS vfs_mknod gate calls
+		# capable(CAP_MKNOD) for character nodes → security_capable →
+		# selinux_capable → cred_has_capability (hooks.c:1641-1666)
+		# checks the capability class bit; the systemd unit carries no
+		# CapabilityBoundingSet (root holds CAP_MKNOD), so the SELinux
+		# side is exactly this one class permission.
+		class capability { dac_read_search dac_override sys_admin fowner setuid setgid mknod };
 		class capability2 { wake_alarm kill };
 		class user_namespace { create };
 	class cap_userns { sys_admin sys_ptrace sys_chroot net_admin chown };
@@ -298,6 +311,112 @@ allow docker_helper_t docker_helper_runtime_t:lnk_file { create read setattr unl
 # ownership-record commit (write temp file + rename).
 allow docker_helper_t docker_helper_state_t:dir { getattr search read open write add_name remove_name create rmdir };
 allow docker_helper_t docker_helper_state_t:file { create read write open getattr setattr lock unlink rename };
+
+# ---------------------------------------------------------------------------
+# R7 P21-E-R3-P1: the trusted dev-prep authority (the accepted R3-P0 daemon
+# matrix, the R3-P0-C1 corrected consumer matrix, and the R3-P0-E1 loaded-
+# policy evidence; the preparer core is dev_prep_linux.go, UNINVOKED in
+# production — this block is the reviewed policy candidate, not an
+# activation).
+#
+# The prepared tree /var/lib/docker-helper/dev-prep/<op> replaces runc's own
+# /dev setup: a bind at /dev skips ALL of doSetupDev (pinned runc v1.4.3,
+# rootfs_linux.go:88-100), so the daemon prepares exactly what runc would
+# have created: the six standard character devices (specconv
+# AllowedDevices, all chr_file, FileMode 0666, no block devices), the five
+# fixed symlinks + the conditional /proc/kcore core symlink
+# (setupDevSymlinks/setupPtmx), and the pts/shm/mqueue mountpoint dirs.
+#
+# PROVENANCE (recorded per the reviewed round, never hidden in macros):
+#
+# 1. TYPE-WIDE RELABEL SCOPE: `docker_helper_t docker_helper_state_t:dir
+#    relabelfrom` and `docker_helper_t docker_helper_devprep_t:dir
+#    relabelto` are TYPE-WIDE — the daemon may relabel any state_t
+#    directory it can setxattr into devprep_t at any path on an fs_t
+#    superblock; SELinux types are global identifiers and the `.fc` row
+#    constrains only what restorecon COMPUTES for one pathname, not where
+#    the type can exist. The bound is the type's reachability: creation
+#    stays path-bounded (a devprep_t parent is required — no transition),
+#    the .fc + the preparer's code discipline keep ACTUAL objects at the
+#    dev-prep path, and access to any devprep_t object is subject only to
+#    MCS where the permission is in a constraint set.
+# 2. ASSOCIATE SCOPE: the subject of the filesystem associate check is the
+#    NEW OBJECT's SID (may_create, hooks.c:1877-1882; the relabel path
+#    re-checks with the new label, hooks.c:3449-3452), so
+#    `docker_helper_devprep_t fs_t:filesystem associate` authorizes
+#    devprep_t objects (and nothing else) on fs_t-labeled superblocks —
+#    the fs_use_xattr venue class (xfs/ext*/btrfs/...), i.e. every
+#    xattr-labeling filesystem on the host, not one path. The
+#    attribute-free + explicit-singleton design is the live-proven
+#    docker_helper_devnode_t precedent (P21-B: the attribute-free type
+#    suffered the exact associate DENIAL until its singleton; the singleton
+#    then enforced ALLOW/DENY via security_compute_av_raw); the loaded base
+#    attribute rule `allow file_type tmpfs_t:filesystem associate`
+#    (exeseal loaded sesearch) is deliberately NOT relied upon.
+# 3. dir:getattr IS NOT MCS-CONSTRAINED: the loaded dir mlsconstrain sets
+#    are { ioctl lock read search }, { add_name append link remove_name
+#    rename setattr unlink write }, { create relabelto }, relabelfrom
+#    (fresh 143-constraint dump, R3-P0-E1) — getattr appears in NONE, so
+#    the builder wrapper's dir getattr is category-blind: a foreign
+#    category's op-directory METADATA (existence, mode, and the
+#    security.selinux label revealing the foreign category) is stat-able
+#    by any mcs_constrained subject granted the row. Everything BELOW the
+#    op dir stays unreachable: `dir:search` IS constrained, and reaching
+#    any entry requires search on the op dir. The wrapper's enforced
+#    own-category refusal (C5-C1) is the behavioral bound; this exposure
+#    is recorded, not silently accepted.
+# 4. chr_file:open IS NOT INDEPENDENTLY MCS-CONSTRAINED: the loaded
+#    chr_file mlsconstrain sets are { getattr ioctl read },
+#    { setattr write }, { create relabelto }, relabelfrom — open, unlink,
+#    append, link, lock, rename are unconstrained. The MCS layer therefore
+#    does NOT independently gate chr_file open/unlink cross-category; the
+#    operative cross-category boundary for device access is the
+#    categorized dir:search traversal gate on the op directory. (The
+#    workload device-content authorities — open/read/write — are
+#    deliberately NOT granted in this block; they are the measured-rung
+#    family, never preempted.)
+# 5. CROSS-OPERATION ISOLATION = CATEGORIZED dir:search: the only MCS-gated
+#    reachability permission on the traverse path is dir:search (decision-
+#    proven DENIED cross-category by the loaded-policy
+#    security_compute_av_raw matrix, R3-P0-E1 kernel-av-matrix.tsv); the
+#    wrapper and the workload run at the operation's own category
+#    (buildkitd_t:s0:cX), so foreign prepared trees are unreachable by
+#    path resolution regardless of the row set below.
+# 6. THE STANDING builder_state_t:dir mounton RULE: the container's /dev
+#    bind destination (the rootfs mountpoint dir in the per-op builder
+#    state tree) is ALREADY covered by the standing snapshot-tree rule
+#    (below, "allow docker_helper_buildkitd_t
+#    docker_helper_builder_state_t:dir { ... mounton ... }") — the classic
+#    MS_BIND checks destination mounton, never the source superblock
+#    (P21-D accepted proof); NO fs_t:filesystem mount is proposed, granted,
+#    or needed. The only potentially-new mounton surface
+#    (devprep_t:dir mounton, the pts/shm/mqueue overmount destinations) is
+#    deliberately NOT granted — pending the OBL-1' live destination
+#    verification.
+#
+# DELTAS TO THE require DECLARATIONS (exactness, no semantic grants):
+# class chr_file + { setattr unlink } (the umask-correction chmod and the
+# cleanup unlink); class capability + mknod (the vfs_mknod capable() gate
+# → cred_has_capability, hooks.c:1641-1666).
+type docker_helper_devprep_t;
+
+# The daemon-side preparation authority (every member maps to a row of the
+# R3-P0 §1 syscall trace; nothing else):
+allow docker_helper_t docker_helper_state_t:dir setattr;
+allow docker_helper_t docker_helper_state_t:dir relabelfrom;
+allow docker_helper_t docker_helper_devprep_t:dir { getattr search read open write add_name remove_name create rmdir setattr relabelfrom relabelto };
+allow docker_helper_t docker_helper_devprep_t:chr_file { create getattr setattr unlink };
+allow docker_helper_t docker_helper_devprep_t:lnk_file { create getattr read unlink };
+allow docker_helper_t self:capability mknod;
+allow docker_helper_devprep_t fs_t:filesystem associate;
+
+# The builder-side wrapper metadata-inspection authority (the C5-C1
+# enforced contract: presence + own-category label; NO readlink, NO
+# directory enumeration, NO device content):
+allow docker_helper_buildkitd_t docker_helper_state_t:dir search;
+allow docker_helper_buildkitd_t docker_helper_devprep_t:dir { search getattr };
+allow docker_helper_buildkitd_t docker_helper_devprep_t:chr_file getattr;
+allow docker_helper_buildkitd_t docker_helper_devprep_t:lnk_file getattr;
 
 # Trusted CA material is dynamically created by the daemon under
 # /run/docker-helper/trusted-ca. Type transitions label newly created snapshot
