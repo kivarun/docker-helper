@@ -43,15 +43,17 @@ type fakeDevPrepNode struct {
 }
 
 type fakeDevPrepFS struct {
-	root *fakeDevPrepNode
-	log  []string
-	fail map[string]error // one-shot injected failures keyed by operation
+	root  *fakeDevPrepNode
+	log   []string
+	fail  map[string]error // one-shot injected failures keyed by operation
+	umask os.FileMode      // modeled process umask (the shipped unit: 0077)
 }
 
 func newFakeDevPrepFS() *fakeDevPrepFS {
 	fs := &fakeDevPrepFS{
-		root: &fakeDevPrepNode{kind: "dir", mode: 0o755, entries: map[string]*fakeDevPrepNode{}, xattrs: map[string][]byte{}},
-		fail: map[string]error{},
+		root:  &fakeDevPrepNode{kind: "dir", mode: 0o755, entries: map[string]*fakeDevPrepNode{}, xattrs: map[string][]byte{}},
+		fail:  map[string]error{},
+		umask: 0o077,
 	}
 	// The state root always exists in production (systemd owns it); tests
 	// that need it missing clear the model explicitly.
@@ -135,7 +137,22 @@ func (f *fakeDevPrepFS) mkdir(path string, perm os.FileMode) error {
 	if _, exists := parent.entries[base]; exists {
 		return os.ErrExist
 	}
-	parent.entries[base] = &fakeDevPrepNode{kind: "dir", mode: perm, entries: map[string]*fakeDevPrepNode{}, xattrs: map[string][]byte{}}
+	// The kernel applies the process umask at creation.
+	parent.entries[base] = &fakeDevPrepNode{kind: "dir", mode: perm &^ f.umask, entries: map[string]*fakeDevPrepNode{}, xattrs: map[string][]byte{}}
+	return nil
+}
+
+func (f *fakeDevPrepFS) chmod(path string, mode os.FileMode) error {
+	f.record("chmod " + path)
+	if err := f.take("chmod " + path); err != nil {
+		return err
+	}
+	// chmod is not umask-affected.
+	node, err := f.resolve(path)
+	if err != nil {
+		return err
+	}
+	node.mode = mode
 	return nil
 }
 
@@ -153,7 +170,7 @@ func (f *fakeDevPrepFS) mknod(path string, mode uint32, dev uint64) error {
 	}
 	parent.entries[base] = &fakeDevPrepNode{
 		kind:   "chr",
-		mode:   os.FileMode(mode &^ unix.S_IFMT),
+		mode:   os.FileMode(mode&^unix.S_IFMT) &^ f.umask,
 		major:  unix.Major(dev),
 		minor:  unix.Minor(dev),
 		xattrs: map[string][]byte{},
@@ -251,6 +268,9 @@ func (f *fakeDevPrepFS) setxattr(path, name string, value []byte) error {
 
 func (f *fakeDevPrepFS) getxattr(path, name string) ([]byte, error) {
 	f.record("getxattr " + name + " " + path)
+	if err := f.take("getxattr " + name + " " + path); err != nil {
+		return nil, err
+	}
 	node, err := f.resolve(path)
 	if err != nil {
 		return nil, err
@@ -777,5 +797,197 @@ func TestDevPrepDeviceContractMatchesPinnedRunc(t *testing.T) {
 		if link.name == "fd" && link.target != "/proc/self/fd" {
 			t.Fatalf("fd target = %q, want /proc/self/fd", link.target)
 		}
+	}
+}
+
+// TestDevPrepRealModesUnderUnitUmask proves the fixed modes survive the
+// shipped UMask=0077: the fake applies the umask at creation, so the
+// mknod'd devices start at 0600 and the mount dirs at 0700; the
+// preparer's narrow verified correction must deliver 0666/0755, and with
+// no umask no correction may be issued at all.
+func TestDevPrepRealModesUnderUnitUmask(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		umask     os.FileMode
+		wantChmod bool
+	}{
+		{name: "shipped UMask=0077", umask: 0o077, wantChmod: true},
+		{name: "no umask truncation", umask: 0, wantChmod: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withDevPrepSeams(t, false, devPrepTestBuilderUID)
+			fs := newFakeDevPrepFS()
+			fs.umask = tc.umask
+			if err := devPrepPrepare(t, fs, devPrepTestOpID, builderCategory(1)); err != nil {
+				t.Fatalf("prepare failed: %v", err)
+			}
+			opDir := devPrepOpDir()
+			for _, dev := range devPrepDevices {
+				node := devPrepNodeAt(t, fs, filepath.Join(opDir, dev.name))
+				if node.mode.Perm() != devPrepFileMode {
+					t.Fatalf("device %s mode = %#o, want %#o", dev.name, node.mode.Perm(), devPrepFileMode)
+				}
+			}
+			for _, name := range devPrepMountDirs {
+				node := devPrepNodeAt(t, fs, filepath.Join(opDir, name))
+				if node.mode.Perm() != devPrepDirMode {
+					t.Fatalf("mount dir %s mode = %#o, want %#o", name, node.mode.Perm(), devPrepDirMode)
+				}
+			}
+			chmods := 0
+			for _, entry := range fs.log {
+				if strings.HasPrefix(entry, "chmod "+opDir+"/") {
+					chmods++
+				}
+			}
+			if tc.wantChmod {
+				// One correction per device and per mount dir — exactly
+				// the nodes the umask truncated.
+				if chmods != len(devPrepDevices)+len(devPrepMountDirs) {
+					t.Fatalf("chmod corrections = %d, want %d", chmods, len(devPrepDevices)+len(devPrepMountDirs))
+				}
+			} else if chmods != 0 {
+				t.Fatalf("chmod corrections = %d, want 0 when no umask truncated the modes", chmods)
+			}
+			// ACL-managed directories keep their effective 0710.
+			for _, dir := range []string{"/var/lib/docker-helper", "/var/lib/docker-helper/dev-prep", opDir} {
+				if mode := (fakeDevPrepInfo{devPrepNodeAt(t, fs, dir)}).Mode().Perm(); mode != devPrepACLEffectiveMode {
+					t.Fatalf("%s effective mode = %#o, want %#o", dir, mode, devPrepACLEffectiveMode)
+				}
+			}
+		})
+	}
+}
+
+// TestDevPrepCorrectionFailureInjection proves the failure handling at
+// the new permission-correction steps: an injected chmod failure is an
+// explicit preparation failure and removes the own residue.
+func TestDevPrepCorrectionFailureInjection(t *testing.T) {
+	withDevPrepSeams(t, false, devPrepTestBuilderUID)
+	opDir := devPrepOpDir()
+	for _, arm := range []string{"chmod " + opDir + "/null", "chmod " + opDir + "/pts"} {
+		t.Run(filepath.Base(strings.TrimPrefix(arm, "chmod "+opDir+"/")), func(t *testing.T) {
+			fs := newFakeDevPrepFS()
+			fs.arm(arm, errors.New("injected chmod failure"))
+			err := devPrepPrepare(t, fs, devPrepTestOpID, builderCategory(1))
+			if err == nil || !strings.Contains(err.Error(), "correct the umask-truncated mode") {
+				t.Fatalf("chmod failure must fail explicitly, got %v", err)
+			}
+			if _, err := fs.resolve(opDir); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("own residue not removed after a correction failure")
+			}
+		})
+	}
+}
+
+// TestDevPrepVerifyTreeRejectsWrongMountDirMode proves the strengthened
+// strict verification: a mountpoint directory whose mode is not 0755
+// fails the verification.
+func TestDevPrepVerifyTreeRejectsWrongMountDirMode(t *testing.T) {
+	withDevPrepSeams(t, false, devPrepTestBuilderUID)
+	fs := newFakeDevPrepFS()
+	if err := devPrepPrepare(t, fs, devPrepTestOpID, builderCategory(1)); err != nil {
+		t.Fatalf("prepare failed: %v", err)
+	}
+	node := devPrepNodeAt(t, fs, filepath.Join(devPrepOpDir(), "shm"))
+	node.mode = 0o700
+	if err := devPrepVerifyTree(fs, devPrepOpDir(), builderCategory(1)); err == nil || !strings.Contains(err.Error(), "mount dir shm") {
+		t.Fatalf("wrong mount-dir mode must fail verification, got %v", err)
+	}
+}
+
+// TestDevPrepCanonicalStateRootBinding proves the canonical source-root
+// contract: only the exact canonical daemon state root spelling is
+// accepted; traversal and noncanonical spellings are refused before the
+// first mutation, and the production binding resolves through the config
+// owner's constant.
+func TestDevPrepCanonicalStateRootBinding(t *testing.T) {
+	withDevPrepSeams(t, false, devPrepTestBuilderUID)
+	if got := getStateDirFunc(); got != daemonStateRoot {
+		t.Fatalf("config state dir = %q, want the canonical %q", got, daemonStateRoot)
+	}
+	for _, bad := range []string{
+		"",
+		"var/lib/docker-helper",
+		"/var/lib/docker-helper/",
+		"/var/lib//docker-helper",
+		"/var/lib/docker-helper/../docker-helper",
+		"/var/lib/other",
+		"/tmp/docker-helper",
+	} {
+		t.Run(bad, func(t *testing.T) {
+			fs := newFakeDevPrepFS()
+			before := len(fs.log)
+			err := prepareTrustedDevWithSyscalls(fs, context.Background(), bad, devPrepTestOpID, builderCategory(1))
+			if err == nil || !strings.Contains(err.Error(), "canonical daemon state root") {
+				t.Fatalf("state dir %q must be refused, got %v", bad, err)
+			}
+			if len(fs.log) != before {
+				t.Fatal("a noncanonical state root must be refused before any mutation")
+			}
+		})
+	}
+}
+
+// TestDevPrepCleanupFailureReportedAndResidueRefused proves cleanup
+// errors are never discarded: a failed own-residue removal is reported
+// alongside the primary failure, the residue tree remains, and a same-ID
+// retry into the residue is refused (no adoption).
+func TestDevPrepCleanupFailureReportedAndResidueRefused(t *testing.T) {
+	withDevPrepSeams(t, false, devPrepTestBuilderUID)
+	opDir := devPrepOpDir()
+	fs := newFakeDevPrepFS()
+	fs.arm("mknod "+opDir+"/zero", errors.New("injected mknod failure"))
+	fs.arm("removeall "+opDir, errors.New("injected removal failure"))
+
+	err := devPrepPrepare(t, fs, devPrepTestOpID, builderCategory(1))
+	if err == nil {
+		t.Fatal("the preparation must fail")
+	}
+	if !strings.Contains(err.Error(), "injected mknod failure") {
+		t.Fatalf("the primary failure must be preserved, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "own-residue cleanup") {
+		t.Fatalf("the cleanup failure must be reported, got %v", err)
+	}
+	if _, err := fs.resolve(opDir); err != nil {
+		t.Fatalf("the residue tree must remain after a failed removal: %v", err)
+	}
+
+	// The same-ID retry into the residue is refused, never adopted.
+	retryErr := devPrepPrepare(t, fs, devPrepTestOpID, builderCategory(1))
+	var refuse *devPrepRefuseError
+	if !errors.As(retryErr, &refuse) {
+		t.Fatalf("the retry must refuse the residue, got %v", retryErr)
+	}
+}
+
+// TestDevPrepSELinuxLabelFailureInjection proves the label write and
+// read-back failures fail the preparation closed (with own-residue
+// cleanup) in addition to the ordinary filesystem mutations.
+func TestDevPrepSELinuxLabelFailureInjection(t *testing.T) {
+	withDevPrepSeams(t, true, devPrepTestBuilderUID)
+	opDir := devPrepOpDir()
+	devPrepRoot := filepath.Dir(opDir)
+	for _, tc := range []struct {
+		name    string
+		arm     string
+		wantErr string
+	}{
+		{name: "op label write", arm: "setxattr security.selinux " + opDir, wantErr: "cannot label"},
+		{name: "op label read-back", arm: "getxattr security.selinux " + opDir, wantErr: "cannot read back the label"},
+		{name: "root label read-back", arm: "getxattr security.selinux " + devPrepRoot, wantErr: "cannot read the label"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newFakeDevPrepFS()
+			fs.arm(tc.arm, errors.New("injected label failure"))
+			err := devPrepPrepare(t, fs, devPrepTestOpID, builderCategory(1))
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("%s must fail explicitly, got %v", tc.name, err)
+			}
+			if _, err := fs.resolve(opDir); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("own residue not removed after %s", tc.name)
+			}
+		})
 	}
 }

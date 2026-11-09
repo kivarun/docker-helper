@@ -268,8 +268,14 @@ func getRuntimeDir() (string, error) {
 	return "/run/docker-helper", nil
 }
 
+// daemonStateRoot is the canonical daemon state root. It is a fixed
+// privileged path, not a configurable one: privileged subsystems bind to
+// this exact spelling (see the trusted /dev preparer's source-root
+// binding).
+const daemonStateRoot = "/var/lib/docker-helper"
+
 func getStateDir() string {
-	return "/var/lib/docker-helper"
+	return daemonStateRoot
 }
 
 // decodeAndValidateConfigDocument is the ONE strict ingest boundary of a

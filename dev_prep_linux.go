@@ -64,7 +64,23 @@ package main
 //     successful return, and nothing is published on any partial state;
 //   - synchronous own-residue cleanup: every failure after the operation
 //     directory was created removes exactly that directory (the only
-//     content this invocation created) before returning.
+//     content this invocation created) before returning, and a failed
+//     removal is reported alongside the primary failure — the residue
+//     then stays refuse-to-adopt for any retry;
+//   - canonical source root: the state root is accepted only at its
+//     exact canonical spelling, the fixed daemon state root
+//     (/var/lib/docker-helper, config.go's daemonStateRoot — a fixed
+//     privileged path, not a configurable one); every other spelling,
+//     including traversal forms, is refused before the first mutation;
+//   - real creation modes: the daemon unit runs UMask=0077, so creation
+//     alone cannot guarantee the fixed modes (mknod 0666 → 0600,
+//     mkdir 0755 → 0700). After every device and mount-dir creation the
+//     actual mode is verified and, only when it differs, corrected with
+//     a narrow chmod and verified again — the process-global umask is
+//     never touched (the daemon is multithreaded). The future SELinux
+//     authority inventory therefore gains devprep_t:chr_file setattr and
+//     keeps devprep_t:dir setattr (the C4-C1 manage set) for these
+//     corrections; nothing is granted in this round.
 
 import (
 	"bytes"
@@ -351,6 +367,11 @@ type devPrepSyscalls interface {
 	readlink(path string) (string, error)
 	readDirNames(path string) ([]string, error)
 	removeAll(path string) error
+	// chmod is the narrow permission-correction primitive: applied only
+	// to a just-created node whose actual mode differs from the fixed
+	// contract (umask-truncated), never as a general-purpose mode
+	// writer.
+	chmod(path string, mode os.FileMode) error
 	// setxattr and getxattr serve both the security.selinux label and
 	// the system.posix_acl_access ACL.
 	setxattr(path, name string, value []byte) error
@@ -391,6 +412,9 @@ func (linuxDevPrepSyscalls) readDirNames(path string) ([]string, error) {
 	return names, nil
 }
 func (linuxDevPrepSyscalls) removeAll(path string) error { return os.RemoveAll(path) }
+func (linuxDevPrepSyscalls) chmod(path string, mode os.FileMode) error {
+	return unix.Chmod(path, uint32(mode))
+}
 func (linuxDevPrepSyscalls) setxattr(path, name string, value []byte) error {
 	return unix.Setxattr(path, name, value, 0)
 }
@@ -413,27 +437,33 @@ func (e *devPrepRefuseError) Error() string {
 }
 
 // prepareTrustedDev prepares the trusted /dev tree for one operation with
-// the production syscall seam. The new core is intentionally not invoked
-// by any production path yet (the integration round wires it into the
-// build driver's stage sequence).
-func prepareTrustedDev(ctx context.Context, stateDir, opID string, category builderCategory) error {
-	return prepareTrustedDevWithSyscalls(linuxDevPrepSyscalls{}, ctx, stateDir, opID, category)
+// the production syscall seam. The state root is bound to the daemon's
+// canonical state root through the config owner; the new core is
+// intentionally not invoked by any production path yet (the integration
+// round wires it into the build driver's stage sequence).
+func prepareTrustedDev(ctx context.Context, opID string, category builderCategory) error {
+	return prepareTrustedDevWithSyscalls(linuxDevPrepSyscalls{}, ctx, getStateDirFunc(), opID, category)
 }
 
 // prepareTrustedDevWithSyscalls is the one synchronous preparation
 // sequence. It never runs asynchronously, never adopts an existing
 // operation tree, and removes its own residue on every partial failure.
-func prepareTrustedDevWithSyscalls(seam devPrepSyscalls, ctx context.Context, stateDir, opID string, category builderCategory) error {
+func prepareTrustedDevWithSyscalls(seam devPrepSyscalls, ctx context.Context, stateDir, opID string, category builderCategory) (err error) {
 	if !isOperationID(opID) {
 		return fmt.Errorf("dev-prep: operation id is not canonical")
 	}
 	if !category.valid() {
 		return fmt.Errorf("dev-prep: category %s is not a valid pool category", category)
 	}
-	if stateDir == "" || !filepath.IsAbs(stateDir) {
-		return fmt.Errorf("dev-prep: state dir must be an absolute path")
+	// Canonical source root: only the exact canonical daemon state root
+	// spelling is accepted. Privileged paths are not configurable; any
+	// other absolute value — including traversal spellings that
+	// filepath.Clean would canonicalize back — is refused before the
+	// first mutation.
+	if stateDir != daemonStateRoot {
+		return fmt.Errorf("dev-prep: state dir %q is not the canonical daemon state root %q; privileged paths are not configurable", stateDir, daemonStateRoot)
 	}
-	devPrepRoot := filepath.Join(stateDir, "dev-prep")
+	devPrepRoot := filepath.Join(daemonStateRoot, "dev-prep")
 	opDir := filepath.Join(devPrepRoot, opID)
 
 	// Refuse-to-adopt: an existing tree is never adopted, repaired, or
@@ -446,18 +476,23 @@ func prepareTrustedDevWithSyscalls(seam devPrepSyscalls, ctx context.Context, st
 
 	// The state root must already exist (systemd owns it); this owner
 	// never creates it.
-	if err := devPrepRequireDir(seam, stateDir, "state root"); err != nil {
+	if err := devPrepRequireDir(seam, daemonStateRoot, "state root"); err != nil {
 		return err
 	}
 
 	createdOpDir := false
 	defer func() {
-		if createdOpDir {
-			// Own-residue cleanup: this invocation created the operation
-			// directory and everything inside it; the removal is
-			// lstat-based (RemoveAll never follows a final symlink) and
-			// cannot touch any other operation's tree.
-			_ = seam.removeAll(opDir)
+		if !createdOpDir {
+			return
+		}
+		// Own-residue cleanup: this invocation created the operation
+		// directory and everything inside it; the removal is
+		// lstat-based (RemoveAll never follows a final symlink) and
+		// cannot touch any other operation's tree. A failed removal is
+		// reported alongside the primary failure — the residue stays
+		// refuse-to-adopt for any retry, never adopted or repaired.
+		if rmErr := seam.removeAll(opDir); rmErr != nil {
+			err = fmt.Errorf("dev-prep: %w; additionally, own-residue cleanup of %s failed: %v", err, opDir, rmErr)
 		}
 	}()
 
@@ -489,7 +524,7 @@ func prepareTrustedDevWithSyscalls(seam devPrepSyscalls, ctx context.Context, st
 	if err != nil {
 		return err
 	}
-	for _, dir := range []string{stateDir, devPrepRoot} {
+	for _, dir := range []string{daemonStateRoot, devPrepRoot} {
 		if err := devPrepEnsureACL(seam, dir, builderUID); err != nil {
 			return err
 		}
@@ -540,15 +575,27 @@ func prepareTrustedDevWithSyscalls(seam devPrepSyscalls, ctx context.Context, st
 	// Operation contents, in the fixed order: mountpoint directories,
 	// devices, symlinks. Every creation is strict (an existing target is
 	// a failure — the tree was just created and is exclusively ours).
+	// The daemon unit runs UMask=0077, so creation alone cannot
+	// guarantee the fixed modes: each created node's actual mode is
+	// verified and, only when the umask truncated it, corrected with a
+	// narrow chmod and verified again. The process-global umask is never
+	// touched (the daemon is multithreaded).
 	for _, name := range devPrepMountDirs {
-		if err := seam.mkdir(filepath.Join(opDir, name), devPrepDirMode); err != nil {
+		path := filepath.Join(opDir, name)
+		if err := seam.mkdir(path, devPrepDirMode); err != nil {
 			return fmt.Errorf("dev-prep: cannot create mount dir %s: %w", name, err)
+		}
+		if err := devPrepEnsureMode(seam, path, name, devPrepDirMode); err != nil {
+			return err
 		}
 	}
 	for _, dev := range devPrepDevices {
 		path := filepath.Join(opDir, dev.name)
 		if err := seam.mknod(path, devPrepFileMode|unix.S_IFCHR, unix.Mkdev(dev.major, dev.minor)); err != nil {
 			return fmt.Errorf("dev-prep: cannot create device %s: %w", dev.name, err)
+		}
+		if err := devPrepEnsureMode(seam, path, dev.name, devPrepFileMode); err != nil {
+			return err
 		}
 	}
 	for _, link := range devPrepSymlinks {
@@ -698,6 +745,32 @@ func devPrepACLMatches(seam devPrepSyscalls, path string, want []devPrepACLEntry
 	return true, nil
 }
 
+// devPrepEnsureMode is the narrowly scoped, verified permission
+// correction for one just-created node: the actual mode is read (never
+// assumed); only a mismatch — the UMask=0077 truncation — triggers a
+// chmod to the exact contract mode, and the correction is verified with
+// a second read. The umask is never changed process-wide.
+func devPrepEnsureMode(seam devPrepSyscalls, path, name string, want os.FileMode) error {
+	st, err := seam.lstat(path)
+	if err != nil {
+		return fmt.Errorf("dev-prep: cannot verify the mode of %s: %w", name, err)
+	}
+	if st.Mode().Perm() == want {
+		return nil
+	}
+	if err := seam.chmod(path, want); err != nil {
+		return fmt.Errorf("dev-prep: cannot correct the umask-truncated mode of %s (got %#o, want %#o): %w", name, st.Mode().Perm(), want, err)
+	}
+	st, err = seam.lstat(path)
+	if err != nil {
+		return fmt.Errorf("dev-prep: cannot verify the corrected mode of %s: %w", name, err)
+	}
+	if st.Mode().Perm() != want {
+		return fmt.Errorf("dev-prep: mode of %s did not verify after correction: got %#o, want %#o", name, st.Mode().Perm(), want)
+	}
+	return nil
+}
+
 // devPrepVerifyTree strictly verifies the finished tree: the exact entry
 // name set (the fixed contract is exhaustive — an unexpected entry is a
 // failure), each entry's type and content contract, the effective mode
@@ -757,6 +830,9 @@ func devPrepVerifyTree(seam devPrepSyscalls, opDir string, category builderCateg
 		}
 		if !st.IsDir() {
 			return fmt.Errorf("dev-prep: mount dir %s is not a directory", name)
+		}
+		if st.Mode().Perm() != devPrepDirMode {
+			return fmt.Errorf("dev-prep: mount dir %s has mode %#o, want %#o", name, st.Mode().Perm(), devPrepDirMode)
 		}
 	}
 	for _, dev := range devPrepDevices {
