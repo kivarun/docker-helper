@@ -63,3 +63,11 @@ func parseBuilderCategory(text string) (builderCategory, bool) {
 	}
 	return c, true
 }
+
+// valid reports whether the category is inside the fixed production pool
+// (the parser mints categories; this is the validity check for typed
+// values that arrived without parsing — the zero value is the
+// never-issued category and is never valid).
+func (c builderCategory) valid() bool {
+	return c >= builderCategoryPoolMin && c <= builderCategoryPoolMax
+}
