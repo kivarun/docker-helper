@@ -35,12 +35,14 @@ package main
 //     caller — it is constructed from the fixed daemon state root
 //     (devPrepOpDir).
 //   - the own category is derived kernel-trust-only: the raw own context
-//     is read from /proc/self/attr/current, its kernel terminal framing
-//     is normalized (exactly one optional terminal NUL or newline — both
-//     encodings are observed live: the NUL form in the C3 capture, the
-//     newline form in the g26 probe), and the category token is validated
-//     exclusively through the single parser (parseBuilderCategory). No
-//     second grammar, no caller-supplied context is trusted.
+//     is read from /proc/self/attr/current (a bounded direct-syscall read
+//     — open and read only, no fstat/getattr; see readOwnContext), its
+//     kernel terminal framing is normalized (exactly one optional
+//     terminal NUL or newline — both encodings are observed live: the NUL
+//     form in the C3 capture, the newline form in the g26 probe), and the
+//     category token is validated exclusively through the single parser
+//     (parseBuilderCategory). No second grammar, no caller-supplied
+//     context is trusted.
 //   - the inspection is strictly read-only and narrow: lstat (getattr)
 //     for every entry's presence and inode type, and one getxattr for the
 //     persisted label — exactly the measured grant family of the
@@ -65,6 +67,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 // wrapperOwnDomain is the SELinux process type (domain) the wrapper runs
@@ -160,8 +164,55 @@ type wrapperOwnContextReader interface {
 // returned unnormalized; the framing is the parser's concern.
 type linuxWrapperOwnContextReader struct{}
 
+// wrapperAttrOpen, wrapperAttrRead and wrapperAttrClose are the procattr
+// read seams (production: the unix syscalls on the fixed procattr
+// pathname). Package-global; tests restore them.
+var (
+	wrapperAttrOpen = func(path string, flags int, perm uint32) (int, error) {
+		return unix.Open(path, flags, perm)
+	}
+	wrapperAttrRead = func(fd int, buf []byte) (int, error) {
+		return unix.Read(fd, buf)
+	}
+	wrapperAttrClose = func(fd int) error {
+		return unix.Close(fd)
+	}
+)
+
+// readOwnContext performs the bounded raw procattr read with direct
+// syscalls only — open, read, close. It deliberately does NOT use
+// os.ReadFile, whose statOrZero path invokes f.Stat — an fstat of the
+// procattr file — before the first read; that would add a self:file
+// getattr check outside the measured OBL-7 denial family { read open }.
+// The read is bounded by the shared context read ceiling
+// (builderObjectContextReadCeiling): more bytes than the ceiling is an
+// oversized failure, never a silent truncation. The read is
+// close-on-exec: the inspection must not leak the procattr descriptor
+// into the exec'd worker.
 func (linuxWrapperOwnContextReader) readOwnContext() ([]byte, error) {
-	return os.ReadFile(selinuxAttrPath)
+	fd, err := wrapperAttrOpen(selinuxAttrPath, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer wrapperAttrClose(fd)
+	buf := make([]byte, builderObjectContextReadCeiling+1)
+	total := 0
+	for {
+		if total > builderObjectContextReadCeiling {
+			return nil, fmt.Errorf("the own process context exceeds the %d-byte read ceiling", builderObjectContextReadCeiling)
+		}
+		n, err := wrapperAttrRead(fd, buf[total:])
+		total += n
+		if err != nil {
+			if errors.Is(err, unix.EINTR) {
+				continue
+			}
+			return nil, err
+		}
+		if n == 0 {
+			return buf[:total], nil
+		}
+	}
 }
 
 // wrapperOwnContextCategory derives the wrapper's own operation category

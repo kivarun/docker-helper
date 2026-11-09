@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 const wrapperTestBundleID = "s4pkwc8u4nxm7ihg20z5xu82j"
@@ -325,6 +327,173 @@ func TestWrapperInspectPreparedDevRefusals(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestWrapperOwnContextReader proves the production procattr read
+// contract: a direct open/read/close sequence on the fixed procattr path
+// (no fstat — the OBL-7 denial family stays exactly { read open }), the
+// shared read ceiling rejecting oversized data without truncation, and
+// fail-closed open/read failures.
+func TestWrapperOwnContextReader(t *testing.T) {
+	// attrSeam records the open/read/close sequence and replays scripted
+	// reads from a fixed byte source.
+	type attrSeam struct {
+		openPath   string
+		openFlags  int
+		readBufLen int
+		readCount  int
+		closed     bool
+		source     []byte
+	}
+	swap := func(t *testing.T, openErr error, readErr error, source []byte) *attrSeam {
+		t.Helper()
+		rec := &attrSeam{source: source}
+		origOpen, origRead, origClose := wrapperAttrOpen, wrapperAttrRead, wrapperAttrClose
+		wrapperAttrOpen = func(path string, flags int, perm uint32) (int, error) {
+			rec.openPath, rec.openFlags = path, flags
+			if openErr != nil {
+				return 0, openErr
+			}
+			return 7, nil
+		}
+		wrapperAttrRead = func(fd int, buf []byte) (int, error) {
+			if fd != 7 {
+				t.Fatalf("read on unexpected fd %d", fd)
+			}
+			if rec.readBufLen == 0 {
+				rec.readBufLen = len(buf)
+			}
+			rec.readCount++
+			if readErr != nil {
+				return 0, readErr
+			}
+			n := copy(buf, rec.source)
+			rec.source = rec.source[n:]
+			return n, nil
+		}
+		wrapperAttrClose = func(fd int) error {
+			rec.closed = true
+			return nil
+		}
+		t.Cleanup(func() { wrapperAttrOpen, wrapperAttrRead, wrapperAttrClose = origOpen, origRead, origClose })
+		return rec
+	}
+	reader := linuxWrapperOwnContextReader{}
+
+	t.Run("bounded successful read in chunks", func(t *testing.T) {
+		raw := wrapperOwnContextRaw(7, "\n")
+		rec := swap(t, nil, nil, raw)
+		got, err := reader.readOwnContext()
+		if err != nil {
+			t.Fatalf("read failed: %v", err)
+		}
+		if string(got) != string(raw) {
+			t.Fatalf("raw bytes altered: got %q want %q", got, raw)
+		}
+		if rec.openPath != selinuxAttrPath {
+			t.Fatalf("open path = %q, want %q", rec.openPath, selinuxAttrPath)
+		}
+		if rec.openFlags != unix.O_RDONLY|unix.O_CLOEXEC {
+			t.Fatalf("open flags = %#x, want O_RDONLY|O_CLOEXEC", rec.openFlags)
+		}
+		if rec.readBufLen != builderObjectContextReadCeiling+1 {
+			t.Fatalf("read buffer = %d bytes, want the ceiling-plus-one bound %d", rec.readBufLen, builderObjectContextReadCeiling+1)
+		}
+		if rec.readCount < 2 {
+			t.Fatalf("chunked source must take several reads, got %d", rec.readCount)
+		}
+		if !rec.closed {
+			t.Fatal("the descriptor must be closed")
+		}
+		category, err := wrapperOwnContextCategory(got)
+		if err != nil || category != 7 {
+			t.Fatalf("the read raw bytes must parse: %d, %v", category, err)
+		}
+	})
+
+	t.Run("exactly at the ceiling is accepted", func(t *testing.T) {
+		// A valid own context padded to exactly the ceiling through its
+		// (policy-dependent, unparsed) user field.
+		raw := []byte(strings.Repeat("u", 215) + ":system_r:" + wrapperOwnDomain + ":s0:c7")
+		if len(raw) != builderObjectContextReadCeiling {
+			t.Fatalf("fixture length %d, want exactly the ceiling", len(raw))
+		}
+		rec := swap(t, nil, nil, raw)
+		got, err := reader.readOwnContext()
+		if err != nil {
+			t.Fatalf("an exactly-ceiling context must be accepted: %v", err)
+		}
+		if string(got) != string(raw) {
+			t.Fatalf("raw bytes altered")
+		}
+		if !rec.closed {
+			t.Fatal("the descriptor must be closed")
+		}
+		if category, err := wrapperOwnContextCategory(got); err != nil || category != 7 {
+			t.Fatalf("the at-ceiling context must parse: %d, %v", category, err)
+		}
+	})
+
+	t.Run("over the ceiling is refused, never truncated", func(t *testing.T) {
+		raw := wrapperOwnContextRaw(7, "\n")
+		raw = append(raw, make([]byte, builderObjectContextReadCeiling)...)
+		rec := swap(t, nil, nil, raw)
+		got, err := reader.readOwnContext()
+		if err == nil {
+			t.Fatal("an oversized context must be refused")
+		}
+		if !strings.Contains(err.Error(), "read ceiling") {
+			t.Fatalf("refusal %q must name the read ceiling", err)
+		}
+		if got != nil {
+			t.Fatal("an oversized read must not return truncated data")
+		}
+		if !rec.closed {
+			t.Fatal("the descriptor must be closed")
+		}
+	})
+
+	t.Run("open failure", func(t *testing.T) {
+		rec := swap(t, os.ErrPermission, nil, nil)
+		got, err := reader.readOwnContext()
+		if !errors.Is(err, os.ErrPermission) {
+			t.Fatalf("the open failure must surface, got %v", err)
+		}
+		if got != nil {
+			t.Fatal("a failed open must not return data")
+		}
+		if rec.closed {
+			t.Fatal("a failed open must not close anything")
+		}
+		if rec.readCount != 0 {
+			t.Fatal("a failed open must not read")
+		}
+	})
+
+	t.Run("read failure", func(t *testing.T) {
+		rec := swap(t, nil, unix.EIO, wrapperOwnContextRaw(7, "\n"))
+		got, err := reader.readOwnContext()
+		if !errors.Is(err, unix.EIO) {
+			t.Fatalf("the read failure must surface, got %v", err)
+		}
+		if got != nil {
+			t.Fatal("a failed read must not return data")
+		}
+		if !rec.closed {
+			t.Fatal("the descriptor must be closed after a read failure")
+		}
+	})
+
+	// The end-to-end refusal contract is unchanged: a reader failure is
+	// still a typed wrapper refusal naming the own-context read.
+	t.Run("end-to-end read failure refusal", func(t *testing.T) {
+		fs := wrapperPrepareFixture(t, wrapperTestOpID, 7, false)
+		err := wrapperInspectDevPrepWithSeams(fakeWrapperOwnContext{err: os.ErrPermission}, fs, wrapperBundlePath(wrapperTestOpID, wrapperTestBundleID))
+		var refuse *wrapperRefuseError
+		if !errors.As(err, &refuse) || !strings.Contains(err.Error(), "cannot read the own process context") {
+			t.Fatalf("want the typed own-context refusal, got %v", err)
+		}
+	})
 }
 
 // TestWrapperInspectDevPrepEndToEnd proves the full enforced sequence of
