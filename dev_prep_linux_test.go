@@ -109,6 +109,9 @@ func (f *fakeDevPrepFS) parentOf(path string) (*fakeDevPrepNode, string, error) 
 
 func (f *fakeDevPrepFS) lstat(path string) (os.FileInfo, error) {
 	f.record("lstat " + path)
+	if err := f.take("lstat " + path); err != nil {
+		return nil, err
+	}
 	node, err := f.resolve(path)
 	if err != nil {
 		return nil, err
@@ -359,8 +362,8 @@ func devPrepPrepare(t *testing.T, fs *fakeDevPrepFS, opID string, category build
 	return prepareTrustedDevWithSyscalls(fs, context.Background(), "/var/lib/docker-helper", opID, category)
 }
 
-func devPrepOpDir() string {
-	return filepath.Join("/var/lib/docker-helper", "dev-prep", devPrepTestOpID)
+func devPrepTestOpDir() string {
+	return devPrepOpDir(devPrepTestOpID)
 }
 
 func devPrepNodeAt(t *testing.T, fs *fakeDevPrepFS, path string) *fakeDevPrepNode {
@@ -383,7 +386,7 @@ func TestDevPrepFullSequenceSELinux(t *testing.T) {
 		t.Fatalf("prepare failed: %v", err)
 	}
 
-	opDir := devPrepOpDir()
+	opDir := devPrepTestOpDir()
 	devPrepRoot := filepath.Dir(opDir)
 	stateRoot := "/var/lib/docker-helper"
 
@@ -497,7 +500,7 @@ func TestDevPrepConditionalCoreSymlink(t *testing.T) {
 	if err := devPrepPrepare(t, fs, devPrepTestOpID, builderCategory(1)); err != nil {
 		t.Fatalf("prepare failed: %v", err)
 	}
-	node := devPrepNodeAt(t, fs, filepath.Join(devPrepOpDir(), "core"))
+	node := devPrepNodeAt(t, fs, filepath.Join(devPrepTestOpDir(), "core"))
 	if node.kind != "symlink" || node.target != "/proc/kcore" {
 		t.Fatalf("core = (%s, %q)", node.kind, node.target)
 	}
@@ -552,7 +555,7 @@ func TestDevPrepRefusesExistingTree(t *testing.T) {
 // shared roots in place.
 func TestDevPrepFailureInjectionCleanup(t *testing.T) {
 	withDevPrepSeams(t, false, devPrepTestBuilderUID)
-	opDir := devPrepOpDir()
+	opDir := devPrepTestOpDir()
 	mutations := []struct {
 		name    string
 		arm     string
@@ -821,7 +824,7 @@ func TestDevPrepRealModesUnderUnitUmask(t *testing.T) {
 			if err := devPrepPrepare(t, fs, devPrepTestOpID, builderCategory(1)); err != nil {
 				t.Fatalf("prepare failed: %v", err)
 			}
-			opDir := devPrepOpDir()
+			opDir := devPrepTestOpDir()
 			for _, dev := range devPrepDevices {
 				node := devPrepNodeAt(t, fs, filepath.Join(opDir, dev.name))
 				if node.mode.Perm() != devPrepFileMode {
@@ -864,7 +867,7 @@ func TestDevPrepRealModesUnderUnitUmask(t *testing.T) {
 // explicit preparation failure and removes the own residue.
 func TestDevPrepCorrectionFailureInjection(t *testing.T) {
 	withDevPrepSeams(t, false, devPrepTestBuilderUID)
-	opDir := devPrepOpDir()
+	opDir := devPrepTestOpDir()
 	for _, arm := range []string{"chmod " + opDir + "/null", "chmod " + opDir + "/pts"} {
 		t.Run(filepath.Base(strings.TrimPrefix(arm, "chmod "+opDir+"/")), func(t *testing.T) {
 			fs := newFakeDevPrepFS()
@@ -889,9 +892,9 @@ func TestDevPrepVerifyTreeRejectsWrongMountDirMode(t *testing.T) {
 	if err := devPrepPrepare(t, fs, devPrepTestOpID, builderCategory(1)); err != nil {
 		t.Fatalf("prepare failed: %v", err)
 	}
-	node := devPrepNodeAt(t, fs, filepath.Join(devPrepOpDir(), "shm"))
+	node := devPrepNodeAt(t, fs, filepath.Join(devPrepTestOpDir(), "shm"))
 	node.mode = 0o700
-	if err := devPrepVerifyTree(fs, devPrepOpDir(), builderCategory(1)); err == nil || !strings.Contains(err.Error(), "mount dir shm") {
+	if err := devPrepVerifyTree(fs, devPrepTestOpDir(), builderCategory(1)); err == nil || !strings.Contains(err.Error(), "mount dir shm") {
 		t.Fatalf("wrong mount-dir mode must fail verification, got %v", err)
 	}
 }
@@ -935,7 +938,7 @@ func TestDevPrepCanonicalStateRootBinding(t *testing.T) {
 // retry into the residue is refused (no adoption).
 func TestDevPrepCleanupFailureReportedAndResidueRefused(t *testing.T) {
 	withDevPrepSeams(t, false, devPrepTestBuilderUID)
-	opDir := devPrepOpDir()
+	opDir := devPrepTestOpDir()
 	fs := newFakeDevPrepFS()
 	fs.arm("mknod "+opDir+"/zero", errors.New("injected mknod failure"))
 	fs.arm("removeall "+opDir, errors.New("injected removal failure"))
@@ -967,7 +970,7 @@ func TestDevPrepCleanupFailureReportedAndResidueRefused(t *testing.T) {
 // cleanup) in addition to the ordinary filesystem mutations.
 func TestDevPrepSELinuxLabelFailureInjection(t *testing.T) {
 	withDevPrepSeams(t, true, devPrepTestBuilderUID)
-	opDir := devPrepOpDir()
+	opDir := devPrepTestOpDir()
 	devPrepRoot := filepath.Dir(opDir)
 	for _, tc := range []struct {
 		name    string

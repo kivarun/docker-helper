@@ -436,6 +436,14 @@ func (e *devPrepRefuseError) Error() string {
 	return "dev-prep tree already exists; refusing to adopt " + e.path
 }
 
+// devPrepOpDir is the canonical prepared-tree path for one operation:
+// <daemonStateRoot>/dev-prep/<op>. One owner of the path shape, shared by
+// the preparer and the wrapper inspection core (which must never accept a
+// caller-supplied tree path).
+func devPrepOpDir(opID string) string {
+	return filepath.Join(daemonStateRoot, "dev-prep", opID)
+}
+
 // prepareTrustedDev prepares the trusted /dev tree for one operation with
 // the production syscall seam. The state root is bound to the daemon's
 // canonical state root through the config owner; the new core is
@@ -464,7 +472,7 @@ func prepareTrustedDevWithSyscalls(seam devPrepSyscalls, ctx context.Context, st
 		return fmt.Errorf("dev-prep: state dir %q is not the canonical daemon state root %q; privileged paths are not configurable", stateDir, daemonStateRoot)
 	}
 	devPrepRoot := filepath.Join(daemonStateRoot, "dev-prep")
-	opDir := filepath.Join(devPrepRoot, opID)
+	opDir := devPrepOpDir(opID)
 
 	// Refuse-to-adopt: an existing tree is never adopted, repaired, or
 	// removed by this invocation.
