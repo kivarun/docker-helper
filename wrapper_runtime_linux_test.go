@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -58,6 +59,16 @@ func withWrapperRuntimeSeams(t *testing.T, execErr error, renameErr error) *wrap
 		wrapperRealRuntimePath, wrapperExecRuntime, wrapperCommitRename = origPath, origExec, origRename
 	})
 	return rec
+}
+
+// withWrapperCreateTemp swaps the exclusive temporary-file creation seam
+// (C4 deterministic fault injection). Package-global; restored via
+// t.Cleanup; never used with t.Parallel.
+func withWrapperCreateTemp(t *testing.T, fn func(dir string) (*os.File, error)) {
+	t.Helper()
+	orig := wrapperCreateTemp
+	wrapperCreateTemp = fn
+	t.Cleanup(func() { wrapperCreateTemp = orig })
 }
 
 // withWrapperBundleTree repoints the builderStateRoot owner at a real
@@ -331,9 +342,11 @@ func TestWrapperRunRewritesSpec(t *testing.T) {
 
 // TestWrapperSpecRewriteRefusals proves the spec-level fail-closed
 // contract: missing, malformed, null, trailing-data, mounts-less,
-// zero-/dev, duplicate-/dev, foreign-shaped, already-rewritten, and
-// malformed-entry specs are all refused with the original spec
-// byte-unchanged and no temporary residue.
+// zero-/dev, duplicate-/dev (literal and normalized aliases), noncanonical
+// /dev spellings, foreign-shaped, already-rewritten, deviant incumbent
+// options, missing options, extra mount fields, and malformed-entry specs
+// are all refused with the original spec byte-unchanged and no temporary
+// residue.
 func TestWrapperSpecRewriteRefusals(t *testing.T) {
 	base := wrapperSpecFixture()
 	mutations := []struct {
@@ -390,6 +403,85 @@ func TestWrapperSpecRewriteRefusals(t *testing.T) {
 		{name: "duplicate /dev mounts", wantText: "2 /dev mounts", mutate: func(t *testing.T, dir string) {
 			doc := wrapperDecodeSpec(t, base)
 			doc["mounts"] = append(doc["mounts"].([]any), map[string]any{"destination": "/dev", "type": "tmpfs", "source": "tmpfs"})
+			writeSpec(t, dir, doc)
+		}},
+		{name: "alias /dev after canonical", wantText: "2 /dev mounts", mutate: func(t *testing.T, dir string) {
+			doc := wrapperDecodeSpec(t, base)
+			doc["mounts"] = append(doc["mounts"].([]any), map[string]any{
+				"destination": "/dev/.", "type": "tmpfs", "source": "tmpfs",
+				"options": []any{"nosuid", "strictatime", "mode=755", "size=65536k"},
+			})
+			writeSpec(t, dir, doc)
+		}},
+		{name: "parent-alias /dev after canonical", wantText: "2 /dev mounts", mutate: func(t *testing.T, dir string) {
+			doc := wrapperDecodeSpec(t, base)
+			doc["mounts"] = append(doc["mounts"].([]any), map[string]any{
+				"destination": "/dev/../dev", "type": "tmpfs", "source": "tmpfs",
+				"options": []any{"nosuid", "strictatime", "mode=755", "size=65536k"},
+			})
+			writeSpec(t, dir, doc)
+		}},
+		{name: "noncanonical sole /dev spelling", wantText: "noncanonical destination", mutate: func(t *testing.T, dir string) {
+			doc := wrapperDecodeSpec(t, base)
+			for _, m := range doc["mounts"].([]any) {
+				if m.(map[string]any)["destination"] == "/dev" {
+					m.(map[string]any)["destination"] = "/dev/."
+				}
+			}
+			writeSpec(t, dir, doc)
+		}},
+		{name: "incumbent options reordered", wantText: "pinned provisional incumbent options", mutate: func(t *testing.T, dir string) {
+			doc := wrapperDecodeSpec(t, base)
+			for _, m := range doc["mounts"].([]any) {
+				if m.(map[string]any)["destination"] == "/dev" {
+					m.(map[string]any)["options"] = []any{"strictatime", "nosuid", "mode=755", "size=65536k"}
+				}
+			}
+			writeSpec(t, dir, doc)
+		}},
+		{name: "incumbent option modified", wantText: "pinned provisional incumbent options", mutate: func(t *testing.T, dir string) {
+			doc := wrapperDecodeSpec(t, base)
+			for _, m := range doc["mounts"].([]any) {
+				if m.(map[string]any)["destination"] == "/dev" {
+					m.(map[string]any)["options"] = []any{"nosuid", "strictatime", "mode=755", "size=131072k"}
+				}
+			}
+			writeSpec(t, dir, doc)
+		}},
+		{name: "incumbent option removed", wantText: "pinned provisional incumbent options", mutate: func(t *testing.T, dir string) {
+			doc := wrapperDecodeSpec(t, base)
+			for _, m := range doc["mounts"].([]any) {
+				if m.(map[string]any)["destination"] == "/dev" {
+					m.(map[string]any)["options"] = []any{"nosuid", "strictatime", "mode=755"}
+				}
+			}
+			writeSpec(t, dir, doc)
+		}},
+		{name: "incumbent extra option", wantText: "pinned provisional incumbent options", mutate: func(t *testing.T, dir string) {
+			doc := wrapperDecodeSpec(t, base)
+			for _, m := range doc["mounts"].([]any) {
+				if m.(map[string]any)["destination"] == "/dev" {
+					m.(map[string]any)["options"] = []any{"nosuid", "strictatime", "mode=755", "size=65536k", "nodev"}
+				}
+			}
+			writeSpec(t, dir, doc)
+		}},
+		{name: "incumbent options missing", wantText: "no options array", mutate: func(t *testing.T, dir string) {
+			doc := wrapperDecodeSpec(t, base)
+			for _, m := range doc["mounts"].([]any) {
+				if m.(map[string]any)["destination"] == "/dev" {
+					delete(m.(map[string]any), "options")
+				}
+			}
+			writeSpec(t, dir, doc)
+		}},
+		{name: "incumbent extra mount field", wantText: "unexpected fields", mutate: func(t *testing.T, dir string) {
+			doc := wrapperDecodeSpec(t, base)
+			for _, m := range doc["mounts"].([]any) {
+				if m.(map[string]any)["destination"] == "/dev" {
+					m.(map[string]any)["propagation"] = "private"
+				}
+			}
 			writeSpec(t, dir, doc)
 		}},
 		{name: "foreign /dev shape", wantText: "unexpected shape", mutate: func(t *testing.T, dir string) {
@@ -477,12 +569,44 @@ func writeSpec(t *testing.T, dir string, doc map[string]any) {
 }
 
 // TestWrapperCommitSemantics proves the accepted commit contract: a
-// pre-commit write failure and a pre-commit rename failure both leave
+// pre-commit create failure, write failure, and rename failure all leave
 // the original spec byte-unchanged, remove the wrapper-owned temporary
 // residue, and never invoke the real runtime; the post-commit exec
-// failure leaves the committed rewrite in place with no rollback.
+// failure leaves the committed rewrite in place with no rollback. The
+// create/write failures use deterministic seam injection (valid under
+// root, unlike a read-only bundle directory).
 func TestWrapperCommitSemantics(t *testing.T) {
 	reader := fakeWrapperOwnContext{raw: wrapperOwnContextRaw(7, "\n")}
+
+	t.Run("pre-commit create failure", func(t *testing.T) {
+		bundleDir, fs, rec := wrapperRunFixture(t)
+		specPath := filepath.Join(bundleDir, "config.json")
+		before, err := os.ReadFile(specPath)
+		if err != nil {
+			t.Fatalf("fixture: %v", err)
+		}
+		withWrapperCreateTemp(t, func(dir string) (*os.File, error) {
+			if dir != bundleDir {
+				t.Errorf("create seam reached with dir %q, want the bundle directory", dir)
+			}
+			return nil, errors.New("injected create failure")
+		})
+		err = wrapperMainWithSeams(wrapperRunArgv(bundleDir), nil, reader, fs)
+		var refuse *wrapperRefuseError
+		if !errors.As(err, &refuse) || !strings.Contains(err.Error(), "cannot create the rewritten OCI spec temporary file") {
+			t.Fatalf("want the typed create refusal, got %v", err)
+		}
+		after, err := os.ReadFile(specPath)
+		if err != nil || string(after) != string(before) {
+			t.Fatal("the original spec must remain byte-unchanged")
+		}
+		if entries, _ := os.ReadDir(bundleDir); len(entries) != 1 {
+			t.Fatalf("no residue may remain, got %v", entries)
+		}
+		if rec.calls != 0 {
+			t.Fatal("the real runtime must never be invoked pre-commit")
+		}
+	})
 
 	t.Run("pre-commit write failure", func(t *testing.T) {
 		bundleDir, fs, rec := wrapperRunFixture(t)
@@ -491,10 +615,24 @@ func TestWrapperCommitSemantics(t *testing.T) {
 		if err != nil {
 			t.Fatalf("fixture: %v", err)
 		}
-		if err := os.Chmod(bundleDir, 0o555); err != nil {
-			t.Fatalf("chmod: %v", err)
+		// Fault injection at the exact write boundary (deterministic
+		// under root, unlike a read-only directory): the creation seam
+		// returns an already-closed handle, so the production Write call
+		// fails with os.ErrClosed while everything else is the real
+		// production path.
+		closed, err := os.CreateTemp(t.TempDir(), "closed-temp")
+		if err != nil {
+			t.Fatalf("closed handle: %v", err)
 		}
-		t.Cleanup(func() { _ = os.Chmod(bundleDir, 0o755) })
+		if err := closed.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+		withWrapperCreateTemp(t, func(dir string) (*os.File, error) {
+			if dir != bundleDir {
+				t.Errorf("create seam reached with dir %q, want the bundle directory", dir)
+			}
+			return closed, nil
+		})
 		err = wrapperMainWithSeams(wrapperRunArgv(bundleDir), nil, reader, fs)
 		var refuse *wrapperRefuseError
 		if !errors.As(err, &refuse) || !strings.Contains(err.Error(), "cannot write the rewritten OCI spec") {
@@ -582,6 +720,117 @@ func TestWrapperCommitSemantics(t *testing.T) {
 			t.Fatalf("no residue may remain after the commit, got %v", entries)
 		}
 	})
+}
+
+// TestWrapperPreexistingTempPath proves the exclusive-ownership contract
+// of the rewritten-spec temporary file: a pre-existing symlink or regular
+// file at the wrapper's temporary-path prefix is never followed, adopted,
+// written through, or removed by the rewrite — the invocation owns only
+// the file it creates, so no foreign path can cause premature spec
+// mutation or violate the commit contract.
+func TestWrapperPreexistingTempPath(t *testing.T) {
+	reader := fakeWrapperOwnContext{raw: wrapperOwnContextRaw(7, "\n")}
+
+	t.Run("temporary-path symlink is never followed", func(t *testing.T) {
+		bundleDir, fs, rec := wrapperRunFixture(t)
+		specPath := filepath.Join(bundleDir, "config.json")
+		decoyPath := filepath.Join(bundleDir, "decoy")
+		decoy := []byte("decoy payload\n")
+		if err := os.WriteFile(decoyPath, decoy, 0o644); err != nil {
+			t.Fatalf("decoy: %v", err)
+		}
+		// A symlink at the temporary path pointing at a writable foreign
+		// file: any adoption would write the spec bytes through it and
+		// mutate the decoy before the declared commit point.
+		tempLink := filepath.Join(bundleDir, wrapperSpecTempName)
+		if err := os.Symlink("decoy", tempLink); err != nil {
+			t.Fatalf("symlink: %v", err)
+		}
+		if err := wrapperMainWithSeams(wrapperRunArgv(bundleDir), nil, reader, fs); err != nil {
+			t.Fatalf("the run must commit despite the planted symlink: %v", err)
+		}
+		if got, err := os.ReadFile(decoyPath); err != nil || string(got) != string(decoy) {
+			t.Fatalf("the planted symlink must never be written through (decoy = %q, %v)", got, err)
+		}
+		info, err := os.Lstat(tempLink)
+		if err != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("the planted symlink must remain untouched (lstat: %v, mode %v)", err, info)
+		}
+		if target, err := os.Readlink(tempLink); err != nil || target != "decoy" {
+			t.Fatalf("symlink target = %q (%v), want the planted decoy", target, err)
+		}
+		doc := wrapperDecodeSpec(t, mustReadFile(t, specPath))
+		var dev map[string]any
+		for _, m := range doc["mounts"].([]any) {
+			if m.(map[string]any)["destination"] == "/dev" {
+				dev = m.(map[string]any)
+			}
+		}
+		if dev == nil || dev["type"] != "bind" || dev["source"] != devPrepOpDir(wrapperTestOpID) {
+			t.Fatalf("the committed spec must carry the prepared-tree bind, got %v", dev)
+		}
+		entries, err := os.ReadDir(bundleDir)
+		if err != nil {
+			t.Fatalf("bundle dir: %v", err)
+		}
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		sort.Strings(names)
+		if !reflect.DeepEqual(names, []string{"config.json", wrapperSpecTempName, "decoy"}) {
+			t.Fatalf("bundle dir contents = %v, want only the spec, the decoy, and the planted symlink", names)
+		}
+		if rec.calls != 1 {
+			t.Fatalf("exec seam calls = %d, want exactly 1", rec.calls)
+		}
+	})
+
+	t.Run("temporary-path regular file is never adopted or deleted", func(t *testing.T) {
+		bundleDir, fs, rec := wrapperRunFixture(t)
+		specPath := filepath.Join(bundleDir, "config.json")
+		before, err := os.ReadFile(specPath)
+		if err != nil {
+			t.Fatalf("fixture: %v", err)
+		}
+		// A pre-existing regular file at the temporary-path prefix: an
+		// adopted write would mutate it, and a non-ownership-aware
+		// cleanup would delete it — both are foreign-file violations.
+		plantedPath := filepath.Join(bundleDir, wrapperSpecTempName)
+		planted := []byte("planted foreign file\n")
+		if err := os.WriteFile(plantedPath, planted, 0o644); err != nil {
+			t.Fatalf("planted file: %v", err)
+		}
+		origRename := wrapperCommitRename
+		wrapperCommitRename = func(tempPath, targetPath string) error {
+			return errors.New("injected rename failure")
+		}
+		t.Cleanup(func() { wrapperCommitRename = origRename })
+		err = wrapperMainWithSeams(wrapperRunArgv(bundleDir), nil, reader, fs)
+		var refuse *wrapperRefuseError
+		if !errors.As(err, &refuse) || !strings.Contains(err.Error(), "cannot commit the rewritten OCI spec") {
+			t.Fatalf("want the typed commit refusal, got %v", err)
+		}
+		after, err := os.ReadFile(specPath)
+		if err != nil || string(after) != string(before) {
+			t.Fatal("the original spec must remain byte-unchanged")
+		}
+		if got, err := os.ReadFile(plantedPath); err != nil || string(got) != string(planted) {
+			t.Fatalf("the planted regular file must survive untouched (got %q, %v)", got, err)
+		}
+		if rec.calls != 0 {
+			t.Fatal("the real runtime must never be invoked pre-commit")
+		}
+	})
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return data
 }
 
 // TestWrapperPassthroughIsolation proves the accepted pass-through

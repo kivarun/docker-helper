@@ -30,9 +30,12 @@ package main
 //     path; it is not a universal enforcement boundary against direct
 //     execution by a compromised in-domain process (R4-P1-C2, accepted)
 //     — SELinux/MCS remains the independent hard isolation boundary;
-//   - the /dev replacement shape is the accepted provisional predicate
-//     (containerd's tmpfs/tmpfs incumbent; bind+nosuid replacement);
-//     OBL-8 remains mandatory before any integration calibration.
+//   - the /dev replacement shape is the accepted provisional predicate:
+//     exactly the pinned containerd v2.3.4 default incumbent (tmpfs/tmpfs
+//     with the pinned option sequence, canonical "/dev" spelling, and no
+//     extra mount fields), replaced by the bind+nosuid shape — anything
+//     else is refused, never silently adopted or discarded (OBL-8 remains
+//     mandatory before any integration calibration).
 //
 // The wrapper core is intentionally not invoked by any production entry
 // point yet (the CLI/binary wiring is a later round; the [worker.oci]
@@ -44,8 +47,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
+	"sort"
 
 	"golang.org/x/sys/unix"
 )
@@ -74,9 +80,13 @@ var wrapperCommitRename = func(tempPath, targetPath string) error {
 	return os.Rename(tempPath, targetPath)
 }
 
-// wrapperSpecTempName is the wrapper-owned temporary spec file, created
-// in the bundle directory (same filesystem as the target, so the commit
-// rename is atomic) and removed again on every pre-commit failure.
+// wrapperSpecTempName is the prefix of the wrapper-owned temporary spec
+// file, created with exclusive creation (os.CreateTemp's O_EXCL random
+// suffix) in the bundle directory — same filesystem as the target, so
+// the commit rename is atomic — and removed again on every pre-commit
+// failure. A pre-existing file or symlink at any temporary-path name is
+// never opened, adopted, or removed: exclusive creation makes the
+// invocation the sole owner of the file it commits.
 const wrapperSpecTempName = "config.json.wrapped"
 
 // wrapperLogFileName is the fixed runc log file name of the canonical
@@ -89,6 +99,24 @@ const wrapperLogFileName = "runc-log.json"
 // (the prepared device nodes must stay openable) and without the
 // incumbent tmpfs-only options (mode=/size=/strictatime).
 var wrapperDevBindOptions = []string{"bind", "nosuid"}
+
+// wrapperDevIncumbentOptions is the exact option sequence of the pinned
+// containerd v2.3.4 default /dev mount (client/oci defaultMounts, the
+// provisional incumbent of R4-P1/C1). The sequence is the producer's
+// deterministic output and is matched element-for-element — reordered,
+// modified, missing, or additional options are refused, never silently
+// discarded. OBL-8 calibrates this constant against a live generated
+// config.json before integration; nothing is broadened speculatively.
+var wrapperDevIncumbentOptions = []string{"nosuid", "strictatime", "mode=755", "size=65536k"}
+
+// wrapperCreateTemp is the injectable exclusive temporary-file creation
+// (production: os.CreateTemp with the wrapper-owned prefix, inside the
+// bundle directory). Exclusive creation (O_CREATE|O_EXCL) means a
+// pre-existing file or symlink at a candidate name is never opened or
+// adopted. Package-global; tests restore it.
+var wrapperCreateTemp = func(dir string) (*os.File, error) {
+	return os.CreateTemp(dir, wrapperSpecTempName)
+}
 
 // wrapperInvocation is one parsed, validated wrapper invocation.
 type wrapperInvocation struct {
@@ -288,7 +316,17 @@ func wrapperRewriteSpecDevBind(bundlePath, opID string) error {
 		if !ok {
 			return fmt.Errorf("the OCI spec %s has a non-object mount entry at index %d", specPath, i)
 		}
-		if dest, _ := m["destination"].(string); dest == "/dev" {
+		// Pinned runc v1.4.3 resolves every mount destination lexically
+		// (pathrs.LexicallyCleanPath, which for absolute destinations is
+		// exactly filepath.Clean) at every /dev-relevant site —
+		// needsSetupDev, mountPropagate, finalizeRootfs — so a
+		// noncanonical alias such as "/dev/." or "/dev/../dev" denotes
+		// the same mountpoint and, placed later in the list, would mount
+		// over the prepared tree. /dev recognition therefore uses the
+		// normalized destination, while the single accepted entry must
+		// additionally use the canonical literal spelling.
+		dest, _ := m["destination"].(string)
+		if path.Clean(dest) == "/dev" {
 			devCount++
 			devIndex = i
 		}
@@ -297,17 +335,23 @@ func wrapperRewriteSpecDevBind(bundlePath, opID string) error {
 		return fmt.Errorf("the OCI spec %s has no /dev mount", specPath)
 	}
 	if devCount > 1 {
-		return fmt.Errorf("the OCI spec %s has %d /dev mounts", specPath, devCount)
+		return fmt.Errorf("the OCI spec %s has %d /dev mounts (by normalized destination)", specPath, devCount)
 	}
 	dev := mounts[devIndex].(map[string]any)
+	if dest, _ := dev["destination"].(string); dest != "/dev" {
+		return fmt.Errorf("the /dev mount of %s has the noncanonical destination %q; only the literal /dev spelling is accepted", specPath, dest)
+	}
 	mountType, _ := dev["type"].(string)
 	mountSource, _ := dev["source"].(string)
-	rawOptions, _ := dev["options"].([]any)
+	rawOptions, ok := dev["options"].([]any)
+	if !ok {
+		return fmt.Errorf("the /dev mount of %s has no options array", specPath)
+	}
 	options := make([]string, 0, len(rawOptions))
 	for _, o := range rawOptions {
 		s, ok := o.(string)
 		if !ok {
-			return fmt.Errorf("the OCI spec %s has a non-string /dev mount option", specPath)
+			return fmt.Errorf("the /dev mount of %s has a non-string /dev mount option", specPath)
 		}
 		options = append(options, s)
 	}
@@ -323,10 +367,31 @@ func wrapperRewriteSpecDevBind(bundlePath, opID string) error {
 		return fmt.Errorf("the /dev mount of %s is already a bind; refusing to adopt a rewritten spec", specPath)
 	}
 	// The strict provisional incumbent predicate: exactly the
-	// containerd-generated tmpfs/tmpfs entry (OBL-8 calibrates before
-	// integration; nothing is silently broadened).
+	// containerd-generated tmpfs/tmpfs entry with the pinned option
+	// sequence, the canonical "/dev" spelling, and no fields beyond
+	// destination/type/source/options (OBL-8 calibrates before
+	// integration; nothing is silently broadened or discarded).
+	var extraFields []string
+	for key := range dev {
+		switch key {
+		case "destination", "type", "source", "options":
+		default:
+			extraFields = append(extraFields, key)
+		}
+	}
+	if len(extraFields) > 0 {
+		sort.Strings(extraFields)
+		return fmt.Errorf("the /dev mount of %s carries unexpected fields %v", specPath, extraFields)
+	}
 	if mountType != "tmpfs" || mountSource != "tmpfs" {
 		return fmt.Errorf("the /dev mount of %s has the unexpected shape type=%q source=%q", specPath, mountType, mountSource)
+	}
+	optionsDeviant := len(options) != len(wrapperDevIncumbentOptions)
+	for i := 0; !optionsDeviant && i < len(options); i++ {
+		optionsDeviant = options[i] != wrapperDevIncumbentOptions[i]
+	}
+	if optionsDeviant {
+		return fmt.Errorf("the /dev mount of %s does not carry the pinned provisional incumbent options %v, got %v", specPath, wrapperDevIncumbentOptions, options)
 	}
 	mounts[devIndex] = map[string]any{
 		"destination": "/dev",
@@ -343,28 +408,41 @@ func wrapperRewriteSpecDevBind(bundlePath, opID string) error {
 	if err != nil {
 		return fmt.Errorf("cannot stat the OCI spec %s: %w", specPath, err)
 	}
-	tempPath := filepath.Join(bundlePath, wrapperSpecTempName)
-	committed := false
-	defer func() {
-		if !committed {
-			// Pre-commit residue removal: the wrapper-owned temporary
-			// file never survives a failed commit.
-			_ = os.Remove(tempPath)
-		}
-	}()
-	if err := os.WriteFile(tempPath, rewritten, st.Mode().Perm()); err != nil {
-		return fmt.Errorf("cannot write the rewritten OCI spec: %w", err)
+	// Exclusive ownership of the temporary file (C3): CreateTemp opens
+	// with O_CREATE|O_EXCL under an unpredictable random suffix inside
+	// the bundle directory, so a pre-existing symlink or regular file at
+	// any temporary-path name is never followed, adopted, or written
+	// through — the write can only reach the file this invocation
+	// created. The commit point remains the rename(2) below.
+	temp, err := wrapperCreateTemp(bundlePath)
+	if err != nil {
+		return fmt.Errorf("cannot create the rewritten OCI spec temporary file: %w", err)
 	}
-	if err := os.Chmod(tempPath, st.Mode().Perm()); err != nil {
-		return fmt.Errorf("cannot preserve the OCI spec mode on the rewritten file: %w", err)
+	tempPath := temp.Name()
+	// Pre-commit residue removal covers only the file this invocation
+	// created, and a failed removal is surfaced rather than silently
+	// discarded or claimed as a clean cleanup.
+	discardTemp := func(cause error) error {
+		if rmErr := os.Remove(tempPath); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
+			return fmt.Errorf("%w; additionally the wrapper temporary file %s remains (cleanup failed: %v)", cause, tempPath, rmErr)
+		}
+		return cause
+	}
+	if _, err := temp.Write(rewritten); err != nil {
+		return discardTemp(fmt.Errorf("cannot write the rewritten OCI spec: %w", err))
+	}
+	if err := temp.Chmod(st.Mode().Perm()); err != nil {
+		return discardTemp(fmt.Errorf("cannot preserve the OCI spec mode on the rewritten file: %w", err))
+	}
+	if err := temp.Close(); err != nil {
+		return discardTemp(fmt.Errorf("cannot close the rewritten OCI spec temporary file: %w", err))
 	}
 	// THE COMMIT POINT (R4-P1-C1 §C1): a successful rename leaves the
 	// rewritten spec in place for every later outcome, including an
 	// execve failure — no rollback, no repair, no retry.
 	if err := wrapperCommitRename(tempPath, specPath); err != nil {
-		return fmt.Errorf("cannot commit the rewritten OCI spec (the original is unchanged): %w", err)
+		return discardTemp(fmt.Errorf("cannot commit the rewritten OCI spec (the original is unchanged): %w", err))
 	}
-	committed = true
 	return nil
 }
 
