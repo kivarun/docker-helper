@@ -98,41 +98,52 @@ func (e *wrapperRefuseError) Error() string {
 
 func (e *wrapperRefuseError) Unwrap() error { return e.cause }
 
-// wrapperBundleOpID derives the operation id from a buildkit-runc bundle
-// path. Only the exact canonical executor layout is accepted —
+// wrapperExecutorTreePath decomposes a canonical executor-tree path —
 //
-//	<builderStateRoot>/ops/<op>/root/runc-native/executor/<bundle>
+//	<builderStateRoot>/ops/<op>/root/runc-native/executor/<leaf>
 //
-// decomposed structurally, so relative spellings, traversal segments
-// ("." / ".."), doubled separators, extra depth, a trailing slash, and
-// any non-canonical shape are refused before the derived id is used for
-// anything. The operation id is validated through the canonical issued-ID
-// grammar; the bundle segment is validated against the measured executor
-// id grammar. The bundle path is a correlation input only — it never
-// becomes the prepared-tree path.
-func wrapperBundleOpID(bundlePath string) (string, error) {
+// structurally (segment table — no filepath.Clean equivalence), so
+// relative spellings, traversal segments ("." / ".."), doubled
+// separators, extra depth, a trailing slash, and any non-canonical shape
+// are refused. It returns the operation id (validated through the
+// canonical issued-ID grammar) and the leaf segment, whose grammar is
+// the caller's concern.
+func wrapperExecutorTreePath(path string) (string, string, error) {
 	state := strings.Split(builderStateRoot, "/")
-	segs := strings.Split(bundlePath, "/")
-	const suffixSegments = 6 // ops, <op>, root, runc-native, executor, <bundle>
+	segs := strings.Split(path, "/")
+	const suffixSegments = 6 // ops, <op>, root, runc-native, executor, <leaf>
 	if len(segs) != len(state)+suffixSegments {
-		return "", fmt.Errorf("the bundle path %q is not a canonical executor bundle", bundlePath)
+		return "", "", fmt.Errorf("the path %q is not a canonical executor-tree path", path)
 	}
 	for i, want := range state {
 		if segs[i] != want {
-			return "", fmt.Errorf("the bundle path %q is not a canonical executor bundle under %q", bundlePath, builderStateRoot)
+			return "", "", fmt.Errorf("the path %q is not a canonical executor-tree path under %q", path, builderStateRoot)
 		}
 	}
 	if segs[len(state)] != "ops" {
-		return "", fmt.Errorf("the bundle path %q is not a canonical executor bundle", bundlePath)
+		return "", "", fmt.Errorf("the path %q is not a canonical executor-tree path", path)
 	}
 	opID := segs[len(state)+1]
 	if !isOperationID(opID) {
-		return "", fmt.Errorf("the bundle path %q carries a non-canonical operation id", bundlePath)
+		return "", "", fmt.Errorf("the path %q carries a non-canonical operation id", path)
 	}
 	if segs[len(state)+2] != "root" || segs[len(state)+3] != "runc-native" || segs[len(state)+4] != "executor" {
-		return "", fmt.Errorf("the bundle path %q is not a canonical executor bundle", bundlePath)
+		return "", "", fmt.Errorf("the path %q is not a canonical executor-tree path", path)
 	}
-	if !validWrapperBundleID(segs[len(state)+5]) {
+	return opID, segs[len(state)+5], nil
+}
+
+// wrapperBundleOpID derives the operation id from a buildkit-runc bundle
+// path. Only the exact canonical executor layout is accepted (the
+// shared executor-tree decomposition), with the bundle segment validated
+// against the measured executor id grammar. The bundle path is a
+// correlation input only — it never becomes the prepared-tree path.
+func wrapperBundleOpID(bundlePath string) (string, error) {
+	opID, leaf, err := wrapperExecutorTreePath(bundlePath)
+	if err != nil {
+		return "", err
+	}
+	if !validWrapperBundleID(leaf) {
 		return "", fmt.Errorf("the bundle path %q carries a non-canonical executor bundle id", bundlePath)
 	}
 	return opID, nil

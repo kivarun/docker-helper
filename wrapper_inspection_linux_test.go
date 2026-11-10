@@ -345,7 +345,9 @@ func TestWrapperOwnContextReader(t *testing.T) {
 		closed     bool
 		source     []byte
 	}
-	swap := func(t *testing.T, openErr error, readErr error, source []byte) *attrSeam {
+	// swap installs the recording seams. chunk bounds the bytes the
+	// source delivers per read (0 = the whole remaining source at once).
+	swap := func(t *testing.T, openErr error, readErr error, source []byte, chunk int) *attrSeam {
 		t.Helper()
 		rec := &attrSeam{source: source}
 		origOpen, origRead, origClose := wrapperAttrOpen, wrapperAttrRead, wrapperAttrClose
@@ -367,7 +369,14 @@ func TestWrapperOwnContextReader(t *testing.T) {
 			if readErr != nil {
 				return 0, readErr
 			}
-			n := copy(buf, rec.source)
+			n := len(rec.source)
+			if chunk > 0 && n > chunk {
+				n = chunk
+			}
+			if n > len(buf) {
+				n = len(buf)
+			}
+			copy(buf, rec.source[:n])
 			rec.source = rec.source[n:]
 			return n, nil
 		}
@@ -380,9 +389,15 @@ func TestWrapperOwnContextReader(t *testing.T) {
 	}
 	reader := linuxWrapperOwnContextReader{}
 
-	t.Run("bounded successful read in chunks", func(t *testing.T) {
+	// The genuinely chunked success case: the source delivers a fixed
+	// small chunk per read, so the accumulation loop — the total
+	// bookkeeping across chunk boundaries plus the EOF probe — is
+	// exercised with an EXACT read count (the R4-P1-C1 correction of
+	// the misleading single-read "chunked" form).
+	t.Run("successful read drained across several reads", func(t *testing.T) {
 		raw := wrapperOwnContextRaw(7, "\n")
-		rec := swap(t, nil, nil, raw)
+		const chunk = 7
+		rec := swap(t, nil, nil, raw, chunk)
 		got, err := reader.readOwnContext()
 		if err != nil {
 			t.Fatalf("read failed: %v", err)
@@ -399,8 +414,9 @@ func TestWrapperOwnContextReader(t *testing.T) {
 		if rec.readBufLen != builderObjectContextReadCeiling+1 {
 			t.Fatalf("read buffer = %d bytes, want the ceiling-plus-one bound %d", rec.readBufLen, builderObjectContextReadCeiling+1)
 		}
-		if rec.readCount < 2 {
-			t.Fatalf("chunked source must take several reads, got %d", rec.readCount)
+		wantReads := (len(raw)+chunk-1)/chunk + 1 // data reads + the EOF probe
+		if rec.readCount != wantReads {
+			t.Fatalf("read count = %d, want exactly %d (%d data reads of %d bytes + the EOF probe)", rec.readCount, wantReads, (len(raw)+chunk-1)/chunk, chunk)
 		}
 		if !rec.closed {
 			t.Fatal("the descriptor must be closed")
@@ -418,7 +434,7 @@ func TestWrapperOwnContextReader(t *testing.T) {
 		if len(raw) != builderObjectContextReadCeiling {
 			t.Fatalf("fixture length %d, want exactly the ceiling", len(raw))
 		}
-		rec := swap(t, nil, nil, raw)
+		rec := swap(t, nil, nil, raw, 0)
 		got, err := reader.readOwnContext()
 		if err != nil {
 			t.Fatalf("an exactly-ceiling context must be accepted: %v", err)
@@ -437,7 +453,7 @@ func TestWrapperOwnContextReader(t *testing.T) {
 	t.Run("over the ceiling is refused, never truncated", func(t *testing.T) {
 		raw := wrapperOwnContextRaw(7, "\n")
 		raw = append(raw, make([]byte, builderObjectContextReadCeiling)...)
-		rec := swap(t, nil, nil, raw)
+		rec := swap(t, nil, nil, raw, 0)
 		got, err := reader.readOwnContext()
 		if err == nil {
 			t.Fatal("an oversized context must be refused")
@@ -454,7 +470,7 @@ func TestWrapperOwnContextReader(t *testing.T) {
 	})
 
 	t.Run("open failure", func(t *testing.T) {
-		rec := swap(t, os.ErrPermission, nil, nil)
+		rec := swap(t, os.ErrPermission, nil, nil, 0)
 		got, err := reader.readOwnContext()
 		if !errors.Is(err, os.ErrPermission) {
 			t.Fatalf("the open failure must surface, got %v", err)
@@ -471,7 +487,7 @@ func TestWrapperOwnContextReader(t *testing.T) {
 	})
 
 	t.Run("read failure", func(t *testing.T) {
-		rec := swap(t, nil, unix.EIO, wrapperOwnContextRaw(7, "\n"))
+		rec := swap(t, nil, unix.EIO, wrapperOwnContextRaw(7, "\n"), 0)
 		got, err := reader.readOwnContext()
 		if !errors.Is(err, unix.EIO) {
 			t.Fatalf("the read failure must surface, got %v", err)
@@ -521,7 +537,7 @@ func TestWrapperInspectDevPrepEndToEnd(t *testing.T) {
 			name:     "non-canonical bundle path",
 			reader:   reader,
 			bundle:   "/tmp/somewhere",
-			wantText: "not a canonical executor bundle",
+			wantText: "not a canonical executor-tree path",
 		},
 		{
 			name:     "own-context read failure",
