@@ -21,6 +21,10 @@
 #                       policy's constraint semantics + membership + the
 #                       live cross-category probe attempt + the cgroup
 #                       forensics; NO grants, NO production changes)
+#                       p21e = the R7 P21-E OBL-8 live config.json capture
+#                       (read-only inotify specimen poller over the
+#                       production executor bundles; NO grants, NO
+#                       production changes)
 
 set -Eeuo pipefail
 
@@ -39,7 +43,8 @@ case "$R7_MODE" in
   p21b) GUEST_SCRIPT='release-2.4-r7-p21b-guest.sh' ;;
   p21c) GUEST_SCRIPT='release-2.4-r7-p21c-guest.sh' ;;
   p21d) GUEST_SCRIPT='release-2.4-r7-p21d-guest.sh' ;;
-  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d)" ;;
+  p21e) GUEST_SCRIPT='release-2.4-r7-p21e-guest.sh' ;;
+  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d | p21e)" ;;
 esac
 
 log()  { printf '%s %s\n' "$PREFIX" "$*"; }
@@ -213,6 +218,20 @@ RMT
         log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
         ;;
     esac
+  elif [ "$R7_MODE" = "p21e" ]; then
+    VERDICT="$(grep -aoE 'R7-P21E-VERDICT=.*' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"
+    case "$VERDICT" in
+      R7-P21E-VERDICT=*)
+        log "R7 P21-E capture verdict: $VERDICT"
+        break
+        ;;
+      *)
+        if [ "$attempt" -eq 3 ]; then
+          fail "the R7 P21-E capture produced no verdict (guest exit $GUEST_RC)"
+        fi
+        log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
+        ;;
+    esac
   else
   VERDICT="$(grep -aoE 'R7-DIAG-RESULT=[A-Z-]+' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"
   case "$VERDICT" in
@@ -289,4 +308,54 @@ if [ "$R7_MODE" = "bprime" ]; then
     fail "the R7 B′ gate did not reach BPRIME-VIABLE: $FINAL_VERDICT"
   fi
   log "R7 B′ gate: BPRIME-VIABLE"
+fi
+if [ "$R7_MODE" = "p21e" ]; then
+  FINAL_VERDICT="$(grep -aoE 'R7-P21E-VERDICT=.*' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"
+  if [ -z "$FINAL_VERDICT" ]; then
+    fail "the R7 P21-E run produced no machine verdict"
+  fi
+  case "$FINAL_VERDICT" in
+    R7-P21E-VERDICT=CAPTURED=[1-9]*) log "R7 P21-E capture gate: $FINAL_VERDICT" ;;
+    *) fail "the R7 P21-E capture gate failed: $FINAL_VERDICT" ;;
+  esac
+  # The host-side specimen validation: every captured config.json must be
+  # ONE complete JSON object with no trailing data (the producer's terminal
+  # newline allowed), and the extracted MOUNT list (destination/type/source/
+  # options only — never the process section) is printed for the report.
+  # A zero-valid-specimen outcome fails the gate; the evidence still uploads.
+  python3 - "$EVIDENCE_DIR" <<'PYEOF'
+import glob, hashlib, json, os, sys
+
+root = sys.argv[1]
+paths = sorted(glob.glob(os.path.join(root, "guest-attempt*", "spec-*", "spec-*.json")))
+valid = 0
+for path in paths:
+    with open(path, "rb") as f:
+        raw = f.read()
+    sha = hashlib.sha256(raw).hexdigest()
+    ok = True
+    why = ""
+    try:
+        doc, end = json.JSONDecoder().raw_decode(raw.decode("utf-8"))
+        if not isinstance(doc, dict):
+            ok, why = False, "not a JSON object"
+        elif raw[end:].strip():
+            ok, why = False, "trailing data after the JSON object"
+    except Exception as exc:  # noqa: BLE001 — the validator reports the reason
+        ok, why = False, f"decode failed: {exc}"
+    if ok:
+        valid += 1
+        print(f"VALID {os.path.basename(os.path.dirname(path))}/{os.path.basename(path)} "
+              f"size={len(raw)} sha256={sha}")
+        for m in doc.get("mounts", []):
+            print("  MOUNT dest=%r type=%r source=%r options=%r"
+                  % (m.get("destination"), m.get("type"), m.get("source"),
+                     m.get("options")))
+    else:
+        print(f"INVALID {path}: {why}")
+if valid == 0:
+    print("P21E-SPECIMEN-VALIDATION: FAILED (no complete specimen)")
+    sys.exit(1)
+print(f"P21E-SPECIMEN-VALIDATION: PASSED ({valid} complete specimen(s))")
+PYEOF
 fi
