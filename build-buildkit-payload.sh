@@ -16,11 +16,20 @@
 #   ./build-buildkit-payload.sh DEST_DIR
 #
 # Staged layout (DEST_DIR):
-#   usr/libexec/docker-helper/buildkit/buildkitd      (0755)
-#   usr/libexec/docker-helper/buildkit/buildctl       (0755)
-#   usr/libexec/docker-helper/buildkit/buildkit-runc  (0755)
-#   usr/share/doc/docker-helper/buildkit/LICENSE      (0644)
-#   usr/share/doc/docker-helper/buildkit/MANIFEST     (0644)
+#   usr/libexec/docker-helper/buildkit/buildkitd              (0755)
+#   usr/libexec/docker-helper/buildkit/buildctl               (0755)
+#   usr/libexec/docker-helper/buildkit/runtime/buildkit-runc  (0755)
+#   usr/share/doc/docker-helper/buildkit/LICENSE              (0644)
+#   usr/share/doc/docker-helper/buildkit/MANIFEST             (0644)
+#
+# The upstream buildkit-runc (the OCI worker runtime binary) is staged at
+# the dedicated runtime/ subpath (the accepted R4-P3-P0 D-2 placement):
+# the top-level payload name buildkit-runc is the installed wrapper role
+# (a copy of the product binary, staged by the artifact assemblers from
+# dist/docker-helper), and the wrapper hands off to this relocated
+# original at its fixed absolute path. The relocation changes ONLY the
+# staged pathname — the bytes, their pinned digest, and the MANIFEST
+# (whose keys record binary identity, not paths) are unchanged.
 #
 # MANIFEST records the pinned version + verified digests so the shipped
 # payload metadata states its own provenance (plan §7: version + digest
@@ -87,7 +96,7 @@ verify_staged() {
 	for member in \
 		usr/libexec/docker-helper/buildkit/buildkitd \
 		usr/libexec/docker-helper/buildkit/buildctl \
-		usr/libexec/docker-helper/buildkit/buildkit-runc \
+		usr/libexec/docker-helper/buildkit/runtime/buildkit-runc \
 		usr/share/doc/docker-helper/buildkit/LICENSE \
 		usr/share/doc/docker-helper/buildkit/MANIFEST; do
 		[ -s "$dir/$member" ] || return 1
@@ -153,10 +162,12 @@ fi
 
 BIN_DIR="$DEST_DIR/usr/libexec/docker-helper/buildkit"
 DOC_DIR="$DEST_DIR/usr/share/doc/docker-helper/buildkit"
-install -d -m 0755 "$BIN_DIR" "$DOC_DIR"
+install -d -m 0755 "$BIN_DIR" "$BIN_DIR/runtime" "$DOC_DIR"
 install -m 0755 "$WORK/bin/buildkitd" "$BIN_DIR/buildkitd"
 install -m 0755 "$WORK/bin/buildctl" "$BIN_DIR/buildctl"
-install -m 0755 "$WORK/bin/buildkit-runc" "$BIN_DIR/buildkit-runc"
+# The relocated OCI worker runtime (the wrapper's fixed handoff target;
+# the top-level buildkit-runc name belongs to the wrapper role).
+install -m 0755 "$WORK/bin/buildkit-runc" "$BIN_DIR/runtime/buildkit-runc"
 install -m 0644 "$WORK/LICENSE" "$DOC_DIR/LICENSE"
 
 # MANIFEST: the payload's own recorded provenance (pinned version, verified
@@ -168,7 +179,7 @@ install -m 0644 "$WORK/LICENSE" "$DOC_DIR/LICENSE"
 	printf 'buildkit-license-sha256=%s\n' "$BUILDKIT_LICENSE_SHA256"
 	printf 'buildkitd-sha256=%s\n' "$(sha256sum "$BIN_DIR/buildkitd" | awk '{print $1}')"
 	printf 'buildctl-sha256=%s\n' "$(sha256sum "$BIN_DIR/buildctl" | awk '{print $1}')"
-	printf 'buildkit-runc-sha256=%s\n' "$(sha256sum "$BIN_DIR/buildkit-runc" | awk '{print $1}')"
+	printf 'buildkit-runc-sha256=%s\n' "$(sha256sum "$BIN_DIR/runtime/buildkit-runc" | awk '{print $1}')"
 	printf 'upstream-notice=absent (no NOTICE file in the %s tag tree; Apache-2.0 requires carrying one only when upstream includes it)\n' "$BUILDKIT_VERSION"
 } > "$DOC_DIR/MANIFEST"
 chmod 0644 "$DOC_DIR/MANIFEST"

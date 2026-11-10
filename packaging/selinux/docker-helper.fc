@@ -71,7 +71,18 @@
 # only; the buildkitd/buildkit-runc siblings keep their own rule.
 /usr/libexec/docker-helper/buildkit/buildctl  --  system_u:object_r:docker_helper_buildctl_exec_t:s0
 /usr/libexec/docker-helper/buildkit/buildkitd  --  system_u:object_r:docker_helper_buildkitd_exec_t:s0
+# R7 P21-E-R4-P3-P2 (the accepted R4-P3-P0 D-2 placement): the top-level
+# payload name buildkit-runc is the WRAPPER role — a byte-copy of the
+# product binary installed under the name BuildKit's LookPath resolves
+# first; it keeps this exact-path row and its dedicated exec identity
+# (buildkitd_t execs it with no transition, the 4C-84 shape). The
+# relocated ORIGINAL pinned upstream runtime — the wrapper's fixed
+# handoff target — joins the SAME dedicated identity through its own
+# exact-path row below. Exact paths only; never a generic subtree rule
+# (the /usr/libexec/docker-helper/buildkit directory itself stays
+# default-labeled).
 /usr/libexec/docker-helper/buildkit/buildkit-runc  --  system_u:object_r:docker_helper_buildkitd_exec_t:s0
+/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc  --  system_u:object_r:docker_helper_buildkitd_exec_t:s0
 /etc/docker-helper(/.*)?                system_u:object_r:docker_helper_config_t:s0
 /var/lib/docker-helper(/.*)?            system_u:object_r:docker_helper_state_t:s0
 # R7 P21-E-R3-P1: the trusted dev-prep subtree. The more-specific stem wins

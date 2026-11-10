@@ -167,20 +167,28 @@ if [[ -n "$PAYLOAD_DIR" ]]; then
         "$BUNDLE_DIR/buildkit/"
   cp -r "$PAYLOAD_DIR/buildkit/usr/share/doc/docker-helper/buildkit/." \
         "$BUNDLE_DIR/buildkit/"
+  # The wrapper role: a byte-copy of the product binary at the payload
+  # name BuildKit resolves (the accepted R4-P3-P0 D-2 placement). The
+  # upstream buildkit-runc arrives from the payload staging under
+  # runtime/ and is never overwritten.
+  cp "$PAYLOAD_DIR/docker-helper" "$BUNDLE_DIR/buildkit/buildkit-runc"
 else
   rm -rf "$BUNDLE_DIR/buildkit"
-  mkdir -p "$BUNDLE_DIR/buildkit"
+  mkdir -p "$BUNDLE_DIR/buildkit/runtime"
   cp "$OUT_DIR/buildkit/usr/libexec/docker-helper/buildkit/buildkitd" \
      "$OUT_DIR/buildkit/usr/libexec/docker-helper/buildkit/buildctl" \
-     "$OUT_DIR/buildkit/usr/libexec/docker-helper/buildkit/buildkit-runc" \
      "$BUNDLE_DIR/buildkit/"
+  cp "$OUT_DIR/buildkit/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc" \
+     "$BUNDLE_DIR/buildkit/runtime/buildkit-runc"
+  cp "$OUT_DIR/docker-helper" "$BUNDLE_DIR/buildkit/buildkit-runc"
   cp "$OUT_DIR/buildkit/usr/share/doc/docker-helper/buildkit/LICENSE" \
      "$OUT_DIR/buildkit/usr/share/doc/docker-helper/buildkit/MANIFEST" \
      "$BUNDLE_DIR/buildkit/"
 fi
 chmod 755 "$BUNDLE_DIR/buildkit/buildkitd" \
           "$BUNDLE_DIR/buildkit/buildctl" \
-          "$BUNDLE_DIR/buildkit/buildkit-runc"
+          "$BUNDLE_DIR/buildkit/buildkit-runc" \
+          "$BUNDLE_DIR/buildkit/runtime/buildkit-runc"
 chmod 644 "$BUNDLE_DIR/buildkit/LICENSE" "$BUNDLE_DIR/buildkit/MANIFEST"
 
 # Builder identity provisioning script (the ONE provisioning owner; the
@@ -315,8 +323,14 @@ echo "OK: SELinux policy artifact present: selinux/docker_helper.pp"
 
 # The pinned BuildKit payload must be present and non-empty in the bundle;
 # its staged bytes must also match the MANIFEST the payload owner generated.
+# The payload name buildkit-runc is the WRAPPER role (a byte-copy of the
+# product binary — verified against the bundle's own docker-helper below);
+# the relocated runtime/buildkit-runc carries the pinned upstream bytes the
+# MANIFEST digest describes (the R4-P3-P0 D-2 layout).
 if [[ ! -s "$BUNDLE_DIR/buildkit/buildkitd" ]] || [[ ! -s "$BUNDLE_DIR/buildkit/buildctl" ]] \
-   || [[ ! -s "$BUNDLE_DIR/buildkit/buildkit-runc" ]] || [[ ! -s "$BUNDLE_DIR/buildkit/LICENSE" ]] \
+   || [[ ! -s "$BUNDLE_DIR/buildkit/buildkit-runc" ]] \
+   || [[ ! -s "$BUNDLE_DIR/buildkit/runtime/buildkit-runc" ]] \
+   || [[ ! -s "$BUNDLE_DIR/buildkit/LICENSE" ]] \
    || [[ ! -s "$BUNDLE_DIR/buildkit/MANIFEST" ]]; then
   echo "FAIL: pinned BuildKit payload missing or empty in bundle: buildkit/" >&2
   exit 1
@@ -324,16 +338,30 @@ fi
 echo "OK: pinned BuildKit payload present: buildkit/"
 while IFS='=' read -r key value; do
   case "$key" in
-    buildkitd-sha256|buildctl-sha256|buildkit-runc-sha256)
+    buildkitd-sha256|buildctl-sha256)
       actual="$(sha256sum "$BUNDLE_DIR/buildkit/${key%%-sha256}" | awk '{print $1}')"
       if [[ "$actual" != "$value" ]]; then
         echo "FAIL: BuildKit payload digest mismatch for $key: manifest $value != staged $actual" >&2
         exit 1
       fi
       ;;
+    buildkit-runc-sha256)
+      # The relocated upstream runtime (the wrapper's fixed handoff target).
+      actual="$(sha256sum "$BUNDLE_DIR/buildkit/runtime/buildkit-runc" | awk '{print $1}')"
+      if [[ "$actual" != "$value" ]]; then
+        echo "FAIL: BuildKit payload digest mismatch for $key (runtime/buildkit-runc): manifest $value != staged $actual" >&2
+        exit 1
+      fi
+      ;;
   esac
 done < "$BUNDLE_DIR/buildkit/MANIFEST"
-echo "OK: BuildKit payload binaries match their MANIFEST digests"
+# The wrapper payload member must be a byte-copy of the bundle's own product
+# binary (the invocation-name dispatch runs the product wrapper role).
+if ! cmp -s "$BUNDLE_DIR/buildkit/buildkit-runc" "$BUNDLE_DIR/docker-helper"; then
+  echo "FAIL: the wrapper payload member buildkit-runc is not a byte-copy of the product binary" >&2
+  exit 1
+fi
+echo "OK: BuildKit payload binaries match their MANIFEST digests; the wrapper member is the product binary copy"
 
 # Check tarball contains the exact mandatory set of paths.
 EXPECTED_PATHS=(
@@ -351,6 +379,7 @@ EXPECTED_PATHS=(
   "docker-helper-${VERSION}-linux-amd64/buildkit/buildkitd"
   "docker-helper-${VERSION}-linux-amd64/buildkit/buildctl"
   "docker-helper-${VERSION}-linux-amd64/buildkit/buildkit-runc"
+  "docker-helper-${VERSION}-linux-amd64/buildkit/runtime/buildkit-runc"
   "docker-helper-${VERSION}-linux-amd64/buildkit/LICENSE"
   "docker-helper-${VERSION}-linux-amd64/buildkit/MANIFEST"
   "docker-helper-${VERSION}-linux-amd64/scripts/provision-builder.sh"

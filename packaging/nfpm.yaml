@@ -115,7 +115,23 @@ contents:
     file_info:
       mode: 0755
 
-  - src: dist/buildkit/usr/libexec/docker-helper/buildkit/buildkit-runc
+  # The relocated pinned BuildKit OCI worker runtime: the original
+  # upstream buildkit-runc, staged by build-buildkit-payload.sh under the
+  # dedicated runtime/ subpath that is the wrapper's fixed handoff target
+  # (R4-P3-P0 D-2). The staged bytes are unchanged and remain verifiable
+  # against the shipped MANIFEST digests.
+  - src: dist/buildkit/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc
+    dst: /usr/libexec/docker-helper/buildkit/runtime/buildkit-runc
+    file_info:
+      mode: 0755
+
+  # The wrapper role: a byte-copy of the product binary at the payload
+  # name BuildKit's defaultCommandCandidates resolves first
+  # (/usr/libexec/docker-helper/buildkit is part of the fixed child
+  # PATH). Same bytes as /usr/bin/docker-helper, packaged as a separate
+  # file so each path carries its own SELinux file identity (the
+  # accepted R4-P3-P0 D-2 placement).
+  - src: dist/docker-helper
     dst: /usr/libexec/docker-helper/buildkit/buildkit-runc
     file_info:
       mode: 0755

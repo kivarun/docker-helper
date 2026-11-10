@@ -65,7 +65,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILDKIT_PAYLOAD_MEMBERS=(
 	"buildkit/usr/libexec/docker-helper/buildkit/buildkitd"
 	"buildkit/usr/libexec/docker-helper/buildkit/buildctl"
-	"buildkit/usr/libexec/docker-helper/buildkit/buildkit-runc"
+	"buildkit/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc"
 	"buildkit/usr/share/doc/docker-helper/buildkit/LICENSE"
 	"buildkit/usr/share/doc/docker-helper/buildkit/MANIFEST"
 )

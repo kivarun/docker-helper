@@ -276,6 +276,32 @@ func TestWrapperDispatchMatrix(t *testing.T) {
 	})
 }
 
+// TestWrapperNoExecutableSearch proves the fixed-path invariant: the
+// wrapper runtime resolves NO executable through any search mechanism —
+// the only exec surface is wrapperExecRuntime at the fixed D-2 constant,
+// and the sources carry no LookPath/os/exec usage at all.
+func TestWrapperNoExecutableSearch(t *testing.T) {
+	for _, f := range []string{"wrapper_runtime_linux.go", "wrapper_inspection_linux.go", "main.go"} {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("%s: %v", f, err)
+		}
+		content := string(data)
+		if strings.Contains(content, "LookPath") {
+			t.Errorf("%s must not perform any executable PATH search", f)
+		}
+	}
+	// The runtime file itself never imports os/exec: the only exec surface
+	// is the unix.Exec seam at the fixed D-2 path.
+	data, err := os.ReadFile("wrapper_runtime_linux.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "os/exec") {
+		t.Error("the wrapper runtime must not import os/exec (no second executable selection path)")
+	}
+}
+
 // TestWrapperRunRewritesSpec proves the happy run path end to end: the
 // prepared tree is inspected through the R4-P0 owner, exactly the /dev
 // entry is replaced by the prepared-tree bind at its original position,

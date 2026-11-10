@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -19,6 +20,41 @@ import (
 )
 
 var version = "dev"
+
+// wrapperPayloadName is the invocation-name dispatch key of the wrapper
+// role (the accepted R4-P3-P0 D-2 placement): the single product binary is
+// installed a second time under the BuildKit payload name BuildKit's
+// defaultCommandCandidates resolves first, and an execution under that
+// basename runs the wrapper role instead of the CLI. The dispatch key is
+// forced by the integration mechanics — BuildKit/go-runc control the argv,
+// so no subcommand can be injected; the packaged payload name is the only
+// identity the wrapper invocation carries. The CLI grammar has no such
+// command, so no legitimate CLI invocation can collide with it.
+const wrapperPayloadName = "buildkit-runc"
+
+// wrapperEntry is the wrapper-role entry seam (production: wrapperMain,
+// the accepted R4-P2 dispatch). Package-global; tests restore it.
+var wrapperEntry = wrapperMain
+
+// runMain is the single production entry dispatch. An execution whose
+// argv[0] basename is the payload name runs the wrapper role (refusals
+// print to stderr and exit nonzero — the build log is the observable
+// surface; the real runtime is handed off through execve only); every
+// other invocation keeps the existing CLI routing byte-for-byte.
+func runMain(argv []string, env []string, stdout, stderr io.Writer) int {
+	if len(argv) > 0 && filepath.Base(argv[0]) == wrapperPayloadName {
+		if err := wrapperEntry(argv, env); err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+	args := []string{}
+	if len(argv) > 1 {
+		args = argv[1:]
+	}
+	return runCommandWithWriters(args, stdout, stderr)
+}
 
 func loadAdminToken(path string) ([sha256.Size]byte, error) {
 	data, err := os.ReadFile(path)
@@ -520,7 +556,7 @@ func runDaemon(stdout, stderr io.Writer) error {
 }
 
 func main() {
-	exitCode := runCommand(os.Args[1:])
+	exitCode := runMain(os.Args, os.Environ(), os.Stdout, os.Stderr)
 	if exitCode != 0 {
 		os.Exit(exitCode)
 	}

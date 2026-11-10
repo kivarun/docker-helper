@@ -238,6 +238,23 @@ func TestBuildBundleScriptContent(t *testing.T) {
 	if !strings.Contains(content, "skills/docker-helper/SKILL.md") {
 		t.Error("build-bundle.sh must reference skills/docker-helper/SKILL.md")
 	}
+	// The R4-P3-P0 D-2 layout: the bundle's payload-name member is the
+	// wrapper role (a byte-copy of the product binary, verified against
+	// the bundle's own docker-helper), and the relocated pinned upstream
+	// runtime ships under runtime/ and is the MANIFEST digest's subject.
+	for _, want := range []string{
+		`cp "$PAYLOAD_DIR/docker-helper" "$BUNDLE_DIR/buildkit/buildkit-runc"`,
+		`cp "$OUT_DIR/docker-helper" "$BUNDLE_DIR/buildkit/buildkit-runc"`,
+		`"$OUT_DIR/buildkit/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc" \`,
+		`"$BUNDLE_DIR/buildkit/runtime/buildkit-runc"`,
+		`buildkit-runc-sha256)`,
+		`cmp -s "$BUNDLE_DIR/buildkit/buildkit-runc" "$BUNDLE_DIR/docker-helper"`,
+		`docker-helper-${VERSION}-linux-amd64/buildkit/runtime/buildkit-runc`,
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("build-bundle.sh must carry the D-2 layout fact: %s", want)
+		}
+	}
 	if !strings.Contains(content, "docker-helper-${VERSION}-linux-amd64/skills/docker-helper/SKILL.md") {
 		t.Error("build-bundle.sh must verify skills/docker-helper/SKILL.md in tarball")
 	}
@@ -2153,7 +2170,103 @@ func TestUninstallSystemScriptContent(t *testing.T) {
 	}
 }
 
-// TestBuilderTunFacilityPackagingParity pins the 4C-13 boot contract across
+// TestWrapperPayloadIntegration pins the accepted R4-P3-P0 D-2 payload
+// layout across every shipping owner: the payload staging owner relocates
+// the upstream buildkit-runc (bytes and MANIFEST digest unchanged) under
+// runtime/, the package manifests install the wrapper byte-copy from the
+// product binary alongside it, the tarball installer refuses a wrapper
+// without its real runtime, and the uninstaller removes the whole payload
+// tree. No second implementation, no configurable runtime path.
+func TestWrapperPayloadIntegration(t *testing.T) {
+	payload, err := os.ReadFile("build-buildkit-payload.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloadContent := string(payload)
+	for _, want := range []string{
+		"usr/libexec/docker-helper/buildkit/runtime/buildkit-runc",
+		`install -d -m 0755 "$BIN_DIR" "$BIN_DIR/runtime" "$DOC_DIR"`,
+		`install -m 0755 "$WORK/bin/buildkit-runc" "$BIN_DIR/runtime/buildkit-runc"`,
+	} {
+		if !strings.Contains(payloadContent, want) {
+			t.Errorf("build-buildkit-payload.sh must carry: %s", want)
+		}
+	}
+	// The staging tree must NOT carry a top-level upstream buildkit-runc
+	// anymore: the payload name belongs to the wrapper role.
+	if strings.Contains(payloadContent, `"$BIN_DIR/buildkit-runc"`) {
+		t.Error("build-buildkit-payload.sh must not stage the upstream runtime at the wrapper payload name")
+	}
+
+	packages, err := os.ReadFile("build-packages.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(packages), `"buildkit/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc"`) {
+		t.Error("build-packages.sh must verify the relocated runtime member before packing")
+	}
+
+	nfpm, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nfpmContent := string(nfpm)
+	for _, want := range []string{
+		"src: dist/buildkit/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc",
+		"dst: /usr/libexec/docker-helper/buildkit/runtime/buildkit-runc",
+		"src: dist/docker-helper",
+		"dst: /usr/libexec/docker-helper/buildkit/buildkit-runc",
+	} {
+		if !strings.Contains(nfpmContent, want) {
+			t.Errorf("nfpm.yaml must carry the D-2 content entry fact: %s", want)
+		}
+	}
+
+	installer, err := os.ReadFile("packaging/install-system.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	installContent := string(installer)
+	for _, want := range []string{
+		`install -d -m 0755 "$BUILDKIT_BIN_DEST/runtime"`,
+		`"$script_dir/$BUILDKIT_BIN_SRC/runtime/buildkit-runc" \`,
+		`"$BUILDKIT_BIN_DEST/runtime/buildkit-runc"`,
+		`"$RESTORECON" /usr/libexec/docker-helper/buildkit/runtime/buildkit-runc 2>/dev/null || true`,
+	} {
+		if !strings.Contains(installContent, want) {
+			t.Errorf("install-system.sh must carry: %s", want)
+		}
+	}
+
+	uninstaller, err := os.ReadFile("packaging/uninstall-system.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(uninstaller), `rm -rf "$BUILDKIT_BIN_DIR"`) {
+		t.Error("uninstall-system.sh must remove the whole payload tree (the runtime subpath included)")
+	}
+}
+
+// TestInstallSystemRefusesWrapperWithoutRuntime proves the fail-closed
+// install contract: a bundle whose relocated pinned runtime is missing
+// aborts the payload installation (an apparently-successful install can
+// never leave the wrapper installed but the real runtime absent).
+func TestInstallSystemRefusesWrapperWithoutRuntime(t *testing.T) {
+	env := newSystemInstallScriptEnv(t)
+	// Remove ONLY the relocated runtime member from the fixture bundle.
+	if err := os.Remove(filepath.Join(env.scriptDir, "buildkit", "runtime", "buildkit-runc")); err != nil {
+		t.Fatal(err)
+	}
+	testRoot := t.TempDir()
+	out, err := env.run(t, "--yes --allowed-root "+testRoot, "")
+	if err == nil {
+		t.Fatalf("the install must fail closed without the relocated runtime:\n%s", out)
+	}
+	if !strings.Contains(out, "refusing to install a wrapper without its real runtime") {
+		t.Fatalf("the failure must name the missing runtime contract:\n%s", out)
+	}
+}
+
 // every artifact format: the one immutable asset (exact bytes, production
 // destination, 0644), the DEB/RPM contents entry, the kmod dependency in
 // both package formats, the tarball membership, and the tarball installer
@@ -2569,13 +2682,18 @@ exit 0
 	if err := os.WriteFile(filepath.Join(e.scriptDir, "systemd", "system", "docker-helper-builder.service"), []byte("[Service]"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(e.scriptDir, "buildkit"), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(e.scriptDir, "buildkit", "runtime"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	for _, member := range []string{"buildkitd", "buildctl", "buildkit-runc", "LICENSE", "MANIFEST"} {
 		if err := os.WriteFile(filepath.Join(e.scriptDir, "buildkit", member), []byte("fixture-buildkit-"+member), 0644); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// The relocated pinned runtime (R4-P3-P0 D-2): the wrapper's fixed
+	// handoff target ships next to the wrapper payload member.
+	if err := os.WriteFile(filepath.Join(e.scriptDir, "buildkit", "runtime", "buildkit-runc"), []byte("fixture-buildkit-runtime-buildkit-runc"), 0644); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Join(e.scriptDir, "scripts"), 0755); err != nil {
 		t.Fatal(err)
@@ -4052,10 +4170,11 @@ exit 0
 	// domain, demonstrated live by the P5-S1 run), and — since 4C-57 — the
 	// bundled
 	// buildkitd payload and — since 4C-84 — the bundled buildkit-runc
-	// worker runtime (the narrowed executable identity, the exact
+	// wrapper payload member and — since R4-P3-P2 — the relocated pinned
+	// runtime (the wrapper's fixed D-2 handoff target; the exact
 	// canonical paths only).
-	if len(restoreconCalls) != 15 {
-		t.Errorf("expected exactly 15 restorecon invocations, got %d: %v", len(restoreconCalls), restoreconCalls)
+	if len(restoreconCalls) != 16 {
+		t.Errorf("expected exactly 16 restorecon invocations, got %d: %v", len(restoreconCalls), restoreconCalls)
 	}
 	joined := strings.Join(restoreconCalls, "\n")
 	for _, want := range []string{
@@ -4068,6 +4187,7 @@ exit 0
 		"restorecon /usr/bin/nsenter",
 		"restorecon /usr/libexec/docker-helper/buildkit/buildkitd",
 		"restorecon /usr/libexec/docker-helper/buildkit/buildkit-runc",
+		"restorecon /usr/libexec/docker-helper/buildkit/runtime/buildkit-runc",
 		"restorecon -R /etc/docker-helper",
 		"restorecon -R /var/lib/docker-helper",
 		"restorecon /run/docker-helper",
@@ -4089,21 +4209,22 @@ exit 0
 	// Every restorecon target must be a docker-helper-owned path: no Docker
 	// daemon/socket path may be relabeled by the installer.
 	allowedTargets := map[string]bool{
-		"/usr/bin/docker-helper":                            true,
-		"/usr/bin/bindfs":                                   true,
-		"/usr/bin/rootlesskit":                              true,
-		"/usr/bin/slirp4netns":                              true,
-		"/usr/bin/newuidmap":                                true,
-		"/usr/bin/newgidmap":                                true,
-		"/usr/bin/nsenter":                                  true,
-		"/usr/libexec/docker-helper/buildkit/buildkitd":     true,
-		"/usr/libexec/docker-helper/buildkit/buildkit-runc": true,
-		"/usr/libexec/docker-helper/buildkit/buildctl":      true,
-		"/etc/docker-helper":                                true,
-		"/var/lib/docker-helper":                            true,
-		"/run/docker-helper":                                true,
-		"/run/docker-helper-builder":                        true,
-		"/var/lib/docker-helper-builder":                    true,
+		"/usr/bin/docker-helper":                                    true,
+		"/usr/bin/bindfs":                                           true,
+		"/usr/bin/rootlesskit":                                      true,
+		"/usr/bin/slirp4netns":                                      true,
+		"/usr/bin/newuidmap":                                        true,
+		"/usr/bin/newgidmap":                                        true,
+		"/usr/bin/nsenter":                                          true,
+		"/usr/libexec/docker-helper/buildkit/buildkitd":             true,
+		"/usr/libexec/docker-helper/buildkit/buildkit-runc":         true,
+		"/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc": true,
+		"/usr/libexec/docker-helper/buildkit/buildctl":              true,
+		"/etc/docker-helper":                                        true,
+		"/var/lib/docker-helper":                                    true,
+		"/run/docker-helper":                                        true,
+		"/run/docker-helper-builder":                                true,
+		"/var/lib/docker-helper-builder":                            true,
 	}
 	for _, c := range restoreconCalls {
 		target := c[strings.LastIndex(c, " ")+1:]
@@ -4180,7 +4301,7 @@ exit 0
 		if len(callsOf(t, env, "semodule")) == 0 {
 			t.Error("SElinux module load must happen once the floor is established")
 		}
-		if len(callsOf(t, env, "restorecon")) != 15 {
+		if len(callsOf(t, env, "restorecon")) != 16 {
 			t.Errorf("restorecon must still be applied on the SELinux path (got %d calls)", len(callsOf(t, env, "restorecon")))
 		}
 	})
@@ -4756,6 +4877,7 @@ func TestNfpmConfigFile(t *testing.T) {
 		"/usr/libexec/docker-helper/buildkit/buildkitd",
 		"/usr/libexec/docker-helper/buildkit/buildctl",
 		"/usr/libexec/docker-helper/buildkit/buildkit-runc",
+		"/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc",
 		"/usr/share/doc/docker-helper/buildkit/LICENSE",
 		"/usr/share/doc/docker-helper/buildkit/MANIFEST",
 		"/usr/share/docker-helper/lib/provision-builder.sh",
@@ -5034,7 +5156,7 @@ func writeSyntheticBuildkitPayload(t *testing.T, tmpDir string) {
 	for _, member := range []string{
 		"buildkit/usr/libexec/docker-helper/buildkit/buildkitd",
 		"buildkit/usr/libexec/docker-helper/buildkit/buildctl",
-		"buildkit/usr/libexec/docker-helper/buildkit/buildkit-runc",
+		"buildkit/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc",
 		"buildkit/usr/share/doc/docker-helper/buildkit/LICENSE",
 		"buildkit/usr/share/doc/docker-helper/buildkit/MANIFEST",
 	} {
@@ -5058,7 +5180,7 @@ func rewriteBuildkitSrcs(configContent, tmpDir string) string {
 	for _, src := range []string{
 		"dist/buildkit/usr/libexec/docker-helper/buildkit/buildkitd",
 		"dist/buildkit/usr/libexec/docker-helper/buildkit/buildctl",
-		"dist/buildkit/usr/libexec/docker-helper/buildkit/buildkit-runc",
+		"dist/buildkit/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc",
 		"dist/buildkit/usr/share/doc/docker-helper/buildkit/LICENSE",
 		"dist/buildkit/usr/share/doc/docker-helper/buildkit/MANIFEST",
 	} {
@@ -5655,6 +5777,7 @@ func verifyRPMPackage(t *testing.T, rpmPath, rpmFile string) {
 		"restorecon /usr/bin/bindfs",
 		"restorecon /usr/libexec/docker-helper/buildkit/buildkitd",
 		"restorecon /usr/libexec/docker-helper/buildkit/buildkit-runc",
+		"restorecon /usr/libexec/docker-helper/buildkit/runtime/buildkit-runc",
 		"restorecon -R /etc/docker-helper",
 		"restorecon -R /var/lib/docker-helper",
 		"restorecon /run/docker-helper",
@@ -5784,6 +5907,7 @@ func verifyPackageContents(t *testing.T, format, contents string) {
 		"/usr/libexec/docker-helper/buildkit/buildkitd",
 		"/usr/libexec/docker-helper/buildkit/buildctl",
 		"/usr/libexec/docker-helper/buildkit/buildkit-runc",
+		"/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc",
 		"/usr/share/doc/docker-helper/buildkit/LICENSE",
 		"/usr/share/doc/docker-helper/buildkit/MANIFEST",
 		"/usr/share/docker-helper/lib/provision-builder.sh",
@@ -6211,28 +6335,35 @@ func verifyBuildkitPayloadAcrossFormats(t *testing.T, version, debFile, rpmFile 
 	}
 
 	// format -> member-relative path (under the /usr-rooted layout; the
-	// tarball uses the flat bundle layout).
+	// tarball uses the flat bundle layout). R4-P3-P2 D-2: the payload-name
+	// member buildkit-runc is the WRAPPER role (a byte-copy of the product
+	// binary — checked against each format's own docker-helper below), and
+	// the relocated pinned upstream runtime lives under runtime/ (still
+	// pinned by the upstream BUILDKIT_RUNC digest).
 	paths := map[string]map[string]string{
 		"tar": {
-			"buildkitd":     "buildkit/buildkitd",
-			"buildctl":      "buildkit/buildctl",
-			"buildkit-runc": "buildkit/buildkit-runc",
-			"LICENSE":       "buildkit/LICENSE",
-			"MANIFEST":      "buildkit/MANIFEST",
+			"buildkitd":             "buildkit/buildkitd",
+			"buildctl":              "buildkit/buildctl",
+			"buildkit-runc":         "buildkit/runtime/buildkit-runc",
+			"wrapper-buildkit-runc": "buildkit/buildkit-runc",
+			"LICENSE":               "buildkit/LICENSE",
+			"MANIFEST":              "buildkit/MANIFEST",
 		},
 		"deb": {
-			"buildkitd":     "usr/libexec/docker-helper/buildkit/buildkitd",
-			"buildctl":      "usr/libexec/docker-helper/buildkit/buildctl",
-			"buildkit-runc": "usr/libexec/docker-helper/buildkit/buildkit-runc",
-			"LICENSE":       "usr/share/doc/docker-helper/buildkit/LICENSE",
-			"MANIFEST":      "usr/share/doc/docker-helper/buildkit/MANIFEST",
+			"buildkitd":             "usr/libexec/docker-helper/buildkit/buildkitd",
+			"buildctl":              "usr/libexec/docker-helper/buildkit/buildctl",
+			"buildkit-runc":         "usr/libexec/docker-helper/buildkit/runtime/buildkit-runc",
+			"wrapper-buildkit-runc": "usr/libexec/docker-helper/buildkit/buildkit-runc",
+			"LICENSE":               "usr/share/doc/docker-helper/buildkit/LICENSE",
+			"MANIFEST":              "usr/share/doc/docker-helper/buildkit/MANIFEST",
 		},
 		"rpm": {
-			"buildkitd":     "usr/libexec/docker-helper/buildkit/buildkitd",
-			"buildctl":      "usr/libexec/docker-helper/buildkit/buildctl",
-			"buildkit-runc": "usr/libexec/docker-helper/buildkit/buildkit-runc",
-			"LICENSE":       "usr/share/doc/docker-helper/buildkit/LICENSE",
-			"MANIFEST":      "usr/share/doc/docker-helper/buildkit/MANIFEST",
+			"buildkitd":             "usr/libexec/docker-helper/buildkit/buildkitd",
+			"buildctl":              "usr/libexec/docker-helper/buildkit/buildctl",
+			"buildkit-runc":         "usr/libexec/docker-helper/buildkit/runtime/buildkit-runc",
+			"wrapper-buildkit-runc": "usr/libexec/docker-helper/buildkit/buildkit-runc",
+			"LICENSE":               "usr/share/doc/docker-helper/buildkit/LICENSE",
+			"MANIFEST":              "usr/share/doc/docker-helper/buildkit/MANIFEST",
 		},
 	}
 
@@ -6243,7 +6374,15 @@ func verifyBuildkitPayloadAcrossFormats(t *testing.T, version, debFile, rpmFile 
 		"LICENSE":       pins["BUILDKIT_LICENSE"],
 		"MANIFEST":      pins["BUILDKIT_MANIFEST"],
 	}
-	for _, member := range []string{"buildkitd", "buildctl", "buildkit-runc", "LICENSE", "MANIFEST"} {
+	// The wrapper payload member is byte-identical to each format's own
+	// product binary (a separate file, the same bytes — the invocation-name
+	// dispatch runs the wrapper role through the product implementation).
+	wrapperPeer := map[string]string{
+		"tar": "docker-helper",
+		"deb": "usr/bin/docker-helper",
+		"rpm": "usr/bin/docker-helper",
+	}
+	for _, member := range []string{"buildkitd", "buildctl", "buildkit-runc", "wrapper-buildkit-runc", "LICENSE", "MANIFEST"} {
 		digests := make(map[string]string)
 		for format, root := range roots {
 			rel, ok := paths[format][member]
@@ -6257,6 +6396,16 @@ func verifyBuildkitPayloadAcrossFormats(t *testing.T, version, debFile, rpmFile 
 			}
 			sum := fmt.Sprintf("%x", sha256Sum(raw))
 			digests[format] = sum
+			if member == "wrapper-buildkit-runc" {
+				peer, err := os.ReadFile(filepath.Join(root, wrapperPeer[format]))
+				if err != nil {
+					t.Fatalf("%s missing the wrapper peer binary: %v", format, err)
+				}
+				if peerSum := fmt.Sprintf("%x", sha256Sum(peer)); peerSum != sum {
+					t.Errorf("%s: the wrapper payload member is not a byte-copy of the product binary", format)
+				}
+				continue
+			}
 			if want := pinFor[member]; sum != want {
 				t.Errorf("%s: payload member %s digest %s != pinned %s", format, member, sum, want)
 			}

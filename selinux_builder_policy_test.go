@@ -2425,7 +2425,8 @@ func TestSELinuxPolicyBuildctlExecIdentityR7(t *testing.T) {
 		if strings.HasPrefix(trimmed, "#") || trimmed == "" {
 			continue
 		}
-		if strings.Contains(trimmed, "docker-helper/buildkit/") && !strings.Contains(trimmed, "/usr/libexec/docker-helper/buildkit/build") {
+		if strings.Contains(trimmed, "docker-helper/buildkit/") && !strings.Contains(trimmed, "/usr/libexec/docker-helper/buildkit/build") &&
+			!strings.Contains(trimmed, "/usr/libexec/docker-helper/buildkit/runtime/") {
 			t.Errorf("the .fc must never cover the payload tree by directory regex: %s", trimmed)
 		}
 	}
@@ -6612,12 +6613,15 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		t.Errorf("exactly one (structural) transition may name the buildkitd domain, found %d", buildkitdTransitions)
 	}
 
-	// The exact .fc entries: two rules, the exact canonical paths, the
-	// `--` form; no rule other than the exact buildkitd and
-	// buildkit-runc paths may carry the type (no directory regex, no
-	// unrelated sibling — buildctl keeps its distro label). The 4C-84
-	// labeling fix joins the bundled worker runtime binary to the SAME
-	// dedicated exec identity; no generic bin_t:file execute grant.
+	// The exact .fc entries: three rules, the exact canonical paths, the
+	// `--` form; no rule other than the exact buildkitd, buildkit-runc,
+	// and runtime/buildkit-runc paths may carry the type (no directory
+	// regex, no unrelated sibling — buildctl keeps its distro label). The
+	// 4C-84 labeling fix joins the bundled worker runtime binary to the
+	// SAME dedicated exec identity, and R4-P3-P2 adds the relocated
+	// original pinned runtime (the wrapper's fixed D-2 handoff target) as
+	// its own exact-path row — never a generic subtree rule, no generic
+	// bin_t:file execute grant.
 	fcLines := 0
 	for _, line := range strings.Split(fc, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -6626,12 +6630,13 @@ func TestSELinuxPolicyBuildkitdExecIdentity(t *testing.T) {
 		}
 		fcLines++
 		if trimmed != "/usr/libexec/docker-helper/buildkit/buildkitd  --  system_u:object_r:docker_helper_buildkitd_exec_t:s0" &&
-			trimmed != "/usr/libexec/docker-helper/buildkit/buildkit-runc  --  system_u:object_r:docker_helper_buildkitd_exec_t:s0" {
+			trimmed != "/usr/libexec/docker-helper/buildkit/buildkit-runc  --  system_u:object_r:docker_helper_buildkitd_exec_t:s0" &&
+			trimmed != "/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc  --  system_u:object_r:docker_helper_buildkitd_exec_t:s0" {
 			t.Errorf("the buildkitd fc rules must be the exact canonical paths in the `--` form: %s", trimmed)
 		}
 	}
-	if fcLines != 2 {
-		t.Errorf("exactly two buildkitd fc rules must exist (the daemon and the bundled worker runtime), found %d", fcLines)
+	if fcLines != 3 {
+		t.Errorf("exactly three buildkitd fc rules must exist (the daemon, the wrapper payload name, and the relocated pinned runtime), found %d", fcLines)
 	}
 
 	// The canonical path identity (the phase's four-congruent-owners

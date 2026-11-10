@@ -572,11 +572,25 @@ install_builder_unit() {
 
 install_buildkit_payload() {
 	local member
+	# The payload name buildkit-runc is the WRAPPER role (a byte-copy of
+	# the product binary, R4-P3-P0 D-2); the relocated upstream runtime
+	# lives in the dedicated runtime/ subdirectory that is the wrapper's
+	# fixed handoff target. Both are installed together so an
+	# apparently-successful install can never leave the wrapper without
+	# its real runtime.
 	for member in buildkitd buildctl buildkit-runc; do
 		info "Installing pinned BuildKit payload member to $BUILDKIT_BIN_DEST/$member"
 		install -d -m 0755 "$BUILDKIT_BIN_DEST"
 		install -m 0755 "$script_dir/$BUILDKIT_BIN_SRC/$member" "$BUILDKIT_BIN_DEST/$member"
 	done
+	if [[ ! -s "$script_dir/$BUILDKIT_BIN_SRC/runtime/buildkit-runc" ]]; then
+		info "FATAL: the bundle's relocated pinned runtime (buildkit/runtime/buildkit-runc) is missing; refusing to install a wrapper without its real runtime" >&2
+		return 1
+	fi
+	info "Installing relocated pinned BuildKit runtime to $BUILDKIT_BIN_DEST/runtime/buildkit-runc"
+	install -d -m 0755 "$BUILDKIT_BIN_DEST/runtime"
+	install -m 0755 "$script_dir/$BUILDKIT_BIN_SRC/runtime/buildkit-runc" \
+		"$BUILDKIT_BIN_DEST/runtime/buildkit-runc"
 	for member in LICENSE MANIFEST; do
 		info "Installing BuildKit license/manifest to $BUILDKIT_DOC_DEST/$member"
 		install -d -m 0755 "$BUILDKIT_DOC_DEST"
@@ -770,12 +784,18 @@ apply_selinux_restorecon() {
 	# identity the flow's eventual transition is bound to. Label-only,
 	# exact paths.
 	"$RESTORECON" /usr/libexec/docker-helper/buildkit/buildkitd 2>/dev/null || true
-	# buildkit-runc: the bundled worker runtime binary the daemon's OCI
-	# worker initializer execs for its probe (4C-84: the L3 live evidence
-	# proved the LookPath selects this exact path and the generic bin_t
-	# label denied the exec). The SAME dedicated exec identity as the
-	# daemon — no generic bin_t:file execute grant.
+	# buildkit-runc: the wrapper role (a byte-copy of the product binary
+	# at the payload name the daemon's OCI worker initializer resolves,
+	# 4C-84: the L3 live evidence proved the LookPath selects this exact
+	# path and the generic bin_t label denied the exec). The SAME
+	# dedicated exec identity as the daemon — no generic bin_t:file
+	# execute grant.
 	"$RESTORECON" /usr/libexec/docker-helper/buildkit/buildkit-runc 2>/dev/null || true
+	# runtime/buildkit-runc: the relocated original pinned upstream
+	# runtime — the wrapper's fixed handoff target (R4-P3-P0 D-2). The
+	# SAME dedicated exec identity (the wrapper runs in the daemon domain
+	# and execs it with no transition). Label-only, exact paths.
+	"$RESTORECON" /usr/libexec/docker-helper/buildkit/runtime/buildkit-runc 2>/dev/null || true
 	# buildctl: the bundled BuildKit client the daemon execs in its own
 	# domain for every build operation; its OWN private exec identity
 	# (R7-A: the failed full artifact-gate run proved the generic bin_t

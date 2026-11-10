@@ -91,10 +91,14 @@ if command -v restorecon >/dev/null 2>&1; then
   # context so the payload carries its private executable identity —
   # buildkit-runc joins the SAME identity (4C-84: the LookPath-selected
   # worker runtime binary; the generic bin_t label denied its exec from
-  # the daemon domain). The exact canonical paths only. Label-only:
-  # restorecon never alters owner, mode, or xattrs.
+  # the daemon domain). buildkit-runc is the WRAPPER role (a byte-copy of
+  # the product binary, R4-P3-P0 D-2) and the relocated original pinned
+  # runtime lives at the dedicated runtime/ subpath — the wrapper's fixed
+  # handoff target, the SAME identity, no transition. The exact canonical
+  # paths only. Label-only: restorecon never alters owner, mode, or xattrs.
   restorecon /usr/libexec/docker-helper/buildkit/buildkitd 2>/dev/null || true
   restorecon /usr/libexec/docker-helper/buildkit/buildkit-runc 2>/dev/null || true
+  restorecon /usr/libexec/docker-helper/buildkit/runtime/buildkit-runc 2>/dev/null || true
   # buildctl carries its OWN private exec identity (R7-A: the failed full
   # artifact-gate run proved the generic bin_t distro label is unusable
   # for the confined daemon domain — the standing bin_t grant carries no

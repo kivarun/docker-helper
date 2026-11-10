@@ -57,12 +57,16 @@ import (
 )
 
 // wrapperRealRuntimePath is the fixed, product-owned absolute path of
-// the real runtime the wrapper hands off to. It is deliberately UNSET:
-// the placement/packaging decision is integration-owned (D-2, R4-P1-C1
-// §9) and the wrapper must fail closed — refuse every invocation —
-// until that boundary establishes the path. It is never PATH-resolved
-// and never caller-controlled.
-var wrapperRealRuntimePath = ""
+// the real runtime the wrapper hands off to (the accepted R4-P3-P0 D-2
+// placement): the original pinned upstream buildkit-runc, relocated into
+// the dedicated runtime subdirectory. It is never PATH-resolved, never
+// caller-controlled, and never a second implementation — the packaged
+// bytes are verified against the pinned BuildKit manifest, and the fixed
+// directory separates the inode from the wrapper payload path, so the
+// handoff can never resolve back to the wrapper itself. The empty-path
+// refusal gate below stays as defense-in-depth: if the constant were
+// ever cleared, every invocation fails closed again.
+var wrapperRealRuntimePath = "/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc"
 
 // wrapperExecRuntime is the injectable exec handoff (production:
 // execve — the PID go-runc monitors and the PdeathSignal relationship

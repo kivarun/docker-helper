@@ -45,7 +45,10 @@ const (
 	// bundled buildkitd resolves its OCI worker helper buildkit-runc
 	// through the same child PATH (upstream exec.LookPath over
 	// defaultCommandCandidates ["buildkit-runc", "runc"]); the product
-	// payload directory is therefore part of the fixed child PATH.
+	// payload directory is therefore part of the fixed child PATH. Since
+	// R4-P3-P2 the resolved buildkit-runc IS the wrapper role (a copy of
+	// this product binary); the wrapper hands off to the relocated pinned
+	// upstream runtime (wrapperRealRuntimePath) by fixed absolute path.
 	builderManagerChildPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:" +
 		"/usr/libexec/docker-helper/buildkit"
 
