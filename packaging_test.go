@@ -6174,18 +6174,58 @@ func TestBundleBuilderMembers(t *testing.T) {
 	}
 }
 
+// makeTreeImmutable applies the producer's staging contract to a synthetic
+// shared release payload: the payload sits immutable (chmod -R a-w) between
+// its production and every assembler, exactly as the canonical producer
+// stages it. Cleanup restores write permission BEFORE the deferred TempDir
+// removal so teardown can delete the tree.
+func makeTreeImmutable(t *testing.T, dir string) {
+	t.Helper()
+	cmd := exec.Command("chmod", "-R", "a-w", dir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("chmod -R a-w %s: %v\n%s", dir, err, out)
+	}
+	t.Cleanup(func() {
+		_ = exec.Command("chmod", "-R", "u+w", dir).Run()
+	})
+}
+
+// requireReadOnlyTree walks dir and fails when any member carries a write
+// bit. Inside a test whose subject is an assembler or packager this proves
+// the tool consumed the shared release payload without repairing or
+// rewriting it: every member still carries the producer's a-w.
+func requireReadOnlyTree(t *testing.T, dir string) {
+	t.Helper()
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.Mode().Perm()&0222 != 0 {
+			t.Errorf("payload member must stay read-only: %s is %v", path, info.Mode().Perm())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestBuildBundlePayloadModeAssembly exercises the ACTUAL
 // `build-bundle.sh VERSION --payload DIR` path of the canonical release
-// producer with a valid D-2 staged layout: the shared payload carries the
-// upstream runtime at the relocated staging path (and nothing at the
-// wrapper payload name), the tarball assembles successfully, and the D-2
-// invariants hold in the produced artifact (wrapper member == product
-// binary; runtime member == the payload's staged upstream bytes). The
+// producer under the ACTUAL producer conditions: the shared payload is
+// made immutable (`chmod -R a-w`, the producer's own staging contract)
+// before assembly, the tarball is extracted as a NON-ROOT process, and
+// the canonical BuildKit DIRECTORY modes and member file modes are proven
+// on the extracted tree. The producer failure this regression pins
+// (R4-P3-P3): an assembler copy from the read-only payload used to
+// propagate 0555 into the tarball's runtime/ directory, which made
+// non-root verification cleanup fail with "Permission denied". The
 // negative case proves a payload whose relocated runtime is missing fails
-// the preflight BEFORE any tarball is produced — the old preflight would
-// have rejected a valid payload (broken canonical assembly) or, with the
-// obsolete layout, silently accepted one.
+// the preflight BEFORE any tarball is produced.
 func TestBuildBundlePayloadModeAssembly(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root would fake the non-root extraction contract")
+	}
 	hasCC := false
 	if _, err := exec.LookPath("gcc"); err == nil {
 		hasCC = true
@@ -6280,6 +6320,7 @@ func TestBuildBundlePayloadModeAssembly(t *testing.T) {
 	// and the produced tarball must carry the full D-2 layout with the
 	// byte-identity invariants.
 	validPayload := newPayload(t, true)
+	makeTreeImmutable(t, validPayload)
 	cmd := exec.Command("bash", "build-bundle.sh", testVersion, "--payload", validPayload)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -6303,6 +6344,38 @@ func TestBuildBundlePayloadModeAssembly(t *testing.T) {
 			t.Fatalf("the assembled tarball must carry %s: %v", rel, err)
 		}
 	}
+	// The regression this test pins: a copy from the read-only payload
+	// used to propagate 0555 into the tarball's runtime/ directory, which
+	// made the non-root verifier's cleanup fail with "Permission denied"
+	// (R4-P3-P3, canonical producer run 43013138999). The canonical
+	// BuildKit directories and member file modes must therefore be exact.
+	for _, rel := range []string{"buildkit", "buildkit/runtime"} {
+		info, err := os.Stat(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0755 {
+			t.Errorf("the assembled root %s directory must be exactly 0755: got %v", rel, got)
+		}
+	}
+	fileModes := map[string]os.FileMode{
+		"docker-helper":                  0755,
+		"buildkit/buildkitd":             0755,
+		"buildkit/buildctl":              0755,
+		"buildkit/buildkit-runc":         0755,
+		"buildkit/runtime/buildkit-runc": 0755,
+		"buildkit/LICENSE":               0644,
+		"buildkit/MANIFEST":              0644,
+	}
+	for rel, want := range fileModes {
+		info, err := os.Stat(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Errorf("the assembled root %s member must have mode exactly %v: got %v", rel, want, got)
+		}
+	}
 	productBinary, err := os.ReadFile(filepath.Join(root, "docker-helper"))
 	if err != nil {
 		t.Fatal(err)
@@ -6321,6 +6394,9 @@ func TestBuildBundlePayloadModeAssembly(t *testing.T) {
 	if string(upstream) != "fixture-upstream-runc" {
 		t.Errorf("the assembled runtime member must be the payload's staged upstream bytes, got %q", upstream)
 	}
+	// The assembler must have taken bytes, not modified the shared
+	// staging tree: every member must still carry the producer's a-w.
+	requireReadOnlyTree(t, validPayload)
 
 	// The negative case: a payload missing the relocated runtime must fail
 	// the preflight BEFORE any tarball is produced (no successful artifact
@@ -6331,6 +6407,7 @@ func TestBuildBundlePayloadModeAssembly(t *testing.T) {
 		t.Fatal(err)
 	}
 	brokenPayload := newPayload(t, false)
+	makeTreeImmutable(t, brokenPayload)
 	cmd = exec.Command("bash", "build-bundle.sh", testVersion, "--payload", brokenPayload)
 	out, err = cmd.CombinedOutput()
 	if err == nil {
@@ -6380,6 +6457,103 @@ func TestReleaseContractsNoObsoleteStaging(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestBuildPackagesPayloadStagingDirs exercises the ACTUAL
+// `build-packages.sh VERSION --payload DIR` packaging path of the canonical
+// release producer under the ACTUAL producer conditions: the shared payload
+// is immutable (`chmod -R a-w`) before the packager stages it, and the
+// packager has consumed a read-only payload (the staging tree keeps no
+// write bits). The regression this test pins (R4-P3-P3-C1, the C2
+// corrective): the packager used to stage the immutable source's directory
+// modes verbatim into dist/buildkit, which leaked 0555 directories into the
+// packaged directory entries. The canonical staging DIRECTORY modes must
+// therefore be normalized to 0755 (directory-only; file modes are the nFPM
+// file_info contract). The produced package files prove the run reached
+// the nFPM packing stage.
+func TestBuildPackagesPayloadStagingDirs(t *testing.T) {
+	// nfpm may live in GOPATH/bin (the pinned installer's default location).
+	if gobin, err := exec.Command("go", "env", "GOPATH").Output(); err == nil {
+		t.Setenv("PATH", filepath.Join(strings.TrimSpace(string(gobin)), "bin")+
+			string(os.PathListSeparator)+os.Getenv("PATH"))
+	}
+	requirePackagingTool(t, "nfpm")
+
+	testVersion := "0.0.1"
+	debFile := "dist/docker-helper_" + testVersion + "_amd64.deb"
+	rpmFile := "dist/docker-helper-" + testVersion + "-1.x86_64.rpm"
+	t.Cleanup(func() {
+		_ = os.Remove(debFile)
+		_ = os.Remove(rpmFile)
+		_ = os.RemoveAll("dist/buildkit")
+	})
+
+	// Clean up dist/ to avoid stale artifacts (the same convention as the
+	// full pipeline test): a previous --payload run stages read-only member
+	// copies into dist/, and the packager must not depend on being able to
+	// overwrite them in place.
+	if err := os.RemoveAll("dist"); err != nil {
+		t.Skipf("cannot clean dist/: %v, skipping test", err)
+	}
+
+	// The shared payload members: the pinned BuildKit payload through its
+	// synthetic fixture plus the product members the packager stages.
+	payload := t.TempDir()
+	writeSyntheticBuildkitPayload(t, payload)
+	members := map[string]os.FileMode{
+		"docker-helper":                 0755,
+		"docker_helper.pp":              0644,
+		"man/docker-helper.1.gz":        0644,
+		"man/docker-helper-config.5.gz": 0644,
+		"completions/docker-helper":     0644,
+	}
+	for rel, mode := range members {
+		path := filepath.Join(payload, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("fixture-"+filepath.Base(rel)), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The producer's staging contract: immutable between members and every
+	// artifact builder.
+	makeTreeImmutable(t, payload)
+
+	cmd := exec.Command("bash", "build-packages.sh", testVersion, "--payload", payload)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("build-packages.sh --payload must stage and pack the shared payload: %v\n%s", err, out)
+	}
+
+	// The packager must reach the nFPM packing stage: both package files
+	// must exist.
+	for _, f := range []string{debFile, rpmFile} {
+		if _, err := os.Stat(f); err != nil {
+			t.Fatalf("the produced package must exist: %v", err)
+		}
+	}
+
+	// The C2 corrective: the staging tree's DIRECTORY modes must be exactly
+	// 0755 (cp -r from the read-only payload would otherwise propagate 0555
+	// into dist/buildkit and leak it into the packaged directory entries).
+	err = filepath.Walk("dist/buildkit", func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() && info.Mode().Perm() != 0755 {
+			t.Errorf("the staged dist/buildkit directory must be exactly 0755: %s is %v", path, info.Mode().Perm())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The packager must have consumed the payload, not modified it: every
+	// member must still carry the producer's a-w.
+	requireReadOnlyTree(t, payload)
 }
 
 // TestPackageBuildIntegration runs the full build-packages.sh pipeline

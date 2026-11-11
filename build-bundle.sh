@@ -195,6 +195,14 @@ chmod 755 "$BUNDLE_DIR/buildkit/buildkitd" \
           "$BUNDLE_DIR/buildkit/buildkit-runc" \
           "$BUNDLE_DIR/buildkit/runtime/buildkit-runc"
 chmod 644 "$BUNDLE_DIR/buildkit/LICENSE" "$BUNDLE_DIR/buildkit/MANIFEST"
+# Canonical BuildKit DIRECTORY modes (R4-P3-P3-C1): the shared release
+# payload is staged read-only (`chmod -R a-w` by the canonical producer),
+# and cp -r propagates source directory modes into the assembled copy —
+# which would ship a tarball whose runtime/ directory is dr-xr-xr-x and
+# break non-root extraction/consumption. The assembled tree therefore
+# establishes its own canonical directory modes explicitly; the payload
+# itself is never modified (its immutability is the producer's contract).
+chmod 755 "$BUNDLE_DIR/buildkit" "$BUNDLE_DIR/buildkit/runtime"
 
 # Builder identity provisioning script (the ONE provisioning owner; the
 # tarball installer executes it, never re-implements it)

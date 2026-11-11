@@ -94,6 +94,13 @@ if [[ -n "$PAYLOAD_DIR" ]]; then
 	cp "$PAYLOAD_DIR/completions/docker-helper" "${SCRIPT_DIR}/dist/completions/docker-helper"
 	rm -rf "${SCRIPT_DIR}/dist/buildkit"
 	cp -r "$PAYLOAD_DIR/buildkit" "${SCRIPT_DIR}/dist/buildkit"
+	# Canonical staging DIRECTORY modes (R4-P3-P3-C1): the shared release
+	# payload is staged read-only by the canonical producer, and cp -r
+	# propagates the source directory modes into dist/buildkit — nfpm
+	# re-stamps every FILE via its explicit file_info, but copied
+	# DIRECTORY modes would leak into the packaged directory entries.
+	# Directory-only normalization; the payload itself is never modified.
+	find "${SCRIPT_DIR}/dist/buildkit" -type d -exec chmod 0755 {} +
 else
 	# Build static binary — build-static.sh is the authoritative builder.
 	"${SCRIPT_DIR}/build-static.sh" "$VERSION"
