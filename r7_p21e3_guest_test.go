@@ -172,6 +172,36 @@ func TestR7P21E3GuestHarnessContract(t *testing.T) {
 	}
 }
 
+// TestR7P21E3GuestSecretHygiene pins the secret-output corrections: the
+// generated admin token never reaches the guest console or the evidence
+// set, the Session bearer response never lands in the evidence set (the
+// R1 round published it as session-response.json), and the image prewarm
+// runs through the intended session-token mechanism with an explicitly
+// recorded success/failure result.
+func TestR7P21E3GuestSecretHygiene(t *testing.T) {
+	raw, err := os.ReadFile("scripts/release-2.4-r7-p21e3-guest.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(raw)
+	if strings.Contains(script, `RESP="$EVIDENCE_DIR/session-response.json"`) {
+		t.Error("the Session bearer response must never be written into the evidence set")
+	}
+	if !strings.Contains(script, `RESP="$STATE_DIR/session-response.json"`) ||
+		!strings.Contains(script, `rm -f "$RESP"`) {
+		t.Error("the Session bearer response must live outside the evidence set and be removed after the token is extracted")
+	}
+	if !strings.Contains(script, "[REDACTED-TOKEN]") {
+		t.Error("redaction of any dht_ token shape must remain in the harness before any captured output is recorded")
+	}
+	if !strings.Contains(script, `DOCKER_HELPER_SESSION_TOKEN="$TOKEN" docker-helper pull`) {
+		t.Error("the image prewarm must run through the intended DOCKER_HELPER_SESSION_TOKEN mechanism")
+	}
+	if !strings.Contains(script, `prewarm=%s`) {
+		t.Error("the harness must record the prewarm result explicitly, never treating a swallowed error as a warmup")
+	}
+}
+
 func fmtInt(n int) string {
 	b := []byte{}
 	if n == 0 {

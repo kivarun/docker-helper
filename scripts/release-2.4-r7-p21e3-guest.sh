@@ -327,7 +327,22 @@ PRINCIPAL="${SUDO_USER:-}"
 [ -n "$PRINCIPAL" ] && [ "$PRINCIPAL" != "root" ] || fail "cannot derive non-root principal"
 PRINCIPAL_HOME="$(getent passwd "$PRINCIPAL" | cut -d: -f6)"
 [ -n "$PRINCIPAL_HOME" ] && [ -d "$PRINCIPAL_HOME" ] || fail "principal home not found"
-docker-helper init --allowed-root "$PRINCIPAL_HOME" || fail "docker-helper init failed"
+# SECURITY — the generated admin token must never reach the guest
+# console or the workflow artifact: docker-helper init prints it to
+# stdout on success. The output is captured to a private file that is
+# NOT part of the evidence set; only a token-free indication (whether
+# the init succeeded) is logged, and the token itself is read from
+# /etc/docker-helper/admin.token below.
+INIT_OUT="$STATE_DIR/init.out"
+if docker-helper init --allowed-root "$PRINCIPAL_HOME" >"$INIT_OUT" 2>&1; then
+  rm -f "$INIT_OUT"
+  echo "docker-helper init: success (admin token withheld from the evidence set)"
+else
+  rc=$?
+  sed -e 's/dht_[A-Za-z0-9]*/[REDACTED-TOKEN]/g' "$INIT_OUT" | tail -5
+  rm -f "$INIT_OUT"
+  fail "docker-helper init failed (rc=$rc)"
+fi
 systemctl daemon-reload
 systemctl enable --now docker-helper.service >/dev/null 2>&1 || true
 systemctl enable --now docker-helper-builder.service >/dev/null 2>&1 || true
@@ -620,7 +635,11 @@ chown -R "$PRINCIPAL:$PRINCIPAL" "$WS"
 docker-helper principal show "$PRINCIPAL" >/dev/null 2>&1 \
   || docker-helper principal create --no-credential "$PRINCIPAL" >/dev/null 2>&1 || true
 docker-helper principal allowed-root add "$PRINCIPAL" "$PRINCIPAL_HOME" >/dev/null 2>&1 || true
-RESP="$EVIDENCE_DIR/session-response.json"
+# SECURITY — the Session bearer response must never reach the evidence
+# set or the workflow artifact (the R1 round published it): the create
+# response is written OUTSIDE the evidence dir, its token extracted, and
+# the raw body removed; only the token-free session identity is recorded.
+RESP="$STATE_DIR/session-response.json"
 CODE="$(curl --silent --max-time 5 \
   --unix-socket "$DH_SOCK" -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
@@ -628,13 +647,30 @@ CODE="$(curl --silent --max-time 5 \
   -o "$RESP" -w '%{http_code}' http://localhost/sessions)" || true
 TOKEN="$(grep -oE '"token": *"[^"]+"' "$RESP" 2>/dev/null | head -1 | sed 's/.*"token": *"//;s/"$//')"
 SID="$(grep -oE '"id": *"dhs_[^"]+"' "$RESP" 2>/dev/null | head -1 | sed 's/.*"id": *"//;s/"$//')"
+rm -f "$RESP"
 printf '%s\n' "$SID" > "$EVIDENCE_DIR/session-id.log"
-[ -n "$TOKEN" ] || fail "session create failed (HTTP $CODE)"
-# Pre-warm the image cache COMPLETELY before the measured operation so
-# the traced build window carries minimal IO noise (the strace filter
-# keeps read but bounds output this way).
-docker-helper pull alpine:3.24 >"$EVIDENCE_DIR/pull.log" 2>&1 || true
-log "session ready ($SID); image cached"
+if [ -z "$TOKEN" ]; then
+  sed -e 's/dht_[A-Za-z0-9]*/[REDACTED-TOKEN]/g' "$RESP" | tail -5
+  rm -f "$RESP"
+  fail "session create failed (HTTP $CODE)"
+fi
+rm -f "$RESP"
+# Pre-warm the image COMPLETELY before the measured operation so the
+# traced build window carries minimal IO noise (the strace filter keeps
+# read but bounds output this way). The pull runs with the established
+# SESSION token through the intended environment mechanism; a swallowed
+# error is a FAILED prewarm, never a successful cache warmup (recorded
+# verbatim and never fatal for the measurement itself).
+if DOCKER_HELPER_SESSION_TOKEN="$TOKEN" docker-helper pull alpine:3.24 \
+    >"$EVIDENCE_DIR/pull.log" 2>&1; then
+  PREWARM=success
+else
+  PREWARM=failed
+fi
+sed -e 's/dht_[A-Za-z0-9]*/[REDACTED-TOKEN]/g' -e 's/^Authorization: Bearer .*/[REDACTED-AUTH]/' \
+  "$EVIDENCE_DIR/pull.log" >"$EVIDENCE_DIR/pull.log.redacted" && mv "$EVIDENCE_DIR/pull.log.redacted" "$EVIDENCE_DIR/pull.log"
+log "session ready ($SID); image prewarm: $PREWARM"
+printf 'prewarm=%s\n' "$PREWARM" > "$EVIDENCE_DIR/prewarm.result"
 
 # --- the pinned audit window, opened IMMEDIATELY before the measured op ---
 if audit_boundary_open "$AUDIT_LOG_PATH"; then
