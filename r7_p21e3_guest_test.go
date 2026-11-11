@@ -183,3 +183,24 @@ func fmtInt(n int) string {
 	}
 	return string(b)
 }
+
+// TestR7P21E3HostGateDetectsVerdict pins the host-side verdict detection
+// regression observed on the first p21e3 dispatch (run 43031588124): the
+// gate fabricated its verdict string with `tail -2 | tr '\n' ' '`, which
+// produced "R7-P21E3-BUILD=failed R7-P21E3-VERDICT=MEASURED" — prefixed by
+// the BUILD line, so the R7-P21E3-VERDICT=* case never matched and the
+// job retried over a valid MEASURED verdict. The detection must select the
+// VERDICT line alone.
+func TestR7P21E3HostGateDetectsVerdict(t *testing.T) {
+	raw, err := os.ReadFile("scripts/release-2.4-r7-diag-tw-selinux-vm.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(raw)
+	if strings.Contains(script, `R7-P21E3-(VERDICT|BUILD)`) {
+		t.Error("the p21e3 host gate must not select VERDICT and BUILD with one grep (the joined string is BUILD-prefixed and never matches R7-P21E3-VERDICT=*)")
+	}
+	if !strings.Contains(script, "grep -aoE 'R7-P21E3-VERDICT=") {
+		t.Error("the p21e3 host gate must match the VERDICT line alone")
+	}
+}

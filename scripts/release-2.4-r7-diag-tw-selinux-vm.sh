@@ -238,10 +238,17 @@ RMT
         ;;
     esac
   elif [ "$R7_MODE" = "p21e3" ]; then
-    VERDICT="$(grep -aoE 'R7-P21E3-(VERDICT|BUILD)=.*' "$RUNNER_TEMP/r7-diag-guest.log" | tail -2 | tr '\n' ' ' || true)"
+    # The BUILD result line and the VERDICT line are matched SEPARATELY:
+    # the previous tail -2 | tr '\n' ' ' fabrication produced a string
+    # PREFIXED with R7-P21E3-BUILD=..., so the case below never matched
+    # R7-P21E3-VERDICT=* even when the guest produced a valid verdict
+    # (observed on the first p21e3 dispatch: verdict MEASURED, job failure
+    # "produced no verdict").
+    BUILD="R7-P21E3-BUILD=$(grep -aoE 'R7-P21E3-BUILD=.*' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 | cut -d= -f2- || true)"
+    VERDICT="$(grep -aoE 'R7-P21E3-VERDICT=.*' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"
     case "$VERDICT" in
       R7-P21E3-VERDICT=*)
-        log "R7 P21-E3 measurement verdict: $VERDICT"
+        log "R7 P21-E3 measurement verdict: $BUILD $VERDICT"
         break
         ;;
       *)
