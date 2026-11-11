@@ -25,6 +25,10 @@
 #                       (read-only inotify specimen poller over the
 #                       production executor bundles; NO grants, NO
 #                       production changes)
+#                       p21e3 = the R7 P21-E-R4-P3-P3 first enforcing
+#                       wrapper integration measurement (one bounded build
+#                       with strace + /proc/context sampling + a pinned
+#                       audit window; NO grants, NO policy changes)
 
 set -Eeuo pipefail
 
@@ -44,7 +48,8 @@ case "$R7_MODE" in
   p21c) GUEST_SCRIPT='release-2.4-r7-p21c-guest.sh' ;;
   p21d) GUEST_SCRIPT='release-2.4-r7-p21d-guest.sh' ;;
   p21e) GUEST_SCRIPT='release-2.4-r7-p21e-guest.sh' ;;
-  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d | p21e)" ;;
+  p21e3) GUEST_SCRIPT='release-2.4-r7-p21e3-guest.sh' ;;
+  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d | p21e | p21e3)" ;;
 esac
 
 log()  { printf '%s %s\n' "$PREFIX" "$*"; }
@@ -228,6 +233,20 @@ RMT
       *)
         if [ "$attempt" -eq 3 ]; then
           fail "the R7 P21-E capture produced no verdict (guest exit $GUEST_RC)"
+        fi
+        log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
+        ;;
+    esac
+  elif [ "$R7_MODE" = "p21e3" ]; then
+    VERDICT="$(grep -aoE 'R7-P21E3-(VERDICT|BUILD)=.*' "$RUNNER_TEMP/r7-diag-guest.log" | tail -2 | tr '\n' ' ' || true)"
+    case "$VERDICT" in
+      R7-P21E3-VERDICT=*)
+        log "R7 P21-E3 measurement verdict: $VERDICT"
+        break
+        ;;
+      *)
+        if [ "$attempt" -eq 3 ]; then
+          fail "the R7 P21-E3 measurement produced no verdict (guest exit $GUEST_RC)"
         fi
         log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
         ;;
