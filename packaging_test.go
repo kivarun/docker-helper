@@ -2248,9 +2248,11 @@ func TestWrapperPayloadIntegration(t *testing.T) {
 }
 
 // TestInstallSystemRefusesWrapperWithoutRuntime proves the fail-closed
-// install contract: a bundle whose relocated pinned runtime is missing
-// aborts the payload installation (an apparently-successful install can
-// never leave the wrapper installed but the real runtime absent).
+// preflight contract: a bundle whose relocated pinned runtime is missing
+// is refused in check_bundled_assets — BEFORE provisioning, binary
+// replacement, unit installation, or any other mutation — so an
+// apparently-successful install can never leave the wrapper installed but
+// the real runtime absent.
 func TestInstallSystemRefusesWrapperWithoutRuntime(t *testing.T) {
 	env := newSystemInstallScriptEnv(t)
 	// Remove ONLY the relocated runtime member from the fixture bundle.
@@ -2264,6 +2266,40 @@ func TestInstallSystemRefusesWrapperWithoutRuntime(t *testing.T) {
 	}
 	if !strings.Contains(out, "refusing to install a wrapper without its real runtime") {
 		t.Fatalf("the failure must name the missing runtime contract:\n%s", out)
+	}
+	// ZERO mutation on the refusal: the preflight owns the failure, so
+	// nothing may have been provisioned, installed, enabled, or loaded.
+	// The provisioner fake logs every invocation; an absent or empty log
+	// proves it never ran.
+	log, err := os.ReadFile(env.logFile)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("cannot read the lifecycle log: %v", err)
+	}
+	if err == nil && len(bytes.TrimSpace(log)) != 0 {
+		t.Fatalf("provisioning must not run on the refusal (log=%q)", log)
+	}
+	for _, mutated := range []string{
+		env.dest("bin/docker-helper"),
+		env.dest("usr/libexec/docker-helper/buildkit/buildkit-runc"),
+		env.dest("usr/libexec/docker-helper/buildkit/runtime/buildkit-runc"),
+		env.dest("etc/systemd/system/docker-helper.service"),
+		env.dest("etc/systemd/system/docker-helper-builder.service"),
+		env.dest("usr/lib/modules-load.d/docker-helper-builder.conf"),
+	} {
+		if _, err := os.Lstat(mutated); !os.IsNotExist(err) {
+			t.Errorf("nothing may be installed on the refusal, found %s", mutated)
+		}
+	}
+	// No service-lifecycle or MAC tooling call may have been issued.
+	for _, call := range env.calls(t) {
+		first := call
+		if idx := strings.IndexByte(call, ' '); idx >= 0 {
+			first = call[:idx]
+		}
+		base := filepath.Base(first)
+		if base == "systemctl" || base == "semodule" || base == "apparmor_parser" {
+			t.Errorf("%s must not run on the refusal (call: %s)", base, call)
+		}
 	}
 }
 
@@ -6134,6 +6170,214 @@ func TestBundleBuilderMembers(t *testing.T) {
 	} {
 		if !strings.Contains(content, want) {
 			t.Errorf("build-bundle.sh must reference %q", want)
+		}
+	}
+}
+
+// TestBuildBundlePayloadModeAssembly exercises the ACTUAL
+// `build-bundle.sh VERSION --payload DIR` path of the canonical release
+// producer with a valid D-2 staged layout: the shared payload carries the
+// upstream runtime at the relocated staging path (and nothing at the
+// wrapper payload name), the tarball assembles successfully, and the D-2
+// invariants hold in the produced artifact (wrapper member == product
+// binary; runtime member == the payload's staged upstream bytes). The
+// negative case proves a payload whose relocated runtime is missing fails
+// the preflight BEFORE any tarball is produced — the old preflight would
+// have rejected a valid payload (broken canonical assembly) or, with the
+// obsolete layout, silently accepted one.
+func TestBuildBundlePayloadModeAssembly(t *testing.T) {
+	hasCC := false
+	if _, err := exec.LookPath("gcc"); err == nil {
+		hasCC = true
+	}
+	if !hasCC {
+		t.Skip("gcc not available, skipping the real --payload assembly regression")
+	}
+	requirePackagingTool(t, "checkmodule")
+
+	if err := os.RemoveAll("dist"); err != nil {
+		t.Skipf("cannot clean dist/: %v, skipping test", err)
+	}
+	testVersion := "0.0.0-payloadmode"
+	bundleTar := filepath.Join("dist", "docker-helper-"+testVersion+"-linux-amd64.tar.gz")
+	t.Cleanup(func() {
+		_ = os.RemoveAll(filepath.Join("dist", "docker-helper-"+testVersion+"-linux-amd64"))
+		_ = os.Remove(bundleTar)
+	})
+
+	// The real static product binary through the canonical builder (the
+	// same producer the release pipeline uses; the bundle verify runs the
+	// binary's version command against VERSION and confirms static
+	// linking).
+	build := exec.Command("bash", "build-static.sh", testVersion)
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build-static.sh failed: %v\n%s", err, out)
+	}
+
+	newPayload := func(t *testing.T, includeRuntime bool) string {
+		t.Helper()
+		payload := t.TempDir()
+		write := func(rel, content string, mode os.FileMode) {
+			path := filepath.Join(payload, rel)
+			if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(content), mode); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.MkdirAll(filepath.Join(payload, "buildkit", "usr", "libexec", "docker-helper", "buildkit", "runtime"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		// The product binary and the product metadata members.
+		if err := os.MkdirAll(filepath.Join(payload, "man"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(payload, "completions"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := exec.Command("cp", filepath.Join("dist", "docker-helper"), filepath.Join(payload, "docker-helper")).Run(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(filepath.Join(payload, "docker-helper"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		write("docker_helper.pp", "fake-pp", 0644)
+		write("man/docker-helper.1.gz", "fake-man1", 0644)
+		write("man/docker-helper-config.5.gz", "fake-man5", 0644)
+		write("completions/docker-helper", "# bash completion\n", 0644)
+		// The pinned BuildKit payload: the upstream members with a
+		// MANIFEST whose digests describe exactly the staged bytes (the
+		// same self-proving shape the payload owner generates).
+		write("buildkit/usr/libexec/docker-helper/buildkit/buildkitd", "fixture-buildkitd", 0755)
+		write("buildkit/usr/libexec/docker-helper/buildkit/buildctl", "fixture-buildctl", 0755)
+		write("buildkit/usr/share/doc/docker-helper/buildkit/LICENSE", "fixture-license", 0644)
+		if includeRuntime {
+			write("buildkit/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc", "fixture-upstream-runc", 0755)
+		}
+		var manifest strings.Builder
+		manifest.WriteString("buildkit-version=v0.33.0\n")
+		for _, member := range []string{"buildkitd", "buildctl"} {
+			data, err := os.ReadFile(filepath.Join(payload, "buildkit/usr/libexec/docker-helper/buildkit", member))
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest.WriteString(member + "-sha256=" + fmt.Sprintf("%x", sha256Sum(data)) + "\n")
+		}
+		if includeRuntime {
+			data, err := os.ReadFile(filepath.Join(payload, "buildkit/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest.WriteString("buildkit-runc-sha256=" + fmt.Sprintf("%x", sha256Sum(data)) + "\n")
+		}
+		manifest.WriteString("upstream-notice=absent (synthetic payload)\n")
+		write("buildkit/usr/share/doc/docker-helper/buildkit/MANIFEST", manifest.String(), 0644)
+		return payload
+	}
+
+	// The valid D-2 payload: the canonical --payload assembly MUST succeed
+	// and the produced tarball must carry the full D-2 layout with the
+	// byte-identity invariants.
+	validPayload := newPayload(t, true)
+	cmd := exec.Command("bash", "build-bundle.sh", testVersion, "--payload", validPayload)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("build-bundle.sh --payload must assemble the valid D-2 payload: %v\n%s", err, out)
+	}
+	tarDir := t.TempDir()
+	if out, err := exec.Command("tar", "xzf", bundleTar, "-C", tarDir).CombinedOutput(); err != nil {
+		t.Fatalf("tar extraction failed: %v\n%s", err, out)
+	}
+	root := filepath.Join(tarDir, "docker-helper-"+testVersion+"-linux-amd64")
+	for _, rel := range []string{
+		"docker-helper",
+		"buildkit/buildkitd",
+		"buildkit/buildctl",
+		"buildkit/buildkit-runc",
+		"buildkit/runtime/buildkit-runc",
+		"buildkit/LICENSE",
+		"buildkit/MANIFEST",
+	} {
+		if _, err := os.Stat(filepath.Join(root, rel)); err != nil {
+			t.Fatalf("the assembled tarball must carry %s: %v", rel, err)
+		}
+	}
+	productBinary, err := os.ReadFile(filepath.Join(root, "docker-helper"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper, err := os.ReadFile(filepath.Join(root, "buildkit", "buildkit-runc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream, err := os.ReadFile(filepath.Join(root, "buildkit", "runtime", "buildkit-runc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprintf("%x", sha256Sum(wrapper)) != fmt.Sprintf("%x", sha256Sum(productBinary)) {
+		t.Error("the assembled wrapper payload member must be a byte-copy of the product binary")
+	}
+	if string(upstream) != "fixture-upstream-runc" {
+		t.Errorf("the assembled runtime member must be the payload's staged upstream bytes, got %q", upstream)
+	}
+
+	// The negative case: a payload missing the relocated runtime must fail
+	// the preflight BEFORE any tarball is produced (no successful artifact
+	// from a broken payload; no compatibility for the obsolete layout).
+	// The valid run's tarball must be untouched by the broken run.
+	validTarball, err := os.ReadFile(bundleTar)
+	if err != nil {
+		t.Fatal(err)
+	}
+	brokenPayload := newPayload(t, false)
+	cmd = exec.Command("bash", "build-bundle.sh", testVersion, "--payload", brokenPayload)
+	out, err = cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("the broken payload must be rejected:\n%s", out)
+	}
+	if !strings.Contains(string(out), "shared release payload member missing or empty") ||
+		!strings.Contains(string(out), "runtime/buildkit-runc") {
+		t.Fatalf("the failure must name the relocated runtime member:\n%s", out)
+	}
+	after, err := os.ReadFile(bundleTar)
+	if err != nil {
+		t.Fatalf("the valid tarball must be untouched by the broken run: %v", err)
+	}
+	if fmt.Sprintf("%x", sha256Sum(after)) != fmt.Sprintf("%x", sha256Sum(validTarball)) {
+		t.Error("the broken-payload run must not replace or modify the previously assembled tarball")
+	}
+}
+
+// TestReleaseContractsNoObsoleteStaging pins the C1 corrective: no release
+// producer or assembler contract may still reference the obsolete upstream
+// staging location (buildkit/usr/libexec/docker-helper/buildkit/
+// buildkit-runc without the runtime/ directory) — any payload-relative
+// buildkit-runc reference must be the relocated runtime path. The
+// installed-path references (usr-rooted or bundle-rooted wrapper member)
+// are unaffected.
+func TestReleaseContractsNoObsoleteStaging(t *testing.T) {
+	for _, f := range []string{"build-bundle.sh", "build-packages.sh", "scripts/release-candidate.sh", "build-buildkit-payload.sh"} {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		content := string(data)
+		// Every contract must reference the relocated runtime (the
+		// shared-payload handoff is the D-2 layout); the exact prefix
+		// differs per file (build-buildkit-payload.sh roots its staging
+		// tree at DEST_DIR, the assembler/producer contracts at the
+		// payload-relative buildkit/ member path).
+		if !strings.Contains(content, "usr/libexec/docker-helper/buildkit/runtime/buildkit-runc") {
+			t.Errorf("%s must reference the relocated upstream runtime staging path", f)
+		}
+		for _, line := range strings.Split(content, "\n") {
+			if !strings.Contains(line, "buildkit/usr/libexec/docker-helper/buildkit/buildkit-runc") {
+				continue
+			}
+			if !strings.Contains(line, "runtime/buildkit-runc") {
+				t.Errorf("%s still references the obsolete upstream staging location: %s", f, strings.TrimSpace(line))
+			}
 		}
 	}
 }

@@ -193,6 +193,15 @@ check_bundled_assets() {
 			exit 1
 		fi
 	done
+	# The relocated pinned upstream runtime (R4-P3-P0 D-2): the wrapper's
+	# fixed handoff target. Verified HERE, before any provisioning or
+	# installation mutation, so an apparently-successful install can never
+	# leave the wrapper payload member installed but the real runtime
+	# absent.
+	if [[ ! -s "$script_dir/$BUILDKIT_BIN_SRC/runtime/buildkit-runc" ]]; then
+		error "the bundle's relocated pinned runtime (buildkit/runtime/buildkit-runc) is missing; refusing to install a wrapper without its real runtime"
+		exit 1
+	fi
 }
 
 # The builder feature's TUN facility convergence may need to load the tun
@@ -573,20 +582,16 @@ install_builder_unit() {
 install_buildkit_payload() {
 	local member
 	# The payload name buildkit-runc is the WRAPPER role (a byte-copy of
-	# the product binary, R4-P3-P0 D-2); the relocated upstream runtime
+	# the product binary, R4-P3-P0 D-2) and the relocated upstream runtime
 	# lives in the dedicated runtime/ subdirectory that is the wrapper's
-	# fixed handoff target. Both are installed together so an
-	# apparently-successful install can never leave the wrapper without
-	# its real runtime.
+	# fixed handoff target. Both members are installed together through
+	# this single installation owner; their PRESENCE was already verified
+	# by check_bundled_assets before any mutation.
 	for member in buildkitd buildctl buildkit-runc; do
 		info "Installing pinned BuildKit payload member to $BUILDKIT_BIN_DEST/$member"
 		install -d -m 0755 "$BUILDKIT_BIN_DEST"
 		install -m 0755 "$script_dir/$BUILDKIT_BIN_SRC/$member" "$BUILDKIT_BIN_DEST/$member"
 	done
-	if [[ ! -s "$script_dir/$BUILDKIT_BIN_SRC/runtime/buildkit-runc" ]]; then
-		info "FATAL: the bundle's relocated pinned runtime (buildkit/runtime/buildkit-runc) is missing; refusing to install a wrapper without its real runtime" >&2
-		return 1
-	fi
 	info "Installing relocated pinned BuildKit runtime to $BUILDKIT_BIN_DEST/runtime/buildkit-runc"
 	install -d -m 0755 "$BUILDKIT_BIN_DEST/runtime"
 	install -m 0755 "$script_dir/$BUILDKIT_BIN_SRC/runtime/buildkit-runc" \

@@ -121,7 +121,7 @@ for member in docker-helper docker_helper.pp man/docker-helper.1.gz \
   man/docker-helper-config.5.gz completions/docker-helper \
   buildkit/usr/libexec/docker-helper/buildkit/buildkitd \
   buildkit/usr/libexec/docker-helper/buildkit/buildctl \
-  buildkit/usr/libexec/docker-helper/buildkit/buildkit-runc \
+  buildkit/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc \
   buildkit/usr/share/doc/docker-helper/buildkit/LICENSE \
   buildkit/usr/share/doc/docker-helper/buildkit/MANIFEST; do
   [ -s "$PAYLOAD_DIR/$member" ] || fail "shared payload member missing or empty: $member"
@@ -253,7 +253,13 @@ PAYLOAD_MEMBERS=(
   "selinux-policy selinux/docker_helper.pp - usr/share/selinux/docker_helper.pp"
   "buildkitd buildkit/buildkitd usr/libexec/docker-helper/buildkit/buildkitd usr/libexec/docker-helper/buildkit/buildkitd"
   "buildctl buildkit/buildctl usr/libexec/docker-helper/buildkit/buildctl usr/libexec/docker-helper/buildkit/buildctl"
-  "buildkit-runc buildkit/buildkit-runc usr/libexec/docker-helper/buildkit/buildkit-runc usr/libexec/docker-helper/buildkit/buildkit-runc"
+  # The relocated pinned upstream runtime (the wrapper's fixed handoff
+  # target; the bytes the MANIFEST buildkit-runc-sha256 describes).
+  "buildkit-runc buildkit/runtime/buildkit-runc usr/libexec/docker-helper/buildkit/runtime/buildkit-runc usr/libexec/docker-helper/buildkit/runtime/buildkit-runc"
+  # The wrapper role: a byte-copy of the product binary at the payload
+  # name (the same PAYLOAD_DIR/docker-helper source as the binary row, so
+  # the cross-format identity check carries the D-2 provenance).
+  "wrapper-buildkit-runc buildkit/buildkit-runc usr/libexec/docker-helper/buildkit/buildkit-runc usr/libexec/docker-helper/buildkit/buildkit-runc"
   "buildkit-license buildkit/LICENSE usr/share/doc/docker-helper/buildkit/LICENSE usr/share/doc/docker-helper/buildkit/LICENSE"
   "buildkit-manifest buildkit/MANIFEST usr/share/doc/docker-helper/buildkit/MANIFEST usr/share/doc/docker-helper/buildkit/MANIFEST"
 )

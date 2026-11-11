@@ -46,7 +46,12 @@
 #   buildkit/
 #     buildkitd
 #     buildctl
-#     buildkit-runc
+#     buildkit-runc        (the WRAPPER role: a byte-copy of docker-helper,
+#                           assembled from the product binary — never a
+#                           payload member)
+#     runtime/
+#       buildkit-runc      (the original pinned upstream runtime; the
+#                           payload member the MANIFEST digest describes)
 #     LICENSE
 #     MANIFEST
 #   scripts/
@@ -98,7 +103,7 @@ if [[ -n "$PAYLOAD_DIR" ]]; then
     completions/docker-helper \
     buildkit/usr/libexec/docker-helper/buildkit/buildkitd \
     buildkit/usr/libexec/docker-helper/buildkit/buildctl \
-    buildkit/usr/libexec/docker-helper/buildkit/buildkit-runc \
+    buildkit/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc \
     buildkit/usr/share/doc/docker-helper/buildkit/LICENSE \
     buildkit/usr/share/doc/docker-helper/buildkit/MANIFEST; do
     if [[ ! -s "$PAYLOAD_DIR/$member" ]]; then
