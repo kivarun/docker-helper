@@ -200,6 +200,68 @@ func TestR7P21E3GuestSecretHygiene(t *testing.T) {
 	if !strings.Contains(script, `prewarm=%s`) {
 		t.Error("the harness must record the prewarm result explicitly, never treating a swallowed error as a warmup")
 	}
+	// The R4-P3-P4-R1 secret corrections: raw pull diagnostics live
+	// OUTSIDE the published evidence tree and only a token-verified
+	// sanitized copy is published; the Session failure path reports a
+	// token-free status and never reads the removed response body.
+	for _, want := range []string{
+		`>"$PULL_RAW" 2>&1`,
+		`"$PULL_RAW" >"$EVIDENCE_DIR/pull.log"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("the raw pull diagnostics must be captured outside the evidence tree and sanitized into it (%q)", want)
+		}
+	}
+	if !strings.Contains(script, `PULL_RAW="$STATE_DIR/pull.raw.log"`) {
+		t.Error("the raw pull diagnostics must be captured in the unpublished state dir")
+	}
+	for _, want := range []string{
+		`grep -aqF -- "$TOKEN" "$EVIDENCE_DIR/pull.log"`,
+		`grep -aqF -- "$ADMIN_TOKEN" "$EVIDENCE_DIR/pull.log"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("the sanitized pull log must be verified absent both live tokens (%q)", want)
+		}
+	}
+	sidIdx := strings.Index(script, `rm -f "$RESP"`)
+	failIdx := strings.Index(script, "session create failed (HTTP")
+	if sidIdx < 0 || failIdx < 0 || sidIdx > failIdx {
+		t.Error("the Session failure path must report a token-free status after the response is removed, without reading it afterward")
+	}
+}
+
+// TestR7P21E3GuestPolicySemanticsGate pins the loaded-policy verification
+// contract: the .pp member is checked against the INSTALLED bytes (never
+// against any locally compiled digest), the loaded policy must carry
+// exactly the accepted slirp4netns cap_userns set, the deliberate
+// rootlesskit_t -> bin_t quarantine must be verified preserved, and a
+// mismatch aborts the round as BLOCKED before the measured build.
+func TestR7P21E3GuestPolicySemanticsGate(t *testing.T) {
+	raw, err := os.ReadFile("scripts/release-2.4-r7-p21e3-guest.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(raw)
+	for _, want := range []string{
+		"p21e3-policy-semantics.log",
+		"rpm2cpio",
+		"rpm==installed: MATCH",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("the p21e3 guest harness must carry the policy-semantics check step %q", want)
+		}
+	}
+	for _, want := range []string{
+		"POLICY-GATE: FAIL",
+		"GATE_REASON=policy-semantics",
+		"normalized: $SLIRP_PERMS",
+		`[ "$SLIRP_PERMS" = "net_admin sys_admin sys_ptrace" ]`,
+		"rootlesskit bin_t quarantine: PRESERVED",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("the p21e3 guest harness must gate the loaded-policy semantics %q", want)
+		}
+	}
 }
 
 func fmtInt(n int) string {

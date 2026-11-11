@@ -455,15 +455,84 @@ cap p21e3-payload-manifest 12 cat /usr/share/doc/docker-helper/buildkit/MANIFEST
   sha256sum /sys/fs/selinux/policy 2>/dev/null || true
 } > "$EVIDENCE_DIR/p21e3-module.log" 2>&1
 cat "$EVIDENCE_DIR/p21e3-module.log"
-# The gates decide BEFORE the measured build: an identity or label
-# mismatch aborts the round as BLOCKED (an aborted measurement decides
-# BLOCKED, never success). Nothing is repaired by hand and no policy is
-# loaded or reloaded.
-if [ "$IDENTITY_OK" != 1 ] || [ "$LABEL_OK" != 1 ]; then
+# --- policy identity + loaded-policy semantics (the accepted widening's
+# --- live effectiveness; a mismatch aborts the round as BLOCKED rather
+# --- than being repaired). The CI-produced .pp is NOT required to equal
+# --- any locally compiled digest: the source .pp is verified against the
+# --- RPM MEMBER and the INSTALLED bytes, and the LOADED policy is read
+# --- through sesearch.
+PP_EXPECTED=1
+{
+  echo "== rpm member vs installed .pp bytes =="
+  if mkdir -p "$STATE_DIR/pp-check" \
+    && (cd "$STATE_DIR/pp-check" && rpm2cpio "$ARTIFACT" | cpio -id --quiet \
+        'usr/share/selinux/docker_helper.pp' 2>/dev/null) \
+    && [ -f "$STATE_DIR/pp-check/usr/share/selinux/docker_helper.pp" ]; then
+    rpm_pp="$(sha256sum "$STATE_DIR/pp-check/usr/share/selinux/docker_helper.pp" | awk '{print $1}')"
+    inst_pp="$(sha256sum /usr/share/selinux/docker_helper.pp 2>/dev/null | awk '{print $1}')"
+    echo "rpm-member  sha256=$rpm_pp"
+    echo "installed   sha256=$inst_pp"
+    if [ -n "$inst_pp" ] && [ "$rpm_pp" = "$inst_pp" ]; then
+      echo "rpm==installed: MATCH"
+    else
+      echo "rpm==installed: MISMATCH"
+      echo "POLICY-GATE: FAIL (the installed module is not the RPM member)"
+      PP_EXPECTED=0
+    fi
+  else
+    echo "rpm member extraction failed (rpm2cpio/cpio/unavailable path)"
+    echo "POLICY-GATE: FAIL (the RPM member cannot be extracted)"
+    PP_EXPECTED=0
+  fi
+  echo "== loaded-policy semantics =="
+  if ! command -v sesearch >/dev/null 2>&1; then
+    timeout 300 zypper --non-interactive install -y setools 2>&1 | tail -3
+    command -v sesearch >/dev/null 2>&1 || echo "sesearch unavailable (the loaded-policy semantics cannot be verified manually)"
+  fi
+  if command -v sesearch >/dev/null 2>&1; then
+    echo "--- slirp4netns self:cap_userns (expect exactly sys_ptrace sys_admin net_admin) ---"
+    SLIRP_CAPS="$(timeout 60 sesearch -A -s docker_helper_slirp4netns_t \
+      -t docker_helper_slirp4netns_t -c cap_userns 2>&1)"
+    printf '%s\n' "$SLIRP_CAPS"
+    SLIRP_PERMS="$(printf '%s\n' "$SLIRP_CAPS" | grep -aoE '\{ [a-z_ ]+ \}' | tr -d '{}' | tr -s ' ' '\n' | sort -u | tr '\n' ' ' | sed 's/ $//')"
+    echo "normalized: $SLIRP_PERMS"
+    if [ "$SLIRP_PERMS" = "net_admin sys_admin sys_ptrace" ]; then
+      echo "slirp4netns cap_userns: EXACT-MATCH (the accepted R4-P3-P4 widening is loaded and effective)"
+    else
+      echo "slirp4netns cap_userns: WRONG-SHAPE (expected exactly net_admin sys_admin sys_ptrace)"
+      echo "POLICY-GATE: FAIL (loaded policy does not carry precisely the accepted widening)"
+      PP_EXPECTED=0
+    fi
+    echo "--- rootlesskit_t -> bin_t:file execute (the quarantine: EXPECT NO RESULT) ---"
+    QUAR="$(timeout 60 sesearch -A -s docker_helper_rootlesskit_t -t bin_t -c file 2>&1)"
+    printf '%s\n' "$QUAR"
+    if printf '%s\n' "$QUAR" | grep -aq 'execute'; then
+      echo "rootlesskit bin_t quarantine: VIOLATED (an execute grant exists)"
+      echo "POLICY-GATE: FAIL (the deliberate bin_t quarantine was not preserved)"
+      PP_EXPECTED=0
+    else
+      echo "rootlesskit bin_t quarantine: PRESERVED (no execute grant in the loaded policy)"
+    fi
+    echo "--- buildkitd self:cap_userns (expect { sys_admin chown } and the P11 sys_chroot singleton) ---"
+    timeout 60 sesearch -A -s docker_helper_buildkitd_t \
+      -t docker_helper_buildkitd_t -c cap_userns 2>&1
+  else
+    echo "POLICY-GATE: FAIL (loaded-policy semantics unverifiable: no sesearch)"
+    PP_EXPECTED=0
+  fi
+} > "$EVIDENCE_DIR/p21e3-policy-semantics.log" 2>&1
+cat "$EVIDENCE_DIR/p21e3-policy-semantics.log"
+# The gates decide BEFORE the measured build: an identity, label or
+# loaded-policy mismatch aborts the round as BLOCKED (an aborted
+# measurement decides BLOCKED, never success). Nothing is repaired by
+# hand and no policy is loaded or reloaded.
+if [ "$IDENTITY_OK" != 1 ] || [ "$LABEL_OK" != 1 ] || [ "$PP_EXPECTED" != 1 ]; then
   if [ "$IDENTITY_OK" != 1 ]; then
     GATE_REASON=identity
-  else
+  elif [ "$LABEL_OK" != 1 ]; then
     GATE_REASON=label-obl4
+  else
+    GATE_REASON=policy-semantics
   fi
   printf 'R7-P21E3-VERDICT=BLOCKED\nR7-P21E3-BLOCKED-REASON=%s\n' "$GATE_REASON"
   fail "pre-build $GATE_REASON gate failed; the measurement refuses to start"
@@ -625,6 +694,7 @@ measure_abandon() {
     exec {AUD_FD}<&- 2>/dev/null || true
     AUD_FD=""
   fi
+  rm -f "${PULL_RAW:-}" 2>/dev/null || true
 }
 
 # --- workspace + session (prepared BEFORE the window/sampler/POST) ---
@@ -647,9 +717,10 @@ CODE="$(curl --silent --max-time 5 \
   -o "$RESP" -w '%{http_code}' http://localhost/sessions)" || true
 TOKEN="$(grep -oE '"token": *"[^"]+"' "$RESP" 2>/dev/null | head -1 | sed 's/.*"token": *"//;s/"$//')"
 SID="$(grep -oE '"id": *"dhs_[^"]+"' "$RESP" 2>/dev/null | head -1 | sed 's/.*"id": *"//;s/"$//')"
-rm -f "$RESP"
 printf '%s\n' "$SID" > "$EVIDENCE_DIR/session-id.log"
 if [ -z "$TOKEN" ]; then
+  # The failure path reports a token-free status only (the response body
+  # is redacted before removal and never published).
   sed -e 's/dht_[A-Za-z0-9]*/[REDACTED-TOKEN]/g' "$RESP" | tail -5
   rm -f "$RESP"
   fail "session create failed (HTTP $CODE)"
@@ -661,14 +732,35 @@ rm -f "$RESP"
 # SESSION token through the intended environment mechanism; a swallowed
 # error is a FAILED prewarm, never a successful cache warmup (recorded
 # verbatim and never fatal for the measurement itself).
+#
+# SECURITY — the RAW pull diagnostics (the CLI can print the request
+# context and stderr on failure) are captured OUTSIDE the published
+# evidence tree (the state dir is never collected), and only a SANITIZED
+# copy — verified to contain neither the session token nor the admin
+# token — is published. The abort paths cannot publish the raw file:
+# it is inside the unpublished tree and removed by the section-5
+# abandonment handler regardless of the outcome.
+PULL_RAW="$STATE_DIR/pull.raw.log"
+measure_abandon_raw_pull() { rm -f "$PULL_RAW"; }
 if DOCKER_HELPER_SESSION_TOKEN="$TOKEN" docker-helper pull alpine:3.24 \
-    >"$EVIDENCE_DIR/pull.log" 2>&1; then
+    >"$PULL_RAW" 2>&1; then
   PREWARM=success
 else
   PREWARM=failed
 fi
 sed -e 's/dht_[A-Za-z0-9]*/[REDACTED-TOKEN]/g' -e 's/^Authorization: Bearer .*/[REDACTED-AUTH]/' \
-  "$EVIDENCE_DIR/pull.log" >"$EVIDENCE_DIR/pull.log.redacted" && mv "$EVIDENCE_DIR/pull.log.redacted" "$EVIDENCE_DIR/pull.log"
+  "$PULL_RAW" >"$EVIDENCE_DIR/pull.log" || true
+# The sanitized copy MUST carry neither live token; a residual token
+# fails loudly instead of being published by accident.
+if [ -n "$TOKEN" ] && grep -aqF -- "$TOKEN" "$EVIDENCE_DIR/pull.log" 2>/dev/null; then
+  rm -f "$EVIDENCE_DIR/pull.log" "$PULL_RAW"
+  fail "the sanitized pull log still carries the session token; nothing was published"
+fi
+if [ -n "$ADMIN_TOKEN" ] && grep -aqF -- "$ADMIN_TOKEN" "$EVIDENCE_DIR/pull.log" 2>/dev/null; then
+  rm -f "$EVIDENCE_DIR/pull.log" "$PULL_RAW"
+  fail "the sanitized pull log still carries the admin token; nothing was published"
+fi
+rm -f "$PULL_RAW"
 log "session ready ($SID); image prewarm: $PREWARM"
 printf 'prewarm=%s\n' "$PREWARM" > "$EVIDENCE_DIR/prewarm.result"
 
