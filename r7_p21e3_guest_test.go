@@ -228,15 +228,75 @@ func TestR7P21E3GuestSecretHygiene(t *testing.T) {
 	if sidIdx < 0 || failIdx < 0 || sidIdx > failIdx {
 		t.Error("the Session failure path must report a token-free status after the response is removed, without reading it afterward")
 	}
+	// The C2 corrective: the response BODY is never printed on any path —
+	// no redacting sed over $RESP survives, and the refusal record carries
+	// only the HTTP status and a token-free classification. The raw
+	// response lives exclusively in the unpublished state dir.
+	if strings.Contains(script, `sed -e 's/dht_[A-Za-z0-9]*/[REDACTED-TOKEN]/g' "$RESP"`) {
+		t.Error("the Session failure path must not print the response body in any redacted form")
+	}
+	for _, want := range []string{
+		"session-create refused: http_status=",
+		"REFUSAL_CLASS=request-refused",
+		"REFUSAL_CLASS=server-error",
+		"REFUSAL_CLASS=transport-unreachable",
+		"session-refusal.log",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("the Session refusal record must carry the token-free classification (%q)", want)
+		}
+	}
 }
 
-// TestR7P21E3GuestPolicySemanticsGate pins the loaded-policy verification
-// contract: the .pp member is checked against the INSTALLED bytes (never
-// against any locally compiled digest), the loaded policy must carry
-// exactly the accepted slirp4netns cap_userns set, the deliberate
-// rootlesskit_t -> bin_t quarantine must be verified preserved, and a
-// mismatch aborts the round as BLOCKED before the measured build.
-func TestR7P21E3GuestPolicySemanticsGate(t *testing.T) {
+// TestR7P21E3PolicySemanticsSelftest runs the p21e3 guest harness's REAL
+// fail-closed sesearch classifier (classify_sesearch_query, the exact
+// function the section-3 gate calls) over the eight deterministic
+// scenarios. The invariant (R4-P3-P4-R1-C1): only a successful,
+// well-formed response decides PRESERVED or the exact three-permission
+// shape; any nonzero exit — including timeout 124, which is NEVER an
+// authoritative empty result — or malformed output is UNTRUSTED and must
+// BLOCK before POST /build.
+func TestR7P21E3PolicySemanticsSelftest(t *testing.T) {
+	dir := t.TempDir()
+	out, err := exec.Command("bash", "scripts/release-2.4-r7-p21e3-guest.sh",
+		"--policy-semantics-selftest", dir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("policy-semantics selftest failed to run: %v\n%s", err, out)
+	}
+	verdict := func(name string) string {
+		t.Helper()
+		raw, err := os.ReadFile(filepath.Join(dir, "results", name))
+		if err != nil {
+			t.Fatalf("selftest result %s missing: %v\n%s", name, err, out)
+		}
+		return strings.TrimSuffix(string(raw), "\n")
+	}
+	for _, tc := range []struct{ name, want string }{
+		{"valid-three.classify", "trusted-set:net_admin sys_admin sys_ptrace"},
+		// A trusted response with the required net_admin member missing is
+		// a DECIDED wrong shape (not untrusted): the gate still blocks, but
+		// with the shape reason, not the query-untrusted reason.
+		{"missing-netadmin.classify", "trusted-set:sys_admin sys_ptrace"},
+		{"quarantine-present.classify", "trusted-set:execute"},
+		{"quarantine-absent.classify", "trusted-set:"},
+		{"quarantine-read-only.classify", "trusted-set:getattr read"},
+		{"exec-error.classify", "untrusted:nonzero-exit-1"},
+		{"timeout.classify", "untrusted:nonzero-exit-124"},
+		{"malformed.classify", "untrusted:malformed-line(error: cannot open /sys/fs/selinux/policy: No such file)"},
+	} {
+		if got := verdict(tc.name); got != tc.want {
+			t.Errorf("%s verdict = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestR7P21E3PolicySemanticsGate pins the section-3 gate's decision wiring
+// around the classifier: the exact three-permission acceptance, the shape
+// and untrusted refusal branches, and the quarantine decision (execute
+// token in a trusted set VIOLATES; genuinely absent PRESERVES; untrusted
+// BLOCKS) — each must reach the same BLOCKED gate, and the gate fires
+// before the build with an explicit reason.
+func TestR7P21E3PolicySemanticsGate(t *testing.T) {
 	raw, err := os.ReadFile("scripts/release-2.4-r7-p21e3-guest.sh")
 	if err != nil {
 		t.Fatal(err)
@@ -246,21 +306,22 @@ func TestR7P21E3GuestPolicySemanticsGate(t *testing.T) {
 		"p21e3-policy-semantics.log",
 		"rpm2cpio",
 		"rpm==installed: MATCH",
-	} {
-		if !strings.Contains(script, want) {
-			t.Errorf("the p21e3 guest harness must carry the policy-semantics check step %q", want)
-		}
-	}
-	for _, want := range []string{
-		"POLICY-GATE: FAIL",
-		"GATE_REASON=policy-semantics",
-		"normalized: $SLIRP_PERMS",
-		`[ "$SLIRP_PERMS" = "net_admin sys_admin sys_ptrace" ]`,
+		"classify_sesearch_query \"$SLIRP_RC\" \"$SLIRP_CAPS\"",
+		"classify_sesearch_query \"$QUAR_RC\" \"$QUAR_CAPS\"",
+		`trusted-set:net_admin sys_admin sys_ptrace`,
+		"QUERY-UNTRUSTED",
 		"rootlesskit bin_t quarantine: PRESERVED",
+		"rootlesskit bin_t quarantine: VIOLATED",
+		"GATE_REASON=policy-semantics",
+		"POLICY-GATE: FAIL",
+		// The old substring-acceptance judgment must not survive.
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("the p21e3 guest harness must gate the loaded-policy semantics %q", want)
 		}
+	}
+	if strings.Contains(script, `if printf '%s\n' "$QUAR_CAPS" | grep -aq 'execute'`) {
+		t.Error("the quarantine decision must come from the classified query, never a raw-output grep")
 	}
 }
 

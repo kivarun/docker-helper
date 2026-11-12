@@ -274,6 +274,93 @@ p21e3_audit_window_selftest() { # <workdir>
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Sesearch result classification — FAIL-CLOSED. A loaded-policy query is
+# decided ONLY from a successful, well-formed response: any nonzero exit
+# (including timeout 124 — NEVER an authoritative empty result) or any
+# malformed output line makes the verdict UNTRUSTED, and the caller must
+# treat untrusted as BLOCKED, never as the asserted absence. Exercised by
+# --policy-semantics-selftest; the Go tests judge the recorded verdicts.
+# classify_sesearch_query <rc> <output> prints exactly one verdict:
+#   trusted-set:<perm tokens, deduped, sorted, space-joined>   (may be empty)
+#   untrusted:nonzero-exit-<rc>                                (timeout rc 124 too)
+#   untrusted:malformed-line(<line>)
+classify_sesearch_query() { # <rc> <output>
+  local rc="$1" out="$2" line p tok parts="" perms
+  if [ -z "$rc" ] || [ "$rc" -ne 0 ] 2>/dev/null; then
+    printf 'untrusted:nonzero-exit-%s\n' "${rc:-none}"
+    return 0
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      'allow '*\ *:*) : ;;
+      *) printf 'untrusted:malformed-line(%s)\n' "$line"; return 0 ;;
+    esac
+    p="${line#allow * *:}" # e.g. "cap_userns { sys_ptrace sys_admin }" (;/w/o)
+    p="${p%;}"             # tolerate a trailing ';'
+    p="${p% }"
+    p="${p#* }"            # strip the class token
+    p="${p#\{}"
+    p="${p%\}}"
+    p="${p%;}"
+    [ -n "${p// /}" ] || { printf 'untrusted:malformed-line(%s)\n' "$line"; return 0; }
+    for tok in $p; do
+      parts="$parts $tok"
+    done
+  done <<EOF
+$out
+EOF
+  perms="$(printf '%s' "$parts" | tr ' \t' '\n\n' | sed '/^$/d' | sort -u | tr '\n' ' ' | sed 's/^ //;s/ $//')"
+  printf 'trusted-set:%s\n' "$perms"
+}
+
+# The accepted R4-P3-P4 exact three-permission check (unchanged semantics):
+# the slirp4netns self:cap_userns verdict must be EXACTLY
+# trusted-set:net_admin sys_admin sys_ptrace — no bit less, no bit more.
+# The quarantine decision: a TRUSTED query whose perm set is either empty or
+# carries NO 'execute' token preserves the deliberate
+# docker_helper_rootlesskit_t -> bin_t:file quarantine; a trusted set WITH
+# the execute token violates it; an untrusted query BLOCKS (never PRESERVED).
+p21e3_policy_semantics_selftest() { # <workdir>
+  local work="$1"
+  mkdir -p "$work/results"
+  # 1. Valid policy with the three accepted slirp4netns permissions.
+  classify_sesearch_query 0 \
+    'allow docker_helper_slirp4netns_t docker_helper_slirp4netns_t:cap_userns { sys_ptrace sys_admin net_admin };' \
+    >"$work/results/valid-three.classify"
+  # 2. Valid query, but the required net_admin member is missing.
+  classify_sesearch_query 0 \
+    'allow docker_helper_slirp4netns_t docker_helper_slirp4netns_t:cap_userns { sys_ptrace sys_admin };' \
+    >"$work/results/missing-netadmin.classify"
+  # 3. Generic bin_t execute PRESENT (quarantine violated).
+  classify_sesearch_query 0 \
+    'allow docker_helper_rootlesskit_t bin_t:file execute;' \
+    >"$work/results/quarantine-present.classify"
+  # 4. Generic bin_t execute GENUINELY absent: a successful query with ZERO
+  #    allow lines is the authoritative empty result.
+  classify_sesearch_query 0 '' >"$work/results/quarantine-absent.classify"
+  # 4b. Trusted query with a NON-execute allow (e.g. a read) — the set does
+  #     not carry the execute token, so the quarantine still holds.
+  classify_sesearch_query 0 \
+    'allow docker_helper_rootlesskit_t bin_t:file { getattr read };' \
+    >"$work/results/quarantine-read-only.classify"
+  # 5. sesearch execution error (nonzero exit, error text on output).
+  classify_sesearch_query 1 'Error: SELinux policy is not managed or store cannot be reached.' \
+    >"$work/results/exec-error.classify"
+  # 6. sesearch timeout (timeout(1) exit 124; possibly truncated/no output).
+  classify_sesearch_query 124 '' >"$work/results/timeout.classify"
+  # 7. Unreadable/malformed response (rc 0 but not an allow response).
+  classify_sesearch_query 0 'error: cannot open /sys/fs/selinux/policy: No such file' \
+    >"$work/results/malformed.classify"
+}
+
+if [ "${1:-}" = "--policy-semantics-selftest" ]; then
+  [ -n "${2:-}" ] || fail "usage: $0 --policy-semantics-selftest <workdir>"
+  p21e3_policy_semantics_selftest "$2"
+  exit $?
+fi
+
 if [ "${1:-}" = "--audit-window-selftest" ]; then
   [ -n "${2:-}" ] || fail "usage: $0 --audit-window-selftest <workdir>"
   p21e3_audit_window_selftest "$2"
@@ -484,7 +571,7 @@ PP_EXPECTED=1
     echo "POLICY-GATE: FAIL (the RPM member cannot be extracted)"
     PP_EXPECTED=0
   fi
-  echo "== loaded-policy semantics =="
+  echo "== loaded-policy semantics (fail-closed sesearch classification) =="
   if ! command -v sesearch >/dev/null 2>&1; then
     timeout 300 zypper --non-interactive install -y setools 2>&1 | tail -3
     command -v sesearch >/dev/null 2>&1 || echo "sesearch unavailable (the loaded-policy semantics cannot be verified manually)"
@@ -493,29 +580,60 @@ PP_EXPECTED=1
     echo "--- slirp4netns self:cap_userns (expect exactly sys_ptrace sys_admin net_admin) ---"
     SLIRP_CAPS="$(timeout 60 sesearch -A -s docker_helper_slirp4netns_t \
       -t docker_helper_slirp4netns_t -c cap_userns 2>&1)"
+    SLIRP_RC=$?
+    printf 'query-rc=%s\n' "$SLIRP_RC"
     printf '%s\n' "$SLIRP_CAPS"
-    SLIRP_PERMS="$(printf '%s\n' "$SLIRP_CAPS" | grep -aoE '\{ [a-z_ ]+ \}' | tr -d '{}' | tr -s ' ' '\n' | sort -u | tr '\n' ' ' | sed 's/ $//')"
-    echo "normalized: $SLIRP_PERMS"
-    if [ "$SLIRP_PERMS" = "net_admin sys_admin sys_ptrace" ]; then
-      echo "slirp4netns cap_userns: EXACT-MATCH (the accepted R4-P3-P4 widening is loaded and effective)"
-    else
-      echo "slirp4netns cap_userns: WRONG-SHAPE (expected exactly net_admin sys_admin sys_ptrace)"
-      echo "POLICY-GATE: FAIL (loaded policy does not carry precisely the accepted widening)"
-      PP_EXPECTED=0
-    fi
-    echo "--- rootlesskit_t -> bin_t:file execute (the quarantine: EXPECT NO RESULT) ---"
-    QUAR="$(timeout 60 sesearch -A -s docker_helper_rootlesskit_t -t bin_t -c file 2>&1)"
-    printf '%s\n' "$QUAR"
-    if printf '%s\n' "$QUAR" | grep -aq 'execute'; then
-      echo "rootlesskit bin_t quarantine: VIOLATED (an execute grant exists)"
-      echo "POLICY-GATE: FAIL (the deliberate bin_t quarantine was not preserved)"
-      PP_EXPECTED=0
-    else
-      echo "rootlesskit bin_t quarantine: PRESERVED (no execute grant in the loaded policy)"
-    fi
+    SLIRP_VERDICT="$(classify_sesearch_query "$SLIRP_RC" "$SLIRP_CAPS")"
+    echo "classify=$SLIRP_VERDICT"
+    case "$SLIRP_VERDICT" in
+      'trusted-set:net_admin sys_admin sys_ptrace')
+        echo "slirp4netns cap_userns: EXACT-MATCH (the accepted R4-P3-P4 widening is loaded and effective)"
+        ;;
+      'trusted-set:'|'trusted-set:'*)
+        echo "slirp4netns cap_userns: WRONG-SHAPE (a TRUSTED response decided the shape, expected exactly net_admin sys_admin sys_ptrace)"
+        echo "POLICY-GATE: FAIL (loaded policy does not carry precisely the accepted widening)"
+        PP_EXPECTED=0
+        ;;
+      *)
+        echo "slirp4netns cap_userns: QUERY-UNTRUSTED (error/timeout/malformed — never an authoritative absence)"
+        echo "POLICY-GATE: FAIL (the loaded-policy query cannot be trusted)"
+        PP_EXPECTED=0
+        ;;
+    esac
+    echo "--- rootlesskit_t -> bin_t:file execute (the quarantine) ---"
+    QUAR_CAPS="$(timeout 60 sesearch -A -s docker_helper_rootlesskit_t -t bin_t -c file 2>&1)"
+    QUAR_RC=$?
+    printf 'query-rc=%s\n' "$QUAR_RC"
+    printf '%s\n' "$QUAR_CAPS"
+    QUAR_VERDICT="$(classify_sesearch_query "$QUAR_RC" "$QUAR_CAPS")"
+    echo "classify=$QUAR_VERDICT"
+    case "$QUAR_VERDICT" in
+      'trusted-set:'*)
+        QUAR_SET=" ${QUAR_VERDICT#trusted-set:} "
+        case "$QUAR_SET" in
+          *' execute '*)
+            echo "rootlesskit bin_t quarantine: VIOLATED (a trusted response carries an execute grant)"
+            echo "POLICY-GATE: FAIL (the deliberate bin_t quarantine was not preserved)"
+            PP_EXPECTED=0
+            ;;
+          *)
+            echo "rootlesskit bin_t quarantine: PRESERVED (trusted response; the execute token is genuinely absent)"
+            ;;
+        esac
+        ;;
+      *)
+        echo "rootlesskit bin_t quarantine: QUERY-UNTRUSTED (error/timeout/malformed — this is BLOCKED, never PRESERVED)"
+        echo "POLICY-GATE: FAIL (the loaded-policy query cannot be trusted)"
+        PP_EXPECTED=0
+        ;;
+    esac
     echo "--- buildkitd self:cap_userns (expect { sys_admin chown } and the P11 sys_chroot singleton) ---"
-    timeout 60 sesearch -A -s docker_helper_buildkitd_t \
-      -t docker_helper_buildkitd_t -c cap_userns 2>&1
+    BKD_CAPS="$(timeout 60 sesearch -A -s docker_helper_buildkitd_t \
+      -t docker_helper_buildkitd_t -c cap_userns 2>&1)"
+    BKD_RC=$?
+    printf 'query-rc=%s (informational)\nclassify=%s\n' "$BKD_RC" \
+      "$(classify_sesearch_query "$BKD_RC" "$BKD_CAPS")"
+    printf '%s\n' "$BKD_CAPS"
   else
     echo "POLICY-GATE: FAIL (loaded-policy semantics unverifiable: no sesearch)"
     PP_EXPECTED=0
@@ -719,9 +837,18 @@ TOKEN="$(grep -oE '"token": *"[^"]+"' "$RESP" 2>/dev/null | head -1 | sed 's/.*"
 SID="$(grep -oE '"id": *"dhs_[^"]+"' "$RESP" 2>/dev/null | head -1 | sed 's/.*"id": *"//;s/"$//')"
 printf '%s\n' "$SID" > "$EVIDENCE_DIR/session-id.log"
 if [ -z "$TOKEN" ]; then
-  # The failure path reports a token-free status only (the response body
-  # is redacted before removal and never published).
-  sed -e 's/dht_[A-Za-z0-9]*/[REDACTED-TOKEN]/g' "$RESP" | tail -5
+  # SECURITY — the failure path prints NO response body at all: the raw
+  # body stays exclusively in the unpublished state dir and is removed
+  # here (both paths remove it). Only the HTTP status, a token-free error
+  # classification, and the fact of refusal are recorded.
+  REFUSAL_CLASS=unknown
+  case "$CODE" in
+    0) REFUSAL_CLASS=transport-unreachable ;;
+    4??) REFUSAL_CLASS=request-refused ;;
+    5??) REFUSAL_CLASS=server-error ;;
+  esac
+  printf 'session-create refused: http_status=%s class=%s (response body withheld)\n' \
+    "$CODE" "$REFUSAL_CLASS" | tee -a "$EVIDENCE_DIR/session-refusal.log"
   rm -f "$RESP"
   fail "session create failed (HTTP $CODE)"
 fi
