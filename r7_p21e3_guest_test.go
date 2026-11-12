@@ -453,10 +453,36 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		"DEPEVENT",
 		"inotify_add_watch",
 		"p21e3-devprep-events.log",
+		// R4-P3-P5-R1 watcher repair: the watch starts on the EXISTING
+		// state root (the traverse chain's first hop), not on the not-
+		// yet-existing dev-prep directory.
+		`/var/lib/docker-helper "$WATCHER_STOP"`,
+		// Watch-attachment success is reported distinctly from
+		// watcher-start success.
+		"WATCHER-ATTACH",
+		// Read-only snapshots: the decoded access ACL and the SELinux
+		// label, plus the explicit overflow/limitation markers.
+		"DEVSNAP",
+		"acl=v2",
+		"system.posix_acl_access",
+		"WATCHER-OVERFLOW",
+		"p21e3-watcher-triage.log",
+		"MISSED-LIFECYCLE",
 		// DAC-state captures (labels remain read-only).
 		"p21e3-dac-state.log",
 		"getfacl -p --absolute-names",
 		"p21e3-devprep-terminal-state.log",
+		// R4-P3-P5-R1: the state root is captured once more AFTER the
+		// build terminal, alongside the per-op teardown race capture.
+		"post-terminal traverse-chain state",
+		// R4-P3-P5-R1 sampler: the near-wrapper traverse-chain snapshot
+		// (root sampler, same sweep as the wrapper observation), the
+		// namespace identities, and the deduped buildkitd credentials.
+		"WRAPPER-SNAP",
+		"/var/lib/docker-helper/dev-prep/%s",
+		"ns_user=",
+		"ns_mnt=",
+		"PROCDETAIL-BUILDKITD",
 		// The dontaudit diagnostic visibility toggle with verified restore.
 		"semodule -DB",
 		"semodule -B",
@@ -480,6 +506,11 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 	}
 	if trapIdx < 0 {
 		t.Error("the EXIT trap must pair the dontaudit restoration with the abandonment handler")
+	}
+	// The P5 regression must not return: the watcher must never be started
+	// on the not-yet-existing dev-prep directory again.
+	if strings.Contains(script, `/var/lib/docker-helper/dev-prep "$WATCHER_STOP"`) {
+		t.Error("the watcher must start on the existing state root, not on the not-yet-existing dev-prep directory")
 	}
 }
 

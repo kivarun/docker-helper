@@ -914,6 +914,7 @@ cat > "$EVIDENCE_DIR/p21e3_proc_sampler.c" <<'CEOF'
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/xattr.h>
 #include <time.h>
 #include <unistd.h>
 #include <limits.h>
@@ -929,6 +930,84 @@ static void wallstamp(char *b, size_t n) {
 static void monostamp(long long *ms) {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     *ms = ts.tv_sec*1000LL + ts.tv_nsec/1000000;
+}
+static void perms(unsigned bits, char *out) {
+    out[0] = (bits & 4) ? 'r' : '-';
+    out[1] = (bits & 2) ? 'w' : '-';
+    out[2] = (bits & 1) ? 'x' : '-';
+    out[3] = '\0';
+}
+static void decode_acl(const unsigned char *raw, size_t n, char *acl, size_t acln) {
+    size_t off = 0;
+    if (n < 4 || raw[0] != 0x02 || raw[1] != 0x00) {
+        snprintf(acl, acln, "acl=<malformed ver=%u.%u bytes=%zu>", raw[0], raw[1], n);
+        return;
+    }
+#define SAMPAPPEND(...) do { \
+    if (off < acln) off += snprintf(acl + off, acln - off, __VA_ARGS__); \
+} while (0)
+    SAMPAPPEND("acl=v2");
+    for (size_t i = 4; i + 8 <= n; i += 8) {
+        unsigned tag = raw[i] | (raw[i+1] << 8);
+        unsigned perm = raw[i+2] | (raw[i+3] << 8);
+        unsigned id = raw[i+4] | (raw[i+5] << 8) | (raw[i+6] << 16) | ((unsigned)raw[i+7] << 24);
+        char p[4]; perms(perm, p);
+        switch (tag) {
+        case 0x0001: SAMPAPPEND(" user::%s", p); break;
+        case 0x0002: SAMPAPPEND(" user:%u:%s", id, p); break;
+        case 0x0004: SAMPAPPEND(" group::%s", p); break;
+        case 0x0008: SAMPAPPEND(" group:%u:%s", id, p); break;
+        case 0x0010: SAMPAPPEND(" mask::%s", p); break;
+        case 0x0020: SAMPAPPEND(" other::%s", p); break;
+        default:     SAMPAPPEND(" tag%x:%u:%s", tag, id, p); break;
+        }
+    }
+#undef SAMPAPPEND
+}
+/* One read-only DAC snapshot record (born from R4-P3-P5-R1 step 2): for
+ * each captured path: timestamp, path, dev:ino, mode, UID/GID, raw
+ * access-ACL presence (xattr size), decoded full ACL, SELinux label. */
+static void snapline(FILE *lg, const char *tag, const char *ts, long long t,
+                     int pid, const char *path) {
+    struct stat st; memset(&st, 0, sizeof st);
+    int rc = lstat(path, &st);
+    char sel[256] = "-";
+    ssize_t xr = lgetxattr(path, "security.selinux", sel, sizeof sel - 1);
+    if (xr > 0) sel[xr] = '\0'; else snprintf(sel, sizeof sel, "<lc=%ld>", (long)xr);
+    char acl[1024] = "acl=<absent>";
+    ssize_t ar = lgetxattr(path, "system.posix_acl_access", NULL, 0);
+    if (ar > 0) {
+        unsigned char raw[8192];
+        size_t n = (size_t)ar <= sizeof raw ? (size_t)ar : sizeof raw;
+        if (lgetxattr(path, "system.posix_acl_access", raw, n) == (ssize_t)n)
+            decode_acl(raw, n, acl, sizeof acl);
+        else
+            snprintf(acl, sizeof acl, "acl=<read-fail bytes=%zu>", n);
+    } else if (ar == 0) snprintf(acl, sizeof acl, "acl=<empty>");
+    else snprintf(acl, sizeof acl, "acl=<xattr-rc=%ld errno=%d>", (long)ar, errno);
+    if (rc == 0)
+        fprintf(lg, "%s %s t=%lld pid=%d path=%s dev=%lu ino=%lu mode=%o uid=%u gid=%u size=%ld selinux=%s %s\n",
+                tag, ts, t, pid, path, (unsigned long)st.st_dev, (unsigned long)st.st_ino,
+                st.st_mode & 07777, st.st_uid, st.st_gid, (long)st.st_size, sel, acl);
+    else
+        fprintf(lg, "%s %s t=%lld pid=%d path=%s lstat=<rc=%d errno=%d> selinux=%s %s\n",
+                tag, ts, t, pid, path, rc, errno, sel, acl);
+}
+/* The near-wrapper chain snapshot: the traverse chain the wrapper's
+ * newfstatat crosses, snapshotted by the ROOT sampler in the same sweep
+ * that first observes the wrapper (0700 parents cannot hide the chain
+ * from root), as close to wrapper execution as the sweep allows. */
+static void chain_snap(FILE *lg, const char *ts, long long t, int pid, const char *opid) {
+    static const char *chain[2] = {
+        "/var/lib/docker-helper",
+        "/var/lib/docker-helper/dev-prep",
+    };
+    char opdir[256];
+    for (int i = 0; i < 2; i++) snapline(lg, "WRAPPER-SNAP", ts, t, pid, chain[i]);
+    if (opid[0]) {
+        snprintf(opdir, sizeof opdir, "/var/lib/docker-helper/dev-prep/%s", opid);
+        snapline(lg, "WRAPPER-SNAP", ts, t, pid, opdir);
+    }
 }
 static int readline(const char *path, char *buf, size_t n) {
     int fd = open(path, O_RDONLY | O_CLOEXEC);
@@ -1007,7 +1086,24 @@ int main(int argc, char **argv) {
              * happens in the SAME sweep that observed the process.
              */
             if (strstr(exe, "buildkit-runc") != NULL) {
-                char umap[256], gmap[256], pline[64], lb[512];
+                /* The near-wrapper DAC chain snapshot (R4-P3-P5-R1 step 2):
+                 * the sampler runs as root, so the 0700 state root cannot
+                 * hide the chain; the op id is derived from the wrapper's
+                 * own bundle argument, never guessed. */
+                char opid[48] = "";
+                char *ops = strstr(argv0, "/op_");
+                if (ops) {
+                    size_t oi = 0;
+                    char c;
+                    ops += 1; /* skip the '/', leaving "op_..." */
+                    while (oi + 1 < sizeof opid && (c = ops[oi]) != '\0' &&
+                           (c == '_' || (c >= '0' && c <= '9') ||
+                            (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')))
+                        opid[oi++] = c;
+                    opid[oi] = '\0';
+                }
+                chain_snap(lg, ts, t, pid, opid);
+                char umap[256], gmap[256], pline[64], lb[512], nsline[128], nsid[256];
                 FILE *mf;
                 snprintf(umap, sizeof umap, "/proc/%s/uid_map", e->d_name);
                 snprintf(gmap, sizeof gmap, "/proc/%s/gid_map", e->d_name);
@@ -1048,6 +1144,63 @@ int main(int argc, char **argv) {
                         fprintf(lg, "PROCDETAIL %s t=%lld pid=%d %s (uid line not reached)\n", ts, t, pid, ppidline);
                     fclose(mf);
                 }
+                /* Namespace identity for the same pid: user = the userns
+                 * mapping carrier, mnt = the mount namespace the mapped
+                 * IDs resolve against. Both are directly observed, never
+                 * inferred. */
+                snprintf(nsline, sizeof nsline, "/proc/%s/ns/user", e->d_name);
+                if (readlinkstr(nsline, nsid, sizeof nsid) > 0)
+                    fprintf(lg, "PROCDETAIL %s t=%lld pid=%d ns_user=%s\n", ts, t, pid, nsid);
+                snprintf(nsline, sizeof nsline, "/proc/%s/ns/mnt", e->d_name);
+                if (readlinkstr(nsline, nsid, sizeof nsid) > 0)
+                    fprintf(lg, "PROCDETAIL %s t=%lld pid=%d ns_mnt=%s\n", ts, t, pid, nsid);
+            }
+            /* The buildkitd credential capture (R4-P3-P5-R1 step 3): the
+             * live buildkitd's uid_map/gid_map/status and namespace
+             * identities, ONCE per pid (dedup; buildkitd is long-lived). */
+            else if (strstr(comm, "buildkitd") != NULL || strstr(exe, "buildkitd") != NULL ||
+                     strstr(argv0, "buildkitd") != NULL) {
+                static int seen_pids[128];
+                static int seen_n;
+                int was_seen = 0;
+                for (int i = 0; i < seen_n; i++)
+                    if (seen_pids[i] == pid) { was_seen = 1; break; }
+                if (!was_seen && seen_n < 128) {
+                    seen_pids[seen_n++] = pid;
+                    char umap[256], gmap[256], pline[64], lb[512], nsline[128], nsid[256];
+                    FILE *mf;
+                    /* Gid too: the full status output, both identity lines
+                     * plus the namespace ids, all directly observed. */
+                    snprintf(umap, sizeof umap, "/proc/%s/uid_map", e->d_name);
+                    snprintf(gmap, sizeof gmap, "/proc/%s/gid_map", e->d_name);
+                    if ((mf = fopen(umap, "r")) != NULL) {
+                        while (fgets(lb, sizeof lb, mf))
+                            fprintf(lg, "PROCDETAIL-BUILDKITD %s t=%lld pid=%d uid_map=%s", ts, t, pid, lb);
+                        fclose(mf);
+                    }
+                    if ((mf = fopen(gmap, "r")) != NULL) {
+                        while (fgets(lb, sizeof lb, mf))
+                            fprintf(lg, "PROCDETAIL-BUILDKITD %s t=%lld pid=%d gid_map=%s", ts, t, pid, lb);
+                        fclose(mf);
+                    }
+                    snprintf(pline, sizeof pline, "/proc/%s/status", e->d_name);
+                    if ((mf = fopen(pline, "r")) != NULL) {
+                        while (fgets(lb, sizeof lb, mf)) {
+                            if (strncmp(lb, "Uid:", 4) == 0 || strncmp(lb, "Gid:", 4) == 0) {
+                                lb[strcspn(lb, "\n")] = 0;
+                                fprintf(lg, "PROCDETAIL-BUILDKITD %s t=%lld pid=%d status_%s\n",
+                                        ts, t, pid, lb);
+                            }
+                        }
+                        fclose(mf);
+                    }
+                    snprintf(nsline, sizeof nsline, "/proc/%s/ns/user", e->d_name);
+                    if (readlinkstr(nsline, nsid, sizeof nsid) > 0)
+                        fprintf(lg, "PROCDETAIL-BUILDKITD %s t=%lld pid=%d ns_user=%s\n", ts, t, pid, nsid);
+                    snprintf(nsline, sizeof nsline, "/proc/%s/ns/mnt", e->d_name);
+                    if (readlinkstr(nsline, nsid, sizeof nsid) > 0)
+                        fprintf(lg, "PROCDETAIL-BUILDKITD %s t=%lld pid=%d ns_mnt=%s\n", ts, t, pid, nsid);
+                }
             }
         }
         closedir(d);
@@ -1071,16 +1224,28 @@ log "sampler compiled"
 # EVENTS. READ-ONLY: inotify watch + stat + getxattr — never a write,
 # chmod, chown or relabel.
 cat > "$EVIDENCE_DIR/p21e3_devprep_watcher.c" <<'WCEOF'
-/* p21e3_devprep_watcher.c — the R4-P3-P5 prepared-tree event watcher.
+/* p21e3_devprep_watcher.c — the R4-P3-P5-R1 prepared-tree event watcher.
  *
- * Watches the canonical prepared-tree parent (read-only inotify) and, on
- * every create/delete event of a per-operation directory, records the
- * event with an IMMEDIATE lstat snapshot (dev/ino/mode/uid/gid), the
- * security.selinux label and the presence+size of the access-ACL xattr.
- * Runs until the stop file appears (identified by argv[2]).
+ * Watches the EXISTING canonical state root (/var/lib/docker-helper, the
+ * traverse-chain root, argv[1]) read-only via inotify, and adaptively
+ * attaches secondary watches as the dev-prep subtree is created during a
+ * build. For every relevant event it records a read-only snapshot:
+ * timestamp, path, dev:ino, mode, UID/GID, raw access-ACL presence and
+ * decoded named-user ACL/mask, and the SELinux label. The watcher never
+ * writes, chmods, chowns or relabels anything. Runs until the stop file
+ * (argv[2]) appears.
+ *
+ * Observed event kinds (all reported explicitly, including limitations):
+ *   WATCHER-START     watcher started and the root watch attached
+ *   WATCHER-ATTACH    a secondary watch was (or could not be) attached
+ *   DEVSNAP           a read-only snapshot of a path
+ *   DEVEVENT          an inotify event on a watched path
+ *   WATCHER-OVERFLOW  the inotify queue overflowed (events missed)
+ *   WATCHER-DONE      watcher stopped
  */
 #define _GNU_SOURCE
 #include <dirent.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1091,6 +1256,18 @@ cat > "$EVIDENCE_DIR/p21e3_devprep_watcher.c" <<'WCEOF'
 #include <time.h>
 #include <unistd.h>
 
+#define MAXWATCH 64
+#define WALTSZ 40
+
+static int watches[MAXWATCH];
+static char wdpaths[MAXWATCH][512];
+static int nwatch = 0;
+static const char *wdpath(int wd) {
+    for (int i = 0; i < nwatch; i++)
+        if (watches[i] == wd) return wdpaths[i];
+    return "";
+}
+
 static void wallstamp(char *b, size_t n) {
     struct timespec ts; struct tm tm;
     clock_gettime(CLOCK_REALTIME, &ts); gmtime_r(&ts.tv_sec, &tm);
@@ -1098,48 +1275,154 @@ static void wallstamp(char *b, size_t n) {
              tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday,
              tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec/1000000);
 }
+
+/* Format three permission bits read-only. */
+static void perms(unsigned bits, char *out) {
+    out[0] = (bits & 4) ? 'r' : '-';
+    out[1] = (bits & 2) ? 'w' : '-';
+    out[2] = (bits & 1) ? 'x' : '-';
+    out[3] = '\0';
+}
+
+/* Decode one access-ACL body (getxattr("system.posix_acl_access")) into
+ * acl: "acl=v2 user::<p> user:<uid>:<p> ... mask::<p>|<nomask> other::<p>".
+ * Covers named users AND named groups; the named-uid search entry the
+ * preparer's contract installs is therefore directly visible. */
+static void decode_acl(const unsigned char *raw, size_t n, char *acl, size_t acln) {
+    size_t off = 0;
+    if (n < 4 || raw[0] != 0x02 || raw[1] != 0x00) {
+        snprintf(acl, acln, "acl=<malformed ver=%u.%u bytes=%zu>", raw[0], raw[1], n);
+        return;
+    }
+#define APPEND(...) do { \
+    if (off < acln) off += snprintf(acl + off, acln - off, __VA_ARGS__); \
+} while (0)
+    APPEND("acl=v2");
+    for (size_t i = 4; i + 8 <= n; i += 8) {
+        unsigned tag = raw[i] | (raw[i+1] << 8);
+        unsigned perm = raw[i+2] | (raw[i+3] << 8);
+        unsigned id = raw[i+4] | (raw[i+5] << 8) | (raw[i+6] << 16) | ((unsigned)raw[i+7] << 24);
+        char p[4]; perms(perm, p);
+        switch (tag) {
+        case 0x0001: APPEND(" user::%s", p); break;
+        case 0x0002: APPEND(" user:%u:%s", id, p); break;
+        case 0x0004: APPEND(" group::%s", p); break;
+        case 0x0008: APPEND(" group:%u:%s", id, p); break;
+        case 0x0010: APPEND(" mask::%s", p); break;
+        case 0x0020: APPEND(" other::%s", p); break;
+        default:     APPEND(" tag%x:%u:%s", tag, id, p); break;
+        }
+    }
+#undef APPEND
+}
+
+/* Snapshot ONE path read-only: lstat + security.selinux + access ACL. */
+static void snap(FILE *lg, char *ts, const char *path) {
+    struct stat st; memset(&st, 0, sizeof st);
+    int rc = lstat(path, &st);
+    char sel[256] = "-";
+    ssize_t xr = lgetxattr(path, "security.selinux", sel, sizeof sel - 1);
+    if (xr > 0) sel[xr] = '\0'; else snprintf(sel, sizeof sel, "<lc=%ld>", (long)xr);
+    char acl[1024] = "acl=<absent>";
+    ssize_t ar = lgetxattr(path, "system.posix_acl_access", NULL, 0);
+    if (ar > 0) {
+        unsigned char raw[8192];
+        size_t n = (size_t)ar <= sizeof raw ? (size_t)ar : sizeof raw;
+        if (lgetxattr(path, "system.posix_acl_access", raw, n) == (ssize_t)n)
+            decode_acl(raw, n, acl, sizeof acl);
+        else
+            snprintf(acl, sizeof acl, "acl=<read-fail bytes=%zu>", n);
+    } else if (ar == 0) {
+        snprintf(acl, sizeof acl, "acl=<empty>");
+    } else {
+        snprintf(acl, sizeof acl, "acl=<xattr-rc=%ld errno=%d>", (long)ar, errno);
+    }
+    wallstamp(ts, WALTSZ);
+    if (rc == 0)
+        fprintf(lg, "DEVSNAP %s path=%s dev=%lu ino=%lu mode=%o uid=%u gid=%u size=%ld selinux=%s %s\n",
+                ts, path, (unsigned long)st.st_dev, (unsigned long)st.st_ino,
+                st.st_mode & 07777, st.st_uid, st.st_gid, (long)st.st_size, sel, acl);
+    else
+        fprintf(lg, "DEVSNAP %s path=%s lstat=<rc=%d errno=%d> selinux=%s %s\n",
+                ts, path, rc, errno, sel, acl);
+    fflush(lg);
+}
+
+static int attach_watch(int fd, FILE *lg, char *ts, const char *path) {
+    int wd = inotify_add_watch(fd, path,
+                               IN_ATTRIB | IN_CREATE | IN_DELETE |
+                               IN_MOVED_FROM | IN_MOVED_TO);
+    if (wd < 0) {
+        fprintf(lg, "WATCHER-ATTACH %s path=%s attach=fail errno=%d\n", ts, path, errno);
+        return -1;
+    }
+    if (nwatch < MAXWATCH) {
+        watches[nwatch] = wd;
+        snprintf(wdpaths[nwatch], sizeof wdpaths[nwatch], "%s", path);
+        nwatch++;
+    }
+    fprintf(lg, "WATCHER-ATTACH %s path=%s attach=ok wd=%d\n", ts, path, wd);
+    return 0;
+}
+
 int main(int argc, char **argv) {
-    if (argc != 3) { fprintf(stderr, "usage: %s <dir> <stopfile>\n", argv[0]); return 2; }
+    if (argc != 3) { fprintf(stderr, "usage: %s <root-dir> <stopfile>\n", argv[0]); return 2; }
     FILE *lg = fopen(getenv("WATCHER_LOG") ? getenv("WATCHER_LOG") : "/tmp/watcher.log", "a");
     if (!lg) return 2;
-    int fd = inotify_init1(IN_CLOEXEC);
+    int fd = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
     if (fd < 0) { fprintf(lg, "WATCHER-ERROR inotify_init\n"); fclose(lg); return 1; }
-    int wd = inotify_add_watch(fd, argv[1],
-                               IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO);
-    if (wd < 0) { fprintf(lg, "WATCHER-ERROR add-watch %s\n", argv[1]); fclose(lg); return 1; }
     char ts[40];
     wallstamp(ts, sizeof ts);
+    if (attach_watch(fd, lg, ts, argv[1]) < 0) { fclose(lg); return 1; }
+    snap(lg, ts, argv[1]); /* baseline snapshot of the traverse-chain root */
     fprintf(lg, "WATCHER-START %s dir=%s\n", ts, argv[1]);
     fflush(lg);
-    char buf[4096] __attribute__((aligned(8)));
+    char buf[8192] __attribute__((aligned(8)));
     for (;;) {
         FILE *sf = fopen(argv[2], "r");
         if (sf) { fclose(sf); break; }
         ssize_t n = read(fd, buf, sizeof buf);
-        if (n <= 0) break;
+        if (n < 0) {
+            if (errno == EAGAIN) { struct timespec slp={0,20*1000*1000}; nanosleep(&slp,NULL); continue; }
+            break;
+        }
+        if (n == 0) break;
+        if (n == (ssize_t)sizeof buf) {
+            fprintf(lg, "WATCHER-OVERFLOW %s\n", ts);
+            fflush(lg);
+        }
         for (char *p = buf; p < buf + n; ) {
             struct inotify_event *ev = (struct inotify_event *)p;
-            if (ev->mask & (IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO)) {
+            char namebuf[512];
+            if (ev->len > 0 && ev->len < sizeof namebuf) {
+                memcpy(namebuf, ev->name, ev->len);
+                namebuf[ev->len] = '\0';
+            } else { namebuf[0] = '\0'; }
+            wallstamp(ts, sizeof ts);
+            if (ev->mask & IN_Q_OVERFLOW) {
+                fprintf(lg, "WATCHER-OVERFLOW %s queue overflow\n", ts);
+                fflush(lg);
+            }
+            if (ev->mask & (IN_ATTRIB | IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO)) {
                 char path[1024];
-                snprintf(path, sizeof path, "%s/%s", argv[1],
-                         ev->name[0] ? ev->name : "?");
-                struct stat st; memset(&st, 0, sizeof st);
-                int rc = lstat(path, &st);
-                char sel[256] = "-", aclinfo[64] = "-";
-                ssize_t xr = getxattr(path, "security.selinux", sel, sizeof sel - 1);
-                if (xr > 0) sel[xr] = '\0'; else snprintf(sel, sizeof sel, "<xattr rc=%ld>", (long)xr);
-                ssize_t ar = lgetxattr(path, "system.posix_acl_access", NULL, 0);
-                if (ar >= 0) snprintf(aclinfo, sizeof aclinfo, "acl_xattr_bytes=%ld", (long)ar);
-                else snprintf(aclinfo, sizeof aclinfo, "acl_xattr=<rc=%ld>", (long)ar);
-                wallstamp(ts, sizeof ts);
-                if (rc == 0)
-                    fprintf(lg, "DEPEVENT %s mask=%#x name=%s lstat=ok dev=%lu ino=%lu mode=%o uid=%u gid=%u size=%ld selinux=%s %s\n",
-                            ts, ev->mask, ev->name, (unsigned long)st.st_dev,
-                            (unsigned long)st.st_ino, st.st_mode & 07777,
-                            st.st_uid, st.st_gid, (long)st.st_size, sel, aclinfo);
-                else
-                    fprintf(lg, "DEPEVENT %s mask=%#x name=%s lstat=<rc=%d errno-implicit> selinux=%s %s\n",
-                            ts, ev->mask, ev->name, rc, sel, aclinfo);
+                snprintf(path, sizeof path, "%s/%s", wdpath(ev->wd), namebuf);
+                fprintf(lg, "DEPEVENT %s wd=%d mask=%#x name=%s\n", ts, ev->wd, ev->mask, namebuf);
+                if (ev->mask & IN_ATTRIB) {
+                    snap(lg, ts, path);
+                }
+                if (ev->mask & IN_CREATE) {
+                    /* Adaptive attach: when dev-prep is created under the root,
+                     * watch it; when an op dir is created under dev-prep, watch it. */
+                    if (strcmp(namebuf, "dev-prep") == 0) {
+                        attach_watch(fd, lg, ts, path);
+                    } else if (strncmp(namebuf, "op_", 3) == 0) {
+                        attach_watch(fd, lg, ts, path);
+                    }
+                    snap(lg, ts, path);
+                }
+                if (ev->mask & (IN_DELETE | IN_MOVED_FROM)) {
+                    snap(lg, ts, path);
+                }
                 fflush(lg);
             }
             p += sizeof(struct inotify_event) + ev->len;
@@ -1391,18 +1674,23 @@ rm -f "$WATCHER_STOP"
 WATCHER_LOG="$EVIDENCE_DIR/p21e3-devprep-events.log"
 WATCHER_PID=""
 WATCHER_ENV="WATCHER_LOG=$WATCHER_LOG"
+# R4-P3-P5-R1: start on the EXISTING canonical state root (the traverse
+# chain's first hop) and let the watcher attach the dev-prep and op watches
+# adaptively as they are created; watching dev-prep directly failed in P5
+# (the directory does not exist before a build).
 env "$WATCHER_ENV" "$EVIDENCE_DIR/p21e3_devprep_watcher" \
-  /var/lib/docker-helper/dev-prep "$WATCHER_STOP" &
+  /var/lib/docker-helper "$WATCHER_STOP" &
 WATCHER_PID=$!
-for _ in $(seq 1 50); do
+for _ in $(seq 1 100); do
   grep -aq '^WATCHER-START' "$WATCHER_LOG" 2>/dev/null && break
   if ! kill -0 "$WATCHER_PID" 2>/dev/null; then break; fi
-  sleep 0.1
+  sleep 0.05
 done
 if grep -aq '^WATCHER-START' "$WATCHER_LOG" 2>/dev/null; then
-  log "dev-prep event watcher confirmed running before POST /build (pid $WATCHER_PID)"
+  log "state-root event watcher START confirmed (root watch attached; pid $WATCHER_PID)"
+  log "watcher start SUCCESS is distinct from watch-attachment SUCCESS: the adaptive dev-prep/op attachments report on WATCHER-ATTACH lines during the build; any attach failure is an explicit limitation, not a missed start"
 else
-  log "dev-prep event watcher NOT confirmed (process-alive=$(kill -0 "$WATCHER_PID" 2>/dev/null && echo yes || echo no)); the prepared-tree event evidence will be absent"
+  log "state-root event watcher NOT confirmed (process-alive=$(kill -0 "$WATCHER_PID" 2>/dev/null && echo yes || echo no)); the prepared-tree event evidence will be absent"
 fi
 
 # --- the measured operation: POST /build ---
@@ -1502,11 +1790,42 @@ if [ -n "${WATCHER_PID:-}" ]; then
   wait "$WATCHER_PID" 2>/dev/null || true
   WATCHER_PID=""
 fi
+# Explicit watcher evidence triage (R4-P3-P5-R1): overflow, failed
+# attachment, and missed lifecycle are recorded as limitation markers at
+# capture time, not reconstructed afterward.
+{
+  echo "== watcher triage (limitations are facts, not silences) =="
+  printf 'watcher-start-records=%s\n' "$(grep -c '^WATCHER-START' "$WATCHER_LOG" 2>/dev/null || echo 0)"
+  printf 'dev-prep-attach-records=%s\n' "$(grep -c 'WATCHER-ATTACH.*docker-helper/dev-prep' "$WATCHER_LOG" 2>/dev/null || echo 0)"
+  printf 'op-flagged-attach-failures=%s\n' "$(grep -c 'WATCHER-ATTACH.*attach=fail' "$WATCHER_LOG" 2>/dev/null || echo 0)"
+  printf 'overflow-records=%s\n' "$(grep -c '^WATCHER-OVERFLOW' "$WATCHER_LOG" 2>/dev/null || echo 0)"
+  printf 'attrib-records=%s\n' "$(grep -c 'DEPEVENT.*IN_ATTRIB\|mask=0x.*ATTRIB' "$WATCHER_LOG" 2>/dev/null || echo 0)"
+  if grep -aq 'name=dev-prep' "$WATCHER_LOG" 2>/dev/null; then
+    echo "dev-prep lifecycle OBSERVED by the watcher"
+  else
+    echo "MISSED-LIFECYCLE dev-prep was never observed by the watcher (no creation/removal event; if the tree existed before start, only its IN_ATTRIB events would appear)"
+  fi
+  if grep -aq '^DEPEVENT' "$WATCHER_LOG" 2>/dev/null; then
+    echo "prepare-lifecycle events OBSERVED"
+  else
+    echo "MISSED-LIFECYCLE no prepare-lifecycle event was observed at all; the watcher saw only its own start"
+  fi
+  echo "-- event timeline (first 40 lines) --"
+  sed -n '1,40p' "$WATCHER_LOG"
+} > "$EVIDENCE_DIR/p21e3-watcher-triage.log" 2>&1
+cat "$EVIDENCE_DIR/p21e3-watcher-triage.log"
 trap - EXIT
 # The prepared-tree state AT THE TERMINAL (R4-P3-P5) is captured FIRST (the
 # teardown may remove the per-op dir at any moment); the policy restore
 # follows immediately after the capture.
 {
+  echo "== post-terminal traverse-chain state (R4-P3-P5-R1: the state root once more after the build terminal) =="
+  for pd in /var/lib/docker-helper /var/lib/docker-helper/dev-prep; do
+    echo "--- $pd (at the terminal) ---"
+    stat -c 'stat: mode=%a uid=%u gid=%g inode=%d:%i' "$pd" 2>&1
+    ls -Zd "$pd" 2>&1
+    getfacl -p --absolute-names "$pd" 2>&1 || echo "(getfacl unavailable)"
+  done
   echo "== per-operation dev-prep dirs at the terminal =="
   ls -laZ --time-style=full-iso /var/lib/docker-helper/dev-prep 2>&1 || true
   found_op=0
