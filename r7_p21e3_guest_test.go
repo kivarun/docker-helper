@@ -427,6 +427,62 @@ func fmtInt(n int) string {
 	return string(b)
 }
 
+// TestR7P21E3InspectionDiagnosticsContract pins the R4-P3-P5 diagnostic
+// machinery: the corrected strace filter (newfstatat/statx — the
+// lstat-family coverage whose absence left R2-C1's wrapper rung syscall
+// unobserved), the wrapper-credential capture in the sampler, the
+// prepared-tree event watcher, the terminal DAC-state captures, and the
+// dontaudit toggle with its guaranteed-and-verified restoration on every
+// path.
+func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
+	raw, err := os.ReadFile("scripts/release-2.4-r7-p21e3-guest.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(raw)
+	for _, want := range []string{
+		// Lstat-family syscall coverage in the buildkitd trace.
+		"read,newfstatat,statx,statfs,getxattr",
+		// The wrapper-credential capture (uid_map/gid_map/status) in the
+		// sampler, keyed on the wrapper/real-runtime exe.
+		"PROCDETAIL",
+		"uid_map",
+		// The prepared-tree event watcher and its read-only discipline.
+		"p21e3_devprep_watcher",
+		"WATCHER-START",
+		"DEPEVENT",
+		"inotify_add_watch",
+		"p21e3-devprep-events.log",
+		// DAC-state captures (labels remain read-only).
+		"p21e3-dac-state.log",
+		"getfacl -p --absolute-names",
+		"p21e3-devprep-terminal-state.log",
+		// The dontaudit diagnostic visibility toggle with verified restore.
+		"semodule -DB",
+		"semodule -B",
+		"R7-P21E3-DONTAUDIT-RESTORED=verified",
+		"policy sha restored",
+		// The toolchain gains the ACL interrogation tool.
+		"zypper --non-interactive install -y gcc strace acl",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("the p21e3 guest harness must carry the inspection diagnostic %q", want)
+		}
+	}
+	// Restoration discipline: the policy identity must be recorded BEFORE
+	// the toggle, and the EXIT trap must pair the restoration with the
+	// abandonment handler.
+	dbIdx := strings.Index(script, "SE_POLICY_SHA_PRE=")
+	restoreIdx := strings.Index(script, "p21e3_dontaudit_restore() {")
+	trapIdx := strings.Index(script, "trap 'p21e3_dontaudit_restore; measure_abandon' EXIT")
+	if dbIdx < 0 || restoreIdx < 0 || dbIdx > restoreIdx {
+		t.Error("the dontaudit toggle must record the policy identity BEFORE the restore-mechanism definition")
+	}
+	if trapIdx < 0 {
+		t.Error("the EXIT trap must pair the dontaudit restoration with the abandonment handler")
+	}
+}
+
 // TestR7P21E3HostGateDetectsVerdict pins the host-side verdict detection
 // regression observed on the first p21e3 dispatch (run 43031588124): the
 // gate fabricated its verdict string with `tail -2 | tr '\n' ' '`, which

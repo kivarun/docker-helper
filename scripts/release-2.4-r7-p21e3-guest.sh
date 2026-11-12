@@ -890,7 +890,7 @@ fi
 if [ ! -x "$EVIDENCE_DIR/p21e3_proc_sampler" ] || [ ! -f "$STATE_DIR/sec4" ]; then
 log "=== section 4: tooling build ==="
 if ! command -v gcc >/dev/null 2>&1 || ! command -v strace >/dev/null 2>&1; then
-  cap p21e3-toolchain 6 timeout 300 zypper --non-interactive install -y gcc strace
+  cap p21e3-toolchain 6 timeout 300 zypper --non-interactive install -y gcc strace acl
 fi
 command -v gcc >/dev/null 2>&1 || fail "gcc unavailable"
 command -v strace >/dev/null 2>&1 || fail "strace unavailable"
@@ -999,6 +999,56 @@ int main(int argc, char **argv) {
             wallstamp(ts, sizeof ts);
             fprintf(lg, "PROC %s t=%lld pid=%d ppid=%lld comm=%s exe=%s argv0=%s ctx=%s\n",
                     ts, t, pid, ppid, comm, exe, argv0, ctx);
+            /* The wrapper-credential capture (R4-P3-P5): for every observed
+             * process whose exe names the wrapper/real-runtime, read the
+             * real DAC credentials and namespace mapping ONCE per pid (the
+             * ladder evidence needs host-uid vs the ACL's named builder
+             * entry). A sample as short as ~20ms still lands: the read
+             * happens in the SAME sweep that observed the process.
+             */
+            if (strstr(exe, "buildkit-runc") != NULL) {
+                char umap[256], gmap[256], pline[64], lb[512];
+                FILE *mf;
+                snprintf(umap, sizeof umap, "/proc/%s/uid_map", e->d_name);
+                snprintf(gmap, sizeof gmap, "/proc/%s/gid_map", e->d_name);
+                mf = fopen(umap, "r");
+                if (mf) {
+                    if (fgets(lb, sizeof lb, mf))
+                        fprintf(lg, "PROCDETAIL %s t=%lld pid=%d uid_map=%s", ts, t, pid, lb);
+                    else
+                        fprintf(lg, "PROCDETAIL %s t=%lld pid=%d uid_map=<empty>\n", ts, t, pid);
+                    fclose(mf);
+                }
+                mf = fopen(gmap, "r");
+                if (mf) {
+                    if (fgets(lb, sizeof lb, mf))
+                        fprintf(lg, "PROCDETAIL %s t=%lld pid=%d gid_map=%s", ts, t, pid, lb);
+                    else
+                        fprintf(lg, "PROCDETAIL %s t=%lld pid=%d gid_map=<empty>\n", ts, t, pid);
+                    fclose(mf);
+                }
+                snprintf(pline, sizeof pline, "/proc/%s/status", e->d_name);
+                mf = fopen(pline, "r");
+                if (mf) {
+                    char ppidline[512] = "";
+                    int have_uid = 0;
+                    while (fgets(lb, sizeof lb, mf)) {
+                        if (strncmp(lb, "Uid:", 4) == 0) {
+                            lb[strcspn(lb, "\n")] = 0;
+                            fprintf(lg, "PROCDETAIL %s t=%lld pid=%d status_uid=\"%s\"\n", ts, t, pid, lb);
+                            have_uid = 1;
+                            break;
+                        }
+                        if (strncmp(lb, "PPid:", 5) == 0) {
+                            lb[strcspn(lb, "\n")] = 0;
+                            snprintf(ppidline, sizeof ppidline, "%s", lb);
+                        }
+                    }
+                    if (!have_uid && ppidline[0])
+                        fprintf(lg, "PROCDETAIL %s t=%lld pid=%d %s (uid line not reached)\n", ts, t, pid, ppidline);
+                    fclose(mf);
+                }
+            }
         }
         closedir(d);
         fflush(lg);
@@ -1014,6 +1064,96 @@ CEOF
 gcc -O2 -Wall -o "$EVIDENCE_DIR/p21e3_proc_sampler" "$EVIDENCE_DIR/p21e3_proc_sampler.c" \
   || fail "sampler compile failed"
 log "sampler compiled"
+
+# The prepared-tree event watcher (R4-P3-P5): the per-operation directory
+# under /var/lib/docker-helper/dev-prep lives only for the length of the
+# operation, so its owner/mode/label/ACL state must be captured AT THE
+# EVENTS. READ-ONLY: inotify watch + stat + getxattr — never a write,
+# chmod, chown or relabel.
+cat > "$EVIDENCE_DIR/p21e3_devprep_watcher.c" <<'WCEOF'
+/* p21e3_devprep_watcher.c — the R4-P3-P5 prepared-tree event watcher.
+ *
+ * Watches the canonical prepared-tree parent (read-only inotify) and, on
+ * every create/delete event of a per-operation directory, records the
+ * event with an IMMEDIATE lstat snapshot (dev/ino/mode/uid/gid), the
+ * security.selinux label and the presence+size of the access-ACL xattr.
+ * Runs until the stop file appears (identified by argv[2]).
+ */
+#define _GNU_SOURCE
+#include <dirent.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/inotify.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/xattr.h>
+#include <time.h>
+#include <unistd.h>
+
+static void wallstamp(char *b, size_t n) {
+    struct timespec ts; struct tm tm;
+    clock_gettime(CLOCK_REALTIME, &ts); gmtime_r(&ts.tv_sec, &tm);
+    snprintf(b, n, "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+             tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday,
+             tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec/1000000);
+}
+int main(int argc, char **argv) {
+    if (argc != 3) { fprintf(stderr, "usage: %s <dir> <stopfile>\n", argv[0]); return 2; }
+    FILE *lg = fopen(getenv("WATCHER_LOG") ? getenv("WATCHER_LOG") : "/tmp/watcher.log", "a");
+    if (!lg) return 2;
+    int fd = inotify_init1(IN_CLOEXEC);
+    if (fd < 0) { fprintf(lg, "WATCHER-ERROR inotify_init\n"); fclose(lg); return 1; }
+    int wd = inotify_add_watch(fd, argv[1],
+                               IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO);
+    if (wd < 0) { fprintf(lg, "WATCHER-ERROR add-watch %s\n", argv[1]); fclose(lg); return 1; }
+    char ts[40];
+    wallstamp(ts, sizeof ts);
+    fprintf(lg, "WATCHER-START %s dir=%s\n", ts, argv[1]);
+    fflush(lg);
+    char buf[4096] __attribute__((aligned(8)));
+    for (;;) {
+        FILE *sf = fopen(argv[2], "r");
+        if (sf) { fclose(sf); break; }
+        ssize_t n = read(fd, buf, sizeof buf);
+        if (n <= 0) break;
+        for (char *p = buf; p < buf + n; ) {
+            struct inotify_event *ev = (struct inotify_event *)p;
+            if (ev->mask & (IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO)) {
+                char path[1024];
+                snprintf(path, sizeof path, "%s/%s", argv[1],
+                         ev->name[0] ? ev->name : "?");
+                struct stat st; memset(&st, 0, sizeof st);
+                int rc = lstat(path, &st);
+                char sel[256] = "-", aclinfo[64] = "-";
+                ssize_t xr = getxattr(path, "security.selinux", sel, sizeof sel - 1);
+                if (xr > 0) sel[xr] = '\0'; else snprintf(sel, sizeof sel, "<xattr rc=%ld>", (long)xr);
+                ssize_t ar = lgetxattr(path, "system.posix_acl_access", NULL, 0);
+                if (ar >= 0) snprintf(aclinfo, sizeof aclinfo, "acl_xattr_bytes=%ld", (long)ar);
+                else snprintf(aclinfo, sizeof aclinfo, "acl_xattr=<rc=%ld>", (long)ar);
+                wallstamp(ts, sizeof ts);
+                if (rc == 0)
+                    fprintf(lg, "DEPEVENT %s mask=%#x name=%s lstat=ok dev=%lu ino=%lu mode=%o uid=%u gid=%u size=%ld selinux=%s %s\n",
+                            ts, ev->mask, ev->name, (unsigned long)st.st_dev,
+                            (unsigned long)st.st_ino, st.st_mode & 07777,
+                            st.st_uid, st.st_gid, (long)st.st_size, sel, aclinfo);
+                else
+                    fprintf(lg, "DEPEVENT %s mask=%#x name=%s lstat=<rc=%d errno-implicit> selinux=%s %s\n",
+                            ts, ev->mask, ev->name, rc, sel, aclinfo);
+                fflush(lg);
+            }
+            p += sizeof(struct inotify_event) + ev->len;
+        }
+    }
+    wallstamp(ts, sizeof ts);
+    fprintf(lg, "WATCHER-DONE %s\n", ts);
+    fclose(lg);
+    return 0;
+}
+WCEOF
+gcc -O2 -Wall -o "$EVIDENCE_DIR/p21e3_devprep_watcher" "$EVIDENCE_DIR/p21e3_devprep_watcher.c" \
+  || fail "dev-prep watcher compile failed"
+log "dev-prep watcher compiled"
 touch "$STATE_DIR/sec4"
 fi
 
@@ -1033,6 +1173,11 @@ measure_abandon() {
     touch "${STOPSAMP:-}" 2>/dev/null || true
     wait "$SAMPLER_PID" 2>/dev/null || true
     SAMPLER_PID=""
+  fi
+  if [ -n "${WATCHER_PID:-}" ]; then
+    touch "${WATCHER_STOP:-/nonexistent}" 2>/dev/null || true
+    wait "$WATCHER_PID" 2>/dev/null || true
+    WATCHER_PID=""
   fi
   if [ -n "${AUD_FD:-}" ]; then
     exec {AUD_FD}<&- 2>/dev/null || true
@@ -1117,6 +1262,86 @@ rm -f "$PULL_RAW"
 log "session ready ($SID); image prewarm: $PREWARM"
 printf 'prewarm=%s\n' "$PREWARM" > "$EVIDENCE_DIR/prewarm.result"
 
+# --- DAC-state captures taken while the prepared trees exist (R4-P3-P5).
+# READ-ONLY throughout: stat/ls -Z/getfacl/uid_map reads; no chmod/chown/
+# relabel/repair of any kind.
+{
+  echo "== builder account =="
+  getent passwd docker-helper-builder || true
+  id docker-helper-builder || true
+  echo "== canonical traversal dirs (stat / ls -Zd / getfacl) =="
+  for pd in /var/lib/docker-helper /var/lib/docker-helper/dev-prep; do
+    echo "--- $pd ---"
+    stat -c 'stat: mode=%a uid=%u gid=%g inode=%d:%i' "$pd" 2>&1
+    ls -Zd "$pd" 2>&1
+    getfacl -p --absolute-names "$pd" 2>&1 || echo "(getfacl unavailable)"
+  done
+  echo "== per-operation dev-prep dirs (as they exist now) =="
+  ls -laZ --time-style=full-iso /var/lib/docker-helper/dev-prep 2>&1 || true
+  for od in /var/lib/docker-helper/dev-prep/op_*; do
+    [ -e "$od" ] || continue
+    echo "--- $od ---"
+    stat -c 'stat: mode=%a uid=%u gid=%g inode=%d:%i' "$od" 2>&1
+    getfacl -p --absolute-names "$od" 2>&1 | sed -n '1,12p'
+  done
+  echo "== live buildkitd process mappings =="
+  BKD_OBSERVED="$(pgrep -u "$(id -u docker-helper-builder 2>/dev/null || echo 0)" -x buildkitd 2>/dev/null | head -1 || true)"
+  if [ -n "$BKD_OBSERVED" ]; then
+    printf 'buildkitd pid=%s\n' "$BKD_OBSERVED"
+    for f in uid_map gid_map; do
+      echo "--- /proc/$BKD_OBSERVED/$f ---"
+      cat "/proc/$BKD_OBSERVED/$f" 2>&1
+    done
+    grep -E '^(Uid|Gid|NSpid|NSuid|NSgid):' "/proc/$BKD_OBSERVED/status" 2>&1
+    readlink "/proc/$BKD_OBSERVED/ns/user" 2>&1
+    readlink "/proc/$BKD_OBSERVED/ns/mnt" 2>&1
+  else
+    echo "no live buildkitd observed at capture time"
+  fi
+} > "$EVIDENCE_DIR/p21e3-dac-state.log" 2>&1
+cat "$EVIDENCE_DIR/p21e3-dac-state.log"
+
+# --- dontaudit visibility toggle (diagnostic ONLY; enforcement unchanged)
+# --- — the established disposable-VM discipline (uat-diag-selinux-utab):
+# --- record the loaded-policy identity, disable dontaudit rules with a
+# --- policy rebuild, restore with semodule -B on EVERY path, verify the
+# --- restoration independently. If the toggle or restore cannot be proven,
+# --- the round decides the distinct infrastructure verdict, never a pass.
+SE_POLICY_SHA_PRE="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
+printf 'policy sha before: %s\n' "$SE_POLICY_SHA_PRE" > "$EVIDENCE_DIR/p21e3-dontaudit.log"
+DB_OUT="$(semodule -DB 2>&1)" || {
+  printf 'semodule -DB failed: %s\n' "$DB_OUT" >> "$EVIDENCE_DIR/p21e3-dontaudit.log"
+  fail "dontaudit visibility toggle failed; the inspection attribution cannot run"
+}
+SE_POLICY_SHA_DB="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
+p21e3_dontaudit_restore() {
+  local out restored rc
+  out="$(semodule -B 2>&1)"
+  rc=$?
+  printf 'semodule -B rc=%d %s\n' "$rc" "$out" >> "$EVIDENCE_DIR/p21e3-dontaudit.log"
+  restored="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
+  printf 'policy sha restored: %s (before=%s)\n' "$restored" "${SE_POLICY_SHA_PRE:-none}" \
+    >> "$EVIDENCE_DIR/p21e3-dontaudit.log"
+  if [ "$rc" = 0 ] && [ -n "$restored" ] && [ "$restored" = "${SE_POLICY_SHA_PRE:-}" ]; then
+    printf 'R7-P21E3-DONTAUDIT-RESTORED=verified\n'
+    return 0
+  fi
+  printf 'R7-P21E3-BUILD=aborted(policy-restore-unverified)\nR7-P21E3-VERDICT=BLOCKED\n'
+  printf 'R7-P21E3-DONTAUDIT-RESTORED=BLOCKED (rc=%d restored-sha=%s)\n' "$rc" "${restored:-none}"
+  return 1
+}
+if [ "$SE_POLICY_SHA_DB" != "$SE_POLICY_SHA_PRE" ] && [ -n "$SE_POLICY_SHA_DB" ]; then
+  printf 'policy sha with -DB: %s (visibility ENABLED: the rebuild differs)\n' "$SE_POLICY_SHA_DB" \
+    >> "$EVIDENCE_DIR/p21e3-dontaudit.log"
+  log "dontaudit visibility enabled (policy rebuild differs from the baseline)"
+else
+  printf 'policy sha with -DB: %s — the rebuild did NOT change the loaded policy\n' "$SE_POLICY_SHA_DB" \
+    >> "$EVIDENCE_DIR/p21e3-dontaudit.log"
+  p21e3_dontaudit_restore
+  fail "dontaudit visibility could NOT be established (identical policy after -DB); distinct infrastructure verdict"
+fi
+trap 'p21e3_dontaudit_restore; measure_abandon' EXIT
+
 # --- the pinned audit window, opened IMMEDIATELY before the measured op ---
 if audit_boundary_open "$AUDIT_LOG_PATH"; then
   printf 'window-open offset=%s size=%s lastbyte=%s path_devino=%s fd_devino=%s empty-log=%s\n' \
@@ -1141,7 +1366,7 @@ rm -f "$STOPSAMP"
 SAMPLER_PID=""
 "$EVIDENCE_DIR/p21e3_proc_sampler" "$EVIDENCE_DIR/p21e3-sampler.log" "$STOPSAMP" &
 SAMPLER_PID=$!
-trap measure_abandon EXIT
+trap 'p21e3_dontaudit_restore; measure_abandon' EXIT
 SAMPLER_CONFIRMED=0
 for _ in $(seq 1 100); do
   grep -aq '^SAMPLER-START' "$EVIDENCE_DIR/p21e3-sampler.log" 2>/dev/null \
@@ -1156,6 +1381,28 @@ else
     "$(kill -0 "$SAMPLER_PID" 2>/dev/null && echo yes || echo no)" \
     >> "$EVIDENCE_DIR/p21e3-window.log"
   fail "sampler not confirmed before POST /build; the window is unmeasurable"
+fi
+
+# --- the prepared-tree event watcher: started BEFORE the measured op, so
+# --- the short-lived per-operation dev-prep directory's creation/deletion
+# --- events carry its immediate lstat/label/ACL presence (R4-P3-P5).
+WATCHER_STOP="$STATE_DIR/watcher.stop"
+rm -f "$WATCHER_STOP"
+WATCHER_LOG="$EVIDENCE_DIR/p21e3-devprep-events.log"
+WATCHER_PID=""
+WATCHER_ENV="WATCHER_LOG=$WATCHER_LOG"
+env "$WATCHER_ENV" "$EVIDENCE_DIR/p21e3_devprep_watcher" \
+  /var/lib/docker-helper/dev-prep "$WATCHER_STOP" &
+WATCHER_PID=$!
+for _ in $(seq 1 50); do
+  grep -aq '^WATCHER-START' "$WATCHER_LOG" 2>/dev/null && break
+  if ! kill -0 "$WATCHER_PID" 2>/dev/null; then break; fi
+  sleep 0.1
+done
+if grep -aq '^WATCHER-START' "$WATCHER_LOG" 2>/dev/null; then
+  log "dev-prep event watcher confirmed running before POST /build (pid $WATCHER_PID)"
+else
+  log "dev-prep event watcher NOT confirmed (process-alive=$(kill -0 "$WATCHER_PID" 2>/dev/null && echo yes || echo no)); the prepared-tree event evidence will be absent"
 fi
 
 # --- the measured operation: POST /build ---
@@ -1208,7 +1455,7 @@ done
 if [ -n "$BKD_PID" ]; then
   log "attaching strace to buildkitd pid $BKD_PID (timeout ${STRACE_TIMEOUT}s)"
   timeout "$STRACE_TIMEOUT" strace -f -qq -tt -s 100 -y -yy -p "$BKD_PID" \
-    -e trace=execve,execveat,open,openat,openat2,read,rename,renameat,renameat2,mount,umount2,mkdir,mkdirat,symlink,symlinkat,getxattr,lgetxattr,fgetxattr \
+    -e trace=execve,execveat,open,openat,openat2,read,newfstatat,statx,statfs,getxattr,lgetxattr,fgetxattr,rename,renameat,renameat2,mount,umount2,mkdir,mkdirat,symlink,symlinkat \
     -o "$EVIDENCE_DIR/p21e3-strace.log" 2>"$EVIDENCE_DIR/p21e3-strace.err" &
   STRACE_PID=$!
   STRACE_ALL_PIDS="$STRACE_ALL_PIDS $STRACE_PID"
@@ -1250,7 +1497,36 @@ for s in $STRACE_ALL_PIDS; do
 done
 wait "$SAMPLER_PID" 2>/dev/null || true
 SAMPLER_PID=""
+if [ -n "${WATCHER_PID:-}" ]; then
+  touch "$WATCHER_STOP" 2>/dev/null || true
+  wait "$WATCHER_PID" 2>/dev/null || true
+  WATCHER_PID=""
+fi
 trap - EXIT
+# The prepared-tree state AT THE TERMINAL (R4-P3-P5) is captured FIRST (the
+# teardown may remove the per-op dir at any moment); the policy restore
+# follows immediately after the capture.
+{
+  echo "== per-operation dev-prep dirs at the terminal =="
+  ls -laZ --time-style=full-iso /var/lib/docker-helper/dev-prep 2>&1 || true
+  found_op=0
+  for od in /var/lib/docker-helper/dev-prep/op_*; do
+    [ -e "$od" ] || continue
+    found_op=1
+    echo "--- $od (still present) ---"
+    stat -c 'stat: mode=%a uid=%u gid=%g inode=%d:%i' "$od" 2>&1
+    getfacl -p --absolute-names "$od" 2>&1 | sed -n '1,12p'
+    getfattr -n security.selinux --only-values "$od" 2>/dev/null; echo
+  done
+  [ "$found_op" = 1 ] || echo "(no per-op dir present at the terminal — removed by the operation teardown; the watcher's event captures hold the ladder's state)"
+} > "$EVIDENCE_DIR/p21e3-devprep-terminal-state.log" 2>&1
+cat "$EVIDENCE_DIR/p21e3-devprep-terminal-state.log"
+# The normal-path restore: the verdict must be independently verified; an
+# unverified restoration decides the distinct infrastructure/policy-state
+# verdict and stops the round.
+if ! p21e3_dontaudit_restore; then
+  fail "the dontaudit restoration could not be verified (distinct infrastructure/policy-state verdict)"
+fi
 
 # The bounded builder-manager service journal covering EXACTLY the
 # operation window (JSTART was taken at window open, JEND at terminal).
