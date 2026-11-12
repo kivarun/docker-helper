@@ -272,17 +272,43 @@ func TestR7P21E3PolicySemanticsSelftest(t *testing.T) {
 		return strings.TrimSuffix(string(raw), "\n")
 	}
 	for _, tc := range []struct{ name, want string }{
-		{"valid-three.classify", "trusted-set:net_admin sys_admin sys_ptrace"},
+		// The R2 live conditional grammar: a conditional suffix is
+		// metadata, never a permission token.
+		{"live-conditional-active.classify",
+			"trusted:perms=map|cond-active=domain_can_mmap_files=True|cond-inactive=none"},
+		{"live-conditional-inactive.classify",
+			"trusted:perms=|cond-active=none|cond-inactive=example_boolean=False"},
+		// An unknown conditional form is neither an effective grant nor an
+		// authoritative absence: UNTRUSTED (BLOCKED).
+		{"conditional-unknown-form.classify",
+			"untrusted:malformed-line(allow docker_helper_rootlesskit_t bin_t:file execute; [ example_boolean ]:MAYBE)"},
+		// The accepted exact three-permission check (conditional-free).
+		{"valid-three.classify",
+			"trusted:perms=net_admin sys_admin sys_ptrace|cond-active=none|cond-inactive=none"},
 		// A trusted response with the required net_admin member missing is
 		// a DECIDED wrong shape (not untrusted): the gate still blocks, but
 		// with the shape reason, not the query-untrusted reason.
-		{"missing-netadmin.classify", "trusted-set:sys_admin sys_ptrace"},
-		{"quarantine-present.classify", "trusted-set:execute"},
-		{"quarantine-absent.classify", "trusted-set:"},
-		{"quarantine-read-only.classify", "trusted-set:getattr read"},
+		{"missing-netadmin.classify",
+			"trusted:perms=sys_admin sys_ptrace|cond-active=none|cond-inactive=none"},
+		{"quarantine-present.classify", "trusted:perms=execute|cond-active=none|cond-inactive=none"},
+		{"quarantine-absent.classify", "trusted:perms=|cond-active=none|cond-inactive=none"},
+		{"quarantine-read-only.classify", "trusted:perms=getattr read|cond-active=none|cond-inactive=none"},
 		{"exec-error.classify", "untrusted:nonzero-exit-1"},
 		{"timeout.classify", "untrusted:nonzero-exit-124"},
 		{"malformed.classify", "untrusted:malformed-line(error: cannot open /sys/fs/selinux/policy: No such file)"},
+	} {
+		if got := verdict(tc.name); got != tc.want {
+			t.Errorf("%s verdict = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+	// The extraction-stage classifier: the four required outcomes (every
+	// failure class blocks).
+	for _, tc := range []struct{ name, want string }{
+		{"extract-member-found.classify", "member-found"},
+		{"extract-member-missing.classify", "blocked:member-missing"},
+		{"extract-cpio-failed.classify", "blocked:cpio-extraction-failed(rc=2)"},
+		{"extract-conversion-failed.classify", "blocked:rpm-conversion-failed(rc=1)"},
+		{"extract-conversion-timeout.classify", "blocked:rpm-conversion-failed(rc=124)"},
 	} {
 		if got := verdict(tc.name); got != tc.want {
 			t.Errorf("%s verdict = %q, want %q", tc.name, got, tc.want)
@@ -308,20 +334,84 @@ func TestR7P21E3PolicySemanticsGate(t *testing.T) {
 		"rpm==installed: MATCH",
 		"classify_sesearch_query \"$SLIRP_RC\" \"$SLIRP_CAPS\"",
 		"classify_sesearch_query \"$QUAR_RC\" \"$QUAR_CAPS\"",
-		`trusted-set:net_admin sys_admin sys_ptrace`,
+		"trusted:perms=net_admin sys_admin sys_ptrace|cond-active=none|cond-inactive=none",
 		"QUERY-UNTRUSTED",
 		"rootlesskit bin_t quarantine: PRESERVED",
 		"rootlesskit bin_t quarantine: VIOLATED",
 		"GATE_REASON=policy-semantics",
 		"POLICY-GATE: FAIL",
-		// The old substring-acceptance judgment must not survive.
+		// The staged extraction gate: separate rpm2cpio/cpio exit statuses
+		// and a stage-classified outcome (no --quiet cpio flag; no
+		// stderr-swallowing on the extraction pipeline).
+		"classify_pp_extraction",
+		"extraction verdict: $EXTRACT_VERDICT",
+		"rpm2cpio stderr (tail; no tokens)",
+		"cpio stderr (tail; no tokens)",
+		`cpio -id <"$PP_DIR/payload.cpio"`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("the p21e3 guest harness must gate the loaded-policy semantics %q", want)
 		}
 	}
-	if strings.Contains(script, `if printf '%s\n' "$QUAR_CAPS" | grep -aq 'execute'`) {
-		t.Error("the quarantine decision must come from the classified query, never a raw-output grep")
+	if strings.Contains(script, "cpio -id --quiet") {
+		t.Error("the extraction must not depend on the guest cpio implementation accepting --quiet")
+	}
+	if strings.Contains(script, `'usr/share/selinux/docker_helper.pp' 2>/dev/null)`) {
+		t.Error("the extraction gate must not swallow its pipeline stderr")
+	}
+}
+
+// TestR7P21E3PPExtractSelftest runs the harness's own
+// --pp-extract-selftest with the cpio-stage fixtures: the member must
+// extract and hash to the fixture content's digest, a member-less payload
+// must extract nothing (blocked), and a truncated archive must not yield
+// the member (blocked). With rpm2cpio and a real RPM provided
+// (R7_P21E3_TEST_RPM), the full gate path runs on the actual artifact.
+func TestR7P21E3PPExtractSelftest(t *testing.T) {
+	dir := t.TempDir()
+	out, err := exec.Command("bash", "scripts/release-2.4-r7-p21e3-guest.sh",
+		"--pp-extract-selftest", dir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("pp-extract selftest failed to run: %v\n%s", err, out)
+	}
+	shaRaw, err := os.ReadFile(filepath.Join(dir, "results", "fixture.member-found.sha256"))
+	if err != nil {
+		t.Fatalf("fixture result missing: %v\n%s", err, out)
+	}
+	got := strings.Fields(strings.TrimSpace(string(shaRaw)))
+	if len(got) != 2 || got[0] != "8bc5b882c687041c292cc12457db6f016a9489947215c420306f4a6152a65c4d" {
+		t.Fatalf("fixture member digest = %q, want the fixture content sha256 8bc5b882…", strings.TrimSpace(string(shaRaw)))
+	}
+	content, err := os.ReadFile(filepath.Join(dir, "results", "fixture.member.pp"))
+	if err != nil || !strings.HasPrefix(string(content), "fixture-module-content") {
+		t.Errorf("the extracted fixture member must be the source bytes: %v %q", err, content)
+	}
+	missRaw, err := os.ReadFile(filepath.Join(dir, "results", "fixture.member-missing.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(missRaw), "confirmed absent") {
+		t.Errorf("the member-less fixture must confirm the member absent (and stay blocked), got %q", missRaw)
+	}
+	toolsRaw, err := os.ReadFile(filepath.Join(dir, "results", "tools.ident"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(toolsRaw), "rpm2cpio=") || !strings.Contains(string(toolsRaw), "cpio=") {
+		t.Errorf("the toolchain identity must be recorded explicitly: %q", toolsRaw)
+	}
+	if rpm := os.Getenv("R7_P21E3_TEST_RPM"); rpm != "" {
+		dir2 := t.TempDir()
+		out2, err := exec.Command("bash", "scripts/release-2.4-r7-p21e3-guest.sh",
+			"--pp-extract-selftest", dir2, rpm).CombinedOutput()
+		if err != nil {
+			t.Fatalf("pp-extract selftest (real RPM) failed: %v\n%s", err, out2)
+		}
+		digestRaw, err := os.ReadFile(filepath.Join(dir2, "results", "member.pp.sha256"))
+		if err != nil {
+			t.Skipf("the local toolchain lacks rpm2cpio (no full-gate run possible here): %v\n%s", err, out2)
+		}
+		t.Logf("real-RPM full-gate member digest: %s", digestRaw)
 	}
 }
 

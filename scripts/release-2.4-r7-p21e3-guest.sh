@@ -275,18 +275,24 @@ p21e3_audit_window_selftest() { # <workdir>
 }
 
 # ---------------------------------------------------------------------------
-# Sesearch result classification — FAIL-CLOSED. A loaded-policy query is
-# decided ONLY from a successful, well-formed response: any nonzero exit
-# (including timeout 124 — NEVER an authoritative empty result) or any
-# malformed output line makes the verdict UNTRUSTED, and the caller must
-# treat untrusted as BLOCKED, never as the asserted absence. Exercised by
-# --policy-semantics-selftest; the Go tests judge the recorded verdicts.
-# classify_sesearch_query <rc> <output> prints exactly one verdict:
-#   trusted-set:<perm tokens, deduped, sorted, space-joined>   (may be empty)
-#   untrusted:nonzero-exit-<rc>                                (timeout rc 124 too)
+# Sesearch result classification — FAIL-CLOSED, aware of the real installed
+# sesearch grammar for CONDITIONAL rules:
+#   allow <source> <target>:<class> <perms>; [ <boolean> ]:True|False
+# Permissions come ONLY from the rule's permission field; conditional
+# metadata is kept SEPARATE: an ACTIVE conditional ([..​]:True) contributes
+# its tokens to the effective set; an INACTIVE one ([..​]:False) contributes
+# NOTHING (its rules do not fire) and is recorded as inactive; any unknown
+# conditional form or malformed line is UNTRUSTED — never an effective
+# grant and never an authoritative absence. Any nonzero exit (including
+# timeout 124) is UNTRUSTED, never an authoritative empty result.
+# Exercised by --policy-semantics-selftest; the Go tests judge the recorded
+# verdicts. classify_sesearch_query <rc> <output> prints exactly one verdict:
+#   trusted:perms=<tokens, deduped, sorted, space-joined>|cond-active=<b=True,...|none>|cond-inactive=<b=False,...|none>
+#   untrusted:nonzero-exit-<rc>
 #   untrusted:malformed-line(<line>)
 classify_sesearch_query() { # <rc> <output>
-  local rc="$1" out="$2" line p tok parts="" perms
+  local rc="$1" out="$2" line rule p cond state cname tok
+  local parts="" active="" inactive=""
   if [ -z "$rc" ] || [ "$rc" -ne 0 ] 2>/dev/null; then
     printf 'untrusted:nonzero-exit-%s\n' "${rc:-none}"
     return 0
@@ -297,31 +303,84 @@ classify_sesearch_query() { # <rc> <output>
       'allow '*\ *:*) : ;;
       *) printf 'untrusted:malformed-line(%s)\n' "$line"; return 0 ;;
     esac
-    p="${line#allow * *:}" # e.g. "cap_userns { sys_ptrace sys_admin }" (;/w/o)
-    p="${p%;}"             # tolerate a trailing ';'
-    p="${p% }"
-    p="${p#* }"            # strip the class token
+    rule="${line%%;*}"  # the rule itself, up to the FIRST ';'
+    cond="${line#*;}"   # the conditional suffix (may be empty)
+    p="${rule#allow * *:}"
+    p="${p#* }"         # strip the class token
     p="${p#\{}"
     p="${p%\}}"
-    p="${p%;}"
+    p="${p% }"
     [ -n "${p// /}" ] || { printf 'untrusted:malformed-line(%s)\n' "$line"; return 0; }
-    for tok in $p; do
-      parts="$parts $tok"
-    done
+    if [ -n "$cond" ]; then
+      cond="$(printf '%s' "$cond" | sed 's/^ *//;s/ *$//')"
+      case "$cond" in
+        '['*']':True | '['*']':False) : ;;
+        *) printf 'untrusted:malformed-line(%s)\n' "$line"; return 0 ;;
+      esac
+      state="${cond##*:}"
+      head="${cond%:*}"     # "[ boolean ]"
+      cname="${head#\[}"
+      cname="${cname%]}"
+      cname="${cname# }"
+      cname="${cname% }"
+      [ -n "$cname" ] || { printf 'untrusted:malformed-line(%s)\n' "$line"; return 0; }
+      if [ "$state" = True ]; then
+        active="${active:+$active,}$cname=True"
+        for tok in $p; do
+          parts="$parts $tok"
+        done
+      else
+        inactive="${inactive:+$inactive,}$cname=False"
+      fi
+    else
+      for tok in $p; do
+        parts="$parts $tok"
+      done
+    fi
   done <<EOF
 $out
 EOF
+  local perms ca ci
   perms="$(printf '%s' "$parts" | tr ' \t' '\n\n' | sed '/^$/d' | sort -u | tr '\n' ' ' | sed 's/^ //;s/ $//')"
-  printf 'trusted-set:%s\n' "$perms"
+  ca="${active:-none}"; ci="${inactive:-none}"
+  ca="${ca#,}"; ci="${ci#,}"
+  printf 'trusted:perms=%s|cond-active=%s|cond-inactive=%s\n' "$perms" "$ca" "$ci"
 }
 
-# The accepted R4-P3-P4 exact three-permission check (unchanged semantics):
-# the slirp4netns self:cap_userns verdict must be EXACTLY
-# trusted-set:net_admin sys_admin sys_ptrace — no bit less, no bit more.
-# The quarantine decision: a TRUSTED query whose perm set is either empty or
-# carries NO 'execute' token preserves the deliberate
-# docker_helper_rootlesskit_t -> bin_t:file quarantine; a trusted set WITH
-# the execute token violates it; an untrusted query BLOCKS (never PRESERVED).
+# classify_pp_extraction <rpm2cpio_rc> <cpio_rc> <member-present> — the
+# EXACT stage classifier the policy gate calls, distinguishing the four
+# required outcomes (all failure classes block):
+#   blocked:rpm-conversion-failed(rc=<n>)  — rpm2cpio itself failed
+#   blocked:cpio-extraction-failed(rc=<n>) — the cpio stage failed
+#   blocked:member-missing                 — extraction succeeded, no member
+#   member-found                           — the member is available for the
+#                                            byte comparison
+classify_pp_extraction() { # <rpm2cpio_rc> <cpio_rc> <member-present>
+  local rc1="$1" rc2="$2" found="$3"
+  case "$rc1" in '' | *[!0-9]*)
+    printf 'blocked:rpm-conversion-failed(rc=%s)\n' "${rc1:-none}"; return 0 ;;
+  esac
+  if [ "$rc1" != 0 ]; then
+    printf 'blocked:rpm-conversion-failed(rc=%s)\n' "$rc1"; return 0
+  fi
+  case "$rc2" in '' | *[!0-9]*)
+    printf 'blocked:cpio-extraction-failed(rc=%s)\n' "${rc2:-none}"; return 0 ;;
+  esac
+  if [ "$rc2" != 0 ]; then
+    printf 'blocked:cpio-extraction-failed(rc=%s)\n' "$rc2"; return 0
+  fi
+  case "$found" in
+    0) printf 'blocked:member-missing\n' ;;
+    1) printf 'member-found\n' ;;
+    *) printf 'blocked:member-missing\n' ;;
+  esac
+}
+
+# The stage decision vocabulary above keeps every extraction failure
+# BLOCKED; the policy gate maps each reason into POLICY-GATE: FAIL with the
+# named stage and records the separate rpm2cpio/cpio exit statuses and
+# unpolluted stderr tails in the evidence log.
+
 p21e3_policy_semantics_selftest() { # <workdir>
   local work="$1"
   mkdir -p "$work/results"
@@ -345,6 +404,24 @@ p21e3_policy_semantics_selftest() { # <workdir>
   classify_sesearch_query 0 \
     'allow docker_helper_rootlesskit_t bin_t:file { getattr read };' \
     >"$work/results/quarantine-read-only.classify"
+  # 8..10: the ACTUAL R2 live sesearch response shapes (conditional rules),
+  #        which the previous grammar smeared into permission tokens.
+  # 8. The exact live conditional rule from the R2 gate log: an ACTIVE
+  #    (domain_can_mmap_files=True) bin_t:file map allow — map is in the
+  #    effective set and the condition is metadata, never a token.
+  classify_sesearch_query 0 \
+    'allow domain file_type:file map; [ domain_can_mmap_files ]:True' \
+    >"$work/results/live-conditional-active.classify"
+  # 9. An INACTIVE conditional: the rule does not fire, so its token is NOT
+  #    an effective grant and is recorded separately.
+  classify_sesearch_query 0 \
+    'allow docker_helper_rootlesskit_t bin_t:file execute; [ example_boolean ]:False' \
+    >"$work/results/live-conditional-inactive.classify"
+  # 10. An unknown conditional suffix form is UNTRUSTED (not an effective
+  #     grant and not an authoritative absence).
+  classify_sesearch_query 0 \
+    'allow docker_helper_rootlesskit_t bin_t:file execute; [ example_boolean ]:MAYBE' \
+    >"$work/results/conditional-unknown-form.classify"
   # 5. sesearch execution error (nonzero exit, error text on output).
   classify_sesearch_query 1 'Error: SELinux policy is not managed or store cannot be reached.' \
     >"$work/results/exec-error.classify"
@@ -353,11 +430,100 @@ p21e3_policy_semantics_selftest() { # <workdir>
   # 7. Unreadable/malformed response (rc 0 but not an allow response).
   classify_sesearch_query 0 'error: cannot open /sys/fs/selinux/policy: No such file' \
     >"$work/results/malformed.classify"
+
+  # The extraction-stage classifier: the four required outcomes.
+  classify_pp_extraction 0 0 1 >"$work/results/extract-member-found.classify"
+  classify_pp_extraction 0 0 0 >"$work/results/extract-member-missing.classify"
+  classify_pp_extraction 0 2 1 >"$work/results/extract-cpio-failed.classify"
+  classify_pp_extraction 1 0 1 >"$work/results/extract-conversion-failed.classify"
+  classify_pp_extraction 124 0 1 >"$work/results/extract-conversion-timeout.classify"
+}
+
+# --pp-extract-selftest <workdir> [<rpmfile>]: exercises the REAL staged
+# extraction used by the policy gate. With rpm2cpio+cpio available AND a
+# real RPM provided, the full gate path runs (conversion -> cpio -> member
+# presence -> sha) and the member's digest lands in results/member.pp.sha.
+# Without rpm tooling, the cpio stage is exercised on a self-synthesized
+# fixture (member present / member missing / truncated cpio) and the
+# tool-unavailability branch is recorded instead of guessed.
+p21e3_pp_extract_selftest() { # <workdir> [<rpmfile>]
+  local work="$1" rpm="${2:-}"
+  local dir="$work/pp-check"
+  mkdir -p "$work/results" "$dir/extract"
+  {
+    printf 'rpm2cpio=%s\n' "$(command -v rpm2cpio || echo missing)"
+    printf 'cpio=%s (%s)\n' "$(command -v cpio || echo missing)" \
+      "$(cpio --version 2>/dev/null | head -1 || echo 'version unknown')"
+  } >"$work/results/tools.ident"
+  if [ -n "$rpm" ] && [ -f "$rpm" ] && command -v rpm2cpio >/dev/null 2>&1 && command -v cpio >/dev/null 2>&1; then
+    if rpm2cpio "$rpm" >"$dir/payload.cpio" 2>"$dir/rpm2cpio.err"; then
+      (cd "$dir/extract" && cpio -id <"$dir/payload.cpio") \
+        >"$dir/cpio.out" 2>"$dir/cpio.err" \
+        && CPIO_RC=0 || CPIO_RC=$?
+      if [ "$CPIO_RC" = 0 ] && [ -f "$dir/extract/usr/share/selinux/docker_helper.pp" ]; then
+        sha256sum "$dir/extract/usr/share/selinux/docker_helper.pp" >"$work/results/member.pp.sha256"
+        cp "$dir/extract/usr/share/selinux/docker_helper.pp" "$work/results/member.pp"
+        echo "member-found" >"$work/results/extract.stages"
+      else
+        echo "cpio rc=$CPIO_RC member-absent" >"$work/results/extract.stages"
+      fi
+    else
+      echo "rpm2cpio rc=$? conversion-failed" >"$work/results/extract.stages"
+    fi
+    cp -a "$dir/rpm2cpio.err" "$work/results/rpm2cpio.stderr"
+    cp -a "$dir/cpio.err" "$work/results/cpio.stderr"
+    return 0
+  fi
+  # cpio-stage fixtures (no rpm2cpio here): synthesize a minimal archive.
+  if command -v cpio >/dev/null 2>&1; then
+    mkdir -p "$dir/src/usr/share/selinux" "$dir/src/usr/share/doc" \
+      "$dir/extract-found" "$dir/extract-miss" "$dir/extract-trunc" \
+      "$dir/src-miss/usr/share/doc"
+    printf 'fixture-module-content\n' >"$dir/src/usr/share/selinux/docker_helper.pp"
+    printf 'other\n' >"$dir/src/usr/share/doc/other"
+    # Paths include their parent dirs so plain `cpio -id` recreates them.
+    (cd "$dir/src" && printf 'usr/share/selinux/docker_helper.pp\nusr/share/doc/other\n' \
+      | cpio -o -H newc 2>/dev/null) >"$dir/fixture.cpio" || true
+    (cd "$dir/extract-found" && cpio -id <"$dir/fixture.cpio" 2>/dev/null)
+    printf 'other\n' >"$dir/src-miss/usr/share/doc/other"
+    (cd "$dir/src-miss" && printf 'usr/share/doc/other\n' | cpio -o -H newc 2>/dev/null) >"$dir/fixture-missing.cpio" || true
+    (cd "$dir/extract-miss" && cpio -id <"$dir/fixture-missing.cpio" 2>/dev/null)
+    head -c 100 "$dir/fixture.cpio" >"$dir/fixture-truncated.cpio" 2>/dev/null || true
+    (cd "$dir/extract-trunc" && cpio -id <"$dir/fixture-truncated.cpio" 2>/dev/null); TRUNC_RC=$?
+    if [ -f "$dir/extract-found/usr/share/selinux/docker_helper.pp" ]; then
+      sha256sum "$dir/extract-found/usr/share/selinux/docker_helper.pp" >"$work/results/fixture.member-found.sha256"
+      cp "$dir/extract-found/usr/share/selinux/docker_helper.pp" "$work/results/fixture.member.pp"
+    else
+      echo "FIXTURE-DEFECT: the member-found fixture did not extract the member" >"$work/results/fixture.member-found.sha256"
+    fi
+    if [ -f "$dir/extract-miss/usr/share/selinux/docker_helper.pp" ]; then
+      echo "fixture MISSING-membership: wrongly extracted" >"$work/results/fixture.member-missing.txt"
+    else
+      # Either cpio refuses a member-less archive or succeeds extracting
+      # nothing — both classify as blocked (member-missing is decisive).
+      printf 'fixture member-missing: confirmed absent (cpio rc=%s)\n' "$?" \
+        >"$work/results/fixture.member-missing.txt"
+    fi
+    if (cd "$dir/extract-trunc" && [ -f usr/share/selinux/docker_helper.pp ]); then
+      echo "fixture truncated: wrongly extracted" >"$work/results/fixture.cpio-failed.txt"
+    else
+      printf 'fixture truncated-extraction: cpio rc=%s — no member; the gate blocks (cpio-failed or member-missing, both fail-closed)\n' "${TRUNC_RC:-none}" \
+        >"$work/results/fixture.cpio-failed.txt"
+    fi
+  else
+    echo "no cpio available; the cpio-stage fixtures cannot run" >"$work/results/tools-unavailable.txt"
+  fi
 }
 
 if [ "${1:-}" = "--policy-semantics-selftest" ]; then
   [ -n "${2:-}" ] || fail "usage: $0 --policy-semantics-selftest <workdir>"
   p21e3_policy_semantics_selftest "$2"
+  exit $?
+fi
+
+if [ "${1:-}" = "--pp-extract-selftest" ]; then
+  [ -n "${2:-}" ] || fail "usage: $0 --pp-extract-selftest <workdir> [<rpmfile>]"
+  p21e3_pp_extract_selftest "$2" "${3:-}"
   exit $?
 fi
 
@@ -550,27 +716,83 @@ cat "$EVIDENCE_DIR/p21e3-module.log"
 # --- through sesearch.
 PP_EXPECTED=1
 {
-  echo "== rpm member vs installed .pp bytes =="
-  if mkdir -p "$STATE_DIR/pp-check" \
-    && (cd "$STATE_DIR/pp-check" && rpm2cpio "$ARTIFACT" | cpio -id --quiet \
-        'usr/share/selinux/docker_helper.pp' 2>/dev/null) \
-    && [ -f "$STATE_DIR/pp-check/usr/share/selinux/docker_helper.pp" ]; then
-    rpm_pp="$(sha256sum "$STATE_DIR/pp-check/usr/share/selinux/docker_helper.pp" | awk '{print $1}')"
-    inst_pp="$(sha256sum /usr/share/selinux/docker_helper.pp 2>/dev/null | awk '{print $1}')"
-    echo "rpm-member  sha256=$rpm_pp"
-    echo "installed   sha256=$inst_pp"
-    if [ -n "$inst_pp" ] && [ "$rpm_pp" = "$inst_pp" ]; then
-      echo "rpm==installed: MATCH"
-    else
-      echo "rpm==installed: MISMATCH"
-      echo "POLICY-GATE: FAIL (the installed module is not the RPM member)"
-      PP_EXPECTED=0
-    fi
-  else
-    echo "rpm member extraction failed (rpm2cpio/cpio/unavailable path)"
-    echo "POLICY-GATE: FAIL (the RPM member cannot be extracted)"
-    PP_EXPECTED=0
+  echo "== rpm member vs installed .pp bytes (staged, fail-closed) =="
+  PP_DIR="$STATE_DIR/pp-check"
+  rm -rf "$PP_DIR"; mkdir -p "$PP_DIR/extract"
+  # The toolchain stages their absence explicitly rather than inferring it.
+  printf 'rpm2cpio=%s\n' "$(command -v rpm2cpio || echo missing)"
+  printf 'cpio=%s (%s)\n' "$(command -v cpio || echo missing)" \
+    "$(cpio --version 2>/dev/null | head -1 || echo 'version unknown')"
+  if ! command -v rpm2cpio >/dev/null 2>&1; then
+    timeout 300 zypper --non-interactive install -y rpm 2>&1 | tail -3
   fi
+  if ! command -v cpio >/dev/null 2>&1; then
+    timeout 300 zypper --non-interactive install -y cpio 2>&1 | tail -3
+  fi
+  RPM2CPIO_RC=""
+  CPIO_RC=""
+  PP_MEMBER=""
+  if command -v rpm2cpio >/dev/null 2>&1 && command -v cpio >/dev/null 2>&1; then
+    if rpm2cpio "$ARTIFACT" >"$PP_DIR/payload.cpio" 2>"$PP_DIR/rpm2cpio.err"; then
+      RPM2CPIO_RC=0
+    else
+      RPM2CPIO_RC=$?
+    fi
+    if [ "$RPM2CPIO_RC" = 0 ]; then
+      (cd "$PP_DIR/extract" && cpio -id <"$PP_DIR/payload.cpio") \
+        >"$PP_DIR/cpio.out" 2>"$PP_DIR/cpio.err" \
+        && CPIO_RC=0 || CPIO_RC=$?
+      if [ "$CPIO_RC" = 0 ] \
+        && [ -f "$PP_DIR/extract/usr/share/selinux/docker_helper.pp" ]; then
+        PP_MEMBER="$PP_DIR/extract/usr/share/selinux/docker_helper.pp"
+      fi
+    fi
+  fi
+  if [ -n "$PP_MEMBER" ]; then
+    EXTRACT_VERDICT="$(classify_pp_extraction "${RPM2CPIO_RC:-none}" "${CPIO_RC:-none}" 1)"
+  else
+    EXTRACT_VERDICT="$(classify_pp_extraction "${RPM2CPIO_RC:-none}" "${CPIO_RC:-none}" 0)"
+  fi
+  echo "extraction verdict: $EXTRACT_VERDICT"
+  if [ -n "$RPM2CPIO_RC" ] && [ -s "$PP_DIR/rpm2cpio.err" ]; then
+    echo "--- rpm2cpio stderr (tail; no tokens) ---"
+    sed 's/dht_[A-Za-z0-9]*/[REDACTED-TOKEN]/g' "$PP_DIR/rpm2cpio.err" | tail -5
+  fi
+  if [ -n "$CPIO_RC" ] && [ -s "$PP_DIR/cpio.err" ]; then
+    echo "--- cpio stderr (tail; no tokens) ---"
+    sed 's/dht_[A-Za-z0-9]*/[REDACTED-TOKEN]/g' "$PP_DIR/cpio.err" | tail -5
+  fi
+  case "$EXTRACT_VERDICT" in
+    member-found)
+      rpm_pp="$(sha256sum "$PP_MEMBER" | awk '{print $1}')"
+      inst_pp="$(sha256sum /usr/share/selinux/docker_helper.pp 2>/dev/null | awk '{print $1}')"
+      echo "rpm-member  sha256=$rpm_pp"
+      echo "installed   sha256=${inst_pp:-<missing>}"
+      if [ -n "$inst_pp" ] && [ "$rpm_pp" = "$inst_pp" ]; then
+        echo "rpm==installed: MATCH"
+      else
+        echo "rpm==installed: MISMATCH"
+        echo "POLICY-GATE: FAIL (the installed module is not the RPM member)"
+        PP_EXPECTED=0
+      fi
+      ;;
+    blocked:member-missing)
+      echo "POLICY-GATE: FAIL (the payload extracted cleanly but carries no usr/share/selinux/docker_helper.pp member)"
+      PP_EXPECTED=0
+      ;;
+    blocked:rpm-conversion-failed*)
+      echo "POLICY-GATE: FAIL (the rpm2cpio conversion stage failed)"
+      PP_EXPECTED=0
+      ;;
+    blocked:cpio-extraction-failed*)
+      echo "POLICY-GATE: FAIL (the cpio extraction stage failed)"
+      PP_EXPECTED=0
+      ;;
+    *)
+      echo "POLICY-GATE: FAIL (the extraction verdict is not member-found)"
+      PP_EXPECTED=0
+      ;;
+  esac
   echo "== loaded-policy semantics (fail-closed sesearch classification) =="
   if ! command -v sesearch >/dev/null 2>&1; then
     timeout 300 zypper --non-interactive install -y setools 2>&1 | tail -3
@@ -586,11 +808,11 @@ PP_EXPECTED=1
     SLIRP_VERDICT="$(classify_sesearch_query "$SLIRP_RC" "$SLIRP_CAPS")"
     echo "classify=$SLIRP_VERDICT"
     case "$SLIRP_VERDICT" in
-      'trusted-set:net_admin sys_admin sys_ptrace')
-        echo "slirp4netns cap_userns: EXACT-MATCH (the accepted R4-P3-P4 widening is loaded and effective)"
+      'trusted:perms=net_admin sys_admin sys_ptrace|cond-active=none|cond-inactive=none')
+        echo "slirp4netns cap_userns: EXACT-MATCH (the accepted R4-P3-P4 widening is loaded and effective, unconditional)"
         ;;
-      'trusted-set:'|'trusted-set:'*)
-        echo "slirp4netns cap_userns: WRONG-SHAPE (a TRUSTED response decided the shape, expected exactly net_admin sys_admin sys_ptrace)"
+      'trusted:'*)
+        echo "slirp4netns cap_userns: WRONG-SHAPE (a TRUSTED response decided the classification, expected exactly net_admin sys_admin sys_ptrace with no conditionals)"
         echo "POLICY-GATE: FAIL (loaded policy does not carry precisely the accepted widening)"
         PP_EXPECTED=0
         ;;
@@ -608,16 +830,20 @@ PP_EXPECTED=1
     QUAR_VERDICT="$(classify_sesearch_query "$QUAR_RC" "$QUAR_CAPS")"
     echo "classify=$QUAR_VERDICT"
     case "$QUAR_VERDICT" in
-      'trusted-set:'*)
-        QUAR_SET=" ${QUAR_VERDICT#trusted-set:} "
+      'trusted:'*)
+        # Effective-permission tokens ONLY (active conditionals contribute;
+        # inactive ones never fire and live in cond-inactive).
+        QUAR_SET=" ${QUAR_VERDICT#trusted:perms=} "
+        QUAR_SET="${QUAR_SET%%|cond-*} "
         case "$QUAR_SET" in
           *' execute '*)
-            echo "rootlesskit bin_t quarantine: VIOLATED (a trusted response carries an execute grant)"
+            echo "rootlesskit bin_t quarantine: VIOLATED (a trusted response carries an effective execute grant)"
             echo "POLICY-GATE: FAIL (the deliberate bin_t quarantine was not preserved)"
             PP_EXPECTED=0
             ;;
           *)
-            echo "rootlesskit bin_t quarantine: PRESERVED (trusted response; the execute token is genuinely absent)"
+            echo "rootlesskit bin_t quarantine: PRESERVED (trusted response; the execute token is genuinely absent from the effective set)"
+            echo "conditionals: $QUAR_VERDICT"
             ;;
         esac
         ;;
