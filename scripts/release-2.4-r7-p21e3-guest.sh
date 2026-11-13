@@ -1278,6 +1278,165 @@ gcc -O2 -Wall -o "$EVIDENCE_DIR/p21e3_proc_sampler" "$EVIDENCE_DIR/p21e3_proc_sa
   || fail "sampler compile failed"
 log "sampler compiled"
 
+# The process-mountinfo snapshotter (R4-P3-P6-MNB diagnostic rung): for
+# every NEW buildkitd or runc container-init pid, ONE read-only snapshot
+# of its mountinfo (mount ids, major:minor, root, propagation tags),
+# SELinux context, ns identities, and the observer-readonly /proc and
+# /proc/bus lookups through the pid's own root. Nothing is mutated.
+cat > "$EVIDENCE_DIR/p21e3_procns_snap.c" <<'PNSCEOF'
+/* p21e3_procns_snap.c — the process-mountinfo snapshotter. Polls /proc
+ * read-only; for every NEW pid whose comm names buildkitd or a runc
+ * container-init ("runc:[...]") it records one snapshot:
+ *   RPNS-BEGIN/CTX/NS/MOUNT(INFO)/LOOKUP/GAP/END records
+ * The observer's EACCES is a recorded gap, never a negative result.
+ * The tool never writes, mounts, or signals anything but its log.
+ */
+#define _GNU_SOURCE
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/xattr.h>
+#include <time.h>
+#include <unistd.h>
+
+#define MAXSEEN 256
+
+static void wallstamp(char *b, size_t n) {
+    struct timespec ts; struct tm tm;
+    clock_gettime(CLOCK_REALTIME, &ts); gmtime_r(&ts.tv_sec, &tm);
+    snprintf(b, n, "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+             tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday,
+             tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec/1000000);
+}
+
+static int seen_pids[MAXSEEN];
+static int seen_n;
+
+static int was_seen(int pid) {
+    for (int i = 0; i < seen_n; i++) if (seen_pids[i] == pid) return 1;
+    return 0;
+}
+
+static void mark_seen(int pid) {
+    if (seen_n < MAXSEEN) seen_pids[seen_n++] = pid;
+}
+
+int main(int argc, char **argv) {
+    if (argc != 3) { fprintf(stderr, "usage: %s <logfile> <stopfile>\n", argv[0]); return 2; }
+    FILE *lg = fopen(argv[1], "a");
+    if (!lg) return 2;
+    char ts[40], path[256], buf[65536], nsid[256];
+    wallstamp(ts, sizeof ts);
+    fprintf(lg, "PNS-START %s\n", ts);
+    fflush(lg);
+    for (;;) {
+        FILE *sf = fopen(argv[2], "r");
+        if (sf) { fclose(sf); break; }
+        DIR *d = opendir("/proc");
+        if (!d) break;
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            if (strspn(e->d_name, "0123456789") != strlen(e->d_name)) continue;
+            snprintf(path, sizeof path, "/proc/%s/comm", e->d_name);
+            int fd = open(path, O_RDONLY);
+            if (fd < 0) continue;
+            ssize_t r = read(fd, buf, sizeof buf - 1);
+            close(fd);
+            if (r <= 0) continue;
+            buf[r] = '\0'; buf[strcspn(buf, "\n")] = '\0';
+            int is_init = strstr(buf, "runc:[") != NULL;
+            int is_bkd = strstr(buf, "buildkitd") != NULL;
+            if (!is_init && !is_bkd) continue;
+            int pid = atoi(e->d_name);
+            if (was_seen(pid)) continue;
+            mark_seen(pid);
+            wallstamp(ts, sizeof ts);
+            fprintf(lg, "RPNS-BEGIN %s pid=%d comm=%s\n", ts, pid, buf);
+            /* SELinux context */
+            snprintf(path, sizeof path, "/proc/%d/attr/current", pid);
+            fd = open(path, O_RDONLY);
+            if (fd >= 0) {
+                r = read(fd, buf, sizeof buf - 1);
+                close(fd);
+                if (r > 0) {
+                    buf[r] = '\0'; buf[strcspn(buf, "\n")] = '\0';
+                    fprintf(lg, "RPNS-CTX pid=%d selinux_context=%s\n", pid, buf);
+                }
+            }
+            /* namespace identities: the process's own ns/user readlink IS
+             * the userns of the mountns creator on the fresh
+             * unshare/clone chains recorded here (recorded verbatim) */
+            const char *nss[3] = {"user", "pid", "mnt"};
+            for (int i = 0; i < 3; i++) {
+                snprintf(path, sizeof path, "/proc/%d/ns/%s", pid, nss[i]);
+                ssize_t lr = readlink(path, nsid, sizeof nsid - 1);
+                if (lr > 0) {
+                    nsid[lr] = '\0';
+                    fprintf(lg, "RPNS-NS pid=%d ns=%s target=%s\n", pid, nss[i], nsid);
+                }
+            }
+            /* raw mountinfo: every line verbatim (major:minor, root,
+             * mountpoint and propagation tags stay in the raw text) */
+            snprintf(path, sizeof path, "/proc/%d/mountinfo", pid);
+            fd = open(path, O_RDONLY);
+            if (fd >= 0) {
+                fprintf(lg, "RPNS-MOUNTINFO-BEGIN pid=%d\n", pid);
+                size_t off = 0;
+                while ((r = read(fd, buf + off, sizeof buf - 1 - off)) > 0) {
+                    off += (size_t)r;
+                    if (off >= sizeof buf - 1) break;
+                }
+                close(fd);
+                buf[off] = '\0';
+                char *ls = buf;
+                for (char *nl = strchr(ls, '\n'); nl; ls = nl + 1, nl = strchr(ls, '\n')) {
+                    *nl = '\0';
+                    fprintf(lg, "RPNS-MOUNT pid=%d %s\n", pid, ls);
+                }
+                fprintf(lg, "RPNS-MOUNTINFO-END pid=%d\n", pid);
+            } else {
+                fprintf(lg, "RPNS-MOUNTINFO-BEGIN pid=%d\nRPNS-GAP pid=%d mountinfo errno=%d\n", pid, pid, errno);
+            }
+            /* observer-readonly lookups through the pid's own root DFS */
+            const char *lookups[2] = {"proc", "proc/bus"};
+            for (int i = 0; i < 2; i++) {
+                snprintf(path, sizeof path, "/proc/%d/root/%s", pid, lookups[i]);
+                struct stat st;
+                if (stat(path, &st) == 0) {
+                    char lbl[256];
+                    ssize_t xr = lgetxattr(path, "security.selinux", lbl, sizeof lbl - 1);
+                    if (xr > 0) { lbl[xr] = '\0'; } else { snprintf(lbl, sizeof lbl, "<rc=%ld>", (long)xr); }
+                    fprintf(lg, "RPNS-LOOKUP pid=%d path=/proc/%s stat=ok dev=%lu ino=%lu mode=%o label=%s\n",
+                            pid, lookups[i], (unsigned long)st.st_dev,
+                            (unsigned long)st.st_ino, st.st_mode & 07777, lbl);
+                } else {
+                    fprintf(lg, "RPNS-LOOKUP pid=%d path=/proc/%s stat=<errno=%d>\n", pid, lookups[i], errno);
+                }
+            }
+            wallstamp(ts, sizeof ts);
+            fprintf(lg, "RPNS-END %s pid=%d\n", ts, pid);
+            fflush(lg);
+        }
+        closedir(d);
+        fflush(lg);
+        struct timespec slp = {0, 5 * 1000 * 1000};
+        nanosleep(&slp, NULL);
+    }
+    wallstamp(ts, sizeof ts);
+    fprintf(lg, "PNS-DONE %s\n", ts);
+    fclose(lg);
+    return 0;
+}
+PNSCEOF
+gcc -O2 -Wall -o "$EVIDENCE_DIR/p21e3_procns_snap" "$EVIDENCE_DIR/p21e3_procns_snap.c" \
+  || fail "procns snapshotter compile failed"
+log "procns snapshotter compiled"
+
 # The prepared-tree event watcher (R4-P3-P5): the per-operation directory
 # under /var/lib/docker-helper/dev-prep lives only for the length of the
 # operation, so its owner/mode/label/ACL state must be captured AT THE
@@ -1709,6 +1868,21 @@ rm -f "$STOPSAMP"
 SAMPLER_PID=""
 "$EVIDENCE_DIR/p21e3_proc_sampler" "$EVIDENCE_DIR/p21e3-sampler.log" "$STOPSAMP" &
 SAMPLER_PID=$!
+# The process-mountinfo snapshotter runs beside the sampler on the SAME
+# stop file; its snapshots are the MNB rung's per-context evidence.
+PNS_PID=""
+"$EVIDENCE_DIR/p21e3_procns_snap" "$EVIDENCE_DIR/p21e3-procns.log" "$STOPSAMP" &
+PNS_PID=$!
+# HOST (initial mount namespace) snapshot: the /proc view, its labels and
+# the observer's lookups; the propagation tags stay in the raw lines.
+{
+  echo "== HOST (init mount namespace, pid 1 view) =="
+  echo "procfs-instance: pidns=$(readlink /proc/1/ns/pid) mntns=$(readlink /proc/1/ns/mnt) userns=$(readlink /proc/1/ns/user)"
+  echo "probe identity: uid=$(id -u) context=$(id -Z 2>/dev/null || echo '<unavailable>')"
+  ls -Zd /proc /proc/bus 2>&1
+  echo ":: /proc and submounts from /proc/1/mountinfo (raw; mount ids, major:minor, root, propagation)"
+  grep -aE '[[:space:]]/proc([[:space:]/]|\b|$)|/proc/' /proc/1/mountinfo || cat /proc/1/mountinfo
+} > "$EVIDENCE_DIR/p21e3-procns-host.log" 2>&1
 trap 'p21e3_dontaudit_restore; measure_abandon' EXIT
 SAMPLER_CONFIRMED=0
 for _ in $(seq 1 100); do
@@ -1845,6 +2019,10 @@ for s in $STRACE_ALL_PIDS; do
 done
 wait "$SAMPLER_PID" 2>/dev/null || true
 SAMPLER_PID=""
+if [ -n "${PNS_PID:-}" ]; then
+  wait "$PNS_PID" 2>/dev/null || true
+  PNS_PID=""
+fi
 if [ -n "${WATCHER_PID:-}" ]; then
   touch "$WATCHER_STOP" 2>/dev/null || true
   wait "$WATCHER_PID" 2>/dev/null || true

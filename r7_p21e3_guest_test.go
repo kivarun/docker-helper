@@ -493,6 +493,12 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		"p21e3-daemon-journal.log",
 		"p21e3-devprep-terminal-probe.log",
 		"dev_prep_cleanup",
+		// R4-P3-P6-MNB mountinfo snapshots: per-context raw mountinfo,
+		// context/ns identities, and the readonly lookups.
+		"p21e3_procns_snap",
+		"p21e3-procns.log",
+		"p21e3-procns-host.log",
+		"RPNS-MOUNT",
 		// R4-P3-P5-R1: the state root is captured once more AFTER the
 		// build terminal, alongside the per-op teardown race capture.
 		"post-terminal traverse-chain state",
