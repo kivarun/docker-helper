@@ -75,10 +75,9 @@ type buildDriver struct {
 	req buildDriverRequest
 
 	// startCategory carries the authoritative per-operation MCS category
-	// returned by the typed manager START (P21-E-A2-C5). It is the future
-	// trusted-preparation input; the manager stays the single allocator,
-	// no category inference from filesystem labels exists, and the value
-	// is consumed strictly within this operation's lifetime.
+	// returned by the typed manager START (P21-E-A2-C5). The manager stays
+	// the single allocator, and this value drives only this operation's
+	// trusted preparation.
 	startCategory builderCategory
 }
 
@@ -118,6 +117,7 @@ func (d *buildDriver) runStages() buildStageResult {
 	// B. validate the expected BuildKit socket (root-side, independent of
 	// manager readiness claims).
 	if err := d.validateSocket(); err != nil {
+		d.a.devPrepAdmission.finishPreparation(d.op.ID)
 		d.logStage("builder_socket_validation_failed", err)
 		d.builderStopCleanup()
 		return buildStageResult{ResultCode: "docker_build_failed", Message: "builder socket validation failed"}
@@ -130,6 +130,7 @@ func (d *buildDriver) runStages() buildStageResult {
 	// buildctl; the instance is live from the successful START, so every
 	// exit here rolls the manager back before returning.
 	prepRes := d.devPrepStage()
+	d.a.devPrepAdmission.finishPreparation(d.op.ID)
 	if prepRes.Err != nil || prepRes.Terminated {
 		d.builderStopCleanup()
 		// Termination keeps priority over failure, classified by the
@@ -139,9 +140,8 @@ func (d *buildDriver) runStages() buildStageResult {
 		if prepRes.Terminated || d.latchObserved() {
 			return buildStageResult{ResultCode: d.terminationResultCode(), Message: "build cancelled"}
 		}
-		// A failed preparation fails closed BEFORE buildctl and removed
-		// its own residue (the preparer's own-residue contract); no
-		// driver-side disposal runs here.
+		// A failed preparation fails closed before buildctl. The
+		// preparer's own-residue contract governs cleanup.
 		return buildStageResult{ResultCode: "docker_build_failed", Message: "trusted dev preparation failed"}
 	}
 
@@ -334,15 +334,20 @@ func (d *buildDriver) validateSocket() error {
 
 // managerStartStage runs the manager START round-trip through the
 // cancellable no-child control stage and the P2 client, capturing the
-// typed authoritative category for the future trusted preparation.
+// typed authoritative category for trusted preparation.
 func (d *buildDriver) managerStartStage() buildStageResult {
 	client := d.builderClient()
 	var startErr error
 	res := runOperationControlStage(d.op, func(ctx context.Context) error {
-		var category builderCategory
-		category, startErr = client.Start(ctx, d.op.ID)
-		if startErr == nil {
-			d.startCategory = category
+		categorized, err := builderProvisionGate()
+		if err != nil {
+			startErr = fmt.Errorf("determine MAC backend before builder START: %w", err)
+			return startErr
+		}
+		if categorized {
+			d.startCategory, startErr = d.a.devPrepAdmission.startBuilder(ctx, d.op.ID, devPrepOccupiedCategories, client.Start)
+		} else {
+			d.startCategory, startErr = client.Start(ctx, d.op.ID, nil)
 		}
 		return startErr
 	})
@@ -403,7 +408,7 @@ func (d *buildDriver) devPrepStage() buildStageResult {
 	if res.Err != nil {
 		// The cancel classification is the LATCH's (the same rule the
 		// START stage applies). A preparation failure is a plain stage
-		// failure: the preparer removed its own residue.
+		// failure. The preparer reports any own-residue cleanup error.
 		if d.latchObserved() {
 			return buildStageResult{Terminated: true}
 		}

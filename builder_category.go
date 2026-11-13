@@ -3,10 +3,8 @@ package main
 // builder_category.go owns the per-operation MCS category representation
 // (G32 r3 §4.1): one canonical internal type, one parser/formatter pair,
 // and the fixed production pool. Categories are bound to instance records
-// at START admission under the manager lock (the manager map is the single
-// occupancy source) and release exactly when the terminal convergence
-// removes the record — there is no separate allocator object, lock, or
-// free-list.
+// at START admission under the manager lock. The manager accounts for
+// instance records and the daemon's prepared-tree exclusions.
 
 import "strconv"
 
@@ -23,6 +21,18 @@ const (
 	builderCategoryPoolMin builderCategory = 1
 	builderCategoryPoolMax builderCategory = 1023
 )
+
+// builderCategorySet is the fixed-size START exclusion bitmap. Bit zero
+// is reserved because c0 is never issued.
+type builderCategorySet [builderCategoryPoolMax/8 + 1]byte
+
+func (s *builderCategorySet) add(c builderCategory) {
+	s[c/8] |= 1 << (c % 8)
+}
+
+func (s *builderCategorySet) contains(c builderCategory) bool {
+	return s[c/8]&(1<<(c%8)) != 0
+}
 
 // String renders the canonical textual form c<N>. It is the single
 // formatter; no production code composes the spelling from parts.

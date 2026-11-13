@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/hex"
 	"errors"
 	"strings"
 )
@@ -10,7 +11,7 @@ import (
 //
 // One request per connection, one response line:
 //
-//	START <operation_id>\n
+//	START <operation_id> [<excluded_categories_hex>]\n
 //	STOP <operation_id>\n
 //	PURGE\n
 //
@@ -18,6 +19,8 @@ import (
 // (isOperationID) owned by operation.go — no second grammar exists.
 // Responses come exactly from the fixed vocabulary below; the protocol
 // never carries filesystem paths, PIDs, argv, or internal errors.
+// A nonempty exclusion set uses a fixed-size hex bitmap over the category
+// pool. The daemon supplies it before the manager reserves and launches.
 //
 // The success vocabulary is command-specific:
 //
@@ -36,9 +39,10 @@ import (
 // The client reads to the terminating newline, never interprets an
 // incomplete prefix, rejects EOF before the newline and an
 // over-ceiling line as ambiguous, and enforces
-// builderManagerRequestCeiling on the line (P21-E-R1-C1).
+// builderManagerResponseCeiling on the line (P21-E-R1-C1).
 const (
-	builderManagerRequestCeiling = 128 // bytes; the grammar needs far less
+	builderManagerRequestCeiling  = 320 // bytes, including the START bitmap and newline
+	builderManagerResponseCeiling = 128
 
 	builderManagerCmdStart = "START"
 	builderManagerCmdStop  = "STOP"
@@ -72,8 +76,21 @@ func builderManagerStartCategoryToken(line string) (string, bool) {
 
 // builderManagerRequest is one parsed manager request.
 type builderManagerRequest struct {
-	Command     string // START | STOP | PURGE
-	OperationID string // canonical op_ + 32 hex; empty for PURGE
+	Command            string // START | STOP | PURGE
+	OperationID        string // canonical op_ + 32 hex; empty for PURGE
+	ExcludedCategories builderCategorySet
+	HasExclusions      bool // true even for an explicit empty snapshot
+}
+
+func (r builderManagerRequest) wireLine() string {
+	line := r.Command
+	if r.OperationID != "" {
+		line += " " + r.OperationID
+	}
+	if r.HasExclusions {
+		line += " " + hex.EncodeToString(r.ExcludedCategories[:])
+	}
+	return line
 }
 
 // parseBuilderManagerRequest parses one request line (without the
@@ -90,11 +107,10 @@ func parseBuilderManagerRequest(line []byte) (builderManagerRequest, string) {
 			return builderManagerRequest{Command: builderManagerCmdPurge}, ""
 		}
 		return builderManagerRequest{}, builderManagerRespBadRequest
-	case 2:
+	case 2, 3:
 		cmd := string(fields[0])
 		opID := string(fields[1])
-		if cmd == builderManagerCmdPurge {
-			// PURGE takes no argument.
+		if cmd == builderManagerCmdPurge || (len(fields) == 3 && cmd != builderManagerCmdStart) {
 			return builderManagerRequest{}, builderManagerRespBadRequest
 		}
 		if cmd != builderManagerCmdStart && cmd != builderManagerCmdStop {
@@ -103,7 +119,18 @@ func parseBuilderManagerRequest(line []byte) (builderManagerRequest, string) {
 		if !isOperationID(opID) {
 			return builderManagerRequest{}, builderManagerRespBadOpID
 		}
-		return builderManagerRequest{Command: cmd, OperationID: opID}, ""
+		req := builderManagerRequest{Command: cmd, OperationID: opID}
+		if len(fields) == 3 {
+			req.HasExclusions = true
+			bitmap := fields[2]
+			if len(bitmap) != hex.EncodedLen(len(req.ExcludedCategories)) {
+				return builderManagerRequest{}, builderManagerRespBadRequest
+			}
+			if _, err := hex.Decode(req.ExcludedCategories[:], bitmap); err != nil || req.ExcludedCategories.contains(0) {
+				return builderManagerRequest{}, builderManagerRespBadRequest
+			}
+		}
+		return req, ""
 	default:
 		return builderManagerRequest{}, builderManagerRespBadRequest
 	}

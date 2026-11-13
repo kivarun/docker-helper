@@ -144,8 +144,9 @@ a per-operation rootless BuildKit instance whose lifecycle is owned by the
 dedicated builder manager — a local service under an unprivileged identity
 with its own Unix socket, not a second HTTP API — and the image leaves the
 sandbox only as the exported tar. The daemon's build driver owns the whole
-sequence: manager START, the bundled `buildctl` build against the
-operation's private BuildKit socket, manager STOP, and the trusted commit.
+sequence: manager START, trusted `/dev` preparation, the bundled `buildctl`
+build against the operation's private BuildKit socket, manager STOP,
+prepared-tree disposal, and the trusted commit.
 The authoritative build description lives in [Build](#build).
 
 There are exactly four bearer classes, described by the [authority
@@ -2730,9 +2731,11 @@ Release 2.4 does not run `docker build` in the daemon's rootful Docker
 position. Every build executes as the frozen server-owned sequence
 
 ```
-manager START -> BuildKit socket validation -> buildctl (staged context,
+manager START -> BuildKit socket validation -> trusted /dev preparation
+              -> buildctl (staged context,
                  internal tag, docker-tar export into the operation's
-                 staging tree) -> manager STOP -> docker load ->
+                 staging tree) -> manager STOP -> prepared-tree disposal
+              -> docker load ->
                  internal-tag verification -> docker tag commit ->
                  bounded internal-tag cleanup
 ```
@@ -2755,6 +2758,15 @@ Ownership and lifecycle:
   and PURGE converges every live instance. Instance records, per-op
   runtime/state directories, process-group kill, reap, and cleanup are
   the manager's; the daemon never manipulates builder state directly.
+- the **daemon** prepares the trusted per-operation `/dev` tree using the
+  category returned by START. It disposes the tree after manager STOP has
+  proven convergence. On enforcing SELinux, the daemon excludes categories
+  of on-disk prepared trees and pending preparations from each START.
+  The manager selects the lowest free category after accounting for
+  those exclusions and its instance records. Surviving trees hold their
+  categories through cleanup failures and service restarts. Both services
+  need the same START protocol on SELinux. A mixed-version pair can refuse
+  builds until both services run the updated binary.
 - the rootless execution chain per operation is rootlesskit
   (`--net=slirp4netns`, `--copy-up=/etc`, `--disable-host-loopback`)
   launching the pinned bundled `buildkitd` with `--rootless` and the

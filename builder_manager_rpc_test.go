@@ -128,7 +128,7 @@ func TestBuilderClientRejectsWrongManagerPeerUID(t *testing.T) {
 		}
 	}()
 	c := &builderManagerClient{}
-	_, err := c.Start(context.Background(), "op_0123456789abcdef0123456789abcdef")
+	_, err := c.Start(context.Background(), "op_0123456789abcdef0123456789abcdef", nil)
 	if err == nil {
 		t.Fatal("wrong manager peer uid must be rejected before write")
 	}
@@ -185,7 +185,7 @@ func TestBuilderClientAmbiguousStartConvergesWithFreshContextStop(t *testing.T) 
 	c := &builderManagerClient{}
 	ctx, cancel := context.WithCancel(context.Background())
 	go time.AfterFunc(50*time.Millisecond, cancel)
-	_, err := c.Start(ctx, "op_0123456789abcdef0123456789abcdef")
+	_, err := c.Start(ctx, "op_0123456789abcdef0123456789abcdef", nil)
 	cancel()
 	if err == nil {
 		t.Fatal("ambiguous START must not report success")
@@ -307,7 +307,7 @@ func TestBuilderClientMapsWellFormedErr(t *testing.T) {
 		}
 	}()
 	c := &builderManagerClient{}
-	_, err := c.Start(context.Background(), "op_0123456789abcdef0123456789abcdef")
+	_, err := c.Start(context.Background(), "op_0123456789abcdef0123456789abcdef", nil)
 	var mgrErr *builderManagerError
 	if !errors.As(err, &mgrErr) {
 		t.Fatalf("well-formed ERR must map to typed manager error, got %v", err)
@@ -319,7 +319,7 @@ func TestBuilderClientMapsWellFormedErr(t *testing.T) {
 
 func TestBuilderClientStartRefusesNoncanonicalID(t *testing.T) {
 	c := &builderManagerClient{}
-	if _, err := c.Start(context.Background(), "OP_UPPER"); err == nil {
+	if _, err := c.Start(context.Background(), "OP_UPPER", nil); err == nil {
 		t.Fatal("noncanonical op id must be refused client-side")
 	}
 }
@@ -347,7 +347,7 @@ func TestBuilderClientAmbiguousStartErrStopIsNotProvenConvergence(t *testing.T) 
 	c := &builderManagerClient{}
 	ctx, cancel := context.WithCancel(context.Background())
 	go time.AfterFunc(50*time.Millisecond, cancel)
-	_, err := c.Start(ctx, "op_0123456789abcdef0123456789abcdef")
+	_, err := c.Start(ctx, "op_0123456789abcdef0123456789abcdef", nil)
 	cancel()
 	if err == nil {
 		t.Fatal("refused compensation must fail closed")
@@ -393,7 +393,7 @@ func TestBuilderClientAmbiguousStartErrStopDistinctFromProvenConvergence(t *test
 			c := &builderManagerClient{}
 			ctx, cancel := context.WithCancel(context.Background())
 			go time.AfterFunc(50*time.Millisecond, cancel)
-			_, err := c.Start(ctx, "op_0123456789abcdef0123456789abcdef")
+			_, err := c.Start(ctx, "op_0123456789abcdef0123456789abcdef", nil)
 			cancel()
 			if err == nil {
 				t.Fatal("ambiguous START must never report success")
@@ -424,7 +424,7 @@ func TestBuilderClientStartDeadlineBounded(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go time.AfterFunc(100*time.Millisecond, cancel)
 	start := time.Now()
-	_, err := c.Start(ctx, "op_0123456789abcdef0123456789abcdef")
+	_, err := c.Start(ctx, "op_0123456789abcdef0123456789abcdef", nil)
 	elapsed := time.Since(start)
 	cancel()
 	if err == nil {
@@ -507,7 +507,7 @@ func TestBuilderClientStartTypedCategorySuccessBoundaries(t *testing.T) {
 			}()
 
 			c := &builderManagerClient{}
-			category, err := c.Start(context.Background(), "op_0123456789abcdef0123456789abcdef")
+			category, err := c.Start(context.Background(), "op_0123456789abcdef0123456789abcdef", nil)
 			if !tc.wantOK {
 				if err == nil {
 					t.Fatalf("response %q must not report START success", tc.response)
@@ -674,7 +674,7 @@ func TestBuilderClientStartFragmentedResponseCompletesToFullLine(t *testing.T) {
 		err      error
 	}, 1)
 	go func() {
-		category, err := c.Start(context.Background(), "op_0123456789abcdef0123456789abcdef")
+		category, err := c.Start(context.Background(), "op_0123456789abcdef0123456789abcdef", nil)
 		result <- struct {
 			category builderCategory
 			err      error
@@ -742,7 +742,7 @@ func TestBuilderClientStartTruncatedResponseEOFCompensates(t *testing.T) {
 	}()
 
 	c := &builderManagerClient{}
-	category, err := c.Start(context.Background(), "op_0123456789abcdef0123456789abcdef")
+	category, err := c.Start(context.Background(), "op_0123456789abcdef0123456789abcdef", nil)
 	if err == nil {
 		t.Fatal("a truncated response must never report START success")
 	}

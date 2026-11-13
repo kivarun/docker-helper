@@ -61,6 +61,32 @@ func TestBuilderManagerRequestParserEmbeddedNUL(t *testing.T) {
 	}
 }
 
+func TestBuilderManagerStartExclusionFraming(t *testing.T) {
+	const opID = "op_0123456789abcdef0123456789abcdef"
+	req := builderManagerRequest{Command: builderManagerCmdStart, OperationID: opID, HasExclusions: true}
+	req.ExcludedCategories.add(1)
+	req.ExcludedCategories.add(1023)
+	line := req.wireLine()
+	if len(line)+1 > builderManagerRequestCeiling {
+		t.Fatalf("START request exceeds the wire ceiling: %d bytes", len(line)+1)
+	}
+	if got, err := parseBuilderManagerRequest([]byte(line)); err != "" || got != req {
+		t.Fatalf("parse START = %+v, %q; want %+v", got, err, req)
+	}
+
+	_, bitmap, _ := strings.Cut(line, opID+" ")
+	for _, malformed := range []string{
+		"START " + opID + " " + bitmap[1:],
+		"START " + opID + " z" + bitmap[1:],
+		"START " + opID + " 03" + bitmap[2:], // reserved c0 bit
+		"STOP " + opID + " " + bitmap,
+	} {
+		if _, err := parseBuilderManagerRequest([]byte(malformed)); err != builderManagerRespBadRequest {
+			t.Errorf("invalid exclusion request got %q; want bad_request", err)
+		}
+	}
+}
+
 // ---------------- identity guard (§3/§24) ----------------
 
 func TestBuilderVerifyIdentityRefusesRoot(t *testing.T) {

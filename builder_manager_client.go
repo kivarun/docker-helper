@@ -119,7 +119,7 @@ func (c *builderManagerClient) verifyManagerPeer(conn *net.UnixConn) error {
 //   - well-formed response (OK / OK absent / ERR ...): returned as-is;
 //   - unreachable before any write: builderClientUnreachable;
 //   - written but response unknowable: builderClientAmbiguous.
-func (c *builderManagerClient) roundTrip(ctx context.Context, command, opID string, readTimeout time.Duration) (string, error) {
+func (c *builderManagerClient) roundTrip(ctx context.Context, request builderManagerRequest, readTimeout time.Duration) (string, error) {
 	dialer := net.Dialer{Timeout: builderClientDialTimeout}
 	dialCtx, cancelDial := context.WithTimeout(ctx, builderClientDialTimeout)
 	defer cancelDial()
@@ -145,14 +145,10 @@ func (c *builderManagerClient) roundTrip(ctx context.Context, command, opID stri
 		return "", &builderClientUnreachable{cause: err}
 	}
 
-	request := command
-	if opID != "" {
-		request = command + " " + opID
-	}
 	if err := unixConn.SetWriteDeadline(time.Now().Add(builderClientWriteTimeout)); err != nil {
 		return "", &builderClientUnreachable{cause: err}
 	}
-	if _, err := fmt.Fprintf(unixConn, "%s\n", request); err != nil {
+	if _, err := fmt.Fprintf(unixConn, "%s\n", request.wireLine()); err != nil {
 		return "", &builderClientAmbiguous{cause: err}
 	}
 
@@ -181,7 +177,7 @@ func (c *builderManagerClient) roundTrip(ctx context.Context, command, opID stri
 	// ceiling on the line. Bytes after the first newline are ignored (one
 	// response line per connection).
 
-	readBuf := make([]byte, builderManagerRequestCeiling+1)
+	readBuf := make([]byte, builderManagerResponseCeiling+1)
 	filled := 0
 	var line []byte
 	for {
@@ -201,7 +197,7 @@ func (c *builderManagerClient) roundTrip(ctx context.Context, command, opID stri
 		}
 	}
 	text := trimNewlineSuffix(string(line))
-	if !isWellFormedManagerResponse(command, text) {
+	if !isWellFormedManagerResponse(request.Command, text) {
 		return "", &builderClientAmbiguous{cause: errors.New("malformed response")}
 	}
 	return text, nil
@@ -315,13 +311,22 @@ func mapManagerStartResponse(line string) (builderCategory, error) {
 // No category is ever returned with an error, on cancellation, on an
 // ambiguous START, or on a refused compensation (the zero category is the
 // never-issued value).
-func (c *builderManagerClient) Start(ctx context.Context, operationID string) (builderCategory, error) {
+func (c *builderManagerClient) Start(ctx context.Context, operationID string, excluded *builderCategorySet) (builderCategory, error) {
 	if !isOperationID(operationID) {
 		return 0, &builderManagerError{kind: builderManagerRespBadOpID}
 	}
-	line, err := c.roundTrip(ctx, builderManagerCmdStart, operationID, builderClientStartRead)
+	request := builderManagerRequest{Command: builderManagerCmdStart, OperationID: operationID}
+	if excluded != nil {
+		request.ExcludedCategories = *excluded
+		request.HasExclusions = true
+	}
+	line, err := c.roundTrip(ctx, request, builderClientStartRead)
 	if err == nil {
-		return mapManagerStartResponse(line)
+		category, responseErr := mapManagerStartResponse(line)
+		if responseErr != nil || excluded == nil || !excluded.contains(category) {
+			return category, responseErr
+		}
+		err = &builderClientAmbiguous{cause: errors.New("manager START returned an excluded category")}
 	}
 	var ambiguous *builderClientAmbiguous
 	if !errors.As(err, &ambiguous) {
@@ -336,7 +341,8 @@ func (c *builderManagerClient) Start(ctx context.Context, operationID string) (b
 	// the proven-convergence verdict.
 	stopCtx, cancel := context.WithTimeout(context.Background(), builderClientStopRead)
 	defer cancel()
-	stopLine, stopErr := c.roundTrip(stopCtx, builderManagerCmdStop, operationID, builderClientStopRead)
+	stopRequest := builderManagerRequest{Command: builderManagerCmdStop, OperationID: operationID}
+	stopLine, stopErr := c.roundTrip(stopCtx, stopRequest, builderClientStopRead)
 	if stopErr != nil {
 		return 0, fmt.Errorf("builder manager START was ambiguous and convergence STOP failed: %w", stopErr)
 	}
@@ -354,7 +360,8 @@ func (c *builderManagerClient) Stop(ctx context.Context, operationID string) err
 	if !isOperationID(operationID) {
 		return &builderManagerError{kind: builderManagerRespBadOpID}
 	}
-	line, err := c.roundTrip(ctx, builderManagerCmdStop, operationID, builderClientStopRead)
+	request := builderManagerRequest{Command: builderManagerCmdStop, OperationID: operationID}
+	line, err := c.roundTrip(ctx, request, builderClientStopRead)
 	if err == nil {
 		return mapManagerResponse(builderManagerCmdStop, line)
 	}
@@ -364,7 +371,7 @@ func (c *builderManagerClient) Stop(ctx context.Context, operationID string) err
 	}
 	retryCtx, cancel := context.WithTimeout(context.Background(), builderClientStopRead)
 	defer cancel()
-	line, retryErr := c.roundTrip(retryCtx, builderManagerCmdStop, operationID, builderClientStopRead)
+	line, retryErr := c.roundTrip(retryCtx, request, builderClientStopRead)
 	if retryErr == nil {
 		return mapManagerResponse(builderManagerCmdStop, line)
 	}
@@ -377,7 +384,7 @@ func (c *builderManagerClient) Stop(ctx context.Context, operationID string) err
 
 // Purge issues runtime PURGE.
 func (c *builderManagerClient) Purge(ctx context.Context) error {
-	line, err := c.roundTrip(ctx, builderManagerCmdPurge, "", builderClientStopRead)
+	line, err := c.roundTrip(ctx, builderManagerRequest{Command: builderManagerCmdPurge}, builderClientStopRead)
 	if err == nil {
 		return mapManagerResponse(builderManagerCmdPurge, line)
 	}

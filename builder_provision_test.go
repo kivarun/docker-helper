@@ -160,7 +160,7 @@ func TestBuilderProvisioningSuccessOrderContextsBeforeSpawn(t *testing.T) {
 		t.Fatal("setup self-test: the record exists before admission")
 	}
 	respCh := make(chan string, 1)
-	go func() { respCh <- m.start(opID, nil) }()
+	go func() { respCh <- m.start(opID, builderCategorySet{}, nil) }()
 	if !waitInstance(t, m, opID, true) {
 		t.Fatal("START did not reserve")
 	}
@@ -238,7 +238,7 @@ func provisionFailureCase(t *testing.T, opID string, force func(f *provisionFixt
 	}
 	t.Cleanup(func() { builderNewRootlessKitCommand = orig })
 
-	if resp := m.start(opID, nil); resp != builderManagerRespInternal {
+	if resp := m.start(opID, builderCategorySet{}, nil); resp != builderManagerRespInternal {
 		t.Fatalf("START = %q, want internal (provisioning failure)", resp)
 	}
 	if !waitInstance(t, m, opID, false) {
@@ -292,7 +292,7 @@ func TestBuilderProvisioningReadBackTerminalNULCanonicalizes(t *testing.T) {
 	}
 
 	respCh := make(chan string, 1)
-	go func() { respCh <- m.start(opID, nil) }()
+	go func() { respCh <- m.start(opID, builderCategorySet{}, nil) }()
 	if !waitInstance(t, m, opID, true) {
 		t.Fatal("START did not reserve")
 	}
@@ -387,7 +387,7 @@ func TestBuilderProvisioningGateDetectionErrorFailsClosed(t *testing.T) {
 	f := newProvisionFixture(t)
 
 	opID := "op_0123456789abcdef0123456789abcdef"
-	if resp := m.start(opID, nil); resp != builderManagerRespInternal {
+	if resp := m.start(opID, builderCategorySet{}, nil); resp != builderManagerRespInternal {
 		t.Fatalf("START = %q, want internal (detection error)", resp)
 	}
 	if !waitInstance(t, m, opID, false) {
@@ -411,7 +411,7 @@ func TestBuilderProvisioningSkippedOnNonSELinux(t *testing.T) {
 
 	opID := "op_0123456789abcdef0123456789abcdef"
 	respCh := make(chan string, 1)
-	go func() { respCh <- m.start(opID, nil) }()
+	go func() { respCh <- m.start(opID, builderCategorySet{}, nil) }()
 	if !waitInstance(t, m, opID, true) {
 		t.Fatal("START did not reserve")
 	}

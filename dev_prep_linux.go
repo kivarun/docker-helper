@@ -92,6 +92,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -441,7 +442,94 @@ func (e *devPrepRefuseError) Error() string {
 // the preparer and the wrapper inspection core (which must never accept a
 // caller-supplied tree path).
 func devPrepOpDir(opID string) string {
-	return filepath.Join(daemonStateRoot, "dev-prep", opID)
+	return filepath.Join(devPrepRoot, opID)
+}
+
+const devPrepRoot = daemonStateRoot + "/dev-prep"
+
+func devPrepOccupiedCategories(ctx context.Context, pending map[string]builderCategory) (builderCategorySet, error) {
+	return devPrepScanCategories(ctx, linuxDevPrepSyscalls{}, pending)
+}
+
+// devPrepScanCategories reads the on-disk category exclusions for START.
+// A surviving op directory is the traversal boundary and outlives the
+// manager's records. Only the root daemon enumerates its own tree.
+func devPrepScanCategories(ctx context.Context, seam devPrepSyscalls, pending map[string]builderCategory) (builderCategorySet, error) {
+	var occupied builderCategorySet
+	root, err := seam.lstat(devPrepRoot)
+	if errors.Is(err, os.ErrNotExist) {
+		return occupied, nil
+	}
+	if err != nil {
+		return occupied, err
+	}
+	if !root.IsDir() {
+		return occupied, fmt.Errorf("dev-prep root %s is not a directory", devPrepRoot)
+	}
+	names, err := seam.readDirNames(devPrepRoot)
+	if err != nil {
+		return occupied, err
+	}
+	for _, name := range names {
+		if err := ctx.Err(); err != nil {
+			return occupied, err
+		}
+		if !isOperationID(name) {
+			return occupied, fmt.Errorf("unexpected entry in dev-prep root: %q", name)
+		}
+		category, err := devPrepReadOccupiedCategory(seam, devPrepOpDir(name), pending[name])
+		if errors.Is(err, os.ErrNotExist) {
+			continue // Proven-STOP disposal raced this scan.
+		}
+		if err != nil {
+			return occupied, err
+		}
+		if category.valid() {
+			occupied.add(category)
+		}
+	}
+	return occupied, nil
+}
+
+func devPrepReadOccupiedCategory(seam devPrepSyscalls, path string, pending builderCategory) (builderCategory, error) {
+	st, err := seam.lstat(path)
+	if err != nil {
+		return 0, fmt.Errorf("inspect prepared-tree entry %s: %w", path, err)
+	}
+	if !st.IsDir() {
+		return 0, fmt.Errorf("dev-prep entry %s is not a directory", path)
+	}
+	raw, err := seam.getxattr(path, "security.selinux")
+	if err != nil {
+		return 0, fmt.Errorf("read prepared-tree label for %s: %w", path, err)
+	}
+	label, err := decodeSELinuxXattrContext(raw)
+	if err != nil {
+		return 0, fmt.Errorf("read dev-prep category for %s: %w", path, err)
+	}
+	if _, token, ok := strings.Cut(label, ":s0:"); ok {
+		if category, valid := parseBuilderCategory(token); valid && label == builderObjectContext(builderDevPrepObjectType, category) {
+			return category, nil
+		}
+	}
+	// A crash between mkdir and labeling can leave an uncategorized,
+	// private directory. The preparer writes the label before adding
+	// the ACL or any child, so only this empty pre-state is accepted.
+	if st.Mode().Perm() == devPrepDirMode0700 && strings.HasSuffix(label, ":"+builderDevPrepObjectType+":s0") {
+		if pending.valid() {
+			// The snapshot holds the START category throughout any
+			// concurrent label and content publication.
+			return 0, nil
+		}
+		names, err := seam.readDirNames(path)
+		if err != nil {
+			return 0, err
+		}
+		if len(names) == 0 {
+			return 0, nil
+		}
+	}
+	return 0, fmt.Errorf("cannot determine prepared-tree category for %s", path)
 }
 
 // devPrepDisposeOperation disposes exactly ONE operation's prepared tree:
@@ -464,9 +552,7 @@ func devPrepDisposeOperation(opID string) error {
 
 // prepareTrustedDev prepares the trusted /dev tree for one operation with
 // the production syscall seam. The state root is bound to the daemon's
-// canonical state root through the config owner; the new core is
-// intentionally not invoked by any production path yet (the integration
-// round wires it into the build driver's stage sequence).
+// canonical state root through the config owner.
 func prepareTrustedDev(ctx context.Context, opID string, category builderCategory) error {
 	return prepareTrustedDevWithSyscalls(linuxDevPrepSyscalls{}, ctx, getStateDirFunc(), opID, category)
 }
@@ -489,7 +575,6 @@ func prepareTrustedDevWithSyscalls(seam devPrepSyscalls, ctx context.Context, st
 	if stateDir != daemonStateRoot {
 		return fmt.Errorf("dev-prep: state dir %q is not the canonical daemon state root %q; privileged paths are not configurable", stateDir, daemonStateRoot)
 	}
-	devPrepRoot := filepath.Join(daemonStateRoot, "dev-prep")
 	opDir := devPrepOpDir(opID)
 
 	// Refuse-to-adopt: an existing tree is never adopted, repaired, or
@@ -525,8 +610,7 @@ func prepareTrustedDevWithSyscalls(seam devPrepSyscalls, ctx context.Context, st
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	// Ensure the dev-prep subtree root: strict creation when absent, a
-	// directory check when present.
+	// Ensure the shared dev-prep root is a directory.
 	if err := devPrepEnsureRootDir(seam, devPrepRoot); err != nil {
 		return err
 	}
@@ -659,21 +743,27 @@ func devPrepRequireDir(seam devPrepSyscalls, path, what string) error {
 	return nil
 }
 
-// devPrepEnsureRootDir creates the dev-prep subtree root strictly: absent
-// → mkdir; present → it must be a directory; anything else fails.
+// devPrepEnsureRootDir creates the shared root and accepts a concurrent
+// mkdir winner only after checking that the resulting entry is a directory.
 func devPrepEnsureRootDir(seam devPrepSyscalls, devPrepRoot string) error {
-	_, err := seam.lstat(devPrepRoot)
-	switch {
-	case err == nil:
-		return devPrepRequireDir(seam, devPrepRoot, "dev-prep root")
-	case errors.Is(err, os.ErrNotExist):
-		if err := seam.mkdir(devPrepRoot, devPrepDirMode0700); err != nil {
-			return fmt.Errorf("dev-prep: cannot create %s: %w", devPrepRoot, err)
+	st, err := seam.lstat(devPrepRoot)
+	if err == nil {
+		if st.IsDir() {
+			return nil
 		}
-		return nil
-	default:
+		return fmt.Errorf("dev-prep root %s is not a directory", devPrepRoot)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("dev-prep: cannot inspect %s: %w", devPrepRoot, err)
 	}
+	err = seam.mkdir(devPrepRoot, devPrepDirMode0700)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, os.ErrExist) {
+		return devPrepRequireDir(seam, devPrepRoot, "dev-prep root")
+	}
+	return fmt.Errorf("dev-prep: cannot create %s: %w", devPrepRoot, err)
 }
 
 // devPrepVerifyRootLabel is the tripwire on the subtree-root relabel: the

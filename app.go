@@ -71,6 +71,8 @@ type App struct {
 	// construction (narrow test seam; production always returns the P2
 	// client).
 	builderClientFn func() *builderManagerClient
+	// devPrepAdmission coordinates START and in-flight tree publication.
+	devPrepAdmission builderDevPrepAdmission
 	// validateBuildKitSocketFn, when set, overrides the root-side BuildKit
 	// socket validation (narrow test seam; production default is the real
 	// validation owner).

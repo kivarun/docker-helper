@@ -75,7 +75,7 @@ func TestBuilderCategoryParseFormat(t *testing.T) {
 }
 
 // builderManagerCategoryOf reads one instance record's category through
-// the manager map (the single occupancy source).
+// the manager map (the authoritative instance record).
 func builderManagerCategoryOf(t *testing.T, m *builderManager, opID string) (builderCategory, bool) {
 	t.Helper()
 	m.mu.Lock()
@@ -107,7 +107,7 @@ func assertStartSuccessResponse(t *testing.T, m *builderManager, opID, resp stri
 func startWithCategory(t *testing.T, m *builderManager, opID string) builderCategory {
 	t.Helper()
 	respCh := make(chan string, 1)
-	go func() { respCh <- m.start(opID, nil) }()
+	go func() { respCh <- m.start(opID, builderCategorySet{}, nil) }()
 	if !waitInstance(t, m, opID, true) {
 		t.Fatalf("START %s did not reserve the map entry", opID)
 	}
@@ -146,13 +146,13 @@ func TestBuilderManagerLowestFreeCategoryAllocation(t *testing.T) {
 	defer m.mu.Unlock()
 
 	// Empty map: c1.
-	if c, ok := m.allocateCategoryLocked(); !ok || c != builderCategory(1) {
+	if c, ok := m.allocateCategoryLocked(builderCategorySet{}); !ok || c != builderCategory(1) {
 		t.Fatalf("empty manager allocated (%v, %v), want c1", c, ok)
 	}
 	// Occupy c1 and c3: the next admission must take the c2 hole.
 	m.instances["op_0123456789abcdef0123456789abcdef"] = &builderInstance{operationID: "op_0123456789abcdef0123456789abcdef", category: builderCategory(1)}
 	m.instances["op_fedcba9876543210fedcba9876543210"] = &builderInstance{operationID: "op_fedcba9876543210fedcba9876543210", category: builderCategory(3)}
-	if c, ok := m.allocateCategoryLocked(); !ok || c != builderCategory(2) {
+	if c, ok := m.allocateCategoryLocked(builderCategorySet{}); !ok || c != builderCategory(2) {
 		t.Fatalf("hole-filling allocated (%v, %v), want c2", c, ok)
 	}
 	// Exhaustion at the pool bound: the bounded test pool (c1..c5) with
@@ -160,7 +160,7 @@ func TestBuilderManagerLowestFreeCategoryAllocation(t *testing.T) {
 	m.instances["op_11111111111111111111111111111111"] = &builderInstance{operationID: "op_11111111111111111111111111111111", category: builderCategory(2)}
 	m.instances["op_22222222222222222222222222222222"] = &builderInstance{operationID: "op_22222222222222222222222222222222", category: builderCategory(4)}
 	m.instances["op_33333333333333333333333333333333"] = &builderInstance{operationID: "op_33333333333333333333333333333333", category: builderCategory(5)}
-	if c, ok := m.allocateCategoryLocked(); ok {
+	if c, ok := m.allocateCategoryLocked(builderCategorySet{}); ok {
 		t.Fatalf("exhausted pool allocated %v, want refusal", c)
 	}
 	// The production pool bound stays the canonical constant.
@@ -187,7 +187,7 @@ func TestBuilderManagerConcurrentStartsNoDuplicateCategory(t *testing.T) {
 		wg.Add(1)
 		go func(i int, opID string) {
 			defer wg.Done()
-			resps[i] = m.start(opID, nil)
+			resps[i] = m.start(opID, builderCategorySet{}, nil)
 		}(i, opID)
 	}
 	for _, opID := range opIDs {
@@ -307,7 +307,7 @@ func TestBuilderManagerPoolExhaustionRefusesBeforeSideEffects(t *testing.T) {
 	}
 
 	op2 := "op_fedcba9876543210fedcba9876543210"
-	if resp := m.start(op2, nil); resp != builderManagerRespAtCeiling {
+	if resp := m.start(op2, builderCategorySet{}, nil); resp != builderManagerRespAtCeiling {
 		t.Fatalf("exhausted-pool START = %q, want %q", resp, builderManagerRespAtCeiling)
 	}
 	// The refusal is the pool-exhaustion branch, not the ceiling branch:
@@ -361,7 +361,7 @@ func TestBuilderManagerFailedStartKeepsCategoryUntilConvergence(t *testing.T) {
 	// between reservation and convergence).
 	engaged, release := launchHoldFixture(t, opID)
 	respCh := make(chan string, 1)
-	go func() { respCh <- m.start(opID, nil) }()
+	go func() { respCh <- m.start(opID, builderCategorySet{}, nil) }()
 	select {
 	case <-engaged:
 	case <-time.After(10 * time.Second):
@@ -377,7 +377,7 @@ func TestBuilderManagerFailedStartKeepsCategoryUntilConvergence(t *testing.T) {
 	go func() {
 		op2Cat <- func() builderCategory {
 			respCh2 := make(chan string, 1)
-			go func() { respCh2 <- m.start(op2, nil) }()
+			go func() { respCh2 <- m.start(op2, builderCategorySet{}, nil) }()
 			if !waitInstance(t, m, op2, true) {
 				t.Error("concurrent admission did not reserve")
 				return 0

@@ -366,7 +366,7 @@ func TestBuilderAdmissionStartupReconcilePurgesLiveManagerState(t *testing.T) {
 	// A live instance from the "previous" daemon generation.
 	opID := "op_0123456789abcdef0123456789abcdef"
 	startResp := make(chan string, 1)
-	go func() { startResp <- m.start(opID, nil) }()
+	go func() { startResp <- m.start(opID, builderCategorySet{}, nil) }()
 	if !waitInstance(t, m, opID, true) {
 		t.Fatal("the previous generation's instance was not admitted")
 	}

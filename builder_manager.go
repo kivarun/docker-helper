@@ -378,7 +378,7 @@ func opSocketPath(opID string) string {
 // — a refusal, or the dispatch-fence registration — is visible under the
 // manager lock, never after the launch, so an absent STOP waiting out
 // older connections does not wait out a BuildKit readiness cycle.
-func (m *builderManager) start(opID string, settled func()) string {
+func (m *builderManager) start(opID string, excluded builderCategorySet, settled func()) string {
 	// Fence registration: under the manager lock — refuse an existing
 	// instance or an in-flight START of the same id (the fixed
 	// one-instance-per-operation grammar), then register the dispatch
@@ -422,10 +422,10 @@ func (m *builderManager) start(opID string, settled func()) string {
 		m.mu.Unlock()
 		return builderManagerRespAtCeiling
 	}
-	category, ok := m.allocateCategoryLocked()
+	category, ok := m.allocateCategoryLocked(excluded)
 	if !ok {
-		// Unreachable in production (the pool exceeds the ceiling by
-		// orders of magnitude); diagnostic-only cause, the protocol
+		// Retained trees may exhaust the category pool independently
+		// of the instance ceiling. Report the cause in diagnostics; the protocol
 		// keeps the existing refusal contract. The fence closes on the
 		// refusal path too, so a waiting STOP reports OK absent.
 		m.managerDiagf("START %s: operation category pool exhausted", opID)
@@ -682,21 +682,18 @@ func (m *builderManager) removeReservation(inst *builderInstance) {
 }
 
 // allocateCategoryLocked selects the lowest free category of the pool for
-// a new reservation (G32 r3 §4.1). m.mu must be held: the occupancy source
-// is the manager map itself — live and retained entries both hold their
-// record's category — so a collision is structurally impossible under the
-// lock, and a category releases exactly when the terminal convergence
-// removes the record (removeReservation is the single map-delete owner).
+// a new reservation (G32 r3 §4.1). m.mu must be held. Live and retained
+// instance records hold their categories until terminal convergence;
+// the daemon excludes its prepared-tree categories independently.
 // The returned false is the pool-exhaustion refusal: it carries no
 // filesystem or process side effects and the caller surfaces the existing
 // at-ceiling contract.
-func (m *builderManager) allocateCategoryLocked() (builderCategory, bool) {
-	occupied := make(map[builderCategory]struct{}, len(m.instances))
+func (m *builderManager) allocateCategoryLocked(occupied builderCategorySet) (builderCategory, bool) {
 	for _, inst := range m.instances {
-		occupied[inst.category] = struct{}{}
+		occupied.add(inst.category)
 	}
 	for c := builderCategoryPoolMin; c <= m.categoryPoolMax; c++ {
-		if _, taken := occupied[c]; !taken {
+		if !occupied.contains(c) {
 			return c, true
 		}
 	}
@@ -1897,7 +1894,7 @@ func (m *builderManager) handleConnection(conn *net.UnixConn, stderr io.Writer, 
 				return
 			}
 		}
-		if idx := bytes.IndexByte(buf[:n], '\n'); idx >= 0 {
+		if idx := bytes.IndexByte(buf[:n], '\n'); idx >= 0 && idx < builderManagerRequestCeiling {
 			line = buf[:idx]
 		} else {
 			// No newline within the ceiling: oversized/malformed.
@@ -1917,7 +1914,18 @@ func (m *builderManager) handleConnection(conn *net.UnixConn, stderr io.Writer, 
 	var response string
 	switch req.Command {
 	case builderManagerCmdStart:
-		response = m.start(req.OperationID, func() { m.ingress.settle(seq) })
+		// A pre-corrective daemon sends no snapshot. On SELinux, refuse
+		// that request before reservation so a mixed-version pair cannot
+		// launch into an old prepared tree's category.
+		if !req.HasExclusions {
+			categorized, err := builderProvisionGate()
+			if err != nil || categorized {
+				m.managerDiagf("START %s: prepared-tree category snapshot required on SELinux (MAC detection: %v)", req.OperationID, err)
+				response = builderManagerRespInternal
+				break
+			}
+		}
+		response = m.start(req.OperationID, req.ExcludedCategories, func() { m.ingress.settle(seq) })
 	case builderManagerCmdStop:
 		m.ingress.settle(seq)
 		response = m.stop(req.OperationID, seq)
