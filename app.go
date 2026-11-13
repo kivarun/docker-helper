@@ -75,6 +75,14 @@ type App struct {
 	// socket validation (narrow test seam; production default is the real
 	// validation owner).
 	validateBuildKitSocketFn func(opID string) error
+	// prepareTrustedDevFn, when set, overrides the build driver's trusted
+	// /dev preparation control stage (narrow test seam; production default
+	// is the real preparer owner).
+	prepareTrustedDevFn func(ctx context.Context, opID string, category builderCategory) error
+	// devPrepDisposeFn, when set, overrides the build driver's prepared-tree
+	// disposal (narrow test seam; production default is the exact
+	// per-operation disposal owner).
+	devPrepDisposeFn func(opID string) error
 	// BuilderAdmission owns the build-admission reconciliation state of the
 	// running daemon: build admission opens only after a bounded
 	// builder-manager PURGE proved the builder-manager state known-clean

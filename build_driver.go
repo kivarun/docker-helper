@@ -4,15 +4,20 @@ package main
 // single build-completion owner that replaces the 2.3 rootful
 // `docker build` child with the sandboxed sequence
 //
-//	manager START -> BuildKit socket validation -> buildctl ->
-//	manager STOP -> docker load -> verify internal tag ->
+//	manager START -> BuildKit socket validation -> trusted /dev
+//	preparation -> buildctl -> manager STOP (+ per-operation
+//	prepared-tree disposal) -> docker load -> verify internal tag ->
 //	docker tag commit -> bounded internal-tag cleanup
 //
 // behind the existing public build contract. It adds no second lifecycle:
 // termination, capacity, MAC lease, staging, logs, audit, and result
 // semantics stay with the existing owners (operation.go, supervisor,
 // staging). The P2 manager client remains the single RPC ambiguity owner;
-// the driver never speaks the manager protocol directly.
+// the driver never speaks the manager protocol directly. The trusted /dev
+// preparation stage delegates to the one preparer owner
+// (prepareTrustedDev); the prepared tree is disposed only after a proven
+// manager STOP convergence through the one disposal owner
+// (devPrepDisposeOperation).
 
 import (
 	"context"
@@ -118,28 +123,58 @@ func (d *buildDriver) runStages() buildStageResult {
 		return buildStageResult{ResultCode: "docker_build_failed", Message: "builder socket validation failed"}
 	}
 
-	// C. buildctl (normal P1 child stage through the existing seam).
+	// C. trusted /dev preparation (cancellable no-child control stage,
+	// R4-P3-P6): the synchronous root-daemon-side preparation of the ONE
+	// trusted tree this operation's wrapper will enforce, using the
+	// authoritative START category. Only a successful preparation admits
+	// buildctl; the instance is live from the successful START, so every
+	// exit here rolls the manager back before returning.
+	prepRes := d.devPrepStage()
+	if prepRes.Err != nil || prepRes.Terminated {
+		d.builderStopCleanup()
+		// Termination keeps priority over failure, classified by the
+		// LATCH (the same rule every stage applies): a cancel that lands
+		// during the preparation surfaces through the latch, regardless
+		// of the underlying error kind.
+		if prepRes.Terminated || d.latchObserved() {
+			return buildStageResult{ResultCode: d.terminationResultCode(), Message: "build cancelled"}
+		}
+		// A failed preparation fails closed BEFORE buildctl and removed
+		// its own residue (the preparer's own-residue contract); no
+		// driver-side disposal runs here.
+		return buildStageResult{ResultCode: "docker_build_failed", Message: "trusted dev preparation failed"}
+	}
+
+	// D. buildctl (normal P1 child stage through the existing seam).
 	buildctlRes := d.buildctlStage()
 	if buildctlRes.Terminated {
 		// Manager STOP is still mandatory cleanup after a cancelled
-		// buildctl (fresh server-owned context).
-		d.builderStopCleanup()
+		// buildctl (fresh server-owned context); only a PROVEN STOP
+		// convergence disposes the prepared tree.
+		if d.builderStopCleanup() == nil {
+			d.disposePreparedTree()
+		}
 		return buildStageResult{ExitCode: buildctlRes.ExitCode, ResultCode: d.terminationResultCode(), Message: "build cancelled"}
 	}
 	if buildctlRes.Err != nil {
-		d.builderStopCleanup()
+		if d.builderStopCleanup() == nil {
+			d.disposePreparedTree()
+		}
 		return buildStageResult{ExitCode: buildctlRes.ExitCode, ResultCode: "docker_build_failed", Message: "build failed"}
 	}
 
-	// D. manager STOP: mandatory cleanup owner; the untrusted builder is
+	// E. manager STOP: mandatory cleanup owner; the untrusted builder is
 	// gone before the trusted Engine import begins.
 	if err := d.builderStopCleanup(); err != nil {
 		// A STOP that cannot be proven converged must not hand an export
-		// tar produced by a possibly-live builder to the Engine.
+		// tar produced by a possibly-live builder to the Engine — and
+		// must not dispose the prepared tree, which a possibly-live
+		// builder may still use.
 		return buildStageResult{ResultCode: "docker_build_failed", Message: "builder stop failed"}
 	}
+	d.disposePreparedTree()
 
-	// E. docker load into the internal tag (normal P1 child stage).
+	// F. docker load into the internal tag (normal P1 child stage).
 	loadRes := d.loadStage()
 	if loadRes.Terminated {
 		// Best-effort exact internal-tag cleanup, then the cancelled result.
@@ -151,7 +186,7 @@ func (d *buildDriver) runStages() buildStageResult {
 		return buildStageResult{ExitCode: loadRes.ExitCode, ResultCode: "docker_build_failed", Message: "docker load failed"}
 	}
 
-	// F. verify the imported internal tag resolves in the local Engine
+	// G. verify the imported internal tag resolves in the local Engine
 	// (cancellable child stage: a latched termination refuses admission so
 	// no inspect process starts; a termination during the stage signals the
 	// admitted child).
@@ -165,7 +200,7 @@ func (d *buildDriver) runStages() buildStageResult {
 		return buildStageResult{ExitCode: verifyRes.ExitCode, ResultCode: "docker_build_failed", Message: "docker load failed"}
 	}
 
-	// G. commit: docker tag <internal> <requested> through the one
+	// H. commit: docker tag <internal> <requested> through the one
 	// linearized commit-stage primitive.
 	commitRes := d.commitStage()
 	if commitRes.Terminated {
@@ -342,6 +377,61 @@ func (d *buildDriver) builderStopCleanup() error {
 	}
 	d.logStage("builder_stop", nil)
 	return nil
+}
+
+// devPrepStage runs the trusted /dev preparation as ONE cancellable
+// no-child control stage through the existing runOperationControlStage
+// owner: admission refuses once the termination latch is set, the exact
+// cancel function is installed under op.mu for the preparation's context,
+// and the slot is cleared afterwards. The preparation itself is the one
+// preparer owner (prepareTrustedDev) with the authoritative START category
+// and the canonical operation ID; the driver adds no preparation
+// semantics, path logic, or category inference.
+func (d *buildDriver) devPrepStage() buildStageResult {
+	prepare := prepareTrustedDev
+	if d.a.prepareTrustedDevFn != nil {
+		prepare = d.a.prepareTrustedDevFn
+	}
+	var prepErr error
+	res := runOperationControlStage(d.op, func(ctx context.Context) error {
+		prepErr = prepare(ctx, d.op.ID, d.startCategory)
+		return prepErr
+	})
+	if res.Terminated {
+		return buildStageResult{Terminated: true}
+	}
+	if res.Err != nil {
+		// The cancel classification is the LATCH's (the same rule the
+		// START stage applies). A preparation failure is a plain stage
+		// failure: the preparer removed its own residue.
+		if d.latchObserved() {
+			return buildStageResult{Terminated: true}
+		}
+		d.logStage("dev_prep", prepErr)
+		return buildStageResult{Err: prepErr}
+	}
+	d.logStage("dev_prep", nil)
+	return buildStageResult{}
+}
+
+// disposePreparedTree disposes exactly THIS operation's trusted prepared
+// tree through the one disposal owner (devPrepDisposeOperation) after the
+// caller proved manager STOP convergence. It is invoked on every exit path
+// that reached the preparation stage with a successfully prepared tree;
+// the driver adds no path logic. A disposal failure never downgrades the
+// build result but is never silent: it is reported through the same stage
+// diagnostics as every other stage (the successful terminal must not hide
+// an unreported prepared-tree cleanup failure).
+func (d *buildDriver) disposePreparedTree() {
+	dispose := devPrepDisposeOperation
+	if d.a.devPrepDisposeFn != nil {
+		dispose = d.a.devPrepDisposeFn
+	}
+	if err := dispose(d.op.ID); err != nil {
+		d.logStage("dev_prep_cleanup", err)
+		return
+	}
+	d.logStage("dev_prep_cleanup", nil)
 }
 
 // buildctlStage assembles the exact server-owned buildctl invocation and

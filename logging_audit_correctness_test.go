@@ -563,6 +563,7 @@ func TestBuildStartFailureOperationalDiagnostic(t *testing.T) {
 	// this proof exercises).
 	newFakeBuilderManager(t)
 	app.validateBuildKitSocketFn = func(string) error { return nil }
+	setBackendDevPrepSeams(app)
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {

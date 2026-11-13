@@ -103,6 +103,7 @@ func newBuildEnforcementApp(t *testing.T) (*App, func() []string) {
 	// returns the buildctl argv (the stage that consumes staged paths).
 	newFakeBuilderManager(t)
 	app.validateBuildKitSocketFn = func(string) error { return nil }
+	setBackendDevPrepSeams(app)
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		if strings.HasSuffix(name, "buildctl") {

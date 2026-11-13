@@ -444,6 +444,24 @@ func devPrepOpDir(opID string) string {
 	return filepath.Join(daemonStateRoot, "dev-prep", opID)
 }
 
+// devPrepDisposeOperation disposes exactly ONE operation's prepared tree:
+// the canonical devPrepOpDir(opID), and nothing else. It never removes the
+// shared dev-prep subtree root or the state root (the derivation is the
+// one path owner above and the ID grammar bounds the final component), it
+// never adopts or repairs anything (an absent tree is success), and it is
+// caller-independent of any invocation path (no caller-supplied paths).
+// The lstat-based removal cannot follow a final symlink, and the
+// refuse-to-adopt contract is untouched. Lifetime ordering is the caller's
+// contract: the build driver invokes this only after a PROVEN builder-manager
+// STOP convergence, never while this operation's builder instance may
+// still use the tree.
+func devPrepDisposeOperation(opID string) error {
+	if !isOperationID(opID) {
+		return fmt.Errorf("dev-prep: operation id is not canonical")
+	}
+	return os.RemoveAll(devPrepOpDir(opID))
+}
+
 // prepareTrustedDev prepares the trusted /dev tree for one operation with
 // the production syscall seam. The state root is bound to the daemon's
 // canonical state root through the config owner; the new core is

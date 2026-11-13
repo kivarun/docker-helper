@@ -339,7 +339,10 @@ func (r *recordedCalls) all() string {
 
 // setupBuildBackendTest wires the full P3 driver path: staging seam (real
 // staged layout), fake manager, socket-validation pass, and the recording
-// child seam (children succeed by default).
+// child seam (children succeed by default). The trusted /dev preparation
+// stage and the prepared-tree disposal use succeeding default seams (the
+// stage machinery is exercised with the real production controller; the
+// per-test preparation/disposal behaviors come from their own fakes).
 func setupBuildBackendTest(t *testing.T) (*App, *operationSupervisor, *CreatedSession, *fakeBuilderManager, *recordedCalls) {
 	t.Helper()
 	app, supervisor, result, token := setupBuildTest(t)
@@ -354,6 +357,7 @@ func setupBuildBackendTest(t *testing.T) (*App, *operationSupervisor, *CreatedSe
 		return cmd
 	}
 	app.validateBuildKitSocketFn = func(string) error { return nil }
+	setBackendDevPrepSeams(app)
 	return app, supervisor, result, manager, calls
 }
 
@@ -402,7 +406,16 @@ func attachBackendFixture(t *testing.T, app *App) (*fakeBuilderManager, *recorde
 		return cmd
 	}
 	app.validateBuildKitSocketFn = func(string) error { return nil }
+	setBackendDevPrepSeams(app)
 	return manager, calls
+}
+
+// setBackendDevPrepSeams installs the succeeding default seams for the
+// trusted /dev preparation stage and the prepared-tree disposal on a
+// backend-fixture App (real stage machinery, no filesystem dependence).
+func setBackendDevPrepSeams(app *App) {
+	app.prepareTrustedDevFn = func(context.Context, string, builderCategory) error { return nil }
+	app.devPrepDisposeFn = func(string) error { return nil }
 }
 
 // contextPathOf returns the staged context path recorded for call i (from
