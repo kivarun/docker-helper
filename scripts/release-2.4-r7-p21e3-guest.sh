@@ -61,8 +61,6 @@
 
 set -uo pipefail
 
-export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-
 log()  { printf '[r7-p21e3] %s\n' "$*"; }
 fail() { printf '[r7-p21e3] FAILED: %s\n' "$*" >&2; exit 1; }
 
@@ -360,7 +358,9 @@ classify_pp_extraction() { # <rpm2cpio_rc> <cpio_rc> <member-present>
   case "$rc1" in '' | *[!0-9]*)
     printf 'blocked:rpm-conversion-failed(rc=%s)\n' "${rc1:-none}"; return 0 ;;
   esac
-  if [ "$rc1" != 0 ]; then
+  # rpm2cpio 4.18 can return 1 with a complete payload. The extraction
+  # stage runs in that case only if a stream was written.
+  if [ "$rc1" != 0 ] && { [ "$rc1" != 1 ] || [ "$rc2" = none ]; }; then
     printf 'blocked:rpm-conversion-failed(rc=%s)\n' "$rc1"; return 0
   fi
   case "$rc2" in '' | *[!0-9]*)
@@ -380,6 +380,44 @@ classify_pp_extraction() { # <rpm2cpio_rc> <cpio_rc> <member-present>
 # BLOCKED; the policy gate maps each reason into POLICY-GATE: FAIL with the
 # named stage and records the separate rpm2cpio/cpio exit statuses and
 # unpolluted stderr tails in the evidence log.
+
+extract_p21e3_rpm_members() { # <rpmfile> <private workdir>
+  local rpm="$1" work="$2" stage
+  RPM2CPIO_RC=none
+  CPIO_RC=none
+  mkdir -p "$work/extract" || return 1
+  if command -v rpm2cpio >/dev/null 2>&1 && command -v cpio >/dev/null 2>&1; then
+    rpm2cpio "$rpm" >"$work/payload.cpio" 2>"$work/rpm2cpio.err" \
+      && RPM2CPIO_RC=0 || RPM2CPIO_RC=$?
+    if [ "$RPM2CPIO_RC" = 0 ] || { [ "$RPM2CPIO_RC" = 1 ] && [ -s "$work/payload.cpio" ]; }; then
+      # nFPM uses absolute archive names. Match those explicitly, then
+      # strip the leading slash on extraction into the private directory.
+      (cd "$work/extract" && cpio -id --no-absolute-filenames \
+        /usr/bin/docker-helper usr/bin/docker-helper ./usr/bin/docker-helper \
+        /usr/share/selinux/docker_helper.pp usr/share/selinux/docker_helper.pp \
+        ./usr/share/selinux/docker_helper.pp <"$work/payload.cpio") \
+        >"$work/cpio.out" 2>"$work/cpio.err" && CPIO_RC=0 || CPIO_RC=$?
+    fi
+  fi
+  printf 'rpm2cpio rc=%s cpio rc=%s\n' "$RPM2CPIO_RC" "$CPIO_RC" >&2
+  for stage in rpm2cpio cpio; do
+    if [ -s "$work/$stage.err" ]; then
+      printf '%s\n' "--- $stage stderr (tail; no tokens) ---" >&2
+      sed 's/dht_[A-Za-z0-9]*/[REDACTED-TOKEN]/g' "$work/$stage.err" | tail -5 >&2
+    fi
+  done
+  [ "$CPIO_RC" = 0 ]
+}
+
+compare_p21e3_digests() {
+  if ! [[ "$1" =~ ^[0-9a-f]{64}$ && "$2" =~ ^[0-9a-f]{64}$ ]]; then
+    echo UNPROVABLE
+  elif [ "$1" = "$2" ]; then
+    echo MATCH
+  else
+    echo MISMATCH
+  fi
+}
 
 p21e3_policy_semantics_selftest() { # <workdir>
   local work="$1"
@@ -435,14 +473,16 @@ p21e3_policy_semantics_selftest() { # <workdir>
   classify_pp_extraction 0 0 1 >"$work/results/extract-member-found.classify"
   classify_pp_extraction 0 0 0 >"$work/results/extract-member-missing.classify"
   classify_pp_extraction 0 2 1 >"$work/results/extract-cpio-failed.classify"
-  classify_pp_extraction 1 0 1 >"$work/results/extract-conversion-failed.classify"
+  classify_pp_extraction 1 none 0 >"$work/results/extract-conversion-failed.classify"
+  classify_pp_extraction 1 0 1 >"$work/results/extract-conversion-rc1-member-found.classify"
+  classify_pp_extraction 1 2 1 >"$work/results/extract-conversion-rc1-cpio-failed.classify"
   classify_pp_extraction 124 0 1 >"$work/results/extract-conversion-timeout.classify"
 }
 
 # --pp-extract-selftest <workdir> [<rpmfile>]: exercises the REAL staged
 # extraction used by the policy gate. With rpm2cpio+cpio available AND a
 # real RPM provided, the full gate path runs (conversion -> cpio -> member
-# presence -> sha) and the member's digest lands in results/member.pp.sha.
+# presence -> sha) and both member digests land in results/.
 # Without rpm tooling, the cpio stage is exercised on a self-synthesized
 # fixture (member present / member missing / truncated cpio) and the
 # tool-unavailability branch is recorded instead of guessed.
@@ -455,24 +495,14 @@ p21e3_pp_extract_selftest() { # <workdir> [<rpmfile>]
     printf 'cpio=%s (%s)\n' "$(command -v cpio || echo missing)" \
       "$(cpio --version 2>/dev/null | head -1 || echo 'version unknown')"
   } >"$work/results/tools.ident"
-  if [ -n "$rpm" ] && [ -f "$rpm" ] && command -v rpm2cpio >/dev/null 2>&1 && command -v cpio >/dev/null 2>&1; then
-    if rpm2cpio "$rpm" >"$dir/payload.cpio" 2>"$dir/rpm2cpio.err"; then
-      (cd "$dir/extract" && cpio -id <"$dir/payload.cpio") \
-        >"$dir/cpio.out" 2>"$dir/cpio.err" \
-        && CPIO_RC=0 || CPIO_RC=$?
-      if [ "$CPIO_RC" = 0 ] && [ -f "$dir/extract/usr/share/selinux/docker_helper.pp" ]; then
-        sha256sum "$dir/extract/usr/share/selinux/docker_helper.pp" >"$work/results/member.pp.sha256"
-        cp "$dir/extract/usr/share/selinux/docker_helper.pp" "$work/results/member.pp"
-        echo "member-found" >"$work/results/extract.stages"
-      else
-        echo "cpio rc=$CPIO_RC member-absent" >"$work/results/extract.stages"
-      fi
-    else
-      echo "rpm2cpio rc=$? conversion-failed" >"$work/results/extract.stages"
-    fi
-    cp -a "$dir/rpm2cpio.err" "$work/results/rpm2cpio.stderr"
-    cp -a "$dir/cpio.err" "$work/results/cpio.stderr"
-    return 0
+  if [ -n "$rpm" ]; then
+    extract_p21e3_rpm_members "$rpm" "$dir" 2>"$work/results/extract.stages" || return 1
+    [ -s "$dir/extract/usr/bin/docker-helper" ] && \
+      [ -s "$dir/extract/usr/share/selinux/docker_helper.pp" ] || return 1
+    sha256sum "$dir/extract/usr/bin/docker-helper" >"$work/results/member.binary.sha256" || return 1
+    sha256sum "$dir/extract/usr/share/selinux/docker_helper.pp" >"$work/results/member.pp.sha256" || return 1
+    cp "$dir/extract/usr/share/selinux/docker_helper.pp" "$work/results/member.pp"
+    return $?
   fi
   # cpio-stage fixtures (no rpm2cpio here): synthesize a minimal archive.
   if command -v cpio >/dev/null 2>&1; then
@@ -532,6 +562,8 @@ if [ "${1:-}" = "--audit-window-selftest" ]; then
   p21e3_audit_window_selftest "$2"
   exit $?
 fi
+
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 ARTIFACT="${R7_ARTIFACT:?R7_ARTIFACT required}"
 ARTIFACT_SHA="${R7_ARTIFACT_SHA256:?R7_ARTIFACT_SHA256 required}"
@@ -631,6 +663,8 @@ P_WRAP=/usr/libexec/docker-helper/buildkit/buildkit-runc
 P_RUNTIME=/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc
 MANIFEST=/usr/share/doc/docker-helper/buildkit/MANIFEST
 IDENTITY_OK=1
+RPM_MEMBERS_DIR=""
+RPM_MEMBERS_OK=0
 {
   echo "== byte identity (sha256, mode, inode) =="
   for p in "$P_BIN" "$P_WRAP" "$P_RUNTIME"; do
@@ -642,17 +676,19 @@ IDENTITY_OK=1
   gw="$(sha256sum "$P_WRAP" | awk '{print $1}')"
   gr="$(sha256sum "$P_RUNTIME" | awk '{print $1}')"
   mw="$(sed -n 's/^buildkit-runc-sha256=//p' "$MANIFEST")"
-  if [ "$iw" = "$gw" ]; then
+  wrapper_verdict="$(compare_p21e3_digests "$iw" "$gw")"
+  if [ "$wrapper_verdict" = MATCH ]; then
     echo "wrapper==product: MATCH"
   else
-    echo "wrapper==product: MISMATCH ($iw vs $gw)"
+    echo "wrapper==product: $wrapper_verdict ($iw vs $gw)"
     echo "IDENTITY-GATE: FAIL (installed wrapper is not the candidate product bytes)"
     IDENTITY_OK=0
   fi
-  if [ -n "$mw" ] && [ "$gr" = "$mw" ]; then
+  runtime_verdict="$(compare_p21e3_digests "$gr" "$mw")"
+  if [ "$runtime_verdict" = MATCH ]; then
     echo "runtime==pinned-manifest: MATCH"
   else
-    echo "runtime==pinned-manifest: MISMATCH (runtime=$gr manifest=${mw:-<unreadable>})"
+    echo "runtime==pinned-manifest: $runtime_verdict (runtime=$gr manifest=${mw:-<unreadable>})"
     echo "IDENTITY-GATE: FAIL (the relocated runtime does not carry the pinned MANIFEST digest)"
     IDENTITY_OK=0
   fi
@@ -663,56 +699,51 @@ IDENTITY_OK=1
   # /proc/<pid>/exe, all three sha256, every verdict recorded.
   rpm_file_sha="$(sha256sum "$ARTIFACT" | awk '{print $1}')"
   echo "rpm-file-sha256=$rpm_file_sha"
-  daemon_pid="$(systemctl show -p MainPID --value docker-helper.service 2>/dev/null)"
-  manager_pid="$(systemctl show -p MainPID --value docker-helper-builder.service 2>/dev/null)"
-  echo "daemon pid=$daemon_pid manager pid=$manager_pid"
-  for p in "$daemon_pid" "$manager_pid"; do
-    if [ -n "$p" ] && [ "$p" != 0 ] && [ -r "/proc/$p/exe" ]; then
+  if ! command -v rpm2cpio >/dev/null 2>&1; then
+    timeout 300 zypper --non-interactive install -y rpm 2>&1 | tail -3
+  fi
+  if ! command -v cpio >/dev/null 2>&1; then
+    timeout 300 zypper --non-interactive install -y cpio 2>&1 | tail -3
+  fi
+  printf 'rpm2cpio=%s\n' "$(command -v rpm2cpio || echo missing)"
+  printf 'cpio=%s (%s)\n' "$(command -v cpio || echo missing)" \
+    "$(cpio --version 2>/dev/null | head -1 || echo 'version unknown')"
+  member_sha=""
+  RPM2CPIO_RC=none
+  CPIO_RC=none
+  if [ "$rpm_file_sha" != "$ARTIFACT_SHA" ]; then
+    printf 'candidate RPM digest differs from expected %s\n' "$ARTIFACT_SHA"
+  elif RPM_MEMBERS_DIR="$(mktemp -d "$STATE_DIR/rpm-members.XXXXXX")" \
+      && extract_p21e3_rpm_members "$ARTIFACT" "$RPM_MEMBERS_DIR"; then
+    RPM_MEMBERS_OK=1
+    if [ -s "$RPM_MEMBERS_DIR/extract/usr/bin/docker-helper" ]; then
+      member_sha="$(sha256sum "$RPM_MEMBERS_DIR/extract/usr/bin/docker-helper" | awk '{print $1}')"
+    fi
+  fi
+
+  echo "rpm-binary-member sha256=${member_sha:-<unavailable>}"
+  installed_verdict="$(compare_p21e3_digests "$member_sha" "$iw")"
+  printf 'rpm-member==installed: %s\n' "$installed_verdict"
+  live_verdict="$installed_verdict"
+  for service in daemon:docker-helper.service manager:docker-helper-builder.service; do
+    who="${service%%:*}"
+    unit="${service#*:}"
+    p="$(systemctl show -p MainPID --value "$unit" 2>/dev/null)"
+    live_sha=""
+    if [[ "$p" =~ ^[1-9][0-9]*$ ]]; then
+      live_sha="$(sha256sum "/proc/$p/exe" | awk '{print $1}')"
       printf 'live pid=%s exe=%s sha256=%s\n' "$p" "$(readlink "/proc/$p/exe")" \
-        "$(sha256sum "/proc/$p/exe" | awk '{print $1}')"
+        "${live_sha:-<unavailable>}"
+    fi
+    verdict="$(compare_p21e3_digests "$member_sha" "$live_sha")"
+    printf '%s exe==rpm-member: %s (pid=%s)\n' "$who" "$verdict" "${p:-<unavailable>}"
+    if [ "$verdict" = MISMATCH ] || [ "$live_verdict" = MATCH ]; then
+      live_verdict="$verdict"
     fi
   done
-  if ! command -v cpio >/dev/null 2>&1; then
-    zypper --non-interactive install -y cpio >/dev/null 2>&1 || true
-  fi
-  if command -v rpm2cpio >/dev/null 2>&1 && command -v cpio >/dev/null 2>&1; then
-    member_dir="$(mktemp -d)"
-    rpm2cpio "$ARTIFACT" 2>/dev/null | (cd "$member_dir" && cpio -idm --quiet usr/bin/docker-helper 2>/dev/null)
-    member_sha="$(sha256sum "$member_dir/usr/bin/docker-helper" 2>/dev/null | awk '{print $1}')"
-    rm -rf "$member_dir"
-    echo "rpm-binary-member sha256=${member_sha:-<unavailable>}"
-    installed="$(sha256sum "$P_BIN" | awk '{print $1}')"
-    live_ok=1
-    if [ -n "$member_sha" ] && [ "$member_sha" = "$installed" ]; then
-      echo "rpm-member==installed: MATCH"
-    else
-      echo "rpm-member==installed: MISMATCH ($member_sha vs $installed)"
-      live_ok=0
-    fi
-    for label in daemon:$daemon_pid manager:$manager_pid; do
-      who="${label%%:*}"; p="${label##*:}"
-      if [ -n "$p" ] && [ "$p" != 0 ] && [ -n "$member_sha" ]; then
-        live_sha="$(sha256sum "/proc/$p/exe" 2>/dev/null | awk '{print $1}')"
-        if [ -n "$live_sha" ] && [ "$live_sha" = "$member_sha" ]; then
-          echo "$who exe==rpm-member: MATCH"
-        else
-          echo "$who exe==rpm-member: MISMATCH ($live_sha vs $member_sha)"
-          live_ok=0
-        fi
-      else
-        echo "$who exe==rpm-member: UNPROVABLE (pid=$p member=$member_sha)"
-        live_ok=0
-      fi
-    done
-  else
-    echo "RPM member extraction impossible (no rpm2cpio/cpio on the guest)"
-    echo "R7-P21E3-RPM-PROCESS-IDENTITY=UNPROVABLE"
-    IDENTITY_OK=0
-  fi
-  if [ "$live_ok" = 1 ]; then
-    echo "R7-P21E3-RPM-PROCESS-IDENTITY=MATCH"
-  else
-    echo "IDENTITY-GATE: FAIL (running processes do not carry the candidate RPM bytes)"
+  echo "R7-P21E3-RPM-PROCESS-IDENTITY=$live_verdict"
+  if [ "$live_verdict" != MATCH ]; then
+    echo "IDENTITY-GATE: FAIL (candidate RPM process identity: $live_verdict)"
     IDENTITY_OK=0
   fi
 } > "$EVIDENCE_DIR/p21e3-byte-identity.log" 2>&1
@@ -776,62 +807,29 @@ cat "$EVIDENCE_DIR/p21e3-module.log"
 PP_EXPECTED=1
 {
   echo "== rpm member vs installed .pp bytes (staged, fail-closed) =="
-  PP_DIR="$STATE_DIR/pp-check"
-  rm -rf "$PP_DIR"; mkdir -p "$PP_DIR/extract"
-  # The toolchain stages their absence explicitly rather than inferring it.
-  printf 'rpm2cpio=%s\n' "$(command -v rpm2cpio || echo missing)"
-  printf 'cpio=%s (%s)\n' "$(command -v cpio || echo missing)" \
-    "$(cpio --version 2>/dev/null | head -1 || echo 'version unknown')"
-  if ! command -v rpm2cpio >/dev/null 2>&1; then
-    timeout 300 zypper --non-interactive install -y rpm 2>&1 | tail -3
-  fi
-  if ! command -v cpio >/dev/null 2>&1; then
-    timeout 300 zypper --non-interactive install -y cpio 2>&1 | tail -3
-  fi
-  RPM2CPIO_RC=""
-  CPIO_RC=""
   PP_MEMBER=""
-  if command -v rpm2cpio >/dev/null 2>&1 && command -v cpio >/dev/null 2>&1; then
-    if rpm2cpio "$ARTIFACT" >"$PP_DIR/payload.cpio" 2>"$PP_DIR/rpm2cpio.err"; then
-      RPM2CPIO_RC=0
-    else
-      RPM2CPIO_RC=$?
-    fi
-    if [ "$RPM2CPIO_RC" = 0 ]; then
-      (cd "$PP_DIR/extract" && cpio -id <"$PP_DIR/payload.cpio") \
-        >"$PP_DIR/cpio.out" 2>"$PP_DIR/cpio.err" \
-        && CPIO_RC=0 || CPIO_RC=$?
-      if [ "$CPIO_RC" = 0 ] \
-        && [ -f "$PP_DIR/extract/usr/share/selinux/docker_helper.pp" ]; then
-        PP_MEMBER="$PP_DIR/extract/usr/share/selinux/docker_helper.pp"
-      fi
-    fi
+  if [ "$RPM_MEMBERS_OK" = 1 ] && [ -s "$RPM_MEMBERS_DIR/extract/usr/share/selinux/docker_helper.pp" ]; then
+    PP_MEMBER="$RPM_MEMBERS_DIR/extract/usr/share/selinux/docker_helper.pp"
   fi
   if [ -n "$PP_MEMBER" ]; then
-    EXTRACT_VERDICT="$(classify_pp_extraction "${RPM2CPIO_RC:-none}" "${CPIO_RC:-none}" 1)"
+    EXTRACT_VERDICT="$(classify_pp_extraction "$RPM2CPIO_RC" "$CPIO_RC" 1)"
   else
-    EXTRACT_VERDICT="$(classify_pp_extraction "${RPM2CPIO_RC:-none}" "${CPIO_RC:-none}" 0)"
+    EXTRACT_VERDICT="$(classify_pp_extraction "$RPM2CPIO_RC" "$CPIO_RC" 0)"
   fi
   echo "extraction verdict: $EXTRACT_VERDICT"
-  if [ -n "$RPM2CPIO_RC" ] && [ -s "$PP_DIR/rpm2cpio.err" ]; then
-    echo "--- rpm2cpio stderr (tail; no tokens) ---"
-    sed 's/dht_[A-Za-z0-9]*/[REDACTED-TOKEN]/g' "$PP_DIR/rpm2cpio.err" | tail -5
-  fi
-  if [ -n "$CPIO_RC" ] && [ -s "$PP_DIR/cpio.err" ]; then
-    echo "--- cpio stderr (tail; no tokens) ---"
-    sed 's/dht_[A-Za-z0-9]*/[REDACTED-TOKEN]/g' "$PP_DIR/cpio.err" | tail -5
-  fi
+  echo "rpm2cpio/cpio stage diagnostics: p21e3-byte-identity.log"
   case "$EXTRACT_VERDICT" in
     member-found)
       rpm_pp="$(sha256sum "$PP_MEMBER" | awk '{print $1}')"
       inst_pp="$(sha256sum /usr/share/selinux/docker_helper.pp 2>/dev/null | awk '{print $1}')"
       echo "rpm-member  sha256=$rpm_pp"
       echo "installed   sha256=${inst_pp:-<missing>}"
-      if [ -n "$inst_pp" ] && [ "$rpm_pp" = "$inst_pp" ]; then
+      pp_verdict="$(compare_p21e3_digests "$rpm_pp" "$inst_pp")"
+      if [ "$pp_verdict" = MATCH ]; then
         echo "rpm==installed: MATCH"
       else
-        echo "rpm==installed: MISMATCH"
-        echo "POLICY-GATE: FAIL (the installed module is not the RPM member)"
+        echo "rpm==installed: $pp_verdict"
+        echo "POLICY-GATE: FAIL (installed module identity: $pp_verdict)"
         PP_EXPECTED=0
       fi
       ;;
@@ -852,6 +850,9 @@ PP_EXPECTED=1
       PP_EXPECTED=0
       ;;
   esac
+  if [ -n "$RPM_MEMBERS_DIR" ]; then
+    rm -rf -- "$RPM_MEMBERS_DIR"
+  fi
   echo "== loaded-policy semantics (fail-closed sesearch classification) =="
   if ! command -v sesearch >/dev/null 2>&1; then
     timeout 300 zypper --non-interactive install -y setools 2>&1 | tail -3
