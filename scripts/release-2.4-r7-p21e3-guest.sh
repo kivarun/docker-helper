@@ -1323,8 +1323,7 @@ struct statx_mind {
     unsigned int stx_uid;
     unsigned int stx_gid;
     unsigned short stx_mode;
-    unsigned char __spare0[1];
-    unsigned char __pad0[5];
+    unsigned short __spare0;
     unsigned long long stx_ino;
     unsigned long long stx_size;
     unsigned long long stx_blocks;
@@ -1469,17 +1468,23 @@ int main(int argc, char **argv) {
             const char *lookups[2] = {"proc", "proc/bus"};
             for (int i = 0; i < 2; i++) {
                 snprintf(path, sizeof path, "/proc/%d/root/%s", pid, lookups[i]);
-                struct statx_mind sx; memset(&sx, 0, sizeof sx);
+                /* The kernel copies the FULL UAPI struct statx (264+
+                 * bytes on current kernels) into the buffer: over-allocate
+                 * and zero a generous fixed area, then read the fields by
+                 * their own offsets. */
+                unsigned char sxb[320];
+                memset(sxb, 0, sizeof sxb);
+                struct statx_mind *sx = (struct statx_mind *)sxb;
                 long sxr = syscall(SYS_statx, AT_FDCWD, path, 0,
-                                   STATX_BASIC_STATS | STATX_MNT_ID, &sx);
-                if (sxr == 0 && (sx.stx_mask & STATX_MNT_ID)) {
+                                   STATX_BASIC_STATS | STATX_MNT_ID, sxb);
+                if (sxr == 0 && (sx->stx_mask & STATX_MNT_ID)) {
                     fprintf(lg,
                             "RPNS-STATX pid=%d path=/proc/%s mnt_id=%llu dev=%u:%u ino=%llu mode=%o mask=%#x\n",
                             pid, lookups[i],
-                            (unsigned long long)sx.stx_mnt_id,
-                            sx.stx_dev_major, sx.stx_dev_minor,
-                            (unsigned long long)sx.stx_ino,
-                            sx.stx_mode & 07777, sx.stx_mask);
+                            (unsigned long long)sx->stx_mnt_id,
+                            sx->stx_dev_major, sx->stx_dev_minor,
+                            (unsigned long long)sx->stx_ino,
+                            sx->stx_mode & 07777, sx->stx_mask);
                     struct stat st;
                     if (stat(path, &st) == 0) {
                         char lbl[256];
