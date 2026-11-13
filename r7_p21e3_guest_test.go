@@ -308,6 +308,8 @@ func TestR7P21E3PolicySemanticsSelftest(t *testing.T) {
 		{"extract-member-missing.classify", "blocked:member-missing"},
 		{"extract-cpio-failed.classify", "blocked:cpio-extraction-failed(rc=2)"},
 		{"extract-conversion-failed.classify", "blocked:rpm-conversion-failed(rc=1)"},
+		{"extract-conversion-rc1-member-found.classify", "member-found"},
+		{"extract-conversion-rc1-cpio-failed.classify", "blocked:cpio-extraction-failed(rc=2)"},
 		{"extract-conversion-timeout.classify", "blocked:rpm-conversion-failed(rc=124)"},
 	} {
 		if got := verdict(tc.name); got != tc.want {
@@ -345,9 +347,13 @@ func TestR7P21E3PolicySemanticsGate(t *testing.T) {
 		// stderr-swallowing on the extraction pipeline).
 		"classify_pp_extraction",
 		"extraction verdict: $EXTRACT_VERDICT",
-		"rpm2cpio stderr (tail; no tokens)",
-		"cpio stderr (tail; no tokens)",
-		`cpio -id <"$PP_DIR/payload.cpio"`,
+		"for stage in rpm2cpio cpio",
+		"$stage stderr (tail; no tokens)",
+		`2>"$work/rpm2cpio.err"`,
+		`2>"$work/cpio.err"`,
+		`cpio -id --no-absolute-filenames`,
+		`/usr/bin/docker-helper usr/bin/docker-helper ./usr/bin/docker-helper`,
+		`/usr/share/selinux/docker_helper.pp usr/share/selinux/docker_helper.pp`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("the p21e3 guest harness must gate the loaded-policy semantics %q", want)
@@ -368,6 +374,9 @@ func TestR7P21E3PolicySemanticsGate(t *testing.T) {
 // the member (blocked). With rpm2cpio and a real RPM provided
 // (R7_P21E3_TEST_RPM), the full gate path runs on the actual artifact.
 func TestR7P21E3PPExtractSelftest(t *testing.T) {
+	if _, err := exec.LookPath("cpio"); err != nil && os.Getenv("R7_P21E3_TEST_RPM") == "" {
+		t.Skip("cpio is required for the archive fixtures")
+	}
 	dir := t.TempDir()
 	out, err := exec.Command("bash", "scripts/release-2.4-r7-p21e3-guest.sh",
 		"--pp-extract-selftest", dir).CombinedOutput()
@@ -405,12 +414,18 @@ func TestR7P21E3PPExtractSelftest(t *testing.T) {
 		out2, err := exec.Command("bash", "scripts/release-2.4-r7-p21e3-guest.sh",
 			"--pp-extract-selftest", dir2, rpm).CombinedOutput()
 		if err != nil {
-			t.Fatalf("pp-extract selftest (real RPM) failed: %v\n%s", err, out2)
+			stages, _ := os.ReadFile(filepath.Join(dir2, "results", "extract.stages"))
+			t.Fatalf("pp-extract selftest (real RPM) failed: %v\n%s\n%s", err, out2, stages)
 		}
 		digestRaw, err := os.ReadFile(filepath.Join(dir2, "results", "member.pp.sha256"))
 		if err != nil {
-			t.Skipf("the local toolchain lacks rpm2cpio (no full-gate run possible here): %v\n%s", err, out2)
+			t.Fatalf("real-RPM policy member digest missing: %v\n%s", err, out2)
 		}
+		binaryDigest, err := os.ReadFile(filepath.Join(dir2, "results", "member.binary.sha256"))
+		if err != nil || len(strings.Fields(string(binaryDigest))) != 2 {
+			t.Fatalf("real-RPM binary member digest missing or malformed: %v %q", err, binaryDigest)
+		}
+		t.Logf("real-RPM full-gate binary digest: %s", binaryDigest)
 		t.Logf("real-RPM full-gate member digest: %s", digestRaw)
 	}
 }
