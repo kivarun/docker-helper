@@ -552,7 +552,7 @@ func TestBuilderManagerSingleCompositionDecision(t *testing.T) {
 
 	opID := "op_0123456789abcdef0123456789abcdef"
 	respCh := make(chan string, 1)
-	go func() { respCh <- m.start(opID, nil) }()
+	go func() { respCh <- m.start(opID, builderCategorySet{}, nil) }()
 	if !waitInstance(t, m, opID, true) {
 		t.Fatal("START did not reserve")
 	}
@@ -608,7 +608,7 @@ func TestBuilderLauncherFailureRunsFailedStartLifecycle(t *testing.T) {
 	}
 	t.Cleanup(func() { builderNewRootlessKitCommand = orig })
 
-	if resp := m.start(opID, nil); resp != builderManagerRespInternal {
+	if resp := m.start(opID, builderCategorySet{}, nil); resp != builderManagerRespInternal {
 		t.Fatalf("START with a failing launch child = %q, want internal", resp)
 	}
 	if !waitInstance(t, m, opID, false) {

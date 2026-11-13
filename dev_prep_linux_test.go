@@ -366,6 +366,160 @@ func devPrepTestOpDir() string {
 	return devPrepOpDir(devPrepTestOpID)
 }
 
+func TestDevPrepSharedRootConcurrentMkdir(t *testing.T) {
+	for _, kind := range []string{"dir", "symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			fs := newFakeDevPrepFS()
+			if kind == "dir" {
+				if err := fs.mkdir(devPrepRoot, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := fs.symlink(daemonStateRoot, devPrepRoot); err != nil {
+				t.Fatal(err)
+			}
+			// The caller's first lookup preceded the competing mkdir.
+			fs.arm("lstat "+devPrepRoot, os.ErrNotExist)
+			if err := devPrepEnsureRootDir(fs, devPrepRoot); (err == nil) != (kind == "dir") {
+				t.Fatalf("shared root race with %s = %v", kind, err)
+			}
+		})
+	}
+}
+
+func TestDevPrepCategoryScanDuringPartialCleanup(t *testing.T) {
+	withDevPrepSeams(t, true, devPrepTestBuilderUID)
+	fs := newFakeDevPrepFS()
+	opDir := devPrepTestOpDir()
+	fs.arm("mknod "+opDir+"/zero", errors.New("mknod failed"))
+	fs.arm("removeall "+opDir, errors.New("remove failed"))
+	if err := devPrepPrepare(t, fs, devPrepTestOpID, 1); err == nil {
+		t.Fatal("injected preparation failure must fail")
+	}
+	ctx := context.Background()
+	excluded, err := devPrepScanCategories(ctx, fs, nil)
+	if err != nil || !excluded.contains(1) {
+		t.Fatalf("partially prepared residue failed to hold c1: %v", err)
+	}
+	if err := fs.removeAll(opDir); err != nil {
+		t.Fatal(err)
+	}
+	excluded, err = devPrepScanCategories(ctx, fs, nil)
+	if err != nil || excluded.contains(1) {
+		t.Fatalf("removed tree still excluded c1: %v", err)
+	}
+}
+
+func TestDevPrepCategoryScanRejectsUnknownTree(t *testing.T) {
+	withDevPrepSeams(t, true, devPrepTestBuilderUID)
+	fs := newFakeDevPrepFS()
+	if err := devPrepPrepare(t, fs, devPrepTestOpID, 1); err != nil {
+		t.Fatal(err)
+	}
+	opDir := devPrepTestOpDir()
+	if err := fs.setxattr(opDir, "security.selinux", []byte("system_u:object_r:"+builderDevPrepObjectType+":s0:c1,c2")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := devPrepScanCategories(context.Background(), fs, nil); err == nil {
+		t.Fatal("unknown category must refuse START")
+	}
+}
+
+func TestDevPrepAdmissionExcludesPendingAndSurvivingTrees(t *testing.T) {
+	withDevPrepSeams(t, false, devPrepTestBuilderUID)
+	fs := newFakeDevPrepFS()
+	var admission builderDevPrepAdmission
+	scan := func(ctx context.Context, pending map[string]builderCategory) (builderCategorySet, error) {
+		return devPrepScanCategories(ctx, fs, pending)
+	}
+	m, _, _ := processTestManager(t)
+	// One slot makes a stale c1 observable before any second launch.
+	m.categoryPoolMax = 1
+	seamCA(t)
+	fakeLeaderSeam(t, true)
+	managerPeerRootSeam(t)
+	listener := realDispatchFixture(t, m)
+	fakeManagerUID(t, os.Getuid(), os.Getgid())
+	fakeManagerPeer(t, os.Getuid(), os.Getgid())
+	origPath := builderClientSocketPath
+	builderClientSocketPath = listener.Addr().String()
+	t.Cleanup(func() { builderClientSocketPath = origPath })
+
+	client := &builderManagerClient{}
+	ctx := context.Background()
+	start := func(owner *builderDevPrepAdmission, opID string) {
+		t.Helper()
+		type result struct {
+			category builderCategory
+			err      error
+		}
+		started := make(chan result, 1)
+		go func() {
+			category, err := owner.startBuilder(ctx, opID, scan, client.Start)
+			started <- result{category, err}
+		}()
+		if !waitInstance(t, m, opID, true) {
+			t.Fatalf("START %s did not reserve an instance", opID)
+		}
+		bindFakeBuildkitdSocket(t, opID)
+		if got := <-started; got.err != nil || got.category != 1 {
+			t.Fatalf("START = %v, %v; want c1", got.category, got.err)
+		}
+	}
+	stop := func(opID string) {
+		t.Helper()
+		if err := client.Stop(ctx, opID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	const next = "op_11111111111111111111111111111111"
+	assertExcluded := func(owner *builderDevPrepAdmission) {
+		t.Helper()
+		// If the manager erroneously admits c1, abort its readiness wait.
+		refusalCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		category, err := owner.startBuilder(refusalCtx, next, scan, client.Start)
+		var refusal *builderManagerError
+		if category != 0 || !errors.As(err, &refusal) || refusal.kind != builderManagerRespAtCeiling {
+			t.Fatalf("START = %v, %v; want category exhaustion", category, err)
+		}
+		if !waitInstance(t, m, next, false) {
+			t.Fatal("excluded category reserved an instance")
+		}
+	}
+
+	start(&admission, devPrepTestOpID)
+	// An exited builder can lose its manager reservation before its
+	// daemon-side preparation has started.
+	stop(devPrepTestOpID)
+	assertExcluded(&admission)
+
+	// Emulate the directory left on disk by the SELinux preparer; the
+	// manager process fixture needs no kernel policy or privileged nodes.
+	if err := fs.mkdir(devPrepRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.mkdir(devPrepTestOpDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.setxattr(devPrepTestOpDir(), "security.selinux", []byte(builderObjectContext(builderDevPrepObjectType, 1))); err != nil {
+		t.Fatal(err)
+	}
+	admission.finishPreparation(devPrepTestOpID)
+	assertExcluded(&admission)
+	// An empty manager and a fresh daemon owner have no in-memory record
+	// of the old operation. Its tree still excludes c1.
+	var restartedAdmission builderDevPrepAdmission
+	assertExcluded(&restartedAdmission)
+
+	if err := fs.removeAll(devPrepTestOpDir()); err != nil {
+		t.Fatal(err)
+	}
+	start(&restartedAdmission, next)
+	restartedAdmission.finishPreparation(next)
+	stop(next)
+}
+
 func devPrepNodeAt(t *testing.T, fs *fakeDevPrepFS, path string) *fakeDevPrepNode {
 	t.Helper()
 	node, err := fs.resolve(path)

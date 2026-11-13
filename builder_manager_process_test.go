@@ -161,7 +161,7 @@ func TestBuilderManagerStartReadinessSuccess(t *testing.T) {
 
 	opID := "op_0123456789abcdef0123456789abcdef"
 	respCh := make(chan string, 1)
-	go func() { respCh <- m.start(opID, nil) }()
+	go func() { respCh <- m.start(opID, builderCategorySet{}, nil) }()
 
 	// Wait for the child to spawn, then bind the fake buildkitd socket.
 	if !waitInstance(t, m, opID, true) {
@@ -192,7 +192,7 @@ func TestBuilderManagerConcurrentStartSameOpExactlyOneChild(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			respCh <- m.start(opID, nil)
+			respCh <- m.start(opID, builderCategorySet{}, nil)
 		}()
 	}
 	if !waitInstance(t, m, opID, true) {
@@ -230,14 +230,14 @@ func TestBuilderManagerThirdStartAtCeiling(t *testing.T) {
 
 	for _, opID := range []string{"op_0123456789abcdef0123456789abcdef", "op_fedcba9876543210fedcba9876543210"} {
 		respCh := make(chan string, 1)
-		go func() { respCh <- m.start(opID, nil) }()
+		go func() { respCh <- m.start(opID, builderCategorySet{}, nil) }()
 		if !waitInstance(t, m, opID, true) {
 			t.Fatalf("START %s did not reserve", opID)
 		}
 		bindFakeBuildkitdSocket(t, opID)
 		assertStartSuccessResponse(t, m, opID, <-respCh)
 	}
-	if resp := m.start("op_11111111111111111111111111111111", nil); resp != builderManagerRespAtCeiling {
+	if resp := m.start("op_11111111111111111111111111111111", builderCategorySet{}, nil); resp != builderManagerRespAtCeiling {
 		t.Fatalf("third START = %q, want builder_at_ceiling", resp)
 	}
 	m.mu.Lock()
@@ -258,7 +258,7 @@ func TestBuilderManagerStopDuringReadiness(t *testing.T) {
 
 	opID := "op_0123456789abcdef0123456789abcdef"
 	respCh := make(chan string, 1)
-	go func() { respCh <- m.start(opID, nil) }()
+	go func() { respCh <- m.start(opID, builderCategorySet{}, nil) }()
 	if !waitInstance(t, m, opID, true) {
 		t.Fatal("reservation missing")
 	}
@@ -278,7 +278,7 @@ func TestBuilderManagerStopDuringReadiness(t *testing.T) {
 	// Ceiling released: a new START is admitted.
 	op2 := "op_fedcba9876543210fedcba9876543210"
 	resp2Ch := make(chan string, 1)
-	go func() { resp2Ch <- m.start(op2, nil) }()
+	go func() { resp2Ch <- m.start(op2, builderCategorySet{}, nil) }()
 	if !waitInstance(t, m, op2, true) {
 		t.Fatal("post-STOP reservation missing")
 	}
@@ -295,7 +295,7 @@ func TestBuilderManagerTwoConcurrentStops(t *testing.T) {
 
 	opID := "op_0123456789abcdef0123456789abcdef"
 	respCh := make(chan string, 1)
-	go func() { respCh <- m.start(opID, nil) }()
+	go func() { respCh <- m.start(opID, builderCategorySet{}, nil) }()
 	if !waitInstance(t, m, opID, true) {
 		t.Fatal("reservation missing")
 	}
@@ -332,7 +332,7 @@ func TestBuilderManagerPurgeRacingStop(t *testing.T) {
 
 	opID := "op_0123456789abcdef0123456789abcdef"
 	respCh := make(chan string, 1)
-	go func() { respCh <- m.start(opID, nil) }()
+	go func() { respCh <- m.start(opID, builderCategorySet{}, nil) }()
 	if !waitInstance(t, m, opID, true) {
 		t.Fatal("reservation missing")
 	}
@@ -374,7 +374,7 @@ func TestBuilderManagerUnexpectedExitReleasesCeiling(t *testing.T) {
 	t.Cleanup(func() { builderNewRootlessKitCommand = orig })
 
 	opID := "op_0123456789abcdef0123456789abcdef"
-	if resp := m.start(opID, nil); resp != builderManagerRespInternal {
+	if resp := m.start(opID, builderCategorySet{}, nil); resp != builderManagerRespInternal {
 		t.Fatalf("START after self-exit = %q, want internal", resp)
 	}
 	if !waitInstance(t, m, opID, false) {
@@ -404,7 +404,7 @@ func TestBuilderManagerStartFailureReleasesCeiling(t *testing.T) {
 	t.Cleanup(func() { builderNewRootlessKitCommand = orig })
 
 	opID := "op_0123456789abcdef0123456789abcdef"
-	if resp := m.start(opID, nil); resp != builderManagerRespInternal {
+	if resp := m.start(opID, builderCategorySet{}, nil); resp != builderManagerRespInternal {
 		t.Fatalf("START spawn failure = %q, want internal", resp)
 	}
 	if !waitInstance(t, m, opID, false) {
@@ -432,7 +432,7 @@ func TestBuilderManagerReadinessFailureKillsGroupAndRemovesDirs(t *testing.T) {
 
 	opID := "op_0123456789abcdef0123456789abcdef"
 	respCh := make(chan string, 1)
-	go func() { respCh <- m.start(opID, nil) }()
+	go func() { respCh <- m.start(opID, builderCategorySet{}, nil) }()
 	if !waitInstance(t, m, opID, true) {
 		t.Fatal("reservation missing")
 	}
@@ -489,7 +489,7 @@ func TestBuilderManagerStopBeforeSpawn(t *testing.T) {
 
 	opID := "op_0123456789abcdef0123456789abcdef"
 	respCh := make(chan string, 1)
-	go func() { respCh <- m.start(opID, nil) }()
+	go func() { respCh <- m.start(opID, builderCategorySet{}, nil) }()
 	if !waitInstance(t, m, opID, true) {
 		t.Fatal("reservation missing")
 	}
@@ -562,7 +562,7 @@ func TestBuilderManagerStopWaitsLaunchQuiescence(t *testing.T) {
 	launchEngaged, launchRelease := launchHoldFixture(t, opID)
 
 	startResp := make(chan string, 1)
-	go func() { startResp <- m.start(opID, nil) }()
+	go func() { startResp <- m.start(opID, builderCategorySet{}, nil) }()
 
 	// The launch is parked before any filesystem work.
 	select {
@@ -617,7 +617,7 @@ func TestBuilderManagerStopWaitsLaunchQuiescence(t *testing.T) {
 	// bindFakeBuildkitdSocket doubles as the barrier that the new
 	// instance's runtime dir exists (it waits for it) before binding.
 	start2Resp := make(chan string, 1)
-	go func() { start2Resp <- m.start(opID, nil) }()
+	go func() { start2Resp <- m.start(opID, builderCategorySet{}, nil) }()
 	if !waitInstance(t, m, opID, true) {
 		t.Fatal("immediate same-ID START after OK not admitted")
 	}
@@ -658,7 +658,7 @@ while :; do sleep 0.05; done`)
 
 	opID := "op_0123456789abcdef0123456789abcdef"
 	respCh := make(chan string, 1)
-	go func() { respCh <- m.start(opID, nil) }()
+	go func() { respCh <- m.start(opID, builderCategorySet{}, nil) }()
 	if !waitInstance(t, m, opID, true) {
 		t.Fatal("reservation missing")
 	}
@@ -1191,7 +1191,7 @@ func TestBuilderClientCompensatingStopConvergesDispatchedStart(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
-		_, err := (&builderManagerClient{}).Start(ctx, opID)
+		_, err := (&builderManagerClient{}).Start(ctx, opID, nil)
 		startErrCh <- err
 	}()
 
@@ -1537,7 +1537,7 @@ func TestBuilderManagerStopGroupSurvivalEscalation(t *testing.T) {
 
 	opID := "op_0123456789abcdef0123456789abcdef"
 	startResp := make(chan string, 1)
-	go func() { startResp <- m.start(opID, nil) }()
+	go func() { startResp <- m.start(opID, builderCategorySet{}, nil) }()
 	if !waitInstance(t, m, opID, true) {
 		t.Fatal("reservation missing")
 	}
@@ -1585,7 +1585,7 @@ func TestBuilderManagerStopRetainsOnDirCleanupFailure(t *testing.T) {
 
 	opID := "op_0123456789abcdef0123456789abcdef"
 	startResp := make(chan string, 1)
-	go func() { startResp <- m.start(opID, nil) }()
+	go func() { startResp <- m.start(opID, builderCategorySet{}, nil) }()
 	if !waitInstance(t, m, opID, true) {
 		t.Fatal("reservation missing")
 	}
@@ -1653,7 +1653,7 @@ func TestBuilderManagerStopSelfExitRace(t *testing.T) {
 
 	opID := "op_0123456789abcdef0123456789abcdef"
 	startResp := make(chan string, 1)
-	go func() { startResp <- m.start(opID, nil) }()
+	go func() { startResp <- m.start(opID, builderCategorySet{}, nil) }()
 	if !waitInstance(t, m, opID, true) {
 		t.Fatal("reservation missing")
 	}
@@ -1726,7 +1726,7 @@ func TestBuilderManagerSelfExitSettlesDescendantsBeforeDirs(t *testing.T) {
 
 	opID := "op_0123456789abcdef0123456789abcdef"
 	startResp := make(chan string, 1)
-	go func() { startResp <- m.start(opID, nil) }()
+	go func() { startResp <- m.start(opID, builderCategorySet{}, nil) }()
 	if !waitInstance(t, m, opID, true) {
 		t.Fatal("reservation missing")
 	}
@@ -1894,7 +1894,7 @@ func TestBuilderManagerStartupPurgeResidue(t *testing.T) {
 		// admitted fresh, and its instance.pid is the NEW leader's.
 		fakeLeaderSeam(t, true)
 		startResp := make(chan string, 1)
-		go func() { startResp <- m.start(opID, nil) }()
+		go func() { startResp <- m.start(opID, builderCategorySet{}, nil) }()
 		if !waitInstance(t, m, opID, true) {
 			t.Fatal("same-ID START after the purge not admitted")
 		}
@@ -1995,7 +1995,7 @@ func TestBuilderManagerStartupPurgeResidue(t *testing.T) {
 		}
 		// No START adopts surviving residue: the refuse-to-adopt check
 		// fails the START closed.
-		if resp := m.start(opID, nil); resp != builderManagerRespInternal {
+		if resp := m.start(opID, builderCategorySet{}, nil); resp != builderManagerRespInternal {
 			t.Fatalf("START over surviving residue = %q, want internal (no adoption)", resp)
 		}
 	})
@@ -2006,7 +2006,7 @@ func TestBuilderManagerStartupPurgeResidue(t *testing.T) {
 		fakeLeaderSeam(t, true)
 		opID := "op_0123456789abcdef0123456789abcdef"
 		startResp := make(chan string, 1)
-		go func() { startResp <- m.start(opID, nil) }()
+		go func() { startResp <- m.start(opID, builderCategorySet{}, nil) }()
 		if !waitInstance(t, m, opID, true) {
 			t.Fatal("reservation missing")
 		}
@@ -2066,7 +2066,7 @@ func TestBuilderManagerSelfExitInheritedPipesUnblocksWaitOwner(t *testing.T) {
 
 	opID := "op_0123456789abcdef0123456789abcdef"
 	startResp := make(chan string, 1)
-	go func() { startResp <- m.start(opID, nil) }()
+	go func() { startResp <- m.start(opID, builderCategorySet{}, nil) }()
 	if !waitInstance(t, m, opID, true) {
 		t.Fatal("reservation missing")
 	}
@@ -2910,7 +2910,7 @@ func TestFailedMkdirMustNotForgetOwnedRuntime(t *testing.T) {
 		t.Cleanup(func() { _ = os.Chmod(opsDir, 0o700) })
 
 		startResp := make(chan string, 1)
-		go func() { startResp <- m.start(opID, nil) }()
+		go func() { startResp <- m.start(opID, builderCategorySet{}, nil) }()
 		select {
 		case resp := <-startResp:
 			if resp != builderManagerRespInternal {
@@ -2957,7 +2957,7 @@ func TestFailedMkdirMustNotForgetOwnedRuntime(t *testing.T) {
 		})
 
 		startResp := make(chan string, 1)
-		go func() { startResp <- m.start(opID, nil) }()
+		go func() { startResp <- m.start(opID, builderCategorySet{}, nil) }()
 		select {
 		case resp := <-startResp:
 			if resp != builderManagerRespInternal {
@@ -2999,7 +2999,7 @@ func TestFailedMkdirMustNotForgetOwnedRuntime(t *testing.T) {
 			t.Fatalf("cannot create the foreign state dir: %v", err)
 		}
 
-		if resp := m.start(opID, nil); resp != builderManagerRespInternal {
+		if resp := m.start(opID, builderCategorySet{}, nil); resp != builderManagerRespInternal {
 			t.Fatalf("START over pre-existing foreign dirs = %q, want internal (fail closed)", resp)
 		}
 
@@ -3017,7 +3017,7 @@ func TestFailedMkdirMustNotForgetOwnedRuntime(t *testing.T) {
 		if !waitInstance(t, m, opID, false) {
 			t.Fatal("the refused START left an instance record behind")
 		}
-		if resp := m.start(opID, nil); resp != builderManagerRespInternal {
+		if resp := m.start(opID, builderCategorySet{}, nil); resp != builderManagerRespInternal {
 			t.Fatalf("a repeated START over the same foreign dirs = %q, want internal", resp)
 		}
 	})
