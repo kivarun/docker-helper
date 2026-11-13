@@ -656,6 +656,65 @@ IDENTITY_OK=1
     echo "IDENTITY-GATE: FAIL (the relocated runtime does not carry the pinned MANIFEST digest)"
     IDENTITY_OK=0
   fi
+
+  # R4-P3-P6 run contract: the RUNNING daemon and builder manager must run
+  # the candidate RPM's own binary member — the same bytes the RPM will be
+  # measured against. Extracted member vs installed path vs live
+  # /proc/<pid>/exe, all three sha256, every verdict recorded.
+  rpm_file_sha="$(sha256sum "$ARTIFACT" | awk '{print $1}')"
+  echo "rpm-file-sha256=$rpm_file_sha"
+  daemon_pid="$(systemctl show -p MainPID --value docker-helper.service 2>/dev/null)"
+  manager_pid="$(systemctl show -p MainPID --value docker-helper-builder.service 2>/dev/null)"
+  echo "daemon pid=$daemon_pid manager pid=$manager_pid"
+  for p in "$daemon_pid" "$manager_pid"; do
+    if [ -n "$p" ] && [ "$p" != 0 ] && [ -r "/proc/$p/exe" ]; then
+      printf 'live pid=%s exe=%s sha256=%s\n' "$p" "$(readlink "/proc/$p/exe")" \
+        "$(sha256sum "/proc/$p/exe" | awk '{print $1}')"
+    fi
+  done
+  if ! command -v cpio >/dev/null 2>&1; then
+    zypper --non-interactive install -y cpio >/dev/null 2>&1 || true
+  fi
+  if command -v rpm2cpio >/dev/null 2>&1 && command -v cpio >/dev/null 2>&1; then
+    member_dir="$(mktemp -d)"
+    rpm2cpio "$ARTIFACT" 2>/dev/null | (cd "$member_dir" && cpio -idm --quiet usr/bin/docker-helper 2>/dev/null)
+    member_sha="$(sha256sum "$member_dir/usr/bin/docker-helper" 2>/dev/null | awk '{print $1}')"
+    rm -rf "$member_dir"
+    echo "rpm-binary-member sha256=${member_sha:-<unavailable>}"
+    installed="$(sha256sum "$P_BIN" | awk '{print $1}')"
+    live_ok=1
+    if [ -n "$member_sha" ] && [ "$member_sha" = "$installed" ]; then
+      echo "rpm-member==installed: MATCH"
+    else
+      echo "rpm-member==installed: MISMATCH ($member_sha vs $installed)"
+      live_ok=0
+    fi
+    for label in daemon:$daemon_pid manager:$manager_pid; do
+      who="${label%%:*}"; p="${label##*:}"
+      if [ -n "$p" ] && [ "$p" != 0 ] && [ -n "$member_sha" ]; then
+        live_sha="$(sha256sum "/proc/$p/exe" 2>/dev/null | awk '{print $1}')"
+        if [ -n "$live_sha" ] && [ "$live_sha" = "$member_sha" ]; then
+          echo "$who exe==rpm-member: MATCH"
+        else
+          echo "$who exe==rpm-member: MISMATCH ($live_sha vs $member_sha)"
+          live_ok=0
+        fi
+      else
+        echo "$who exe==rpm-member: UNPROVABLE (pid=$p member=$member_sha)"
+        live_ok=0
+      fi
+    done
+  else
+    echo "RPM member extraction impossible (no rpm2cpio/cpio on the guest)"
+    echo "R7-P21E3-RPM-PROCESS-IDENTITY=UNPROVABLE"
+    IDENTITY_OK=0
+  fi
+  if [ "$live_ok" = 1 ]; then
+    echo "R7-P21E3-RPM-PROCESS-IDENTITY=MATCH"
+  else
+    echo "IDENTITY-GATE: FAIL (running processes do not carry the candidate RPM bytes)"
+    IDENTITY_OK=0
+  fi
 } > "$EVIDENCE_DIR/p21e3-byte-identity.log" 2>&1
 cat "$EVIDENCE_DIR/p21e3-byte-identity.log"
 # Actual labels vs the exact .fc expectations (OBL-4: live labels, never
