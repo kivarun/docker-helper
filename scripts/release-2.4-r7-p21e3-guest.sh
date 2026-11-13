@@ -1299,10 +1299,57 @@ cat > "$EVIDENCE_DIR/p21e3_procns_snap.c" <<'PNSCEOF'
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/xattr.h>
 #include <time.h>
 #include <unistd.h>
+
+/* Self-contained statx surface (linux/statx.h may be absent on some
+ * toolchains): the offset layout is the UAPI contract of
+ * linux/statx.h; STATX_MNT_ID requires kernel >= 5.8, where the field
+ * exists at offset 0x90. */
+#ifndef STATX_BASIC_STATS
+#define STATX_BASIC_STATS 0x000007ffU
+#endif
+#ifndef STATX_MNT_ID
+#define STATX_MNT_ID 0x1000
+#endif
+struct statx_mind {
+    unsigned int stx_mask;
+    unsigned int stx_blksize;
+    unsigned long long stx_attributes;
+    unsigned int stx_nlink;
+    unsigned int stx_uid;
+    unsigned int stx_gid;
+    unsigned short stx_mode;
+    unsigned char __spare0[1];
+    unsigned char __pad0[5];
+    unsigned long long stx_ino;
+    unsigned long long stx_size;
+    unsigned long long stx_blocks;
+    unsigned long long stx_attributes_mask;
+    unsigned long long stx_atime_sec;
+    unsigned int stx_atime_nsec;
+    int __pad1;
+    unsigned long long stx_btime_sec;
+    unsigned int stx_btime_nsec;
+    int __pad2;
+    unsigned long long stx_ctime_sec;
+    unsigned int stx_ctime_nsec;
+    int __pad3;
+    unsigned long long stx_mtime_sec;
+    unsigned int stx_mtime_nsec;
+    int __pad4;
+    unsigned int stx_rdev_major;
+    unsigned int stx_rdev_minor;
+    unsigned int stx_dev_major;
+    unsigned int stx_dev_minor;
+    unsigned long long stx_mnt_id;
+};
+#ifndef SYS_statx
+#define SYS_statx 332
+#endif
 
 #define MAXSEEN 256
 
@@ -1353,10 +1400,18 @@ int main(int argc, char **argv) {
             int is_bkd = strstr(buf, "buildkitd") != NULL;
             if (!is_init && !is_bkd) continue;
             int pid = atoi(e->d_name);
-            if (was_seen(pid)) continue;
-            mark_seen(pid);
+            /* The container init is short-lived and MUTATES its own view
+             * (pivot_root, fresh proc mount, the failing self-bind): it is
+             * RE-SNAPSHOTTED on every sweep so the failing mount() has a
+             * bounded bracket of post-pivot views tied to the syscall
+             * timeline (rep=0 only on the first observation). buildkitd
+             * is stable: one snapshot per pid (rep stays 0). */
+            if (!is_init && was_seen(pid)) continue;
+            int first = !was_seen(pid);
+            if (first) mark_seen(pid);
+            int rep = first ? 0 : 1;
             wallstamp(ts, sizeof ts);
-            fprintf(lg, "RPNS-BEGIN %s pid=%d comm=%s\n", ts, pid, buf);
+            fprintf(lg, "RPNS-BEGIN %s pid=%d comm=%s rep=%d\n", ts, pid, buf, rep);
             /* SELinux context */
             snprintf(path, sizeof path, "/proc/%d/attr/current", pid);
             fd = open(path, O_RDONLY);
@@ -1381,15 +1436,20 @@ int main(int argc, char **argv) {
                 }
             }
             /* raw mountinfo: every line verbatim (major:minor, root,
-             * mountpoint and propagation tags stay in the raw text) */
+             * mountpoint and propagation tags stay in the raw text); a
+             * failed or empty read is an explicit GAP record */
             snprintf(path, sizeof path, "/proc/%d/mountinfo", pid);
             fd = open(path, O_RDONLY);
             if (fd >= 0) {
                 fprintf(lg, "RPNS-MOUNTINFO-BEGIN pid=%d\n", pid);
                 size_t off = 0;
-                while ((r = read(fd, buf + off, sizeof buf - 1 - off)) > 0) {
-                    off += (size_t)r;
-                    if (off >= sizeof buf - 1) break;
+                int read_err = 0;
+                for (ssize_t rr = 0; (rr = read(fd, buf + off, sizeof buf - 1 - off)) > 0; off += (size_t)rr) {
+                }
+                read_err = errno;
+                if (off >= sizeof buf - 1) read_err = 0;
+                if (off == 0) {
+                    fprintf(lg, "RPNS-GAP pid=%d mountinfo=empty errno=%d\n", pid, read_err);
                 }
                 close(fd);
                 buf[off] = '\0';
@@ -1402,20 +1462,48 @@ int main(int argc, char **argv) {
             } else {
                 fprintf(lg, "RPNS-MOUNTINFO-BEGIN pid=%d\nRPNS-GAP pid=%d mountinfo errno=%d\n", pid, pid, errno);
             }
-            /* observer-readonly lookups through the pid's own root DFS */
+            /* Observer-readonly lookups through the pid's own root DFS,
+             * each carrying STATX_MNT_ID so the resolved target binds to
+             * a mountinfo line by mount id (the failing self-bind's target
+             * correlation); an impossible read is a GAP, not a verdict. */
             const char *lookups[2] = {"proc", "proc/bus"};
             for (int i = 0; i < 2; i++) {
                 snprintf(path, sizeof path, "/proc/%d/root/%s", pid, lookups[i]);
-                struct stat st;
-                if (stat(path, &st) == 0) {
-                    char lbl[256];
-                    ssize_t xr = lgetxattr(path, "security.selinux", lbl, sizeof lbl - 1);
-                    if (xr > 0) { lbl[xr] = '\0'; } else { snprintf(lbl, sizeof lbl, "<rc=%ld>", (long)xr); }
-                    fprintf(lg, "RPNS-LOOKUP pid=%d path=/proc/%s stat=ok dev=%lu ino=%lu mode=%o label=%s\n",
-                            pid, lookups[i], (unsigned long)st.st_dev,
-                            (unsigned long)st.st_ino, st.st_mode & 07777, lbl);
+                struct statx_mind sx; memset(&sx, 0, sizeof sx);
+                long sxr = syscall(SYS_statx, AT_FDCWD, path, 0,
+                                   STATX_BASIC_STATS | STATX_MNT_ID, &sx);
+                if (sxr == 0 && (sx.stx_mask & STATX_MNT_ID)) {
+                    fprintf(lg,
+                            "RPNS-STATX pid=%d path=/proc/%s mnt_id=%llu dev=%u:%u ino=%llu mode=%o mask=%#x\n",
+                            pid, lookups[i],
+                            (unsigned long long)sx.stx_mnt_id,
+                            sx.stx_dev_major, sx.stx_dev_minor,
+                            (unsigned long long)sx.stx_ino,
+                            sx.stx_mode & 07777, sx.stx_mask);
+                    struct stat st;
+                    if (stat(path, &st) == 0) {
+                        char lbl[256];
+                        ssize_t xr = lgetxattr(path, "security.selinux", lbl, sizeof lbl - 1);
+                        if (xr > 0) { lbl[xr] = '\0'; } else { snprintf(lbl, sizeof lbl, "<rc=%ld>", (long)xr); }
+                        fprintf(lg, "RPNS-LOOKUP pid=%d path=/proc/%s stat=ok dev=%lu ino=%lu mode=%o label=%s\n",
+                                pid, lookups[i], (unsigned long)st.st_dev,
+                                (unsigned long)st.st_ino, st.st_mode & 07777, lbl);
+                    } else {
+                        fprintf(lg, "RPNS-LOOKUP pid=%d path=/proc/%s GAP errno=%d\n", pid, lookups[i], errno);
+                    }
                 } else {
-                    fprintf(lg, "RPNS-LOOKUP pid=%d path=/proc/%s stat=<errno=%d>\n", pid, lookups[i], errno);
+                    fprintf(lg, "RPNS-STATX pid=%d path=/proc/%s GAP errno=%d mask=%#x\n",
+                            pid, lookups[i], sxr < 0 ? errno : ENODATA,
+                            STATX_BASIC_STATS | STATX_MNT_ID);
+                    snprintf(path, sizeof path, "/proc/%d/root/%s", pid, lookups[i]);
+                    struct stat st;
+                    if (stat(path, &st) == 0) {
+                        fprintf(lg, "RPNS-LOOKUP pid=%d path=/proc/%s stat=ok dev=%lu ino=%lu mode=%o statx=<unavailable>\n",
+                                pid, lookups[i], (unsigned long)st.st_dev,
+                                (unsigned long)st.st_ino, st.st_mode & 07777);
+                    } else {
+                        fprintf(lg, "RPNS-LOOKUP pid=%d path=/proc/%s GAP errno=%d\n", pid, lookups[i], errno);
+                    }
                 }
             }
             wallstamp(ts, sizeof ts);
