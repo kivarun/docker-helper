@@ -389,10 +389,21 @@ allow docker_helper_t docker_helper_state_t:file { create read write open getatt
 #    docker_helper_builder_state_t:dir { ... mounton ... }") — the classic
 #    MS_BIND checks destination mounton, never the source superblock
 #    (P21-D accepted proof); NO fs_t:filesystem mount is proposed, granted,
-#    or needed. The only potentially-new mounton surface
-#    (devprep_t:dir mounton, the pts/shm/mqueue overmount destinations) is
-#    deliberately NOT granted — pending the OBL-1' live destination
-#    verification.
+#    or needed. The remaining mounton surface (devprep_t:dir mounton, the
+#    pts/shm/mqueue overmount destinations) was granted by the reviewed
+#    test-candidate rung R4-P3-P6-M3 from the M2 live destination evidence
+#    (real-runc mounton denial, audit 1794575580.301:1231). EXACT SCOPE of
+#    the grant: `docker_helper_buildkitd_t docker_helper_devprep_t:dir
+#    mounton` applies to EVERY directory labeled docker_helper_devprep_t —
+#    the shared dev-prep subtree root and every per-operation root included
+#    — with all subjects in the buildkitd domain, any MCS pair. dir:mounton
+#    is NOT in any loaded dir mlsconstrain set, so MCS does not directly
+#    gate it. Cross-operation isolation rests on: the categorized
+#    dir:search gate on foreign op directories (decision-proven
+#    cross-category DENIED), the absence of an addressable foreign
+#    mount-target fd, and the mount-namespace locality of the per-op
+#    runtime. The c1-vs-c2 isolation proof remains the Release-GO blocker
+#    and must decide the residual cross-category mount exposure.
 #
 # DELTAS TO THE require DECLARATIONS (exactness, no semantic grants):
 # class chr_file + { setattr unlink } (the umask-correction chmod and the
@@ -417,6 +428,11 @@ allow docker_helper_buildkitd_t docker_helper_state_t:dir search;
 allow docker_helper_buildkitd_t docker_helper_devprep_t:dir { search getattr };
 allow docker_helper_buildkitd_t docker_helper_devprep_t:chr_file getattr;
 allow docker_helper_buildkitd_t docker_helper_devprep_t:lnk_file getattr;
+# R4-P3-P6-M2 live rung (audit 1794575580.301:1231): the real runc's
+# container-init (buildkitd domain, own category) mounts devpts
+# new-instance onto …/rootfs/dev/pts INSIDE the prepared /dev bind. The
+# experimentally scoped grant (test candidate, single permission):
+allow docker_helper_buildkitd_t docker_helper_devprep_t:dir mounton;
 
 # Trusted CA material is dynamically created by the daemon under
 # /run/docker-helper/trusted-ca. Type transitions label newly created snapshot

@@ -472,6 +472,12 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		"p21e3-dac-state.log",
 		"getfacl -p --absolute-names",
 		"p21e3-devprep-terminal-state.log",
+		// R4-P3-P6/M3: the dev-prep lifecycle diagnostics come from the
+		// daemon's own operational journal (dev_prep, dev_prep_cleanup),
+		// and the exact prepared-tree path is probed at the terminal.
+		"p21e3-daemon-journal.log",
+		"p21e3-devprep-terminal-probe.log",
+		"dev_prep_cleanup",
 		// R4-P3-P5-R1: the state root is captured once more AFTER the
 		// build terminal, alongside the per-op teardown race capture.
 		"post-terminal traverse-chain state",

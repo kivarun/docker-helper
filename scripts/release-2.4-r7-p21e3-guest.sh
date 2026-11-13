@@ -1992,6 +1992,33 @@ fi
 # orientation for the report; the ANALYSIS stays with the round report)
 # ---------------------------------------------------------------------------
 log "=== section 6: chain inventory ==="
+# R4-P3-P6 cleanup proof: the daemon's internal stage diagnostics carry
+# the trusted dev-prep lifecycle (dev_prep success before buildctl and
+# dev_prep_cleanup after the proven STOP) with the operation id. The
+# prepared-tree terminal absence is ALSO probed on the exact op path from
+# an identity with confirmed parent traversal (the builder account's ACL
+# row covers exactly that hop in the capturing script's position too).
+{
+  echo "== daemon operational stage diagnostics (dev-prep lifecycle) =="
+  journalctl -u docker-helper.service -o short-iso --no-pager 2>/dev/null \
+    | grep -aE 'dev_prep|build stage|operation_id' | tail -80 || echo "(journalctl unavailable)"
+} > "$EVIDENCE_DIR/p21e3-daemon-journal.log" 2>&1
+{
+  op_now="$(cat "$EVIDENCE_DIR/operation-id.log" 2>/dev/null || true)"
+  case "$op_now" in
+    op_*)
+      op_path="/var/lib/docker-helper/dev-prep/$op_now"
+      echo "== exact prepared-tree path probe at the terminal =="
+      echo "probe id: $op_now"
+      stat -c 'stat: mode=%a uid=%u gid=%g' "$op_path" 2>&1
+      getfacl -p --absolute-names "$op_path" 2>&1 || true
+      ;;
+    *) echo "no operation id recorded; the exact-path probe is skipped" ;;
+  esac
+  echo "-- probe identity: uid=$(id -u) selinux=$(id -Z 2>/dev/null || echo '<unavailable>')"
+  echo "-- parent chain access: the state-root ACL covers only the named builder uid by contract; the probe result is interpreted against that access, and the daemon journal's dev_prep_cleanup diagnostic is the primary absence proof"
+} > "$EVIDENCE_DIR/p21e3-devprep-terminal-probe.log" 2>&1
+cat "$EVIDENCE_DIR/p21e3-devprep-terminal-probe.log"
 {
   echo "== wrapper vs runtime observations (by /proc/<pid>/exe) =="
   grep -oE 'exe=[^ ]+' "$EVIDENCE_DIR/p21e3-sampler.log" 2>/dev/null | sort | uniq -c || true
