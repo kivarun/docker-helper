@@ -2178,8 +2178,9 @@ EOF
   p21e3_dontaudit_restore
   fail "the diagnostic module could not be built or installed; BLOCKED"
 }
-{
-  echo "-- post-install sesearch (fail-closed: EXACTLY the two reviewed rows) --"
+  DIAG_LOAD_OK=1
+  {
+    echo "-- post-install sesearch (fail-closed: EXACTLY the two reviewed rows) --"
   DIAG_LOADED_Q="$(timeout 60 sesearch -A -s docker_helper_buildkitd_t -t proc_t -c dir -p mounton 2>&1)"
   DIAG_LOADED_RC=$?
   DIAG_LOADED_V="$(classify_sesearch_query "$DIAG_LOADED_RC" "$DIAG_LOADED_Q")"
