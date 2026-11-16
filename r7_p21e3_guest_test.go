@@ -532,6 +532,15 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		"trusted:perms=mounton|cond-active=none|cond-inactive=none",
 		"trusted:perms=|cond-active=none|cond-inactive=none",
 		"checkpolicy policycoreutils",
+		// R4-P3-P6-MNB12: the read-only baseline probe branch — no diag
+		// module in probe mode, the resolving tool, and its machine record.
+		"R7_P21E3_PROBE",
+		"p21e3_nsier",
+		"NS_GET_USERNS",
+		"NSR-SERVING-PIDNS",
+		"NSR-SERVING-USERNS",
+		"p21e3-nsr-probe.log",
+		"R7-P21E3-BUILD=skipped(probe-only)",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("the p21e3 guest harness must carry the inspection diagnostic %q", want)

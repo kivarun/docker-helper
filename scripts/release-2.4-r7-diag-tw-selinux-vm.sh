@@ -49,7 +49,10 @@ case "$R7_MODE" in
   p21d) GUEST_SCRIPT='release-2.4-r7-p21d-guest.sh' ;;
   p21e) GUEST_SCRIPT='release-2.4-r7-p21e-guest.sh' ;;
   p21e3) GUEST_SCRIPT='release-2.4-r7-p21e3-guest.sh' ;;
-  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d | p21e | p21e3)" ;;
+  # p21e3probe = the SAME p21e3 guest script in its read-only baseline probe
+  # branch (no diag module, no build, no session); no extra script file.
+  p21e3probe) GUEST_SCRIPT='release-2.4-r7-p21e3-guest.sh' ;;
+  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d | p21e | p21e3 | p21e3probe)" ;;
 esac
 
 log()  { printf '%s %s\n' "$PREFIX" "$*"; }
@@ -122,6 +125,7 @@ export R7_ARTIFACT_SHA256="$UAT_RPM_SHA256"
 export R7_EXPECT=fail
 export R7_RUNTIME_DEPS=install
 export R7_EVIDENCE_DIR='$GUEST_EVIDENCE_DIR'
+export R7_P21E3_PROBE=$( [ "$R7_MODE" = p21e3probe ] && echo 1 || echo 0 )
 bash /tmp/r7-diag/release-2.4-r7-diag-guest.sh
 RMT
   GUEST_RC=$?
@@ -237,7 +241,7 @@ RMT
         log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
         ;;
     esac
-  elif [ "$R7_MODE" = "p21e3" ]; then
+  elif [ "$R7_MODE" = "p21e3" ] || [ "$R7_MODE" = "p21e3probe" ]; then
     # The BUILD result line and the VERDICT line are matched SEPARATELY:
     # the previous tail -2 | tr '\n' ' ' fabrication produced a string
     # PREFIXED with R7-P21E3-BUILD=..., so the case below never matched

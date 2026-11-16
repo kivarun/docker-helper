@@ -1529,6 +1529,123 @@ PNSCEOF
 gcc -O2 -Wall -o "$EVIDENCE_DIR/p21e3_procns_snap" "$EVIDENCE_DIR/p21e3_procns_snap.c" \
   || fail "procns snapshotter compile failed"
 log "procns snapshotter compiled"
+cat > "$EVIDENCE_DIR/p21e3_nsier.c" <<'NIROF'
+/* p21e3_nsier.c — the namespace-instance resolver (R4-P3-P6-MNB12).
+ *
+ * READ-ONLY: enters the TARGET's mount namespace (setns of its own procns
+ * fd), resolves through the inherited /proc instance:
+ *   NSR-TARGET-MNTNS   — the target's mount ns (readlink, before setns)
+ *   NSR-ENTERED-MNTNS  — our mount ns after setns (should equal the target)
+ *   NSR-PROBE-USERNS   — our (probe) user ns
+ *   NSR-PROC-MOUNT     — the /proc line: RUN-LOCAL mount id + major:minor
+ *   NSR-SERVING-PIDNS  — readlink /proc/1/ns/pid THROUGH the instance: the
+ *                        PID namespace that services exactly this procfs
+ *   NSR-SERVING-USERNS — NS_GET_USERNS on the opened serving-pidns fd
+ *   NSR-INSTANCE-INIT  — /proc/1's comm THROUGH the instance
+ *   NSR-TASKC          — the task count visible through the instance
+ * No mount/unmount/remount/write of any kind; every fd opened O_RDONLY|
+ * O_CLOEXEC and closed. The NS_GET_USERNS numbers are defined locally so
+ * no <linux/nsfs.h> dependency is needed.
+ */
+#define _GNU_SOURCE
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#ifndef NSIO
+#define NSIO 0xb7
+#endif
+#ifndef NS_GET_USERNS
+#define NS_GET_USERNS _IO(NSIO, 0x1)
+#endif
+#ifndef NS_GET_NSPID
+#define NS_GET_NSPID _IO(NSIO, 0x2)
+#endif
+#include <sched.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/mount.h>
+#include <unistd.h>
+
+int main(int argc, char **argv) {
+    if (argc != 2) { fprintf(stderr, "usage: %s <target-pid>\n", argv[0]); return 2; }
+    char path[128], buf[256];
+    ssize_t n;
+
+    snprintf(path, sizeof(path), "/proc/%s/ns/mnt", argv[1]);
+    int mfd = open(path, O_RDONLY | O_CLOEXEC);
+    if (mfd < 0) { perror("open target mntns"); return 3; }
+    n = readlink(path, buf, sizeof(buf) - 1);
+    if (n > 0) { buf[n] = '\0'; printf("NSR-TARGET-MNTNS %s\n", buf); }
+    if (setns(mfd, CLONE_NEWNS) != 0) { perror("setns CLONE_NEWNS"); close(mfd); return 4; }
+    n = readlink("/proc/self/ns/mnt", buf, sizeof(buf) - 1);
+    if (n > 0) { buf[n] = '\0'; printf("NSR-ENTERED-MNTNS %s\n", buf); }
+    n = readlink("/proc/self/ns/user", buf, sizeof(buf) - 1);
+    if (n > 0) { buf[n] = '\0'; printf("NSR-PROBE-USERNS %s\n", buf); }
+    close(mfd);
+
+    FILE *mi = fopen("/proc/self/mountinfo", "r");
+    if (!mi) { perror("mountinfo"); return 5; }
+    char line[8192];
+    while (fgets(line, sizeof(line), mi)) {
+        if (strstr(line, " - proc proc ")) {
+            char id[32] = "", parent[32] = "", dev[64] = "";
+            sscanf(line, "%31s %31s %63s", id, parent, dev);
+            printf("NSR-PROC-MOUNT id=%s %s\n", id, line);
+            printf("NSR-PROC-DEV dev=%s\n", dev);
+            break;
+        }
+    }
+    fclose(mi);
+
+    n = readlink("/proc/1/ns/pid", buf, sizeof(buf) - 1);
+    if (n > 0) { buf[n] = '\0'; printf("NSR-SERVING-PIDNS %s\n", buf); }
+    else perror("readlink /proc/1/ns/pid");
+
+    int pfd = open("/proc/1/ns/pid", O_RDONLY | O_CLOEXEC);
+    if (pfd >= 0) {
+        int ufd = ioctl(pfd, NS_GET_USERNS, 0);
+        if (ufd >= 0) {
+            char fdpath[64];
+            snprintf(fdpath, sizeof(fdpath), "/proc/self/fd/%d", ufd);
+            n = readlink(fdpath, buf, sizeof(buf) - 1);
+            if (n > 0) { buf[n] = '\0'; printf("NSR-SERVING-USERNS %s\n", buf); }
+            else perror("readlink userns fd");
+            close(ufd);
+        } else {
+            printf("NSR-SERVING-USERNS-GAP errno=%d (%s)\n", errno, strerror(errno));
+        }
+        close(pfd);
+    }
+
+    FILE *c = fopen("/proc/1/comm", "r");
+    if (c) {
+        char cm[128] = "";
+        if (fgets(cm, sizeof(cm), c)) { char *nl = strchr(cm, '\n'); if (nl) *nl = 0;
+            printf("NSR-INSTANCE-INIT %s\n", cm); }
+        fclose(c);
+    }
+    DIR *d = opendir("/proc");
+    if (d) {
+        long tc = 0;
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            if (e->d_name[0] >= '0' && e->d_name[0] <= '9') tc++;
+        }
+        closedir(d);
+        printf("NSR-TASKC %ld\n", tc);
+    }
+    printf("NSR-DONE\n");
+    return 0;
+}
+NIROF
+if ! command -v gcc >/dev/null 2>&1; then
+  timeout 300 zypper --non-interactive install -y gcc 2>&1 | tail -2
+fi
+gcc -O2 -Wall -o "$EVIDENCE_DIR/p21e3_nsier" "$EVIDENCE_DIR/p21e3_nsier.c" \
+  || fail "namespace-instance resolver compile failed"
+log "namespace-instance resolver compiled"
 
 # The prepared-tree event watcher (R4-P3-P5): the per-operation directory
 # under /var/lib/docker-helper/dev-prep lives only for the length of the
@@ -1757,6 +1874,70 @@ fi
 # ---------------------------------------------------------------------------
 if [ -f "$STATE_DIR/sec5" ]; then log "phase marker: section 5 done; skipping"; else
 log "=== section 5: one bounded enforcing build ==="
+# R4-P3-P6-MNB12: the read-only baseline probe (reviewer rung). When
+# R7_P21E3_PROBE=1 the whole build/diag-module/window machinery is BYPASSED:
+# no policy delta at all (the module from the Proc-mounton rung is NOT
+# loaded), no build, no session. The probe enters the live builder's mount
+# namespace READ-ONLY, resolves the /proc instance line (RUN-LOCAL mount id
+# and major:minor), reads the PID namespace that SERVICES exactly this
+# procfs instance, resolves its owning user namespace through NS_GET_USERNS,
+# and inventories the same-superblock carriers visible in this window.
+if [ "${R7_P21E3_PROBE:-0}" = 1 ]; then
+  NSR_LOG="$EVIDENCE_DIR/p21e3-nsr-probe.log"
+  BKD_PID=""
+  for pd in /proc/[0-9]*; do
+    pn="$(cat "$pd/comm" 2>/dev/null || true)"
+    if [ "$pn" = buildkitd ]; then BKD_PID="${pd#/proc/}"; break; fi
+  done
+  if [ -n "${BKD_PID:-}" ]; then
+    log "probe target: live buildkitd pid $BKD_PID (mount-namespace owner of the inherited procfs view)"
+    : > "$NSR_LOG"
+    "$EVIDENCE_DIR/p21e3_nsier" "$BKD_PID" >> "$NSR_LOG" 2>&1 \
+      || printf 'nsier rc=%d\n' "$?" >> "$NSR_LOG"
+    NSR_DEV="$(grep -a '^NSR-PROC-DEV ' "$NSR_LOG" | awk '{print $2}' | sed 's/^dev=//' | head -1)"
+    {
+      echo "== carriers of the builder procfs superblock (per live process, same window) =="
+      if [ -n "${NSR_DEV:-}" ]; then
+        for pd in /proc/[0-9]*; do
+          pn="$(cat "$pd/comm" 2>/dev/null || true)"
+          case "$pn" in
+            buildkitd|rootlesskit|slirp4netns|*runc*) : ;;
+            *) continue ;;
+          esac
+          cp="${pd#/proc/}"
+          ln="$(awk -v d="$NSR_DEV" '$3==d && $7=="-" && $8=="proc" {print "mount_id="$1" parent="$2" dev="$3" root="$4" mntpoint="$5}' "$pd/mountinfo" 2>/dev/null | head -2)"
+          if [ -n "$ln" ]; then
+            echo "--- carrier pid=$cp comm=$pn mntns=$(readlink "$pd/ns/mnt" 2>/dev/null)"
+            printf 'context=%s\n' "$(cat "$pd/attr/current" 2>/dev/null || echo unknown)"
+            printf '%s\n' "$ln"
+          fi
+        done
+      else
+        echo "GAP: the probe did not resolve the procfs instance line; carrier inventory aborted"
+      fi
+      echo "== the same-window live family inventory =="
+      for pd in /proc/[0-9]*; do
+        pn="$(cat "$pd/comm" 2>/dev/null || true)"
+        case "$pn" in
+          buildkitd|rootlesskit|slirp4netns|*runc*) printf 'pid=%s comm=%s mnt=%s user=%s pidns=%s\n' \
+            "${pd#/proc/}" "$pn" "$(readlink "$pd/ns/mnt" 2>/dev/null)" \
+            "$(readlink "$pd/ns/user" 2>/dev/null)" "$(readlink "$pd/ns/pid" 2>/dev/null)" ;;
+        esac
+      done
+      echo "== enforcement state (must be untouched) =="
+      getenforce 2>&1
+    } >> "$NSR_LOG" 2>&1
+  else
+    {
+      echo "GAP: no live buildkitd process found in this window; the probe target is absent"
+      echo "(nothing was started to create the target; the measurement records the state as observed)"
+    } > "$NSR_LOG"
+  fi
+  cat "$NSR_LOG"
+  printf 'R7-P21E3-BUILD=skipped(probe-only)\n'
+  printf 'R7-P21E3-VERDICT=MEASURED\n'
+  touch "$STATE_DIR/sec5"
+else
 [ -n "$ADMIN_TOKEN" ] || fail "admin token unreadable; the measurement cannot run"
 
 # Abandonment bookkeeping: everything started in this section below is
@@ -2437,6 +2618,7 @@ esac
 printf 'R7-P21E3-BUILD=%s\n' "$BUILD_RESULT"
 printf 'R7-P21E3-VERDICT=MEASURED\n'
 touch "$STATE_DIR/sec5"
+fi
 fi
 
 # ---------------------------------------------------------------------------
