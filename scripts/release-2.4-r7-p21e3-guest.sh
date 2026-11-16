@@ -2192,6 +2192,7 @@ if [ "$DIAG_LOAD_OK" != 1 ]; then
 fi
 DIAG_ACTIVE=1
 log "diagnostic module loaded: $DIAG_MODULE (exactly one allow rule; removal verified at the teardown)"
+fi  # end of the diag-module-load probe guard (probe mode loaded nothing)
 
 # --- the pinned audit window, opened IMMEDIATELY before the measured op ---
 if audit_boundary_open "$AUDIT_LOG_PATH"; then
@@ -2486,6 +2487,10 @@ cat "$EVIDENCE_DIR/p21e3-devprep-terminal-state.log"
 # --- verification BEFORE the dontaudit restore (the removal's own rebuild
 # --- PRESERVES the disable-dontaudit build state, so the policy-shape
 # --- check below runs only AFTER the restore has returned the baseline).
+if [ "${R7_P21E3_PROBE:-0}" = 1 ]; then
+  log "probe mode: nothing was loaded; no unload is needed (the baseline policy never moved)"
+  printf 'R7-P21E3-DIAG-UNLOADED=probe-not-loaded' >> "$DIAG_LOG"
+else
 p21e3_diag_remove
 DIAG_UNLOAD_OK=1
 {
@@ -2545,7 +2550,7 @@ if [ "$DIAG_UNLOAD_OK" != 1 ]; then
   fail "the diagnostic module unload could not be verified (policy-shape leg); BLOCKED"
 fi
 log "diagnostic module unloaded and verified ($DIAG_MODULE)"
-fi  # end of the diagnostic-machinery probe guard
+fi  # end of the diag-module-unload probe guard
 
 # The bounded builder-manager service journal covering EXACTLY the
 # operation window (JSTART was taken at window open, JEND at terminal).

@@ -564,7 +564,7 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 	}
 	// The diagnostic-module unload must be verified BEFORE the script can
 	// report a success-path verdict, and the verified marker must never be
-	// printed when a unload-gate check failed.
+	// printed when an unload-gate check failed.
 	unloadGate := strings.Index(script, "DIAG-UNLOAD-GATE")
 	unloadVerified := strings.Index(script, "R7-P21E3-DIAG-UNLOADED=verified")
 	if unloadGate < 0 || unloadVerified < 0 || unloadVerified < unloadGate {
