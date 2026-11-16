@@ -1973,7 +1973,9 @@ if ! command -v checkmodule >/dev/null 2>&1 || ! command -v semodule_package >/d
 fi
 command -v checkmodule >/dev/null 2>&1 || fail "checkmodule unavailable; the diagnostic module cannot be compiled"
 command -v semodule_package >/dev/null 2>&1 || fail "semodule_package unavailable; the diagnostic module cannot be packaged"
-DIAG_PP="$EVIDENCE_DIR/p21e3-diag-mounton.pp"
+DIAG_PP="$EVIDENCE_DIR/docker_helper_diag_mounton.pp"
+# checkmodule requires the OUTPUT basename to equal the module name inside
+# the source header; the source file keeps its reporting name.
 DIAG_RELEASE_PP_SHA_PRE="$(sha256sum /usr/share/selinux/docker_helper.pp 2>/dev/null | awk '{print $1}')"
 {
   echo "== fixed single-row diagnostic module: $DIAG_MODULE (temporary) =="
