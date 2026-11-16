@@ -1974,8 +1974,12 @@ fi
 command -v checkmodule >/dev/null 2>&1 || fail "checkmodule unavailable; the diagnostic module cannot be compiled"
 command -v semodule_package >/dev/null 2>&1 || fail "semodule_package unavailable; the diagnostic module cannot be packaged"
 DIAG_PP="$EVIDENCE_DIR/docker_helper_diag_mounton.pp"
-# checkmodule requires the OUTPUT basename to equal the module name inside
-# the source header; the source file keeps its reporting name.
+# checkmodule validates the OUTPUT base filename against the module name in
+# the source header; the exact comparison form differs between checkmodule
+# versions (with or without the .pp extension stripped). Naming the
+# checkmodule output EXACTLY the module name (no extension) satisfies every
+# observed version; the packager output keeps the .pp name for `semodule -i`.
+DIAG_COMPILE_OUT="$EVIDENCE_DIR/docker_helper_diag_mounton"
 DIAG_RELEASE_PP_SHA_PRE="$(sha256sum /usr/share/selinux/docker_helper.pp 2>/dev/null | awk '{print $1}')"
 {
   echo "== fixed single-row diagnostic module: $DIAG_MODULE (temporary) =="
@@ -2018,8 +2022,8 @@ EOF
   echo "-- module source (exactly one allow rule) --"
   cat "$EVIDENCE_DIR/p21e3-diag-mounton.te"
   echo "-- compile --"
-  checkmodule -M -m -o "$DIAG_PP.m" "$EVIDENCE_DIR/p21e3-diag-mounton.te"
-  semodule_package -o "$DIAG_PP" -m "$DIAG_PP.m"
+  checkmodule -M -m -o "$DIAG_COMPILE_OUT" "$EVIDENCE_DIR/p21e3-diag-mounton.te"
+  semodule_package -o "$DIAG_PP" -m "$DIAG_COMPILE_OUT"
   echo "-- install (temporary module only) --"
   semodule -i "$DIAG_PP"
 } >> "$DIAG_LOG" 2>&1 || {
