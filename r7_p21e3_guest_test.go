@@ -540,7 +540,9 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		"NSR-SERVING-PIDNS",
 		"NSR-SERVING-USERNS",
 		"p21e3-nsr-probe.log",
-		"R7-P21E3-BUILD=skipped(probe-only)",
+		// In the probe mode the diagnostic machinery writes a distinct skip note.
+		"probe mode: no diagnostic module is loaded",
+		"the read-only baseline probe INSIDE the live build",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("the p21e3 guest harness must carry the inspection diagnostic %q", want)
