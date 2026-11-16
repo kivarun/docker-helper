@@ -532,7 +532,7 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		"DIAG-UNLOAD-GATE",
 		"R7-P21E3-DIAG-UNLOADED=verified",
 		"trusted:perms=mounton|cond-active=none|cond-inactive=none",
-		"trusted:perms=remount|cond-active=none|cond-inactive=none",
+		"trusted:perms=mount remount|cond-active=none|cond-inactive=none",
 		"trusted:perms=|cond-active=none|cond-inactive=none",
 		"checkpolicy policycoreutils",
 		// R4-P3-P6-MNB12: the read-only baseline probe branch — no diag

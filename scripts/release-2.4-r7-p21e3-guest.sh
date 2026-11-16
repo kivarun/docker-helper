@@ -2192,7 +2192,7 @@ EOF
   DIAG_LOADED_RC2=$?
   DIAG_LOADED_V2="$(classify_sesearch_query "$DIAG_LOADED_RC2" "$DIAG_LOADED_Q2")"
   printf 'query-rc=%s\nclassify=%s\n%s\n' "$DIAG_LOADED_RC2" "$DIAG_LOADED_V2" "$DIAG_LOADED_Q2"
-  if [ "$DIAG_LOADED_V2" != 'trusted:perms=remount|cond-active=none|cond-inactive=none' ]; then
+  if [ "$DIAG_LOADED_V2" != 'trusted:perms=mount remount|cond-active=none|cond-inactive=none' ]; then
     echo "DIAG-LOAD-GATE: FAIL (the loaded rule set is not exactly the two reviewed rows: $DIAG_LOADED_V2)"
     DIAG_LOAD_OK=0
   fi
