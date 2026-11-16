@@ -2296,8 +2296,8 @@ trap - EXIT
 cat "$EVIDENCE_DIR/p21e3-devprep-terminal-state.log"
 # --- the fixed single-row diagnostic module: removal and unload
 # --- verification BEFORE the dontaudit restore (the removal's own rebuild
-# --- is the first return to the pre-module shape; the restore then
-# --- re-verifies against the pre-toggle baseline independently).
+# --- PRESERVES the disable-dontaudit build state, so the policy-shape
+# --- check below runs only AFTER the restore has returned the baseline).
 p21e3_diag_remove
 DIAG_UNLOAD_OK=1
 {
@@ -2316,11 +2316,29 @@ DIAG_UNLOAD_OK=1
     echo "DIAG-UNLOAD-GATE: FAIL (the mounton rule is still present: $DIAG_UNLOAD_V)"
     DIAG_UNLOAD_OK=0
   fi
+} >> "$DIAG_LOG" 2>&1
+if [ "$DIAG_UNLOAD_OK" != 1 ]; then
+  cat "$DIAG_LOG"
+  p21e3_dontaudit_restore
+  fail "the diagnostic module rule-level unload could not be verified; BLOCKED"
+fi
+# The normal-path restore: the verdict must be independently verified; an
+# unverified restoration decides the distinct infrastructure/policy-state
+# verdict and stops the round.
+if ! p21e3_dontaudit_restore; then
+  fail "the dontaudit restoration could not be verified (distinct infrastructure/policy-state verdict)"
+fi
+# --- diagnostic module unload, policy-shape leg: the restored policy must
+# --- equal the pre-toggle baseline exactly, and the release policy bytes
+# --- must be unchanged; only then the removal may be pronounced verified.
+{
   DIAG_SHA_UNLOAD="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
-  echo "policy sha after removal: $DIAG_SHA_UNLOAD (loaded: ${DIAG_SHA_LOADED:-none}, pre-toggle baseline: ${SE_POLICY_SHA_PRE:-none})"
+  echo "policy sha after removal+restore: $DIAG_SHA_UNLOAD (pre-toggle baseline: ${SE_POLICY_SHA_PRE:-none})"
   if [ -z "$DIAG_SHA_UNLOAD" ] || [ "$DIAG_SHA_UNLOAD" != "${SE_POLICY_SHA_PRE:-}" ]; then
     echo "DIAG-UNLOAD-GATE: FAIL (the loaded policy did not return to the pre-toggle baseline shape)"
     DIAG_UNLOAD_OK=0
+  else
+    echo "policy shape: baseline restored => OK"
   fi
   DIAG_RELEASE_PP_SHA_POST="$(sha256sum /usr/share/selinux/docker_helper.pp 2>/dev/null | awk '{print $1}')"
   echo "release-policy .pp sha (post; must equal $DIAG_RELEASE_PP_SHA_PRE): $DIAG_RELEASE_PP_SHA_POST"
@@ -2336,16 +2354,9 @@ DIAG_UNLOAD_OK=1
 } >> "$DIAG_LOG" 2>&1
 cat "$DIAG_LOG"
 if [ "$DIAG_UNLOAD_OK" != 1 ]; then
-  p21e3_dontaudit_restore
-  fail "the diagnostic module unload could not be verified; BLOCKED"
+  fail "the diagnostic module unload could not be verified (policy-shape leg); BLOCKED"
 fi
 log "diagnostic module unloaded and verified ($DIAG_MODULE)"
-# The normal-path restore: the verdict must be independently verified; an
-# unverified restoration decides the distinct infrastructure/policy-state
-# verdict and stops the round.
-if ! p21e3_dontaudit_restore; then
-  fail "the dontaudit restoration could not be verified (distinct infrastructure/policy-state verdict)"
-fi
 
 # The bounded builder-manager service journal covering EXACTLY the
 # operation window (JSTART was taken at window open, JEND at terminal).
