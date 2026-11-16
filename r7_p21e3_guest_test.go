@@ -517,22 +517,47 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		"policy sha restored",
 		// The toolchain gains the ACL interrogation tool.
 		"zypper --non-interactive install -y gcc strace acl",
+		// R4-P3-P6-MNB9: the fixed single-row diagnostic module — exactly the
+		// reviewed rule, loaded through a temporary module only, with the
+		// fail-closed load gate and the independent unload verification.
+		"p21e3-diag-mounton.log",
+		"module docker_helper_diag_mounton 1.0;",
+		"allow docker_helper_buildkitd_t proc_t:dir mounton;",
+		"checkmodule -M -m",
+		"semodule_package -o",
+		"semodule -i \"$DIAG_PP\"",
+		"DIAG-LOAD-GATE",
+		"DIAG-UNLOAD-GATE",
+		"R7-P21E3-DIAG-UNLOADED=verified",
+		"trusted:perms=mounton|cond-active=none|cond-inactive=none",
+		"trusted:perms=|cond-active=none|cond-inactive=none",
+		"checkpolicy policycoreutils",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("the p21e3 guest harness must carry the inspection diagnostic %q", want)
 		}
 	}
 	// Restoration discipline: the policy identity must be recorded BEFORE
-	// the toggle, and the EXIT trap must pair the restoration with the
-	// abandonment handler.
+	// the toggle, and the EXIT trap must pair the diagnostic-module removal
+	// with the policy restoration and the abandonment handler, in that
+	// order (the removal rebuild must precede the restore so the restored
+	// baseline excludes the temporary module).
 	dbIdx := strings.Index(script, "SE_POLICY_SHA_PRE=")
 	restoreIdx := strings.Index(script, "p21e3_dontaudit_restore() {")
-	trapIdx := strings.Index(script, "trap 'p21e3_dontaudit_restore; measure_abandon' EXIT")
+	trapIdx := strings.Index(script, "trap 'p21e3_diag_remove; p21e3_dontaudit_restore; measure_abandon' EXIT")
 	if dbIdx < 0 || restoreIdx < 0 || dbIdx > restoreIdx {
 		t.Error("the dontaudit toggle must record the policy identity BEFORE the restore-mechanism definition")
 	}
 	if trapIdx < 0 {
-		t.Error("the EXIT trap must pair the dontaudit restoration with the abandonment handler")
+		t.Error("the EXIT trap must pair the diagnostic-module removal with the policy restoration and the abandonment handler")
+	}
+	// The diagnostic-module unload must be verified BEFORE the script can
+	// report a success-path verdict, and the verified marker must never be
+	// printed when a unload-gate check failed.
+	unloadGate := strings.Index(script, "DIAG-UNLOAD-GATE")
+	unloadVerified := strings.Index(script, "R7-P21E3-DIAG-UNLOADED=verified")
+	if unloadGate < 0 || unloadVerified < 0 || unloadVerified < unloadGate {
+		t.Error("the diagnostic module unload verification must gate the R7-P21E3-DIAG-UNLOADED=verified marker")
 	}
 	// The P5 regression must not return: the watcher must never be started
 	// on the not-yet-existing dev-prep directory again.

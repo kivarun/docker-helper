@@ -1781,6 +1781,33 @@ measure_abandon() {
   rm -f "${PULL_RAW:-}" 2>/dev/null || true
 }
 
+# The fixed single-row diagnostic module (R4-P3-P6-MNB9 rung): a temporary
+# loadable module carrying EXACTLY `allow docker_helper_buildkitd_t
+# proc_t:dir mounton;`. It is compiled from a one-rule source below, loaded
+# after the policy gates and the dontaudit toggle, removed BEFORE the
+# dontaudit restore at the terminal (its own rebuild returns the loaded
+# policy to the pre-module shape), and the removal is verified
+# independently (module store, sesearch, policy sha). The release policy
+# bytes are never touched. p21e3_diag_remove is idempotent (once-guard) and
+# must be paired with the policy RESTORE in that order on every exit path:
+# a removal rebuild discards the disable-dontaudit build flag, so removing
+# the module first lets the subsequent semodule -B restoration verify
+# against the true pre-toggle baseline.
+DIAG_MODULE=docker_helper_diag_mounton
+DIAG_ACTIVE=0
+DIAG_REMOVED=0
+p21e3_diag_remove() {
+  [ "${DIAG_ACTIVE:-0}" = 1 ] || return 0
+  [ "${DIAG_REMOVED:-0}" = 1 ] && return 0
+  local out rc
+  out="$(semodule -r "$DIAG_MODULE" 2>&1)"
+  rc=$?
+  printf 'p21e3_diag_remove: semodule -r %s rc=%d %s\n' "$DIAG_MODULE" "$rc" "$out" \
+    >> "${DIAG_LOG:-$EVIDENCE_DIR/p21e3-diag-mounton.log}"
+  DIAG_REMOVED=1
+  return 0
+}
+
 # --- workspace + session (prepared BEFORE the window/sampler/POST) ---
 WS="$PRINCIPAL_HOME/r7-p21e3-ws"
 rm -rf "$WS"; mkdir -p "$WS/ctx"
@@ -1935,7 +1962,97 @@ else
   p21e3_dontaudit_restore
   fail "dontaudit visibility could NOT be established (identical policy after -DB); distinct infrastructure verdict"
 fi
-trap 'p21e3_dontaudit_restore; measure_abandon' EXIT
+
+# --- the fixed single-row diagnostic module (R4-P3-P6-MNB9 rung): compiled
+# --- from a one-rule source, loaded through `semodule -i` ONLY, removed and
+# --- independently verified at the teardown (trap + explicit sequence). The
+# --- DELTA is exactly the reviewed row; nothing else is ever loaded.
+DIAG_LOG="$EVIDENCE_DIR/p21e3-diag-mounton.log"
+if ! command -v checkmodule >/dev/null 2>&1 || ! command -v semodule_package >/dev/null 2>&1; then
+  timeout 300 zypper --non-interactive install -y checkpolicy policycoreutils 2>&1 | tail -3
+fi
+command -v checkmodule >/dev/null 2>&1 || fail "checkmodule unavailable; the diagnostic module cannot be compiled"
+command -v semodule_package >/dev/null 2>&1 || fail "semodule_package unavailable; the diagnostic module cannot be packaged"
+DIAG_PP="$EVIDENCE_DIR/p21e3-diag-mounton.pp"
+DIAG_RELEASE_PP_SHA_PRE="$(sha256sum /usr/share/selinux/docker_helper.pp 2>/dev/null | awk '{print $1}')"
+{
+  echo "== fixed single-row diagnostic module: $DIAG_MODULE (temporary) =="
+  echo "committed-policy delta: NONE (temporary module only; unload verified at the teardown)"
+  echo "release-policy .pp sha (must not change): $DIAG_RELEASE_PP_SHA_PRE"
+} > "$DIAG_LOG"
+# Residual self-heal: a crashed previous attempt could leave the module
+# registered; the removal attempt is logged, and the baseline check below
+# decides fail-closed whether the rule is REALLY absent.
+semodule -r "$DIAG_MODULE" >> "$DIAG_LOG" 2>&1 \
+  || printf 'no residue to remove (semodule -r rc=%d)\n' "$?" >> "$DIAG_LOG"
+echo "-- module store (before; docker-helper entries) --" >> "$DIAG_LOG"
+semodule -l 2>/dev/null | grep -i docker >> "$DIAG_LOG" 2>&1 || true
+DIAG_SHA_BASE="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
+echo "policy sha baseline (pre-diag): $DIAG_SHA_BASE" >> "$DIAG_LOG"
+echo "-- baseline sesearch (fail-closed: NO mounton rule may exist) --" >> "$DIAG_LOG"
+DIAG_BASE_Q="$(timeout 60 sesearch -A -s docker_helper_buildkitd_t -t proc_t -c dir -p mounton 2>&1)"
+DIAG_BASE_RC=$?
+DIAG_BASE_V="$(classify_sesearch_query "$DIAG_BASE_RC" "$DIAG_BASE_Q")"
+printf 'query-rc=%s\nclassify=%s\n%s\n' "$DIAG_BASE_RC" "$DIAG_BASE_V" "$DIAG_BASE_Q" >> "$DIAG_LOG"
+if [ "$DIAG_BASE_V" != 'trusted:perms=|cond-active=none|cond-inactive=none' ]; then
+  p21e3_diag_remove
+  p21e3_dontaudit_restore
+  p21e3_diag_remove
+  fail "baseline sesearch is not an authoritative absence ($DIAG_BASE_V); the diagnostic rule must not pre-exist"
+fi
+cat > "$EVIDENCE_DIR/p21e3-diag-mounton.te" <<'EOF'
+module docker_helper_diag_mounton 1.0;
+
+require {
+	type docker_helper_buildkitd_t;
+	type proc_t;
+	class dir mounton;
+}
+
+# The reviewed single row (R4-P3-P6-MNB9): exactly this, nothing else.
+allow docker_helper_buildkitd_t proc_t:dir mounton;
+EOF
+{
+  echo "-- module source (exactly one allow rule) --"
+  cat "$EVIDENCE_DIR/p21e3-diag-mounton.te"
+  echo "-- compile --"
+  checkmodule -M -m -o "$DIAG_PP.m" "$EVIDENCE_DIR/p21e3-diag-mounton.te"
+  semodule_package -o "$DIAG_PP" -m "$DIAG_PP.m"
+  echo "-- install (temporary module only) --"
+  semodule -i "$DIAG_PP"
+} >> "$DIAG_LOG" 2>&1 || {
+  DIAG_INSTALL_RC=$?
+  printf 'diagnostic module build/install failed (rc=%d); nothing is loaded beyond the residue\n' "$DIAG_INSTALL_RC" >> "$DIAG_LOG"
+  p21e3_diag_remove
+  p21e3_dontaudit_restore
+  fail "the diagnostic module could not be built or installed; BLOCKED"
+}
+{
+  echo "-- post-install sesearch (fail-closed: EXACTLY the one mounton rule) --"
+  DIAG_LOADED_Q="$(timeout 60 sesearch -A -s docker_helper_buildkitd_t -t proc_t -c dir -p mounton 2>&1)"
+  DIAG_LOADED_RC=$?
+  DIAG_LOADED_V="$(classify_sesearch_query "$DIAG_LOADED_RC" "$DIAG_LOADED_Q")"
+  printf 'query-rc=%s\nclassify=%s\n%s\n' "$DIAG_LOADED_RC" "$DIAG_LOADED_V" "$DIAG_LOADED_Q"
+  if [ "$DIAG_LOADED_V" != 'trusted:perms=mounton|cond-active=none|cond-inactive=none' ]; then
+    echo "DIAG-LOAD-GATE: FAIL (the loaded rule set is not exactly the one reviewed row: $DIAG_LOADED_V)"
+    DIAG_LOAD_OK=0
+  else
+    echo "DIAG-LOAD-GATE: PASS (exactly the reviewed row is loaded, unconditional)"
+  fi
+  DIAG_SHA_LOADED="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
+  echo "policy sha with the diagnostic module: $DIAG_SHA_LOADED"
+  echo "-- release-policy .pp sha (post-install; must be unchanged) --"
+  sha256sum /usr/share/selinux/docker_helper.pp 2>/dev/null || true
+} >> "$DIAG_LOG" 2>&1
+DIAG_LOAD_OK=1
+grep -aq '^DIAG-LOAD-GATE: FAIL' "$DIAG_LOG" && DIAG_LOAD_OK=0
+if [ "$DIAG_LOAD_OK" != 1 ]; then
+  p21e3_diag_remove
+  p21e3_dontaudit_restore
+  fail "the diagnostic module load gate failed; BLOCKED"
+fi
+DIAG_ACTIVE=1
+log "diagnostic module loaded: $DIAG_MODULE (exactly one allow rule; removal verified at the teardown)"
 
 # --- the pinned audit window, opened IMMEDIATELY before the measured op ---
 if audit_boundary_open "$AUDIT_LOG_PATH"; then
@@ -1976,7 +2093,7 @@ PNS_PID=$!
   echo ":: /proc and submounts from /proc/1/mountinfo (raw; mount ids, major:minor, root, propagation)"
   grep -aE '[[:space:]]/proc([[:space:]/]|\b|$)|/proc/' /proc/1/mountinfo || cat /proc/1/mountinfo
 } > "$EVIDENCE_DIR/p21e3-procns-host.log" 2>&1
-trap 'p21e3_dontaudit_restore; measure_abandon' EXIT
+trap 'p21e3_diag_remove; p21e3_dontaudit_restore; measure_abandon' EXIT
 SAMPLER_CONFIRMED=0
 for _ in $(seq 1 100); do
   grep -aq '^SAMPLER-START' "$EVIDENCE_DIR/p21e3-sampler.log" 2>/dev/null \
@@ -2171,6 +2288,52 @@ trap - EXIT
   [ "$found_op" = 1 ] || echo "(no per-op dir present at the terminal — removed by the operation teardown; the watcher's event captures hold the ladder's state)"
 } > "$EVIDENCE_DIR/p21e3-devprep-terminal-state.log" 2>&1
 cat "$EVIDENCE_DIR/p21e3-devprep-terminal-state.log"
+# --- the fixed single-row diagnostic module: removal and unload
+# --- verification BEFORE the dontaudit restore (the removal's own rebuild
+# --- is the first return to the pre-module shape; the restore then
+# --- re-verifies against the pre-toggle baseline independently).
+p21e3_diag_remove
+DIAG_UNLOAD_OK=1
+{
+  echo "-- diagnostic module unload verification --"
+  if semodule -l 2>/dev/null | grep -aq docker_helper_diag_mounton; then
+    echo "DIAG-UNLOAD-GATE: FAIL (the module is still registered in the store)"
+    DIAG_UNLOAD_OK=0
+  else
+    echo "module store: docker_helper_diag_mounton absent => OK"
+  fi
+  DIAG_UNLOAD_Q="$(timeout 60 sesearch -A -s docker_helper_buildkitd_t -t proc_t -c dir -p mounton 2>&1)"
+  DIAG_UNLOAD_RC=$?
+  DIAG_UNLOAD_V="$(classify_sesearch_query "$DIAG_UNLOAD_RC" "$DIAG_UNLOAD_Q")"
+  printf 'query-rc=%s\nclassify=%s\n%s\n' "$DIAG_UNLOAD_RC" "$DIAG_UNLOAD_V" "$DIAG_UNLOAD_Q"
+  if [ "$DIAG_UNLOAD_V" != 'trusted:perms=|cond-active=none|cond-inactive=none' ]; then
+    echo "DIAG-UNLOAD-GATE: FAIL (the mounton rule is still present: $DIAG_UNLOAD_V)"
+    DIAG_UNLOAD_OK=0
+  fi
+  DIAG_SHA_UNLOAD="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
+  echo "policy sha after removal: $DIAG_SHA_UNLOAD (loaded: ${DIAG_SHA_LOADED:-none}, pre-toggle baseline: ${SE_POLICY_SHA_PRE:-none})"
+  if [ -z "$DIAG_SHA_UNLOAD" ] || [ "$DIAG_SHA_UNLOAD" != "${SE_POLICY_SHA_PRE:-}" ]; then
+    echo "DIAG-UNLOAD-GATE: FAIL (the loaded policy did not return to the pre-toggle baseline shape)"
+    DIAG_UNLOAD_OK=0
+  fi
+  DIAG_RELEASE_PP_SHA_POST="$(sha256sum /usr/share/selinux/docker_helper.pp 2>/dev/null | awk '{print $1}')"
+  echo "release-policy .pp sha (post; must equal $DIAG_RELEASE_PP_SHA_PRE): $DIAG_RELEASE_PP_SHA_POST"
+  if [ "$DIAG_RELEASE_PP_SHA_POST" != "$DIAG_RELEASE_PP_SHA_PRE" ]; then
+    echo "DIAG-UNLOAD-GATE: FAIL (the release policy bytes changed)"
+    DIAG_UNLOAD_OK=0
+  else
+    echo "release-policy .pp sha unchanged => OK"
+  fi
+  if [ "$DIAG_UNLOAD_OK" = 1 ]; then
+    echo "R7-P21E3-DIAG-UNLOADED=verified"
+  fi
+} >> "$DIAG_LOG" 2>&1
+cat "$DIAG_LOG"
+if [ "$DIAG_UNLOAD_OK" != 1 ]; then
+  p21e3_dontaudit_restore
+  fail "the diagnostic module unload could not be verified; BLOCKED"
+fi
+log "diagnostic module unloaded and verified ($DIAG_MODULE)"
 # The normal-path restore: the verdict must be independently verified; an
 # unverified restoration decides the distinct infrastructure/policy-state
 # verdict and stops the round.
