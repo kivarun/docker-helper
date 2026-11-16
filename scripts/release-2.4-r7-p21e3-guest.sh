@@ -2128,7 +2128,7 @@ echo "-- module store (before; docker-helper entries) --" >> "$DIAG_LOG"
 semodule -l 2>/dev/null | grep -i docker >> "$DIAG_LOG" 2>&1 || true
 DIAG_SHA_BASE="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
 echo "policy sha baseline (pre-diag): $DIAG_SHA_BASE" >> "$DIAG_LOG"
-echo "-- baseline sesearch (fail-closed: NO mounton rule may exist) --" >> "$DIAG_LOG"
+echo "-- baseline sesearch (fail-closed: NO mounton/remount rule may exist) --" >> "$DIAG_LOG"
 DIAG_BASE_Q="$(timeout 60 sesearch -A -s docker_helper_buildkitd_t -t proc_t -c dir -p mounton 2>&1)"
 DIAG_BASE_RC=$?
 DIAG_BASE_V="$(classify_sesearch_query "$DIAG_BASE_RC" "$DIAG_BASE_Q")"
@@ -2139,6 +2139,16 @@ if [ "$DIAG_BASE_V" != 'trusted:perms=|cond-active=none|cond-inactive=none' ]; t
   p21e3_diag_remove
   fail "baseline sesearch is not an authoritative absence ($DIAG_BASE_V); the diagnostic rule must not pre-exist"
 fi
+DIAG_BASE_Q2="$(timeout 60 sesearch -A -s docker_helper_buildkitd_t -t proc_t -c filesystem -p remount 2>&1)"
+DIAG_BASE_RC2=$?
+DIAG_BASE_V2="$(classify_sesearch_query "$DIAG_BASE_RC2" "$DIAG_BASE_Q2")"
+printf 'query-rc=%s\nclassify=%s\n%s\n' "$DIAG_BASE_RC2" "$DIAG_BASE_V2" "$DIAG_BASE_Q2" >> "$DIAG_LOG"
+if [ "$DIAG_BASE_V2" != 'trusted:perms=|cond-active=none|cond-inactive=none' ]; then
+  p21e3_diag_remove
+  p21e3_dontaudit_restore
+  p21e3_diag_remove
+  fail "baseline sesearch is not an authoritative absence for remount ($DIAG_BASE_V2); the diagnostic rule must not pre-exist"
+fi
 cat > "$EVIDENCE_DIR/p21e3-diag-mounton.te" <<'EOF'
 module docker_helper_diag_mounton 1.0;
 
@@ -2146,10 +2156,12 @@ require {
 	type docker_helper_buildkitd_t;
 	type proc_t;
 	class dir mounton;
+	class filesystem remount;
 }
 
-# The reviewed single row (R4-P3-P6-MNB9): exactly this, nothing else.
+# The reviewed two rows (R4-P3-P6-MNB13): exactly these, nothing else.
 allow docker_helper_buildkitd_t proc_t:dir mounton;
+allow docker_helper_buildkitd_t proc_t:filesystem remount;
 EOF
 {
   echo "-- module source (exactly one allow rule) --"
@@ -2167,16 +2179,25 @@ EOF
   fail "the diagnostic module could not be built or installed; BLOCKED"
 }
 {
-  echo "-- post-install sesearch (fail-closed: EXACTLY the one mounton rule) --"
+  echo "-- post-install sesearch (fail-closed: EXACTLY the two reviewed rows) --"
   DIAG_LOADED_Q="$(timeout 60 sesearch -A -s docker_helper_buildkitd_t -t proc_t -c dir -p mounton 2>&1)"
   DIAG_LOADED_RC=$?
   DIAG_LOADED_V="$(classify_sesearch_query "$DIAG_LOADED_RC" "$DIAG_LOADED_Q")"
   printf 'query-rc=%s\nclassify=%s\n%s\n' "$DIAG_LOADED_RC" "$DIAG_LOADED_V" "$DIAG_LOADED_Q"
   if [ "$DIAG_LOADED_V" != 'trusted:perms=mounton|cond-active=none|cond-inactive=none' ]; then
-    echo "DIAG-LOAD-GATE: FAIL (the loaded rule set is not exactly the one reviewed row: $DIAG_LOADED_V)"
+    echo "DIAG-LOAD-GATE: FAIL (the loaded rule set is not exactly the two reviewed rows: $DIAG_LOADED_V)"
     DIAG_LOAD_OK=0
-  else
-    echo "DIAG-LOAD-GATE: PASS (exactly the reviewed row is loaded, unconditional)"
+  fi
+  DIAG_LOADED_Q2="$(timeout 60 sesearch -A -s docker_helper_buildkitd_t -t proc_t -c filesystem -p remount 2>&1)"
+  DIAG_LOADED_RC2=$?
+  DIAG_LOADED_V2="$(classify_sesearch_query "$DIAG_LOADED_RC2" "$DIAG_LOADED_Q2")"
+  printf 'query-rc=%s\nclassify=%s\n%s\n' "$DIAG_LOADED_RC2" "$DIAG_LOADED_V2" "$DIAG_LOADED_Q2"
+  if [ "$DIAG_LOADED_V2" != 'trusted:perms=remount|cond-active=none|cond-inactive=none' ]; then
+    echo "DIAG-LOAD-GATE: FAIL (the loaded rule set is not exactly the two reviewed rows: $DIAG_LOADED_V2)"
+    DIAG_LOAD_OK=0
+  fi
+  if [ "$DIAG_LOAD_OK" = 1 ]; then
+    echo "DIAG-LOAD-GATE: PASS (exactly the two reviewed rows are loaded, unconditional)"
   fi
   DIAG_SHA_LOADED="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
   echo "policy sha with the diagnostic module: $DIAG_SHA_LOADED"
@@ -2507,6 +2528,14 @@ DIAG_UNLOAD_OK=1
   printf 'query-rc=%s\nclassify=%s\n%s\n' "$DIAG_UNLOAD_RC" "$DIAG_UNLOAD_V" "$DIAG_UNLOAD_Q"
   if [ "$DIAG_UNLOAD_V" != 'trusted:perms=|cond-active=none|cond-inactive=none' ]; then
     echo "DIAG-UNLOAD-GATE: FAIL (the mounton rule is still present: $DIAG_UNLOAD_V)"
+    DIAG_UNLOAD_OK=0
+  fi
+  DIAG_UNLOAD_Q2="$(timeout 60 sesearch -A -s docker_helper_buildkitd_t -t proc_t -c filesystem -p remount 2>&1)"
+  DIAG_UNLOAD_RC2=$?
+  DIAG_UNLOAD_V2="$(classify_sesearch_query "$DIAG_UNLOAD_RC2" "$DIAG_UNLOAD_Q2")"
+  printf 'query-rc=%s\nclassify=%s\n%s\n' "$DIAG_UNLOAD_RC2" "$DIAG_UNLOAD_V2" "$DIAG_UNLOAD_Q2"
+  if [ "$DIAG_UNLOAD_V2" != 'trusted:perms=|cond-active=none|cond-inactive=none' ]; then
+    echo "DIAG-UNLOAD-GATE: FAIL (the remount rule is still present: $DIAG_UNLOAD_V2)"
     DIAG_UNLOAD_OK=0
   fi
 } >> "$DIAG_LOG" 2>&1

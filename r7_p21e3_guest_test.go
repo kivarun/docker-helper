@@ -523,6 +523,8 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		"p21e3-diag-mounton.log",
 		"module docker_helper_diag_mounton 1.0;",
 		"allow docker_helper_buildkitd_t proc_t:dir mounton;",
+		"allow docker_helper_buildkitd_t proc_t:filesystem remount;",
+		"class filesystem remount;",
 		"checkmodule -M -m",
 		"semodule_package -o",
 		"semodule -i \"$DIAG_PP\"",
@@ -530,6 +532,7 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		"DIAG-UNLOAD-GATE",
 		"R7-P21E3-DIAG-UNLOADED=verified",
 		"trusted:perms=mounton|cond-active=none|cond-inactive=none",
+		"trusted:perms=remount|cond-active=none|cond-inactive=none",
 		"trusted:perms=|cond-active=none|cond-inactive=none",
 		"checkpolicy policycoreutils",
 		// R4-P3-P6-MNB12: the read-only baseline probe branch — no diag
