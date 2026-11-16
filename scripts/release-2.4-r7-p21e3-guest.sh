@@ -1874,70 +1874,6 @@ fi
 # ---------------------------------------------------------------------------
 if [ -f "$STATE_DIR/sec5" ]; then log "phase marker: section 5 done; skipping"; else
 log "=== section 5: one bounded enforcing build ==="
-# R4-P3-P6-MNB12: the read-only baseline probe (reviewer rung). When
-# R7_P21E3_PROBE=1 the whole build/diag-module/window machinery is BYPASSED:
-# no policy delta at all (the module from the Proc-mounton rung is NOT
-# loaded), no build, no session. The probe enters the live builder's mount
-# namespace READ-ONLY, resolves the /proc instance line (RUN-LOCAL mount id
-# and major:minor), reads the PID namespace that SERVICES exactly this
-# procfs instance, resolves its owning user namespace through NS_GET_USERNS,
-# and inventories the same-superblock carriers visible in this window.
-if [ "${R7_P21E3_PROBE:-0}" = 1 ]; then
-  NSR_LOG="$EVIDENCE_DIR/p21e3-nsr-probe.log"
-  BKD_PID=""
-  for pd in /proc/[0-9]*; do
-    pn="$(cat "$pd/comm" 2>/dev/null || true)"
-    if [ "$pn" = buildkitd ]; then BKD_PID="${pd#/proc/}"; break; fi
-  done
-  if [ -n "${BKD_PID:-}" ]; then
-    log "probe target: live buildkitd pid $BKD_PID (mount-namespace owner of the inherited procfs view)"
-    : > "$NSR_LOG"
-    "$EVIDENCE_DIR/p21e3_nsier" "$BKD_PID" >> "$NSR_LOG" 2>&1 \
-      || printf 'nsier rc=%d\n' "$?" >> "$NSR_LOG"
-    NSR_DEV="$(grep -a '^NSR-PROC-DEV ' "$NSR_LOG" | awk '{print $2}' | sed 's/^dev=//' | head -1)"
-    {
-      echo "== carriers of the builder procfs superblock (per live process, same window) =="
-      if [ -n "${NSR_DEV:-}" ]; then
-        for pd in /proc/[0-9]*; do
-          pn="$(cat "$pd/comm" 2>/dev/null || true)"
-          case "$pn" in
-            buildkitd|rootlesskit|slirp4netns|*runc*) : ;;
-            *) continue ;;
-          esac
-          cp="${pd#/proc/}"
-          ln="$(awk -v d="$NSR_DEV" '$3==d && $7=="-" && $8=="proc" {print "mount_id="$1" parent="$2" dev="$3" root="$4" mntpoint="$5}' "$pd/mountinfo" 2>/dev/null | head -2)"
-          if [ -n "$ln" ]; then
-            echo "--- carrier pid=$cp comm=$pn mntns=$(readlink "$pd/ns/mnt" 2>/dev/null)"
-            printf 'context=%s\n' "$(cat "$pd/attr/current" 2>/dev/null || echo unknown)"
-            printf '%s\n' "$ln"
-          fi
-        done
-      else
-        echo "GAP: the probe did not resolve the procfs instance line; carrier inventory aborted"
-      fi
-      echo "== the same-window live family inventory =="
-      for pd in /proc/[0-9]*; do
-        pn="$(cat "$pd/comm" 2>/dev/null || true)"
-        case "$pn" in
-          buildkitd|rootlesskit|slirp4netns|*runc*) printf 'pid=%s comm=%s mnt=%s user=%s pidns=%s\n' \
-            "${pd#/proc/}" "$pn" "$(readlink "$pd/ns/mnt" 2>/dev/null)" \
-            "$(readlink "$pd/ns/user" 2>/dev/null)" "$(readlink "$pd/ns/pid" 2>/dev/null)" ;;
-        esac
-      done
-      echo "== enforcement state (must be untouched) =="
-      getenforce 2>&1
-    } >> "$NSR_LOG" 2>&1
-  else
-    {
-      echo "GAP: no live buildkitd process found in this window; the probe target is absent"
-      echo "(nothing was started to create the target; the measurement records the state as observed)"
-    } > "$NSR_LOG"
-  fi
-  cat "$NSR_LOG"
-  printf 'R7-P21E3-BUILD=skipped(probe-only)\n'
-  printf 'R7-P21E3-VERDICT=MEASURED\n'
-  touch "$STATE_DIR/sec5"
-else
 [ -n "$ADMIN_TOKEN" ] || fail "admin token unreadable; the measurement cannot run"
 
 # Abandonment bookkeeping: everything started in this section below is
@@ -2064,6 +2000,74 @@ fi
 rm -f "$PULL_RAW"
 log "session ready ($SID); image prewarm: $PREWARM"
 printf 'prewarm=%s\n' "$PREWARM" > "$EVIDENCE_DIR/prewarm.result"
+
+# --- R4-P3-P6-MNB12: the read-only baseline probe (reviewer rung). When
+# R7_P21E3_PROBE=1 the rest of the section (diag module, dontaudit toggle,
+# audit window, sampler, measured build) is BYPASSED — nothing below this
+# point changes any policy or mount state. The probe (section-4-compiled
+# tool p21e3_nsier) enters the LIVE builder mount namespace READ-ONLY,
+# resolves the inherited /proc instance (RUN-LOCAL mount id + major:minor),
+# reads the PID namespace that SERVICES exactly this procfs instance, and
+# resolves its owning user namespace through NS_GET_USERNS; the carrier
+# inventory of the same superblock is collected in the same window. A
+# missing live process is recorded as GAP, never simulated.
+if [ "${R7_P21E3_PROBE:-0}" = 1 ]; then
+  NSR_LOG="$EVIDENCE_DIR/p21e3-nsr-probe.log"
+  BKD_PID=""
+  for pd in /proc/[0-9]*; do
+    pn="$(cat "$pd/comm" 2>/dev/null || true)"
+    if [ "$pn" = buildkitd ]; then BKD_PID="${pd#/proc/}"; break; fi
+  done
+  if [ -n "${BKD_PID:-}" ]; then
+    log "probe target: live buildkitd pid $BKD_PID (mount-namespace owner of the inherited procfs view)"
+    : > "$NSR_LOG"
+    "$EVIDENCE_DIR/p21e3_nsier" "$BKD_PID" >> "$NSR_LOG" 2>&1 \
+      || printf 'nsier rc=%d\n' "$?" >> "$NSR_LOG"
+    NSR_DEV="$(grep -a '^NSR-PROC-DEV ' "$NSR_LOG" | awk '{print $2}' | sed 's/^dev=//' | head -1)"
+    {
+      echo "== carriers of the builder procfs superblock (per live process, same window) =="
+      if [ -n "${NSR_DEV:-}" ]; then
+        for pd in /proc/[0-9]*; do
+          pn="$(cat "$pd/comm" 2>/dev/null || true)"
+          case "$pn" in
+            buildkitd|rootlesskit|slirp4netns|*runc*) : ;;
+            *) continue ;;
+          esac
+          cp="${pd#/proc/}"
+          ln="$(awk -v d="$NSR_DEV" '$3==d && $7=="-" && $8=="proc" {print "mount_id="$1" parent="$2" dev="$3" root="$4" mntpoint="$5}' "$pd/mountinfo" 2>/dev/null | head -2)"
+          if [ -n "$ln" ]; then
+            echo "--- carrier pid=$cp comm=$pn mntns=$(readlink "$pd/ns/mnt" 2>/dev/null)"
+            printf 'context=%s\n' "$(cat "$pd/attr/current" 2>/dev/null || echo unknown)"
+            printf '%s\n' "$ln"
+          fi
+        done
+      else
+        echo "GAP: the probe did not resolve the procfs instance line; carrier inventory aborted"
+      fi
+      echo "== the same-window live family inventory =="
+      for pd in /proc/[0-9]*; do
+        pn="$(cat "$pd/comm" 2>/dev/null || true)"
+        case "$pn" in
+          buildkitd|rootlesskit|slirp4netns|*runc*) printf 'pid=%s comm=%s mnt=%s user=%s pidns=%s\n' \
+            "${pd#/proc/}" "$pn" "$(readlink "$pd/ns/mnt" 2>/dev/null)" \
+            "$(readlink "$pd/ns/user" 2>/dev/null)" "$(readlink "$pd/ns/pid" 2>/dev/null)" ;;
+        esac
+      done
+      echo "== enforcement state (must be untouched) =="
+      getenforce 2>&1
+    } >> "$NSR_LOG" 2>&1
+  else
+    {
+      echo "GAP: no live buildkitd process found in this window; the probe target is absent"
+      echo "(nothing was started to create the target; the measurement records the state as observed)"
+    } > "$NSR_LOG"
+  fi
+  cat "$NSR_LOG"
+  printf 'R7-P21E3-BUILD=skipped(probe-only)\n'
+  printf 'R7-P21E3-VERDICT=MEASURED\n'
+  touch "$STATE_DIR/sec5"
+  exit 0
+fi
 
 # --- DAC-state captures taken while the prepared trees exist (R4-P3-P5).
 # READ-ONLY throughout: stat/ls -Z/getfacl/uid_map reads; no chmod/chown/
@@ -2618,7 +2622,6 @@ esac
 printf 'R7-P21E3-BUILD=%s\n' "$BUILD_RESULT"
 printf 'R7-P21E3-VERDICT=MEASURED\n'
 touch "$STATE_DIR/sec5"
-fi
 fi
 
 # ---------------------------------------------------------------------------
