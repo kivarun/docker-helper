@@ -540,7 +540,13 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		// R4-P3-P6-MNB14: pre-load check of sysctl_irq_t and /proc/irq.
 		"matchpathcon /proc/irq",
 		"sesearch -t sysctl_irq_t",
-		"IRQ-MOUNT",
+		// R4-P3-P6-MNB14proc: read-only /proc/sys preflight (genfscon, label,
+		// mountinfo in builder/init views, propagation).
+		"seinfo --genfscon",
+		"matchpathcon /proc/sys",
+		"INIT-MOUNT",
+		"BUILDER-MOUNT",
+		"p21e3-proc-sys.log",
 		// R4-P3-P6-MNB12: the read-only baseline probe branch — no diag
 		// module in probe mode, the resolving tool, and its machine record.
 		"R7_P21E3_PROBE",

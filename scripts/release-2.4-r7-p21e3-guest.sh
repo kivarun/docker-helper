@@ -2001,6 +2001,52 @@ rm -f "$PULL_RAW"
 log "session ready ($SID); image prewarm: $PREWARM"
 printf 'prewarm=%s\n' "$PREWARM" > "$EVIDENCE_DIR/prewarm.result"
 
+# R4-P3-P6-MNB14: read-only /proc/sys preflight (no diag module, no build,
+# no session usage). Reads genfscon from the loaded policy and the /proc/sys
+# mountinfo view from builder, init and (if present) rootfs/proc views. Read
+# only: no mount/automount triggering, no policy change.
+if [ "${R7_P21E3_PROC_SYS:-0}" = 1 ]; then
+  SYS_LOG="$EVIDENCE_DIR/p21e3-proc-sys.log"
+  : > "$SYS_LOG"
+  {
+    echo "== /proc/sys preflight (R4-P3-P6-MNB14), read-only, no policy change =="
+    echo "enforcement: $(getenforce 2>&1 || echo unknown)"
+    echo "-- genfscon from the loaded policy (seinfo --genfscon) =="
+    if command -v seinfo >/dev/null 2>&1; then
+      seinfo --genfscon -- /sys/fs/selinux/policy 2>&1 | grep -iE 'proc|sysctl|irq' || true
+    else
+      echo "seinfo unavailable: genfscon not captured"
+    fi
+    echo "-- matchpathcon /proc/sys =="
+    if command -v matchpathcon >/dev/null 2>&1; then
+      matchpathcon /proc/sys 2>&1 || true
+    else
+      echo "matchpathcon unavailable: label not captured"
+    fi
+    echo "-- /proc/sys mountinfo in the harness (init) mount namespace =="
+    awk '$5=="/proc/sys" && $10=="proc" {print "INIT-MOUNT " $0}' /proc/self/mountinfo 2>/dev/null || true
+    echo "-- /proc/sys mountinfo in the builder mount namespace =="
+    BKD_PID="$(pgrep -u "$(id -u docker-helper-builder 2>/dev/null || echo 0)" -x buildkitd 2>/dev/null | head -1 || true)"
+    if [ -n "$BKD_PID" ]; then
+      echo "builder pid=$BKD_PID"
+      awk '$5=="/proc/sys" && $10=="proc" {print "BUILDER-MOUNT pid='$BKD_PID' " $0}' "/proc/$BKD_PID/mountinfo" 2>/dev/null || true
+      echo "builder mountns=$(readlink "/proc/$BKD_PID/ns/mnt" 2>/dev/null)"
+      echo "builder userns=$(readlink "/proc/$BKD_PID/ns/user" 2>/dev/null)"
+    else
+      echo "no live buildkitd observed: builder /proc/sys view not captured"
+    fi
+    echo "-- rootfs/proc view =="
+    echo "GAP: rootfs/proc is only present during a build; this preflight runs without a build, so the rootfs/proc /proc/sys view is not captured here"
+    echo "-- propagation / nested mounts check (from init mountinfo, read-only) =="
+    awk '$5=="/proc/sys" {print "PROP " $0}' /proc/self/mountinfo 2>/dev/null | grep -iE 'shared|master|propagate|slave|unbindable' || echo "no propagation tag on /proc/sys in init view (private)"
+    echo "== preflight end =="
+  } > "$SYS_LOG" 2>&1
+  cat "$SYS_LOG"
+  printf 'R7-P21E3-BUILD=skipped(proc-sys-preflight)\n'
+  printf 'R7-P21E3-VERDICT=MEASURED\n'
+  touch "$STATE_DIR/sec5"
+  exit 0
+fi
 
 # --- DAC-state captures taken while the prepared trees exist (R4-P3-P5).
 # READ-ONLY throughout: stat/ls -Z/getfacl/uid_map reads; no chmod/chown/
@@ -2049,7 +2095,7 @@ cat "$EVIDENCE_DIR/p21e3-dac-state.log"
 # --- the round decides the distinct infrastructure verdict, never a pass.
 # R4-P3-P6-MNB12: in the read-only baseline probe mode the toggle is
 # SKIPPED — policy bytes must not move at all on that round.
-if [ "${R7_P21E3_PROBE:-0}" != 1 ]; then
+if [ "${R7_P21E3_PROBE:-0}" != 1 ] && [ "${R7_P21E3_PROC_SYS:-0}" != 1 ]; then
 SE_POLICY_SHA_PRE="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
 printf 'policy sha before: %s\n' "$SE_POLICY_SHA_PRE" > "$EVIDENCE_DIR/p21e3-dontaudit.log"
 DB_OUT="$(semodule -DB 2>&1)" || {
