@@ -2378,7 +2378,7 @@ allow docker_helper_buildkitd_t proc_kcore_t:file getattr;
 allow docker_helper_buildkitd_t proc_kcore_t:file mounton;
 EOF
 {
-  echo "-- module source (exactly one allow rule) --"
+  echo "-- module source (exactly the seven reviewed allow rows) --"
   cat "$EVIDENCE_DIR/p21e3-diag-mounton.te"
   echo "-- compile --"
   checkmodule -M -m -o "$DIAG_COMPILE_OUT" "$EVIDENCE_DIR/p21e3-diag-mounton.te"
@@ -2392,7 +2392,8 @@ EOF
   p21e3_dontaudit_restore
   fail "the diagnostic module could not be built or installed; BLOCKED"
 }
-  DIAG_LOAD_OK=1
+  DIAG_ACTIVE=1
+DIAG_LOAD_OK=1
   {
     echo "-- post-install sesearch (fail-closed: EXACTLY the seven reviewed rows) --"
     DIAG_LOADED_Q="$(timeout 60 sesearch -A -s docker_helper_buildkitd_t -t proc_t -c dir -p mounton 2>&1)"
@@ -2442,16 +2443,20 @@ EOF
     DIAG_LOADED_RC6=$?
     DIAG_LOADED_V6="$(classify_sesearch_query "$DIAG_LOADED_RC6" "$DIAG_LOADED_Q6")"
     printf 'query-rc=%s\nclassify=%s\n%s\n' "$DIAG_LOADED_RC6" "$DIAG_LOADED_V6" "$DIAG_LOADED_Q6"
-    # R4-P3-P6-MNB18: the seventh reviewed row.
+    # R4-P3-P6-MNB18: the seventh reviewed row. Rows 6 and 7 share the
+    # proc_kcore_t:file class, so both loaded-gate checks expect the UNION
+    # of the two allow rules' permissions (getattr mounton) — the exact
+    # merged pair for that (source,target,class) proves both rows and
+    # nothing else.
     DIAG_LOADED_Q7="$(timeout 60 sesearch -A -s docker_helper_buildkitd_t -t proc_kcore_t -c file -p mounton 2>&1)"
     DIAG_LOADED_RC7=$?
     DIAG_LOADED_V7="$(classify_sesearch_query "$DIAG_LOADED_RC7" "$DIAG_LOADED_Q7")"
     printf 'query-rc=%s\nclassify=%s\n%s\n' "$DIAG_LOADED_RC7" "$DIAG_LOADED_V7" "$DIAG_LOADED_Q7"
-    if [ "$DIAG_LOADED_V6" != 'trusted:perms=getattr|cond-active=none|cond-inactive=none' ]; then
+    if [ "$DIAG_LOADED_V6" != 'trusted:perms=getattr mounton|cond-active=none|cond-inactive=none' ]; then
       echo "DIAG-LOAD-GATE: FAIL (the loaded rule set is not exactly the seven reviewed rows: $DIAG_LOADED_V6)"
       DIAG_LOAD_OK=0
     fi
-    if [ "$DIAG_LOADED_V7" != 'trusted:perms=mounton|cond-active=none|cond-inactive=none' ]; then
+    if [ "$DIAG_LOADED_V7" != 'trusted:perms=getattr mounton|cond-active=none|cond-inactive=none' ]; then
       echo "DIAG-LOAD-GATE: FAIL (the loaded rule set is not exactly the seven reviewed rows: $DIAG_LOADED_V7)"
       DIAG_LOAD_OK=0
     fi
@@ -2470,7 +2475,6 @@ if [ "$DIAG_LOAD_OK" != 1 ]; then
   p21e3_dontaudit_restore
   fail "the diagnostic module load gate failed; BLOCKED"
 fi
-DIAG_ACTIVE=1
 log "diagnostic module loaded: $DIAG_MODULE (exactly the seven reviewed allow rules; removal verified at the teardown)"
 fi  # end of the diag-module-load probe guard (probe mode loaded nothing)
 
