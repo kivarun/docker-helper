@@ -1898,9 +1898,10 @@ measure_abandon() {
   rm -f "${PULL_RAW:-}" 2>/dev/null || true
 }
 
-# The fixed single-row diagnostic module (R4-P3-P6-MNB9 rung): a temporary
-# loadable module carrying EXACTLY `allow docker_helper_buildkitd_t
-# proc_t:dir mounton;`. It is compiled from a one-rule source below, loaded
+# The fixed diag-module rung (R4-P3-P6-MNB9..MNB15): a temporary loadable
+# module carrying EXACTLY the reviewed rows (currently the four MNB15 rows:
+# proc_t:dir mounton, proc_t:filesystem remount, sysctl_irq_t:dir mounton,
+# sysctl_t:dir mounton). It is compiled from a fixed-row source below, loaded
 # after the policy gates and the dontaudit toggle, removed BEFORE the
 # dontaudit restore at the terminal (its own rebuild returns the loaded
 # policy to the pre-module shape), and the removal is verified
