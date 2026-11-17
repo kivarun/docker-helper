@@ -1466,7 +1466,7 @@ int main(int argc, char **argv) {
              * a mountinfo line by mount id (the failing self-bind's target
              * correlation); an impossible read is a GAP, not a verdict. */
             const char *lookups[3] = {"proc", "proc/bus", "proc/sys"};
-            for (int i = 0; i < 2; i++) {
+            for (int i = 0; i < 3; i++) {
                 snprintf(path, sizeof path, "/proc/%d/root/%s", pid, lookups[i]);
                 /* The kernel copies the FULL UAPI struct statx (264+
                  * bytes on current kernels) into the buffer: over-allocate
