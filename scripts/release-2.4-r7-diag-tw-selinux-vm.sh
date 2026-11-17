@@ -63,7 +63,13 @@ case "$R7_MODE" in
   # dedicated-type policy/label analysis branch (no diag module, no build,
   # no relabel; metadata + loaded-policy queries only).
   p21e3proc-keys) GUEST_SCRIPT='release-2.4-r7-p21e3-guest.sh' ;;
-  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d | p21e | p21e3 | p21e3probe | p21e3proc-sys | p21e3proc-file | p21e3proc-keys)" ;;
+  # p21e3diag-keys = the SAME p21e3 guest script in its MNB19 measurement
+  # branch: the seven reviewed rows PLUS the temporary dedicated-type CIL
+  # module (proc_keys_t, six attribute memberships, genfscon /keys, the
+  # proc_keys_t:file getattr row), loaded BEFORE the build's fresh procfs
+  # instances exist; one bounded enforcing build, then the verified unload.
+  p21e3diag-keys) GUEST_SCRIPT='release-2.4-r7-p21e3-guest.sh' ;;
+  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d | p21e | p21e3 | p21e3probe | p21e3proc-sys | p21e3proc-file | p21e3proc-keys | p21e3diag-keys)" ;;
 esac
 
 log()  { printf '%s %s\n' "$PREFIX" "$*"; }
@@ -140,6 +146,7 @@ export R7_P21E3_PROBE=$( [ "$R7_MODE" = p21e3probe ] && echo 1 || echo 0 )
 export R7_P21E3_PROC_SYS=$( [ "$R7_MODE" = p21e3proc-sys ] && echo 1 || echo 0 )
 export R7_P21E3_PROC_FILE=$( [ "$R7_MODE" = p21e3proc-file ] && echo 1 || echo 0 )
 export R7_P21E3_PROC_KEYS=$( [ "$R7_MODE" = p21e3proc-keys ] && echo 1 || echo 0 )
+export R7_P21E3_DIAG_KEYS=$( [ "$R7_MODE" = p21e3diag-keys ] && echo 1 || echo 0 )
 bash /tmp/r7-diag/release-2.4-r7-diag-guest.sh
 RMT
   GUEST_RC=$?
@@ -255,7 +262,7 @@ RMT
         log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
         ;;
     esac
-  elif [ "$R7_MODE" = "p21e3" ] || [ "$R7_MODE" = "p21e3probe" ] || [ "$R7_MODE" = "p21e3proc-sys" ] || [ "$R7_MODE" = "p21e3proc-file" ] || [ "$R7_MODE" = "p21e3proc-keys" ]; then
+  elif [ "$R7_MODE" = "p21e3" ] || [ "$R7_MODE" = "p21e3probe" ] || [ "$R7_MODE" = "p21e3proc-sys" ] || [ "$R7_MODE" = "p21e3proc-file" ] || [ "$R7_MODE" = "p21e3proc-keys" ] || [ "$R7_MODE" = "p21e3diag-keys" ]; then
     # The BUILD result line and the VERDICT line are matched SEPARATELY:
     # the previous tail -2 | tr '\n' ' ' fabrication produced a string
     # PREFIXED with R7-P21E3-BUILD=..., so the case below never matched

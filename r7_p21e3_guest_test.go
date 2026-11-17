@@ -580,6 +580,35 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		// In the probe mode the diagnostic machinery writes a distinct skip note.
 		"probe mode: no diagnostic module is loaded",
 		"the read-only baseline probe INSIDE the live build",
+		// R4-P3-P6-MNB19 (dedicated-type /proc/keys rung): the temporary CIL
+		// module carries the type, the six attribute memberships copied from
+		// proc_t, the genfscon row for the file target /keys, and the single
+		// eighth reviewed allow row; the load is mode-gated and verified by
+		// a row-8 load gate; the removal covers both temporary modules, and
+		// the fresh-procfs orientation probe proves the genfscon lives on
+		// inodes initialized after the policy load (init-namespace mount
+		// state is never touched).
+		"R7_P21E3_DIAG_KEYS",
+		"DIAG_MODULES=\"$DIAG_MODULES docker_helper_diag_keys\"",
+		"docker_helper_diag_keys.cil",
+		"(type proc_keys_t)",
+		"(typeattributeset file_type (proc_keys_t))",
+		"(typeattributeset filesystem_type (proc_keys_t))",
+		"(typeattributeset mountpoint (proc_keys_t))",
+		"(typeattributeset non_auth_file_type (proc_keys_t))",
+		"(typeattributeset non_security_file_type (proc_keys_t))",
+		"(typeattributeset proc_type (proc_keys_t))",
+		`(genfscon "proc" "/keys" system_u:object_r:proc_keys_t:s0)`,
+		"(allow docker_helper_buildkitd_t proc_keys_t (file (getattr)))",
+		"semodule -i \"$DIAG_KEYS_CIL\"",
+		"the loaded dedicated-type rule set is not exactly the eighth reviewed row",
+		"the dedicated type proc_keys_t already exists in the loaded policy",
+		"a genfscon row for /keys already exists in the loaded policy",
+		"genfscon /keys: ABSENT from the loaded policy => OK",
+		"semodule -r \"$mod\"",
+		"fresh procfs instance label probe (private mnt namespace)",
+		"the dedicated label IS live",
+		"R4-P3-P6-MNB19 dedicated-type unload corroboration",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("the p21e3 guest harness must carry the inspection diagnostic %q", want)
@@ -632,5 +661,70 @@ func TestR7P21E3HostGateDetectsVerdict(t *testing.T) {
 	}
 	if !strings.Contains(script, "grep -aoE 'R7-P21E3-VERDICT=") {
 		t.Error("the p21e3 host gate must match the VERDICT line alone")
+	}
+}
+
+// TestR7P21E3DiagKeysModePlumbing pins the MNB19 dedicated-type rung's
+// plumbing end to end: the workflow exposes the p21e3diag-keys mode, only
+// the SELinux VM job may run it, the VM wrapper selects the same p21e3
+// guest script for it and exports R7_P21E3_DIAG_KEYS=1, and the guest
+// script reacts to that flag.
+func TestR7P21E3DiagKeysModePlumbing(t *testing.T) {
+	wf, err := os.ReadFile(".github/workflows/release-2.4-r7-diag.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := string(wf)
+	if !strings.Contains(workflow, "p21e3diag-keys = the R7 MNB19 measurement") {
+		t.Error("the workflow must document the p21e3diag-keys mode")
+	}
+	for _, job := range []string{"ubuntu-tarball-diag", "apparmor-vm-diag"} {
+		idx := strings.Index(workflow, job+":")
+		if idx < 0 {
+			t.Fatalf("workflow job %s missing", job)
+		}
+		end := strings.Index(workflow[idx:], "runs-on:")
+		if end < 0 {
+			t.Fatalf("workflow job %s has no runs-on", job)
+		}
+		if !strings.Contains(workflow[idx:idx+end], "inputs.mode != 'p21e3diag-keys'") {
+			t.Errorf("workflow job %s must be excluded for the p21e3diag-keys mode", job)
+		}
+	}
+	selinuxIdx := strings.Index(workflow, "selinux-vm-diag:")
+	if selinuxIdx < 0 {
+		t.Fatal("workflow selinux-vm-diag job missing")
+	}
+	selinuxSlice := workflow[selinuxIdx : selinuxIdx+600]
+	if strings.Contains(selinuxSlice, "inputs.mode != 'p21e3diag-keys'") {
+		t.Error("the SELinux VM job must keep running the p21e3diag-keys mode")
+	}
+
+	vm, err := os.ReadFile("scripts/release-2.4-r7-diag-tw-selinux-vm.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vmScript := string(vm)
+	if !strings.Contains(vmScript, "p21e3diag-keys) GUEST_SCRIPT='release-2.4-r7-p21e3-guest.sh'") {
+		t.Error("the VM wrapper must select the p21e3 guest script for the p21e3diag-keys mode")
+	}
+	if !strings.Contains(vmScript, "R7_P21E3_DIAG_KEYS=$( [ \"$R7_MODE\" = p21e3diag-keys ] && echo 1 || echo 0 )") {
+		t.Error("the VM wrapper must export R7_P21E3_DIAG_KEYS=1 for the p21e3diag-keys mode")
+	}
+
+	guest, err := os.ReadFile("scripts/release-2.4-r7-p21e3-guest.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	guestScript := string(guest)
+	if !strings.Contains(guestScript, `if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then`) {
+		t.Error("the guest script must gate the dedicated-type machinery on R7_P21E3_DIAG_KEYS")
+	}
+	// The preflight read-only skip must NOT swallow the measurement mode:
+	// the dontaudit toggle and the diagnostic-module machinery must run for
+	// p21e3diag-keys (they run by default; the guard must not have grown).
+	guard := `if [ "${R7_P21E3_PROBE:-0}" != 1 ] && [ "${R7_P21E3_PROC_SYS:-0}" != 1 ] && [ "${R7_P21E3_PROC_FILE:-0}" != 1 ] && [ "${R7_P21E3_PROC_KEYS:-0}" != 1 ]; then`
+	if !strings.Contains(guestScript, guard) {
+		t.Error("the dontaudit-toggle guard must stay limited to the read-only probe/preflight modes")
 	}
 }
