@@ -457,7 +457,7 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 	script := string(raw)
 	for _, want := range []string{
 		// Lstat-family syscall coverage in the buildkitd trace.
-		"read,newfstatat,statx,statfs,getxattr",
+		"read,newfstatat,fstat,statx,statfs,getxattr",
 		// The wrapper-credential capture (uid_map/gid_map/status) in the
 		// sampler, keyed on the wrapper/real-runtime exe.
 		"PROCDETAIL",
