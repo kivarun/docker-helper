@@ -2352,7 +2352,7 @@ require {
 	type sysctl_t;
 	type proc_kcore_t;
 	class dir mounton;
-	class file mounton;
+	class file { mounton getattr };
 	class filesystem remount;
 }
 
