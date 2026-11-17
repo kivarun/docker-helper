@@ -2623,7 +2623,10 @@ if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
   } > "$DIAG_KEYS_LOG"
   cat > "$DIAG_KEYS_CIL" <<'EOF'
 ; R4-P3-P6-MNB19 rung: the dedicated /proc/keys type for docker-helper
-; diagnostics. Exactly this block, nothing else.
+; diagnostics. Exactly this block, nothing else. The genfscon context is
+; expressed in CIL list form (user role type category-suffix), NOT as a
+; colon string: the guest libsemanage refuses (Failed to resolve genfscon
+; statement) a colon-string context in module CIL.
 (type proc_keys_t)
 (typeattributeset file_type (proc_keys_t))
 (typeattributeset filesystem_type (proc_keys_t))
@@ -2631,13 +2634,13 @@ if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
 (typeattributeset non_auth_file_type (proc_keys_t))
 (typeattributeset non_security_file_type (proc_keys_t))
 (typeattributeset proc_type (proc_keys_t))
-(genfscon "proc" "/keys" system_u:object_r:proc_keys_t:s0)
+(genfscon "proc" "/keys" (system_u object_r proc_keys_t s0))
 (allow docker_helper_buildkitd_t proc_keys_t (file (getattr)))
 EOF
   {
     echo "-- module source (exactly the dedicated-type CIL block) --"
     cat "$DIAG_KEYS_CIL"
-    echo "-- install (temporary module only; `semodule -i` accepts CIL) --"
+    echo "-- install (temporary module only; semodule -i accepts CIL) --"
     semodule -i "$DIAG_KEYS_CIL"
   } >> "$DIAG_KEYS_LOG" 2>&1 || {
     DIAG_KEYS_INSTALL_RC=$?
