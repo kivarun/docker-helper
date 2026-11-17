@@ -561,6 +561,10 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		// coverage preflight (genfscon full proc section, policy capabilities,
 		// metadata-only live labels in available views).
 		"R7_P21E3_PROC_FILE",
+		"R7_P21E3_PROC_KEYS",
+		"p21e3-proc-keys.log",
+		"p21e3-proc-file-rules-full.log",
+		"hypothesis (NOT measured here",
 		"p21e3-proc-file.log",
 		"policy_capabilities",
 		"genfs_seclabel_wildcard",

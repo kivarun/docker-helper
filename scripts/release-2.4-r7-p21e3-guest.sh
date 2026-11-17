@@ -1922,7 +1922,12 @@ p21e3_diag_remove() {
   rc=$?
   printf 'p21e3_diag_remove: semodule -r %s rc=%d %s\n' "$DIAG_MODULE" "$rc" "$out" \
     >> "${DIAG_LOG:-$EVIDENCE_DIR/p21e3-diag-mounton.log}"
-  DIAG_REMOVED=1
+  # Only a SUCCESSFUL removal marks the module as gone; a failed `semodule -r`
+  # must keep retrying on the next call (the failure is visible in the log and
+  # the terminal unload gate stays fail-closed on the sesearch absence check).
+  if [ "$rc" = 0 ]; then
+    DIAG_REMOVED=1
+  fi
   return 0
 }
 
@@ -2127,13 +2132,83 @@ EOF
     echo "INIT-NAMESPACE: the labels and mount bindings above are direct measurements of the guest init (harness) namespace."
     echo "GAP-BUILDER: no live buildkitd in this build-free preflight; no direct builder-namespace measurement of the /proc/sys subtree targets here. The builder binding is carried by the build-window procns snapshots (MNB14/MNB15: the /proc subtree resolves through the same proc superblock instance; MNB15 pid=3523/4738: proc mount 338/0:46; post-pivot runc: 457/0:52)."
     echo "GAP-RUNC: no direct runc-namespace measurement of the individual targets in this build-free preflight; the runc binding is carried by MNB15 (RPNS 457/0:52 post-pivot pre-self-bind; strace 7036-7038 for /proc/sys; AVC 1233 for /proc/sysrq-trigger)."
-    echo "== preflight end =="
     echo "-- rootfs/proc view =="
     echo "GAP: rootfs/proc is only present during a build; this preflight runs without a build. The rootfs/proc binding is carried by the MNB15 evidence: RPNS resolved /proc at 457/0:52 post-pivot (pre-self-bind of /proc/sys) and AVC serial 1233 gave the kernel binding tcontext=sysctl_t (tclass=file, ino=4026532086) at the bind attempt."
     echo "== preflight end =="
   } > "$FILE_LOG" 2>&1
   cat "$FILE_LOG"
   printf 'R7-P21E3-BUILD=skipped(proc-file-preflight)\n'
+  printf 'R7-P21E3-VERDICT=MEASURED\n'
+  touch "$STATE_DIR/sec5"
+  exit 0
+fi
+
+# R4-P3-P6-MNB18proc: read-only policy/label analysis for a dedicated
+# /proc/keys type. No diag module, no build, no relabel, no session usage.
+# Metadata + loaded-policy queries only; the later-mounton bind check stays
+# a hypothesis (explicitly marked, never measured here).
+if [ "${R7_P21E3_PROC_KEYS:-0}" = 1 ]; then
+  KEYS_LOG="$EVIDENCE_DIR/p21e3-proc-keys.log"
+  : > "$KEYS_LOG"
+  {
+    echo "== /proc/keys dedicated-type preflight (R4-P3-P6-MNB18proc), read-only, no policy change, no relabel =="
+    echo "enforcement: $(getenforce 2>&1 || echo unknown)"
+    echo "loaded-policy sha256: $(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
+    echo "-- genfscon: the proc rows that decide the /proc/keys label =="
+    if command -v seinfo >/dev/null 2>&1; then
+      seinfo --genfscon -- /sys/fs/selinux/policy 2>&1 | grep -a '^ *genfscon proc ' | grep -aE ' / | /keys' || true
+      seinfo --genfscon -- /sys/fs/selinux/policy 2>&1 | grep -a 'keys' | grep -av sysctl || true
+    fi
+    echo "-- /proc/keys live label + binding in the harness (init) view (metadata only) =="
+    ls -Zd /proc/keys 2>&1
+    stat -c 'stat: mode=%a ino=%i' /proc/keys 2>&1 || true
+    if command -v findmnt >/dev/null 2>&1; then
+      findmnt -T /proc/keys -n -o ID,MAJ:MIN,FSTYPE,TARGET,OPTIONS,PROPAGATION 2>&1 || true
+    fi
+    awk '$5=="/proc" { fstype=""; for (i=6;i<=NF;i++) if ($i=="-") { fstype=$(i+1); break } print "INIT-MOUNT fstype=" fstype " " $0 }' /proc/self/mountinfo 2>/dev/null || true
+    echo "INIT-ROW-COUNT: $(awk '$5 ~ /^\/proc\/keys/' /proc/self/mountinfo 2>/dev/null | wc -l) separate /proc/keys mounts"
+    echo "-- xattr confirmation on the host procfs instance (read-only) =="
+    if command -v python3 >/dev/null 2>&1; then
+      python3 - <<'PYEOF' 2>&1
+import os
+for p in ("/proc/keys", "/proc/sysrq-trigger"):
+    try:
+        lab = os.getxattr(p, "security.selinux")
+        print("xattr security.selinux on %s: %r" % (p, lab))
+    except OSError as e:
+        print("xattr security.selinux on %s: OSError errno=%d" % (p, e.errno))
+PYEOF
+    fi
+    echo "-- proc_t type membership (attributes; the carrier of attribute-based rules) =="
+    if command -v seinfo >/dev/null 2>&1; then
+      seinfo -xt proc_t 2>&1 || seinfo -x proc_t 2>&1 || echo "seinfo -x unavailable"
+    fi
+    echo "-- DIRECT allow rules on proc_t:file (exact target proc_t; these STOP matching /proc/keys after a relabel) — all domains =="
+    sesearch -A -t proc_t -c file > "$EVIDENCE_DIR/p21e3-proc-file-rules-full.log" 2>&1 || true
+    wc -l < "$EVIDENCE_DIR/p21e3-proc-file-rules-full.log"
+    grep -aE '^allow [a-z_0-9]+ proc_t:file' "$EVIDENCE_DIR/p21e3-proc-file-rules-full.log" | head -60
+    echo "-- domains with DIRECT proc_t:file rules (the candidate losers; perm detail in the full capture) =="
+    grep -aE '^allow [a-z_0-9]+ proc_t:file' "$EVIDENCE_DIR/p21e3-proc-file-rules-full.log" \
+      | awk '{print $2}' | sort | uniq -c | sort -rn | head -30
+    echo "-- docker_helper domains: DIRECT proc_t:file rules =="
+    grep -aE '^allow docker_helper[a-z_0-9]* proc_t:file' "$EVIDENCE_DIR/p21e3-proc-file-rules-full.log" || echo "(none)"
+    echo "-- ATTRIBUTE-based rules that cover proc_t files (persist for a new type ONLY if the new type carries the same attribute memberships) =="
+    seinfo -xt proc_t 2>&1 | grep -oE 'attribute +[a-zA-Z0-9_]+' | awk '{print $2}' | while IFS= read -r attr; do
+      n="$(sesearch -A -t "$attr" -c file 2>/dev/null | wc -l)"
+      echo "attr=$attr -t $attr -c file rules=$n"
+      sesearch -A -t "$attr" -c file 2>/dev/null | grep -aE '^allow docker_helper[a-z_0-9]*' | head -8
+    done
+    echo "-- the docker_helper_buildkitd_t namespace: sesearch -A -s buildkitd_t -t proc_t -c file (direct AND attribute expansion) =="
+    sesearch -A -s docker_helper_buildkitd_t -t proc_t -c file 2>&1 || true
+    echo "-- hypothesis (NOT measured here, explicit per review): =="
+    echo "If the mask ladder proceeds past the dedicated-getattr rule, the later bind /dev/null over the relabeled /proc/keys would need ${new type}:file mounton — the same class-of-target rung measured for /proc/kcore (MNB17 AVC 1237 -> MNB18 mount = 0). AVC 1217 (MNB18) proves only the getattr/fstat refusal."
+    echo "-- representation matrix for a relabel (metadata-based reasoning; no change performed) =="
+    echo "HOST-procfs instance: the container's /proc/keys bind lives on the SAME host superblock as the harness init view (mount 52/0:27 = MNB15 builder/parent 338/0:46 at same mnt-ns 4026532281) — an xattr relabel of the HOST /proc/keys changes the label in the init AND builder views; matchpathcon-based tools then see the new type."
+    echo "CONTAINER procfs instance: post-pivot rootfs/proc is a SEPARATE procfs superblock (MNB15: 457/0:52; AVC 1217 tcontext=proc_t reflects THAT instance under the same genfscon default) — a host-side relabel does NOT change the container instance; a dedicated type created with a genfscon row would label BOTH instances at inode creation."
+    echo "== preflight end =="
+  } > "$KEYS_LOG" 2>&1
+  cat "$KEYS_LOG"
+  printf 'R7-P21E3-BUILD=skipped(proc-keys-preflight)\n'
   printf 'R7-P21E3-VERDICT=MEASURED\n'
   touch "$STATE_DIR/sec5"
   exit 0
@@ -2186,7 +2261,7 @@ cat "$EVIDENCE_DIR/p21e3-dac-state.log"
 # --- the round decides the distinct infrastructure verdict, never a pass.
 # R4-P3-P6-MNB12: in the read-only baseline probe mode the toggle is
 # SKIPPED — policy bytes must not move at all on that round.
-if [ "${R7_P21E3_PROBE:-0}" != 1 ] && [ "${R7_P21E3_PROC_SYS:-0}" != 1 ] && [ "${R7_P21E3_PROC_FILE:-0}" != 1 ]; then
+if [ "${R7_P21E3_PROBE:-0}" != 1 ] && [ "${R7_P21E3_PROC_SYS:-0}" != 1 ] && [ "${R7_P21E3_PROC_FILE:-0}" != 1 ] && [ "${R7_P21E3_PROC_KEYS:-0}" != 1 ]; then
 SE_POLICY_SHA_PRE="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
 printf 'policy sha before: %s\n' "$SE_POLICY_SHA_PRE" > "$EVIDENCE_DIR/p21e3-dontaudit.log"
 DB_OUT="$(semodule -DB 2>&1)" || {
