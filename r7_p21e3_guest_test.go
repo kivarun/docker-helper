@@ -524,6 +524,8 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		"module docker_helper_diag_mounton 1.0;",
 		"allow docker_helper_buildkitd_t proc_t:dir mounton;",
 		"allow docker_helper_buildkitd_t proc_t:filesystem remount;",
+		"allow docker_helper_buildkitd_t sysctl_irq_t:dir mounton;",
+		"type sysctl_irq_t;",
 		"class filesystem remount;",
 		"checkmodule -M -m",
 		"semodule_package -o",
@@ -535,6 +537,10 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		"trusted:perms=mount remount|cond-active=none|cond-inactive=none",
 		"trusted:perms=|cond-active=none|cond-inactive=none",
 		"checkpolicy policycoreutils",
+		// R4-P3-P6-MNB14: pre-load check of sysctl_irq_t and /proc/irq.
+		"matchpathcon /proc/irq",
+		"sesearch -t sysctl_irq_t",
+		"IRQ-MOUNT",
 		// R4-P3-P6-MNB12: the read-only baseline probe branch — no diag
 		// module in probe mode, the resolving tool, and its machine record.
 		"R7_P21E3_PROBE",
