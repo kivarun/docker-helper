@@ -2011,34 +2011,44 @@ if [ "${R7_P21E3_PROC_SYS:-0}" = 1 ]; then
   {
     echo "== /proc/sys preflight (R4-P3-P6-MNB14), read-only, no policy change =="
     echo "enforcement: $(getenforce 2>&1 || echo unknown)"
-    echo "-- genfscon from the loaded policy (seinfo --genfscon) =="
+    echo "loaded-policy sha256: $(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
+    echo "-- genfscon from the loaded policy (seinfo --genfscon -- /sys/fs/selinux/policy) =="
     if command -v seinfo >/dev/null 2>&1; then
       seinfo --genfscon -- /sys/fs/selinux/policy 2>&1 | grep -iE 'proc|sysctl|irq' || true
     else
       echo "seinfo unavailable: genfscon not captured"
     fi
-    echo "-- matchpathcon /proc/sys =="
+    echo "-- /proc/sys label: policy prediction vs the live inode (stat of /proc/sys itself only) =="
     if command -v matchpathcon >/dev/null 2>&1; then
-      matchpathcon /proc/sys 2>&1 || true
+      echo "matchpathcon /proc/sys: $(matchpathcon /proc/sys 2>&1 || true)"
     else
       echo "matchpathcon unavailable: label not captured"
     fi
-    echo "-- /proc/sys mountinfo in the harness (init) mount namespace =="
-    awk '$5=="/proc/sys" && $10=="proc" {print "INIT-MOUNT " $0}' /proc/self/mountinfo 2>/dev/null || true
-    echo "-- /proc/sys mountinfo in the builder mount namespace =="
+    ls -Zd /proc/sys 2>&1
+    echo "-- /proc and /proc/sys mountinfo in the harness (init) mount namespace (fstype parsed after the '-') =="
+    awk '$5=="/proc" || $5=="/proc/sys" || $5 ~ /^\/proc\/sys\// { fstype=""; for (i=6;i<=NF;i++) if ($i=="-") { fstype=$(i+1); break } print "INIT-MOUNT fstype=" fstype " " $0 }' /proc/self/mountinfo 2>/dev/null || true
+    echo "-- /proc/sys resolved mount entry (findmnt -T /proc/sys; stat of /proc/sys only; binfmt_misc is NOT traversed) =="
+    if command -v findmnt >/dev/null 2>&1; then
+      findmnt -T /proc/sys -n -o ID,MAJ:MIN,FSTYPE,TARGET,OPTIONS,PROPAGATION 2>&1 || true
+    else
+      echo "findmnt unavailable: mount id/propagation not captured"
+    fi
+    echo "-- /proc/sys mountinfo in the builder mount namespace (same fstype parsing; mountinfo read only) =="
     BKD_PID="$(pgrep -u "$(id -u docker-helper-builder 2>/dev/null || echo 0)" -x buildkitd 2>/dev/null | head -1 || true)"
     if [ -n "$BKD_PID" ]; then
       echo "builder pid=$BKD_PID"
-      awk '$5=="/proc/sys" && $10=="proc" {print "BUILDER-MOUNT pid='$BKD_PID' " $0}' "/proc/$BKD_PID/mountinfo" 2>/dev/null || true
+      awk '$5=="/proc" || $5=="/proc/sys" || $5 ~ /^\/proc\/sys\// { fstype=""; for (i=6;i<=NF;i++) if ($i=="-") { fstype=$(i+1); break } print "BUILDER-MOUNT pid='$BKD_PID' fstype=" fstype " " $0 }' "/proc/$BKD_PID/mountinfo" 2>/dev/null || true
       echo "builder mountns=$(readlink "/proc/$BKD_PID/ns/mnt" 2>/dev/null)"
       echo "builder userns=$(readlink "/proc/$BKD_PID/ns/user" 2>/dev/null)"
     else
-      echo "no live buildkitd observed: builder /proc/sys view not captured"
+      echo "no live buildkitd observed: builder /proc/sys view not captured here (the builder view is bound through the MNB14 build-window procns snapshots in its report)"
     fi
     echo "-- rootfs/proc view =="
-    echo "GAP: rootfs/proc is only present during a build; this preflight runs without a build, so the rootfs/proc /proc/sys view is not captured here"
-    echo "-- propagation / nested mounts check (from init mountinfo, read-only) =="
-    awk '$5=="/proc/sys" {print "PROP " $0}' /proc/self/mountinfo 2>/dev/null | grep -iE 'shared|master|propagate|slave|unbindable' || echo "no propagation tag on /proc/sys in init view (private)"
+    echo "GAP: rootfs/proc is only present during a build; this preflight runs without a build, so the rootfs/proc /proc/sys view is not captured here (the rootfs/proc view is bound through the MNB14 build-window procns snapshots in its report)"
+    echo "-- propagation / nested mounts check (mountinfo read only; the propagation tags are inside the full lines above; binfmt_misc is NOT path-traversed, no automount triggered) =="
+    awk '$5=="/proc" || $5=="/proc/sys" || $5 ~ /^\/proc\/sys\// { opts=""; for (i=6;i<=NF && $i!="-"; i++) opts=opts (opts==""?"":",") $i; print "PROP " $5 " opts=" opts }' /proc/self/mountinfo 2>/dev/null || true
+    SUBMOUNTS="$(awk '$5 ~ /^\/proc\/sys\//' /proc/self/mountinfo 2>/dev/null | wc -l)"
+    echo "submounts under /proc/sys in the init view: $SUBMOUNTS (each is listed above as an INIT-MOUNT row; reading mountinfo does not touch the autofs mountpoint)"
     echo "== preflight end =="
   } > "$SYS_LOG" 2>&1
   cat "$SYS_LOG"
