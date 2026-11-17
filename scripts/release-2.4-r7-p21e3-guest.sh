@@ -1898,10 +1898,10 @@ measure_abandon() {
   rm -f "${PULL_RAW:-}" 2>/dev/null || true
 }
 
-# The fixed diag-module rung (R4-P3-P6-MNB9..MNB15): a temporary loadable
-# module carrying EXACTLY the reviewed rows (currently the four MNB15 rows:
+# The fixed diag-module rung (R4-P3-P6-MNB9..MNB16): a temporary loadable
+# module carrying EXACTLY the reviewed rows (currently the five MNB16 rows:
 # proc_t:dir mounton, proc_t:filesystem remount, sysctl_irq_t:dir mounton,
-# sysctl_t:dir mounton). It is compiled from a fixed-row source below, loaded
+# sysctl_t:dir mounton, sysctl_t:file mounton). It is compiled from a fixed-row source below, loaded
 # after the policy gates and the dontaudit toggle, removed BEFORE the
 # dontaudit restore at the terminal (its own rebuild returns the loaded
 # policy to the pre-module shape), and the removal is verified
@@ -2308,6 +2308,18 @@ if [ "$DIAG_BASE_V4" != 'trusted:perms=|cond-active=none|cond-inactive=none' ]; 
   p21e3_diag_remove
   fail "baseline sesearch is not an authoritative absence for sysctl_t mounton ($DIAG_BASE_V4); the diagnostic rule must not pre-exist"
 fi
+# R4-P3-P6-MNB16: fail-closed baseline check for the FIFTH reviewed rule:
+# sysctl_t:file mounton must not pre-exist (the MNB15 AVC proved it denied).
+DIAG_BASE_Q5="$(timeout 60 sesearch -A -s docker_helper_buildkitd_t -t sysctl_t -c file -p mounton 2>&1)"
+DIAG_BASE_RC5=$?
+DIAG_BASE_V5="$(classify_sesearch_query "$DIAG_BASE_RC5" "$DIAG_BASE_Q5")"
+printf 'query-rc=%s\nclassify=%s\n%s\n' "$DIAG_BASE_RC5" "$DIAG_BASE_V5" "$DIAG_BASE_Q5" >> "$DIAG_LOG"
+if [ "$DIAG_BASE_V5" != 'trusted:perms=|cond-active=none|cond-inactive=none' ]; then
+  p21e3_diag_remove
+  p21e3_dontaudit_restore
+  p21e3_diag_remove
+  fail "baseline sesearch is not an authoritative absence for sysctl_t file mounton ($DIAG_BASE_V5); the diagnostic rule must not pre-exist"
+fi
 # R4-P3-P6-MNB14: pre-load check of sysctl_irq_t and the /proc/irq instance.
 echo "-- pre-load check: sysctl_irq_t assignment in the active policy --" >> "$DIAG_LOG"
 IRQ_MATCH="$(matchpathcon /proc/irq 2>&1 || true)"
@@ -2327,14 +2339,16 @@ require {
 	type sysctl_irq_t;
 	type sysctl_t;
 	class dir mounton;
+	class file mounton;
 	class filesystem remount;
 }
 
-# The reviewed four rows (R4-P3-P6-MNB15): exactly these, nothing else.
+# The reviewed five rows (R4-P3-P6-MNB16): exactly these, nothing else.
 allow docker_helper_buildkitd_t proc_t:dir mounton;
 allow docker_helper_buildkitd_t proc_t:filesystem remount;
 allow docker_helper_buildkitd_t sysctl_irq_t:dir mounton;
 allow docker_helper_buildkitd_t sysctl_t:dir mounton;
+allow docker_helper_buildkitd_t sysctl_t:file mounton;
 EOF
 {
   echo "-- module source (exactly one allow rule) --"
@@ -2353,13 +2367,13 @@ EOF
 }
   DIAG_LOAD_OK=1
   {
-    echo "-- post-install sesearch (fail-closed: EXACTLY the four reviewed rows) --"
+    echo "-- post-install sesearch (fail-closed: EXACTLY the five reviewed rows) --"
     DIAG_LOADED_Q="$(timeout 60 sesearch -A -s docker_helper_buildkitd_t -t proc_t -c dir -p mounton 2>&1)"
     DIAG_LOADED_RC=$?
     DIAG_LOADED_V="$(classify_sesearch_query "$DIAG_LOADED_RC" "$DIAG_LOADED_Q")"
     printf 'query-rc=%s\nclassify=%s\n%s\n' "$DIAG_LOADED_RC" "$DIAG_LOADED_V" "$DIAG_LOADED_Q"
     if [ "$DIAG_LOADED_V" != 'trusted:perms=mounton|cond-active=none|cond-inactive=none' ]; then
-      echo "DIAG-LOAD-GATE: FAIL (the loaded rule set is not exactly the four reviewed rows: $DIAG_LOADED_V)"
+      echo "DIAG-LOAD-GATE: FAIL (the loaded rule set is not exactly the five reviewed rows: $DIAG_LOADED_V)"
       DIAG_LOAD_OK=0
     fi
     DIAG_LOADED_Q2="$(timeout 60 sesearch -A -s docker_helper_buildkitd_t -t proc_t -c filesystem -p remount 2>&1)"
@@ -2367,7 +2381,7 @@ EOF
     DIAG_LOADED_V2="$(classify_sesearch_query "$DIAG_LOADED_RC2" "$DIAG_LOADED_Q2")"
     printf 'query-rc=%s\nclassify=%s\n%s\n' "$DIAG_LOADED_RC2" "$DIAG_LOADED_V2" "$DIAG_LOADED_Q2"
     if [ "$DIAG_LOADED_V2" != 'trusted:perms=mount remount|cond-active=none|cond-inactive=none' ]; then
-      echo "DIAG-LOAD-GATE: FAIL (the loaded rule set is not exactly the four reviewed rows: $DIAG_LOADED_V2)"
+      echo "DIAG-LOAD-GATE: FAIL (the loaded rule set is not exactly the five reviewed rows: $DIAG_LOADED_V2)"
       DIAG_LOAD_OK=0
     fi
     DIAG_LOADED_Q3="$(timeout 60 sesearch -A -s docker_helper_buildkitd_t -t sysctl_irq_t -c dir -p mounton 2>&1)"
@@ -2375,7 +2389,7 @@ EOF
     DIAG_LOADED_V3="$(classify_sesearch_query "$DIAG_LOADED_RC3" "$DIAG_LOADED_Q3")"
     printf 'query-rc=%s\nclassify=%s\n%s\n' "$DIAG_LOADED_RC3" "$DIAG_LOADED_V3" "$DIAG_LOADED_Q3"
     if [ "$DIAG_LOADED_V3" != 'trusted:perms=mounton|cond-active=none|cond-inactive=none' ]; then
-      echo "DIAG-LOAD-GATE: FAIL (the loaded rule set is not exactly the four reviewed rows: $DIAG_LOADED_V3)"
+      echo "DIAG-LOAD-GATE: FAIL (the loaded rule set is not exactly the five reviewed rows: $DIAG_LOADED_V3)"
       DIAG_LOAD_OK=0
     fi
     # R4-P3-P6-MNB15: the fourth reviewed row.
@@ -2384,11 +2398,20 @@ EOF
     DIAG_LOADED_V4="$(classify_sesearch_query "$DIAG_LOADED_RC4" "$DIAG_LOADED_Q4")"
     printf 'query-rc=%s\nclassify=%s\n%s\n' "$DIAG_LOADED_RC4" "$DIAG_LOADED_V4" "$DIAG_LOADED_Q4"
     if [ "$DIAG_LOADED_V4" != 'trusted:perms=mounton|cond-active=none|cond-inactive=none' ]; then
-      echo "DIAG-LOAD-GATE: FAIL (the loaded rule set is not exactly the four reviewed rows: $DIAG_LOADED_V4)"
+      echo "DIAG-LOAD-GATE: FAIL (the loaded rule set is not exactly the five reviewed rows: $DIAG_LOADED_V4)"
+      DIAG_LOAD_OK=0
+    fi
+    # R4-P3-P6-MNB16: the fifth reviewed row.
+    DIAG_LOADED_Q5="$(timeout 60 sesearch -A -s docker_helper_buildkitd_t -t sysctl_t -c file -p mounton 2>&1)"
+    DIAG_LOADED_RC5=$?
+    DIAG_LOADED_V5="$(classify_sesearch_query "$DIAG_LOADED_RC5" "$DIAG_LOADED_Q5")"
+    printf 'query-rc=%s\nclassify=%s\n%s\n' "$DIAG_LOADED_RC5" "$DIAG_LOADED_V5" "$DIAG_LOADED_Q5"
+    if [ "$DIAG_LOADED_V5" != 'trusted:perms=mounton|cond-active=none|cond-inactive=none' ]; then
+      echo "DIAG-LOAD-GATE: FAIL (the loaded rule set is not exactly the five reviewed rows: $DIAG_LOADED_V5)"
       DIAG_LOAD_OK=0
     fi
     if [ "$DIAG_LOAD_OK" = 1 ]; then
-      echo "DIAG-LOAD-GATE: PASS (exactly the four reviewed rows are loaded, unconditional)"
+      echo "DIAG-LOAD-GATE: PASS (exactly the five reviewed rows are loaded, unconditional)"
     fi
   DIAG_SHA_LOADED="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
   echo "policy sha with the diagnostic module: $DIAG_SHA_LOADED"
@@ -2403,7 +2426,7 @@ if [ "$DIAG_LOAD_OK" != 1 ]; then
   fail "the diagnostic module load gate failed; BLOCKED"
 fi
 DIAG_ACTIVE=1
-log "diagnostic module loaded: $DIAG_MODULE (exactly the four reviewed allow rules; removal verified at the teardown)"
+log "diagnostic module loaded: $DIAG_MODULE (exactly the five reviewed allow rules; removal verified at the teardown)"
 fi  # end of the diag-module-load probe guard (probe mode loaded nothing)
 
 # --- the pinned audit window, opened IMMEDIATELY before the measured op ---
@@ -2744,6 +2767,15 @@ DIAG_UNLOAD_OK=1
   printf 'query-rc=%s\nclassify=%s\n%s\n' "$DIAG_UNLOAD_RC4" "$DIAG_UNLOAD_V4" "$DIAG_UNLOAD_Q4"
   if [ "$DIAG_UNLOAD_V4" != 'trusted:perms=|cond-active=none|cond-inactive=none' ]; then
     echo "DIAG-UNLOAD-GATE: FAIL (the sysctl_t mounton rule is still present: $DIAG_UNLOAD_V4)"
+    DIAG_UNLOAD_OK=0
+  fi
+  # R4-P3-P6-MNB16: the fifth reviewed row must also be gone.
+  DIAG_UNLOAD_Q5="$(timeout 60 sesearch -A -s docker_helper_buildkitd_t -t sysctl_t -c file -p mounton 2>&1)"
+  DIAG_UNLOAD_RC5=$?
+  DIAG_UNLOAD_V5="$(classify_sesearch_query "$DIAG_UNLOAD_RC5" "$DIAG_UNLOAD_Q5")"
+  printf 'query-rc=%s\nclassify=%s\n%s\n' "$DIAG_UNLOAD_RC5" "$DIAG_UNLOAD_V5" "$DIAG_UNLOAD_Q5"
+  if [ "$DIAG_UNLOAD_V5" != 'trusted:perms=|cond-active=none|cond-inactive=none' ]; then
+    echo "DIAG-UNLOAD-GATE: FAIL (the sysctl_t file mounton rule is still present: $DIAG_UNLOAD_V5)"
     DIAG_UNLOAD_OK=0
   fi
 } >> "$DIAG_LOG" 2>&1

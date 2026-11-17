@@ -527,6 +527,9 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		"allow docker_helper_buildkitd_t sysctl_irq_t:dir mounton;",
 		// R4-P3-P6-MNB15: the fourth reviewed row.
 		"allow docker_helper_buildkitd_t sysctl_t:dir mounton;",
+		// R4-P3-P6-MNB16: the fifth reviewed row.
+		"allow docker_helper_buildkitd_t sysctl_t:file mounton;",
+		"class file mounton;",
 		"type sysctl_irq_t;",
 		"type sysctl_t;",
 		"class filesystem remount;",
