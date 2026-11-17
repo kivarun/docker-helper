@@ -533,7 +533,7 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		"allow docker_helper_buildkitd_t proc_kcore_t:file getattr;",
 		// R4-P3-P6-MNB18: the seventh reviewed row.
 		"allow docker_helper_buildkitd_t proc_kcore_t:file mounton;",
-		"class file mounton;",
+		"class file { mounton getattr };",
 		"type sysctl_irq_t;",
 		"type sysctl_t;",
 		"class filesystem remount;",
