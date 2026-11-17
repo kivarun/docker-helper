@@ -2193,15 +2193,18 @@ PYEOF
     echo "-- docker_helper domains: DIRECT proc_t:file rules =="
     grep -aE '^allow docker_helper[a-z_0-9]* proc_t:file' "$EVIDENCE_DIR/p21e3-proc-file-rules-full.log" || echo "(none)"
     echo "-- ATTRIBUTE-based rules that cover proc_t files (persist for a new type ONLY if the new type carries the same attribute memberships) =="
-    seinfo -xt proc_t 2>&1 | grep -oE 'attribute +[a-zA-Z0-9_]+' | awk '{print $2}' | while IFS= read -r attr; do
+    ATTR_LIST="$(seinfo -xt proc_t 2>/dev/null | sed -n 's/^ *type proc_t, *\(.*\);$/\1/p' | tr ',' '\n' | awk '{$1=$1;print}')"
+    echo "proc_t attributes: $(echo "$ATTR_LIST" | tr '\n' ' ')"
+    for attr in $ATTR_LIST; do
+      [ "$attr" = proc_t ] && continue
       n="$(sesearch -A -t "$attr" -c file 2>/dev/null | wc -l)"
-      echo "attr=$attr -t $attr -c file rules=$n"
+      echo "attr=$attr rules=-t $attr -c file count=$n"
       sesearch -A -t "$attr" -c file 2>/dev/null | grep -aE '^allow docker_helper[a-z_0-9]*' | head -8
     done
     echo "-- the docker_helper_buildkitd_t namespace: sesearch -A -s buildkitd_t -t proc_t -c file (direct AND attribute expansion) =="
     sesearch -A -s docker_helper_buildkitd_t -t proc_t -c file 2>&1 || true
-    echo "-- hypothesis (NOT measured here, explicit per review): =="
-    echo "If the mask ladder proceeds past the dedicated-getattr rule, the later bind /dev/null over the relabeled /proc/keys would need ${new type}:file mounton — the same class-of-target rung measured for /proc/kcore (MNB17 AVC 1237 -> MNB18 mount = 0). AVC 1217 (MNB18) proves only the getattr/fstat refusal."
+    echo '-- hypothesis (NOT measured here, explicit per review):'
+    echo 'If the mask ladder proceeds past the dedicated-getattr rule, the later bind /dev/null over the relabeled /proc/keys would need <new-type>:file mounton — the same class-of-target rung measured for /proc/kcore (MNB17 AVC 1237 -> MNB18 mount = 0). AVC 1217 (MNB18) proves only the getattr/fstat refusal.'
     echo "-- representation matrix for a relabel (metadata-based reasoning; no change performed) =="
     echo "HOST-procfs instance: the container's /proc/keys bind lives on the SAME host superblock as the harness init view (mount 52/0:27 = MNB15 builder/parent 338/0:46 at same mnt-ns 4026532281) — an xattr relabel of the HOST /proc/keys changes the label in the init AND builder views; matchpathcon-based tools then see the new type."
     echo "CONTAINER procfs instance: post-pivot rootfs/proc is a SEPARATE procfs superblock (MNB15: 457/0:52; AVC 1217 tcontext=proc_t reflects THAT instance under the same genfscon default) — a host-side relabel does NOT change the container instance; a dedicated type created with a genfscon row would label BOTH instances at inode creation."
