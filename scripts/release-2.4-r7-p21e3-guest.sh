@@ -2111,7 +2111,7 @@ if [ "${R7_P21E3_PROC_FILE:-0}" = 1 ]; then
           done
     fi
     echo "-- top-level /proc entries NOT labeled proc_t (the reachable non-proc_t inventory, metadata only; no recursion, no binfmt_misc) =="
-    ls -Zd /proc/* 2>/dev/null | grep -av ' proc_t ' || echo "(all top-level procfs entries are proc_t)"
+    ls -Zd /proc/* 2>/dev/null | grep -avE ' /proc/[0-9]+$' | grep -av ' proc_t ' || echo "(all top-level procfs entries carry the fs default type)"
     echo "-- coverage justification: file_contexts prediction vs the live inode xattr (metadata reads only) =="
     echo "matchpathcon /proc/sysrq-trigger: $(matchpathcon /proc/sysrq-trigger 2>&1 || true)"
     echo "matchpathcon /proc/uptime (control): $(matchpathcon /proc/uptime 2>&1 || true)"
@@ -2119,8 +2119,18 @@ if [ "${R7_P21E3_PROC_FILE:-0}" = 1 ]; then
     if command -v getfattr >/dev/null 2>&1; then
       echo "xattr security.selinux on /proc/sysrq-trigger: [$(getfattr --only-values -n security.selinux /proc/sysrq-trigger 2>&1; echo)]"
       echo "xattr security.selinux on /proc/uptime (control): [$(getfattr --only-values -n security.selinux /proc/uptime 2>&1; echo)]"
+    elif command -v python3 >/dev/null 2>&1; then
+      python3 - <<'PYEOF' 2>&1
+import os
+for p in ("/proc/sysrq-trigger", "/proc/uptime"):
+    try:
+        lab = os.getxattr(p, "security.selinux")
+        print("xattr security.selinux on %s: %r" % (p, lab))
+    except OSError as e:
+        print("xattr security.selinux on %s: OSError errno=%d (%s)" % (p, e.errno, e.strerror))
+PYEOF
     else
-      echo "getfattr unavailable: xattr state not captured"
+      echo "getfattr/python3 unavailable: xattr state not captured"
     fi
     echo "-- inherited-view direct measurement of /proc/sysrq-trigger =="
     echo "MEASURED-HERE: the ls -Zd / statx above IS the inherited (init) view direct binding for this preflight; MNB15 itself carried no inherited-view direct probe for this path."
