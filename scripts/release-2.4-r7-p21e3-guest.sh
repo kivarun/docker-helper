@@ -2090,50 +2090,44 @@ if [ "${R7_P21E3_PROC_FILE:-0}" = 1 ]; then
       [ -e "$f" ] || continue
       printf '%s=%s\n' "$(basename "$f")" "$(cat "$f" 2>&1)"
     done
-    echo "-- /proc/sysrq-trigger: live label + binding in the harness (init) view (metadata stat only) =="
-    ls -Zd /proc/sysrq-trigger 2>&1
-    stat -c 'stat: mode=%a ino=%i' /proc/sysrq-trigger 2>&1 || true
-    if command -v findmnt >/dev/null 2>&1; then
-      findmnt -T /proc/sysrq-trigger -n -o ID,MAJ:MIN,FSTYPE,TARGET,OPTIONS,PROPAGATION 2>&1 || true
+    echo "-- nested mounts under /proc/sys in the init view (excluded BEFORE any traversal; mountinfo read only) =="
+    EXC_PATHS="$(awk '$5 ~ /^\/proc\/sys\// {print $5}' /proc/self/mountinfo 2>/dev/null || true)"
+    if [ -n "$EXC_PATHS" ]; then
+      printf 'EXCLUDED-MOUNT %s\n' $EXC_PATHS
     else
-      echo "findmnt unavailable: mount id/propagation not captured"
+      echo "EXCLUDED-MOUNT none"
     fi
     awk '$5=="/proc" { fstype=""; for (i=6;i<=NF;i++) if ($i=="-") { fstype=$(i+1); break } print "INIT-MOUNT fstype=" fstype " " $0 }' /proc/self/mountinfo 2>/dev/null || true
-    echo "-- separate /proc/sysrq-trigger mounts in the init view (none expected) =="
-    echo "INIT-ROW-COUNT: $(awk '$5 ~ /^\/proc\/sysrq-trigger/' /proc/self/mountinfo 2>/dev/null | wc -l) row(s)"
-    echo "-- every procfs path typed sysctl_t: live labels (ls -Zd of the LISTED entries only; no tree walk, no binfmt_misc) =="
-    if command -v seinfo >/dev/null 2>&1; then
-      seinfo --genfscon -- /sys/fs/selinux/policy 2>&1 \
-        | awk '$2=="proc" && $4 ~ /^system_u:object_r:sysctl_t/ {print $3}' \
-        | while IFS= read -r p; do
-            case "$p" in *binfmt_misc*) continue ;; esac
-            echo "LIVE path=/proc$p -> $(ls -Zd "/proc$p" 2>&1)"
-          done
-    fi
     echo "-- top-level /proc entries NOT labeled proc_t (the reachable non-proc_t inventory, metadata only; no recursion, no binfmt_misc) =="
     ls -Zd /proc/* 2>/dev/null | grep -avE ' /proc/[0-9]+$' | grep -av ' proc_t ' || echo "(all top-level procfs entries carry the fs default type)"
-    echo "-- coverage justification: file_contexts prediction vs the live inode xattr (metadata reads only) =="
-    echo "matchpathcon /proc/sysrq-trigger: $(matchpathcon /proc/sysrq-trigger 2>&1 || true)"
-    echo "matchpathcon /proc/uptime (control): $(matchpathcon /proc/uptime 2>&1 || true)"
-    grep -ahn 'sysrq' /etc/selinux/targeted/contexts/files/file_contexts* 2>/dev/null || echo "no sysrq rows in the visible file_contexts files"
-    if command -v getfattr >/dev/null 2>&1; then
-      echo "xattr security.selinux on /proc/sysrq-trigger: [$(getfattr --only-values -n security.selinux /proc/sysrq-trigger 2>&1; echo)]"
-      echo "xattr security.selinux on /proc/uptime (control): [$(getfattr --only-values -n security.selinux /proc/uptime 2>&1; echo)]"
-    elif command -v python3 >/dev/null 2>&1; then
-      python3 - <<'PYEOF' 2>&1
-import os
-for p in ("/proc/sysrq-trigger", "/proc/uptime"):
-    try:
-        lab = os.getxattr(p, "security.selinux")
-        print("xattr security.selinux on %s: %r" % (p, lab))
-    except OSError as e:
-        print("xattr security.selinux on %s: OSError errno=%d (%s)" % (p, e.errno, e.strerror))
-PYEOF
-    else
-      echo "getfattr/python3 unavailable: xattr state not captured"
-    fi
-    echo "-- inherited-view direct measurement of /proc/sysrq-trigger =="
-    echo "MEASURED-HERE: the ls -Zd / statx above IS the inherited (init) view direct binding for this preflight; MNB15 itself carried no inherited-view direct probe for this path."
+    echo "-- guest init namespace: every path INSIDE /proc/sys with the live label sysctl_t (metadata only: find listing + ls -Zd + findmnt stat; nested mounts from mountinfo pruned BEFORE the walk; no writes, no content reads) =="
+    PRUNE_ARGS=()
+    for m in $EXC_PATHS; do PRUNE_ARGS+=( -path "$m" -prune -o ); done
+    SYS_INVENTORY="$(find /proc/sys "${PRUNE_ARGS[@]}" \( -type f -printf 'FILE %p\n' -o -type d -printf 'DIR %p\n' \) 2>/dev/null)"
+    SYS_HITS=0
+    while IFS= read -r row; do
+      [ -n "$row" ] || continue
+      kind="${row%% *}"; p="${row#* }"
+      lbl="$(ls -Zd "$p" 2>&1)"
+      case "$lbl" in
+        *sysctl_t:s0*)
+          SYS_HITS=$((SYS_HITS + 1))
+          bind="(findmnt unavailable)"
+          if command -v findmnt >/dev/null 2>&1; then
+            bind="$(findmnt -T "$p" -n -o ID,MAJ:MIN,FSTYPE,TARGET,OPTIONS,PROPAGATION 2>&1 || true)"
+          fi
+          printf 'SYSTL-TARGET %s %s -> %s | mount: %s\n' "$kind" "$p" "$lbl" "$bind"
+          ;;
+      esac
+    done <<EOF
+$SYS_INVENTORY
+EOF
+    echo "SYSTL-TARGET-COUNT inside /proc/sys: $SYS_HITS"
+    echo "-- representation notes (metadata probes ran in the guest init/harness namespace) =="
+    echo "INIT-NAMESPACE: the labels and mount bindings above are direct measurements of the guest init (harness) namespace."
+    echo "GAP-BUILDER: no live buildkitd in this build-free preflight; no direct builder-namespace measurement of the /proc/sys subtree targets here. The builder binding is carried by the build-window procns snapshots (MNB14/MNB15: the /proc subtree resolves through the same proc superblock instance; MNB15 pid=3523/4738: proc mount 338/0:46; post-pivot runc: 457/0:52)."
+    echo "GAP-RUNC: no direct runc-namespace measurement of the individual targets in this build-free preflight; the runc binding is carried by MNB15 (RPNS 457/0:52 post-pivot pre-self-bind; strace 7036-7038 for /proc/sys; AVC 1233 for /proc/sysrq-trigger)."
+    echo "== preflight end =="
     echo "-- rootfs/proc view =="
     echo "GAP: rootfs/proc is only present during a build; this preflight runs without a build. The rootfs/proc binding is carried by the MNB15 evidence: RPNS resolved /proc at 457/0:52 post-pivot (pre-self-bind of /proc/sys) and AVC serial 1233 gave the kernel binding tcontext=sysctl_t (tclass=file, ino=4026532086) at the bind attempt."
     echo "== preflight end =="
