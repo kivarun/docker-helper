@@ -56,7 +56,10 @@ case "$R7_MODE" in
   # preflight branch (no diag module, no build, no session). Reads genfscon
   # from the loaded policy and the /proc/sys mountinfo view.
   p21e3proc-sys) GUEST_SCRIPT='release-2.4-r7-p21e3-guest.sh' ;;
-  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d | p21e | p21e3 | p21e3probe | p21e3proc-sys)" ;;
+  # p21e3proc-file = the SAME p21e3 guest script in its read-only /proc/sysrq-trigger
+  # preflight branch (no diag module, no build; metadata-only coverage capture).
+  p21e3proc-file) GUEST_SCRIPT='release-2.4-r7-p21e3-guest.sh' ;;
+  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d | p21e | p21e3 | p21e3probe | p21e3proc-sys | p21e3proc-file)" ;;
 esac
 
 log()  { printf '%s %s\n' "$PREFIX" "$*"; }
@@ -131,6 +134,7 @@ export R7_RUNTIME_DEPS=install
 export R7_EVIDENCE_DIR='$GUEST_EVIDENCE_DIR'
 export R7_P21E3_PROBE=$( [ "$R7_MODE" = p21e3probe ] && echo 1 || echo 0 )
 export R7_P21E3_PROC_SYS=$( [ "$R7_MODE" = p21e3proc-sys ] && echo 1 || echo 0 )
+export R7_P21E3_PROC_FILE=$( [ "$R7_MODE" = p21e3proc-file ] && echo 1 || echo 0 )
 bash /tmp/r7-diag/release-2.4-r7-diag-guest.sh
 RMT
   GUEST_RC=$?
@@ -246,7 +250,7 @@ RMT
         log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
         ;;
     esac
-  elif [ "$R7_MODE" = "p21e3" ] || [ "$R7_MODE" = "p21e3probe" ] || [ "$R7_MODE" = "p21e3proc-sys" ]; then
+  elif [ "$R7_MODE" = "p21e3" ] || [ "$R7_MODE" = "p21e3probe" ] || [ "$R7_MODE" = "p21e3proc-sys" ] || [ "$R7_MODE" = "p21e3proc-file" ]; then
     # The BUILD result line and the VERDICT line are matched SEPARATELY:
     # the previous tail -2 | tr '\n' ' ' fabrication produced a string
     # PREFIXED with R7-P21E3-BUILD=..., so the case below never matched

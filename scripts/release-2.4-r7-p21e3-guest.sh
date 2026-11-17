@@ -2059,6 +2059,70 @@ if [ "${R7_P21E3_PROC_SYS:-0}" = 1 ]; then
   exit 0
 fi
 
+# R4-P3-P6-MNB15proc: read-only preflight for the sysctl_t:file rung
+# (/proc/sysrq-trigger and the full procfs sysctl_t coverage). No diag
+# module, no build, no session usage. METADATA ONLY: no file writes, and
+# binfmt_misc is never path-traversed (no automount triggering anywhere).
+if [ "${R7_P21E3_PROC_FILE:-0}" = 1 ]; then
+  FILE_LOG="$EVIDENCE_DIR/p21e3-proc-file.log"
+  : > "$FILE_LOG"
+  {
+    echo "== sysctl_t:file preflight (R4-P3-P6-MNB15proc), read-only, metadata only =="
+    echo "enforcement: $(getenforce 2>&1 || echo unknown)"
+    echo "loaded-policy sha256: $(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
+    echo "-- genfscon from the loaded policy: the FULL proc section (no filter) =="
+    if command -v seinfo >/dev/null 2>&1; then
+      seinfo --genfscon -- /sys/fs/selinux/policy 2>&1 | grep -a '^ *genfscon proc ' || true
+    else
+      echo "seinfo unavailable: genfscon not captured"
+    fi
+    echo "-- the sysrq-trigger genfscon rows (the direct coverage answer) =="
+    if command -v seinfo >/dev/null 2>&1; then
+      seinfo --genfscon -- /sys/fs/selinux/policy 2>&1 | grep -a 'sysrq' || true
+    fi
+    echo "-- every genfscon row typed sysctl_t (whole policy, every fs) =="
+    if command -v seinfo >/dev/null 2>&1; then
+      seinfo --genfscon -- /sys/fs/selinux/policy 2>&1 | grep -aE 'object_r:sysctl_t:s0' || true
+    fi
+    echo "-- policy capabilities (read-only cat; genfs_seclabel_wildcard decides genfscon path matching) =="
+    ls /sys/fs/selinux/policy_capabilities 2>&1 || echo "policy_capabilities listing unavailable"
+    for f in /sys/fs/selinux/policy_capabilities/*; do
+      [ -e "$f" ] || continue
+      printf '%s=%s\n' "$(basename "$f")" "$(cat "$f" 2>&1)"
+    done
+    echo "-- /proc/sysrq-trigger: live label + binding in the harness (init) view (metadata stat only) =="
+    ls -Zd /proc/sysrq-trigger 2>&1
+    stat -c 'stat: mode=%a ino=%i' /proc/sysrq-trigger 2>&1 || true
+    if command -v findmnt >/dev/null 2>&1; then
+      findmnt -T /proc/sysrq-trigger -n -o ID,MAJ:MIN,FSTYPE,TARGET,OPTIONS,PROPAGATION 2>&1 || true
+    else
+      echo "findmnt unavailable: mount id/propagation not captured"
+    fi
+    awk '$5=="/proc" { fstype=""; for (i=6;i<=NF;i++) if ($i=="-") { fstype=$(i+1); break } print "INIT-MOUNT fstype=" fstype " " $0 }' /proc/self/mountinfo 2>/dev/null || true
+    echo "-- separate /proc/sysrq-trigger mounts in the init view (none expected) =="
+    echo "INIT-ROW-COUNT: $(awk '$5 ~ /^\/proc\/sysrq-trigger/' /proc/self/mountinfo 2>/dev/null | wc -l) row(s)"
+    echo "-- every procfs path typed sysctl_t: live labels (ls -Zd of the LISTED entries only; no tree walk, no binfmt_misc) =="
+    if command -v seinfo >/dev/null 2>&1; then
+      seinfo --genfscon -- /sys/fs/selinux/policy 2>&1 \
+        | awk '$2=="proc" && $4 ~ /^system_u:object_r:sysctl_t/ {print $3}' \
+        | while IFS= read -r p; do
+            case "$p" in *binfmt_misc*) continue ;; esac
+            echo "LIVE path=/proc$p -> $(ls -Zd "/proc$p" 2>&1)"
+          done
+    fi
+    echo "-- inherited-view direct measurement of /proc/sysrq-trigger =="
+    echo "MEASURED-HERE: the ls -Zd / statx above IS the inherited (init) view direct binding for this preflight; MNB15 itself carried no inherited-view direct probe for this path."
+    echo "-- rootfs/proc view =="
+    echo "GAP: rootfs/proc is only present during a build; this preflight runs without a build. The rootfs/proc binding is carried by the MNB15 evidence: RPNS resolved /proc at 457/0:52 post-pivot (pre-self-bind of /proc/sys) and AVC serial 1233 gave the kernel binding tcontext=sysctl_t (tclass=file, ino=4026532086) at the bind attempt."
+    echo "== preflight end =="
+  } > "$FILE_LOG" 2>&1
+  cat "$FILE_LOG"
+  printf 'R7-P21E3-BUILD=skipped(proc-file-preflight)\n'
+  printf 'R7-P21E3-VERDICT=MEASURED\n'
+  touch "$STATE_DIR/sec5"
+  exit 0
+fi
+
 # --- DAC-state captures taken while the prepared trees exist (R4-P3-P5).
 # READ-ONLY throughout: stat/ls -Z/getfacl/uid_map reads; no chmod/chown/
 # relabel/repair of any kind.
@@ -2106,7 +2170,7 @@ cat "$EVIDENCE_DIR/p21e3-dac-state.log"
 # --- the round decides the distinct infrastructure verdict, never a pass.
 # R4-P3-P6-MNB12: in the read-only baseline probe mode the toggle is
 # SKIPPED — policy bytes must not move at all on that round.
-if [ "${R7_P21E3_PROBE:-0}" != 1 ] && [ "${R7_P21E3_PROC_SYS:-0}" != 1 ]; then
+if [ "${R7_P21E3_PROBE:-0}" != 1 ] && [ "${R7_P21E3_PROC_SYS:-0}" != 1 ] && [ "${R7_P21E3_PROC_FILE:-0}" != 1 ]; then
 SE_POLICY_SHA_PRE="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
 printf 'policy sha before: %s\n' "$SE_POLICY_SHA_PRE" > "$EVIDENCE_DIR/p21e3-dontaudit.log"
 DB_OUT="$(semodule -DB 2>&1)" || {

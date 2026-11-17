@@ -550,6 +550,14 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		"INIT-MOUNT",
 		"BUILDER-MOUNT",
 		"p21e3-proc-sys.log",
+		// R4-P3-P6-MNB15proc: read-only /proc/sysrq-trigger + procfs sysctl_t
+		// coverage preflight (genfscon full proc section, policy capabilities,
+		// metadata-only live labels in available views).
+		"R7_P21E3_PROC_FILE",
+		"p21e3-proc-file.log",
+		"policy_capabilities",
+		"genfs_seclabel_wildcard",
+		"sysrq",
 		// R4-P3-P6-MNB12: the read-only baseline probe branch — no diag
 		// module in probe mode, the resolving tool, and its machine record.
 		"R7_P21E3_PROBE",
