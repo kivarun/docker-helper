@@ -1898,14 +1898,14 @@ measure_abandon() {
   rm -f "${PULL_RAW:-}" 2>/dev/null || true
 }
 
-# The fixed diag-module rung (R4-P3-P6-MNB9..MNB19): a temporary loadable
+# The fixed diag-module rung (R4-P3-P6-MNB9..MNB20): a temporary loadable
 # module carrying EXACTLY the reviewed rows (currently the seven MNB18 rows:
 # proc_t:dir mounton, proc_t:filesystem remount, sysctl_irq_t:dir mounton,
 # sysctl_t:dir mounton, sysctl_t:file mounton, proc_kcore_t:file getattr, proc_kcore_t:file mounton), plus —
-# in the MNB19 dedicated-ladder mode only — a second, purely CIL module carrying
+# in the dedicated-type diagnostic mode only — a second, purely CIL module carrying
 # the dedicated proc_keys_t type (with the six attribute memberships copied from
-# proc_t), the genfscon row for file target /keys, and the eighth reviewed row
-# proc_keys_t:file getattr. The CIL module loads AFTER the row module and
+# proc_t), the genfscon row for file target /keys, and the two reviewed permissions
+# proc_keys_t:file { getattr mounton }. The CIL module loads AFTER the row module and
 # BEFORE the measured build, so the genfscon decision applies at the
 # initialization of every procfs inode created from then on (fresh container
 # procfs instances included). Both are removed and verified independently at
@@ -1927,7 +1927,7 @@ p21e3_diag_remove() {
   [ "${DIAG_REMOVED:-0}" = 1 ] && return 0
   local out rc mod all
   all=ok
-  # A diagnostic round may carry MORE THAN ONE temporary module (the MNB19
+  # A diagnostic round may carry MORE THAN ONE temporary module (the
   # dedicated-type CIL block rides next to the fixed row module). Every
   # removal is performed and logged; the round is marked removed ONLY when
   # every `semodule -r` exits 0 — a failed removal keeps retrying on the
@@ -2439,15 +2439,13 @@ if [ "$DIAG_BASE_V7" != 'trusted:perms=|cond-active=none|cond-inactive=none' ]; 
   p21e3_diag_remove
   fail "baseline sesearch is not an authoritative absence for proc_kcore_t file mounton ($DIAG_BASE_V7); the diagnostic rule must not pre-exist"
 fi
-# R4-P3-P6-MNB19 (dedicated-type mode): fail-closed baseline check for the
-# EIGHTH reviewed rung — the dedicated proc_keys_t must not exist in the
-# loaded policy at all. A nonexistent type cannot have allow rules, cannot
-# hold an attribute membership, and cannot be the subject of a genfscon
-# row: full type absence is the authoritative absence proof for the whole
-# block. sesearch cannot prove this (a query on a nonexistent type is an
-# untrusted error), so the enumeration is the instrument.
+# R4-P3-P6-MNB20 (dedicated-type mode): fail-closed baseline check for the
+# dedicated type. A nonexistent proc_keys_t cannot have allow rules,
+# hold an attribute membership, or be the subject of a genfscon row.
+# Full type absence proves the whole block is absent. A sesearch query on
+# a nonexistent type errors, so the gate uses seinfo instead.
 if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
-  echo "-- baseline pre-check (R4-P3-P6-MNB19): the dedicated type and the genfscon row must not exist --" >> "$DIAG_LOG"
+  echo "-- baseline pre-check (R4-P3-P6-MNB20): the dedicated type and the genfscon row must not exist --" >> "$DIAG_LOG"
   # seinfo return codes are checked BEFORE any filtering: the absence proof
   # is only as good as a SUCCESSFUL enumeration query; a failed/timeout
   # query is untrusted and decides BLOCKED, never an absence.
@@ -2631,12 +2629,12 @@ if [ "$DIAG_LOAD_OK" != 1 ]; then
 fi
 log "diagnostic module loaded: $DIAG_MODULE (exactly the seven reviewed allow rules; removal verified at the teardown)"
 
-# --- the R4-P3-P6-MNB19 dedicated-type CIL block (diag-keys mode only) ---
+# --- the R4-P3-P6-MNB20 dedicated-type CIL block (diag-keys mode only) ---
 # A PURELY CIL module: the dedicated proc_keys_t with the six attribute
 # memberships copied from proc_t (file_type, filesystem_type, mountpoint,
 # non_auth_file_type, non_security_file_type, proc_type), the genfscon row
-# for the file target /keys, and the single eighth reviewed allow row
-# proc_keys_t:file getattr. The genfscon decision applies at the
+# for the file target /keys, and the two reviewed permissions
+# proc_keys_t:file { getattr mounton }. The genfscon decision applies at the
 # initialization of every procfs inode created from the policy load onward
 # (fresh container procfs instances included); the six memberships keep
 # every attribute-based rule matching /proc/keys exactly as on proc_t,
@@ -2656,7 +2654,7 @@ if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
     echo "policy sha before dedicated-module load: $DIAG_KEYS_PRELOAD_SHA"
   } > "$DIAG_KEYS_LOG"
   cat > "$DIAG_KEYS_CIL" <<'EOF'
-; R4-P3-P6-MNB19 rung: the dedicated /proc/keys type for docker-helper
+; R4-P3-P6-MNB20 rung: the dedicated /proc/keys type for docker-helper
 ; diagnostics. Exactly this block, nothing else. The genfscon row uses the
 ; explicit class + explicit MLS-range form: run 44125639504 rejected the
 ; class-less/range-less forms and run 44284343854 showed the context must
@@ -2672,7 +2670,7 @@ if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
 (typeattributeset non_security_file_type (proc_keys_t))
 (typeattributeset proc_type (proc_keys_t))
 (genfscon "proc" "/keys" file (system_u object_r proc_keys_t ((s0) (s0))))
-(allow docker_helper_buildkitd_t proc_keys_t (file (getattr)))
+(allow docker_helper_buildkitd_t proc_keys_t (file (getattr mounton)))
 EOF
   {
     echo "-- module source (exactly the dedicated-type CIL block) --"
@@ -2689,23 +2687,25 @@ EOF
     fail "the dedicated-type CIL module could not be installed; BLOCKED"
   }
   {
-    echo "-- post-install policy readouts (fail-closed row-8 gate + orientation) --"
-    DIAG_KEYS_Q="$(timeout 60 sesearch -A -s docker_helper_buildkitd_t -t proc_keys_t -c file -p getattr 2>&1)"
+    echo "-- post-install policy readouts (fail-closed check of direct permissions + orientation) --"
+    # Inspect the whole direct pair so separate or merged rules yield the same
+    # verdict and unexpected direct permissions are rejected. Attribute-based
+    # rules inherited through the copied memberships are outside this delta.
+    DIAG_KEYS_Q="$(timeout 60 sesearch -A -ds -dt -s docker_helper_buildkitd_t -t proc_keys_t -c file 2>&1)"
     DIAG_KEYS_RC=$?
     DIAG_KEYS_V="$(classify_sesearch_query "$DIAG_KEYS_RC" "$DIAG_KEYS_Q")"
     printf 'query-rc=%s\nclassify=%s\n%s\n' "$DIAG_KEYS_RC" "$DIAG_KEYS_V" "$DIAG_KEYS_Q"
-    if [ "$DIAG_KEYS_V" != 'trusted:perms=getattr|cond-active=none|cond-inactive=none' ]; then
-      echo "DIAG-LOAD-GATE: FAIL (the loaded dedicated-type rule set is not exactly the eighth reviewed row: $DIAG_KEYS_V)"
+    if [ "$DIAG_KEYS_V" != 'trusted:perms=getattr mounton|cond-active=none|cond-inactive=none' ]; then
+      echo "DIAG-LOAD-GATE: FAIL (the loaded dedicated-type direct permissions differ from the reviewed pair: $DIAG_KEYS_V)"
     else
-      echo "DIAG-LOAD-GATE: PASS (exactly the eighth reviewed row is loaded, unconditional)"
+      echo "DIAG-LOAD-GATE: PASS (exactly the reviewed direct getattr and mounton permissions are loaded, unconditional)"
     fi
     if semodule -l 2>/dev/null | grep -aq docker_helper_diag_keys; then
       echo "module store: docker_helper_diag_keys registered"
     else
       echo "DIAG-LOAD-GATE: FAIL (docker_helper_diag_keys is not registered despite the successful install)"
     fi
-    echo "-- orientation (NOT a gate): /proc/keys in the pre-existing host instance keeps proc_t"
-    echo "-- (genfscon decides at inode init; this inode was created before the module load) --"
+    echo "-- orientation (NOT a gate): /proc/keys label in the existing guest init view --"
     ls -Zd /proc/keys 2>&1 || true
     DIAG_SHA_KEYS="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
     echo "policy sha with the dedicated-type module: $DIAG_SHA_KEYS"
@@ -2717,22 +2717,22 @@ EOF
     p21e3_dontaudit_restore
     fail "the dedicated-type module load gate failed; BLOCKED"
   fi
-  log "dedicated-type module loaded: docker_helper_diag_keys (type + six attribute memberships + genfscon /keys + the eighth reviewed row)"
+  log "dedicated-type module loaded: docker_helper_diag_keys (type + six attribute memberships + genfscon /keys + reviewed getattr and mounton)"
 
   # --- fresh-procfs orientation probe (private mount namespace) ---
   # genfscon decides the label at inode initialization, so a FRESH procfs
   # instance created after the policy load must show the dedicated type.
   # This probe is a read-only ORIENTATION check in a private mount
   # namespace (the init mount namespace is never touched); its failure is
-  # recorded as a limitation, never a round blocker — the in-window AVC
-  # tcontext remains the authoritative label evidence.
+  # recorded as a limitation. The post-pivot syscall trace is the authority
+  # on whether runc reaches and completes the mask.
   PROBE_LOG="$EVIDENCE_DIR/p21e3-keys-freshproc.log"
   {
     echo "== fresh procfs instance label probe (private mnt namespace) =="
     echo "loaded-policy sha256: $(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
     rm -rf /tmp/r7-p21e3-procprobe
     mkdir -p /tmp/r7-p21e3-procprobe
-    if unshare -m sh -c '
+    if unshare --mount --pid --fork sh -c '
       mount -t proc proc /tmp/r7-p21e3-procprobe || exit 90
       ls -Zd /tmp/r7-p21e3-procprobe/keys
       ls -Zd /tmp/r7-p21e3-procprobe | head -1
@@ -2740,7 +2740,7 @@ EOF
     ' 2>&1; then
       echo "probe: DONE (the fresh instance label is above)"
     else
-      echo "probe: FAILED-PROBE rc=$? (limitation, not a gate; the in-window AVC tcontext is the label instrument)"
+      echo "probe: FAILED-PROBE rc=$? (limitation, not a gate)"
     fi
     rm -rf /tmp/r7-p21e3-procprobe 2>/dev/null || true
   } > "$PROBE_LOG" 2>&1
@@ -2749,7 +2749,7 @@ EOF
   if [ -n "$DIAG_KEYS_PROBE_LABEL" ]; then
     log "fresh-procfs probe: the dedicated label IS live (orientation)"
   else
-    log "fresh-procfs probe: dedicated label NOT confirmed outside the window (orientation; in-window AVC decides)"
+    log "fresh-procfs probe: dedicated label NOT confirmed outside the window (orientation)"
   fi
 fi
 fi  # end of the diag-module-load probe guard (probe mode loaded nothing)
@@ -3127,14 +3127,14 @@ if [ "$DIAG_UNLOAD_OK" != 1 ]; then
   p21e3_dontaudit_restore
   fail "the diagnostic module rule-level unload could not be verified; BLOCKED"
 fi
-# R4-P3-P6-MNB19: the dedicated-type module unload + the /proc/keys label
+# R4-P3-P6-MNB20: the dedicated-type module unload + the /proc/keys label
 # in the REMAINING guest view. The policy-shape leg below (exact baseline
 # sha equality) is the authoritative proof that the type, its memberships,
-# the genfscon /keys row and the eighth row are all gone; the enumeration
-# and the live label here are the explicit corroborating records.
+# the genfscon /keys row and both permissions are gone. The enumeration
+# corroborates policy restoration. The live label is a separate observation.
 if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
   {
-    echo "-- R4-P3-P6-MNB19 dedicated-type unload corroboration --"
+    echo "-- R4-P3-P6-MNB20 dedicated-type unload corroboration --"
     if semodule -l 2>/dev/null | grep -aq docker_helper_diag_keys; then
       echo "DIAG-UNLOAD-GATE: FAIL (the dedicated-type module is still registered in the store)"
     else
@@ -3174,8 +3174,7 @@ if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
     echo "policy sha at unload-check time (post-removal, pre-restore): $DIAG_SHADERE"
     echo "policy sha before dedicated-module load (for comparison): $DIAG_KEYS_PRELOAD_SHA"
     echo "-- /proc/keys label in the remaining guest (init) view --"
-    echo "-- (the pre-existing host-instance inode was initialized before the module load;"
-    echo "--  its post-run label depends on the genfscon's live effect; recorded as observed) --"
+    echo "-- (observed inode label; policy restoration is verified separately) --"
     ls -Zd /proc/keys 2>&1 || true
     stat -c 'stat: mode=%a ino=%i' /proc/keys 2>&1 || true
     python3 - <<'PYEOF' 2>&1 || true
@@ -3226,8 +3225,10 @@ fi
 log "diagnostic module unloaded and verified ($DIAG_MODULE)"
 if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
   {
-    echo "-- final policy state after removal+restore (R4-P3-P6-MNB19) --"
+    echo "-- final policy state after removal+restore (R4-P3-P6-MNB20) --"
     echo "policy sha after removal+restore (final): $DIAG_SHA_UNLOAD"
+    echo "-- /proc/keys label after policy restore, guest init view --"
+    ls -Zd /proc/keys 2>&1 || true
     echo "release-policy .pp sha (final): $DIAG_RELEASE_PP_SHA_POST"
     echo "R7-P21E3-DIAG-UNLOADED=verified"
   } >> "$DIAG_KEYS_LOG" 2>&1
