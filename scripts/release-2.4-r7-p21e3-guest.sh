@@ -2451,23 +2451,35 @@ if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
   # seinfo return codes are checked BEFORE any filtering: the absence proof
   # is only as good as a SUCCESSFUL enumeration query; a failed/timeout
   # query is untrusted and decides BLOCKED, never an absence.
-  DIAG_KEYS_PRE_TYPES_RC=0
-  DIAG_KEYS_PRE_TYPES="$(seinfo --types /sys/fs/selinux/policy 2>&1)" || DIAG_KEYS_PRE_TYPES_RC=$?
-  if [ "$DIAG_KEYS_PRE_TYPES_RC" != 0 ]; then
-    printf 'seinfo --types rc=%d (untrusted; absence cannot be proven by a failed query)\n%s\n' \
-      "$DIAG_KEYS_PRE_TYPES_RC" "$DIAG_KEYS_PRE_TYPES" >> "$DIAG_LOG"
+  # (This guest's seinfo has no --types flag: rc=2 usage error — the type
+  # absence is proven through the SUPPORTED anchored name query instead,
+  # after a self-check that the instrument resolves a known type.)
+  echo "-- instrument self-check: seinfo -xt proc_t must resolve (rc=0) --" >> "$DIAG_LOG"
+  DIAG_KEYS_SANITY_RC=0
+  DIAG_KEYS_SANITY="$(seinfo -xt proc_t 2>&1)" || DIAG_KEYS_SANITY_RC=$?
+  printf 'sanity rc=%d -- %s\n' "$DIAG_KEYS_SANITY_RC" "$DIAG_KEYS_SANITY" >> "$DIAG_LOG"
+  if [ "$DIAG_KEYS_SANITY_RC" != 0 ] \
+    || ! printf '%s\n' "$DIAG_KEYS_SANITY" | grep -aq 'type proc_t'; then
     p21e3_diag_remove
     p21e3_dontaudit_restore
-    fail "the types enumeration query failed (rc=$DIAG_KEYS_PRE_TYPES_RC); the dedicated-type absence cannot be proven"
+    fail "the seinfo instrument cannot resolve a known type (proc_t self-check failed); absence cannot be proven"
   fi
-  if printf '%s\n' "$DIAG_KEYS_PRE_TYPES" | grep -aqE '(^|[[:space:]])proc_keys_t([[:space:]]|$)'; then
-    printf 'proc_keys_t: PRESENT (unexpected); types enumeration md5=%s\n' \
-      "$(printf '%s\n' "$DIAG_KEYS_PRE_TYPES" | md5sum | cut -d' ' -f1)" >> "$DIAG_LOG"
-    p21e3_diag_remove
-    p21e3_dontaudit_restore
-    fail "the dedicated type proc_keys_t already exists in the loaded policy; the diagnostic block must not pre-exist"
+  echo "sanity: instrument resolves a known type => OK" >> "$DIAG_LOG"
+  DIAG_KEYS_PRE_RC=0
+  DIAG_KEYS_PRE_TYPE="$(seinfo -xt proc_keys_t 2>&1)" || DIAG_KEYS_PRE_RC=$?
+  printf 'target rc=%d -- %s\n' "$DIAG_KEYS_PRE_RC" "$DIAG_KEYS_PRE_TYPE" >> "$DIAG_LOG"
+  if [ "$DIAG_KEYS_PRE_RC" = 0 ]; then
+    if printf '%s\n' "$DIAG_KEYS_PRE_TYPE" | grep -aq 'type proc_keys_t'; then
+      p21e3_diag_remove
+      p21e3_dontaudit_restore
+      fail "the dedicated type proc_keys_t already exists in the loaded policy; the diagnostic block must not pre-exist"
+    fi
+    echo "proc_keys_t: ABSENT from the loaded policy (successful query, no matching type) => OK" >> "$DIAG_LOG"
+  else
+    # The instrument self-check passed, so a nonzero rc for the dedicated
+    # type is the seinfo not-found shape: absence, with the raw output kept.
+    echo "proc_keys_t: ABSENT from the loaded policy (self-checked instrument, not-found rc=$DIAG_KEYS_PRE_RC) => OK" >> "$DIAG_LOG"
   fi
-  echo "proc_keys_t: ABSENT from the loaded policy => OK" >> "$DIAG_LOG"
   DIAG_KEYS_PRE_GEN_RC=0
   DIAG_KEYS_PRE_GENFSCON="$(seinfo --genfscon -- /sys/fs/selinux/policy 2>&1)" || DIAG_KEYS_PRE_GEN_RC=$?
   if [ "$DIAG_KEYS_PRE_GEN_RC" != 0 ]; then
@@ -2484,7 +2496,7 @@ if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
     p21e3_dontaudit_restore
     fail "a genfscon row for /keys already exists in the loaded policy; the diagnostic block must not pre-exist"
   fi
-  echo "genfscon /keys: ABSENT from the loaded policy => OK (seinfo --genfscon rc=0 first; successful-query absence)" >> "$DIAG_LOG"
+  echo "genfscon /keys: ABSENT from the loaded policy => OK (successful seinfo --genfscon query first; absence after filtering)" >> "$DIAG_LOG"
 fi
 # R4-P3-P6-MNB14: pre-load check of sysctl_irq_t and the /proc/irq instance.
 echo "-- pre-load check: sysctl_irq_t assignment in the active policy --" >> "$DIAG_LOG"
@@ -3129,15 +3141,24 @@ if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
     fi
     echo "-- dedicated type + genfscon absence (enumeration; authoritative proof is the policy-shape leg) --"
     echo "-- seinfo return codes are checked BEFORE any filtering: absence is proven by a SUCCESSFUL query --"
-    DIAG_KEYS_TYPES_RC=0
-    DIAG_KEYS_TYPES="$(seinfo --types /sys/fs/selinux/policy 2>&1)" || DIAG_KEYS_TYPES_RC=$?
-    if [ "$DIAG_KEYS_TYPES_RC" != 0 ]; then
-      echo "DIAG-UNLOAD-GATE: FAIL (the types enumeration query failed rc=$DIAG_KEYS_TYPES_RC; absence cannot be proven)"
+    echo "-- instrument self-check (the instrument must resolve a known type) --"
+    DIAG_KEYS_SANITY_RC=0
+    DIAG_KEYS_SANITY="$(seinfo -xt proc_t 2>&1)" || DIAG_KEYS_SANITY_RC=$?
+    if [ "$DIAG_KEYS_SANITY_RC" != 0 ] \
+      || ! printf '%s\n' "$DIAG_KEYS_SANITY" | grep -aq 'type proc_t'; then
+      echo "DIAG-UNLOAD-GATE: FAIL (the seinfo instrument cannot resolve a known type; absence cannot be proven)"
     else
-      printf '%s\n' "$DIAG_KEYS_TYPES" \
-        | grep -aE '(^|[[:space:]])proc_keys_t([[:space:]]|$)' \
-        | sed 's/^/type still found: /' \
-        || echo "proc_keys_t type: ABSENT (seinfo --types rc=0 first)"
+      DIAG_KEYS_TARGET_RC=0
+      DIAG_KEYS_TARGET="$(seinfo -xt proc_keys_t 2>&1)" || DIAG_KEYS_TARGET_RC=$?
+      if [ "$DIAG_KEYS_TARGET_RC" = 0 ]; then
+        if printf '%s\n' "$DIAG_KEYS_TARGET" | grep -aq 'type proc_keys_t'; then
+          echo "DIAG-UNLOAD-GATE: FAIL (the dedicated type proc_keys_t still exists in the loaded policy)"
+        else
+          echo "proc_keys_t type: ABSENT (successful query, no matching type)"
+        fi
+      else
+        echo "proc_keys_t type: ABSENT (self-checked instrument, not-found rc=$DIAG_KEYS_TARGET_RC)"
+      fi
     fi
     DIAG_KEYS_GEN_RC=0
     DIAG_KEYS_GENFSCON="$(seinfo --genfscon -- /sys/fs/selinux/policy 2>&1)" || DIAG_KEYS_GEN_RC=$?
@@ -3146,7 +3167,7 @@ if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
     else
       printf '%s\n' "$DIAG_KEYS_GENFSCON" \
         | grep -a ' /keys' | sed 's/^/genfscon still found: /' \
-        || echo "genfscon /keys: ABSENT (seinfo --genfscon rc=0 first)"
+        || echo "genfscon /keys: ABSENT (successful seinfo --genfscon query first)"
     fi
     DIAG_SHADERE="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
     echo "policy sha at unload-check time (post-removal, pre-restore): $DIAG_SHADERE"

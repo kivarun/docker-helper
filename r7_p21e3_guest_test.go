@@ -602,12 +602,14 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		"explicit class + explicit MLS-range form",
 		// The seinfo enumeration queries must prove absence through a
 		// SUCCESSFUL query (return code checked before any filtering),
-		// before the module load and after the unload.
+		// before the module load and after the unload; this guest's seinfo
+		// has no --types flag, so the type absence rides the SUPPORTED
+		// anchored name query after an instrument self-check on proc_t.
 		"seinfo --genfscon -- /sys/fs/selinux/policy",
-		"seinfo --types",
+		"seinfo -xt proc_t",
 		"the genfscon enumeration query failed (rc=",
 		"absence cannot be proven by a failed query",
-		"successful-query absence",
+		"successful seinfo --genfscon query first",
 		"policy sha before dedicated-module load",
 		"(allow docker_helper_buildkitd_t proc_keys_t (file (getattr)))",
 		"semodule -i \"$DIAG_KEYS_CIL\"",
