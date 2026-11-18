@@ -2448,7 +2448,18 @@ fi
 # untrusted error), so the enumeration is the instrument.
 if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
   echo "-- baseline pre-check (R4-P3-P6-MNB19): the dedicated type and the genfscon row must not exist --" >> "$DIAG_LOG"
-  DIAG_KEYS_PRE_TYPES="$(seinfo --types /sys/fs/selinux/policy 2>&1 || true)"
+  # seinfo return codes are checked BEFORE any filtering: the absence proof
+  # is only as good as a SUCCESSFUL enumeration query; a failed/timeout
+  # query is untrusted and decides BLOCKED, never an absence.
+  DIAG_KEYS_PRE_TYPES_RC=0
+  DIAG_KEYS_PRE_TYPES="$(seinfo --types /sys/fs/selinux/policy 2>&1)" || DIAG_KEYS_PRE_TYPES_RC=$?
+  if [ "$DIAG_KEYS_PRE_TYPES_RC" != 0 ]; then
+    printf 'seinfo --types rc=%d (untrusted; absence cannot be proven by a failed query)\n%s\n' \
+      "$DIAG_KEYS_PRE_TYPES_RC" "$DIAG_KEYS_PRE_TYPES" >> "$DIAG_LOG"
+    p21e3_diag_remove
+    p21e3_dontaudit_restore
+    fail "the types enumeration query failed (rc=$DIAG_KEYS_PRE_TYPES_RC); the dedicated-type absence cannot be proven"
+  fi
   if printf '%s\n' "$DIAG_KEYS_PRE_TYPES" | grep -aqE '(^|[[:space:]])proc_keys_t([[:space:]]|$)'; then
     printf 'proc_keys_t: PRESENT (unexpected); types enumeration md5=%s\n' \
       "$(printf '%s\n' "$DIAG_KEYS_PRE_TYPES" | md5sum | cut -d' ' -f1)" >> "$DIAG_LOG"
@@ -2457,7 +2468,15 @@ if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
     fail "the dedicated type proc_keys_t already exists in the loaded policy; the diagnostic block must not pre-exist"
   fi
   echo "proc_keys_t: ABSENT from the loaded policy => OK" >> "$DIAG_LOG"
-  DIAG_KEYS_PRE_GENFSCON="$(seinfo --genfscon /sys/fs/selinux/policy 2>&1 || true)"
+  DIAG_KEYS_PRE_GEN_RC=0
+  DIAG_KEYS_PRE_GENFSCON="$(seinfo --genfscon -- /sys/fs/selinux/policy 2>&1)" || DIAG_KEYS_PRE_GEN_RC=$?
+  if [ "$DIAG_KEYS_PRE_GEN_RC" != 0 ]; then
+    printf 'seinfo --genfscon rc=%d (untrusted; absence cannot be proven by a failed query)\n%s\n' \
+      "$DIAG_KEYS_PRE_GEN_RC" "$DIAG_KEYS_PRE_GENFSCON" >> "$DIAG_LOG"
+    p21e3_diag_remove
+    p21e3_dontaudit_restore
+    fail "the genfscon enumeration query failed (rc=$DIAG_KEYS_PRE_GEN_RC); the /keys-row absence cannot be proven"
+  fi
   if printf '%s\n' "$DIAG_KEYS_PRE_GENFSCON" | grep -aq ' /keys'; then
     printf 'genfscon /keys: PRESENT (unexpected) -- %s\n' \
       "$(printf '%s\n' "$DIAG_KEYS_PRE_GENFSCON" | grep -a ' /keys')" >> "$DIAG_LOG"
@@ -2465,7 +2484,7 @@ if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
     p21e3_dontaudit_restore
     fail "a genfscon row for /keys already exists in the loaded policy; the diagnostic block must not pre-exist"
   fi
-  echo "genfscon /keys: ABSENT from the loaded policy => OK" >> "$DIAG_LOG"
+  echo "genfscon /keys: ABSENT from the loaded policy => OK (seinfo --genfscon rc=0 first; successful-query absence)" >> "$DIAG_LOG"
 fi
 # R4-P3-P6-MNB14: pre-load check of sysctl_irq_t and the /proc/irq instance.
 echo "-- pre-load check: sysctl_irq_t assignment in the active policy --" >> "$DIAG_LOG"
@@ -2616,17 +2635,22 @@ log "diagnostic module loaded: $DIAG_MODULE (exactly the seven reviewed allow ru
 if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
   DIAG_KEYS_LOG="$EVIDENCE_DIR/p21e3-diag-keys.log"
   DIAG_KEYS_CIL="$EVIDENCE_DIR/docker_helper_diag_keys.cil"
+  DIAG_KEYS_PRELOAD_SHA="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
   {
     echo "== the dedicated-type CIL diagnostic module: docker_helper_diag_keys (temporary) =="
     echo "committed-policy delta: NONE (temporary module only; unload verified at the teardown)"
     echo "release-policy .pp sha (must not change): $DIAG_RELEASE_PP_SHA_PRE"
+    echo "guest version: $(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME ($VERSION_ID)")"
+    echo "policy sha before dedicated-module load: $DIAG_KEYS_PRELOAD_SHA"
   } > "$DIAG_KEYS_LOG"
   cat > "$DIAG_KEYS_CIL" <<'EOF'
 ; R4-P3-P6-MNB19 rung: the dedicated /proc/keys type for docker-helper
-; diagnostics. Exactly this block, nothing else. The genfscon context is
-; expressed in CIL list form (user role type category-suffix), NOT as a
-; colon string: the guest libsemanage refuses (Failed to resolve genfscon
-; statement) a colon-string context in module CIL.
+; diagnostics. Exactly this block, nothing else. The genfscon row uses the
+; explicit class + explicit MLS-range form: runs 44124041043 and 44125639504
+; rejected the class-less colon-string and the class-less range-less forms
+; ("Failed to resolve genfscon statement"); whether this guest accepts a
+; module-carried genfscon AT ALL stays an open question — this run decides
+; it. The range is (lo (s0)) (hi (s0)).
 (type proc_keys_t)
 (typeattributeset file_type (proc_keys_t))
 (typeattributeset filesystem_type (proc_keys_t))
@@ -2634,7 +2658,7 @@ if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
 (typeattributeset non_auth_file_type (proc_keys_t))
 (typeattributeset non_security_file_type (proc_keys_t))
 (typeattributeset proc_type (proc_keys_t))
-(genfscon "proc" "/keys" (system_u object_r proc_keys_t s0))
+(genfscon "proc" "/keys" file (system_u object_r proc_keys_t ((s0) (s0))))
 (allow docker_helper_buildkitd_t proc_keys_t (file (getattr)))
 EOF
   {
@@ -3104,18 +3128,42 @@ if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
       echo "module store: docker_helper_diag_keys absent => OK"
     fi
     echo "-- dedicated type + genfscon absence (enumeration; authoritative proof is the policy-shape leg) --"
-    seinfo --types /sys/fs/selinux/policy 2>/dev/null \
-      | grep -aE '(^|[[:space:]])proc_keys_t([[:space:]]|$)' \
-      | sed 's/^/type still found: /' \
-      || echo "proc_keys_t type: ABSENT"
-    seinfo --genfscon /sys/fs/selinux/policy 2>&1 \
-      | grep -a ' /keys' | sed 's/^/genfscon still found: /' \
-      || echo "genfscon /keys: ABSENT"
+    echo "-- seinfo return codes are checked BEFORE any filtering: absence is proven by a SUCCESSFUL query --"
+    DIAG_KEYS_TYPES_RC=0
+    DIAG_KEYS_TYPES="$(seinfo --types /sys/fs/selinux/policy 2>&1)" || DIAG_KEYS_TYPES_RC=$?
+    if [ "$DIAG_KEYS_TYPES_RC" != 0 ]; then
+      echo "DIAG-UNLOAD-GATE: FAIL (the types enumeration query failed rc=$DIAG_KEYS_TYPES_RC; absence cannot be proven)"
+    else
+      printf '%s\n' "$DIAG_KEYS_TYPES" \
+        | grep -aE '(^|[[:space:]])proc_keys_t([[:space:]]|$)' \
+        | sed 's/^/type still found: /' \
+        || echo "proc_keys_t type: ABSENT (seinfo --types rc=0 first)"
+    fi
+    DIAG_KEYS_GEN_RC=0
+    DIAG_KEYS_GENFSCON="$(seinfo --genfscon -- /sys/fs/selinux/policy 2>&1)" || DIAG_KEYS_GEN_RC=$?
+    if [ "$DIAG_KEYS_GEN_RC" != 0 ]; then
+      echo "DIAG-UNLOAD-GATE: FAIL (the genfscon enumeration query failed rc=$DIAG_KEYS_GEN_RC; absence cannot be proven)"
+    else
+      printf '%s\n' "$DIAG_KEYS_GENFSCON" \
+        | grep -a ' /keys' | sed 's/^/genfscon still found: /' \
+        || echo "genfscon /keys: ABSENT (seinfo --genfscon rc=0 first)"
+    fi
+    DIAG_SHADERE="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
+    echo "policy sha at unload-check time (post-removal, pre-restore): $DIAG_SHADERE"
+    echo "policy sha before dedicated-module load (for comparison): $DIAG_KEYS_PRELOAD_SHA"
     echo "-- /proc/keys label in the remaining guest (init) view --"
     echo "-- (the pre-existing host-instance inode was initialized before the module load;"
-    echo "--  it keeps proc_t regardless of the unload; the measured label evidence lives in the window) --"
+    echo "--  its post-run label depends on the genfscon's live effect; recorded as observed) --"
     ls -Zd /proc/keys 2>&1 || true
     stat -c 'stat: mode=%a ino=%i' /proc/keys 2>&1 || true
+    python3 - <<'PYEOF' 2>&1 || true
+import os
+try:
+    lab = os.getxattr("/proc/keys", "security.selinux")
+    print("xattr security.selinux on /proc/keys: %r" % lab)
+except OSError as e:
+    print("xattr security.selinux on /proc/keys: OSError errno=%d" % e.errno)
+PYEOF
   } >> "$DIAG_LOG" 2>&1
   grep -aq '^DIAG-UNLOAD-GATE: FAIL' "$DIAG_LOG" && DIAG_UNLOAD_OK=0
 fi
@@ -3154,6 +3202,15 @@ if [ "$DIAG_UNLOAD_OK" != 1 ]; then
   fail "the diagnostic module unload could not be verified (policy-shape leg); BLOCKED"
 fi
 log "diagnostic module unloaded and verified ($DIAG_MODULE)"
+if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
+  {
+    echo "-- final policy state after removal+restore (R4-P3-P6-MNB19) --"
+    echo "policy sha after removal+restore (final): $DIAG_SHA_UNLOAD"
+    echo "release-policy .pp sha (final): $DIAG_RELEASE_PP_SHA_POST"
+    echo "R7-P21E3-DIAG-UNLOADED=verified"
+  } >> "$DIAG_KEYS_LOG" 2>&1
+  cat "$DIAG_KEYS_LOG"
+fi
 fi  # end of the diag-module-unload probe guard
 
 # The bounded builder-manager service journal covering EXACTLY the
