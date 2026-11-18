@@ -63,12 +63,10 @@ case "$R7_MODE" in
   # dedicated-type policy/label analysis branch (no diag module, no build,
   # no relabel; metadata + loaded-policy queries only).
   p21e3proc-keys) GUEST_SCRIPT='release-2.4-r7-p21e3-guest.sh' ;;
-  # p21e3diag-keys = the SAME p21e3 guest script in its MNB20 measurement
+  # p21e3diag-keys = the SAME p21e3 guest script in its MNB21 measurement
   # branch: the seven reviewed rows PLUS the temporary dedicated-type CIL
-  # module (proc_keys_t, six attribute memberships, genfscon /keys, the
-  # proc_keys_t:file getattr and mounton permissions), loaded before the
-  # build creates fresh procfs instances; one bounded enforcing build and
-  # verified unload.
+  # module (proc_keys_t:file getattr and mounton, proc_timer_list_t:file
+  # getattr), loaded before one bounded enforcing build and verified unload.
   p21e3diag-keys) GUEST_SCRIPT='release-2.4-r7-p21e3-guest.sh' ;;
   *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d | p21e | p21e3 | p21e3probe | p21e3proc-sys | p21e3proc-file | p21e3proc-keys | p21e3diag-keys)" ;;
 esac
