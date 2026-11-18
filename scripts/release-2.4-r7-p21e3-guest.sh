@@ -2658,12 +2658,13 @@ if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
   cat > "$DIAG_KEYS_CIL" <<'EOF'
 ; R4-P3-P6-MNB19 rung: the dedicated /proc/keys type for docker-helper
 ; diagnostics. Exactly this block, nothing else. The genfscon row uses the
-; explicit class + explicit MLS-range form: runs 44124041043 and 44125639504
-; rejected the class-less colon-string and the class-less range-less forms
-; ("Failed to resolve genfscon statement"); whether this guest accepts a
-; module-carried genfscon AT ALL stays an open question — this run decides
-; it. The range is (lo (s0)) (hi (s0)).
+; explicit class + explicit MLS-range form: run 44125639504 rejected the
+; class-less/range-less forms and run 44284343854 showed the context must
+; also be role-authorized ("Type proc_keys_t is invalid for role object_r"
+; at the CIL verify stage), so the roletype line is the enabling statement
+; for the genfscon context. The range is (lo (s0)) (hi (s0)).
 (type proc_keys_t)
+(roletype object_r proc_keys_t)
 (typeattributeset file_type (proc_keys_t))
 (typeattributeset filesystem_type (proc_keys_t))
 (typeattributeset mountpoint (proc_keys_t))

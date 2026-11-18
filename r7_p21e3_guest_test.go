@@ -592,6 +592,7 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		"DIAG_MODULES=\"$DIAG_MODULES docker_helper_diag_keys\"",
 		"docker_helper_diag_keys.cil",
 		"(type proc_keys_t)",
+		"(roletype object_r proc_keys_t)",
 		"(typeattributeset file_type (proc_keys_t))",
 		"(typeattributeset filesystem_type (proc_keys_t))",
 		"(typeattributeset mountpoint (proc_keys_t))",
