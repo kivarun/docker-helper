@@ -1886,6 +1886,11 @@ measure_abandon() {
     wait "$SAMPLER_PID" 2>/dev/null || true
     SAMPLER_PID=""
   fi
+  if [ -n "${PROC_INVENTORY_PID:-}" ]; then
+    touch "$STOPSAMP" 2>/dev/null || true
+    wait "$PROC_INVENTORY_PID" 2>/dev/null || true
+    PROC_INVENTORY_PID=""
+  fi
   if [ -n "${WATCHER_PID:-}" ]; then
     touch "${WATCHER_STOP:-/nonexistent}" 2>/dev/null || true
     wait "$WATCHER_PID" 2>/dev/null || true
@@ -1898,7 +1903,7 @@ measure_abandon() {
   rm -f "${PULL_RAW:-}" 2>/dev/null || true
 }
 
-# The fixed diag-module rung (R4-P3-P6-MNB9..MNB21): a temporary loadable
+# The fixed diag-module rung (R4-P3-P6-MNB9..MNB22): a temporary loadable
 # module carrying EXACTLY the reviewed rows (currently the seven MNB18 rows:
 # proc_t:dir mounton, proc_t:filesystem remount, sysctl_irq_t:dir mounton,
 # sysctl_t:dir mounton, sysctl_t:file mounton, proc_kcore_t:file getattr, proc_kcore_t:file mounton), plus —
@@ -2463,7 +2468,7 @@ p21e3_diag_proc_types_absent() {
   echo "genfscon: /keys and /timer_list absent (successful seinfo --genfscon query first)"
 }
 if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
-  echo "-- baseline pre-check (R4-P3-P6-MNB21): dedicated types and genfscon rows --" >> "$DIAG_LOG"
+  echo "-- baseline pre-check (R4-P3-P6-MNB22): dedicated types and genfscon rows --" >> "$DIAG_LOG"
   if ! p21e3_diag_proc_types_absent >> "$DIAG_LOG"; then
     p21e3_diag_remove
     p21e3_dontaudit_restore
@@ -2603,9 +2608,10 @@ if [ "$DIAG_LOAD_OK" != 1 ]; then
 fi
 log "diagnostic module loaded: $DIAG_MODULE (exactly the seven reviewed allow rules; removal verified at the teardown)"
 
-# --- the R4-P3-P6-MNB21 dedicated-type CIL block (diag-keys mode only) ---
+# --- the R4-P3-P6-MNB22 dedicated-type CIL block (diag-keys mode only) ---
 # Keep the measured /keys rules and add a dedicated type for /timer_list
-# with getattr only. Genfscon applies at inode initialization in fresh procfs.
+# with the reviewed getattr and mounton pair. Genfscon applies at inode
+# initialization in fresh procfs.
 # `semodule -i` consumes the CIL source directly (no TE compilation). The
 # store entry is named docker_helper_diag_keys and is removed+verified
 # together with the row module at the teardown.
@@ -2621,7 +2627,7 @@ if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
     echo "policy sha before dedicated-module load: $DIAG_KEYS_PRELOAD_SHA"
   } > "$DIAG_KEYS_LOG"
   cat > "$DIAG_KEYS_CIL" <<'EOF'
-; R4-P3-P6-MNB21: dedicated procfs file types for docker-helper.
+; R4-P3-P6-MNB22: dedicated procfs file types for docker-helper.
 ; The genfscon rows use the
 ; explicit class + explicit MLS-range form: run 44125639504 rejected the
 ; class-less/range-less forms and run 44284343854 showed the context must
@@ -2647,7 +2653,7 @@ if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
 (typeattributeset non_security_file_type (proc_timer_list_t))
 (typeattributeset proc_type (proc_timer_list_t))
 (genfscon "proc" "/timer_list" file (system_u object_r proc_timer_list_t ((s0) (s0))))
-(allow docker_helper_buildkitd_t proc_timer_list_t (file (getattr)))
+(allow docker_helper_buildkitd_t proc_timer_list_t (file (getattr mounton)))
 EOF
   {
     echo "-- module source (exactly the dedicated-type CIL block) --"
@@ -2665,21 +2671,16 @@ EOF
   }
   {
     echo "-- post-install policy readouts (fail-closed check of direct permissions + orientation) --"
-    # Inspect each complete direct grant. This also rejects unreviewed
-    # permissions and conditionals.
+    # Each direct grant must be the exact reviewed, unconditional pair.
     for DIAG_PROC_TYPE in proc_keys_t proc_timer_list_t; do
-      DIAG_PROC_EXPECTED=getattr
-      if [ "$DIAG_PROC_TYPE" = proc_keys_t ]; then
-        DIAG_PROC_EXPECTED='getattr mounton'
-      fi
       DIAG_PROC_Q="$(timeout 60 sesearch -A -ds -dt -s docker_helper_buildkitd_t -t "$DIAG_PROC_TYPE" -c file 2>&1)"
       DIAG_PROC_RC=$?
       DIAG_PROC_V="$(classify_sesearch_query "$DIAG_PROC_RC" "$DIAG_PROC_Q")"
       printf 'type=%s query-rc=%s\nclassify=%s\n%s\n' "$DIAG_PROC_TYPE" "$DIAG_PROC_RC" "$DIAG_PROC_V" "$DIAG_PROC_Q"
-      if [ "$DIAG_PROC_V" != "trusted:perms=$DIAG_PROC_EXPECTED|cond-active=none|cond-inactive=none" ]; then
-        echo "DIAG-LOAD-GATE: FAIL ($DIAG_PROC_TYPE direct permissions differ from $DIAG_PROC_EXPECTED: $DIAG_PROC_V)"
+      if [ "$DIAG_PROC_V" != 'trusted:perms=getattr mounton|cond-active=none|cond-inactive=none' ]; then
+        echo "DIAG-LOAD-GATE: FAIL ($DIAG_PROC_TYPE direct permissions differ from the reviewed pair: $DIAG_PROC_V)"
       else
-        echo "DIAG-LOAD-GATE: PASS ($DIAG_PROC_TYPE has exactly the reviewed direct permissions: $DIAG_PROC_EXPECTED)"
+        echo "DIAG-LOAD-GATE: PASS ($DIAG_PROC_TYPE has exactly the reviewed direct getattr and mounton)"
       fi
     done
     if semodule -l 2>/dev/null | grep -aq docker_helper_diag_keys; then
@@ -2699,7 +2700,7 @@ EOF
     p21e3_dontaudit_restore
     fail "the dedicated-type module load gate failed; BLOCKED"
   fi
-  log "dedicated-type module loaded: docker_helper_diag_keys (/proc/keys getattr and mounton, /proc/timer_list getattr)"
+  log "dedicated-type module loaded: docker_helper_diag_keys (/proc/keys getattr and mounton, /proc/timer_list getattr and mounton)"
 
   # --- fresh-procfs orientation probe (private mount namespace) ---
   # genfscon decides the label at inode initialization, so a FRESH procfs
@@ -2818,6 +2819,22 @@ if grep -aq '^WATCHER-START' "$WATCHER_LOG" 2>/dev/null; then
   log "watcher start SUCCESS is distinct from watch-attachment SUCCESS: the adaptive dev-prep/op attachments report on WATCHER-ATTACH lines during the build; any attach failure is an explicit limitation, not a missed start"
 else
   log "state-root event watcher NOT confirmed (process-alive=$(kill -0 "$WATCHER_PID" 2>/dev/null && echo yes || echo no)); the prepared-tree event evidence will be absent"
+fi
+
+# Capture only the hardening lists and target metadata in the live OCI view.
+# The sampler runs before POST and shares the measurement's stop marker.
+PROC_INVENTORY_PID=""
+PROC_INVENTORY_SCRIPT=/opt/uat/scripts/release-2.4-r7-proc-inventory.py
+PROC_INVENTORY_CAPTURE="$EVIDENCE_DIR/p21e3-proc-inventory.jsonl"
+if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
+  python3 "$PROC_INVENTORY_SCRIPT" capture "$BUILDER_STATE_ROOT" "$STOPSAMP" \
+    > "$PROC_INVENTORY_CAPTURE" 2>"$EVIDENCE_DIR/p21e3-proc-inventory.err" &
+  PROC_INVENTORY_PID=$!
+  for _ in $(seq 1 40); do
+    grep -Fq '"event": "ready"' "$PROC_INVENTORY_CAPTURE" && break
+    if ! kill -0 "$PROC_INVENTORY_PID" 2>/dev/null; then break; fi
+    sleep 0.05
+  done
 fi
 
 # --- the measured operation: POST /build ---
@@ -3026,6 +3043,13 @@ trap - EXIT
   [ "$found_op" = 1 ] || echo "(no per-op dir present at the terminal — removed by the operation teardown; the watcher's event captures hold the ladder's state)"
 } > "$EVIDENCE_DIR/p21e3-devprep-terminal-state.log" 2>&1
 cat "$EVIDENCE_DIR/p21e3-devprep-terminal-state.log"
+if [ -n "$PROC_INVENTORY_PID" ]; then
+  wait "$PROC_INVENTORY_PID" 2>/dev/null || true
+  PROC_INVENTORY_PID=""
+  timeout 25 python3 "$PROC_INVENTORY_SCRIPT" report "$OP" "$PROC_INVENTORY_CAPTURE" \
+    > "$EVIDENCE_DIR/p21e3-proc-inventory-policy.jsonl" 2>>"$EVIDENCE_DIR/p21e3-proc-inventory.err" \
+    || log "OCI path policy inventory was incomplete; see the inventory evidence"
+fi
 # --- the fixed single-row diagnostic module: removal and unload
 # --- verification BEFORE the dontaudit restore (the removal's own rebuild
 # --- PRESERVES the disable-dontaudit build state, so the policy-shape
@@ -3114,7 +3138,7 @@ fi
 # independently of the policy checks.
 if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
   {
-    echo "-- R4-P3-P6-MNB21 dedicated-type unload corroboration --"
+    echo "-- R4-P3-P6-MNB22 dedicated-type unload corroboration --"
     if semodule -l 2>/dev/null | grep -aq docker_helper_diag_keys; then
       echo "DIAG-UNLOAD-GATE: FAIL (the dedicated-type module is still registered in the store)"
     else
@@ -3179,7 +3203,7 @@ fi
 log "diagnostic module unloaded and verified ($DIAG_MODULE)"
 if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
   {
-    echo "-- final policy state after removal+restore (R4-P3-P6-MNB21) --"
+    echo "-- final policy state after removal+restore (R4-P3-P6-MNB22) --"
     echo "policy sha after removal+restore (final): $DIAG_SHA_UNLOAD"
     echo "-- proc inode labels after policy restore, guest init view --"
     ls -Zd /proc/keys /proc/timer_list 2>&1 || true

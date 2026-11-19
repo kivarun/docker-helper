@@ -580,8 +580,7 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		// In the probe mode the diagnostic machinery writes a distinct skip note.
 		"probe mode: no diagnostic module is loaded",
 		"the read-only baseline probe INSIDE the live build",
-		// MNB21 keeps the measured /keys rules and grants only getattr
-		// on a dedicated type for /timer_list.
+		// MNB22 checks the two reviewed pairs and inventories the live OCI targets.
 		"R7_P21E3_DIAG_KEYS",
 		"DIAG_MODULES=\"$DIAG_MODULES docker_helper_diag_keys\"",
 		"docker_helper_diag_keys.cil",
@@ -608,14 +607,16 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		"semodule -i \"$DIAG_KEYS_CIL\"",
 		`(genfscon "proc" "/timer_list" file (system_u object_r proc_timer_list_t ((s0) (s0))))`,
 		"(roletype object_r proc_timer_list_t)",
-		"(allow docker_helper_buildkitd_t proc_timer_list_t (file (getattr)))",
+		"(allow docker_helper_buildkitd_t proc_timer_list_t (file (getattr mounton)))",
 		`if ! p21e3_diag_proc_types_absent`,
 		`sesearch -A -ds -dt -s docker_helper_buildkitd_t -t "$DIAG_PROC_TYPE" -c file`,
-		`trusted:perms=$DIAG_PROC_EXPECTED|cond-active=none|cond-inactive=none`,
+		"trusted:perms=getattr mounton|cond-active=none|cond-inactive=none",
+		"release-2.4-r7-proc-inventory.py",
+		"p21e3-proc-inventory-policy.jsonl",
 		"semodule -r \"$mod\"",
 		"fresh procfs instance label probe (private mnt namespace)",
 		"both dedicated labels are live",
-		"R4-P3-P6-MNB21 dedicated-type unload corroboration",
+		"R4-P3-P6-MNB22 dedicated-type unload corroboration",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("the p21e3 guest harness must carry the inspection diagnostic %q", want)
@@ -671,7 +672,7 @@ func TestR7P21E3HostGateDetectsVerdict(t *testing.T) {
 	}
 }
 
-// TestR7P21E3DiagKeysModePlumbing pins the MNB21 dedicated-type rung's
+// TestR7P21E3DiagKeysModePlumbing pins the MNB22 dedicated-type rung's
 // plumbing end to end: the workflow exposes the p21e3diag-keys mode, only
 // the SELinux VM job may run it, the VM wrapper selects the same p21e3
 // guest script for it and exports R7_P21E3_DIAG_KEYS=1, and the guest
@@ -682,7 +683,7 @@ func TestR7P21E3DiagKeysModePlumbing(t *testing.T) {
 		t.Fatal(err)
 	}
 	workflow := string(wf)
-	if !strings.Contains(workflow, "p21e3diag-keys = the R7 MNB21 measurement") {
+	if !strings.Contains(workflow, "p21e3diag-keys = the R7 MNB22 measurement") {
 		t.Error("the workflow must document the p21e3diag-keys mode")
 	}
 	for _, job := range []string{"ubuntu-tarball-diag", "apparmor-vm-diag"} {
