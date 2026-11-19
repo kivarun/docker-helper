@@ -834,6 +834,7 @@ type docker_helper_builder_state_root_t, file_type;
 # watchState/destroyState read-back cycle). Creation-assigned via the
 # type_transition below; no fc row, no MCS membership of its own — the
 # files inherit the creator's categories.
+type docker_helper_builder_runc_dir_t, file_type;
 type docker_helper_builder_runc_state_t, file_type;
 
 # P5-S2 G32 r3 context type: the daemon's handoff material typed at
@@ -1106,6 +1107,7 @@ allow docker_helper_builder_t docker_helper_builder_runtime_t:fifo_file unlink;
 allow docker_helper_builder_t docker_helper_builder_runtime_root_t:dir { relabelfrom };
 allow docker_helper_builder_t docker_helper_builder_state_root_t:dir { relabelfrom };
 allow docker_helper_builder_t docker_helper_builder_runtime_t:dir { relabelto };
+allow docker_helper_builder_t docker_helper_builder_runc_dir_t:dir { relabelto };
 allow docker_helper_builder_t docker_helper_builder_state_t:dir { relabelto };
 
 # State root and per-op state dirs: startup purge scan + removal, and the
@@ -7396,69 +7398,24 @@ allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:sock_file { crea
 # byte-unchanged; the standing runtime-tree owners stay byte-unchanged.
 allow docker_helper_buildkitd_t docker_helper_builder_runtime_t:fifo_file { create setattr };
 
-# --- R7 MNB23: the runc state-file type — the dedicated type for the
-# --- ordinary files of the runtime subtree's runc state plane
-# ---
-# R7 (enforcing evidence, diag run 44500052007, checkout 7aac4ba8):
-# the hardening ladder's whole procfs plane passed (walk, masked
-# kcore/keys/timer_list/scsi binds, the readonly set) and the next
-# terminal moved INTO the runtime state plane:
-#
-#   avc:  denied  { create } for  pid=4488 comm="buildkit-runc"
-#     name="state-1942865667" dev="tmpfs" ino=...
-#     scontext=system_u:system_r:docker_helper_buildkitd_t:s0:c1
-#     tcontext=system_u:object_r:docker_helper_builder_runtime_t:s0:c1
-#     tclass=file permissive=0                              (serial 1217)
-#   runc run failed: unable to store init state: open
-#     /run/docker-helper-builder/ops/<op>/runc/<bundle>/state-1942865667:
-#     permission denied
-#
-# THE DESIGN IS THE DEDICATED TYPE, NOT A WIDENED RUNTIME-TREE FILE
-# GRANT: the runtime-tree file surface stays UNGRANTED from the
-# buildkitd domain (the standing anti-merge plane above), and every
-# ordinary file the runtime domain creates inside the categorized
-# runtime tree receives its OWN type at creation (kernel label-init,
-# the same mechanism the P21-B devnode and the runc-memfd precedents
-# use): the saveState/destroyState state.json cycle can never be read
-# as a writable-file bundle over the whole per-op tree.
-# PROVENANCE SPLIT (recorded per review):
-#   * CONFIRMED AVC: file { create } (serial 1217 above; the state-*
-#     temp file name is saveState's os.CreateTemp shape with the
-#     random suffix — runc v1.5.1 libcontainer/container_linux.go
-#     L837-L860 creates state-<random>, encodes, closes, and renames
-#     it to state.json);
-#   * CODE-DERIVED (the same cycle, the same one delta): saveState
-#     needs open + write + rename (the temp file write and the atomic
-#     rename to state.json); the read/write-back path
-#     (loadState/watchState through os.ReadFile) needs open + read +
-#     getattr (ReadFile fstats the opened fd); destroyState and the
-#     manager's per-op convergence need unlink; the rename's parent
-#     hooks are the standing runtime-tree dir rule's (add_name/
-#     remove_name/write — already granted, never re-granted here);
-#   * NOT GRANTED THIS RUNG: setattr/lock/append/map/execute/ioctl
-#     (no chmod/append/mmap/exec/ ioctl record in the cycle), no
-#     stamping of the fifo (exec.fifo stays its own fifo_file class
-#     singleton; the fifo files are NOT plain files), no dir transition
-#     (bundle dirs inherit the parent runtime_t type and reach their
-#     hooks through the standing dir rule), no MCS/category change of
-#     any site, no .fc row (the type is creation-assigned only; there
-#     is no persistent path that should pre-type it).
-#
-# The transition is source-scoped (docker_helper_buildkitd_t) and
-# parent-scoped (docker_helper_builder_runtime_t:file); the manager's
-# (docker_helper_builder_t) and init_t's cleanup unlink facts are the
-# per-op teardown owners' authority over files that now carry the new
-# type (the manager's removeInstanceDirs/purge removal and the
-# RuntimeDirectory stop-time removal; the same AUTHORITY SHAPE the
-# runtime-tree file unlink rules already carry for runtime_t files).
-# MCS: files inherit the creator's categories (buildkitd_t:s0:c1 ->
-# state files at s0:c1), so the cross-operation boundary stays the
-# class constraints + the constrained parent-dir traversal, exactly as
-# the state-tree prohibitions describe. The provisioning read-back
-# (the full op label s0:cX on ops/<op>/runc) is the Go-side owner's
-# mandatory verification (builder_provision.go), not a policy grant.
+# R7 MNB23: the manager labels the per-operation runc directory before
+# launch. Bundle directories carry the same type. The regular-file
+# transition is keyed to that directory type and covers temporary
+# state-* names as well as the final state.json inode after rename.
+# Neighboring runtime directories remain builder_runtime_t. The exec.fifo
+# transition preserves the existing FIFO type and its lifecycle grants.
+# The manager and init_t own directory removal. The manager also relabels
+# the freshly created runc root and verifies its full operation context.
+allow docker_helper_builder_t docker_helper_builder_runc_dir_t:dir { getattr search read open write remove_name rmdir setattr };
+allow init_t docker_helper_builder_runc_dir_t:dir { rmdir write remove_name setattr };
+allow docker_helper_buildkitd_t docker_helper_builder_runc_dir_t:dir { getattr search write add_name create remove_name setattr };
+type_transition docker_helper_buildkitd_t docker_helper_builder_runc_dir_t:dir docker_helper_builder_runc_dir_t;
+type_transition docker_helper_buildkitd_t docker_helper_builder_runc_dir_t:fifo_file docker_helper_builder_runtime_t "exec.fifo";
+
+# MNB22 observed create denied (AVC 1217). The remaining file permissions
+# are for the verified saveState/loadState cycle and failed-write cleanup.
 allow docker_helper_buildkitd_t docker_helper_builder_runc_state_t:file { create open read write rename getattr unlink };
-type_transition docker_helper_buildkitd_t docker_helper_builder_runtime_t:file docker_helper_builder_runc_state_t;
+type_transition docker_helper_buildkitd_t docker_helper_builder_runc_dir_t:file docker_helper_builder_runc_state_t;
 allow docker_helper_builder_t docker_helper_builder_runc_state_t:file unlink;
 allow init_t docker_helper_builder_runc_state_t:file unlink;
 

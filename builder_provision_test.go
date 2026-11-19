@@ -116,10 +116,13 @@ func TestBuilderObjectContextCanonical(t *testing.T) {
 	if got := builderObjectContext(builderRuntimeObjectType, builderCategory(1023)); got != "system_u:object_r:docker_helper_builder_runtime_t:s0:c1023" {
 		t.Errorf("runtime c1023 context = %q", got)
 	}
+	if got := builderObjectContext(builderRuncDirObjectType, builderCategory(2)); got != "system_u:object_r:docker_helper_builder_runc_dir_t:s0:c2" {
+		t.Errorf("runc directory c2 context = %q", got)
+	}
 	// Type separation in the matrix: the three state paths carry the
 	// state type, the runtime paths (the runtime dir and the OTEL
-	// trace-socket parent) carry the runtime type, and each path appears
-	// exactly once.
+	// trace-socket parent) carry the runtime type, and runc carries
+	// its own directory type. Each path appears exactly once.
 	const opID = "op_0123456789abcdef0123456789abcdef"
 	paths := builderProvisionedPaths(opID, opRuntimeDir(opID), opStateDir(opID))
 	if len(paths) != 6 {
@@ -131,9 +134,12 @@ func TestBuilderObjectContextCanonical(t *testing.T) {
 			t.Errorf("duplicate provisioning entry: %s", p.path)
 		}
 		seen[p.path] = true
-		want := builderRuntimeObjectType
-		if p.rel != "runtime" && p.rel != "runtime/buildkit" && p.rel != "runtime/runc" {
-			want = builderStateObjectType
+		want := builderStateObjectType
+		switch p.rel {
+		case "runtime", "runtime/buildkit":
+			want = builderRuntimeObjectType
+		case "runtime/runc":
+			want = builderRuncDirObjectType
 		}
 		if p.objectType != want {
 			t.Errorf("provisioning entry %s carries type %s, want %s", p.rel, p.objectType, want)
@@ -142,7 +148,7 @@ func TestBuilderObjectContextCanonical(t *testing.T) {
 }
 
 // TestBuilderProvisioningSuccessOrderContextsBeforeSpawn proves the
-// successful provisioning: all five required paths receive their exact
+// successful provisioning: all required paths receive their exact
 // expected contexts (type + the record's category), each in set-then-get
 // order, and every provisioning event strictly precedes the command
 // creation; the launch continues only after the last verification.
@@ -186,8 +192,8 @@ func TestBuilderProvisioningSuccessOrderContextsBeforeSpawn(t *testing.T) {
 		{"get", 3, builderRuntimeObjectType},
 		{"set", 4, builderRuntimeObjectType},
 		{"get", 4, builderRuntimeObjectType},
-		{"set", 5, builderRuntimeObjectType},
-		{"get", 5, builderRuntimeObjectType},
+		{"set", 5, builderRuncDirObjectType},
+		{"get", 5, builderRuncDirObjectType},
 	}
 	entries := f.entries()
 	if len(entries) != len(wantOrder)+1 {

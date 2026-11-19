@@ -25,6 +25,7 @@ import (
 const (
 	builderStateObjectType   = "docker_helper_builder_state_t"
 	builderRuntimeObjectType = "docker_helper_builder_runtime_t"
+	builderRuncDirObjectType = "docker_helper_builder_runc_dir_t"
 )
 
 // builderProvisionedPath is one required top-level provisioning entry.
@@ -35,7 +36,7 @@ type builderProvisionedPath struct {
 }
 
 // builderProvisionedPaths is the exact provisioning matrix (G32 r3 §4.2):
-// the four required top-level per-op paths and their expected types.
+// the required per-op paths and their expected types.
 // State paths never carry the runtime type and vice versa; the roots and
 // the shared ops containers are never relabeled.
 func builderProvisionedPaths(opID, rtDir, stDir string) []builderProvisionedPath {
@@ -51,14 +52,9 @@ func builderProvisionedPaths(opID, rtDir, stDir string) []builderProvisionedPath
 		// relabel matrix is not recursive, so the directory needs its
 		// own explicit entry.
 		{rel: "runtime/buildkit", path: filepath.Join(rtDir, "buildkit"), objectType: builderRuntimeObjectType},
-		// R7 MNB23: runc's state root (--root, the saveState/loadState
-		// plane). Pre-created and provisioned with the exact categorized
-		// context like every other required per-op path; its ordinary
-		// files receive the dedicated runc-state type at creation from
-		// the policy's type_transition, and the plain read-back here
-		// proves the full op label (type + the operation's category)
-		// before any launch step.
-		{rel: "runtime/runc", path: filepath.Join(rtDir, "runc"), objectType: builderRuntimeObjectType},
+		// The distinct parent type confines the state-file transition
+		// to this tree. Verify its operation category before launch.
+		{rel: "runtime/runc", path: filepath.Join(rtDir, "runc"), objectType: builderRuncDirObjectType},
 	}
 }
 

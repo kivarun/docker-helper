@@ -126,8 +126,23 @@ def emit(event, value):
     print(json.dumps({"event": event, **value}, ensure_ascii=True), flush=True)
 
 
+def capture_runtime_labels(spec):
+    runtime = Path("/run/docker-helper-builder/ops") / spec["op"]
+    runc = runtime / "runc"
+    bundle = runc / spec["bundle"]
+    paths = (runtime, runtime / "buildkit", runc, bundle, bundle / "state.json")
+    try:
+        labels = {
+            str(path): os.getxattr(path, "security.selinux", follow_symlinks=False).rstrip(b"\0").decode("ascii")
+            for path in paths
+        }
+    except (OSError, UnicodeError):
+        return None
+    return {"op": spec["op"], "bundle": spec["bundle"], "labels": labels}
+
+
 def capture(state, stop):
-    specs, seen = {}, set()
+    specs, seen, labeled = {}, set(), set()
     emit("ready", {})
     deadline = time.monotonic() + 125
     while not stop.exists() and time.monotonic() < deadline:
@@ -135,6 +150,10 @@ def capture(state, stop):
             if config not in specs and (spec := read_spec(config, state)):
                 specs[config] = spec
                 emit("spec", spec)
+        for config, spec in specs.items():
+            if config not in labeled and (labels := capture_runtime_labels(spec)):
+                labeled.add(config)
+                emit("runtime-labels", labels)
         if specs:
             for process in Path("/proc").iterdir():
                 if not process.name.isdecimal() or process.name in seen:
@@ -156,6 +175,12 @@ def report(op, capture_log):
         return
     candidates = set()
     for spec in specs:
+        labels = [event for event in events if event["event"] == "runtime-labels"
+                  and event["op"] == op and event["bundle"] == spec["bundle"]]
+        if labels:
+            print(json.dumps(labels[0], ensure_ascii=True), flush=True)
+        else:
+            emit("gap", {"reason": "runtime state labels not captured", "bundle": spec["bundle"]})
         emit("spec", {key: spec[key] for key in ("op", "bundle", "sha256", "paths")})
         matching = [
             event for event in events

@@ -2768,12 +2768,32 @@ static const char *T_STATE_C1 = "system_u:object_r:docker_helper_builder_runc_st
 static const char *T_STATE_C2 = "system_u:object_r:docker_helper_builder_runc_state_t:s0:c2";
 static const char *T_RUNTIME_C1 = "system_u:object_r:docker_helper_builder_runtime_t:s0:c1";
 static const char *T_RUNTIME_C2 = "system_u:object_r:docker_helper_builder_runtime_t:s0:c2";
+static const char *T_RUNC_C1 = "system_u:object_r:docker_helper_builder_runc_dir_t:s0:c1";
+static const char *T_RUNC_C2 = "system_u:object_r:docker_helper_builder_runc_dir_t:s0:c2";
+
 
 static struct q { const char *scon, *tcon, *cls, *perm, *expect; } ROWS[256];
 static size_t NROWS;
 static void add(const char *s, const char *t, const char *c, const char *p, const char *e) {
   ROWS[NROWS].scon = s; ROWS[NROWS].tcon = t; ROWS[NROWS].cls = c;
   ROWS[NROWS].perm = p; ROWS[NROWS].expect = e; NROWS++;
+}
+
+static char *create_context(const char *parent, const char *object_class,
+                            const char *name, const char *expected) {
+  security_class_t cls = string_to_security_class(object_class);
+  char *computed = NULL;
+  if (!cls || security_compute_create_name_raw(S_C1, parent, cls, name, &computed) < 0) {
+    fprintf(stderr, "ERR\tcreate-context %s %s\n", object_class, name);
+    return NULL;
+  }
+  printf("CREATE-LABEL\t%s\t%s\t%s\t%s\n", parent, object_class, name, computed);
+  if (strcmp(computed, expected) != 0) {
+    fprintf(stderr, "ERR\tunexpected context for %s, expected %s\n", name, expected);
+    freecon(computed);
+    return NULL;
+  }
+  return computed;
 }
 
 int main(void) {
@@ -2802,23 +2822,37 @@ int main(void) {
   add(S_C2, T_STATE_C1, "file", "open", "report");
   add(S_C1, T_STATE_C1, "file", "getattr", "report");
   add(S_C1, T_STATE_C2, "file", "getattr", "report");
-  /* the parent runtime-tree dir hooks keep the proven cross closure */
+  /* Use the kernel-computed child contexts, then check the create
+   * decision from the same source category for both parent types. */
+  char *inside = create_context(T_RUNC_C1, "file", "state-diagnostic", T_STATE_C1);
+  char *outside = create_context(T_RUNTIME_C1, "file", "state-diagnostic", T_RUNTIME_C1);
+  char *bundle = create_context(T_RUNC_C1, "dir", "diagnostic-bundle", T_RUNC_C1);
+  char *fifo = create_context(T_RUNC_C1, "fifo_file", "exec.fifo", T_RUNTIME_C1);
+  if (!inside || !outside || !bundle || !fifo)
+    return 1;
+  add(S_C1, inside, "file", "create", "allow");
+  add(S_C1, outside, "file", "create", "deny");
+  add(S_C1, bundle, "dir", "create", "allow");
+  add(S_C1, fifo, "fifo_file", "create", "allow");
   static const char *dperms[] = { "search", "write", "add_name", "remove_name" };
   for (size_t i = 0; i < 4; i++) {
+    add(S_C1, T_RUNC_C1, "dir", dperms[i], "allow");
+    add(S_C1, T_RUNC_C2, "dir", dperms[i], "deny");
+    add(S_C2, T_RUNC_C1, "dir", dperms[i], "deny");
     add(S_C1, T_RUNTIME_C2, "dir", dperms[i], "deny");
     add(S_C2, T_RUNTIME_C1, "dir", dperms[i], "deny");
   }
   for (size_t i = 0; i < NROWS; i++) {
     struct q *r = &ROWS[i];
     security_class_t cls = string_to_security_class(r->cls);
-    if (!cls) { printf("ERR\tclass %s unknown\n", r->cls); continue; }
+    if (!cls) { printf("ERR\tclass %s unknown\n", r->cls); return 1; }
     access_vector_t bit = string_to_av_perm(cls, r->perm);
-    if (!bit) { printf("ERR\tperm %s %s unknown\n", r->cls, r->perm); continue; }
+    if (!bit) { printf("ERR\tperm %s %s unknown\n", r->cls, r->perm); return 1; }
     struct av_decision avd;
     memset(&avd, 0, sizeof(avd));
     if (security_compute_av_raw(r->scon, r->tcon, cls, bit, &avd) < 0) {
       printf("ERR\tcompute_av failed\n");
-      continue;
+      return 1;
     }
     printf("%s\t%s\t%s\t%s\t%u\t%u\t%u\t%u\t%u\t%s\n",
            r->scon, r->tcon, r->cls, r->perm,
@@ -2829,6 +2863,10 @@ int main(void) {
            (avd.flags & SELINUX_AVD_FLAGS_PERMISSIVE) ? 1 : 0,
            r->expect);
   }
+  freecon(inside);
+  freecon(outside);
+  freecon(bundle);
+  freecon(fifo);
   return 0;
 }
 CEOF
@@ -2840,9 +2878,9 @@ CEOF
   } > "$KC_LOG" 2>&1
   gcc -O2 -o "$EVIDENCE_DIR/p21e3_runcstate_avdec" "$EVIDENCE_DIR/p21e3_runcstate_avdec.c" -lselinux \
     >> "$KC_LOG" 2>&1 || { cat "$KC_LOG"; fail "the MNB23 kernel-decision helper build failed; BLOCKED"; }
-  "$EVIDENCE_DIR/p21e3_runcstate_avdec" >> "$KC_LOG" 2>&1 || true
-  BADS="$(awk -F'\t' 'NF>=10 && $10!="" {
-    if ($1=="ERR") { print "ERRROW " $0; next }
+  "$EVIDENCE_DIR/p21e3_runcstate_avdec" >> "$KC_LOG" 2>&1 \
+    || { cat "$KC_LOG"; fail "the MNB23 kernel-decision helper failed; BLOCKED"; }
+  BADS="$(awk -F'\t' '$1=="ERR" { print "ERRROW " $0; next } NF>=10 && $10!="" {
     if ($6 != 1) { print "UNDECIDED " $0 }
     if ($9 != 0) { print "PERMISSIVE " $0 }
     if ($10=="allow" && $5!=1) { print "MISMATCH-ALLOW " $0 }
@@ -3448,6 +3486,32 @@ log "=== section 6: chain inventory ==="
   echo "-- parent chain access: the state-root ACL covers only the named builder uid by contract; the probe result is interpreted against that access, and the daemon journal's dev_prep_cleanup diagnostic is the primary absence proof"
 } > "$EVIDENCE_DIR/p21e3-devprep-terminal-probe.log" 2>&1
 cat "$EVIDENCE_DIR/p21e3-devprep-terminal-probe.log"
+# Runtime-tree absence is separate from the prepared /dev tree.
+if [[ "$OP" =~ ^op_[a-f0-9]{32}$ ]]; then
+  python3 - "$OP" > "$EVIDENCE_DIR/p21e3-runc-runtime-terminal.log" <<'PYEOF'
+import errno
+import os
+import sys
+
+op = sys.argv[1]
+parent = "/run/docker-helper-builder/ops"
+try:
+    fd = os.open(parent, os.O_PATH | os.O_DIRECTORY)
+except OSError as exc:
+    print(f"probe=gap parent={parent} errno={exc.errno}")
+    raise SystemExit(0)
+try:
+    os.stat(op, dir_fd=fd, follow_symlinks=False)
+except OSError as exc:
+    status = "absent" if exc.errno == errno.ENOENT else "gap"
+    print(f"probe={status} path={parent}/{op} errno={exc.errno}")
+else:
+    print(f"probe=present path={parent}/{op}")
+finally:
+    os.close(fd)
+PYEOF
+  cat "$EVIDENCE_DIR/p21e3-runc-runtime-terminal.log"
+fi
 {
   echo "== wrapper vs runtime observations (by /proc/<pid>/exe) =="
   grep -oE 'exe=[^ ]+' "$EVIDENCE_DIR/p21e3-sampler.log" 2>/dev/null | sort | uniq -c || true
