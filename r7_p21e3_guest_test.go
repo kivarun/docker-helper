@@ -655,7 +655,7 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		"PR_CAPBSET_DROP",
 		"capset(",
 		"distinct user namespaces seen",
-		"comm transitions (exec ladder)",
+		"comm transitions (exec ladder; only pids that were ever in the runc chain)",
 		"workload-exec OBSERVED",
 		"OCI config capabilities (from the live spec capture)",
 	} {

@@ -3832,22 +3832,26 @@ inventory = EV / "p21e3-proc-inventory.jsonl"
 print("== MNB24 bounding-set evidence ==")
 prctl_rows, capset_rows = [], []
 if strace.exists():
-    capset_re = re.compile(r"^\[pid +(\d+)\] +\S* *capset\(")
+    # strace paints two shapes here: "[pid N] TS call" for -f forks in the
+    # attach window and "N TS call" for the interleaved per-tid lines; the
+    # PR_CAPBSET_DROP argument is a symbolic CAP_* name or a numeric bit.
+    line_re = re.compile(r"^(?:\[pid +(\d+)\]|(\d+)) +([0-9:.]+) +prctl\(PR_CAPBSET_DROP, +(CAP_[A-Z0-9_]+|[0-9xXa-fA-F]+)\)\s*(?:\)\s*)?= +(-?\d+)(.*)$")
+    capset_re = re.compile(r"^(?:\[pid +(\d+)\]|(\d+)) +([0-9:.]+) +capset\(")
     for line in strace.read_text(errors="replace").splitlines():
         if "PR_CAPBSET_DROP" in line:
-            m = re.match(
-                r"\[pid +(\d+)\] +\S* *prctl\(PR_CAPBSET_DROP, +([0-9A-Fa-fx]+|[A-Z_]+)\)[ \)]* = +(-?\d+)[ \w(),]*",
-                line)
+            m = line_re.match(line)
             if m:
-                prctl_rows.append((int(m.group(1)), m.group(2), int(m.group(3)),
+                pid = int(m.group(1) or m.group(2))
+                prctl_rows.append((pid, m.group(4), int(m.group(5)),
                                    "EPERM" if "EPERM" in line else ""))
             else:
                 prctl_rows.append((None, None, None, "UNPARSED " + line.strip()[:200]))
         elif "capset(" in line:
             m = capset_re.match(line)
-            pid = int(m.group(1)) if m else None
+            pid = int(m.group(1) or m.group(2)) if m else None
             rc = re.search(r"= +(-?\d+)", line)
-            capset_rows.append((pid, int(rc.group(1)) if rc else None))
+            capset_rows.append((pid, int(rc.group(1)) if rc else None,
+                                line.strip()[:160]))
 else:
     print("strace log absent (NOT evidence of absence)")
 
@@ -3861,8 +3865,8 @@ else:
     print("no PR_CAPBSET_DROP rows captured")
 if capset_rows:
     print(f"capset rows: {len(capset_rows)} rc=0 {sum(1 for r in capset_rows if r[1] == 0)}")
-    for r in capset_rows[-20:]:
-        print(f"  capset pid={r[0]} rc={r[1]}")
+    for r in capset_rows[-12:]:
+        print(f"  capset pid={r[0]} rc={r[1]} {r[2]}")
 else:
     print("no capset rows captured")
 
@@ -3894,8 +3898,13 @@ else:
     for u in userns[:8]:
         pids_x = sorted(dict.fromkeys(r["pid"] for r in rows if r.get("nsuser") == u))
         print(f"  ns_user={u} pids(first14)={','.join(pids_x[:14])}")
-    print("== comm transitions (exec ladder) ==")
-    transitions = [r for r in rows if r.get("comm") and not r.get("comm", "").startswith("runc:")]
+    print("== comm transitions (exec ladder; only pids that were ever in the runc chain) ==")
+    ever_runc = {int(r["pid"]) for r in rows if r.get("comm", "").startswith("runc:")}
+    transitions = [
+        r for r in rows
+        if int(r["pid"]) in ever_runc and r.get("event") == "comm-change"
+        and not r.get("comm", "").startswith("runc:")
+    ]
     for r in transitions[-20:]:
         print(f"  pid={r['pid']} comm={r.get('comm')} exe={r.get('exe','-')} ctx={r.get('ctx','-')}"
               f" eff={r.get('capeff','-')} bnd={r.get('capbnd','-')} amb={r.get('capamb','-')}")
@@ -3916,16 +3925,36 @@ if inventory.exists():
             spec_caps = d["caps"]
 if spec_caps:
     print("== OCI config capabilities (from the live spec capture) ==")
+    cap_names = (
+        "CHOWN", "DAC_OVERRIDE", "DAC_READ_SEARCH", "FOWNER", "FSETID",
+        "KILL", "SETGID", "SETUID", "SETPCAP", "LINUX_IMMUTABLE",
+        "NET_BIND_SERVICE", "NET_BROADCAST", "NET_ADMIN", "NET_RAW",
+        "IPC_LOCK", "IPC_OWNER", "SYS_MODULE", "SYS_RAWIO", "SYS_CHROOT",
+        "SYS_PTRACE", "SYS_PACCT", "SYS_ADMIN", "SYS_BOOT", "SYS_NICE",
+        "SYS_RESOURCE", "SYS_TIME", "SYS_TTY_CONFIG", "MKNOD", "LEASE",
+        "AUDIT_WRITE", "AUDIT_CONTROL", "SETFCAP", "MAC_OVERRIDE",
+        "MAC_ADMIN", "SYSLOG", "WAKE_ALARM", "BLOCK_SUSPEND", "AUDIT_READ",
+        "PERFMON", "BPF", "CHECKPOINT_RESTORE",
+    )
+    cap_bits = {"CAP_%s" % name: bit for bit, name in enumerate(cap_names)}
     for k in ("inheritable", "permitted", "effective", "bounding", "ambient"):
         v = spec_caps.get(k)
         if not isinstance(v, list):
             print(f"  {k}: <unresolved>")
             continue
         mask = 0
-        for cv in v:
-            if isinstance(cv, int) and 0 <= cv < 64:
-                mask |= 1 << cv
-        print(f"  {k}: 0x{mask:016x} ({len(v)} caps)")
+        unresolved = []
+        for entry in v:
+            if isinstance(entry, int) and not isinstance(entry, bool) and 0 <= entry < 64:
+                mask |= 1 << entry
+            elif isinstance(entry, str) and entry in cap_bits:
+                mask |= 1 << cap_bits[entry]
+            elif isinstance(entry, str):
+                unresolved.append(entry)
+        suffix = f" unresolved={unresolved}" if unresolved else ""
+        print(f"  {k}: 0x{mask:016x} ({len(v)} caps){suffix}")
+        if k == "bounding" and unresolved:
+            print(f"  bounding-names: {sorted(v)}")
 else:
     print("OCI capability block not captured")
 PYEOF

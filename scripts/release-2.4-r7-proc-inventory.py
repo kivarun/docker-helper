@@ -47,17 +47,22 @@ def read_spec(config, state):
             for entries in paths.values()
         ):
             return None
-        # R7 MNB24: the OCI capability block for the bounding-set cross-reference.
-        caps = spec.get("process", {}).get("capabilities", {}) if isinstance(
-            spec.get("process", {}), dict
+        # R7 MNB24: the OCI capability block for the bounding-set cross-
+        # reference. OCI config.json carries BOOLEAN-capability NAME lists
+        # (strings); the numeric mask conversion stays in the analysis.
+        caps_block = spec.get("process", {}) if isinstance(
+            spec.get("process"), dict
+        ) else {}
+        caps = caps_block.get("capabilities", {}) if isinstance(
+            caps_block.get("capabilities"), dict
         ) else {}
         cap_rows = {}
-        if isinstance(caps, dict):
-            for key, entries in caps.items():
-                if isinstance(entries, list) and len(entries) <= 64 and all(
-                    isinstance(entry, int) for entry in entries
-                ):
-                    cap_rows[key] = entries
+        for key, entries in caps.items():
+            if isinstance(entries, list) and not isinstance(entries, bool) and len(entries) <= 64 and all(
+                isinstance(entry, (str, int)) and entry is not True and entry is not False
+                for entry in entries
+            ):
+                cap_rows[key] = entries
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
     return {
