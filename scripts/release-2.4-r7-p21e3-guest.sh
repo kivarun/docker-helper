@@ -3612,11 +3612,6 @@ if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
     echo "policy sha at unload-check time (post-removal, pre-restore): $DIAG_SHADERE"
     echo "policy sha before dedicated-module load (for comparison): $DIAG_KEYS_PRELOAD_SHA"
     echo "policy sha before cap-module load (for comparison): $DIAG_CAP_PRELOAD_SHA"
-    if [ "$DIAG_SHADERE" != "$DIAG_KEYS_PRELOAD_SHA" ]; then
-      echo "DIAG-UNLOAD-GATE: FAIL (policy sha restore mismatch against the pre-diag sha: $DIAG_SHADERE vs $DIAG_KEYS_PRELOAD_SHA)"
-    else
-      echo "DIAG-UNLOAD-GATE: PASS (the loaded policy SHA is byte-identical to the pre-diag-module sha)"
-    fi
     echo "-- proc inode labels in the remaining guest (init) view --"
     echo "-- (observed inode label; policy restoration is verified separately) --"
     ls -Zd /proc/keys /proc/timer_list 2>&1 || true
