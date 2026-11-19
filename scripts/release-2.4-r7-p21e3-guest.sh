@@ -2735,6 +2735,118 @@ EOF
   else
     log "fresh-procfs probe: at least one dedicated label is unconfirmed (orientation)"
   fi
+
+  # --- R7 MNB23: the runc-state kernel-decision matrix (the candidate's
+  # --- own production grants; the loaded policy bytes decide) ---
+  # security_compute_av_raw over the categorized contexts for the
+  # dedicated type created by the candidate's own type_transition: the
+  # same-category pairs must resolve ALLOW for the file cycle's
+  # constrained perms and DENY for both cross-category directions (the
+  # state-tree matrix precedent), the runtime-tree dir hooks keep their
+  # proven cross-category closure, and every row must be a DECIDED
+  # kernel evaluation with no permissive-domain exception. A mismatch
+  # is the BLOCKED shape, never a report note.
+  if ! command -v gcc >/dev/null 2>&1 || [ ! -e /usr/include/selinux/selinux.h ]; then
+    timeout 300 zypper --non-interactive install -y gcc libselinux-devel >/dev/null 2>&1 || true
+  fi
+  command -v gcc >/dev/null 2>&1 || fail "gcc unavailable; the kernel-decision matrix cannot run"
+  [ -e /usr/include/selinux/selinux.h ] || fail "libselinux headers unavailable; the kernel-decision matrix cannot run"
+  KC_LOG="$EVIDENCE_DIR/p21e3-runcstate-av-matrix.log"
+  cat > "$EVIDENCE_DIR/p21e3_runcstate_avdec.c" <<'CEOF'
+/* R7 MNB23: security_compute_av_raw over the categorized contexts for
+ * the dedicated runc-state type (the candidate's own production grants).
+ * Columns: scon tcon class perm allowed decided auditallow auditdeny
+ * permissive expect; expect=allow|deny is checked by the shell verdict;
+ * expect=report rows are recorded, never asserted. */
+#include <selinux/selinux.h>
+#include <stdio.h>
+#include <string.h>
+
+static const char *S_C1 = "system_u:system_r:docker_helper_buildkitd_t:s0:c1";
+static const char *S_C2 = "system_u:system_r:docker_helper_buildkitd_t:s0:c2";
+static const char *T_STATE_C1 = "system_u:object_r:docker_helper_builder_runc_state_t:s0:c1";
+static const char *T_STATE_C2 = "system_u:object_r:docker_helper_builder_runc_state_t:s0:c2";
+static const char *T_RUNTIME_C1 = "system_u:object_r:docker_helper_builder_runtime_t:s0:c1";
+static const char *T_RUNTIME_C2 = "system_u:object_r:docker_helper_builder_runtime_t:s0:c2";
+
+static struct { const char *scon, *tcon, *cls, *perm, *expect; } ROWS[256];
+static size_t NROWS;
+static void add(const char *s, const char *t, const char *c, const char *p, const char *e) {
+  ROWS[NROWS].scon = s; ROWS[NROWS].tcon = t; ROWS[NROWS].cls = c;
+  ROWS[NROWS].perm = p; ROWS[NROWS].expect = e; NROWS++;
+}
+
+int main(void) {
+  /* the file cycle on the dedicated type: same-category ALLOW (the
+   * candidate's own MNB23 grant), both cross directions DENY for the
+   * constrained set (the state-tree matrix precedent: create/open/
+   * read/write/rename/unlink); getattr carries expect=report — its
+   * constraint membership is recorded separately through
+   * seinfo --constrain file. */
+  static const char *perms[] = { "create", "open", "read", "write", "rename", "unlink" };
+  for (size_t i = 0; i < 6; i++) {
+    add(S_C1, T_STATE_C1, "file", perms[i], "allow");
+    add(S_C2, T_STATE_C2, "file", perms[i], "allow");
+    add(S_C1, T_STATE_C2, "file", perms[i], "deny");
+    add(S_C2, T_STATE_C1, "file", perms[i], "deny");
+  }
+  add(S_C1, T_STATE_C1, "file", "getattr", "report");
+  add(S_C1, T_STATE_C2, "file", "getattr", "report");
+  /* the parent runtime-tree dir hooks keep the proven cross closure */
+  static const char *dperms[] = { "search", "write", "add_name", "remove_name" };
+  for (size_t i = 0; i < 4; i++) {
+    add(S_C1, T_RUNTIME_C2, "dir", dperms[i], "deny");
+    add(S_C2, T_RUNTIME_C1, "dir", dperms[i], "deny");
+  }
+  for (size_t i = 0; i < NROWS; i++) {
+    struct { const char *scon, *tcon, *cls, *perm, *expect; } *r = &ROWS[i];
+    security_class_t cls = string_to_security_class(r->cls);
+    if (!cls) { printf("ERR\tclass %s unknown\n", r->cls); continue; }
+    access_vector_t bit = string_to_av_perm(cls, r->perm);
+    if (!bit) { printf("ERR\tperm %s %s unknown\n", r->cls, r->perm); continue; }
+    struct av_decision avd;
+    memset(&avd, 0, sizeof(avd));
+    if (security_compute_av_raw(r->scon, r->tcon, cls, bit, &avd) < 0) {
+      printf("ERR\tcompute_av failed\n");
+      continue;
+    }
+    printf("%s\t%s\t%s\t%s\t%u\t%u\t%u\t%u\t%u\t%s\n",
+           r->scon, r->tcon, r->cls, r->perm,
+           (avd.allowed & bit) ? 1 : 0,
+           (avd.decided & bit) ? 1 : 0,
+           (avd.auditallow & bit) ? 1 : 0,
+           (avd.auditdeny & bit) ? 1 : 0,
+           (avd.flags & SELINUX_AVD_FLAGS_PERMISSIVE) ? 1 : 0,
+           r->expect);
+  }
+  return 0;
+}
+CEOF
+  {
+    echo "== MNB23 runc-state kernel-decision matrix (loaded policy = candidate + temp diag rows) =="
+    echo "policy sha: $(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
+    echo "-- file mlsconstrain sets (constraint provenance for the expectations) --"
+    seinfo --constrain file 2>&1 | head -30 || true
+  } > "$KC_LOG" 2>&1
+  gcc -O2 -o "$EVIDENCE_DIR/p21e3_runcstate_avdec" "$EVIDENCE_DIR/p21e3_runcstate_avdec.c" -lselinux \
+    >> "$KC_LOG" 2>&1 || { cat "$KC_LOG"; fail "the MNB23 kernel-decision helper build failed; BLOCKED"; }
+  "$EVIDENCE_DIR/p21e3_runcstate_avdec" >> "$KC_LOG" 2>&1 || true
+  BADS="$(awk -F'\t' 'NF>=10 && $10!="" {
+    if ($1=="ERR") { print "ERRROW " $0; next }
+    if ($5 != 1) { print "UNDECIDED " $0 }
+    if ($9 != 0) { print "PERMISSIVE " $0 }
+    if ($10=="allow" && $5==1) { next }
+    if ($10=="allow" && $5!=1) { print "MISMATCH-ALLOW " $0 }
+    if ($10=="deny" && $5!=0) { print "MISMATCH-DENY " $0 }
+  }' "$KC_LOG")"
+  if [ -n "$BADS" ]; then
+    printf '%s\n' "$BADS" >> "$KC_LOG"
+    cat "$KC_LOG"
+    fail "the MNB23 kernel-decision matrix reached an unexpected resolution; BLOCKED (privacy/correctness invariant refusal)"
+  fi
+  echo "R7-P21E3-RUNCSTATE-MATRIX=PASS" >> "$KC_LOG"
+  cat "$KC_LOG"
+  log "MNB23 kernel-decision matrix: PASS (same-category cycle allow; cross-category deny; all rows decided, no permissive)"
 fi
 fi  # end of the diag-module-load probe guard (probe mode loaded nothing)
 

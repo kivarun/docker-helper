@@ -51,6 +51,14 @@ func builderProvisionedPaths(opID, rtDir, stDir string) []builderProvisionedPath
 		// relabel matrix is not recursive, so the directory needs its
 		// own explicit entry.
 		{rel: "runtime/buildkit", path: filepath.Join(rtDir, "buildkit"), objectType: builderRuntimeObjectType},
+		// R7 MNB23: runc's state root (--root, the saveState/loadState
+		// plane). Pre-created and provisioned with the exact categorized
+		// context like every other required per-op path; its ordinary
+		// files receive the dedicated runc-state type at creation from
+		// the policy's type_transition, and the plain read-back here
+		// proves the full op label (type + the operation's category)
+		// before any launch step.
+		{rel: "runtime/runc", path: filepath.Join(rtDir, "runc"), objectType: builderRuntimeObjectType},
 	}
 }
 

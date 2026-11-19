@@ -617,6 +617,15 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		"fresh procfs instance label probe (private mnt namespace)",
 		"both dedicated labels are live",
 		"R4-P3-P6-MNB22 dedicated-type unload corroboration",
+		// R7 MNB23: the runtime-state plane. The guest carries the
+		// kernel-decision matrix over the candidate's own dedicated
+		// runc-state type (same-category cycle allow, cross-category
+		// deny, every row decided, no permissive exception).
+		"R7 MNB23: the runc-state kernel-decision matrix",
+		"p21e3-runcstate-av-matrix.log",
+		"p21e3_runcstate_avdec",
+		"R7-P21E3-RUNCSTATE-MATRIX=PASS",
+		"docker_helper_builder_runc_state_t",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("the p21e3 guest harness must carry the inspection diagnostic %q", want)

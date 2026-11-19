@@ -494,7 +494,7 @@ func (m *builderManager) launchInstance(inst *builderInstance) bool {
 		m.removeReservation(inst)
 		return false
 	}
-	for _, dir := range []string{rtDir, filepath.Join(rtDir, "buildkit"), filepath.Join(stDir, "rootlesskit-state"), filepath.Join(stDir, "root")} {
+	for _, dir := range []string{rtDir, filepath.Join(rtDir, "buildkit"), filepath.Join(rtDir, "runc"), filepath.Join(stDir, "rootlesskit-state"), filepath.Join(stDir, "root")} {
 		if err := builderMkdirAll(dir, 0700); err != nil {
 			m.managerDiagf("START %s: cannot create instance dirs: %v", opID, err)
 			// A mkdir failure after the first created path may leave OWNED
