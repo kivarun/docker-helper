@@ -2769,7 +2769,7 @@ static const char *T_STATE_C2 = "system_u:object_r:docker_helper_builder_runc_st
 static const char *T_RUNTIME_C1 = "system_u:object_r:docker_helper_builder_runtime_t:s0:c1";
 static const char *T_RUNTIME_C2 = "system_u:object_r:docker_helper_builder_runtime_t:s0:c2";
 
-static struct { const char *scon, *tcon, *cls, *perm, *expect; } ROWS[256];
+static struct q { const char *scon, *tcon, *cls, *perm, *expect; } ROWS[256];
 static size_t NROWS;
 static void add(const char *s, const char *t, const char *c, const char *p, const char *e) {
   ROWS[NROWS].scon = s; ROWS[NROWS].tcon = t; ROWS[NROWS].cls = c;
@@ -2799,7 +2799,7 @@ int main(void) {
     add(S_C2, T_RUNTIME_C1, "dir", dperms[i], "deny");
   }
   for (size_t i = 0; i < NROWS; i++) {
-    struct { const char *scon, *tcon, *cls, *perm, *expect; } *r = &ROWS[i];
+    struct q *r = &ROWS[i];
     security_class_t cls = string_to_security_class(r->cls);
     if (!cls) { printf("ERR\tclass %s unknown\n", r->cls); continue; }
     access_vector_t bit = string_to_av_perm(cls, r->perm);
