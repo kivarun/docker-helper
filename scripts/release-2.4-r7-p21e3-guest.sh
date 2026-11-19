@@ -3818,12 +3818,13 @@ fi
 # the captured surfaces (strace prctl/capset lines joined with the capwatch
 # userns rows and the inventory's OCI capability block); no live reads.
 if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
-  python3 - > "$EVIDENCE_DIR/p21e3-capbset-evidence.log" <<'PYEOF'
+  python3 - "$EVIDENCE_DIR" > "$EVIDENCE_DIR/p21e3-capbset-evidence.log" <<'PYEOF'
 import json
 import re
+import sys
 from pathlib import Path
 
-EV = Path("/tmp/r7-p21e3-evidence")
+EV = Path(sys.argv[1])
 strace = EV / "p21e3-strace.log"
 capwatch = EV / "p21e3-capwatch.log"
 inventory = EV / "p21e3-proc-inventory.jsonl"
