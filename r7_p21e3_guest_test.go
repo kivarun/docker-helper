@@ -626,6 +626,38 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		"p21e3_runcstate_avdec",
 		"R7-P21E3-RUNCSTATE-MATRIX=PASS",
 		"docker_helper_builder_runc_state_t",
+		// R7 MNB24: the single-rule capability diagnostic module with the
+		// fail-closed two-class baseline absence, the exact one-token delta
+		// at load, the prctl/capset strace coverage, the userns survival
+		// watch, and the bounding-set evidence extraction.
+		"docker_helper_diag_cap",
+		"DIAG_MODULES=\"$DIAG_MODULES docker_helper_diag_cap\"",
+		"docker_helper_diag_cap.cil",
+		"DIAG_CAP_LOG=\"$EVIDENCE_DIR/p21e3-diag-cap.log\"",
+		"p21e3-diag-cap.log",
+		"DIAG-CAP-GATE",
+		"DIAG-CAP-BASE",
+		"(allow docker_helper_buildkitd_t self (cap_userns (setpcap)))",
+		`sesearch -A -ds -dt -s docker_helper_buildkitd_t \
+      -t docker_helper_buildkitd_t -c "$DIAG_CAP_CLASS" -p setpcap`,
+		"baseline sesearch (fail-closed: setpcap must be absent for buildkitd self in BOTH setpcap-bearing classes)",
+		"the load delta is exactly {setpcap} on self cap_userns",
+		"the capability class is unchanged: still no rules",
+		"module store: docker_helper_diag_cap absent => OK",
+		"setpcap absence restored",
+		"policy sha before cap-module load",
+		",prctl,capset \\",
+		"p21e3_capwatch",
+		"p21e3-capwatch.log",
+		"CAPWATCH-START",
+		"capinh=", "capprm=", "capeff=", "capbnd=", "capamb=",
+		"p21e3-capbset-evidence.log",
+		"PR_CAPBSET_DROP",
+		"capset(",
+		"distinct user namespaces seen",
+		"comm transitions (exec ladder)",
+		"workload-exec OBSERVED",
+		"OCI config capabilities (from the live spec capture)",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("the p21e3 guest harness must carry the inspection diagnostic %q", want)

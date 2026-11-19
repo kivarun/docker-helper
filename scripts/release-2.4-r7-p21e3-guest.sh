@@ -1278,6 +1278,171 @@ gcc -O2 -Wall -o "$EVIDENCE_DIR/p21e3_proc_sampler" "$EVIDENCE_DIR/p21e3_proc_sa
   || fail "sampler compile failed"
 log "sampler compiled"
 
+# R7 MNB24: the user-namespace/capability-survival watch. Every ~3ms walks
+# /proc; for each process whose user namespace differs from the host
+# observer's (or whose comm names the runc helper chain) records the first
+# arrival and every comm change (runc:[1:CHILD] -> runc:[2:INIT] -> the
+# workload on exec) with: pid, ppid, comm, exe, ns/user and ns/mnt inodes
+# (the userns binding), /proc/<pid>/attr/current, and the capability state
+# from /proc/<pid>/status (CapInh/CapPrm/CapEff/CapBnd/CapAmb, NoNewPrivs).
+# Runs on the SAME stop file as the sampler; output is bounded.
+cat > "$EVIDENCE_DIR/p21e3_capwatch.c" <<'CEOF'
+/* p21e3_capwatch.c - R7 MNB24 userns/capability watch (pure observer). */
+#define _GNU_SOURCE
+#include <dirent.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <time.h>
+#include <unistd.h>
+#include <limits.h>
+
+#define MAXROWS 20000
+
+static long long now_ms(void) {
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec*1000LL + ts.tv_nsec/1000000;
+}
+static void wallstamp(char *b, size_t n) {
+    struct timespec ts; struct tm tm;
+    clock_gettime(CLOCK_REALTIME, &ts); gmtime_r(&ts.tv_sec, &tm);
+    snprintf(b, n, "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+             tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday,
+             tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec/1000000);
+}
+static void readlinkstr(const char *p, char *out, size_t n) {
+    ssize_t r = readlink(p, out, n - 1);
+    if (r < 0) { out[0] = '\0'; return; }
+    out[r] = '\0';
+}
+static pid_t selfpid;
+static char host_userns[256];
+
+static int targeted(int pid, const char *comm) {
+    char p[64], ns[256];
+    snprintf(p, sizeof p, "/proc/%d/ns/user", pid);
+    readlinkstr(p, ns, sizeof ns);
+    if (host_userns[0] != '\0' && ns[0] != '\0' && strcmp(ns, host_userns) != 0)
+        return 1;
+    return strncmp(comm, "runc:", 5) == 0;
+}
+static void emit(FILE *lg, const char *event, int pid, int ppid,
+                 const char *comm, const char *exe) {
+    char ts[64]; wallstamp(ts, sizeof ts);
+    char nsuser[256], nsmnt[256], p[64], ctx[512] = "<unresolvable>";
+    char capinh[128] = "-", capprm[128] = "-", capeff[128] = "-",
+         capbnd[128] = "-", capamb[128] = "-", nnp[32] = "-";
+    (void)event; (void)ppid;
+    snprintf(p, sizeof p, "/proc/%d/ns/user", pid);
+    readlinkstr(p, nsuser, sizeof nsuser);
+    snprintf(p, sizeof p, "/proc/%d/ns/mnt", pid);
+    readlinkstr(p, nsmnt, sizeof nsmnt);
+    snprintf(p, sizeof p, "/proc/%d/attr/current", pid);
+    FILE *f = fopen(p, "r");
+    if (f) {
+        size_t r = fread(ctx, 1, sizeof ctx - 1, f);
+        if (r == 0) snprintf(ctx, sizeof ctx, "<empty>");
+        else { if (ctx[r-1] == '\n') r--; ctx[r] = '\0'; }
+        fclose(f);
+    } else snprintf(ctx, sizeof ctx, "<rc=%d>", errno);
+    snprintf(p, sizeof p, "/proc/%d/status", pid);
+    f = fopen(p, "r");
+    if (f) {
+        char lb[512];
+        while (fgets(lb, sizeof lb, f)) {
+            char *v = strchr(lb, ':');
+            if (!v) continue;
+            *v = '\0'; v++;
+            while (*v == ' ' || *v == '\t') v++;
+            lb[strcspn(lb, "\n")] = 0;
+            if (!strcmp(lb, "CapInh")) snprintf(capinh, sizeof capinh, "%s", v);
+            else if (!strcmp(lb, "CapPrm")) snprintf(capprm, sizeof capprm, "%s", v);
+            else if (!strcmp(lb, "CapEff")) snprintf(capeff, sizeof capeff, "%s", v);
+            else if (!strcmp(lb, "CapBnd")) snprintf(capbnd, sizeof capbnd, "%s", v);
+            else if (!strcmp(lb, "CapAmb")) snprintf(capamb, sizeof capamb, "%s", v);
+            else if (!strcmp(lb, "NoNewPrivs")) snprintf(nnp, sizeof nnp, "%s", v);
+        }
+        fclose(f);
+    }
+    fprintf(lg, "CAPWATCH %s t=%lld pid=%d ppid=%d comm=%s exe=%s nsuser=%s nsmnt=%s ctx=%s capinh=%s capprm=%s capeff=%s capbnd=%s capamb=%s nnp=%s\n",
+            ts, now_ms(), pid, ppid, comm, exe[0] ? exe : "-", nsuser, nsmnt,
+            ctx, capinh, capprm, capeff, capbnd, capamb, nnp);
+    fflush(lg);
+}
+int main(int argc, char **argv) {
+    if (argc != 3) { fprintf(stderr, "usage: capwatch LOG STOPFILE\n"); return 2; }
+    FILE *lg = fopen(argv[1], "w");
+    if (!lg) return 1;
+    selfpid = getpid();
+    readlinkstr("/proc/self/ns/user", host_userns, sizeof host_userns);
+    {
+        char ts[64]; wallstamp(ts, sizeof ts);
+        fprintf(lg, "CAPWATCH-START %s host_userns=%s\n", ts, host_userns);
+        fflush(lg);
+    }
+    struct { pid_t pid; char comm[64]; } seen[MAXROWS];
+    size_t nseen = 0;
+    long long rows = 0;
+    while (1) {
+        int stop = 0;
+        FILE *sf = fopen(argv[2], "r");
+        if (sf) { fclose(sf); stop = 1; }
+        if (stop) break;
+        DIR *d = opendir("/proc");
+        if (!d) { usleep(3000); continue; }
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+            long pid = strtol(e->d_name, NULL, 10);
+            if (pid <= 0 || (pid_t)pid == selfpid) continue;
+            char p[64], comm[64] = "", exe[PATH_MAX] = "";
+            snprintf(p, sizeof p, "/proc/%s/comm", e->d_name);
+            FILE *f = fopen(p, "r");
+            if (!f) continue;
+            if (!fgets(comm, sizeof comm, f)) { fclose(f); continue; }
+            fclose(f);
+            comm[strcspn(comm, "\n")] = 0;
+            if (!targeted((int)pid, comm)) continue;
+            snprintf(p, sizeof p, "/proc/%s/exe", e->d_name);
+            readlinkstr(p, exe, sizeof exe);
+            size_t i;
+            for (i = 0; i < nseen; i++)
+                if (seen[i].pid == (pid_t)pid) break;
+            if (i == nseen) {
+                if (nseen < MAXROWS) {
+                    seen[nseen].pid = (pid_t)pid;
+                    snprintf(seen[nseen].comm, sizeof seen[nseen].comm, "%s", comm);
+                    nseen++;
+                }
+                if (++rows > MAXROWS) goto done;
+                emit(lg, "arrival", (int)pid, 0, comm, exe);
+            } else if (strcmp(seen[i].comm, comm) != 0) {
+                snprintf(seen[i].comm, sizeof seen[i].comm, "%s", comm);
+                if (++rows > MAXROWS) goto done;
+                emit(lg, "comm-change", (int)pid, 0, comm, exe);
+            }
+        }
+        closedir(d);
+        struct timespec slp = {0, 3 * 1000 * 1000};
+        nanosleep(&slp, NULL);
+    }
+done:
+    {
+        char ts[64]; wallstamp(ts, sizeof ts);
+        fprintf(lg, "CAPWATCH-DONE %s t=%lld rows=%lld pidervals-tracked=%zu\n",
+                ts, now_ms(), rows, nseen);
+    }
+    fclose(lg);
+    return 0;
+}
+CEOF
+gcc -O2 -Wall -o "$EVIDENCE_DIR/p21e3_capwatch" "$EVIDENCE_DIR/p21e3_capwatch.c" \
+  || fail "capwatch compile failed"
+log "capwatch compiled"
+
 # The process-mountinfo snapshotter (R4-P3-P6-MNB diagnostic rung): for
 # every NEW buildkitd or runc container-init pid, ONE read-only snapshot
 # of its mountinfo (mount ids, major:minor, root, propagation tags),
@@ -1891,6 +2056,11 @@ measure_abandon() {
     wait "$PROC_INVENTORY_PID" 2>/dev/null || true
     PROC_INVENTORY_PID=""
   fi
+  if [ -n "${CAPWATCH_PID:-}" ]; then
+    touch "$STOPSAMP" 2>/dev/null || true
+    wait "$CAPWATCH_PID" 2>/dev/null || true
+    CAPWATCH_PID=""
+  fi
   if [ -n "${WATCHER_PID:-}" ]; then
     touch "${WATCHER_STOP:-/nonexistent}" 2>/dev/null || true
     wait "$WATCHER_PID" 2>/dev/null || true
@@ -1925,6 +2095,7 @@ DIAG_REMOVED=0
 DIAG_MODULES="$DIAG_MODULE"
 if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
   DIAG_MODULES="$DIAG_MODULES docker_helper_diag_keys"
+  DIAG_MODULES="$DIAG_MODULES docker_helper_diag_cap"
 fi
 p21e3_diag_remove() {
   [ "${DIAG_ACTIVE:-0}" = 1 ] || return 0
@@ -2702,6 +2873,111 @@ EOF
   fi
   log "dedicated-type module loaded: docker_helper_diag_keys (/proc/keys getattr and mounton, /proc/timer_list getattr and mounton)"
 
+  # --- R7 MNB24: the one-rule capability diagnostic module ---
+  # The blocking denial at the MNB23b terminal was the runc INIT child's
+  # bounding-set application: setpcap denied on self cap_userns. The
+  # candidate grant is reviewed as EXACTLY one rule for the buildkitd
+  # domain; the module below carries that one line and nothing else, and
+  # the load gate proves the source absence (both setpcap-bearing classes),
+  # the exact one-token delta at load, and the SHA restoration at unload.
+  DIAG_CAP_LOG="$EVIDENCE_DIR/p21e3-diag-cap.log"
+  DIAG_CAP_CIL="$EVIDENCE_DIR/docker_helper_diag_cap.cil"
+  DIAG_CAP_PRELOAD_SHA="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
+  {
+    echo "== the single-rule capability diagnostic module: docker_helper_diag_cap (temporary) =="
+    echo "committed-policy delta: NONE (temporary module only; unload verified at the teardown)"
+    echo "release-policy .pp sha (must not change): $DIAG_RELEASE_PP_SHA_PRE"
+    echo "policy sha before cap-module load: $DIAG_CAP_PRELOAD_SHA"
+    echo "-- baseline sesearch (fail-closed: setpcap must be absent for buildkitd self in BOTH setpcap-bearing classes) --"
+  } > "$DIAG_CAP_LOG"
+  DIAG_CAP_ALL_ABSENT=1
+  for DIAG_CAP_CLASS in cap_userns capability; do
+    DIAG_CAP_Q="$(timeout 60 sesearch -A -ds -dt -s docker_helper_buildkitd_t \
+      -t docker_helper_buildkitd_t -c "$DIAG_CAP_CLASS" -p setpcap 2>&1)"
+    DIAG_CAP_RC=$?
+    DIAG_CAP_V="$(classify_sesearch_query "$DIAG_CAP_RC" "$DIAG_CAP_Q")"
+    printf 'class=%s query-rc=%s\nclassify=%s\n%s\n' "$DIAG_CAP_CLASS" "$DIAG_CAP_RC" "$DIAG_CAP_V" "$DIAG_CAP_Q" >> "$DIAG_CAP_LOG"
+    if [ "$DIAG_CAP_V" != 'trusted:perms=|cond-active=none|cond-inactive=none' ]; then
+      echo "DIAG-CAP-GATE: FAIL (baseline setpcap on self $DIAG_CAP_CLASS is not an authoritative absence: $DIAG_CAP_V)" >> "$DIAG_CAP_LOG"
+      DIAG_CAP_ALL_ABSENT=0
+    else
+      echo "DIAG-CAP-BASE: PASS (class=$DIAG_CAP_CLASS authoritative absence of setpcap from buildkitd self)" >> "$DIAG_CAP_LOG"
+    fi
+  done
+  {
+    echo "-- baseline buildkitd self cap_userns full perm set (the delta anchor) --"
+    echo "QUERY: $(echo 'sesearch -A -ds -dt -s docker_helper_buildkitd_t -t docker_helper_buildkitd_t -c cap_userns')"
+    DIAG_CAP_BASE_Q="$(timeout 60 sesearch -A -ds -dt -s docker_helper_buildkitd_t \
+      -t docker_helper_buildkitd_t -c cap_userns 2>&1)"
+    printf 'query-rc=%s\nclassify=%s\n%s\n' "$?" \
+      "$(classify_sesearch_query 0 "$DIAG_CAP_BASE_Q")" "$DIAG_CAP_BASE_Q"
+  } >> "$DIAG_CAP_LOG" 2>&1
+  DIAG_CAP_BASE_PERMS="$(classify_sesearch_query 0 "$DIAG_CAP_BASE_Q" | sed -n 's/^trusted:perms=\([^|]*\)|.*/\1/p')"
+  printf 'baseline-perms=%s\n' "${DIAG_CAP_BASE_PERMS:-<unresolvable>}" >> "$DIAG_CAP_LOG"
+  cat > "$DIAG_CAP_CIL" <<'EOF'
+(allow docker_helper_buildkitd_t self (cap_userns (setpcap)))
+EOF
+  {
+    echo "-- module source (exactly one rule line) --"
+    cat "$DIAG_CAP_CIL"
+    echo "-- install (temporary module only; semodule -i accepts CIL) --"
+    semodule -i "$DIAG_CAP_CIL"
+  } >> "$DIAG_CAP_LOG" 2>&1 || {
+    cat "$DIAG_CAP_LOG"
+    p21e3_diag_remove
+    p21e3_dontaudit_restore
+    fail "the single-rule capability diagnostic module could not be installed; BLOCKED"
+  }
+  {
+    echo "-- post-install delta (fail-closed: exactly the one reviewed token added to cap_userns; capability class must remain unchanged) --"
+    DIAG_CAP_POST_Q="$(timeout 60 sesearch -A -ds -dt -s docker_helper_buildkitd_t \
+      -t docker_helper_buildkitd_t -c cap_userns 2>&1)"
+    printf 'query-rc=%s\nclassify=%s\n%s\n' "$?" \
+      "$(classify_sesearch_query 0 "$DIAG_CAP_POST_Q")" "$DIAG_CAP_POST_Q"
+    DIAG_CAP_POST_PERMS="$(classify_sesearch_query 0 "$DIAG_CAP_POST_Q" | sed -n 's/^trusted:perms=\([^|]*\)|.*/\1/p')"
+    printf 'post-perms=%s\n' "${DIAG_CAP_POST_PERMS:-<unresolvable>}"
+    DIAG_CAP_CAPPOST_Q="$(timeout 60 sesearch -A -ds -dt -s docker_helper_buildkitd_t \
+      -t docker_helper_buildkitd_t -c capability 2>&1)"
+    printf 'capability-class query-rc=%s\nclassify=%s\n%s\n' "$?" \
+      "$(classify_sesearch_query 0 "$DIAG_CAP_CAPPOST_Q")" "$DIAG_CAP_CAPPOST_Q"
+    DIAG_CAP_CAPPOST_PERMS="$(classify_sesearch_query 0 "$DIAG_CAP_CAPPOST_Q" | sed -n 's/^trusted:perms=\([^|]*\)|.*/\1/p')"
+    printf 'capability-post-perms=%s\n' "${DIAG_CAP_CAPPOST_PERMS:-<unresolvable>}"
+    if [ -z "$DIAG_CAP_BASE_PERMS" ] || [ -z "$DIAG_CAP_POST_PERMS" ]; then
+      echo "DIAG-CAP-GATE: FAIL (the baseline or post perm set could not be resolved from the trusted classification)"
+    else
+      DIAG_CAP_WANT="$(printf '%s\n' "$DIAG_CAP_BASE_PERMS" setpcap | tr ' ' '\n' | sed '/^$/d' | sort | tr '\n' ' ' | sed 's/ $//')"
+      DIAG_CAP_GOT="$(printf '%s\n' "$DIAG_CAP_POST_PERMS" | tr ' ' '\n' | sed '/^$/d' | sort | tr '\n' ' ' | sed 's/ $//')"
+      if [ "$DIAG_CAP_GOT" = "$DIAG_CAP_WANT" ]; then
+        echo "DIAG-CAP-GATE: PASS (the load delta is exactly {setpcap} on self cap_userns: $DIAG_CAP_GOT)"
+      else
+        echo "DIAG-CAP-GATE: FAIL (post cap_userns set differs from baseline+setpcap: want=[$DIAG_CAP_WANT] got=[$DIAG_CAP_GOT])"
+      fi
+      if [ -n "$DIAG_CAP_CAPPOST_PERMS" ]; then
+        echo "DIAG-CAP-GATE: FAIL (the capability class carries rules after the load; expected none: $DIAG_CAP_CAPPOST_PERMS)"
+      else
+        echo "DIAG-CAP-GATE: PASS (the capability class is unchanged: still no rules)"
+      fi
+    fi
+    if semodule -l 2>/dev/null | grep -aq docker_helper_diag_cap; then
+      echo "module store: docker_helper_diag_cap registered"
+    else
+      echo "DIAG-CAP-GATE: FAIL (docker_helper_diag_cap is not registered despite the successful install)"
+    fi
+    DIAG_SHA_CAP="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
+    echo "policy sha with the cap module loaded: $DIAG_SHA_CAP (pre-load: $DIAG_CAP_PRELOAD_SHA; must differ)"
+    echo "release-policy .pp sha (post install; must be unchanged): $(sha256sum /usr/share/selinux/docker_helper.pp 2>/dev/null | awk '{print $1}')"
+  } >> "$DIAG_CAP_LOG" 2>&1
+  cat "$DIAG_CAP_LOG"
+  if [ "$DIAG_SHA_CAP" = "$DIAG_CAP_PRELOAD_SHA" ]; then
+    echo "DIAG-CAP-GATE: FAIL (policy sha unchanged after the install; the module load is unproven)" >> "$DIAG_CAP_LOG"
+  fi
+  if grep -aq '^DIAG-CAP-GATE: FAIL' "$DIAG_CAP_LOG" || [ "$DIAG_CAP_ALL_ABSENT" != 1 ]; then
+    p21e3_diag_remove
+    p21e3_dontaudit_restore
+    fail "the single-rule capability module load gate failed; BLOCKED"
+  fi
+  log "single-rule capability module loaded: docker_helper_diag_cap (buildkitd self cap_userns setpcap; delta {setpcap} verified)"
+
   # --- fresh-procfs orientation probe (private mount namespace) ---
   # genfscon decides the label at inode initialization, so a FRESH procfs
   # instance created after the policy load must show the dedicated type.
@@ -2926,6 +3202,11 @@ SAMPLER_PID=$!
 PNS_PID=""
 "$EVIDENCE_DIR/p21e3_procns_snap" "$EVIDENCE_DIR/p21e3-procns.log" "$STOPSAMP" &
 PNS_PID=$!
+# The MNB24 userns/capability watch rides the SAME stop file: it observes
+# the whole short-lived chain where PR_CAPBSET_DROP decisions are made.
+CAPWATCH_PID=""
+"$EVIDENCE_DIR/p21e3_capwatch" "$EVIDENCE_DIR/p21e3-capwatch.log" "$STOPSAMP" &
+CAPWATCH_PID=$!
 # HOST (initial mount namespace) snapshot: the /proc view, its labels and
 # the observer's lookups; the propagation tags stay in the raw lines.
 {
@@ -3046,7 +3327,7 @@ done
 if [ -n "$BKD_PID" ]; then
   log "attaching strace to buildkitd pid $BKD_PID (timeout ${STRACE_TIMEOUT}s)"
   timeout "$STRACE_TIMEOUT" strace -f -qq -tt -s 100 -y -yy -p "$BKD_PID" \
-    -e trace=execve,execveat,open,openat,openat2,read,newfstatat,fstat,statx,statfs,getxattr,lgetxattr,fgetxattr,rename,renameat,renameat2,mount,umount2,mkdir,mkdirat,symlink,symlinkat \
+    -e trace=execve,execveat,open,openat,openat2,read,newfstatat,fstat,statx,statfs,getxattr,lgetxattr,fgetxattr,rename,renameat,renameat2,mount,umount2,mkdir,mkdirat,symlink,symlinkat,prctl,capset \
     -o "$EVIDENCE_DIR/p21e3-strace.log" 2>"$EVIDENCE_DIR/p21e3-strace.err" &
   STRACE_PID=$!
   STRACE_ALL_PIDS="$STRACE_ALL_PIDS $STRACE_PID"
@@ -3143,6 +3424,10 @@ for s in $STRACE_ALL_PIDS; do
 done
 wait "$SAMPLER_PID" 2>/dev/null || true
 SAMPLER_PID=""
+if [ -n "${CAPWATCH_PID:-}" ]; then
+  wait "$CAPWATCH_PID" 2>/dev/null || true
+  CAPWATCH_PID=""
+fi
 if [ -n "${PNS_PID:-}" ]; then
   wait "$PNS_PID" 2>/dev/null || true
   PNS_PID=""
@@ -3303,6 +3588,22 @@ if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
     else
       echo "module store: docker_helper_diag_keys absent => OK"
     fi
+    # R7 MNB24: the single-rule capability module unload corroboration.
+    if semodule -l 2>/dev/null | grep -aq docker_helper_diag_cap; then
+      echo "DIAG-UNLOAD-GATE: FAIL (the cap module is still registered in the store)"
+    else
+      echo "module store: docker_helper_diag_cap absent => OK"
+    fi
+    for DIAG_CAP_CLASS in cap_userns capability; do
+      DIAG_CAP_UQ="$(timeout 60 sesearch -A -ds -dt -s docker_helper_buildkitd_t \
+        -t docker_helper_buildkitd_t -c "$DIAG_CAP_CLASS" -p setpcap 2>&1)"
+      DIAG_CAP_UV="$(classify_sesearch_query "$?" "$DIAG_CAP_UQ")"
+      if [ "$DIAG_CAP_UV" != 'trusted:perms=|cond-active=none|cond-inactive=none' ]; then
+        echo "DIAG-UNLOAD-GATE: FAIL (setpcap on self $DIAG_CAP_CLASS is still present: $DIAG_CAP_UV)"
+      else
+        echo "DIAG-UNLOAD-GATE: PASS (class=$DIAG_CAP_CLASS setpcap absence restored)"
+      fi
+    done
     echo "-- dedicated types and genfscon absence --"
     if ! p21e3_diag_proc_types_absent; then
       echo "DIAG-UNLOAD-GATE: FAIL (dedicated-type and genfscon absence could not be verified)"
@@ -3310,6 +3611,12 @@ if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
     DIAG_SHADERE="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
     echo "policy sha at unload-check time (post-removal, pre-restore): $DIAG_SHADERE"
     echo "policy sha before dedicated-module load (for comparison): $DIAG_KEYS_PRELOAD_SHA"
+    echo "policy sha before cap-module load (for comparison): $DIAG_CAP_PRELOAD_SHA"
+    if [ "$DIAG_SHADERE" != "$DIAG_KEYS_PRELOAD_SHA" ]; then
+      echo "DIAG-UNLOAD-GATE: FAIL (policy sha restore mismatch against the pre-diag sha: $DIAG_SHADERE vs $DIAG_KEYS_PRELOAD_SHA)"
+    else
+      echo "DIAG-UNLOAD-GATE: PASS (the loaded policy SHA is byte-identical to the pre-diag-module sha)"
+    fi
     echo "-- proc inode labels in the remaining guest (init) view --"
     echo "-- (observed inode label; policy restoration is verified separately) --"
     ls -Zd /proc/keys /proc/timer_list 2>&1 || true
@@ -3511,6 +3818,122 @@ finally:
     os.close(fd)
 PYEOF
   cat "$EVIDENCE_DIR/p21e3-runc-runtime-terminal.log"
+fi
+# R7 MNB24: the bounding-set evidence extraction. Pure post-processing of
+# the captured surfaces (strace prctl/capset lines joined with the capwatch
+# userns rows and the inventory's OCI capability block); no live reads.
+if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
+  python3 - > "$EVIDENCE_DIR/p21e3-capbset-evidence.log" <<'PYEOF'
+import json
+import re
+from pathlib import Path
+
+EV = Path("/tmp/r7-p21e3-evidence")
+strace = EV / "p21e3-strace.log"
+capwatch = EV / "p21e3-capwatch.log"
+inventory = EV / "p21e3-proc-inventory.jsonl"
+
+print("== MNB24 bounding-set evidence ==")
+prctl_rows, capset_rows = [], []
+if strace.exists():
+    capset_re = re.compile(r"^\[pid +(\d+)\] +\S* *capset\(")
+    for line in strace.read_text(errors="replace").splitlines():
+        if "PR_CAPBSET_DROP" in line:
+            m = re.match(
+                r"\[pid +(\d+)\] +\S* *prctl\(PR_CAPBSET_DROP, +([0-9A-Fa-fx]+|[A-Z_]+)\)[ \)]* = +(-?\d+)[ \w(),]*",
+                line)
+            if m:
+                prctl_rows.append((int(m.group(1)), m.group(2), int(m.group(3)),
+                                   "EPERM" if "EPERM" in line else ""))
+            else:
+                prctl_rows.append((None, None, None, "UNPARSED " + line.strip()[:200]))
+        elif "capset(" in line:
+            m = capset_re.match(line)
+            pid = int(m.group(1)) if m else None
+            rc = re.search(r"= +(-?\d+)", line)
+            capset_rows.append((pid, int(rc.group(1)) if rc else None))
+else:
+    print("strace log absent (NOT evidence of absence)")
+
+if prctl_rows:
+    ok = sum(1 for r in prctl_rows if r[2] == 0)
+    fail = sum(1 for r in prctl_rows if r[2] not in (0, None))
+    print(f"prctl PR_CAPBSET_DROP rows: {len(prctl_rows)} rc=0 {ok} rc!=0 {fail}")
+    for r in prctl_rows[-80:]:
+        print(f"  drop pid={r[0]} cap={r[1]} rc={r[2]} {r[3]}")
+else:
+    print("no PR_CAPBSET_DROP rows captured")
+if capset_rows:
+    print(f"capset rows: {len(capset_rows)} rc=0 {sum(1 for r in capset_rows if r[1] == 0)}")
+    for r in capset_rows[-20:]:
+        print(f"  capset pid={r[0]} rc={r[1]}")
+else:
+    print("no capset rows captured")
+
+rows = []
+if capwatch.exists():
+    for line in capwatch.read_text(errors="replace").splitlines():
+        if not line.startswith("CAPWATCH "):
+            continue
+        row = {}
+        for tok in line.split(" ")[2:]:
+            if "=" in tok:
+                k, v = tok.split("=", 1)
+                row[k] = v
+        row["event"] = line.split(" ")[1]
+        rows.append(row)
+if not rows:
+    print("capwatch: no rows")
+else:
+    firstiglie = {}
+    for r in rows:
+        firstiglie.setdefault(int(r["pid"]), r)
+    print(f"capwatch rows: {len(rows)}; distinct pids: {len(firstiglie)}")
+    runcpids = sorted(
+        int(r["pid"]) for r in rows
+        if r.get("comm", "").startswith("runc:"))
+    print("runc-chain pids observed: %s" % ",".join(map(str, runcpids)))
+    userns = sorted({r.get("nsuser", "-") for r in rows if r.get("nsuser")})
+    print(f"distinct user namespaces seen: {len(userns)}")
+    for u in userns[:8]:
+        pids_x = sorted(dict.fromkeys(r["pid"] for r in rows if r.get("nsuser") == u))
+        print(f"  ns_user={u} pids(first14)={','.join(pids_x[:14])}")
+    print("== comm transitions (exec ladder) ==")
+    transitions = [r for r in rows if r.get("comm") and not r.get("comm", "").startswith("runc:")]
+    for r in transitions[-20:]:
+        print(f"  pid={r['pid']} comm={r.get('comm')} exe={r.get('exe','-')} ctx={r.get('ctx','-')}"
+              f" eff={r.get('capeff','-')} bnd={r.get('capbnd','-')} amb={r.get('capamb','-')}")
+    if transitions:
+        print("workload-exec OBSERVED (a comm without the runc prefix ran)")
+    else:
+        print("workload-exec NOT-OBSERVED (no non-runc comm under the tracked chain)")
+
+# OCI capability cross-reference (from the inventory's spec block).
+spec_caps = None
+if inventory.exists():
+    for line in inventory.read_text(errors="replace").splitlines():
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if d.get("event") == "spec" and d.get("caps") is not None:
+            spec_caps = d["caps"]
+if spec_caps:
+    print("== OCI config capabilities (from the live spec capture) ==")
+    for k in ("inheritable", "permitted", "effective", "bounding", "ambient"):
+        v = spec_caps.get(k)
+        if not isinstance(v, list):
+            print(f"  {k}: <unresolved>")
+            continue
+        mask = 0
+        for cv in v:
+            if isinstance(cv, int) and 0 <= cv < 64:
+                mask |= 1 << cv
+        print(f"  {k}: 0x{mask:016x} ({len(v)} caps)")
+else:
+    print("OCI capability block not captured")
+PYEOF
+  cat "$EVIDENCE_DIR/p21e3-capbset-evidence.log"
 fi
 {
   echo "== wrapper vs runtime observations (by /proc/<pid>/exe) =="

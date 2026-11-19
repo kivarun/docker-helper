@@ -47,9 +47,26 @@ def read_spec(config, state):
             for entries in paths.values()
         ):
             return None
+        # R7 MNB24: the OCI capability block for the bounding-set cross-reference.
+        caps = spec.get("process", {}).get("capabilities", {}) if isinstance(
+            spec.get("process", {}), dict
+        ) else {}
+        cap_rows = {}
+        if isinstance(caps, dict):
+            for key, entries in caps.items():
+                if isinstance(entries, list) and len(entries) <= 64 and all(
+                    isinstance(entry, int) for entry in entries
+                ):
+                    cap_rows[key] = entries
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
-    return {"op": op, "bundle": bundle, "sha256": hashlib.sha256(raw).hexdigest(), "paths": paths}
+    return {
+        "op": op,
+        "bundle": bundle,
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "paths": paths,
+        "caps": cap_rows,
+    }
 
 
 def inspect_path(root, path):
