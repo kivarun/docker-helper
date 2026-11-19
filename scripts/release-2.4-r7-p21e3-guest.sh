@@ -2779,17 +2779,27 @@ static void add(const char *s, const char *t, const char *c, const char *p, cons
 int main(void) {
   /* the file cycle on the dedicated type: same-category ALLOW (the
    * candidate's own MNB23 grant), both cross directions DENY for the
-   * constrained set (the state-tree matrix precedent: create/open/
-   * read/write/rename/unlink); getattr carries expect=report — its
-   * constraint membership is recorded separately through
-   * seinfo --constrain file. */
-  static const char *perms[] = { "create", "open", "read", "write", "rename", "unlink" };
-  for (size_t i = 0; i < 6; i++) {
-    add(S_C1, T_STATE_C1, "file", perms[i], "allow");
-    add(S_C2, T_STATE_C2, "file", perms[i], "allow");
-    add(S_C1, T_STATE_C2, "file", perms[i], "deny");
-    add(S_C2, T_STATE_C1, "file", perms[i], "deny");
+   * constrained set. The loaded file constraint sets (recorded in the
+   * matrix log via seinfo --constrain file) cover
+   *   { create relabelfrom relabelto } (same-user),
+   *   { append link rename setattr unlink write },
+   *   { execute execute_no_trans ioctl lock read } — so open is NOT
+   * mcs-constrained at the object layer (the cross-category open row
+   * carries expect=report; the cross-operation isolation stays owned
+   * by the cross-category dir traversal denial, exactly as the
+   * exec.fifo setattr precedent records it). getattr likewise carries
+   * expect=report. */
+  static const char *constrained[] = { "create", "read", "write", "rename", "unlink" };
+  for (size_t i = 0; i < 5; i++) {
+    add(S_C1, T_STATE_C1, "file", constrained[i], "allow");
+    add(S_C2, T_STATE_C2, "file", constrained[i], "allow");
+    add(S_C1, T_STATE_C2, "file", constrained[i], "deny");
+    add(S_C2, T_STATE_C1, "file", constrained[i], "deny");
   }
+  add(S_C1, T_STATE_C1, "file", "open", "allow");
+  add(S_C2, T_STATE_C2, "file", "open", "allow");
+  add(S_C1, T_STATE_C2, "file", "open", "report");
+  add(S_C2, T_STATE_C1, "file", "open", "report");
   add(S_C1, T_STATE_C1, "file", "getattr", "report");
   add(S_C1, T_STATE_C2, "file", "getattr", "report");
   /* the parent runtime-tree dir hooks keep the proven cross closure */
@@ -2833,9 +2843,8 @@ CEOF
   "$EVIDENCE_DIR/p21e3_runcstate_avdec" >> "$KC_LOG" 2>&1 || true
   BADS="$(awk -F'\t' 'NF>=10 && $10!="" {
     if ($1=="ERR") { print "ERRROW " $0; next }
-    if ($5 != 1) { print "UNDECIDED " $0 }
+    if ($6 != 1) { print "UNDECIDED " $0 }
     if ($9 != 0) { print "PERMISSIVE " $0 }
-    if ($10=="allow" && $5==1) { next }
     if ($10=="allow" && $5!=1) { print "MISMATCH-ALLOW " $0 }
     if ($10=="deny" && $5!=0) { print "MISMATCH-DENY " $0 }
   }' "$KC_LOG")"
