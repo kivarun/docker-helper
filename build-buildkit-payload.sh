@@ -6,11 +6,13 @@
 # this script and this script only, so all formats ship byte-identical payload
 # files. It downloads the pinned upstream release tarball, verifies its SHA-256
 # BEFORE any staging, extracts exactly the proven executable set (the M0/M1 and
-# P4-A1 evidence: buildkitd, buildctl, and the buildkit-runc OCI worker helper
-# resolved by buildkitd's defaultCommandCandidates; the CNI and QEMU helpers
-# are unused by the slirp4netns composition and are NOT shipped), and stages
-# them together with the pinned upstream LICENSE into a /usr-rooted staging
-# tree the artifact assemblers consume.
+# P4-A1 evidence: buildkitd and buildctl; the CNI and QEMU helpers
+# are unused by the slirp4netns composition and are NOT shipped), verifies the
+# archive's own buildkit-runc member against its recorded upstream digest, and
+# builds the DEPLOYED runtime member — the pinned-payload runc loader — from
+# the pinned runc sources patched by the committed in-repo runc-loader patch.
+# The loader build then stages together with the pinned upstream LICENSE into
+# a /usr-rooted staging tree the artifact assemblers consume.
 #
 # Usage:
 #   ./build-buildkit-payload.sh DEST_DIR
@@ -22,14 +24,16 @@
 #   usr/share/doc/docker-helper/buildkit/LICENSE              (0644)
 #   usr/share/doc/docker-helper/buildkit/MANIFEST             (0644)
 #
-# The upstream buildkit-runc (the OCI worker runtime binary) is staged at
-# the dedicated runtime/ subpath (the accepted R4-P3-P0 D-2 placement):
-# the top-level payload name buildkit-runc is the installed wrapper role
-# (a copy of the product binary, staged by the artifact assemblers from
-# dist/docker-helper), and the wrapper hands off to this relocated
-# original at its fixed absolute path. The relocation changes ONLY the
-# staged pathname — the bytes, their pinned digest, and the MANIFEST
-# (whose keys record binary identity, not paths) are unchanged.
+# The upstream buildkit-runc binary is NOT shipped: the deployed runtime
+# member is the pinned-payload runc loader (pinned runc sources + committed
+# patch, built in-script), staged at the dedicated runtime/ subpath (the
+# accepted R4-P3-P0 D-2 placement): the top-level payload name buildkit-runc
+# is the installed wrapper role (a copy of the product binary, staged by the
+# artifact assemblers from dist/docker-helper), and the wrapper hands off to
+# this relocated loader binary at its fixed absolute path. The relocation
+# changes ONLY the staged pathname — the MANIFEST (whose keys record binary
+# identity, not paths) records the deployed loader digest plus its source
+# and patch provenance.
 #
 # MANIFEST records the pinned version + verified digests so the shipped
 # payload metadata states its own provenance (plan §7: version + digest
@@ -57,12 +61,44 @@ BUILDKIT_LICENSE_URL="https://raw.githubusercontent.com/moby/buildkit/${BUILDKIT
 # Computed from the pinned v0.33.0 tag raw fetch (and re-verified on every
 # staging run against this constant).
 BUILDKIT_LICENSE_SHA256="c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
-# Executable digests inside the pinned tarball (identical to the P4-A1
-# proof-recorded payload SHAs; the verify-first re-staging path checks them
-# so a second assembler pass reuses the first one's verified staging).
+# Executable digests inside the pinned upstream tarball (identical to the
+# P4-A1 proof-recorded payload SHAs; the verify-first re-staging path checks
+# them so a second assembler pass reuses the first one's verified staging).
 BUILDKITD_SHA256="157da954fa081d9ec4f063d62029fbbf12437c1d47ab63080594eae5a85b36f2"
 BUILDCTL_SHA256="0b45ae3696f836bf711dbd78138e403924d7733f0b2328ba29a7fcf9ad5f1dfd"
+# The deployed runtime member (runtime/buildkit-runc) is NOT the upstream
+# archive binary: it is the pinned-payload runc loader — the pinned upstream
+# runc v1.4.3 sources patched by the committed runc-loader patch and built
+# here through the deterministic recipe below. The upstream archive member
+# bin/buildkit-runc keeps its upstream digest (upstream identity/
+# provenance guards), but the shipped runtime bytes are the loader build.
+# BUILDKIT_RUNC_SHA256 pins those DEPLOYED bytes: the canonical producer
+# (the release-candidate producer job, its canonical toolchain set) is the
+# authority for this digest. When a build produces a different digest the
+# staging FAILS CLOSED: the recipe (pinned source patch + pinned loader
+# toolchain + fixed flags) or the builder environment changed, and the
+# re-pin procedure (recompute on the canonical producer, land the pin,
+# then re-run) replays explicitly — a silently drifting runtime is never
+# staged.
+# CI-REPIN-PENDING: the value below is still the upstream archive member
+# digest and is WRONG for the loader build by construction; the staging of
+# the loader FAILS CLOSED against it (printing the actual build digest)
+# until the canonical producer's digest is landed here.
 BUILDKIT_RUNC_SHA256="0acdd302ddc5540b2e445b683661bfada9935c702f9008ffb0481abcda16c9b4"
+# RUNC-LOADER pinning: the loader sources and their digest, the committed
+# patch and its digest, and the pinned loader toolchain version (the
+# GOTOOLCHAIN value; also stamped into the binary's `go:` version line).
+# The patch path is fixed in-repo (packaging/runc-loader/runc-loader.patch);
+# its digest guard keeps the recipe subtraction committed exactly as
+# recorded here.
+RUNC_LOADER_TAG="v1.4.3"
+RUNC_LOADER_SOURCE_URL="https://github.com/opencontainers/runc/archive/refs/tags/v1.4.3.tar.gz"
+RUNC_LOADER_SOURCE_SHA256="e0a89f9e883ce93e740d14bb105b25c665f7d7beade4cfd0714fcafb38855d35"
+RUNC_LOADER_PATCH_SHA256="014d50caa7fa5ffaece36f73b5d915aa1211a42e9e743c530af35783973882ef"
+RUNC_LOADER_TOOLCHAIN="go1.26.10"
+# The upstream archive's OWN runc member (provenance guard; its bytes are
+# never shipped — the deployed runtime member is the loader build above).
+BUILDKIT_RUNC_UPSTREAM_SHA256="0acdd302ddc5540b2e445b683661bfada9935c702f9008ffb0481abcda16c9b4"
 # The generated MANIFEST is deterministic given the pinned payload bytes; its
 # digest is pinned so the verify-first re-staging path covers every member.
 BUILDKIT_MANIFEST_SHA256="5d65fac136087c2d865f7d69bc21771055eadb8edc05cbe1ff66db78a4a3a0fd"
@@ -84,6 +120,12 @@ if ! command -v tar >/dev/null 2>&1; then
 fi
 if ! command -v sha256sum >/dev/null 2>&1; then
 	fail "sha256sum not found"
+fi
+if ! command -v patch >/dev/null 2>&1; then
+	fail "patch not found (required to apply the committed runc-loader patch)"
+fi
+if ! command -v go >/dev/null 2>&1; then
+	fail "go not found (required to build the pinned-payload runc loader)"
 fi
 
 # Verify-first idempotency: when the staging directory already carries every
@@ -160,6 +202,70 @@ if ! tar -xzf "$WORK/$BUILDKIT_TARBALL" -C "$WORK" \
 	fail "the pinned upstream archive does not carry the expected bin/ members (buildkitd, buildctl, buildkit-runc)"
 fi
 
+# Upstream provenance guard for the archive's own runc member: the upstream
+# bin/buildkit-runc extraction must still match its recorded upstream digest
+# (the archive identity is checked again at member granularity), even though
+# its bytes are NOT the shipped runtime anymore.
+UPSTREAM_RUNC_SHA="$(sha256sum "$WORK/bin/buildkit-runc" | awk '{print $1}')"
+if [ "$UPSTREAM_RUNC_SHA" != "$BUILDKIT_RUNC_UPSTREAM_SHA256" ]; then
+	fail "upstream archive buildkit-runc SHA-256 mismatch: expected $BUILDKIT_RUNC_UPSTREAM_SHA256, got $UPSTREAM_RUNC_SHA"
+fi
+echo "OK: upstream archive buildkit-runc SHA-256 verified: $UPSTREAM_RUNC_SHA"
+
+# ---------------------------------------------------------------------------
+# The pinned-payload runc loader: verify the pinned sources and the committed
+# patch, apply the patch, and build the deployed runtime through the fixed
+# recipe. The built bytes are then evaluated against BUILDKIT_RUNC_SHA256
+# below (fail closed; the canonical producer is the re-pin authority).
+# ---------------------------------------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+RUNC_LOADER_PATCH_PATH="$SCRIPT_DIR/packaging/runc-loader/runc-loader.patch"
+if [ ! -s "$RUNC_LOADER_PATCH_PATH" ]; then
+	fail "the committed runc-loader patch is missing: $RUNC_LOADER_PATCH_PATH"
+fi
+PATCH_SHA="$(sha256sum "$RUNC_LOADER_PATCH_PATH" | awk '{print $1}')"
+if [ "$PATCH_SHA" != "$RUNC_LOADER_PATCH_SHA256" ]; then
+	fail "runc-loader patch SHA-256 mismatch: expected $RUNC_LOADER_PATCH_SHA256, got $PATCH_SHA"
+fi
+echo "OK: runc-loader patch SHA-256 verified: $PATCH_SHA"
+
+RUNC_LOADER_TARBALL="runc-${RUNC_LOADER_TAG}.tar.gz"
+RUNC_LOADER_TARBALL_URL="https://github.com/opencontainers/runc/archive/refs/tags/${RUNC_LOADER_TAG}.tar.gz"
+RUNC_LOADER_SRC="${RUNC_LOADER_SOURCE_PATH:-}"
+if [ -n "$RUNC_LOADER_SRC" ]; then
+	if [ ! -s "$RUNC_LOADER_SRC" ]; then
+		fail "RUNC_LOADER_SOURCE_PATH is set but missing or empty: $RUNC_LOADER_SRC"
+	fi
+	cp "$RUNC_LOADER_SRC" "$WORK/$RUNC_LOADER_TARBALL"
+else
+	curl -fsSL -o "$WORK/$RUNC_LOADER_TARBALL" "$RUNC_LOADER_SOURCE_URL" \
+		|| fail "cannot download $RUNC_LOADER_SOURCE_URL"
+fi
+RUNC_SRC_SHA="$(sha256sum "$WORK/$RUNC_LOADER_TARBALL" | awk '{print $1}')"
+if [ "$RUNC_SRC_SHA" != "$RUNC_LOADER_SOURCE_SHA256" ]; then
+	fail "runc loader source SHA-256 mismatch: expected $RUNC_LOADER_SOURCE_SHA256, got $RUNC_SRC_SHA"
+fi
+echo "OK: runc loader source SHA-256 verified: $RUNC_SRC_SHA"
+
+tar -xzf "$WORK/$RUNC_LOADER_TARBALL" -C "$WORK" \
+	|| fail "cannot extract the runc loader source tree"
+RUNC_SRC_DIR="$WORK/runc-${RUNC_LOADER_TAG#v}"
+[ -d "$RUNC_SRC_DIR" ] || fail "the loader source archive does not carry the expected top-level tree"
+(cd "$RUNC_SRC_DIR" && patch -p1 < "$RUNC_LOADER_PATCH_PATH") \
+	|| fail "the committed runc-loader patch does not apply to the pinned sources"
+
+# Fixed build recipe: pinned toolchain (GOTOOLCHAIN — identical `go:` stamp),
+# cgo on (runc requires it), trimpath (no filesystem-path residue). No
+# version flags: the tag tree carries its own version constant.
+( cd "$RUNC_SRC_DIR" && CGO_ENABLED=1 GOTOOLCHAIN="$RUNC_LOADER_TOOLCHAIN" \
+	go build -trimpath -o "$WORK/bin/buildkit-runc" . ) \
+	|| fail "cannot build the pinned-payload runc loader"
+LOADER_SHA="$(sha256sum "$WORK/bin/buildkit-runc" | awk '{print $1}')"
+if [ "$LOADER_SHA" != "$BUILDKIT_RUNC_SHA256" ]; then
+	fail "the built runc loader digest $LOADER_SHA does not match the pinned deployed runtime digest $BUILDKIT_RUNC_SHA256 (re-pin procedure: recompute the digest on the canonical producer, land BUILDKIT_RUNC_SHA256 and BUILDKIT_MANIFEST_SHA256, then re-run)"
+fi
+echo "OK: built runc loader digest verified: $LOADER_SHA"
+
 BIN_DIR="$DEST_DIR/usr/libexec/docker-helper/buildkit"
 DOC_DIR="$DEST_DIR/usr/share/doc/docker-helper/buildkit"
 install -d -m 0755 "$BIN_DIR" "$BIN_DIR/runtime" "$DOC_DIR"
@@ -180,6 +286,10 @@ install -m 0644 "$WORK/LICENSE" "$DOC_DIR/LICENSE"
 	printf 'buildkitd-sha256=%s\n' "$(sha256sum "$BIN_DIR/buildkitd" | awk '{print $1}')"
 	printf 'buildctl-sha256=%s\n' "$(sha256sum "$BIN_DIR/buildctl" | awk '{print $1}')"
 	printf 'buildkit-runc-sha256=%s\n' "$(sha256sum "$BIN_DIR/runtime/buildkit-runc" | awk '{print $1}')"
+	printf 'runc-loader-base=%s\n' "$RUNC_LOADER_TAG"
+	printf 'runc-loader-source-sha256=%s\n' "$RUNC_LOADER_SOURCE_SHA256"
+	printf 'runc-loader-patch-sha256=%s\n' "$RUNC_LOADER_PATCH_SHA256"
+	printf 'runc-loader-toolchain=%s\n' "$RUNC_LOADER_TOOLCHAIN"
 	printf 'upstream-notice=absent (no NOTICE file in the %s tag tree; Apache-2.0 requires carrying one only when upstream includes it)\n' "$BUILDKIT_VERSION"
 } > "$DOC_DIR/MANIFEST"
 chmod 0644 "$DOC_DIR/MANIFEST"

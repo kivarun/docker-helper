@@ -1,0 +1,132 @@
+diff --git a/exec.go b/exec.go
+index cd5a9d1..9d9366c 100644
+--- a/exec.go
++++ b/exec.go
+@@ -214,7 +214,7 @@ func getProcess(context *cli.Context, c *libcontainer.Container) (*specs.Process
+ 	if err := os.Chdir(bundle); err != nil {
+ 		return nil, err
+ 	}
+-	spec, err := loadSpec(specConfig)
++	spec, err := loadSpec(specConfig, false)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+diff --git a/spec.go b/spec.go
+index 15e933e..82424b0 100644
+--- a/spec.go
++++ b/spec.go
+@@ -1,9 +1,13 @@
+ package main
+ 
+ import (
++	"bytes"
++	"crypto/sha256"
++	"encoding/hex"
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
++	"io"
+ 	"os"
+ 
+ 	"github.com/opencontainers/runc/libcontainer/configs"
+@@ -113,8 +117,22 @@ created by an unprivileged user.
+ 	},
+ }
+ 
+-// loadSpec loads the specification from the provided path.
+-func loadSpec(cPath string) (spec *specs.Spec, err error) {
++// specDigestEnv is the digest-token environment RESERVED for the
++// wrapper: it carries the SHA-256 (hex) of the committed config.json the
++// wrapper handed off with the managed run. The loader reads config.json
++// ONCE into a buffer and decodes THE SAME buffer, so the container
++// -creation command (`run`) is bound to exactly the committed bytes.
++const specDigestEnv = "RUNC_SPEC_SHA256"
++
++// loadSpec loads the specification from the provided path. The file is
++// read exactly once into a buffer. When requireDigest is set (the
++// container-creation command, `run`), the digest environment token is
++// REQUIRED: an absent token or a mismatched digest refuses the load, so
++// the run dies before any container is created. When requireDigest is
++// unset, the token is NEVER consulted: the other commands' behavior is
++// independent of the reserved key (an inherited value cannot alter any
++// non-run command).
++func loadSpec(cPath string, requireDigest bool) (spec *specs.Spec, err error) {
+ 	cf, err := os.Open(cPath)
+ 	if err != nil {
+ 		if errors.Is(err, os.ErrNotExist) {
+@@ -124,7 +142,20 @@ func loadSpec(cPath string) (spec *specs.Spec, err error) {
+ 	}
+ 	defer cf.Close()
+ 
+-	if err = json.NewDecoder(cf).Decode(&spec); err != nil {
++	specBytes, err := io.ReadAll(cf)
++	if err != nil {
++		return nil, err
++	}
++	if requireDigest {
++		digest := os.Getenv(specDigestEnv)
++		if digest == "" {
++			return nil, fmt.Errorf("%s is absent: refusing the container start (the wrapper handoff digest is required)", specDigestEnv)
++		}
++		if sum := sha256.Sum256(specBytes); hex.EncodeToString(sum[:]) != digest {
++			return nil, fmt.Errorf("the %s bytes do not match the handed-off %s digest: refusing before any container creation", cPath, specDigestEnv)
++		}
++	}
++	if err = json.NewDecoder(bytes.NewReader(specBytes)).Decode(&spec); err != nil {
+ 		return nil, err
+ 	}
+ 	if spec == nil {
+diff --git a/utils.go b/utils.go
+index 75752f1..3199de2 100644
+--- a/utils.go
++++ b/utils.go
+@@ -67,15 +67,22 @@ func fatalWithCode(err error, ret int) {
+ 	os.Exit(ret)
+ }
+ 
+-// setupSpec performs initial setup based on the cli.Context for the container
+-func setupSpec(context *cli.Context) (*specs.Spec, error) {
++// setupSpec performs initial setup based on the cli.Context for the container.
++// The requireDigest flag is set ONLY on the container-creation command
++// (`run`, via startContainer): there the loader's digest token is
++// mandatory and the refusal happens before any container is created.
++// Every other command loads the spec with the token NEVER consulted —
++// its behavior does not depend on the reserved key (the wrapper refuses
++// direct `create` before the loader is reached, and the loader refuses
++// that path independently, before any container creation).
++func setupSpec(context *cli.Context, requireDigest bool) (*specs.Spec, error) {
+ 	bundle := context.String("bundle")
+ 	if bundle != "" {
+ 		if err := os.Chdir(bundle); err != nil {
+ 			return nil, err
+ 		}
+ 	}
+-	spec, err := loadSpec(specConfig)
++	spec, err := loadSpec(specConfig, requireDigest)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+diff --git a/utils_linux.go b/utils_linux.go
+index d7f51e2..6bf235c 100644
+--- a/utils_linux.go
++++ b/utils_linux.go
+@@ -365,10 +365,18 @@ const (
+ )
+ 
+ func startContainer(context *cli.Context, action CtAct, criuOpts *libcontainer.CriuOpts) (int, error) {
++	// The wrapper owns the container-creation path (the pinned forms it
++	// forwards execute `run` only). A direct `create` in the managed
++	// circuit would bypass the wrapper's spec gate, so this private
++	// runtime refuses it BEFORE any container creation: the refusal is a
++	// typed loader error and no container object is ever created.
++	if action == CT_ACT_CREATE {
++		return -1, errors.New("create is not a supported command of this private runtime (the wrapper's managed run is the only container-creation admission path)")
++	}
+ 	if err := revisePidFile(context); err != nil {
+ 		return -1, err
+ 	}
+-	spec, err := setupSpec(context)
++	spec, err := setupSpec(context, action == CT_ACT_RUN)
+ 	if err != nil {
+ 		return -1, err
+ 	}
