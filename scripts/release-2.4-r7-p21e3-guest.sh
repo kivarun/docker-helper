@@ -4047,6 +4047,7 @@ else:
 
 print("== distinct capability states across the runc chain (decoded) ==")
 masks = {}
+rows_by_mask = {}
 for r in rows:
     effb, bndb = r.get("capeff", "-"), r.get("capbnd", "-")
     if effb in ("-", "") or not re.fullmatch(r"[0-9a-fA-F]{1,16}", effb or ""):
@@ -4056,6 +4057,8 @@ for r in rows:
     key = (mask, bnd)
     if key not in masks:
         masks[key] = r
+        rows_by_mask[key] = set()
+    rows_by_mask[key].add(r["pid"])
 cap_names = (
     "CHOWN", "DAC_OVERRIDE", "DAC_READ_SEARCH", "FOWNER", "FSETID",
     "KILL", "SETGID", "SETUID", "SETPCAP", "LINUX_IMMUTABLE",
@@ -4074,8 +4077,10 @@ for (mask, bnd) in sorted(masks):
     names = [nm for bit, nm in bitname.items() if mask & bit]
     bnames = [nm for bit, nm in bitname.items() if bnd is not None and bnd & bit]
     row = masks[(mask, bnd)]
-    print(f"  pid={row['pid']} comm={row.get('comm','-')} cap_eff=0x{mask:016x}"
-          f" setgid={'PRESENT' if mask & (1 << 6) else 'ABSENT'} eff={'+'.join(names)}"
+    pids = sorted(rows_by_mask[(mask, bnd)])
+    print(f"  cap_eff=0x{mask:016x} pids={','.join(pids[:10])}"
+          f" first-comm={row.get('comm','-')} setgid={'PRESENT' if mask & (1 << 6) else 'ABSENT'}"
+          f" eff={'+'.join(names)}"
           + (f" bnd={'+'.join(bnames)}" if bnd is not None else ""))
     print(f"    uid_map={row.get('uidmap','-')}")
     print(f"    gid_map={row.get('gidmap','-')}")
