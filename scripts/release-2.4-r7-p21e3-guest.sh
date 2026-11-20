@@ -3237,7 +3237,8 @@ EOF
 (allow docker_helper_buildkitd_t ${WL_POLICY_TYPE} (file (read open getattr map)))
 (allow docker_helper_buildkitd_t ${WL_POLICY_TYPE} (security (read_policy)))
 (allow docker_helper_buildkitd_t tmpfs_t (lnk_file (read getattr)))
-(allow docker_helper_buildkitd_t tmpfs_t (file (read open getattr)))"
+(allow docker_helper_buildkitd_t tmpfs_t (file (read open getattr)))
+(allow docker_helper_buildkitd_t self (process (setfscreate setkeycreate)))"
   {
     echo '(type docker_helper_builder_workload_t)'
     echo '(roletype system_r docker_helper_builder_workload_t)'
