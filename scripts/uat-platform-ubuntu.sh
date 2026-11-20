@@ -44,7 +44,8 @@ platform_install_deps() {
   DEBIAN_FRONTEND=noninteractive apt-get install -y \
     musl-tools checkpolicy semodule-utils apparmor-utils openssl \
     tar gzip file curl \
-    rootlesskit slirp4netns uidmap
+    rootlesskit slirp4netns uidmap \
+    libseccomp-dev pkg-config
 }
 
 # platform_default_principal returns the OS user mapped to the docker-helper

@@ -80,11 +80,11 @@ BUILDCTL_SHA256="0b45ae3696f836bf711dbd78138e403924d7733f0b2328ba29a7fcf9ad5f1df
 # re-pin procedure (recompute on the canonical producer, land the pin,
 # then re-run) replays explicitly — a silently drifting runtime is never
 # staged.
-# CI-REPIN-PENDING is resolved: the canonical producer (run 44754439545,
-# ubuntu-24.04, the pinned toolchain go1.26.10, the fixed -trimpath recipe)
-# built the loader at 9c2881529eaf16c662ad02127a846df41a243af7c57cd64d6dd95017a13c31c5
-# and that digest is the RE-VERIFIED authoritative pinned value below
-# (the staging fails closed against it on every subsequent build).
+# CI-REPIN-PENDING: the seccomp-tagged loader build changes the digest by
+# construction (a new compiled feature set); the value below is the
+# previous tag-less loader's digest and is WRONG for the seccomp-tagged
+# build. The staging FAILS CLOSED against it (printing the actual build
+# digest) until the canonical producer's digest is landed here.
 BUILDKIT_RUNC_SHA256="9c2881529eaf16c662ad02127a846df41a243af7c57cd64d6dd95017a13c31c5"
 # RUNC-LOADER pinning: the loader sources and their digest, the committed
 # patch and its digest, and the pinned loader toolchain version (the
@@ -258,11 +258,20 @@ RUNC_SRC_DIR="$WORK/runc-${RUNC_LOADER_TAG#v}"
 	|| fail "the committed runc-loader patch does not apply to the pinned sources"
 
 # Fixed build recipe: pinned toolchain (GOTOOLCHAIN — identical `go:` stamp),
-# cgo on (runc requires it), trimpath (no filesystem-path residue). No
-# version flags: the tag tree carries its own version constant.
+# cgo on (runc requires it), the seccomp build tag (runc's libcontainer/seccomp
+# is tag-gated; buildkit always issues a default seccomp profile, so a
+# tag-less loader build is seccomp-UNsupported and every container init dies
+# with "seccomp: config provided but seccomp not supported" BEFORE the
+# composed exec — the seccomp tag is part of the loader contract), and
+# trimpath (no filesystem-path residue). No version flags: the tag tree
+# carries its own version constant.
+pkg-config libseccomp >/dev/null 2>&1 \
+	|| fail "the seccomp-tagged loader build requires the libseccomp development package (the canonical producer's install-deps provides it)"
 ( cd "$RUNC_SRC_DIR" && CGO_ENABLED=1 GOTOOLCHAIN="$RUNC_LOADER_TOOLCHAIN" \
-	go build -trimpath -o "$WORK/bin/buildkit-runc" . ) \
+	go build -trimpath -tags seccomp -o "$WORK/bin/buildkit-runc" . ) \
 	|| fail "cannot build the pinned-payload runc loader"
+"$WORK/bin/buildkit-runc" --version | grep -q '^libseccomp:' \
+	|| fail "the built runc loader does not report the libseccomp face: the seccomp feature is not compiled in"
 LOADER_SHA="$(sha256sum "$WORK/bin/buildkit-runc" | awk '{print $1}')"
 if [ "$LOADER_SHA" != "$BUILDKIT_RUNC_SHA256" ]; then
 	fail "the built runc loader digest $LOADER_SHA does not match the pinned deployed runtime digest $BUILDKIT_RUNC_SHA256 (re-pin procedure: recompute the digest on the canonical producer, land BUILDKIT_RUNC_SHA256 and BUILDKIT_MANIFEST_SHA256, then re-run)"
