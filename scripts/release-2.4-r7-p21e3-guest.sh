@@ -3209,7 +3209,18 @@ EOF
     [a-z_]*_t) : ;;
     *) WL_SEINFO_TYPE=bin_t ;;
   esac
-  DIAG_MODULES_SCL_LINE="(allow docker_helper_buildkitd_t ${WL_SEINFO_TYPE} (file (execute execute_no_trans)))"
+  # The explicit-policy operand: the wrapper's production roletype query
+  # pins seinfo to /sys/fs/selinux/policy (the LOADED policy, no /etc
+  # chain reads), so the module also carries the selinuxfs read faces the
+  # operand read performs under the buildkitd_t subject.
+  WL_POLICY_TYPE="$(ls -ZN /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}' | awk -F: '{print $3}')"
+  case "$WL_POLICY_TYPE" in
+    [a-z_]*_t) : ;;
+    *) WL_POLICY_TYPE=security_t ;;
+  esac
+  DIAG_WL_SEINFO_ROW="(allow docker_helper_buildkitd_t ${WL_SEINFO_TYPE} (file (execute execute_no_trans)))"
+  DIAG_WL_POLICY_ROWS="(allow docker_helper_buildkitd_t ${WL_POLICY_TYPE} (dir (search)))
+(allow docker_helper_buildkitd_t ${WL_POLICY_TYPE} (file (read open getattr)))"
   cat > "$DIAG_WL_CIL" <<EOF
 (type docker_helper_builder_workload_t)
 (roletype system_r docker_helper_builder_workload_t)
@@ -3219,13 +3230,15 @@ EOF
 (allow docker_helper_builder_workload_t docker_helper_builder_state_t (file (execute entrypoint map open read getattr)))
 (allow docker_helper_builder_workload_t docker_helper_builder_state_t (dir (search)))
 (allow docker_helper_buildkitd_t docker_helper_builder_workload_t (process (transition)))
-$DIAG_MODULES_SCL_LINE
+$DIAG_WL_SEINFO_ROW
+$DIAG_WL_POLICY_ROWS
 EOF
   {
     echo "== the MNB30 temporary workload-domain module: docker_helper_diag_workload =="
     echo "committed-policy delta: NONE (temporary module only; unload verified at the teardown)"
     echo "reviewed scheme: MNB28 decision row (b) + the kernel necessities for the explicit exec (the measured AVC 1246 execute denial surface) + the measured rolecheck seinfo fork/exec denial (fork/exec /usr/bin/seinfo permission denied; the row targets the observed label type only)"
     echo "seinfo label type for the rolecheck row: $WL_SEINFO_TYPE"
+    echo "selinuxfs policy label type for the explicit operand rows: $WL_POLICY_TYPE"
     echo "released-policy .pp sha (must not change): $DIAG_RELEASE_PP_SHA_PRE"
     echo "guest version: $(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME ($VERSION_ID)")"
     echo "policy sha before workload-module load: $DIAG_WL_PRELOAD_SHA"
@@ -4310,12 +4323,18 @@ if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ] || [ "${R7_MNB30:-0}" = 1 ]; then
         [a-z_]*_t) : ;;
         *) WL_SEINFO_TYPE=bin_t ;;
       esac
+      WL_POLICY_TYPE="$(ls -ZN /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}' | awk -F: '{print $3}')"
+      case "$WL_POLICY_TYPE" in
+        [a-z_]*_t) : ;;
+        *) WL_POLICY_TYPE=security_t ;;
+      esac
       for WL_ROW in \
         'docker_helper_builder_workload_t.docker_helper_builder_state_t:file:execute' \
         'docker_helper_builder_workload_t.docker_helper_builder_state_t:file:entrypoint' \
         'docker_helper_builder_workload_t.docker_helper_builder_state_t:dir:search' \
         'docker_helper_buildkitd_t.docker_helper_builder_workload_t:process:transition' \
-        "docker_helper_buildkitd_t.${WL_SEINFO_TYPE}:file:execute" ; do
+        "docker_helper_buildkitd_t.${WL_SEINFO_TYPE}:file:execute" \
+        "docker_helper_buildkitd_t.${WL_POLICY_TYPE}:file:read" ; do
         WL_S="${WL_ROW%%.*}"
         WL_REST="${WL_ROW#*.}"
         WL_T="$(printf '%s\n' "$WL_REST" | cut -d: -f1)"

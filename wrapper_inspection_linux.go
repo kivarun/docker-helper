@@ -324,11 +324,25 @@ func wrapperWorkloadProcessLabel(raw []byte) (string, string, error) {
 // install locations. Package-global; tests restore it.
 var wrapperSeinfoCandidates = []string{"seinfo", "/usr/bin/seinfo", "/usr/sbin/seinfo"}
 
+// wrapperSeinfoPolicyPath is the explicit binary-policy operand of the
+// production roletype query. When this file exists the wrapper pins the
+// query to the LOADED policy through selinuxfs instead of letting seinfo
+// search the /etc chain itself — the wrapper's own LSM subject has no
+// policy-config read authority, and supplying the loaded policy keeps the
+// queried relation EXACTLY the authority the composed label is judged
+// against.
+const wrapperSeinfoPolicyPath = "/sys/fs/selinux/policy"
+
 var wrapperRoleCheck = func(role, domain string) error {
 	var out []byte
 	var err error
+	var args []string
+	if _, err := os.Stat(wrapperSeinfoPolicyPath); err == nil {
+		args = append(args, wrapperSeinfoPolicyPath)
+	}
 	for _, seinfo := range wrapperSeinfoCandidates {
-		out, err = exec.Command(seinfo, "--role_types", domain).CombinedOutput()
+		query := append([]string{"--role_types", domain}, args...)
+		out, err = exec.Command(seinfo, query...).CombinedOutput()
 		if err == nil {
 			break
 		}
