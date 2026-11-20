@@ -509,7 +509,7 @@ pinned BuildKit v0.33.0
 (`157da954fa081d9ec4f063d62029fbbf12437c1d47ab63080594eae5a85b36f2` buildkitd,
 `0b45ae3696f836bf711dbd78138e403924d7733f0b2328ba29a7fcf9ad5f1dfd` buildctl,
 `9c2881529eaf16c662ad02127a846df41a243af7c57cd64d6dd95017a13c31c5`
-buildkit-runc), tarball digest
+buildkit-runc [superseded; see below]), tarball digest
 `b6242896d343100808dcbe37565caf381e0a444a6a83d7255926bb1519248ead`.
 The buildkit-runc pin records the staged payload member, not the upstream
 tarball member: since MNB29c/MNB30 the staging recipe builds the pinned
@@ -517,6 +517,15 @@ runc v1.4.3 source with the committed loader patch
 (`packaging/runc-loader/runc-loader.patch`), so the deployed digest is the
 PATCHED loader bytes (the P4-A1 run itself carried the unpatched upstream
 `0acdd302ddc5540b2e445b683661bfada9935c702f9008ffb0481abcda16c9b4`).
+The MNB30 compose walk then showed that the tag-less loader build is
+seccomp-UNsupported (buildkit always issues a default seccomp profile,
+so every container init died with `seccomp: config provided but seccomp
+not supported` before any composed exec could land); the staging recipe
+now builds the loader with runc's seccomp tag and the canonical producer
+(artifact-gate producer job) built the seccomp-capable loader at
+`f0165f1dbec2f1f7b1fc7e4b55a33e3742fa70e416ea6651f2274e98a7195b33`
+(MANIFEST `8449e64db346f9b1d23dff0bb1023ba89949efbea4da4de0a9c3d1a930223c9e`),
+which is the authoritative deployed digest.
 Environments: Ubuntu 24.04.5 LTS, kernel 6.17.0-1022-azure, systemd 255,
 `apparmor_restrict_unprivileged_userns=1` (unchanged default; the passing
 path does not relax it); openSUSE Tumbleweed 20260922, kernel 7.2.6-1,

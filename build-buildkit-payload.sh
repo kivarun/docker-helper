@@ -80,12 +80,19 @@ BUILDCTL_SHA256="0b45ae3696f836bf711dbd78138e403924d7733f0b2328ba29a7fcf9ad5f1df
 # re-pin procedure (recompute on the canonical producer, land the pin,
 # then re-run) replays explicitly — a silently drifting runtime is never
 # staged.
-# CI-REPIN-PENDING: the seccomp-tagged loader build changes the digest by
-# construction (a new compiled feature set); the value below is the
-# previous tag-less loader's digest and is WRONG for the seccomp-tagged
-# build. The staging FAILS CLOSED against it (printing the actual build
-# digest) until the canonical producer's digest is landed here.
-BUILDKIT_RUNC_SHA256="9c2881529eaf16c662ad02127a846df41a243af7c57cd64d6dd95017a13c31c5"
+# CI-REPIN-PENDING is resolved: the canonical producer (the artifact-gate
+# producer job, ubuntu-24.04, the pinned toolchain go1.26.10, the fixed
+# -trimpath recipe WITH the seccomp tag) built the seccomp-capable loader at
+# f0165f1dbec2f1f7b1fc7e4b55a33e3742fa70e416ea6651f2274e98a7195b33
+# (dispatch 44806534610) and that digest is the RE-VERIFIED authoritative
+# pinned value below (the staging fails closed against it on every
+# subsequent build). The earlier tag-less loader built at
+# 9c2881529eaf16c662ad02127a846df41a243af7c57cd64d6dd95017a13c31c5 was
+# seccomp-UNsupported: buildkit's default container spec carries a seccomp
+# profile, so every container init died
+# ("seccomp: config provided but seccomp not supported") BEFORE the composed
+# exec could land.
+BUILDKIT_RUNC_SHA256="f0165f1dbec2f1f7b1fc7e4b55a33e3742fa70e416ea6651f2274e98a7195b33"
 # RUNC-LOADER pinning: the loader sources and their digest, the committed
 # patch and its digest, and the pinned loader toolchain version (the
 # GOTOOLCHAIN value; also stamped into the binary's `go:` version line).
@@ -102,9 +109,9 @@ RUNC_LOADER_TOOLCHAIN="go1.26.10"
 BUILDKIT_RUNC_UPSTREAM_SHA256="0acdd302ddc5540b2e445b683661bfada9935c702f9008ffb0481abcda16c9b4"
 # The generated MANIFEST is deterministic given the pinned payload bytes; its
 # digest is pinned so the verify-first re-staging path covers every member.
-# Pinned with the loader re-pin above (the loader keys made the MANIFEST
-# longer than the upstream-only form).
-BUILDKIT_MANIFEST_SHA256="caa954f4f72b3f4930911d3c76406a1704820f3b5f1dc6f6fe46f1de36ee3fa2"
+# Pinned with the seccomp loader re-pin above (the seccomp-tagged loader
+# digest keys the MANIFEST).
+BUILDKIT_MANIFEST_SHA256="8449e64db346f9b1d23dff0bb1023ba89949efbea4da4de0a9c3d1a930223c9e"
 
 fail() { echo "error: $*" >&2; exit 1; }
 
