@@ -1407,9 +1407,9 @@ static void emit(FILE *lg, const char *event, int pid, int ppid,
         while (fgets(lb, sizeof lb, f)) {
             char *v = strchr(lb, ':');
             if (!v) continue;
+            lb[strcspn(lb, "\n")] = 0;
             *v = '\0'; v++;
             while (*v == ' ' || *v == '\t') v++;
-            lb[strcspn(lb, "\n")] = 0;
             if (!strcmp(lb, "CapInh")) snprintf(capinh, sizeof capinh, "%s", v);
             else if (!strcmp(lb, "CapPrm")) snprintf(capprm, sizeof capprm, "%s", v);
             else if (!strcmp(lb, "CapEff")) snprintf(capeff, sizeof capeff, "%s", v);
@@ -3993,7 +3993,33 @@ else:
 # readback right until the stop; the OCI cross-reference closes the loop.
 sg_rows = []
 if strace.exists():
+    # strace splits syscalls that straddle a fork ("call <unfinished ...>"
+    # then "<... call resumed>) = rc"); join them before matching so the
+    # measured line carries the real return code instead of an UNPARSED
+    # fragment. The resumed form carries no pid, so a call joins with the
+    # most recent unfinished invocation of the same call name.
+    pending, joined_lines = {}, []
     for line in strace.read_text(errors="replace").splitlines():
+        m_unf = re.match(
+            r"^((?:\[pid +(\d+)\]|(\d+)) +[0-9:.]+ +(\S+)\(.*)<unfinished \.\.\.>\s*$", line)
+        m_res = re.match(
+            r"^(?:(?:\[pid +(\d+)\]|(\d+)) +[0-9:.]+ +)?<\.\.\. +(\S+) resumed>(.*=\s+-?\d+.*)?$", line)
+        if m_unf:
+            pid_k = m_unf.group(2) or m_unf.group(3)
+            pending[(pid_k, m_unf.group(4))] = line
+            continue
+        if m_res:
+            cand = [k for k in pending if k[1] == m_res.group(3)]
+            if cand:
+                prior = pending.pop(cand[-1])
+                tail = m_res.group(4) or ""
+                if tail.startswith(")"):
+                    joined_lines.append(prior.split("<unfinished")[0].rstrip() + tail)
+                else:
+                    joined_lines.append(prior.split("<unfinished")[0].rstrip() + ")" + tail)
+                continue
+        joined_lines.append(line)
+    for line in joined_lines:
         if not re.match(r"^(?:\[pid +\d+\]|\d+) +[0-9:.]+ +(setgroups|setgid|setregid|setresgid)\(", line):
             continue
         m = re.match(
@@ -4071,7 +4097,7 @@ if spec_caps:
     for k in ("inheritable", "permitted", "effective", "bounding", "ambient"):
         v = spec_caps.get(k)
         if not isinstance(v, list):
-            print(f"  {k}: <unresolved>")
+            print(f"  {k}: <absent-in-config>")
             continue
         mask = 0
         unresolved = []
