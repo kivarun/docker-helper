@@ -3235,6 +3235,7 @@ EOF
   # domain attempts were abandoned: the interpreter relabel is denied).
   DIAG_WL_POLICY_ROWS="(allow docker_helper_buildkitd_t ${WL_POLICY_TYPE} (dir (search)))
 (allow docker_helper_buildkitd_t ${WL_POLICY_TYPE} (file (read open getattr map)))
+(allow docker_helper_buildkitd_t ${WL_POLICY_TYPE} (security (read_policy)))
 (allow docker_helper_buildkitd_t tmpfs_t (lnk_file (read getattr)))
 (allow docker_helper_buildkitd_t tmpfs_t (file (read open getattr)))"
   {
