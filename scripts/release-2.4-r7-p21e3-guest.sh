@@ -1351,8 +1351,10 @@ static int targeted(int pid, const char *comm) {
         return 1;
     return strncmp(comm, "runc:", 5) == 0;
 }
-/* One bounded /proc/<pid>/status capability read (the tracked state */
-static void readeff(int pid, char *out, size_t n) {
+/* One bounded /proc/<pid>/status capability read. MNB26: the field
+ * selector covers CapEff AND CapBnd — the post-drop bounding snapshot is
+ * tied to the PR_CAPBSET_DROP series by its own state-change row. */
+static void readcap(int pid, const char *field, char *out, size_t n) {
     char p[64];
     snprintf(p, sizeof p, "/proc/%d/status", pid);
     FILE *f = fopen(p, "r");
@@ -1360,10 +1362,11 @@ static void readeff(int pid, char *out, size_t n) {
         snprintf(out, n, "<rc=%d>", errno);
         return;
     }
+    size_t flen = strlen(field);
     char lb[512];
     out[0] = '\0';
     while (fgets(lb, sizeof lb, f)) {
-        if (strncmp(lb, "CapEff", 6) == 0) {
+        if (strncmp(lb, field, flen) == 0 && lb[flen] == ':') {
             char *v = strchr(lb, ':');
             if (v) {
                 v++;
@@ -1376,6 +1379,9 @@ static void readeff(int pid, char *out, size_t n) {
     }
     fclose(f);
     if (out[0] == '\0') snprintf(out, n, "<absent>");
+}
+static void readeff(int pid, char *out, size_t n) {
+    readcap(pid, "CapEff", out, n);
 }
 static void emit(FILE *lg, const char *event, int pid, int ppid,
                  const char *comm, const char *exe) {
@@ -1435,7 +1441,7 @@ int main(int argc, char **argv) {
         fprintf(lg, "CAPWATCH-START %s host_userns=%s\n", ts, host_userns);
         fflush(lg);
     }
-    struct { pid_t pid; char comm[64]; char capeff[64]; char gidmap[64]; } seen[MAXROWS];
+    struct { pid_t pid; char comm[64]; char capeff[64]; char capbnd[64]; char gidmap[64]; } seen[MAXROWS];
     size_t nseen = 0;
     long long rows = 0;
     while (1) {
@@ -1468,6 +1474,7 @@ int main(int argc, char **argv) {
                     seen[nseen].pid = (pid_t)pid;
                     snprintf(seen[nseen].comm, sizeof seen[nseen].comm, "%s", comm);
                     readeff((int)pid, seen[nseen].capeff, sizeof seen[nseen].capeff);
+                    readcap((int)pid, "CapBnd", seen[nseen].capbnd, sizeof seen[nseen].capbnd);
                     readsmall((int)pid, "gid_map", seen[nseen].gidmap, sizeof seen[nseen].gidmap);
                     nseen++;
                 }
@@ -1479,15 +1486,22 @@ int main(int argc, char **argv) {
                     snprintf(seen[i].comm, sizeof seen[i].comm, "%s", comm);
                     evict = 1;
                 }
-                /* MNB25: the caps and gid state between arrival and
-                 * setgroups are the decision state; emit on change. */
-                char ce[64], gm[64];
+                /* MNB26: the caps and gid state between arrival and
+                 * setgroups are the decision state; CapBnd changes when
+                 * the PR_CAPBSET_DROP series lands — its own row is the
+                 * time-bound post-drop snapshot. */
+                char ce[64], cb[64], gm[64];
                 readeff((int)pid, ce, sizeof ce);
+                readcap((int)pid, "CapBnd", cb, sizeof cb);
                 readsmall((int)pid, "gid_map", gm, sizeof gm);
                 if (strcmp(seen[i].capeff, ce) != 0 ||
                     strcmp(seen[i].gidmap, gm) != 0) {
                     snprintf(seen[i].capeff, sizeof seen[i].capeff, "%s", ce);
                     snprintf(seen[i].gidmap, sizeof seen[i].gidmap, "%s", gm);
+                    evict = 1;
+                }
+                if (strcmp(seen[i].capbnd, cb) != 0) {
+                    snprintf(seen[i].capbnd, sizeof seen[i].capbnd, "%s", cb);
                     evict = 1;
                 }
                 if (evict) {
@@ -2944,36 +2958,42 @@ EOF
   fi
   log "dedicated-type module loaded: docker_helper_diag_keys (/proc/keys getattr and mounton, /proc/timer_list getattr and mounton)"
 
-  # --- R7 MNB24: the one-rule capability diagnostic module ---
-  # The blocking denial at the MNB23b terminal was the runc INIT child's
-  # bounding-set application: setpcap denied on self cap_userns. The
-  # candidate grant is reviewed as EXACTLY one rule for the buildkitd
-  # domain; the module below carries that one line and nothing else, and
-  # the load gate proves the source absence (both setpcap-bearing classes),
-  # the exact one-token delta at load, and the SHA restoration at unload.
+  # --- R7 MNB26: the two-rule capability diagnostic module ---
+  # The MNB24/25 terminal evidence put the bounding-set application on
+  # self cap_userns setpcap and the setgroups stage on self cap_userns
+  # setgid (audit 1233/1243 correlation). The module carries EXACTLY the
+  # two reviewed rules and nothing else; the load gate proves the source
+  # absence (both tokens, both setpcap-bearing classes), the exact
+  # two-token delta at load, and the SHA restoration at unload. The
+  # dac_override/fsetid/setfcap families stay WITNESSED only (no rules).
   DIAG_CAP_LOG="$EVIDENCE_DIR/p21e3-diag-cap.log"
   DIAG_CAP_CIL="$EVIDENCE_DIR/docker_helper_diag_cap.cil"
   DIAG_CAP_PRELOAD_SHA="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
   {
-    echo "== the single-rule capability diagnostic module: docker_helper_diag_cap (temporary) =="
+    echo "== the two-rule capability diagnostic module: docker_helper_diag_cap (temporary) =="
     echo "committed-policy delta: NONE (temporary module only; unload verified at the teardown)"
+    echo "reviewed rules (exactly two, self cap_userns): setpcap (MNB24) + setgid (MNB26)"
+    echo "witness-only tokens (no rule): dac_override fsetid setfcap"
     echo "release-policy .pp sha (must not change): $DIAG_RELEASE_PP_SHA_PRE"
     echo "policy sha before cap-module load: $DIAG_CAP_PRELOAD_SHA"
-    echo "-- baseline sesearch (fail-closed: setpcap must be absent for buildkitd self in BOTH setpcap-bearing classes) --"
+    echo "-- baseline sesearch (fail-closed: setpcap AND setgid absent for buildkitd self in BOTH setpcap-bearing classes) --"
   } > "$DIAG_CAP_LOG"
   DIAG_CAP_ALL_ABSENT=1
   for DIAG_CAP_CLASS in cap_userns capability; do
-    DIAG_CAP_Q="$(timeout 60 sesearch -A -ds -dt -s docker_helper_buildkitd_t \
-      -t docker_helper_buildkitd_t -c "$DIAG_CAP_CLASS" -p setpcap 2>&1)"
-    DIAG_CAP_RC=$?
-    DIAG_CAP_V="$(classify_sesearch_query "$DIAG_CAP_RC" "$DIAG_CAP_Q")"
-    printf 'class=%s query-rc=%s\nclassify=%s\n%s\n' "$DIAG_CAP_CLASS" "$DIAG_CAP_RC" "$DIAG_CAP_V" "$DIAG_CAP_Q" >> "$DIAG_CAP_LOG"
-    if [ "$DIAG_CAP_V" != 'trusted:perms=|cond-active=none|cond-inactive=none' ]; then
-      echo "DIAG-CAP-GATE: FAIL (baseline setpcap on self $DIAG_CAP_CLASS is not an authoritative absence: $DIAG_CAP_V)" >> "$DIAG_CAP_LOG"
-      DIAG_CAP_ALL_ABSENT=0
-    else
-      echo "DIAG-CAP-BASE: PASS (class=$DIAG_CAP_CLASS authoritative absence of setpcap from buildkitd self)" >> "$DIAG_CAP_LOG"
-    fi
+    for DIAG_CAP_TOKEN in setpcap setgid; do
+      DIAG_CAP_Q="$(timeout 60 sesearch -A -ds -dt -s docker_helper_buildkitd_t \
+        -t docker_helper_buildkitd_t -c "$DIAG_CAP_CLASS" -p "$DIAG_CAP_TOKEN" 2>&1)"
+      DIAG_CAP_RC=$?
+      DIAG_CAP_V="$(classify_sesearch_query "$DIAG_CAP_RC" "$DIAG_CAP_Q")"
+      printf 'class=%s token=%s query-rc=%s\nclassify=%s\n%s\n' \
+        "$DIAG_CAP_CLASS" "$DIAG_CAP_TOKEN" "$DIAG_CAP_RC" "$DIAG_CAP_V" "$DIAG_CAP_Q" >> "$DIAG_CAP_LOG"
+      if [ "$DIAG_CAP_V" != 'trusted:perms=|cond-active=none|cond-inactive=none' ]; then
+        echo "DIAG-CAP-GATE: FAIL (baseline $DIAG_CAP_TOKEN on self $DIAG_CAP_CLASS is not an authoritative absence: $DIAG_CAP_V)" >> "$DIAG_CAP_LOG"
+        DIAG_CAP_ALL_ABSENT=0
+      else
+        echo "DIAG-CAP-BASE: PASS (class=$DIAG_CAP_CLASS authoritative absence of $DIAG_CAP_TOKEN from buildkitd self)" >> "$DIAG_CAP_LOG"
+      fi
+    done
   done
   {
     echo "-- baseline buildkitd self cap_userns full perm set (the delta anchor) --"
@@ -2987,9 +3007,10 @@ EOF
   printf 'baseline-perms=%s\n' "${DIAG_CAP_BASE_PERMS:-<unresolvable>}" >> "$DIAG_CAP_LOG"
   cat > "$DIAG_CAP_CIL" <<'EOF'
 (allow docker_helper_buildkitd_t self (cap_userns (setpcap)))
+(allow docker_helper_buildkitd_t self (cap_userns (setgid)))
 EOF
   {
-    echo "-- module source (exactly one rule line) --"
+    echo "-- module source (exactly the two reviewed rules) --"
     cat "$DIAG_CAP_CIL"
     echo "-- install (temporary module only; semodule -i accepts CIL) --"
     semodule -i "$DIAG_CAP_CIL"
@@ -2997,10 +3018,10 @@ EOF
     cat "$DIAG_CAP_LOG"
     p21e3_diag_remove
     p21e3_dontaudit_restore
-    fail "the single-rule capability diagnostic module could not be installed; BLOCKED"
+    fail "the two-rule capability diagnostic module could not be installed; BLOCKED"
   }
   {
-    echo "-- post-install delta (fail-closed: exactly the one reviewed token added to cap_userns; capability class must remain unchanged) --"
+    echo "-- post-install delta (fail-closed: exactly the two reviewed tokens added to cap_userns; capability class must remain unchanged) --"
     DIAG_CAP_POST_Q="$(timeout 60 sesearch -A -ds -dt -s docker_helper_buildkitd_t \
       -t docker_helper_buildkitd_t -c cap_userns 2>&1)"
     printf 'query-rc=%s\nclassify=%s\n%s\n' "$?" \
@@ -3016,12 +3037,12 @@ EOF
     if [ -z "$DIAG_CAP_BASE_PERMS" ] || [ -z "$DIAG_CAP_POST_PERMS" ]; then
       echo "DIAG-CAP-GATE: FAIL (the baseline or post perm set could not be resolved from the trusted classification)"
     else
-      DIAG_CAP_WANT="$(printf '%s\n' "$DIAG_CAP_BASE_PERMS" setpcap | tr ' ' '\n' | sed '/^$/d' | sort | tr '\n' ' ' | sed 's/ $//')"
+      DIAG_CAP_WANT="$(printf '%s\n' "$DIAG_CAP_BASE_PERMS" setpcap setgid | tr ' ' '\n' | sed '/^$/d' | sort | tr '\n' ' ' | sed 's/ $//')"
       DIAG_CAP_GOT="$(printf '%s\n' "$DIAG_CAP_POST_PERMS" | tr ' ' '\n' | sed '/^$/d' | sort | tr '\n' ' ' | sed 's/ $//')"
       if [ "$DIAG_CAP_GOT" = "$DIAG_CAP_WANT" ]; then
-        echo "DIAG-CAP-GATE: PASS (the load delta is exactly {setpcap} on self cap_userns: $DIAG_CAP_GOT)"
+        echo "DIAG-CAP-GATE: PASS (the load delta is exactly {setpcap setgid} on self cap_userns: $DIAG_CAP_GOT)"
       else
-        echo "DIAG-CAP-GATE: FAIL (post cap_userns set differs from baseline+setpcap: want=[$DIAG_CAP_WANT] got=[$DIAG_CAP_GOT])"
+        echo "DIAG-CAP-GATE: FAIL (post cap_userns set differs from baseline+{setpcap setgid}: want=[$DIAG_CAP_WANT] got=[$DIAG_CAP_GOT])"
       fi
       if [ -n "$DIAG_CAP_CAPPOST_PERMS" ]; then
         echo "DIAG-CAP-GATE: FAIL (the capability class carries rules after the load; expected none: $DIAG_CAP_CAPPOST_PERMS)"
@@ -3045,9 +3066,9 @@ EOF
   if grep -aq '^DIAG-CAP-GATE: FAIL' "$DIAG_CAP_LOG" || [ "$DIAG_CAP_ALL_ABSENT" != 1 ]; then
     p21e3_diag_remove
     p21e3_dontaudit_restore
-    fail "the single-rule capability module load gate failed; BLOCKED"
+    fail "the two-rule capability module load gate failed; BLOCKED"
   fi
-  log "single-rule capability module loaded: docker_helper_diag_cap (buildkitd self cap_userns setpcap; delta {setpcap} verified)"
+  log "two-rule capability module loaded: docker_helper_diag_cap (buildkitd self cap_userns setpcap+setgid; delta {setpcap setgid} verified)"
 
   # --- fresh-procfs orientation probe (private mount namespace) ---
   # genfscon decides the label at inode initialization, so a FRESH procfs
@@ -3659,21 +3680,23 @@ if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
     else
       echo "module store: docker_helper_diag_keys absent => OK"
     fi
-    # R7 MNB24: the single-rule capability module unload corroboration.
+    # R7 MNB26: the two-rule capability module unload corroboration.
     if semodule -l 2>/dev/null | grep -aq docker_helper_diag_cap; then
       echo "DIAG-UNLOAD-GATE: FAIL (the cap module is still registered in the store)"
     else
       echo "module store: docker_helper_diag_cap absent => OK"
     fi
     for DIAG_CAP_CLASS in cap_userns capability; do
-      DIAG_CAP_UQ="$(timeout 60 sesearch -A -ds -dt -s docker_helper_buildkitd_t \
-        -t docker_helper_buildkitd_t -c "$DIAG_CAP_CLASS" -p setpcap 2>&1)"
-      DIAG_CAP_UV="$(classify_sesearch_query "$?" "$DIAG_CAP_UQ")"
-      if [ "$DIAG_CAP_UV" != 'trusted:perms=|cond-active=none|cond-inactive=none' ]; then
-        echo "DIAG-UNLOAD-GATE: FAIL (setpcap on self $DIAG_CAP_CLASS is still present: $DIAG_CAP_UV)"
-      else
-        echo "DIAG-UNLOAD-GATE: PASS (class=$DIAG_CAP_CLASS setpcap absence restored)"
-      fi
+      for DIAG_CAP_TOKEN in setpcap setgid; do
+        DIAG_CAP_UQ="$(timeout 60 sesearch -A -ds -dt -s docker_helper_buildkitd_t \
+          -t docker_helper_buildkitd_t -c "$DIAG_CAP_CLASS" -p "$DIAG_CAP_TOKEN" 2>&1)"
+        DIAG_CAP_UV="$(classify_sesearch_query "$?" "$DIAG_CAP_UQ")"
+        if [ "$DIAG_CAP_UV" != 'trusted:perms=|cond-active=none|cond-inactive=none' ]; then
+          echo "DIAG-UNLOAD-GATE: FAIL ($DIAG_CAP_TOKEN on self $DIAG_CAP_CLASS is still present: $DIAG_CAP_UV)"
+        else
+          echo "DIAG-UNLOAD-GATE: PASS (class=$DIAG_CAP_CLASS $DIAG_CAP_TOKEN absence restored)"
+        fi
+      done
     done
     echo "-- dedicated types and genfscon absence --"
     if ! p21e3_diag_proc_types_absent; then
@@ -3901,6 +3924,37 @@ capwatch = EV / "p21e3-capwatch.log"
 inventory = EV / "p21e3-proc-inventory.jsonl"
 
 print("== MNB24 bounding-set evidence ==")
+# R7 MNB26: the per-call cap_userns denial inventory (dac_override, fsetid,
+# setfcap, ... stay witnessed, not acted on) and the time-bound CapBnd tie.
+import collections
+avc_rows = []
+window = EV / "p21e3-window-records.log"
+if window.exists():
+    for line in window.read_text(errors="replace").splitlines():
+        m = re.match(
+            r".*audit\((\d+\.\d+):\d+\).*avc:\s+denied\s+\{ ([^}]+) \}.*?pid=(\d+) "
+            r'.*?capability=(\d+)*.*scontext=(\S+) tcontext=(\S+) tclass=(\S+)', line)
+        if not m:
+            continue
+        ts, perms, pid, capid, sctx, tctx, tclass = m.groups()
+        avc_rows.append({
+            "t": float(ts), "perms": perms.strip(), "pid": int(pid),
+            "cap": capid, "sctx": sctx, "tctx": tctx, "tclass": tclass,
+        })
+capu = [r for r in avc_rows if r["tclass"] == "cap_userns"]
+if capu:
+    print("== cap_userns denial inventory (per pid+perm, first..last) ==")
+    groups = collections.OrderedDict()
+    for r in capu:
+        key = (r["pid"], r["perms"])
+        groups.setdefault(key, []).append(r)
+    for (pidv, permsv), rr in groups.items():
+        first = rr[0]
+        print(f"  pid={pidv} perm={permsv} count={len(rr)}"
+              f" first={rr[0]['t']:.3f} last={rr[-1]['t']:.3f}"
+              f" sctx={first['sctx']}")
+else:
+    print("cap_userns denial inventory: no rows")
 prctl_rows, capset_rows = [], []
 if strace.exists():
     # strace paints two shapes here: "[pid N] TS call" for -f forks in the
@@ -3914,9 +3968,10 @@ if strace.exists():
             if m:
                 pid = int(m.group(1) or m.group(2))
                 prctl_rows.append((pid, m.group(4), int(m.group(5)),
-                                   "EPERM" if "EPERM" in line else ""))
+                                   "EPERM" if "EPERM" in line else "",
+                                   m.group(3)))
             else:
-                prctl_rows.append((None, None, None, "UNPARSED " + line.strip()[:200]))
+                prctl_rows.append((None, None, None, "UNPARSED " + line.strip()[:200], None))
         elif "capset(" in line:
             m = capset_re.match(line)
             pid = int(m.group(1) or m.group(2)) if m else None
@@ -3929,9 +3984,10 @@ else:
 if prctl_rows:
     ok = sum(1 for r in prctl_rows if r[2] == 0)
     fail = sum(1 for r in prctl_rows if r[2] not in (0, None))
-    print(f"prctl PR_CAPBSET_DROP rows: {len(prctl_rows)} rc=0 {ok} rc!=0 {fail}")
+    print(f"prctl PR_CAPBSET_DROP rows: {len(prctl_rows)} rc=0 {ok} rc!=0 {fail}"
+          f" first={prctl_rows[0][4]} last={prctl_rows[-1][4]}")
     for r in prctl_rows[-80:]:
-        print(f"  drop pid={r[0]} cap={r[1]} rc={r[2]} {r[3]}")
+        print(f"  drop pid={r[0]} cap={r[1]} rc={r[2]} {r[3]} t={r[4]}")
 else:
     print("no PR_CAPBSET_DROP rows captured")
 if capset_rows:
@@ -3986,6 +4042,19 @@ else:
         print("workload-exec OBSERVED (the runc-chain pid now carries a non-runc exe)")
     else:
         print("workload-exec NOT-OBSERVED (no tracked pid left the runc surfaces)")
+    # R7 MNB26: the FULL CapBnd from the pre-drop arrival row must not be
+    # read as the post-drop snapshot: bind by time — print every row of
+    # the dropping pids in order so each CapBnd state carries its own
+    # event row between the DROP series timestamps.
+    if prctl_rows:
+        drop_p = sorted({r[0] for r in prctl_rows if r[0]})
+        print(f"== CapBnd binding: rows of the dropping pids {','.join(map(str, drop_p))} (drop series {prctl_rows[0][4]}..{prctl_rows[-1][4]}) ==")
+        for r in rows:
+            if int(r["pid"]) in drop_p:
+                print(f"  {r.get('event')} t={r.get('t')} pid={r['pid']}"
+                      f" comm={r.get('comm','-')} capeff={r.get('capeff','-')}"
+                      f" capbnd={r.get('capbnd','-')} nnp={r.get('nnp','-')}"
+                      f" uidmap={r.get('uidmap','-')} setgroups={r.get('setgroups','-')}")
 
 # R7 MNB25: the setgroups stage. The syscall lines come from the strace
 # filter (setgroups/setgid/setregid/setresgid now traced with errno); the
