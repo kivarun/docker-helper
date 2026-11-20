@@ -3263,19 +3263,19 @@ EOF
 (permissive ${WL_SEINFO_TOOL_TYPE})
 (roletype system_r ${WL_SEINFO_TOOL_TYPE})
 (typeattributeset domain (${WL_SEINFO_TOOL_TYPE}))"
-  cat > "$DIAG_WL_CIL" <<EOF
-(type docker_helper_builder_workload_t)
-(roletype system_r docker_helper_builder_workload_t)
-(typeattributeset domain (docker_helper_builder_workload_t))
-(typeattributeset mcs_constrained_type (docker_helper_builder_workload_t))
-(allow docker_helper_buildkitd_t docker_helper_builder_state_t (file (execute)))
-(allow docker_helper_builder_workload_t docker_helper_builder_state_t (file (execute entrypoint map open read getattr)))
-(allow docker_helper_builder_workload_t docker_helper_builder_state_t (dir (search)))
-(allow docker_helper_buildkitd_t docker_helper_builder_workload_t (process (transition)))
-(allow docker_helper_buildkitd_t ${WL_SEINFO_TYPE} (file (execute execute_no_trans)))
-$DIAG_WL_POLICY_ROWS
-$DIAG_WL_SEINFO_ROW
-EOF
+  {
+    echo '(type docker_helper_builder_workload_t)'
+    echo '(roletype system_r docker_helper_builder_workload_t)'
+    echo '(typeattributeset domain (docker_helper_builder_workload_t))'
+    echo '(typeattributeset mcs_constrained_type (docker_helper_builder_workload_t))'
+    echo '(allow docker_helper_buildkitd_t docker_helper_builder_state_t (file (execute)))'
+    echo '(allow docker_helper_builder_workload_t docker_helper_builder_state_t (file (execute entrypoint map open read getattr)))'
+    echo '(allow docker_helper_builder_workload_t docker_helper_builder_state_t (dir (search)))'
+    echo '(allow docker_helper_buildkitd_t docker_helper_builder_workload_t (process (transition)))'
+    printf '(allow docker_helper_buildkitd_t %s (file (execute execute_no_trans)))\n' "$WL_SEINFO_TYPE"
+    echo "$DIAG_WL_POLICY_ROWS"
+    echo "$DIAG_WL_SEINFO_ROW"
+  } > "$DIAG_WL_CIL"
   DIAG_WL_SEINFO_LABEL_PRE="$(ls -ZN /usr/bin/seinfo 2>/dev/null | awk '{print $1}')"
   WL_SEINFO_INTERPRETER_PRE="$(ls -ZN "$WL_SEINFO_SHEBANG" 2>/dev/null | awk '{print $1}')"
   {
@@ -3290,9 +3290,13 @@ EOF
     echo "released-policy .pp sha (must not change): $DIAG_RELEASE_PP_SHA_PRE"
     echo "guest version: $(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME ($VERSION_ID)")"
     echo "policy sha before workload-module load: $DIAG_WL_PRELOAD_SHA"
-    echo "-- module source --"
+    echo "-- module source (bytes: $(wc -c < "$DIAG_WL_CIL")) --"
     cat "$DIAG_WL_CIL"
     echo "-- install (temporary module only; semodule -i accepts CIL) --"
+    if [ ! -s "$DIAG_WL_CIL" ]; then
+      echo "WL-GATE: FAIL (the module source file is empty; the install refuses)"
+      false
+    fi
     semodule -i "$DIAG_WL_CIL"
   } > "$DIAG_WL_LOG" 2>&1 || {
     cat "$DIAG_WL_LOG"
