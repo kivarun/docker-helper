@@ -1183,6 +1183,53 @@ func TestWrapperRoleCheckRefusalShapes(t *testing.T) {
 	}
 }
 
+// TestWrapperRoleCheckPathIndependentResolution proves the production
+// rolecheck resolves seinfo against a restricted PATH exactly like the
+// builder-daemon spawn environment (measured: `exec: "seinfo":
+// executable file not found in $PATH`): a bare "seinfo" absent from PATH
+// falls through to the absolute candidates and the first resolving
+// candidate's own output decides the verdict. The fake seinfo markers
+// prove which candidate answered.
+func TestWrapperRoleCheckPathIndependentResolution(t *testing.T) {
+	binDir := t.TempDir()
+	writeFake := func(t *testing.T, path string, lines []string) {
+		t.Helper()
+		script := "#!/bin/sh\n"
+		for _, line := range lines {
+			script += "echo '" + line + "'\n"
+		}
+		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pathFake := binDir + "/fake-path-seinfo" // answered only when its directory is on PATH
+	absoluteFake := filepath.Join(t.TempDir(), "fake-absolute-seinfo")
+	writeFake(t, pathFake, []string{"Roles: 1", "   unconfined_r"})
+	writeFake(t, absoluteFake, []string{"Roles: 1", "   system_r"})
+
+	origCandidates := wrapperSeinfoCandidates
+	t.Cleanup(func() { wrapperSeinfoCandidates = origCandidates })
+	// The PATH fake stays resolvable THROUGH the bare "seinfo" lookup only
+	// when its directory is on PATH; the restricted environment hides it.
+	wrapperSeinfoCandidates = []string{"seinfo", absoluteFake}
+	t.Setenv("PATH", "/nonexistent-restricted-path")
+	if err := wrapperRoleCheck("system_r", wrapperWorkloadDomain); err != nil {
+		t.Fatalf("the absolute fallback must resolve the roletype check: %v", err)
+	}
+	// With the fake on PATH the bare lookup ANSWERS and its (foreign-role)
+	// output classifies verbatim: the resolution order, not the lookup
+	// success, decides the verdict.
+	wrapperSeinfoCandidates = []string{"fake-path-seinfo", absoluteFake}
+	t.Setenv("PATH", binDir)
+	err := wrapperRoleCheck("user_r", wrapperWorkloadDomain)
+	if err == nil || !strings.Contains(err.Error(), "role authorization") {
+		t.Fatalf("the answering bare candidate must classify verbatim, got %v", err)
+	}
+	if err := wrapperRoleCheck("unconfined_r", wrapperWorkloadDomain); err != nil {
+		t.Fatalf("the answering bare candidate must allow its own entry: %v", err)
+	}
+}
+
 // TestWrapperSpecHandoffMissingDigest proves the fail-closed digest
 // handoff contract: an ABSENT commit digest token aborts the managed
 // run before the real runtime is exec'd — the check is never skippable.

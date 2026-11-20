@@ -64,6 +64,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -310,8 +311,35 @@ func wrapperWorkloadProcessLabel(raw []byte) (string, string, error) {
 // relation; sesearch searches TE/RBAC rule sets only. Fail-closed
 // classification: a failed query is never an authoritative absence.
 // Package-global; tests restore it.
+//
+// Resolution is PATH-independent: the runtime is spawned by the builder
+// daemon with a restricted environment, and a bare "seinfo" lookup can
+// fail there for tooling that IS installed (measured on the enforcing
+// guest: `exec: "seinfo": executable file not found in $PATH`). After
+// the bare lookup fails with a not-found error, the standard absolute
+// install locations are tried; a not-found result after every candidate
+// is still a trusted-query failure, never an authoritative absence.
+// wrapperSeinfoCandidates is the production resolution order of the
+// roletype query tool: the bare lookup first, then the standard absolute
+// install locations. Package-global; tests restore it.
+var wrapperSeinfoCandidates = []string{"seinfo", "/usr/bin/seinfo", "/usr/sbin/seinfo"}
+
 var wrapperRoleCheck = func(role, domain string) error {
-	out, err := exec.Command("seinfo", "--role_types", domain).CombinedOutput()
+	var out []byte
+	var err error
+	for _, seinfo := range wrapperSeinfoCandidates {
+		out, err = exec.Command(seinfo, "--role_types", domain).CombinedOutput()
+		if err == nil {
+			break
+		}
+		if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		return fmt.Errorf("the roletype query cannot be trusted (%v)", err)
+	}
+	if err != nil {
+		return fmt.Errorf("the roletype query cannot be trusted (%v)", err)
+	}
 	if err != nil {
 		return fmt.Errorf("the roletype query cannot be trusted (%v)", err)
 	}
