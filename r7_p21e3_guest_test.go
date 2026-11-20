@@ -626,11 +626,11 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		"p21e3_runcstate_avdec",
 		"R7-P21E3-RUNCSTATE-MATRIX=PASS",
 		"docker_helper_builder_runc_state_t",
-		// R7 MNB24/MNB26: the two-rule capability diagnostic module with
-		// the fail-closed two-class baseline absence, the exact two-token
-		// delta at load, the prctl/capset/setgid-family strace coverage,
-		// the userns survival watch (with the time-bound CapBnd tie), and
-		// the bounding-set evidence extraction.
+		// R7 MNB24-27: the three-rule capability diagnostic module with
+		// the fail-closed verifiable baseline absence, the exact deltas
+		// per class at load, the prctl/capset/setgid-family strace
+		// coverage, the userns survival watch (with the time-bound CapBnd
+		// tie), and the bounding-set evidence extraction.
 		"docker_helper_diag_cap",
 		"DIAG_MODULES=\"$DIAG_MODULES docker_helper_diag_cap\"",
 		"docker_helper_diag_cap.cil",
@@ -638,17 +638,20 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		"p21e3-diag-cap.log",
 		"DIAG-CAP-GATE",
 		"DIAG-CAP-BASE",
-		"reviewed rules (exactly two, self cap_userns): setpcap (MNB24) + setgid (MNB26)",
-		"witness-only tokens (no rule): dac_override fsetid setfcap",
+		"reviewed rules (exactly three): self cap_userns setpcap (MNB24); self cap_userns setgid (MNB26); self process setcap (MNB27)",
+		"witness-only tokens (no rule): dac_override fsetid setuid setfcap; relabelfrom state tree",
 		"(allow docker_helper_buildkitd_t self (cap_userns (setpcap)))",
 		"(allow docker_helper_buildkitd_t self (cap_userns (setgid)))",
+		"(allow docker_helper_buildkitd_t self (process (setcap)))",
 		`sesearch -A -ds -dt -s docker_helper_buildkitd_t \
         -t docker_helper_buildkitd_t -c "$DIAG_CAP_CLASS" -p "$DIAG_CAP_TOKEN"`,
-		"baseline sesearch (fail-closed: setpcap AND setgid absent for buildkitd self in BOTH setpcap-bearing classes)",
+		"baseline sesearch (fail-closed: setpcap AND setgid absent for buildkitd self in BOTH setpcap-bearing classes; setcap absent on self process)",
 		"the load delta is exactly {setpcap setgid} on self cap_userns",
+		"the load delta is exactly {setcap} on self process",
 		"the capability class is unchanged: still no rules",
 		"module store: docker_helper_diag_cap absent => OK",
 		"absence restored",
+		"class=process setcap absence restored",
 		"policy sha before cap-module load",
 		",prctl,capset,setgroups,setgid,setregid,setresgid \\",
 		"p21e3_capwatch",

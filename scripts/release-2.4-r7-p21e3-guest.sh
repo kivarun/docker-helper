@@ -2958,25 +2958,25 @@ EOF
   fi
   log "dedicated-type module loaded: docker_helper_diag_keys (/proc/keys getattr and mounton, /proc/timer_list getattr and mounton)"
 
-  # --- R7 MNB26: the two-rule capability diagnostic module ---
-  # The MNB24/25 terminal evidence put the bounding-set application on
-  # self cap_userns setpcap and the setgroups stage on self cap_userns
-  # setgid (audit 1233/1243 correlation). The module carries EXACTLY the
-  # two reviewed rules and nothing else; the load gate proves the source
-  # absence (both tokens, both setpcap-bearing classes), the exact
-  # two-token delta at load, and the SHA restoration at unload. The
-  # dac_override/fsetid/setfcap families stay WITNESSED only (no rules).
+  # --- R7 MNB27: the three-rule capability diagnostic module ---
+  # MNB24 setpcap + MNB26 setgid (both self cap_userns) are kept; MNB27
+  # adds the reviewed self process setcap (the capset EACCES tie of
+  # audit 1260). The module carries EXACTLY the three reviewed rules;
+  # the load gate proves the source absence (both cap tokens in both
+  # setpcap-bearing classes, the setcap token on self process), the
+  # exact deltas at load per class, and the SHA restoration at unload.
+  # dac_override/fsetid/setuid/relabelfrom stay WITNESSED only (no rules).
   DIAG_CAP_LOG="$EVIDENCE_DIR/p21e3-diag-cap.log"
   DIAG_CAP_CIL="$EVIDENCE_DIR/docker_helper_diag_cap.cil"
   DIAG_CAP_PRELOAD_SHA="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
   {
-    echo "== the two-rule capability diagnostic module: docker_helper_diag_cap (temporary) =="
+    echo "== the three-rule capability diagnostic module: docker_helper_diag_cap (temporary) =="
     echo "committed-policy delta: NONE (temporary module only; unload verified at the teardown)"
-    echo "reviewed rules (exactly two, self cap_userns): setpcap (MNB24) + setgid (MNB26)"
-    echo "witness-only tokens (no rule): dac_override fsetid setfcap"
+    echo "reviewed rules (exactly three): self cap_userns setpcap (MNB24); self cap_userns setgid (MNB26); self process setcap (MNB27)"
+    echo "witness-only tokens (no rule): dac_override fsetid setuid setfcap; relabelfrom state tree"
     echo "release-policy .pp sha (must not change): $DIAG_RELEASE_PP_SHA_PRE"
     echo "policy sha before cap-module load: $DIAG_CAP_PRELOAD_SHA"
-    echo "-- baseline sesearch (fail-closed: setpcap AND setgid absent for buildkitd self in BOTH setpcap-bearing classes) --"
+    echo "-- baseline sesearch (fail-closed: setpcap AND setgid absent for buildkitd self in BOTH setpcap-bearing classes; setcap absent on self process) --"
   } > "$DIAG_CAP_LOG"
   DIAG_CAP_ALL_ABSENT=1
   for DIAG_CAP_CLASS in cap_userns capability; do
@@ -2995,6 +2995,23 @@ EOF
       fi
     done
   done
+  # MNB27: the self process setcap baseline (fail-closed token absence)
+  # and the full pre-set process perm set (the delta anchor).
+  DIAG_PROC_Q="$(timeout 60 sesearch -A -ds -dt -s docker_helper_buildkitd_t \
+    -t docker_helper_buildkitd_t -c process -p setcap 2>&1)"
+  DIAG_PROC_V="$(classify_sesearch_query "$?" "$DIAG_PROC_Q")"
+  printf 'class=process token=setcap query (baseline absence)\nclassify=%s\n%s\n' \
+    "$DIAG_PROC_V" "$DIAG_PROC_Q" >> "$DIAG_CAP_LOG"
+  if [ "$DIAG_PROC_V" != 'trusted:perms=|cond-active=none|cond-inactive=none' ]; then
+    echo "DIAG-CAP-GATE: FAIL (baseline setcap on self process is not an authoritative absence: $DIAG_PROC_V)" >> "$DIAG_CAP_LOG"
+    DIAG_CAP_ALL_ABSENT=0
+  else
+    echo "DIAG-CAP-BASE: PASS (class=process authoritative absence of setcap from buildkitd self)" >> "$DIAG_CAP_LOG"
+  fi
+  DIAG_PROCBASE_Q="$(timeout 60 sesearch -A -ds -dt -s docker_helper_buildkitd_t \
+    -t docker_helper_buildkitd_t -c process 2>&1)"
+  DIAG_PROCBASE_PERMS="$(classify_sesearch_query 0 "$DIAG_PROCBASE_Q" | sed -n 's/^trusted:perms=\([^|]*\)|.*/\1/p')"
+  printf 'process-baseline-perms=%s\n' "${DIAG_PROCBASE_PERMS:-<unresolvable>}" >> "$DIAG_CAP_LOG"
   {
     echo "-- baseline buildkitd self cap_userns full perm set (the delta anchor) --"
     echo "QUERY: $(echo 'sesearch -A -ds -dt -s docker_helper_buildkitd_t -t docker_helper_buildkitd_t -c cap_userns')"
@@ -3008,9 +3025,10 @@ EOF
   cat > "$DIAG_CAP_CIL" <<'EOF'
 (allow docker_helper_buildkitd_t self (cap_userns (setpcap)))
 (allow docker_helper_buildkitd_t self (cap_userns (setgid)))
+(allow docker_helper_buildkitd_t self (process (setcap)))
 EOF
   {
-    echo "-- module source (exactly the two reviewed rules) --"
+    echo "-- module source (exactly the three reviewed rules) --"
     cat "$DIAG_CAP_CIL"
     echo "-- install (temporary module only; semodule -i accepts CIL) --"
     semodule -i "$DIAG_CAP_CIL"
@@ -3018,10 +3036,10 @@ EOF
     cat "$DIAG_CAP_LOG"
     p21e3_diag_remove
     p21e3_dontaudit_restore
-    fail "the two-rule capability diagnostic module could not be installed; BLOCKED"
+    fail "the three-rule capability diagnostic module could not be installed; BLOCKED"
   }
   {
-    echo "-- post-install delta (fail-closed: exactly the two reviewed tokens added to cap_userns; capability class must remain unchanged) --"
+    echo "-- post-install delta (fail-closed: exactly the two reviewed tokens on cap_userns, exactly setcap on the pre-set self process anchor; capability class must remain unchanged) --"
     DIAG_CAP_POST_Q="$(timeout 60 sesearch -A -ds -dt -s docker_helper_buildkitd_t \
       -t docker_helper_buildkitd_t -c cap_userns 2>&1)"
     printf 'query-rc=%s\nclassify=%s\n%s\n' "$?" \
@@ -3043,6 +3061,21 @@ EOF
         echo "DIAG-CAP-GATE: PASS (the load delta is exactly {setpcap setgid} on self cap_userns: $DIAG_CAP_GOT)"
       else
         echo "DIAG-CAP-GATE: FAIL (post cap_userns set differs from baseline+{setpcap setgid}: want=[$DIAG_CAP_WANT] got=[$DIAG_CAP_GOT])"
+      fi
+      DIAG_PROCPOST_Q="$(timeout 60 sesearch -A -ds -dt -s docker_helper_buildkitd_t \
+        -t docker_helper_buildkitd_t -c process 2>&1)"
+      DIAG_PROCPOST_PERMS="$(classify_sesearch_query 0 "$DIAG_PROCPOST_Q" | sed -n 's/^trusted:perms=\([^|]*\)|.*/\1/p')"
+      printf 'process-post-perms=%s\n' "${DIAG_PROCPOST_PERMS:-<unresolvable>}"
+      if [ -z "$DIAG_PROCBASE_PERMS" ] || [ -z "$DIAG_PROCPOST_PERMS" ]; then
+        echo "DIAG-CAP-GATE: FAIL (the process baseline or post perm set could not be resolved from the trusted classification)"
+      else
+        DIAG_PROC_WANT="$(printf '%s\n' "$DIAG_PROCBASE_PERMS" setcap | tr ' ' '\n' | sed '/^$/d' | sort | tr '\n' ' ' | sed 's/ $//')"
+        DIAG_PROC_GOT="$(printf '%s\n' "$DIAG_PROCPOST_PERMS" | tr ' ' '\n' | sed '/^$/d' | sort | tr '\n' ' ' | sed 's/ $//')"
+        if [ "$DIAG_PROC_GOT" = "$DIAG_PROC_WANT" ]; then
+          echo "DIAG-CAP-GATE: PASS (the load delta is exactly {setcap} on self process: $DIAG_PROC_GOT)"
+        else
+          echo "DIAG-CAP-GATE: FAIL (post self process set differs from baseline+{setcap}: want=[$DIAG_PROC_WANT] got=[$DIAG_PROC_GOT])"
+        fi
       fi
       if [ -n "$DIAG_CAP_CAPPOST_PERMS" ]; then
         echo "DIAG-CAP-GATE: FAIL (the capability class carries rules after the load; expected none: $DIAG_CAP_CAPPOST_PERMS)"
@@ -3066,9 +3099,9 @@ EOF
   if grep -aq '^DIAG-CAP-GATE: FAIL' "$DIAG_CAP_LOG" || [ "$DIAG_CAP_ALL_ABSENT" != 1 ]; then
     p21e3_diag_remove
     p21e3_dontaudit_restore
-    fail "the two-rule capability module load gate failed; BLOCKED"
+    fail "the three-rule capability module load gate failed; BLOCKED"
   fi
-  log "two-rule capability module loaded: docker_helper_diag_cap (buildkitd self cap_userns setpcap+setgid; delta {setpcap setgid} verified)"
+  log "three-rule capability module loaded: docker_helper_diag_cap (self cap_userns setpcap+setgid, self process setcap; deltas {setpcap setgid} and {setcap} verified)"
 
   # --- fresh-procfs orientation probe (private mount namespace) ---
   # genfscon decides the label at inode initialization, so a FRESH procfs
@@ -3698,6 +3731,14 @@ if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
         fi
       done
     done
+    DIAG_PROC_UQ="$(timeout 60 sesearch -A -ds -dt -s docker_helper_buildkitd_t \
+      -t docker_helper_buildkitd_t -c process -p setcap 2>&1)"
+    DIAG_PROC_UV="$(classify_sesearch_query "$?" "$DIAG_PROC_UQ")"
+    if [ "$DIAG_PROC_UV" != 'trusted:perms=|cond-active=none|cond-inactive=none' ]; then
+      echo "DIAG-UNLOAD-GATE: FAIL (setcap on self process is still present: $DIAG_PROC_UV)"
+    else
+      echo "DIAG-UNLOAD-GATE: PASS (class=process setcap absence restored)"
+    fi
     echo "-- dedicated types and genfscon absence --"
     if ! p21e3_diag_proc_types_absent; then
       echo "DIAG-UNLOAD-GATE: FAIL (dedicated-type and genfscon absence could not be verified)"
