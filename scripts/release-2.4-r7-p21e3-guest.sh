@@ -4401,10 +4401,6 @@ if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ] || [ "${R7_MNB30:-0}" = 1 ]; then
         *) WL_POLICY_TYPE=security_t ;;
       esac
       for WL_ROW in \
-        'docker_helper_builder_workload_t.docker_helper_builder_state_t:file:execute' \
-        'docker_helper_builder_workload_t.docker_helper_builder_state_t:file:entrypoint' \
-        'docker_helper_builder_workload_t.docker_helper_builder_state_t:dir:search' \
-        'docker_helper_buildkitd_t.docker_helper_builder_workload_t:process:transition' \
         "docker_helper_buildkitd_t.${WL_SEINFO_TYPE}:file:execute" \
         "docker_helper_buildkitd_t.${WL_POLICY_TYPE}:file:read" ; do
         WL_S="${WL_ROW%%.*}"
@@ -4420,6 +4416,16 @@ if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ] || [ "${R7_MNB30:-0}" = 1 ]; then
           echo "DIAG-UNLOAD-GATE: PASS ($WL_ROW absence restored)"
         fi
       done
+      # The workload-type rows are absent in a STRONGER sense: after the
+      # unload, docker_helper_builder_workload_t does not exist at all, so
+      # a sesearch query naming it errors (rc=1), not "no rules" — the
+      # type absence itself is the unload proof of those rows (the
+      # seinfo Types: 0 form, the round's established absence evidence).
+      if seinfo -xt docker_helper_builder_workload_t 2>/dev/null | grep -aqx 'Types: 0'; then
+        echo "DIAG-UNLOAD-GATE: PASS (docker_helper_builder_workload_t does not exist after the unload; the workload-type rows cannot exist)"
+      else
+        echo "DIAG-UNLOAD-GATE: FAIL (docker_helper_builder_workload_t still exists after the unload)"
+      fi
       echo "-- the workload type itself must be gone again (the wrapper's rolecheck refuses it) --"
       if seinfo --role_types docker_helper_builder_workload_t 2>/dev/null | grep -aqw system_r; then
         echo "DIAG-UNLOAD-GATE: FAIL (the workload roletype survives the unload)"
