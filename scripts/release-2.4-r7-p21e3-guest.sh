@@ -3934,9 +3934,14 @@ done
 printf '%s\n' "$STATUS" > "$EVIDENCE_DIR/build-status.json"
 # The op log is the wrapper's own refusal/error surface; it is captured
 # IMMEDIATELY at the terminal so a mid-diagnosis reboot cannot lose the
-# precise refused reason behind the BUILD=failed result.
+# precise refused reason behind the BUILD=failed result. The audit window
+# is drained at the same point for the same reason: the window records are
+# the kernel-decision evidence (e.g. the measured seinfo read denial) a
+# reboot would otherwise lose.
 curl --silent --max-time 5 --unix-socket "$DH_SOCK" -H "Authorization: Bearer $TOKEN" \
   "http://localhost/operations/$OP/logs?offset=0" > "$EVIDENCE_DIR/operation-terminal.log" 2>&1 || true
+audit_window_drain "$EVIDENCE_DIR/p21e3-window-records.log" || true
+touch "$EVIDENCE_DIR/window-drained-at-terminal"
 JEND="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 case "$STATUS" in
   *'"succeeded"'*|*'"failed"'*) : ;;
@@ -4498,7 +4503,11 @@ if [ "$AUD_WINDOW_IDENTITY" != "proven" ]; then
   measure_abandon
   fail "audit window identity unproven ($AUD_WINDOW_IDENTITY); the measurement decides BLOCKED"
 fi
-audit_window_drain "$EVIDENCE_DIR/p21e3-window-records.log" || true
+if [ -f "$EVIDENCE_DIR/window-drained-at-terminal" ]; then
+  log "audit window drained already at the build terminal (the reboot-proof capture); no second drain"
+else
+  audit_window_drain "$EVIDENCE_DIR/p21e3-window-records.log" || true
+fi
 {
   echo "window identity: $AUD_WINDOW_IDENTITY"
   echo "window start offset: $AUD_START (aligned to lastbyte=$AUD_LASTBYTE size=$AUD_SIZE)"
