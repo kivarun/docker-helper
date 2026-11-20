@@ -3260,7 +3260,7 @@ EOF
 (allow docker_helper_buildkitd_t ${WL_SEINFO_TOOL_TYPE} (process (transition)))
 (allow ${WL_SEINFO_TOOL_TYPE} ${WL_SEINFO_TOOL_FILE} (file (entrypoint)))
 (typetransition docker_helper_buildkitd_t ${WL_SEINFO_TOOL_FILE} process ${WL_SEINFO_TOOL_TYPE})
-(permissivedomain ${WL_SEINFO_TOOL_TYPE})
+(typepermissive ${WL_SEINFO_TOOL_TYPE})
 (roletype system_r ${WL_SEINFO_TOOL_TYPE})
 (typeattributeset domain (${WL_SEINFO_TOOL_TYPE}))"
   {
