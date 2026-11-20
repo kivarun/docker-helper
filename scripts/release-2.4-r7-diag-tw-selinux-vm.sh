@@ -69,7 +69,20 @@ case "$R7_MODE" in
   # getattr and mounton), one bounded enforcing build with OCI path
   # inventory, then verified unload.
   p21e3diag-keys) GUEST_SCRIPT='release-2.4-r7-p21e3-guest.sh' ;;
-  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d | p21e | p21e3 | p21e3probe | p21e3proc-sys | p21e3proc-file | p21e3proc-keys | p21e3diag-keys)" ;;
+  # mnb30 = the FIRST TRACER-FREE transition round (the same p21e3 guest
+  # script, MNB30 branch): NO ptrace at any boundary — the /proc sampler
+  # and the audit window are the instruments. Hard preflight gates: the
+  # candidate RPM's runtime member extracted and byte-pinned, the four
+  # loader checks plus the create probe on the EXTRACTED binary, and the
+  # seinfo --role_types workload roletype calibration. The measured build
+  # runs under the temporary three-rule capability module only (MNB24/26/27
+  # grants, unload verified at the teardown); the transition verdict comes
+  # from the live sampler contexts (composed workload domain + MCS
+  # category, Cap*, NoNewPrivs) and the libselinux kernel-decision matrix
+  # over the observed categories, including the cross-operation rootfs
+  # denial.
+  mnb30) GUEST_SCRIPT='release-2.4-r7-p21e3-guest.sh' ;;
+  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d | p21e | p21e3 | p21e3probe | p21e3proc-sys | p21e3proc-file | p21e3proc-keys | p21e3diag-keys | mnb30)" ;;
 esac
 
 log()  { printf '%s %s\n' "$PREFIX" "$*"; }
@@ -99,6 +112,15 @@ vm_selinux_two_stage_docker
 log '== 7. transfer and run the R7 guest diagnostic'
 vm_ssh 'rm -rf /tmp/r7-diag && mkdir -p /tmp/r7-diag'
 vm_scp "$SCRIPT_DIR/$GUEST_SCRIPT" opc@127.0.0.1:/tmp/r7-diag/release-2.4-r7-diag-guest.sh
+if [ "$R7_MODE" = "mnb30" ]; then
+  # The loader harness rides along (the guest runs it against the runtime
+  # member extracted from the candidate RPM), together with the payload
+  # staging owner (the single pins authority for the runtime byte-pin).
+  vm_scp "$SCRIPT_DIR/payload-runc-loader-harness.sh" \
+    opc@127.0.0.1:/tmp/r7-diag/payload-runc-loader-harness.sh
+  vm_scp "$SCRIPT_DIR/../build-buildkit-payload.sh" \
+    opc@127.0.0.1:/tmp/r7-diag/build-buildkit-payload.sh
+fi
 if [ "$R7_MODE" = "bprime" ]; then
   # The B′ gate evaluator rides along: the guest invokes it for the
   # machine-readable verdict; the host re-uses it for the job gate below.
@@ -147,6 +169,7 @@ export R7_P21E3_PROC_SYS=$( [ "$R7_MODE" = p21e3proc-sys ] && echo 1 || echo 0 )
 export R7_P21E3_PROC_FILE=$( [ "$R7_MODE" = p21e3proc-file ] && echo 1 || echo 0 )
 export R7_P21E3_PROC_KEYS=$( [ "$R7_MODE" = p21e3proc-keys ] && echo 1 || echo 0 )
 export R7_P21E3_DIAG_KEYS=$( [ "$R7_MODE" = p21e3diag-keys ] && echo 1 || echo 0 )
+export R7_MNB30=$( [ "$R7_MODE" = mnb30 ] && echo 1 || echo 0 )
 bash /tmp/r7-diag/release-2.4-r7-diag-guest.sh
 RMT
   GUEST_RC=$?
@@ -262,7 +285,7 @@ RMT
         log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
         ;;
     esac
-  elif [ "$R7_MODE" = "p21e3" ] || [ "$R7_MODE" = "p21e3probe" ] || [ "$R7_MODE" = "p21e3proc-sys" ] || [ "$R7_MODE" = "p21e3proc-file" ] || [ "$R7_MODE" = "p21e3proc-keys" ] || [ "$R7_MODE" = "p21e3diag-keys" ]; then
+  elif [ "$R7_MODE" = "p21e3" ] || [ "$R7_MODE" = "p21e3probe" ] || [ "$R7_MODE" = "p21e3proc-sys" ] || [ "$R7_MODE" = "p21e3proc-file" ] || [ "$R7_MODE" = "p21e3proc-keys" ] || [ "$R7_MODE" = "p21e3diag-keys" ] || [ "$R7_MODE" = "mnb30" ]; then
     # The BUILD result line and the VERDICT line are matched SEPARATELY:
     # the previous tail -2 | tr '\n' ' ' fabrication produced a string
     # PREFIXED with R7-P21E3-BUILD=..., so the case below never matched

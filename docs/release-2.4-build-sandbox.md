@@ -508,9 +508,15 @@ provisioner `5ede306828ebffea76e095c539b4b2b930d7b2d333e101d2e08ae89c03594945`;
 pinned BuildKit v0.33.0
 (`157da954fa081d9ec4f063d62029fbbf12437c1d47ab63080594eae5a85b36f2` buildkitd,
 `0b45ae3696f836bf711dbd78138e403924d7733f0b2328ba29a7fcf9ad5f1dfd` buildctl,
-`0acdd302ddc5540b2e445b683661bfada9935c702f9008ffb0481abcda16c9b4`
+`9c2881529eaf16c662ad02127a846df41a243af7c57cd64d6dd95017a13c31c5`
 buildkit-runc), tarball digest
 `b6242896d343100808dcbe37565caf381e0a444a6a83d7255926bb1519248ead`.
+The buildkit-runc pin records the staged payload member, not the upstream
+tarball member: since MNB29c/MNB30 the staging recipe builds the pinned
+runc v1.4.3 source with the committed loader patch
+(`packaging/runc-loader/runc-loader.patch`), so the deployed digest is the
+PATCHED loader bytes (the P4-A1 run itself carried the unpatched upstream
+`0acdd302ddc5540b2e445b683661bfada9935c702f9008ffb0481abcda16c9b4`).
 Environments: Ubuntu 24.04.5 LTS, kernel 6.17.0-1022-azure, systemd 255,
 `apparmor_restrict_unprivileged_userns=1` (unchanged default; the passing
 path does not relax it); openSUSE Tumbleweed 20260922, kernel 7.2.6-1,

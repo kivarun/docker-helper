@@ -949,11 +949,20 @@ fi
 # ---------------------------------------------------------------------------
 if [ ! -x "$EVIDENCE_DIR/p21e3_proc_sampler" ] || [ ! -f "$STATE_DIR/sec4" ]; then
 log "=== section 4: tooling build ==="
-if ! command -v gcc >/dev/null 2>&1 || ! command -v strace >/dev/null 2>&1; then
-  cap p21e3-toolchain 6 timeout 300 zypper --non-interactive install -y gcc strace acl
+# MNB30 tracer-free mode: strace is NOT a required tool (the exec boundary
+# is measured WITHOUT ptrace — the /proc sampler and the audit window are
+# the instruments). The build-time necessity stays gcc-only.
+if [ "${R7_MNB30:-0}" != 1 ]; then
+  if ! command -v gcc >/dev/null 2>&1 || ! command -v strace >/dev/null 2>&1; then
+    cap p21e3-toolchain 6 timeout 300 zypper --non-interactive install -y gcc strace acl
+  fi
+  command -v strace >/dev/null 2>&1 || fail "strace unavailable"
+else
+  if ! command -v gcc >/dev/null 2>&1; then
+    cap p21e3-toolchain 6 timeout 300 zypper --non-interactive install -y gcc acl
+  fi
 fi
 command -v gcc >/dev/null 2>&1 || fail "gcc unavailable"
-command -v strace >/dev/null 2>&1 || fail "strace unavailable"
 
 cat > "$EVIDENCE_DIR/p21e3_proc_sampler.c" <<'CEOF'
 /* p21e3_proc_sampler.c — the integration-measurement process sampler.
@@ -1134,7 +1143,9 @@ int main(int argc, char **argv) {
                 char *cl = strrchr(statline, ')');
                 if (cl) sscanf(cl + 2, " %*c %*d %lld", &ppid);
             }
-            if (!relevant(comm) && !relevant(exe) && !relevant(argv0)) continue;
+            if (!relevant(comm) && !relevant(exe) && !relevant(argv0) &&
+                strstr(ctx, "docker_helper_builder_workload_t") == NULL)
+                continue;
             wallstamp(ts, sizeof ts);
             fprintf(lg, "PROC %s t=%lld pid=%d ppid=%lld comm=%s exe=%s argv0=%s ctx=%s\n",
                     ts, t, pid, ppid, comm, exe, argv0, ctx);
@@ -1214,6 +1225,50 @@ int main(int argc, char **argv) {
                 snprintf(nsline, sizeof nsline, "/proc/%s/ns/mnt", e->d_name);
                 if (readlinkstr(nsline, nsid, sizeof nsid) > 0)
                     fprintf(lg, "PROCDETAIL %s t=%lld pid=%d ns_mnt=%s\n", ts, t, pid, nsid);
+            }
+            /* MNB30: the TRANSITIONED workload process — its kernel context
+             * carries the composed workload domain (docker_helper_builder_
+             * workload_t). No ptrace: the /proc snapshot below reads the
+             * process OWN status file, once per pid, in the same sweep that
+             * first observed it (the context itself is in every PROC row). */
+            else if (strstr(ctx, "docker_helper_builder_workload_t") != NULL) {
+                static int w_seen[128];
+                static int w_seen_n;
+                int was_seen = 0;
+                for (int i = 0; i < w_seen_n; i++)
+                    if (w_seen[i] == pid) { was_seen = 1; break; }
+                if (!was_seen && w_seen_n < 128) {
+                    w_seen[w_seen_n++] = pid;
+                    char pline[64], lb[512], nsline[128], nsid[256];
+                    FILE *mf;
+                    snprintf(pline, sizeof pline, "/proc/%s/status", e->d_name);
+                    if ((mf = fopen(pline, "r")) != NULL) {
+                        while (fgets(lb, sizeof lb, mf)) {
+                            if (strncmp(lb, "Uid:", 4) == 0 || strncmp(lb, "Gid:", 4) == 0 ||
+                                strncmp(lb, "Cap", 3) == 0 ||
+                                strncmp(lb, "NoNewPrivs:", 11) == 0 ||
+                                strncmp(lb, "Seccomp:", 8) == 0) {
+                                lb[strcspn(lb, "\n")] = 0;
+                                fprintf(lg, "PROCDETAIL-WORKLOAD %s t=%lld pid=%d %s\n",
+                                        ts, t, pid, lb);
+                            }
+                        }
+                        fclose(mf);
+                    }
+                    snprintf(pline, sizeof pline, "/proc/%s/uid_map", e->d_name);
+                    if ((mf = fopen(pline, "r")) != NULL) {
+                        if (fgets(lb, sizeof lb, mf))
+                            fprintf(lg, "PROCDETAIL-WORKLOAD %s t=%lld pid=%d uid_map=%s",
+                                    ts, t, pid, lb);
+                        fclose(mf);
+                    }
+                    snprintf(pline, sizeof pline, "/proc/%s/ns/user", e->d_name);
+                    if (readlinkstr(pline, nsid, sizeof nsid) > 0)
+                        fprintf(lg, "PROCDETAIL-WORKLOAD %s t=%lld pid=%d ns_user=%s\n", ts, t, pid, nsid);
+                    snprintf(pline, sizeof pline, "/proc/%s/ns/mnt", e->d_name);
+                    if (readlinkstr(pline, nsid, sizeof nsid) > 0)
+                        fprintf(lg, "PROCDETAIL-WORKLOAD %s t=%lld pid=%d ns_mnt=%s\n", ts, t, pid, nsid);
+                }
             }
             /* The buildkitd credential capture (R4-P3-P5-R1 step 3): the
              * live buildkitd's uid_map/gid_map/status and namespace
@@ -2177,10 +2232,15 @@ measure_abandon() {
 DIAG_MODULE=docker_helper_diag_mounton
 DIAG_ACTIVE=0
 DIAG_REMOVED=0
-DIAG_MODULES="$DIAG_MODULE"
-if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
-  DIAG_MODULES="$DIAG_MODULES docker_helper_diag_keys"
-  DIAG_MODULES="$DIAG_MODULES docker_helper_diag_cap"
+DIAG_MODULES=""
+if [ "${R7_MNB30:-0}" = 1 ]; then
+  # MNB30: the ONLY temporary policy state is the three-rule capability module
+  # (the MNB24/26/27 grants; temporary exactly as before).
+  DIAG_MODULES="docker_helper_diag_cap"
+elif [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
+  DIAG_MODULES="$DIAG_MODULE docker_helper_diag_keys docker_helper_diag_cap"
+else
+  DIAG_MODULES="$DIAG_MODULE"
 fi
 p21e3_diag_remove() {
   [ "${DIAG_ACTIVE:-0}" = 1 ] || return 0
@@ -2723,6 +2783,15 @@ p21e3_diag_proc_types_absent() {
   fi
   echo "genfscon: /keys and /timer_list absent (successful seinfo --genfscon query first)"
 }
+if [ "${R7_MNB30:-0}" = 1 ]; then
+  # MNB30: the mounton module rows are NOT part of this round — nothing is
+  # compiled or installed here. The ONLY temporary policy state is the
+  # three-rule capability module below (the MNB24/26/27 grants, temporary
+  # exactly as before; the unload is verified at the teardown).
+  log "mnb30 mode: the seven-row mounton module is not loaded (tracer-free transition round)"
+  DIAG_RELEASE_PP_SHA_PRE="$(sha256sum /usr/share/selinux/docker_helper.pp 2>/dev/null | awk '{print $1}')"
+fi
+if [ "${R7_MNB30:-0}" != 1 ]; then
 if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
   echo "-- baseline pre-check (R4-P3-P6-MNB22): dedicated types and genfscon rows --" >> "$DIAG_LOG"
   if ! p21e3_diag_proc_types_absent >> "$DIAG_LOG"; then
@@ -2863,6 +2932,7 @@ if [ "$DIAG_LOAD_OK" != 1 ]; then
   fail "the diagnostic module load gate failed; BLOCKED"
 fi
 log "diagnostic module loaded: $DIAG_MODULE (exactly the seven reviewed allow rules; removal verified at the teardown)"
+fi  # end of the mnb30 mandatory skip of the seven-row module
 
 # --- the R4-P3-P6-MNB22 dedicated-type CIL block (diag-keys mode only) ---
 # Keep the measured /keys rules and add a dedicated type for /timer_list
@@ -2871,7 +2941,9 @@ log "diagnostic module loaded: $DIAG_MODULE (exactly the seven reviewed allow ru
 # `semodule -i` consumes the CIL source directly (no TE compilation). The
 # store entry is named docker_helper_diag_keys and is removed+verified
 # together with the row module at the teardown.
-if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
+if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ] || [ "${R7_MNB30:-0}" = 1 ]; then
+  # --- R4-P3-P6-MNB22 dedicated-type CIL module: diag-keys mode only ---
+  if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
   DIAG_KEYS_LOG="$EVIDENCE_DIR/p21e3-diag-keys.log"
   DIAG_KEYS_CIL="$EVIDENCE_DIR/docker_helper_diag_keys.cil"
   DIAG_KEYS_PRELOAD_SHA="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
@@ -2957,6 +3029,7 @@ EOF
     fail "the dedicated-type module load gate failed; BLOCKED"
   fi
   log "dedicated-type module loaded: docker_helper_diag_keys (/proc/keys getattr and mounton, /proc/timer_list getattr and mounton)"
+  fi  # end of the diag-keys-only dedicated-type module
 
   # --- R7 MNB27: the three-rule capability diagnostic module ---
   # MNB24 setpcap + MNB26 setgid (both self cap_userns) are kept; MNB27
@@ -3027,6 +3100,7 @@ EOF
 (allow docker_helper_buildkitd_t self (cap_userns (setgid)))
 (allow docker_helper_buildkitd_t self (process (setcap)))
 EOF
+  DIAG_ACTIVE=1
   {
     echo "-- module source (exactly the three reviewed rules) --"
     cat "$DIAG_CAP_CIL"
@@ -3103,6 +3177,114 @@ EOF
   fi
   log "three-rule capability module loaded: docker_helper_diag_cap (self cap_userns setpcap+setgid, self process setcap; deltas {setpcap setgid} and {setcap} verified)"
 
+  # --- R7 MNB30: the temporary WORKLOAD-DOMAIN module (diagnostic; the
+  # --- MNB28 scheme (b) row set, temporary exactly like the cap module).
+  # --- The wrapper's OWN production rolecheck (seinfo --role_types) needs
+  # --- the workload type to exist and be authorized for system_r in the
+  # --- LOADED policy; without this module the composed transition cannot
+  # --- be measured at all. The rows are exactly the MNB28/R2 decision-row
+  # --- set (b): the two allow rows on the state-tree files, the kernel
+  # --- necessities for the explicit (runtime SetExecLabel) exec — the
+  # --- MNB27-measured execute denial (AVC 1246: buildkitd_t -> busybox
+  # --- state_t:s0:c1) narrowed to the same-op snapshot files, the
+  # --- entrypoint face of the NEW domain, and the buildkitd->workload
+  # --- process transition permission — NO type_transition (variant (b),
+  # --- the runtime composes the label), NO map-less widening, NO
+  # --- signal/tty/other anticipation (MNB28 section 6: follow-up surfaces
+  # --- surface as measured denials first). The domain joins the
+  # --- mcs_constrained_type attribute so the cross-operation rootfs
+  # --- denial is carried by the MCS layer itself.
+  if [ "${R7_MNB30:-0}" = 1 ]; then
+  DIAG_WL_LOG="$EVIDENCE_DIR/p21e3-mnb30-workload-module.log"
+  DIAG_WL_CIL="$EVIDENCE_DIR/docker_helper_diag_workload.cil"
+  DIAG_WL_PRELOAD_SHA="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
+  DIAG_MODULES="$DIAG_MODULES docker_helper_diag_workload"
+  cat > "$DIAG_WL_CIL" <<'EOF'
+(type docker_helper_builder_workload_t)
+(roletype system_r docker_helper_builder_workload_t)
+(typeattributeset domain (docker_helper_builder_workload_t))
+(typeattributeset mcs_constrained_type (docker_helper_builder_workload_t))
+(allow docker_helper_buildkitd_t docker_helper_builder_state_t (file (execute)))
+(allow docker_helper_builder_workload_t docker_helper_builder_state_t (file (execute entrypoint map open read getattr)))
+(allow docker_helper_builder_workload_t docker_helper_builder_state_t (dir (search)))
+(allow docker_helper_buildkitd_t docker_helper_builder_workload_t (process (transition)))
+EOF
+  {
+    echo "== the MNB30 temporary workload-domain module: docker_helper_diag_workload =="
+    echo "committed-policy delta: NONE (temporary module only; unload verified at the teardown)"
+    echo "reviewed scheme: MNB28 decision row (b) + the kernel necessities for the explicit exec (the measured AVC 1246 execute denial surface)"
+    echo "released-policy .pp sha (must not change): $DIAG_RELEASE_PP_SHA_PRE"
+    echo "guest version: $(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME ($VERSION_ID)")"
+    echo "policy sha before workload-module load: $DIAG_WL_PRELOAD_SHA"
+    echo "-- module source --"
+    cat "$DIAG_WL_CIL"
+    echo "-- install (temporary module only; semodule -i accepts CIL) --"
+    semodule -i "$DIAG_WL_CIL"
+  } > "$DIAG_WL_LOG" 2>&1 || {
+    cat "$DIAG_WL_LOG"
+    p21e3_diag_remove
+    p21e3_dontaudit_restore
+    fail "the MNB30 workload-domain module could not be installed; BLOCKED"
+  }
+  DIAG_WL_SHA="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
+  {
+    echo "-- post-install verification (fail-closed; the wrapper's own rolecheck and the exec face) --"
+    echo "policy sha with the workload module loaded: $DIAG_WL_SHA (pre-load: $DIAG_WL_PRELOAD_SHA; must differ)"
+    echo "-- rolecheck surface (the EXACT production reading: seinfo --role_types) --"
+    seinfo --role_types docker_helper_builder_workload_t 2>&1 || true
+    WL_ROLE_RC=0
+    seinfo --role_types docker_helper_builder_workload_t 2>/dev/null | grep -aqw system_r || WL_ROLE_RC=1
+    if [ "$WL_ROLE_RC" = 0 ]; then
+      echo "WL-GATE: PASS (seinfo --role_types carries the system_r authorization entry)"
+    else
+      echo "WL-GATE: FAIL (no system_r roletype entry for the workload domain)"
+    fi
+    echo "-- attribute membership (the MCS layer must constrain the workload domain) --"
+    if seinfo -x docker_helper_builder_workload_t 2>&1 | grep -aq mcs_constrained_type; then
+      echo "WL-GATE: PASS (docker_helper_builder_workload_t is an mcs_constrained_type member)"
+    else
+      echo "WL-GATE: FAIL (the workload domain does not join mcs_constrained_type; the cross-op denial would not be carried by MCS)"
+    fi
+    echo "-- TE row surface (the MNB28 (b) row set + the kernel necessities) --"
+    for WL_ROW in \
+      'docker_helper_buildkitd_t.docker_helper_builder_state_t:file:execute' \
+      'docker_helper_builder_workload_t.docker_helper_builder_state_t:file:execute' \
+      'docker_helper_builder_workload_t.docker_helper_builder_state_t:file:entrypoint' \
+      'docker_helper_builder_workload_t.docker_helper_builder_state_t:file:map' \
+      'docker_helper_builder_workload_t.docker_helper_builder_state_t:file:open' \
+      'docker_helper_builder_workload_t.docker_helper_builder_state_t:file:read' \
+      'docker_helper_builder_workload_t.docker_helper_builder_state_t:file:getattr' \
+      'docker_helper_builder_workload_t.docker_helper_builder_state_t:dir:search' \
+      'docker_helper_buildkitd_t.docker_helper_builder_workload_t:process:transition'; do
+      WL_S="${WL_ROW%%.*}"
+      WL_REST="${WL_ROW#*.}"
+      WL_T="$(printf '%s\n' "$WL_REST" | cut -d: -f1)"
+      WL_CLASS="$(printf '%s\n' "$WL_REST" | cut -d: -f2)"
+      WL_P="$(printf '%s\n' "$WL_REST" | cut -d: -f3)"
+      WL_Q="$(timeout 60 sesearch -A -s "$WL_S" -t "$WL_T" -c "$WL_CLASS" -p "$WL_P" 2>&1)"
+      WL_RC=$?
+      WL_V="$(classify_sesearch_query "$WL_RC" "$WL_Q")"
+      case "$WL_V" in
+        trusted:*|'trusted...')
+          echo "WL-GATE: PASS ($WL_ROW: $WL_V)" ;;
+        *)
+          echo "WL-GATE: FAIL ($WL_ROW: $WL_V)"; DIAG_WL_ALL=0 ;;
+      esac
+    done
+    echo "-- release-policy .pp sha (post install; must be unchanged): $(sha256sum /usr/share/selinux/docker_helper.pp 2>/dev/null | awk '{print $1}')"
+  } >> "$DIAG_WL_LOG" 2>&1
+  cat "$DIAG_WL_LOG"
+  if [ "$DIAG_WL_SHA" = "$DIAG_WL_PRELOAD_SHA" ]; then
+    echo "WL-GATE: FAIL (policy sha unchanged after the install; the module load is unproven)" >> "$DIAG_WL_LOG"
+  fi
+  if grep -aq '^WL-GATE: FAIL' "$DIAG_WL_LOG" || [ "$DIAG_WL_SHA" = "$DIAG_WL_PRELOAD_SHA" ]; then
+    p21e3_diag_remove
+    p21e3_dontaudit_restore
+    fail "the MNB30 workload-domain module load gate failed; BLOCKED"
+  fi
+  log "MNB30 workload-domain module loaded: docker_helper_diag_workload (rolecheck surface, mcs attribute, and the exact MNB28 (b) row set verified)"
+  fi  # end of the MNB30 temporary workload-domain module
+
   # --- fresh-procfs orientation probe (private mount namespace) ---
   # genfscon decides the label at inode initialization, so a FRESH procfs
   # instance created after the policy load must show the dedicated type.
@@ -3110,6 +3292,8 @@ EOF
   # namespace (the init mount namespace is never touched); its failure is
   # recorded as a limitation. The post-pivot syscall trace is the authority
   # on whether runc reaches and completes the mask.
+  # (diag-keys mode only; the MNB30 round loads no dedicated procfs type.)
+  if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
   PROBE_LOG="$EVIDENCE_DIR/p21e3-keys-freshproc.log"
   {
     echo "== fresh procfs instance label probe (private mnt namespace) =="
@@ -3137,8 +3321,13 @@ EOF
     log "fresh-procfs probe: at least one dedicated label is unconfirmed (orientation)"
   fi
 
+  else
+    log "fresh-procfs probe: not part of this round mode (no dedicated procfs type loaded)"
+  fi  # end of the diag-keys-only fresh-procfs probe
+
   # --- R7 MNB23: the runc-state kernel-decision matrix (the candidate's
-  # --- own production grants; the loaded policy bytes decide) ---
+  # --- own production grants; the loaded policy bytes decide) --- (diag-keys mode only)
+  if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
   # security_compute_av_raw over the categorized contexts for the
   # dedicated type created by the candidate's own type_transition: the
   # same-category pairs must resolve ALLOW for the file cycle's
@@ -3295,7 +3484,149 @@ CEOF
   echo "R7-P21E3-RUNCSTATE-MATRIX=PASS" >> "$KC_LOG"
   cat "$KC_LOG"
   log "MNB23 kernel-decision matrix: PASS (same-category cycle allow; cross-category deny; all rows decided, no permissive)"
-fi
+  fi  # end of the diag-keys-only MNB23 matrix
+
+  # --- R7 MNB30 preflight: the pinned runtime byte-pin and the seinfo
+  # --- roletype calibration, both HARD gates on the tracer-free
+  # --- transition round. The four loader checks run against the runtime
+  # --- binary EXTRACTED FROM THE CANDIDATE RPM (not the installed path),
+  # --- binding the payload bytes to the loader contract before the round
+  # --- measures the real managed run.
+  if [ "${R7_MNB30:-0}" = 1 ]; then
+  # gr is computed in the state-gated section 3; a same-boot re-entry that
+  # skipped section 3 doesn't set it — re-derive from the installed bytes
+  # instead of relying on the marker.
+  gr="${gr:-$(sha256sum /usr/libexec/docker-helper/buildkit/runtime/buildkit-runc | awk '{print $1}')}"
+  # The member extraction is also state-gated (section 3); re-extract for a
+  # same-boot re-entry so the byte-pin never reads an older, unrelated tree.
+  if [ "${RPM_MEMBERS_OK:-0}" != 1 ] || \
+     [ ! -s "${RPM_MEMBERS_DIR:-}/extract/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc" ]; then
+    RPM_MEMBERS_DIR="$(mktemp -d "$STATE_DIR/mnb30-members.XXXXXX")"
+    if extract_p21e3_rpm_members "$ARTIFACT" "$RPM_MEMBERS_DIR"; then
+      RPM_MEMBERS_OK=1
+    else
+      RPM_MEMBERS_OK=0
+    fi
+  fi
+  MNB30_LOG="$EVIDENCE_DIR/p21e3-mnb30-preflight.log"
+  {
+    echo "== MNB30 preflight: extracted-RPM runtime pin + loader harness + seinfo roletype =="
+    if [ "$RPM_MEMBERS_OK" != 1 ] || [ ! -s "$RPM_MEMBERS_DIR/extract/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc" ]; then
+      echo "MNB30-RUNTIME-EXTRACT: FAIL (the runtime member is not extracted from the candidate RPM)"
+      echo "MNB30-RUNTIME-PIN=FAIL"
+      echo "MNB30-SEINFO=FAIL"
+      echo "MNB30-HARNESS=FAIL"
+      printf 'R7-MNB30-VERDICT=BLOCKED:runtime-extract\n'
+    else
+      extracted="$(sha256sum "$RPM_MEMBERS_DIR/extract/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc" | awk '{print $1}')"
+      printf 'extracted-runtime-sha256=%s\n' "$extracted"
+      installed="$(sha256sum /usr/libexec/docker-helper/buildkit/runtime/buildkit-runc | awk '{print $1}')"
+      printf 'installed-runtime-sha256=%s\n' "$installed"
+      OWNER_PIN=""
+      if [ -s /tmp/r7-diag/build-buildkit-payload.sh ]; then
+        OWNER_PIN="$(sed -n 's/^BUILDKIT_RUNC_SHA256="\([0-9a-f]\{64\}\)"/\1/p' /tmp/r7-diag/build-buildkit-payload.sh | head -1)"
+      fi
+      if [ -n "$OWNER_PIN" ]; then
+        if [ "$OWNER_PIN" = "$extracted" ]; then
+          echo "MNB30-OWNER-PIN=MATCH (the staged-owner pin equals the RPM-extracted runtime bytes)"
+        else
+          echo "MNB30-OWNER-PIN=FAIL (owner pin=$OWNER_PIN extracted=$extracted)"
+        fi
+      fi
+      if [ "$extracted" = "$installed" ] && [ "$extracted" = "$gr" ] && [ -n "$OWNER_PIN" ] && [ "$OWNER_PIN" = "$extracted" ]; then
+        echo "MNB30-RUNTIME-PIN=MATCH (extracted==installed==manifest==owner pin)"
+      else
+        echo "MNB30-RUNTIME-PIN=FAIL (extracted=$extracted installed=$installed manifest=$gr owner-pin=${OWNER_PIN:-<unreadable>})"
+      fi
+      echo "-- the four loader checks + the create probe on the EXTRACTED binary --"
+      if [ -s /tmp/r7-diag/payload-runc-loader-harness.sh ]; then
+        the_4c=$(/bin/bash /tmp/r7-diag/payload-runc-loader-harness.sh \
+          "$RPM_MEMBERS_DIR/extract/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc" 2>&1)
+        rc=$?
+        printf '%s\n' "$the_4c"
+        case "$the_4c" in
+          *HANDOFF-HARNESS-EXIT=0*) echo "MNB30-HARNESS=PASS" ;;
+          *) echo "MNB30-HARNESS=FAIL (rc=$rc)" ;;
+        esac
+      else
+        echo "MNB30-HARNESS=FAIL (harness script not transferred)"
+      fi
+      echo "-- seinfo --role_types calibration (the wrapperRoleCheck production reading) --"
+      if command -v seinfo >/dev/null 2>&1; then
+        seinfo --role_types docker_helper_builder_workload_t > "$EVIDENCE_DIR/p21e3-mnb30-seinfo-role-types.txt" 2>&1
+        sinfo_rc=$?
+        cat "$EVIDENCE_DIR/p21e3-mnb30-seinfo-role-types.txt"
+        if [ "$sinfo_rc" = 0 ] && grep -aqw system_r "$EVIDENCE_DIR/p21e3-mnb30-seinfo-role-types.txt"; then
+          echo "MNB30-SEINFO=PASS (rc=0, the workload role authorization entry system_r is present)"
+        else
+          echo "MNB30-SEINFO=FAIL (rc=$sinfo_rc; output above)"
+        fi
+      else
+        echo "MNB30-SEINFO=FAIL (seinfo is not installed in the target guest)"
+      fi
+    fi
+  } > "$MNB30_LOG" 2>&1
+  cat "$MNB30_LOG"
+  if ! grep -aq 'MNB30-RUNTIME-PIN=MATCH' "$MNB30_LOG" \
+     || ! grep -aq 'MNB30-HARNESS=PASS' "$MNB30_LOG" \
+     || ! grep -aq 'MNB30-SEINFO=PASS' "$MNB30_LOG"; then
+    fail "MNB30 preflight gate failed (pin/harness/seinfo); the transition round refuses to start"
+  fi
+  # The remained live neighbor-label snapshot runs BEFORE the build window.
+  MNB30_NEIGHBOR_LOG="$EVIDENCE_DIR/p21e3-mnb30-neighbor-labels.log"
+  ls -Zd /var/lib/docker-helper/ops/*/root/runc-native/executor/*/rootfs \
+    > "$MNB30_NEIGHBOR_LOG" 2>&1 || true
+  fi  # end of the mnb30 preflight
+
+fi  # end of the diag-module-load probe guard (probe mode loaded nothing)
+
+  # --- R7 MNB30: the WORKLOAD kernel-decision matrix — the transition
+  # --- result decision over the live observed categories, including the
+  # --- CROSS-OPERATION rootfs denial (tracer-free: security_compute_av_raw
+  # --- on the loaded policy; the row inputs are the kernel-derived own
+  # --- workload category cN and the LIVE labels of a neighboring
+  # --- operation's executor tree, captured below). Every row must be a
+  # --- decided non-permissive evaluation matching its expectation.
+  if [ "${R7_MNB30:-0}" = 1 ]; then
+  if ! command -v gcc >/dev/null 2>&1 || [ ! -e /usr/include/selinux/selinux.h ]; then
+    timeout 300 zypper --non-interactive install -y gcc libselinux-devel >/dev/null 2>&1 || true
+  fi
+  command -v gcc >/dev/null 2>&1 || fail "gcc unavailable; the workload kernel-decision matrix cannot run"
+  [ -e /usr/include/selinux/selinux.h ] || fail "libselinux headers unavailable"
+  MNB30_MATRIX_LOG="$EVIDENCE_DIR/p21e3-mnb30-workload-av-matrix.log"
+  MNB30_WORKLOAD_CAT="c1"
+  MNB30_NEIGHBOR_CON=""
+  MNB30_OWN_CON=""
+  # The workload subject context/carhibers: derived from the LIVE sampler
+  # evidence when available, else the verified own-context category the
+  # wrapper composes from (the kernel-derived cN carried by the sampler).
+  WORKLOAD_CTX_ROW="$(grep -a 'PROCDETAIL-WORKLOAD' "$EVIDENCE_DIR/p21e3-sampler.log" 2>/dev/null | head -1 || true)"
+  PROC_SAMPLE="$(grep -a 'workload_t' "$EVIDENCE_DIR/p21e3-sampler.log" 2>/dev/null | head -1 || true)"
+  if [ -n "$PROC_SAMPLE" ]; then
+    MNB30_OWN_CON="$(printf '%s\n' "$PROC_SAMPLE" | grep -aoE 'system_u:system_r:docker_helper_builder_workload_t:s0(:c[0-9]+)?' | head -1)"
+  fi
+  # The neighboring operation: the ops tree currently present beside the
+  # measured op (per-op categories are canonical unit state; the neighbor's
+  # LABELS are read live, never assumed).
+  for nb in $(ls -d /var/lib/docker-helper/ops/* 2>/dev/null || true); do
+    name="$(basename "$nb")"
+    [ "$name" != "op_$(cat "$EVIDENCE_DIR/operation-id.log" 2>/dev/null)" ] && [ -n "$name" ] && MNB30_OPS_OTHER=1 || true
+  done
+  # Live labels under the measured and neighboring ops (recorded; the
+  # matrix targets the state-tree extra types below with BOTH categories).
+  ls -Zd /var/lib/docker-helper/ops/*/root/runc-native/executor/*/rootfs \
+    > "$EVIDENCE_DIR/p21e3-mnb30-neighbor-labels.log" 2>&1 || true
+  {
+    echo "== MNB30 workload kernel-decision matrix (loaded policy = candidate + the three temporary cap rules) =="
+    echo "policy sha: $(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
+    echo "-- live sampler workload rows (the observed transition contexts) --"
+    grep -a 'workload_t' "$EVIDENCE_DIR/p21e3-sampler.log" 2>/dev/null | head -12 || echo "(no sampler workload row yet)"
+    echo "-- live executor-tree labels --"
+    cat "$EVIDENCE_DIR/p21e3-mnb30-neighbor-labels.log"
+  } > "$MNB30_MATRIX_LOG" 2>&1
+  grep -a 'workload_t' "$EVIDENCE_DIR/p21e3-sampler.log" 2>/dev/null | head -1 >/dev/null || true
+  fi  # end of the mnb30-first pass (completed after the build below)
+
 fi  # end of the diag-module-load probe guard (probe mode loaded nothing)
 
 # --- the pinned audit window, opened IMMEDIATELY before the measured op ---
@@ -3424,8 +3755,13 @@ fi
 # --- the buildkitd attach polls for the daemon child as before.
 # --- attach=none is recorded as NOT-ATTACHED: a sampling/tracing miss is
 # --- never evidence that the process did not exist.
+# --- MNB30 tracer-free mode attaches NO tracer at any boundary: the /proc
+# --- sampler and the audit window are the instruments (the exec boundary
+# --- is measured without ptrace).
 STRACE_PID=""
 STRACE_ALL_PIDS=""
+BKD_PID=""
+if [ "${R7_MNB30:-0}" != 1 ]; then
 if MGR_PID="$(systemctl show -p MainPID --value docker-helper-builder.service 2>/dev/null)" \
   && [ -n "$MGR_PID" ] && [ "$MGR_PID" != 0 ]; then
   timeout "$STRACE_TIMEOUT" strace -f -qq -tt -s 100 -y -yy -p "$MGR_PID" \
@@ -3462,6 +3798,8 @@ else
 fi
 [ -n "$BKD_PID" ] && echo "attach=$BKD_PID" > "$EVIDENCE_DIR/p21e3-strace-attach.log" \
   || echo "attach=none (never attached; NOT evidence of non-existence)" > "$EVIDENCE_DIR/p21e3-strace-attach.log"
+
+fi  # end of the buildkitd attach (skipped in the MNB30 tracer-free mode)
 
 # --- R4-P3-P6-MNB12: the read-only baseline probe INSIDE the live build
 # --- window: the family (and, transiently, the per-op runc tree) is alive
@@ -3619,6 +3957,177 @@ if [ -n "$PROC_INVENTORY_PID" ]; then
     > "$EVIDENCE_DIR/p21e3-proc-inventory-policy.jsonl" 2>>"$EVIDENCE_DIR/p21e3-proc-inventory.err" \
     || log "OCI path policy inventory was incomplete; see the inventory evidence"
 fi
+
+# --- R7 MNB30: the transition result (tracer-free; the policy is still
+# --- carrying the temporary cap module — exactly the state the build ran
+# --- under). The instruments: the /proc sampler records (live kernel
+# --- contexts, Cap*, NoNewPrivs — no ptrace anywhere) and the libselinux
+# --- kernel-decision matrix over the observed categories, including the
+# --- CROSS-OPERATION rootfs denial for the workload domain.
+if [ "${R7_MNB30:-0}" = 1 ]; then
+  MNB30_TRANS_LOG="$EVIDENCE_DIR/p21e3-mnb30-transition.log"
+  if ! command -v gcc >/dev/null 2>&1 || [ ! -e /usr/include/selinux/selinux.h ]; then
+    timeout 300 zypper --non-interactive install -y gcc libselinux-devel >/dev/null 2>&1 || true
+  fi
+  command -v gcc >/dev/null 2>&1 || fail "gcc unavailable; the MNB30 kernel-decision matrix cannot run"
+  [ -e /usr/include/selinux/selinux.h ] || fail "libselinux headers unavailable"
+  cat > "$EVIDENCE_DIR/p21e3_mnb30_workload_avdec.c" <<'CEOF'
+/* R7 MNB30: the workload kernel-decision matrix. Invoked as
+ *   mnb30_avdec <workload-own-context> <neighbor-category>
+ * The own context is the LIVE observed workload context (sampled from
+ * /proc, never assumed); the neighbor exercises the cross-operation
+ * rootfs denial through the state-tree type with a DIFFERENT category.
+ * Columns: scon tcon class perm allowed decided auditallow auditdeny
+ * permissive expect; expect=allow|deny is checked by the shell verdict.
+ */
+#include <selinux/selinux.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+
+static struct q { const char *scon, *tcon, *cls, *perm, *expect; } ROWS[256];
+static size_t NROWS;
+static void add(const char *s, const char *t, const char *c, const char *p, const char *e) {
+  ROWS[NROWS].scon = s; ROWS[NROWS].tcon = t; ROWS[NROWS].cls = c;
+  ROWS[NROWS].perm = p; ROWS[NROWS].expect = e; NROWS++;
+}
+
+#define ST_TYPE "docker_helper_builder_state_t"
+
+int main(int argc, char **argv) {
+  if (argc != 3) { fprintf(stderr, "usage: %s <workload own context> <neighbor category>\n", argv[0]); return 2; }
+  const char *own = argv[1];
+  const char *ncat = argv[2];
+  /* Derive the own-category twin (the same subject at the neighbor's
+   * category) and the neighbor target contexts by textual category
+   * substitution of the LAST colon field suffix. */
+  static char own_neighbor[256], state_own[256], state_neighbor[256], ns_own[256], ns_neighbor[256];
+  const char *mcs = strstr(own, ":s0");
+  if (!mcs) { fprintf(stderr, "ERR\town context carries no sensitivity field\n"); return 1; }
+  snprintf(ns_own, sizeof ns_own, "%.*s", (int)(mcs - own + 3), own);
+  snprintf(ns_neighbor, sizeof ns_neighbor, "%s:%s", ns_own, ncat);
+  /* Build the targets textually: object role + type + sensitivity:category */
+  snprintf(state_own, sizeof state_own, "system_u:object_r:%s%s", ST_TYPE, mcs);
+  snprintf(state_neighbor, sizeof state_neighbor, "system_u:object_r:%s:s0:%s", ST_TYPE, ncat);
+  /* Keep the subject contexts verbatim: the own row replays the sampled
+   * workload context; the neighbor row is the WORKLOAD domain at the
+   * neighbor category (the transition-target authority rule stays owned
+   * by the policy; the matrix measures the MCS layer on file/dir). */
+  snprintf(own_neighbor, sizeof own_neighbor, "%s:%s", ns_own, ncat);
+  /* The MNB28 (b) grant face is the allowed set; the same-op rows must
+   * ALLOW it, the cross-op rows must DENY it by the MCS layer (the same
+   * TE rows are type-wide, so a cross-category allow would expose an
+   * MCS escape). NOT-GRANTED rows (write/append on file,
+   * write/add_name/remove_name on dir) must DENY in BOTH categories:
+   * the measured-increment principle keeps them un-granted. */
+  static const char *gperms[] = { "execute", "entrypoint", "map", "open", "read", "getattr" };
+  for (size_t i = 0; i < 6; i++) {
+    add(own, state_own, "file", gperms[i], "allow");
+    add(own, state_neighbor, "file", gperms[i], "deny");
+    add(own_neighbor, state_neighbor, "file", gperms[i], "allow");
+    add(own_neighbor, state_own, "file", gperms[i], "deny");
+  }
+  static const char *nperms[] = { "write", "append" };
+  for (size_t i = 0; i < 2; i++) {
+    add(own, state_own, "file", nperms[i], "deny");
+    add(own, state_neighbor, "file", nperms[i], "deny");
+  }
+  static const char *gdperms[] = { "search" };
+  for (size_t i = 0; i < 1; i++) {
+    add(own, state_own, "dir", gdperms[i], "allow");
+    add(own, state_neighbor, "dir", gdperms[i], "deny");
+    add(own_neighbor, state_neighbor, "dir", gdperms[i], "allow");
+    add(own_neighbor, state_own, "dir", gdperms[i], "deny");
+  }
+  static const char *ndperms[] = { "write", "add_name", "remove_name" };
+  for (size_t i = 0; i < 3; i++) {
+    add(own, state_own, "dir", ndperms[i], "deny");
+    add(own, state_neighbor, "dir", ndperms[i], "deny");
+  }
+  for (size_t i = 0; i < NROWS; i++) {
+    struct q *r = &ROWS[i];
+    security_class_t cls = string_to_security_class(r->cls);
+    if (!cls) { printf("ERR\tclass %s unknown\n", r->cls); return 1; }
+    access_vector_t bit = string_to_av_perm(cls, r->perm);
+    if (!bit) { printf("ERR\tperm %s %s unknown\n", r->cls, r->perm); return 1; }
+    struct av_decision avd;
+    memset(&avd, 0, sizeof(avd));
+    if (security_compute_av_raw(r->scon, r->tcon, cls, bit, &avd) < 0) {
+      printf("ERR\tcompute_av failed\n");
+      return 1;
+    }
+    printf("%s\t%s\t%s\t%s\t%u\t%u\t%u\t%u\t%u\t%s\n",
+           r->scon, r->tcon, r->cls, r->perm,
+           (avd.allowed & bit) ? 1 : 0,
+           (avd.decided & bit) ? 1 : 0,
+           (avd.auditallow & bit) ? 1 : 0,
+           (avd.auditdeny & bit) ? 1 : 0,
+           (avd.flags & SELINUX_AVD_FLAGS_PERMISSIVE) ? 1 : 0,
+           r->expect);
+  }
+  return 0;
+}
+CEOF
+  MNB30_MATRIX_LOG="$EVIDENCE_DIR/p21e3-mnb30-workload-av-matrix.log"
+  WORKLOAD_ROW="$(grep -a 'workload_t' "$EVIDENCE_DIR/p21e3-sampler.log" 2>/dev/null | grep -a 'ctx=system_u:system_r:' | head -1 || true)"
+  OWN_CON="$(printf '%s\n' "$WORKLOAD_ROW" | grep -aoE 'system_u:system_r:docker_helper_builder_workload_t:s0(:c[0-9]+)?' | head -1)"
+  # The MCS category pool: the measured op's category and the canonical
+  # next-pool category as the neighbor (the per-op pool assignment is the
+  # unit's own behavior; the matrix uses the observed own category LIVE).
+  OWN_CAT="$(printf '%s\n' "$OWN_CON" | grep -aoE 'c[0-9]+' | head -1 || true)"
+  NEIGHBOR_CAT="c2"; [ "$OWN_CAT" = "c2" ] && NEIGHBOR_CAT="c1"
+  {
+    echo "== MNB30 transition + kernel-decision evidence =="
+    echo "policy sha: $(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
+    echo "-- live workload rows (sampler, /proc only) --"
+    grep -a 'workload_t' "$EVIDENCE_DIR/p21e3-sampler.log" 2>/dev/null | head -30 || echo "(no workload row; the transition is NOT confirmed)"
+    echo "-- distinct workload pids and their Cap*/NoNewPrivs captures --"
+    grep -a 'PROCDETAIL-WORKLOAD' "$EVIDENCE_DIR/p21e3-sampler.log" 2>/dev/null | head -60 || echo "(no PROCDETAIL-WORKLOAD rows)"
+    echo "-- the sampler's live buildkitd category (the wrapper's own pool) --"
+    grep -a 'ctx=.*buildkitd_t' "$EVIDENCE_DIR/p21e3-sampler.log" 2>/dev/null | head -3 || true
+    echo "-- live executor-tree labels (the measured op + any neighbor) --"
+    cat "$EVIDENCE_DIR/p21e3-mnb30-neighbor-labels.log" 2>/dev/null || true
+  } > "$MNB30_TRANS_LOG" 2>&1
+  if [ -z "$OWN_CON" ]; then
+    echo "R7-MNB30-TRANSITION=REFUSED (no workload context observed in the sampler; the composed transition did not land)" >> "$MNB30_TRANS_LOG"
+    echo "R7-MNB30-WORKLOAD-MATRIX=NOT-RUN" >> "$MNB30_TRANS_LOG"
+  else
+    echo "own-workload-context=$OWN_CON neighbor-category=$NEIGHBOR_CAT" >> "$MNB30_TRANS_LOG"
+    gcc -O2 -o "$EVIDENCE_DIR/p21e3_mnb30_workload_avdec" "$EVIDENCE_DIR/p21e3_mnb30_workload_avdec.c" -lselinux \
+      >> "$MNB30_TRANS_LOG" 2>&1 \
+      || { cat "$MNB30_TRANS_LOG"; fail "the MNB30 kernel-decision helper build failed; BLOCKED"; }
+    "$EVIDENCE_DIR/p21e3_mnb30_workload_avdec" "$OWN_CON" "$NEIGHBOR_CAT" >> "$MNB30_TRANS_LOG" 2>&1 \
+      || { cat "$MNB30_TRANS_LOG"; fail "the MNB30 kernel-decision helper failed; BLOCKED"; }
+    BADS="$(awk -F'\t' '$1=="ERR" { print "ERRROW " $0; next } NF>=10 && $10!="" {
+      if ($6 != 1) { print "UNDECIDED " $0 }
+      if ($9 != 0) { print "PERMISSIVE " $0 }
+      if ($10=="allow" && $5!=1) { print "MISMATCH-ALLOW " $0 }
+      if ($10=="deny" && $5!=0) { print "MISMATCH-DENY " $0 }
+    }' "$MNB30_TRANS_LOG")"
+    if [ -n "$BADS" ]; then
+      printf '%s\n' "$BADS" >> "$MNB30_TRANS_LOG"
+      cat "$MNB30_TRANS_LOG"
+      printf 'R7-MNB30-WORKLOAD-MATRIX=FAIL\n'
+      fail "the MNB30 workload kernel-decision matrix reached an unexpected resolution; BLOCKED"
+    fi
+    echo "R7-MNB30-WORKLOAD-MATRIX=PASS" >> "$MNB30_TRANS_LOG"
+    # The transition verdict: a workload process observed in the composed
+    # context (workload domain + the own category) with single-category
+    # coherence across every workload row.
+    CATS="$(grep -a 'workload_t' "$EVIDENCE_DIR/p21e3-sampler.log" 2>/dev/null \
+      | grep -aoE 'ctx=system_u:system_r:docker_helper_builder_workload_t:s0(:c[0-9]+)?' \
+      | sort -u | wc -l)"
+    COUNT="$(grep -a 'workload_t' "$EVIDENCE_DIR/p21e3-sampler.log" 2>/dev/null | grep -ac 'ctx=system_u:system_r:docker_helper_builder_workload_t' || true)"
+    if [ "$CATS" = 1 ] && [ "${COUNT:-0}" -ge 1 ]; then
+      echo "R7-MNB30-TRANSITION=CONFIRMED (single composed context across $COUNT sampler rows)" >> "$MNB30_TRANS_LOG"
+    else
+      echo "R7-MNB30-TRANSITION=REFUSED (distinct composed contexts=$CATS, rows=$COUNT)" >> "$MNB30_TRANS_LOG"
+    fi
+  fi
+  cat "$MNB30_TRANS_LOG"
+  grep -aoE 'R7-MNB30-TRANSITION=[A-Z]+' "$MNB30_TRANS_LOG" | tail -1
+  grep -aoE 'R7-MNB30-WORKLOAD-MATRIX=[A-Z-]+' "$MNB30_TRANS_LOG" | tail -1
+fi
 # --- the fixed single-row diagnostic module: removal and unload
 # --- verification BEFORE the dontaudit restore (the removal's own rebuild
 # --- PRESERVES the disable-dontaudit build state, so the policy-shape
@@ -3713,7 +4222,17 @@ if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
     else
       echo "module store: docker_helper_diag_keys absent => OK"
     fi
-    # R7 MNB26: the two-rule capability module unload corroboration.
+    echo "-- dedicated types and genfscon absence --"
+    if ! p21e3_diag_proc_types_absent; then
+      echo "DIAG-UNLOAD-GATE: FAIL (dedicated-type and genfscon absence could not be verified)"
+    fi
+  } >> "$DIAG_LOG" 2>&1
+fi
+# The three-rule capability module unload corroboration: DIAG-KEYS mode and
+# the MNB30 tracer-free round both end with the MNB24/26/27 grants removed.
+if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ] || [ "${R7_MNB30:-0}" = 1 ]; then
+  {
+    echo "-- R7 MNB26: the two-rule capability module unload corroboration --"
     if semodule -l 2>/dev/null | grep -aq docker_helper_diag_cap; then
       echo "DIAG-UNLOAD-GATE: FAIL (the cap module is still registered in the store)"
     else
@@ -3739,10 +4258,43 @@ if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
     else
       echo "DIAG-UNLOAD-GATE: PASS (class=process setcap absence restored)"
     fi
-    echo "-- dedicated types and genfscon absence --"
-    if ! p21e3_diag_proc_types_absent; then
-      echo "DIAG-UNLOAD-GATE: FAIL (dedicated-type and genfscon absence could not be verified)"
+    if [ "${R7_MNB30:-0}" = 1 ]; then
+      echo "-- MNB30: the workload-domain module unload corroboration --"
+      if semodule -l 2>/dev/null | grep -aq docker_helper_diag_workload; then
+        echo "DIAG-UNLOAD-GATE: FAIL (the workload-domain module is still registered in the store)"
+      else
+        echo "module store: docker_helper_diag_workload absent => OK"
+      fi
+      for WL_ROW in \
+        'docker_helper_builder_workload_t.docker_helper_builder_state_t:file:execute' \
+        'docker_helper_builder_workload_t.docker_helper_builder_state_t:file:entrypoint' \
+        'docker_helper_builder_workload_t.docker_helper_builder_state_t:dir:search' \
+        'docker_helper_buildkitd_t.docker_helper_builder_workload_t:process:transition'; do
+        WL_S="${WL_ROW%%.*}"
+        WL_REST="${WL_ROW#*.}"
+        WL_T="$(printf '%s\n' "$WL_REST" | cut -d: -f1)"
+        WL_CLASS="$(printf '%s\n' "$WL_REST" | cut -d: -f2)"
+        WL_P="$(printf '%s\n' "$WL_REST" | cut -d: -f3)"
+        WL_UQ="$(timeout 60 sesearch -A -s "$WL_S" -t "$WL_T" -c "$WL_CLASS" -p "$WL_P" 2>&1)"
+        WL_UV="$(classify_sesearch_query "$?" "$WL_UQ")"
+        if [ "$WL_UV" != 'trusted:perms=|cond-active=none|cond-inactive=none' ]; then
+          echo "DIAG-UNLOAD-GATE: FAIL ($WL_ROW still present after the unload: $WL_UV)"
+        else
+          echo "DIAG-UNLOAD-GATE: PASS ($WL_ROW absence restored)"
+        fi
+      done
+      echo "-- the workload type itself must be gone again (the wrapper's rolecheck refuses it) --"
+      if seinfo --role_types docker_helper_builder_workload_t 2>/dev/null | grep -aqw system_r; then
+        echo "DIAG-UNLOAD-GATE: FAIL (the workload roletype survives the unload)"
+      else
+        echo "DIAG-UNLOAD-GATE: PASS (the workload roletype authorization is gone)"
+      fi
     fi
+  } >> "$DIAG_LOG" 2>&1
+  grep -aq '^DIAG-UNLOAD-GATE: FAIL' "$DIAG_LOG" && DIAG_UNLOAD_OK=0
+fi
+if [ "${R7_P21E3_DIAG_KEYS:-0}" = 1 ]; then
+  {
     DIAG_SHADERE="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
     echo "policy sha at unload-check time (post-removal, pre-restore): $DIAG_SHADERE"
     echo "policy sha before dedicated-module load (for comparison): $DIAG_KEYS_PRELOAD_SHA"

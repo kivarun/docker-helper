@@ -25,6 +25,14 @@
 #     space byte by format definition; "cleaning" them would break
 #     `git apply`.
 #
+#   packaging/runc-loader/runc-loader.patch
+#
+#     The committed unified diff applied to the pinned runc v1.4.3 spec.go
+#     source (the staged-payload loader patch, MNB30). Its context lines
+#     carry the exact-byte trailing whitespace of the pinned upstream
+#     source (including the source's own tab/space layout); "cleaning"
+#     them would break `patch`/`git apply` against the verified archive.
+#
 # Exit 0 = gate passed; exit 1 = gate failed.
 
 set -uo pipefail
@@ -35,7 +43,8 @@ fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 EXCEPTION="testdata/semanage-fcontext-producer-capture.txt"
 EXCEPTION2="scripts/release-2.4-p5s2-cat-launch.patch"
-EXCLUSION_PATHSPEC=(":!$EXCEPTION" ":!$EXCEPTION2")
+EXCEPTION3="packaging/runc-loader/runc-loader.patch"
+EXCLUSION_PATHSPEC=(":!$EXCEPTION" ":!$EXCEPTION2" ":!$EXCEPTION3")
 
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   fail "must run inside the docker-helper git work tree"

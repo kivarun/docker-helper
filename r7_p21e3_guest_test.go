@@ -582,7 +582,7 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		"the read-only baseline probe INSIDE the live build",
 		// MNB22 checks the two reviewed pairs and inventories the live OCI targets.
 		"R7_P21E3_DIAG_KEYS",
-		"DIAG_MODULES=\"$DIAG_MODULES docker_helper_diag_keys\"",
+		"DIAG_MODULES=\"$DIAG_MODULE docker_helper_diag_keys docker_helper_diag_cap\"",
 		"docker_helper_diag_keys.cil",
 		"(type proc_keys_t)",
 		"(roletype object_r proc_keys_t)",
@@ -632,7 +632,7 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		// coverage, the userns survival watch (with the time-bound CapBnd
 		// tie), and the bounding-set evidence extraction.
 		"docker_helper_diag_cap",
-		"DIAG_MODULES=\"$DIAG_MODULES docker_helper_diag_cap\"",
+		"DIAG_MODULES=\"$DIAG_MODULE docker_helper_diag_keys docker_helper_diag_cap\"",
 		"docker_helper_diag_cap.cil",
 		"DIAG_CAP_LOG=\"$EVIDENCE_DIR/p21e3-diag-cap.log\"",
 		"p21e3-diag-cap.log",
@@ -683,6 +683,30 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		"cap_userns denial inventory (per pid+perm, first..last)",
 		"CapBnd binding: rows of the dropping pids",
 		"readcap",
+		// R7 MNB30: the tracer-free transition round — the extracted-RPM
+		// runtime byte-pin, the loader harness on the extracted binary,
+		// the seinfo rolecheck calibration, the temporary workload-domain
+		// module carrying exactly the MNB28 (b) row set, the /proc-only
+		// sampler observation, and the kernel-decision matrix with the
+		// cross-operation rootfs denial.
+		"if [ \"${R7_MNB30:-0}\" = 1 ]",
+		"mnb30 mode: the seven-row mounton module is not loaded (tracer-free transition round)",
+		"MNB30-RUNTIME-PIN=MATCH (extracted==installed==manifest==owner pin)",
+		"MNB30-HARNESS=PASS",
+		"MNB30-SEINFO=PASS (rc=0, the workload role authorization entry system_r is present)",
+		"docker_helper_diag_workload",
+		"docker_helper_diag_workload.cil",
+		"(roletype system_r docker_helper_builder_workload_t)",
+		"(typeattributeset mcs_constrained_type (docker_helper_builder_workload_t))",
+		"(allow docker_helper_buildkitd_t docker_helper_builder_state_t (file (execute)))",
+		"(allow docker_helper_builder_workload_t docker_helper_builder_state_t (file (execute entrypoint map open read getattr)))",
+		"(allow docker_helper_builder_workload_t docker_helper_builder_state_t (dir (search)))",
+		"(allow docker_helper_buildkitd_t docker_helper_builder_workload_t (process (transition)))",
+		"MNB30 tracer-free mode attaches NO tracer at any boundary",
+		"p21e3_mnb30_workload_avdec",
+		"R7-MNB30-TRANSITION=",
+		"R7-MNB30-WORKLOAD-MATRIX=",
+		"module store: docker_helper_diag_workload absent => OK",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("the p21e3 guest harness must carry the inspection diagnostic %q", want)
