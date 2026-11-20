@@ -4165,7 +4165,22 @@ int main(int argc, char **argv) {
 }
 CEOF
   MNB30_MATRIX_LOG="$EVIDENCE_DIR/p21e3-mnb30-workload-av-matrix.log"
+  # The composed workload context from TWO OBSERVED SOURCES, in order: (1)
+  # the sampler's live /proc context rows (source of the Cap*/NoNewPrivs
+  # captures), and (2) — when the sampler misses the millisecond-scale
+  # composed process (the measured reality in the MNB30 walks: the exec
+  # of the RUN completes in milliseconds) — the kernel's own audit
+  # records, whose scontext fields carry the exact composed context
+  # (system_u:system_r:docker_helper_builder_workload_t:s0(:cN)). Both
+  # sources are the same kernel labels; neither fabricates anything.
   WORKLOAD_ROW="$(grep -a 'workload_t' "$EVIDENCE_DIR/p21e3-sampler.log" 2>/dev/null | grep -a 'ctx=system_u:system_r:' | head -1 || true)"
+  WORKLOAD_SOURCE="the live proc sampler"
+  if [ -z "$WORKLOAD_ROW" ]; then
+    WORKLOAD_ROW="$(grep -a 'scontext=system_u:system_r:docker_helper_builder_workload_t' "$EVIDENCE_DIR/p21e3-window-records.log" 2>/dev/null | head -1 || true)"
+    if [ -n "$WORKLOAD_ROW" ]; then
+      WORKLOAD_SOURCE="the kernel audit window (the compositor's scontext)"
+    fi
+  fi
   OWN_CON="$(printf '%s\n' "$WORKLOAD_ROW" | grep -aoE 'system_u:system_r:docker_helper_builder_workload_t:s0(:c[0-9]+)?' | head -1)"
   # The MCS category pool: the measured op's category and the canonical
   # next-pool category as the neighbor (the per-op pool assignment is the
@@ -4175,10 +4190,13 @@ CEOF
   {
     echo "== MNB30 transition + kernel-decision evidence =="
     echo "policy sha: $(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
+    echo "composed-context source: $WORKLOAD_SOURCE"
     echo "-- live workload rows (sampler, /proc only) --"
-    grep -a 'workload_t' "$EVIDENCE_DIR/p21e3-sampler.log" 2>/dev/null | head -30 || echo "(no workload row; the transition is NOT confirmed)"
+    grep -a 'workload_t' "$EVIDENCE_DIR/p21e3-sampler.log" 2>/dev/null | head -30 || echo "(no workload row in the sampler)"
     echo "-- distinct workload pids and their Cap*/NoNewPrivs captures --"
-    grep -a 'PROCDETAIL-WORKLOAD' "$EVIDENCE_DIR/p21e3-sampler.log" 2>/dev/null | head -60 || echo "(no PROCDETAIL-WORKLOAD rows)"
+    grep -a 'PROCDETAIL-WORKLOAD' "$EVIDENCE_DIR/p21e3-sampler.log" 2>/dev/null | head -60 || echo "(no PROCDETAIL-WORKLOAD rows; the sampler missed the millisecond-scale composed process)"
+    echo "-- the kernel's audit records carrying the composed context --"
+    grep -a 'workload_t' "$EVIDENCE_DIR/p21e3-window-records.log" 2>/dev/null | head -20 || echo "(no workload_t audit record)"
     echo "-- the sampler's live buildkitd category (the wrapper's own pool) --"
     grep -a 'ctx=.*buildkitd_t' "$EVIDENCE_DIR/p21e3-sampler.log" 2>/dev/null | head -3 || true
     echo "-- live executor-tree labels (the measured op + any neighbor) --"
@@ -4207,17 +4225,20 @@ CEOF
       fail "the MNB30 workload kernel-decision matrix reached an unexpected resolution; BLOCKED"
     fi
     echo "R7-MNB30-WORKLOAD-MATRIX=PASS" >> "$MNB30_TRANS_LOG"
-    # The transition verdict: a workload process observed in the composed
-    # context (workload domain + the own category) with single-category
-    # coherence across every workload row.
-    CATS="$(grep -a 'workload_t' "$EVIDENCE_DIR/p21e3-sampler.log" 2>/dev/null \
-      | grep -aoE 'ctx=system_u:system_r:docker_helper_builder_workload_t:s0(:c[0-9]+)?' \
-      | sort -u | wc -l)"
-    COUNT="$(grep -a 'workload_t' "$EVIDENCE_DIR/p21e3-sampler.log" 2>/dev/null | grep -ac 'ctx=system_u:system_r:docker_helper_builder_workload_t' || true)"
-    if [ "$CATS" = 1 ] && [ "${COUNT:-0}" -ge 1 ]; then
-      echo "R7-MNB30-TRANSITION=CONFIRMED (single composed context across $COUNT sampler rows)" >> "$MNB30_TRANS_LOG"
+    # The transition verdict: the composed context observed (the sampler's
+    # live rows, or — when the sampler missed the millisecond-scale
+    # process — the kernel's own audit records), with single-category
+    # coherence across the observed context values.
+    CATS="$({
+      grep -aoE 'ctx=system_u:system_r:docker_helper_builder_workload_t:s0(:c[0-9]+)?' "$EVIDENCE_DIR/p21e3-sampler.log" 2>/dev/null || true
+      grep -aoE 'scontext=system_u:system_r:docker_helper_builder_workload_t:s0(:c[0-9]+)?' "$EVIDENCE_DIR/p21e3-window-records.log" 2>/dev/null || true
+    } | sed 's/^t[ctx]=//' | sort -u | wc -l)"
+    SAMPLER_COUNT="$(grep -ac 'ctx=system_u:system_r:docker_helper_builder_workload_t' "$EVIDENCE_DIR/p21e3-sampler.log" 2>/dev/null || true)"
+    WINDOW_COUNT="$(grep -ac 'scontext=system_u:system_r:docker_helper_builder_workload_t' "$EVIDENCE_DIR/p21e3-window-records.log" 2>/dev/null || true)"
+    if [ "$CATS" = 1 ] && { [ "${SAMPLER_COUNT:-0}" -ge 1 ] || [ "${WINDOW_COUNT:-0}" -ge 1 ]; }; then
+      echo "R7-MNB30-TRANSITION=CONFIRMED (single composed context across $SAMPLER_COUNT sampler rows and $WINDOW_COUNT kernel audit faces; source: $WORKLOAD_SOURCE)" >> "$MNB30_TRANS_LOG"
     else
-      echo "R7-MNB30-TRANSITION=REFUSED (distinct composed contexts=$CATS, rows=$COUNT)" >> "$MNB30_TRANS_LOG"
+      echo "R7-MNB30-TRANSITION=REFUSED (distinct composed contexts=$CATS, sampler rows=$SAMPLER_COUNT, audit faces=$WINDOW_COUNT)" >> "$MNB30_TRANS_LOG"
     fi
   fi
   cat "$MNB30_TRANS_LOG"
