@@ -3259,6 +3259,8 @@ EOF
   DIAG_WL_SEINFO_ROW="(allow docker_helper_buildkitd_t ${WL_SEINFO_TOOL_FILE} (file (execute execute_no_trans getattr open read map)))
 (allow docker_helper_buildkitd_t ${WL_SEINFO_TOOL_TYPE} (process (transition)))
 (allow ${WL_SEINFO_TOOL_TYPE} ${WL_SEINFO_TOOL_FILE} (file (entrypoint)))
+(allow unconfined_t ${WL_SEINFO_TOOL_FILE} (file (relabelfrom relabelto)))
+(allow unconfined_t ${WL_SEINFO_TYPE} (file (relabelfrom)))
 (typetransition docker_helper_buildkitd_t ${WL_SEINFO_TOOL_FILE} process ${WL_SEINFO_TOOL_TYPE})
 (typepermissive ${WL_SEINFO_TOOL_TYPE})
 (roletype system_r ${WL_SEINFO_TOOL_TYPE})
@@ -3370,6 +3372,15 @@ EOF
   # permissive tool domain. Restore-on-teardown is owned by
   # p21e3_diag_remove (every exit path).
   if ! chcon -t "$WL_SEINFO_TOOL_FILE" "$WL_SEINFO_SHEBANG" 2>&1; then
+    echo "-- chcon was denied; a throwaway-copy probe and the live kernel denials follow --"
+    cp "$WL_SEINFO_SHEBANG" /tmp/mnb30-chcon-probe.bin 2>/dev/null || true
+    if chcon -t "$WL_SEINFO_TOOL_FILE" /tmp/mnb30-chcon-probe.bin 2>&1; then
+      rm -f /tmp/mnb30-chcon-probe.bin
+      echo "probe: the tmpfs COPY relabels fine; the denial is specific to the shipped interpreter's location/label"
+    else
+      echo "probe: the tmpfs COPY is denied as well; the kernel-side face is below (last denials)"
+      dmesg 2>/dev/null | tail -12
+    fi
     p21e3_diag_remove
     p21e3_dontaudit_restore
     fail "the seinfo interpreter relabel failed; BLOCKED"
