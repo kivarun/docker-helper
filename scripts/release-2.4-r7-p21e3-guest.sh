@@ -3268,6 +3268,8 @@ EOF
     echo '(roletype system_r docker_helper_builder_workload_t)'
     echo '(typeattributeset domain (docker_helper_builder_workload_t))'
     echo '(typeattributeset mcs_constrained_type (docker_helper_builder_workload_t))'
+    echo '(type seinfo_tool_file_t)'
+    echo '(type seinfo_tool_t)'
     echo '(allow docker_helper_buildkitd_t docker_helper_builder_state_t (file (execute)))'
     echo '(allow docker_helper_builder_workload_t docker_helper_builder_state_t (file (execute entrypoint map open read getattr)))'
     echo '(allow docker_helper_builder_workload_t docker_helper_builder_state_t (dir (search)))'
