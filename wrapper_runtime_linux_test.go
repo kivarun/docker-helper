@@ -14,6 +14,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -888,6 +890,82 @@ func mustReadFile(t *testing.T, path string) []byte {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return data
+}
+
+// TestWrapperReservedDigestEnv proves the wrapper-owned handoff-key
+// contract: every inherited RUNC_SPEC_SHA256 entry is stripped from the
+// environment before any dispatch —
+//   - the managed run forwards the inherited entries REMOVED and carries
+//     EXACTLY ONE occurrence whose value is the exact SHA-256 of the
+//     FINAL committed config.json bytes (the assertion computes the
+//     digest of the bytes the committed file actually holds and requires
+//     the token to EQUAL it — a hex-shaped but wrong value is a failure,
+//     never merely a format check), and
+//   - a pass-through command forwards the environment with NO
+//     occurrence: its behavior never depends on the reserved key.
+func TestWrapperReservedDigestEnv(t *testing.T) {
+	// Two inherited values, one hex-shaped-but-wrong and one non-hex
+	// junk: the strip is value-independent and reproduces neither.
+	env := []string{
+		"PATH=/nonexistent",
+		"RUNC_SPEC_SHA256=" + strings.Repeat("a", 64),
+		"HOME=/x",
+		"RUNC_SPEC_SHA256=not-hex-inherited",
+	}
+	reader := fakeWrapperOwnContext{raw: wrapperOwnContextRaw(7, "\n")}
+
+	t.Run("run carries exactly one wrapper-committed digest", func(t *testing.T) {
+		bundleDir, fs, rec := wrapperRunFixture(t)
+		if err := wrapperMainWithSeams(wrapperRunArgv(bundleDir), env, reader, fs); err != nil {
+			t.Fatalf("the ready run invocation must be accepted: %v", err)
+		}
+		// The expectation binds to the FINAL bytes: the digest of the
+		// committed config.json as it exists on disk after the run —
+		// not a wrapper-internal value, not a remembered pre-rewrite
+		// digest, and not merely a hex-format token.
+		committed := mustReadFile(t, filepath.Join(bundleDir, "config.json"))
+		sum := sha256.Sum256(committed)
+		want := hex.EncodeToString(sum[:])
+		var tokens []string
+		for _, entry := range rec.env {
+			if parts := strings.SplitN(entry, "=", 2); len(parts) == 2 && parts[0] == wrapperSpecDigestEnv {
+				tokens = append(tokens, parts[1])
+			}
+		}
+		if len(tokens) != 1 {
+			t.Fatalf("the run handoff must carry exactly one %s entry, got %d (%v)",
+				wrapperSpecDigestEnv, len(tokens), rec.env)
+		}
+		if tokens[0] != want {
+			t.Fatalf("the handoff digest %q must equal the exact SHA-256 of the final committed bytes %q", tokens[0], want)
+		}
+		for _, inherited := range []string{strings.Repeat("a", 64), "not-hex-inherited"} {
+			if tokens[0] == inherited {
+				t.Fatalf("the handoff digest must never reproduce an inherited value (%q)", inherited)
+			}
+		}
+		// The non-reserved entries survive verbatim, in order.
+		if len(rec.env) != 3 || rec.env[0] != "PATH=/nonexistent" || rec.env[1] != "HOME=/x" {
+			t.Fatalf("the forwarded environment must keep exactly the stripped inherited set before the token, got %v", rec.env)
+		}
+	})
+
+	t.Run("pass-through carries no occurrence", func(t *testing.T) {
+		_, fs, _ := wrapperRunFixture(t)
+		for _, kind := range []string{"delete", "state", "kill", "exec"} {
+			t.Run(kind, func(t *testing.T) {
+				rec := withWrapperRuntimeSeams(t, nil, nil)
+				if err := wrapperMainWithSeams(wrapperPassthroughArgv(kind), env, reader, fs); err != nil {
+					t.Fatalf("the pinned %s form must pass through: %v", kind, err)
+				}
+				want := []string{"PATH=/nonexistent", "HOME=/x"}
+				if !reflect.DeepEqual(rec.env, want) {
+					t.Fatalf("the pass-through environment must drop every inherited %s entry, got %v",
+						wrapperSpecDigestEnv, rec.env)
+				}
+			})
+		}
+	})
 }
 
 // TestWrapperPassthroughIsolation proves the accepted pass-through

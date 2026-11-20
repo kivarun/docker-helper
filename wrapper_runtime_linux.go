@@ -11,8 +11,9 @@ package main
 // config.json — replacing exactly the one `/dev` tmpfs mount with the
 // prepared-tree bind — commits it atomically, and hands off to the real
 // runtime through execve. Validated pass-through commands are forwarded
-// byte-identically with no prepared-tree or spec access; every other
-// invocation shape is refused.
+// with a byte-identical argv and the environment's reserved
+// RUNC_SPEC_SHA256 key stripped — no prepared-tree or spec access; every
+// other invocation shape is refused.
 //
 // Contract anchors (accepted, not re-derived here):
 //
@@ -55,6 +56,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -249,6 +251,12 @@ func wrapperMainWithSeams(argv []string, env []string, reader wrapperOwnContextR
 	if wrapperRealRuntimePath == "" {
 		return &wrapperRefuseError{cause: errors.New("the real runtime path is not established; refusing every invocation")}
 	}
+	// The reserved digest key is the wrapper's own handoff channel: every
+	// inherited occurrence is dropped before any dispatch, so the pass
+	// -through forwards a key-free environment and the run pipeline's
+	// wrapperHandoffEnv can append the single wrapper-committed token
+	// (never an inherited value).
+	env = wrapperStripReservedEnv(env)
 	if inv.kind == "run" {
 		return wrapperRunPipeline(reader, seam, inv, env)
 	}
@@ -301,17 +309,38 @@ func wrapperRunPipeline(reader wrapperOwnContextReader, seam wrapperInspectionSy
 	return nil
 }
 
-// wrapperSpecDigestEnv is the digest-token environment name injected
-// into the handoff environment for the run command only: the deployed
-// loader reads config.json exactly once, verifies its bytes against
-// this token, and decodes the same buffer, refusing the managed run
-// before any container creation on an absent or mismatched token. The
-// value is the pinned-loader contract, tested against the built
-// runtime; pass-through commands never carry the token.
+// wrapperSpecDigestEnv is the digest-token environment name RESERVED for
+// the wrapper: it is injected into the handoff environment for the run
+// command only — exactly one entry whose value is the committed spec
+// digest — and the deployed loader reads config.json exactly once,
+// verifies its bytes against this token, and decodes the same buffer,
+// refusing the managed run before any container creation on an absent
+// or mismatched token. The key is wrapper-owned end to end: every
+// inherited occurrence is stripped from the forwarded environment
+// before any dispatch (run passes exactly one wrapper-committed SHA;
+// pass-through carries none), so an inherited value can never reach
+// the loader or masquerade as the handoff token.
 const wrapperSpecDigestEnv = "RUNC_SPEC_SHA256"
 
-// wrapperHandoffEnv appends the committed digest token to the forwarded
-// environment as a copy (the forwarded slice is never mutated).
+// wrapperStripReservedEnv returns the forwarded environment with every
+// inherited wrapperSpecDigestEnv entry removed. The forwarded slice is
+// never mutated. The key is reserved for the wrapper's own run handoff;
+// pass-through commands (which must not depend on the key) and the run
+// pipeline both operate on the stripped form — the run pipeline then
+// appends exactly one token through wrapperHandoffEnv.
+var wrapperStripReservedEnv = func(env []string) []string {
+	filtered := env[:0:0]
+	for _, entry := range env {
+		if strings.HasPrefix(entry, wrapperSpecDigestEnv+"=") {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
+}
+
+// wrapperHandoffEnv appends the committed digest token to the (already
+// reserved-key-stripped) forwarded environment as a copy.
 var wrapperHandoffEnv = func(env []string, digest string) []string {
 	out := make([]string, 0, len(env)+1)
 	out = append(out, env...)
