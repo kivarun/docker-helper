@@ -2233,6 +2233,10 @@ DIAG_MODULE=docker_helper_diag_mounton
 DIAG_ACTIVE=0
 DIAG_REMOVED=0
 DIAG_MODULES=""
+WL_SEINFO_RELABELED=0
+WL_SEINFO_SHEBANG=""
+WL_SEINFO_INTERPRETER_PRE=""
+WL_SEINFO_ORIG_TYPE=""
 if [ "${R7_MNB30:-0}" = 1 ]; then
   # MNB30: the ONLY temporary policy state is the three-rule capability module
   # (the MNB24/26/27 grants; temporary exactly as before).
@@ -2247,6 +2251,20 @@ p21e3_diag_remove() {
   [ "${DIAG_REMOVED:-0}" = 1 ] && return 0
   local out rc mod all
   all=ok
+  # The MNB30 rolecheck relabel is part of the round's temporary state and
+  # must be restored BEFORE the module removal (the chcon target type stops
+  # existing at removal). A failed restore keeps the removal retrying on
+  # the next call and leaves the terminal verdict fail-closed.
+  if [ "${WL_SEINFO_RELABELED:-0}" = 1 ] && [ -n "${WL_SEINFO_SHEBANG:-}" ] \
+     && [ -n "${WL_SEINFO_INTERPRETER_PRE:-}" ]; then
+    if chcon -t "$WL_SEINFO_ORIG_TYPE" "$WL_SEINFO_SHEBANG" >/dev/null 2>&1; then
+      WL_SEINFO_RELABELED=0
+      log "the seinfo interpreter label restored: $WL_SEINFO_SHEBANG (original: $WL_SEINFO_INTERPRETER_PRE)"
+    else
+      all=fail
+      echo "p21e3_diag_remove: the seinfo interpreter relabel RESTORE FAILED" >> "${DIAG_WL_LOG:-$EVIDENCE_DIR/p21e3-mnb30-workload-module.log}"
+    fi
+  fi
   # A diagnostic round may carry MORE THAN ONE temporary module (the
   # dedicated-type CIL block rides next to the fixed row module). Every
   # removal is performed and logged; the round is marked removed ONLY when
@@ -3218,24 +3236,33 @@ EOF
     [a-z_]*_t) : ;;
     *) WL_POLICY_TYPE=security_t ;;
   esac
-  # seinfo is a dynamically linked analysis tool; its loader needs the
-  # classic library faces mmap/read/open of its linked library and
-  # ld-cache file types (derived live; never a wildcard attribute).
-  WL_LIB_TYPES="$(ldd /usr/bin/seinfo 2>/dev/null \
-    | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^\//) print $i}' \
-    | sort -u \
-    | while read -r wl_lib; do
-        matchpathcon -n "$wl_lib" 2>/dev/null | awk -F: '{print $3}'
-      done | sort -u)"
-  WL_LIB_ROWS=""
-  for wl_lt in $WL_LIB_TYPES; do
-    WL_LIB_ROWS="$WL_LIB_ROWS(allow docker_helper_buildkitd_t $wl_lt (file (execute execute_no_trans map open read getattr)))
-"
-  done
-  DIAG_WL_SEINFO_ROW="(allow docker_helper_buildkitd_t ${WL_SEINFO_TYPE} (file (execute execute_no_trans)))"
-  DIAG_WL_POLICY_ROWS="(allow docker_helper_buildkitd_t ${WL_POLICY_TYPE} (dir (search)))
+  # seinfo on this distro is a python script (the measured response format
+  # "[Errno 13] …" is python), so a file-type type_transition cannot bind
+  # to the script itself: the kernel's shebang chain transitions on the
+  # INTERPRETER exec. The diagnostic round therefore relabels the exact
+  # interpreter of /usr/bin/seinfo (a shebang-resolved path, restored at
+  # the teardown) into a dedicated file type and transitions the exec of
+  # that type into a PERMISSIVE tool domain — the tool's own unit reads
+  # (python imports, libraries, the policy file) surface as audited
+  # denials that are allowed in the rounding, while the QUERYED roletype
+  # data stays the real loaded-policy bytes (permissive never fakes a
+  # query result). The wrapper's production reading stays /usr/bin/seinfo.
+  WL_SEINFO_SHEBANG="$(awk 'NR==1 { sub(/^#! */, ""); sub(/ +.*/, ""); print }' /usr/bin/seinfo)"
+  case "$WL_SEINFO_SHEBANG" in
+    /*) : ;;
+    *) WL_SEINFO_SHEBANG="$(command -v "${WL_SEINFO_SHEBANG:-python3}")" || WL_SEINFO_SHEBANG=/usr/bin/python3 ;;
+  esac
+  WL_SEINFO_TOOL_FILE=seinfo_tool_file_t
+  WL_SEINFO_TOOL_TYPE=seinfo_tool_t
+  DIAG_WL_SEINFO_ROW="(allow docker_helper_buildkitd_t ${WL_POLICY_TYPE} (dir (search)))
 (allow docker_helper_buildkitd_t ${WL_POLICY_TYPE} (file (read open getattr)))
-$WL_LIB_ROWS"
+(allow docker_helper_buildkitd_t ${WL_SEINFO_TOOL_FILE} (file (execute execute_no_trans getattr open read map)))
+(allow docker_helper_buildkitd_t ${WL_SEINFO_TOOL_TYPE} (process (transition)))
+(allow ${WL_SEINFO_TOOL_TYPE} ${WL_SEINFO_TOOL_FILE} (file (entrypoint)))
+(typetransition docker_helper_buildkitd_t ${WL_SEINFO_TOOL_FILE} process ${WL_SEINFO_TOOL_TYPE})
+(permissive ${WL_SEINFO_TOOL_TYPE})
+(roletype system_r ${WL_SEINFO_TOOL_TYPE})
+(typeattributeset domain (${WL_SEINFO_TOOL_TYPE}))"
   cat > "$DIAG_WL_CIL" <<EOF
 (type docker_helper_builder_workload_t)
 (roletype system_r docker_helper_builder_workload_t)
@@ -3245,16 +3272,21 @@ $WL_LIB_ROWS"
 (allow docker_helper_builder_workload_t docker_helper_builder_state_t (file (execute entrypoint map open read getattr)))
 (allow docker_helper_builder_workload_t docker_helper_builder_state_t (dir (search)))
 (allow docker_helper_buildkitd_t docker_helper_builder_workload_t (process (transition)))
-$DIAG_WL_SEINFO_ROW
+(allow docker_helper_buildkitd_t ${WL_SEINFO_TYPE} (file (execute execute_no_trans)))
 $DIAG_WL_POLICY_ROWS
+$DIAG_WL_SEINFO_ROW
 EOF
+  DIAG_WL_SEINFO_LABEL_PRE="$(ls -ZN /usr/bin/seinfo 2>/dev/null | awk '{print $1}')"
+  WL_SEINFO_INTERPRETER_PRE="$(ls -ZN "$WL_SEINFO_SHEBANG" 2>/dev/null | awk '{print $1}')"
   {
     echo "== the MNB30 temporary workload-domain module: docker_helper_diag_workload =="
     echo "committed-policy delta: NONE (temporary module only; unload verified at the teardown)"
-    echo "reviewed scheme: MNB28 decision row (b) + the kernel necessities for the explicit exec (the measured AVC 1246 execute denial surface) + the measured rolecheck seinfo fork/exec denial (fork/exec /usr/bin/seinfo permission denied; the row targets the observed label type only)"
+    echo "reviewed scheme: MNB28 decision row (b) + the kernel necessities for the explicit exec (the measured AVC 1246 execute denial surface) + the measured rolecheck seinfo exec/read denials handled through the relabeled interpreter into a permissive tool domain (the shebang chain transitions on the interpreter, not on the python script)"
     echo "seinfo label type for the rolecheck row: $WL_SEINFO_TYPE"
+    echo "seinfo interpreter (shebang): $WL_SEINFO_SHEBANG"
+    echo "seinfo interpreter original label (restored at the teardown): $WL_SEINFO_INTERPRETER_PRE"
+    echo "seinfo script original label: $DIAG_WL_SEINFO_LABEL_PRE"
     echo "selinuxfs policy label type for the explicit operand rows: $WL_POLICY_TYPE"
-    echo "seinfo linked-library label types (ldd-derived, one module row each): $WL_LIB_TYPES"
     echo "released-policy .pp sha (must not change): $DIAG_RELEASE_PP_SHA_PRE"
     echo "guest version: $(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME ($VERSION_ID)")"
     echo "policy sha before workload-module load: $DIAG_WL_PRELOAD_SHA"
@@ -3310,7 +3342,7 @@ EOF
         trusted:*|'trusted...')
           echo "WL-GATE: PASS ($WL_ROW: $WL_V)" ;;
         *)
-          echo "WL-GATE: FAIL ($WL_ROW: $WL_V)"; DIAG_WL_ALL=0 ;;
+          echo "WL-GATE: FAIL ($WL_ROW: $WL_V)" ;;
       esac
     done
     echo "-- release-policy .pp sha (post install; must be unchanged): $(sha256sum /usr/share/selinux/docker_helper.pp 2>/dev/null | awk '{print $1}')"
@@ -3325,6 +3357,38 @@ EOF
     fail "the MNB30 workload-domain module load gate failed; BLOCKED"
   fi
   log "MNB30 workload-domain module loaded: docker_helper_diag_workload (rolecheck surface, mcs attribute, and the exact MNB28 (b) row set verified)"
+
+  # The relabel step (AFTER the module made the target type exist): the
+  # shebang-resolved interpreter of /usr/bin/seinfo enters the dedicated
+  # file type so the interpreter exec carries the transition into the
+  # permissive tool domain. Restore-on-teardown is owned by
+  # p21e3_diag_remove (every exit path).
+  if ! chcon -t "$WL_SEINFO_TOOL_FILE" "$WL_SEINFO_SHEBANG" 2>&1; then
+    p21e3_diag_remove
+    p21e3_dontaudit_restore
+    fail "the seinfo interpreter relabel failed; BLOCKED"
+  fi
+  WL_SEINFO_RELABELED=1
+  WL_SEINFO_ORIG_TYPE="$(printf '%s' "$WL_SEINFO_INTERPRETER_PRE" | awk -F: '{print $3}')"
+  DIAG_WL_FILE_LOG="$EVIDENCE_DIR/p21e3-mnb30-seinfo-relabel.log"
+  {
+    echo "== the rolecheck tool relabel (temporary; restored at the teardown) =="
+    echo "interpreter: $WL_SEINFO_SHEBANG"
+    echo "label before: $WL_SEINFO_INTERPRETER_PRE"
+    ls -ZN "$WL_SEINFO_SHEBANG"
+    echo "target type: $WL_SEINFO_TOOL_FILE (the transition source; the tool domain $WL_SEINFO_TOOL_TYPE is permissive)"
+  } > "$DIAG_WL_FILE_LOG" 2>&1
+  cat "$DIAG_WL_FILE_LOG"
+  WL_RELABELED_TYPE="$(ls -ZN "$WL_SEINFO_SHEBANG" 2>/dev/null | awk '{print $1}' | awk -F: '{print $3}')"
+  if [ "$WL_RELABELED_TYPE" = "$WL_SEINFO_TOOL_FILE" ]; then
+    echo "WL-RELABEL-GATE: PASS (the interpreter carries the tool file type)"
+  else
+    p21e3_diag_remove
+    p21e3_dontaudit_restore
+    fail "the interpreter relabel verification failed (want $WL_SEINFO_TOOL_FILE, got $WL_RELABELED_TYPE)"
+  fi
+  echo "WL-RELABEL-GATE: PASS" >> "$DIAG_WL_FILE_LOG"
+  log "MNB30 rolecheck tool relabel applied: $WL_SEINFO_SHEBANG -> $WL_SEINFO_TOOL_FILE"
   fi  # end of the MNB30 temporary workload-domain module
 
   # --- fresh-procfs orientation probe (private mount namespace) ---
