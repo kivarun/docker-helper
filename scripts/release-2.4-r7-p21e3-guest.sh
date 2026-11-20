@@ -3254,9 +3254,9 @@ EOF
   esac
   WL_SEINFO_TOOL_FILE=seinfo_tool_file_t
   WL_SEINFO_TOOL_TYPE=seinfo_tool_t
-  DIAG_WL_SEINFO_ROW="(allow docker_helper_buildkitd_t ${WL_POLICY_TYPE} (dir (search)))
-(allow docker_helper_buildkitd_t ${WL_POLICY_TYPE} (file (read open getattr)))
-(allow docker_helper_buildkitd_t ${WL_SEINFO_TOOL_FILE} (file (execute execute_no_trans getattr open read map)))
+  DIAG_WL_POLICY_ROWS="(allow docker_helper_buildkitd_t ${WL_POLICY_TYPE} (dir (search)))
+(allow docker_helper_buildkitd_t ${WL_POLICY_TYPE} (file (read open getattr)))"
+  DIAG_WL_SEINFO_ROW="(allow docker_helper_buildkitd_t ${WL_SEINFO_TOOL_FILE} (file (execute execute_no_trans getattr open read map)))
 (allow docker_helper_buildkitd_t ${WL_SEINFO_TOOL_TYPE} (process (transition)))
 (allow ${WL_SEINFO_TOOL_TYPE} ${WL_SEINFO_TOOL_FILE} (file (entrypoint)))
 (typetransition docker_helper_buildkitd_t ${WL_SEINFO_TOOL_FILE} process ${WL_SEINFO_TOOL_TYPE})
