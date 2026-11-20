@@ -3238,7 +3238,7 @@ EOF
 (allow docker_helper_buildkitd_t ${WL_POLICY_TYPE} (security (read_policy)))
 (allow docker_helper_buildkitd_t tmpfs_t (lnk_file (read getattr)))
 (allow docker_helper_buildkitd_t tmpfs_t (file (read open getattr)))
-(allow docker_helper_buildkitd_t self (process (setfscreate setkeycreate)))
+(allow docker_helper_buildkitd_t self (process (setfscreate setkeycreate setexec)))
 (allow docker_helper_buildkitd_t docker_helper_builder_workload_t (key (create view setattr)))
 (allow docker_helper_buildkitd_t proc_t (dir (mounton)))
 (allow docker_helper_buildkitd_t proc_t (filesystem (remount)))
