@@ -3903,6 +3903,11 @@ for _ in $(seq 1 600); do
   sleep 0.1
 done
 printf '%s\n' "$STATUS" > "$EVIDENCE_DIR/build-status.json"
+# The op log is the wrapper's own refusal/error surface; it is captured
+# IMMEDIATELY at the terminal so a mid-diagnosis reboot cannot lose the
+# precise refused reason behind the BUILD=failed result.
+curl --silent --max-time 5 --unix-socket "$DH_SOCK" -H "Authorization: Bearer $TOKEN" \
+  "http://localhost/operations/$OP/logs?offset=0" > "$EVIDENCE_DIR/operation-terminal.log" 2>&1 || true
 JEND="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 case "$STATUS" in
   *'"succeeded"'*|*'"failed"'*) : ;;
