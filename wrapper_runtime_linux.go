@@ -43,6 +43,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -51,7 +53,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"sort"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -274,8 +278,22 @@ func wrapperRunPipeline(reader wrapperOwnContextReader, seam wrapperInspectionSy
 	if err := wrapperInspectPreparedDev(seam, devPrepOpDir(inv.bundleOpID), category); err != nil {
 		return err
 	}
-	if err := wrapperRewriteSpecDevBind(inv.bundlePath, inv.bundleOpID); err != nil {
+	label, role, err := wrapperWorkloadProcessLabel(raw)
+	if err != nil {
+		return &wrapperRefuseError{cause: fmt.Errorf("cannot compose the workload process label: %w", err)}
+	}
+	if err := wrapperRoleCheck(role, wrapperWorkloadDomain); err != nil {
+		return &wrapperRefuseError{cause: fmt.Errorf("the workload role authorization check refused the run: %w", err)}
+	}
+	if err := wrapperInspectPreparedDev(seam, devPrepOpDir(inv.bundleOpID), category); err != nil {
+		return err
+	}
+	commit, err := wrapperRewriteSpecHandoff(inv.bundlePath, inv.bundleOpID, label)
+	if err != nil {
 		return &wrapperRefuseError{cause: err}
+	}
+	if err := wrapperVerifySpecHandoff(inv.bundlePath, commit); err != nil {
+		return err
 	}
 	if err := wrapperExecRuntime(wrapperRealRuntimePath, inv.argv, env); err != nil {
 		return &wrapperRefuseError{cause: fmt.Errorf("post-commit: cannot execute the real runtime: %w", err)}
@@ -283,42 +301,49 @@ func wrapperRunPipeline(reader wrapperOwnContextReader, seam wrapperInspectionSy
 	return nil
 }
 
-// wrapperRewriteSpecDevBind reads and validates the bundle's config.json
-// and replaces exactly the one /dev tmpfs mount with the prepared-tree
-// bind, committing the result atomically. The prepared-tree source comes
-// exclusively from the canonical path owner (devPrepOpDir) derived from
-// the derived operation id — never from argv, environment, or spec
-// contents. An already-rewritten /dev bind is never adopted; the
-// predicted incumbent shape is a strict provisional predicate (OBL-8
-// remains mandatory before any integration calibration).
-func wrapperRewriteSpecDevBind(bundlePath, opID string) error {
+// wrapperRewriteSpecHandoff reads and validates the bundle's config.json
+// and commits the managed-spec rewrite atomically: it replaces exactly
+// the one /dev tmpfs mount with the prepared-tree bind AND assigns the
+// workload process label (process.selinuxLabel) — one atomic rename for
+// both changes. The prepared-tree source comes exclusively from the
+// canonical path owner (devPrepOpDir) derived from the derived operation
+// id — never from argv, environment, or spec contents. An
+// already-rewritten /dev bind and an already-present foreign
+// process.selinuxLabel are never adopted; the predicted incumbent shape
+// is a strict provisional predicate (OBL-8 remains mandatory before any
+// integration calibration). The return value carries the commit
+// identity: the SHA-256 of the final spec bytes (the token the wrapper
+// hands to the managed-run check) and the exact expected tree the
+// rewrite built.
+func wrapperRewriteSpecHandoff(bundlePath, opID, label string) (wrapperSpecCommit, error) {
+	var zero wrapperSpecCommit
 	specPath := filepath.Join(bundlePath, "config.json")
 	original, err := os.ReadFile(specPath)
 	if err != nil {
-		return fmt.Errorf("cannot read the OCI spec %s: %w", specPath, err)
+		return zero, fmt.Errorf("cannot read the OCI spec %s: %w", specPath, err)
 	}
 	var doc map[string]any
 	dec := json.NewDecoder(bytes.NewReader(original))
 	dec.UseNumber()
 	if err := dec.Decode(&doc); err != nil {
-		return fmt.Errorf("the OCI spec %s is not a JSON object: %w", specPath, err)
+		return zero, fmt.Errorf("the OCI spec %s is not a JSON object: %w", specPath, err)
 	}
 	// The rewrite re-serializes the whole document, so any trailing data
 	// would be silently discarded — refuse it instead (runc's own loader
 	// tolerates it; the rewrite must not).
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return fmt.Errorf("the OCI spec %s carries trailing data", specPath)
+		return zero, fmt.Errorf("the OCI spec %s carries trailing data", specPath)
 	}
 	mounts, ok := doc["mounts"].([]any)
 	if !ok {
-		return fmt.Errorf("the OCI spec %s has no mounts array", specPath)
+		return zero, fmt.Errorf("the OCI spec %s has no mounts array", specPath)
 	}
 	devIndex := -1
 	devCount := 0
 	for i, entry := range mounts {
 		m, ok := entry.(map[string]any)
 		if !ok {
-			return fmt.Errorf("the OCI spec %s has a non-object mount entry at index %d", specPath, i)
+			return zero, fmt.Errorf("the OCI spec %s has a non-object mount entry at index %d", specPath, i)
 		}
 		// Pinned runc v1.4.3 resolves every mount destination lexically
 		// (pathrs.LexicallyCleanPath, which for absolute destinations is
@@ -336,39 +361,39 @@ func wrapperRewriteSpecDevBind(bundlePath, opID string) error {
 		}
 	}
 	if devCount == 0 {
-		return fmt.Errorf("the OCI spec %s has no /dev mount", specPath)
+		return zero, fmt.Errorf("the OCI spec %s has no /dev mount", specPath)
 	}
 	if devCount > 1 {
-		return fmt.Errorf("the OCI spec %s has %d /dev mounts (by normalized destination)", specPath, devCount)
+		return zero, fmt.Errorf("the OCI spec %s has %d /dev mounts (by normalized destination)", specPath, devCount)
 	}
 	dev := mounts[devIndex].(map[string]any)
 	if dest, _ := dev["destination"].(string); dest != "/dev" {
-		return fmt.Errorf("the /dev mount of %s has the noncanonical destination %q; only the literal /dev spelling is accepted", specPath, dest)
+		return zero, fmt.Errorf("the /dev mount of %s has the noncanonical destination %q; only the literal /dev spelling is accepted", specPath, dest)
 	}
 	mountType, _ := dev["type"].(string)
 	mountSource, _ := dev["source"].(string)
 	rawOptions, ok := dev["options"].([]any)
 	if !ok {
-		return fmt.Errorf("the /dev mount of %s has no options array", specPath)
+		return zero, fmt.Errorf("the /dev mount of %s has no options array", specPath)
 	}
 	options := make([]string, 0, len(rawOptions))
 	for _, o := range rawOptions {
 		s, ok := o.(string)
 		if !ok {
-			return fmt.Errorf("the /dev mount of %s has a non-string /dev mount option", specPath)
+			return zero, fmt.Errorf("the /dev mount of %s has a non-string /dev mount option", specPath)
 		}
 		options = append(options, s)
 	}
 	for _, o := range options {
 		if o == "bind" || o == "rbind" {
-			return fmt.Errorf("the /dev mount of %s is already a bind; refusing to adopt a rewritten spec", specPath)
+			return zero, fmt.Errorf("the /dev mount of %s is already a bind; refusing to adopt a rewritten spec", specPath)
 		}
 	}
 	if mountType == "bind" {
 		// A bind TYPE makes runc's conversion produce Device="bind" even
 		// without a bind option (specconv: mnt.Device = m.Type) — the
 		// needsSetupDev predicate would already see a bind.
-		return fmt.Errorf("the /dev mount of %s is already a bind; refusing to adopt a rewritten spec", specPath)
+		return zero, fmt.Errorf("the /dev mount of %s is already a bind; refusing to adopt a rewritten spec", specPath)
 	}
 	// The strict provisional incumbent predicate: exactly the
 	// containerd-generated tmpfs/tmpfs entry with the pinned option
@@ -385,17 +410,17 @@ func wrapperRewriteSpecDevBind(bundlePath, opID string) error {
 	}
 	if len(extraFields) > 0 {
 		sort.Strings(extraFields)
-		return fmt.Errorf("the /dev mount of %s carries unexpected fields %v", specPath, extraFields)
+		return zero, fmt.Errorf("the /dev mount of %s carries unexpected fields %v", specPath, extraFields)
 	}
 	if mountType != "tmpfs" || mountSource != "tmpfs" {
-		return fmt.Errorf("the /dev mount of %s has the unexpected shape type=%q source=%q", specPath, mountType, mountSource)
+		return zero, fmt.Errorf("the /dev mount of %s has the unexpected shape type=%q source=%q", specPath, mountType, mountSource)
 	}
 	optionsDeviant := len(options) != len(wrapperDevIncumbentOptions)
 	for i := 0; !optionsDeviant && i < len(options); i++ {
 		optionsDeviant = options[i] != wrapperDevIncumbentOptions[i]
 	}
 	if optionsDeviant {
-		return fmt.Errorf("the /dev mount of %s does not carry the pinned provisional incumbent options %v, got %v", specPath, wrapperDevIncumbentOptions, options)
+		return zero, fmt.Errorf("the /dev mount of %s does not carry the pinned provisional incumbent options %v, got %v", specPath, wrapperDevIncumbentOptions, options)
 	}
 	mounts[devIndex] = map[string]any{
 		"destination": "/dev",
@@ -403,14 +428,24 @@ func wrapperRewriteSpecDevBind(bundlePath, opID string) error {
 		"source":      devPrepOpDir(opID),
 		"options":     optionsToAny(wrapperDevBindOptions),
 	}
+	process, ok := doc["process"].(map[string]any)
+	if !ok {
+		return zero, fmt.Errorf("the OCI spec %s has no process object", specPath)
+	}
+	// The workload process label rides the same single commit: an
+	// already-present label would be a foreign value — never adopted.
+	if old, present := process["selinuxLabel"]; present {
+		return zero, fmt.Errorf("the OCI spec %s already carries process.selinuxLabel %v; refusing to adopt a rewritten spec", specPath, old)
+	}
+	process["selinuxLabel"] = label
 	rewritten, err := json.Marshal(doc)
 	if err != nil {
-		return fmt.Errorf("cannot re-serialize the OCI spec %s: %w", specPath, err)
+		return zero, fmt.Errorf("cannot re-serialize the OCI spec %s: %w", specPath, err)
 	}
 	// Preserve the original file's exposure exactly.
 	st, err := os.Stat(specPath)
 	if err != nil {
-		return fmt.Errorf("cannot stat the OCI spec %s: %w", specPath, err)
+		return zero, fmt.Errorf("cannot stat the OCI spec %s: %w", specPath, err)
 	}
 	// Exclusive ownership of the temporary file (C3): CreateTemp opens
 	// with O_CREATE|O_EXCL under an unpredictable random suffix inside
@@ -420,17 +455,17 @@ func wrapperRewriteSpecDevBind(bundlePath, opID string) error {
 	// created. The commit point remains the rename(2) below.
 	temp, err := wrapperCreateTemp(bundlePath)
 	if err != nil {
-		return fmt.Errorf("cannot create the rewritten OCI spec temporary file: %w", err)
+		return zero, fmt.Errorf("cannot create the rewritten OCI spec temporary file: %w", err)
 	}
 	tempPath := temp.Name()
 	// Pre-commit residue removal covers only the file this invocation
 	// created, and a failed removal is surfaced rather than silently
 	// discarded or claimed as a clean cleanup.
-	discardTemp := func(cause error) error {
+	discardTemp := func(cause error) (wrapperSpecCommit, error) {
 		if rmErr := os.Remove(tempPath); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
-			return fmt.Errorf("%w; additionally the wrapper temporary file %s remains (cleanup failed: %v)", cause, tempPath, rmErr)
+			return zero, fmt.Errorf("%w; additionally the wrapper temporary file %s remains (cleanup failed: %v)", cause, tempPath, rmErr)
 		}
-		return cause
+		return zero, cause
 	}
 	if _, err := temp.Write(rewritten); err != nil {
 		return discardTemp(fmt.Errorf("cannot write the rewritten OCI spec: %w", err))
@@ -441,11 +476,107 @@ func wrapperRewriteSpecDevBind(bundlePath, opID string) error {
 	if err := temp.Close(); err != nil {
 		return discardTemp(fmt.Errorf("cannot close the rewritten OCI spec temporary file: %w", err))
 	}
+	// The pre-rename inode identity of the committed temporary file: the
+	// managed-run check re-opens config.json BY PATH and must see this
+	// exact inode (a path-replacement since the commit is a refusal).
+	tempSt, stErr := os.Stat(tempPath)
+	if stErr != nil {
+		return zero, fmt.Errorf("cannot stat the committed temporary spec %s: %w", tempPath, stErr)
+	}
+	tempSys, ok := tempSt.Sys().(*syscall.Stat_t)
+	if !ok {
+		return zero, fmt.Errorf("cannot resolve the inode identity of the committed temporary spec")
+	}
+	digest := sha256.Sum256(rewritten)
+	commit := wrapperSpecCommit{
+		digest:   hex.EncodeToString(digest[:]),
+		dev:      uint64(tempSys.Dev),
+		ino:      tempSys.Ino,
+		expected: doc,
+	}
 	// THE COMMIT POINT (R4-P1-C1 §C1): a successful rename leaves the
 	// rewritten spec in place for every later outcome, including an
 	// execve failure — no rollback, no repair, no retry.
 	if err := wrapperCommitRename(tempPath, specPath); err != nil {
 		return discardTemp(fmt.Errorf("cannot commit the rewritten OCI spec (the original is unchanged): %w", err))
+	}
+	return commit, nil
+}
+
+// wrapperSpecCommit is the wrapper-side commit identity of the
+// managed-spec rewrite. Digest is the SHA-256 (hex) of the FINAL spec
+// bytes — the token the wrapper hands to the managed-run check (the
+// runtime-side integrity gate of the prototype). The committed-inode
+// identity (dev/ino), the mode, and the exact expected decoded tree are
+// wrapper-side verification context for that check; they are not a
+// separate handoff channel (the real runtime reads config.json by
+// path).
+type wrapperSpecCommit struct {
+	digest   string
+	dev      uint64
+	ino      uint64
+	expected any
+}
+
+// wrapperVerifySpecHandoff is the narrow prototype of the runtime-side
+// acceptance check in the managed `run` (the "runc side" of the
+// handoff): it opens config.json BY PATH exactly once (O_NOFOLLOW — the
+// provider-identical path the real runtime opens), reads it fully into
+// ONE buffer, verifies the wrapper-committed SHA-256 against THAT
+// buffer, and decodes THE SAME buffer. A missing or mismatched digest,
+// an inode identity change since the commit, or any divergence of the
+// verified tree from the committed expectation is a refusal BEFORE the
+// real runtime is exec'd — the run dies before any container creation,
+// and the integrity check binds to the bytes the runtime actually
+// parses. The structural gate has no delta vocabulary of its own: the
+// expected tree is the exact tree the commit itself built, so the H4
+// comparison allows exactly the /dev bind and the process.selinuxLabel
+// assignment by construction.
+func wrapperVerifySpecHandoff(bundlePath string, commit wrapperSpecCommit) error {
+	specPath := filepath.Join(bundlePath, "config.json")
+	refuse := func(err error) error { return &wrapperRefuseError{cause: err} }
+	if commit.digest == "" {
+		return refuse(fmt.Errorf("the committed spec digest token is absent; refusing the managed run"))
+	}
+	f, err := os.OpenFile(specPath, os.O_RDONLY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return refuse(fmt.Errorf("cannot open the committed OCI spec %s for the managed read: %w", specPath, err))
+	}
+	defer f.Close()
+	buf, err := io.ReadAll(f)
+	if err != nil {
+		return refuse(fmt.Errorf("cannot read the committed OCI spec %s: %w", specPath, err))
+	}
+	st, err := f.Stat()
+	if err != nil {
+		return refuse(fmt.Errorf("cannot stat the opened OCI spec %s: %w", specPath, err))
+	}
+	sys, ok := st.Sys().(*syscall.Stat_t)
+	if !ok {
+		return refuse(fmt.Errorf("cannot resolve the inode identity of the opened OCI spec %s", specPath))
+	}
+	if uint64(sys.Dev) != commit.dev || sys.Ino != commit.ino {
+		return refuse(fmt.Errorf("the OCI spec %s was replaced after the commit check (the opened inode %d:%d is not the committed %d:%d)",
+			specPath, uint64(sys.Dev), sys.Ino, commit.dev, commit.ino))
+	}
+	got := sha256.Sum256(buf)
+	if hex.EncodeToString(got[:]) != commit.digest {
+		return refuse(fmt.Errorf("the OCI spec %s bytes do not match the committed digest (post-commit replacement detected)",
+			specPath))
+	}
+	// Decode THE SAME buffer: the verified bytes are the only JSON the
+	// handoff may vouch for.
+	dec := json.NewDecoder(bytes.NewReader(buf))
+	dec.UseNumber()
+	var doc map[string]any
+	if err := dec.Decode(&doc); err != nil {
+		return refuse(fmt.Errorf("the committed OCI spec %s is not a JSON object: %w", specPath, err))
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return refuse(fmt.Errorf("the committed OCI spec %s carries trailing data", specPath))
+	}
+	if !reflect.DeepEqual(doc, commit.expected) {
+		return refuse(fmt.Errorf("the verified OCI spec %s differs from the committed expectation", specPath))
 	}
 	return nil
 }

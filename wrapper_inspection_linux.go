@@ -65,6 +65,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -235,28 +236,95 @@ func (linuxWrapperOwnContextReader) readOwnContext() ([]byte, error) {
 // single parser) are refused — no caller-supplied context is ever
 // trusted.
 func wrapperOwnContextCategory(raw []byte) (builderCategory, error) {
+	_, category, err := wrapperParseOwnContext(raw)
+	return category, err
+}
+
+// wrapperParseOwnContext decomposes the verified own process context into
+// its five canonical fields and the parsed pool category. The framing,
+// shape, own-domain, and category validation are the shared grammar of
+// every own-context consumer; no normalized or caller-supplied value ever
+// enters the product.
+func wrapperParseOwnContext(raw []byte) ([5]string, builderCategory, error) {
+	var fields [5]string
 	ctx := raw
 	if n := len(ctx); n > 0 && (ctx[n-1] == '\n' || ctx[n-1] == 0) {
 		ctx = ctx[:n-1]
 	}
 	if len(ctx) == 0 {
-		return 0, errors.New("the own process context is empty")
+		return fields, 0, errors.New("the own process context is empty")
 	}
 	if bytes.IndexByte(ctx, 0) >= 0 || bytes.IndexByte(ctx, '\n') >= 0 {
-		return 0, errors.New("the own process context carries an embedded terminal byte")
+		return fields, 0, errors.New("the own process context carries an embedded terminal byte")
 	}
-	fields := strings.Split(string(ctx), ":")
-	if len(fields) != 5 {
-		return 0, fmt.Errorf("the own process context %q is not user:role:type:sensitivity:category", ctx)
+	parts := strings.Split(string(ctx), ":")
+	if len(parts) != 5 {
+		return fields, 0, fmt.Errorf("the own process context %q is not user:role:type:sensitivity:category", ctx)
 	}
+	copy(fields[:], parts)
 	if fields[2] != wrapperOwnDomain {
-		return 0, fmt.Errorf("the own process context type %q, want %q", fields[2], wrapperOwnDomain)
+		return fields, 0, fmt.Errorf("the own process context type %q, want %q", fields[2], wrapperOwnDomain)
 	}
 	category, ok := parseBuilderCategory(fields[4])
 	if !ok {
-		return 0, fmt.Errorf("the own process context category %q is not a canonical pool category", fields[4])
+		return fields, 0, fmt.Errorf("the own process context category %q is not a canonical pool category", fields[4])
 	}
-	return category, nil
+	return fields, category, nil
+}
+
+// wrapperWorkloadDomain is the fixed workload domain type of the MNB28
+// (b) decision row: the container payload's process context keeps the
+// wrapper's own user, role, sensitivity, and category verbatim and
+// substitutes exactly this type. The domain stays diagnostic until the
+// transition review accepts the SELinux plumbing; no TE grant exists
+// yet.
+const wrapperWorkloadDomain = "docker_helper_builder_workload_t"
+
+// wrapperWorkloadProcessLabel composes the full five-field SELinux
+// PROCESS context assigned to the container payload at the managed-spec
+// commit. The user, role, sensitivity, and category come from the
+// wrapper's own VERIFIED context (kernel trust, never from the spec or
+// argv); only the domain type is the fixed workload type. This is a
+// process context, not an object context — the role is the wrapper's
+// own process role, and its authorization to hold the workload domain
+// is a separate policy check (wrapperRoleCheck); builderObjectContext's
+// object_r object role does not apply here.
+func wrapperWorkloadProcessLabel(raw []byte) (string, string, error) {
+	fields, _, err := wrapperParseOwnContext(raw)
+	if err != nil {
+		return "", "", err
+	}
+	if fields[0] == "" || fields[1] == "" || fields[3] == "" {
+		return "", "", fmt.Errorf("the own process context carries empty user/role/sensitivity fields")
+	}
+	label := fields[0] + ":" + fields[1] + ":" + wrapperWorkloadDomain + ":" +
+		fields[3] + ":" + fields[4]
+	return label, fields[1], nil
+}
+
+// wrapperRoleCheck is the injectable roletype authorization check: the
+// wrapper's own process ROLE must be authorized to hold the workload
+// domain type in the LOADED policy (the roletype relation, not an
+// allow rule). Production: seinfo --role_types <domain> against the
+// loaded policy — seinfo is the component-query tool for the role/type
+// relation; sesearch searches TE/RBAC rule sets only. Fail-closed
+// classification: a failed query is never an authoritative absence.
+// Package-global; tests restore it.
+var wrapperRoleCheck = func(role, domain string) error {
+	out, err := exec.Command("seinfo", "--role_types", domain).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("the roletype query cannot be trusted (%v)", err)
+	}
+	// The --role_types TYPE rendering is the per-role statement list for
+	// that type; an exact role TOKEN on its own entry line is the match.
+	// Empty output or a query error is a refusal, never an allowance.
+	for _, entry := range strings.Split(string(out), "\n") {
+		entry = strings.TrimSpace(entry)
+		if entry == role {
+			return nil
+		}
+	}
+	return fmt.Errorf("the loaded policy carries no %s role authorization for the workload domain (%q)", role, wrapperWorkloadDomain)
 }
 
 // wrapperInspectionSyscalls is the narrow inspection seam: exactly the

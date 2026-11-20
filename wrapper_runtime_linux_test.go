@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -38,7 +39,9 @@ type wrapperExecRecord struct {
 // withWrapperRuntimeSeams swaps the runtime-path value, the exec seam
 // (recording, optionally failing), and the commit rename (optionally
 // failing). Package-global seams; restored via t.Cleanup; never used
-// with t.Parallel.
+// with t.Parallel. The roletype authorization check rides an
+// always-allow stub here (the run fixtures carry no seinfo-backed
+// loaded policy); the dedicated role-check tests override it.
 func withWrapperRuntimeSeams(t *testing.T, execErr error, renameErr error) *wrapperExecRecord {
 	t.Helper()
 	rec := &wrapperExecRecord{err: execErr}
@@ -55,8 +58,17 @@ func withWrapperRuntimeSeams(t *testing.T, execErr error, renameErr error) *wrap
 		}
 		return origRename(tempPath, targetPath)
 	}
+	origRoleCheck := wrapperRoleCheck
+	wrapperRoleCheck = func(role, domain string) error {
+		if role != "system_r" || domain != wrapperWorkloadDomain {
+			t.Errorf("unexpected role check call: role=%q domain=%q", role, domain)
+			return errors.New("unexpected role check call")
+		}
+		return nil
+	}
 	t.Cleanup(func() {
 		wrapperRealRuntimePath, wrapperExecRuntime, wrapperCommitRename = origPath, origExec, origRename
+		wrapperRoleCheck = origRoleCheck
 	})
 	return rec
 }
@@ -85,6 +97,34 @@ func withWrapperBundleTree(t *testing.T) string {
 		t.Fatalf("bundle dir: %v", err)
 	}
 	return bundleDir
+}
+
+// wrapperTestWorkloadLabel renders the workload process label the
+// fixture's own context (category 7) composes.
+func wrapperTestWorkloadLabel() string {
+	return "system_u:system_r:" + wrapperWorkloadDomain + ":s0:c7"
+}
+
+// wrapperExpectedCommittedSpec renders the H4 structural expectation of
+// the committed spec: the original document with EXACTLY the /dev mount
+// replaced in place and the workload label assigned — the only allowed
+// changes of the (b) handoff prototype.
+func wrapperExpectedCommittedSpec(t *testing.T, original []byte) map[string]any {
+	t.Helper()
+	expected := wrapperDecodeSpec(t, original)
+	mounts := expected["mounts"].([]any)
+	for i, m := range mounts {
+		if m.(map[string]any)["destination"] == "/dev" {
+			mounts[i] = map[string]any{
+				"destination": "/dev",
+				"type":        "bind",
+				"source":      devPrepOpDir(wrapperTestOpID),
+				"options":     []any{"bind", "nosuid"},
+			}
+		}
+	}
+	expected["process"].(map[string]any)["selinuxLabel"] = wrapperTestWorkloadLabel()
+	return expected
 }
 
 // wrapperSpecFixture renders the predicted incumbent OCI spec: the
@@ -328,20 +368,8 @@ func TestWrapperRunRewritesSpec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rewritten spec: %v", err)
 	}
-	// Structural expectation: the original document with exactly the
-	// /dev mount replaced in place.
-	expected := wrapperDecodeSpec(t, original)
-	mounts := expected["mounts"].([]any)
-	for i, m := range mounts {
-		if m.(map[string]any)["destination"] == "/dev" {
-			mounts[i] = map[string]any{
-				"destination": "/dev",
-				"type":        "bind",
-				"source":      devPrepOpDir(wrapperTestOpID),
-				"options":     []any{"bind", "nosuid"},
-			}
-		}
-	}
+	// Structural expectation: the H4-allowed delta set only.
+	expected := wrapperExpectedCommittedSpec(t, original)
 	if got := wrapperDecodeSpec(t, rewritten); !reflect.DeepEqual(got, expected) {
 		t.Fatalf("rewritten spec diverges beyond the /dev replacement:\n got %v\nwant %v", got, expected)
 	}
@@ -519,6 +547,11 @@ func TestWrapperSpecRewriteRefusals(t *testing.T) {
 			}
 			writeSpec(t, dir, doc)
 		}},
+		{name: "already carries a foreign selinuxLabel", wantText: "already carries process.selinuxLabel", mutate: func(t *testing.T, dir string) {
+			doc := wrapperDecodeSpec(t, base)
+			doc["process"].(map[string]any)["selinuxLabel"] = "system_u:system_r:foreign_t:s0:c1"
+			writeSpec(t, dir, doc)
+		}},
 		{name: "already rewritten bind type", wantText: "already a bind", mutate: func(t *testing.T, dir string) {
 			doc := wrapperDecodeSpec(t, base)
 			for _, m := range doc["mounts"].([]any) {
@@ -556,7 +589,7 @@ func TestWrapperSpecRewriteRefusals(t *testing.T) {
 			if err != nil {
 				before = nil
 			}
-			err = wrapperRewriteSpecDevBind(bundleDir, wrapperTestOpID)
+			_, err = wrapperRewriteSpecHandoff(bundleDir, wrapperTestOpID, wrapperTestWorkloadLabel())
 			if err == nil {
 				t.Fatalf("the mutated spec must be refused")
 			}
@@ -724,18 +757,7 @@ func TestWrapperCommitSemantics(t *testing.T) {
 		if err != nil {
 			t.Fatalf("rewritten spec: %v", err)
 		}
-		expected := wrapperDecodeSpec(t, original)
-		mounts := expected["mounts"].([]any)
-		for i, m := range mounts {
-			if m.(map[string]any)["destination"] == "/dev" {
-				mounts[i] = map[string]any{
-					"destination": "/dev",
-					"type":        "bind",
-					"source":      devPrepOpDir(wrapperTestOpID),
-					"options":     []any{"bind", "nosuid"},
-				}
-			}
-		}
+		expected := wrapperExpectedCommittedSpec(t, original)
 		if got := wrapperDecodeSpec(t, rewritten); !reflect.DeepEqual(got, expected) {
 			t.Fatal("the committed rewrite must remain in place")
 		}
@@ -983,5 +1005,181 @@ func TestWrapperExecPathIndependentOfPATH(t *testing.T) {
 	}
 	if !reflect.DeepEqual(rec.env, env) {
 		t.Fatalf("env must be forwarded verbatim, got %v", rec.env)
+	}
+}
+
+// TestWrapperWorkloadProcessLabelComposesOwnContext proves the process-
+// context composition: the user, role, sensitivity, and category come
+// verbatim from the wrapper's own verified context; ONLY the domain
+// type becomes the fixed workload type; malformed own contexts, foreign
+// domains, and decorated categories are refusals. The composed value is
+// a PROCESS context — the role is the wrapper's own process role, never
+// the object_r object role of builderObjectContext.
+func TestWrapperWorkloadProcessLabelComposesOwnContext(t *testing.T) {
+	label, role, err := wrapperWorkloadProcessLabel(wrapperOwnContextRaw(7, "\n"))
+	if err != nil {
+		t.Fatalf("valid own context: %v", err)
+	}
+	if label != wrapperTestWorkloadLabel() {
+		t.Fatalf("label = %q, want %q", label, wrapperTestWorkloadLabel())
+	}
+	if role != "system_r" {
+		t.Fatalf("role = %q, want the carried-over own process role system_r", role)
+	}
+	mutations := []struct {
+		name string
+		raw  []byte
+	}{
+		{name: "foreign domain", raw: []byte("system_u:system_r:other_domain_t:s0:c7")},
+		{name: "four fields", raw: []byte("system_u:system_r:x_t:s0:c7")},
+		{name: "embedded newline", raw: wrapperOwnContextRaw(7, "extra\n")},
+		{name: "category set", raw: []byte("system_u:system_r:" + wrapperOwnDomain + ":s0:c1.c3")},
+		{name: "invalid category", raw: []byte("system_u:system_r:" + wrapperOwnDomain + ":s0:c0")},
+	}
+	for _, tc := range mutations {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, _, err := wrapperWorkloadProcessLabel(tc.raw); err == nil {
+				t.Fatal("the malformed own context must be refused")
+			}
+		})
+	}
+}
+
+// wrapperRoleCheckFromOutput is the pure roletype-output classifier
+// extracted from the production wrapperRoleCheck.
+func wrapperRoleCheckFromOutput(out []byte, queryErr error, role, domain string) error {
+	if queryErr != nil {
+		return fmt.Errorf("the roletype query cannot be trusted (%v)", queryErr)
+	}
+	for _, entry := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(entry) == role {
+			return nil
+		}
+	}
+	return fmt.Errorf("the loaded policy carries no %s role authorization for the workload domain (%q)", role, domain)
+}
+
+// TestWrapperRoleCheckRefusalShapes proves the fail-closed roletype
+// classification: a failed seinfo query is never an authoritative
+// allowance, an empty result is a refusal, and an exact role-token entry
+// is the only allowance.
+func TestWrapperRoleCheckRefusalShapes(t *testing.T) {
+	cases := []struct {
+		name     string
+		out      []byte
+		queryErr error
+		wantErr  string
+	}{
+		{name: "query failure", out: nil, queryErr: errors.New("exit 2"), wantErr: "cannot be trusted"},
+		{name: "absent row", out: []byte(""), queryErr: nil, wantErr: "role authorization"},
+		{name: "authorized", out: []byte("Roles: 1\n   system_r\n"), queryErr: nil, wantErr: ""},
+		{name: "decorated entry", out: []byte("system_r\n"), queryErr: nil, wantErr: ""},
+		{name: "foreign role only", out: []byte("unconfined_r\n"), queryErr: nil, wantErr: "role authorization"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := wrapperRoleCheckFromOutput(tc.out, tc.queryErr, "system_r", wrapperWorkloadDomain)
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("want allowance, got %v", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("want refusal naming %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+// TestWrapperSpecHandoffMissingDigest proves the fail-closed digest
+// handoff contract: an ABSENT commit digest token aborts the managed
+// run before the real runtime is exec'd — the check is never skippable.
+func TestWrapperSpecHandoffMissingDigest(t *testing.T) {
+	bundleDir, _, _ := wrapperRunFixture(t)
+	// The token-absent probe: a zero commit record with an as-if
+	// provided (but empty) digest value.
+	err := wrapperVerifySpecHandoff(bundleDir, wrapperSpecCommit{})
+	if err == nil || !strings.Contains(err.Error(), "digest token is absent") {
+		t.Fatalf("want the absent-digest refusal, got %v", err)
+	}
+}
+
+// TestWrapperSpecHandoffTamperBetweenCommitAndRead proves the integrity
+// gate of the handoff prototype: a config.json replacement that lands
+// AFTER the wrapper's commit and BEFORE the managed read is refused
+// before the real runtime is exec'd — the substitution case of the
+// prototype (the inode-swap form and the in-place content-tamper form).
+func TestWrapperSpecHandoffTamperBetweenCommitAndRead(t *testing.T) {
+	tamperedSpec := wrapperDecodeSpec(t, wrapperSpecFixture())
+	mounts := tamperedSpec["mounts"].([]any)
+	for i, m := range mounts {
+		if m.(map[string]any)["destination"] == "/dev" {
+			// The replacement rewrites the prepared-tree source: a
+			// structurally plausible but DIFFERENT committed shape.
+			mounts[i] = map[string]any{
+				"destination": "/dev",
+				"type":        "bind",
+				"source":      "/attacker/controlled/dev-prep",
+				"options":     []any{"bind", "nosuid"},
+			}
+		}
+	}
+	substituted, err := json.Marshal(tamperedSpec)
+	if err != nil {
+		t.Fatalf("substitute marshal: %v", err)
+	}
+	cases := []struct {
+		name     string
+		tamper   func(t *testing.T, bundleDir string)
+		wantText string
+	}{
+		{
+			name:     "path-replaced spec (new inode)",
+			wantText: "was replaced after the commit check",
+			tamper: func(t *testing.T, bundleDir string) {
+				t.Helper()
+				replacement := filepath.Join(t.TempDir(), "foreign.json")
+				if err := os.WriteFile(replacement, substituted, 0o644); err != nil {
+					t.Fatalf("substitute: %v", err)
+				}
+				if err := os.Rename(replacement, filepath.Join(bundleDir, "config.json")); err != nil {
+					t.Fatalf("substitute rename: %v", err)
+				}
+			},
+		},
+		{
+			name:     "content-replaced spec (same inode)",
+			wantText: "do not match the committed digest",
+			tamper: func(t *testing.T, bundleDir string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(bundleDir, "config.json"), substituted, 0o644); err != nil {
+					t.Fatalf("substitute: %v", err)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bundleDir, fs, rec := wrapperRunFixture(t)
+			reader := fakeWrapperOwnContext{raw: wrapperOwnContextRaw(7, "\n")}
+			// Inject the substitution exactly between the commit and
+			// the managed read: the commit seam performs the accepted
+			// rename, then tampers, and the pipeline's very next step
+			// (the managed read) must refuse.
+			origRename := wrapperCommitRename
+			defer func() { wrapperCommitRename = origRename }()
+			wrapperCommitRename = func(tempPath, targetPath string) error {
+				if err := origRename(tempPath, targetPath); err != nil {
+					return err
+				}
+				tc.tamper(t, bundleDir)
+				return nil
+			}
+			err := wrapperMainWithSeams(wrapperRunArgv(bundleDir), nil, reader, fs)
+			if err == nil || !strings.Contains(err.Error(), tc.wantText) {
+				t.Fatalf("want the tamper refusal naming %q, got %v", tc.wantText, err)
+			}
+			if rec.calls != 0 {
+				t.Fatal("the real runtime must never be exec'd on a tampered spec")
+			}
+		})
 	}
 }
