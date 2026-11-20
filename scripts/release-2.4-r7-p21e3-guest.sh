@@ -3499,26 +3499,48 @@ CEOF
   gr="${gr:-$(sha256sum /usr/libexec/docker-helper/buildkit/runtime/buildkit-runc | awk '{print $1}')}"
   # The member extraction is also state-gated (section 3); re-extract for a
   # same-boot re-entry so the byte-pin never reads an older, unrelated tree.
-  if [ "${RPM_MEMBERS_OK:-0}" != 1 ] || \
-     [ ! -s "${RPM_MEMBERS_DIR:-}/extract/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc" ]; then
+  # The runtime member needs its OWN cpio pass: section 3's extraction pulls
+  # only the product binary and the policy package members.
+  MNB30_RUNTIME="$RPM_MEMBERS_DIR/extract/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc"
+  if [ ! -s "$MNB30_RUNTIME" ]; then
     RPM_MEMBERS_DIR="$(mktemp -d "$STATE_DIR/mnb30-members.XXXXXX")"
-    if extract_p21e3_rpm_members "$ARTIFACT" "$RPM_MEMBERS_DIR"; then
+    MNB30_RUNTIME="$RPM_MEMBERS_DIR/extract/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc"
+    mkdir -p "$RPM_MEMBERS_DIR/extract" "$RPM_MEMBERS_DIR/rtwork" \
+      || { printf 'MNB30-RUNTIME-EXTRACT: FAIL (workdir)\n'; }
+    if command -v rpm2cpio >/dev/null 2>&1 && command -v cpio >/dev/null 2>&1; then
+      rpm2cpio "$ARTIFACT" > "$RPM_MEMBERS_DIR/rtwork/payload.cpio" \
+        && RPM2CPIO_RC=0 || RPM2CPIO_RC=$?
+      if [ "$RPM2CPIO_RC" = 0 ] || { [ "$RPM2CPIO_RC" = 1 ] && [ -s "$RPM_MEMBERS_DIR/rtwork/payload.cpio" ]; }; then
+        (cd "$RPM_MEMBERS_DIR/extract" && cpio -id --no-absolute-filenames \
+          /usr/libexec/docker-helper/buildkit/runtime/buildkit-runc \
+          usr/libexec/docker-helper/buildkit/runtime/buildkit-runc \
+          ./usr/libexec/docker-helper/buildkit/runtime/buildkit-runc \
+          <"$RPM_MEMBERS_DIR/rtwork/payload.cpio") \
+          >"$RPM_MEMBERS_DIR/rtwork/cpio.out" 2>"$RPM_MEMBERS_DIR/rtwork/cpio.err" \
+          && CPIO_RC=0 || CPIO_RC=$?
+      fi
+    else
+      CPIO_RC=none
+    fi
+    if [ "$CPIO_RC" = 0 ] && [ -s "$MNB30_RUNTIME" ]; then
       RPM_MEMBERS_OK=1
     else
       RPM_MEMBERS_OK=0
+      printf 'MNB30-RUNTIME-EXTRACT: FAIL (rpm2cpio rc=%s cpio rc=%s)\n' \
+        "${RPM2CPIO_RC:-none}" "${CPIO_RC:-none}"
     fi
   fi
   MNB30_LOG="$EVIDENCE_DIR/p21e3-mnb30-preflight.log"
   {
     echo "== MNB30 preflight: extracted-RPM runtime pin + loader harness + seinfo roletype =="
-    if [ "$RPM_MEMBERS_OK" != 1 ] || [ ! -s "$RPM_MEMBERS_DIR/extract/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc" ]; then
+    if [ "$RPM_MEMBERS_OK" != 1 ] || [ ! -s "$MNB30_RUNTIME" ]; then
       echo "MNB30-RUNTIME-EXTRACT: FAIL (the runtime member is not extracted from the candidate RPM)"
       echo "MNB30-RUNTIME-PIN=FAIL"
       echo "MNB30-SEINFO=FAIL"
       echo "MNB30-HARNESS=FAIL"
       printf 'R7-MNB30-VERDICT=BLOCKED:runtime-extract\n'
     else
-      extracted="$(sha256sum "$RPM_MEMBERS_DIR/extract/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc" | awk '{print $1}')"
+      extracted="$(sha256sum "$MNB30_RUNTIME" | awk '{print $1}')"
       printf 'extracted-runtime-sha256=%s\n' "$extracted"
       installed="$(sha256sum /usr/libexec/docker-helper/buildkit/runtime/buildkit-runc | awk '{print $1}')"
       printf 'installed-runtime-sha256=%s\n' "$installed"
@@ -3541,7 +3563,7 @@ CEOF
       echo "-- the four loader checks + the create probe on the EXTRACTED binary --"
       if [ -s /tmp/r7-diag/payload-runc-loader-harness.sh ]; then
         the_4c=$(/bin/bash /tmp/r7-diag/payload-runc-loader-harness.sh \
-          "$RPM_MEMBERS_DIR/extract/usr/libexec/docker-helper/buildkit/runtime/buildkit-runc" 2>&1)
+          "$MNB30_RUNTIME" 2>&1)
         rc=$?
         printf '%s\n' "$the_4c"
         case "$the_4c" in
