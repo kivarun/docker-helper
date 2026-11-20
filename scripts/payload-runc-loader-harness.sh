@@ -22,8 +22,22 @@ DIR="$(mktemp -d /tmp/handoff-harness.XXXXXX)"
 cd "$DIR"
 "$RUNC" spec >/dev/null 2>&1 || { echo "spec generation failed"; exit 1; }
 mkdir -p rootfs
+# The Harness NEVER executes a real container workload: the generated spec's
+# entrypoint becomes a non-executable path, so every control run's expected
+# post-spec failure is the deterministic exec failure (the digest gate is
+# the only boundary under test).
+python3 - <<'PY'
+import json
+doc = json.load(open('config.json'))
+doc['process']['args'] = ['/nonexistent-mnb-harness-exec']
+json.dump(doc, open('config.json', 'w'))
+PY
 sha() { sha256sum "$1" | awk '{print $1}'; }
 DIGEST_OK="$(sha config.json)"
+# Cleanup after every attempt: a container that reached creation (the
+# post-spec failure paths) must not leave state for the later cases.
+cleanup() { "$RUNC" delete -f test >/dev/null 2>&1 || true; }
+trap cleanup EXIT
 fails=0
 
 echo "== control: untouched committed bytes pass the spec check =="

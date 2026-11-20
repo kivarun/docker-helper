@@ -80,11 +80,12 @@ BUILDCTL_SHA256="0b45ae3696f836bf711dbd78138e403924d7733f0b2328ba29a7fcf9ad5f1df
 # re-pin procedure (recompute on the canonical producer, land the pin,
 # then re-run) replays explicitly — a silently drifting runtime is never
 # staged.
-# CI-REPIN-PENDING: the value below is still the upstream archive member
-# digest and is WRONG for the loader build by construction; the staging of
-# the loader FAILS CLOSED against it (printing the actual build digest)
-# until the canonical producer's digest is landed here.
-BUILDKIT_RUNC_SHA256="0acdd302ddc5540b2e445b683661bfada9935c702f9008ffb0481abcda16c9b4"
+# CI-REPIN-PENDING is resolved: the canonical producer (run 44754439545,
+# ubuntu-24.04, the pinned toolchain go1.26.10, the fixed -trimpath recipe)
+# built the loader at 9c2881529eaf16c662ad02127a846df41a243af7c57cd64d6dd95017a13c31c5
+# and that digest is the RE-VERIFIED authoritative pinned value below
+# (the staging fails closed against it on every subsequent build).
+BUILDKIT_RUNC_SHA256="9c2881529eaf16c662ad02127a846df41a243af7c57cd64d6dd95017a13c31c5"
 # RUNC-LOADER pinning: the loader sources and their digest, the committed
 # patch and its digest, and the pinned loader toolchain version (the
 # GOTOOLCHAIN value; also stamped into the binary's `go:` version line).
@@ -101,7 +102,9 @@ RUNC_LOADER_TOOLCHAIN="go1.26.10"
 BUILDKIT_RUNC_UPSTREAM_SHA256="0acdd302ddc5540b2e445b683661bfada9935c702f9008ffb0481abcda16c9b4"
 # The generated MANIFEST is deterministic given the pinned payload bytes; its
 # digest is pinned so the verify-first re-staging path covers every member.
-BUILDKIT_MANIFEST_SHA256="5d65fac136087c2d865f7d69bc21771055eadb8edc05cbe1ff66db78a4a3a0fd"
+# Pinned with the loader re-pin above (the loader keys made the MANIFEST
+# longer than the upstream-only form).
+BUILDKIT_MANIFEST_SHA256="caa954f4f72b3f4930911d3c76406a1704820f3b5f1dc6f6fe46f1de36ee3fa2"
 
 fail() { echo "error: $*" >&2; exit 1; }
 
