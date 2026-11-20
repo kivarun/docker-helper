@@ -333,6 +333,25 @@ var wrapperSeinfoCandidates = []string{"seinfo", "/usr/bin/seinfo", "/usr/sbin/s
 // against.
 const wrapperSeinfoPolicyPath = "/sys/fs/selinux/policy"
 
+// wrapperRoleCheckQueryError is the trusted-query failure with the query
+// tool's own response attached (bounded, first line only). The tool's
+// stderr diagnostic is what the enforcing guest must see to distinguish a
+// policy-visibility boundary from a broken toolchain; no credential or
+// secret material can appear in a policy component query.
+func wrapperRoleCheckQueryError(err error, out []byte) error {
+	detail := strings.TrimSpace(string(out))
+	if i := strings.IndexByte(detail, '\n'); i > 0 {
+		detail = detail[:i]
+	}
+	if len(detail) > 200 {
+		detail = detail[:200]
+	}
+	if detail == "" {
+		return fmt.Errorf("the roletype query cannot be trusted (%v)", err)
+	}
+	return fmt.Errorf("the roletype query cannot be trusted (%v; the query tool responded: %q)", err, detail)
+}
+
 var wrapperRoleCheck = func(role, domain string) error {
 	var out []byte
 	var err error
@@ -349,10 +368,10 @@ var wrapperRoleCheck = func(role, domain string) error {
 		if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
-		return fmt.Errorf("the roletype query cannot be trusted (%v)", err)
+		return wrapperRoleCheckQueryError(err, out)
 	}
 	if err != nil {
-		return fmt.Errorf("the roletype query cannot be trusted (%v)", err)
+		return wrapperRoleCheckQueryError(err, out)
 	}
 	if err != nil {
 		return fmt.Errorf("the roletype query cannot be trusted (%v)", err)
