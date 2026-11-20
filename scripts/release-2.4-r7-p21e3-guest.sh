@@ -3240,7 +3240,7 @@ EOF
       echo "WL-GATE: FAIL (no system_r roletype entry for the workload domain)"
     fi
     echo "-- attribute membership (the MCS layer must constrain the workload domain) --"
-    if seinfo -x docker_helper_builder_workload_t 2>&1 | grep -aq mcs_constrained_type; then
+    if seinfo -a mcs_constrained_type -x 2>/dev/null | grep -aq docker_helper_builder_workload_t; then
       echo "WL-GATE: PASS (docker_helper_builder_workload_t is an mcs_constrained_type member)"
     else
       echo "WL-GATE: FAIL (the workload domain does not join mcs_constrained_type; the cross-op denial would not be carried by MCS)"
