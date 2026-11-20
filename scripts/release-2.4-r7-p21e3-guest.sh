@@ -3241,7 +3241,11 @@ EOF
 (allow docker_helper_buildkitd_t self (process (setfscreate setkeycreate)))
 (allow docker_helper_buildkitd_t docker_helper_builder_workload_t (key (create view setattr)))
 (allow docker_helper_buildkitd_t proc_t (dir (mounton)))
-(allow docker_helper_buildkitd_t proc_t (filesystem (remount)))"
+(allow docker_helper_buildkitd_t proc_t (filesystem (remount)))
+(allow docker_helper_buildkitd_t sysctl_irq_t (dir (mounton)))
+(allow docker_helper_buildkitd_t sysctl_irq_t (filesystem (remount)))
+(allow docker_helper_buildkitd_t sysctl_t (dir (mounton)))
+(allow docker_helper_buildkitd_t sysctl_t (filesystem (remount)))"
   {
     echo '(type docker_helper_builder_workload_t)'
     echo '(roletype system_r docker_helper_builder_workload_t)'
