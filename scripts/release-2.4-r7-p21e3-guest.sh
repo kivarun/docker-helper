@@ -3218,9 +3218,24 @@ EOF
     [a-z_]*_t) : ;;
     *) WL_POLICY_TYPE=security_t ;;
   esac
+  # seinfo is a dynamically linked analysis tool; its loader needs the
+  # classic library faces mmap/read/open of its linked library and
+  # ld-cache file types (derived live; never a wildcard attribute).
+  WL_LIB_TYPES="$(ldd /usr/bin/seinfo 2>/dev/null \
+    | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^\//) print $i}' \
+    | sort -u \
+    | while read -r wl_lib; do
+        matchpathcon -n "$wl_lib" 2>/dev/null | awk -F: '{print $3}'
+      done | sort -u)"
+  WL_LIB_ROWS=""
+  for wl_lt in $WL_LIB_TYPES; do
+    WL_LIB_ROWS="$WL_LIB_ROWS(allow docker_helper_buildkitd_t $wl_lt (file (execute execute_no_trans map open read getattr)))
+"
+  done
   DIAG_WL_SEINFO_ROW="(allow docker_helper_buildkitd_t ${WL_SEINFO_TYPE} (file (execute execute_no_trans)))"
   DIAG_WL_POLICY_ROWS="(allow docker_helper_buildkitd_t ${WL_POLICY_TYPE} (dir (search)))
-(allow docker_helper_buildkitd_t ${WL_POLICY_TYPE} (file (read open getattr)))"
+(allow docker_helper_buildkitd_t ${WL_POLICY_TYPE} (file (read open getattr)))
+$WL_LIB_ROWS"
   cat > "$DIAG_WL_CIL" <<EOF
 (type docker_helper_builder_workload_t)
 (roletype system_r docker_helper_builder_workload_t)
@@ -3239,6 +3254,7 @@ EOF
     echo "reviewed scheme: MNB28 decision row (b) + the kernel necessities for the explicit exec (the measured AVC 1246 execute denial surface) + the measured rolecheck seinfo fork/exec denial (fork/exec /usr/bin/seinfo permission denied; the row targets the observed label type only)"
     echo "seinfo label type for the rolecheck row: $WL_SEINFO_TYPE"
     echo "selinuxfs policy label type for the explicit operand rows: $WL_POLICY_TYPE"
+    echo "seinfo linked-library label types (ldd-derived, one module row each): $WL_LIB_TYPES"
     echo "released-policy .pp sha (must not change): $DIAG_RELEASE_PP_SHA_PRE"
     echo "guest version: $(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME ($VERSION_ID)")"
     echo "policy sha before workload-module load: $DIAG_WL_PRELOAD_SHA"
