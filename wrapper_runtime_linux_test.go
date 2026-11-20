@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -98,6 +99,10 @@ func withWrapperBundleTree(t *testing.T) string {
 	}
 	return bundleDir
 }
+
+// wrapperDigestToken is the expected run-time digest-token form of the
+// handoff environment (RUNC_SPEC_SHA256=<64 hex>).
+var wrapperDigestToken = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // wrapperTestWorkloadLabel renders the workload process label the
 // fixture's own context (category 7) composes.
@@ -389,8 +394,12 @@ func TestWrapperRunRewritesSpec(t *testing.T) {
 	if rec.calls != 1 || rec.path != wrapperTestRuntimePath || !reflect.DeepEqual(rec.argv, wrapperRunArgv(bundleDir)) {
 		t.Fatalf("exec handoff mismatch: calls=%d path=%q argv=%v", rec.calls, rec.path, rec.argv)
 	}
-	if len(rec.env) != 1 || rec.env[0] != "PATH=/nonexistent" {
-		t.Fatalf("env must be forwarded verbatim, got %v", rec.env)
+	if len(rec.env) != 2 || rec.env[0] != "PATH=/nonexistent" {
+		t.Fatalf("env must be forwarded verbatim before the digest token, got %v", rec.env)
+	}
+	if parts := strings.SplitN(rec.env[1], "=", 2); len(parts) != 2 ||
+		parts[0] != wrapperSpecDigestEnv || !wrapperDigestToken.MatchString(parts[1]) {
+		t.Fatalf("the run handoff must carry the committed digest token, got %q", rec.env[1])
 	}
 }
 
@@ -911,6 +920,9 @@ func TestWrapperPassthroughIsolation(t *testing.T) {
 			if !reflect.DeepEqual(rec.argv, wrapperPassthroughArgv(kind)) {
 				t.Fatal("the forwarded argv must be byte-identical")
 			}
+			if len(rec.env) != 0 {
+				t.Fatalf("pass-through must not carry the run digest token, got %v", rec.env)
+			}
 		})
 	}
 
@@ -1003,8 +1015,12 @@ func TestWrapperExecPathIndependentOfPATH(t *testing.T) {
 	if rec.path != wrapperTestRuntimePath {
 		t.Fatalf("exec path = %q, want the fixed runtime path regardless of PATH", rec.path)
 	}
-	if !reflect.DeepEqual(rec.env, env) {
-		t.Fatalf("env must be forwarded verbatim, got %v", rec.env)
+	if rec.env[0] != "PATH=/attacker/controlled/path" || rec.env[1] != "HOME=/x" {
+		t.Fatalf("env must be forwarded verbatim before the digest token, got %v", rec.env)
+	}
+	if parts := strings.SplitN(rec.env[2], "=", 2); len(parts) != 2 ||
+		parts[0] != wrapperSpecDigestEnv || !wrapperDigestToken.MatchString(parts[1]) {
+		t.Fatalf("the run handoff must carry the committed digest token, got %q", rec.env[2])
 	}
 }
 

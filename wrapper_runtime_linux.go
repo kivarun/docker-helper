@@ -295,10 +295,27 @@ func wrapperRunPipeline(reader wrapperOwnContextReader, seam wrapperInspectionSy
 	if err := wrapperVerifySpecHandoff(inv.bundlePath, commit); err != nil {
 		return err
 	}
-	if err := wrapperExecRuntime(wrapperRealRuntimePath, inv.argv, env); err != nil {
+	if err := wrapperExecRuntime(wrapperRealRuntimePath, inv.argv, wrapperHandoffEnv(env, commit.digest)); err != nil {
 		return &wrapperRefuseError{cause: fmt.Errorf("post-commit: cannot execute the real runtime: %w", err)}
 	}
 	return nil
+}
+
+// wrapperSpecDigestEnv is the digest-token environment name injected
+// into the handoff environment for the run command only: the deployed
+// loader reads config.json exactly once, verifies its bytes against
+// this token, and decodes the same buffer, refusing the managed run
+// before any container creation on an absent or mismatched token. The
+// value is the pinned-loader contract, tested against the built
+// runtime; pass-through commands never carry the token.
+const wrapperSpecDigestEnv = "RUNC_SPEC_SHA256"
+
+// wrapperHandoffEnv appends the committed digest token to the forwarded
+// environment as a copy (the forwarded slice is never mutated).
+var wrapperHandoffEnv = func(env []string, digest string) []string {
+	out := make([]string, 0, len(env)+1)
+	out = append(out, env...)
+	return append(out, wrapperSpecDigestEnv+"="+digest)
 }
 
 // wrapperRewriteSpecHandoff reads and validates the bundle's config.json
