@@ -3248,10 +3248,11 @@ EOF
 (allow docker_helper_buildkitd_t sysctl_t (filesystem (remount)))
 (allow docker_helper_buildkitd_t sysctl_t (file (mounton getattr)))
 (allow docker_helper_buildkitd_t proc_t (file (mounton getattr)))
+(allow docker_helper_buildkitd_t proc_t (file (read open)))
 (allow docker_helper_buildkitd_t proc_t (dir (mounton getattr)))
 (allow docker_helper_buildkitd_t proc_kcore_t (file (getattr mounton)))
 (allow docker_helper_buildkitd_t docker_helper_builder_runtime_t (fifo_file (read write open unlink)))
-(allow docker_helper_buildkitd_t docker_helper_builder_runtime_t (dir (remove_name)))
+(allow docker_helper_buildkitd_t docker_helper_builder_runtime_t (dir (remove_name rmdir)))
 (allow docker_helper_buildkitd_t docker_helper_builder_runc_dir_t (dir (read open rmdir remove_name)))"
   {
     echo '(type docker_helper_builder_workload_t)'
