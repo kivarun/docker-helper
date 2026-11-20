@@ -3250,7 +3250,7 @@ EOF
 (allow docker_helper_buildkitd_t proc_t (file (mounton getattr)))
 (allow docker_helper_buildkitd_t proc_t (dir (mounton getattr)))
 (allow docker_helper_buildkitd_t proc_kcore_t (file (getattr mounton)))
-(allow docker_helper_buildkitd_t docker_helper_builder_runtime_t (fifo_file (read write)))"
+(allow docker_helper_buildkitd_t docker_helper_builder_runtime_t (fifo_file (read write open)))"
   {
     echo '(type docker_helper_builder_workload_t)'
     echo '(roletype system_r docker_helper_builder_workload_t)'
