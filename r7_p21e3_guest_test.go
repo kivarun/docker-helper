@@ -646,7 +646,7 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		"module store: docker_helper_diag_cap absent => OK",
 		"setpcap absence restored",
 		"policy sha before cap-module load",
-		",prctl,capset \\",
+		",prctl,capset,setgroups,setgid,setregid,setresgid \\",
 		"p21e3_capwatch",
 		"p21e3-capwatch.log",
 		"CAPWATCH-START",
@@ -655,9 +655,22 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		"PR_CAPBSET_DROP",
 		"capset(",
 		"distinct user namespaces seen",
-		"comm transitions (exec ladder; only pids that were ever in the runc chain)",
+		"exec ladder (only pids that were ever in the runc chain; exe fully left the runc surfaces)",
 		"workload-exec OBSERVED",
 		"OCI config capabilities (from the live spec capture)",
+		// R7 MNB25: the setgroups stage — traced errno-bearing group syscalls,
+		// the tracked pre-setgroups capability/namespace state, and the
+		// measured-vs-spec workload caps comparison.
+		"p21e3-capwatch.log",
+		"uidmap=", "gidmap=", "setgroups=",
+		"state-change",
+		"readsmall",
+		"readeff",
+		"the group/setgid stage (traced syscalls with errno)",
+		"distinct capability states across the runc chain (decoded)",
+		"workload caps vs OCI config (measured-vs-spec)",
+		"workload-vs-OCI cross-reference not applicable",
+		"the runc-chain pid now carries a non-runc exe",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("the p21e3 guest harness must carry the inspection diagnostic %q", want)

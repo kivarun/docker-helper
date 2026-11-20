@@ -1321,6 +1321,28 @@ static void readlinkstr(const char *p, char *out, size_t n) {
 static pid_t selfpid;
 static char host_userns[256];
 
+/* The MNB25 bounded namespace-file readout: uid_map/gid_map/setgroups
+ * are short single-line-per-entry files; newlines inside the token are
+ * flattened to spaces so the TSV row stays one line. */
+static void readsmall(int pid, const char *name, char *out, size_t n) {
+    char p[64];
+    snprintf(p, sizeof p, "/proc/%d/%s", pid, name);
+    FILE *f = fopen(p, "r");
+    if (!f) {
+        snprintf(out, n, "<rc=%d>", errno);
+        return;
+    }
+    size_t off = 0;
+    out[0] = '\0';
+    char lb[256];
+    while (off + 1 < n && fgets(lb, sizeof lb, f)) {
+        lb[strcspn(lb, "\n")] = ' ';
+        off += snprintf(out + off, n - off, "%s", lb);
+    }
+    if (out[0] == '\0') snprintf(out, n, "<empty>");
+    fclose(f);
+}
+
 static int targeted(int pid, const char *comm) {
     char p[64], ns[256];
     snprintf(p, sizeof p, "/proc/%d/ns/user", pid);
@@ -1329,13 +1351,43 @@ static int targeted(int pid, const char *comm) {
         return 1;
     return strncmp(comm, "runc:", 5) == 0;
 }
+/* One bounded /proc/<pid>/status capability read (the tracked state */
+static void readeff(int pid, char *out, size_t n) {
+    char p[64];
+    snprintf(p, sizeof p, "/proc/%d/status", pid);
+    FILE *f = fopen(p, "r");
+    if (!f) {
+        snprintf(out, n, "<rc=%d>", errno);
+        return;
+    }
+    char lb[512];
+    out[0] = '\0';
+    while (fgets(lb, sizeof lb, f)) {
+        if (strncmp(lb, "CapEff", 6) == 0) {
+            char *v = strchr(lb, ':');
+            if (v) {
+                v++;
+                while (*v == ' ' || *v == '\t') v++;
+                lb[strcspn(lb, "\n")] = 0;
+                snprintf(out, n, "%s", v);
+            }
+            break;
+        }
+    }
+    fclose(f);
+    if (out[0] == '\0') snprintf(out, n, "<absent>");
+}
 static void emit(FILE *lg, const char *event, int pid, int ppid,
                  const char *comm, const char *exe) {
     char ts[64]; wallstamp(ts, sizeof ts);
     char nsuser[256], nsmnt[256], p[64], ctx[512] = "<unresolvable>";
     char capinh[128] = "-", capprm[128] = "-", capeff[128] = "-",
          capbnd[128] = "-", capamb[128] = "-", nnp[32] = "-";
+    char uidmap[128] = "-", gidmap[128] = "-", sgfile[32] = "-";
     (void)event; (void)ppid;
+    readsmall(pid, "uid_map", uidmap, sizeof uidmap);
+    readsmall(pid, "gid_map", gidmap, sizeof gidmap);
+    readsmall(pid, "setgroups", sgfile, sizeof sgfile);
     snprintf(p, sizeof p, "/proc/%d/ns/user", pid);
     readlinkstr(p, nsuser, sizeof nsuser);
     snprintf(p, sizeof p, "/proc/%d/ns/mnt", pid);
@@ -1367,9 +1419,9 @@ static void emit(FILE *lg, const char *event, int pid, int ppid,
         }
         fclose(f);
     }
-    fprintf(lg, "CAPWATCH %s t=%lld pid=%d ppid=%d comm=%s exe=%s nsuser=%s nsmnt=%s ctx=%s capinh=%s capprm=%s capeff=%s capbnd=%s capamb=%s nnp=%s\n",
+    fprintf(lg, "CAPWATCH %s t=%lld pid=%d ppid=%d comm=%s exe=%s nsuser=%s nsmnt=%s ctx=%s capinh=%s capprm=%s capeff=%s capbnd=%s capamb=%s nnp=%s uidmap=%s gidmap=%s setgroups=%s\n",
             ts, now_ms(), pid, ppid, comm, exe[0] ? exe : "-", nsuser, nsmnt,
-            ctx, capinh, capprm, capeff, capbnd, capamb, nnp);
+            ctx, capinh, capprm, capeff, capbnd, capamb, nnp, uidmap, gidmap, sgfile);
     fflush(lg);
 }
 int main(int argc, char **argv) {
@@ -1383,7 +1435,7 @@ int main(int argc, char **argv) {
         fprintf(lg, "CAPWATCH-START %s host_userns=%s\n", ts, host_userns);
         fflush(lg);
     }
-    struct { pid_t pid; char comm[64]; } seen[MAXROWS];
+    struct { pid_t pid; char comm[64]; char capeff[64]; char gidmap[64]; } seen[MAXROWS];
     size_t nseen = 0;
     long long rows = 0;
     while (1) {
@@ -1415,14 +1467,33 @@ int main(int argc, char **argv) {
                 if (nseen < MAXROWS) {
                     seen[nseen].pid = (pid_t)pid;
                     snprintf(seen[nseen].comm, sizeof seen[nseen].comm, "%s", comm);
+                    readeff((int)pid, seen[nseen].capeff, sizeof seen[nseen].capeff);
+                    readsmall((int)pid, "gid_map", seen[nseen].gidmap, sizeof seen[nseen].gidmap);
                     nseen++;
                 }
                 if (++rows > MAXROWS) goto done;
                 emit(lg, "arrival", (int)pid, 0, comm, exe);
-            } else if (strcmp(seen[i].comm, comm) != 0) {
-                snprintf(seen[i].comm, sizeof seen[i].comm, "%s", comm);
-                if (++rows > MAXROWS) goto done;
-                emit(lg, "comm-change", (int)pid, 0, comm, exe);
+            } else {
+                int evict = 0;
+                if (strcmp(seen[i].comm, comm) != 0) {
+                    snprintf(seen[i].comm, sizeof seen[i].comm, "%s", comm);
+                    evict = 1;
+                }
+                /* MNB25: the caps and gid state between arrival and
+                 * setgroups are the decision state; emit on change. */
+                char ce[64], gm[64];
+                readeff((int)pid, ce, sizeof ce);
+                readsmall((int)pid, "gid_map", gm, sizeof gm);
+                if (strcmp(seen[i].capeff, ce) != 0 ||
+                    strcmp(seen[i].gidmap, gm) != 0) {
+                    snprintf(seen[i].capeff, sizeof seen[i].capeff, "%s", ce);
+                    snprintf(seen[i].gidmap, sizeof seen[i].gidmap, "%s", gm);
+                    evict = 1;
+                }
+                if (evict) {
+                    if (++rows > MAXROWS) goto done;
+                    emit(lg, "state-change", (int)pid, 0, comm, exe);
+                }
             }
         }
         closedir(d);
@@ -3327,7 +3398,7 @@ done
 if [ -n "$BKD_PID" ]; then
   log "attaching strace to buildkitd pid $BKD_PID (timeout ${STRACE_TIMEOUT}s)"
   timeout "$STRACE_TIMEOUT" strace -f -qq -tt -s 100 -y -yy -p "$BKD_PID" \
-    -e trace=execve,execveat,open,openat,openat2,read,newfstatat,fstat,statx,statfs,getxattr,lgetxattr,fgetxattr,rename,renameat,renameat2,mount,umount2,mkdir,mkdirat,symlink,symlinkat,prctl,capset \
+    -e trace=execve,execveat,open,openat,openat2,read,newfstatat,fstat,statx,statfs,getxattr,lgetxattr,fgetxattr,rename,renameat,renameat2,mount,umount2,mkdir,mkdirat,symlink,symlinkat,prctl,capset,setgroups,setgid,setregid,setresgid \
     -o "$EVIDENCE_DIR/p21e3-strace.log" 2>"$EVIDENCE_DIR/p21e3-strace.err" &
   STRACE_PID=$!
   STRACE_ALL_PIDS="$STRACE_ALL_PIDS $STRACE_PID"
@@ -3871,6 +3942,7 @@ else:
     print("no capset rows captured")
 
 rows = []
+transitions = []
 if capwatch.exists():
     for line in capwatch.read_text(errors="replace").splitlines():
         if not line.startswith("CAPWATCH "):
@@ -3898,20 +3970,91 @@ else:
     for u in userns[:8]:
         pids_x = sorted(dict.fromkeys(r["pid"] for r in rows if r.get("nsuser") == u))
         print(f"  ns_user={u} pids(first14)={','.join(pids_x[:14])}")
-    print("== comm transitions (exec ladder; only pids that were ever in the runc chain) ==")
+    print("== exec ladder (only pids that were ever in the runc chain; exe fully left the runc surfaces) ==")
     ever_runc = {int(r["pid"]) for r in rows if r.get("comm", "").startswith("runc:")}
     transitions = [
         r for r in rows
-        if int(r["pid"]) in ever_runc and r.get("event") == "comm-change"
+        if int(r["pid"]) in ever_runc
         and not r.get("comm", "").startswith("runc:")
+        and "runc" not in r.get("exe", "")
     ]
     for r in transitions[-20:]:
-        print(f"  pid={r['pid']} comm={r.get('comm')} exe={r.get('exe','-')} ctx={r.get('ctx','-')}"
-              f" eff={r.get('capeff','-')} bnd={r.get('capbnd','-')} amb={r.get('capamb','-')}")
+        print(f"  {r.get('event')} pid={r['pid']} comm={r.get('comm','-')} exe={r.get('exe','-')}"
+              f" ctx={r.get('ctx','-')} eff={r.get('capeff','-')} bnd={r.get('capbnd','-')}"
+              f" amb={r.get('capamb','-')} inh={r.get('capinh','-')} prm={r.get('capprm','-')}")
     if transitions:
-        print("workload-exec OBSERVED (a comm without the runc prefix ran)")
+        print("workload-exec OBSERVED (the runc-chain pid now carries a non-runc exe)")
     else:
-        print("workload-exec NOT-OBSERVED (no non-runc comm under the tracked chain)")
+        print("workload-exec NOT-OBSERVED (no tracked pid left the runc surfaces)")
+
+# R7 MNB25: the setgroups stage. The syscall lines come from the strace
+# filter (setgroups/setgid/setregid/setresgid now traced with errno); the
+# capwatch rows carry the same pids' CapEff/uid_map/gid_map/setgroups
+# readback right until the stop; the OCI cross-reference closes the loop.
+sg_rows = []
+if strace.exists():
+    for line in strace.read_text(errors="replace").splitlines():
+        if not re.match(r"^(?:\[pid +\d+\]|\d+) +[0-9:.]+ +(setgroups|setgid|setregid|setresgid)\(", line):
+            continue
+        m = re.match(
+            r"^(?:\[pid +(\d+)\]|(\d+)) +([0-9:.]+) +(setgroups|setgid|setregid|setresgid)\((.*)\)\s*\)?\s*= +(-?\d+)(?: +([A-Z0-9]+) \(([^)]*)\))?",
+            line)
+        if m:
+            sg_rows.append((int(m.group(1) or m.group(2)), m.group(4), m.group(5),
+                            int(m.group(6)), m.group(7) or "",
+                            line.strip()[:200]))
+        else:
+            sg_rows.append((None, "UNPARSED", line.strip()[:200], None, "", ""))
+    print("== the group/setgid stage (traced syscalls with errno) ==")
+    if sg_rows:
+        for r in sg_rows[-20:]:
+            if r[1] == "UNPARSED":
+                print(f"  UNPARSED {r[2]}")
+            else:
+                extra = f" errno={r[4]}" if r[3] != 0 else ""
+                print(f"  {r[1]}( pid={r[0]} rc={r[3]}{extra} args=[{r[2]}]")
+                print(f"    raw=`{r[5]}`")
+    else:
+        print("no setgroups/setgid-family syscall rows captured")
+else:
+    print("strace log absent (NOT evidence of absence)")
+
+print("== distinct capability states across the runc chain (decoded) ==")
+masks = {}
+for r in rows:
+    effb, bndb = r.get("capeff", "-"), r.get("capbnd", "-")
+    if effb in ("-", "") or not re.fullmatch(r"[0-9a-fA-F]{1,16}", effb or ""):
+        continue
+    mask = int(effb, 16)
+    bnd = int(bndb, 16) if re.fullmatch(r"[0-9a-fA-F]{1,16}", bndb or "") else None
+    key = (mask, bnd)
+    if key not in masks:
+        masks[key] = r
+cap_names = (
+    "CHOWN", "DAC_OVERRIDE", "DAC_READ_SEARCH", "FOWNER", "FSETID",
+    "KILL", "SETGID", "SETUID", "SETPCAP", "LINUX_IMMUTABLE",
+    "NET_BIND_SERVICE", "NET_BROADCAST", "NET_ADMIN", "NET_RAW",
+    "IPC_LOCK", "IPC_OWNER", "SYS_MODULE", "SYS_RAWIO", "SYS_CHROOT",
+    "SYS_PTRACE", "SYS_PACCT", "SYS_ADMIN", "SYS_BOOT", "SYS_NICE",
+    "SYS_RESOURCE", "SYS_TIME", "SYS_TTY_CONFIG", "MKNOD", "LEASE",
+    "AUDIT_WRITE", "AUDIT_CONTROL", "SETFCAP", "MAC_OVERRIDE",
+    "MAC_ADMIN", "SYSLOG", "WAKE_ALARM", "BLOCK_SUSPEND", "AUDIT_READ",
+    "PERFMON", "BPF", "CHECKPOINT_RESTORE",
+)
+bitname = {1 << b: n for b, n in enumerate(cap_names)}
+cap_bits = {"CAP_%s" % name: bit for bit, name in enumerate(cap_names)}
+spec_bits = cap_bits
+for (mask, bnd) in sorted(masks):
+    names = [nm for bit, nm in bitname.items() if mask & bit]
+    bnames = [nm for bit, nm in bitname.items() if bnd is not None and bnd & bit]
+    row = masks[(mask, bnd)]
+    print(f"  pid={row['pid']} comm={row.get('comm','-')} cap_eff=0x{mask:016x}"
+          f" setgid={'PRESENT' if mask & (1 << 6) else 'ABSENT'} eff={'+'.join(names)}"
+          + (f" bnd={'+'.join(bnames)}" if bnd is not None else ""))
+    print(f"    uid_map={row.get('uidmap','-')}")
+    print(f"    gid_map={row.get('gidmap','-')}")
+    print(f"    setgroups-file={row.get('setgroups','-')}")
+    print(f"    nsuser={row.get('nsuser','-')} ctx={row.get('ctx','-')}")
 
 # OCI capability cross-reference (from the inventory's spec block).
 spec_caps = None
@@ -3925,18 +4068,6 @@ if inventory.exists():
             spec_caps = d["caps"]
 if spec_caps:
     print("== OCI config capabilities (from the live spec capture) ==")
-    cap_names = (
-        "CHOWN", "DAC_OVERRIDE", "DAC_READ_SEARCH", "FOWNER", "FSETID",
-        "KILL", "SETGID", "SETUID", "SETPCAP", "LINUX_IMMUTABLE",
-        "NET_BIND_SERVICE", "NET_BROADCAST", "NET_ADMIN", "NET_RAW",
-        "IPC_LOCK", "IPC_OWNER", "SYS_MODULE", "SYS_RAWIO", "SYS_CHROOT",
-        "SYS_PTRACE", "SYS_PACCT", "SYS_ADMIN", "SYS_BOOT", "SYS_NICE",
-        "SYS_RESOURCE", "SYS_TIME", "SYS_TTY_CONFIG", "MKNOD", "LEASE",
-        "AUDIT_WRITE", "AUDIT_CONTROL", "SETFCAP", "MAC_OVERRIDE",
-        "MAC_ADMIN", "SYSLOG", "WAKE_ALARM", "BLOCK_SUSPEND", "AUDIT_READ",
-        "PERFMON", "BPF", "CHECKPOINT_RESTORE",
-    )
-    cap_bits = {"CAP_%s" % name: bit for bit, name in enumerate(cap_names)}
     for k in ("inheritable", "permitted", "effective", "bounding", "ambient"):
         v = spec_caps.get(k)
         if not isinstance(v, list):
@@ -3957,6 +4088,32 @@ if spec_caps:
             print(f"  bounding-names: {sorted(v)}")
 else:
     print("OCI capability block not captured")
+
+# R7 MNB25: workload caps vs the OCI config (measured-vs-spec).
+if spec_caps and transitions:
+    print("== workload caps vs OCI config (measured-vs-spec) ==")
+    for r in transitions[-6:]:
+        print(f"  observed pid={r['pid']} comm={r.get('comm')}")
+        for field, key in (
+            ("CapInh", "inheritable"), ("CapPrm", "permitted"),
+            ("CapEff", "effective"), ("CapBnd", "bounding"),
+            ("CapAmb", "ambient"),
+        ):
+            obs_raw = r.get(field.lower(), "-")
+            spec_mask = 0
+            for entry in spec_caps.get(key, []) or []:
+                if isinstance(entry, str) and entry in spec_bits:
+                    spec_mask |= 1 << spec_bits[entry]
+                elif isinstance(entry, int) and not isinstance(entry, bool):
+                    spec_mask |= 1 << entry
+            obs_mask = int(obs_raw, 16) if re.fullmatch(r"[0-9a-fA-F]{1,16}", obs_raw or "") else None
+            obs_names = [nm for bit, nm in bitname.items() if obs_mask is not None and obs_mask & bit]
+            spec_names = [nm for nm, b in spec_bits.items() if spec_mask & b]
+            mark = "MATCH" if obs_mask == spec_mask else "DIFF"
+            print(f"    {field}: observed={('0x%016x' % obs_mask) if obs_mask is not None else '<unresolved>'} spec=0x{spec_mask:016x} {mark}"
+                  f" (observed-names={'+'.join(obs_names) or 'none'}; spec-names={'+'.join(x[4:] for x in spec_names) or 'none'})")
+else:
+    print("workload-vs-OCI cross-reference not applicable (no exec or no OCI capture)")
 PYEOF
   cat "$EVIDENCE_DIR/p21e3-capbset-evidence.log"
 fi
