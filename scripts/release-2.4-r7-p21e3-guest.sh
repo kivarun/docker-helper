@@ -3536,6 +3536,12 @@ EOF
   # No relabel, no permissive domain, no permanent policy change.
   # ==========================================================================
   if [ "${R7_MNB32:-0}" = 1 ]; then
+  # The C helpers below link against libselinux; the headers may not be
+  # installed yet (the MNB30 matrix section installs them much later).
+  if ! command -v gcc >/dev/null 2>&1 || [ ! -e /usr/include/selinux/selinux.h ]; then
+    timeout 300 zypper --non-interactive install -y gcc libselinux-devel >/dev/null 2>&1 || true
+  fi
+  [ -e /usr/include/selinux/selinux.h ] || fail "libselinux headers unavailable (the mnb32 helpers cannot build)"
   # --- S1 demonstration: a dedicated rolecheck-tool file type with the
   # --- EXACTLY narrow exec row set. The demonstration is a computed-
   # decision surface (the guest cannot relabel a filesystem object without
