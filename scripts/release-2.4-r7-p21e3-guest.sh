@@ -5445,9 +5445,15 @@ CEOF
     else
       echo "W7-UNLOAD-GATE: FAIL (the W7 row survives the unload: $W7_UV)"
     fi
+    if semodule -l 2>/dev/null | grep -aq docker_helper_diag_w7; then
+      echo "W7-UNLOAD-GATE: FAIL (the module is still registered in the store)"
+    else
+      echo "module store: docker_helper_diag_w7 absent => OK"
+    fi
+    echo "-- closure: the policy state now equals the pre-W7-load state byte-exactly (${W7_USHA} vs pre-load ${MNB33_W7_PRE_SHA}) --"
   } > "$MNB33_UNLOAD_LOG" 2>&1
   cat "$MNB33_UNLOAD_LOG"
-  if grep -aq '^W7-UNLOAD-GATE: FAIL' "$MNB33_UNLOAD_LOG"; then
+  if grep -aq '^W7-UNLOAD-GATE: FAIL' "$MNB33_UNLOAD_LOG" || [ "$W7_USHA" != "$MNB33_W7_PRE_SHA" ]; then
     p21e3_diag_remove
     p21e3_dontaudit_restore
     fail "the MNB33 W7 module unload verification failed; BLOCKED"
