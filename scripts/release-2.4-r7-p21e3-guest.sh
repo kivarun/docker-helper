@@ -4791,9 +4791,10 @@ PYEOF
     # No denial row may touch the workload's granted faces on the state tree.
     # No denial row may touch the workload's granted faces on the state
     # tree at the FILE class (the dir read denial is the EXPECTED dir-fd
-    # negative, not a granted-face denial).
+    # negative; the /proc/stat denial is the EXPECTED proc negative).
     V_NODENY=1
-    if grep -a 'tclass=file' "$AW" 2>/dev/null \
+    if grep -a 'tcontext=system_u:object_r:docker_helper_builder_state_t' "$AW" 2>/dev/null \
+        | grep -a 'tclass=file' \
         | grep -aqE 'denied  \{ (open|read|map|entrypoint) \}'; then
       V_NODENY=0
     fi
