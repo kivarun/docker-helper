@@ -3644,18 +3644,30 @@ CEOF
   TOOL_UNLOAD_SHA="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
   TOOL_UQ="$(timeout 60 sesearch -A -s docker_helper_buildkitd_t -t "$TOOL_TYPE" -c file -p execute 2>&1)"
   TOOL_UV="$(classify_sesearch_query "$?" "$TOOL_UQ")"
+  # After the module removal the demonstration TYPE no longer exists, so a
+  # sesearch query naming it errors (rc=1, "unknown type"), the same
+  # established absence shape the MNB30 workload unload recorded. The row
+  # absence is therefore proven by the type's own absence (seinfo Types: 0)
+  # together with a sesearch verdict that is either empty or the type-absence
+  # error; a surviving TYPE with a resolvable row is the FAIL shape.
+  TOOL_TYPE_GONE=unknown
+  seinfo -xt "$TOOL_TYPE" 2>/dev/null | grep -aqx 'Types: 0' && TOOL_TYPE_GONE=1
+  TOOL_MENTION="$(seinfo -xt "$TOOL_TYPE" 2>&1 | head -3)"
   {
     echo "-- unload verification (fail-closed; THE BUILD MUST NOT RUN WITH THE DEMONSTRATION) --"
+    echo "tool-type absence check: $TOOL_MENTION"
     echo "policy sha after the tool-module removal: $TOOL_UNLOAD_SHA (load: $TOOL_LOAD_SHA; unload restore to pre-load expected: $TOOL_PRELOAD_SHA)"
     if [ "$TOOL_UNLOAD_SHA" = "$TOOL_PRELOAD_SHA" ]; then
       echo "TOOL-UNLOAD-GATE: PASS (policy sha restored to the pre-load value)"
     else
       echo "TOOL-UNLOAD-GATE: FAIL (policy sha not restored)"
     fi
-    if [ "$TOOL_UV" = 'trusted:perms=|cond-active=none|cond-inactive=none' ]; then
+    if [ "$TOOL_TYPE_GONE" = 1 ]; then
+      echo "TOOL-UNLOAD-GATE: PASS (docker_helper_rolecheck_tool_t does not exist after the unload; its rows cannot exist — sesearch verdict: $TOOL_UV)"
+    elif [ "$TOOL_UV" = 'trusted:perms=|cond-active=none|cond-inactive=none' ]; then
       echo "TOOL-UNLOAD-GATE: PASS (the tool-type execute row is absent after the unload)"
     else
-      echo "TOOL-UNLOAD-GATE: FAIL (the tool-type execute row survives: $TOOL_UV)"
+      echo "TOOL-UNLOAD-GATE: FAIL (the tool type still exists and the execute row survives: $TOOL_UV)"
     fi
   } >> "$TOOL_LOG" 2>&1
   cat "$TOOL_LOG"
