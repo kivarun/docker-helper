@@ -952,7 +952,7 @@ log "=== section 4: tooling build ==="
 # MNB30 tracer-free mode: strace is NOT a required tool (the exec boundary
 # is measured WITHOUT ptrace — the /proc sampler and the audit window are
 # the instruments). The build-time necessity stays gcc-only.
-if [ "${R7_MNB30:-0}" != 1 ] && [ "${R7_MNB32:-0}" != 1 ]; then
+if [ "${R7_MNB30:-0}" != 1 ] && [ "${R7_MNB32:-0}" != 1 ] && [ "${R7_MNB33:-0}" != 1 ]; then
   if ! command -v gcc >/dev/null 2>&1 || ! command -v strace >/dev/null 2>&1; then
     cap p21e3-toolchain 6 timeout 300 zypper --non-interactive install -y gcc strace acl
   fi
