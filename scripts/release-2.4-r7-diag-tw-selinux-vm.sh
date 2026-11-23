@@ -82,7 +82,18 @@ case "$R7_MODE" in
   # over the observed categories, including the cross-operation rootfs
   # denial.
   mnb30) GUEST_SCRIPT='release-2.4-r7-p21e3-guest.sh' ;;
-  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d | p21e | p21e3 | p21e3probe | p21e3proc-sys | p21e3proc-file | p21e3proc-keys | p21e3diag-keys | mnb30)" ;;
+  # mnb32 = the MNB32 policy-breadth and syscall-boundary review (the same
+  # p21e3 guest script, MNB32 branch): the MNB30 pin preflight rides along
+  # unchanged (artifact identity), and the round adds the S1 bin_t scope
+  # inventory, the P5 proc_t label/mode/DAC inventory, the extended
+  # kernel-decision matrix (lock/ioctl/setattr/mmap rows, own+cross), a
+  # temporary dedicated-rolecheck-type demonstration module (load, matrix,
+  # verified unload), and one bounded build under the MNB31 Tier-A rows
+  # MINUS the proc_t read/open rows (the P5 counterfactual) with a static
+  # guest-compiled syscall-ladder probe run as the composed workload.
+  # No permanent policy change, no relabel, no permissive domain.
+  mnb32) GUEST_SCRIPT='release-2.4-r7-p21e3-guest.sh' ;;
+  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d | p21e | p21e3 | p21e3probe | p21e3proc-sys | p21e3proc-file | p21e3proc-keys | p21e3diag-keys | mnb30 | mnb32)" ;;
 esac
 
 log()  { printf '%s %s\n' "$PREFIX" "$*"; }
@@ -112,7 +123,7 @@ vm_selinux_two_stage_docker
 log '== 7. transfer and run the R7 guest diagnostic'
 vm_ssh 'rm -rf /tmp/r7-diag && mkdir -p /tmp/r7-diag'
 vm_scp "$SCRIPT_DIR/$GUEST_SCRIPT" opc@127.0.0.1:/tmp/r7-diag/release-2.4-r7-diag-guest.sh
-if [ "$R7_MODE" = "mnb30" ]; then
+if [ "$R7_MODE" = "mnb30" ] || [ "$R7_MODE" = "mnb32" ]; then
   # The loader harness rides along (the guest runs it against the runtime
   # member extracted from the candidate RPM), together with the payload
   # staging owner (the single pins authority for the runtime byte-pin).
@@ -170,6 +181,7 @@ export R7_P21E3_PROC_FILE=$( [ "$R7_MODE" = p21e3proc-file ] && echo 1 || echo 0
 export R7_P21E3_PROC_KEYS=$( [ "$R7_MODE" = p21e3proc-keys ] && echo 1 || echo 0 )
 export R7_P21E3_DIAG_KEYS=$( [ "$R7_MODE" = p21e3diag-keys ] && echo 1 || echo 0 )
 export R7_MNB30=$( [ "$R7_MODE" = mnb30 ] && echo 1 || echo 0 )
+export R7_MNB32=$( [ "$R7_MODE" = mnb32 ] && echo 1 || echo 0 )
 bash /tmp/r7-diag/release-2.4-r7-diag-guest.sh
 RMT
   GUEST_RC=$?
@@ -285,7 +297,7 @@ RMT
         log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
         ;;
     esac
-  elif [ "$R7_MODE" = "p21e3" ] || [ "$R7_MODE" = "p21e3probe" ] || [ "$R7_MODE" = "p21e3proc-sys" ] || [ "$R7_MODE" = "p21e3proc-file" ] || [ "$R7_MODE" = "p21e3proc-keys" ] || [ "$R7_MODE" = "p21e3diag-keys" ] || [ "$R7_MODE" = "mnb30" ]; then
+  elif [ "$R7_MODE" = "p21e3" ] || [ "$R7_MODE" = "p21e3probe" ] || [ "$R7_MODE" = "p21e3proc-sys" ] || [ "$R7_MODE" = "p21e3proc-file" ] || [ "$R7_MODE" = "p21e3proc-keys" ] || [ "$R7_MODE" = "p21e3diag-keys" ] || [ "$R7_MODE" = "mnb30" ] || [ "$R7_MODE" = "mnb32" ]; then
     # The BUILD result line and the VERDICT line are matched SEPARATELY:
     # the previous tail -2 | tr '\n' ' ' fabrication produced a string
     # PREFIXED with R7-P21E3-BUILD=..., so the case below never matched
