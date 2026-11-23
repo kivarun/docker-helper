@@ -3700,6 +3700,13 @@ struct tc { char type[128]; unsigned long n; };
 static struct tc tab[MAXT]; static size_t ntab;
 static unsigned long total, bint;
 static void bump(const char *type) {
+  char slim[128];
+  const char *c = strchr(type, ':');
+  size_t n = c ? (size_t)(c - type) : strlen(type);
+  if (n >= sizeof slim) n = sizeof slim - 1;
+  memcpy(slim, type, n);
+  slim[n] = 0;
+  type = slim;
   if (!strcmp(type, "bin_t")) bint++;
   for (size_t i = 0; i < ntab; i++)
     if (!strcmp(tab[i].type, type)) { tab[i].n++; return; }
@@ -4782,8 +4789,14 @@ PYEOF
     V_DIRREAD=0;   grep -a 'tclass=dir' "$AW" 2>/dev/null | grep -aq 'read' && V_DIRREAD=1
     V_FIFO=0;      grep -a 'tclass=fifo_file' "$AW" 2>/dev/null | grep -aq 'buildkitd_t' && V_FIFO=1
     # No denial row may touch the workload's granted faces on the state tree.
-    V_NODENY=0;    grep -a 'tcontext=system_u:object_r:docker_helper_builder_state_t' "$AW" 2>/dev/null \
-                     | grep -aE 'denied  \{ (open|read|map|entrypoint) \}' >/dev/null || V_NODENY=1
+    # No denial row may touch the workload's granted faces on the state
+    # tree at the FILE class (the dir read denial is the EXPECTED dir-fd
+    # negative, not a granted-face denial).
+    V_NODENY=1
+    if grep -a 'tclass=file' "$AW" 2>/dev/null \
+        | grep -aqE 'denied  \{ (open|read|map|entrypoint) \}'; then
+      V_NODENY=0
+    fi
     echo "flags: completed=$V_COMPLETED proc_read_denied=$V_PROC proc_file_class=$V_PROCTCLASS lock_denied=$V_LOCK ioctl_denied=$V_IOCTL dir_read_denied=$V_DIRREAD fifo_stdio_denied=$V_FIFO granted_faces_no_denial=$V_NODENY"
     if [ "$V_COMPLETED" = 1 ] && [ "$V_PROC" = 1 ] && [ "$V_LOCK" = 1 ] \
        && [ "$V_IOCTL" = 1 ] && [ "$V_DIRREAD" = 1 ] && [ "$V_FIFO" = 1 ] \
