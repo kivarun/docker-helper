@@ -5269,7 +5269,8 @@ PYEOF
   # --- constraint coverage (deny when read/write are constraint-covered,
   # --- the honest computed-allow record when they are not).
   MNB33_MATRIX_LOG="$EVIDENCE_DIR/p21e3-mnb33-matrix.log"
-  OWN_CON_M33="$(sed -n 's/^own-workload-context=\(.*\)$/\1/p' "$MNB30_TRANS_LOG" 2>/dev/null | head -1)"
+  OWN_CON_M33="$(printf '%s\n' "$(sed -n 's/^own-workload-context=\(.*\)$/CTX=\1/p' "$MNB30_TRANS_LOG" 2>/dev/null | head -1)" \
+    | grep -aoE 'system_u:system_r:docker_helper_builder_workload_t:s0(:c[0-9]+)?' | head -1)"
   if [ -z "$OWN_CON_M33" ]; then
     echo "R7-MNB33-MATRIX=NOT-RUN (no composed workload context observed)" > "$MNB33_MATRIX_LOG"
     cat "$MNB33_MATRIX_LOG"
