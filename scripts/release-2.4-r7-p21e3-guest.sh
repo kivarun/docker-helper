@@ -3805,10 +3805,16 @@ CEOF
       echo "$P5P: live=$(ls -Zn "$P5P" 2>/dev/null || echo absent) predict=$(matchpathcon "$P5P" 2>/dev/null || true)"
     done
     echo "-- the DAC layer as the builder uid (the LSM is bypassed by unconfined; this measures DAC only) --"
-    for P5P in /proc/keys /proc/kallsyms /proc/stat /proc/meminfo /proc/cpuinfo /proc/uptime /proc/self/cmdline; do
+    for P5P in /proc/keys /proc/kallsyms /proc/stat /proc/meminfo /proc/cpuinfo /proc/uptime \
+               /proc/self/cmdline /proc/slabinfo /proc/timer_list /proc/vmallocinfo \
+               /proc/kpageflags /proc/kpagecgroup /proc/pagetypeinfo /proc/kmsg \
+               /proc/iomem /proc/ioports /proc/modules /proc/1/environ /proc/1/mem; do
       setpriv --reuid "$BUILDER_UID" --regid "$BUILDER_GID" --clear-groups \
         sh -c "head -c 32 \"$P5P\" >/dev/null 2>&1 && echo DAC ALLOW $P5P || echo DAC DENY $P5P"
     done
+    echo "-- the kernel content-shaping layer (an unprivileged DAC-allowed read still masks content) --"
+    setpriv --reuid "$BUILDER_UID" --regid "$BUILDER_GID" --clear-groups \
+      sh -c "echo 'iomem first three lines:'; head -n 3 /proc/iomem 2>/dev/null | cat -A | head -3"
     echo "-- shipped-policy baseline: buildkitd_t's proc_t decisions (no module rows; the counterfactual state) --"
     for P5P in read open getattr write setattr; do
       echo "shipped proc_t:file $P5P:"
