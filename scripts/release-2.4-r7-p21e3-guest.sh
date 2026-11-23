@@ -1118,6 +1118,7 @@ cat > "$EVIDENCE_DIR/p21e3_mnb33_wprobe.c" <<'CEOF'
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 int main(void) {
@@ -1127,6 +1128,14 @@ int main(void) {
   ssize_t w2 = write(2, err, strlen(err));
   fflush(stdout);
   fflush(stderr);
+  /* Deterministic post-token dwell (20 x 25 ms): long enough for the
+   * 20 ms /proc sampler to sweep the composed workload process live
+   * (the transition evidence channel), short enough to stay noise. The
+   * dwell never touches any controlled surface — it measures only. */
+  for (int i = 0; i < 20; i++) {
+    struct timespec slp = {0, 25 * 1000 * 1000};
+    nanosleep(&slp, NULL);
+  }
   /* The exit only reports local write syscalls, never the LSM layer:
    * the event-stream capture is the authority on the channel. */
   return (w1 < 0 || w2 < 0) ? 1 : 0;
