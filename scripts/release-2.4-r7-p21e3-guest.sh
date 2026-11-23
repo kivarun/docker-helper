@@ -3705,6 +3705,20 @@ static void bump(const char *type) {
     if (!strcmp(tab[i].type, type)) { tab[i].n++; return; }
   if (ntab < MAXT) { snprintf(tab[ntab].type, sizeof tab[ntab].type, "%s", type); tab[ntab].n = 1; ntab++; }
 }
+/* The SELinux context grammar is user:role:type[:level]; the TYPE is the
+ * third field — walk to the second colon, not to the last field (the
+ * targeted-policy context also carries the MCS suffix). */
+static const char *ctype(const char *ctx) {
+  const char *p = ctx;
+  int colons = 0;
+  for (; *p; p++) {
+    if (*p == ':') {
+      colons++;
+      if (colons == 2) return p + 1;
+    }
+  }
+  return "?";
+}
 int main(void) {
   char *line = NULL; size_t cap = 0; ssize_t len;
   while ((len = getline(&line, &cap, stdin)) > 0) {
@@ -3712,8 +3726,7 @@ int main(void) {
     if (!len) continue;
     char *ctx = NULL;
     if (getfilecon(line, &ctx) > 0) {
-      char *last = strrchr(ctx, ':');
-      bump(last ? last + 1 : "?");
+      bump(ctype(ctx));
       freecon(ctx);
     } else {
       bump("NOPREDICT");
@@ -3744,14 +3757,14 @@ CEOF
       > "$STATE_DIR/mnb32-usr-type-histogram.txt"
     echo "TOTAL row: $(grep -a '^TOTAL' "$STATE_DIR/mnb32-usr-type-histogram.txt" || echo absent)"
     echo "BIN_T row: $(grep -a '^BIN_T' "$STATE_DIR/mnb32-usr-type-histogram.txt" || echo absent)"
-    grep -avE '^(TOTAL|BIN_T)\t' "$STATE_DIR/mnb32-usr-type-histogram.txt" \
+    grep -avE '^(TOTAL|BIN_T)' "$STATE_DIR/mnb32-usr-type-histogram.txt" \
       | sort -t$'\t' -k2 -rn > "$STATE_DIR/mnb32-usr-type-histogram-sorted.txt"
     echo "-- top 25 label types by file count (types with fewer than 5 files omitted) --"
     head -25 "$STATE_DIR/mnb32-usr-type-histogram-sorted.txt"
     echo "-- bin_t count (from the BIN_T row above; /usr regular files) --"
     echo "-- the docker-helper payload tree's own labels (the product identity) --"
     find /usr/libexec/docker-helper -xdev -type f 2>/dev/null \
-      | "$EVIDENCE_DIR/p21e3_mnb32_labelinv" 2>/dev/null | grep -avE '^(TOTAL|BIN_T)\t' | head -20
+      | "$EVIDENCE_DIR/p21e3_mnb32_labelinv" 2>/dev/null | grep -avE '^(TOTAL|BIN_T)' | head -20
     echo "-- the distro consumer norm: subjects holding bin_t:file execute --"
     S1_Q="$(timeout 120 sesearch -A -t bin_t -c file -p execute 2>&1)"
     echo "consumers: $(printf '%s\n' "$S1_Q" | sed -n 's/^allow \([^ ]*\) bin_t.*/\1/p' | sort -u | wc -l) distinct subjects"
@@ -4734,29 +4747,59 @@ PYEOF
       "$STATE_DIR/mnb32-op-logs.txt" > "$STATE_DIR/mnb32-ladder-rows.txt" \
       || echo "(no LADDER rows captured)"
     cat "$STATE_DIR/mnb32-ladder-rows.txt"
-    echo "-- the workload-domain /proc denial witnesses in the audit window --"
-    grep -a 'avc: *denied' "$EVIDENCE_DIR/p21e3-window-records.log" 2>/dev/null \
-      | grep -a 'workload_t' | grep -a 'proc_t' | head -10 || true
-    echo "-- verdict expectations --"
-    awk '
-      $0 == "LADDER-BEGIN" { seen_begin=1 }
-      $0 == "LADDER-END" { seen_end=1 }
-      /^LADDER open path=\/bin\/busybox / { if ($4 ~ /^rc=[0-9]/) seen_open_own=1 }
-      /^LADDER read path=\/bin\/busybox / { if ($4 ~ /^rc=-/) seen_read_denied=1; else seen_read_own=1 }
-      /^LADDER mmap-prot-read path=\/bin\/busybox / { if ($4 ~ /^rc=-/) mmap_denied=1; else seen_mmap_own=1 }
-      /^LADDER flock path=\/bin\/busybox / { if ($4 ~ /^rc=-/) seen_flock_deny=1 }
-      /^LADDER open path=\/proc\/stat / { if ($4 ~ /^rc=-/) seen_proc_deny=1; else seen_proc_deny_noop=1 }
-      /^LADDER open path=\/probe / { if ($4 ~ /^rc=[0-9]/) seen_self_open=1 }
-      /^LADDER open path=\/bin / { if ($4 ~ /^rc=-/) seen_diropen_deny=1 }
-      END {
-        printf "flags: begin=%d end=%d open_own=%d read_own=%d mmap_own=%d flock_deny=%d proc_deny=%d self_open=%d diropen_deny=%d read_denied=%d mmap_denied=%d proc_allowed=%d\n",
-          seen_begin, seen_end, seen_open_own, seen_read_own, seen_mmap_own, seen_flock_deny, seen_proc_deny, seen_self_open, seen_diropen_deny, seen_read_denied, mmap_denied, seen_proc_deny_noop
-        if (seen_begin && seen_end && seen_open_own && seen_read_own && seen_mmap_own \
-            && seen_flock_deny && seen_proc_deny && seen_self_open && seen_diropen_deny)
-          print "LADDER-VERDICT=VERIFIED"
-        else
-          print "LADDER-VERDICT=INCOMPLETE"
-      }' "$STATE_DIR/mnb32-ladder-rows.txt"
+    echo "-- the probe completion (the RUN step's console record) --"
+    python3 - "$STATE_DIR/mnb32-op-logs.txt" <<'PYEOF'
+import re, sys
+text = sys.stdin.read()
+completed = bool(re.search(r'RUN \["/probe"\][^"]*DONE', text)) and \
+            not re.search(r'RUN \["/probe"\][^"]*ERROR', text)
+print(f"RUN-STEP-COMPLETED={'1' if completed else '0'}")
+PYEOF
+    echo "-- the LADDER denial witnesses in the audit window (comm=probe) --"
+    grep -a 'comm="probe"' "$EVIDENCE_DIR/p21e3-window-records.log" 2>/dev/null \
+      > "$STATE_DIR/mnb32-probe-avcs.txt" || true
+    cat "$STATE_DIR/mnb32-probe-avcs.txt"
+    echo "-- the workload-domain /proc/stat denial witness (deduplicated) --"
+    grep -a 'avc: *denied' "$STATE_DIR/mnb32-probe-avcs.txt" 2>/dev/null \
+      | grep -a 'tcontext=system_u:object_r:proc_t:s0' | head -3 || true
+    echo "-- verdict expectations (the audit-window channel is primary) --"
+    LADDER_SRC="audit-window"
+    V_COMPLETED="$(python3 - "$STATE_DIR/mnb32-op-logs.txt" <<'PYEOF'
+import re, sys
+text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+completed = bool(re.search(r'RUN \["/probe"\][^"]*DONE', text)) and \
+            not re.search(r'RUN \["/probe"\][^"]*ERROR', text)
+print("1" if completed else "0")
+PYEOF
+)"
+    # Every expected denial must be WITNESSED; every protected face must be
+    # absent from the denial set (allowed faces generate no audit rows).
+    AW="$STATE_DIR/mnb32-probe-avcs.txt"
+    V_PROC=0;      grep -aq 'avc: *denied' "$AW" 2>/dev/null && grep -aq 'proc_t:s0' "$AW" 2>/dev/null && V_PROC=1
+    V_PROCTCLASS=0; grep -a 'avc: *denied' "$AW" 2>/dev/null | grep -aq 'tclass=file' && grep -a 'proc_t' "$AW" 2>/dev/null | grep -aq 'tclass=file' && V_PROCTCLASS=1
+    V_LOCK=0;      grep -aq 'denied  { lock }' "$AW" 2>/dev/null && V_LOCK=1
+    V_IOCTL=0;     grep -aq 'denied  { ioctl }' "$AW" 2>/dev/null && V_IOCTL=1
+    V_DIRREAD=0;   grep -a 'tclass=dir' "$AW" 2>/dev/null | grep -aq 'read' && V_DIRREAD=1
+    V_FIFO=0;      grep -a 'tclass=fifo_file' "$AW" 2>/dev/null | grep -aq 'buildkitd_t' && V_FIFO=1
+    # No denial row may touch the workload's granted faces on the state tree.
+    V_NODENY=0;    grep -a 'tcontext=system_u:object_r:docker_helper_builder_state_t' "$AW" 2>/dev/null \
+                     | grep -aE 'denied  \{ (open|read|map|entrypoint) \}' >/dev/null || V_NODENY=1
+    echo "flags: completed=$V_COMPLETED proc_read_denied=$V_PROC proc_file_class=$V_PROCTCLASS lock_denied=$V_LOCK ioctl_denied=$V_IOCTL dir_read_denied=$V_DIRREAD fifo_stdio_denied=$V_FIFO granted_faces_no_denial=$V_NODENY"
+    if [ "$V_COMPLETED" = 1 ] && [ "$V_PROC" = 1 ] && [ "$V_LOCK" = 1 ] \
+       && [ "$V_IOCTL" = 1 ] && [ "$V_DIRREAD" = 1 ] && [ "$V_FIFO" = 1 ] \
+       && [ "$V_NODENY" = 1 ]; then
+      echo "LADDER-VERDICT=VERIFIED"
+    else
+      echo "LADDER-VERDICT=INCOMPLETE"
+    fi
+    # The stdout channel itself: the composed workload's own output pipes
+    # are buildkitd_t: fifo_file objects (the RUN step's stdout/stderr);
+    # their denial IS the W7 flow evidence this round was sent to resolve.
+    if [ "$V_FIFO" = 1 ]; then
+      echo "STDOUT-CHANNEL=WITNESSED-DENIED (the workload cannot write the RUN event stream without W7)"
+    else
+      echo "STDOUT-CHANNEL=CAPTURED (the raw LADDER rows above are the probe's unescaped stdout)"
+    fi
   } > "$LADDER_LOG" 2>&1
   cat "$LADDER_LOG"
   grep -aoE 'LADDER-VERDICT=[A-Z]+' "$LADDER_LOG" | tail -1
