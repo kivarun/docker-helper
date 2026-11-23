@@ -5414,12 +5414,14 @@ CEOF
   # --- round records the GAP honestly.
   {
     echo "== MNB33 cross fd-use probe feasibility =="
-    echo "-- the workload domain's socket rows (must be absent: no fd passage channel) --"
+    echo "-- the workload domain's unix_stream_socket rows (the measured shape: SELF-only rows; any fd PASSED through a self-pair socket must already be held by the domain, so passage cannot mint authority) --"
     timeout 60 sesearch -A -s docker_helper_builder_workload_t -c unix_stream_socket 2>&1 || true
-    echo "-- the workload domain's proc faces (must be absent: no reopen channel) --"
+    echo "-- the workload domain's proc faces (must be absent: no /proc/<pid>/fd reopen channel) --"
     timeout 60 sesearch -A -s docker_helper_builder_workload_t -t proc_t -c file 2>&1 || true
+    echo "-- the measured acquisition surface --"
+    echo "The composed workload's own inherited FIFO fds are buildkitd_t:s0:c1 (the measured operation category: see the pipe-label snapshot and the stdio/witness rows); pipefs inodes are name-unreachable (no openable namespace entry), so the ONLY ways a c1 workload process could hold a c2-labeled buildkitd FIFO fd would be (a) a proc_t:file read/open face to reopen /proc/<pid>/fd (ABSENT above), (b) acquiring it from another domain's fd table through a socket passage (the workload's socket rows are SELF-only and both endpoints must already hold the fd — passage cannot mint acquisition), or (c) receiving it through channels outside the measured permission set. No channel exists."
     echo "-- the structural statement --"
-    echo "GAP: no existing channel carries a c2-labeled buildkitd FIFO fd into a c1 workload process; constructing one would require either a new unix_stream_socket row, a proc_t read row, or a foreign-composed workload, each of which weakens a control this review forbids touching. The computed cross DENY/ALLOW decision above plus the constraint text is the recorded evidence; the syscall-level cross-use probe stays UNestablished."
+    echo "GAP: the syscall-level cross-category fd-use probe stays UNestablished because a c1 workload has no existing channel to ACQUIRE a c2-labeled buildkitd FIFO fd; constructing one would require adding a proc_t face, coupling a foreign domain's socket table, or expanding the diagnostic permission set — each weakens a control this review forbids touching. The computed cross decisions above (both faces ALLOW: the fifo_file mlsconstrain covers only create/relabelfrom/relabelto/open/relabelfrom) plus the verbatim constraint text and the self-only socket shape are the recorded evidence for the review."
   } > "$EVIDENCE_DIR/p21e3-mnb33-gap.log" 2>&1
   cat "$EVIDENCE_DIR/p21e3-mnb33-gap.log"
   printf 'R7-MNB33-CROSS-FD-PROBE=GAP (no fd channel exists; see evidence/p21e3-mnb33-gap.log)\n'
