@@ -93,7 +93,22 @@ case "$R7_MODE" in
   # guest-compiled syscall-ladder probe run as the composed workload.
   # No permanent policy change, no relabel, no permissive domain.
   mnb32) GUEST_SCRIPT='release-2.4-r7-p21e3-guest.sh' ;;
-  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d | p21e | p21e3 | p21e3probe | p21e3proc-sys | p21e3proc-file | p21e3proc-keys | p21e3diag-keys | mnb30 | mnb32)" ;;
+  # mnb33 = the R7 MNB33 W7-stdout/stderr-channel round (the same p21e3
+  # guest script, MNB33 branch): the unchanged MNB30/MNB32 pin preflight,
+  # the measured diagnostic permission set (the MNB31 Tier-A rows WITH the
+  # load-bearing P5 proc read/open pair), plus EXACTLY the proposed W7
+  # FIFO permissions loaded as a separate, named diagnostic module
+  # (docker_helper_diag_w7: workload_t -> buildkitd_t:fifo_file
+  # { read write }). The positive test runs a real producing RUN step whose
+  # stdout and stderr carry distinct known tokens; the harness FAILS if
+  # either token is missing from the operation event stream; the image
+  # export must complete. The isolation test queries the kernel decisions
+  # for workload c1 against buildkitd FIFO objects in c1 and c2 with the
+  # loaded fifo_file constraint captured verbatim; the cross fd-use probe
+  # is attempted only through existing channels and is recorded as a GAP
+  # when no channel exists. Unload-verified, policy-sha closure recorded.
+  mnb33) GUEST_SCRIPT='release-2.4-r7-p21e3-guest.sh' ;;
+  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d | p21e | p21e3 | p21e3probe | p21e3proc-sys | p21e3proc-file | p21e3proc-keys | p21e3diag-keys | mnb30 | mnb32 | mnb33)" ;;
 esac
 
 log()  { printf '%s %s\n' "$PREFIX" "$*"; }
@@ -123,7 +138,7 @@ vm_selinux_two_stage_docker
 log '== 7. transfer and run the R7 guest diagnostic'
 vm_ssh 'rm -rf /tmp/r7-diag && mkdir -p /tmp/r7-diag'
 vm_scp "$SCRIPT_DIR/$GUEST_SCRIPT" opc@127.0.0.1:/tmp/r7-diag/release-2.4-r7-diag-guest.sh
-if [ "$R7_MODE" = "mnb30" ] || [ "$R7_MODE" = "mnb32" ]; then
+if [ "$R7_MODE" = "mnb30" ] || [ "$R7_MODE" = "mnb32" ] || [ "$R7_MODE" = "mnb33" ]; then
   # The loader harness rides along (the guest runs it against the runtime
   # member extracted from the candidate RPM), together with the payload
   # staging owner (the single pins authority for the runtime byte-pin).
@@ -182,6 +197,7 @@ export R7_P21E3_PROC_KEYS=$( [ "$R7_MODE" = p21e3proc-keys ] && echo 1 || echo 0
 export R7_P21E3_DIAG_KEYS=$( [ "$R7_MODE" = p21e3diag-keys ] && echo 1 || echo 0 )
 export R7_MNB30=$( [ "$R7_MODE" = mnb30 ] && echo 1 || echo 0 )
 export R7_MNB32=$( [ "$R7_MODE" = mnb32 ] && echo 1 || echo 0 )
+export R7_MNB33=$( [ "$R7_MODE" = mnb33 ] && echo 1 || echo 0 )
 bash /tmp/r7-diag/release-2.4-r7-diag-guest.sh
 RMT
   GUEST_RC=$?
@@ -297,7 +313,7 @@ RMT
         log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
         ;;
     esac
-  elif [ "$R7_MODE" = "p21e3" ] || [ "$R7_MODE" = "p21e3probe" ] || [ "$R7_MODE" = "p21e3proc-sys" ] || [ "$R7_MODE" = "p21e3proc-file" ] || [ "$R7_MODE" = "p21e3proc-keys" ] || [ "$R7_MODE" = "p21e3diag-keys" ] || [ "$R7_MODE" = "mnb30" ] || [ "$R7_MODE" = "mnb32" ]; then
+  elif [ "$R7_MODE" = "p21e3" ] || [ "$R7_MODE" = "p21e3probe" ] || [ "$R7_MODE" = "p21e3proc-sys" ] || [ "$R7_MODE" = "p21e3proc-file" ] || [ "$R7_MODE" = "p21e3proc-keys" ] || [ "$R7_MODE" = "p21e3diag-keys" ] || [ "$R7_MODE" = "mnb30" ] || [ "$R7_MODE" = "mnb32" ] || [ "$R7_MODE" = "mnb33" ]; then
     # The BUILD result line and the VERDICT line are matched SEPARATELY:
     # the previous tail -2 | tr '\n' ' ' fabrication produced a string
     # PREFIXED with R7-P21E3-BUILD=..., so the case below never matched
