@@ -4222,7 +4222,7 @@ CEOF
   fi
   MNB36_BASE_CROSS="$(awk -F'\t' '$1=="BASELINE" && $2=="fifo_file" { printf "%s(%s->%s)=%s ", $3, ($4 ~ /:s0:c1$/ ? "c1" : "c2"), ($5 ~ /:s0:c1$/ ? "c1" : "c2"), ($6==1?"ALLOW":"DENY") }' "$MNB36_MATRIX_LOG")"
   MNB36_BASE_FD="$(awk -F'\t' '$1=="BASELINE" && $2=="fd" { printf "%s ", ($6==1 && $7==1 ? "use=ALLOW(decided)" : "use=UNDECIDED-OR-DENY") }' "$MNB36_MATRIX_LOG")"
-  MNB36_BASE_FD_OK="$(printf '%s\n' "$MNB36_BASE_FD" | grep -c 'ALLOW(decided)')"
+  MNB36_BASE_FD_OK="$(printf '%s\n' "$MNB36_BASE_FD" | grep -o 'ALLOW(decided)' | wc -l)"
   echo "baseline fd decisions: $MNB36_BASE_FD (allow rows=$MNB36_BASE_FD_OK of 4)" >> "$MNB36_MATRIX_LOG"
   cat "$MNB36_MATRIX_LOG"
   # fd:use unchanged: the SAME four fd cells must resolve allow+decided in
@@ -4382,7 +4382,7 @@ EOF
   MNB36_OPEN_DEC="$(awk -F'\t' '$1=="CONSTRAINED" && $2=="fifo_file" && $11=="deny" && $3=="open" { printf "%s ", ($6==1?"ALLOW-UNEXPECTED":"DENY") }' "$MNB36_MATRIX_LOG")"
   echo "constrained matrix summary: own=$MNB36_OWN_DEC cross=$MNB36_CROSS_DEC open_cross=$MNB36_OPEN_DEC fd=$MNB36_FD_DEC" >> "$MNB36_MATRIX_LOG"
   cat "$MNB36_MATRIX_LOG"
-  MNB36_FD_OK="$(printf '%s\n' "$MNB36_FD_DEC" | grep -c 'ALLOW(decided)')"
+  MNB36_FD_OK="$(printf '%s\n' "$MNB36_FD_DEC" | grep -o 'ALLOW(decided)' | wc -l)"
   if printf '%s\n' "$MNB36_CROSS_DEC" | grep -aq 'ALLOW-UNEXPECTED' || printf '%s\n' "$MNB36_OPEN_DEC" | grep -aq 'ALLOW-UNEXPECTED'; then
     echo 'R7-MNB36-MATRIX=FAIL'
     mnb36_constraint_remove
