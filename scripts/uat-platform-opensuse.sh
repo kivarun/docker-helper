@@ -76,6 +76,7 @@ platform_install_deps() {
     policycoreutils policycoreutils-python-utils \
     setools-console \
     bzip2 \
+    diffutils \
     bindfs \
     rootlesskit slirp4netns \
     tar gzip file curl docker \
