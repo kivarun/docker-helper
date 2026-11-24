@@ -183,11 +183,13 @@ ensure_services_active() {
   # Re-entry after a mid-run reboot: enabled units come back (systemd), but
   # the contract below needs an explicitly ACTIVE pair, not a best-effort
   # boot result. reset-failed first so a prior attempt's start-limit failure
-  # cannot mask a fresh start attempt.
+  # cannot mask a fresh start attempt. The state root was already
+  # initialized in P1 (the deployment contract), so a plain start is valid
+  # from P2 onward.
   systemctl reset-failed "$MAIN_UNIT" "$UNIT" 2>/dev/null || true
   if [ "$(systemctl is-enabled "$MAIN_UNIT" 2>/dev/null || true)" = "enabled" ] \
     || [ "$(systemctl is-enabled "$UNIT" 2>/dev/null || true)" = "enabled" ]; then
-start_or_fail p1
+    systemctl start "$MAIN_UNIT" "$UNIT"
   fi
   expected_active "$MAIN_UNIT" || fail "$MAIN_UNIT must be active at the start of this phase"
   expected_active "$UNIT" || fail "$UNIT must be active at the start of this phase"
@@ -309,6 +311,20 @@ constraint_statement_ok \
 
 PP_BASELINE_SHA="$(sha256sum "$PP" | awk '{print $1}')"
 printf 'pp_baseline=%s\n' "$PP_BASELINE_SHA" >"$EVIDENCE_DIR/p1-pp-baseline"
+
+# The shipped deployment order: a fresh install is INITIALIZED by the
+# operator (docker-helper init --allowed-root ...) before the services
+# start — init creates the state configuration as the invoking root, and
+# the systemd STATE_DIRECTORY bootstrap then operates on the existing
+# state root (identical to install-system.sh and the packaged lifecycle
+# proofs). A bare 'systemctl start' on a never-initialized fresh host is
+# NOT the deployment contract.
+ALLOWED_ROOT=/srv/docker-helper-mnb38-uat
+mkdir -p "$ALLOWED_ROOT"
+/usr/bin/docker-helper init --allowed-root "$ALLOWED_ROOT" \
+  >"$EVIDENCE_DIR/p1-init.log" 2>&1 \
+  || { tail -20 "$EVIDENCE_DIR/p1-init.log"; fail "docker-helper init failed on the fresh install (see p1-init.log)"; }
+ev p1-init "allowed-root=$ALLOWED_ROOT initialized"
 
 start_or_fail p1
 expected_active "$MAIN_UNIT" || fail "the main service must be startable after the fresh install"
