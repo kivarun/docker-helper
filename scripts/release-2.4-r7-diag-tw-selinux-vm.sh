@@ -105,10 +105,26 @@ case "$R7_MODE" in
   # export must complete. The isolation test queries the kernel decisions
   # for workload c1 against buildkitd FIFO objects in c1 and c2 with the
   # loaded fifo_file constraint captured verbatim; the cross fd-use probe
-  # is attempted only through existing channels and is recorded as a GAP
+  #   is attempted only through existing channels and is recorded as a GAP
   # when no channel exists. Unload-verified, policy-sha closure recorded.
   mnb33) GUEST_SCRIPT='release-2.4-r7-p21e3-guest.sh' ;;
-  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d | p21e | p21e3 | p21e3probe | p21e3proc-sys | p21e3proc-file | p21e3proc-keys | p21e3diag-keys | mnb30 | mnb32 | mnb33)" ;;
+  # mnb36 = the R7 MNB36 live CIL constraint-integration gate (the same
+  # p21e3 guest script, MNB36 branch, which reuses the MNB33 machinery
+  # wholesale): the unchanged MNB30/MNB32/MNB33 pin preflight and the
+  # diagnostic module set (cap, workload-with-P5, W7), the guest's policy
+  # identity / module store / baseline FIFO constraints, the candidate
+  # CIL module (docker-helper-fifo-rw-constraint, priority 400, identity
+  # verified from the store), the live four-cell FIFO kernel-decision
+  # matrix under the ACTIVE constraint (own ALLOW / cross DENY; baseline
+  # cross-ALLOW recorded before the install), the fd:use / open / TE
+  # invariance checks, the MNB33 producing-RUN flow with the constraint
+  # active, and the verified rollback (module removal, baseline
+  # constraint restoration, policy-sha closure, release .pp unchanged,
+  # all diagnostic modules unloaded, dontaudit restored). ONE controlled
+  # experiment: removal on every path; NO permanent RPM change, NO
+  # Release-GO UAT.
+  mnb36) GUEST_SCRIPT='release-2.4-r7-p21e3-guest.sh' ;;
+  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d | p21e | p21e3 | p21e3probe | p21e3proc-sys | p21e3proc-file | p21e3proc-keys | p21e3diag-keys | mnb30 | mnb32 | mnb33 | mnb36)" ;;
 esac
 
 log()  { printf '%s %s\n' "$PREFIX" "$*"; }
@@ -138,7 +154,7 @@ vm_selinux_two_stage_docker
 log '== 7. transfer and run the R7 guest diagnostic'
 vm_ssh 'rm -rf /tmp/r7-diag && mkdir -p /tmp/r7-diag'
 vm_scp "$SCRIPT_DIR/$GUEST_SCRIPT" opc@127.0.0.1:/tmp/r7-diag/release-2.4-r7-diag-guest.sh
-if [ "$R7_MODE" = "mnb30" ] || [ "$R7_MODE" = "mnb32" ] || [ "$R7_MODE" = "mnb33" ]; then
+if [ "$R7_MODE" = "mnb30" ] || [ "$R7_MODE" = "mnb32" ] || [ "$R7_MODE" = "mnb33" ] || [ "$R7_MODE" = "mnb36" ]; then
   # The loader harness rides along (the guest runs it against the runtime
   # member extracted from the candidate RPM), together with the payload
   # staging owner (the single pins authority for the runtime byte-pin).
@@ -198,6 +214,7 @@ export R7_P21E3_DIAG_KEYS=$( [ "$R7_MODE" = p21e3diag-keys ] && echo 1 || echo 0
 export R7_MNB30=$( [ "$R7_MODE" = mnb30 ] && echo 1 || echo 0 )
 export R7_MNB32=$( [ "$R7_MODE" = mnb32 ] && echo 1 || echo 0 )
 export R7_MNB33=$( [ "$R7_MODE" = mnb33 ] && echo 1 || echo 0 )
+export R7_MNB36=$( [ "$R7_MODE" = mnb36 ] && echo 1 || echo 0 )
 bash /tmp/r7-diag/release-2.4-r7-diag-guest.sh
 RMT
   GUEST_RC=$?
@@ -313,7 +330,7 @@ RMT
         log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
         ;;
     esac
-  elif [ "$R7_MODE" = "p21e3" ] || [ "$R7_MODE" = "p21e3probe" ] || [ "$R7_MODE" = "p21e3proc-sys" ] || [ "$R7_MODE" = "p21e3proc-file" ] || [ "$R7_MODE" = "p21e3proc-keys" ] || [ "$R7_MODE" = "p21e3diag-keys" ] || [ "$R7_MODE" = "mnb30" ] || [ "$R7_MODE" = "mnb32" ] || [ "$R7_MODE" = "mnb33" ]; then
+  elif [ "$R7_MODE" = "p21e3" ] || [ "$R7_MODE" = "p21e3probe" ] || [ "$R7_MODE" = "p21e3proc-sys" ] || [ "$R7_MODE" = "p21e3proc-file" ] || [ "$R7_MODE" = "p21e3proc-keys" ] || [ "$R7_MODE" = "p21e3diag-keys" ] || [ "$R7_MODE" = "mnb30" ] || [ "$R7_MODE" = "mnb32" ] || [ "$R7_MODE" = "mnb33" ] || [ "$R7_MODE" = "mnb36" ]; then
     # The BUILD result line and the VERDICT line are matched SEPARATELY:
     # the previous tail -2 | tr '\n' ' ' fabrication produced a string
     # PREFIXED with R7-P21E3-BUILD=..., so the case below never matched

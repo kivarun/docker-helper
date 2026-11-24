@@ -64,6 +64,15 @@ set -uo pipefail
 log()  { printf '[r7-p21e3] %s\n' "$*"; }
 fail() { printf '[r7-p21e3] FAILED: %s\n' "$*" >&2; exit 1; }
 
+# R7 MNB36: the live CIL constraint-integration gate reuses the MNB33
+# diagnostics machinery wholesale (pin preflight, diagnostic module set,
+# build window, token flow, pipe labels, teardown). Enabling the alias
+# here makes every MNB33-conditioned block apply to the MNB36 round; the
+# MNB36-only sections below key on R7_MNB36 itself.
+if [ "${R7_MNB36:-0}" = 1 ]; then
+  R7_MNB33=1
+fi
+
 
 cap() { # <name> <max-lines> <cmd...>
   local name="$1" maxn="$2" rc; shift 2
@@ -2462,6 +2471,23 @@ p21e3_diag_remove() {
   return 0
 }
 
+# R7 MNB36: the candidate CIL constraint module's own fail-closed removal
+# hook. It runs on EVERY path (roll-forward success, mid-gate failure and
+# the EXIT trap) BEFORE the diagnostic modules are removed, and it never
+# raises: the verification of its effect lives in the MNB36 rollback gate.
+mnb36_constraint_remove() {
+  [ "${MNB36_ACTIVE:-0}" = 1 ] || return 0
+  [ "${MNB36_CONSTRAINT_REMOVED:-0}" = 1 ] && return 0
+  local out rc log="${MNB36_ROLLBACK_LOG:-$EVIDENCE_DIR/p21e3-mnb36-rollback.log}"
+  out="$(semodule -r "${MNB36_MODULE:-docker-helper-fifo-rw-constraint}" 2>&1)"
+  rc=$?
+  printf 'mnb36_constraint_remove: semodule -r rc=%d %s\n' "$rc" "$out" >> "$log"
+  if [ "$rc" = 0 ]; then
+    MNB36_CONSTRAINT_REMOVED=1
+  fi
+  return 0
+}
+
 # --- workspace + session (prepared BEFORE the window/sampler/POST) ---
 WS="$PRINCIPAL_HOME/r7-p21e3-ws"
 rm -rf "$WS"; mkdir -p "$WS/ctx"
@@ -3394,6 +3420,84 @@ EOF
   fi
   log "three-rule capability module loaded: docker_helper_diag_cap (self cap_userns setpcap+setgid, self process setcap; deltas {setpcap setgid} and {setcap} verified)"
 
+  # ==========================================================================
+  # R7 MNB36 gate 1: the guest's policy identity, module store and the
+  # baseline FIFO constraints, captured BEFORE any constraint-work state is
+  # created. Also removes any stale constraint module from a prior aborted
+  # attempt, and installs the toolchain the live kernel-decision helper
+  # needs (gcc + libselinux headers) — installed lazily with the same
+  # bounded zypper call the post-build matrix uses.
+  # ==========================================================================
+  if [ "${R7_MNB36:-0}" = 1 ]; then
+  MNB36_LOG="$EVIDENCE_DIR/p21e3-mnb36-baseline.log"
+  MNB36_MODULE=docker-helper-fifo-rw-constraint
+  MNB36_CIL="$EVIDENCE_DIR/$MNB36_MODULE.cil"
+  MNB36_IDENTITY_OK=1
+  if ! command -v gcc >/dev/null 2>&1 || [ ! -e /usr/include/selinux/selinux.h ]; then
+    timeout 300 zypper --non-interactive install -y gcc libselinux-devel >/dev/null 2>&1 || true
+  fi
+  command -v gcc >/dev/null 2>&1 || { echo "MNB36-G1: FAIL (gcc unavailable; the live kernel-decision helper cannot run)" >> "$MNB36_LOG"; echo 'R7-MNB36-IDENTITY=FAIL'; cat "$MNB36_LOG"; fail "the MNB36 gate-1 toolchain is unavailable; BLOCKED"; }
+  [ -e /usr/include/selinux/selinux.h ] || { echo "MNB36-G1: FAIL (libselinux headers unavailable)" >> "$MNB36_LOG"; echo 'R7-MNB36-IDENTITY=FAIL'; cat "$MNB36_LOG"; fail "the MNB36 gate-1 libselinux headers are unavailable; BLOCKED"; }
+  {
+    echo "== MNB36 gate 1: policy identity, module store, baseline FIFO constraints =="
+    echo "enforcement: $(getenforce 2>&1)"
+    echo "store: $(sed -n 's/^SELINUXTYPE=\(.*\)/SELINUXTYPE=\1/p' /etc/selinux/config 2>/dev/null | head -1)"
+    echo "loaded policy sha (with the cap diagnostic module): $(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
+    echo "pre-diag baseline sha: ${SE_POLICY_SHA_PRE:-none}"
+    echo "policy bytes: $(wc -c < /sys/fs/selinux/policy 2>/dev/null)"
+    echo "-- semanage defrecord / store identity (active store path) --"
+    ls -la /etc/selinux/targeted/active/policy.kern 2>/dev/null | sed 's/^/store-kern: /'
+    sha256sum /etc/selinux/targeted/active/policy.kern 2>/dev/null || true
+    echo "-- module store (semodule -lfull; baseline capture) --"
+    semodule -lfull 2>&1
+    echo "-- stale constraint-module cleanup (a prior aborted attempt must not leak state) --"
+    if semodule -l 2>/dev/null | grep -aq "$MNB36_MODULE"; then
+      echo "stale module found; removing it before measuring (its effects never enter this round's baseline)"
+      semodule -r "$MNB36_MODULE"
+    fi
+    if semodule -l 2>/dev/null | grep -aq "$MNB36_MODULE"; then
+      echo "MNB36-G1: FAIL (the constraint module is registered despite the stale-cleanup removal; collision/cleanup failure)"
+      MNB36_IDENTITY_OK=0
+    else
+      echo "MNB36-G1: PASS (no $MNB36_MODULE module in the store)"
+    fi
+    echo "-- baseline fifo_file constraints (verbatim; must NOT cover read/write) --"
+    MNB36_CON_BASE="$(seinfo --constrain -- /sys/fs/selinux/policy 2>&1 || seinfo -x --constrain -- /sys/fs/selinux/policy 2>&1 || true)"
+    MNB36_CON_BASE_FIFO="$(printf '%s\n' "$MNB36_CON_BASE" | grep -ai 'fifo_file' || true)"
+    printf '%s\n' "$MNB36_CON_BASE_FIFO"
+    MNB36_CovRead="$(printf '%s\n' "$MNB36_CON_BASE_FIFO" | grep -aoi '{[^}]*}' | tr ' {}' ' ' | tr '\n' ' ' | grep -aow read | head -1)"
+    MNB36_CovWrite="$(printf '%s\n' "$MNB36_CON_BASE_FIFO" | grep -aoi '{[^}]*}' | tr ' {}' ' ' | tr '\n' ' ' | grep -aow write | head -1)"
+    if [ -z "$MNB36_CovRead" ] && [ -z "$MNB36_CovWrite" ]; then
+      echo "MNB36-G1: PASS (the baseline fifo_file mlsconstrain set does NOT cover read/write; the constraint baseline matches the MNB33 measured state)"
+    else
+      echo "MNB36-G1: FAIL (the baseline fifo_file constraint unexpectedly covers read=$([ -n "$MNB36_CovRead" ] && echo yes || echo no) write=$([ -n "$MNB36_CovWrite" ] && echo yes || echo no))"
+      MNB36_IDENTITY_OK=0
+    fi
+    echo "-- fd class baseline (zero constraints expected; fd:use stays TE-owned) --"
+    MNB36_FD_BASE="$(seinfo --constrain fd -- /sys/fs/selinux/policy 2>&1 || true)"
+    printf '%s\n' "$MNB36_FD_BASE" | head -5
+    echo "-- mcs_constrained_type census (the constraint's escape population) --"
+    seinfo -a mcs_constrained_type -x 2>/dev/null | sed -n '2,30p' || true
+    echo "-- the known docker-helper subject types must be members --"
+    seinfo -a mcs_constrained_type -x 2>/dev/null | grep -aq docker_helper_buildkitd_t && \
+    seinfo -a mcs_constrained_type -x 2>/dev/null | grep -aq docker_helper_builder_workload_t \
+      && echo "MNB36-G1: PASS (both docker-helper MCS members present)" \
+      || { echo "MNB36-G1: FAIL (a docker-helper mcs_constrained_type member is missing)"; MNB36_IDENTITY_OK=0; }
+    echo "-- kernel-decision helper toolchain --"
+    gcc --version 2>&1 | head -1
+    ls -l /usr/include/selinux/selinux.h 2>&1 | head -1
+  } > "$MNB36_LOG" 2>&1
+  cat "$MNB36_LOG"
+  if [ "$MNB36_IDENTITY_OK" != 1 ] || grep -aq '^MNB36-G1: FAIL' "$MNB36_LOG"; then
+    echo 'R7-MNB36-IDENTITY=FAIL'
+    p21e3_diag_remove
+    p21e3_dontaudit_restore
+    fail "the MNB36 gate-1 identity/baseline gate failed; BLOCKED"
+  fi
+  echo 'R7-MNB36-IDENTITY=PASS'
+  log "MNB36 gate 1 passed: policy identity, module store, baseline FIFO constraints (read/write uncovered), no constraint-module collision"
+  fi  # end of the MNB36 gate-1 baseline block
+
   # --- R7 MNB30: the temporary WORKLOAD-DOMAIN module (diagnostic; the
   # --- MNB28 scheme (b) row set, temporary exactly like the cap module).
   # --- The wrapper's OWN production rolecheck (seinfo --role_types) needs
@@ -3987,6 +4091,321 @@ EOF
     fail "the MNB33 W7 module load gate failed; BLOCKED"
   fi
   log "MNB33 W7 module loaded (the exact proposed fifo pair, separately identifiable: docker_helper_diag_w7)"
+
+  # ==========================================================================
+  # R7 MNB36 gates 2+3: the candidate CIL constraint module and the live
+  # kernel-decision matrices. Order: (a) the BASELINE matrix against the
+  # mnb33 diagnostic state (W7 loaded, read/write NOT constraint-covered —
+  # the recorded cross-ALLOW baseline), (b) the constraint-module install
+  # at priority 400 with identity verification, (c) the CONSTRAINED matrix
+  # against the live loaded policy (own ALLOW / cross DENY), (d) the
+  # invariance checks (fd:use, open face, TE rows). The matrices query the
+  # LIVE kernel through libselinux's security_compute_av_raw; the
+  # pre-build rows use the policy-constructible workload contexts at the
+  # canonical pool categories (c1/c2 — the per-op pool assignment is the
+  # unit's own behavior and is re-verified live in the post-build matrix
+  # through the observed composed context).
+  # ==========================================================================
+  if [ "${R7_MNB36:-0}" = 1 ]; then
+  MNB36_MATRIX_LOG="$EVIDENCE_DIR/p21e3-mnb36-matrix.log"
+  MNB36_INTEGRITY_LOG="$EVIDENCE_DIR/p21e3-mnb36-integrity.log"
+  cat > "$EVIDENCE_DIR/p21e3_mnb36_avdec.c" <<'CEOF'
+/* p21e3_mnb36_avdec.c — the MNB36 live kernel-decision matrix.
+ * Rows: workload_t at the own category (c1) and its twin at the neighbor
+ * category (c2), against buildkitd_t fifo_file and fd objects at both
+ * categories. FIFO rows: own read/write MUST allow; cross rows carry the
+ * shell-supplied expectation (allow = the baseline constraint-uncovered
+ * state; deny = the constraint-covered state). fd rows: fd:use MUST allow
+ * in ALL four pairs — the fd class carries no constraints in either
+ * state, so these rows are the fd:use invariance witness.
+ * Columns: scon tcon class perm allowed decided auditallow auditdeny
+ * permissive expect. */
+#include <selinux/selinux.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+static struct q { const char *scon, *tcon, *cls, *perm, *expect; } ROWS[64];
+static size_t NROWS;
+static void add(const char *s, const char *t, const char *c, const char *p, const char *e) {
+  ROWS[NROWS].scon = s; ROWS[NROWS].tcon = t; ROWS[NROWS].cls = c;
+  ROWS[NROWS].perm = p; ROWS[NROWS].expect = e; NROWS++;
+}
+#define BK_TYPE "docker_helper_buildkitd_t"
+int main(int argc, char **argv) {
+  if (argc != 5) { fprintf(stderr, "usage: %s <own-cat> <neighbor-cat> <cross-expect> <label>\n", argv[0]); return 2; }
+  static char own_s[256], twin_s[256], bk_own[256], bk_neighbor[256];
+  snprintf(own_s, sizeof own_s, "system_u:system_r:docker_helper_builder_workload_t:s0:%s", argv[1]);
+  snprintf(twin_s, sizeof twin_s, "system_u:system_r:docker_helper_builder_workload_t:s0:%s", argv[2]);
+  snprintf(bk_own, sizeof bk_own, "system_u:object_r:%s:s0:%s", BK_TYPE, argv[1]);
+  snprintf(bk_neighbor, sizeof bk_neighbor, "system_u:object_r:%s:s0:%s", BK_TYPE, argv[2]);
+  const char *cxexp = argv[3];
+  const char *label = argv[4];
+  /* same-category rows: type-wide, must allow */
+  add(own_s, bk_own, "fifo_file", "read", "allow");
+  add(own_s, bk_own, "fifo_file", "write", "allow");
+  add(twin_s, bk_neighbor, "fifo_file", "read", "allow");
+  add(twin_s, bk_neighbor, "fifo_file", "write", "allow");
+  /* cross rows: shell-supplied expectation, both directions */
+  add(own_s, bk_neighbor, "fifo_file", "read", cxexp);
+  add(own_s, bk_neighbor, "fifo_file", "write", cxexp);
+  add(twin_s, bk_own, "fifo_file", "read", cxexp);
+  add(twin_s, bk_own, "fifo_file", "write", cxexp);
+  /* open-face invariance rows: the distro's open constraint denies the
+   * cross face and allows the own face in BOTH states (the candidate adds
+   * no open coverage) — these rows are the open-face invariance witness. */
+  add(own_s, bk_own, "fifo_file", "open", "allow");
+  add(own_s, bk_neighbor, "fifo_file", "open", "deny");
+  add(twin_s, bk_neighbor, "fifo_file", "open", "allow");
+  add(twin_s, bk_own, "fifo_file", "open", "deny");
+  /* fd:use invariance rows: allow in every cell, both states */
+  add(own_s, bk_own, "fd", "use", "allow");
+  add(own_s, bk_neighbor, "fd", "use", "allow");
+  add(twin_s, bk_own, "fd", "use", "allow");
+  add(twin_s, bk_neighbor, "fd", "use", "allow");
+  for (size_t i = 0; i < NROWS; i++) {
+    struct q *r = &ROWS[i];
+    security_class_t cls = string_to_security_class(r->cls);
+    if (!cls) { printf("ERR\tclass %s unknown\n", r->cls); return 1; }
+    access_vector_t bit = string_to_av_perm(cls, r->perm);
+    if (!bit) { printf("ERR\tperm %s %s unknown\n", r->cls, r->perm); return 1; }
+    struct av_decision avd;
+    memset(&avd, 0, sizeof(avd));
+    if (security_compute_av_raw(r->scon, r->tcon, cls, bit, &avd) < 0) {
+      printf("ERR\tcompute_av failed\n");
+      return 1;
+    }
+    printf("%s\t%s\t%s\t%s\t%s\t%u\t%u\t%u\t%u\t%u\t%s\n",
+           label, r->cls, r->perm, r->scon, r->tcon,
+           (avd.allowed & bit) ? 1 : 0,
+           (avd.decided & bit) ? 1 : 0,
+           (avd.auditallow & bit) ? 1 : 0,
+           (avd.auditdeny & bit) ? 1 : 0,
+           (avd.flags & SELINUX_AVD_FLAGS_PERMISSIVE) ? 1 : 0,
+           r->expect);
+  }
+  return 0;
+}
+CEOF
+  gcc -O2 -o "$EVIDENCE_DIR/p21e3_mnb36_avdec" "$EVIDENCE_DIR/p21e3_mnb36_avdec.c" -lselinux \
+    > /dev/null 2>&1 || { echo 'R7-MNB36-BASELINE-MATRIX=NOT-RUN (helper build failed)'; cat "$MNB36_MATRIX_LOG" 2>/dev/null; fail "the MNB36 kernel-decision helper build failed; BLOCKED"; }
+  # --- (a) the BASELINE matrix: the mnb33 state (W7 loaded, constraint
+  # absent) — the mandated baseline c1/c2 decisions with the constraint
+  # coverage gap recorded.
+  {
+    echo "== MNB36 baseline kernel-decision matrix (mnb33 diagnostic state; NO constraint module) =="
+    echo "policy sha: $(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
+    "$EVIDENCE_DIR/p21e3_mnb36_avdec" c1 c2 allow BASELINE
+  } > "$MNB36_MATRIX_LOG" 2>&1 \
+    || { cat "$MNB36_MATRIX_LOG"; echo 'R7-MNB36-BASELINE-MATRIX=NOT-RUN (helper failed)'; fail "the MNB36 baseline matrix failed; BLOCKED"; }
+  MNB36_BADS="$(awk -F'\t' '$1=="ERR" { print "ERRROW " $0 } NF>=11 {
+      if ($10 != 0) { print "PERMISSIVE " $0 }
+      if ($11=="allow" && ($6!=1 || $7!=1)) { print "MISMATCH-ALLOW " $0 }
+      if ($11=="deny" && $6!=0) { print "MISMATCH-DENY " $0 }
+      if ($11=="deny" && $7!=1) { print "UNDECIDED-ACTOR " $0 }
+    }' "$MNB36_MATRIX_LOG")"
+  # The baseline cross rows are EXPECTED to allow (the MNB33 measured
+  # CONSTRAINT-UNCOVERED state) — recorded as evidence, not a failure:
+  # the baseline verdict is the same-category allow plus the DECIDED cross
+  # resolution; the cross-ALLOW fact is quoted, then flipped by gate 3.
+  if [ -n "$MNB36_BADS" ]; then
+    {
+      printf '%s\n' "$MNB36_BADS"
+      echo 'MNB36-G3-BASELINE: FAIL'
+    } >> "$MNB36_MATRIX_LOG"
+    cat "$MNB36_MATRIX_LOG"
+    echo 'R7-MNB36-BASELINE-MATRIX=FAIL'
+    mnb36_constraint_remove
+    p21e3_diag_remove
+    p21e3_dontaudit_restore
+    fail "the MNB36 baseline kernel-decision matrix reached an unexpected resolution; BLOCKED"
+  fi
+  MNB36_BASE_CROSS="$(awk -F'\t' '$1=="BASELINE" && $3=="fifo_file" { printf "%s(%s->%s)=%s ", $2, ($4 ~ /:s0:c1$/ ? "c1" : "c2"), ($5 ~ /:s0:c1$/ ? "c1" : "c2"), ($6==1?"ALLOW":"DENY") }' "$MNB36_MATRIX_LOG")"
+  MNB36_BASE_FD="$(awk -F'\t' '$1=="BASELINE" && $3=="fd" { printf "%s ", ($6==1 && $7==1 ? "use=ALLOW(decided)" : "use=UNDECIDED-OR-DENY") }' "$MNB36_MATRIX_LOG")"
+  MNB36_BASE_FD_OK="$(printf '%s\n' "$MNB36_BASE_FD" | grep -c 'ALLOW(decided)')"
+  echo "baseline fd decisions: $MNB36_BASE_FD (allow rows=$MNB36_BASE_FD_OK of 4)" >> "$MNB36_MATRIX_LOG"
+  cat "$MNB36_MATRIX_LOG"
+  # fd:use unchanged: the SAME four fd cells must resolve allow+decided in
+  # the baseline state (the constrained state re-checks them below).
+  if [ "$MNB36_BASE_FD_OK" != 4 ]; then
+    echo 'MNB36-G3-BASELINE: FAIL (the fd:use witness rows did not resolve allow+decided in the baseline state)' >> "$MNB36_MATRIX_LOG"
+    echo 'R7-MNB36-BASELINE-MATRIX=FAIL'
+    p21e3_diag_remove
+    p21e3_dontaudit_restore
+    fail "the MNB36 baseline fd:use witness rows failed; BLOCKED"
+  fi
+  echo 'R7-MNB36-BASELINE-MATRIX=PASS'
+  log "MNB36 baseline matrix passed (the mnb33 constraint-uncovered state reproduced on the live kernel: $MNB36_BASE_CROSS)"
+  # --- (b) the constraint-module install (priority 400, exact candidate
+  # bytes) with store-identity verification.
+  MNB36_ACTIVE=1
+  cat > "$MNB36_CIL" <<'EOF'
+; MNB35 candidate: extend fifo_file MCS constraint coverage to read/write
+; using the same dominance predicate as the distro's fifo_file:open constraint
+; (Tumbleweed snapshot 20261121, policy.kern 00a8f6a6... lines 1329-1332).
+(mlsconstrain (fifo_file (read write)) (or (dom h1 h2) (neq t1 mcs_constrained_type)))
+EOF
+  MNB36_PRECONSTRAINT_SHA="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
+  {
+    echo "== MNB36 gate 2: the candidate CIL constraint module install =="
+    echo "-- candidate bytes (the MNB35-pinned artifact; pinned sha below) --"
+    sha256sum "$MNB36_CIL"
+    echo "pinned mnb35 sha: 975490b5701c2d3bb1b59a6023a22d2807e42bfec4934be7c1b2691c704b3ce2"
+    cat "$MNB36_CIL"
+    echo "-- install at priority 400 --"
+    semodule -X 400 -i "$MNB36_CIL"
+  } > "$MNB36_INTEGRITY_LOG" 2>&1 || {
+    cat "$MNB36_INTEGRITY_LOG"
+    echo 'R7-MNB36-INTEGRITY=FAIL (install refused)'
+    mnb36_constraint_remove
+    p21e3_diag_remove
+    p21e3_dontaudit_restore
+    fail "the MNB36 constraint module could not be installed; BLOCKED"
+  }
+  MNB36_CON_SHA="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
+  MNB36_INTEGRITY_OK=1
+  {
+    echo "-- post-install registration (priority 400 expected) --"
+    semodule -lfull 2>&1 | grep -a "$MNB36_MODULE" || { echo "MNB36-G2: FAIL (the module is not registered in the store)"; MNB36_INTEGRITY_OK=0; }
+    semodule -lfull 2>&1 | grep -a "400.*$MNB36_MODULE" >/dev/null 2>&1 \
+      && echo "MNB36-G2: PASS (registered at priority 400)" \
+      || { echo "MNB36-G2: FAIL (the module is not at priority 400)"; MNB36_INTEGRITY_OK=0; }
+    echo "-- installed module identity (the store's extracted CIL) --"
+    MNB36_XDIR=$(mktemp -d)
+    ( cd "$MNB36_XDIR" && semodule -E -c "$MNB36_MODULE" >/dev/null 2>&1; ls -la; sha256sum ./* 2>/dev/null )
+    if [ -f "$MNB36_XDIR/$MNB36_MODULE.cil" ]; then
+      if cmp -s "$MNB36_XDIR/$MNB36_MODULE.cil" "$MNB36_CIL"; then
+        echo "MNB36-G2: PASS (the extracted store CIL is byte-identical to the candidate source)"
+      elif grep -aqF '(mlsconstrain (fifo_file (read write)) (or (dom h1 h2) (neq t1 mcs_constrained_type)))' "$MNB36_XDIR/$MNB36_MODULE.cil"; then
+        echo "MNB36-G2: PASS (the extracted store CIL carries the exact constraint statement; bytes normalized by the store)"
+      else
+        echo "MNB36-G2: FAIL (the extracted store CIL lost the constraint statement)"
+        MNB36_INTEGRITY_OK=0
+      fi
+    else
+      echo "MNB36-G2: FAIL (the module extraction produced no CIL; identity unverifiable)"
+      MNB36_INTEGRITY_OK=0
+    fi
+    rm -rf "$MNB36_XDIR"
+    echo "-- effective loaded-policy constraints (fifo_file must now cover read/write) --"
+    MNB36_CON_POST="$(seinfo --constrain -- /sys/fs/selinux/policy 2>&1 || seinfo -x --constrain -- /sys/fs/selinux/policy 2>&1 || true)"
+    MNB36_CON_POST_FIFO="$(printf '%s\n' "$MNB36_CON_POST" | grep -ai 'fifo_file' || true)"
+    printf '%s\n' "$MNB36_CON_POST_FIFO"
+    if printf '%s\n' "$MNB36_CON_POST_FIFO" | grep -aqi '{ read write }'; then
+      echo "MNB36-G2: PASS (the loaded policy carries mlsconstrain fifo_file { read write })"
+    else
+      echo "MNB36-G2: FAIL (the read/write constraint statement is NOT in the loaded policy)"
+      MNB36_INTEGRITY_OK=0
+    fi
+    echo "-- the five baseline statements are unchanged (the candidate only ADDS a node) --"
+    if [ "$(printf '%s\n' "$MNB36_CON_BASE_FIFO" | sort | sha256sum | awk '{print $1}')" = "$(printf '%s\n' "$MNB36_CON_POST_FIFO" | grep -av 'read write' | sort | sha256sum | awk '{print $1}')" ]; then
+      echo "MNB36-G2: PASS (the constraint set is the baseline set PLUS the single new read/write node)"
+    else
+      echo "MNB36-G2: FAIL (a baseline fifo constraint statement changed)"
+      MNB36_INTEGRITY_OK=0
+    fi
+    echo "-- fd class invariance (zero fd constraints in both states) --"
+    MNB36_FD_POST="$(seinfo --constrain fd -- /sys/fs/selinux/policy 2>&1 || true)"
+    printf '%s\n' "$MNB36_FD_POST" | head -5
+    if [ "$MNB36_FD_POST" = "$MNB36_FD_BASE" ]; then
+      echo "MNB36-G2: PASS (the fd class constraint capture is unchanged)"
+    else
+      echo "MNB36-G2: FAIL (the fd class capture changed)"
+      MNB36_INTEGRITY_OK=0
+    fi
+    echo "-- TE row invariance (the fifo allow surface must be unchanged) --"
+    timeout 60 sesearch -A -s docker_helper_builder_workload_t -t docker_helper_buildkitd_t -c fifo_file 2>&1 || true
+    echo "-- docker-helper store members before the install (should be exactly the released module + the three diagnostics) --"
+    semodule -l 2>&1 | grep -a docker || true
+    echo "-- release-policy .pp sha (must be unchanged): $(sha256sum /usr/share/selinux/docker_helper.pp 2>/dev/null | awk '{print $1}')"
+    echo "-- policy sha with the constraint: $MNB36_CON_SHA (pre: $MNB36_PRECONSTRAINT_SHA; must differ) --"
+  } >> "$MNB36_INTEGRITY_LOG" 2>&1
+  cat "$MNB36_INTEGRITY_LOG"
+  if [ "$MNB36_CON_SHA" = "$MNB36_PRECONSTRAINT_SHA" ]; then
+    echo "MNB36-G2: FAIL (policy sha unchanged after the install; the module load is unproven)" >> "$MNB36_INTEGRITY_LOG"
+    MNB36_INTEGRITY_OK=0
+  fi
+  if [ "$MNB36_INTEGRITY_OK" != 1 ] || grep -aq '^MNB36-G2: FAIL' "$MNB36_INTEGRITY_LOG"; then
+    echo 'R7-MNB36-INTEGRITY=FAIL'
+    mnb36_constraint_remove
+    p21e3_diag_remove
+    p21e3_dontaudit_restore
+    fail "the MNB36 constraint-module integrity gate failed; BLOCKED"
+  fi
+  echo 'R7-MNB36-INTEGRITY=PASS'
+  log "MNB36 gate 2 passed: the candidate CIL module installed at priority 400, identity-verified, loaded-policy constraint confirmed"
+  # The mnb33 constraint-coverage analysis sits on the PRE-W7 capture; with
+  # the candidate constraint module active, RE-DERIVE the coverage from the
+  # post-install capture so the mnb33 post-build matrix expectations are
+  # computed from the loaded state the BUILD actually runs under.
+  MNB33_CON_PRE="$MNB36_CON_POST"
+  MNB33_CON_FIFO="$(printf '%s\n' "$MNB33_CON_PRE" | grep -ai '^mlsconstrain fifo_file' || true)"
+  CovRead="$(printf '%s\n' "$MNB33_CON_FIFO" | grep -aoi '{[^}]*}' | tr ' {}' ' ' | tr '\n' ' ' | grep -aow read | head -1)"
+  CovWrite="$(printf '%s\n' "$MNB33_CON_FIFO" | grep -aoi '{[^}]*}' | tr ' {}' ' ' | tr '\n' ' ' | grep -aow write | head -1)"
+  COVERED=""
+  [ -n "$CovRead" ] && [ -n "$CovWrite" ] && COVERED=both
+  [ -z "$COVERED" ] && [ -n "$CovRead" ] && COVERED=read-only
+  [ -z "$COVERED" ] && [ -n "$CovWrite" ] && COVERED=write-only
+  [ -z "$COVERED" ] && COVERED=neither
+  echo "MNB36: re-derived mnb33 constraint coverage from the loaded policy: $COVERED (the mnb33 pre-build parse predates the constraint module; the build runs under coverage=$COVERED)"
+  # --- (c) the CONSTRAINED matrix: the mandatory four cells on the live
+  # loaded policy (same-cat ALLOW both directions; cross DENY both
+  # directions), plus the fd:use rows (unchanged ALLOW — the invariance
+  # face) — all before any operation is issued.
+  {
+    echo "== MNB36 constrained kernel-decision matrix (the constraint module ACTIVE) =="
+    echo "policy sha: $(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
+    "$EVIDENCE_DIR/p21e3_mnb36_avdec" c1 c2 deny CONSTRAINED
+  } >> "$MNB36_MATRIX_LOG" 2>&1 \
+    || { cat "$MNB36_MATRIX_LOG"; echo 'R7-MNB36-MATRIX=NOT-RUN (helper failed)'; mnb36_constraint_remove; p21e3_diag_remove; p21e3_dontaudit_restore; fail "the MNB36 constrained matrix failed; BLOCKED"; }
+  MNB36_BADS="$(awk -F'\t' '$1=="ERR" { print "ERRROW " $0 } NF>=11 {
+      if ($10 != 0) { print "PERMISSIVE " $0 }
+      if ($11=="allow" && ($6!=1 || $7!=1)) { print "MISMATCH-ALLOW " $0 }
+      if ($11=="deny" && $6!=0) { print "MISMATCH-DENY " $0 }
+      if ($11=="deny" && $7!=1) { print "UNDECIDED-ACTOR " $0 }
+    }' "$MNB36_MATRIX_LOG")"
+  if [ -n "$MNB36_BADS" ]; then
+    {
+      printf '%s\n' "$MNB36_BADS"
+      echo 'MNB36-G3: FAIL'
+    } >> "$MNB36_MATRIX_LOG"
+    cat "$MNB36_MATRIX_LOG"
+    echo 'R7-MNB36-MATRIX=FAIL'
+    mnb36_constraint_remove
+    p21e3_diag_remove
+    p21e3_dontaudit_restore
+    fail "the MNB36 constrained kernel-decision matrix reached an unexpected resolution; BLOCKED"
+  fi
+  MNB36_CROSS_DEC="$(awk -F'\t' '$1=="CONSTRAINED" && $3=="fifo_file" && $11=="deny" { printf "%s=%s ", $2, ($6==1?"ALLOW-UNEXPECTED":"DENY") }' "$MNB36_MATRIX_LOG")"
+  MNB36_FD_DEC="$(awk -F'\t' '$1=="CONSTRAINED" && $3=="fd" { printf "%s ", ($6==1 && $7==1 ? "use=ALLOW(decided)" : "use=UNDECIDED-OR-DENY") }' "$MNB36_MATRIX_LOG")"
+  MNB36_OWN_DEC="$(awk -F'\t' '$1=="CONSTRAINED" && $3=="fifo_file" && $11=="allow" { printf "%s=%s ", $2, ($6==1?"ALLOW":"DENY-UNEXPECTED") }' "$MNB36_MATRIX_LOG")"
+  MNB36_OPEN_DEC="$(awk -F'\t' '$1=="CONSTRAINED" && $3=="fifo_file" && $11=="deny" && $2=="open" { printf "%s ", ($6==1?"ALLOW-UNEXPECTED":"DENY") }' "$MNB36_MATRIX_LOG")"
+  echo "constrained matrix summary: own=$MNB36_OWN_DEC cross=$MNB36_CROSS_DEC open_cross=$MNB36_OPEN_DEC fd=$MNB36_FD_DEC" >> "$MNB36_MATRIX_LOG"
+  cat "$MNB36_MATRIX_LOG"
+  MNB36_FD_OK="$(printf '%s\n' "$MNB36_FD_DEC" | grep -c 'ALLOW(decided)')"
+  if printf '%s\n' "$MNB36_CROSS_DEC" | grep -aq 'ALLOW-UNEXPECTED' || printf '%s\n' "$MNB36_OPEN_DEC" | grep -aq 'ALLOW-UNEXPECTED'; then
+    echo 'R7-MNB36-MATRIX=FAIL'
+    mnb36_constraint_remove
+    p21e3_diag_remove
+    p21e3_dontaudit_restore
+    fail "the MNB36 constrained matrix left a cross cell allowed; BLOCKED"
+  fi
+  if printf '%s\n' "$MNB36_OWN_DEC" | grep -aq 'DENY-UNEXPECTED'; then
+    echo 'R7-MNB36-MATRIX=FAIL'
+    mnb36_constraint_remove
+    p21e3_diag_remove
+    p21e3_dontaudit_restore
+    fail "the MNB36 constrained matrix denied a same-category cell; BLOCKED"
+  fi
+  if printf '%s\n' "$MNB36_FD_DEC" | grep -aq 'UNDECIDED' || [ "$MNB36_FD_OK" != 4 ]; then
+    echo 'R7-MNB36-MATRIX=FAIL (fd:use undecided/changed under the constraint; BLOCKED)'
+    mnb36_constraint_remove
+    p21e3_diag_remove
+    p21e3_dontaudit_restore
+    fail "the MNB36 fd:use invariance face changed; BLOCKED"
+  fi
+  echo 'R7-MNB36-MATRIX=PASS'
+  log "MNB36 gate 3 passed: live matrix own=ALLOW (both cells, both faces), cross=DENY (both directions), fd:use=ALLOW unchanged"
+  fi  # end of the MNB36 gates-2/3 block
   fi  # end of the MNB33 pre-build block
 
   # --- fresh-procfs orientation probe (private mount namespace) ---
@@ -4439,7 +4858,7 @@ CAPWATCH_PID=$!
   echo ":: /proc and submounts from /proc/1/mountinfo (raw; mount ids, major:minor, root, propagation)"
   grep -aE '[[:space:]]/proc([[:space:]/]|\b|$)|/proc/' /proc/1/mountinfo || cat /proc/1/mountinfo
 } > "$EVIDENCE_DIR/p21e3-procns-host.log" 2>&1
-trap 'p21e3_diag_remove; p21e3_dontaudit_restore; measure_abandon' EXIT
+trap 'mnb36_constraint_remove; p21e3_diag_remove; p21e3_dontaudit_restore; measure_abandon' EXIT
 SAMPLER_CONFIRMED=0
 for _ in $(seq 1 100); do
   grep -aq '^SAMPLER-START' "$EVIDENCE_DIR/p21e3-sampler.log" 2>/dev/null \
@@ -5427,6 +5846,90 @@ CEOF
   printf 'R7-MNB33-CROSS-FD-PROBE=GAP (no fd channel exists; see evidence/p21e3-mnb33-gap.log)\n'
   grep -aoE 'R7-MNB33-CROSS-ISOLATION=[A-Z-]+' "$MNB33_MATRIX_LOG" 2>/dev/null | tail -1
   grep -aoE 'R7-MNB33-MATRIX=PASS' "$MNB33_MATRIX_LOG" 2>/dev/null | tail -1
+
+  # --- MNB36: the post-build live-flow note on the gap vocabulary, then
+  # --- the constraint rollback (the constraint is removed FIRST so the
+  # --- mnb33 W7-unload sha closure below stays exact). With the constraint
+  # --- active, the mnb33 gap block's "computed cross decisions ALLOW"
+  # --- sentence describes the PRE-constraint state; the loaded-policy
+  # --- facts under the constraint are the constrained matrix (DENY) and
+  # --- this round's post-build corroboration.
+  if [ "${R7_MNB36:-0}" = 1 ]; then
+  {
+    echo "== MNB36 in-place correction to the mnb33 gap vocabulary (the constraint module was ACTIVE during this spoken claim) =="
+    echo "the constraint module was loaded when the gap block above was printed; the sentence describing the computed cross decisions as ALLOW describes the PRE-constraint mnb33 state, not the live state at print time."
+    echo "live state at this point (post-build, constraint still loaded): the mnb33 post-build matrix (cross expectation deny per the re-derived coverage) resolved CONSTRAINT-MET; the fd-acquisition channel analysis above stands unchanged (no channel exists)."
+    echo "the baseline (pre-constraint) cross ALLOW decision is preserved verbatim in p21e3-mnb36-matrix.log (BASELINE rows)."
+  } >> "$EVIDENCE_DIR/p21e3-mnb33-gap.log" 2>&1
+  cat "$EVIDENCE_DIR/p21e3-mnb33-gap.log" | tail -6
+
+  # --- gate 5: remove the constraint module and verify the rollback trail
+  # --- (store absence, baseline constraint restoration, policy-sha
+  # --- closure to the pre-constraint state, release .pp unchanged).
+  MNB36_ROLLBACK_LOG="$EVIDENCE_DIR/p21e3-mnb36-rollback.log"
+  {
+    echo "== MNB36 gate 5: constraint-module rollback =="
+    semodule -r "$MNB36_MODULE"
+  } > "$MNB36_ROLLBACK_LOG" 2>&1 || {
+    cat "$MNB36_ROLLBACK_LOG"
+    echo 'R7-MNB36-ROLLBACK=FAIL (the removal itself failed)'
+    fail "the MNB36 constraint module removal failed; BLOCKED"
+  }
+  MNB36_CONSTRAINT_REMOVED=1
+  MNB36_ROLLBACK_OK=1
+  {
+    MNB36_ROLLBACK_SHA="$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
+    echo "-- policy sha after removal: $MNB36_ROLLBACK_SHA (pre-constraint: $MNB36_PRECONSTRAINT_SHA; must match byte-exactly) --"
+    if [ "$MNB36_ROLLBACK_SHA" != "$MNB36_PRECONSTRAINT_SHA" ]; then
+      echo "MNB36-G5: FAIL (the loaded policy did not return to the pre-constraint shape)"
+      MNB36_ROLLBACK_OK=0
+    else
+      echo "MNB36-G5: PASS (policy sha closure to the pre-constraint state)"
+    fi
+    if semodule -l 2>/dev/null | grep -aq "$MNB36_MODULE"; then
+      echo "MNB36-G5: FAIL (the module is still registered in the store)"
+      MNB36_ROLLBACK_OK=0
+    else
+      echo "MNB36-G5: PASS (module store: absence verified)"
+    fi
+    echo "-- fifo constraints restored (must equal the gate-1 baseline capture) --"
+    MNB36_CON_ROLLBACK="$(seinfo --constrain -- /sys/fs/selinux/policy 2>&1 || seinfo -x --constrain -- /sys/fs/selinux/policy 2>&1 || true)"
+    MNB36_CON_ROLLBACK_FIFO="$(printf '%s\n' "$MNB36_CON_ROLLBACK" | grep -ai 'fifo_file' || true)"
+    printf '%s\n' "$MNB36_CON_ROLLBACK_FIFO"
+    if [ "$(printf '%s\n' "$MNB36_CON_ROLLBACK_FIFO" | sort | sha256sum | awk '{print $1}')" = "$(printf '%s\n' "$MNB36_CON_BASE_FIFO" | sort | sha256sum | awk '{print $1}')" ]; then
+      echo "MNB36-G5: PASS (the baseline fifo_file constraint set is restored verbatim)"
+    else
+      echo "MNB36-G5: FAIL (the restored fifo constraint set differs from the gate-1 baseline)"
+      MNB36_ROLLBACK_OK=0
+    fi
+    MNB36_FD_ROLLBACK="$(seinfo --constrain fd -- /sys/fs/selinux/policy 2>&1 || true)"
+    if [ "$MNB36_FD_ROLLBACK" = "$MNB36_FD_BASE" ]; then
+      echo "MNB36-G5: PASS (the fd class capture is unchanged from baseline)"
+    else
+      echo "MNB36-G5: FAIL (the fd class capture changed; refusal state)"
+      MNB36_ROLLBACK_OK=0
+    fi
+    echo "-- release-policy .pp sha (must equal the pre-round pin $DIAG_RELEASE_PP_SHA_PRE): $(sha256sum /usr/share/selinux/docker_helper.pp 2>/dev/null | awk '{print $1}')"
+    DIAG_RELEASE_PP_SHA_ROLLBACK="$(sha256sum /usr/share/selinux/docker_helper.pp 2>/dev/null | awk '{print $1}')"
+    if [ "$DIAG_RELEASE_PP_SHA_ROLLBACK" != "$DIAG_RELEASE_PP_SHA_PRE" ]; then
+      echo "MNB36-G5: FAIL (the release policy bytes changed)"
+      MNB36_ROLLBACK_OK=0
+    else
+      echo "MNB36-G5: PASS (the release .pp is unchanged)"
+    fi
+    echo "-- the diagnostic modules are still loaded at this point (removed by the standard teardown) --"
+    semodule -l 2>/dev/null | grep -a docker_helper_diag || true
+  } >> "$MNB36_ROLLBACK_LOG" 2>&1
+  cat "$MNB36_ROLLBACK_LOG"
+  if [ "$MNB36_ROLLBACK_OK" != 1 ] || grep -aq '^MNB36-G5: FAIL' "$MNB36_ROLLBACK_LOG"; then
+    echo 'R7-MNB36-ROLLBACK=FAIL'
+    p21e3_diag_remove
+    p21e3_dontaudit_restore
+    fail "the MNB36 rollback verification failed; BLOCKED"
+  fi
+  echo 'R7-MNB36-ROLLBACK=verified'
+  log "MNB36 gate 5 passed: constraint module removed; baseline constraints, policy sha closure and the release .pp verified"
+  fi  # end of the MNB36 post-build rollback block
 
   # --- the fail-closed W7 unload (FIRST, with the workload domain still
   # --- loaded so the row-absence verdict is a clean no-rules query); the

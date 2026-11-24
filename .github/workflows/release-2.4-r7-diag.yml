@@ -12,6 +12,21 @@ name: Release 2.4 R7 full-gate corrective diagnosis
 #                    labels / live AVC records / differential sesearch proof,
 #                    plus the R7-D child-lifecycle records, on a disposable
 #                    ENFORCING Tumbleweed VM (RPM);
+#   selinux-vm     — mode=mnb36 instead runs the R7 MNB36 live CIL
+#                    constraint-integration gate on the same enforcing
+#                    SELinux consumer: the guest's policy identity and
+#                    module store, the installed candidate CIL module
+#                    (docker-helper-fifo-rw-constraint at priority 400,
+#                    identity-verified), the live four-cell FIFO kernel
+#                    decision matrix (own ALLOW / cross DENY under the
+#                    active constraint, baseline and constrained), the
+#                    fd:use / open / TE invariance checks, the MNB33
+#                    producing-RUN flow with the constraint active, and
+#                    the verified rollback (module removal, constraint
+#                    restoration, policy-sha closure, release .pp
+#                    unchanged). ONE controlled experiment: the CIL
+#                    module is removed on every path; NO permanent RPM
+#                    change, NO Release-GO UAT.
 #   apparmor-vm    — R7-C the Tumbleweed AppArmor builder START refusal with
 #                    the builder service journal and the AppArmor launch
 #                    vehicle prerequisites (distro rootlesskit profile, userns
@@ -112,7 +127,7 @@ permissions:
 
 jobs:
   ubuntu-tarball-diag:
-    if: inputs.mode != 'stop-proof' && inputs.mode != 'mcs-audit' && inputs.mode != 'exeseal' && inputs.mode != 'bprime' && inputs.mode != 'p21a' && inputs.mode != 'p21b' && inputs.mode != 'p21c' && inputs.mode != 'p21d' && inputs.mode != 'p21e' && inputs.mode != 'p21e3' && inputs.mode != 'p21e3probe' && inputs.mode != 'p21e3proc-sys' && inputs.mode != 'p21e3proc-file' && inputs.mode != 'p21e3proc-keys' && inputs.mode != 'p21e3diag-keys' && inputs.mode != 'mnb30' && inputs.mode != 'mnb32' && inputs.mode != 'mnb33'
+    if: inputs.mode != 'stop-proof' && inputs.mode != 'mcs-audit' && inputs.mode != 'exeseal' && inputs.mode != 'bprime' && inputs.mode != 'p21a' && inputs.mode != 'p21b' && inputs.mode != 'p21c' && inputs.mode != 'p21d' && inputs.mode != 'p21e' && inputs.mode != 'p21e3' && inputs.mode != 'p21e3probe' && inputs.mode != 'p21e3proc-sys' && inputs.mode != 'p21e3proc-file' && inputs.mode != 'p21e3proc-keys' && inputs.mode != 'p21e3diag-keys' && inputs.mode != 'mnb30' && inputs.mode != 'mnb32' && inputs.mode != 'mnb33' && inputs.mode != 'mnb36'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -189,7 +204,7 @@ jobs:
           if-no-files-found: error
 
   apparmor-vm-diag:
-    if: inputs.mode != 'stop-proof' && inputs.mode != 'mcs-audit' && inputs.mode != 'exeseal' && inputs.mode != 'bprime' && inputs.mode != 'p21a' && inputs.mode != 'p21b' && inputs.mode != 'p21c' && inputs.mode != 'p21d' && inputs.mode != 'p21e' && inputs.mode != 'p21e3' && inputs.mode != 'p21e3probe' && inputs.mode != 'p21e3proc-sys' && inputs.mode != 'p21e3proc-file' && inputs.mode != 'p21e3proc-keys' && inputs.mode != 'p21e3diag-keys' && inputs.mode != 'mnb30' && inputs.mode != 'mnb32' && inputs.mode != 'mnb33'
+    if: inputs.mode != 'stop-proof' && inputs.mode != 'mcs-audit' && inputs.mode != 'exeseal' && inputs.mode != 'bprime' && inputs.mode != 'p21a' && inputs.mode != 'p21b' && inputs.mode != 'p21c' && inputs.mode != 'p21d' && inputs.mode != 'p21e' && inputs.mode != 'p21e3' && inputs.mode != 'p21e3probe' && inputs.mode != 'p21e3proc-sys' && inputs.mode != 'p21e3proc-file' && inputs.mode != 'p21e3proc-keys' && inputs.mode != 'p21e3diag-keys' && inputs.mode != 'mnb30' && inputs.mode != 'mnb32' && inputs.mode != 'mnb33' && inputs.mode != 'mnb36'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:

@@ -690,7 +690,7 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 		// sampler observation, and the kernel-decision matrix with the
 		// cross-operation rootfs denial.
 		"if [ \"${R7_MNB30:-0}\" = 1 ]",
-		"mnb30 mode: the seven-row mounton module is not loaded (tracer-free transition round)",
+		"mnb30/mnb32/mnb33 mode: the seven-row mounton module is not loaded (tracer-free transition rounds)",
 		"MNB30-RUNTIME-PIN=MATCH (extracted==installed==manifest==owner pin)",
 		"MNB30-HARNESS=PASS",
 		"MNB30-SEINFO=PASS (rc=0, the workload role authorization entry system_r is present)",
@@ -716,14 +716,18 @@ func TestR7P21E3InspectionDiagnosticsContract(t *testing.T) {
 	// the toggle, and the EXIT trap must pair the diagnostic-module removal
 	// with the policy restoration and the abandonment handler, in that
 	// order (the removal rebuild must precede the restore so the restored
-	// baseline excludes the temporary module).
+	// baseline excludes the temporary module). The MNB36 round prepends
+	// its own constraint-module removal hook to the SAME pairing — the
+	// hook must appear before the two canonical calls, never between or
+	// after them.
 	dbIdx := strings.Index(script, "SE_POLICY_SHA_PRE=")
 	restoreIdx := strings.Index(script, "p21e3_dontaudit_restore() {")
-	trapIdx := strings.Index(script, "trap 'p21e3_diag_remove; p21e3_dontaudit_restore; measure_abandon' EXIT")
+	trapIdx := strings.Index(script, "trap 'mnb36_constraint_remove; p21e3_diag_remove; p21e3_dontaudit_restore; measure_abandon' EXIT")
+	legacyTrapIdx := strings.Index(script, "trap 'p21e3_diag_remove; p21e3_dontaudit_restore; measure_abandon' EXIT")
 	if dbIdx < 0 || restoreIdx < 0 || dbIdx > restoreIdx {
 		t.Error("the dontaudit toggle must record the policy identity BEFORE the restore-mechanism definition")
 	}
-	if trapIdx < 0 {
+	if trapIdx < 0 && legacyTrapIdx < 0 {
 		t.Error("the EXIT trap must pair the diagnostic-module removal with the policy restoration and the abandonment handler")
 	}
 	// The diagnostic-module unload must be verified BEFORE the script can
