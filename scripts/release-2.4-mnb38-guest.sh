@@ -310,7 +310,7 @@ constraint_statement_ok \
 PP_BASELINE_SHA="$(sha256sum "$PP" | awk '{print $1}')"
 printf 'pp_baseline=%s\n' "$PP_BASELINE_SHA" >"$EVIDENCE_DIR/p1-pp-baseline"
 
-systemctl start "$MAIN_UNIT" "$UNIT"
+start_or_fail p1
 expected_active "$MAIN_UNIT" || fail "the main service must be startable after the fresh install"
 expected_active "$UNIT" || fail "the builder service must be startable after the fresh install"
 systemctl show "$MAIN_UNIT" -p MainPID --value >"$EVIDENCE_DIR/p1-mainpid"
