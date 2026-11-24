@@ -74,6 +74,8 @@ platform_install_deps() {
     apparmor-parser apparmor-utils openssl \
     apparmor-abstractions \
     policycoreutils policycoreutils-python-utils \
+    setools-console \
+    bzip2 \
     bindfs \
     rootlesskit slirp4netns \
     tar gzip file curl docker \
