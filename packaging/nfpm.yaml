@@ -56,6 +56,12 @@ overrides:
       # against the installed candidate (UNVERIFIABLE-classifying refusals
       # need the tool present, never silently degraded).
       - "(bzip2 if selinux-policy)"
+      # The same byte-exact identity engine compares blob bytes with cmp —
+      # the MNB38 enforcing-VM fresh install aborted exactly there on the
+      # minimal cloud image ('cmp: command not found'), so the comparison
+      # tool (diffutils) is part of the SELinux deployment contract, not an
+      # ambient base-image assumption.
+      - "(diffutils if selinux-policy)"
       # The effective-policy acceptance queries the LIVE loaded policy with
       # seinfo; without setools-console the constraint module must not
       # declare success on an unverifiable load, so the SELinux deployment
