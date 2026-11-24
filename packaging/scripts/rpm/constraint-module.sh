@@ -80,14 +80,19 @@ dh_constraint_same_name_elsewhere() {
 }
 
 # dh_constraint_store_identity: verifies the module resident in the store
-# at our priority. The identity decision is BYTE-EXACT: every known-shape
-# store blob must be the bzip2 compression of exactly the installed
-# candidate CIL. Sets dh_constraint_store_identity_rc only:
-#   0 byte-exact identical,
-#   1 absent (no blob at our priority),
-#   2 present but NOT byte-identical,
-#   3 present but unverifiable (blobs unreadable, undecodable, or missing
-#     the bzip2 tooling — the identity can never be trusted here).
+# at our priority. The identity decision is BYTE-EXACT over EVERY
+# recognized store blob: MATCH only when each blob decodes and is
+# byte-identical to the installed candidate CIL — one differing, corrupt,
+# or undecodable blob is a refusal. A resident module directory without
+# verifiable content is UNVERIFIABLE, never ABSENT. Sets
+# dh_constraint_store_identity_rc only:
+#   0 all blobs decode and are byte-exact identical,
+#   1 absent (no module directory at our priority at all),
+#   2 present, decodable, but at least one blob differs from the
+#     candidate (identity failure),
+#   3 unverifiable (a present module directory carries no recognizable
+#     blob, some blob is corrupt/undecodable, or the bzip2 tooling is
+#     missing — the identity can never be trusted here).
 dh_constraint_store_identity() {
   dh_constraint_store_identity_rc=3
   cil="$1"
@@ -97,24 +102,35 @@ dh_constraint_store_identity() {
   fi
   blobs="$(dh_constraint_store_blobs 2>/dev/null)"
   if [ -z "$blobs" ]; then
-    dh_constraint_store_identity_rc=1
+    if dh_constraint_module_dir_present; then
+      # A module directory exists but carries no recognizable blob: its
+      # content can never be trusted, so this is UNVERIFIABLE (a refusal),
+      # not an absent module.
+      dh_constraint_store_identity_rc=3
+    else
+      dh_constraint_store_identity_rc=1
+    fi
     return
   fi
-  comparable=false
   for blob in $blobs; do
-    if bzip2 -dc "$blob" >/dev/null 2>&1; then
-      comparable=true
-      if bzip2 -dc "$blob" 2>/dev/null | cmp -s - "$cil"; then
-        dh_constraint_store_identity_rc=0
-        return
-      fi
+    if ! bzip2 -dc "$blob" >/dev/null 2>&1; then
+      dh_constraint_store_identity_rc=3
+      return
+    fi
+    if ! bzip2 -dc "$blob" 2>/dev/null | cmp -s - "$cil"; then
+      dh_constraint_store_identity_rc=2
+      return
     fi
   done
-  if [ "$comparable" = "true" ]; then
-    dh_constraint_store_identity_rc=2
-  fi
-  # rc stays 3 when present blobs exist but none is a decompressable CIL
-  # blob: the resident content can never be trusted.
+  dh_constraint_store_identity_rc=0
+}
+
+# dh_constraint_module_dir_present: reports (exit status) whether ANY
+# module directory with our name exists at our priority, in either store
+# layout — even one without a recognizable blob.
+dh_constraint_module_dir_present() {
+  [ -d "$(dh_constraint_store_root)/active/modules/${DH_CONSTRAINT_PRIORITY}/${DH_CONSTRAINT_MODULE}" ] || \
+    [ -d "$(dh_constraint_store_root)/active/modules/${DH_CONSTRAINT_PRIORITY}/hll/${DH_CONSTRAINT_MODULE}" ]
 }
 
 # dh_constraint_preinstall_collision: the fail-closed ownership pre-check.

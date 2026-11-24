@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -464,19 +463,37 @@ func TestConstraintModulePackaging(t *testing.T) {
 		}
 	}
 
-	// A failed constraint install in %posttrans must stop the running
-	// backends (fail-closed upgrade semantics: no backend may keep
-	// executing operations without the required policy) and must never
-	// enqueue a restart; the deferred-restart decision stays preserved.
+	// Every %posttrans failure branch before the constraint module's
+	// effective-policy acceptance routes through the ONE centralized
+	// fail-closed abort: it stops both running backends, VERIFIES the
+	// actual stop, never recurs beyond an unconfirmed stop (a separate
+	// CRITICAL verdict), and never enqueues a restart; the
+	// deferred-restart decision stays preserved.
 	posttransContent := installerSrc(t, "scripts/rpm/posttrans.sh")
-	if !strings.Contains(posttransContent, "if ! dh_constraint_install \"$CONSTRAINT_CIL\"; then") {
-		t.Error("posttrans must handle the constraint install failure explicitly")
+	if !strings.Contains(posttransContent, "stop_backends_and_fail() {") {
+		t.Error("posttrans must define the centralized fail-closed abort")
 	}
-	stopIdx := strings.Index(posttransContent, "systemctl stop docker-helper.service")
-	builderStopIdx := strings.Index(posttransContent, "systemctl stop docker-helper-builder.service")
-	failIdx := strings.Index(posttransContent, "if ! dh_constraint_install \"$CONSTRAINT_CIL\"; then")
-	if stopIdx == -1 || builderStopIdx == -1 || stopIdx < failIdx || builderStopIdx < stopIdx {
-		t.Error("posttrans must stop the running backends on a failed constraint install")
+	handlerDef := strings.Index(posttransContent, "stop_backends_and_fail() {")
+	abortBody := posttransContent[handlerDef:]
+	if !strings.Contains(abortBody, "for unit in docker-helper.service docker-helper-builder.service") ||
+		!strings.Contains(abortBody, "systemctl stop \"$unit\"") {
+		t.Error("the centralized abort must stop both running backends")
+	}
+	if !strings.Contains(abortBody, "is-active --quiet \"$unit\"") ||
+		!strings.Contains(abortBody, "STILL ACTIVE") ||
+		!strings.Contains(abortBody, "NOT in a verified stopped state") {
+		t.Error("the centralized abort must verify the actual stop and record a CRITICAL verdict when unconfirmed")
+	}
+	for _, branch := range []string{
+		"stop_backends_and_fail \"SELinux container policy module not loaded",
+		"stop_backends_and_fail \"semodule failed to load /usr/share/selinux/docker_helper.pp\"",
+		"stop_backends_and_fail \"the constraint module lifecycle library is missing",
+		"stop_backends_and_fail \"the constraint module lifecycle library failed to source",
+		"stop_backends_and_fail \"the FIFO constraint module install failed",
+	} {
+		if !strings.Contains(posttransContent, branch) {
+			t.Errorf("posttrans failure branch must route through the centralized abort: %q", branch)
+		}
 	}
 }
 
@@ -623,27 +640,48 @@ func (c *constraintBehavior) blobPath(prio string) string {
 // decompress.
 func (c *constraintBehavior) seedBlob(prio, content string, corrupt bool) {
 	c.t.Helper()
-	target := c.blobPath(prio)
+	c.seedBlobAt(fmt.Sprintf("active/modules/%s/docker-helper-fifo-rw-constraint/cil", prio), content, corrupt)
+}
+
+// seedHllBlob seeds the older priority/hll store-layout blob for one
+// priority (the store identity must read BOTH layouts as independent
+// blobs).
+func (c *constraintBehavior) seedHllBlob(prio, content string, corrupt bool) {
+	c.t.Helper()
+	c.seedBlobAt(fmt.Sprintf("active/modules/%s/hll/docker-helper-fifo-rw-constraint/hll-blob", prio), content, corrupt)
+}
+
+// seedBlobAt writes one store blob at an explicit store-relative path.
+func (c *constraintBehavior) seedBlobAt(rel, content string, corrupt bool) {
+	c.t.Helper()
+	target := filepath.Join(c.storeRoot, filepath.FromSlash(rel))
 	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 		c.t.Fatal(err)
 	}
-	var in io.Reader
 	if corrupt {
-		in = strings.NewReader(content)
-	} else {
-		var out bytes.Buffer
-		cmd := exec.Command("bzip2", "-c")
-		cmd.Stdin = strings.NewReader(content)
-		cmd.Stdout = &out
-		if err := cmd.Run(); err != nil {
-			c.t.Fatalf("bzip2 fixture compression failed: %v", err)
+		if err := os.WriteFile(target, []byte(content), 0644); err != nil {
+			c.t.Fatal(err)
 		}
-		in = bytes.NewReader(out.Bytes())
+		return
 	}
-	if err := os.WriteFile(target, func() []byte {
-		data, _ := io.ReadAll(in)
-		return data
-	}(), 0644); err != nil {
+	var out bytes.Buffer
+	cmd := exec.Command("bzip2", "-c")
+	cmd.Stdin = strings.NewReader(content)
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		c.t.Fatalf("bzip2 fixture compression failed: %v", err)
+	}
+	if err := os.WriteFile(target, out.Bytes(), 0644); err != nil {
+		c.t.Fatal(err)
+	}
+}
+
+// emptyModuleDir creates a resident module directory at one priority
+// WITHOUT any blob: the store identity must classify this UNVERIFIABLE,
+// never ABSENT.
+func (c *constraintBehavior) emptyModuleDir(prio string) {
+	c.t.Helper()
+	if err := os.MkdirAll(filepath.Join(c.storeRoot, "active", "modules", prio, "docker-helper-fifo-rw-constraint"), 0755); err != nil {
 		c.t.Fatal(err)
 	}
 }
@@ -960,6 +998,100 @@ exit 0
 		for _, call := range c.calls() {
 			if strings.Contains(call, "-r") {
 				t.Errorf("an absent module must not be removed: %s", call)
+			}
+		}
+	})
+
+	t.Run("two blobs one wrong is a refusal without overwrite", func(t *testing.T) {
+		c := newConstraintBehavior(t)
+		cil := c.candidateCIL("exact", exactCIL)
+		// Both store-layout blobs are recognized independently: the
+		// identity is a MATCH only when EVERY recognized blob is
+		// byte-exact; one wrong blob refuses the install.
+		c.seedBlob("400", exactCIL, false)
+		c.seedHllBlob("400", mutatedCIL, false)
+		c.withFakes(constraintFakeSemodule(c), goodSeinfo)
+		out, code := c.run("dh_constraint_install " + shQuote(cil))
+		if code == 0 || !strings.Contains(out, "already installed at priority 400") {
+			t.Fatalf("one wrong blob among correct ones must refuse the install: %s", out)
+		}
+		if got, want := string(c.blobBytes("400")), exactCIL; got != want {
+			t.Fatal("the refusing install must not rewrite the correct blob")
+		}
+		wrongBlob := filepath.Join(c.storeRoot, "active", "modules", "400", "hll", "docker-helper-fifo-rw-constraint", "hll-blob")
+		decoded, err := exec.Command("bzip2", "-dc", wrongBlob).Output()
+		if err != nil || string(decoded) != mutatedCIL {
+			t.Fatalf("the refusing install must not rewrite the wrong blob: %v %q", err, decoded)
+		}
+	})
+
+	t.Run("two blobs both exact match the install", func(t *testing.T) {
+		c := newConstraintBehavior(t)
+		cil := c.candidateCIL("exact", exactCIL)
+		c.seedBlob("400", exactCIL, false)
+		c.seedHllBlob("400", exactCIL, false)
+		c.withFakes(constraintFakeSemodule(c), goodSeinfo)
+		out, code := c.run("dh_constraint_install " + shQuote(cil))
+		if code != 0 {
+			t.Fatalf("an install over an all-exact resident module must be allowed: %s", out)
+		}
+		if got, want := string(c.blobBytes("400")), exactCIL; got != want {
+			t.Fatal("the stored blob must keep the exact candidate bytes")
+		}
+	})
+
+	t.Run("identity classification is byte-exact and stateful", func(t *testing.T) {
+		// Direct classification of dh_constraint_store_identity over the
+		// stateful store shapes: ABSENT only when no module directory
+		// exists at all; an empty module directory is UNVERIFIABLE; one
+		// corrupt blob refuses even next to a correct blob; one differing
+		// blob is a mismatch; all-exact blobs match.
+		cases := []struct {
+			name string
+			seed func(c *constraintBehavior)
+			want string
+		}{
+			{name: "absent no module directory", seed: func(c *constraintBehavior) {}, want: "rc=1"},
+			{name: "empty module directory is unverifiable", seed: func(c *constraintBehavior) { c.emptyModuleDir("400") }, want: "rc=3"},
+			{name: "corrupt blob next to exact blob", seed: func(c *constraintBehavior) {
+				c.seedBlob("400", exactCIL, false)
+				c.seedHllBlob("400", exactCIL, true)
+			}, want: "rc=3"},
+			{name: "one differing blob", seed: func(c *constraintBehavior) {
+				c.seedBlob("400", exactCIL, false)
+				c.seedHllBlob("400", mutatedCIL, false)
+			}, want: "rc=2"},
+			{name: "all exact", seed: func(c *constraintBehavior) {
+				c.seedBlob("400", exactCIL, false)
+				c.seedHllBlob("400", exactCIL, false)
+			}, want: "rc=0"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				c := newConstraintBehavior(t)
+				cil := c.candidateCIL("exact", exactCIL)
+				tc.seed(c)
+				c.withFakes(constraintFakeSemodule(c), goodSeinfo)
+				out, code := c.run("CIL=" + shQuote(cil) + "; dh_constraint_store_identity \"$CIL\"; echo rc=$dh_constraint_store_identity_rc")
+				if code != 0 || !strings.Contains(out, tc.want) {
+					t.Fatalf("identity classification %q must be %s, got code %d: %s", tc.name, tc.want, code, out)
+				}
+			})
+		}
+	})
+
+	t.Run("empty module directory refuses the install", func(t *testing.T) {
+		c := newConstraintBehavior(t)
+		cil := c.candidateCIL("exact", exactCIL)
+		c.emptyModuleDir("400")
+		c.withFakes(constraintFakeSemodule(c), goodSeinfo)
+		out, code := c.run("dh_constraint_install " + shQuote(cil))
+		if code == 0 || !strings.Contains(out, "cannot be read or verified") {
+			t.Fatalf("a resident directory without verifiable content must refuse the install (UNVERIFIABLE, not ABSENT): %s", out)
+		}
+		for _, call := range c.calls() {
+			if strings.Contains(call, "-X 400") {
+				t.Errorf("the refused install must not reach semodule -i: %s", call)
 			}
 		}
 	})
@@ -9769,76 +9901,153 @@ func TestRpmPreremoveOrphanConstraintRemoved(t *testing.T) {
 	}
 }
 
-// TestRpmPosttransFailedUpgradeStopsServices verifies the fail-closed
-// failed-upgrade lifecycle with a stateful process-state fixture: a
-// previously active docker-helper daemon and builder backend, a failing
-// constraint install in %posttrans (the main module load SUCCEEDED) must
-// stop BOTH running backends — no backend may keep executing operations
-// against a loaded policy without the required FIFO constraint — report
-// the failure loudly, preserve the deferred-restart decision for the
-// recovery transaction, and never enqueue a restart.
-func TestRpmPosttransFailedUpgradeStopsServices(t *testing.T) {
-	fakeDir, logFile := setupScriptTest(t)
-	statePath := logFile + ".systemctl-state"
-	writeStatefulSystemctl(t, fakeDir, logFile, statePath, map[string]string{
-		"docker-helper.service":         "active",
-		"docker-helper-builder.service": "active",
-	})
-	writeFakeSemodule(t, fakeDir, logFile, false, false)
-	writeFakeRestorecon(t, fakeDir, logFile)
+// TestRpmPosttransFailureStopsBackends verifies the ONE centralized
+// fail-closed abort of %posttrans over ALL failure branches before the
+// constraint module's effective-policy acceptance: a missing container
+// policy, a failed docker_helper.pp load, a missing lifecycle library,
+// and a failed constraint install. Each branch, replayed in a stateful
+// process-state fixture with both backends previously active, must stop
+// BOTH services and verify their actual stop, must preserve the
+// deferred-restart decision, and must never enqueue a restart. The
+// stop-failure branch must NOT claim a safe stopped state: an
+// unconfirmed stop is a separate CRITICAL verdict naming the units that
+// remained active.
+func TestRpmPosttransFailureStopsBackends(t *testing.T) {
+	cases := []struct {
+		name string
+		// reason text the centralized abort must carry for this branch
+		reason string
+		env    []string
+		// semodule fakes differences: the .pp-load branch bakes an
+		// install failure into the fake; the constraint branches use the
+		// CONSTRAINT_SEMODULE_FAIL env seam so the FIRST load succeeds.
+		ppLoadFailure bool
+		// stopFailure replays systemctl stop failing on both units
+		stopFailure bool
+	}{
+		{
+			name:   "container policy missing",
+			reason: "SELinux container policy module not loaded",
+			env:    []string{"SEMODULE_MODULE_PRESENT=false"},
+		},
+		{
+			name:          "docker_helper.pp load failure",
+			reason:        "semodule failed to load /usr/share/selinux/docker_helper.pp",
+			ppLoadFailure: true,
+		},
+		{
+			name:   "lifecycle library missing",
+			reason: "constraint module lifecycle library is missing",
+			env:    []string{"CONSTRAINT_LIB=/nonexistent/constraint-module.sh"},
+		},
+		{
+			name:   "constraint install failure",
+			reason: "the FIFO constraint module install failed",
+			env:    []string{"CONSTRAINT_SEMODULE_FAIL=true"},
+		},
+		{
+			name:        "constraint install failure with unconfirmed stops",
+			reason:      "the FIFO constraint module install failed",
+			env:         []string{"CONSTRAINT_SEMODULE_FAIL=true"},
+			stopFailure: true,
+		},
+	}
 
-	tmpDir := t.TempDir()
-	selinuxEnforceDir := filepath.Join(tmpDir, "sys", "fs", "selinux")
-	if err := os.MkdirAll(selinuxEnforceDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(selinuxEnforceDir, "enforce"), []byte("1"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeDir, logFile := setupScriptTest(t)
+			statePath := logFile + ".systemctl-state"
+			writeStatefulSystemctl(t, fakeDir, logFile, statePath, map[string]string{
+				"docker-helper.service":         "active",
+				"docker-helper-builder.service": "active",
+			})
+			writeFakeSemodule(t, fakeDir, logFile, tc.ppLoadFailure, false)
+			writeFakeRestorecon(t, fakeDir, logFile)
 
-	// The upgrade transaction's %post already recorded the was-active
-	// decision (both services were active before the transaction).
-	runtimeDir := filepath.Join(tmpDir, "run", "docker-helper")
-	stateFilePath := runtimeDir + "-rpm/posttrans-state"
-	if err := os.MkdirAll(filepath.Dir(stateFilePath), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(stateFilePath, []byte("was_active=true\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
+			tmpDir := t.TempDir()
+			selinuxEnforceDir := filepath.Join(tmpDir, "sys", "fs", "selinux")
+			if err := os.MkdirAll(selinuxEnforceDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(selinuxEnforceDir, "enforce"), []byte("1"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			runtimeDir := filepath.Join(tmpDir, "run", "docker-helper")
+			stateFilePath := runtimeDir + "-rpm/posttrans-state"
+			if err := os.MkdirAll(filepath.Dir(stateFilePath), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(stateFilePath, []byte("was_active=true\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
 
-	_, stderr, code := runScript(t, "packaging/scripts/rpm/posttrans.sh", fakeDir, logFile,
-		nil, true, []string{
-			"SELINUX_ENFORCE_PATH=" + filepath.Join(selinuxEnforceDir, "enforce"),
-			"RUNTIME_DIR=" + runtimeDir,
-			"CONSTRAINT_SEMODULE_FAIL=true",
+			env := []string{
+				"SELINUX_ENFORCE_PATH=" + filepath.Join(selinuxEnforceDir, "enforce"),
+				"RUNTIME_DIR=" + runtimeDir,
+			}
+			env = append(env, tc.env...)
+			if tc.stopFailure {
+				env = append(env, "STOP_FAIL=true")
+			}
+
+			_, stderr, code := runScript(t, "packaging/scripts/rpm/posttrans.sh", fakeDir, logFile,
+				nil, true, env)
+
+			if code != 1 {
+				t.Fatalf("the failing branch must fail the posttrans transaction, got %d (stderr: %s)", code, stderr)
+			}
+			if !strings.Contains(stderr, tc.reason) {
+				t.Errorf("the abort must carry the branch reason, got: %s", stderr)
+			}
+			if tc.stopFailure {
+				// The stop could not even be executed: the fixture state
+				// stays active and the verdict must NOT claim a safe
+				// stopped state.
+				if got := stateOfService(t, statePath, "docker-helper.service"); got != "active" {
+					t.Errorf("the fixture stop failed; the daemon state must remain active, got %s", got)
+				}
+				if !strings.Contains(stderr, "CRITICAL: docker-helper.service is STILL ACTIVE") ||
+					!strings.Contains(stderr, "CRITICAL: docker-helper-builder.service is STILL ACTIVE") {
+					t.Errorf("each unconfirmed unit must earn its own CRITICAL verdict: %s", stderr)
+				}
+				if !strings.Contains(stderr, "NOT in a verified stopped state") ||
+					!strings.Contains(stderr, "manual intervention is required") {
+					t.Errorf("the unconfirmed state must be a separate critical verdict, got: %s", stderr)
+				}
+				if strings.Contains(stderr, "confirmed stopped") {
+					t.Errorf("the abort must not claim a verified stopped state when the stops failed: %s", stderr)
+				}
+			} else {
+				if got := stateOfService(t, statePath, "docker-helper.service"); got != "inactive" {
+					t.Errorf("docker-helper.service must actually be stopped after the abort, state=%s", got)
+				}
+				if got := stateOfService(t, statePath, "docker-helper-builder.service"); got != "inactive" {
+					t.Errorf("docker-helper-builder.service must actually be stopped after the abort, state=%s", got)
+				}
+				if !strings.Contains(stderr, "both backends confirmed stopped") {
+					t.Errorf("a verified stop must be reported as the safe stopped state, got: %s", stderr)
+				}
+			}
+			decision, err := os.ReadFile(stateFilePath)
+			if err != nil || string(decision) != "was_active=true\n" {
+				t.Fatalf("the failed posttrans must preserve the deferred-restart decision: %q %v", decision, err)
+			}
+			stoppedUnits := 0
+			for _, c := range readLifecycleScriptCalls(t, logFile) {
+				if strings.Contains(c, "try-restart") || strings.Contains(c, "restart") {
+					t.Errorf("a failed posttrans must never restart: %s", c)
+				}
+				if strings.Contains(c, " stop docker-helper.service") {
+					stoppedUnits++
+				}
+				if strings.Contains(c, " stop docker-helper-builder.service") {
+					stoppedUnits++
+				}
+			}
+			if stoppedUnits != 2 {
+				t.Errorf("both backends must have received a stop attempt, got %d", stoppedUnits)
+			}
 		})
-
-	if code != 1 {
-		t.Fatalf("a failed constraint install must fail the posttrans transaction, got %d (stderr: %s)", code, stderr)
-	}
-	if !strings.Contains(stderr, "docker-helper-fifo-rw-constraint") ||
-		!strings.Contains(stderr, "FIFO constraint module install failed") {
-		t.Errorf("the failure must be loud under the constraint scope: %s", stderr)
-	}
-	// The previously active backends must actually be stopped: the
-	// pre-upgrade daemon and the builder service cannot keep executing
-	// operations against a policy that lacks the constraint.
-	if got := stateOfService(t, statePath, "docker-helper.service"); got != "inactive" {
-		t.Errorf("docker-helper.service must be stopped after the failed upgrade, state=%s", got)
-	}
-	if got := stateOfService(t, statePath, "docker-helper-builder.service"); got != "inactive" {
-		t.Errorf("docker-helper-builder.service must be stopped after the failed upgrade, state=%s", got)
-	}
-	// The deferred-restart decision survives for the recovery transaction.
-	decision, err := os.ReadFile(stateFilePath)
-	if err != nil || string(decision) != "was_active=true\n" {
-		t.Fatalf("the failed posttrans must preserve the deferred-restart decision: %q %v", decision, err)
-	}
-	for _, c := range readLifecycleScriptCalls(t, logFile) {
-		if strings.Contains(c, "try-restart") || strings.Contains(c, "restart") {
-			t.Errorf("a failed upgrade must never restart: %s", c)
-		}
 	}
 }
 

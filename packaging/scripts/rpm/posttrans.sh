@@ -39,12 +39,51 @@ if [ "$selinux_enforcing" != "1" ]; then
   exit 0
 fi
 
+# stop_backends_and_fail is the ONE centralized fail-closed abort for every
+# %posttrans failure BEFORE the constraint module's effective-policy
+# acceptance: a missing container policy, a failed docker_helper.pp load, a
+# missing/unsourcable lifecycle library, and a failed constraint install
+# (the constraint install itself ends in that acceptance). A previously
+# active docker-helper daemon and builder backend may still be running
+# their PRE-upgrade process images against a policy that does not carry
+# the required setup (or the FIFO constraint, once the main module loads
+# without it) — neither backend may keep executing operations. Both
+# services are stopped, the stop is then VERIFIED against the actual
+# service state, and only a verified stop may be reported as a safe
+# stopped state; an unconfirmed stop is a separate CRITICAL verdict naming
+# exactly which unit remained active. The deferred-restart decision below
+# is NOT consumed: the recorded was-active state survives for the recovery
+# transaction, and the stopped services are only ever restarted by an
+# explicit operator action or a later successful transaction that observes
+# them active again. Always exits 1.
+stop_backends_and_fail() {
+  reason="$1"
+  echo "error: docker-helper posttrans: ${reason}; stopping the running backends" >&2
+  for unit in docker-helper.service docker-helper-builder.service; do
+    if ! systemctl stop "$unit" 2>/dev/null; then
+      echo "warning: could not stop $unit" >&2
+    fi
+  done
+  stopped_confirmed=true
+  for unit in docker-helper.service docker-helper-builder.service; do
+    if systemctl is-active --quiet "$unit" 2>/dev/null; then
+      stopped_confirmed=false
+      echo "CRITICAL: $unit is STILL ACTIVE after the stop attempts; the system is NOT in a verified stopped state" >&2
+    fi
+  done
+  if [ "$stopped_confirmed" = "true" ]; then
+    echo "error: docker-helper posttrans: both backends confirmed stopped (verified); the transaction is failed and nothing restarts" >&2
+  else
+    echo "CRITICAL: docker-helper backends were NOT all verified stopped; manual intervention is required" >&2
+  fi
+  exit 1
+}
+
 # Container policy must be loaded before the docker_helper module can
 # resolve its require statements. container-selinux provides these symbols
 # (bsc#1252672); its %posttrans installs the module before this one.
 if ! semodule -l 2>/dev/null | grep -qw container; then
-  echo "error: SELinux container policy module not loaded; refusing to load docker_helper policy (requires container-selinux)" >&2
-  exit 1
+  stop_backends_and_fail "SELinux container policy module not loaded; refusing to load docker_helper policy (requires container-selinux)"
 fi
 
 # Ordering marker: appears in the transaction log only after this scriptlet
@@ -53,41 +92,26 @@ fi
 echo "docker-helper posttrans: container policy loaded; installing docker_helper module"
 
 if ! semodule -i /usr/share/selinux/docker_helper.pp; then
-  echo "error: semodule failed to load /usr/share/selinux/docker_helper.pp; docker-helper.service was not restarted" >&2
-  exit 1
+  stop_backends_and_fail "semodule failed to load /usr/share/selinux/docker_helper.pp"
 fi
 
 # The separately owned FIFO read/write constraint module (same %posttrans
 # contract: loud failure, no restart). The constraint install library is
-# sourced from its packaged path; a failure is reported through its
-# non-zero exit status and handled below. The lifecycle library never
+# sourced from its packaged path; every failure below is routed through
+# the centralized fail-closed abort above. The lifecycle library never
 # overwrites an unexpected resident module and never declares success on
 # an unverifiable store or loaded policy.
 CONSTRAINT_LIB=/usr/share/docker-helper/selinux/constraint-module.sh
 CONSTRAINT_CIL=/usr/share/selinux/docker-helper-fifo-rw-constraint.cil
 
-. "$CONSTRAINT_LIB"
+if [ ! -r "$CONSTRAINT_LIB" ]; then
+  stop_backends_and_fail "the constraint module lifecycle library is missing at $CONSTRAINT_LIB"
+fi
+if ! . "$CONSTRAINT_LIB"; then
+  stop_backends_and_fail "the constraint module lifecycle library failed to source from $CONSTRAINT_LIB"
+fi
 if ! dh_constraint_install "$CONSTRAINT_CIL"; then
-  # Fail-closed upgrade semantics: this %posttrans failed while the
-  # previously active docker-helper service and builder backend may still
-  # be running their PRE-upgrade process images against a loaded policy
-  # that does NOT carry the required FIFO constraint (the module load
-  # succeeded, the constraint did not). Neither backend may keep
-  # executing operations without the required policy: stop both, loudly,
-  # best-effort (a failing stop cannot make the situation worse than an
-  # unconfined backend). The deferred-restart decision below is NOT
-  # consumed: the recorded was-active state survives for the recovery
-  # transaction, and the stopped services are only ever restarted by an
-  # explicit operator action or a later successful transaction that
-  # observes them active again.
-  if ! systemctl stop docker-helper.service 2>/dev/null; then
-    echo "warning: could not stop docker-helper.service after the failed constraint install" >&2
-  fi
-  if ! systemctl stop docker-helper-builder.service 2>/dev/null; then
-    echo "warning: could not stop docker-helper-builder.service after the failed constraint install" >&2
-  fi
-  echo "error: the FIFO constraint module install failed; docker-helper services were stopped and will NOT restart" >&2
-  exit 1
+  stop_backends_and_fail "the FIFO constraint module install failed (collision, store identity, or loaded-policy verification)"
 fi
 
 if command -v restorecon >/dev/null 2>&1; then
