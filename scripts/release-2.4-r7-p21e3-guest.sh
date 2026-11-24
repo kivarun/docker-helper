@@ -4272,20 +4272,39 @@ EOF
       || { echo "MNB36-G2: FAIL (the module is not at priority 400)"; MNB36_INTEGRITY_OK=0; }
     echo "-- installed module identity (the store's extracted CIL) --"
     MNB36_XDIR=$(mktemp -d)
-    ( cd "$MNB36_XDIR" && semodule -E -c "$MNB36_MODULE" >/dev/null 2>&1; ls -la; sha256sum ./* 2>/dev/null )
+    ( cd "$MNB36_XDIR" && semodule -E -c "$MNB36_MODULE" 2>>"$MNB36_INTEGRITY_LOG" || true
+      ls -la; sha256sum ./* 2>/dev/null ) >> "$MNB36_INTEGRITY_LOG" 2>&1
+    MNB36_IDENTITY_VERIFIED=0
     if [ -f "$MNB36_XDIR/$MNB36_MODULE.cil" ]; then
       if cmp -s "$MNB36_XDIR/$MNB36_MODULE.cil" "$MNB36_CIL"; then
         echo "MNB36-G2: PASS (the extracted store CIL is byte-identical to the candidate source)"
+        MNB36_IDENTITY_VERIFIED=1
       elif grep -aqF '(mlsconstrain (fifo_file (read write)) (or (dom h1 h2) (neq t1 mcs_constrained_type)))' "$MNB36_XDIR/$MNB36_MODULE.cil"; then
         echo "MNB36-G2: PASS (the extracted store CIL carries the exact constraint statement; bytes normalized by the store)"
+        MNB36_IDENTITY_VERIFIED=1
       else
         echo "MNB36-G2: FAIL (the extracted store CIL lost the constraint statement)"
-        MNB36_INTEGRITY_OK=0
       fi
     else
-      echo "MNB36-G2: FAIL (the module extraction produced no CIL; identity unverifiable)"
-      MNB36_INTEGRITY_OK=0
+      echo "-- extraction produced no CIL; falling back to the store's module files --"
+      MNB36_STORE_DIR="$(find /var/lib/selinux/targeted/active/modules -maxdepth 2 -name "$MNB36_MODULE" 2>/dev/null | head -1)"
+      if [ -n "$MNB36_STORE_DIR" ]; then
+        echo "store dir: $MNB36_STORE_DIR"
+        ls -la "$MNB36_STORE_DIR" 2>/dev/null
+        MNB36_STORE_RAW="$(bzcat "$MNB36_STORE_DIR/hll" 2>/dev/null || cat "$MNB36_STORE_DIR/hll" 2>/dev/null || true)"
+        printf '%s\n' "$MNB36_STORE_RAW" | sha256sum | awk '{print "store module sha256 (decompressed): "$1}'
+        if printf '%s\n' "$MNB36_STORE_RAW" | sha256sum | awk '{print $1}' | grep -aq 975490b5701c2d3bb1b59a6023a22d2807e42bfec4934be7c1b2691c704b3ce2 \
+           || printf '%s\n' "$MNB36_STORE_RAW" | grep -aqF '(mlsconstrain (fifo_file (read write)) (or (dom h1 h2) (neq t1 mcs_constrained_type)))'; then
+          echo "MNB36-G2: PASS (the store's module bytes carry the exact constraint statement)"
+          MNB36_IDENTITY_VERIFIED=1
+        else
+          echo "MNB36-G2: FAIL (the store's module files do not carry the constraint statement)"
+        fi
+      else
+        echo "MNB36-G2: FAIL (no module directory in the store; identity unverifiable)"
+      fi
     fi
+    [ "$MNB36_IDENTITY_VERIFIED" = 0 ] && MNB36_INTEGRITY_OK=0
     rm -rf "$MNB36_XDIR"
     echo "-- effective loaded-policy constraints (fifo_file must now cover read/write) --"
     MNB36_CON_POST="$(seinfo --constrain -- /sys/fs/selinux/policy 2>&1 || seinfo -x --constrain -- /sys/fs/selinux/policy 2>&1 || true)"
