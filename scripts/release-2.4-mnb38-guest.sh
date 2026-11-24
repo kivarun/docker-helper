@@ -153,13 +153,39 @@ ensure_clean_semodule() {
   fi
 }
 
+start_or_fail() {
+  # $1 label; start both services with full failure forensics. Every start
+  # failure must leave evidence: the journal lines, the unit status, and
+  # the /var/lib directory + label state ('Failed to set up special
+  # execution directory' class failures are invisible without them).
+  if ! systemctl start "$MAIN_UNIT" "$UNIT" 2>"$EVIDENCE_DIR/start-fail-$1.err"; then
+    {
+      echo "--- start stderr ---"
+      cat "$EVIDENCE_DIR/start-fail-$1.err"
+      echo "--- systemctl status ---"
+      systemctl status "$MAIN_UNIT" "$UNIT" --no-pager -l 2>&1 || true
+      echo "--- journal ---"
+      journalctl --no-pager -q -o short-precise -u "$MAIN_UNIT" -u "$UNIT" 2>&1 | tail -40 || true
+      echo "--- /var/lib state roots ---"
+      ls -laZ /var/lib 2>&1 | head -30 || true
+      ls -laZ /var/lib/docker-helper /var/lib/docker-helper-builder 2>&1 || true
+    } > "$EVIDENCE_DIR/start-fail-$1.log" 2>&1 || true
+    cat "$EVIDENCE_DIR/start-fail-$1.log" >&2
+    systemctl reset-failed "$MAIN_UNIT" "$UNIT" 2>/dev/null || true
+    fail "phase $1: the docker-helper services must start on the enforcing guest (see start-fail-$1.* evidence)"
+  fi
+  rm -f "$EVIDENCE_DIR/start-fail-$1.err"
+}
+
 ensure_services_active() {
   # Re-entry after a mid-run reboot: enabled units come back (systemd), but
   # the contract below needs an explicitly ACTIVE pair, not a best-effort
-  # boot result.
+  # boot result. reset-failed first so a prior attempt's start-limit failure
+  # cannot mask a fresh start attempt.
+  systemctl reset-failed "$MAIN_UNIT" "$UNIT" 2>/dev/null || true
   if [ "$(systemctl is-enabled "$MAIN_UNIT" 2>/dev/null || true)" = "enabled" ] \
     || [ "$(systemctl is-enabled "$UNIT" 2>/dev/null || true)" = "enabled" ]; then
-    systemctl start "$MAIN_UNIT" "$UNIT"
+start_or_fail p1
   fi
   expected_active "$MAIN_UNIT" || fail "$MAIN_UNIT must be active at the start of this phase"
   expected_active "$UNIT" || fail "$UNIT must be active at the start of this phase"
@@ -425,8 +451,7 @@ for u in "$MAIN_UNIT" "$UNIT"; do
 done
 ev p4-after-recovery "both units still inactive (no implicit restart; the successful posttrans restarts only services already active)"
 
-systemctl start "$MAIN_UNIT" "$UNIT" \
-  || fail "explicit operator activation after recovery failed"
+start_or_fail p4-explicit-activation
 for u in "$MAIN_UNIT" "$UNIT"; do
   expected_active "$u" || fail "explicit activation must leave $u active"
   pid="$(systemctl show "$u" -p MainPID --value)"
