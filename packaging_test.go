@@ -6492,6 +6492,8 @@ func TestRPMBackendDependencies(t *testing.T) {
 		"policycoreutils",
 		"policycoreutils-python-utils",
 		`"(container-selinux if selinux-policy)"`,
+		`"(bzip2 if selinux-policy)"`,
+		`"(setools-console if selinux-policy)"`,
 	}
 	for _, want := range required {
 		found := false
@@ -6805,6 +6807,16 @@ func verifyRPMPackage(t *testing.T, rpmPath, rpmFile string) {
 	// without container-selinux (P4-B1).
 	if !strings.Contains(requires, "(container-selinux if selinux-policy)") {
 		t.Error("RPM Requires must include the conditional rich dependency (container-selinux if selinux-policy)")
+	}
+	// The SELinux constraint lifecycle needs its own query/compression tools
+	// exactly where the SELinux path is active: store-identity blob
+	// decompression (bzip2) and the live-policy acceptance query (seinfo,
+	// package setools-console). Both stay conditional on selinux-policy,
+	// mirroring the container-selinux architecture.
+	for _, dep := range []string{"(bzip2 if selinux-policy)", "(setools-console if selinux-policy)"} {
+		if !strings.Contains(requires, dep) {
+			t.Errorf("RPM Requires must include the conditional rich dependency %s", dep)
+		}
 	}
 	// container-selinux must stay conditional: an unconditional entry would
 	// pull the container policy stack onto every RPM host regardless of its

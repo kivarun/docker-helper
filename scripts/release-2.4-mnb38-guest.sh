@@ -1,0 +1,409 @@
+#!/usr/bin/env bash
+#
+# release-2.4-mnb38-guest.sh — MNB38 RPM lifecycle UAT, guest side.
+#
+# Runs as root inside the disposable ENFORCING openSUSE Tumbleweed VM. The
+# exact candidate RPM (R7_ARTIFACT, sha-pinned via R7_ARTIFACT_SHA256) is
+# consumed exactly as the artifact-gate producer staged it — never rebuilt:
+#
+#   P0  candidate/metadata preflight: artifact SHA-256, RPM Requires carries
+#       the conditional SELinux lifecycle dependencies (container-selinux,
+#       bzip2, setools-console — never unconditional), shipped scriptlets and
+#       the packaged SELinux artifacts; enforcing-targeted host proof.
+#   P1  fresh RPM install (real zypper dependency resolution): CIL artifact
+#       identity (pinned SHA-256), priority-400 module in the store
+#       (byte-exact blob identity), the exact loaded-policy constraint
+#       statement (seinfo against /sys/fs/selinux/policy), and the release
+#       .pp identity baseline.
+#   P2  repeated install (rpm -U --replacepkgs) and upgrade shape: no
+#       absent-constraint window — the store blob's inode/mtime/bytes are
+#       UNCHANGED across the transaction (the success path never removes the
+#       resident module), identity and effective-policy checks still pass,
+#       both services still active after the transactional restart.
+#   P3  failed upgrade: a controlled constraint-install failure (semodule
+#       shim that lets the docker_helper.pp load pass and fails ONLY the
+#       constraint CIL install, reached through rpm's scriptlet PATH): both
+#       services stopped AND verified stopped, no automatic restart, the
+#       deferred-restart decision preserved, the constraint module still
+#       intact. The RPM command exits zero on Tumbleweed while the individual
+#       scriptlet is reported failed — both facts are recorded separately.
+#   P4  recovery: restore a healthy package state (shim removed): the
+#       recovery transaction must NOT implicitly restart the stopped
+#       services; explicit operator activation then verifies is-active=active
+#       and a valid nonzero MainPID, and the effective constraint.
+#   P5  final erase: rpm -e removes ONLY the product-owned modules
+#       (docker_helper + the constraint module at priority 400); container
+#       policy and the base policy survive; no orphaned module entries or
+#       store directories; the units are gone from systemd.
+#
+# Boundary: packaging lifecycle only. NO new TE grants, no S1 replacement,
+# no runtime repinning, no permissive mode, no Release-GO UAT.
+#
+# Evidence: one file per phase under R7_EVIDENCE_DIR plus a summary with the
+# R7-MNB38-<X>=PASS tokens. Any failed gate exits non-zero with the gate
+# name in the failure line; nothing is auto-repaired except the explicit
+# recovery step (P4), which is itself part of the matrix.
+
+set -Eeuo pipefail
+
+PREFIX='[release-2.4-mnb38]'
+say()  { printf '%s %s\n' "$PREFIX" "$*"; }
+fail() { printf '%s FAILED: %s\n' "$PREFIX" "$*" >&2; exit 1; }
+log()  { echo "[guest] $*"; }
+ev()   { printf '%s\n' "$2" > "$EVIDENCE_DIR/$1"; }
+
+: "${R7_ARTIFACT:?R7_ARTIFACT required}"
+: "${R7_ARTIFACT_SHA256:?R7_ARTIFACT_SHA256 required}"
+: "${R7_EVIDENCE_DIR:?R7_EVIDENCE_DIR required}"
+: "${MNB38_CIL_SHA256:?MNB38_CIL_SHA256 required}"
+
+# Canonical domain vocabulary (one term per concept, mirrored from the
+# shipped constraint library and the wrapper admission gate).
+RPM="$R7_ARTIFACT"
+EVIDENCE_DIR="$R7_EVIDENCE_DIR"
+STATEMENT='mlsconstrain fifo_file { read write } (h1 dom h2 or t1 != mcs_constrained_type);'
+CIL=/usr/share/selinux/docker-helper-fifo-rw-constraint.cil
+CONSTRAINT_LIB=/usr/share/docker-helper/selinux/constraint-module.sh
+PP=/usr/share/selinux/docker_helper.pp
+PRIORITY=400
+MAIN_UNIT=docker-helper.service
+UNIT=docker-helper-builder.service
+SELINUX_STORE=/var/lib/selinux/targeted/active/modules
+
+mkdir -p "$EVIDENCE_DIR"
+
+store_blobs() {
+  # Every known-shape blob for the constraint module at our priority,
+  # newest-listing normalization shared with the shipped library's view.
+  find "$SELINUX_STORE/$PRIORITY" -type f -name 'hll-blob' \
+    -path "*docker-helper-fifo-rw-constraint*" 2>/dev/null | sort
+}
+
+blob_identity_ok() {
+  # Every recognized blob must decode to byte-exactly the installed CIL.
+  local blobs blob
+  blobs="$(store_blobs)"
+  [ -n "$blobs" ] || return 1
+  while read -r blob; do
+    [ -n "$blob" ] || continue
+    bzip2 -dc "$blob" 2>/dev/null | cmp -s - "$CIL" || return 1
+  done <<<"$blobs"
+  return 0
+}
+
+constraint_statement_ok() {
+  seinfo --constrain fifo_file /sys/fs/selinux/policy 2>/dev/null \
+    | sed 's/^[[:space:]]*//' | grep -Fqx "$STATEMENT"
+}
+
+expected_active() {
+  [ "$(systemctl is-active "$1" 2>/dev/null || true)" = "active" ]
+}
+
+rpm_capture() {
+  # "$1" evidence basename; the rpm command is executed in the caller's
+  # arguments context; captures rc + output separately and exports them.
+  set +e
+  RPM_OUT="$(rpm -Uvh --replacepkgs "$RPM" 2>&1)"
+  RPM_RC=$?
+  set -e
+  printf '%s\n' "$RPM_OUT" > "$EVIDENCE_DIR/$1"
+  ev "$1.rc" "$RPM_RC"
+}
+
+# ---------------------------------------------------------------------------
+# P0 — candidate and metadata preflight
+# ---------------------------------------------------------------------------
+say 'P0: candidate identity, RPM metadata, enforcing host'
+ACTUAL_SHA="$(sha256sum "$RPM" | awk '{print $1}')"
+[ "$ACTUAL_SHA" = "$R7_ARTIFACT_SHA256" ] \
+  || fail "candidate RPM SHA-256 mismatch (expected $R7_ARTIFACT_SHA256, got $ACTUAL_SHA)"
+ev p0-artifact.sha256 "$ACTUAL_SHA"
+
+getenforce 2>/dev/null | grep -qx 'Enforcing' \
+  || fail "the lifecycle matrix requires an enforcing SELinux host (getenforce failed)"
+
+TRequires="$(rpm -qp --requires "$RPM" 2>&1)"
+ev p0-requires "$TRequires"
+for want in '(container-selinux if selinux-policy)' '(bzip2 if selinux-policy)' '(setools-console if selinux-policy)'; do
+  printf '%s\n' "$TRequires" | grep -Fqx "$want" \
+    || fail "RPM Requires must carry the conditional SELinux lifecycle dependency $want"
+done
+if printf '%s\n' "$TRequires" | grep -Eq '^(bzip2|setools-console)$'; then
+  fail "bzip2/setools-console must stay conditional on selinux-policy, not unconditional"
+fi
+
+TScripts="$(rpm -q --scripts -p "$RPM" 2>&1)"
+ev p0-scriptlets "$TScripts"
+printf '%s\n' "$TScripts" | grep -q 'posttrans scriptlet' \
+  || fail "the candidate RPM must carry %posttrans (deferred module load/restart)"
+
+TFiles="$(rpm -qpl "$RPM" 2>&1)"
+ev p0-filelist "$TFiles"
+for f in "$CIL" "$CONSTRAINT_LIB" "$PP"; do
+  printf '%s\n' "$TFiles" | grep -qF "$f" \
+    || fail "the candidate RPM must ship $f"
+done
+
+# The CIL artifact identity is verified after the fresh install from the
+# INSTALLED bytes (the packaged bytes are the bytes the RPM owns at the
+# packaged path). The .pp record becomes the per-candidate baseline whose
+# UNCHANGE across every later phase is asserted on each transaction.
+ev p0-shipped-artifacts "CIL=$CIL LIB=$CONSTRAINT_LIB PP=$PP"
+
+say 'P0: PASS'
+
+# ---------------------------------------------------------------------------
+# P1 — fresh install
+# ---------------------------------------------------------------------------
+say 'P1: fresh RPM installation (zypper, real dependency resolution)'
+zypper --non-interactive --gpg-auto-import-keys refresh >/dev/null 2>&1 || true
+# The candidate RPM is intentionally unsigned (nfpm does not sign); zypper
+# aborts unsigned local packages in non-interactive mode unless explicitly
+# allowed (--allow-unsigned-rpm is an install-command option, not a global
+# one). The full output (scriptlet lines included) is kept as evidence: an
+# RPM transaction exiting zero is NOT the same as every scriptlet
+# succeeding, so 'scriptlet failed' lines are hunted separately.
+set +e
+ZYPPER_OUT="$(zypper --non-interactive install -y --allow-unsigned-rpm "$RPM" 2>&1)"
+ZYPPER_RC=$?
+set -e
+printf '%s\n' "$ZYPPER_OUT" > "$EVIDENCE_DIR/p1-zypper-install.log"
+ev p1-zypper.rc "$ZYPPER_RC"
+printf '%s\n' "$ZYPPER_OUT" | grep -Eq 'scriptlet failed' \
+  && fail "fresh install must not report a failed scriptlet (zypper rc 0 is NOT scriptlet-success evidence)" \
+  || true
+[ "$ZYPPER_RC" = "0" ] || { tail -20 "$EVIDENCE_DIR/p1-zypper-install.log"; fail "zypper fresh install failed (rc $ZYPPER_RC)"; }
+
+for f in "$CIL" "$CONSTRAINT_LIB" "$PP"; do
+  [ -f "$f" ] || fail "fresh install must place $f"
+done
+NEW_CIL_SHA="$(sha256sum "$CIL" | awk '{print $1}')"
+[ "$NEW_CIL_SHA" = "$MNB38_CIL_SHA256" ] \
+  || fail "installed CIL sha mismatch: expected $MNB38_CIL_SHA256, got $NEW_CIL_SHA"
+
+semodule -l | grep -q '^docker_helper' \
+  || fail "the docker_helper module must be loaded by the fresh install"
+semodule -l | grep -q 'container' \
+  || fail "the container policy must remain present after the fresh install"
+
+[ -n "$(store_blobs)" ] || fail "the priority-400 constraint module must exist in the SELinux store"
+blob_identity_ok || fail "the installed constraint store blobs do not decode byte-exactly to the CIL"
+
+seinfo --constrain fifo_file /sys/fs/selinux/policy >"$EVIDENCE_DIR/p1-loaded-constraint.txt" 2>&1 \
+  || fail "seinfo loaded-policy query failed"
+constraint_statement_ok \
+  || fail "the loaded policy must carry exactly: $STATEMENT"
+
+PP_BASELINE_SHA="$(sha256sum "$PP" | awk '{print $1}')"
+printf 'pp_baseline=%s\n' "$PP_BASELINE_SHA" >"$EVIDENCE_DIR/p1-pp-baseline"
+
+systemctl start "$MAIN_UNIT" "$UNIT"
+expected_active "$MAIN_UNIT" || fail "the main service must be startable after the fresh install"
+expected_active "$UNIT" || fail "the builder service must be startable after the fresh install"
+systemctl show "$MAIN_UNIT" -p MainPID --value >"$EVIDENCE_DIR/p1-mainpid"
+ev p1-services "both active"
+
+ev p1-module-store "$(semodule -l)"
+
+say 'P1: PASS'
+
+# ---------------------------------------------------------------------------
+# P2 — repeated install / upgrade shape (no absent-constraint window)
+# ---------------------------------------------------------------------------
+say 'P2: repeated installation and upgrade shape'
+BLOB_BEFORE="$(stat -c '%i %Y' "$(store_blobs | head -1)")"
+rpm_capture p2-repeat-rpm
+[ "$RPM_RC" = "0" ] || { ev p2-repeat-out "$RPM_OUT"; fail "repeated install failed (rc $RPM_RC)"; }
+printf '%s\n' "$RPM_OUT" | grep -Ein 'scriptlet failed' \
+  && fail "repeated install must not report a failed scriptlet" \
+  || true
+
+BLOB_AFTER="$(stat -c '%i %Y' "$(store_blobs | head -1)")"
+[ "$BLOB_BEFORE" = "$BLOB_AFTER" ] \
+  || fail "the store blob was replaced by the repeated install (status $BLOB_BEFORE -> $BLOB_AFTER): remove+reinstall would open an absent-constraint window"
+blob_identity_ok || fail "constraint store identity must hold across the repeated install"
+constraint_statement_ok \
+  || fail "the effective-policy check must hold across the repeated install"
+expected_active "$MAIN_UNIT" || fail "the main service must stay active across the upgrade"
+expected_active "$UNIT" || fail "the builder service must stay active across the upgrade"
+[ "$(sha256sum "$PP" | awk '{print $1}')" = "$PP_BASELINE_SHA" ] \
+  || fail "the release .pp identity must be unchanged"
+
+# An actual upgrade transaction shape (same bytes, force the transaction):
+rpm_capture p2-upgrade-rpm
+[ "$RPM_RC" = "0" ] || { fail "upgrade-shape rpm -U failed (rc $RPM_RC)"; }
+printf '%s\n' "$RPM_OUT" | grep -Ein 'scriptlet failed' \
+  && fail "upgrade must not report a failed scriptlet" \
+  || true
+blob_identity_ok || fail "constraint store identity must hold across the upgrade transaction"
+constraint_statement_ok \
+  || fail "the effective-policy check must hold across the upgrade transaction"
+expected_active "$MAIN_UNIT" || fail "the main service must stay active across the upgrade"
+ev p2-blob-before "$BLOB_BEFORE"
+ev p2-blob-after "$BLOB_AFTER"
+[ "$(sha256sum "$PP" | awk '{print $1}')" = "$PP_BASELINE_SHA" ] \
+  || fail "the release .pp identity must be unchanged after the upgrade"
+
+say 'P2: PASS'
+
+# ---------------------------------------------------------------------------
+# P3 — failed upgrade (controlled constraint-install failure)
+# ---------------------------------------------------------------------------
+say 'P3: failed upgrade, constraint-install failure, verified stop'
+cat > /usr/local/sbin/semodule <<'POISON'
+#!/bin/sh
+# Let the container-policy listing and the docker_helper.pp load pass
+# through; fail ONLY the constraint CIL install (docker-helper's own
+# posttrans branch: the centralized fail-closed abort).
+[ "$1" = "-l" ] && exec /usr/sbin/semodule "$@"
+case "$*" in
+  *docker-helper-fifo-rw-constraint.cil*)
+    echo "poisoned constraint semodule (MNB38 controlled failure)" >&2
+    exit 1
+    ;;
+esac
+exec /usr/sbin/semodule "$@"
+POISON
+chmod 0755 /usr/local/sbin/semodule
+
+set +e
+POISON_OUT="$(rpm -Uvh --replacepkgs "$RPM" \
+  --define '_install_script_path /usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin' 2>&1)"
+POISON_RC=$?
+set -e
+printf '%s\n' "$POISON_OUT" > "$EVIDENCE_DIR/p3-failed-rpm.log"
+ev p3-failed-rpm.rc "$POISON_RC"
+rm -f /usr/local/sbin/semodule
+
+# Tumbleweed behavior: rpm treats a failing %posttrans as a WARNING and
+# completes the transaction with exit 0. The failure proof is the
+# scriptlet-failure report; the RPM exit code alone proves nothing.
+[ "$POISON_RC" = "0" ] || fail "expected the observed rpm exit-0 behavior (the scriptlet failure is the proof); got rpm rc $POISON_RC"
+printf '%s\n' "$POISON_OUT" | grep -q 'scriptlet failed' \
+  || fail "rpm must report the failing posttrans scriptlet (rpm rc 0 is NOT success evidence)"
+for want in 'stopping the running backends' 'both backends confirmed stopped (verified)'; do
+  printf '%s\n' "$POISON_OUT" | grep -qF "$want" \
+    || fail "the centralized fail-closed abort must report: $want"
+done
+
+for u in "$MAIN_UNIT" "$UNIT"; do
+  expected_active "$u" && fail "the failed upgrade must leave $u stopped"
+done
+ev p3-services-after "both stopped (verified by the posttrans + is-active here)"
+
+STATE_FILE=/run/docker-helper-rpm/posttrans-state
+[ -f "$STATE_FILE" ] || fail "the failed posttrans must preserve the deferred-restart decision file"
+grep -q 'was_active=true' "$STATE_FILE" \
+  || fail "the preserved decision must keep was_active=true (the recorded pre-failure state)"
+
+# No automatic restart: sample again after the settle window.
+sleep 15
+for u in "$MAIN_UNIT" "$UNIT"; do
+  expected_active "$u" && fail "$u restarted by itself after the failed upgrade"
+done
+ev p3-no-restart "both units still inactive after the settle window"
+
+# The constraint module and its loaded constraint survive the failed branch:
+# the failure happened BEFORE any removal step in the lifecycle library.
+blob_identity_ok || fail "the constraint module must remain in the store after the failed install"
+constraint_statement_ok \
+  || fail "the loaded constraint must remain active after the failed install"
+[ "$(sha256sum "$PP" | awk '{print $1}')" = "$PP_BASELINE_SHA" ] \
+  || fail "the release .pp identity must be unchanged after the failed upgrade"
+
+say 'P3: PASS'
+
+# ---------------------------------------------------------------------------
+# P4 — recovery
+# ---------------------------------------------------------------------------
+say 'P4: recovery, explicit activation, effective constraint'
+rpm_capture p4-recovery-rpm
+[ "$RPM_RC" = "0" ] || { fail "recovery rpm -U --replacepkgs failed (rc $RPM_RC)"; }
+printf '%s\n' "$RPM_OUT" | grep -Ein 'scriptlet failed' \
+  && fail "the recovery transaction must not report a failed scriptlet" \
+  || true
+for u in "$MAIN_UNIT" "$UNIT"; do
+  expected_active "$u" && fail "the recovery transaction must NOT implicitly restart the stopped $u"
+done
+ev p4-after-recovery "both units still inactive (no implicit restart; the successful posttrans restarts only services already active)"
+
+systemctl start "$MAIN_UNIT" "$UNIT" \
+  || fail "explicit operator activation after recovery failed"
+for u in "$MAIN_UNIT" "$UNIT"; do
+  expected_active "$u" || fail "explicit activation must leave $u active"
+  pid="$(systemctl show "$u" -p MainPID --value)"
+  [ -n "$pid" ] && [ "$pid" != "0" ] \
+    || fail "$u must carry a valid nonzero MainPID after explicit activation (got $pid)"
+done
+ev p4-activated "$(systemctl show "$MAIN_UNIT" "$UNIT" -p ActiveState -p MainPID)"
+constraint_statement_ok \
+  || fail "the effective-policy constraint must hold after recovery"
+blob_identity_ok || fail "the constraint store identity must hold after recovery"
+[ "$(sha256sum "$PP" | awk '{print $1}')" = "$PP_BASELINE_SHA" ] \
+  || fail "the release .pp identity must be unchanged after recovery"
+
+say 'P4: PASS'
+
+# ---------------------------------------------------------------------------
+# P5 — final erase
+# ---------------------------------------------------------------------------
+say 'P5: final erase, product-owned modules only'
+MODULES_BEFORE="$(semodule -l)"
+ev p5-modules-before "$MODULES_BEFORE"
+MODULE_COUNT_BEFORE="$(printf '%s\n' "$MODULES_BEFORE" | grep -c '^')"
+
+set +e
+ERASE_OUT="$(rpm -ev docker-helper 2>&1)"
+ERASE_RC=$?
+set -e
+printf '%s\n' "$ERASE_OUT" > "$EVIDENCE_DIR/p5-erase.log"
+ev p5-erase.rc "$ERASE_RC"
+[ "$ERASE_RC" = "0" ] || { tail -20 "$EVIDENCE_DIR/p5-erase.log"; fail "rpm -e failed (rc $ERASE_RC)"; }
+printf '%s\n' "$ERASE_OUT" | grep -Ein 'scriptlet failed' \
+  && fail "erase must not report a failed scriptlet" \
+  || true
+
+MODULES_AFTER="$(semodule -l)"
+ev p5-modules-after "$MODULES_AFTER"
+MODULE_COUNT_AFTER="$(printf '%s\n' "$MODULES_AFTER" | grep -c '^')"
+MODULE_COUNT_EXPECTED=$((MODULE_COUNT_BEFORE - 2))
+[ "$MODULE_COUNT_AFTER" = "$MODULE_COUNT_EXPECTED" ] \
+  || fail "erase must remove exactly the product-owned module set (before $MODULE_COUNT_BEFORE, after $MODULE_COUNT_AFTER, expected $MODULE_COUNT_EXPECTED)"
+printf '%s\n' "$MODULES_AFTER" | grep -q 'docker_helper' \
+  && fail "docker_helper must be removed from the module store"
+printf '%s\n' "$MODULES_AFTER" | grep -q 'docker-helper-fifo-rw-constraint' \
+  && fail "the constraint module must be removed from the module store"
+printf '%s\n' "$MODULES_AFTER" | grep -q 'container' \
+  || fail "the container policy must survive the product erase"
+[ -n "$(store_blobs 2>/dev/null)" ] \
+  && fail "no constraint store directory may remain (orphaned module entries)"
+if [ -e "$SELINUX_STORE/$PRIORITY/docker-helper-fifo-rw-constraint" ] \
+  || [ -e "$SELINUX_STORE/$PRIORITY/hll/docker-helper-fifo-rw-constraint" ]; then
+  fail "the priority-400 constraint module directory must be gone after erase"
+fi
+constraint_statement_ok \
+  && fail "the loaded policy must NOT still carry the product constraint after the erase (policy reload removes it with the module)"
+ev p5-no-orphan "no product modules in the store, no orphan directories, constraint no longer in the loaded policy"
+
+rpm -q docker-helper >/dev/null 2>&1 \
+  && fail "the package must be gone after the erase"
+systemctl cat "$MAIN_UNIT" >/dev/null 2>&1 \
+  && fail "the main unit must be removed by the erase"
+systemctl cat "$UNIT" >/dev/null 2>&1 \
+  && fail "the builder unit must be removed by the erase"
+for u in "$MAIN_UNIT" "$UNIT"; do
+  expected_active "$u" && fail "$u must be inactive after the erase"
+done
+ev p5-units "units removed, services inactive"
+
+ev p5-loaded-policy.sha "$(sha256sum /sys/fs/selinux/policy 2>/dev/null | awk '{print $1}')"
+say 'P5: PASS'
+
+echo "R7-MNB38-P0-METADATA=PASS"
+echo "R7-MNB38-P1-FRESH-INSTALL=PASS"
+echo "R7-MNB38-P2-NO-ABSENT-WINDOW=PASS"
+echo "R7-MNB38-P3-VERIFIED-STOP=PASS"
+echo "R7-MNB38-P4-RECOVERY-EXPLICIT-ACTIVATION=PASS"
+echo "R7-MNB38-P5-CLEAN-ERASE=PASS"
+echo "R7-MNB38-VERDICT=PASS"

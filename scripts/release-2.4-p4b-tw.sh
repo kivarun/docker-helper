@@ -401,8 +401,23 @@ done
 assert_selinux_module_loaded
 rm -f /usr/local/sbin/semodule
 rpm -Uvh --replacepkgs "$RPM" >/dev/null || fail "recovery rpm -U --replacepkgs after the poisoned-semodule failure"
-[ "$(systemctl show "$MAIN_UNIT" -p MainPID --value)" != "$OLD_PID" ] \
-  || fail "the recovery posttrans must restart the previously active service"
+# The failed upgrade left both services STOPPED, so the recovery transaction
+# begins from inactive services and must not be claimed as an automatic
+# restart: a successful posttrans only restarts services it OBSERVES active
+# (was_active=false here — the stopped state is the recorded pre-install
+# state). Service restoration requires the explicit operator activation
+# below, verified with is-active=active and a valid nonzero MainPID.
+for unit in "$MAIN_UNIT" "$UNIT"; do
+  [ "$(systemctl is-active "$unit" 2>/dev/null || true)" != "active" ] \
+    || fail "the recovery transaction must not implicitly restart the stopped $unit"
+done
+systemctl start "$MAIN_UNIT" "$UNIT" || fail "explicit operator activation after the recovery transaction failed"
+for unit in "$MAIN_UNIT" "$UNIT"; do
+  [ "$(systemctl is-active "$unit" 2>/dev/null || true)" = "active" ] \
+    || fail "explicit activation must leave $unit active"
+  [ "$(systemctl show "$unit" -p MainPID --value)" != "0" ] \
+    || fail "$unit must carry a valid nonzero MainPID after explicit activation"
+done
 assert_selinux_module_loaded
 say "P2b asserts OK"
 

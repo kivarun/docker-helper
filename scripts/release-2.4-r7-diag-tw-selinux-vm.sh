@@ -124,7 +124,25 @@ case "$R7_MODE" in
   # experiment: removal on every path; NO permanent RPM change, NO
   # Release-GO UAT.
   mnb36) GUEST_SCRIPT='release-2.4-r7-p21e3-guest.sh' ;;
-  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d | p21e | p21e3 | p21e3probe | p21e3proc-sys | p21e3proc-file | p21e3proc-keys | p21e3diag-keys | mnb30 | mnb32 | mnb33 | mnb36)" ;;
+  # mnb38 = the MNB38 RPM lifecycle UAT on the enforcing consumer (the
+  # dedicated MNB38 guest script, NOT the p21e3 diagnostic stack): the
+  # exact candidate RPM through the real package-manager lifecycle —
+  # P0 candidate/metadata preflight (Requires carry the conditional
+  # container-selinux/bzip2/setools-console SELinux lifecycle deps),
+  # P1 fresh install (CIL artifact identity, priority-400 store module
+  # with byte-exact blob identity, the exact loaded-policy constraint,
+  # release .pp baseline), P2 repeated install/upgrade shape (UNCHANGED
+  # store blob inode/mtime/bytes: no absent-constraint window),
+  # P3 failed upgrade by a controlled constraint-install failure (both
+  # services stopped AND verified, no automatic restart, restart-decision
+  # preserved, rpm rc 0 distinguished from scriptlet failure),
+  # P4 recovery with no implicit restart plus EXPLICIT activation and
+  # MainPID proof, P5 final erase removing only the product-owned
+  # modules (no orphans, container policy survives, units removed).
+  # Packaging lifecycle only: NO policy grants, NO permissive mode,
+  # NO Release-GO UAT.
+  mnb38) GUEST_SCRIPT='release-2.4-mnb38-guest.sh' ;;
+  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d | p21e | p21e3 | p21e3probe | p21e3proc-sys | p21e3proc-file | p21e3proc-keys | p21e3diag-keys | mnb30 | mnb32 | mnb33 | mnb36 | mnb38)" ;;
 esac
 
 log()  { printf '%s %s\n' "$PREFIX" "$*"; }
@@ -206,6 +224,9 @@ export R7_ARTIFACT_SHA256="$UAT_RPM_SHA256"
 export R7_EXPECT=fail
 export R7_RUNTIME_DEPS=install
 export R7_EVIDENCE_DIR='$GUEST_EVIDENCE_DIR'
+# MNB38 pins: the installed CIL artifact identity (the same digest the
+# wrapper admission gate and the store-identity acceptance verify).
+export MNB38_CIL_SHA256='975490b5701c2d3bb1b59a6023a22d2807e42bfec4934be7c1b2691c704b3ce2'
 export R7_P21E3_PROBE=$( [ "$R7_MODE" = p21e3probe ] && echo 1 || echo 0 )
 export R7_P21E3_PROC_SYS=$( [ "$R7_MODE" = p21e3proc-sys ] && echo 1 || echo 0 )
 export R7_P21E3_PROC_FILE=$( [ "$R7_MODE" = p21e3proc-file ] && echo 1 || echo 0 )

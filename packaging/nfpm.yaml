@@ -51,6 +51,16 @@ overrides:
       # (bsc#1252672): only where SELinux policy is installed, never an
       # unconditional container-selinux or Docker dependency.
       - "(container-selinux if selinux-policy)"
+      # The constraint module's store-identity decision decompresses every
+      # recognized SELinux-store blob with bzip2 and compares it byte-exactly
+      # against the installed candidate (UNVERIFIABLE-classifying refusals
+      # need the tool present, never silently degraded).
+      - "(bzip2 if selinux-policy)"
+      # The effective-policy acceptance queries the LIVE loaded policy with
+      # seinfo; without setools-console the constraint module must not
+      # declare success on an unverifiable load, so the SELinux deployment
+      # path always needs the query tool available.
+      - "(setools-console if selinux-policy)"
       # Builder backend runtime on openSUSE Tumbleweed: shadow (useradd/
       # usermod AND newuidmap/newgidmap), rootlesskit, slirp4netns.
       - shadow
