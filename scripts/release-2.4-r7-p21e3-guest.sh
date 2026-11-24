@@ -3478,11 +3478,10 @@ EOF
     printf '%s\n' "$MNB36_FD_BASE" | head -5
     echo "-- mcs_constrained_type census (the constraint's escape population) --"
     seinfo -a mcs_constrained_type -x 2>/dev/null | sed -n '2,30p' || true
-    echo "-- the known docker-helper subject types must be members --"
-    seinfo -a mcs_constrained_type -x 2>/dev/null | grep -aq docker_helper_buildkitd_t && \
-    seinfo -a mcs_constrained_type -x 2>/dev/null | grep -aq docker_helper_builder_workload_t \
-      && echo "MNB36-G1: PASS (both docker-helper MCS members present)" \
-      || { echo "MNB36-G1: FAIL (a docker-helper mcs_constrained_type member is missing)"; MNB36_IDENTITY_OK=0; }
+    echo "-- the buildkitd subject type must be a member (the workload-domain member is verified by the workload-module load gate later in this round) --"
+    seinfo -a mcs_constrained_type -x 2>/dev/null | grep -aq docker_helper_buildkitd_t \
+      && echo "MNB36-G1: PASS (docker_helper_buildkitd_t is an mcs_constrained_type member)" \
+      || { echo "MNB36-G1: FAIL (docker_helper_buildkitd_t is not an mcs_constrained_type member)"; MNB36_IDENTITY_OK=0; }
     echo "-- kernel-decision helper toolchain --"
     gcc --version 2>&1 | head -1
     ls -l /usr/include/selinux/selinux.h 2>&1 | head -1
