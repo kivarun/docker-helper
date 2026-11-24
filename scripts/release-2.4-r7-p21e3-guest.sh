@@ -4272,7 +4272,7 @@ EOF
       || { echo "MNB36-G2: FAIL (the module is not at priority 400)"; MNB36_INTEGRITY_OK=0; }
     echo "-- installed module identity (the store's extracted CIL) --"
     MNB36_XDIR=$(mktemp -d)
-    ( cd "$MNB36_XDIR" && semodule -E -c "$MNB36_MODULE" 2>>"$MNB36_INTEGRITY_LOG" || true
+    ( cd "$MNB36_XDIR" && semodule -c -E "$MNB36_MODULE" 2>>"$MNB36_INTEGRITY_LOG" || true
       ls -la; sha256sum ./* 2>/dev/null ) >> "$MNB36_INTEGRITY_LOG" 2>&1
     MNB36_IDENTITY_VERIFIED=0
     if [ -f "$MNB36_XDIR/$MNB36_MODULE.cil" ]; then
@@ -4291,7 +4291,8 @@ EOF
       if [ -n "$MNB36_STORE_DIR" ]; then
         echo "store dir: $MNB36_STORE_DIR"
         ls -la "$MNB36_STORE_DIR" 2>/dev/null
-        MNB36_STORE_FILE="$MNB36_STORE_DIR/hll"
+        MNB36_STORE_FILE="$MNB36_STORE_DIR/cil"
+        [ -f "$MNB36_STORE_FILE" ] || MNB36_STORE_FILE="$MNB36_STORE_DIR/hll"
         [ -f "$MNB36_STORE_FILE" ] || MNB36_STORE_FILE="$(find "$MNB36_STORE_DIR" -type f ! -name lang_ext 2>/dev/null | head -1)"
         MNB36_STORE_RAW="$(bzcat "$MNB36_STORE_FILE" 2>/dev/null || cat "$MNB36_STORE_FILE" 2>/dev/null || true)"
         printf '%s\n' "$MNB36_STORE_RAW" | sha256sum | awk '{print "store module sha256 (decompressed): "$1}'
