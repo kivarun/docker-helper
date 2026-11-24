@@ -4220,8 +4220,8 @@ CEOF
     p21e3_dontaudit_restore
     fail "the MNB36 baseline kernel-decision matrix reached an unexpected resolution; BLOCKED"
   fi
-  MNB36_BASE_CROSS="$(awk -F'\t' '$1=="BASELINE" && $3=="fifo_file" { printf "%s(%s->%s)=%s ", $2, ($4 ~ /:s0:c1$/ ? "c1" : "c2"), ($5 ~ /:s0:c1$/ ? "c1" : "c2"), ($6==1?"ALLOW":"DENY") }' "$MNB36_MATRIX_LOG")"
-  MNB36_BASE_FD="$(awk -F'\t' '$1=="BASELINE" && $3=="fd" { printf "%s ", ($6==1 && $7==1 ? "use=ALLOW(decided)" : "use=UNDECIDED-OR-DENY") }' "$MNB36_MATRIX_LOG")"
+  MNB36_BASE_CROSS="$(awk -F'\t' '$1=="BASELINE" && $2=="fifo_file" { printf "%s(%s->%s)=%s ", $3, ($4 ~ /:s0:c1$/ ? "c1" : "c2"), ($5 ~ /:s0:c1$/ ? "c1" : "c2"), ($6==1?"ALLOW":"DENY") }' "$MNB36_MATRIX_LOG")"
+  MNB36_BASE_FD="$(awk -F'\t' '$1=="BASELINE" && $2=="fd" { printf "%s ", ($6==1 && $7==1 ? "use=ALLOW(decided)" : "use=UNDECIDED-OR-DENY") }' "$MNB36_MATRIX_LOG")"
   MNB36_BASE_FD_OK="$(printf '%s\n' "$MNB36_BASE_FD" | grep -c 'ALLOW(decided)')"
   echo "baseline fd decisions: $MNB36_BASE_FD (allow rows=$MNB36_BASE_FD_OK of 4)" >> "$MNB36_MATRIX_LOG"
   cat "$MNB36_MATRIX_LOG"
@@ -4376,10 +4376,10 @@ EOF
     p21e3_dontaudit_restore
     fail "the MNB36 constrained kernel-decision matrix reached an unexpected resolution; BLOCKED"
   fi
-  MNB36_CROSS_DEC="$(awk -F'\t' '$1=="CONSTRAINED" && $3=="fifo_file" && $11=="deny" { printf "%s=%s ", $2, ($6==1?"ALLOW-UNEXPECTED":"DENY") }' "$MNB36_MATRIX_LOG")"
-  MNB36_FD_DEC="$(awk -F'\t' '$1=="CONSTRAINED" && $3=="fd" { printf "%s ", ($6==1 && $7==1 ? "use=ALLOW(decided)" : "use=UNDECIDED-OR-DENY") }' "$MNB36_MATRIX_LOG")"
-  MNB36_OWN_DEC="$(awk -F'\t' '$1=="CONSTRAINED" && $3=="fifo_file" && $11=="allow" { printf "%s=%s ", $2, ($6==1?"ALLOW":"DENY-UNEXPECTED") }' "$MNB36_MATRIX_LOG")"
-  MNB36_OPEN_DEC="$(awk -F'\t' '$1=="CONSTRAINED" && $3=="fifo_file" && $11=="deny" && $2=="open" { printf "%s ", ($6==1?"ALLOW-UNEXPECTED":"DENY") }' "$MNB36_MATRIX_LOG")"
+  MNB36_CROSS_DEC="$(awk -F'\t' '$1=="CONSTRAINED" && $2=="fifo_file" && $11=="deny" { printf "%s=%s ", $3, ($6==1?"ALLOW-UNEXPECTED":"DENY") }' "$MNB36_MATRIX_LOG")"
+  MNB36_FD_DEC="$(awk -F'\t' '$1=="CONSTRAINED" && $2=="fd" { printf "%s ", ($6==1 && $7==1 ? "use=ALLOW(decided)" : "use=UNDECIDED-OR-DENY") }' "$MNB36_MATRIX_LOG")"
+  MNB36_OWN_DEC="$(awk -F'\t' '$1=="CONSTRAINED" && $2=="fifo_file" && $11=="allow" { printf "%s=%s ", $3, ($6==1?"ALLOW":"DENY-UNEXPECTED") }' "$MNB36_MATRIX_LOG")"
+  MNB36_OPEN_DEC="$(awk -F'\t' '$1=="CONSTRAINED" && $2=="fifo_file" && $11=="deny" && $3=="open" { printf "%s ", ($6==1?"ALLOW-UNEXPECTED":"DENY") }' "$MNB36_MATRIX_LOG")"
   echo "constrained matrix summary: own=$MNB36_OWN_DEC cross=$MNB36_CROSS_DEC open_cross=$MNB36_OPEN_DEC fd=$MNB36_FD_DEC" >> "$MNB36_MATRIX_LOG"
   cat "$MNB36_MATRIX_LOG"
   MNB36_FD_OK="$(printf '%s\n' "$MNB36_FD_DEC" | grep -c 'ALLOW(decided)')"
