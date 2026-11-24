@@ -4287,11 +4287,13 @@ EOF
       fi
     else
       echo "-- extraction produced no CIL; falling back to the store's module files --"
-      MNB36_STORE_DIR="$(find /var/lib/selinux/targeted/active/modules -maxdepth 2 -name "$MNB36_MODULE" 2>/dev/null | head -1)"
+      MNB36_STORE_DIR="$(find /var/lib/selinux /etc/selinux -type d -name "$MNB36_MODULE" 2>/dev/null | head -1)"
       if [ -n "$MNB36_STORE_DIR" ]; then
         echo "store dir: $MNB36_STORE_DIR"
         ls -la "$MNB36_STORE_DIR" 2>/dev/null
-        MNB36_STORE_RAW="$(bzcat "$MNB36_STORE_DIR/hll" 2>/dev/null || cat "$MNB36_STORE_DIR/hll" 2>/dev/null || true)"
+        MNB36_STORE_FILE="$MNB36_STORE_DIR/hll"
+        [ -f "$MNB36_STORE_FILE" ] || MNB36_STORE_FILE="$(find "$MNB36_STORE_DIR" -type f ! -name lang_ext 2>/dev/null | head -1)"
+        MNB36_STORE_RAW="$(bzcat "$MNB36_STORE_FILE" 2>/dev/null || cat "$MNB36_STORE_FILE" 2>/dev/null || true)"
         printf '%s\n' "$MNB36_STORE_RAW" | sha256sum | awk '{print "store module sha256 (decompressed): "$1}'
         if printf '%s\n' "$MNB36_STORE_RAW" | sha256sum | awk '{print $1}' | grep -aq 975490b5701c2d3bb1b59a6023a22d2807e42bfec4934be7c1b2691c704b3ce2 \
            || printf '%s\n' "$MNB36_STORE_RAW" | grep -aqF '(mlsconstrain (fifo_file (read write)) (or (dom h1 h2) (neq t1 mcs_constrained_type)))'; then
