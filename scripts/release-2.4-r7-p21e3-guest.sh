@@ -4361,7 +4361,7 @@ EOF
   # post-install capture so the mnb33 post-build matrix expectations are
   # computed from the loaded state the BUILD actually runs under.
   MNB33_CON_PRE="$MNB36_CON_POST"
-  MNB33_CON_FIFO="$(printf '%s\n' "$MNB33_CON_PRE" | grep -ai '^mlsconstrain fifo_file' || true)"
+  MNB33_CON_FIFO="$(printf '%s\n' "$MNB33_CON_PRE" | grep -ai 'mlsconstrain fifo_file' || true)"
   CovRead="$(printf '%s\n' "$MNB33_CON_FIFO" | grep -aoi '{[^}]*}' | tr ' {}' ' ' | tr '\n' ' ' | grep -aow read | head -1)"
   CovWrite="$(printf '%s\n' "$MNB33_CON_FIFO" | grep -aoi '{[^}]*}' | tr ' {}' ' ' | tr '\n' ' ' | grep -aow write | head -1)"
   COVERED=""
