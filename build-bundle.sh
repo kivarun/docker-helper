@@ -241,6 +241,14 @@ else
   mkdir -p "$BUNDLE_DIR/selinux"
   cp "$OUT_DIR/docker_helper.pp" "$BUNDLE_DIR/selinux/docker_helper.pp"
 fi
+# The separately owned FIFO read/write constraint module source CIL and the
+# constraint module lifecycle library it shares with the RPM scriptlets.
+cp "$SCRIPT_DIR/packaging/selinux/docker-helper-fifo-rw-constraint.cil" \
+   "$BUNDLE_DIR/selinux/docker-helper-fifo-rw-constraint.cil"
+cp "$SCRIPT_DIR/packaging/scripts/rpm/constraint-module.sh" \
+   "$BUNDLE_DIR/selinux/constraint-module.sh"
+chmod 644 "$BUNDLE_DIR/selinux/docker-helper-fifo-rw-constraint.cil" \
+          "$BUNDLE_DIR/selinux/constraint-module.sh"
 
 # Agent skill
 mkdir -p "$BUNDLE_DIR/skills/docker-helper"
@@ -334,6 +342,14 @@ if [[ ! -s "$BUNDLE_DIR/selinux/docker_helper.pp" ]]; then
 fi
 echo "OK: SELinux policy artifact present: selinux/docker_helper.pp"
 
+# The FIFO read/write constraint module artifacts must be present and non-empty.
+if [[ ! -s "$BUNDLE_DIR/selinux/docker-helper-fifo-rw-constraint.cil" || \
+      ! -s "$BUNDLE_DIR/selinux/constraint-module.sh" ]]; then
+  echo "FAIL: constraint module artifacts missing or empty in bundle: selinux/" >&2
+  exit 1
+fi
+echo "OK: constraint module artifacts present: selinux/"
+
 # The pinned BuildKit payload must be present and non-empty in the bundle;
 # its staged bytes must also match the MANIFEST the payload owner generated.
 # The payload name buildkit-runc is the WRAPPER role (a byte-copy of the
@@ -389,6 +405,8 @@ EXPECTED_PATHS=(
   "docker-helper-${VERSION}-linux-amd64/apparmor/docker-helper-builder"
   "docker-helper-${VERSION}-linux-amd64/apparmor/local/curl"
   "docker-helper-${VERSION}-linux-amd64/selinux/docker_helper.pp"
+  "docker-helper-${VERSION}-linux-amd64/selinux/docker-helper-fifo-rw-constraint.cil"
+  "docker-helper-${VERSION}-linux-amd64/selinux/constraint-module.sh"
   "docker-helper-${VERSION}-linux-amd64/buildkit/buildkitd"
   "docker-helper-${VERSION}-linux-amd64/buildkit/buildctl"
   "docker-helper-${VERSION}-linux-amd64/buildkit/buildkit-runc"

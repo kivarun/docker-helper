@@ -333,12 +333,47 @@ var wrapperSeinfoCandidates = []string{"seinfo", "/usr/bin/seinfo", "/usr/sbin/s
 // against.
 const wrapperSeinfoPolicyPath = "/sys/fs/selinux/policy"
 
-// wrapperRoleCheckQueryError is the trusted-query failure with the query
-// tool's own response attached (bounded, first line only). The tool's
-// stderr diagnostic is what the enforcing guest must see to distinguish a
-// policy-visibility boundary from a broken toolchain; no credential or
-// secret material can appear in a policy component query.
-func wrapperRoleCheckQueryError(err error, out []byte) error {
+// wrapperSeinfoQuery runs one seinfo operation against the LOADED binary
+// policy and classifies tool failures under the refusing check's subject.
+// It resolves the query tool through the wrapperSeinfoCandidates order (a
+// bare PATH lookup first, then the standard absolute install locations:
+// the runtime is spawned with a restricted environment, and a bare
+// "seinfo" lookup can fail there for tooling that IS installed) and pins
+// the query to the loaded policy through selinuxfs when that file exists
+// instead of letting seinfo search the /etc chain itself — the wrapper's
+// own LSM subject has no policy-config read authority. The operation is
+// fail-closed: a not-found result after every candidate, a tooling error,
+// or output of an answering candidate is returned to the caller for
+// classification, never turned into an authoritative absence.
+func wrapperSeinfoQuery(subject, op string, args ...string) ([]byte, error) {
+	var out []byte
+	var err error
+	var query []string
+	query = append(query, op)
+	query = append(query, args...)
+	if _, statErr := os.Stat(wrapperSeinfoPolicyPath); statErr == nil {
+		query = append(query, wrapperSeinfoPolicyPath)
+	}
+	for _, seinfo := range wrapperSeinfoCandidates {
+		out, err = exec.Command(seinfo, query...).CombinedOutput()
+		if err == nil {
+			return out, nil
+		}
+		if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		return nil, wrapperSeinfoQueryError(subject, err, out)
+	}
+	return nil, wrapperSeinfoQueryError(subject, err, out)
+}
+
+// wrapperSeinfoQueryError is the trusted-query failure with the query
+// tool's own response attached (bounded, first line only), scoped by the
+// check subject the refusing gate names. The tool's stderr diagnostic is
+// what the enforcing guest must see to distinguish a policy-visibility
+// boundary from a broken toolchain; no credential or secret material can
+// appear in a policy component query.
+func wrapperSeinfoQueryError(subject string, err error, out []byte) error {
 	detail := strings.TrimSpace(string(out))
 	if i := strings.IndexByte(detail, '\n'); i > 0 {
 		detail = detail[:i]
@@ -347,43 +382,42 @@ func wrapperRoleCheckQueryError(err error, out []byte) error {
 		detail = detail[:200]
 	}
 	if detail == "" {
-		return fmt.Errorf("the roletype query cannot be trusted (%v)", err)
+		return fmt.Errorf("the %s query cannot be trusted (%v)", subject, err)
 	}
-	return fmt.Errorf("the roletype query cannot be trusted (%v; the query tool responded: %q)", err, detail)
+	return fmt.Errorf("the %s query cannot be trusted (%v; the query tool responded: %q)", subject, err, detail)
 }
 
+// wrapperPolicyExactLine is the exact-line output classifier shared by the
+// wrapper's policy-shape checks: a normalized entry line (leading
+// whitespace trimmed) must equal the expected statement token exactly.
+// Empty output or near-miss lines are refusals, never allowances.
+func wrapperPolicyExactLine(out []byte, statement string) bool {
+	for _, entry := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(entry) == statement {
+			return true
+		}
+	}
+	return false
+}
+
+// wrapperRoleCheck is the injectable roletype authorization check: the
+// wrapper's own process ROLE must be authorized to hold the workload
+// domain type in the LOADED policy (the roletype relation, not an
+// allow rule). Production: seinfo --role_types <domain> against the
+// loaded policy — seinfo is the component-query tool for the role/type
+// relation; sesearch searches TE/RBAC rule sets only. Fail-closed
+// classification: a failed query is never an authoritative absence.
+// Package-global; tests restore it.
 var wrapperRoleCheck = func(role, domain string) error {
-	var out []byte
-	var err error
-	var args []string
-	if _, err := os.Stat(wrapperSeinfoPolicyPath); err == nil {
-		args = append(args, wrapperSeinfoPolicyPath)
-	}
-	for _, seinfo := range wrapperSeinfoCandidates {
-		query := append([]string{"--role_types", domain}, args...)
-		out, err = exec.Command(seinfo, query...).CombinedOutput()
-		if err == nil {
-			break
-		}
-		if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) {
-			continue
-		}
-		return wrapperRoleCheckQueryError(err, out)
-	}
+	out, err := wrapperSeinfoQuery("roletype", "--role_types", domain)
 	if err != nil {
-		return wrapperRoleCheckQueryError(err, out)
-	}
-	if err != nil {
-		return fmt.Errorf("the roletype query cannot be trusted (%v)", err)
+		return err
 	}
 	// The --role_types TYPE rendering is the per-role statement list for
 	// that type; an exact role TOKEN on its own entry line is the match.
 	// Empty output or a query error is a refusal, never an allowance.
-	for _, entry := range strings.Split(string(out), "\n") {
-		entry = strings.TrimSpace(entry)
-		if entry == role {
-			return nil
-		}
+	if wrapperPolicyExactLine(out, role) {
+		return nil
 	}
 	return fmt.Errorf("the loaded policy carries no %s role authorization for the workload domain (%q)", role, wrapperWorkloadDomain)
 }

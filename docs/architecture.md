@@ -2778,6 +2778,56 @@ Ownership and lifecycle:
   `/usr/bin/rootlesskit` with `px`, which requires the distro rootlesskit
   profile to be loaded — `px` promises NO unconfined fallback — and the
   distro profile owns the userns/flow mediation there.
+- the executor payload's FIFO handoff between concurrent per-operation
+  categories is kernel-isolated by the shipped **FIFO read/write
+  isolation constraint module**
+  (`docker-helper-fifo-rw-constraint`, CIL, package priority 400). The
+  constraint is a separately owned product artifact — installed
+  byte-exact from
+  `/usr/share/selinux/docker-helper-fifo-rw-constraint.cil`, never
+  merged into the `docker_helper.pp` policy package — carrying the exact
+  statement
+  `mlsconstrain fifo_file { read write } (or (dom h1 h2) (neq t1
+  mcs_constrained_type))`: categories do not gain FIFO read/write access
+  to each other's fifos. It was compiled against the distro policy in
+  isolation, its live kernel behavior was measured through the dedicated
+  distribution verification gates (loaded-policy identity, baseline
+  matrix, workload matrix, live flow, and rollback all verified), and the
+  packaging install refuses any resident module of the same name that is
+  not byte-identical, re-verifies store identity after the install, and
+  requires the exact constraint statement to be verifiable in the LOADED
+  policy (`seinfo --constrain fifo_file`) before the transaction may
+  declare success. Uninstall removes the module only on final erase (an
+  upgrade never manufactures an absent-constraint window) and a removal
+  failure stays fail-secure (the constraint keeps holding in the loaded
+  policy until explicitly removed).
+- the enforcing buildkitd payload carries its own fail-closed admission
+  gate over the constraint: before any managed run reaches its spec
+  commit, the payload queries the LOADED policy (`seinfo --constrain
+  fifo_file`, pinned to `/sys/fs/selinux/policy` through the same
+  resolution order as its role authorization check) and requires the
+  exact shipped constraint statement — an absent tool, an untrusted
+  query, or a missing/foreign statement refuses the run before any
+  committed rewrite and before the real runtime is exec'd. The module
+  store listing and the installed CIL filename are never sufficient:
+  only the kernel-deciding loaded policy shapes. The gate's own
+  enforcement is subject to the same pending buildkitd-domain policy
+  integration as the role authorization check (its production policy
+  grant is not yet integrated); until that integration lands, the gate's
+  fail-closed refusals are the acceptance behavior an enforcing
+  deployment observes, and a failed packaging install keeps the service
+  down rather than exposing an unconstrained runtime. A policy reload or
+  distro policy update removing the constraint re-arms the gate on the
+  first subsequent run: the check runs per managed run, never per
+  builder lifetime.
+- the kernel-level cross-descriptor behavior behind the constraint is
+  measured, not assumed: the shipped constraint statement is the
+  enforced boundary for FIFO fd acquisition and use across operation
+  categories. An earlier offline review round recorded its inability to
+  perform a direct foreign-fd syscall experiment (known gap); the live
+  kernel measurements of the same isolation surface have since
+  validated the enforced boundary — the gap sentence describes the
+  unperformed experiment, not the current enforcement state.
 - the manager performs a fail-closed startup purge of crash residue, and
   the daemon's own startup reconciliation issues one bounded PURGE
   through the manager client before build admission opens for a new

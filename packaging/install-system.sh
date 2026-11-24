@@ -59,6 +59,14 @@ AA_LEGACY_FRAGMENT="${AA_LEGACY_FRAGMENT:-/etc/apparmor.d/docker-helper.d/manage
 AA_PARSER="${AA_PARSER:-/usr/sbin/apparmor_parser}"
 SELINUX_PP_SRC="${SELINUX_PP_SRC:-selinux/docker_helper.pp}"
 SELINUX_PP_DEST="${SELINUX_PP_DEST:-/usr/share/selinux/docker_helper.pp}"
+# The separately owned FIFO read/write constraint module: its byte-exact
+# source CIL ships in the bundle's selinux/ directory and is installed to
+# the packaged path (the same maintenance/remediation path the RPM layout
+# uses) through the same shared constraint-module lifecycle library the
+# RPM scriptlets drive.
+SELINUX_CONSTRAINT_CIL_SRC="${SELINUX_CONSTRAINT_CIL_SRC:-selinux/docker-helper-fifo-rw-constraint.cil}"
+SELINUX_CONSTRAINT_CIL_DEST="${SELINUX_CONSTRAINT_CIL_DEST:-/usr/share/selinux/docker-helper-fifo-rw-constraint.cil}"
+SELINUX_CONSTRAINT_LIB_SRC="${SELINUX_CONSTRAINT_LIB_SRC:-selinux/constraint-module.sh}"
 SEMODULE="${SEMODULE:-semodule}"
 RESTORECON="${RESTORECON:-restorecon}"
 BINDFS="${BINDFS:-bindfs}"
@@ -415,6 +423,16 @@ check_selected_mac_tools() {
 			error "the release tarball must carry selinux/docker_helper.pp."
 			exit 1
 		fi
+		if [[ ! -f "$script_dir/$SELINUX_CONSTRAINT_CIL_SRC" || ! -f "$script_dir/$SELINUX_CONSTRAINT_LIB_SRC" ]]; then
+			error "bundled constraint-module artifacts not found under $script_dir/selinux/"
+			error "the release tarball must carry $SELINUX_CONSTRAINT_CIL_SRC and $SELINUX_CONSTRAINT_LIB_SRC."
+			exit 1
+		fi
+		if ! command -v seinfo >/dev/null 2>&1; then
+			error "seinfo not found in PATH"
+			error "the setools-console seinfo query tool is required for system mode on a SELinux host: the FIFO constraint module's effective-policy acceptance is verified against the loaded policy."
+			exit 1
+		fi
 	fi
 }
 
@@ -741,6 +759,20 @@ install_selinux_policy() {
 		error "Failed to install SELinux policy artifact to $SELINUX_PP_DEST"
 		exit 1
 	fi
+
+	# The separately owned FIFO read/write constraint module, installed
+	# through the same shared lifecycle library the RPM %posttrans drives:
+	# collision pre-check, priority-400 semodule install, store identity
+	# verification, and the effective-policy (loaded policy) verification.
+	# Its failure aborts the installation (fail closed) exactly like the
+	# module load above.
+	if ! cp "$script_dir/$SELINUX_CONSTRAINT_CIL_SRC" "$SELINUX_CONSTRAINT_CIL_DEST" || ! chmod 0644 "$SELINUX_CONSTRAINT_CIL_DEST"; then
+		error "Failed to install the constraint module artifact to $SELINUX_CONSTRAINT_CIL_DEST"
+		exit 1
+	fi
+	# shellcheck disable=SC1090
+	. "$script_dir/$SELINUX_CONSTRAINT_LIB_SRC"
+	dh_constraint_install "$SELINUX_CONSTRAINT_CIL_DEST"
 }
 
 apply_selinux_restorecon() {

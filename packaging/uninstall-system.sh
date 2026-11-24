@@ -52,6 +52,11 @@ AA_STATE_FILE="${AA_STATE_FILE:-/var/lib/docker-helper/apparmor/managed-boundari
 AA_LEGACY_FRAGMENT="${AA_LEGACY_FRAGMENT:-/etc/apparmor.d/docker-helper.d/managed-roots}"
 AA_PARSER="${AA_PARSER:-/usr/sbin/apparmor_parser}"
 SELINUX_PP_DEST="${SELINUX_PP_DEST:-/usr/share/selinux/docker_helper.pp}"
+# The separately owned FIFO read/write constraint module: removal is shipped
+# through the same packaged lifecycle library the RPM final-erase scriptlet
+# drives; the artifact path is the packaged maintenance path.
+SELINUX_CONSTRAINT_CIL_DEST="${SELINUX_CONSTRAINT_CIL_DEST:-/usr/share/selinux/docker-helper-fifo-rw-constraint.cil}"
+SELINUX_CONSTRAINT_LIB="${SELINUX_CONSTRAINT_LIB:-/usr/share/docker-helper/selinux/constraint-module.sh}"
 SEMODULE="${SEMODULE:-semodule}"
 RESTORECON="${RESTORECON:-restorecon}"
 ROOTLESSKIT_BIN="${ROOTLESSKIT_BIN:-/usr/bin/rootlesskit}"
@@ -297,6 +302,21 @@ remove_selinux_policy() {
 		warn "SELinux module docker_helper still installed after removal attempt; third-party binary labels not restored"
 		return
 	fi
+	# The separately owned constraint module: removed through the same
+	# packaged lifecycle library the RPM final-erase drives (absent
+	# library or unavailable module removal stay fail-secure: a surviving
+	# constraint remains kernel-enforced, never silently unshipped).
+	if [[ -r "$SELINUX_CONSTRAINT_LIB" ]]; then
+		# shellcheck disable=SC1090
+		. "$SELINUX_CONSTRAINT_LIB"
+		if ! dh_constraint_remove; then
+			warn "constraint module $DH_CONSTRAINT_MODULE removal failed (see the error above for the manual remediation command)"
+		fi
+	elif "$SEMODULE" -l 2>/dev/null | grep -qw docker-helper-fifo-rw-constraint; then
+		if ! "$SEMODULE" -r docker-helper-fifo-rw-constraint 2>/dev/null; then
+			warn "Failed to remove SELinux module docker-helper-fifo-rw-constraint; manual remediation: semodule -X 400 -r docker-helper-fifo-rw-constraint"
+		fi
+	fi
 	restore_third_party_binary_labels
 }
 
@@ -304,6 +324,10 @@ remove_selinux_artifact() {
 	if [[ -f "$SELINUX_PP_DEST" ]]; then
 		info "Removing SELinux policy artifact $SELINUX_PP_DEST"
 		rm -f "$SELINUX_PP_DEST"
+	fi
+	if [[ -f "$SELINUX_CONSTRAINT_CIL_DEST" ]]; then
+		info "Removing constraint module artifact $SELINUX_CONSTRAINT_CIL_DEST"
+		rm -f "$SELINUX_CONSTRAINT_CIL_DEST"
 	fi
 }
 

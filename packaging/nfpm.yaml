@@ -190,6 +190,25 @@ contents:
     file_info:
       mode: 0644
 
+  # The separately owned FIFO read/write constraint module (MNB35/MNB36
+  # distribution evidence). Byte-exact candidate CIL, installed by
+  # %posttrans at priority 400 through the packaged constraint-module
+  # lifecycle library; never merged into docker_helper.pp.
+  - src: packaging/selinux/docker-helper-fifo-rw-constraint.cil
+    dst: /usr/share/selinux/docker-helper-fifo-rw-constraint.cil
+    packager: rpm
+    file_info:
+      mode: 0644
+
+  # The constraint module lifecycle library (install/remove/collision/
+  # identity/effective-policy verification), shared by the RPM scriptlets
+  # and usable for explicit operator remediation.
+  - src: packaging/scripts/rpm/constraint-module.sh
+    dst: /usr/share/docker-helper/selinux/constraint-module.sh
+    packager: rpm
+    file_info:
+      mode: 0644
+
   - src: dist/completions/docker-helper
     dst: /usr/share/bash-completion/completions/docker-helper
     file_info:

@@ -1,0 +1,4 @@
+; MNB35 candidate: extend fifo_file MCS constraint coverage to read/write
+; using the same dominance predicate as the distro's fifo_file:open constraint
+; (Tumbleweed snapshot 20261121, policy.kern 00a8f6a6... lines 1329-1332).
+(mlsconstrain (fifo_file (read write)) (or (dom h1 h2) (neq t1 mcs_constrained_type)))

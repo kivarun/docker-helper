@@ -142,4 +142,16 @@ if semodule -l 2>/dev/null | grep -qw docker_helper; then
   fi
 fi
 
+# Remove the separately owned FIFO read/write constraint module, via the
+# same packaged lifecycle library the installer drives. Final erase only
+# (this scriptlet already returned early on upgrades): constraint-module
+# removal follows the same fail-secure contract as docker_helper — the
+# removal is best-effort and loud on failure; a surviving constraint
+# remains kernel-enforced until explicitly removed.
+CONSTRAINT_LIB=/usr/share/docker-helper/selinux/constraint-module.sh
+if [ -r "$CONSTRAINT_LIB" ]; then
+  . "$CONSTRAINT_LIB"
+  dh_constraint_remove || true
+fi
+
 exit 0

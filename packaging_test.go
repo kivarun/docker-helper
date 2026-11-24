@@ -134,6 +134,7 @@ func TestScriptSyntax(t *testing.T) {
 		{"sh", "packaging/scripts/rpm/postinstall.sh"},
 		{"sh", "packaging/scripts/rpm/preremove.sh"},
 		{"sh", "packaging/scripts/rpm/postremove.sh"},
+		{"sh", "packaging/scripts/rpm/constraint-module.sh"},
 		{"sh", "packaging/scripts/lib/provision-builder.sh"},
 	}
 
@@ -316,6 +317,150 @@ func TestBuildBundleSELinuxArtifact(t *testing.T) {
 	// The tarball mandatory-path list must include the SELinux policy artifact.
 	if !strings.Contains(content, "selinux/docker_helper.pp") {
 		t.Error("build-bundle.sh EXPECTED_PATHS must include selinux/docker_helper.pp")
+	}
+}
+
+// TestConstraintModuleArtifact verifies the shipped FIFO read/write
+// constraint module is the EXACT distribution-evidenced candidate CIL
+// (byte identity is the collision anchor of the constraint-module
+// lifecycle: any divergent byte in the packaged artifact or in the repo
+// is a regression against the release evidence).
+func TestConstraintModuleArtifact(t *testing.T) {
+	data, err := os.ReadFile("packaging/selinux/docker-helper-fifo-rw-constraint.cil")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := fmt.Sprintf("%x", sha256.Sum256(data))
+	const want = "975490b5701c2d3bb1b59a6023a22d2807e42bfec4934be7c1b2691c704b3ce2"
+	if got != want {
+		t.Fatalf("constraint CIL bytes changed: got sha256 %s, want the evidenced %s", got, want)
+	}
+	// The artifact must carry exactly one constraint statement and its own
+	// evidence comments (the MNB35/MNB36 candidate provenance).
+	content := string(data)
+	if got := strings.Count(content, "(mlsconstrain"); got != 1 {
+		t.Fatalf("the artifact must carry exactly one mlsconstrain statement, found %d", got)
+	}
+	if !strings.Contains(content, "mcs_constrained_type") {
+		t.Error("the constraint must keep the mcs_constrained_type dominance predicate")
+	}
+}
+
+// TestConstraintModulePackaging verifies the packaged constraint module
+// shipping contract: the exact candidate CIL and its lifecycle library
+// ship at the RPM-only SELinux paths, the %posttrans installs the module
+// through the shared lib AFTER the docker_helper.pp module (the late
+// %posttrans order contract), and the %preun final-erase removes it while
+// upgrades never touch it.
+func TestConstraintModulePackaging(t *testing.T) {
+	nfpm, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nfpmContent := string(nfpm)
+	if !strings.Contains(nfpmContent, "src: packaging/selinux/docker-helper-fifo-rw-constraint.cil") ||
+		!strings.Contains(nfpmContent, "dst: /usr/share/selinux/docker-helper-fifo-rw-constraint.cil") {
+		t.Error("nfpm.yaml must ship the exact candidate constraint CIL at the packaged SELinux path")
+	}
+	if !strings.Contains(nfpmContent, "src: packaging/scripts/rpm/constraint-module.sh") ||
+		!strings.Contains(nfpmContent, "dst: /usr/share/docker-helper/selinux/constraint-module.sh") {
+		t.Error("nfpm.yaml must ship the constraint module lifecycle library")
+	}
+
+	posttrans, err := os.ReadFile("packaging/scripts/rpm/posttrans.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pt := string(posttrans)
+	if !strings.Contains(pt, ". \"$CONSTRAINT_LIB\"") ||
+		!strings.Contains(pt, "dh_constraint_install \"$CONSTRAINT_CIL\"") {
+		t.Error("posttrans must install the constraint module through the shared lifecycle library")
+	}
+	// Ordering: the constraint install must come after the docker_helper.pp
+	// load (constraint coverage rides the module's types) and before any
+	// restart contract decision.
+	ppLoad := strings.Index(pt, "semodule -i /usr/share/selinux/docker_helper.pp")
+	constraintInstall := strings.Index(pt, "dh_constraint_install")
+	if ppLoad == -1 || constraintInstall == -1 || constraintInstall < ppLoad {
+		t.Error("posttrans must install the constraint module after the docker_helper.pp module load")
+	}
+
+	preremove, err := os.ReadFile("packaging/scripts/rpm/preremove.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr := string(preremove)
+	if !strings.Contains(pr, "dh_constraint_remove") || !strings.Contains(pr, "$CONSTRAINT_LIB\"") {
+		t.Error("preremove must remove the constraint module through the shared lifecycle library")
+	}
+	// The upgrade early-return must stay ahead of the constraint removal:
+	// upgrades must never manufacture an absent-constraint window.
+	upgradeReturn := strings.Index(pr, "if [ \"$1\" != \"0\" ]; then")
+	constraintRemove := strings.Index(pr, "dh_constraint_remove")
+	if upgradeReturn == -1 || constraintRemove == -1 || constraintRemove < upgradeReturn {
+		t.Error("preremove must keep the upgrade early-return before the constraint-module removal")
+	}
+
+	// The lib must fail closed: collision refusal, post-install store
+	// identity, and the loaded-policy (seinfo) acceptance gate — and stay
+	// tolerant on removal absence.
+	lib, err := os.ReadFile("packaging/scripts/rpm/constraint-module.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	libContent := string(lib)
+	for _, must := range []string{
+		"DH_CONSTRAINT_PRIORITY=400",
+		"DH_CONSTRAINT_MODULE=docker-helper-fifo-rw-constraint",
+		"mlsconstrain fifo_file { read write } (h1 dom h2 or t1 != mcs_constrained_type);",
+		"dh_constraint_preinstall_collision",
+		"dh_constraint_store_identity",
+		"dh_constraint_effective_policy_check",
+		"seinfo --constrain fifo_file",
+		"semodule -X \"$DH_CONSTRAINT_PRIORITY\" -i \"$cil\"",
+		"semodule -r \"$DH_CONSTRAINT_MODULE\"",
+	} {
+		if !strings.Contains(libContent, must) {
+			t.Errorf("constraint-module.sh must contain %q", must)
+		}
+	}
+}
+
+// TestConstraintModuleBundleContract verifies build-bundle.sh stages the
+// constraint artifacts into the release tarball's selinux/ directory, so
+// the manual installer drives the same lifecycle owner as the RPM
+// scriptlets.
+func TestConstraintModuleBundleContract(t *testing.T) {
+	bundle, err := os.ReadFile("build-bundle.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(bundle)
+	for _, must := range []string{
+		"BUNDLE_DIR/selinux/docker-helper-fifo-rw-constraint.cil",
+		"BUNDLE_DIR/selinux/constraint-module.sh",
+		"selinux/docker-helper-fifo-rw-constraint.cil",
+		"selinux/constraint-module.sh",
+	} {
+		if !strings.Contains(content, must) {
+			t.Errorf("build-bundle.sh must carry %q", must)
+		}
+	}
+
+	installer, err := os.ReadFile("packaging/install-system.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	installContent := string(installer)
+	if !strings.Contains(installContent, "dh_constraint_install") {
+		t.Error("install-system.sh must install the constraint module through the shared lifecycle library")
+	}
+	uninstaller, err := os.ReadFile("packaging/uninstall-system.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uninstall := string(uninstaller); !strings.Contains(uninstall, "dh_constraint_remove") {
+		t.Error("uninstall-system.sh must remove the constraint module through the shared lifecycle library")
 	}
 }
 
@@ -2447,7 +2592,7 @@ func (e *systemScriptEnv) fakeSemoduleStateful(t *testing.T, failRemove bool) {
 	e.fakeSemodule(t, fmt.Sprintf(`#!/bin/bash
 log_file="%s"
 echo "$0 $@" >> "$log_file"
-marker="${log_file}.module-removed"
+marker="${log_file}.docker-helper-removed"
 case "$*" in
   *"-l"*) if [ ! -f "$marker" ]; then echo docker_helper; fi ;;
   *"-r"*)
@@ -2511,8 +2656,11 @@ func (e *systemScriptEnv) setLSMState(t *testing.T, aaEnabled, selinuxEnforce st
 	}
 }
 
-// writeBundledSELinuxPP creates the bundled selinux/docker_helper.pp asset in
-// the emulated bundle so the SELinux install path has an artifact to load.
+// writeBundledSELinuxPP creates the bundled selinux/ assets in the emulated
+// bundle so the SELinux install path has the policy artifacts to load: the
+// docker_helper.pp module and the separately owned FIFO constraint module
+// (its exact candidate CIL and the lifecycle library, byte-copies of the
+// shipped repo artifacts).
 func (e *systemScriptEnv) writeBundledSELinuxPP(t *testing.T) {
 	t.Helper()
 	dir := filepath.Join(e.scriptDir, "selinux")
@@ -2522,6 +2670,43 @@ func (e *systemScriptEnv) writeBundledSELinuxPP(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "docker_helper.pp"), []byte("fake-pp"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	cilData, err := os.ReadFile("packaging/selinux/docker-helper-fifo-rw-constraint.cil")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "docker-helper-fifo-rw-constraint.cil"), cilData, 0644); err != nil {
+		t.Fatal(err)
+	}
+	libData, err := os.ReadFile("packaging/scripts/rpm/constraint-module.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "constraint-module.sh"), libData, 0755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// fakeConstraintToolchain stages the constraint-module install toolchain
+// for the SELinux installation paths under test: a seinfo fake that
+// renders the shipped canonical constraint statement from the loaded
+// policy, and an emulated empty policy store root. Callers injecting a
+// different seinfo verdict override the fake afterwards.
+func (e *systemScriptEnv) fakeConstraintToolchain(t *testing.T) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(e.fakeBinDir, "seinfo"), []byte(fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$0 $@" >> "$log_file"
+echo "Constraints: 6"
+echo "   mlsconstrain fifo_file { read write } (h1 dom h2 or t1 != mcs_constrained_type);"
+exit 0
+`, e.logFile)), 0755); err != nil {
+		t.Fatal(err)
+	}
+	storeRoot := e.dest("etc/selinux/targeted")
+	if err := os.MkdirAll(storeRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	e.env = append(e.env, "DH_CONSTRAINT_STORE_ROOT="+storeRoot)
 }
 
 // calls returns the lifecycle tool calls recorded so far, in order.
@@ -2796,6 +2981,7 @@ exit 0
 		"SYSTEMCTL=" + filepath.Join(e.fakeBinDir, "systemctl"),
 		"DOCKER=" + filepath.Join(e.fakeBinDir, "docker"),
 		"SELINUX_PP_DEST=" + e.dest("usr/share/selinux/docker_helper.pp"),
+		"SELINUX_CONSTRAINT_CIL_DEST=" + e.dest("usr/share/selinux/docker-helper-fifo-rw-constraint.cil"),
 		"AA_ENABLED_PATH=" + e.aaEnabledPath,
 		"SELINUX_ENFORCE_PATH=" + e.selinuxEnforcePath,
 	}
@@ -2853,6 +3039,8 @@ func newSystemUninstallScriptEnv(t *testing.T) *systemScriptEnv {
 		"RUNTIME_DIR=" + e.dest("run/docker-helper"),
 		"AA_PARSER=" + filepath.Join(e.fakeBinDir, "apparmor_parser"),
 		"SELINUX_PP_DEST=" + e.dest("usr/share/selinux/docker_helper.pp"),
+		"SELINUX_CONSTRAINT_CIL_DEST=" + e.dest("usr/share/selinux/docker-helper-fifo-rw-constraint.cil"),
+		"SELINUX_CONSTRAINT_LIB=" + e.dest("usr/share/docker-helper/selinux/constraint-module.sh"),
 		"SYSTEMCTL=" + filepath.Join(e.fakeBinDir, "systemctl"),
 		"ROOTLESSKIT_BIN=" + e.dest("usr/bin/rootlesskit"),
 		"BINDFS_BIN=" + e.dest("usr/bin/bindfs"),
@@ -3886,6 +4074,22 @@ func TestInstallSystemSelectsApparmor(t *testing.T) {
 	}
 }
 
+// constraintStoreFakeBody is the semodule-fake snippet shared by the
+// SELinux-path script fixtures: a constraint-module load materializes the
+// store blob the lifecycle library's identity verification reads back
+// (the bzip2-compressed installed source at the emulated store root).
+const constraintStoreFakeBody = `case "$*" in
+  *"docker-helper-fifo-rw-constraint"*)
+    if [ -n "${DH_CONSTRAINT_STORE_ROOT:-}" ]; then
+      blob="$DH_CONSTRAINT_STORE_ROOT/active/modules/400/docker-helper-fifo-rw-constraint/cil"
+      mkdir -p "$(dirname "$blob")"
+      for a in "$@"; do last="$a"; done
+      bzip2 -c "$last" > "$blob"
+    fi
+    ;;
+esac
+`
+
 // TestInstallSystemSelectsSelinux verifies the SELinux-enforcing host selects
 // the SELinux path: docker_helper module loaded with semodule -i from the
 // bundled artifact, the artifact copied to the stable path, exact narrow
@@ -3894,10 +4098,11 @@ func TestInstallSystemSelectsSelinux(t *testing.T) {
 	env := newSystemInstallScriptEnv(t)
 	env.setLSMState(t, "N", "1")
 	env.writeBundledSELinuxPP(t)
+	env.fakeConstraintToolchain(t)
 	env.fakeSemodule(t, fmt.Sprintf(`#!/bin/bash
 log_file="%s"
 echo "$0 $@" >> "$log_file"
-exit 0
+`+constraintStoreFakeBody+`exit 0
 `, env.logFile))
 	env.fakeRestorecon(t, fmt.Sprintf(`#!/bin/bash
 log_file="%s"
@@ -3912,13 +4117,28 @@ exit 0
 	}
 
 	semoduleSeen := false
+	constraintSeen := false
+	seinfoSeen := false
 	restoreconSeen := false
 	for _, c := range env.calls(t) {
 		if strings.Contains(c, "semodule") {
-			semoduleSeen = true
-			if !strings.Contains(c, "-i") || !strings.Contains(c, "docker_helper.pp") {
-				t.Errorf("semodule must load the bundled docker_helper.pp with -i: %q", c)
+			if strings.Contains(c, "constraint") {
+				// The separately owned constraint module installs at its
+				// fixed priority from the packaged CIL.
+				constraintSeen = true
+				if !strings.Contains(c, "-X 400") || !strings.Contains(c, "-i") ||
+					!strings.Contains(c, "docker-helper-fifo-rw-constraint.cil") {
+					t.Errorf("the constraint module must install at priority 400 from the packaged CIL: %q", c)
+				}
+			} else {
+				semoduleSeen = true
+				if !strings.Contains(c, "-i") || !strings.Contains(c, "docker_helper.pp") {
+					t.Errorf("semodule must load the bundled docker_helper.pp with -i: %q", c)
+				}
 			}
+		}
+		if strings.Contains(c, "/seinfo ") || strings.HasSuffix(c, "/seinfo") {
+			seinfoSeen = true
 		}
 		if strings.Contains(c, "restorecon") {
 			first := c
@@ -3936,6 +4156,12 @@ exit 0
 	if !semoduleSeen {
 		t.Error("semodule -i must be called on the SELinux path")
 	}
+	if !constraintSeen {
+		t.Error("the constraint module install must run on the SELinux path")
+	}
+	if !seinfoSeen {
+		t.Error("the constraint module's effective-policy verification must query the loaded policy through seinfo")
+	}
 	if !restoreconSeen {
 		t.Error("restorecon must be applied on the SELinux path")
 	}
@@ -3943,9 +4169,12 @@ exit 0
 	if _, err := os.Stat(env.dest("etc/apparmor.d/docker-helper-system")); !os.IsNotExist(err) {
 		t.Error("AppArmor profile must not be installed on the SELinux path")
 	}
-	// The policy artifact must be copied to the stable path.
+	// The policy artifacts must be copied to the stable paths.
 	if _, err := os.Stat(env.dest("usr/share/selinux/docker_helper.pp")); err != nil {
 		t.Error("SELinux policy artifact must be installed to the stable path")
+	}
+	if _, err := os.Stat(env.dest("usr/share/selinux/docker-helper-fifo-rw-constraint.cil")); err != nil {
+		t.Error("the constraint module artifact must be installed to the stable SELinux path")
 	}
 }
 
@@ -3996,10 +4225,11 @@ func TestInstallSystemSelinuxWithBindfsProceeds(t *testing.T) {
 	env := newSystemInstallScriptEnv(t)
 	env.setLSMState(t, "N", "1")
 	env.writeBundledSELinuxPP(t)
+	env.fakeConstraintToolchain(t)
 	env.fakeSemodule(t, fmt.Sprintf(`#!/bin/bash
 log_file="%s"
 echo "$0 $@" >> "$log_file"
-exit 0
+`+constraintStoreFakeBody+`exit 0
 `, env.logFile))
 	env.fakeRestorecon(t, fmt.Sprintf(`#!/bin/bash
 log_file="%s"
@@ -4171,8 +4401,9 @@ func TestInstallSystemSelinuxRestoreconExact(t *testing.T) {
 	env := newSystemInstallScriptEnv(t)
 	env.setLSMState(t, "N", "1")
 	env.writeBundledSELinuxPP(t)
+	env.fakeConstraintToolchain(t)
 	env.fakeSemodule(t, `#!/bin/bash
-exit 0
+`+constraintStoreFakeBody+`exit 0
 `)
 	env.fakeRestorecon(t, fmt.Sprintf(`#!/bin/bash
 log_file="%s"
@@ -4299,10 +4530,11 @@ func TestInstallSystemSelinuxLibselinuxFloor(t *testing.T) {
 		env := newSystemInstallScriptEnv(t)
 		env.setLSMState(t, "N", "1")
 		env.writeBundledSELinuxPP(t)
+		env.fakeConstraintToolchain(t)
 		env.fakeSemodule(t, fmt.Sprintf(`#!/bin/bash
 log_file="%s"
 echo "$0 $@" >> "$log_file"
-exit 0
+`+constraintStoreFakeBody+`exit 0
 `, env.logFile))
 		env.fakeRestorecon(t, fmt.Sprintf(`#!/bin/bash
 log_file="%s"
@@ -6974,9 +7206,12 @@ func writeFakeSemodule(t *testing.T, fakeDir, logFile string, failInstall bool, 
 echo "$0 $@" >> "%s"
 case "$*" in
   *"-l"*)
-    if [ "${SEMODULE_MODULE_PRESENT:-true}" = "true" ] && [ ! -f "%s.module-removed" ]; then
+    if [ "${SEMODULE_MODULE_PRESENT:-true}" = "true" ] && [ ! -f "%s.docker-helper-removed" ]; then
       echo "container"
       echo "docker_helper"
+    fi
+    if [ "${CONSTRAINT_MODULE_PRESENT:-false}" = "true" ] && [ ! -f "%s.constraint-removed" ]; then
+      echo "docker-helper-fifo-rw-constraint"
     fi
     exit 0
     ;;
@@ -6985,6 +7220,23 @@ case "$*" in
       echo "semodule: Failed to install module" >&2
       exit 1
     fi
+    # A constraint-module load (the separate priority-400 CIL) materializes
+    # the store blob the identity verification reads back: the blob is the
+    # bzip2-compressed installed source.
+    case "$*" in
+      *"docker-helper-fifo-rw-constraint"*)
+        if [ "${CONSTRAINT_SEMODULE_FAIL:-false}" = "true" ]; then
+          echo "semodule: Failed to install the constraint module" >&2
+          exit 1
+        fi
+        if [ -n "${DH_CONSTRAINT_STORE_ROOT:-}" ]; then
+          blob="$DH_CONSTRAINT_STORE_ROOT/active/modules/400/docker-helper-fifo-rw-constraint/cil"
+          mkdir -p "$(dirname "$blob")"
+          for a in "$@"; do last="$a"; done
+          bzip2 -c "$last" > "$blob"
+        fi
+        ;;
+    esac
     exit 0
     ;;
   *"-r"*)
@@ -6992,12 +7244,15 @@ case "$*" in
       echo "semodule: Failed to remove module" >&2
       exit 1
     fi
-    : > "%s.module-removed"
+    case "$*" in
+      *"docker-helper-fifo-rw-constraint"*) : > "%s.constraint-removed" ;;
+      *) : > "%s.docker-helper-removed" ;;
+    esac
     exit 0
     ;;
   *) exit 0 ;;
 esac
-`, logFile, logFile, failInstallStr, failRemoveStr, logFile)
+`, logFile, logFile, logFile, failInstallStr, failRemoveStr, logFile, logFile)
 	if err := os.WriteFile(filepath.Join(fakeDir, "semodule"), []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -7148,6 +7403,11 @@ func runScript(t *testing.T, scriptPath, fakeDir, logFile string, args []string,
 	modified = strings.ReplaceAll(modified, "/usr/bin/newuidmap", "$NEWUIDMAP_BIN")
 	modified = strings.ReplaceAll(modified, "/usr/bin/newgidmap", "$NEWGIDMAP_BIN")
 	modified = strings.ReplaceAll(modified, "/usr/bin/nsenter", "$NSENTER_BIN")
+	// The FIFO constraint module paths: the packaged production paths are
+	// resolved through the env overrides (the staged constraintModule test
+	// fixtures below).
+	modified = strings.ReplaceAll(modified, "/usr/share/docker-helper/selinux/constraint-module.sh", "$CONSTRAINT_LIB")
+	modified = strings.ReplaceAll(modified, "/usr/share/selinux/docker-helper-fifo-rw-constraint.cil", "$CONSTRAINT_CIL")
 	modifiedFile := filepath.Join(scriptDir, "modified.sh")
 	if err := os.WriteFile(modifiedFile, []byte(modified), 0755); err != nil {
 		t.Fatal(err)
@@ -7173,6 +7433,47 @@ echo "$0 $@" >> "%s"
 }
 exit 0
 `, logFile)), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// FIFO constraint module fixtures: the packaged lifecycle library and
+	// the exact candidate CIL staged at their emulated production paths
+	// (the scriptlets under test reference the packaged paths), a seinfo
+	// fake that renders the shipped constraint statement from the loaded
+	// policy, and an emulated empty policy store root. Tests inject store
+	// state or override the fakes explicitly.
+	constraintLib := filepath.Join(tmpDir, "usr", "share", "docker-helper", "selinux", "constraint-module.sh")
+	if err := os.MkdirAll(filepath.Dir(constraintLib), 0755); err != nil {
+		t.Fatal(err)
+	}
+	libData, err := os.ReadFile("packaging/scripts/rpm/constraint-module.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(constraintLib, libData, 0755); err != nil {
+		t.Fatal(err)
+	}
+	constraintCil := filepath.Join(tmpDir, "usr", "share", "selinux", "docker-helper-fifo-rw-constraint.cil")
+	if err := os.MkdirAll(filepath.Dir(constraintCil), 0755); err != nil {
+		t.Fatal(err)
+	}
+	cilData, err := os.ReadFile("packaging/selinux/docker-helper-fifo-rw-constraint.cil")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(constraintCil, cilData, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeDir, "seinfo"), []byte(fmt.Sprintf(`#!/bin/sh
+echo "$0 $@" >> "%s"
+echo "Constraints: 6"
+echo "   mlsconstrain fifo_file { read write } (h1 dom h2 or t1 != mcs_constrained_type);"
+exit 0
+`, logFile)), 0755); err != nil {
+		t.Fatal(err)
+	}
+	storeRoot := filepath.Join(tmpDir, "etc", "selinux", "targeted")
+	if err := os.MkdirAll(storeRoot, 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -7256,6 +7557,9 @@ exit 0
 		"STATE_DIR="+filepath.Join(tmpDir, "var", "lib", "docker-helper"),
 		"RUNTIME_DIR="+filepath.Join(tmpDir, "run", "docker-helper"),
 		"TEST_CONFIG_DIR="+filepath.Join(tmpDir, "etc", "docker-helper"),
+		"CONSTRAINT_LIB="+constraintLib,
+		"CONSTRAINT_CIL="+constraintCil,
+		"DH_CONSTRAINT_STORE_ROOT="+storeRoot,
 		"PROVISION_BUILDER="+filepath.Join(fakeDir, "provision-builder"),
 	)
 	// Third-party binary fixtures present by default (the distro owns them,
@@ -8181,6 +8485,23 @@ func TestBuildSelinuxPolicyHelperProducesPP(t *testing.T) {
 	}
 }
 
+// constraintSeinfoIdx returns the index of the first seinfo call recorded
+// in the lifecycle call log, or -1 when the loaded-policy constraint
+// verification never ran. Its basename match covers the fixture seinfo
+// fake path only; no other tool is named seinfo.
+func constraintSeinfoIdx(calls []string) int {
+	for i, c := range calls {
+		first := c
+		if idx := strings.IndexByte(c, ' '); idx >= 0 {
+			first = c[:idx]
+		}
+		if strings.HasSuffix(first, "/seinfo") {
+			return i
+		}
+	}
+	return -1
+}
+
 // TestRpmPostinstallSelinuxDefersModuleLoad verifies the RPM scriptlet
 // ordering contract (P4-B1.2): on a SELinux enforcing fresh install the
 // %post records the was-active decision for the posttrans scriptlet and does NOT load
@@ -8535,16 +8856,18 @@ func TestRpmPosttrans(t *testing.T) {
 	cases := []struct {
 		name string
 
-		selinuxEnforcing bool
-		containerPresent bool
-		failInstall      bool
-		failRestart      bool
-		wasActive        bool
-
-		wantCode           int
-		wantModuleLoad     bool
-		wantRestart        bool
-		wantStatePreserved bool
+		selinuxEnforcing    bool
+		containerPresent    bool
+		failInstall         bool
+		failConstraint      bool
+		failRestart         bool
+		wasActive           bool
+		wantCode            int
+		wantModuleLoad      bool
+		wantRestart         bool
+		wantStatePreserved  bool
+		wantConstraintLoad  bool
+		wantConstraintError bool
 	}{
 		{
 			name:             "selinux inactive: silent no-op",
@@ -8552,20 +8875,33 @@ func TestRpmPosttrans(t *testing.T) {
 			wantCode:         0,
 		},
 		{
-			name:             "fresh install: module load and relabels, no restart",
-			selinuxEnforcing: true,
-			containerPresent: true,
-			wantCode:         0,
-			wantModuleLoad:   true,
+			name:               "fresh install: module load and relabels, no restart",
+			selinuxEnforcing:   true,
+			containerPresent:   true,
+			wantCode:           0,
+			wantModuleLoad:     true,
+			wantConstraintLoad: true,
 		},
 		{
-			name:             "active daemon: restart after module load and relabels",
-			selinuxEnforcing: true,
-			containerPresent: true,
-			wasActive:        true,
-			wantCode:         0,
-			wantModuleLoad:   true,
-			wantRestart:      true,
+			name:               "active daemon: restart after module load and relabels",
+			selinuxEnforcing:   true,
+			containerPresent:   true,
+			wasActive:          true,
+			wantCode:           0,
+			wantModuleLoad:     true,
+			wantRestart:        true,
+			wantConstraintLoad: true,
+		},
+		{
+			name:                "constraint install failure: loud failure, no restart, decision preserved",
+			selinuxEnforcing:    true,
+			containerPresent:    true,
+			failConstraint:      true,
+			wasActive:           true,
+			wantCode:            1,
+			wantModuleLoad:      true,
+			wantConstraintError: true,
+			wantStatePreserved:  true,
 		},
 		{
 			name:               "module load failure: loud failure, no restart, decision preserved",
@@ -8641,6 +8977,9 @@ func TestRpmPosttrans(t *testing.T) {
 			if tc.failRestart {
 				env = append(env, "RESTART_FAIL=true")
 			}
+			if tc.failConstraint {
+				env = append(env, "CONSTRAINT_SEMODULE_FAIL=true")
+			}
 
 			_, stderr, code := runScript(t, "packaging/scripts/rpm/posttrans.sh", fakeDir, logFile,
 				nil, true, env)
@@ -8664,11 +9003,13 @@ func TestRpmPosttrans(t *testing.T) {
 
 			calls := readLifecycleScriptCalls(t, logFile)
 
-			loadIdx, restoreconIdx, restartIdx := -1, -1, -1
+			loadIdx, constraintIdx, restoreconIdx, restartIdx := -1, -1, -1, -1
 			for i, c := range calls {
 				switch {
-				case strings.Contains(c, "semodule") && strings.Contains(c, "-i"):
+				case strings.Contains(c, "semodule") && strings.Contains(c, "-i") && strings.Contains(c, "docker_helper.pp"):
 					loadIdx = i
+				case strings.Contains(c, "semodule") && strings.Contains(c, "-X 400"):
+					constraintIdx = i
 				case strings.Contains(c, "restorecon"):
 					if restoreconIdx < 0 {
 						restoreconIdx = i
@@ -8687,6 +9028,24 @@ func TestRpmPosttrans(t *testing.T) {
 				if tc.wantCode == 0 && restoreconIdx < 0 {
 					t.Error("posttrans must apply the exact restorecon set after a successful module load")
 				}
+				// The separately owned constraint module installs after the
+				// shipped module and before the restart contract.
+				if tc.wantCode == 0 {
+					if constraintIdx < 0 {
+						t.Error("posttrans must install the FIFO constraint module at priority 400")
+					} else if loadIdx < 0 || constraintIdx < loadIdx || (tc.wantRestart && restartIdx >= 0 && constraintIdx > restartIdx) {
+						t.Errorf("the constraint install must run after the module load and before the restart (load=%d constraint=%d restart=%d)", loadIdx, constraintIdx, restartIdx)
+					}
+					if constraintSeinfoIdx(calls) < 0 {
+						t.Error("posttrans must verify the loaded-policy constraint through seinfo")
+					}
+				}
+			}
+			if tc.wantConstraintLoad && constraintIdx < 0 {
+				t.Error("posttrans must attempt the FIFO constraint module install at priority 400")
+			}
+			if tc.wantConstraintError && !strings.Contains(stderr, "docker-helper-fifo-rw-constraint") {
+				t.Error("a constraint install failure must be loud under the constraint scope prefix")
 			}
 			if tc.wantRestart {
 				if restartIdx < 0 {
@@ -8730,6 +9089,28 @@ func TestRpmPreremoveFinalEraseSELinux(t *testing.T) {
 	}
 	if !found {
 		t.Error("must call semodule -r docker_helper on final erase")
+	}
+
+	// With the separately owned constraint module present, the final erase
+	// removes it too, through the same tolerant removal contract.
+	fakeDir2, logFile2 := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir2, logFile2, true, true)
+	writeFakeApparmorParser(t, fakeDir2, logFile2, false, false)
+	writeFakeSemodule(t, fakeDir2, logFile2, false, false)
+	_, _, code = runScript(t, "packaging/scripts/rpm/preremove.sh", fakeDir2, logFile2,
+		[]string{"0"}, true, []string{"CONSTRAINT_MODULE_PRESENT=true"})
+	if code != 0 {
+		t.Fatalf("rpm preun final erase with the constraint module should exit 0, got %d", code)
+	}
+	constraintSeen := false
+	for _, c := range readLifecycleScriptCalls(t, logFile2) {
+		if strings.Contains(c, "semodule") && strings.Contains(c, "-r") &&
+			strings.Contains(c, "docker-helper-fifo-rw-constraint") {
+			constraintSeen = true
+		}
+	}
+	if !constraintSeen {
+		t.Error("final erase must remove the docker-helper-fifo-rw-constraint module")
 	}
 }
 

@@ -293,6 +293,15 @@ func wrapperRunPipeline(reader wrapperOwnContextReader, seam wrapperInspectionSy
 	if err := wrapperRoleCheck(role, wrapperWorkloadDomain); err != nil {
 		return &wrapperRefuseError{cause: fmt.Errorf("the workload role authorization check refused the run: %w", err)}
 	}
+	// The wrapper's second policy-shape gate: the loaded policy must carry
+	// the shipped fifo_file read/write isolation constraint (the same
+	// authority chain wrapperRoleCheck uses — the kernel-deciding loaded
+	// policy, queried through the seam-resolved seinfo). Without it the
+	// concurrent operation categories would not isolate their FIFO pipes,
+	// so an unverifiable or missing constraint refuses the run closed.
+	if err := wrapperFifoConstraintCheck(); err != nil {
+		return &wrapperRefuseError{cause: fmt.Errorf("the FIFO constraint admission gate refused the run: %w", err)}
+	}
 	if err := wrapperInspectPreparedDev(seam, devPrepOpDir(inv.bundleOpID), category); err != nil {
 		return err
 	}

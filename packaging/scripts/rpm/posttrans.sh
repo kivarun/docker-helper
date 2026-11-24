@@ -18,6 +18,15 @@ set -eu
 # the container-policy precondition and never restarts the service on a
 # failed load. AppArmor and MAC-less hosts exit immediately: their behavior
 # is owned entirely by %post (unchanged).
+#
+# The FIFO read/write constraint module (docker-helper-fifo-rw-constraint,
+# priority 400) is installed AFTER the docker_helper.pp module: it carries
+# its own separately owned CIL artifact, refuses collisions against a
+# non-identical resident module, verifies its store identity, and requires
+# the exact constraint statement to be verifiable in the LOADED policy
+# (seinfo) before this scriptlet may declare success. Its own helper
+# library lives at the packaged constraint-module path, so posttrans and
+# the uninstaller drive one lifecycle owner.
 
 # Live-system guard (same as %post).
 if [ ! -d /run/systemd/system ]; then
@@ -47,6 +56,17 @@ if ! semodule -i /usr/share/selinux/docker_helper.pp; then
   echo "error: semodule failed to load /usr/share/selinux/docker_helper.pp; docker-helper.service was not restarted" >&2
   exit 1
 fi
+
+# The separately owned FIFO read/write constraint module (same %posttrans
+# contract: loud failure, no restart). The constraint install library is
+# sourced from its packaged path; a failure propagates through its
+# non-zero exit and aborts this scriptlet under set -e before any relabel
+# or restart runs.
+CONSTRAINT_LIB=/usr/share/docker-helper/selinux/constraint-module.sh
+CONSTRAINT_CIL=/usr/share/selinux/docker-helper-fifo-rw-constraint.cil
+
+. "$CONSTRAINT_LIB"
+dh_constraint_install "$CONSTRAINT_CIL"
 
 if command -v restorecon >/dev/null 2>&1; then
   restorecon /usr/bin/docker-helper || true

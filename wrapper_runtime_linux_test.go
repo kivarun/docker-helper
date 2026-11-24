@@ -42,9 +42,10 @@ type wrapperExecRecord struct {
 // withWrapperRuntimeSeams swaps the runtime-path value, the exec seam
 // (recording, optionally failing), and the commit rename (optionally
 // failing). Package-global seams; restored via t.Cleanup; never used
-// with t.Parallel. The roletype authorization check rides an
-// always-allow stub here (the run fixtures carry no seinfo-backed
-// loaded policy); the dedicated role-check tests override it.
+// with t.Parallel. The roletype authorization check and the FIFO
+// constraint admission gate ride always-allow stubs here (the run
+// fixtures carry no seinfo-backed loaded policy); the dedicated
+// role-check and constraint tests override them.
 func withWrapperRuntimeSeams(t *testing.T, execErr error, renameErr error) *wrapperExecRecord {
 	t.Helper()
 	rec := &wrapperExecRecord{err: execErr}
@@ -69,9 +70,12 @@ func withWrapperRuntimeSeams(t *testing.T, execErr error, renameErr error) *wrap
 		}
 		return nil
 	}
+	origFifoConstraint := wrapperFifoConstraintCheck
+	wrapperFifoConstraintCheck = func() error { return nil }
 	t.Cleanup(func() {
 		wrapperRealRuntimePath, wrapperExecRuntime, wrapperCommitRename = origPath, origExec, origRename
 		wrapperRoleCheck = origRoleCheck
+		wrapperFifoConstraintCheck = origFifoConstraint
 	})
 	return rec
 }
@@ -1077,6 +1081,37 @@ func TestWrapperRunInspectionRefusalGatesExec(t *testing.T) {
 				t.Fatal("the real runtime must never be invoked past a refused inspection")
 			}
 		})
+	}
+}
+
+// TestWrapperFifoConstraintGateRefusesBeforeCommit proves the FIFO
+// constraint admission gate is a pre-commit refusal in the REAL run
+// pipeline: a refused loaded-policy constraint aborts the run before any
+// spec rewrite/commit and before the real runtime is exec'd, with the
+// original spec untouched.
+func TestWrapperFifoConstraintGateRefusesBeforeCommit(t *testing.T) {
+	bundleDir := withWrapperBundleTree(t)
+	if err := os.WriteFile(filepath.Join(bundleDir, "config.json"), wrapperSpecFixture(), 0o644); err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	fs := wrapperPrepareFixture(t, wrapperTestOpID, 7, false)
+	rec := withWrapperRuntimeSeams(t, nil, nil)
+	// Overriding the always-allow runtime-seam stub makes the constraint
+	// refusal observable at the pipeline boundary.
+	wrapperFifoConstraintCheck = func() error {
+		return errors.New("the loaded policy does not carry the shipped constraint")
+	}
+	err := wrapperMainWithSeams(wrapperRunArgv(bundleDir), nil, fakeWrapperOwnContext{raw: wrapperOwnContextRaw(7, "\n")}, fs)
+	var refuse *wrapperRefuseError
+	if !errors.As(err, &refuse) || !strings.Contains(err.Error(), "FIFO constraint admission gate refused") {
+		t.Fatalf("want the typed constraint refusal, got %v", err)
+	}
+	specAfter, err := os.ReadFile(filepath.Join(bundleDir, "config.json"))
+	if err != nil || string(specAfter) != string(wrapperSpecFixture()) {
+		t.Fatal("the spec must remain untouched when the constraint gate refuses")
+	}
+	if rec.calls != 0 {
+		t.Fatal("the real runtime must never be invoked past a refused constraint gate")
 	}
 }
 
