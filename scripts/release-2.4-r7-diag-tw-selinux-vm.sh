@@ -207,12 +207,22 @@ fi
 
 set +e
 # The diag VM reboots mid-diagnosis (observed ~55s after boot; runs
-# 39006788899+). The guest script is phased with state markers under
-# /tmp/r7-diag-state and the evidence lives in a tmpfs dir, so each
-# invocation's evidence is collected immediately and the invocation is
-# repeated over fresh SSH sessions until the verdict appears.
+# 39006788899+). The guest script is phased with state markers (the
+# MNB38 lifecycle matrix keeps its markers on the persistent /var/lib
+# because Tumbleweed mounts /tmp as tmpfs) and the evidence lives in a
+# tmpfs dir, so each invocation's evidence is collected immediately and
+# the invocation is repeated over fresh SSH sessions until the verdict
+# appears.
+ATTEMPTS=3
+if [ "$R7_MODE" = "mnb38" ]; then
+  # The lifecycle matrix is six sequential package transactions; with the
+  # observed boot-length interruption each attempt reliably completes only
+  # a couple of phases, so the re-entry budget must fit the matrix, not a
+  # single-shot session.
+  ATTEMPTS=8
+fi
 VERDICT=""
-for attempt in 1 2 3; do
+for attempt in $(seq 1 "$ATTEMPTS"); do
   if [ "$attempt" -gt 1 ]; then
     log "re-entry: waiting for SSH after the observed mid-diagnosis reboot"
     vm_wait_ssh

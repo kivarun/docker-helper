@@ -72,13 +72,14 @@ UNIT=docker-helper-builder.service
 mkdir -p "$EVIDENCE_DIR"
 
 # Re-entry: the disposable guest has an observed mid-run reboot (~55s after
-# first boot on this image family), and the diagnosis orchestrator re-runs
-# this script per attempt. The matrix is therefore STATE-MARKED: a phase
-# that recorded PASS is not re-run (a re-run would be a second fresh state
-# where 'already installed' means something else), and an interrupted
-# lifecycle resumes at its first unfinished phase instead of replaying the
-# whole matrix against a half-updated guest.
-STATE_DIR=/tmp/r7-mnb38-state
+# first boot on this image family), and Tumbleweed mounts /tmp as tmpfs, so
+# the diagnosis orchestrator re-runs this script per attempt and re-entry
+# state must live PERSISTENTLY. The matrix is therefore STATE-MARKED under
+# /var/lib: a phase that recorded PASS is not re-run (a re-run would be a
+# second transaction where 'already installed' means something else), and
+# an interrupted lifecycle resumes at its first unfinished phase instead of
+# replaying the whole matrix against a half-updated guest.
+STATE_DIR=/var/lib/docker-helper-mnb38-state
 PHASE_FILE="$STATE_DIR/phase-done"
 mark() { mkdir -p "$STATE_DIR"; printf '%s\n' "$1" >> "$PHASE_FILE"; }
 done_phase() {
@@ -225,23 +226,25 @@ zypper --non-interactive --gpg-auto-import-keys refresh >/dev/null 2>&1 || true
 # RPM transaction exiting zero is NOT the same as every scriptlet
 # succeeding, so 'scriptlet failed' lines are hunted separately.
 if rpm -q docker-helper >/dev/null 2>&1; then
-  # Re-entry: the package is already installed. If the constraint module is
-  # missing at our priority, the PRIOR fresh install aborted inside its
-  # %posttrans (recorded; the accepted recovery contract). The recovery
-  # transaction must succeed WITHOUT a scriptlet failure, the store must
-  # then carry the byte-exact module, and the shipped scriptlet must be the
-  # one installing it.
-  say "P1 re-entry: docker-helper already installed (prior attempt persisted); recovering the constraint install"
-  set +e
-  RECOVERY_OUT="$(rpm -Uvh --replacepkgs "$RPM" 2>&1)"
-  RECOVERY_RC=$?
-  set -e
-  printf '%s\n' "$RECOVERY_OUT" > "$EVIDENCE_DIR/p1-recovery-rpm.log"
-  ev p1-recovery.rc "$RECOVERY_RC"
-  [ "$RECOVERY_RC" = "0" ] || { tail -20 "$EVIDENCE_DIR/p1-recovery-rpm.log"; fail "the P1 re-entry recovery transaction failed (rc $RECOVERY_RC)"; }
-  printf '%s\n' "$RECOVERY_OUT" | grep -Eq 'scriptlet failed' \
-    && fail "the recovery %posttrans must succeed (the explicit lifecycle deps make the abort class impossible on the prepared guest)" \
-    || true
+  # Re-entry: the package is already installed. A transaction is run ONLY
+  # when the constraint store is missing (the prior fresh install aborted
+  # inside its %posttrans — the recorded P1 recovery contract); an already
+  # healthy installation goes straight to the identity assertions.
+  if [ -z "$(store_blobs)" ]; then
+    say "P1 re-entry: docker-helper installed without the constraint store; running the recorded recovery transaction"
+    set +e
+    RECOVERY_OUT="$(rpm -Uvh --replacepkgs "$RPM" 2>&1)"
+    RECOVERY_RC=$?
+    set -e
+    printf '%s\n' "$RECOVERY_OUT" > "$EVIDENCE_DIR/p1-recovery-rpm.log"
+    ev p1-recovery.rc "$RECOVERY_RC"
+    [ "$RECOVERY_RC" = "0" ] || { tail -20 "$EVIDENCE_DIR/p1-recovery-rpm.log"; fail "the P1 re-entry recovery transaction failed (rc $RECOVERY_RC)"; }
+    printf '%s\n' "$RECOVERY_OUT" | grep -Eq 'scriptlet failed' \
+      && fail "the recovery %posttrans must succeed (the explicit lifecycle deps make the abort class impossible on the prepared guest)" \
+      || true
+  else
+    say "P1 re-entry: docker-helper already installed with the constraint store present; identity assertions only"
+  fi
 else
   set +e
   ZYPPER_OUT="$(zypper --non-interactive install -y --allow-unsigned-rpm "$RPM" 2>&1)"
