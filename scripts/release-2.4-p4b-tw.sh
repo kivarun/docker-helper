@@ -328,7 +328,8 @@ rpm -Uvh --replacepkgs "$RPM" >/dev/null || fail "idempotent rpm -U --replacepkg
 assert_builder_unit_enabled
 say "P2 asserts OK"
 
-# --- P2b: failed SELinux module load must not touch the running daemon --------
+# --- P2b (SUPERSEDED assertions): failed SELinux module load forces the --------
+# fail-closed stop, not the retired 'daemon untouched' contract -----------------
 
 # The enforcing-SELinux `docker-helper init` relabels the exact docker CLI
 # executable the daemon will exec (applyDeploymentSELinuxRelabel), so the
@@ -380,12 +381,21 @@ printf '%s\n' "$POISON_OUT" > "$EVIDENCE_DIR/failed-semodule-rpm.txt"
 # refusal, never the transaction exit code.
 printf '%s\n' "$POISON_OUT" | grep -q "scriptlet failed" \
   || fail "rpm must report the failing scriptlet (actual failure reporting is recorded; never claimed as rollback)"
-printf '%s\n' "$POISON_OUT" | grep -q "docker-helper.service was not restarted" \
-  || fail "the failed module load must refuse loudly without restarting the daemon (the shipped %posttrans contract)"
-[ "$(systemctl is-active "$MAIN_UNIT" 2>/dev/null || true)" = "active" ] \
-  || fail "the failed module load must not stop the active daemon"
-[ "$(systemctl show "$MAIN_UNIT" -p MainPID --value)" = "$OLD_PID" ] \
-  || fail "the failed module load must not restart the active daemon"
+# MNB37c: the historical P2b contract — "was not restarted" / "must not
+# stop the active daemon" / same MainPID — is SUPERSEDED by the
+# fail-closed upgrade contract (MNB37a/MNB37b/MNB37c): every %posttrans
+# failure before the constraint module's effective-policy acceptance
+# stops BOTH backends and VERIFIES the stop. The historical evidence in
+# $EVIDENCE_DIR is preserved; this block asserts the superseding
+# contract instead of the retired must-not-stop form.
+printf '%s\n' "$POISON_OUT" | grep -q "stopping the running backends" \
+  || fail "the failed module load must route through the centralized fail-closed abort (the shipped %posttrans contract)"
+printf '%s\n' "$POISON_OUT" | grep -q "both backends confirmed stopped (verified)" \
+  || fail "the failed module load must stop both backends and verify the stop"
+for unit in "$MAIN_UNIT" "$UNIT"; do
+  [ "$(systemctl is-active "$unit" 2>/dev/null || true)" != "active" ] \
+    || fail "the failed module load must leave $unit stopped (fail-closed upgrade contract)"
+done
 [ -f /run/docker-helper-rpm/posttrans-state ] \
   || fail "a failed %posttrans must not consume the deferred-restart decision"
 assert_selinux_module_loaded

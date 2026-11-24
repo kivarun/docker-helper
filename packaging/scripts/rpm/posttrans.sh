@@ -107,10 +107,19 @@ CONSTRAINT_CIL=/usr/share/selinux/docker-helper-fifo-rw-constraint.cil
 if [ ! -r "$CONSTRAINT_LIB" ]; then
   stop_backends_and_fail "the constraint module lifecycle library is missing at $CONSTRAINT_LIB"
 fi
-if ! . "$CONSTRAINT_LIB"; then
+# The library is sourced ONLY inside isolated child shells: a sourcing
+# failure must be caught here as an ordinary non-zero status, never
+# terminate this scriptlet directly. In the parent shell the same failure
+# would bypass the centralized abort (a syntax error aborts the shell
+# itself; a runtime error inside the sourced file, including one that
+# re-enables errexit, ends the scriptlet outside any if-guard), leaving
+# the running backends un-stopped. Each child prints its own diagnostics
+# to stderr, and the outer process maps the two failure stages to their
+# exact abort reasons.
+if ! sh -c 'set -e; . "$1"' sh "$CONSTRAINT_LIB"; then
   stop_backends_and_fail "the constraint module lifecycle library failed to source from $CONSTRAINT_LIB"
 fi
-if ! dh_constraint_install "$CONSTRAINT_CIL"; then
+if ! sh -c 'set -e; . "$1" && dh_constraint_install "$2"' sh "$CONSTRAINT_LIB" "$CONSTRAINT_CIL"; then
   stop_backends_and_fail "the FIFO constraint module install failed (collision, store identity, or loaded-policy verification)"
 fi
 

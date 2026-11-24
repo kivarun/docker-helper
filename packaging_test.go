@@ -372,9 +372,14 @@ func TestConstraintModulePackaging(t *testing.T) {
 		t.Fatal(err)
 	}
 	pt := string(posttrans)
-	if !strings.Contains(pt, ". \"$CONSTRAINT_LIB\"") ||
-		!strings.Contains(pt, "dh_constraint_install \"$CONSTRAINT_CIL\"") {
-		t.Error("posttrans must install the constraint module through the shared lifecycle library")
+	// The library is sourced ONLY inside isolated child shells: a sourcing
+	// failure must be caught here as an ordinary non-zero status, never
+	// terminate this scriptlet directly (in the parent shell a syntax
+	// error or an errexit re-enabled by the sourced file would bypass the
+	// centralized fail-closed abort and leave the backends running).
+	if !strings.Contains(pt, "sh -c 'set -e; . \"$1\"' sh \"$CONSTRAINT_LIB\"") ||
+		!strings.Contains(pt, "sh -c 'set -e; . \"$1\" && dh_constraint_install \"$2\"' sh \"$CONSTRAINT_LIB\" \"$CONSTRAINT_CIL\"") {
+		t.Error("posttrans must source the lifecycle library and install through it in isolated child shells")
 	}
 	// Ordering: the constraint install must come after the docker_helper.pp
 	// load (constraint coverage rides the module's types) and before any
@@ -9924,6 +9929,10 @@ func TestRpmPosttransFailureStopsBackends(t *testing.T) {
 		ppLoadFailure bool
 		// stopFailure replays systemctl stop failing on both units
 		stopFailure bool
+		// libContent stages a purpose-broken lifecycle library at a
+		// fresh file and points CONSTRAINT_LIB at it (source-failure
+		// branches).
+		libContent string
 	}{
 		{
 			name:   "container policy missing",
@@ -9939,6 +9948,21 @@ func TestRpmPosttransFailureStopsBackends(t *testing.T) {
 			name:   "lifecycle library missing",
 			reason: "constraint module lifecycle library is missing",
 			env:    []string{"CONSTRAINT_LIB=/nonexistent/constraint-module.sh"},
+		},
+		{
+			// A syntactically broken library aborts the sourcing child
+			// shell (and, in the pre-MNB37c parent-shell form, the whole
+			// %posttrans) before any lifecycle function exists.
+			name:       "lifecycle library with broken shell syntax",
+			reason:     "the constraint module lifecycle library failed to source",
+			libContent: "dh_constraint_install() {\n",
+		},
+		{
+			// A runtime error during sourcing (here re-enabling errexit
+			// and failing) must abort the child shell, not the scriptlet.
+			name:       "lifecycle library failing at source time",
+			reason:     "the constraint module lifecycle library failed to source",
+			libContent: "set -e\nfalse\n",
 		},
 		{
 			name:   "constraint install failure",
@@ -9986,6 +10010,13 @@ func TestRpmPosttransFailureStopsBackends(t *testing.T) {
 				"RUNTIME_DIR=" + runtimeDir,
 			}
 			env = append(env, tc.env...)
+			if tc.libContent != "" {
+				libPath := filepath.Join(tmpDir, "constraint-module.sh")
+				if err := os.WriteFile(libPath, []byte(tc.libContent), 0644); err != nil {
+					t.Fatal(err)
+				}
+				env = append(env, "CONSTRAINT_LIB="+libPath)
+			}
 			if tc.stopFailure {
 				env = append(env, "STOP_FAIL=true")
 			}
