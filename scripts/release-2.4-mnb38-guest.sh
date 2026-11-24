@@ -154,27 +154,29 @@ ensure_clean_semodule() {
 }
 
 start_or_fail() {
-  # $1 label; start both services with full failure forensics. Every start
-  # failure must leave evidence: the journal lines, the unit status, and
-  # the /var/lib directory + label state ('Failed to set up special
-  # execution directory' class failures are invisible without them).
-  if ! systemctl start "$MAIN_UNIT" "$UNIT" 2>"$EVIDENCE_DIR/start-fail-$1.err"; then
+  # $1 label; start both services with FULL FAILURE FORENSICS printed to
+  # the console (the orchestrator collects stderr). 'Failed to set up
+  # special execution directory' class failures are otherwise invisible.
+  printf '%s %s: starting %s + %s\n' "$PREFIX" "$1" "$MAIN_UNIT" "$UNIT"
+  if ! start_out="$(systemctl start "$MAIN_UNIT" "$UNIT" 2>&1)"; then
+    printf '%s FAILED: %s: the services must start on the enforcing guest systemctl said:\n%s\n' "$PREFIX" "$1" "$start_out"
     {
-      echo "--- start stderr ---"
-      cat "$EVIDENCE_DIR/start-fail-$1.err"
-      echo "--- systemctl status ---"
+      echo "--- unit status ---"
       systemctl status "$MAIN_UNIT" "$UNIT" --no-pager -l 2>&1 || true
       echo "--- journal ---"
       journalctl --no-pager -q -o short-precise -u "$MAIN_UNIT" -u "$UNIT" 2>&1 | tail -40 || true
-      echo "--- /var/lib state roots ---"
+      echo "--- /var/lib listing (labels) ---"
       ls -laZ /var/lib 2>&1 | head -30 || true
+      echo "--- state roots ---"
       ls -laZ /var/lib/docker-helper /var/lib/docker-helper-builder 2>&1 || true
-    } > "$EVIDENCE_DIR/start-fail-$1.log" 2>&1 || true
-    cat "$EVIDENCE_DIR/start-fail-$1.log" >&2
+      echo "--- mountinfo excerpts ---"
+      grep -E "/var/lib|/run/docker-helper" /proc/self/mountinfo 2>&1 || true
+    } | while IFS= read -r line; do printf '%s %s: %s\n' "$PREFIX" "$1" "$line"; done
     systemctl reset-failed "$MAIN_UNIT" "$UNIT" 2>/dev/null || true
-    fail "phase $1: the docker-helper services must start on the enforcing guest (see start-fail-$1.* evidence)"
+    printf 'R7-MNB38-VERDICT=FAILED:%s-service-start\n' "$1"
+    exit 1
   fi
-  rm -f "$EVIDENCE_DIR/start-fail-$1.err"
+  printf '%s %s: services started\n' "$PREFIX" "$1"
 }
 
 ensure_services_active() {

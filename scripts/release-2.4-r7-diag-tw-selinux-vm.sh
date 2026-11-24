@@ -361,6 +361,27 @@ RMT
         log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
         ;;
     esac
+  elif [ "$R7_MODE" = "mnb38" ]; then
+    # The MNB38 lifecycle matrix verdicts on the phase-token summary: PASS
+    # only when every phase recorded (the guest pre-req is the whole
+    # matrix; the first failing gate otherwise exits with its FAILED line).
+    VERDICT="$(grep -aoE 'R7-MNB38-VERDICT=(PASS|FAILED.*)' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"
+    case "$VERDICT" in
+      R7-MNB38-VERDICT=PASS)
+        log "MNB38 lifecycle matrix verdict: $VERDICT"
+        break
+        ;;
+      R7-MNB38-VERDICT=FAILED*)
+        log "MNB38 lifecycle matrix verdict: $VERDICT"
+        break
+        ;;
+      *)
+        if [ "$attempt" -eq "$ATTEMPTS" ]; then
+          fail "the MNB38 lifecycle matrix produced no verdict (guest exit $GUEST_RC)"
+        fi
+        log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
+        ;;
+    esac
   elif [ "$R7_MODE" = "p21e3" ] || [ "$R7_MODE" = "p21e3probe" ] || [ "$R7_MODE" = "p21e3proc-sys" ] || [ "$R7_MODE" = "p21e3proc-file" ] || [ "$R7_MODE" = "p21e3proc-keys" ] || [ "$R7_MODE" = "p21e3diag-keys" ] || [ "$R7_MODE" = "mnb30" ] || [ "$R7_MODE" = "mnb32" ] || [ "$R7_MODE" = "mnb33" ] || [ "$R7_MODE" = "mnb36" ]; then
     # The BUILD result line and the VERDICT line are matched SEPARATELY:
     # the previous tail -2 | tr '\n' ' ' fabrication produced a string
