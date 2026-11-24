@@ -4149,12 +4149,14 @@ int main(int argc, char **argv) {
   add(own_s, bk_neighbor, "fifo_file", "write", cxexp);
   add(twin_s, bk_own, "fifo_file", "read", cxexp);
   add(twin_s, bk_own, "fifo_file", "write", cxexp);
-  /* open-face invariance rows: the distro's open constraint denies the
-   * cross face and allows the own face in BOTH states (the candidate adds
-   * no open coverage) — these rows are the open-face invariance witness. */
-  add(own_s, bk_own, "fifo_file", "open", "allow");
+  /* open-face invariance rows: the open face is UNCHANGED in both states
+   * — the own-cell open is denied by TE-row absence (the diagnostic W7 row
+   * grants exactly { read write }) and the cross-cell open is denied by
+   * the distro's mlsconstrain open face. All four rows expect deny; the
+   * witness is their UNCHANGED resolution across both states. */
+  add(own_s, bk_own, "fifo_file", "open", "deny");
   add(own_s, bk_neighbor, "fifo_file", "open", "deny");
-  add(twin_s, bk_neighbor, "fifo_file", "open", "allow");
+  add(twin_s, bk_neighbor, "fifo_file", "open", "deny");
   add(twin_s, bk_own, "fifo_file", "open", "deny");
   /* fd:use invariance rows: allow in every cell, both states */
   add(own_s, bk_own, "fd", "use", "allow");
