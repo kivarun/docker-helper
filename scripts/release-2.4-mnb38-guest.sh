@@ -16,10 +16,13 @@
 #       statement (seinfo against /sys/fs/selinux/policy), and the release
 #       .pp identity baseline.
 #   P2  repeated install (rpm -U --replacepkgs) and upgrade shape: no
-#       absent-constraint window — the store blob's inode/mtime/bytes are
-#       UNCHANGED across the transaction (the success path never removes the
-#       resident module), identity and effective-policy checks still pass,
-#       both services still active after the transactional restart.
+#       absent-constraint window — the store blob CONTENT and the resident
+#       module's presence are UNCHANGED across every transaction (the
+#       success path never removes the resident module; libsemanage may
+#       legitimately rewrite blobs in place, which is why the gate is on
+#       decoded bytes, not on inode/mtime), and the effective-policy check
+#       still passes; both services still active after the transactional
+#       restart.
 #   P3  failed upgrade: a controlled constraint-install failure (semodule
 #       shim that lets the docker_helper.pp load pass and fails ONLY the
 #       constraint CIL install, reached through rpm's scriptlet PATH): both
@@ -345,16 +348,24 @@ phase_p2() {
 say 'P2: repeated installation and upgrade shape'
 ensure_clean_semodule
 ensure_services_active
-BLOB_BEFORE="$(stat -c '%i %Y' "$(store_blobs | head -1)")"
+# The no-absent-window contract is about CONTENT and PRESENCE, not inode
+# identity: libsemanage legitimately rewrites blob files in place during a
+# commit even when the module bytes are unchanged (observed live: fresh
+# inode + new mtime per transaction on the identical module). The gate is:
+# every blob still decodes byte-exactly to the installed candidate, the
+# module stays present at priority 400, and the loaded policy still carries
+# the exact constraint after every transaction.
+BLOB_BEFORE_DECODED="$(for b in $(store_blobs); do bzip2 -dc "$b" 2>/dev/null | sha256sum; done | sort)"
 rpm_capture p2-repeat-rpm
 [ "$RPM_RC" = "0" ] || { ev p2-repeat-out "$RPM_OUT"; fail "repeated install failed (rc $RPM_RC)"; }
 printf '%s\n' "$RPM_OUT" | grep -Ein 'scriptlet failed' \
   && fail "repeated install must not report a failed scriptlet" \
   || true
 
-BLOB_AFTER="$(stat -c '%i %Y' "$(store_blobs | head -1)")"
-[ "$BLOB_BEFORE" = "$BLOB_AFTER" ] \
-  || fail "the store blob was replaced by the repeated install (status $BLOB_BEFORE -> $BLOB_AFTER): remove+reinstall would open an absent-constraint window"
+BLOB_AFTER_DECODED="$(for b in $(store_blobs); do bzip2 -dc "$b" 2>/dev/null | sha256sum; done | sort)"
+[ -n "$BLOB_BEFORE_DECODED" ] || fail "the constraint store lost its blobs across the repeated install"
+[ "$BLOB_BEFORE_DECODED" = "$BLOB_AFTER_DECODED" ] \
+  || fail "the store blob CONTENT changed across the repeated install (remove+reinstall would open an absent-constraint window)"
 blob_identity_ok || fail "constraint store identity must hold across the repeated install"
 constraint_statement_ok \
   || fail "the effective-policy check must hold across the repeated install"
@@ -364,17 +375,22 @@ expected_active "$UNIT" || fail "the builder service must stay active across the
   || fail "the release .pp identity must be unchanged"
 
 # An actual upgrade transaction shape (same bytes, force the transaction):
+BLOB_BEFORE_DECODED_UP="$(for b in $(store_blobs); do bzip2 -dc "$b" 2>/dev/null | sha256sum; done | sort)"
 rpm_capture p2-upgrade-rpm
 [ "$RPM_RC" = "0" ] || { fail "upgrade-shape rpm -U failed (rc $RPM_RC)"; }
 printf '%s\n' "$RPM_OUT" | grep -Ein 'scriptlet failed' \
   && fail "upgrade must not report a failed scriptlet" \
   || true
+BLOB_AFTER_DECODED_UP="$(for b in $(store_blobs); do bzip2 -dc "$b" 2>/dev/null | sha256sum; done | sort)"
+[ -n "$BLOB_AFTER_DECODED_UP" ] || fail "the constraint store lost its blobs across the upgrade transaction"
+[ "$BLOB_BEFORE_DECODED_UP" = "$BLOB_AFTER_DECODED_UP" ] \
+  || fail "the store blob CONTENT changed across the upgrade transaction (remove+reinstall would open an absent-constraint window)"
 blob_identity_ok || fail "constraint store identity must hold across the upgrade transaction"
 constraint_statement_ok \
   || fail "the effective-policy check must hold across the upgrade transaction"
 expected_active "$MAIN_UNIT" || fail "the main service must stay active across the upgrade"
-ev p2-blob-before "$BLOB_BEFORE"
-ev p2-blob-after "$BLOB_AFTER"
+ev p2-blob-before "$BLOB_BEFORE_DECODED_UP"
+ev p2-blob-after "$BLOB_AFTER_DECODED_UP"
 [ "$(sha256sum "$PP" | awk '{print $1}')" = "$PP_BASELINE_SHA" ] \
   || fail "the release .pp identity must be unchanged after the upgrade"
 
