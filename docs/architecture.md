@@ -2797,10 +2797,23 @@ Ownership and lifecycle:
   not byte-identical, re-verifies store identity after the install, and
   requires the exact constraint statement to be verifiable in the LOADED
   policy (`seinfo --constrain fifo_file`) before the transaction may
-  declare success. Uninstall removes the module only on final erase (an
+  declare success. The identity decision is byte-exact CIL comparison
+  only: the install refuses any resident module of the same name at ANY
+  store priority that is not byte-identical to the shipped artifact, and
+  treats an unreadable or undecodable resident as a refusal, never an
+  overwrite. A failed constraint install in the RPM transaction stops
+  the running docker-helper service and builder backend (a backend may
+  not keep executing operations against a loaded policy without the
+  constraint) and preserves the recorded restart decision for the
+  recovery transaction; the manual tarball path installs the same
+  lifecycle library to the same durable packaged path the RPM ships, so
+  uninstall and later maintenance drive one constraint-module owner.
+  Uninstall removes the module only on final erase (an
   upgrade never manufactures an absent-constraint window) and a removal
   failure stays fail-secure (the constraint keeps holding in the loaded
-  policy until explicitly removed).
+  policy until explicitly removed); the removal is attempted
+  independently of the main `docker_helper.pp` module's store state, so
+  an orphaned constraint module is removed just the same.
 - the enforcing buildkitd payload carries its own fail-closed admission
   gate over the constraint: before any managed run reaches its spec
   commit, the payload queries the LOADED policy (`seinfo --constrain

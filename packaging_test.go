@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -401,9 +402,11 @@ func TestConstraintModulePackaging(t *testing.T) {
 		t.Error("preremove must keep the upgrade early-return before the constraint-module removal")
 	}
 
-	// The lib must fail closed: collision refusal, post-install store
-	// identity, and the loaded-policy (seinfo) acceptance gate — and stay
-	// tolerant on removal absence.
+	// The lib must fail closed: byte-exact identity only, same-name
+	// collision refusal at every priority, post-install store identity,
+	// and the loaded-policy (seinfo) acceptance gate — and stay tolerant
+	// on removal absence. Its functions report failure through their exit
+	// status; the scriptlets own the abort semantics.
 	lib, err := os.ReadFile("packaging/scripts/rpm/constraint-module.sh")
 	if err != nil {
 		t.Fatal(err)
@@ -414,6 +417,7 @@ func TestConstraintModulePackaging(t *testing.T) {
 		"DH_CONSTRAINT_MODULE=docker-helper-fifo-rw-constraint",
 		"mlsconstrain fifo_file { read write } (h1 dom h2 or t1 != mcs_constrained_type);",
 		"dh_constraint_preinstall_collision",
+		"dh_constraint_same_name_elsewhere",
 		"dh_constraint_store_identity",
 		"dh_constraint_effective_policy_check",
 		"seinfo --constrain fifo_file",
@@ -424,6 +428,82 @@ func TestConstraintModulePackaging(t *testing.T) {
 			t.Errorf("constraint-module.sh must contain %q", must)
 		}
 	}
+	// The identity decision is byte-exact CIL comparison; no
+	// statement-level or name-level substitute may accept a resident
+	// module (the exact-statement classifier belongs to the loaded-policy
+	// acceptance gate only), and the install/identity functions must never
+	// exit from inside the sourced library (the scriptlets own the abort
+	// path).
+	if identity := libFunctionBody(libContent, "dh_constraint_store_identity() {"); identity != "" &&
+		strings.Contains(identity, "grep -Fqx") {
+		t.Error("the store identity decision must be byte-exact only (the statement match belongs to the loaded-policy acceptance gate)")
+	}
+	for _, fn := range []string{"dh_constraint_preinstall_collision() {", "dh_constraint_store_identity() {", "dh_constraint_install() {", "dh_constraint_effective_policy_check() {"} {
+		body := libFunctionBody(libContent, fn)
+		if body == "" {
+			t.Errorf("constraint-module.sh must define %s", fn)
+			continue
+		}
+		if strings.Contains(body, "\n  exit ") || strings.HasSuffix(body, "\n  exit 1") || strings.HasSuffix(body, "\n  exit 2") {
+			t.Errorf("%s must not exit from inside the sourced library (return to the scriptlet's abort owner)", fn)
+		}
+	}
+
+	// The installer must install the lifecycle library to the durable
+	// packaged path (the same path the RPM ships it at) and drive THE
+	// INSTALLED COPY.
+	installerContent := installerSrc(t, "install-system.sh")
+	for _, must := range []string{
+		"SELINUX_CONSTRAINT_LIB_DEST=\"${SELINUX_CONSTRAINT_LIB_DEST:-/usr/share/docker-helper/selinux/constraint-module.sh}\"",
+		"cp \"$script_dir/$SELINUX_CONSTRAINT_LIB_SRC\" \"$SELINUX_CONSTRAINT_LIB_DEST\"",
+		". \"$SELINUX_CONSTRAINT_LIB_DEST\"",
+		"dh_constraint_install \"$SELINUX_CONSTRAINT_CIL_DEST\"",
+	} {
+		if !strings.Contains(installerContent, must) {
+			t.Errorf("install-system.sh must contain %q", must)
+		}
+	}
+
+	// A failed constraint install in %posttrans must stop the running
+	// backends (fail-closed upgrade semantics: no backend may keep
+	// executing operations without the required policy) and must never
+	// enqueue a restart; the deferred-restart decision stays preserved.
+	posttransContent := installerSrc(t, "scripts/rpm/posttrans.sh")
+	if !strings.Contains(posttransContent, "if ! dh_constraint_install \"$CONSTRAINT_CIL\"; then") {
+		t.Error("posttrans must handle the constraint install failure explicitly")
+	}
+	stopIdx := strings.Index(posttransContent, "systemctl stop docker-helper.service")
+	builderStopIdx := strings.Index(posttransContent, "systemctl stop docker-helper-builder.service")
+	failIdx := strings.Index(posttransContent, "if ! dh_constraint_install \"$CONSTRAINT_CIL\"; then")
+	if stopIdx == -1 || builderStopIdx == -1 || stopIdx < failIdx || builderStopIdx < stopIdx {
+		t.Error("posttrans must stop the running backends on a failed constraint install")
+	}
+}
+
+// libFunctionBody returns the body of one POSIX shell function (from its
+// definition line to its closing brace column), for abort-semantics
+// assertions.
+func libFunctionBody(lib, defLine string) string {
+	idx := strings.Index(lib, defLine)
+	if idx == -1 {
+		return ""
+	}
+	rest := lib[idx:]
+	end := strings.Index(rest, "\n}")
+	if end == -1 {
+		return ""
+	}
+	return rest[:end]
+}
+
+// installerSrc is a small helper reading one packaging script under test.
+func installerSrc(t *testing.T, rel string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("packaging", rel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }
 
 // TestConstraintModuleBundleContract verifies build-bundle.sh stages the
@@ -462,6 +542,441 @@ func TestConstraintModuleBundleContract(t *testing.T) {
 	if uninstall := string(uninstaller); !strings.Contains(uninstall, "dh_constraint_remove") {
 		t.Error("uninstall-system.sh must remove the constraint module through the shared lifecycle library")
 	}
+}
+
+// TestSkillAgentContract verifies the shipped agent-facing SKILL.md keeps
+// the canonical current contract vocabulary and does not resurrect
+// known-stale claims. The file is a shipped release artifact
+// --- Behavioral lifecycle tests for the constraint module library ---
+//
+// These tests source the packaged constraint-module library in a real
+// shell with an emulated module store and faked policy tooling, so the
+// collision/identity/effective-policy/removal contracts are exercised as
+// executed behavior (stateful module stores, real bzip2 byte comparison),
+// not merely as static script-text matches.
+
+// constraintBehavior stages one behavioral scenario: a scenario directory
+// with a logging fake bin dir (semodule/seinfo scripts written per case),
+// an emulated SELinux policy store root, a stateful module list fixture
+// the semodule fake reads and mutates, and the candidate CIL the case
+// installs.
+type constraintBehavior struct {
+	t          *testing.T
+	dir        string
+	fakeDir    string
+	storeRoot  string
+	logFile    string
+	moduleList string
+	cilPath    string
+}
+
+func newConstraintBehavior(t *testing.T) *constraintBehavior {
+	t.Helper()
+	dir := t.TempDir()
+	c := &constraintBehavior{
+		t:          t,
+		dir:        dir,
+		fakeDir:    filepath.Join(dir, "bin"),
+		storeRoot:  filepath.Join(dir, "store"),
+		logFile:    filepath.Join(dir, "calls.log"),
+		moduleList: filepath.Join(dir, "store-list"),
+		cilPath:    filepath.Join(dir, "candidate.cil"),
+	}
+	if err := os.MkdirAll(c.fakeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(c.storeRoot, "active", "modules"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(c.logFile, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(c.moduleList, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// candidateCIL writes one candidate CIL variant at a scenario-unique path
+// and returns its path (content variants must never share one path: the
+// identity contract compares bytes against whatever it is handed).
+func (c *constraintBehavior) candidateCIL(variant, content string) string {
+	c.t.Helper()
+	path := c.cilPath
+	if variant != "" {
+		path = filepath.Join(c.dir, "candidate-"+variant+".cil")
+	}
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		c.t.Fatal(err)
+	}
+	return path
+}
+
+// blobPath returns the emulated store blob path for one priority.
+func (c *constraintBehavior) blobPath(prio string) string {
+	return filepath.Join(c.storeRoot, "active", "modules", prio, "docker-helper-fifo-rw-constraint", "cil")
+}
+
+// seedBlob writes one store blob carrying the bzip2 compression of content
+// (exact candidate bytes for an identical module, anything else for a
+// collision); corrupt=true writes raw garbage the identity can never
+// decompress.
+func (c *constraintBehavior) seedBlob(prio, content string, corrupt bool) {
+	c.t.Helper()
+	target := c.blobPath(prio)
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		c.t.Fatal(err)
+	}
+	var in io.Reader
+	if corrupt {
+		in = strings.NewReader(content)
+	} else {
+		var out bytes.Buffer
+		cmd := exec.Command("bzip2", "-c")
+		cmd.Stdin = strings.NewReader(content)
+		cmd.Stdout = &out
+		if err := cmd.Run(); err != nil {
+			c.t.Fatalf("bzip2 fixture compression failed: %v", err)
+		}
+		in = bytes.NewReader(out.Bytes())
+	}
+	if err := os.WriteFile(target, func() []byte {
+		data, _ := io.ReadAll(in)
+		return data
+	}(), 0644); err != nil {
+		c.t.Fatal(err)
+	}
+}
+
+// blobBytes reads one store blob's decompressed bytes for assertions.
+func (c *constraintBehavior) blobBytes(prio string) []byte {
+	c.t.Helper()
+	cmd := exec.Command("bzip2", "-dc", c.blobPath(prio))
+	out, err := cmd.Output()
+	if err != nil {
+		c.t.Fatalf("reading blob at priority %s: %v", prio, err)
+	}
+	return out
+}
+
+// withFakes writes the per-case semodule/seinfo fakes. The semodule fake
+// is stateful: -l prints the scenario's module-list fixture, -r removes a
+// name line from it (real state change), and every -i install
+// materializes the store blob at the emulated priority from the named
+// source (the post-install identity reads this state back).
+func (c *constraintBehavior) withFakes(semoduleScript, seinfoScript string) {
+	c.t.Helper()
+	if err := os.WriteFile(filepath.Join(c.fakeDir, "semodule"), []byte(semoduleScript), 0755); err != nil {
+		c.t.Fatal(err)
+	}
+	if seinfoScript != "" {
+		if err := os.WriteFile(filepath.Join(c.fakeDir, "seinfo"), []byte(seinfoScript), 0755); err != nil {
+			c.t.Fatal(err)
+		}
+	}
+}
+
+// semoduleStoreFake is the shared stateful semodule fake body: an -i
+// materializes the blob from the named source compressed with the real
+// bzip2 (a CORRUPT_BLOB source value writes raw garbage instead), and -l
+// and -r drive the module-list fixture state file.
+const semoduleStoreFake = `#!/bin/sh
+echo "$0 $@" >> "__LOG__"
+case "$1" in
+  -l) cat "__LIST__" ;;
+  -r)
+    if [ "${CONSTRAINT_SEMODULE_FAIL:-false}" = "true" ]; then
+      echo "semodule: Failed to remove module" >&2
+      exit 1
+    fi
+    grep -v "^$2$" "__LIST__" > "__LIST__.tmp"
+    mv "__LIST__.tmp" "__LIST__"
+    ;;
+  *)
+    if [ "${CONSTRAINT_SEMODULE_FAIL:-false}" = "true" ]; then
+      echo "semodule: Failed to install module" >&2
+      exit 1
+    fi
+    blob="__STORE__/active/modules/400/docker-helper-fifo-rw-constraint/cil"
+    mkdir -p "$(dirname "$blob")"
+    for a in "$@"; do last="$a"; done
+    if [ "${FAKE_BLOB_SOURCE:-}" != "" ]; then
+      bzip2 -c "$FAKE_BLOB_SOURCE" > "$blob"
+    else
+      bzip2 -c "$last" > "$blob"
+    fi
+    ;;
+esac
+exit 0
+`
+
+// run sources the packaged constraint-module library (the real shipped
+// code) and executes the snippet in a shell whose environment resolves
+// the emulated store and the fake bin dir first. Returns stderr and the
+// exit code of the whole shell.
+func (c *constraintBehavior) run(snippet string) (string, int) {
+	c.t.Helper()
+	lib, err := os.ReadFile("packaging/scripts/rpm/constraint-module.sh")
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	libCopy := filepath.Join(c.dir, "constraint-module.sh")
+	if err := os.WriteFile(libCopy, lib, 0644); err != nil {
+		c.t.Fatal(err)
+	}
+	script := fmt.Sprintf(". %s\n%s\n", libCopy, snippet)
+	cmd := exec.Command("sh", "-c", script)
+	cmd.Env = append(os.Environ(),
+		"PATH="+c.fakeDir+":"+os.Getenv("PATH"),
+		"DH_CONSTRAINT_STORE_ROOT="+c.storeRoot,
+	)
+	out, err := cmd.CombinedOutput()
+	code := 0
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		code = exitErr.ExitCode()
+	} else if err != nil {
+		c.t.Fatalf("scenario shell failed to run: %v", err)
+	}
+	return string(out), code
+}
+
+// calls returns the semodule/seinfo invocations recorded so far.
+func (c *constraintBehavior) calls() []string {
+	c.t.Helper()
+	data, err := os.ReadFile(c.logFile)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	return strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+}
+
+// TestConstraintModuleLifecycleBehavior proves the constraint-module
+// library's fail-closed ownership semantics against an emulated store:
+// byte-exact identity only (no statement fallback), same-name collision
+// refusal at every priority, unverifiable resident content refusal
+// without overwrite, post-install identity + effective-policy acceptance,
+// and stateful orphan removal behavior.
+func TestConstraintModuleLifecycleBehavior(t *testing.T) {
+	const exactCIL = "; MNB35 candidate: extend fifo_file MCS constraint coverage to read/write\n" +
+		"(mlsconstrain (fifo_file (read write)) (or (dom h1 h2) (neq t1 mcs_constrained_type)))\n"
+	const mutatedCIL = "; mutated constraint statement\n" +
+		"(mlsconstrain (fifo_file (read)) (or (dom h1 h2) (neq t1 mcs_constrained_type)))\n"
+	goodSeinfo := `#!/bin/sh
+echo "Constraints: 6"
+echo "   mlsconstrain fifo_file { read write } (h1 dom h2 or t1 != mcs_constrained_type);"
+exit 0
+`
+	foreignSeinfo := `#!/bin/sh
+echo "Constraints: 6"
+echo "   mlsconstrain fifo_file { read } (h1 dom h2);"
+exit 0
+`
+
+	t.Run("fresh install succeeds and stores exact bytes", func(t *testing.T) {
+		c := newConstraintBehavior(t)
+		cil := c.candidateCIL("exact", exactCIL)
+		c.withFakes(constraintFakeSemodule(c), goodSeinfo)
+		out, code := c.run("dh_constraint_install " + shQuote(cil))
+		if code != 0 || !strings.Contains(out, "installing at priority 400") {
+			t.Fatalf("fresh install must succeed, got code %d: %s", code, out)
+		}
+		if got, want := string(c.blobBytes("400")), exactCIL; got != want {
+			t.Fatalf("the stored blob must decompress to the exact candidate bytes")
+		}
+	})
+
+	t.Run("repeat install is idempotent", func(t *testing.T) {
+		c := newConstraintBehavior(t)
+		cil := c.candidateCIL("exact", exactCIL)
+		c.withFakes(constraintFakeSemodule(c), goodSeinfo)
+		if _, code := c.run("dh_constraint_install " + shQuote(cil)); code != 0 {
+			t.Fatalf("first install must succeed")
+		}
+		before := c.blobPath("400")
+		infoBefore, err := os.Stat(before)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, code := c.run("dh_constraint_install " + shQuote(cil))
+		if code != 0 {
+			t.Fatalf("repeat install over a byte-identical resident module must succeed: %s", out)
+		}
+		infoAfter, err := os.Stat(before)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if infoAfter.Size() != infoBefore.Size() {
+			t.Fatal("the resident blob must not be rewritten on an idempotent repeat install")
+		}
+	})
+
+	t.Run("different resident bytes refused without overwrite", func(t *testing.T) {
+		c := newConstraintBehavior(t)
+		cil := c.candidateCIL("exact", exactCIL)
+		c.seedBlob("400", mutatedCIL, false)
+		c.withFakes(constraintFakeSemodule(c), goodSeinfo)
+		out, code := c.run("dh_constraint_install " + shQuote(cil))
+		if code == 0 || !strings.Contains(out, "already installed at priority 400") {
+			t.Fatalf("a different resident module must be refused loudly, got code %d: %s", code, out)
+		}
+		if got := string(c.blobBytes("400")); got != mutatedCIL {
+			t.Fatal("the refusing install must not overwrite the resident blob")
+		}
+		for _, call := range c.calls() {
+			if strings.Contains(call, "-X 400") {
+				t.Errorf("the refused install must not reach semodule -i: %s", call)
+			}
+		}
+	})
+
+	t.Run("same name at another priority refused without overwrite", func(t *testing.T) {
+		c := newConstraintBehavior(t)
+		cil := c.candidateCIL("exact", exactCIL)
+		// Even a BYTE-IDENTICAL module under a foreign priority is a
+		// collision: the name is product-owned at priority 400 only.
+		c.seedBlob("100", exactCIL, false)
+		c.withFakes(constraintFakeSemodule(c), goodSeinfo)
+		out, code := c.run("dh_constraint_install " + shQuote(cil))
+		if code == 0 || !strings.Contains(out, "outside priority 400") {
+			t.Fatalf("a same-name module at another priority must be refused: %s", out)
+		}
+		if got := string(c.blobBytes("100")); got != exactCIL {
+			t.Fatal("the refusing install must not touch the foreign-priority module")
+		}
+		if _, err := os.Stat(c.blobPath("400")); !os.IsNotExist(err) {
+			t.Fatal("the refused install must not install at priority 400 either")
+		}
+	})
+
+	t.Run("unverifiable resident content refused without overwrite", func(t *testing.T) {
+		c := newConstraintBehavior(t)
+		cil := c.candidateCIL("exact", exactCIL)
+		c.seedBlob("400", "plainly not a bzip2 stream", true)
+		c.withFakes(constraintFakeSemodule(c), goodSeinfo)
+		out, code := c.run("dh_constraint_install " + shQuote(cil))
+		if code == 0 || !strings.Contains(out, "cannot be read or verified") {
+			t.Fatalf("an unverifiable resident module must be refused: %s", out)
+		}
+		data, err := os.ReadFile(c.blobPath("400"))
+		if err != nil || string(data) != "plainly not a bzip2 stream" {
+			t.Fatal("the refusing install must not overwrite the unverifiable blob")
+		}
+	})
+
+	t.Run("post-install store mismatch refused", func(t *testing.T) {
+		c := newConstraintBehavior(t)
+		cil := c.candidateCIL("exact", exactCIL)
+		// The fake module store materializes a WRONG blob (the mutated CIL)
+		// regardless of the installed source: the post-install identity
+		// must catch the divergence.
+		wrong := c.candidateCIL("wrong", mutatedCIL)
+		c.withFakes(constraintFakeSemodule(c), goodSeinfo)
+		out, code := c.run("export FAKE_BLOB_SOURCE=" + shQuote(wrong) + "; dh_constraint_install " + shQuote(cil))
+		if code == 0 || !strings.Contains(out, "does not match the shipped") {
+			t.Fatalf("a post-install store divergence must be refused: %s", out)
+		}
+	})
+
+	t.Run("effective-policy mismatch refused", func(t *testing.T) {
+		c := newConstraintBehavior(t)
+		cil := c.candidateCIL("exact", exactCIL)
+		c.withFakes(constraintFakeSemodule(c), foreignSeinfo)
+		out, code := c.run("dh_constraint_install " + shQuote(cil))
+		if code == 0 || !strings.Contains(out, "does not carry the installed") {
+			t.Fatalf("a loaded policy without the exact statement must be refused: %s", out)
+		}
+	})
+
+	t.Run("seinfo absence refused closed", func(t *testing.T) {
+		c := newConstraintBehavior(t)
+		cil := c.candidateCIL("exact", exactCIL)
+		c.withFakes(constraintFakeSemodule(c), "")
+		out, code := c.run("dh_constraint_install " + shQuote(cil))
+		if code == 0 || !strings.Contains(out, "seinfo is not available") {
+			t.Fatalf("a missing seinfo must fail the install closed: %s", out)
+		}
+	})
+
+	t.Run("orphan constraint removal", func(t *testing.T) {
+		c := newConstraintBehavior(t)
+		if err := os.WriteFile(c.moduleList, []byte("docker-helper-fifo-rw-constraint\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		c.withFakes(constraintFakeSemodule(c), goodSeinfo)
+		out, code := c.run("dh_constraint_remove")
+		if code != 0 {
+			t.Fatalf("an orphan constraint removal must succeed: %s", out)
+		}
+		list, err := os.ReadFile(c.moduleList)
+		if err != nil || strings.Contains(string(list), "docker-helper-fifo-rw-constraint") {
+			t.Fatalf("the removed module must leave the store list: %q %v", list, err)
+		}
+	})
+
+	t.Run("removal keeps neighbor modules", func(t *testing.T) {
+		c := newConstraintBehavior(t)
+		list := "container\ndocker_helper\ndocker-helper-fifo-rw-constraint\n"
+		if err := os.WriteFile(c.moduleList, []byte(list), 0644); err != nil {
+			t.Fatal(err)
+		}
+		c.withFakes(constraintFakeSemodule(c), goodSeinfo)
+		out, code := c.run("dh_constraint_remove")
+		if code != 0 {
+			t.Fatalf("removal of a present module must succeed: %s", out)
+		}
+		listAfter, err := os.ReadFile(c.moduleList)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(listAfter), "docker-helper-fifo-rw-constraint") ||
+			!strings.Contains(string(listAfter), "docker_helper") {
+			t.Fatalf("only the constraint module must be removed, list is now: %q", listAfter)
+		}
+	})
+
+	t.Run("removal failure keeps module and fails", func(t *testing.T) {
+		c := newConstraintBehavior(t)
+		if err := os.WriteFile(c.moduleList, []byte("docker-helper-fifo-rw-constraint\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		c.withFakes(constraintFakeSemodule(c), goodSeinfo)
+		out, code := c.run("CONSTRAINT_SEMODULE_FAIL=true dh_constraint_remove")
+		if code == 0 || !strings.Contains(out, "failed to remove the module") {
+			t.Fatalf("a real removal failure must be loud and fail: %s", out)
+		}
+		list, err := os.ReadFile(c.moduleList)
+		if err != nil || !strings.Contains(string(list), "docker-helper-fifo-rw-constraint") {
+			t.Fatal("a failed removal must leave the module in the store list")
+		}
+	})
+
+	t.Run("absent module is an idempotent no-op", func(t *testing.T) {
+		c := newConstraintBehavior(t)
+		c.withFakes(constraintFakeSemodule(c), goodSeinfo)
+		out, code := c.run("dh_constraint_remove")
+		if code != 0 {
+			t.Fatalf("absence must be a no-op success: %s", out)
+		}
+		for _, call := range c.calls() {
+			if strings.Contains(call, "-r") {
+				t.Errorf("an absent module must not be removed: %s", call)
+			}
+		}
+	})
+}
+
+// constraintFakeSemodule renders the shared stateful semodule fake with
+// the scenario's call log, module-list fixture, and emulated store.
+func constraintFakeSemodule(c *constraintBehavior) string {
+	return strings.NewReplacer(
+		"__LOG__", c.logFile,
+		"__LIST__", c.moduleList,
+		"__STORE__", c.storeRoot,
+	).Replace(semoduleStoreFake)
+}
+
+func shQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // TestSkillAgentContract verifies the shipped agent-facing SKILL.md keeps
@@ -2982,6 +3497,7 @@ exit 0
 		"DOCKER=" + filepath.Join(e.fakeBinDir, "docker"),
 		"SELINUX_PP_DEST=" + e.dest("usr/share/selinux/docker_helper.pp"),
 		"SELINUX_CONSTRAINT_CIL_DEST=" + e.dest("usr/share/selinux/docker-helper-fifo-rw-constraint.cil"),
+		"SELINUX_CONSTRAINT_LIB_DEST=" + e.dest("usr/share/docker-helper/selinux/constraint-module.sh"),
 		"AA_ENABLED_PATH=" + e.aaEnabledPath,
 		"SELINUX_ENFORCE_PATH=" + e.selinuxEnforcePath,
 	}
@@ -3008,6 +3524,21 @@ func newSystemUninstallScriptEnv(t *testing.T) *systemScriptEnv {
 	}
 	if err := os.WriteFile(e.dest("etc/apparmor.d/docker-helper.d/managed-roots"),
 		[]byte("# fixture managed-roots fragment\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// The installed constraint-module lifecycle library at its durable
+	// packaged path (a prior successful install placed it there; the
+	// uninstaller drives the same owner). Tests exercising a broken
+	// installation override the SELINUX_CONSTRAINT_LIB override further.
+	constraintLibDest := e.dest("usr/share/docker-helper/selinux/constraint-module.sh")
+	if err := os.MkdirAll(filepath.Dir(constraintLibDest), 0755); err != nil {
+		t.Fatal(err)
+	}
+	libData, err := os.ReadFile("packaging/scripts/rpm/constraint-module.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(constraintLibDest, libData, 0644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Dir(e.dest("var/lib/docker-helper/apparmor/managed-boundaries")), 0755); err != nil {
@@ -4175,6 +4706,20 @@ exit 0
 	}
 	if _, err := os.Stat(env.dest("usr/share/selinux/docker-helper-fifo-rw-constraint.cil")); err != nil {
 		t.Error("the constraint module artifact must be installed to the stable SELinux path")
+	}
+	// The lifecycle library must be installed to the SAME durable packaged
+	// path the RPM ships it at, byte-identical to the shipped artifact, so
+	// the uninstaller and maintenance drive the one canonical owner.
+	installedLib, err := os.ReadFile(env.dest("usr/share/docker-helper/selinux/constraint-module.sh"))
+	if err != nil {
+		t.Fatalf("the constraint lifecycle library must be installed to the durable packaged path: %v", err)
+	}
+	shippedLib, err := os.ReadFile("packaging/scripts/rpm/constraint-module.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(installedLib, shippedLib) {
+		t.Error("the installed lifecycle library must be byte-identical to the shipped constraint-module.sh")
 	}
 }
 
@@ -7151,6 +7696,75 @@ esac
 	}
 }
 
+// writeStatefulSystemctl creates a systemctl fake whose is-active, stop
+// and restart operations read and mutate a PERSISTENT per-unit state file
+// ("unit=state" lines), so multi-scriptlet upgrade scenarios observe real
+// process-state semantics: a stop makes the next is-active report
+// inactive, and an is-active answer reflects the actual recorded state
+// instead of a static fixture answer. try-restart is inactive-safe (a
+// stopped unit stays stopped); daemon-reload/enable/disable/is-enabled
+// succeed statically. The fake logs every invocation to the same call log.
+func writeStatefulSystemctl(t *testing.T, fakeDir, logFile string, statePath string, initial map[string]string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(statePath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	var sb strings.Builder
+	for unit, state := range initial {
+		sb.WriteString(unit + "=" + state + "\n")
+	}
+	if err := os.WriteFile(statePath, []byte(sb.String()), 0644); err != nil {
+		t.Fatal(err)
+	}
+	script := fmt.Sprintf(`#!/bin/sh
+echo "$0 $@" >> "%s"
+unit=""
+for a in "$@"; do
+  case "$a" in *".service") unit="$a" ;; esac
+done
+get_state() { sed -n "s/^$1=//p" "%s" | tail -n 1; }
+set_state() {
+  tmp="%s.tmp"
+  sed "s/^$1=.*/$1=$2/" "%s" > "$tmp" && mv "$tmp" "%s"
+}
+case "$1" in
+  is-active)
+    [ "$(get_state "$unit")" = "active" ] && exit 0 || exit 3
+    ;;
+  stop)
+    if [ "${STOP_FAIL:-false}" = "true" ]; then exit 1; fi
+    set_state "$unit" inactive
+    ;;
+  try-restart|restart)
+    if [ "${RESTART_FAIL:-false}" = "true" ]; then exit 1; fi
+    # try-restart is inactive-safe: a stopped unit stays stopped.
+    [ "$(get_state "$unit")" = "active" ] || exit 0
+    set_state "$unit" active
+    ;;
+  *) exit 0 ;;
+esac
+`, logFile, statePath, statePath, statePath, statePath)
+	if err := os.WriteFile(filepath.Join(fakeDir, "systemctl"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// stateOfService reads one unit's state line from a stateful systemctl
+// fixture state file ("inactive" when absent).
+func stateOfService(t *testing.T, statePath, unit string) string {
+	t.Helper()
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if rest, ok := strings.CutPrefix(line, unit+"="); ok {
+			return rest
+		}
+	}
+	return "inactive"
+}
+
 // writeFakeApparmorParser creates an apparmor_parser script that logs calls.
 func writeFakeApparmorParser(t *testing.T, fakeDir, logFile string, failReplace bool, failUnload bool) {
 	t.Helper()
@@ -9111,6 +9725,210 @@ func TestRpmPreremoveFinalEraseSELinux(t *testing.T) {
 	}
 	if !constraintSeen {
 		t.Error("final erase must remove the docker-helper-fifo-rw-constraint module")
+	}
+}
+
+// TestRpmPreremoveOrphanConstraintRemoved verifies uninstall parity: the
+// constraint module is removed through the shared lifecycle library even
+// when the docker_helper module is NOT resident in the store (an orphaned
+// constraint after an external main-module removal, or a store state where
+// only the constraint was ever loaded). No main-module removal may be
+// attempted for an absent module.
+func TestRpmPreremoveOrphanConstraintRemoved(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, true)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+	writeFakeSemodule(t, fakeDir, logFile, false, false)
+
+	_, stderr, code := runScript(t, "packaging/scripts/rpm/preremove.sh", fakeDir, logFile,
+		[]string{"0"}, true, []string{
+			// Orphan state: the main docker_helper module is absent, the
+			// separately owned constraint module is resident.
+			"SEMODULE_MODULE_PRESENT=false",
+			"CONSTRAINT_MODULE_PRESENT=true",
+		})
+	if code != 0 {
+		t.Fatalf("orphan-constraint final erase should exit 0, got %d (stderr: %s)", code, stderr)
+	}
+	constraintRemoved, mainAttempted := false, false
+	for _, c := range readLifecycleScriptCalls(t, logFile) {
+		if strings.Contains(c, "semodule") && strings.Contains(c, "-r") {
+			if strings.Contains(c, "docker-helper-fifo-rw-constraint") {
+				constraintRemoved = true
+			}
+			if strings.Contains(c, "docker_helper") {
+				mainAttempted = true
+			}
+		}
+	}
+	if !constraintRemoved {
+		t.Error("the orphaned constraint module must be removed on final erase")
+	}
+	if mainAttempted {
+		t.Error("an absent main module must not be removed (absence is an idempotent no-op)")
+	}
+}
+
+// TestRpmPosttransFailedUpgradeStopsServices verifies the fail-closed
+// failed-upgrade lifecycle with a stateful process-state fixture: a
+// previously active docker-helper daemon and builder backend, a failing
+// constraint install in %posttrans (the main module load SUCCEEDED) must
+// stop BOTH running backends — no backend may keep executing operations
+// against a loaded policy without the required FIFO constraint — report
+// the failure loudly, preserve the deferred-restart decision for the
+// recovery transaction, and never enqueue a restart.
+func TestRpmPosttransFailedUpgradeStopsServices(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	statePath := logFile + ".systemctl-state"
+	writeStatefulSystemctl(t, fakeDir, logFile, statePath, map[string]string{
+		"docker-helper.service":         "active",
+		"docker-helper-builder.service": "active",
+	})
+	writeFakeSemodule(t, fakeDir, logFile, false, false)
+	writeFakeRestorecon(t, fakeDir, logFile)
+
+	tmpDir := t.TempDir()
+	selinuxEnforceDir := filepath.Join(tmpDir, "sys", "fs", "selinux")
+	if err := os.MkdirAll(selinuxEnforceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(selinuxEnforceDir, "enforce"), []byte("1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The upgrade transaction's %post already recorded the was-active
+	// decision (both services were active before the transaction).
+	runtimeDir := filepath.Join(tmpDir, "run", "docker-helper")
+	stateFilePath := runtimeDir + "-rpm/posttrans-state"
+	if err := os.MkdirAll(filepath.Dir(stateFilePath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stateFilePath, []byte("was_active=true\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, stderr, code := runScript(t, "packaging/scripts/rpm/posttrans.sh", fakeDir, logFile,
+		nil, true, []string{
+			"SELINUX_ENFORCE_PATH=" + filepath.Join(selinuxEnforceDir, "enforce"),
+			"RUNTIME_DIR=" + runtimeDir,
+			"CONSTRAINT_SEMODULE_FAIL=true",
+		})
+
+	if code != 1 {
+		t.Fatalf("a failed constraint install must fail the posttrans transaction, got %d (stderr: %s)", code, stderr)
+	}
+	if !strings.Contains(stderr, "docker-helper-fifo-rw-constraint") ||
+		!strings.Contains(stderr, "FIFO constraint module install failed") {
+		t.Errorf("the failure must be loud under the constraint scope: %s", stderr)
+	}
+	// The previously active backends must actually be stopped: the
+	// pre-upgrade daemon and the builder service cannot keep executing
+	// operations against a policy that lacks the constraint.
+	if got := stateOfService(t, statePath, "docker-helper.service"); got != "inactive" {
+		t.Errorf("docker-helper.service must be stopped after the failed upgrade, state=%s", got)
+	}
+	if got := stateOfService(t, statePath, "docker-helper-builder.service"); got != "inactive" {
+		t.Errorf("docker-helper-builder.service must be stopped after the failed upgrade, state=%s", got)
+	}
+	// The deferred-restart decision survives for the recovery transaction.
+	decision, err := os.ReadFile(stateFilePath)
+	if err != nil || string(decision) != "was_active=true\n" {
+		t.Fatalf("the failed posttrans must preserve the deferred-restart decision: %q %v", decision, err)
+	}
+	for _, c := range readLifecycleScriptCalls(t, logFile) {
+		if strings.Contains(c, "try-restart") || strings.Contains(c, "restart") {
+			t.Errorf("a failed upgrade must never restart: %s", c)
+		}
+	}
+}
+
+// TestUninstallSystemOrphanConstraintRemoved verifies the tarball uninstall
+// parity contract: the constraint module is removed through the DURABLE
+// installed lifecycle library (same owner as the RPM and the installer)
+// even when the docker_helper module is not in the store, and no removal
+// of the absent main module is attempted.
+func TestUninstallSystemOrphanConstraintRemoved(t *testing.T) {
+	env := newSystemUninstallScriptEnv(t)
+	// Stateful module store: ONLY the constraint module is resident.
+	moduleList := filepath.Join(t.TempDir(), "modules.list")
+	if err := os.WriteFile(moduleList, []byte("docker-helper-fifo-rw-constraint\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	env.fakeSemodule(t, fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$0 $@" >> "$log_file"
+case "$1" in
+  -l) cat "%s" ;;
+  -r)
+    grep -v "^$2$" "%s" > "%s.tmp"
+    mv "%s.tmp" "%s"
+    ;;
+  *) exit 0 ;;
+esac
+exit 0
+`, env.logFile, moduleList, moduleList, moduleList, moduleList, moduleList))
+
+	out, err := env.run(t, "--yes", "")
+	if err != nil {
+		t.Fatalf("uninstall must succeed with an orphaned constraint module: %v\n%s", err, out)
+	}
+	removeAttempts := 0
+	for _, c := range env.calls(t) {
+		if strings.Contains(c, "semodule") && strings.Contains(c, "-r") {
+			if strings.Contains(c, "docker_helper") {
+				t.Errorf("an absent docker_helper module must not be removed: %s", c)
+			}
+			if strings.Contains(c, "docker-helper-fifo-rw-constraint") {
+				removeAttempts++
+			}
+		}
+	}
+	if removeAttempts == 0 {
+		t.Error("the orphaned constraint module must be removed on uninstall")
+	}
+	list, err := os.ReadFile(moduleList)
+	if err != nil || strings.Contains(string(list), "docker-helper-fifo-rw-constraint") {
+		t.Fatalf("the removed constraint module must leave the store: %q %v", list, err)
+	}
+}
+
+// TestUninstallSystemConstraintMissingLibraryWarns verifies the
+// fail-secure boundary: when the durable lifecycle library is missing but
+// a constraint module is resident, the uninstaller never silently skips
+// the removal and never re-implements it ad hoc — it warns loudly with the
+// explicit remediation command.
+func TestUninstallSystemConstraintMissingLibraryWarns(t *testing.T) {
+	env := newSystemUninstallScriptEnv(t)
+	if err := os.Remove(env.dest("usr/share/docker-helper/selinux/constraint-module.sh")); err != nil {
+		t.Fatal(err)
+	}
+	moduleList := filepath.Join(t.TempDir(), "modules.list")
+	if err := os.WriteFile(moduleList, []byte("docker-helper-fifo-rw-constraint\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	env.fakeSemodule(t, fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$0 $@" >> "$log_file"
+case "$1" in
+  -l) cat "%s" ;;
+  *) exit 0 ;;
+esac
+exit 0
+`, env.logFile, moduleList))
+
+	out, err := env.run(t, "--yes", "")
+	if err != nil {
+		t.Fatalf("uninstall must proceed despite the missing library: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "lifecycle library is missing") ||
+		!strings.Contains(out, "semodule -X 400 -r docker-helper-fifo-rw-constraint") {
+		t.Errorf("a resident constraint module with a missing library must warn with the explicit remediation: %s", out)
+	}
+	for _, c := range env.calls(t) {
+		if strings.Contains(c, "semodule") && strings.Contains(c, "-r") &&
+			strings.Contains(c, "docker-helper-fifo-rw-constraint") {
+			t.Errorf("the uninstaller must not re-implement the removal ad hoc without the library: %s", c)
+		}
 	}
 }
 

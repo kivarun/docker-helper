@@ -3,13 +3,18 @@
 # backend. Sourced by the RPM scriptlets (posttrans, preremove) and by the
 # manual installer/uninstaller; every function fails loud where an
 # installation decision is made and stays idempotent-tolerant where
-# absence is a normal state.
+# absence is a normal state. The install/remove functions REPORT failure
+# through their exit status; the calling scriptlet owns the abort
+# semantics (the RPM %posttrans stops the running backend on failure, the
+# installer aborts the installation).
 #
 # The constraint module (docker-helper-fifo-rw-constraint.cil) is a
 # separately owned product artifact: it is never merged into the
 # docker_helper.pp policy package. Its exact candidate bytes carry their
 # own identity via the distribution release evidence, so any divergence in
-# the module store is a collision, not an upgrade.
+# the module store is a collision, not an upgrade: the identity decision is
+# byte-exact CIL comparison ONLY — a statement-level or name-level match
+# never substitutes for the bytes.
 
 # The canonical module identity. Changing any of these requires new
 # distribution evidence (fresh isolated-policy measurements), never a
@@ -39,7 +44,7 @@ dh_constraint_store_root() {
 }
 
 # dh_constraint_store_blobs: prints every known-shape module-store blob
-# holding the constraint module source CIL at our fixed priority (the
+# holding the constraint module source CIL at OUR priority (the
 # per-module directory carrying the compressed 'cil' source blob; older
 # layouts keep an HLL directory). Only existing paths are printed.
 dh_constraint_store_blobs() {
@@ -55,51 +60,89 @@ dh_constraint_store_blobs() {
   fi
 }
 
+# dh_constraint_same_name_elsewhere: prints the module directories holding
+# a module with OUR NAME at any priority OTHER than ours (both the
+# per-module layout and the older priority/hll layout), one per line. A
+# same-name module outside our priority is a collision by definition here:
+# our module name is product-owned end to end and must never appear at
+# another priority, whatever its bytes are.
+dh_constraint_same_name_elsewhere() {
+  store="$(dh_constraint_store_root)"
+  for dir in "$store"/active/modules/*/"${DH_CONSTRAINT_MODULE}" \
+             "$store"/active/modules/*/hll/"${DH_CONSTRAINT_MODULE}"; do
+    # Unmatched globs stay literal; only real module directories count.
+    [ -d "$dir" ] || continue
+    rel="${dir#"${store}"/active/modules/}"
+    prio="${rel%%/*}"
+    [ "$prio" = "$DH_CONSTRAINT_PRIORITY" ] && continue
+    echo "$dir"
+  done
+}
+
 # dh_constraint_store_identity: verifies the module resident in the store
-# at our priority. Sets dh_constraint_store_identity_rc only:
-#   0 identical (byte-exact blob, or at minimum the exact constraint
-#     statement resident when byte extraction is impossible),
-#   1 absent, 2 mismatch, 3 unreadable/never-identical.
+# at our priority. The identity decision is BYTE-EXACT: every known-shape
+# store blob must be the bzip2 compression of exactly the installed
+# candidate CIL. Sets dh_constraint_store_identity_rc only:
+#   0 byte-exact identical,
+#   1 absent (no blob at our priority),
+#   2 present but NOT byte-identical,
+#   3 present but unverifiable (blobs unreadable, undecodable, or missing
+#     the bzip2 tooling — the identity can never be trusted here).
 dh_constraint_store_identity() {
   dh_constraint_store_identity_rc=3
   cil="$1"
   [ -r "$cil" ] || return
+  if ! command -v bzip2 >/dev/null 2>&1; then
+    return
+  fi
   blobs="$(dh_constraint_store_blobs 2>/dev/null)"
   if [ -z "$blobs" ]; then
     dh_constraint_store_identity_rc=1
     return
   fi
+  comparable=false
   for blob in $blobs; do
-    if bzip2 -dc "$blob" 2>/dev/null | cmp -s - "$cil"; then
-      dh_constraint_store_identity_rc=0
-      return
+    if bzip2 -dc "$blob" >/dev/null 2>&1; then
+      comparable=true
+      if bzip2 -dc "$blob" 2>/dev/null | cmp -s - "$cil"; then
+        dh_constraint_store_identity_rc=0
+        return
+      fi
     fi
   done
-  for blob in $blobs; do
-    if bzip2 -dc "$blob" 2>/dev/null | grep -Fqx "$DH_CONSTRAINT_STATEMENT"; then
-      dh_constraint_store_identity_rc=0
-      return
-    fi
-  done
-  dh_constraint_store_identity_rc=2
+  if [ "$comparable" = "true" ]; then
+    dh_constraint_store_identity_rc=2
+  fi
+  # rc stays 3 when present blobs exist but none is a decompressable CIL
+  # blob: the resident content can never be trusted.
 }
 
-# dh_constraint_preinstall_collision: refuses to proceed when a module with
-# our name is already resident at our priority and is NOT byte-identical to
-# the artifact about to be installed. An identical resident module is not a
-# collision (idempotent repeat install / same-content upgrade).
+# dh_constraint_preinstall_collision: the fail-closed ownership pre-check.
+# Refuses to proceed (returns 2) when
+#   - a module with our name is resident at ANY other priority (an
+#     unexpected same-name module is a collision whatever its bytes), or
+#   - the resident module at our priority is present but not byte-exactly
+#     identical to the artifact about to be installed (a different or an
+#     UNVERIFIABLE resident module is never overwritten silently).
+# An absent module at our priority, or a byte-exact resident module, is
+# not a collision (fresh install / idempotent repeat install).
 dh_constraint_preinstall_collision() {
   cil="$1"
+  foreign="$(dh_constraint_same_name_elsewhere 2>/dev/null)"
+  if [ -n "$foreign" ]; then
+    dh_constraint_error "a module named $DH_CONSTRAINT_MODULE is already installed outside priority $DH_CONSTRAINT_PRIORITY ($foreign); refusing to proceed (remove it explicitly; the constraint module name is product-owned at priority $DH_CONSTRAINT_PRIORITY only)"
+    return 2
+  fi
   dh_constraint_store_identity "$cil"
   case "$dh_constraint_store_identity_rc" in
     0|1) return 0 ;;
     2)
-      dh_constraint_error "a different module named $DH_CONSTRAINT_MODULE is already installed at priority $DH_CONSTRAINT_PRIORITY; refusing to overwrite it silently (an explicit repair requires removing it first: semodule -X $DH_CONSTRAINT_PRIORITY -r $DH_CONSTRAINT_MODULE)"
-      exit 2
+      dh_constraint_error "a DIFFERENT module named $DH_CONSTRAINT_MODULE is already installed at priority $DH_CONSTRAINT_PRIORITY; refusing to overwrite it silently (an explicit repair requires removing it first: semodule -X $DH_CONSTRAINT_PRIORITY -r $DH_CONSTRAINT_MODULE)"
+      return 2
       ;;
     *)
       dh_constraint_error "the resident $DH_CONSTRAINT_MODULE store content cannot be read or verified; refusing to install over an unverifiable module (remove it explicitly: semodule -X $DH_CONSTRAINT_PRIORITY -r $DH_CONSTRAINT_MODULE)"
-      exit 2
+      return 2
       ;;
   esac
 }
@@ -114,44 +157,47 @@ dh_constraint_preinstall_collision() {
 dh_constraint_effective_policy_check() {
   if ! command -v seinfo >/dev/null 2>&1; then
     dh_constraint_error "seinfo is not available; the loaded policy cannot be verified for the $DH_CONSTRAINT_MODULE constraint (install setools-console and re-run the module install)"
-    exit 2
+    return 2
   fi
   if ! query_out="$(seinfo --constrain fifo_file /sys/fs/selinux/policy 2>&1)"; then
     dh_constraint_error "the seinfo constraint query failed against the loaded policy: $query_out"
-    exit 2
+    return 2
   fi
   if ! printf '%s\n' "$query_out" | sed 's/^[[:space:]]*//' | grep -Fqx "$DH_CONSTRAINT_STATEMENT"; then
     dh_constraint_error "the loaded policy does not carry the installed fifo_file read/write constraint after the module install (this can follow a failed reload or a store/policy mismatch); refusing to declare success"
     dh_constraint_error "re-verify with: seinfo --constrain fifo_file /sys/fs/selinux/policy"
-    exit 2
+    return 2
   fi
 }
 
 # dh_constraint_install: the RPM and install-system install contract.
 #   1. artifact readable;
-#   2. collision/ownership pre-check against the module store;
+#   2. collision/ownership pre-check against the module store (all
+#      priorities, byte-exact identity only);
 #   3. semodule install at the fixed priority;
-#   4. store identity re-verified immediately after the install;
+#   4. store identity re-verified immediately after the install
+#      (byte-exact; an unverifiable store is a refusal);
 #   5. effective-policy check against the loaded policy.
-# Any failed step exits non-zero: the RPM %posttrans contract declares the
-# whole transaction failed and the service is not restarted (docker-helper
-# stays down until the module state is repaired).
+# Any failed step RETURNS non-zero; the calling scriptlet owns the abort
+# semantics (see the file header).
 dh_constraint_install() {
   cil="$1"
   [ -r "$cil" ] || {
     dh_constraint_error "constraint module artifact not readable at $cil"
-    exit 1
+    return 1
   }
   if ! command -v semodule >/dev/null 2>&1; then
     dh_constraint_error "semodule not available; cannot install $DH_CONSTRAINT_MODULE"
-    exit 1
+    return 1
   fi
-  dh_constraint_preinstall_collision "$cil"
+  if ! dh_constraint_preinstall_collision "$cil"; then
+    return 2
+  fi
 
   echo "docker-helper [${DH_CONSTRAINT_MODULE}]: installing at priority $DH_CONSTRAINT_PRIORITY from $cil"
   if ! semodule -X "$DH_CONSTRAINT_PRIORITY" -i "$cil"; then
-    dh_constraint_error "semodule failed to install $DH_CONSTRAINT_MODULE at priority $DH_CONSTRAINT_PRIORITY (the transaction is failed; the service has not been restarted)"
-    exit 1
+    dh_constraint_error "semodule failed to install $DH_CONSTRAINT_MODULE at priority $DH_CONSTRAINT_PRIORITY (the transaction is failed; recovery is owned by the calling scriptlet)"
+    return 1
   fi
 
   dh_constraint_store_identity "$cil"
@@ -159,11 +205,11 @@ dh_constraint_install() {
     0) ;;
     2)
       dh_constraint_error "the installed module store does not match the shipped constraint artifact; refusing to declare success"
-      exit 2
+      return 2
       ;;
     *)
       dh_constraint_error "the installed module store content cannot be read or verified after install; refusing to declare success"
-      exit 2
+      return 2
       ;;
   esac
 

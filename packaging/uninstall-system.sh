@@ -285,27 +285,34 @@ remove_selinux_policy() {
 		warn "semodule not available; skipping SELinux policy module removal"
 		return
 	fi
-	# Absence is a normal idempotent no-op (same as the RPM preremove): an
-	# AppArmor-only host never installed our module and must not emit a bogus
-	# "failed to remove" warning.
-	if ! "$SEMODULE" -l 2>/dev/null | grep -qw docker_helper; then
-		return
-	fi
-	info "Removing SELinux policy module docker_helper (best-effort)"
-	if ! "$SEMODULE" -r docker_helper 2>/dev/null; then
-		warn "Failed to remove SELinux policy module docker_helper (may not be loaded)"
-	fi
-	# Verified cleanup: the module must actually be gone from the policy store
-	# before the third-party label restore runs; a module that remains after
-	# the removal attempt is an explicit warning (never a silent success).
+	# Absence of the main module is a normal idempotent no-op for the
+	# docker_helper removal itself (same as the RPM preremove): an
+	# AppArmor-only host never installed our module and must not emit a
+	# bogus "failed to remove" warning.
 	if "$SEMODULE" -l 2>/dev/null | grep -qw docker_helper; then
-		warn "SELinux module docker_helper still installed after removal attempt; third-party binary labels not restored"
-		return
+		info "Removing SELinux policy module docker_helper (best-effort)"
+		if ! "$SEMODULE" -r docker_helper 2>/dev/null; then
+			warn "Failed to remove SELinux policy module docker_helper (may not be loaded)"
+		fi
+		# Verified cleanup: the module must actually be gone from the policy store
+		# before the third-party label restore runs; a module that remains after
+		# the removal attempt is an explicit warning (never a silent success).
+		if "$SEMODULE" -l 2>/dev/null | grep -qw docker_helper; then
+			warn "SELinux module docker_helper still installed after removal attempt; third-party binary labels not restored"
+			return
+		fi
+		restore_third_party_binary_labels
 	fi
 	# The separately owned constraint module: removed through the same
-	# packaged lifecycle library the RPM final-erase drives (absent
-	# library or unavailable module removal stay fail-secure: a surviving
-	# constraint remains kernel-enforced, never silently unshipped).
+	# durable lifecycle library the installer and the RPM scriptlets
+	# maintain (absence of the module is a normal idempotent no-op). The
+	# removal is UNCONDITIONALLY attempted here, independent of the
+	# docker_helper module's state — an orphaned constraint module (or a
+	# store state where only ever the constraint was loaded) is removed
+	# just the same. A missing library next to a PRESENT constraint module
+	# never silently skips the removal and never re-implements it ad hoc:
+	# it is a loud warning with the explicit remediation (a surviving
+	# constraint is fail-SECURE, never silently unshipped).
 	if [[ -r "$SELINUX_CONSTRAINT_LIB" ]]; then
 		# shellcheck disable=SC1090
 		. "$SELINUX_CONSTRAINT_LIB"
@@ -313,11 +320,8 @@ remove_selinux_policy() {
 			warn "constraint module $DH_CONSTRAINT_MODULE removal failed (see the error above for the manual remediation command)"
 		fi
 	elif "$SEMODULE" -l 2>/dev/null | grep -qw docker-helper-fifo-rw-constraint; then
-		if ! "$SEMODULE" -r docker-helper-fifo-rw-constraint 2>/dev/null; then
-			warn "Failed to remove SELinux module docker-helper-fifo-rw-constraint; manual remediation: semodule -X 400 -r docker-helper-fifo-rw-constraint"
-		fi
+		warn "constraint module docker-helper-fifo-rw-constraint is installed but its lifecycle library is missing at $SELINUX_CONSTRAINT_LIB; manual remediation: semodule -X 400 -r docker-helper-fifo-rw-constraint"
 	fi
-	restore_third_party_binary_labels
 }
 
 remove_selinux_artifact() {

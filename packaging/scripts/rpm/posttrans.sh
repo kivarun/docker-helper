@@ -59,14 +59,36 @@ fi
 
 # The separately owned FIFO read/write constraint module (same %posttrans
 # contract: loud failure, no restart). The constraint install library is
-# sourced from its packaged path; a failure propagates through its
-# non-zero exit and aborts this scriptlet under set -e before any relabel
-# or restart runs.
+# sourced from its packaged path; a failure is reported through its
+# non-zero exit status and handled below. The lifecycle library never
+# overwrites an unexpected resident module and never declares success on
+# an unverifiable store or loaded policy.
 CONSTRAINT_LIB=/usr/share/docker-helper/selinux/constraint-module.sh
 CONSTRAINT_CIL=/usr/share/selinux/docker-helper-fifo-rw-constraint.cil
 
 . "$CONSTRAINT_LIB"
-dh_constraint_install "$CONSTRAINT_CIL"
+if ! dh_constraint_install "$CONSTRAINT_CIL"; then
+  # Fail-closed upgrade semantics: this %posttrans failed while the
+  # previously active docker-helper service and builder backend may still
+  # be running their PRE-upgrade process images against a loaded policy
+  # that does NOT carry the required FIFO constraint (the module load
+  # succeeded, the constraint did not). Neither backend may keep
+  # executing operations without the required policy: stop both, loudly,
+  # best-effort (a failing stop cannot make the situation worse than an
+  # unconfined backend). The deferred-restart decision below is NOT
+  # consumed: the recorded was-active state survives for the recovery
+  # transaction, and the stopped services are only ever restarted by an
+  # explicit operator action or a later successful transaction that
+  # observes them active again.
+  if ! systemctl stop docker-helper.service 2>/dev/null; then
+    echo "warning: could not stop docker-helper.service after the failed constraint install" >&2
+  fi
+  if ! systemctl stop docker-helper-builder.service 2>/dev/null; then
+    echo "warning: could not stop docker-helper-builder.service after the failed constraint install" >&2
+  fi
+  echo "error: the FIFO constraint module install failed; docker-helper services were stopped and will NOT restart" >&2
+  exit 1
+fi
 
 if command -v restorecon >/dev/null 2>&1; then
   restorecon /usr/bin/docker-helper || true

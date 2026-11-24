@@ -66,7 +66,12 @@ SELINUX_PP_DEST="${SELINUX_PP_DEST:-/usr/share/selinux/docker_helper.pp}"
 # RPM scriptlets drive.
 SELINUX_CONSTRAINT_CIL_SRC="${SELINUX_CONSTRAINT_CIL_SRC:-selinux/docker-helper-fifo-rw-constraint.cil}"
 SELINUX_CONSTRAINT_CIL_DEST="${SELINUX_CONSTRAINT_CIL_DEST:-/usr/share/selinux/docker-helper-fifo-rw-constraint.cil}"
+# The lifecycle library is installed to the SAME durable packaged path the
+# RPM ships it at, so the uninstaller and any later maintenance drive the
+# one canonical constraint-module owner — the installer's script-tree copy
+# is only the staging source, never the sole resident of the semantics.
 SELINUX_CONSTRAINT_LIB_SRC="${SELINUX_CONSTRAINT_LIB_SRC:-selinux/constraint-module.sh}"
+SELINUX_CONSTRAINT_LIB_DEST="${SELINUX_CONSTRAINT_LIB_DEST:-/usr/share/docker-helper/selinux/constraint-module.sh}"
 SEMODULE="${SEMODULE:-semodule}"
 RESTORECON="${RESTORECON:-restorecon}"
 BINDFS="${BINDFS:-bindfs}"
@@ -762,17 +767,29 @@ install_selinux_policy() {
 
 	# The separately owned FIFO read/write constraint module, installed
 	# through the same shared lifecycle library the RPM %posttrans drives:
-	# collision pre-check, priority-400 semodule install, store identity
-	# verification, and the effective-policy (loaded policy) verification.
-	# Its failure aborts the installation (fail closed) exactly like the
-	# module load above.
+	# collision pre-check (all priorities, byte-exact identity only),
+	# priority-400 semodule install, store identity verification, and the
+	# effective-policy (loaded policy) verification. Its failure aborts
+	# the installation (fail closed) exactly like the module load above.
 	if ! cp "$script_dir/$SELINUX_CONSTRAINT_CIL_SRC" "$SELINUX_CONSTRAINT_CIL_DEST" || ! chmod 0644 "$SELINUX_CONSTRAINT_CIL_DEST"; then
 		error "Failed to install the constraint module artifact to $SELINUX_CONSTRAINT_CIL_DEST"
 		exit 1
 	fi
+	# The lifecycle library itself is installed to the durable packaged
+	# path BEFORE the constraint install, and the install drives THE
+	# INSTALLED COPY: the uninstaller and later maintenance read this same
+	# path, so the installed file is the one semantic owner.
+	if ! mkdir -p "$(dirname "$SELINUX_CONSTRAINT_LIB_DEST")" || \
+	   ! cp "$script_dir/$SELINUX_CONSTRAINT_LIB_SRC" "$SELINUX_CONSTRAINT_LIB_DEST" || ! chmod 0644 "$SELINUX_CONSTRAINT_LIB_DEST"; then
+		error "Failed to install the constraint module lifecycle library to $SELINUX_CONSTRAINT_LIB_DEST"
+		exit 1
+	fi
 	# shellcheck disable=SC1090
-	. "$script_dir/$SELINUX_CONSTRAINT_LIB_SRC"
-	dh_constraint_install "$SELINUX_CONSTRAINT_CIL_DEST"
+	. "$SELINUX_CONSTRAINT_LIB_DEST"
+	if ! dh_constraint_install "$SELINUX_CONSTRAINT_CIL_DEST"; then
+		error "Failed to install the FIFO constraint module; installation aborted. Service will not be started."
+		exit 1
+	fi
 }
 
 apply_selinux_restorecon() {
