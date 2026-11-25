@@ -141,7 +141,8 @@ load_stage() {
     cat <<EOF
 (type $PROBERTYPE)
 (allow docker_helper_buildkitd_t $PROBERTYPE (file (entrypoint execute getattr open read map)))
-(allow $shdom $PROBERTYPE (file (relabelto)))
+(allow $shdom $PROBERTYPE (file (relabelto setattr)))
+(allow $shdom bin_t (file (relabelfrom setattr)))
 (allow $shdom self (process (setexec)))
 (allow docker_helper_buildkitd_t self (process (setexec)))
 (allow $shdom docker_helper_buildkitd_t (process (transition)))
