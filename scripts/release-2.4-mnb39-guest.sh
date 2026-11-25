@@ -286,6 +286,7 @@ TARGETCTX=system_u:system_r:docker_helper_buildkitd_t:s0:c1
 sed 's/^[Cc][0-9].*/&/' "$EVIDENCE_DIR/m1-controls.txt"
 dmesg -T 2>/dev/null | grep -i avc | tail -5 >> "$EVIDENCE_DIR/m1-controls.txt" || true
 OWNCTX="$(runc_rc "$TARGETCTX" selfctx)"
+ev m1-why "rc=$RUNCON_RC len=${#OWNCTX} raw=$(head -c 120 "$OUTF" 2>/dev/null | tr '\n' '|')"
 if [ "$RUNCON_RC" != "0" ] || [ -z "$OWNCTX" ]; then
   say 'M1: the :s0:c1 entry attempt was refused; retrying at the shell base level'
   TARGETCTX=system_u:system_r:docker_helper_buildkitd_t:s0
