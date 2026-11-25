@@ -495,11 +495,24 @@ else
 fi
 
 # re-assert the parse checks (unchanged; no additional faces)
+OUTF2="/tmp/mnb39-out2.$$"
+: > "$OUTF2"
+ev m2-constr-pre-lsZ "$(ls -l "$OUTF" "$TRACEF" 2>/dev/null)"
 runc "$TARGETCTX" constrain fifo_file > "$EVIDENCE_DIR/m2-probe-constrain.txt"
 restore_rc
+cp "$TRACEF" "$EVIDENCE_DIR/m2-constr-trace.txt" 2>/dev/null || true
+ev m2-constr-stat "$(ls -l "$OUTF" 2>/dev/null; true)"
 [ "$RUNCON_RC" = "0" ] \
   || { cat "$EVIDENCE_DIR/m2-probe-constrain.txt"
-       sed 's/^/TRACE: /' "$TRACEF" 2>/dev/null | head -20
+       # the second channel kills the single-OUTF-state theory: a fresh
+       # output file, the same subcommand, run back to back
+       set +e
+       runcon "$TARGETCTX" "$PROBE" out "$OUTF2" constrain fifo_file
+       RUNCON_RC2=$?
+       set -e
+       printf 'constr2-rc=%d len=%s\n' "$RUNCON_RC2" "$(wc -c < "$OUTF2" 2>/dev/null)"
+       cat "$OUTF2" 2>/dev/null
+       sed 's/^/TRACE: /' "$TRACEF" 2>/dev/null | head -24
        fail "stage-2 constrain render probe rc=$RUNCON_RC"; }
 grep -Fqx "$STATEMENT" "$EVIDENCE_DIR/m2-probe-constrain.txt" \
   || { sed 's/^/TRACE: /' "$TRACEF" 2>/dev/null | head -20; fail "stage-2 constrain render lost the canonical statement"; }
