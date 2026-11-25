@@ -289,6 +289,19 @@ static void out(const char *fmt, ...)
 	}
 }
 
+static void out2(const char *fmt, ...)
+{
+	static char obuf[2048];
+	va_list ap;
+	va_start(ap, fmt);
+	size_t n = mini_vsnprintf(obuf, sizeof obuf, fmt, ap);
+	va_end(ap);
+	if (n < sizeof obuf - 1) {
+		obuf[n++] = '\n';
+		sys_write(2, obuf, n);
+	}
+}
+
 static void TR(const char *fmt, ...)
 {
 	static char obuf[1024];
@@ -672,6 +685,7 @@ static void parse_type(struct rd *r)
 
 static void load_policy(const char *ppath)
 {
+	out2("probe: policy-open attempt path=%s", ppath);
 	int fd = (int)sys_open(ppath, O_RDONLY);
 	if (fd < 0) {
 		out("policy-open errno=%d", (int)(-fd));
@@ -999,6 +1013,7 @@ static int probe_run(int argc, char **argv)
 			return 2;
 		}
 		sys_close(ofd);
+		out2("probe: out-mode fd=%d path=%s", ofd, argv[2]);
 		argv += 2;
 		argc -= 2;
 	}
