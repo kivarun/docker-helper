@@ -420,17 +420,20 @@ ev m2-policy-sha "$(policy_sha)"
 TARGETCTX="$(cat "$EVIDENCE_DIR/m1-target-ctx")"
 {
   printf 'm2-pre-lsZ: '; ls -Z "$OUTF" || true
+  printf 'm2-pre-trace-lsZ: '; ls -Z "$TRACEF" || true
   printf 'm2-pre-content: '; head -c 200 "$OUTF" 2>/dev/null | tr '\n' '|'
   printf '\n'
 } >> "$EVIDENCE_DIR/m2-why.log" 2>&1
-OWNCTX="$(runc "$TARGETCTX" selfctx)"
+OWNCTX="$(runc_rc "$TARGETCTX" selfctx)"
 restore_rc
 {
   printf 'm2-trace: %s\n' "$(tail -3 "$TRACEF" 2>/dev/null | tr '\n' '|')"
   printf 'm2-selfctx-rc=%d len=%s\n' "$RUNCON_RC" "${#OWNCTX}"
   printf 'm2-post-content: '; head -c 200 "$OUTF" 2>/dev/null | tr '\n' '|'
   printf '\n'
+  dmesg -T 2>/dev/null | grep -i 'avc' | tail -8 || true
 } >> "$EVIDENCE_DIR/m2-why.log" 2>&1
+[ "$RUNCON_RC" = "0" ] || fail "m2 selfctx rc=$RUNCON_RC: $OWNCTX"
 WL="$(compose_workload "$OWNCTX" "$WL_DOMAIN")"
 ev m2-workload-ctx "$WL"
 
