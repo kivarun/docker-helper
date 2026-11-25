@@ -320,7 +320,7 @@ ev m1-noexec-parse "PASS (constrain exact match; roletype: no ref-only role; pro
 runc_rc "$TARGETCTX" checkctx "$MNB39_CHECKCTX_PATH" "$WL" 'valid-workload' \
   > "$EVIDENCE_DIR/m1-checkctx-valid.txt"
 ev m1-checkctx-valid.rc "$RUNCON_RC"
-if ! grep -q 'rc=1' "$EVIDENCE_DIR/m1-checkctx-valid.txt"; then
+if ! grep -q 'errno=13' "$EVIDENCE_DIR/m1-checkctx-valid.txt"; then
   cat "$EVIDENCE_DIR/m1-checkctx-valid.txt"
   fail "stage 1 must DENY the check_context write (the only missing row is the measured surface)"
 fi
