@@ -397,13 +397,17 @@ say 'M2: stage-2 module (+check_context); the context-validation matrix'
 if [ -n "$MNB39_CHECKCTX_PATH" ]; then
   unload_stage "$MOD1"
   load_stage "$MOD2" "(allow docker_helper_buildkitd_t security_t (security (check_context)))"
+  # the stage-1 unload strips the probe type from the policy: objects
+  # labeled with it fall to unlabeled_t and STAY there even when stage-2
+  # re-adds the type, so both probe artifacts must be relabeled NOW
+  probe_labelize "$PROBE"
+  probe_labelize "$OUTF"
 else
   ev m2-stage2 "SKIPPED (no check_context node on /sys/fs/selinux; the diagnostics keep the stage-1 module and the parse evidence)"
 fi
 ev m2-modules "$(semodule -l 2>/dev/null | grep -E 'dh_mnb39|docker_helper' || true)"
 ev m2-policy-sha "$(policy_sha)"
 
-semodule -DB >/dev/null 2>&1 || true
 TARGETCTX="$(cat "$EVIDENCE_DIR/m1-target-ctx")"
 {
   printf 'm2-pre-lsZ: '; ls -Z "$OUTF" || true
