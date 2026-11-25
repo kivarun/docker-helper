@@ -542,9 +542,10 @@ if semodule -l 2>/dev/null | grep -qE '^dh_mnb39'; then
   fail "a diagnostic module is still listed after the teardown"
 fi
 TARGETCTX="$(cat "$EVIDENCE_DIR/m1-target-ctx")"
+: > "$OUTF"
 OUT="$(runc_rc "$TARGETCTX" policyinfo)"
 restore_rc
-ev m1-probe-trace "$(cat "$TRACEF" 2>/dev/null || echo empty)"
+ev m3-negative-trace "$(tail -4 "$TRACEF" 2>/dev/null | tr '\n' '|')"
 [ "$RUNCON_RC" != "0" ] \
   || { printf '%s\n' "$OUT"; fail "after the unload the probe must NOT reenter buildkitd_t"; }
 printf '%s\n' "$OUT" > "$EVIDENCE_DIR/m3-negative-rerun.txt"
@@ -552,7 +553,7 @@ semodule -l 2>/dev/null | grep -q '^docker_helper' \
   || fail "the product module must remain loaded after the diagnostic teardown"
 [ -f /usr/share/selinux/docker-helper-fifo-rw-constraint.cil ] \
   || fail "the shipped constraint artifact must remain"
-{ journalctl -k -b --no-pager 2>/dev/null | grep -iE 'avc|denied' | tail -12; } \
+{ journalctl -k -b --no-pager 2>/dev/null | grep -iE 'avc|denied' | tail -12; true; } \
   > "$EVIDENCE_DIR/m3-kernel-avcs.txt"
 say 'M3: PASS'
 }
