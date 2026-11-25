@@ -943,22 +943,37 @@ static int checkctx_once(const char *path, const char *ctx, const char *label)
 {
 	int fd = (int)sys_open(path, O_RDWR);
 	if (fd < 0) {
-		out("checkctx %s: open errno=%d rc=2", label, (int)(-fd));
+		/* rc=3: the interface itself is unavailable (ENOENT);
+		 * rc=2: LSM-permission denial on the node file */
+		int e = (int)(-fd);
+		if (e == 2) {
+			out("checkctx %s: UNAVAILABLE open errno=%d rc=3", label, e);
+			return 3;
+		}
+		out("checkctx %s: PERMISSION open errno=%d rc=2", label, e);
 		return 2;
 	}
 	size_t clen = strlen(ctx);
-	long w = sys_write(fd, ctx, clen);
+	/* libselinux parity: security_check_context writes strlen+1 */
+	long w = sys_write(fd, ctx, clen + 1);
 	int e = w < 0 ? (int)(-w) : 0;
 	char canon[512];
-	long rdn = w == (long)clen ? sys_read(fd, canon, sizeof canon - 1) : 0;
+	long rdn = w == (long)(clen + 1) ? sys_read(fd, canon, sizeof canon - 1) : 0;
 	sys_close(fd);
-	if (w != (long)clen) {
-		out("checkctx %s: DENIED errno=%d rc=1", label, e);
+	if (w != (long)(clen + 1)) {
+		/* NOT a permission result: the kernel validates the context
+		 * through security_context_to_sid and answers EINVAL for an
+		 * unknown type / unauthorized role/type / bad category */
+		if (e == 13 || e == 1) {
+			out("checkctx %s: PERMISSION write errno=%d rc=2", label, e);
+			return 2;
+		}
+		out("checkctx %s: INVALID errno=%d rc=1", label, e);
 		return 1;
 	}
 	if (rdn < 0) {
-		out("checkctx %s: write ok, read-back errno=%d rc=1", label, (int)(-rdn));
-		return 1;
+		out("checkctx %s: UNAVAILABLE read-back errno=%d rc=3", label, (int)(-rdn));
+		return 3;
 	}
 	if ((size_t)rdn < sizeof canon)
 		canon[rdn] = 0;

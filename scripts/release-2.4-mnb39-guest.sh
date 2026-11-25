@@ -58,7 +58,8 @@ MNB39_POLICY_SHA_BASE="${MNB39_POLICY_SHA_BASE:-}"
 [ -f "${STATE_DIR:-/var/lib/docker-helper-mnb39-state}/policy-sha-base" ] \
   && MNB39_POLICY_SHA_BASE="$(cat "$STATE_DIR/policy-sha-base" 2>/dev/null || true)" || true
 MNB39_POLICYPATH=/sys/fs/selinux/policy
-MNB39_CHECKCTX_PATH="$(ls /sys/fs/selinux/check_context 2>/dev/null || true)"
+MNB39_CHECKCTX_PATH="$(ls /sys/fs/selinux/context 2>/dev/null || true)"
+MNB39_GHOST_PROBE_PATH=/sys/fs/selinux/check_context
 # check_context is a kernel-compile-time selinuxfs node; its ABSENCE is a
 # measured finding for the kernel-native alternative, not a script failure
 
@@ -177,8 +178,13 @@ load_stage() {
 (roletype $shrole docker_helper_buildkitd_t)
 (typetransition $shdom $PROBERTYPE process docker_helper_buildkitd_t)
 (allow docker_helper_buildkitd_t security_t (dir (search)))
-(allow docker_helper_buildkitd_t security_t (file (getattr open read)))
+(allow docker_helper_buildkitd_t security_t (file (getattr open read write)))
 (allow docker_helper_buildkitd_t security_t (security (read_policy)))
+# the composed workload context must VALIDATE through check_context, so the
+# diagnostic module carries the product's workload type as p21e3 did
+(type docker_helper_builder_workload_t)
+(roletype unconfined_r docker_helper_builder_workload_t)
+(roletype system_r docker_helper_builder_workload_t)
 EOF
     if [ -n "${2:-}" ]; then
       shift
@@ -257,6 +263,10 @@ seinfo --role_types docker_helper_buildkitd_t "$MNB39_POLICYPATH" \
 seinfo --constrain fifo_file "$MNB39_POLICYPATH" \
   > "$EVIDENCE_DIR/m0-seinfo-constrain.txt" 2>&1 \
   || fail "seinfo --constrain baseline failed"
+# the role inventory (root query) feeds the unauthorized-role matrix row
+SEINFO_ROLES="$(seinfo -r "$MNB39_POLICYPATH" 2>&1 | sed 's/^[[:space:]]*//' | grep -v '^Roles:' | grep -v '^$')"
+printf '%s\n' "$SEINFO_ROLES" > "$STATE_DIR/seinfo-roles"
+ev m0-roles "${SEINFO_ROLES:-none}"
 sed 's/^[[:space:]]*//' "$EVIDENCE_DIR/m0-seinfo-constrain.txt" | grep -Fqx "$STATEMENT" \
   || { sed 's/^/ENTRY: /' "$EVIDENCE_DIR/m0-seinfo-constrain.txt" | head; \
        fail "the installed policy must carry the canonical constraint"; }
@@ -320,38 +330,48 @@ if ! grep -Fqx "$STATEMENT" "$EVIDENCE_DIR/m1-probe-constrain.txt"; then
   sed 's/^/PROBE: /' "$EVIDENCE_DIR/m1-probe-constrain.txt" | head
   fail "the probe's in-process constraint render does not carry the canonical statement"
 fi
+# ref/parser parity is measured against the SAME loaded binary policy
+# snapshot: the diagnostic module has ALREADY added its roletype rows, so
+# the pre-module M0 seinfo capture cannot be the reference (it cannot see
+# the module's own roletype). Both queries record the loaded-policy sha.
+M1_PAR_SHA_REF="$(policy_sha)"
+seinfo --role_types docker_helper_buildkitd_t "$MNB39_POLICYPATH" \
+  > "$EVIDENCE_DIR/m1-seinfo-roletype-post.txt" 2>&1 \
+  || fail "post-module seinfo reference query failed"
+M1_PAR_SHA_PROBE="$(policy_sha)"
 runc "$TARGETCTX" roletype docker_helper_buildkitd_t > "$EVIDENCE_DIR/m1-probe-roletype.txt"
-sed 's/^[[:space:]]*//' "$EVIDENCE_DIR/m0-seinfo-roletype.txt" \
+[ "$M1_PAR_SHA_REF" = "$M1_PAR_SHA_PROBE" ] \
+  || fail "the reference and parser queries ran against DIFFERENT loaded policies"
+ev m1-parity-policy-sha "$M1_PAR_SHA_REF"
+sed 's/^[[:space:]]*//' "$EVIDENCE_DIR/m1-seinfo-roletype-post.txt" \
   | grep -v '^Roles:' | grep -v '^$' | sort -u > "$EVIDENCE_DIR/m1-roletype-ref.txt"
 grep -vE '^(policy-open:|policyinfo:)' "$EVIDENCE_DIR/m1-probe-roletype.txt" \
   | sed 's/^[[:space:]]*//' | grep -v '^$' | sort -u > "$EVIDENCE_DIR/m1-roletype-probe.txt"
 diff -u "$EVIDENCE_DIR/m1-roletype-ref.txt" "$EVIDENCE_DIR/m1-roletype-probe.txt" \
   > "$EVIDENCE_DIR/m1-roletype.diff" || true
-# probe-only roles are NOT an immediate failure: seinfo is only a second
-# parser, not the authority; stage 2 arbitrates probe-only roles against
-# the kernel itself (check_context validates the role/type enrollment)
 comm -13 "$EVIDENCE_DIR/m1-roletype-ref.txt" "$EVIDENCE_DIR/m1-roletype-probe.txt" \
   > "$EVIDENCE_DIR/m1-roletype-extras.txt" || true
-# missing roles (ref-only) ARE a probe bug
-if ! comm -23 "$EVIDENCE_DIR/m1-roletype-ref.txt" "$EVIDENCE_DIR/m1-roletype-probe.txt" \
-  > "$EVIDENCE_DIR/m1-roletype-missing.txt"; then :; fi
-if [ -s "$EVIDENCE_DIR/m1-roletype-missing.txt" ]; then
-  cat "$EVIDENCE_DIR/m1-roletype-missing.txt"
-  fail "the probe missed a role seinfo knows"
+comm -23 "$EVIDENCE_DIR/m1-roletype-ref.txt" "$EVIDENCE_DIR/m1-roletype-probe.txt" \
+  > "$EVIDENCE_DIR/m1-roletype-missing.txt" || true
+if [ -s "$EVIDENCE_DIR/m1-roletype.diff" ]; then
+  cat "$EVIDENCE_DIR/m1-roletype.diff"
+  fail "the parsed roletype set is not EXACTLY equal to the same-snapshot seinfo reference"
 fi
-ev m1-noexec-parse "PASS (constrain exact match; roletype: no ref-only role; probe-only roles go to the kernel arbitration)"
+ev m1-noexec-parse "PASS (constrain exact match; roletype set EQUALITY against the same-policy-snapshot seinfo reference)"
 
-# ---- the check_context surface, EXPECTED to be kernel-denied now ----
+# ---- the check_context surface, EXPECTED to be kernel-denied now (the
+#      security:check_context denial surfaces at the WRITE, after the
+#      file-class open/read/write faces of stage 1 already pass) ----
 if [ -n "$MNB39_CHECKCTX_PATH" ]; then
   runc_rc "$TARGETCTX" checkctx "$MNB39_CHECKCTX_PATH" "$WL" 'valid-workload' \
     > "$EVIDENCE_DIR/m1-checkctx-valid.txt"
   ev m1-checkctx-valid.rc "$RUNCON_RC"
-  if ! grep -q 'errno=13' "$EVIDENCE_DIR/m1-checkctx-valid.txt"; then
+  if ! grep -q 'PERMISSION write errno=13 rc=2' "$EVIDENCE_DIR/m1-checkctx-valid.txt"; then
     cat "$EVIDENCE_DIR/m1-checkctx-valid.txt"
-    fail "stage 1 must DENY the check_context write (the only missing row is the measured surface)"
+    fail "stage 1 must refuse the check_context WRITE with the security-class permission denial (EACCES), never mistaken for an invalid context"
   fi
 else
-  ev m1-checkctx-valid "SKIPPED (no check_context node on /sys/fs/selinux; the kernel-native interface is NOT AVAILABLE on this guest)"
+  ev m1-checkctx-valid "SKIPPED (no /sys/fs/selinux/context node; the kernel-native interface is NOT AVAILABLE on this guest)"
 fi
 {
   journalctl -k -b --no-pager 2>/dev/null | grep -iE 'avc|denied' | tail -20 \
@@ -403,17 +423,26 @@ if [ -n "$MNB39_CHECKCTX_PATH" ]; then
   row_should_refuse() {
     runc_rc "$TARGETCTX" checkctx "$MNB39_CHECKCTX_PATH" "$2" "$1" \
       > "$EVIDENCE_DIR/m2-checkctx-$1.txt"
-    [ "$RUNCON_RC" = "1" ] \
-      || { cat "$EVIDENCE_DIR/m2-checkctx-$1.txt"; fail "row $1 must be refused (rc $RUNCON_RC)"; }
+    grep -q 'INVALID errno=' "$EVIDENCE_DIR/m2-checkctx-$1.txt"
+    rc_seen="$?"
+    [ "$RUNCON_RC" = "1" ] && [ "$rc_seen" = "0" ] \
+      || { cat "$EVIDENCE_DIR/m2-checkctx-$1.txt"; fail "row $1 must be a POLICY invalid-context refusal (rc $RUNCON_RC)"; }
   }
   row_should_refuse unknown-type "$(printf '%s\n' "$WL" | sed 's/docker_helper_builder_workload_t/dh_mnb39_notype_t/')"
-  row_should_refuse wrong-role    "$(printf '%s\n' "$WL" | awk -F: -v OFS=: '{$2="user_r"; print}')"
+  # the unauthorized role/type association row needs a role the LOADED
+  # policy really knows; pick it from the persisted seinfo role inventory
+  SEINFO_ROLES="${SEINFO_ROLES:-$(cat "$STATE_DIR/seinfo-roles" 2>/dev/null || true)}"
+  UNAUTH_ROLE="$(printf '%s\n' "$SEINFO_ROLES" | grep -Ev '^(system_r|unconfined_r)$' | head -1)"
+  [ -n "$UNAUTH_ROLE" ] || UNAUTH_ROLE=staff_r
+  ev m2-unauth-role "$UNAUTH_ROLE"
+  row_should_refuse wrong-role    "$(printf '%s\n' "$WL" | awk -F: -v OFS=: -v r="$UNAUTH_ROLE" '$2=r; print')"
   row_should_refuse bad-category  "${WL}:c999"
-  # matrix row 5: unavailable interface -> fail-closed refusal with its own rc
-  runc_rc "$TARGETCTX" checkctx /nonexistent/mnb39-check_context "$WL" 'unavailable' \
+  # matrix row 5: the GHOST check_context node name -> interface/query
+  # failure with its own class (rc 3), never a policy verdict
+  runc_rc "$TARGETCTX" checkctx "$MNB39_GHOST_PROBE_PATH" "$WL" 'unavailable' \
     > "$EVIDENCE_DIR/m2-checkctx-unavailable.txt"
-  [ "$RUNCON_RC" = "2" ] \
-    || { cat "$EVIDENCE_DIR/m2-checkctx-unavailable.txt"; fail "the unavailable-interface row must fail closed (rc $RUNCON_RC)"; }
+  [ "$RUNCON_RC" = "3" ] \
+    || { cat "$EVIDENCE_DIR/m2-checkctx-unavailable.txt"; fail "the interface-query-failure row must fail with rc 3 (rc $RUNCON_RC)"; }
 
   # the roletype arbitration: every probe-only role is KERNELED through
   # check_context — a role truly enrolled for the type VALIDATES
@@ -453,6 +482,12 @@ unload_stage "$MOD1"
 RESTORED_SHA="$(policy_sha)"
 [ "$(cat "$STATE_DIR/policy-sha-base" 2>/dev/null)" = "$RESTORED_SHA" ] \
   || fail "the loaded policy sha must restore byte-exactly after the diagnostic unload (base $(cat "$STATE_DIR/policy-sha-base" 2>/dev/null || echo unknown), now $RESTORED_SHA)"
+ev m3-restored-policy-sha "$RESTORED_SHA"
+# restored-baseline reference: the module's roletype rows are gone again
+seinfo --role_types docker_helper_buildkitd_t "$MNB39_POLICYPATH" \
+  > "$EVIDENCE_DIR/m3-seinfo-roletype-restore.txt" 2>&1 || true
+sed 's/^[[:space:]]*//' "$EVIDENCE_DIR/m3-seinfo-roletype-restore.txt" \
+  | grep -v '^Roles:' | grep -v '^$' | sort -u > "$EVIDENCE_DIR/m3-roletype-restore.txt" || true
 if semodule -l 2>/dev/null | grep -qE '^dh_mnb39'; then
   fail "a diagnostic module is still listed after the teardown"
 fi
@@ -477,12 +512,31 @@ phase_m4() {
 # ---------------------------------------------------------------------------
 say 'M4: verdict composition'
 {
-  printf 'rolecheck.checkcontext   = %s\n' "$(grep -q ACCEPT "$EVIDENCE_DIR/m2-checkctx-valid.txt" && echo PASS || echo FAILED)"
-  printf 'rolecheck.parse          = %s\n' "$(grep -q PASS "$EVIDENCE_DIR/m1-noexec-parse" && echo PASS || echo FAILED)"
+  printf 'rolecheck.parity         = %s\n' "$(grep -q EQUALITY "$EVIDENCE_DIR/m1-noexec-parse" && echo 'PASS (exact set equality, same policy snapshot)' || echo FAILED)"
   printf 'constraint.exact-render  = %s\n' "$(grep -Fqx "$STATEMENT" "$EVIDENCE_DIR/m1-probe-constrain.txt" && echo PASS || echo FAILED)"
-  printf 'matrix.rows.refused      = unknown-type/wrong-role/bad-category/unavailable\n'
-  printf 'kernel.check_context     = %s\n' "$([ -n "$MNB39_CHECKCTX_PATH" ] && echo present || echo ABSENT)"
-  printf 'stage2.delta             = one row: security_t:security check_context\n'
+  if [ -n "$MNB39_CHECKCTX_PATH" ]; then
+    if grep -q ACCEPT "$EVIDENCE_DIR/m2-checkctx-valid.txt" 2>/dev/null; then
+      printf 'checkctx.valid           = PASS\n'
+    else
+      printf 'checkctx.valid           = FAILED\n'
+    fi
+    for row in unknown-type wrong-role bad-category; do
+      if grep -q 'INVALID errno=22' "$EVIDENCE_DIR/m2-checkctx-$row.txt" 2>/dev/null; then
+        printf 'checkctx.row.%-14s = PASS (policy-invalid, EINVAL)\n' "$row"
+      else
+        printf 'checkctx.row.%-14s = FAILED\n' "$row"
+      fi
+    done
+    if grep -q UNAVAILABLE "$EVIDENCE_DIR/m2-checkctx-unavailable.txt" 2>/dev/null; then
+      printf 'checkctx.row.unavailable  = PASS (interface-query failure, own rc class)\n'
+    else
+      printf 'checkctx.row.unavailable  = FAILED\n'
+    fi
+  else
+    printf 'checkctx.valid           = SKIPPED (no /sys/fs/selinux/context node)\n'
+  fi
+  printf 'kernel.check_context     = %s\n' "$([ -n "$MNB39_CHECKCTX_PATH" ] && echo 'present (/sys/fs/selinux/context)' || echo 'absent node')"
+  printf 'stage2.delta             = one row: security_t:security check_context (file-class faces measured in stage 1)\n'
   printf 'unload.verified          = sha restored + deny-again proof\n'
 } > "$EVIDENCE_DIR/m4-verdict.txt"
 say 'M4: PASS'
