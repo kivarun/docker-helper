@@ -692,17 +692,16 @@ static void load_policy(const char *ppath)
 		die(&r, "policy string");
 	policyvers_g = u32r(&r);
 	uint32_t config = u32r(&r);
-	(void)u32r(&r); /* handle_unknown */
-	out("policyinfo: version=%u mls=%u", policyvers_g, config & 1);
+	uint32_t sym_num = u32r(&r);
+	uint32_t ocon_num = u32r(&r);
+	out("policyinfo: version=%u mls=%u sym_num=%u ocon_num=%u",
+	    policyvers_g, config & 1, sym_num, ocon_num);
 	if (policyvers_g >= POLICYDB_VERSION_POLCAP)
 		ebitmap_parse(&r, "policycaps", 0);
 	if (policyvers_g >= POLICYDB_VERSION_PERMISSIVE)
 		ebitmap_parse(&r, "permissive", 0);
 	if (policyvers_g >= POLICYDB_VERSION_NEVERAUDIT)
 		ebitmap_parse(&r, "neveraudit", 0);
-	uint32_t sym_num = u32r(&r);
-	uint32_t ocon_num = u32r(&r);
-	out("policyinfo: sym_num=%u ocon_num=%u", sym_num, ocon_num);
 	if (sym_num != 8)
 		die(&r, "sym_num");
 
