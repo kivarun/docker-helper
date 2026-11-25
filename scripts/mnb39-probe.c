@@ -92,6 +92,7 @@ static int trace_enabled;
 static int g_tfd = -2;
 static void TR(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void out(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void out2(const char *fmt, ...);
 
 /* ---------------- raw x86_64 syscall interface ---------------- */
 
@@ -287,7 +288,9 @@ static void out(const char *fmt, ...)
 	va_end(ap);
 	if (n < sizeof obuf - 1) {
 		obuf[n++] = '\n';
-		sys_write(1, obuf, n);
+		long wr = sys_write(1, obuf, n);
+		if (wr < 0)
+			out2("out: write rc=%ld to fd1 dropped", wr);
 	}
 }
 
@@ -953,11 +956,14 @@ static void constrain_emit(struct class_entry *c)
 			}
 		}
 		render_expr_stream(&r, nexpr);
-		out2("render i=%u expr-end-off=%u", i, r.o);
 		snprintf(rendered_root, sizeof rendered_root, "%s", last_rendered_root);
 		int mls = last_render_mls;
+		if (r.o >= r.n)
+			out2("render i=%u expr-end-off=%u BEYOND cons_len=%u", i, r.o, c->cons_len);
+		out2("render i=%u expr-end-off=%u", i, r.o);
 		out("%s %s { %s } %s;", mls ? "mlsconstrain" : "constraint", c->name, perms, rendered_root);
 	}
+	out2("render exit off=%u len=%u", r.o, c->cons_len);
 }
 
 /* ---------------- checkctx ---------------- */
