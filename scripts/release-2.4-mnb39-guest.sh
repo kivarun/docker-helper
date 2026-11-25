@@ -114,15 +114,20 @@ compose_workload() {
 # typetransition. Fatal variant (expected-success callers) and rc variant
 # (expected-failure matrix rows).
 RUNCON_RC=0
+# output is captured through a pre-created, pre-labeled file rather than a
+# pipe: the probe domain must not need fifo_file or foreign evidence-file
+# write rows, and the shell reads the result back itself
+OUTF="/tmp/mnb39-out.$$"
+: > "$OUTF"
+chcon 'system_u:object_r:dh_mnb39_probe_t:s0' "$OUTF"   || { ls -Z "$OUTF"; fail "chcon of the probe output file failed"; }
 runc_rc() {
   # sets RUNCON_RC; $1=ctx, remaining = probe argv
   local ctx="$1"; shift
   set +e
-  local out
-  out="$(runcon "$ctx" "$PROBE" "$@" 2>&1)"
+  runcon "$ctx" "$PROBE" "$@" > "$OUTF" 2>&1
   RUNCON_RC=$?
   set -e
-  printf '%s\n' "$out"
+  cat "$OUTF"
 }
 runc() {
   local out
@@ -142,7 +147,8 @@ load_stage() {
   {
     cat <<EOF
 (type $PROBERTYPE)
-(allow docker_helper_buildkitd_t $PROBERTYPE (file (entrypoint execute getattr open read map)))
+(allow docker_helper_buildkitd_t $PROBERTYPE (file (entrypoint execute getattr open read map create write)))
+(allow $shdom $PROBERTYPE (file (read getattr)))
 (allow $shdom $PROBERTYPE (file (execute getattr open read map)))
 (allow $shdom $PROBERTYPE (dir (search)))
 (allow $shdom $PROBERTYPE (file (relabelto setattr)))
