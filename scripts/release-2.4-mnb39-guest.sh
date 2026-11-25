@@ -137,6 +137,8 @@ load_stage() {
   local shdom
   shdom="$(tr -d '\0' < /proc/self/attr/current | awk -F: '{print $3}')"
   [ -n "$shdom" ] || fail "cannot discover the diag shell domain"
+  local shrole
+  shrole="$(tr -d '\0' < /proc/self/attr/current | awk -F: '{print $2}')"
   {
     cat <<EOF
 (type $PROBERTYPE)
@@ -155,6 +157,8 @@ load_stage() {
 (allow $shdom self (process (setexec)))
 (allow docker_helper_buildkitd_t self (process (setexec)))
 (allow $shdom docker_helper_buildkitd_t (process (transition)))
+(roleallow ${shrole:-} system_r)
+(usertransition unconfined_u system_u (system_r docker_helper_buildkitd_t))
 (typetransition $shdom $PROBERTYPE process docker_helper_buildkitd_t)
 (allow docker_helper_buildkitd_t security_t (dir (search)))
 (allow docker_helper_buildkitd_t security_t (file (getattr open read)))
