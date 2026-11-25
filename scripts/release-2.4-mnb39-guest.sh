@@ -344,15 +344,16 @@ say 'M1: PASS'
 
 phase_m2() {
 # ---------------------------------------------------------------------------
-# M2 — stage-2 module (+check_context row): the full behavior matrix
+# M2 — stage-2 module (+check_context): the full behavior matrix; WITHOUT
+#      the kernel node this round's matrix degrades to the parsed policy
+#      evidence (the node absence is itself a measured finding from M0)
 # ---------------------------------------------------------------------------
 say 'M2: stage-2 module (+check_context); the context-validation matrix'
 unload_stage "$MOD1"
 if [ -n "$MNB39_CHECKCTX_PATH" ]; then
   load_stage "$MOD2" "(allow docker_helper_buildkitd_t security_t (security (check_context)))"
 else
-  ev m2-stage2 "SKIPPED (no check_context node; no module replacement needed)"
-  cp "$EVIDENCE_DIR/m1-policy-sha" "$EVIDENCE_DIR/m2-policy-sha" 2>/dev/null || true
+  ev m2-stage2 "SKIPPED (no check_context node on /sys/fs/selinux; the diagnostics keep the stage-1 module and the parse evidence)"
 fi
 ev m2-modules "$(semodule -l 2>/dev/null | grep -E 'dh_mnb39|docker_helper' || true)"
 ev m2-policy-sha "$(policy_sha)"
@@ -362,41 +363,51 @@ OWNCTX="$(runc "$TARGETCTX" selfctx)"
 WL="$(compose_workload "$OWNCTX" "$WL_DOMAIN")"
 ev m2-workload-ctx "$WL"
 
-# matrix rows 2..4: every malformed row must be REFUSED by the policy check
-row_should_refuse() {
-  runc_rc "$TARGETCTX" checkctx "$MNB39_CHECKCTX_PATH" "$2" "$1" \
-    > "$EVIDENCE_DIR/m2-checkctx-$1.txt"
-  [ "$RUNCON_RC" = "1" ] \
-    || { cat "$EVIDENCE_DIR/m2-checkctx-$1.txt"; fail "row $1 must be refused (rc $RUNCON_RC)"; }
-}
-row_should_refuse unknown-type "$(printf '%s\n' "$WL" | sed 's/docker_helper_builder_workload_t/dh_mnb39_notype_t/')"
-row_should_refuse wrong-role    "$(printf '%s\n' "$WL" | awk -F: -v OFS=: '{$2="user_r"; print}')"
-row_should_refuse bad-category  "${WL}:c999"
-# matrix row 5: unavailable interface -> fail-closed refusal with its own rc
-runc_rc "$TARGETCTX" checkctx /nonexistent/mnb39-check_context "$WL" 'unavailable' \
-  > "$EVIDENCE_DIR/m2-checkctx-unavailable.txt"
-[ "$RUNCON_RC" = "2" ] \
-  || { cat "$EVIDENCE_DIR/m2-checkctx-unavailable.txt"; fail "the unavailable-interface row must fail closed (rc $RUNCON_RC)"; }
+if [ -n "$MNB39_CHECKCTX_PATH" ]; then
+  # matrix row 1: the valid composed workload context must VALIDATE
+  runc_rc "$TARGETCTX" checkctx "$MNB39_CHECKCTX_PATH" "$WL" 'valid-workload' \
+    > "$EVIDENCE_DIR/m2-checkctx-valid.txt"
+  [ "$RUNCON_RC" = "0" ] \
+    || { cat "$EVIDENCE_DIR/m2-checkctx-valid.txt"; fail "the composed workload context must validate"; }
+  # matrix rows 2..4: every malformed row must be REFUSED by the policy check
+  row_should_refuse() {
+    runc_rc "$TARGETCTX" checkctx "$MNB39_CHECKCTX_PATH" "$2" "$1" \
+      > "$EVIDENCE_DIR/m2-checkctx-$1.txt"
+    [ "$RUNCON_RC" = "1" ] \
+      || { cat "$EVIDENCE_DIR/m2-checkctx-$1.txt"; fail "row $1 must be refused (rc $RUNCON_RC)"; }
+  }
+  row_should_refuse unknown-type "$(printf '%s\n' "$WL" | sed 's/docker_helper_builder_workload_t/dh_mnb39_notype_t/')"
+  row_should_refuse wrong-role    "$(printf '%s\n' "$WL" | awk -F: -v OFS=: '{$2="user_r"; print}')"
+  row_should_refuse bad-category  "${WL}:c999"
+  # matrix row 5: unavailable interface -> fail-closed refusal with its own rc
+  runc_rc "$TARGETCTX" checkctx /nonexistent/mnb39-check_context "$WL" 'unavailable' \
+    > "$EVIDENCE_DIR/m2-checkctx-unavailable.txt"
+  [ "$RUNCON_RC" = "2" ] \
+    || { cat "$EVIDENCE_DIR/m2-checkctx-unavailable.txt"; fail "the unavailable-interface row must fail closed (rc $RUNCON_RC)"; }
 
-# re-assert the parse checks under stage 2 (unchanged; no additional faces)
+  # the roletype arbitration: every probe-only role is KERNELED through
+  # check_context — a role truly enrolled for the type VALIDATES
+  NEWCTX="$(printf '%s\n' "$WL" | sed 's/docker_helper_builder_workload_t/docker_helper_buildkitd_t/')"
+  while IFS= read -r exrole; do
+    [ -n "$exrole" ] || continue
+    runc_rc "$TARGETCTX" checkctx "$MNB39_CHECKCTX_PATH" \
+      "$(printf '%s\n' "$NEWCTX" | awk -F: -v OFS=: -v r="$exrole" '$2=r; print')" \
+      "arbitrate-$exrole" > "$EVIDENCE_DIR/m2-roletype-arb-$exrole.txt" 2>&1
+    ev "m2-arb-$exrole.rc" "$RUNCON_RC"
+    [ "$RUNCON_RC" = "0" ] \
+      || { cat "$EVIDENCE_DIR/m2-roletype-arb-$exrole.txt"
+           fail "probe-only role $exrole is not kernel-enrolled for buildkitd_t"; }
+    echo "$exrole: kernel-VALIDATED via check_context" >> "$EVIDENCE_DIR/m2-roletype-arbitration.txt"
+  done < "$EVIDENCE_DIR/m1-roletype-extras.txt"
+  ev m2-roletype-arbitration "$(cat "$EVIDENCE_DIR/m2-roletype-arbitration.txt" 2>/dev/null || echo 'none needed: the sets matched')"
+else
+  ev m2-checkctx-matrix "SKIPPED (no check_context node on the guest; the kernel-native check_context alternative is NOT FEASIBLE on this kernel)"
+  ev m2-roletype-arbitration "SKIPPED (no check_context node; the parsed roletype set stands on its own parse evidence)"
+fi
+
+# re-assert the parse checks (unchanged; no additional faces)
 runc "$TARGETCTX" constrain fifo_file | grep -Fqx "$STATEMENT" \
   || fail "stage-2 constrain render lost the canonical statement"
-
-# the roletype arbitration: every probe-only role is KERNELED through
-# check_context — a role truly enrolled for the type VALIDATES
-NEWCTX="$(printf '%s\n' "$WL" | sed 's/docker_helper_builder_workload_t/docker_helper_buildkitd_t/')"
-while IFS= read -r exrole; do
-  [ -n "$exrole" ] || continue
-  runc_rc "$TARGETCTX" checkctx "$MNB39_CHECKCTX_PATH" \
-    "$(printf '%s\n' "$NEWCTX" | awk -F: -v OFS=: -v r="$exrole" '$2=r; print')" \
-    "arbitrate-$exrole" > "$EVIDENCE_DIR/m2-roletype-arb-$exrole.txt" 2>&1
-  ev "m2-arb-$exrole.rc" "$RUNCON_RC"
-  [ "$RUNCON_RC" = "0" ] \
-    || { cat "$EVIDENCE_DIR/m2-roletype-arb-$exrole.txt"
-         fail "probe-only role $exrole is not kernel-enrolled for buildkitd_t"; }
-  echo "$exrole: kernel-VALIDATED via check_context" >> "$EVIDENCE_DIR/m2-roletype-arbitration.txt"
-done < "$EVIDENCE_DIR/m1-roletype-extras.txt"
-ev m2-roletype-arbitration "$(cat "$EVIDENCE_DIR/m2-roletype-arbitration.txt" 2>/dev/null || echo 'none needed: the sets matched')"
 
 say 'M2: PASS'
 }
@@ -408,6 +419,7 @@ phase_m3() {
 say 'M3: teardown verification (unload gate + deny-again proof)'
 rm -f "$PROBE" || fail "the diagnostic probe binary must be removable while the module is still loaded"
 unload_stage "$MOD2"
+unload_stage "$MOD1"
 [ "$(policy_sha)" = "$MNB39_POLICY_SHA_BASE" ] \
   || fail "the loaded policy sha must restore byte-exactly after the diagnostic unload (base $MNB39_POLICY_SHA_BASE, now $(policy_sha))"
 if semodule -l 2>/dev/null | grep -qE '^dh_mnb39'; then
@@ -437,6 +449,7 @@ say 'M4: verdict composition'
   printf 'rolecheck.parse          = %s\n' "$(grep -q PASS "$EVIDENCE_DIR/m1-noexec-parse" && echo PASS || echo FAILED)"
   printf 'constraint.exact-render  = %s\n' "$(grep -Fqx "$STATEMENT" "$EVIDENCE_DIR/m1-probe-constrain.txt" && echo PASS || echo FAILED)"
   printf 'matrix.rows.refused      = unknown-type/wrong-role/bad-category/unavailable\n'
+  printf 'kernel.check_context     = %s\n' "$([ -n "$MNB39_CHECKCTX_PATH" ] && echo present || echo ABSENT)"
   printf 'stage2.delta             = one row: security_t:security check_context\n'
   printf 'unload.verified          = sha restored + deny-again proof\n'
 } > "$EVIDENCE_DIR/m4-verdict.txt"
