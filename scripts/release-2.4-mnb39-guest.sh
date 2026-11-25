@@ -299,6 +299,10 @@ ev m1-modules "$(semodule -l 2>/dev/null | grep -E 'dh_mnb39|docker_helper' || t
 # no relabel-back is needed)
 probe_labelize "$PROBE"
 ev m1-probe-label "$(ls -Z "$PROBE")"
+ev m1-probe-src-sha "$(sha256sum "$MNB39_PROBE_SRC" | awk '{print $1}')"
+ev m1-probe-bin-sha "$(sha256sum "$PROBE" | awk '{print $1}')"
+ev m1-probe-trace "out-mode-trace-count: $(grep -ac 'out-mode fd' "$PROBE" 2>/dev/null || echo 0)
+stderr-trace-count: $(grep -ac 'policy-open attempt' "$PROBE" 2>/dev/null || echo 0)"
 probe_labelize "$OUTF"
 
 TARGETCTX=system_u:system_r:docker_helper_buildkitd_t:s0:c1
