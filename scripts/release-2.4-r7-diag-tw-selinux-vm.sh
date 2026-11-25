@@ -142,7 +142,22 @@ case "$R7_MODE" in
   # Packaging lifecycle only: NO policy grants, NO permissive mode,
   # NO Release-GO UAT.
   mnb38) GUEST_SCRIPT='release-2.4-mnb38-guest.sh' ;;
-  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d | p21e | p21e3 | p21e3probe | p21e3proc-sys | p21e3proc-file | p21e3proc-keys | p21e3diag-keys | mnb30 | mnb32 | mnb33 | mnb36 | mnb38)" ;;
+  # mnb39 = the no-exec wrapper policy verification feasibility on the
+  # enforcing consumer (the dedicated MNB39 guest script + the
+  # guest-compiled C probe): both wrapper admission-gate checks measured
+  # IN-PROCESS under docker_helper_buildkitd_t — (1) the kernel-native
+  # security_check_context interface against the exact composed workload
+  # context (behavior matrix: valid/unknown-type/unauthorized-role/
+  # bad-category/unavailable interface), (2) an in-process parse of the
+  # loaded binary policy rendering the fifo_file constraint statements
+  # and the roletype relation, compared against the root-run seinfo
+  # reference outputs. Separately removable diagnostic modules only
+  # (stage 1 parse-only face set; stage 2 adds exactly the
+  # security:check_context row); full unload verification (policy sha
+  # restored byte-exactly, deny-again proof). NO permanent policy
+  # integration, NO product code change, NO Release-GO UAT.
+  mnb39) GUEST_SCRIPT='release-2.4-mnb39-guest.sh' ;;
+  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d | p21e | p21e3 | p21e3probe | p21e3proc-sys | p21e3proc-file | p21e3proc-keys | p21e3diag-keys | mnb30 | mnb32 | mnb33 | mnb36 | mnb38 | mnb39)" ;;
 esac
 
 log()  { printf '%s %s\n' "$PREFIX" "$*"; }
@@ -204,6 +219,13 @@ if [ "$R7_MODE" = "p21d" ]; then
   vm_scp "$SCRIPT_DIR/release-2.4-r7-p21d-verdict.sh" \
     opc@127.0.0.1:/tmp/r7-diag/release-2.4-r7-p21d-verdict.sh
 fi
+if [ "$R7_MODE" = "mnb39" ]; then
+  # The guest-compiled C probe rides along: the no-exec in-process policy
+  # reader (checkctx matrix, loaded-policy constraint render, roletype
+  # render) that the mnb39 guest script compiles statically and runs
+  # inside docker_helper_buildkitd_t.
+  vm_scp "$SCRIPT_DIR/mnb39-probe.c" opc@127.0.0.1:/tmp/r7-diag/mnb39-probe.c
+fi
 
 set +e
 # The diag VM reboots mid-diagnosis (observed ~55s after boot; runs
@@ -220,6 +242,12 @@ if [ "$R7_MODE" = "mnb38" ]; then
   # a couple of phases, so the re-entry budget must fit the matrix, not a
   # single-shot session.
   ATTEMPTS=8
+fi
+if [ "$R7_MODE" = "mnb39" ]; then
+  # The probe matrix is five phases behind one provisioning install; give
+  # the observed boot-length interruption the same treatment as the
+  # lifecycle matrix (persistent markers handle the rest).
+  ATTEMPTS=6
 fi
 VERDICT=""
 for attempt in $(seq 1 "$ATTEMPTS"); do
@@ -246,6 +274,11 @@ export R7_MNB30=$( [ "$R7_MODE" = mnb30 ] && echo 1 || echo 0 )
 export R7_MNB32=$( [ "$R7_MODE" = mnb32 ] && echo 1 || echo 0 )
 export R7_MNB33=$( [ "$R7_MODE" = mnb33 ] && echo 1 || echo 0 )
 export R7_MNB36=$( [ "$R7_MODE" = mnb36 ] && echo 1 || echo 0 )
+# MNB39 pins: the guest-compiled probe source path and the pin-level
+# loaded-policy sha BEFORE any diagnostic module (the unload gate's
+# restore identity). The base is recomputed in the guest from the
+# provisioned state; the orchestrator export is a cross-check only.
+export MNB39_PROBE_SRC='/tmp/r7-diag/mnb39-probe.c'
 bash /tmp/r7-diag/release-2.4-r7-diag-guest.sh
 RMT
   GUEST_RC=$?
@@ -378,6 +411,27 @@ RMT
       *)
         if [ "$attempt" -eq "$ATTEMPTS" ]; then
           fail "the MNB38 lifecycle matrix produced no verdict (guest exit $GUEST_RC)"
+        fi
+        log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
+        ;;
+    esac
+  elif [ "$R7_MODE" = "mnb39" ]; then
+    # The MNB39 feasibility verdict on the phase-token summary (the probe
+    # matrix is self-contained; the verdict appears only after every
+    # phase marked PASS or the first failing gate exits with its line).
+    VERDICT="$(grep -aoE 'R7-MNB39-VERDICT=(PASS|FAILED.*)' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"
+    case "$VERDICT" in
+      R7-MNB39-VERDICT=PASS)
+        log "MNB39 no-exec feasibility verdict: $VERDICT"
+        break
+        ;;
+      R7-MNB39-VERDICT=FAILED*)
+        log "MNB39 no-exec feasibility verdict: $VERDICT"
+        break
+        ;;
+      *)
+        if [ "$attempt" -eq "$ATTEMPTS" ]; then
+          fail "the MNB39 probe matrix produced no verdict (guest exit $GUEST_RC)"
         fi
         log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
         ;;
