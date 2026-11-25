@@ -618,6 +618,14 @@ static void parse_class(struct rd *r)
 			die(r, "vtrans count");
 		constraint_tree_walk(r, nv, 1);
 	}
+	if (policyvers_g >= 27) {
+		(void)u32r(r); /* default_user */
+		(void)u32r(r); /* default_role */
+		(void)u32r(r); /* default_range */
+	}
+	if (policyvers_g >= 28) {
+		(void)u32r(r); /* default_type */
+	}
 }
 
 static void parse_role(struct rd *r)
