@@ -54,9 +54,11 @@ ev()   { printf '%s\n' "$2" > "$EVIDENCE_DIR/$1"; }
 : "${R7_ARTIFACT_SHA256:?R7_ARTIFACT_SHA256 required}"
 : "${R7_EVIDENCE_DIR:?R7_EVIDENCE_DIR required}"
 : "${MNB39_PROBE_SRC:?MNB39_PROBE_SRC required}"
-MNB39_POLICY_SHA_BASE="${MNB39_POLICY_SHA_BASE:-}"
-[ -f "${STATE_DIR:-/var/lib/docker-helper-mnb39-state}/policy-sha-base" ] \
-  && MNB39_POLICY_SHA_BASE="$(cat "$STATE_DIR/policy-sha-base" 2>/dev/null || true)" || true
+STATE_DIR=/var/lib/docker-helper-mnb39-state
+MNB39_POLICY_SHA_BASE=""
+if [ -f "$STATE_DIR/policy-sha-base" ]; then
+  MNB39_POLICY_SHA_BASE="$(cat "$STATE_DIR/policy-sha-base" 2>/dev/null || true)"
+fi
 MNB39_POLICYPATH=/sys/fs/selinux/policy
 MNB39_CHECKCTX_PATH="$(ls /sys/fs/selinux/context 2>/dev/null || true)"
 MNB39_GHOST_PROBE_PATH=/sys/fs/selinux/check_context
@@ -76,7 +78,6 @@ MOD2=dh_mnb39_stage2
 
 mkdir -p "$EVIDENCE_DIR"
 
-STATE_DIR=/var/lib/docker-helper-mnb39-state
 PHASE_FILE="$STATE_DIR/phase-done"
 mark() { mkdir -p "$STATE_DIR"; printf '%s\n' "$1" >> "$PHASE_FILE"; }
 done_phase() {
