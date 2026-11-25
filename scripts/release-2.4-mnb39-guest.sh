@@ -223,6 +223,7 @@ phase_m0() {
 # M0 — preflight: enforcing guest, candidate identity, provision, baselines
 # ---------------------------------------------------------------------------
 say 'M0: enforcing guest, candidate identity, provisioning, seinfo baselines'
+ev m0-guest-script-sha "$(sha256sum "$0" 2>/dev/null | awk '{print $1}')"
 ev m0-selinux-nodes "$(ls /sys/fs/selinux 2>/dev/null)"
 [ "$(sha256sum "$RPM" | awk '{print $1}')" = "$R7_ARTIFACT_SHA256" ] \
   || fail "candidate RPM sha mismatch"
