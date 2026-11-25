@@ -406,9 +406,10 @@ if [ -n "$MNB39_CHECKCTX_PATH" ]; then
   load_stage "$MOD2" "(allow docker_helper_buildkitd_t security_t (security (check_context)))"
   # the stage-1 unload strips the probe type from the policy: objects
   # labeled with it fall to unlabeled_t and STAY there even when stage-2
-  # re-adds the type, so both probe artifacts must be relabeled NOW
+  # re-adds the type, so the probe artifacts must be relabeled NOW
   probe_labelize "$PROBE"
   probe_labelize "$OUTF"
+  probe_labelize "$TRACEF" || true
 else
   ev m2-stage2 "SKIPPED (no check_context node on /sys/fs/selinux; the diagnostics keep the stage-1 module and the parse evidence)"
 fi
