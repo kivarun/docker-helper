@@ -269,7 +269,9 @@ TARGETCTX=system_u:system_r:docker_helper_buildkitd_t:s0:c1
   printf 'C5 dontaudit-off enforcing repeat: '
   semodule -DB >/dev/null 2>&1 || true
   runcon "$TARGETCTX" "$PROBE" selfctx; printf 'rc=%d\n' "$?"
-  dmesg | grep -i avc | tail -10 || true
+  ( ausearch -m avc -ts recent 2>/dev/null \
+      || grep -i avc /var/log/audit/audit.log 2>/dev/null \
+      || dmesg 2>/dev/null | grep -i avc ) | tail -12 || true
   semodule -B >/dev/null 2>&1 || true
   printf 'restored: '; getenforce
   [ "$(cat /sys/fs/selinux/enforce)" = "1" ] || fail "C5 failed to restore enforcing mode"
