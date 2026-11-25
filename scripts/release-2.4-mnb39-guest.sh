@@ -147,7 +147,7 @@ load_stage() {
 (allow $shdom bin_t (file (relabelfrom setattr)))
 (allow $shdom tmpfs_t (file (relabelfrom setattr)))
 (allow $shdom user_tmp_t (file (relabelfrom setattr)))
-(allow $shdom $PROBERTYPE (file (unlink getattr removename)))
+(allow $shdom $PROBERTYPE (file (unlink getattr remove_name)))
 (allow $shdom self (process (setexec)))
 (allow docker_helper_buildkitd_t self (process (setexec)))
 (allow $shdom docker_helper_buildkitd_t (process (transition)))
