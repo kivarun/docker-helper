@@ -350,8 +350,8 @@ phase_m2() {
 #      evidence (the node absence is itself a measured finding from M0)
 # ---------------------------------------------------------------------------
 say 'M2: stage-2 module (+check_context); the context-validation matrix'
-unload_stage "$MOD1"
 if [ -n "$MNB39_CHECKCTX_PATH" ]; then
+  unload_stage "$MOD1"
   load_stage "$MOD2" "(allow docker_helper_buildkitd_t security_t (security (check_context)))"
 else
   ev m2-stage2 "SKIPPED (no check_context node on /sys/fs/selinux; the diagnostics keep the stage-1 module and the parse evidence)"
