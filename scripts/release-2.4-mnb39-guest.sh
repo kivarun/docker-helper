@@ -57,7 +57,6 @@ ev()   { printf '%s\n' "$2" > "$EVIDENCE_DIR/$1"; }
 MNB39_POLICY_SHA_BASE="${MNB39_POLICY_SHA_BASE:-}"
 MNB39_POLICYPATH=/sys/fs/selinux/policy
 MNB39_CHECKCTX_PATH="$(ls /sys/fs/selinux/check_context 2>/dev/null || true)"
-ev m0-selinux-nodes "$(ls /sys/fs/selinux 2>/dev/null)"
 # check_context is a kernel-compile-time selinuxfs node; its ABSENCE is a
 # measured finding for the kernel-native alternative, not a script failure
 
@@ -197,6 +196,7 @@ phase_m0() {
 # M0 — preflight: enforcing guest, candidate identity, provision, baselines
 # ---------------------------------------------------------------------------
 say 'M0: enforcing guest, candidate identity, provisioning, seinfo baselines'
+ev m0-selinux-nodes "$(ls /sys/fs/selinux 2>/dev/null)"
 [ "$(sha256sum "$RPM" | awk '{print $1}')" = "$R7_ARTIFACT_SHA256" ] \
   || fail "candidate RPM sha mismatch"
 getenforce 2>/dev/null | grep -qx 'Enforcing' \
