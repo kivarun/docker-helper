@@ -180,6 +180,10 @@ EOF
 }
 
 unload_stage() {
+  # idempotent: re-entry runs may find the module already uninstalled
+  if ! semodule -l 2>/dev/null | grep -q "^$1"; then
+    return 0
+  fi
   semodule -r "$1" 2>&1 || fail "$1 module failed to unload"
   if semodule -l 2>/dev/null | grep -q "^$1"; then
     fail "$1 module still listed after unload"
