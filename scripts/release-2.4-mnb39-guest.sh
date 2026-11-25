@@ -205,10 +205,13 @@ semodule -l | grep -q '^docker_helper' \
 # The probe compiler is a DIAGNOSTIC tool dependency of this round only;
 # the prepared guest deliberately carries no build toolchain.
 if ! command -v gcc >/dev/null 2>&1; then
-  zypper --non-interactive install -y gcc glibc-devel-static \
+  zypper --non-interactive install -y gcc glibc-devel-static strace \
     > "$EVIDENCE_DIR/m0-gcc-install.log" 2>&1 \
     || { tail -20 "$EVIDENCE_DIR/m0-gcc-install.log"; fail "gcc (diagnostic probe compiler) install failed"; }
 fi
+command -v strace >/dev/null 2>&1 \
+  || zypper --non-interactive install -y strace \
+     >> "$EVIDENCE_DIR/m0-gcc-install.log" 2>&1 || true
 
 MNB39_POLICY_SHA_BASE="$(policy_sha)"
 ev m0-policy-sha "$MNB39_POLICY_SHA_BASE"
@@ -259,6 +262,10 @@ TARGETCTX=system_u:system_r:docker_helper_buildkitd_t:s0:c1
   runcon "$TARGETCTX" /bin/true; printf 'rc=%d\n' "$?"
   printf 'C3 full ctx probe selfctx: '
   runcon "$TARGETCTX" "$PROBE" selfctx; printf 'rc=%d\n' "$?"
+  printf 'C4 strace of C3: '
+  strace -x -f -o /tmp/mnb39-c4.strace runcon "$TARGETCTX" "$PROBE" selfctx
+  printf 'rc=%d\n' "$?"
+  grep -E "EACCES|EPERM|denied" /tmp/mnb39-c4.strace | tail -12 || true
   set -e
 } > "$EVIDENCE_DIR/m1-controls.txt" 2>&1 || true
 sed 's/^[Cc][0-9].*/&/' "$EVIDENCE_DIR/m1-controls.txt"
