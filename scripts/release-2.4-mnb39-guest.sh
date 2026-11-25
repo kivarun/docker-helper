@@ -55,6 +55,8 @@ ev()   { printf '%s\n' "$2" > "$EVIDENCE_DIR/$1"; }
 : "${R7_EVIDENCE_DIR:?R7_EVIDENCE_DIR required}"
 : "${MNB39_PROBE_SRC:?MNB39_PROBE_SRC required}"
 MNB39_POLICY_SHA_BASE="${MNB39_POLICY_SHA_BASE:-}"
+[ -f "${STATE_DIR:-/var/lib/docker-helper-mnb39-state}/policy-sha-base" ] \
+  && MNB39_POLICY_SHA_BASE="$(cat "$STATE_DIR/policy-sha-base" 2>/dev/null || true)" || true
 MNB39_POLICYPATH=/sys/fs/selinux/policy
 MNB39_CHECKCTX_PATH="$(ls /sys/fs/selinux/check_context 2>/dev/null || true)"
 # check_context is a kernel-compile-time selinuxfs node; its ABSENCE is a
@@ -226,8 +228,14 @@ command -v strace >/dev/null 2>&1 \
   || zypper --non-interactive install -y strace \
      >> "$EVIDENCE_DIR/m0-gcc-install.log" 2>&1 || true
 
-MNB39_POLICY_SHA_BASE="$(policy_sha)"
-ev m0-policy-sha "$MNB39_POLICY_SHA_BASE"
+BASE_SHA="$(policy_sha)"
+MNB39_POLICY_SHA_BASE="$BASE_SHA"
+ev m0-policy-sha "$BASE_SHA"
+printf '%s
+' "$BASE_SHA" > "$STATE_DIR/policy-sha-base"
+if [ -n "${MNB39_POLICY_SHA_BASE_ORC:-}" ] && [ "$MNB39_POLICY_SHA_BASE_ORC" != "$BASE_SHA" ]; then
+  fail "the orchestrator base-policy sha cross-check disagrees ($MNB39_POLICY_SHA_BASE_ORC vs $BASE_SHA)"
+fi
 ev m0-policyvers "$(cat /sys/fs/selinux/policyvers 2>/dev/null || echo n/a)"
 ev m0-checkctx-node "$MNB39_CHECKCTX_PATH"
 ev m0-modules "$(semodule -l 2>/dev/null | head -20)"
