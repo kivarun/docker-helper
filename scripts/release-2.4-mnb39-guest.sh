@@ -212,7 +212,7 @@ seinfo --role_types "$WL_DOMAIN" "$MNB39_POLICYPATH" \
 seinfo --constrain fifo_file "$MNB39_POLICYPATH" \
   > "$EVIDENCE_DIR/m0-seinfo-constrain.txt" 2>&1 \
   || fail "seinfo --constrain baseline failed"
-grep -Fqx "$STATEMENT" "$EVIDENCE_DIR/m0-seinfo-constrain.txt" \
+sed 's/^[[:space:]]*//' "$EVIDENCE_DIR/m0-seinfo-constrain.txt" | grep -Fqx "$STATEMENT" \
   || { sed 's/^/ENTRY: /' "$EVIDENCE_DIR/m0-seinfo-constrain.txt" | head; \
        fail "the installed policy must carry the canonical constraint"; }
 say 'M0: PASS'

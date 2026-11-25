@@ -127,7 +127,7 @@ permissions:
 
 jobs:
   ubuntu-tarball-diag:
-    if: inputs.mode != 'stop-proof' && inputs.mode != 'mcs-audit' && inputs.mode != 'exeseal' && inputs.mode != 'bprime' && inputs.mode != 'p21a' && inputs.mode != 'p21b' && inputs.mode != 'p21c' && inputs.mode != 'p21d' && inputs.mode != 'p21e' && inputs.mode != 'p21e3' && inputs.mode != 'p21e3probe' && inputs.mode != 'p21e3proc-sys' && inputs.mode != 'p21e3proc-file' && inputs.mode != 'p21e3proc-keys' && inputs.mode != 'p21e3diag-keys' && inputs.mode != 'mnb30' && inputs.mode != 'mnb32' && inputs.mode != 'mnb33' && inputs.mode != 'mnb36' && inputs.mode != 'mnb38'
+    if: inputs.mode != 'stop-proof' && inputs.mode != 'mcs-audit' && inputs.mode != 'exeseal' && inputs.mode != 'bprime' && inputs.mode != 'p21a' && inputs.mode != 'p21b' && inputs.mode != 'p21c' && inputs.mode != 'p21d' && inputs.mode != 'p21e' && inputs.mode != 'p21e3' && inputs.mode != 'p21e3probe' && inputs.mode != 'p21e3proc-sys' && inputs.mode != 'p21e3proc-file' && inputs.mode != 'p21e3proc-keys' && inputs.mode != 'p21e3diag-keys' && inputs.mode != 'mnb30' && inputs.mode != 'mnb32' && inputs.mode != 'mnb33' && inputs.mode != 'mnb36' && inputs.mode != 'mnb38' && inputs.mode != 'mnb39'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -204,7 +204,7 @@ jobs:
           if-no-files-found: error
 
   apparmor-vm-diag:
-    if: inputs.mode != 'stop-proof' && inputs.mode != 'mcs-audit' && inputs.mode != 'exeseal' && inputs.mode != 'bprime' && inputs.mode != 'p21a' && inputs.mode != 'p21b' && inputs.mode != 'p21c' && inputs.mode != 'p21d' && inputs.mode != 'p21e' && inputs.mode != 'p21e3' && inputs.mode != 'p21e3probe' && inputs.mode != 'p21e3proc-sys' && inputs.mode != 'p21e3proc-file' && inputs.mode != 'p21e3proc-keys' && inputs.mode != 'p21e3diag-keys' && inputs.mode != 'mnb30' && inputs.mode != 'mnb32' && inputs.mode != 'mnb33' && inputs.mode != 'mnb36' && inputs.mode != 'mnb38'
+    if: inputs.mode != 'stop-proof' && inputs.mode != 'mcs-audit' && inputs.mode != 'exeseal' && inputs.mode != 'bprime' && inputs.mode != 'p21a' && inputs.mode != 'p21b' && inputs.mode != 'p21c' && inputs.mode != 'p21d' && inputs.mode != 'p21e' && inputs.mode != 'p21e3' && inputs.mode != 'p21e3probe' && inputs.mode != 'p21e3proc-sys' && inputs.mode != 'p21e3proc-file' && inputs.mode != 'p21e3proc-keys' && inputs.mode != 'p21e3diag-keys' && inputs.mode != 'mnb30' && inputs.mode != 'mnb32' && inputs.mode != 'mnb33' && inputs.mode != 'mnb36' && inputs.mode != 'mnb38' && inputs.mode != 'mnb39'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
