@@ -331,6 +331,8 @@ static void *balloc(size_t n)
 
 /* ---------------- policy tables ---------------- */
 
+static uint8_t *g_blob;
+
 struct rd {
 	const uint8_t *b;
 	size_t o, n;
@@ -339,6 +341,11 @@ struct rd {
 static void die(const struct rd *r, const char *what)
 {
 	out("PARSE-FAIL at offset %zu: %s", r->o, what);
+	if (g_blob) {
+		for (size_t i = 0; i < 64; i += 4)
+			out("h[%02zu]=%08x", i, g_blob[i] | (g_blob[i+1] << 8) |
+			    (g_blob[i+2] << 16) | ((unsigned)g_blob[i+3] << 24));
+	}
 	sys_exit_group(3);
 }
 
@@ -442,7 +449,6 @@ static char *roles_names[MAXTYPES];
 static struct bitlist *roles_types[MAXTYPES];
 static char *types_names[MAXTYPES];
 static uint32_t types_nprim_g;
-static uint8_t *g_blob;
 static uint32_t policyvers_g;
 
 /* expression reader (kernel order); optionally records the node mask
