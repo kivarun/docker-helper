@@ -266,13 +266,11 @@ TARGETCTX=system_u:system_r:docker_helper_buildkitd_t:s0:c1
   strace -x -f -o /tmp/mnb39-c4.strace runcon "$TARGETCTX" "$PROBE" selfctx
   printf 'rc=%d\n' "$?"
   grep -E "EACCES|EPERM|denied" /tmp/mnb39-c4.strace | tail -12 || true
-  printf 'C5 permissive dontaudit-off repeat: '
-  ENF="$(getenforce 2>/dev/null || cat /sys/fs/selinux/enforce)"
-  setenforce 0; semodule -DB >/dev/null 2>&1 || true
+  printf 'C5 dontaudit-off enforcing repeat: '
+  semodule -DB >/dev/null 2>&1 || true
   runcon "$TARGETCTX" "$PROBE" selfctx; printf 'rc=%d\n' "$?"
   dmesg | grep -i avc | tail -10 || true
   semodule -B >/dev/null 2>&1 || true
-  setenforce 1
   printf 'restored: '; getenforce
   [ "$(cat /sys/fs/selinux/enforce)" = "1" ] || fail "C5 failed to restore enforcing mode"
   set -e
