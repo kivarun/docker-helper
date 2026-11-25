@@ -551,10 +551,13 @@ ev m3-negative-trace "$(tail -4 "$TRACEF" 2>/dev/null | tr '\n' '|')"
 printf '%s\n' "$OUT" > "$EVIDENCE_DIR/m3-negative-rerun.txt"
 semodule -l 2>/dev/null | grep -q '^docker_helper' \
   || fail "the product module must remain loaded after the diagnostic teardown"
+printf 'm3-step: semodule-check done\n'
 [ -f /usr/share/selinux/docker-helper-fifo-rw-constraint.cil ] \
   || fail "the shipped constraint artifact must remain"
+printf 'm3-step: shipped-artifact done\n'
 { journalctl -k -b --no-pager 2>/dev/null | grep -iE 'avc|denied' | tail -12; true; } \
   > "$EVIDENCE_DIR/m3-kernel-avcs.txt"
+printf 'm3-step: journal tail done\n'
 say 'M3: PASS'
 }
 
