@@ -555,8 +555,9 @@ printf 'm3-step: semodule-check done\n'
 [ -f /usr/share/selinux/docker-helper-fifo-rw-constraint.cil ] \
   || fail "the shipped constraint artifact must remain"
 printf 'm3-step: shipped-artifact done\n'
-{ journalctl -k -b --no-pager 2>/dev/null | grep -iE 'avc|denied' | tail -12; true; } \
-  > "$EVIDENCE_DIR/m3-kernel-avcs.txt"
+journalctl -k -b --no-pager 2>/dev/null > "$EVIDENCE_DIR/m3-journal-raw.txt" || true
+grep -iE 'avc|denied' "$EVIDENCE_DIR/m3-journal-raw.txt" 2>/dev/null \
+  | tail -12 > "$EVIDENCE_DIR/m3-kernel-avcs.txt" || true
 printf 'm3-step: journal tail done\n'
 say 'M3: PASS'
 }
