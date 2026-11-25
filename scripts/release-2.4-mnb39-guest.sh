@@ -440,7 +440,7 @@ if [ -n "$MNB39_CHECKCTX_PATH" ]; then
   UNAUTH_ROLE="$(printf '%s\n' "$SEINFO_ROLES" | grep -Ev '^(system_r|unconfined_r)$' | head -1)"
   [ -n "$UNAUTH_ROLE" ] || UNAUTH_ROLE=staff_r
   ev m2-unauth-role "$UNAUTH_ROLE"
-  row_should_refuse wrong-role    "$(printf '%s\n' "$WL" | awk -F: -v OFS=: -v r="$UNAUTH_ROLE" '$2=r; print')"
+  row_should_refuse wrong-role    "$(printf '%s\n' "$WL" | awk -F: -v OFS=: -v r="$UNAUTH_ROLE" '{$2=r; print}')"
   row_should_refuse bad-category  "${WL}:c999"
   # matrix row 5: the GHOST check_context node name -> interface/query
   # failure with its own class (rc 3), never a policy verdict
@@ -455,7 +455,7 @@ if [ -n "$MNB39_CHECKCTX_PATH" ]; then
   while IFS= read -r exrole; do
     [ -n "$exrole" ] || continue
     runc_rc "$TARGETCTX" checkctx "$MNB39_CHECKCTX_PATH" \
-      "$(printf '%s\n' "$NEWCTX" | awk -F: -v OFS=: -v r="$exrole" '$2=r; print')" \
+      "$(printf '%s\n' "$NEWCTX" | awk -F: -v OFS=: -v r="$exrole" '{$2=r; print}')" \
       "arbitrate-$exrole" > "$EVIDENCE_DIR/m2-roletype-arb-$exrole.txt" 2>&1
     ev "m2-arb-$exrole.rc" "$RUNCON_RC"
     [ "$RUNCON_RC" = "0" ] \

@@ -995,10 +995,11 @@ static int probe_run(int argc, char **argv)
 			return 2;
 		}
 		if (sys_dup2(ofd, 1) < 0) {
-			out("out: dup2 errno=%d", (int)-sys_dup2(ofd, 1));
+			out("out: dup2 errno=%d", (int)-ofd);
 			return 2;
 		}
 		sys_close(ofd);
+		out("out-mode active");
 		argv += 2;
 		argc -= 2;
 	}
