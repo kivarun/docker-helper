@@ -686,6 +686,7 @@ static void load_policy(const char *ppath)
 		die(&r, "policy string");
 	policyvers_g = u32r(&r);
 	uint32_t config = u32r(&r);
+	(void)u32r(&r); /* handle_unknown */
 	out("policyinfo: version=%u mls=%u", policyvers_g, config & 1);
 	if (policyvers_g >= POLICYDB_VERSION_POLCAP)
 		ebitmap_parse(&r, "policycaps", 0);
