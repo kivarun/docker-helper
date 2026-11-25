@@ -223,7 +223,7 @@ phase_m1() {
 # M1 — probe build + stage-1 module (parse-only face set) + measured denial
 # ---------------------------------------------------------------------------
 say 'M1: probe build; stage-1 module (no check_context); measured surface'
-gcc -O1 -static -o "$PROBE" "$MNB39_PROBE_SRC" 2> "$EVIDENCE_DIR/m1-gcc.log" \
+gcc -O1 -static -no-pie -o "$PROBE" "$MNB39_PROBE_SRC" 2> "$EVIDENCE_DIR/m1-gcc.log" \
   || { tail -20 "$EVIDENCE_DIR/m1-gcc.log"; fail "probe compile failed (gcc log kept)"; }
 [ -x "$PROBE" ] || fail "probe binary missing"
 ev m1-probe-size "$(wc -c < "$PROBE")"
