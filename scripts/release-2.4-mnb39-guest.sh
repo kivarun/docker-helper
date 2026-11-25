@@ -119,7 +119,6 @@ RUNCON_RC=0
 # write rows, and the shell reads the result back itself
 OUTF="/tmp/mnb39-out.$$"
 : > "$OUTF"
-chcon 'system_u:object_r:dh_mnb39_probe_t:s0' "$OUTF"   || { ls -Z "$OUTF"; fail "chcon of the probe output file failed"; }
 runc_rc() {
   # sets RUNCON_RC; $1=ctx, remaining = probe argv
   local ctx="$1"; shift
@@ -261,6 +260,8 @@ ev m1-modules "$(semodule -l 2>/dev/null | grep -E 'dh_mnb39|docker_helper' || t
 chcon 'system_u:object_r:dh_mnb39_probe_t:s0' "$PROBE" 2>&1 >/dev/null \
   || { ls -Z "$PROBE"; fail "chcon of the probe binary failed"; }
 ev m1-probe-label "$(ls -Z "$PROBE")"
+chcon 'system_u:object_r:dh_mnb39_probe_t:s0' "$OUTF" \
+  || { ls -Z "$OUTF"; fail "chcon of the probe output file failed"; }
 
 TARGETCTX=system_u:system_r:docker_helper_buildkitd_t:s0:c1
 {
