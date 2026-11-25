@@ -478,7 +478,11 @@ else
 fi
 
 # re-assert the parse checks (unchanged; no additional faces)
-runc "$TARGETCTX" constrain fifo_file | grep -Fqx "$STATEMENT" \
+runc "$TARGETCTX" constrain fifo_file > "$EVIDENCE_DIR/m2-probe-constrain.txt"
+restore_rc
+[ "$RUNCON_RC" = "0" ] \
+  || { cat "$EVIDENCE_DIR/m2-probe-constrain.txt"; fail "stage-2 constrain render probe rc=$RUNCON_RC"; }
+grep -Fqx "$STATEMENT" "$EVIDENCE_DIR/m2-probe-constrain.txt" \
   || fail "stage-2 constrain render lost the canonical statement"
 
 semodule -B >/dev/null 2>&1 || true
