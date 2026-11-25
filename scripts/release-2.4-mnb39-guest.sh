@@ -440,8 +440,9 @@ say 'M3: teardown verification (unload gate + deny-again proof)'
 rm -f "$PROBE" || fail "the diagnostic probe binary must be removable while the module is still loaded"
 unload_stage "$MOD2"
 unload_stage "$MOD1"
-[ "$(policy_sha)" = "$MNB39_POLICY_SHA_BASE" ] \
-  || fail "the loaded policy sha must restore byte-exactly after the diagnostic unload (base $MNB39_POLICY_SHA_BASE, now $(policy_sha))"
+RESTORED_SHA="$(policy_sha)"
+[ "$(cat "$STATE_DIR/policy-sha-base" 2>/dev/null)" = "$RESTORED_SHA" ] \
+  || fail "the loaded policy sha must restore byte-exactly after the diagnostic unload (base $(cat "$STATE_DIR/policy-sha-base" 2>/dev/null || echo unknown), now $RESTORED_SHA)"
 if semodule -l 2>/dev/null | grep -qE '^dh_mnb39'; then
   fail "a diagnostic module is still listed after the teardown"
 fi
