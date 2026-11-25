@@ -229,7 +229,7 @@ ev m0-modules "$(semodule -l 2>/dev/null | head -20)"
 # The root-run setools reference outputs (the authority the probe's
 # in-process renderings are compared against; setools runs in the ROOT
 # shell, never inside docker_helper_buildkitd_t).
-seinfo --role_types "$WL_DOMAIN" "$MNB39_POLICYPATH" \
+seinfo --role_types docker_helper_buildkitd_t "$MNB39_POLICYPATH" \
   > "$EVIDENCE_DIR/m0-seinfo-roletype.txt" 2>&1 \
   || fail "seinfo --role_types baseline failed"
 seinfo --constrain fifo_file "$MNB39_POLICYPATH" \
@@ -295,7 +295,7 @@ if ! grep -Fqx "$STATEMENT" "$EVIDENCE_DIR/m1-probe-constrain.txt"; then
   sed 's/^/PROBE: /' "$EVIDENCE_DIR/m1-probe-constrain.txt" | head
   fail "the probe's in-process constraint render does not carry the canonical statement"
 fi
-runc "$TARGETCTX" roletype "$WL_DOMAIN" > "$EVIDENCE_DIR/m1-probe-roletype.txt"
+runc "$TARGETCTX" roletype docker_helper_buildkitd_t > "$EVIDENCE_DIR/m1-probe-roletype.txt"
 sort -u "$EVIDENCE_DIR/m0-seinfo-roletype.txt" | grep -v '^$' > "$EVIDENCE_DIR/m1-roletype-ref.txt"
 sort -u "$EVIDENCE_DIR/m1-probe-roletype.txt" | grep -v '^$' > "$EVIDENCE_DIR/m1-roletype-probe.txt"
 if ! diff -u "$EVIDENCE_DIR/m1-roletype-ref.txt" "$EVIDENCE_DIR/m1-roletype-probe.txt" \
