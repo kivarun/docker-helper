@@ -296,8 +296,10 @@ if ! grep -Fqx "$STATEMENT" "$EVIDENCE_DIR/m1-probe-constrain.txt"; then
   fail "the probe's in-process constraint render does not carry the canonical statement"
 fi
 runc "$TARGETCTX" roletype docker_helper_buildkitd_t > "$EVIDENCE_DIR/m1-probe-roletype.txt"
-sort -u "$EVIDENCE_DIR/m0-seinfo-roletype.txt" | grep -v '^$' > "$EVIDENCE_DIR/m1-roletype-ref.txt"
-sort -u "$EVIDENCE_DIR/m1-probe-roletype.txt" | grep -v '^$' > "$EVIDENCE_DIR/m1-roletype-probe.txt"
+sed 's/^[[:space:]]*//' "$EVIDENCE_DIR/m0-seinfo-roletype.txt" \
+  | grep -v '^Roles:' | grep -v '^$' | sort -u > "$EVIDENCE_DIR/m1-roletype-ref.txt"
+grep -vE '^(policy-open:|policyinfo:)' "$EVIDENCE_DIR/m1-probe-roletype.txt" \
+  | sed 's/^[[:space:]]*//' | grep -v '^$' | sort -u > "$EVIDENCE_DIR/m1-roletype-probe.txt"
 if ! diff -u "$EVIDENCE_DIR/m1-roletype-ref.txt" "$EVIDENCE_DIR/m1-roletype-probe.txt" \
   > "$EVIDENCE_DIR/m1-roletype.diff"; then
   cat "$EVIDENCE_DIR/m1-roletype.diff"
