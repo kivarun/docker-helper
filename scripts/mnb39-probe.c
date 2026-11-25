@@ -34,7 +34,10 @@
 #include <stdint.h>
 
 #define O_RDONLY 0
+#define O_WRONLY 1
 #define O_RDWR 2
+#define O_CREAT 0100
+#define O_TRUNC 01000
 
 #define SYS_read 0
 #define SYS_write 1
@@ -43,6 +46,7 @@
 #define SYS_fstat 5
 #define SYS_mmap 9
 #define SYS_exit_group 231
+#define SYS_dup2 33
 
 #define MAXPERMS 32
 #define MAXCLASSES 512
@@ -107,6 +111,7 @@ static long sys_open(const char *p, int fl) { return syscall6(SYS_open, (long)p,
 static long sys_read(int fd, void *b, unsigned long n) { return syscall6(SYS_read, fd, (long)b, (long)n, 0, 0, 0); }
 static long sys_write(int fd, const void *b, unsigned long n) { return syscall6(SYS_write, fd, (long)b, (long)n, 0, 0, 0); }
 static long sys_close(int fd) { return syscall6(SYS_close, fd, 0, 0, 0, 0, 0); }
+static long sys_dup2(int old, int new) { return syscall6(SYS_dup2, old, new, 0, 0, 0, 0); }
 static void *sys_mmap(void *addr, unsigned long len, int prot, int flags, int fd, long off)
 {
 	return (void *)syscall6(SYS_mmap, (long)addr, len, prot, flags, fd, off);
@@ -951,6 +956,23 @@ static int checkctx_once(const char *path, const char *ctx, const char *label)
 
 static int probe_run(int argc, char **argv)
 {
+	/* "out <path> <sub> ...": the probe opens the output file itself and
+	 * dups it over stdout so the caller-shell never needs a write face
+	 * on the probe type; the shell reads the file back afterwards */
+	if (argc >= 3 && strcmp(argv[1], "out") == 0) {
+		int ofd = (int)sys_open(argv[2], O_WRONLY | O_CREAT | O_TRUNC);
+		if (ofd < 0) {
+			out("out: open errno=%d", (int)-ofd);
+			return 2;
+		}
+		if (sys_dup2(ofd, 1) < 0) {
+			out("out: dup2 errno=%d", (int)-sys_dup2(ofd, 1));
+			return 2;
+		}
+		sys_close(ofd);
+		argv += 2;
+		argc -= 2;
+	}
 	if (argc < 2) {
 		out("usage: probe [checkctx <path> <ctx> <label> | policyinfo | constrain <class> | roletype <type>] | selfctx");
 		return 64;

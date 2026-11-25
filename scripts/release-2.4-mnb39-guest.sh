@@ -123,7 +123,7 @@ runc_rc() {
   # sets RUNCON_RC; $1=ctx, remaining = probe argv
   local ctx="$1"; shift
   set +e
-  runcon "$ctx" "$PROBE" "$@" > "$OUTF" 2>&1
+  runcon "$ctx" "$PROBE" out "$OUTF" "$@"
   RUNCON_RC=$?
   set -e
   cat "$OUTF"
@@ -269,22 +269,13 @@ TARGETCTX=system_u:system_r:docker_helper_buildkitd_t:s0:c1
   set +e; runcon -t docker_helper_buildkitd_t /bin/true; printf 'rc=%d\n' "$?"
   printf 'C2 full ctx /bin/true: '
   runcon "$TARGETCTX" /bin/true; printf 'rc=%d\n' "$?"
-  printf 'C3 full ctx probe selfctx: '
-  runcon "$TARGETCTX" "$PROBE" selfctx; printf 'rc=%d\n' "$?"
-  printf 'C4 strace of C3: '
-  strace -x -f -o /tmp/mnb39-c4.strace runcon "$TARGETCTX" "$PROBE" selfctx
+  printf 'C3 full ctx probe selfctx (out-capture): '
+  runcon "$TARGETCTX" "$PROBE" out "$OUTF" selfctx
   printf 'rc=%d\n' "$?"
-  grep -E "EACCES|EPERM|denied" /tmp/mnb39-c4.strace | tail -12 || true
-  printf 'C5 dontaudit-off enforcing repeat: '
-  semodule -DB >/dev/null 2>&1 || true
-  runcon "$TARGETCTX" "$PROBE" selfctx; printf 'rc=%d\n' "$?"
+  printf 'C3 output: '; cat "$OUTF"
   ( ausearch -m avc -ts recent 2>/dev/null \
       || grep -i avc /var/log/audit/audit.log 2>/dev/null \
       || dmesg 2>/dev/null | grep -i avc ) | tail -12 || true
-  semodule -B >/dev/null 2>&1 || true
-  printf 'restored: '; getenforce
-  [ "$(cat /sys/fs/selinux/enforce)" = "1" ] || fail "C5 failed to restore enforcing mode"
-  set -e
 } > "$EVIDENCE_DIR/m1-controls.txt" 2>&1 || true
 sed 's/^[Cc][0-9].*/&/' "$EVIDENCE_DIR/m1-controls.txt"
 dmesg -T 2>/dev/null | grep -i avc | tail -5 >> "$EVIDENCE_DIR/m1-controls.txt" || true
