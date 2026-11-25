@@ -193,6 +193,15 @@ EOF
   semodule -X 400 -i "$f" || fail "$1 module failed to load"
 }
 
+probe_labelize() {
+  chcon 'system_u:object_r:dh_mnb39_probe_t:s0' "$1" 2>/dev/null || true
+  if [ "$(ls -Zd "$1" 2>/dev/null | awk '{print $1}')" \
+      != 'system_u:object_r:dh_mnb39_probe_t:s0' ]; then
+    ls -Z "$1"
+    fail "the probe artifact did not accept the diagnostic exec type"
+  fi
+}
+
 unload_stage() {
   # idempotent: re-entry runs may find the module already uninstalled
   if ! semodule -l 2>/dev/null | grep -q "^$1"; then
@@ -287,11 +296,9 @@ ev m1-modules "$(semodule -l 2>/dev/null | grep -E 'dh_mnb39|docker_helper' || t
 # the probe binary carries the diagnostic exec type (the probe is rm'ed
 # at teardown while the module is still loaded, then the module unloads;
 # no relabel-back is needed)
-chcon 'system_u:object_r:dh_mnb39_probe_t:s0' "$PROBE" 2>&1 >/dev/null \
-  || { ls -Z "$PROBE"; fail "chcon of the probe binary failed"; }
+probe_labelize "$PROBE"
 ev m1-probe-label "$(ls -Z "$PROBE")"
-chcon 'system_u:object_r:dh_mnb39_probe_t:s0' "$OUTF" \
-  || { ls -Z "$OUTF"; fail "chcon of the probe output file failed"; }
+probe_labelize "$OUTF"
 
 TARGETCTX=system_u:system_r:docker_helper_buildkitd_t:s0:c1
 {
@@ -573,10 +580,8 @@ if [ ! -x "$PROBE" ]; then
     || fail "probe rebuild failed at preamble"
 fi
 if semodule -l 2>/dev/null | grep -q '^dh_mnb39'; then
-  chcon 'system_u:object_r:dh_mnb39_probe_t:s0' "$PROBE" \
-    || fail "preamble: probe relabel failed while the module is loaded"
-  chcon 'system_u:object_r:dh_mnb39_probe_t:s0' "$OUTF" \
-    || fail "preamble: output-file relabel failed while the module is loaded"
+  probe_labelize "$PROBE"
+  probe_labelize "$OUTF"
 fi
 for ph in m0 m1 m2 m3 m4; do
   if done_phase "$ph"; then

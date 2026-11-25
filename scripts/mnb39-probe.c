@@ -999,7 +999,6 @@ static int probe_run(int argc, char **argv)
 			return 2;
 		}
 		sys_close(ofd);
-		out("out-mode active");
 		argv += 2;
 		argc -= 2;
 	}
