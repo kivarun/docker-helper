@@ -559,6 +559,21 @@ run_phase() {
   esac
 }
 
+# every attempt rebuilds the probe artifacts and re-labels them while the
+# diagnostic module is loaded: re-entry attempts after a phase-scoped
+# failure find stale/missing binaries because a failed attempt never runs
+# the M3 teardown, and earlier-attempt tmpfs state does not survive a boot
+if [ ! -x "$PROBE" ]; then
+  gcc -O1 -static -nostdlib -nostartfiles -fno-stack-protector -no-pie \
+    -o "$PROBE" "$MNB39_PROBE_SRC" 2>> "$EVIDENCE_DIR/m1-gcc.log" \
+    || fail "probe rebuild failed at preamble"
+fi
+if semodule -l 2>/dev/null | grep -q '^dh_mnb39'; then
+  chcon 'system_u:object_r:dh_mnb39_probe_t:s0' "$PROBE" \
+    || fail "preamble: probe relabel failed while the module is loaded"
+  chcon 'system_u:object_r:dh_mnb39_probe_t:s0' "$OUTF" \
+    || fail "preamble: output-file relabel failed while the module is loaded"
+fi
 for ph in m0 m1 m2 m3 m4; do
   if done_phase "$ph"; then
     say "re-entry: $ph already PASS"
