@@ -497,25 +497,25 @@ fi
 # re-assert the parse checks (unchanged; no additional faces)
 OUTF2="/tmp/mnb39-out2.$$"
 : > "$OUTF2"
-ev m2-constr-pre-lsZ "$(ls -l "$OUTF" "$TRACEF" 2>/dev/null)"
-runc "$TARGETCTX" constrain fifo_file > "$EVIDENCE_DIR/m2-probe-constrain.txt"
+OUT="$(runc_rc "$TARGETCTX" constrain fifo_file)"
 restore_rc
 cp "$TRACEF" "$EVIDENCE_DIR/m2-constr-trace.txt" 2>/dev/null || true
-ev m2-constr-stat "$(ls -l "$OUTF" 2>/dev/null; true)"
-[ "$RUNCON_RC" = "0" ] \
-  || { cat "$EVIDENCE_DIR/m2-probe-constrain.txt"
-       # the second channel kills the single-OUTF-state theory: a fresh
-       # output file, the same subcommand, run back to back
-       set +e
-       runcon "$TARGETCTX" "$PROBE" out "$OUTF2" constrain fifo_file
-       RUNCON_RC2=$?
-       set -e
-       printf 'constr2-rc=%d len=%s\n' "$RUNCON_RC2" "$(wc -c < "$OUTF2" 2>/dev/null)"
-       cat "$OUTF2" 2>/dev/null
-       sed 's/^/TRACE: /' "$TRACEF" 2>/dev/null | head -24
-       fail "stage-2 constrain render probe rc=$RUNCON_RC"; }
+printf 'm2-constr-rc=%d out=%s\n' "$RUNCON_RC" "$(printf '%s\n' "$OUT" | wc -l)"
+printf '%s\n' "$OUT" > "$EVIDENCE_DIR/m2-probe-constrain.txt"
+if [ "$RUNCON_RC" != "0" ]; then
+  # a fresh output file on a second ran kills the single-OUTF-state theory
+  set +e
+  runcon "$TARGETCTX" "$PROBE" out "$OUTF2" constrain fifo_file
+  RUNCON_RC2=$?
+  set -e
+  printf 'constr2-rc=%d o2len=%s\n' "$RUNCON_RC2" "$(wc -c < "$OUTF2" 2>/dev/null)"
+  cp "$OUTF2" "$EVIDENCE_DIR/m2-probe-constr2.txt" 2>/dev/null || true
+  cp "$TRACEF" "$EVIDENCE_DIR/m2-constr-trace2.txt" 2>/dev/null || true
+  cat "$EVIDENCE_DIR/m2-probe-constrain.txt"
+  fail "stage-2 constrain render probe rc=$RUNCON_RC (constr2-rc=$RUNCON_RC2)"
+fi
 grep -Fqx "$STATEMENT" "$EVIDENCE_DIR/m2-probe-constrain.txt" \
-  || { sed 's/^/TRACE: /' "$TRACEF" 2>/dev/null | head -20; fail "stage-2 constrain render lost the canonical statement"; }
+  || fail "stage-2 constrain render lost the canonical statement"
 ev m2-probe-trace "$(cat "$TRACEF" 2>/dev/null | tail -6 || echo empty)"
 
 say 'M2: PASS'
