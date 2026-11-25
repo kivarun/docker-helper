@@ -65,7 +65,7 @@ STATEMENT='mlsconstrain fifo_file { read write } (h1 dom h2 or t1 != mcs_constra
 MAIN_UNIT=docker-helper.service
 UNIT=docker-helper-builder.service
 WL_DOMAIN=docker_helper_builder_workload_t
-PROBE=/tmp/mnb39-probe
+PROBE=/tmp/mnb39-probe.$$
 PROBERTYPE=dh_mnb39_probe_t
 MOD1=dh_mnb39_stage1
 MOD2=dh_mnb39_stage2
@@ -147,6 +147,7 @@ load_stage() {
 (allow $shdom bin_t (file (relabelfrom setattr)))
 (allow $shdom tmpfs_t (file (relabelfrom setattr)))
 (allow $shdom user_tmp_t (file (relabelfrom setattr)))
+(allow $shdom $PROBERTYPE (file (unlink getattr removename)))
 (allow $shdom self (process (setexec)))
 (allow docker_helper_buildkitd_t self (process (setexec)))
 (allow $shdom docker_helper_buildkitd_t (process (transition)))
