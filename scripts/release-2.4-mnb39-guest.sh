@@ -395,6 +395,7 @@ fi
 ev m2-modules "$(semodule -l 2>/dev/null | grep -E 'dh_mnb39|docker_helper' || true)"
 ev m2-policy-sha "$(policy_sha)"
 
+semodule -DB >/dev/null 2>&1 || true
 TARGETCTX="$(cat "$EVIDENCE_DIR/m1-target-ctx")"
 {
   printf 'm2-pre-lsZ: '; ls -Z "$OUTF" || true
@@ -415,8 +416,14 @@ if [ -n "$MNB39_CHECKCTX_PATH" ]; then
   # matrix row 1: the valid composed workload context must VALIDATE
   runc_rc "$TARGETCTX" checkctx "$MNB39_CHECKCTX_PATH" "$WL" 'valid-workload' \
     > "$EVIDENCE_DIR/m2-checkctx-valid.txt"
-  [ "$RUNCON_RC" = "0" ] \
-    || { cat "$EVIDENCE_DIR/m2-checkctx-valid.txt"; fail "the composed workload context must validate"; }
+  if [ "$RUNCON_RC" != "0" ]; then
+    cat "$EVIDENCE_DIR/m2-checkctx-valid.txt"
+    ( ausearch -m avc -ts recent 2>/dev/null \
+        || grep -i 'avc.*denied' /var/log/audit/audit.log 2>/dev/null ) \
+      | tail -12 > "$EVIDENCE_DIR/m2-kernel-avcs.txt" || true
+    cat "$EVIDENCE_DIR/m2-kernel-avcs.txt"
+    fail "the composed workload context must validate"
+  fi
   # matrix rows 2..4: every malformed row must be REFUSED by the policy check
   row_should_refuse() {
     runc_rc "$TARGETCTX" checkctx "$MNB39_CHECKCTX_PATH" "$2" "$1" \
@@ -466,6 +473,7 @@ fi
 runc "$TARGETCTX" constrain fifo_file | grep -Fqx "$STATEMENT" \
   || fail "stage-2 constrain render lost the canonical statement"
 
+semodule -B >/dev/null 2>&1 || true
 say 'M2: PASS'
 }
 
