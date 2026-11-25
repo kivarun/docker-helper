@@ -180,8 +180,6 @@ load_stage() {
 (allow docker_helper_buildkitd_t security_t (dir (search)))
 (allow docker_helper_buildkitd_t security_t (file (getattr open read write)))
 (allow docker_helper_buildkitd_t security_t (security (read_policy)))
-# the composed workload context must VALIDATE through check_context, so the
-# diagnostic module carries the product's workload type as p21e3 did
 (type docker_helper_builder_workload_t)
 (roletype unconfined_r docker_helper_builder_workload_t)
 (roletype system_r docker_helper_builder_workload_t)
