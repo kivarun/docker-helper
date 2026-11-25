@@ -123,8 +123,10 @@ RUNCON_RC=0
 # pipe: the probe domain must not need fifo_file or foreign evidence-file
 # write rows, and the shell reads the result back itself
 OUTF="/tmp/mnb39-out.$$"
+TRACEF=/tmp/mnb39-trace.0
 RCF="/tmp/mnb39-rc.$$"
 : > "$OUTF"
+: > "$TRACEF"
 runc_rc() {
   # sets RUNCON_RC; $1=ctx, remaining = probe argv
   local ctx="$1"; shift
@@ -158,7 +160,7 @@ load_stage() {
   {
     cat <<EOF
 (type $PROBERTYPE)
-(allow docker_helper_buildkitd_t $PROBERTYPE (file (entrypoint execute getattr open read map create write)))
+(allow docker_helper_buildkitd_t $PROBERTYPE (file (entrypoint execute getattr open read map create write append)))
 (allow $shdom $PROBERTYPE (file (read getattr)))
 (allow $shdom $PROBERTYPE (file (execute getattr open read map)))
 (allow $shdom $PROBERTYPE (dir (search)))
@@ -301,8 +303,7 @@ probe_labelize "$PROBE"
 ev m1-probe-label "$(ls -Z "$PROBE")"
 ev m1-probe-src-sha "$(sha256sum "$MNB39_PROBE_SRC" | awk '{print $1}')"
 ev m1-probe-bin-sha "$(sha256sum "$PROBE" | awk '{print $1}')"
-ev m1-probe-trace "out-mode-trace-count: $(grep -ac 'out-mode fd' "$PROBE" 2>/dev/null || echo 0)
-stderr-trace-count: $(grep -ac 'policy-open attempt' "$PROBE" 2>/dev/null || echo 0)"
+
 probe_labelize "$OUTF"
 
 TARGETCTX=system_u:system_r:docker_helper_buildkitd_t:s0:c1
@@ -421,6 +422,7 @@ TARGETCTX="$(cat "$EVIDENCE_DIR/m1-target-ctx")"
 OWNCTX="$(runc "$TARGETCTX" selfctx)"
 restore_rc
 {
+  printf 'm2-trace: %s\n' "$(tail -3 "$TRACEF" 2>/dev/null | tr '\n' '|')"
   printf 'm2-selfctx-rc=%d len=%s\n' "$RUNCON_RC" "${#OWNCTX}"
   printf 'm2-post-content: '; head -c 200 "$OUTF" 2>/dev/null | tr '\n' '|'
   printf '\n'
@@ -489,9 +491,12 @@ fi
 runc "$TARGETCTX" constrain fifo_file > "$EVIDENCE_DIR/m2-probe-constrain.txt"
 restore_rc
 [ "$RUNCON_RC" = "0" ] \
-  || { cat "$EVIDENCE_DIR/m2-probe-constrain.txt"; fail "stage-2 constrain render probe rc=$RUNCON_RC"; }
+  || { cat "$EVIDENCE_DIR/m2-probe-constrain.txt"
+       sed 's/^/TRACE: /' "$TRACEF" 2>/dev/null | head -20
+       fail "stage-2 constrain render probe rc=$RUNCON_RC"; }
 grep -Fqx "$STATEMENT" "$EVIDENCE_DIR/m2-probe-constrain.txt" \
-  || fail "stage-2 constrain render lost the canonical statement"
+  || { sed 's/^/TRACE: /' "$TRACEF" 2>/dev/null | head -20; fail "stage-2 constrain render lost the canonical statement"; }
+ev m2-probe-trace "$(cat "$TRACEF" 2>/dev/null | tail -6 || echo empty)"
 
 say 'M2: PASS'
 }
@@ -519,6 +524,7 @@ fi
 TARGETCTX="$(cat "$EVIDENCE_DIR/m1-target-ctx")"
 OUT="$(runc_rc "$TARGETCTX" policyinfo)"
 restore_rc
+ev m1-probe-trace "$(cat "$TRACEF" 2>/dev/null || echo empty)"
 [ "$RUNCON_RC" != "0" ] \
   || { printf '%s\n' "$OUT"; fail "after the unload the probe must NOT reenter buildkitd_t"; }
 printf '%s\n' "$OUT" > "$EVIDENCE_DIR/m3-negative-rerun.txt"
@@ -594,6 +600,7 @@ fi
 if semodule -l 2>/dev/null | grep -q '^dh_mnb39'; then
   probe_labelize "$PROBE"
   probe_labelize "$OUTF"
+  probe_labelize "$TRACEF" || true
 fi
 for ph in m0 m1 m2 m3 m4; do
   if done_phase "$ph"; then

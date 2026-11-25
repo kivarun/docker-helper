@@ -38,6 +38,7 @@
 #define O_RDWR 2
 #define O_CREAT 0100
 #define O_TRUNC 01000
+#define O_APPEND 02000
 
 #define SYS_read 0
 #define SYS_write 1
@@ -88,6 +89,7 @@
 static void sys_exit_group(long rc) __attribute__((noreturn));
 
 static int trace_enabled;
+static int g_tfd = -2;
 static void TR(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void out(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
@@ -298,7 +300,10 @@ static void out2(const char *fmt, ...)
 	va_end(ap);
 	if (n < sizeof obuf - 1) {
 		obuf[n++] = '\n';
-		sys_write(2, obuf, n);
+		if (g_tfd != -2)
+			sys_write(g_tfd, obuf, n);
+		else
+			sys_write(2, obuf, n);
 	}
 }
 
@@ -1012,8 +1017,10 @@ static int probe_run(int argc, char **argv)
 			out("out: dup2 errno=%d", (int)-ofd);
 			return 2;
 		}
-		sys_close(ofd);
-		out2("probe: out-mode fd=%d path=%s", ofd, argv[2]);
+		int tfd = (int)sys_open("/tmp/mnb39-trace.0", O_WRONLY | O_APPEND);
+		if (tfd >= 0)
+			g_tfd = tfd;
+		out2("probe: out-mode fd=%d path=%s trace-fd=%d", ofd, argv[2], g_tfd);
 		argv += 2;
 		argc -= 2;
 	}
