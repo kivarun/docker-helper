@@ -249,6 +249,17 @@ chcon 'system_u:object_r:dh_mnb39_probe_t:s0' "$PROBE" 2>&1 >/dev/null \
 ev m1-probe-label "$(ls -Z "$PROBE")"
 
 TARGETCTX=system_u:system_r:docker_helper_buildkitd_t:s0:c1
+{
+  printf 'C1 type-only /bin/true: '
+  set +e; runcon -t docker_helper_buildkitd_t /bin/true; printf 'rc=%d\n' "$?"
+  printf 'C2 full ctx /bin/true: '
+  runcon "$TARGETCTX" /bin/true; printf 'rc=%d\n' "$?"
+  printf 'C3 full ctx probe selfctx: '
+  runcon "$TARGETCTX" "$PROBE" selfctx; printf 'rc=%d\n' "$?"
+  set -e
+} > "$EVIDENCE_DIR/m1-controls.txt" 2>&1 || true
+sed 's/^[Cc][0-9].*/&/' "$EVIDENCE_DIR/m1-controls.txt"
+dmesg -T 2>/dev/null | grep -i avc | tail -5 >> "$EVIDENCE_DIR/m1-controls.txt" || true
 OWNCTX="$(runc_rc "$TARGETCTX" selfctx)"
 if [ "$RUNCON_RC" != "0" ] || [ -z "$OWNCTX" ]; then
   say 'M1: the :s0:c1 entry attempt was refused; retrying at the shell base level'
