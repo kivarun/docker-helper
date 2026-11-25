@@ -121,6 +121,7 @@ RUNCON_RC=0
 # pipe: the probe domain must not need fifo_file or foreign evidence-file
 # write rows, and the shell reads the result back itself
 OUTF="/tmp/mnb39-out.$$"
+RCF="/tmp/mnb39-rc.$$"
 : > "$OUTF"
 runc_rc() {
   # sets RUNCON_RC; $1=ctx, remaining = probe argv
@@ -128,9 +129,15 @@ runc_rc() {
   set +e
   runcon "$ctx" "$PROBE" out "$OUTF" "$@"
   RUNCON_RC=$?
+  if [ -n "${RCF:-}" ]; then
+    printf '%d\n' "$RUNCON_RC" > "$RCF" 2>/dev/null || true
+  fi
   set -e
   cat "$OUTF"
 }
+# a command substitution runs runc_rc in its own subshell, so the rc
+# travels through a file, not through a lost variable
+restore_rc() { RUNCON_RC="$(cat "$RCF" 2>/dev/null || echo 255)"; }
 runc() {
   local out
   out="$(runc_rc "$@")"
@@ -295,11 +302,13 @@ TARGETCTX=system_u:system_r:docker_helper_buildkitd_t:s0:c1
 sed 's/^[Cc][0-9].*/&/' "$EVIDENCE_DIR/m1-controls.txt"
 dmesg -T 2>/dev/null | grep -i avc | tail -5 >> "$EVIDENCE_DIR/m1-controls.txt" || true
 OWNCTX="$(runc_rc "$TARGETCTX" selfctx)"
+restore_rc
 ev m1-why "rc=$RUNCON_RC len=${#OWNCTX} raw=$(head -c 120 "$OUTF" 2>/dev/null | tr '\n' '|')"
 if [ "$RUNCON_RC" != "0" ] || [ -z "$OWNCTX" ]; then
   say 'M1: the :s0:c1 entry attempt was refused; retrying at the shell base level'
   TARGETCTX=system_u:system_r:docker_helper_buildkitd_t:s0
   OWNCTX="$(runc "$TARGETCTX" selfctx)"
+restore_rc
 fi
 ev m1-target-ctx "$TARGETCTX"
 WL="$(compose_workload "$OWNCTX" "$WL_DOMAIN")"
@@ -375,6 +384,7 @@ TARGETCTX="$(cat "$EVIDENCE_DIR/m1-target-ctx")"
   printf '\n'
 } >> "$EVIDENCE_DIR/m2-why.log" 2>&1
 OWNCTX="$(runc "$TARGETCTX" selfctx)"
+restore_rc
 {
   printf 'm2-selfctx-rc=%d len=%s\n' "$RUNCON_RC" "${#OWNCTX}"
   printf 'm2-post-content: '; head -c 200 "$OUTF" 2>/dev/null | tr '\n' '|'
@@ -448,6 +458,7 @@ if semodule -l 2>/dev/null | grep -qE '^dh_mnb39'; then
 fi
 TARGETCTX="$(cat "$EVIDENCE_DIR/m1-target-ctx")"
 OUT="$(runc_rc "$TARGETCTX" policyinfo)"
+restore_rc
 [ "$RUNCON_RC" != "0" ] \
   || { printf '%s\n' "$OUT"; fail "after the unload the probe must NOT reenter buildkitd_t"; }
 printf '%s\n' "$OUT" > "$EVIDENCE_DIR/m3-negative-rerun.txt"
@@ -499,3 +510,4 @@ done
 
 printf '%s\n' 'R7-MNB39-VERDICT=PASS'
 exit 0
+
