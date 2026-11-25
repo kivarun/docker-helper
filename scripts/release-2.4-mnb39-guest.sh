@@ -157,6 +157,8 @@ load_stage() {
 (allow $shdom self (process (setexec)))
 (allow docker_helper_buildkitd_t self (process (setexec)))
 (allow $shdom docker_helper_buildkitd_t (process (transition)))
+(allow $shdom docker_helper_buildkitd_t (process2 (nosuid_transition)))
+(allow docker_helper_buildkitd_t bin_t (file (entrypoint execute getattr open read map)))
 (roletype $shrole docker_helper_buildkitd_t)
 (typetransition $shdom $PROBERTYPE process docker_helper_buildkitd_t)
 (allow docker_helper_buildkitd_t security_t (dir (search)))
