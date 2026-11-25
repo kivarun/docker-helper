@@ -564,6 +564,10 @@ run_phase() {
 # failure find stale/missing binaries because a failed attempt never runs
 # the M3 teardown, and earlier-attempt tmpfs state does not survive a boot
 if [ ! -x "$PROBE" ]; then
+  command -v gcc >/dev/null 2>&1 \
+    || zypper --non-interactive install -y gcc glibc-devel-static \
+       >> "$EVIDENCE_DIR/m1-gcc.log" 2>&1 \
+    || fail "probe rebuild toolchain unavailable at preamble"
   gcc -O1 -static -nostdlib -nostartfiles -fno-stack-protector -no-pie \
     -o "$PROBE" "$MNB39_PROBE_SRC" 2>> "$EVIDENCE_DIR/m1-gcc.log" \
     || fail "probe rebuild failed at preamble"
