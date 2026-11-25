@@ -231,6 +231,7 @@ command -v strace >/dev/null 2>&1 \
 BASE_SHA="$(policy_sha)"
 MNB39_POLICY_SHA_BASE="$BASE_SHA"
 ev m0-policy-sha "$BASE_SHA"
+mkdir -p "$STATE_DIR"
 printf '%s
 ' "$BASE_SHA" > "$STATE_DIR/policy-sha-base"
 if [ -n "${MNB39_POLICY_SHA_BASE_ORC:-}" ] && [ "$MNB39_POLICY_SHA_BASE_ORC" != "$BASE_SHA" ]; then
