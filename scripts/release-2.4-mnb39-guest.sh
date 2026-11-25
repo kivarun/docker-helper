@@ -300,12 +300,21 @@ sed 's/^[[:space:]]*//' "$EVIDENCE_DIR/m0-seinfo-roletype.txt" \
   | grep -v '^Roles:' | grep -v '^$' | sort -u > "$EVIDENCE_DIR/m1-roletype-ref.txt"
 grep -vE '^(policy-open:|policyinfo:)' "$EVIDENCE_DIR/m1-probe-roletype.txt" \
   | sed 's/^[[:space:]]*//' | grep -v '^$' | sort -u > "$EVIDENCE_DIR/m1-roletype-probe.txt"
-if ! diff -u "$EVIDENCE_DIR/m1-roletype-ref.txt" "$EVIDENCE_DIR/m1-roletype-probe.txt" \
-  > "$EVIDENCE_DIR/m1-roletype.diff"; then
-  cat "$EVIDENCE_DIR/m1-roletype.diff"
-  fail "the probe's parsed roletype set differs from the seinfo reference"
+diff -u "$EVIDENCE_DIR/m1-roletype-ref.txt" "$EVIDENCE_DIR/m1-roletype-probe.txt" \
+  > "$EVIDENCE_DIR/m1-roletype.diff" || true
+# probe-only roles are NOT an immediate failure: seinfo is only a second
+# parser, not the authority; stage 2 arbitrates probe-only roles against
+# the kernel itself (check_context validates the role/type enrollment)
+comm -13 "$EVIDENCE_DIR/m1-roletype-ref.txt" "$EVIDENCE_DIR/m1-roletype-probe.txt" \
+  > "$EVIDENCE_DIR/m1-roletype-extras.txt" || true
+# missing roles (ref-only) ARE a probe bug
+if ! comm -23 "$EVIDENCE_DIR/m1-roletype-ref.txt" "$EVIDENCE_DIR/m1-roletype-probe.txt" \
+  > "$EVIDENCE_DIR/m1-roletype-missing.txt"; then :; fi
+if [ -s "$EVIDENCE_DIR/m1-roletype-missing.txt" ]; then
+  cat "$EVIDENCE_DIR/m1-roletype-missing.txt"
+  fail "the probe missed a role seinfo knows"
 fi
-ev m1-noexec-parse "PASS (constrain exact match; roletype set equality with the seinfo reference)"
+ev m1-noexec-parse "PASS (constrain exact match; roletype: no ref-only role; probe-only roles go to the kernel arbitration)"
 
 # ---- the check_context surface, EXPECTED to be kernel-denied now ----
 runc_rc "$TARGETCTX" checkctx "$MNB39_CHECKCTX_PATH" "$WL" 'valid-workload' \
@@ -362,6 +371,22 @@ runc_rc "$TARGETCTX" checkctx /nonexistent/mnb39-check_context "$WL" 'unavailabl
 # re-assert the parse checks under stage 2 (unchanged; no additional faces)
 runc "$TARGETCTX" constrain fifo_file | grep -Fqx "$STATEMENT" \
   || fail "stage-2 constrain render lost the canonical statement"
+
+# the roletype arbitration: every probe-only role is KERNELED through
+# check_context — a role truly enrolled for the type VALIDATES
+NEWCTX="$(printf '%s\n' "$WL" | sed 's/docker_helper_builder_workload_t/docker_helper_buildkitd_t/')"
+while IFS= read -r exrole; do
+  [ -n "$exrole" ] || continue
+  runc_rc "$TARGETCTX" checkctx "$MNB39_CHECKCTX_PATH" \
+    "$(printf '%s\n' "$NEWCTX" | awk -F: -v OFS=: -v r="$exrole" '$2=r; print')" \
+    "arbitrate-$exrole" > "$EVIDENCE_DIR/m2-roletype-arb-$exrole.txt" 2>&1
+  ev "m2-arb-$exrole.rc" "$RUNCON_RC"
+  [ "$RUNCON_RC" = "0" ] \
+    || { cat "$EVIDENCE_DIR/m2-roletype-arb-$exrole.txt"
+         fail "probe-only role $exrole is not kernel-enrolled for buildkitd_t"; }
+  echo "$exrole: kernel-VALIDATED via check_context" >> "$EVIDENCE_DIR/m2-roletype-arbitration.txt"
+done < "$EVIDENCE_DIR/m1-roletype-extras.txt"
+ev m2-roletype-arbitration "$(cat "$EVIDENCE_DIR/m2-roletype-arbitration.txt" 2>/dev/null || echo 'none needed: the sets matched')"
 
 say 'M2: PASS'
 }
