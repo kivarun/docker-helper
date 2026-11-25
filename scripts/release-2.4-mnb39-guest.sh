@@ -145,7 +145,9 @@ restore_rc() { RUNCON_RC="$(cat "$RCF" 2>/dev/null || echo 255)"; }
 runc() {
   local out
   out="$(runc_rc "$@")"
-  [ "$RUNCON_RC" = "0" ] || { printf '%s\n' "$out" | head -6; fail "probe (runcon) failed rc=$RUNCON_RC: $*"; }
+  [ "$RUNCON_RC" = "0" ] || { printf '%s\n' "$out" | head -6
+    tail -8 "$TRACEF" 2>/dev/null | sed 's/^/S-TRACE: /'
+    fail "probe (runcon) failed rc=$RUNCON_RC: $*"; }
   printf '%s\n' "$out"
 }
 

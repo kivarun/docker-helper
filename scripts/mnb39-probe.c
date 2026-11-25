@@ -358,6 +358,7 @@ struct rd {
 
 static void die(const struct rd *r, const char *what)
 {
+	out2("PARSE-FAIL at offset %zu: %s", r->o, what);
 	out("PARSE-FAIL at offset %zu: %s", r->o, what);
 	if (g_blob) {
 		for (size_t i = 0; i < 64; i += 4)
@@ -923,8 +924,10 @@ static char rendered_root[1536];
 static void constrain_emit(struct class_entry *c)
 {
 	struct rd r = { c->cons_bytes, 0, c->cons_len };
+	out2("render enter ncons=%u len=%u", c->ncons, c->cons_len);
 	for (uint32_t i = 0; i < c->ncons; i++) {
 		uint32_t permissions = u32r(&r);
+		out2("render i=%u perms=%#x nexpr-next", i, permissions);
 		uint32_t nexpr = u32r(&r);
 		char perms[400];
 		perms[0] = 0;
@@ -950,6 +953,7 @@ static void constrain_emit(struct class_entry *c)
 			}
 		}
 		render_expr_stream(&r, nexpr);
+		out2("render i=%u expr-end-off=%u", i, r.o);
 		snprintf(rendered_root, sizeof rendered_root, "%s", last_rendered_root);
 		int mls = last_render_mls;
 		out("%s %s { %s } %s;", mls ? "mlsconstrain" : "constraint", c->name, perms, rendered_root);
@@ -1008,18 +1012,19 @@ static int probe_run(int argc, char **argv)
 	 * dups it over stdout so the caller-shell never needs a write face
 	 * on the probe type; the shell reads the file back afterwards */
 	if (argc >= 3 && strcmp(argv[1], "out") == 0) {
+		int tfd = (int)sys_open("/tmp/mnb39-trace.0", O_WRONLY | O_APPEND);
+		if (tfd >= 0)
+			g_tfd = tfd;
 		int ofd = (int)sys_open(argv[2], O_WRONLY | O_CREAT | O_TRUNC);
 		if (ofd < 0) {
+			out2("out: open errno=%d", (int)-ofd);
 			out("out: open errno=%d", (int)-ofd);
 			return 2;
 		}
 		if (sys_dup2(ofd, 1) < 0) {
-			out("out: dup2 errno=%d", (int)-ofd);
+			out2("out: dup2 errno=%d", (int)-ofd);
 			return 2;
 		}
-		int tfd = (int)sys_open("/tmp/mnb39-trace.0", O_WRONLY | O_APPEND);
-		if (tfd >= 0)
-			g_tfd = tfd;
 		out2("probe: out-mode fd=%d path=%s trace-fd=%d", ofd, argv[2], g_tfd);
 		argv += 2;
 		argc -= 2;
