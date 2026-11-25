@@ -360,7 +360,17 @@ ev m2-modules "$(semodule -l 2>/dev/null | grep -E 'dh_mnb39|docker_helper' || t
 ev m2-policy-sha "$(policy_sha)"
 
 TARGETCTX="$(cat "$EVIDENCE_DIR/m1-target-ctx")"
+{
+  printf 'm2-pre-lsZ: '; ls -Z "$OUTF" || true
+  printf 'm2-pre-content: '; head -c 200 "$OUTF" 2>/dev/null | tr '\n' '|'
+  printf '\n'
+} >> "$EVIDENCE_DIR/m2-why.log" 2>&1
 OWNCTX="$(runc "$TARGETCTX" selfctx)"
+{
+  printf 'm2-selfctx-rc=%d len=%s\n' "$RUNCON_RC" "${#OWNCTX}"
+  printf 'm2-post-content: '; head -c 200 "$OUTF" 2>/dev/null | tr '\n' '|'
+  printf '\n'
+} >> "$EVIDENCE_DIR/m2-why.log" 2>&1
 WL="$(compose_workload "$OWNCTX" "$WL_DOMAIN")"
 ev m2-workload-ctx "$WL"
 
