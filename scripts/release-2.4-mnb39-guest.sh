@@ -489,7 +489,6 @@ restore_rc
 grep -Fqx "$STATEMENT" "$EVIDENCE_DIR/m2-probe-constrain.txt" \
   || fail "stage-2 constrain render lost the canonical statement"
 
-semodule -B >/dev/null 2>&1 || true
 say 'M2: PASS'
 }
 
