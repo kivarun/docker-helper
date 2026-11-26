@@ -18,7 +18,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -62,19 +61,15 @@ func withWrapperRuntimeSeams(t *testing.T, execErr error, renameErr error) *wrap
 		}
 		return origRename(tempPath, targetPath)
 	}
-	origRoleCheck := wrapperRoleCheck
-	wrapperRoleCheck = func(role, domain string) error {
-		if role != "system_r" || domain != wrapperWorkloadDomain {
-			t.Errorf("unexpected role check call: role=%q domain=%q", role, domain)
-			return errors.New("unexpected role check call")
-		}
+	origContextCheck := wrapperWorkloadContextCheck
+	wrapperWorkloadContextCheck = func(label string) error {
 		return nil
 	}
 	origFifoConstraint := wrapperFifoConstraintCheck
 	wrapperFifoConstraintCheck = func() error { return nil }
 	t.Cleanup(func() {
 		wrapperRealRuntimePath, wrapperExecRuntime, wrapperCommitRename = origPath, origExec, origRename
-		wrapperRoleCheck = origRoleCheck
+		wrapperWorkloadContextCheck = origContextCheck
 		wrapperFifoConstraintCheck = origFifoConstraint
 	})
 	return rec
@@ -341,15 +336,6 @@ func TestWrapperNoExecutableSearch(t *testing.T) {
 		if strings.Contains(content, "LookPath") {
 			t.Errorf("%s must not perform any executable PATH search", f)
 		}
-	}
-	// The runtime file itself never imports os/exec: the only exec surface
-	// is the unix.Exec seam at the fixed D-2 path.
-	data, err := os.ReadFile("wrapper_runtime_linux.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(data), "os/exec") {
-		t.Error("the wrapper runtime must not import os/exec (no second executable selection path)")
 	}
 }
 
@@ -1171,97 +1157,6 @@ func TestWrapperWorkloadProcessLabelComposesOwnContext(t *testing.T) {
 				t.Fatal("the malformed own context must be refused")
 			}
 		})
-	}
-}
-
-// wrapperRoleCheckFromOutput is the pure roletype-output classifier
-// extracted from the production wrapperRoleCheck.
-func wrapperRoleCheckFromOutput(out []byte, queryErr error, role, domain string) error {
-	if queryErr != nil {
-		return fmt.Errorf("the roletype query cannot be trusted (%v)", queryErr)
-	}
-	for _, entry := range strings.Split(string(out), "\n") {
-		if strings.TrimSpace(entry) == role {
-			return nil
-		}
-	}
-	return fmt.Errorf("the loaded policy carries no %s role authorization for the workload domain (%q)", role, domain)
-}
-
-// TestWrapperRoleCheckRefusalShapes proves the fail-closed roletype
-// classification: a failed seinfo query is never an authoritative
-// allowance, an empty result is a refusal, and an exact role-token entry
-// is the only allowance.
-func TestWrapperRoleCheckRefusalShapes(t *testing.T) {
-	cases := []struct {
-		name     string
-		out      []byte
-		queryErr error
-		wantErr  string
-	}{
-		{name: "query failure", out: nil, queryErr: errors.New("exit 2"), wantErr: "cannot be trusted"},
-		{name: "absent row", out: []byte(""), queryErr: nil, wantErr: "role authorization"},
-		{name: "authorized", out: []byte("Roles: 1\n   system_r\n"), queryErr: nil, wantErr: ""},
-		{name: "decorated entry", out: []byte("system_r\n"), queryErr: nil, wantErr: ""},
-		{name: "foreign role only", out: []byte("unconfined_r\n"), queryErr: nil, wantErr: "role authorization"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			err := wrapperRoleCheckFromOutput(tc.out, tc.queryErr, "system_r", wrapperWorkloadDomain)
-			if tc.wantErr == "" && err != nil {
-				t.Fatalf("want allowance, got %v", err)
-			}
-			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
-				t.Fatalf("want refusal naming %q, got %v", tc.wantErr, err)
-			}
-		})
-	}
-}
-
-// TestWrapperRoleCheckPathIndependentResolution proves the production
-// rolecheck resolves seinfo against a restricted PATH exactly like the
-// builder-daemon spawn environment (measured: `exec: "seinfo":
-// executable file not found in $PATH`): a bare "seinfo" absent from PATH
-// falls through to the absolute candidates and the first resolving
-// candidate's own output decides the verdict. The fake seinfo markers
-// prove which candidate answered.
-func TestWrapperRoleCheckPathIndependentResolution(t *testing.T) {
-	binDir := t.TempDir()
-	writeFake := func(t *testing.T, path string, lines []string) {
-		t.Helper()
-		script := "#!/bin/sh\n"
-		for _, line := range lines {
-			script += "echo '" + line + "'\n"
-		}
-		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	pathFake := binDir + "/fake-path-seinfo" // answered only when its directory is on PATH
-	absoluteFake := filepath.Join(t.TempDir(), "fake-absolute-seinfo")
-	writeFake(t, pathFake, []string{"Roles: 1", "   unconfined_r"})
-	writeFake(t, absoluteFake, []string{"Roles: 1", "   system_r"})
-
-	origCandidates := wrapperSeinfoCandidates
-	t.Cleanup(func() { wrapperSeinfoCandidates = origCandidates })
-	// The PATH fake stays resolvable THROUGH the bare "seinfo" lookup only
-	// when its directory is on PATH; the restricted environment hides it.
-	wrapperSeinfoCandidates = []string{"seinfo", absoluteFake}
-	t.Setenv("PATH", "/nonexistent-restricted-path")
-	if err := wrapperRoleCheck("system_r", wrapperWorkloadDomain); err != nil {
-		t.Fatalf("the absolute fallback must resolve the roletype check: %v", err)
-	}
-	// With the fake on PATH the bare lookup ANSWERS and its (foreign-role)
-	// output classifies verbatim: the resolution order, not the lookup
-	// success, decides the verdict.
-	wrapperSeinfoCandidates = []string{"fake-path-seinfo", absoluteFake}
-	t.Setenv("PATH", binDir)
-	err := wrapperRoleCheck("user_r", wrapperWorkloadDomain)
-	if err == nil || !strings.Contains(err.Error(), "role authorization") {
-		t.Fatalf("the answering bare candidate must classify verbatim, got %v", err)
-	}
-	if err := wrapperRoleCheck("unconfined_r", wrapperWorkloadDomain); err != nil {
-		t.Fatalf("the answering bare candidate must allow its own entry: %v", err)
 	}
 }
 

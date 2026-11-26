@@ -1,0 +1,20 @@
+# MNB39a fifo_file constraint reference fixture (test-only).
+#
+# Provenance: measured statement set of the enforcing Tumbleweed guest's
+# loaded distro+builder policy with the MNB39a diagnostic stage-1 module
+# loaded (loaded-policy sha be89a52e..., CI run 45666353890 attempt 1,
+# evidence file m1-probe-constrain.txt of the published
+# r7-p21e-r4-p3-p6-mnb39a package; the seinfo reference
+# m0-seinfo-constrain.txt agreed on the statement set). Historical
+# reference for the parity test only — never a runtime dependency.
+#
+# Line 1 is the shipped wrapper gate statement (byte-exact gate target).
+# The remaining lines are the distro's own fifo_file constraint set
+# shape, honored by rendering only (the gate judges line 1's presence).
+#
+mlsconstrain fifo_file { read write } (h1 dom h2 or t1 != mcs_constrained_type);
+mlsconstrain fifo_file open (h1 dom h2 or t1 != mcs_constrained_type);
+mlsconstrain fifo_file relabelfrom (h1 dom h2 or t1 != mcs_constrained_type);
+mlsconstrain fifo_file { create relabelto } (l2 == h2 or t1 != mcs_constrained_type);
+mlsconstrain fifo_file { create relabelto } (h1 dom h2 or t1 != mcs_constrained_type);
+constraint fifo_file { create relabelfrom relabelto } (u1 == u2 or t1 == can_change_object_identity);

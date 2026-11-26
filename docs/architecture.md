@@ -2815,24 +2815,46 @@ Ownership and lifecycle:
   independently of the main `docker_helper.pp` module's store state, so
   an orphaned constraint module is removed just the same.
 - the enforcing buildkitd payload carries its own fail-closed admission
-  gate over the constraint: before any managed run reaches its spec
-  commit, the payload queries the LOADED policy (`seinfo --constrain
-  fifo_file`, pinned to `/sys/fs/selinux/policy` through the same
-  resolution order as its role authorization check) and requires the
-  exact shipped constraint statement — an absent tool, an untrusted
-  query, or a missing/foreign statement refuses the run before any
-  committed rewrite and before the real runtime is exec'd. The module
-  store listing and the installed CIL filename are never sufficient:
-  only the kernel-deciding loaded policy shapes. The gate's own
-  enforcement is subject to the same pending buildkitd-domain policy
-  integration as the role authorization check (its production policy
-  grant is not yet integrated); until that integration lands, the gate's
-  fail-closed refusals are the acceptance behavior an enforcing
-  deployment observes, and a failed packaging install keeps the service
-  down rather than exposing an unconstrained runtime. A policy reload or
-  distro policy update removing the constraint re-arms the gate on the
-  first subsequent run: the check runs per managed run, never per
-  builder lifetime.
+  gates, both in-process (the payload never forks a helper binary for
+  policy questions, mirroring the no-executable-search invariant of the
+  whole wrapper runtime):
+  - before any managed run reaches its spec commit, the payload
+    validates the composed workload process context against the
+    kernel's selinuxfs context node: one `open(O_RDWR)`/write/read-back
+    transaction on `/sys/fs/selinux/context`, the written payload
+    NUL-terminated, the canonical read-back must equal the composed
+    context byte-exactly. The transaction is the kernel's own native
+    context validation (`security_context_to_sid` plus canonical
+    re-derivation, gated by `security_t:security:check_context`); its
+    success proves context validity, never a transition or
+    authorization grant by itself. Every failure class is a typed
+    pre-commit refusal (interface unavailable, EACCES/EPERM permission,
+    EINVAL invalid context, short-I/O, or an uncanonical/broken
+    read-back) — no failure class is turned into an allowance, and a
+    refused path leaves the spec untouched.
+  - the payload then admits the FIFO constraint by reading the LOADED
+    binary policy from `/sys/fs/selinux/policy` and parsing it with an
+    in-process bounded policydb v35 reader: it resolves the `fifo_file`
+    class's MLS constraints with their permission mask and rendered
+    type-set names, and requires the exact shipped statement
+    `mlsconstrain fifo_file { read write } (h1 dom h2 or t1 !=
+    mcs_constrained_type)`. A malformation, an unsupported policy
+    version, a bounded-resource limit, an unresolvable nameset bit, an
+    ambiguous type-set shape, or a missing/foreign statement refuses
+    the run before any committed rewrite and before the real runtime is
+    exec'd. The module store listing and the installed CIL filename are
+    never sufficient: only the kernel-deciding loaded policy shapes, and
+    no verdict is cached across runs. The gates' own enforcement is
+    subject to the pending buildkitd-domain policy integration (their
+    production policy grants are not yet integrated — read access to
+    the selinuxfs policy node and `security_t:security {check_context
+    read_policy}` are open reports); until that integration lands, the
+    gates' fail-closed refusals are the acceptance behavior an
+    enforcing deployment observes, and a failed packaging install keeps
+    the service down rather than exposing an unconstrained runtime. A
+    policy reload or distro policy update removing the constraint
+    re-arms the gate on the first subsequent run: both checks run per
+    managed run, never per builder lifetime.
 - the kernel-level cross-descriptor behavior behind the constraint is
   measured, not assumed: the shipped constraint statement is the
   enforced boundary for FIFO fd acquisition and use across operation

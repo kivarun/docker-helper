@@ -286,19 +286,26 @@ func wrapperRunPipeline(reader wrapperOwnContextReader, seam wrapperInspectionSy
 	if err := wrapperInspectPreparedDev(seam, devPrepOpDir(inv.bundleOpID), category); err != nil {
 		return err
 	}
-	label, role, err := wrapperWorkloadProcessLabel(raw)
+	label, _, err := wrapperWorkloadProcessLabel(raw)
 	if err != nil {
 		return &wrapperRefuseError{cause: fmt.Errorf("cannot compose the workload process label: %w", err)}
 	}
-	if err := wrapperRoleCheck(role, wrapperWorkloadDomain); err != nil {
-		return &wrapperRefuseError{cause: fmt.Errorf("the workload role authorization check refused the run: %w", err)}
+	// The first policy gate: the composed workload context must
+	// validate against the LOADED policy through the kernel's own
+	// context-validation interface, with the canonical read-back
+	// matching the composed context exactly. This validates the
+	// context; it does NOT authorize the subsequent process transition
+	// — the kernel's own transition checks remain independently
+	// authoritative.
+	if err := wrapperWorkloadContextCheck(label); err != nil {
+		return &wrapperRefuseError{cause: fmt.Errorf("the workload context validation refused the run: %w", err)}
 	}
-	// The wrapper's second policy-shape gate: the loaded policy must carry
-	// the shipped fifo_file read/write isolation constraint (the same
-	// authority chain wrapperRoleCheck uses — the kernel-deciding loaded
-	// policy, queried through the seam-resolved seinfo). Without it the
-	// concurrent operation categories would not isolate their FIFO pipes,
-	// so an unverifiable or missing constraint refuses the run closed.
+	// The second policy gate: the loaded policy must carry the shipped
+	// fifo_file read/write isolation constraint, extracted from the
+	// same kernel-deciding loaded policy binary. Without it the
+	// concurrent operation categories would not isolate their FIFO
+	// pipes, so an unverifiable or missing constraint refuses the run
+	// closed.
 	if err := wrapperFifoConstraintCheck(); err != nil {
 		return &wrapperRefuseError{cause: fmt.Errorf("the FIFO constraint admission gate refused the run: %w", err)}
 	}
