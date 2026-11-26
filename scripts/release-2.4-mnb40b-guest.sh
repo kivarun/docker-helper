@@ -39,6 +39,7 @@
 # integration, NO Release-GO UAT, no runtime pins touched.
 
 set -Eeuo pipefail
+trap 'printf "[release-2.4-mnb40b] ERR rc=%d line=%d cmd=%s\n" "$?" "$LINENO" "${BASH_COMMAND:-?}" >&2' ERR
 
 PREFIX='[release-2.4-mnb40b]'
 say()  { printf '%s %s\n' "$PREFIX" "$*"; }
