@@ -452,6 +452,27 @@ RMT
         log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
         ;;
     esac
+  elif [ "$R7_MODE" = "mnb40a" ]; then
+    # The MNB40a reconciliation verdict on the phase-token summary (the
+    # ladder is self-contained; the verdict appears only after every
+    # phase marked PASS or the first failing gate exits with its line).
+    VERDICT="$(grep -aoE 'R7-MNB40A-VERDICT=(PASS|FAILED.*)' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"
+    case "$VERDICT" in
+      R7-MNB40A-VERDICT=PASS)
+        log "MNB40a reconciliation verdict: $VERDICT"
+        break
+        ;;
+      R7-MNB40A-VERDICT=FAILED*)
+        log "MNB40a reconciliation verdict: $VERDICT"
+        break
+        ;;
+      *)
+        if [ "$attempt" -eq "$ATTEMPTS" ]; then
+          fail "the MNB40a reconciliation ladder produced no verdict (guest exit $GUEST_RC)"
+        fi
+        log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
+        ;;
+    esac
   elif [ "$R7_MODE" = "p21e3" ] || [ "$R7_MODE" = "p21e3probe" ] || [ "$R7_MODE" = "p21e3proc-sys" ] || [ "$R7_MODE" = "p21e3proc-file" ] || [ "$R7_MODE" = "p21e3proc-keys" ] || [ "$R7_MODE" = "p21e3diag-keys" ] || [ "$R7_MODE" = "mnb30" ] || [ "$R7_MODE" = "mnb32" ] || [ "$R7_MODE" = "mnb33" ] || [ "$R7_MODE" = "mnb36" ]; then
     # The BUILD result line and the VERDICT line are matched SEPARATELY:
     # the previous tail -2 | tr '\n' ' ' fabrication produced a string
