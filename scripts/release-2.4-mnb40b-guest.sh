@@ -152,8 +152,7 @@ prod_build() {
   mkdir -p "$WS/ctx"
   local stamp
   stamp="$(date +%s%N)"
-  printf 'FROM alpine:3.24\nRUN echo mnb40b-build-ok\nRUN echo mnb40b-stamp-%s > /mnb40b-stamp\n' "$stamp" > "$WS/ctx/Dockerfile"
-  printf '%s\n' "$stamp" > "$WS/ctx/mnb40b-marker"
+  printf 'FROM alpine:3.24\nRUN echo mnb40b-build-ok\nRUN echo mnb40b-stamp-%s\n' "$stamp" > "$WS/ctx/Dockerfile"
   chown -R "$PRINCIPAL:$PRINCIPAL" "$WS"
   set +e
   out="$(docker-helper build "$WS/ctx" --dockerfile Dockerfile --image "mnb40b-probe-$stamp:1" 2>&1)"
