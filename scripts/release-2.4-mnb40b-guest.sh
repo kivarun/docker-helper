@@ -108,7 +108,10 @@ write_cil() {
   local f="/tmp/$1.cil"
   cat > "$f"
   cp "$f" "$EVIDENCE_DIR/$(basename "$f")"
-  semodule -X 400 -i "$f" || fail "$1 module failed to load"
+  local loadrc=0
+  semodule -X 400 -i "$f" > "$EVIDENCE_DIR/$(basename "$f")-load.log" 2>&1 || loadrc=$?
+  [ "$loadrc" = "0" ] \
+    || { tail -4 "$EVIDENCE_DIR/$(basename "$f")-load.log"; fail "$1 module failed to load (load log kept)"; }
 }
 module_loaded() { semodule -l 2>/dev/null | grep -q "^$1"; }
 unload_verbose() {
@@ -316,6 +319,21 @@ EOF
 EOF
   ev s0-modules "$(semodule -l 2>/dev/null | grep mnb40b || true)"
   ev s0-policy-sha "$(policy_sha)"
+  # dontaudit visibility toggle (the established disposable-VM discipline):
+  # the deny rows for the unchanged-not-yet-proven faces can be
+  # dontaudit'd by the distro policy, so the ladder's attribution requires
+  # the -DB rebuild (sha-recorded) and the -B restoration (verified)
+  DONTAUDIT_PRE_SHA="$(policy_sha)"
+  set +e
+  DBOUT="$(semodule -DB 2>&1)"
+  DB_RC=$?
+  set -e
+  ev s0-dontaudit-toggle-rc "$DB_RC ($DBOUT)"
+  [ "$DB_RC" = "0" ] || fail "S0: the dontaudit visibility toggle failed"
+  DONTAUDIT_DB_SHA="$(policy_sha)"
+  ev s0-policy-sha-dontaudit-off "$DONTAUDIT_DB_SHA"
+  [ "$DONTAUDIT_DB_SHA" != "$DONTAUDIT_PRE_SHA" ] \
+    || fail "S0: semodule -DB did not change the loaded policy; the attribution would sight silently"
   # the installed binary identity (provenance closure)
   {
     printf 'installed wrapper (buildkit/buildkit-runc): '
@@ -382,7 +400,7 @@ permdrop() {
     ev "m1-$face-verdict" "REMOVABLE (the production BUILD admitted without the face; the minimal set drops it)"
     say "M1 $face: REMOVABLE (admitted without the face)"
   else
-    if grep -qa "denied { $perm }" "$EVIDENCE_DIR/m1-$face-avcs.txt" \
+    if grep -qaE "denied +\\{ $perm \\}" "$EVIDENCE_DIR/m1-$face-avcs.txt" \
       && grep -qa "tclass=$kind" "$EVIDENCE_DIR/m1-$face-avcs.txt"; then
       ev "m1-$face-verdict" "NECESSARY (the removal was measured as the wrapper refusal with the exact denial: { $perm } tclass=$kind)"
       say "M1 $face: NECESSARY (denial { $perm } tclass=$kind)"
@@ -480,6 +498,15 @@ phase_m4() {
   # product modules/constraint artifact/.pp are unchanged.
   # ---------------------------------------------------------------------
   say 'M5: teardown (unload-all + sha restore + deny-again)'
+  set +e
+  BOUT="$(semodule -B 2>&1)"
+  B_RC=$?
+  set -e
+  ev m4-dontaudit-restore-rc "$B_RC ($BOUT)"
+  [ "$B_RC" = "0" ] || fail "M4: the dontaudit restore failed"
+  ev m4-policy-sha-dontaudit-restored "$(policy_sha)"
+  [ "$(policy_sha)" = "$(cat "$EVIDENCE_DIR/s0-policy-sha" 2>/dev/null)" ] \
+    || fail "M4: the restored policy sha must equal the pre-toggle working-set sha"
   for m in "$M_VARIANT" "$M_FS_MIN" "$M_RP" "$M_CC" "$M_FS" "$M_W7" "$M_WL" "$M_CAP"; do
     unload_verbose "$m"
   done
