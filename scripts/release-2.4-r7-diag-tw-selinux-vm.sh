@@ -173,7 +173,20 @@ case "$R7_MODE" in
   # restore; full unload verification, policy sha restored, deny-again
   # refused closed. NO permanent policy integration, NO Release-GO UAT.
   mnb40a) GUEST_SCRIPT='release-2.4-mnb40a-guest.sh' ;;
-  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d | p21e | p21e3 | p21e3probe | p21e3proc-sys | p21e3proc-file | p21e3proc-keys | p21e3diag-keys | mnb30 | mnb32 | mnb33 | mnb36 | mnb38 | mnb39 | mnb40a)" ;;
+  # mnb40b = the admission-boundary trace + the minimal authority proof
+  # on the enforcing consumer (the dedicated MNB40b guest script): the
+  # S0 face trace records the RUN-op path (the system docker engine;
+  # no wrapper) against the BUILD-op path (the wrapper gates) with the
+  # process-identity samples; M1 removes each of the five previously
+  # unproven faces INDEPENDENTLY and records the exact denial
+  # ({ search } dir / { getattr open read write } file), the wrapper
+  # decision, the affected syscalls via the captured AVCs, and the
+  # loaded-policy SHA per arm; M2 enumerates the of the write-bit
+  # authority surface; M3 validates the COMBINED minimal set through
+  # both faces; verified unload, byte-exact restore, deny-again. NO
+  # permanent policy integration, NO Release-GO UAT.
+  mnb40b) GUEST_SCRIPT='release-2.4-mnb40b-guest.sh' ;;
+  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d | p21e | p21e3 | p21e3probe | p21e3proc-sys | p21e3proc-file | p21e3proc-keys | p21e3diag-keys | mnb30 | mnb32 | mnb33 | mnb36 | mnb38 | mnb39 | mnb40a | mnb40b)" ;;
 esac
 
 log()  { printf '%s %s\n' "$PREFIX" "$*"; }
@@ -469,6 +482,25 @@ RMT
       *)
         if [ "$attempt" -eq "$ATTEMPTS" ]; then
           fail "the MNB40a reconciliation ladder produced no verdict (guest exit $GUEST_RC)"
+        fi
+        log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
+        ;;
+    esac
+  elif [ "$R7_MODE" = "mnb40b" ]; then
+    # The MNB40b reconciliation verdict on the phase-token summary.
+    VERDICT="$(grep -aoE 'R7-MNB40B-VERDICT=(PASS|FAILED.*)' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"
+    case "$VERDICT" in
+      R7-MNB40B-VERDICT=PASS)
+        log "MNB40b authority verdict: $VERDICT"
+        break
+        ;;
+      R7-MNB40B-VERDICT=FAILED*)
+        log "MNB40b authority verdict: $VERDICT"
+        break
+        ;;
+      *)
+        if [ "$attempt" -eq "$ATTEMPTS" ]; then
+          fail "the MNB40b authority ladder produced no verdict (guest exit $GUEST_RC)"
         fi
         log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
         ;;
