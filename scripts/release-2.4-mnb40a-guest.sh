@@ -518,7 +518,7 @@ phase_m6() {
     printf 'parser.seinfo.parity          = %s\n' \
       "$(sed 's/^[[:space:]]*//' "$EVIDENCE_DIR/s3-seinfo-constrain.txt" | grep -Fqx "$STATEMENT" && ! sed 's/^[[:space:]]*//' "$EVIDENCE_DIR/s4-seinfo-constrain.txt" | grep -Fqx "$STATEMENT" && echo 'PASS (same-snapshot decision parity: present-case admitted, absent-case refused)' || echo FAILED)"
     printf 'constraint.missing.refusal    = %s\n' \
-      "$(grep -qF "$GATEMSG_MISSING" "$EVIDENCE_DIR/s4-run-stdout.txt" && grep -qF "$REMEDIATION" "$EVIDENCE_DIR/s4-run-stdout.txt" && echo 'PASS (exact remediation message on the missing-constraint snapshot)' || echo FAILED)"
+      "$(grep -qF "$GATEMSG_MISSING" "$EVIDENCE_DIR/s4-build-stdout.txt" && grep -qF "$REMEDIATION" "$EVIDENCE_DIR/s4-build-stdout.txt" && echo 'PASS (exact remediation message on the missing-constraint snapshot)' || echo FAILED)"
     printf 'unload.verified               = %s\n' \
       "$(grep -qx "0" "$EVIDENCE_DIR/m5-modules-after" && echo 'PASS (no diagnostic module remains; sha restored)' || echo FAILED)"
     printf 'deny.again.closed             = %s\n' \
