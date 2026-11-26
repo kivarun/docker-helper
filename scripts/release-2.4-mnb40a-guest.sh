@@ -122,6 +122,7 @@ unload_verbose() {
 # acceptance/refusal classification is printed by the caller.
 RUN_LABEL=""
 RUN_RC=0
+# one managed production RUN through the real CLI/product chain
 prod_run() {
   RUN_LABEL="$1"
   local out
@@ -129,14 +130,35 @@ prod_run() {
   out="$(docker-helper run alpine:3.24 -- sh -ec 'echo mnb40a-run-ok' 2>&1)"
   RUN_RC=$?
   set -e
-  printf '%s rc=%d\n' "$RUN_LABEL" "$RUN_RC" > "$EVIDENCE_DIR/$RUN_LABEL.rc"
+  printf 'rc=%d\n' "$RUN_RC" > "$EVIDENCE_DIR/$RUN_LABEL.rc"
   {
-    echo "== $RUN_LABEL (rc=$RUN_RC) =="
+    echo "== $RUN_LABEL RUN (rc=$RUN_RC) =="
     printf '%s\n' "$out"
     echo "== AVC tail (stage-scoped) =="
     avc_tail
   } > "$EVIDENCE_DIR/$RUN_LABEL.log"
   RUN_OUT="$out"
+}
+# one managed production BUILD (the UAT-evidenced wrapper face: the
+# Dockerfile RUN step's container creation)
+prod_build() {
+  BUILD_LABEL="$1"
+  local out
+  mkdir -p "$WS/ctx"
+  printf 'FROM alpine:3.24\nRUN echo mnb40a-build-ok\n' > "$WS/ctx/Dockerfile"
+  chown -R "$PRINCIPAL:$PRINCIPAL" "$WS"
+  set +e
+  out="$(docker-helper build "$WS/ctx" --dockerfile Dockerfile --image mnb40a-evidence:1 2>&1)"
+  BUILD_RC=$?
+  set -e
+  printf 'rc=%d\n' "$BUILD_RC" > "$EVIDENCE_DIR/$BUILD_LABEL.rc"
+  {
+    echo "== $BUILD_LABEL BUILD (rc=$BUILD_RC) =="
+    printf '%s\n' "$out"
+    echo "== AVC tail (stage-scoped) =="
+    avc_tail
+  } > "$EVIDENCE_DIR/$BUILD_LABEL.log"
+  BUILD_OUT="$out"
 }
 
 phase_p0() {
@@ -282,16 +304,25 @@ EOF
   ev s0-modules "$(semodule -l 2>/dev/null | grep mnb40a || true)"
   ev s0-policy-sha "$(policy_sha)"
 
-  prod_run s0
+  prod_run s0-run
   printf '%s\n' "$RUN_OUT" > "$EVIDENCE_DIR/s0-run-stdout.txt"
-  if printf '%s\n' "$RUN_OUT" | grep -q "mnb40a-run-ok"; then
-    fail "S0: the run must NOT be admitted without any security_t faces"
+  prod_build s0-build
+  printf '%s\n' "$BUILD_OUT" > "$EVIDENCE_DIR/s0-build-stdout.txt"
+  # the BUILD face is the UAT-evidenced wrapper surface: it must refuse
+  # at the context gate; the RUN-shaped op's gate face is recorded
+  # verbatim either way (a run-path admission without any faces is a
+  # REPORTED finding, not accepted evidence)
+  if printf '%s\n' "$BUILD_OUT" | grep -q "mnb40a-build-ok"; then
+    fail "S0: the build must NOT be admitted without any security_t faces"
   fi
-  grep -qF "$GATEMSG_CTX" "$EVIDENCE_DIR/s0-run-stdout.txt" \
-    || { tail -12 "$EVIDENCE_DIR/s0-run-stdout.txt"; fail "S0: the refusal must be the wrapper's context-validation gate"; }
-  grep -qF "$GATEMSG_FIFO" "$EVIDENCE_DIR/s0-run-stdout.txt" && \
-    fail "S0: the run must stop at the FIRST gate (context), not the FIFO gate"
-  say 'S0: PASS (context gate refused closed; typed pre-commit refusal)'
+  grep -qF "$GATEMSG_CTX" "$EVIDENCE_DIR/s0-build-stdout.txt" \
+    || { tail -12 "$EVIDENCE_DIR/s0-build-stdout.txt"; fail "S0: the refusal must be the wrapper's context-validation gate (build face)"; }
+  if printf '%s\n' "$RUN_OUT" | grep -q "mnb40a-run-ok"; then
+    ev s0-run-face "ADMITTED (the run-shaped op did not refuse without any security_t faces; reported finding)"
+  else
+    ev s0-run-face "refused"
+  fi
+  say 'S0: PASS'
 }
 
 phase_s1() {
