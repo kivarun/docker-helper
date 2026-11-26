@@ -463,20 +463,24 @@ func parsePolicySymbolTables(p *parsedPolicy, r *policyReader) error {
 		return r.fail("type record count")
 	}
 	for i := uint32(0); i < nel; i++ {
-		name, value, err := parsePolicyTypeRecord(r)
+		name, value, primary, err := parsePolicyTypeRecord(r)
 		if err != nil {
 			return err
 		}
 		if value == 0 || value > maxPolicyTypes {
 			return r.fail("type value out of range")
 		}
+		if !primary {
+			continue
+		}
 		// The type's bitmap index is value-1; sparse values are legal
-		// and reserve-fill the table.
+		// and reserve-fill the table. Only primary records claim the
+		// value slot (the kernel registers primary values only).
+		if len(p.types) >= int(value) && p.types[value-1] != "" {
+			return r.fail("duplicate type value")
+		}
 		for len(p.types) < int(value) {
 			p.types = append(p.types, "")
-		}
-		if p.types[value-1] != "" {
-			return r.fail("duplicate type value")
 		}
 		p.types[value-1] = name
 	}
@@ -688,27 +692,33 @@ func parsePolicyRoleRecord(r *policyReader, idx uint32) error {
 }
 
 // parsePolicyTypeRecord reads one type datum: name length, value,
-// primary/attribute property bits, bounds, name.
-func parsePolicyTypeRecord(r *policyReader) (string, uint32, error) {
+// primary/attribute property bits, bounds, name; the third return value
+// is the datum's primary bit.
+func parsePolicyTypeRecord(r *policyReader) (string, uint32, bool, error) {
 	hlen, err := r.u32()
 	if err != nil {
-		return "", 0, err
+		return "", 0, false, err
 	}
 	value, err := r.u32()
 	if err != nil {
-		return "", 0, err
+		return "", 0, false, err
 	}
-	if _, err := r.u32(); err != nil { // primary/attr property bits
-		return "", 0, err
+	primary, err := r.u32()
+	if err != nil { // primary/attr property bits
+		return "", 0, false, err
 	}
 	if _, err := r.u32(); err != nil { // bounds
-		return "", 0, err
+		return "", 0, false, err
 	}
 	name, err := r.rawName(hlen, "type name")
 	if err != nil {
-		return "", 0, err
+		return "", 0, false, err
 	}
-	return name, value, nil
+	// the kernel registers the value only for PRIMARY type records; the
+	// distro policy carries non-primary streamed records whose values
+	// coincide with an existing primary's (the measured enforcing guest
+	// rejected the duplicate-value check on non-primary records)
+	return name, value, primary&1 == 1, nil
 }
 
 // walkConstraintList validates a class's constraint (or validatetrans)
