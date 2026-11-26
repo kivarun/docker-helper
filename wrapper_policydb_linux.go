@@ -654,7 +654,8 @@ func parsePolicyClassRecord(r *policyReader) (policyClass, error) {
 // bounds, name, the role-dominates ebitmap, and the role-types ebitmap.
 // object_r is the kernel's first pre-inserted record and consumes its
 // streamed datum too; both ebitmaps are read purely to keep the record
-// boundary exact.
+// boundary exact. The streamed value is bounds-checked only (the distro
+// policy's role values are not stream positions).
 func parsePolicyRoleRecord(r *policyReader, idx uint32) error {
 	hlen, err := r.u32()
 	if err != nil {
@@ -670,7 +671,11 @@ func parsePolicyRoleRecord(r *policyReader, idx uint32) error {
 	if _, err := r.rawName(hlen, "role name"); err != nil {
 		return err
 	}
-	if value != idx {
+	// the streamed role VALUE is the kernel's own identifier; the distro
+	// policy carries values that do not equal the stream position (the
+	// measured enforcing guest rejects the stream-index identity), so the
+	// value is only bounds-checked, never equality-checked
+	if value == 0 || value > maxPolicyRoles {
 		return r.fail(fmt.Sprintf("role value %d at streamed record %d", value, idx))
 	}
 	if _, err := r.ebitmap(); err != nil { // role-dominates
