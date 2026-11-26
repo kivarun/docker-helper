@@ -487,9 +487,10 @@ phase_m3() {
     fi
     case "$face" in
       search) NEED_DIR=$REMED ;;
-      getattr|open|read|write)
-        NEED_FILE_FACE_$face=$REMED
-        ;;
+      getattr) NEED_FILE_FACE_getattr=$REMED ;;
+      open) NEED_FILE_FACE_open=$REMED ;;
+      read) NEED_FILE_FACE_read=$REMED ;;
+      write) NEED_FILE_FACE_write=$REMED ;;
     esac
   done
   PERM_LIST=""
