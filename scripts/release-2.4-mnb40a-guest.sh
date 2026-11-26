@@ -60,6 +60,9 @@ CONSTRAINT_CIL=/usr/share/selinux/docker-helper-fifo-rw-constraint.cil
 MAIN_UNIT=docker-helper.service
 WL_DOMAIN=docker_helper_builder_workload_t
 PRINCIPAL="${SUDO_USER:-}"
+PRINCIPAL_HOME="$(getent passwd "$PRINCIPAL" 2>/dev/null | cut -d: -f6)"
+WS="$PRINCIPAL_HOME/r7-mnb40a-ws"
+ADMIN_TOKEN=""
 GATEMSG_CTX='the workload context validation refused the run'
 GATEMSG_FIFO='the FIFO constraint admission gate refused the run'
 GATEMSG_MISSING='does not carry the shipped fifo_file read/write isolation constraint'
@@ -146,6 +149,10 @@ phase_p0() {
     || fail "candidate RPM sha mismatch"
   getenforce 2>/dev/null | grep -qx 'Enforcing' \
     || fail "the MNB40a production reconciliation requires an enforcing SELinux host"
+  [ -n "$PRINCIPAL" ] && [ "$PRINCIPAL" != "root" ] \
+    || fail "cannot derive the non-root principal"
+  [ -n "$PRINCIPAL_HOME" ] && [ -d "$PRINCIPAL_HOME" ] \
+    || fail "principal home not found"
   command -v seinfo >/dev/null 2>&1 \
     || zypper --non-interactive install -y setools-console \
        > "$EVIDENCE_DIR/p0-setools.log" 2>&1 || true
@@ -191,9 +198,30 @@ phase_s0() {
   # wrapper must refuse closed at the CONTEXT gate.
   # ---------------------------------------------------------------------
   say 'S0: scaffold only; the wrapper must refuse at the context gate'
+  ADMIN_TOKEN="$(cat /etc/docker-helper/admin.token 2>/dev/null || true)"
+  [ -n "$ADMIN_TOKEN" ] || fail "the admin token file is missing (provisioning did not land)"
+  mkdir -p "$WS"
+  chown -R "$PRINCIPAL:$PRINCIPAL" "$WS"
   docker-helper principal show "$PRINCIPAL" >/dev/null 2>&1 \
     || docker-helper principal create --no-credential "$PRINCIPAL" >/dev/null 2>&1 || true
-  docker-helper principal allowed-root add "$PRINCIPAL" "/home/$PRINCIPAL" >/dev/null 2>&1 || true
+  docker-helper principal allowed-root add "$PRINCIPAL" "$PRINCIPAL_HOME" >/dev/null 2>&1 || true
+  # the session the production runs use (the bearer token NEVER enters
+  # the evidence set; only its existence is recorded)
+  DH_SOCK=/run/docker-helper/docker-helper.sock
+  RESP="$STATE_DIR/session-response.json"
+  CODE="$(curl --silent --max-time 8 \
+    --unix-socket "$DH_SOCK" -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H 'Content-Type: application/json' \
+    -d "{\"workspace\":\"$WS\",\"principal\":\"$PRINCIPAL\"}" \
+    -o "$RESP" -w '%{http_code}' http://localhost/sessions)" || true
+  SESS_TOKEN="$(grep -oE '"token": *"[^"]+"' "$RESP" 2>/dev/null | head -1 | sed 's/.*"token": *"//;s/"$//')"
+  SID="$(grep -oE '"id": *"dhs_[^"]+"' "$RESP" 2>/dev/null | head -1 | sed 's/.*"id": *"//;s/"$//')"
+  rm -f "$RESP"
+  ev s0-session-id "$SID"
+  [ -n "$SESS_TOKEN" ] || fail "s0: session creation failed (HTTP $CODE; body withheld)"
+  export DOCKER_HELPER_SESSION_TOKEN="$SESS_TOKEN"
+  docker-helper pull alpine:3.24 > "$EVIDENCE_DIR/s0-pull.log" 2>&1 \
+    || { tail -6 "$EVIDENCE_DIR/s0-pull.log"; fail "s0: image prewarm pull failed"; }
 
   # the three measured buildkitd scaffold rows (MNB24/26/27), separate module
   cat <<'EOF' | write_cil "$M_CAP"
