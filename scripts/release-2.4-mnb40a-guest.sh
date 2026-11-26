@@ -522,7 +522,7 @@ phase_m6() {
     printf 'unload.verified               = %s\n' \
       "$(grep -qx "0" "$EVIDENCE_DIR/m5-modules-after" && echo 'PASS (no diagnostic module remains; sha restored)' || echo FAILED)"
     printf 'deny.again.closed             = %s\n' \
-      "$(printf '%s\n' "$RUN_OUT" | grep -q 'refused the run' && echo 'PASS (post-unload run refused closed)' || echo FAILED)"
+      "$(grep -qi 'refused the run' "$EVIDENCE_DIR/m5-deny-again.txt" && grep -qx 'rc=1' "$EVIDENCE_DIR/m5-deny-again.rc" && echo 'PASS (post-unload build refused closed, wrapper gate message)' || echo FAILED)"
   } > "$EVIDENCE_DIR/m6-verdict.txt"
   if grep -q FAILED "$EVIDENCE_DIR/m6-verdict.txt"; then
     cat "$EVIDENCE_DIR/m6-verdict.txt"
@@ -546,6 +546,17 @@ run_phase() {
   esac
 }
 
+# the enforcement VM boots fresh on every attempt: a previous attempt's
+# completed-phase markers describe a DIFFERENT machine state, so the
+# boot identity invalidates them (the tape state dir persists in
+# /var/lib, the boot never does)
+CURBOOT="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+mkdir -p "$STATE_DIR"
+if [ -n "$CURBOOT" ] && [ -f "$STATE_DIR/boot-id" ] \
+  && [ "$(cat "$STATE_DIR/boot-id" 2>/dev/null)" != "$CURBOOT" ]; then
+  rm -f "$PHASE_FILE"
+fi
+[ -n "$CURBOOT" ] && printf '%s\n' "$CURBOOT" > "$STATE_DIR/boot-id" || true
 for ph in p0 s0 s1 s2 s3 s4 m5 m6; do
   if done_phase "$ph"; then
     say "re-entry: $ph already PASS"
