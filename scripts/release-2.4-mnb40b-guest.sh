@@ -321,21 +321,6 @@ EOF
   } | write_cil "$M_AUTH"
   ev s0-modules "$(semodule -l 2>/dev/null | grep mnb40b || true)"
   ev s0-policy-sha "$(policy_sha)"
-  # dontaudit visibility toggle (the established disposable-VM discipline):
-  # the deny rows for the unchanged-not-yet-proven faces can be
-  # dontaudit'd by the distro policy, so the ladder's attribution requires
-  # the -DB rebuild (sha-recorded) and the -B restoration (verified)
-  DONTAUDIT_PRE_SHA="$(policy_sha)"
-  set +e
-  DBOUT="$(semodule -DB 2>&1)"
-  DB_RC=$?
-  set -e
-  ev s0-dontaudit-toggle-rc "$DB_RC ($DBOUT)"
-  [ "$DB_RC" = "0" ] || fail "S0: the dontaudit visibility toggle failed"
-  DONTAUDIT_DB_SHA="$(policy_sha)"
-  ev s0-policy-sha-dontaudit-off "$DONTAUDIT_DB_SHA"
-  [ "$DONTAUDIT_DB_SHA" != "$DONTAUDIT_PRE_SHA" ] \
-    || fail "S0: semodule -DB did not change the loaded policy; the attribution would sight silently"
   # the installed binary identity (provenance closure)
   {
     printf 'installed wrapper (buildkit/buildkit-runc): '
@@ -371,7 +356,43 @@ EOF
   printf '%s\n' "$BUILD_OUT" > "$EVIDENCE_DIR/s0-build-stdout.txt"
   [ "$RUN_RC" = "0" ] || { tail -12 "$EVIDENCE_DIR/s0-run-stdout.txt"; fail "S0: the working set must admit the RUN face"; }
   [ "$BUILD_RC" = "0" ] || { tail -12 "$EVIDENCE_DIR/s0-build-stdout.txt"; fail "S0: the working set must admit the BUILD face"; }
-  say 'S0: PASS (both faces admitted under the working set)'
+  # dontaudit visibility cycle (the established disposable-VM discipline):
+  # the remove-arm deny rows can be dontaudit'd by the distro policy, so
+  # the ladder's attribution requires the -DB rebuild (sha-recorded).
+  # The cycle is self-contained in this phase: -B restores the
+  # dontaudit-carrying binary and the restore is verified by sha.
+  dontaudit_on() {
+    # $1 label; $2 restore-target sha
+    local DBOUT DB_RC DSHA
+    set +e
+    DBOUT="$(semodule -DB 2>&1)"
+    DB_RC=$?
+    set -e
+    ev "$1-rc" "$DB_RC ($DBOUT)"
+    [ "$DB_RC" = "0" ] || fail "$1: the dontaudit visibility toggle failed"
+    DSHA="$(policy_sha)"
+    ev s0-policy-sha-dontaudit-off "$DSHA"
+    [ "$DSHA" != "$2" ] \
+      || fail "$1: semodule -DB did not change the loaded policy; the attribution would sight silently"
+  }
+  dontaudit_restore() {
+    # $1 label; $2 expected working-set sha
+    local BOUT B_RC
+    set +e
+    BOUT="$(semodule -B 2>&1)"
+    B_RC=$?
+    set -e
+    ev "$1-rc" "$B_RC ($BOUT)"
+    [ "$B_RC" = "0" ] || fail "$1: the dontaudit restore failed"
+    DSHA="$(policy_sha)"
+    ev "$1-sha" "$DSHA"
+    [ "$DSHA" = "$2" ] || fail "$1: the restored policy sha must equal the pre-toggle working-set sha"
+  }
+  S0_WORK_SHA="$(policy_sha)"
+  dontaudit_on s0-dontaudit-toggle "$S0_WORK_SHA"
+  ev s0-face-run "PASS"
+  ev s0-face-build "PASS"
+  say 'S0: PASS (both faces admitted under the working set; dontaudit visibility cycle closed)'
 }
 
 # per-face removal arm: load the faces module WITHOUT the removed face,
@@ -396,6 +417,8 @@ permdrop() {
   } > "/tmp/$M_AUTH.cil"
   cp "/tmp/$M_AUTH.cil" "$EVIDENCE_DIR/$M_AUTH-$face.cil"
   semodule -X 400 -i "/tmp/$M_AUTH.cil" || fail "the without-$face auth replacement failed to load"
+  semodule -B >/dev/null 2>&1 || fail "the without-$face rebuild failed"
+  semodule -DB >/dev/null 2>&1 || fail "the without-$face dontaudit toggle failed"
   ev "m1-$face-policy-sha" "$(policy_sha)"
   prod_build "m1-$face-build"
   printf '%s\n' "$BUILD_OUT" > "$EVIDENCE_DIR/m1-$face-build-stdout.txt"
@@ -419,6 +442,7 @@ permdrop() {
   # restore the full auth set for the next ladder arm (same-name replace)
   cp "$EVIDENCE_DIR/$M_AUTH.cil" "/tmp/$M_AUTH.cil"
   semodule -X 400 -i "/tmp/$M_AUTH.cil" || fail "the auth replacement (restore) failed to load"
+  semodule -B >/dev/null 2>&1 || fail "the auth rebuild (restore) failed"
 }
 
 phase_m1() {
@@ -487,6 +511,7 @@ phase_m3() {
   } > "/tmp/$M_AUTH.cil"
   cp "/tmp/$M_AUTH.cil" "$EVIDENCE_DIR/$M_AUTH-minimal.cil"
   semodule -X 400 -i "/tmp/$M_AUTH.cil" || fail "the minimal auth replacement failed to load"
+  semodule -B >/dev/null 2>&1 || fail "the minimal auth rebuild failed"
   ev m3-policy-sha "$(policy_sha)"
   ev m3-minimal-faces "$NEED_DIR [$PERM_LIST]"
   prod_run m3-run
@@ -495,6 +520,12 @@ phase_m3() {
   printf '%s\n' "$BUILD_OUT" > "$EVIDENCE_DIR/m3-build-stdout.txt"
   [ "$RUN_RC" = "0" ] || { tail -12 "$EVIDENCE_DIR/m3-run-stdout.txt"; fail "M3: the RUN face must admit under the minimal set"; }
   [ "$BUILD_RC" = "0" ] || { tail -12 "$EVIDENCE_DIR/m3-build-stdout.txt"; fail "M3: the BUILD face must admit under the minimal set"; }
+  # restore the full working set before the teardown (the same-name replace)
+  cp "$EVIDENCE_DIR/$M_AUTH.cil" "/tmp/$M_AUTH.cil"
+  semodule -X 400 -i "/tmp/$M_AUTH.cil" || fail "the auth replacement (M3 restore) failed to load"
+  semodule -B >/dev/null 2>&1 || fail "the auth rebuild (M3 restore) failed"
+  [ "$(policy_sha)" = "$(cat "$EVIDENCE_DIR/s0-policy-sha" 2>/dev/null)" ] \
+    || fail "M3: the post-restore policy sha must equal the S0 working-set sha"
   say 'M3: PASS'
 }
 
