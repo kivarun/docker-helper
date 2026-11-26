@@ -123,9 +123,9 @@ func TestWorkloadContextCheckExactCanonicalAccept(t *testing.T) {
 		return len(buf), nil
 	}
 	wrapperContextNodeRead = func(fd int, buf []byte) (int, error) {
-		copy(buf, label)
-		readBuf = buf[:len(label)]
-		return len(label), nil
+		copy(buf, label+"\x00")
+		readBuf = buf[:len(label)+1]
+		return len(label)+1, nil
 	}
 	wrapperContextNodeClose = func(fd int) error { closed++; return nil }
 	if err := wrapperWorkloadContextCheck(label); err != nil {
@@ -134,8 +134,8 @@ func TestWorkloadContextCheckExactCanonicalAccept(t *testing.T) {
 	if string(wrote) != label+"\x00" {
 		t.Fatalf("the write must be the NUL-terminated composed context, got %q", wrote)
 	}
-	if string(readBuf) != label {
-		t.Fatalf("the read-back comparison must be byte-exact against %q, got %q", label, readBuf)
+	if string(readBuf) != label+"\x00" {
+		t.Fatalf("the read-back comparison must be byte-exact against the NUL-terminated canonical form %q, got %q", label+"\x00", readBuf)
 	}
 	if closed != 1 {
 		t.Fatalf("the transaction descriptor must close exactly once, closed %d times", closed)

@@ -142,7 +142,9 @@ func checkContextTransaction(label string) error {
 		}
 	}
 
-	// The canonical response is readable on the SAME open descriptor:
+	// The canonical read-back must equal the composed context INCLUDING
+	// the NUL terminator the transaction response carries (the kernel's
+	// response buffer is strlen(resp)+1 bytes).
 	// the transaction state (the processed request and the response
 	// size) lives in the open's private data and a second open would
 	// start an empty transaction. The write already ran the kernel's
@@ -159,7 +161,7 @@ func checkContextTransaction(label string) error {
 			err:  errors.New("the canonical response is empty"),
 		}
 	}
-	if string(buf[:n]) != label {
+	if n != len(form) || string(buf[:n]) != string(form) {
 		return &checkContextFailure{
 			kind: checkContextBroken.kind,
 			err: fmt.Errorf("the kernel's canonical context %q does not match the composed workload context",
