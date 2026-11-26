@@ -478,19 +478,25 @@ phase_m3() {
   # (minimal faces + check_context + read_policy + scaffold).
   # ---------------------------------------------------------------------
   say 'M3: the minimal set: both faces admitted under the measured faces'
+  NEED_DIR=0
+  NEED_FILE_FACE_getattr=1
+  NEED_FILE_FACE_open=1
+  NEED_FILE_FACE_read=1
+  NEED_FILE_FACE_write=1
   for face in search getattr open read write; do
     if grep -q "REMOVABLE" "$EVIDENCE_DIR/m1-$face-verdict"; then
       REMED=1
       say "M3: the $face face is dropped from the minimal set (measured removable)"
     else
       REMED=0
+      say "M3: the $face face is kept (measured necessary)"
     fi
     case "$face" in
-      search) NEED_DIR=$REMED ;;
-      getattr) NEED_FILE_FACE_getattr=$REMED ;;
-      open) NEED_FILE_FACE_open=$REMED ;;
-      read) NEED_FILE_FACE_read=$REMED ;;
-      write) NEED_FILE_FACE_write=$REMED ;;
+      search) NEED_DIR=$((1 - REMED)) ;;
+      getattr) NEED_FILE_FACE_getattr=$((1 - REMED)) ;;
+      open) NEED_FILE_FACE_open=$((1 - REMED)) ;;
+      read) NEED_FILE_FACE_read=$((1 - REMED)) ;;
+      write) NEED_FILE_FACE_write=$((1 - REMED)) ;;
     esac
   done
   PERM_LIST=""
