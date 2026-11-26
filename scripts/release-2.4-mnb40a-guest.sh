@@ -179,7 +179,7 @@ phase_p0() {
   # constraint (the present-side of the parity pair)
   seinfo --constrain fifo_file "$POLICYPATH" > "$EVIDENCE_DIR/p0-seinfo-constrain.txt" 2>&1 \
     || fail "seinfo --constrain baseline failed"
-  grep -Fqx "$STATEMENT" "$EVIDENCE_DIR/p0-seinfo-constrain.txt" \
+  sed 's/^[[:space:]]*//' "$EVIDENCE_DIR/p0-seinfo-constrain.txt" | grep -Fqx "$STATEMENT" \
     || fail "the installed policy must carry the canonical constraint (seinfo present-side)"
   ev p0-pp-sha "$(sha256sum /usr/share/selinux/docker_helper.pp 2>/dev/null | awk '{print $1}')"
   say 'P0: PASS'
@@ -316,6 +316,7 @@ EOF
   printf '%s\n' "$RUN_OUT" > "$EVIDENCE_DIR/s3-run-stdout.txt"
   printf '%s\n' "$RUN_OUT" | grep -q "mnb40a-run-ok" \
     || { tail -12 "$EVIDENCE_DIR/s3-run-stdout.txt"; fail "S3: the production run must be ADMITTED and produce its container output"; }
+  printf 'ok' > /dev/null
   if grep -qiF "$GATEMSG_CTX" "$EVIDENCE_DIR/s3-run-stdout.txt"; then
     fail "S3: the context gate must not refuse in the positive case"
   fi
@@ -343,7 +344,7 @@ phase_s4() {
     || fail "S4: the policy sha must change after the constraint removal"
   seinfo --constrain fifo_file "$POLICYPATH" > "$EVIDENCE_DIR/s4-seinfo-constrain.txt" 2>&1 \
     || fail "S4: seinfo reference capture failed"
-  ! grep -Fqx "$STATEMENT" "$EVIDENCE_DIR/s4-seinfo-constrain.txt" \
+  ! sed 's/^[[:space:]]*//' "$EVIDENCE_DIR/s4-seinfo-constrain.txt" | grep -Fqx "$STATEMENT" \
     || fail "S4: seinfo must NOT carry the canonical statement after the removal"
   prod_run s4
   printf '%s\n' "$RUN_OUT" > "$EVIDENCE_DIR/s4-run-stdout.txt"
@@ -421,9 +422,9 @@ phase_m6() {
     printf 'run.admission.positive        = %s\n' \
       "$(grep -q mnb40a-run-ok "$EVIDENCE_DIR/s3-run-stdout.txt" && grep -q mnb40a-run-ok "$EVIDENCE_DIR/s4-restore-run.txt" && echo 'PASS (S3 admitted; re-admitted after the byte-exact restore)' || echo FAILED)"
     printf 'parser.seinfo.parity          = %s\n' \
-      "$(grep -Fqx "$STATEMENT" "$EVIDENCE_DIR/s3-seinfo-constrain.txt" && ! grep -Fqx "$STATEMENT" "$EVIDENCE_DIR/s4-seinfo-constrain.txt" && echo 'PASS (same-snapshot decision parity: present-case admitted, absent-case refused)' || echo FAILED)"
+      "$(sed 's/^[[:space:]]*//' "$EVIDENCE_DIR/s3-seinfo-constrain.txt" | grep -Fqx "$STATEMENT" && ! sed 's/^[[:space:]]*//' "$EVIDENCE_DIR/s4-seinfo-constrain.txt" | grep -Fqx "$STATEMENT" && echo 'PASS (same-snapshot decision parity: present-case admitted, absent-case refused)' || echo FAILED)"
     printf 'constraint.missing.refusal    = %s\n' \
-      "$(grep -qF "$GATEMSG_MISSING" "$EVIDENCE_DIR/s4-run-stdout.txt" && echo 'PASS (exact remediation message on the missing-constraint snapshot)' || echo FAILED)"
+      "$(grep -qF "$GATEMSG_MISSING" "$EVIDENCE_DIR/s4-run-stdout.txt" && grep -qF "$REMEDIATION" "$EVIDENCE_DIR/s4-run-stdout.txt" && echo 'PASS (exact remediation message on the missing-constraint snapshot)' || echo FAILED)"
     printf 'unload.verified               = %s\n' \
       "$(grep -qx "0" "$EVIDENCE_DIR/m5-modules-after" && echo 'PASS (no diagnostic module remains; sha restored)' || echo FAILED)"
     printf 'deny.again.closed             = %s\n' \
