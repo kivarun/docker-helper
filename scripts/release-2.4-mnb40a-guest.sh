@@ -161,10 +161,17 @@ phase_p0() {
     zypper --non-interactive install -y --allow-unsigned-rpm "$RPM" \
       > "$EVIDENCE_DIR/p0-provision-rpm.log" 2>&1 \
       || { tail -20 "$EVIDENCE_DIR/p0-provision-rpm.log"; fail "candidate provisioning install failed"; }
-    mkdir -p /srv/docker-helper-mnb40a-uat
-    /usr/bin/docker-helper init --allowed-root /srv/docker-helper-mnb40a-uat \
-      > "$EVIDENCE_DIR/p0-init.log" 2>&1 \
-      || { tail -20 "$EVIDENCE_DIR/p0-init.log"; fail "docker-helper init failed"; }
+    mkdir -p "$STATE_DIR"
+    INIT_OUT="$STATE_DIR/init.out"
+    /usr/bin/docker-helper init --allowed-root "$PRINCIPAL_HOME" \
+      > "$INIT_OUT" 2>&1 \
+      || { sed -e 's/dht_[A-Za-z0-9]*/[REDACTED]/g' "$INIT_OUT" | tail -8; rm -f "$INIT_OUT"; \
+           fail "docker-helper init failed"; }
+    # SECURITY — the init output carries the admin token: it stays in the
+    # UNPUBLISHED state dir, is redacted before any copy, and the
+    # token-bearing file is removed after the token is read below.
+    rm -f "$INIT_OUT"
+    ev p0-init "success (admin token withheld from the evidence set)"
   else
     # a re-entry attempt: ensure the INSTALLED candidate is EXACTLY this
     # round's candidate bytes (never silently diagnose a stale binary)
@@ -203,8 +210,10 @@ phase_s0() {
   mkdir -p "$WS"
   chown -R "$PRINCIPAL:$PRINCIPAL" "$WS"
   docker-helper principal show "$PRINCIPAL" >/dev/null 2>&1 \
-    || docker-helper principal create --no-credential "$PRINCIPAL" >/dev/null 2>&1 || true
-  docker-helper principal allowed-root add "$PRINCIPAL" "$PRINCIPAL_HOME" >/dev/null 2>&1 || true
+    || docker-helper principal create --no-credential "$PRINCIPAL" >/dev/null 2>&1 \
+    || { ev s0-principal "create failed"; fail "the principal could not be provisioned"; }
+  docker-helper principal allowed-root add "$PRINCIPAL" "$PRINCIPAL_HOME" \
+    || { ev s0-allowed-root "add failed"; fail "the principal allowed-root could not be added"; }
   # the session the production runs use (the bearer token NEVER enters
   # the evidence set; only its existence is recorded)
   DH_SOCK=/run/docker-helper/docker-helper.sock
