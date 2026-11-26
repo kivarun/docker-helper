@@ -312,12 +312,12 @@ EOF
   # at the context gate; the RUN-shaped op's gate face is recorded
   # verbatim either way (a run-path admission without any faces is a
   # REPORTED finding, not accepted evidence)
-  if printf '%s\n' "$BUILD_OUT" | grep -q "mnb40a-build-ok"; then
+  if [ "$BUILD_RC" = "0" ]; then
     fail "S0: the build must NOT be admitted without any security_t faces"
   fi
   grep -qF "$GATEMSG_CTX" "$EVIDENCE_DIR/s0-build-stdout.txt" \
     || { tail -12 "$EVIDENCE_DIR/s0-build-stdout.txt"; fail "S0: the refusal must be the wrapper's context-validation gate (build face)"; }
-  if printf '%s\n' "$RUN_OUT" | grep -q "mnb40a-run-ok"; then
+  if [ "$RUN_RC" = "0" ]; then
     ev s0-run-face "ADMITTED (the run-shaped op did not refuse without any security_t faces; reported finding)"
   else
     ev s0-run-face "refused"
@@ -339,10 +339,12 @@ EOF
   ev s1-policy-sha "$(policy_sha)"
   prod_run s1
   printf '%s\n' "$RUN_OUT" > "$EVIDENCE_DIR/s1-run-stdout.txt"
-  if printf '%s\n' "$RUN_OUT" | grep -q "mnb40a-run-ok"; then
-    fail "S1: the run must still be refused (check_context is not granted)"
+  prod_build s1-build
+  printf '%s\n' "$BUILD_OUT" > "$EVIDENCE_DIR/s1-build-stdout.txt"
+  if [ "$BUILD_RC" = "0" ]; then
+    fail "S1: the build must still be refused (check_context is not granted)"
   fi
-  grep -qF "$GATEMSG_CTX" "$EVIDENCE_DIR/s1-run-stdout.txt" \
+  grep -qF "$GATEMSG_CTX" "$EVIDENCE_DIR/s1-build-stdout.txt" \
     || fail "S1: the refusal must remain the context gate"
   avc_tail > "$EVIDENCE_DIR/s1-avcs.txt"
   grep -qi 'check_context' "$EVIDENCE_DIR/s1-avcs.txt" \
@@ -363,13 +365,16 @@ phase_s2() {
 (allow docker_helper_buildkitd_t security_t (security (check_context)))
 EOF
   ev s2-policy-sha "$(policy_sha)"
-  prod_run s2
+  prod_run s2-run
   printf '%s\n' "$RUN_OUT" > "$EVIDENCE_DIR/s2-run-stdout.txt"
-  if printf '%s\n' "$RUN_OUT" | grep -q "mnb40a-run-ok"; then
-    fail "S2: the run must still be refused (read_policy is not granted)"
+  prod_build s2-build
+  printf '%s\n' "$BUILD_OUT" > "$EVIDENCE_DIR/s2-build-stdout.txt"
+  if [ "$BUILD_RC" = "0" ]; then
+    fail "S2: the build must still be refused (read_policy is not granted)"
   fi
-  grep -qF "$GATEMSG_FIFO" "$EVIDENCE_DIR/s2-run-stdout.txt" \
+  grep -qF "$GATEMSG_FIFO" "$EVIDENCE_DIR/s2-build-stdout.txt" \
     || fail "S2: the context gate must now pass and the FIFO gate must refuse"
+  ev s2-run-face "$([ "$RUN_RC" = "0" ] && echo admitted || echo refused)"
   avc_tail > "$EVIDENCE_DIR/s2-avcs.txt"
   grep -qi 'read_policy' "$EVIDENCE_DIR/s2-avcs.txt" \
     || fail "S2: the denial must be security_t:security read_policy at the policy open"
@@ -390,10 +395,14 @@ EOF
   seinfo --constrain fifo_file "$POLICYPATH" > "$EVIDENCE_DIR/s3-seinfo-constrain.txt" 2>&1 \
     || fail "S3: seinfo reference capture failed"
   printf '%s\n' "$(policy_sha)" > "$STATE_DIR/policy-sha-s3"
-  prod_run s3
+  prod_run s3-run
   printf '%s\n' "$RUN_OUT" > "$EVIDENCE_DIR/s3-run-stdout.txt"
-  printf '%s\n' "$RUN_OUT" | grep -q "mnb40a-run-ok" \
-    || { tail -12 "$EVIDENCE_DIR/s3-run-stdout.txt"; fail "S3: the production run must be ADMITTED and produce its container output"; }
+  prod_build s3-build
+  printf '%s\n' "$BUILD_OUT" > "$EVIDENCE_DIR/s3-build-stdout.txt"
+  [ "$RUN_RC" = "0" ] \
+    || { tail -12 "$EVIDENCE_DIR/s3-run-stdout.txt"; fail "S3: the production RUN must be ADMITTED and produce its container output"; }
+  [ "$BUILD_RC" = "0" ] \
+    || { tail -12 "$EVIDENCE_DIR/s3-build-stdout.txt"; fail "S3: the production BUILD must be ADMITTED"; }
   printf 'ok' > /dev/null
   if grep -qiF "$GATEMSG_CTX" "$EVIDENCE_DIR/s3-run-stdout.txt"; then
     fail "S3: the context gate must not refuse in the positive case"
@@ -424,11 +433,11 @@ phase_s4() {
     || fail "S4: seinfo reference capture failed"
   ! sed 's/^[[:space:]]*//' "$EVIDENCE_DIR/s4-seinfo-constrain.txt" | grep -Fqx "$STATEMENT" \
     || fail "S4: seinfo must NOT carry the canonical statement after the removal"
-  prod_run s4
-  printf '%s\n' "$RUN_OUT" > "$EVIDENCE_DIR/s4-run-stdout.txt"
-  grep -qF "$GATEMSG_MISSING" "$EVIDENCE_DIR/s4-run-stdout.txt" \
+  prod_build s4-build
+  printf '%s\n' "$BUILD_OUT" > "$EVIDENCE_DIR/s4-build-stdout.txt"
+  grep -qF "$GATEMSG_MISSING" "$EVIDENCE_DIR/s4-build-stdout.txt" \
     || fail "S4: the wrapper must refuse with the exact remediation message"
-  printf '%s\n' "$RUN_OUT" | grep -qF "$REMEDIATION" \
+  printf '%s\n' "$BUILD_OUT" | grep -qF "$REMEDIATION" \
     || fail "S4: the refusal must name the packaged repair path"
   # restore: exactly the repair the product names, from the packaged
   # artifact, verified byte-exact against the pre-removal snapshot
@@ -439,10 +448,14 @@ phase_s4() {
   [ "$(policy_sha)" = "$(cat "$STATE_DIR/policy-sha-s3")" ] \
     || fail "S4: the restored policy sha must be byte-exact ($(cat "$STATE_DIR/policy-sha-s3") vs $(policy_sha))"
   ev s4-restored-sha "$(policy_sha)"
-  prod_run s4-restore-assert
+  prod_run s4-restore-run
   printf '%s\n' "$RUN_OUT" > "$EVIDENCE_DIR/s4-restore-run.txt"
-  printf '%s\n' "$RUN_OUT" | grep -q "mnb40a-run-ok" \
+  [ "$RUN_RC" = "0" ] \
     || fail "S4: after the restore the run must be admitted again"
+  prod_build s4-restore-build
+  printf '%s\n' "$BUILD_OUT" > "$EVIDENCE_DIR/s4-restore-build.txt"
+  [ "$BUILD_RC" = "0" ] \
+    || fail "S4: after the restore the build must be admitted again"
   say 'S4: PASS (absent-side parity + byte-exact restore + re-admission)'
 }
 
@@ -464,14 +477,14 @@ phase_m5() {
   [ "$(cat "$STATE_DIR/policy-sha-base" 2>/dev/null)" = "$RESTORED_SHA" ] \
     || fail "the loaded policy sha must restore byte-exactly (base $(cat "$STATE_DIR/policy-sha-base" 2>/dev/null || echo unknown), now $RESTORED_SHA)"
   ev m5-restored-policy-sha "$RESTORED_SHA"
-  prod_run m5-deny-again
-  printf '%s\n' "$RUN_OUT" > "$EVIDENCE_DIR/m5-deny-again.txt"
-  if printf '%s\n' "$RUN_OUT" | grep -q "mnb40a-run-ok"; then
+  prod_build m5-deny-again
+  printf '%s\n' "$BUILD_OUT" > "$EVIDENCE_DIR/m5-deny-again.txt"
+  if [ "$BUILD_RC" = "0" ]; then
     fail "M5: after the unload the production run must be denied again"
   fi
   grep -qiF 'refused the run' "$EVIDENCE_DIR/m5-deny-again.txt" \
     || fail "M5: the deny-again refusal must come from the wrapper's admission gates"
-  ev m5-deny-again-class "$(printf '%s\n' "$RUN_OUT" | grep -oiF "$GATEMSG_CTX" || echo other-gate)"
+  ev m5-deny-again-class "$(printf '%s\n' "$BUILD_OUT" | grep -oiF "$GATEMSG_CTX" || echo other-gate)"
   semodule -l 2>/dev/null | grep -q '^docker_helper' \
     || fail "the product module must remain loaded after the diagnostic teardown"
   [ -f "$CONSTRAINT_CIL" ] \
@@ -492,13 +505,13 @@ phase_m6() {
   say 'M6: verdict composition'
   {
     printf 'wrapper.contextgate.refusal   = %s\n' \
-      "$(grep -qF "$GATEMSG_CTX" "$EVIDENCE_DIR/s0-run-stdout.txt" && grep -qF "$GATEMSG_CTX" "$EVIDENCE_DIR/s1-run-stdout.txt" && echo 'PASS (S0+S1 typed pre-commit refusals, denial moved file-open -> security:check_context)' || echo FAILED)"
+      "$(grep -qF "$GATEMSG_CTX" "$EVIDENCE_DIR/s0-build-stdout.txt" && grep -qF "$GATEMSG_CTX" "$EVIDENCE_DIR/s1-build-stdout.txt" && echo 'PASS (S0+S1 typed pre-commit refusals, denial moved file-open -> security:check_context)' || echo FAILED)"
     printf 'checkctx.positive             = %s\n' \
-      "$(grep -qF "$GATEMSG_FIFO" "$EVIDENCE_DIR/s2-run-stdout.txt" && echo 'PASS (S2: the context gate accepted the composed workload context; the run reached the FIFO gate)' || echo FAILED)"
+      "$(grep -qF "$GATEMSG_FIFO" "$EVIDENCE_DIR/s2-build-stdout.txt" && echo 'PASS (S2: the context gate accepted the composed workload context; the run reached the FIFO gate)' || echo FAILED)"
     printf 'fifogate.readpolicy.required  = %s\n' \
       "$(grep -qi read_policy "$EVIDENCE_DIR/s2-avcs.txt" 2>/dev/null && echo 'PASS (S2: policy OPEN denied on security read_policy WITH all file faces present — read_policy is NOT inferable from file open/read)' || echo FAILED)"
     printf 'run.admission.positive        = %s\n' \
-      "$(grep -q mnb40a-run-ok "$EVIDENCE_DIR/s3-run-stdout.txt" && grep -q mnb40a-run-ok "$EVIDENCE_DIR/s4-restore-run.txt" && echo 'PASS (S3 admitted; re-admitted after the byte-exact restore)' || echo FAILED)"
+      "$(grep -qx 'rc=0' "$EVIDENCE_DIR/s3-run.rc" && grep -qx 'rc=0' "$EVIDENCE_DIR/s3-build.rc" && grep -qx 'rc=0' "$EVIDENCE_DIR/s4-restore-run.rc" && grep -qx 'rc=0' "$EVIDENCE_DIR/s4-restore-build.rc" && echo 'PASS (S3 admitted; re-admitted after the byte-exact restore)' || echo FAILED)"
     printf 'parser.seinfo.parity          = %s\n' \
       "$(sed 's/^[[:space:]]*//' "$EVIDENCE_DIR/s3-seinfo-constrain.txt" | grep -Fqx "$STATEMENT" && ! sed 's/^[[:space:]]*//' "$EVIDENCE_DIR/s4-seinfo-constrain.txt" | grep -Fqx "$STATEMENT" && echo 'PASS (same-snapshot decision parity: present-case admitted, absent-case refused)' || echo FAILED)"
     printf 'constraint.missing.refusal    = %s\n' \
