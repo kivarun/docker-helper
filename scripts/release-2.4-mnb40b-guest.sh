@@ -602,7 +602,7 @@ phase_m5() {
     printf 'unload.verified              = %s\n' \
       "$(grep -qx 0 "$EVIDENCE_DIR/m5-modules-after" 2>/dev/null && echo 'PASS (no diagnostic module remains; sha restored; deny-again refused closed)' || echo FAILED)"
     printf 'installed.digest             = %s\n' \
-      "$(grep -qa '[a-f0-9]\\{64\\}' "$EVIDENCE_DIR/s0-installed-digests.txt" 2>/dev/null && echo PASS || echo FAILED)"
+      "$(grep -qaE '[a-f0-9]{64}' "$EVIDENCE_DIR/s0-installed-digests.txt" 2>/dev/null && echo PASS || echo FAILED)"
   } > "$EVIDENCE_DIR/m5-verdict.txt"
   if grep -q FAILED "$EVIDENCE_DIR/m5-verdict.txt"; then
     cat "$EVIDENCE_DIR/m5-verdict.txt"
