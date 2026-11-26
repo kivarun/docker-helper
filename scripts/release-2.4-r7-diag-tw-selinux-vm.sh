@@ -157,7 +157,23 @@ case "$R7_MODE" in
   # restored byte-exactly, deny-again proof). NO permanent policy
   # integration, NO product code change, NO Release-GO UAT.
   mnb39) GUEST_SCRIPT='release-2.4-mnb39-guest.sh' ;;
-  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d | p21e | p21e3 | p21e3probe | p21e3proc-sys | p21e3proc-file | p21e3proc-keys | p21e3diag-keys | mnb30 | mnb32 | mnb33 | mnb36 | mnb38 | mnb39)" ;;
+  # mnb40a = the production-wrapper evidence reconciliation on the
+  # enforcing consumer (the dedicated MNB40a guest script): the MNB40
+  # candidate binary is verified through the REAL managed-run chain —
+  # a staged permission ladder of separately removable, mnb40a-named
+  # modules — proving per stage (S0..S4): the context-validation gate
+  # refuses closed without any selinuxfs faces and moves its denial to
+  # security_t:security check_context when the file faces land; the
+  # FIFO gate refuses with all file faces present (the security
+  # read_policy denial at the policy OPEN — read_policy can NOT be
+  # inferred unnecessary from an ordinary file open/read); the positive
+  # run admission with the exact canonical fifo_file statement; the
+  # missing-constraint case (semodule -X 400 -r) with same-snapshot
+  # seinfo parity and the exact remediation refusal plus byte-exact
+  # restore; full unload verification, policy sha restored, deny-again
+  # refused closed. NO permanent policy integration, NO Release-GO UAT.
+  mnb40a) GUEST_SCRIPT='release-2.4-mnb40a-guest.sh' ;;
+  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d | p21e | p21e3 | p21e3probe | p21e3proc-sys | p21e3proc-file | p21e3proc-keys | p21e3diag-keys | mnb30 | mnb32 | mnb33 | mnb36 | mnb38 | mnb39 | mnb40a)" ;;
 esac
 
 log()  { printf '%s %s\n' "$PREFIX" "$*"; }
