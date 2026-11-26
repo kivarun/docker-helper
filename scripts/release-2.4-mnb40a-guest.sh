@@ -214,10 +214,20 @@ phase_s0() {
     -H 'Content-Type: application/json' \
     -d "{\"workspace\":\"$WS\",\"principal\":\"$PRINCIPAL\"}" \
     -o "$RESP" -w '%{http_code}' http://localhost/sessions)" || true
-  SESS_TOKEN="$(grep -oE '"token": *"[^"]+"' "$RESP" 2>/dev/null | head -1 | sed 's/.*"token": *"//;s/"$//')"
-  SID="$(grep -oE '"id": *"dhs_[^"]+"' "$RESP" 2>/dev/null | head -1 | sed 's/.*"id": *"//;s/"$//')"
+  SESS_TOKEN="$(grep -oE '"token": *"[^"]+"' "$RESP" 2>/dev/null | head -1 | sed 's/.*"token": *"//;s/"$//' || true)"
+  SID="$(grep -oE '"id": *"dhs_[^"]+"' "$RESP" 2>/dev/null | head -1 | sed 's/.*"id": *"//;s/"$//' || true)"
+  STACKCLASS=unknown
+  case "$CODE" in
+    200) STACKCLASS=created ;;
+    0) STACKCLASS=transport-unreachable ;;
+    4??) STACKCLASS=request-refused ;;
+    5??) STACKCLASS=server-error ;;
+  esac
+  ev s0-session-attempt "$STACKCLASS (token-present=$([ -n "$SESS_TOKEN" ] && echo yes || echo no))"
   rm -f "$RESP"
   ev s0-session-id "$SID"
+  [ -n "$SESS_TOKEN" ] \
+    || { ev s0-session-refusal "$STACKCLASS"; fail "s0: session creation failed (HTTP $STACKCLASS; body withheld)"; }
   [ -n "$SESS_TOKEN" ] || fail "s0: session creation failed (HTTP $CODE; body withheld)"
   export DOCKER_HELPER_SESSION_TOKEN="$SESS_TOKEN"
   docker-helper pull alpine:3.24 > "$EVIDENCE_DIR/s0-pull.log" 2>&1 \
