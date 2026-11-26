@@ -409,9 +409,7 @@ permdrop() {
   FP="${FP# }"
   {
     [ "$face" = "search" ] || printf '(allow docker_helper_buildkitd_t security_t (dir (search)))\n'
-    if [ "$face" != "search" ]; then
-      printf '(allow docker_helper_buildkitd_t security_t (file (%s)))\n' "$FP"
-    fi
+    printf '(allow docker_helper_buildkitd_t security_t (file (%s)))\n' "$FP"
     printf '(allow docker_helper_buildkitd_t security_t (security (check_context read_policy)))\n'
   } > "/tmp/$M_AUTH.cil"
   cp "/tmp/$M_AUTH.cil" "$EVIDENCE_DIR/$M_AUTH-$face.cil"
