@@ -125,7 +125,7 @@ func TestWorkloadContextCheckExactCanonicalAccept(t *testing.T) {
 	wrapperContextNodeRead = func(fd int, buf []byte) (int, error) {
 		copy(buf, label+"\x00")
 		readBuf = buf[:len(label)+1]
-		return len(label)+1, nil
+		return len(label) + 1, nil
 	}
 	wrapperContextNodeClose = func(fd int) error { closed++; return nil }
 	if err := wrapperWorkloadContextCheck(label); err != nil {
