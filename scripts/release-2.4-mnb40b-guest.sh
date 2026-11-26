@@ -70,11 +70,11 @@ GATEMSG_MISSING='does not carry the shipped fifo_file read/write isolation const
 M_CAP=docker_helper_diag_mnb40b_cap
 M_WL=docker_helper_diag_mnb40b_wl
 M_W7=docker_helper_diag_mnb40b_w7
-M_FS=docker_helper_diag_mnb40b_fs
-M_CC=docker_helper_diag_mnb40b_cc
-M_RP=docker_helper_diag_mnb40b_rp
-M_VARIANT=docker_helper_diag_mnb40b_fsv
-M_FS_MIN=docker_helper_diag_mnb40b_fsmin
+# the auth ladder module is ONE replaceable module: semodule -i with the
+# same basename REPLACES its content; module loading can only ever ADD
+# grants, so a face-removal arm must be a replacement, never an
+# additional module beside the working set
+M_AUTH=docker_helper_diag_mnb40b_auth
 
 mkdir -p "$EVIDENCE_DIR"
 PHASE_FILE="$STATE_DIR/phase-done"
@@ -307,16 +307,15 @@ EOF
 (allow docker_helper_builder_workload_t docker_helper_buildkitd_t (fifo_file (read write)))
 EOF
   # the FULL faces module (the MNB40a S3 baseline)
-  cat <<'EOF' | write_cil "$M_FS"
+  # the combined AUTH module: dir search + file {getattr open read write}
+  # + security {check_context read_policy} — the MNB40a S3 working set
+  {
+    cat <<'EOF'
 (allow docker_helper_buildkitd_t security_t (dir (search)))
 (allow docker_helper_buildkitd_t security_t (file (getattr open read write)))
+(allow docker_helper_buildkitd_t security_t (security (check_context read_policy)))
 EOF
-  cat <<'EOF' | write_cil "$M_CC"
-(allow docker_helper_buildkitd_t security_t (security (check_context)))
-EOF
-  cat <<'EOF' | write_cil "$M_RP"
-(allow docker_helper_buildkitd_t security_t (security (read_policy)))
-EOF
+  } | write_cil "$M_AUTH"
   ev s0-modules "$(semodule -l 2>/dev/null | grep mnb40b || true)"
   ev s0-policy-sha "$(policy_sha)"
   # dontaudit visibility toggle (the established disposable-VM discipline):
@@ -377,7 +376,6 @@ EOF
 permdrop() {
   local face="$1"
   local kind perm
-  unload_verbose "$M_VARIANT"
   case "$face" in
     search)  kind=dir;  perm=search;  FP=" getattr open read write" ;;
     getattr) kind=file; perm=getattr; FP=" open read write" ;;
@@ -386,12 +384,18 @@ permdrop() {
     write)   kind=file; perm=write;   FP=" getattr open read" ;;
   esac
   FP="${FP# }"
+  cp "$EVIDENCE_DIR/$M_AUTH.cil" "/tmp/$M_AUTH.cil"
+  AUTHROWS="$(grep -v security_t "/tmp/$M_AUTH.cil")"
   {
+    printf '%s\n' "$AUTHROWS"
     [ "$face" = "search" ] || printf '(allow docker_helper_buildkitd_t security_t (dir (search)))\n'
-    printf '(allow docker_helper_buildkitd_t security_t (file (%s)))\n' "$FP"
-  } > "/tmp/$M_VARIANT.cil"
-  cp "/tmp/$M_VARIANT.cil" "$EVIDENCE_DIR/$M_VARIANT-$face.cil"
-  semodule -X 400 -i "/tmp/$M_VARIANT.cil" || fail "the without-$face faces module failed to load"
+    if [ "$face" != "search" ]; then
+      printf '(allow docker_helper_buildkitd_t security_t (file (%s)))\n' "$FP"
+    fi
+    printf '(allow docker_helper_buildkitd_t security_t (security (check_context read_policy)))\n'
+  } > "/tmp/$M_AUTH.cil"
+  cp "/tmp/$M_AUTH.cil" "$EVIDENCE_DIR/$M_AUTH-$face.cil"
+  semodule -X 400 -i "/tmp/$M_AUTH.cil" || fail "the without-$face auth replacement failed to load"
   ev "m1-$face-policy-sha" "$(policy_sha)"
   prod_build "m1-$face-build"
   printf '%s\n' "$BUILD_OUT" > "$EVIDENCE_DIR/m1-$face-build-stdout.txt"
@@ -412,9 +416,9 @@ permdrop() {
         || fail "M1 $face: the refusal must come from the wrapper's admission gates"
     fi
   fi
-  # restore the full faces set for the next ladder arm
-  unload_verbose "$M_VARIANT"
-  write_cil "$M_FS"
+  # restore the full auth set for the next ladder arm (same-name replace)
+  cp "$EVIDENCE_DIR/$M_AUTH.cil" "/tmp/$M_AUTH.cil"
+  semodule -X 400 -i "/tmp/$M_AUTH.cil" || fail "the auth replacement (restore) failed to load"
 }
 
 phase_m1() {
@@ -472,14 +476,19 @@ phase_m3() {
   if [ "${NEED_FILE_FACE_read:-1}" = 1 ]; then PERM_LIST="$PERM_LIST read"; fi
   if [ "${NEED_FILE_FACE_write:-1}" = 1 ]; then PERM_LIST="$PERM_LIST write"; fi
   PERM_LIST="${PERM_LIST# }"
+  AUTHROWS="$(grep -v security_t "$EVIDENCE_DIR/$M_AUTH.cil")"
   {
+    printf '%s\n' "$AUTHROWS"
     if [ "${NEED_DIR:-0}" = 1 ]; then
       printf '(allow docker_helper_buildkitd_t security_t (dir (search)))\n'
     fi
-    printf '(allow docker_helper_buildkitd_t security_t (file (%s)))\n' "$PERM_LIST"
-  } > /tmp/$M_FS_MIN.cil
-  cp "/tmp/$M_FS_MIN.cil" "$EVIDENCE_DIR/$M_FS_MIN.cil"
-  semodule -X 400 -i "/tmp/$M_FS_MIN.cil" || fail "the minimal faces module failed to load"
+    if [ -n "$PERM_LIST" ]; then
+      printf '(allow docker_helper_buildkitd_t security_t (file (%s)))\n' "$PERM_LIST"
+    fi
+    printf '(allow docker_helper_buildkitd_t security_t (security (check_context read_policy)))\n'
+  } > "/tmp/$M_AUTH.cil"
+  cp "/tmp/$M_AUTH.cil" "$EVIDENCE_DIR/$M_AUTH-minimal.cil"
+  semodule -X 400 -i "/tmp/$M_AUTH.cil" || fail "the minimal auth replacement failed to load"
   ev m3-policy-sha "$(policy_sha)"
   ev m3-minimal-faces "$NEED_DIR [$PERM_LIST]"
   prod_run m3-run
@@ -507,7 +516,7 @@ phase_m4() {
   ev m4-policy-sha-dontaudit-restored "$(policy_sha)"
   [ "$(policy_sha)" = "$(cat "$EVIDENCE_DIR/s0-policy-sha" 2>/dev/null)" ] \
     || fail "M4: the restored policy sha must equal the pre-toggle working-set sha"
-  for m in "$M_VARIANT" "$M_FS_MIN" "$M_RP" "$M_CC" "$M_FS" "$M_W7" "$M_WL" "$M_CAP"; do
+  for m in "$M_AUTH" "$M_W7" "$M_WL" "$M_CAP"; do
     unload_verbose "$m"
   done
   if semodule -l 2>/dev/null | grep -q 'mnb40b'; then
