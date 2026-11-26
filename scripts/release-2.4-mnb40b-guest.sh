@@ -150,10 +150,13 @@ prod_build() {
   BUILD_LABEL="$1"
   local out
   mkdir -p "$WS/ctx"
-  printf 'FROM alpine:3.24\nRUN echo mnb40b-build-ok\n' > "$WS/ctx/Dockerfile"
+  local stamp
+  stamp="$(date +%s%N)"
+  printf 'FROM alpine:3.24\nRUN echo mnb40b-build-ok\nRUN echo mnb40b-stamp-%s > /mnb40b-stamp\n' "$stamp" > "$WS/ctx/Dockerfile"
+  printf '%s\n' "$stamp" > "$WS/ctx/mnb40b-marker"
   chown -R "$PRINCIPAL:$PRINCIPAL" "$WS"
   set +e
-  out="$(docker-helper build "$WS/ctx" --dockerfile Dockerfile --image mnb40b-evidence:1 2>&1)"
+  out="$(docker-helper build "$WS/ctx" --dockerfile Dockerfile --image "mnb40b-probe-$stamp:1" 2>&1)"
   BUILD_RC=$?
   set -e
   printf 'rc=%d\n' "$BUILD_RC" > "$EVIDENCE_DIR/$BUILD_LABEL.rc"
@@ -384,10 +387,7 @@ permdrop() {
     write)   kind=file; perm=write;   FP=" getattr open read" ;;
   esac
   FP="${FP# }"
-  cp "$EVIDENCE_DIR/$M_AUTH.cil" "/tmp/$M_AUTH.cil"
-  AUTHROWS="$(grep -v security_t "/tmp/$M_AUTH.cil")"
   {
-    printf '%s\n' "$AUTHROWS"
     [ "$face" = "search" ] || printf '(allow docker_helper_buildkitd_t security_t (dir (search)))\n'
     if [ "$face" != "search" ]; then
       printf '(allow docker_helper_buildkitd_t security_t (file (%s)))\n' "$FP"
@@ -476,9 +476,7 @@ phase_m3() {
   if [ "${NEED_FILE_FACE_read:-1}" = 1 ]; then PERM_LIST="$PERM_LIST read"; fi
   if [ "${NEED_FILE_FACE_write:-1}" = 1 ]; then PERM_LIST="$PERM_LIST write"; fi
   PERM_LIST="${PERM_LIST# }"
-  AUTHROWS="$(grep -v security_t "$EVIDENCE_DIR/$M_AUTH.cil")"
   {
-    printf '%s\n' "$AUTHROWS"
     if [ "${NEED_DIR:-0}" = 1 ]; then
       printf '(allow docker_helper_buildkitd_t security_t (dir (search)))\n'
     fi
