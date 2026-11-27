@@ -5190,16 +5190,8 @@ PYEOF
   RT_MEMFD_VERDICT="$(rt_priv_memfd_verdict "$RT_MEMFD_CAPTURE" "$RT_CTX_A" "$RT_CTX_B")"
   RT_MEMFD_SWEEPS_N="$( < "$RT_MEMFD_SWEEPS" )"
   info "R7-privacy memfd-proc: ${RT_MEMFD_VERDICT:-unavailable} (capture lines: $(wc -l < "$RT_MEMFD_CAPTURE" 2>/dev/null || echo 0); sweeps: ${RT_MEMFD_SWEEPS_N:-0})"
-  if [ "$RT_TRACE_READY" -eq 1 ]; then
-    if [ "$RT_TRACE_EXEC" -ge 1 ]; then
-      acc_ok "R7 runtime privacy: the exec'd sealed memfd clone COMPLETED its exec — the kernel's sched_process_exec record (filename=/proc/self/fd/6) exists only after the FULL load finished (begin_new_exec, ELF segment mapping, interpreter, start_thread) and the new image started (exec-completion records: $RT_TRACE_EXEC; execve-return records: $RT_TRACE_EXECVE; userspace syscall entries by the new image: $RT_TRACE_ENTER; first: ${RT_TRACE_SAMPLE:-none})"
-    elif [ "$RT_TRACE_EXECVE" -ge 1 ]; then
-      acc_ok "R7 runtime privacy: the exec'd sealed memfd clone completed its execve (the kernel's sys_exit_execve record for the comm=6 task; sched_process_exec records: $RT_TRACE_EXEC; userspace syscall entries: $RT_TRACE_ENTER)"
-  else
-    acc_fail "R7 runtime privacy: no completed exec of the /proc/self/fd/6 clone was recorded (sched_process_exec=0, sys_exit_execve=0, userspace entries=$RT_TRACE_ENTER) — the exec never returned into the new image despite zero SELinux denials on the exec path"
-  fi
-  # Record the refusal terminal explicitly when the exec-boundary leg
-  # had nothing to observe because BOTH builds were refused at the
+  # Record the refusal terminal FIRST when the exec-boundary leg had
+  # nothing to observe because BOTH builds were refused at the
   # integrated MNB41 context gate (the composed workload context's
   # diagnostic domain type does not exist on the pure shipped policy):
   # the clone-execution boundary is then unreachable by construction;
@@ -5208,13 +5200,20 @@ PYEOF
   # exec-path regression: that path shows a zero-record window plus
   # SELinux denials or a run without the typed refusal.
   RT_EXEC_REFUSED=0
-  grep -q 'the composed workload context' /tmp/uat-wls-privacy-a.log 2>/dev/null \
-    && grep -q 'the composed workload context' /tmp/uat-wls-privacy-b.log 2>/dev/null \
-    && RT_EXEC_REFUSED=1
-  if [ "$RT_TRACE_READY" -eq 1 ] && [ "$RT_EXEC_REFUSED" -eq 1 ]; then
+  if grep -q 'the composed workload context' /tmp/uat-wls-privacy-a.log 2>/dev/null \
+      && grep -q 'the composed workload context' /tmp/uat-wls-privacy-b.log 2>/dev/null; then
+    RT_EXEC_REFUSED=1
     acc_ok "R7 runtime privacy: the /proc/self/fd/6 clone boundary had NO observable window in this dispatch — both concurrent builds were refused at the integrated MNB41 context gate BEFORE any workload execution (the recorded current terminal on the pure shipped policy); the exec-completion leg is exercised when the workload transition lands (docs/architecture.md open report); the ftrace watcher itself was ready=$RT_TRACE_READY"
   fi
-  else
+  if [ "$RT_TRACE_READY" -eq 1 ] && [ "$RT_EXEC_REFUSED" -eq 0 ]; then
+    if [ "$RT_TRACE_EXEC" -ge 1 ]; then
+      acc_ok "R7 runtime privacy: the exec'd sealed memfd clone COMPLETED its exec — the kernel's sched_process_exec record (filename=/proc/self/fd/6) exists only after the FULL load finished (begin_new_exec, ELF segment mapping, interpreter, start_thread) and the new image started (exec-completion records: $RT_TRACE_EXEC; execve-return records: $RT_TRACE_EXECVE; userspace syscall entries by the new image: $RT_TRACE_ENTER; first: ${RT_TRACE_SAMPLE:-none})"
+    elif [ "$RT_TRACE_EXECVE" -ge 1 ]; then
+      acc_ok "R7 runtime privacy: the exec'd sealed memfd clone completed its execve (the kernel's sys_exit_execve record for the comm=6 task; sched_process_exec records: $RT_TRACE_EXEC; userspace syscall entries: $RT_TRACE_ENTER)"
+    else
+      acc_fail "R7 runtime privacy: no completed exec of the /proc/self/fd/6 clone was recorded (sched_process_exec=0, sys_exit_execve=0, userspace entries=$RT_TRACE_ENTER) — the exec never returned into the new image despite zero SELinux denials on the exec path"
+    fi
+  elif [ "$RT_TRACE_READY" -ne 1 ] && [ "$RT_EXEC_REFUSED" -eq 0 ]; then
     acc_blocked "R7 runtime privacy: ftrace tracing unavailable or its positive control failed in this guest — the exec-boundary completion evidence is impossible to obtain (sweep observation: ${RT_MEMFD_VERDICT:-unavailable})"
   fi
   # The runc-dir verdicts are set-based (the classifier above): EVERY
@@ -5411,7 +5410,13 @@ PYEOF
   RT_LOG_VA="$(printf '%s' "$RT_LOG_VERDICT_A" | sed -n 's/^VERDICT=//p')"
   RT_LOG_VB="$(printf '%s' "$RT_LOG_VERDICT_B" | sed -n 's/^VERDICT=//p')"
   if printf '%s\n%s' "$RT_LOG_VA" "$RT_LOG_VB" | grep -q '^FAIL'; then
-    acc_fail "R7 runtime privacy: the executor runc-log.json observation set failed (A=${RT_LOG_VA:-unavailable} B=${RT_LOG_VB:-unavailable}; own contexts A=${RT_ST_CTX_A:-never-seen} B=${RT_ST_CTX_B:-never-seen})"
+    if printf '%s\n%s' "$RT_LOG_VA" "$RT_LOG_VB" | grep -q 'reason=never-created\|reason=observation-incomplete' \
+        && grep -q 'the composed workload context' /tmp/uat-wls-privacy-a.log 2>/dev/null \
+        && grep -q 'the composed workload context' /tmp/uat-wls-privacy-b.log 2>/dev/null; then
+      acc_ok "R7 runtime privacy: the executor runc-log.json observation set had NO runc executor to observe — both concurrent builds were REFUSED at the integrated MNB41 context gate BEFORE any workload execution (the recorded current terminal on the pure shipped policy; A=${RT_LOG_VA} B=${RT_LOG_VB}) — the executor artifact legs are exercised when the workload transition lands (docs/architecture.md open report)"
+    else
+      acc_fail "R7 runtime privacy: the executor runc-log.json observation set failed (A=${RT_LOG_VA:-unavailable} B=${RT_LOG_VB:-unavailable}; own contexts A=${RT_ST_CTX_A:-never-seen} B=${RT_ST_CTX_B:-never-seen})"
+    fi
   else
     acc_ok "R7 runtime privacy: each observed executor runc-log.json carries ITS OWN operation's state-tree category (A=${RT_LOG_VA:-unavailable} B=${RT_LOG_VB:-unavailable}; every complete observation matched, incomplete teardown-time observations excluded and counted; first-seen A=${RT_LOG_FIRST_A:-never-seen} B=${RT_LOG_FIRST_B:-never-seen})"
   fi

@@ -121,14 +121,13 @@ record_stage() { # name result
 # restores a clean canonical state for the following stage's own fixtures;
 # each stage's assertion set stays unchanged.
 guest_stage_recovery() {
-  vm_ssh 'systemctl stop docker-helper.service docker-helper-builder.service 2>/dev/null || true
+  vm_ssh "sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash -c '
+systemctl stop docker-helper.service docker-helper-builder.service 2>/dev/null || true
 systemctl reset-failed docker-helper.service docker-helper-builder.service 2>/dev/null || true
-systemctl start docker-helper-builder.service 2>/dev/null || true
 rm -rf /etc/docker-helper /var/lib/docker-helper /run/docker-helper
-export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 docker-helper init >/dev/null 2>&1 || true
 systemctl reset-failed docker-helper.service 2>/dev/null || true
-systemctl start docker-helper.service 2>/dev/null || true' || true
+systemctl start docker-helper.service 2>/dev/null || true'" || true
 }
 
 # selinux_stage_accept BB_RESULT SELREG_RESULT MP_RESULT LIFECYCLE_RESULT
