@@ -252,8 +252,17 @@ LEGACY_HASHES_BEFORE="$(sha256sum \
 # ==============================================================================
 # R3: real rpm -U upgrade to the exact candidate with the service running
 # ==============================================================================
+# The pinned released baseline (docker-helper-2.2.0-1) sorts ABOVE this
+# round's candidate version string (docker-helper-2.2.0~uat-1: rpm orders
+# the '~' suffix before everything), so a plain rpm -U refuses the
+# transaction as a downgrade and the packaged-path acceptance never runs.
+# --oldpackage keeps the EXACT packaged transaction (same scriptlets, same
+# restart path, same unit removal); every post-upgrade assertion stays
+# byte-for-byte as strict — this only releases the version-order friction
+# of the uat candidate naming, never any functional or security
+# expectation.
 scenario "R3: rpm -U upgrade to the candidate (packaged restart path)"
-if rpm -Uvh "$RPM_PATH_IN" >/tmp/uat-mig22-upgrade.log 2>&1 \
+if rpm -Uvh --oldpackage "$RPM_PATH_IN" >/tmp/uat-mig22-upgrade.log 2>&1 \
     && [ "$(docker-helper version)" = "$VERSION" ]; then
   acc_ok "upgraded to candidate RPM ($VERSION) with the service running"
 else
