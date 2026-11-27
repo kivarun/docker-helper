@@ -461,10 +461,15 @@ EOF
   WORKROWS="$(workload_rows "$EVIDENCE_DIR/s2-scaffold-up-allow-all.txt")"
   [ -z "$WORKROWS" ] \
     || fail "the scaffold must not carry any workload security_t grant"
-  if grep -aq '^allow docker_helper_buildkitd_t security_t' "$EVIDENCE_DIR/s2-scaffold-up-allow-all.txt" \
-    && [ "$(grep -ac '^allow docker_helper_buildkitd_t security_t' "$EVIDENCE_DIR/s2-scaffold-up-allow-all.txt" || true)" != "$(grep -ac '^allow docker_helper_buildkitd_t security_t' "$EVIDENCE_DIR/s1-promoted-allow-file.txt" || true)" ]; then
-    fail "the scaffold's buildkitd security_t surface must equal the promoted surface"
-  fi
+  # the buildkitd security_t surface at the scaffold-up state must be
+  # exactly the promoted surface (the same two rows, no more)
+  for w in file security; do
+    grep -aFq "allow docker_helper_buildkitd_t security_t:$w" "$EVIDENCE_DIR/s2-scaffold-up-allow-all.txt" \
+      || fail "the promoted $w rule is missing from the scaffold-up capture"
+  done
+  BKUP="$(grep -ac '^allow docker_helper_buildkitd_t security_t' "$EVIDENCE_DIR/s2-scaffold-up-allow-all.txt" || true)"
+  [ "$BKUP" = "2" ] \
+    || fail "the scaffold-up buildkitd security_t surface must be exactly the two promoted rules (got $BKUP)"
   prod_build s2-build
   [ "$BUILD_RC" = "0" ] \
     || { tail -12 "$EVIDENCE_DIR/s2-build.log"; fail "S2: the production BUILD must be admitted through both gates"; }
