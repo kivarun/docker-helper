@@ -74,6 +74,7 @@ PRINCIPAL_HOME="$(getent passwd "$PRINCIPAL" 2>/dev/null | cut -d: -f6)"
 WS="$PRINCIPAL_HOME/r7-mnb41-ws"
 GATEMSG_CTX='the workload context validation refused the run'
 GATEMSG_FIFO='the FIFO constraint admission gate refused the run'
+GATEMSG_MISSING='the loaded policy does not carry the shipped fifo_file read/write isolation constraint'
 SHIP_PP=/usr/share/selinux/docker_helper.pp
 SHIP_PP_COPY="$STATE_DIR/shipped-docker_helper.pp"
 # the mnb40b-established scaffold (the diagnostic-era type/cap/carrier
