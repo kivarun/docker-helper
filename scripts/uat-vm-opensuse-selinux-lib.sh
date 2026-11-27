@@ -141,6 +141,14 @@ if rpm -i "$UAT_RPM" >/dev/null 2>&1; then
 else
   echo "[stage-recovery] reinstall FAILED: $(rpm -Uvh --oldpackage "$UAT_RPM" 2>&1 | tail -2 | tr '\n' '|')"
 fi
+# The SELinux install path creates the systemd StateDirectory only through
+# the docker-helper init wire (the same wire the black-box install adapter
+# uses: run_init inside install-system.sh invokes 'docker-helper init
+# --allowed-root ...'); without it the unit's own StateDirectory setup has
+# no grant to create the pinned state type (init_t -> docker_helper_state_t:dir
+# create denied, audit 1795791035) and the start dies with
+# status=238/STATE_DIRECTORY.
+docker-helper init --allowed-root /home/opc >/dev/null 2>&1 || echo "[stage-recovery] init failed (rc=$?)"
 systemctl daemon-reload >/dev/null 2>&1 || true
 systemctl reset-failed docker-helper.service 2>/dev/null || true
 systemctl enable docker-helper.service >/dev/null 2>&1
