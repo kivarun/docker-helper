@@ -305,6 +305,12 @@ if [ "$R7_MODE" = "mnb39" ]; then
   # lifecycle matrix (persistent markers handle the rest).
   ATTEMPTS=6
 fi
+if [ "$R7_MODE" = "mnb41" ]; then
+  # The acceptance ladder is six phases (p0 s1..s4 m5) plus the repeated
+  # store splices; give the observed boot-length interruption the same
+  # re-entry treatment as the lifecycle matrix.
+  ATTEMPTS=8
+fi
 VERDICT=""
 for attempt in $(seq 1 "$ATTEMPTS"); do
   if [ "$attempt" -gt 1 ]; then
