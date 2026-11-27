@@ -143,8 +143,14 @@ MANIFEST_SOURCE_SHA="$(sed -n 's/^source_sha=//p' "$MANIFEST_IN" | head -1)"
 
 FAIL_COUNT=0
 BLOCKED_COUNT=0
+# Every acc_fail row is mirrored to a stdout-replayed ledger: assertion
+# rows that reach stderr but are suppressed by the console transport
+# must still be visible in the streamed log (a counted-but-silent
+# failure is not legible evidence). The stderr row stays the primary.
+FAIL_LEDGER=/tmp/uat-wls-fails.txt
+: > "$FAIL_LEDGER"
 acc_ok() { printf '  ok:      %s\n' "$*"; }
-acc_fail() { printf '  FAIL:    %s\n' "$*" >&2; FAIL_COUNT=$((FAIL_COUNT + 1)); }
+acc_fail() { printf '  FAIL:    %s\n' "$*" >&2; printf '%s\n' "$*" >> "$FAIL_LEDGER"; FAIL_COUNT=$((FAIL_COUNT + 1)); }
 acc_blocked() { printf '  BLOCKED: %s\n' "$*" >&2; BLOCKED_COUNT=$((BLOCKED_COUNT + 1)); }
 
 # rt_priv_log_verdict SURVEY OP OWN_CTX OWN_OWNER [QUALITY] — the R7
@@ -5553,6 +5559,11 @@ echo "========= RELEASE 2.2 SELINUX WORKLOAD-MAC UAT SUMMARY (Tumbleweed/RPM) ==
 printf '  FAILS:    %d\n' "$FAIL_COUNT"
 printf '  BLOCKED:  %d\n' "$BLOCKED_COUNT"
 echo "================================================================================="
+if [ -s "$FAIL_LEDGER" ]; then
+  echo "----- acc_fail rows (stdout ledger mirror) -----"
+  cat "$FAIL_LEDGER"
+  echo "----- end acc_fail ledger -----"
+fi
 
 if [ "$FAIL_COUNT" -gt 0 ]; then
   echo "RESULT: at least one mandatory SELinux workload-MAC scenario FAILED" >&2
