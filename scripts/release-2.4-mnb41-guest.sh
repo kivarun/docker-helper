@@ -98,6 +98,14 @@ avc_tail() {
 }
 # the scaffold modules write directly to the CIL file, load it, and keep
 # the exact loaded bytes as evidence
+module_loaded() { semodule -l 2>/dev/null | grep -q "^$1"; }
+unload_verbose() {
+  # idempotent; verifies the store listing is gone
+  module_loaded "$1" || return 0
+  semodule -r "$1" || fail "$1 failed to unload"
+  ! module_loaded "$1" || fail "$1 still listed after unload"
+}
+
 write_cil_scaffold() {
   local f="/tmp/$1.cil"
   cat > "$f"
@@ -492,6 +500,16 @@ phase_s3() {
   # -------------------------------------------------------------------
   say 'S3: the missing-constraint fail-closed path (removal + exact restore)'
   ensure_session
+  # the phase re-entry anchors to the S2 acceptance state first: if a
+  # previous attempt died after the removal but before the restore, the
+  # module is absent here and the splice would never see the module
+  if ! module_loaded "$CONSTRAINT_MODULE"; then
+    semodule -X 400 -i "$CONSTRAINT_CIL" > "$EVIDENCE_DIR/s3-reentry-restore.log" 2>&1 \
+      || { tail -4 "$EVIDENCE_DIR/s3-reentry-restore.log"; fail "S3: the re-entry constraint restore failed"; }
+    sleep 1
+    [ "$(policy_sha)" = "$(cat "$EVIDENCE_DIR/s2-loaded-sha" 2>/dev/null)" ] \
+      || fail "S3: the re-entry restore must return the S2 acceptance sha before the splice"
+  fi
   ev s3-condition-cil-sha "$(sha256sum "$CONSTRAINT_CIL" | awk '{print $1}')"
   semodule -X 400 -r "$CONSTRAINT_MODULE" \
     || fail "S3: the constraint module removal failed"
