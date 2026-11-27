@@ -355,9 +355,12 @@ phase_s1() {
     || fail "the promoted file rule is missing from the loaded-level capture"
   grep -aFq 'allow docker_helper_buildkitd_t security_t:security { check_context read_policy };' "$DELTA_FILE" \
     || fail "the promoted security rule is missing from the loaded-level capture"
-  grep -aq 'security_t:dir' "$DELTA_FILE" \
-    && grep -aq 'buildkitd' <(grep -a 'security_t:dir' "$DELTA_FILE") \
-    && fail "a buildkitd security_t:dir grant leaked into the promoted state; dir search stays ungranted" || true
+  # dir search stays ungranted: no sesearch allow row may target
+  # security_t:dir from the buildkitd domain (the captures also carry
+  # the distro's own rows, so the check anchors the subject)
+  BKDIR="$(grep -ac '^allow docker_helper_buildkitd_t security_t:dir' "$EVIDENCE_DIR/s1-promoted-allow-dir.txt")"
+  [ "$BKDIR" = "0" ] \
+    || fail "a buildkitd security_t:dir grant leaked into the promoted state; dir search stays ungranted"
   # the workload domain gains nothing in either state
   if grep -aq 'builder_workload_t' "$EVIDENCE_DIR/s1-baseline-allow-workload.txt" \
     || grep -aq 'builder_workload_t' "$EVIDENCE_DIR/s1-promoted-allow-workload.txt"; then
