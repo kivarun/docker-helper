@@ -76,6 +76,14 @@ GATEMSG_CTX='the workload context validation refused the run'
 GATEMSG_FIFO='the FIFO constraint admission gate refused the run'
 SHIP_PP=/usr/share/selinux/docker_helper.pp
 SHIP_PP_COPY="$STATE_DIR/shipped-docker_helper.pp"
+# the mnb40b-established scaffold (the diagnostic-era type/cap/carrier
+# set), separately removable and always evidence-recorded: the workload
+# DOMAIN TYPE and the wrapper's own-context authority exist only under
+# these modules; the PROMOTED authority under verification never lives
+# here (no scaffold row touches security_t)
+M_CAP=docker_helper_diag_mnb41_cap
+M_WL=docker_helper_diag_mnb41_wl
+M_W7=docker_helper_diag_mnb41_w7
 
 mkdir -p "$EVIDENCE_DIR" "$STATE_DIR"
 PHASE_FILE="$STATE_DIR/phase-done"
@@ -88,6 +96,28 @@ avc_tail() {
       || grep -i 'avc.*denied' /var/log/audit/audit.log 2>/dev/null \
       || dmesg -T 2>/dev/null | grep -i denied; } | tail -8 || true
 }
+# the scaffold modules write directly to the CIL file, load it, and keep
+# the exact loaded bytes as evidence
+write_cil_scaffold() {
+  local f="/tmp/$1.cil"
+  cat > "$f"
+  cp "$f" "$EVIDENCE_DIR/$(basename "$f")"
+  local loadrc=0
+  semodule -X 400 -i "$f" > "$EVIDENCE_DIR/$(basename "$f")-load.log" 2>&1 || loadrc=$?
+  [ "$loadrc" = "0" ] \
+    || { tail -4 "$EVIDENCE_DIR/$(basename "$f")-load.log"; fail "$1 module failed to load (load log kept)"; }
+}
+
+# the workload-domain boundary: a real sesearch allow row may never name
+# the workload domain as its subject toward security_t (the row shape
+# anchors the check; error strings mentioning the type name are noise,
+# not rows)
+workload_rows() {
+  for f in "$@"; do
+    grep -a '^allow .*docker_helper_builder_workload_t.*security_t' "$f" 2>/dev/null || true
+  done
+}
+
 # the security_t-surface rows of one op window (a structured subset)
 security_rows() {
   { ausearch -m avc -ts recent 2>/dev/null | grep -a security_t \
@@ -118,8 +148,14 @@ sesearch_capture() {
   sesearch --allow -t security_t -c dir  > "$EVIDENCE_DIR/$label-allow-dir.txt" 2>&1 || ec=0
   sesearch --allow -t security_t -c file > "$EVIDENCE_DIR/$label-allow-file.txt" 2>&1 || ec=0
   sesearch --allow -t security_t -c security > "$EVIDENCE_DIR/$label-allow-security.txt" 2>&1 || ec=0
-  sesearch --allow -s docker_helper_builder_workload_t -t security_t \
-    > "$EVIDENCE_DIR/$label-allow-workload.txt" 2>&1 || ec=0
+  # the whole allow surface toward security_t, one file. The workload
+  # domain is diagnostic-only (the type exists in the loaded policy only
+  # while the scaffold modules are installed), so a -s query against an
+  # absent type would emit an error STRING containing the type name: the
+  # workload-boundary checks anchor on rows in this dump instead of any
+  # -s query.
+  sesearch --allow -t security_t \
+    > "$EVIDENCE_DIR/$label-allow-all.txt" 2>&1 || ec=0
 }
 
 prod_run() {
@@ -361,11 +397,11 @@ phase_s1() {
   BKDIR="$(grep -ac '^allow docker_helper_buildkitd_t security_t:dir' "$EVIDENCE_DIR/s1-promoted-allow-dir.txt" || true)"
   [ "$BKDIR" = "0" ] \
     || fail "a buildkitd security_t:dir grant leaked into the promoted state; dir search stays ungranted"
-  # the workload domain gains nothing in either state
-  if grep -aq 'builder_workload_t' "$EVIDENCE_DIR/s1-baseline-allow-workload.txt" \
-    || grep -aq 'builder_workload_t' "$EVIDENCE_DIR/s1-promoted-allow-workload.txt"; then
-    fail "the workload domain must carry no security_t grant in either state"
-  fi
+  # the workload domain gains nothing in either state (row-anchored: the
+  # dumps must carry no allow row whose subject is the workload domain)
+  WORKROWS="$(workload_rows "$EVIDENCE_DIR/s1-baseline-allow-all.txt" "$EVIDENCE_DIR/s1-promoted-allow-all.txt")"
+  [ -z "$WORKROWS" ] \
+    || fail "the workload domain must carry no security_t grant in either state"
   say 'S1: PASS (the effective delta is exactly the two promoted rules)'
 }
 
@@ -375,6 +411,60 @@ phase_s2() {
   # -------------------------------------------------------------------
   say 'S2: the production acceptance (both wrapper gates + the run lane)'
   ensure_session
+  # install the scaffold (the mnb40b-proven bytes; each module loaded
+  # and recorded, never replaced)
+  {
+    cat <<'EOF'
+(allow docker_helper_buildkitd_t self (cap_userns (setpcap)))
+(allow docker_helper_buildkitd_t self (cap_userns (setgid)))
+(allow docker_helper_buildkitd_t self (process (setcap)))
+EOF
+  } | write_cil_scaffold "$M_CAP"
+  {
+    cat <<'EOF'
+(type docker_helper_builder_workload_t)
+(roletype system_r docker_helper_builder_workload_t)
+(typeattributeset domain (docker_helper_builder_workload_t))
+(typeattributeset mcs_constrained_type (docker_helper_builder_workload_t))
+(allow docker_helper_buildkitd_t docker_helper_builder_state_t (file (execute)))
+(allow docker_helper_builder_workload_t docker_helper_builder_state_t (file (execute entrypoint map open read getattr)))
+(allow docker_helper_builder_workload_t docker_helper_builder_state_t (dir (search)))
+(allow docker_helper_buildkitd_t docker_helper_builder_workload_t (process (transition)))
+(allow docker_helper_buildkitd_t self (process (setfscreate setkeycreate setexec)))
+(allow docker_helper_buildkitd_t docker_helper_builder_workload_t (key (create view setattr)))
+(allow docker_helper_buildkitd_t tmpfs_t (lnk_file (read getattr)))
+(allow docker_helper_buildkitd_t tmpfs_t (file (read open getattr)))
+(allow docker_helper_buildkitd_t proc_t (dir (mounton)))
+(allow docker_helper_buildkitd_t proc_t (filesystem (remount)))
+(allow docker_helper_buildkitd_t sysctl_irq_t (dir (mounton)))
+(allow docker_helper_buildkitd_t sysctl_irq_t (filesystem (remount)))
+(allow docker_helper_buildkitd_t sysctl_t (dir (mounton)))
+(allow docker_helper_buildkitd_t sysctl_t (filesystem (remount)))
+(allow docker_helper_buildkitd_t sysctl_t (file (mounton getattr)))
+(allow docker_helper_buildkitd_t proc_t (file (mounton getattr)))
+(allow docker_helper_buildkitd_t proc_t (file (read open)))
+(allow docker_helper_buildkitd_t proc_t (dir (mounton getattr)))
+(allow docker_helper_buildkitd_t proc_kcore_t (file (getattr mounton)))
+(allow docker_helper_buildkitd_t docker_helper_builder_runtime_t (fifo_file (read write open unlink)))
+(allow docker_helper_buildkitd_t docker_helper_builder_runtime_t (dir (remove_name rmdir)))
+(allow docker_helper_buildkitd_t docker_helper_builder_runc_dir_t (dir (read open rmdir remove_name)))
+EOF
+  } | write_cil_scaffold "$M_WL"
+  {
+    cat <<'EOF'
+(allow docker_helper_builder_workload_t docker_helper_buildkitd_t (fifo_file (read write)))
+EOF
+  } | write_cil_scaffold "$M_W7"
+  # the scaffold carries no security_t authority: the captures at the
+  # loaded state prove the acceptance runs on the PERMANENT promotion
+  sesearch_capture s2-scaffold-up
+  WORKROWS="$(workload_rows "$EVIDENCE_DIR/s2-scaffold-up-allow-all.txt")"
+  [ -z "$WORKROWS" ] \
+    || fail "the scaffold must not carry any workload security_t grant"
+  if grep -aq '^allow docker_helper_buildkitd_t security_t' "$EVIDENCE_DIR/s2-scaffold-up-allow-all.txt" \
+    && [ "$(grep -ac '^allow docker_helper_buildkitd_t security_t' "$EVIDENCE_DIR/s2-scaffold-up-allow-all.txt" || true)" != "$(grep -ac '^allow docker_helper_buildkitd_t security_t' "$EVIDENCE_DIR/s1-promoted-allow-file.txt" || true)" ]; then
+    fail "the scaffold's buildkitd security_t surface must equal the promoted surface"
+  fi
   prod_build s2-build
   [ "$BUILD_RC" = "0" ] \
     || { tail -12 "$EVIDENCE_DIR/s2-build.log"; fail "S2: the production BUILD must be admitted through both gates"; }
@@ -425,6 +515,15 @@ phase_s3() {
   prod_build s3-restored
   [ "$BUILD_RC" = "0" ] \
     || fail "S3: after the exact restore the BUILD must be admitted again"
+  # unload the scaffold modules; the boundary audit then runs on the
+  # two-product-module store
+  for m in "$M_W7" "$M_WL" "$M_CAP"; do
+    unload_verbose "$m"
+  done
+  if semodule -l 2>/dev/null | grep -aqE 'diag|mnb4[01]|probe'; then
+    faillist="$(semodule -l 2>/dev/null | grep -aE 'diag|mnb4[01]|probe' || true)"
+    fail "S3: a scaffold module must not survive: $faillist"
+  fi
   say 'S3: PASS (fail-closed missing-constraint; byte-exact restore; re-admission)'
 }
 
@@ -436,10 +535,10 @@ phase_s4() {
   say 'S4: the boundary audit (workload isolation, no-diagnostics, store shape)'
   ensure_session
   sesearch_capture s4-final
-  # the workload domain: NO security_t grant in the final state
-  if grep -aq 'builder_workload_t' "$EVIDENCE_DIR/s4-final-allow-workload.txt"; then
-    fail "S4: the workload domain must carry no security_t grant"
-  fi
+  # the workload domain: NO security_t grant row in the final state
+  WORKROWS="$(workload_rows "$EVIDENCE_DIR/s4-final-allow-all.txt")"
+  [ -z "$WORKROWS" ] \
+    || fail "S4: the workload domain must carry no security_t grant"
   # the loaded policy's allow set toward security_t, every subject
   # captured, side by side (the permanence record)
   {
@@ -508,9 +607,7 @@ phase_m5() {
       "$(grep -qx "$(cat "$EVIDENCE_DIR/s2-loaded-sha" 2>/dev/null)" <(cat "$EVIDENCE_DIR/s3-policy-sha-restored" 2>/dev/null) 2>/dev/null \
         && echo 'PASS (S3: the constraint restoration returned the loaded policy byte-exactly)')"
     printf 'workload.no.grant        = %s\n' \
-      "$(grep -aq 'builder_workload_t' "$EVIDENCE_DIR/s4-final-allow-workload.txt" 2>/dev/null \
-        && echo FAILED \
-        || echo 'PASS (S4: the workload domain carries no security_t grant anywhere)')"
+      "$(if [ -n "$(workload_rows "$EVIDENCE_DIR/s4-final-allow-all.txt" 2>/dev/null)" ]; then echo FAILED; else echo 'PASS (S4: the workload domain carries no security_t grant row anywhere)'; fi)"
     printf 'no.diagnostic.modules    = %s\n' \
       "$(semodule -l 2>/dev/null | grep -aqE 'diag|mnb4[01]|probe' \
         && echo FAILED \
