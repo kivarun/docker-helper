@@ -118,7 +118,19 @@ info "RPM sha256: $UAT_RPM_SHA256"
 # 1. bring the service back up after the common black-box cleanup
 # ---------------------------------------------------------------------------
 info "== 1. restart docker-helper service =="
-systemctl enable --now docker-helper.service >/dev/null 2>&1 || { echo "error: cannot enable+start docker-helper" >&2; exit 1; }
+# The staged guest runs finalize the common cleanup asynchronously right up to
+# the unit boundary; a stop/daemon-reload/start race from the previous stage can
+# still be settling when this stage starts. Retry the bounded stop/start instead
+# of exercising the race; every later assertion is unchanged.
+serv_up=1
+systemctl enable docker-helper.service >/dev/null 2>&1
+for _ in 1 2 3 4; do
+  systemctl reset-failed docker-helper.service >/dev/null 2>&1 || true
+  systemctl start docker-helper.service >/dev/null 2>&1 || { sleep 2; continue; }
+  serv_up=0
+  break
+done
+[ "$serv_up" = 0 ] || { echo "error: cannot enable+start docker-helper" >&2; exit 1; }
 systemctl is-active --quiet docker-helper.service || { echo "error: docker-helper not active" >&2; exit 1; }
 DAEMON_PID="$(systemctl show -p MainPID --value docker-helper.service)"
 echo "DAEMON_CONTEXT_BEFORE=$(attr_current "$DAEMON_PID")"

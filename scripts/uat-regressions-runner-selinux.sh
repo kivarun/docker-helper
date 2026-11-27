@@ -31,8 +31,20 @@ source "$SCRIPT_DIR/uat-regression-lib.sh"
 [ "$(getenforce 2>/dev/null || true)" = "Enforcing" ] || { echo "error: SELinux not enforcing" >&2; exit 1; }
 
 say "ensure docker-helper service (common black-box may have stopped it)"
-systemctl enable --now docker-helper.service >/dev/null 2>&1 || true
-for _ in $(seq 1 60); do
+# An earlier stage's early abort can leave the unit reset-failed and the
+# start-rate limit armed; a plain enable --now then burns the whole wait loop
+# on rate-limited starts. Reset the failed state (and release the rate limit)
+# before the bounded wait; no fixture or assertion semantics change.
+systemctl enable docker-helper.service >/dev/null 2>&1 || true
+for _ in 1 2 3; do
+  systemctl reset-failed docker-helper.service >/dev/null 2>&1 || true
+  systemctl start docker-helper.service >/dev/null 2>&1 || true
+  for _ in $(seq 1 20); do
+    systemctl is-active --quiet docker-helper.service && break 2
+    sleep 1
+  done
+done
+for _ in $(seq 1 5); do
   systemctl is-active --quiet docker-helper.service && break
   sleep 1
 done
