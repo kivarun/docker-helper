@@ -216,6 +216,20 @@ phase_p0() {
   getenforce 2>/dev/null | grep -qx 'Enforcing' \
     || fail "the MNB41 acceptance requires an enforcing SELinux host"
 
+  if ! rpm -q docker-helper >/dev/null 2>&1; then
+    zypper --non-interactive install -y --allow-unsigned-rpm "$RPM" \
+      > "$EVIDENCE_DIR/p0-provision-rpm.log" 2>&1 \
+      || { tail -20 "$EVIDENCE_DIR/p0-provision-rpm.log"; fail "candidate provisioning install failed"; }
+    mkdir -p "$STATE_DIR"
+    INIT_OUT="$STATE_DIR/init.out"
+    /usr/bin/docker-helper init --allowed-root "$PRINCIPAL_HOME" \
+      > "$INIT_OUT" 2>&1 \
+      || { sed -e 's/dht_[A-Za-z0-9]*/[REDACTED]/g' "$INIT_OUT" | tail -8; rm -f "$INIT_OUT"; \
+           fail "docker-helper init failed"; }
+    rm -f "$INIT_OUT"
+    ev p0-init "success (admin token withheld from the evidence set)"
+  fi
+
   # the enforcing wrapper binary identity: every MNB40 parser-correction
   # marker must be inside the INSTALLED wrapper (the shared binary that
   # runs the buildkit-runc wrap).
@@ -247,19 +261,6 @@ phase_p0() {
   [ "$(sha256sum "$SHIP_PP_COPY" | awk '{print $1}')" = "$MNB41_EXPECTED_PP_SHA256" ] \
     || fail "the pp working copy digest diverged from the packaged artifact"
 
-  if ! rpm -q docker-helper >/dev/null 2>&1; then
-    zypper --non-interactive install -y --allow-unsigned-rpm "$RPM" \
-      > "$EVIDENCE_DIR/p0-provision-rpm.log" 2>&1 \
-      || { tail -20 "$EVIDENCE_DIR/p0-provision-rpm.log"; fail "candidate provisioning install failed"; }
-    mkdir -p "$STATE_DIR"
-    INIT_OUT="$STATE_DIR/init.out"
-    /usr/bin/docker-helper init --allowed-root "$PRINCIPAL_HOME" \
-      > "$INIT_OUT" 2>&1 \
-      || { sed -e 's/dht_[A-Za-z0-9]*/[REDACTED]/g' "$INIT_OUT" | tail -8; rm -f "$INIT_OUT"; \
-           fail "docker-helper init failed"; }
-    rm -f "$INIT_OUT"
-    ev p0-init "success (admin token withheld from the evidence set)"
-  fi
   ensure_services_active
   semodule -l | grep -q '^docker_helper' \
     || fail "the docker_helper product module must be loaded"
