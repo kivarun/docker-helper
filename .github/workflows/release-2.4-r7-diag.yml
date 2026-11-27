@@ -219,7 +219,8 @@ jobs:
           echo "MNB41_BASELINE_RPM=$path" >> "$GITHUB_ENV"
           REF="${{ inputs.mnb41_expected_pp_sha256 }}"
           if [ -z "$REF" ]; then
-            REF="$(tar xzf /tmp/candidate/$(basename "$(scripts/release-candidate-artifact.sh /tmp/candidate tar | cut -d' ' -f1)") -O selinux/docker_helper.pp | sha256sum | awk '{print $1}')"
+            tar xzf /tmp/candidate/$(basename "$(scripts/release-candidate-artifact.sh /tmp/candidate tar | cut -d' ' -f1)") -C /tmp/candidate --wildcards '*/selinux/docker_helper.pp'
+            REF="$(sha256sum /tmp/candidate/*/selinux/docker_helper.pp | awk '{print $1}')"
           fi
           echo "MNB41_EXPECTED_PP_SHA256=$REF" >> "$GITHUB_ENV"
           echo "MNB41_BASELINE_RPM_SHA256=${{ inputs.mnb41_baseline_rpm_sha256 }}" >> "$GITHUB_ENV"
