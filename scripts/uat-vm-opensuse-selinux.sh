@@ -273,6 +273,7 @@ record_stage "SELinux check diagnostic" "$SELCHECK_RESULT"
 # ---------------------------------------------------------------------------
 log "== 8. SELinux mount-pin / RPM postinstall regression =="
 MP_RESULT=FAIL
+guest_stage_recovery
 if run_guest_capture "SELinux mount-pin regression inside the guest" \
   "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_RPM=/opt/uat-import/docker-helper.rpm UAT_RPM_SHA256=$UAT_RPM_SHA256 scripts/uat-selinux-mount-pin-regression.sh"; then
   MP_RESULT=PASS
@@ -293,6 +294,7 @@ record_stage "SELinux mount-pin regression" "$MP_RESULT"
 # ---------------------------------------------------------------------------
 log "== 8c. SELinux targeted regression groups 1-10 (collect-all runner) =="
 SELREG_RESULT=FAIL
+guest_stage_recovery
 if run_guest_capture "SELinux regression groups 1-10 inside the guest" \
   "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash scripts/uat-regressions-runner-selinux.sh"; then
   SELREG_RESULT=PASS

@@ -110,6 +110,27 @@ record_stage() { # name result
   SELINUX_STAGES+="${stage_line}"
 }
 
+# guest_stage_recovery — reset the daemon's service + state between the
+# collect-all guest stages. An earlier stage that aborted MID-FIXTURE (the
+# black-box UAT's exit trap on a build admission refusal) can leave the
+# systemd unit failed with the container-start rate limit armed and the
+# /var/lib processing state poisoned by an unrestored fixture; a later
+# stage's own enable --now then burns its whole wait on rate-limited starts.
+# The same reset the black-box phase 2 performs (service stop, state-tree
+# removal, fresh system init, start) is idempotent for a healthy guest and
+# restores a clean canonical state for the following stage's own fixtures;
+# each stage's assertion set stays unchanged.
+guest_stage_recovery() {
+  vm_ssh 'systemctl stop docker-helper.service docker-helper-builder.service 2>/dev/null || true
+systemctl reset-failed docker-helper.service docker-helper-builder.service 2>/dev/null || true
+systemctl start docker-helper-builder.service 2>/dev/null || true
+rm -rf /etc/docker-helper /var/lib/docker-helper /run/docker-helper
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+docker-helper init >/dev/null 2>&1 || true
+systemctl reset-failed docker-helper.service 2>/dev/null || true
+systemctl start docker-helper.service 2>/dev/null || true' || true
+}
+
 # selinux_stage_accept BB_RESULT SELREG_RESULT MP_RESULT LIFECYCLE_RESULT
 #                      SELCHECK_RESULT RUNDIR_RESULT UTABDIAG_RESULT
 #                      WLMAC_RESULT MIG211_RESULT MIG22_RESULT
