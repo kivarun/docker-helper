@@ -358,7 +358,7 @@ phase_s1() {
   # dir search stays ungranted: no sesearch allow row may target
   # security_t:dir from the buildkitd domain (the captures also carry
   # the distro's own rows, so the check anchors the subject)
-  BKDIR="$(grep -ac '^allow docker_helper_buildkitd_t security_t:dir' "$EVIDENCE_DIR/s1-promoted-allow-dir.txt")"
+  BKDIR="$(grep -ac '^allow docker_helper_buildkitd_t security_t:dir' "$EVIDENCE_DIR/s1-promoted-allow-dir.txt" || echo 0)"
   [ "$BKDIR" = "0" ] \
     || fail "a buildkitd security_t:dir grant leaked into the promoted state; dir search stays ungranted"
   # the workload domain gains nothing in either state
