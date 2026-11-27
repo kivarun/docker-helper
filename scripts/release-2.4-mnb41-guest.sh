@@ -226,9 +226,19 @@ phase_p0() {
   } > "$EVIDENCE_DIR/p0-wrapper-markers.txt" 2>/dev/null \
     || fail "the installed wrapper lacks the MNB40 r9 correction marker"
 
-  # the installed candidate must carry exactly the promoted .pp bytes
+  # the installed candidate must carry exactly the produced .pp bytes:
+  # the installed file, the .pp extracted from THIS round's RPM bytes,
+  # and the producer-side compiled digest must all be identical
   [ -f "$SHIP_PP" ] || fail "the shipped docker_helper.pp artifact is missing"
   ev p0-pp-sha "$(sha256sum "$SHIP_PP" | awk '{print $1}')"
+  mkdir -p /tmp/mnb41-rpmdump
+  rpm2cpio "$RPM" \
+    | ( cd /tmp/mnb41-rpmdump && cpio -idmu --quiet ./usr/share/selinux/docker_helper.pp ) \
+    > "$EVIDENCE_DIR/p0-rpm-extract.log" 2>&1 \
+    || { tail -4 "$EVIDENCE_DIR/p0-rpm-extract.log"; fail "the .pp extraction from the candidate RPM failed"; }
+  ev p0-rpm-pp-sha "$(sha256sum /tmp/mnb41-rpmdump/usr/share/selinux/docker_helper.pp | awk '{print $1}')"
+  [ "$(cat "$EVIDENCE_DIR/p0-rpm-pp-sha")" = "$(cat "$EVIDENCE_DIR/p0-pp-sha")" ] \
+    || fail "the installed docker_helper.pp differs from the candidate RPM's packaged bytes"
   [ "$(cat "$EVIDENCE_DIR/p0-pp-sha")" = "$MNB41_EXPECTED_PP_SHA256" ] \
     || fail "the installed docker_helper.pp does not match the MNB41 compiled digest"
   # a byte-exact working copy for the phase-S1 reinstall (the packaged
