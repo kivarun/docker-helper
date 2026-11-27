@@ -112,12 +112,14 @@ ensure_services_active() {
 # $1 = evidence label; captures the grant and deny rows toward
 # security_t for every subject, split by target class.
 sesearch_capture() {
+  # an empty result is a nonzero grep rc inside sesearch: capture the
+  # empties deliberately (the absence IS the measurement)
   local label="$1"
-  sesearch --allow -t security_t -c dir  > "$EVIDENCE_DIR/$label-allow-dir.txt" 2>&1
-  sesearch --allow -t security_t -c file > "$EVIDENCE_DIR/$label-allow-file.txt" 2>&1
-  sesearch --allow -t security_t -c security > "$EVIDENCE_DIR/$label-allow-security.txt" 2>&1
+  sesearch --allow -t security_t -c dir  > "$EVIDENCE_DIR/$label-allow-dir.txt" 2>&1 || ec=0
+  sesearch --allow -t security_t -c file > "$EVIDENCE_DIR/$label-allow-file.txt" 2>&1 || ec=0
+  sesearch --allow -t security_t -c security > "$EVIDENCE_DIR/$label-allow-security.txt" 2>&1 || ec=0
   sesearch --allow -s docker_helper_builder_workload_t -t security_t \
-    > "$EVIDENCE_DIR/$label-allow-workload.txt" 2>&1
+    > "$EVIDENCE_DIR/$label-allow-workload.txt" 2>&1 || ec=0
 }
 
 prod_run() {
