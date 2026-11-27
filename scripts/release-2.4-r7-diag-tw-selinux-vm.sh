@@ -186,7 +186,26 @@ case "$R7_MODE" in
   # both faces; verified unload, byte-exact restore, deny-again. NO
   # permanent policy integration, NO Release-GO UAT.
   mnb40b) GUEST_SCRIPT='release-2.4-mnb40b-guest.sh' ;;
-  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d | p21e | p21e3 | p21e3probe | p21e3proc-sys | p21e3proc-file | p21e3proc-keys | p21e3diag-keys | mnb30 | mnb32 | mnb33 | mnb36 | mnb38 | mnb39 | mnb40a | mnb40b)" ;;
+  # mnb41 = the enforcing-VM acceptance of the PERMANENT MNB41 promotion
+  # (module docker_helper 1.3: the exact MNB40b-measured minimal set on the
+  # buildkitd payload domain — file {getattr open read write} and security
+  # {check_context read_policy}; dir search stays ungranted, no workload
+  # grant). The dedicated guest verifies: the effective compiled-policy
+  # delta against the pinned accepted baseline candidate (the byte-identical
+  # 1.2 .pp from the accepted MNB40a RPM installed through the same store
+  # path, sesearch captures of the whole security_t surface at baseline and
+  # after the promoted reinstall, the accepted-baseline BUILD refused
+  # closed, the reinstall restoring the loaded sha byte-exactly); the
+  # production BUILD admitted through both wrapper gates and the RUN
+  # through its independent lane; the exact FIFO constraint recognition
+  # plus the fail-closed missing-constraint behavior BEFORE execution commit
+  # (semodule -X 400 -r + the exact remediation refusal + byte-exact
+  # restore + re-admission); the boundary audit (no workload security_t
+  # grant anywhere, no diagnostic module anywhere, the store holds exactly
+  # the two product modules); the closure identity (the .pp digest,
+  # constraint digest and loaded-policy sha unchanged at closure).
+  mnb41) GUEST_SCRIPT='release-2.4-mnb41-guest.sh' ;;
+  *) fail "unknown R7_MODE '$R7_MODE' (diag | mcs-audit | exeseal | bprime | p21a | p21b | p21c | p21d | p21e | p21e3 | p21e3probe | p21e3proc-sys | p21e3proc-file | p21e3proc-keys | p21e3diag-keys | mnb30 | mnb32 | mnb33 | mnb36 | mnb38 | mnb39 | mnb40a | mnb40b | mnb41)" ;;
 esac
 
 log()  { printf '%s %s\n' "$PREFIX" "$*"; }
@@ -209,6 +228,14 @@ vm_selinux_bootstrap
 log '== 6. transfer repo + exact candidate RPM into the guest'
 vm_selinux_transfer_repo
 vm_selinux_transfer_artifact "docker-helper.rpm" "$UAT_RPM"
+if [ "$R7_MODE" = "mnb41" ]; then
+  # the pinned accepted MNB40a candidate RPM carries the byte-identical
+  # pre-promotion docker_helper.pp (module 1.2) — the effective-delta
+  # baseline, installed through the same store path in the guest
+  : "${MNB41_BASELINE_RPM:?MNB41_BASELINE_RPM required}"
+  : "${MNB41_BASELINE_RPM_SHA256:?MNB41_BASELINE_RPM_SHA256 required}"
+  vm_selinux_transfer_artifact "docker-helper-baseline.rpm" "$MNB41_BASELINE_RPM"
+fi
 
 log '== 6b-7a. two-stage Docker preparation + health gate'
 vm_selinux_two_stage_docker
@@ -308,6 +335,9 @@ export R7_MNB36=$( [ "$R7_MODE" = mnb36 ] && echo 1 || echo 0 )
 # restore identity). The base is recomputed in the guest from the
 # provisioned state; the orchestrator export is a cross-check only.
 export MNB39_PROBE_SRC='/tmp/r7-diag/mnb39-probe.c'
+export MNB41_BASELINE_RPM='/opt/uat-import/docker-helper-baseline.rpm'
+export MNB41_BASELINE_RPM_SHA256="${MNB41_BASELINE_RPM_SHA256:-}"
+export MNB41_EXPECTED_PP_SHA256="${MNB41_EXPECTED_PP_SHA256:-}"
 bash /tmp/r7-diag/release-2.4-r7-diag-guest.sh
 RMT
   GUEST_RC=$?
@@ -501,6 +531,24 @@ RMT
       *)
         if [ "$attempt" -eq "$ATTEMPTS" ]; then
           fail "the MNB40b authority ladder produced no verdict (guest exit $GUEST_RC)"
+        fi
+        log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
+        ;;
+    esac
+  elif [ "$R7_MODE" = "mnb41" ]; then
+    VERDICT="$(grep -aoE 'R7-MNB41-VERDICT=(PASS|FAILED.*)' "$RUNNER_TEMP/r7-diag-guest.log" | tail -1 || true)"
+    case "$VERDICT" in
+      R7-MNB41-VERDICT=PASS)
+        log "MNB41 acceptance verdict: $VERDICT"
+        break
+        ;;
+      R7-MNB41-VERDICT=FAILED*)
+        log "MNB41 acceptance verdict: $VERDICT"
+        break
+        ;;
+      *)
+        if [ "$attempt" -eq "$ATTEMPTS" ]; then
+          fail "the MNB41 acceptance ladder produced no verdict (guest exit $GUEST_RC)"
         fi
         log "attempt $attempt produced no verdict (guest exit $GUEST_RC); retrying"
         ;;
