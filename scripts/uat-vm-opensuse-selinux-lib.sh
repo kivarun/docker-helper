@@ -110,26 +110,41 @@ record_stage() { # name result
   SELINUX_STAGES+="${stage_line}"
 }
 
-# guest_stage_recovery — reset the daemon's service + state between the
-# collect-all guest stages. An earlier stage that aborted MID-FIXTURE (the
-# black-box UAT's exit trap on a build admission refusal) can leave the
-# systemd unit failed with the container-start rate limit armed and the
-# /var/lib processing state poisoned by an unrestored fixture; a later
-# stage's own enable --now then burns its whole wait on rate-limited starts.
-# The same reset the black-box phase 2 performs (service stop, state-tree
-# removal, fresh system init, start) is idempotent for a healthy guest and
-# restores a clean canonical state for the following stage's own fixtures;
-# each stage's assertion set stays unchanged.
+# guest_stage_recovery — reset the installed state between the collect-all
+# guest stages. An earlier stage that aborted MID-FIXTURE (the black-box UAT's
+# exit trap on a build admission refusal) can leave the systemd unit failed
+# with the container-start rate limit armed, unrestored fixture labels in the
+# state trees, and an orphaned builder dev-prep subtree the admin domain
+# cannot even getattr (audit 1795789876.728: unconfined_t -> devprep_t:dir
+# getattr denied): rm -rf and restorecon then CANNOT clean the tree and the
+# next start dies with status=238/STATE_DIRECTORY. This stage reset mirrors
+# the RPM lifecycle stage's own proven wire: full erase (which removes the
+# packaged trees through the package-owning semantics), state-tree removal,
+# fresh reinstall from the exact pinned candidate RPM, system init, start;
+# the reinstall is the same artifact the lifecycle stage reinstalls and each
+# stage's assertion set stays unchanged.
 guest_stage_recovery() {
-  vm_ssh "sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash -s" <<'RMT' || true
-echo "[stage-recovery] prior: $(systemctl show -p ActiveState -p SubState -p Result docker-helper.service 2>&1 | tr '\n' ' ')"
+  local rpm_path="${1:-/opt/uat-import/docker-helper.rpm}"
+  vm_ssh "sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_RPM=$rpm_path bash -s" <<'RMT' || true
+echo "[stage-recovery] prior: active=$(systemctl is-active docker-helper.service 2>&1) $(systemctl show -p SubState -p Result docker-helper.service 2>&1 | tr '\n' ' ')"
+if [ "$(systemctl is-active docker-helper.service 2>/dev/null)" = active ]; then
+  curl --silent --max-time 3 --unix-socket /run/docker-helper/docker-helper.sock http://localhost/health >/dev/null 2>&1 \
+    && { echo "[stage-recovery] daemon healthy; skip"; exit 0; }
+  echo "[stage-recovery] daemon active but health failed; resetting"
+fi
 systemctl stop docker-helper.service docker-helper-builder.service 2>/dev/null || true
 systemctl reset-failed docker-helper.service docker-helper-builder.service 2>/dev/null || true
+rpm -e docker-helper >/dev/null 2>&1
 rm -rf /etc/docker-helper /var/lib/docker-helper /run/docker-helper
-docker-helper init >/dev/null 2>&1 || echo "[stage-recovery] init failed (rc=$?)"
-restorecon -R /etc/docker-helper /var/lib/docker-helper /run/docker-helper 2>/dev/null || true
+if rpm -i "$UAT_RPM" >/dev/null 2>&1; then
+  echo "[stage-recovery] reinstall: ok (sha256 $(sha256sum "$UAT_RPM" | awk '{print $1}'))"
+else
+  echo "[stage-recovery] reinstall FAILED: $(rpm -Uvh --oldpackage "$UAT_RPM" 2>&1 | tail -2 | tr '\n' '|')"
+fi
+systemctl daemon-reload >/dev/null 2>&1 || true
 systemctl reset-failed docker-helper.service 2>/dev/null || true
-systemctl start docker-helper.service 2>/dev/null || echo "[stage-recovery] start failed (rc=$?): $(systemctl status docker-helper.service --no-pager 2>&1 | sed -n '1,6p' | tr '\n' '|')"
+systemctl enable docker-helper.service >/dev/null 2>&1
+systemctl start docker-helper.service >/dev/null 2>&1 || echo "[stage-recovery] start failed (rc=$?): $(systemctl status docker-helper.service --no-pager 2>&1 | sed -n '1,4p' | tr '\n' '|')"
 echo "[stage-recovery] after: active=$(systemctl is-active docker-helper.service 2>&1) $(systemctl show -p SubState -p Result docker-helper.service 2>&1 | tr '\n' ' ')"
 RMT
 }
