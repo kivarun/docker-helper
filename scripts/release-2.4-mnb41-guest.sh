@@ -606,7 +606,7 @@ phase_m5() {
     || fail "the final loaded-policy sha must equal the post-scaffold-unload acceptance sha"
   seinfo --constrain fifo_file "$POLICYPATH" > "$EVIDENCE_DIR/m5-seinfo-constrain.txt" 2>&1 \
     || fail "seinfo closure capture failed"
-  grep -Fqx "$STATEMENT" "$EVIDENCE_DIR/m5-seinfo-constrain.txt" \
+  sed 's/^[[:space:]]*//' "$EVIDENCE_DIR/m5-seinfo-constrain.txt" | grep -Fqx "$STATEMENT" \
     || fail "the closure snapshot must carry the canonical constraint verbatim"
 
   {
