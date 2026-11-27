@@ -2844,14 +2844,14 @@ Ownership and lifecycle:
     the run before any committed rewrite and before the real runtime is
     exec'd. The module store listing and the installed CIL filename are
     never sufficient: only the kernel-deciding loaded policy shapes, and
-    no verdict is cached across runs. The gates' own enforcement is
-    subject to the pending buildkitd-domain policy integration (their
-    production policy grants are not yet integrated — read access to
-    the selinuxfs policy node and `security_t:security {check_context
-    read_policy}` are open reports); until that integration lands, the
-    gates' fail-closed refusals are the acceptance behavior an
-    enforcing deployment observes, and a failed packaging install keeps
-    the service down rather than exposing an unconstrained runtime. A
+    no verdict is cached across runs. The gates' production grants are
+    integrated (MNB41 promotion: `allow docker_helper_buildkitd_t
+    security_t:file { getattr open read write }` and `security_t:security
+    { check_context read_policy }` — the MNB40a run 45842265856 staged /
+    MNB40b run 45860607197 per-face-ladder-measured necessary-and-
+    sufficient set; `security_t:dir search` was measured unnecessary and
+    stays ungranted, and no workload domain gains any security_t
+    surface). An enforcing deployment now observes active gates; a
     policy reload or distro policy update removing the constraint
     re-arms the gate on the first subsequent run: both checks run per
     managed run, never per builder lifetime.

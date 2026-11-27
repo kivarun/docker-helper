@@ -56,7 +56,7 @@
 # Remove:
 #   sudo semodule -r docker_helper
 
-module docker_helper 1.2;
+module docker_helper 1.3;
 
 	require {
 		attribute domain;
@@ -146,6 +146,16 @@ module docker_helper 1.2;
 	class key { view setattr };
 		class process { transition siginh noatsecure rlimitinh sigkill setexec signull signal setpgid };
 		class process2 { nnp_transition };
+		# R7 MNB41: the enforcing wrapper's policy-check authority — the
+		# MNB40a/MNB40b proven minimal set promoted permanent (module-
+		# local runtime rules live below, at the "R7 MNB41" section).
+		# check_context: the wrapper's context gate (kernel
+		# security_check_context via /sys/fs/selinux/context);
+		# read_policy: the constraints' policy decode
+		# (security_read_policy via /sys/fs/selinux/policy). Both are
+		# security class perms; no other security class permission is
+		# granted to this domain.
+		class security { check_context read_policy };
 	}
 
 # Domain definition
@@ -4948,6 +4958,52 @@ allow docker_helper_rootlesskit_t docker_helper_buildkitd_t:process transition;
 # pair's own identity hook; the cross-operation gate stays OPEN/Critical
 # until the cross-operation isolation proof (4C-37) holds for the now
 # reachable domain.
+#
+# --- R7 MNB41: the enforcing wrapper's policy-check authority ---
+# --- (the MNB40a/MNB40b proven minimal set, promoted permanent) ---
+#
+# The buildkit-runc wrapper's admission gates read the loaded policy and
+# validate the workload's target context THROUGH the kernel before the
+# commit step. Under the shipped policy without any buildkitd security_t
+# grant, the gates denied the construct closed. The MNB40a diagnostic
+# (CI run 45842265856, one attempt) staged the candidate working set as
+# temporary SELinux modules and measured both faces admitted; the MNB40b
+# diagnostic (CI run 45860607197, one attempt) removed each face
+# individually and re-measured the same production wrapper path:
+#
+#   removal of file getattr -> production refusal, denial { getattr } tclass=file
+#   removal of file open    -> production refusal, denial { open } tclass=file
+#   removal of file read    -> production refusal, denial { read } tclass=file
+#   removal of file write   -> production refusal, denial { write } tclass=file
+#   removal of dir search   -> production BUILD admitted without the face
+#   the minimal set { file getattr open read write } +
+#   { security check_context read_policy } -> both faces admitted again
+#
+# So the promoted pair IS the measured necessary-and-sufficient set, and
+# security_t:dir search is measured UNNECESSARY and stays ungranted.
+#
+# Scope guards, verified against the kernel source in the MNB40 review:
+#   under file { getattr open read write } alone the write-openable
+#   selinuxfs surface is the six transaction nodes and validatetrans
+#   (S_IWUGO in selinuxfs.c, the only world-writable nodes); every non-
+#   context node among them additionally requires its own security class
+#   permission (access/create/relabel/member/validatetrans), which stays
+#   ungranted here; the user node is a deprecated no-op stub; every other
+#   write path (load, enforce, booleans, commit_pending_bools,
+#   avc/cache_threshold, disable, checkreqprot) is either guarded by its
+#   own security class permission or root-only by file mode bits
+#   (S_IWUSR/S_IWUSR-only) and unreachable from the non-root buildkitd
+#   payload even before its hook. Under the promoted set the single
+#   reachable write surface is the context node — the wrapper's own
+#   check_context gate.
+#
+# The workload domain receives NO security_t surface from this promotion
+# (the checks run inside the buildkitd payload before the workload
+# transition; the workload MAC boundary is untouched); no other domain
+# gains any security_t grant from this change; no broader attribute,
+# interface, or wildcard is introduced, and no other rule is touched.
+allow docker_helper_buildkitd_t security_t:file { getattr open read write };
+allow docker_helper_buildkitd_t security_t:security { check_context read_policy };
 #
 # --- 4C-85: the target-side exec-type file getattr — the 4C-61/62 rule
 # --- widened IN PLACE (ONE rule, never split) ---
