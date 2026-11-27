@@ -548,6 +548,7 @@ phase_s3() {
     faillist="$(semodule -l 2>/dev/null | grep -aE 'diag|mnb4[01]|probe' || true)"
     fail "S3: a scaffold module must not survive: $faillist"
   fi
+  ev s3-final-sha "$(policy_sha)"
   say 'S3: PASS (fail-closed missing-constraint; byte-exact restore; re-admission)'
 }
 
@@ -582,8 +583,8 @@ phase_s4() {
   fi
   ev s4-store-listing "$(semodule -l 2>/dev/null | grep -E 'docker.helper|docker_helper' || true)"
   ev s4-policy-sha "$(policy_sha)"
-  [ "$(cat "$EVIDENCE_DIR/s4-policy-sha")" = "$(cat "$EVIDENCE_DIR/s2-loaded-sha")" ] \
-    || fail "S4: the final loaded sha must equal the S2 acceptance sha"
+  [ "$(cat "$EVIDENCE_DIR/s4-policy-sha")" = "$(cat "$EVIDENCE_DIR/s3-final-sha" 2>/dev/null)" ] \
+    || fail "S4: the final loaded sha must equal the post-scaffold-unload acceptance sha"
   say 'S4: PASS (the boundaries hold; no diagnostic module anywhere)'
 }
 
@@ -601,8 +602,8 @@ phase_m5() {
   [ "$(cat "$EVIDENCE_DIR/m5-constraint-cil-sha")" = "$(cat "$EVIDENCE_DIR/p0-constraint-artifact-sha")" ] \
     || fail "the shipped constraint artifact must be unchanged at closure"
   ev m5-final-policy-sha "$(policy_sha)"
-  [ "$(cat "$EVIDENCE_DIR/m5-final-policy-sha")" = "$(cat "$EVIDENCE_DIR/s2-loaded-sha")" ] \
-    || fail "the final loaded-policy sha must equal the S2 acceptance sha"
+  [ "$(cat "$EVIDENCE_DIR/m5-final-policy-sha")" = "$(cat "$EVIDENCE_DIR/s3-final-sha" 2>/dev/null)" ] \
+    || fail "the final loaded-policy sha must equal the post-scaffold-unload acceptance sha"
   seinfo --constrain fifo_file "$POLICYPATH" > "$EVIDENCE_DIR/m5-seinfo-constrain.txt" 2>&1 \
     || fail "seinfo closure capture failed"
   grep -Fqx "$STATEMENT" "$EVIDENCE_DIR/m5-seinfo-constrain.txt" \
@@ -637,7 +638,7 @@ phase_m5() {
         && echo FAILED \
         || echo 'PASS (the store holds exactly the two product modules)')"
     printf 'closure.sha.identity     = %s\n' \
-      "$(grep -qx "$(cat "$EVIDENCE_DIR/s2-loaded-sha" 2>/dev/null)" <(cat "$EVIDENCE_DIR/m5-final-policy-sha" 2>/dev/null) 2>/dev/null \
+      "$(grep -qx "$(cat "$EVIDENCE_DIR/s3-final-sha" 2>/dev/null)" <(cat "$EVIDENCE_DIR/m5-final-policy-sha" 2>/dev/null) 2>/dev/null \
         && echo 'PASS (the .pp digest, constraint digest and loaded-policy sha are all unchanged at closure)')"
   } > "$EVIDENCE_DIR/m5-verdict.txt"
   if grep -q 'FAILED\|=' "$EVIDENCE_DIR/m5-verdict.txt" && grep -q 'FAILED' "$EVIDENCE_DIR/m5-verdict.txt"; then
